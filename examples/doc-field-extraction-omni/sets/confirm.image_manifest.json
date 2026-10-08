@@ -1,0 +1,4370 @@
+[
+ {
+  "id": "omni-102",
+  "image_file": "102.jpg",
+  "image_sha256": "7a4e0fc66cea123983bdb7b20bbea8dff6e99d932257209f43e14349c6d8c2d0",
+  "sets_json_sha256": "7a4e0fc66cea123983bdb7b20bbea8dff6e99d932257209f43e14349c6d8c2d0",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-103",
+  "image_file": "103.png",
+  "image_sha256": "c5849007120571c4531f83b0e90286fcc459c2fa020b52eddcb14e0ac58f738c",
+  "sets_json_sha256": "c5849007120571c4531f83b0e90286fcc459c2fa020b52eddcb14e0ac58f738c",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-104",
+  "image_file": "104.png",
+  "image_sha256": "ba963179bc1916e6f2e1493053994417987def679ff5b1e245fc8b3ff1627f2e",
+  "sets_json_sha256": "ba963179bc1916e6f2e1493053994417987def679ff5b1e245fc8b3ff1627f2e",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-107",
+  "image_file": "107.png",
+  "image_sha256": "94b26bf3384ee441bd305e796eeac48370db19596f9671f55eea42385e52c95a",
+  "sets_json_sha256": "94b26bf3384ee441bd305e796eeac48370db19596f9671f55eea42385e52c95a",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-110",
+  "image_file": "110.png",
+  "image_sha256": "02a64035fbda622da2d58a0af4098958310852706d433087783e0cf9345b5ae9",
+  "sets_json_sha256": "02a64035fbda622da2d58a0af4098958310852706d433087783e0cf9345b5ae9",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-111",
+  "image_file": "111.png",
+  "image_sha256": "d81858f4b916e2a661278914c69dbc42ee900a73a88d969a1d68c6e4f4c7e192",
+  "sets_json_sha256": "d81858f4b916e2a661278914c69dbc42ee900a73a88d969a1d68c6e4f4c7e192",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-113",
+  "image_file": "113.png",
+  "image_sha256": "b5d6e088b626b21a4b2a8c25e595af7c2fe95c963dc25839bedb651e168066f4",
+  "sets_json_sha256": "b5d6e088b626b21a4b2a8c25e595af7c2fe95c963dc25839bedb651e168066f4",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-114",
+  "image_file": "114.png",
+  "image_sha256": "6688710dba5dacc9400d8323c2cd7782fd38a3dbbd83aa0604aabd155dd1bb81",
+  "sets_json_sha256": "6688710dba5dacc9400d8323c2cd7782fd38a3dbbd83aa0604aabd155dd1bb81",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-115",
+  "image_file": "115.png",
+  "image_sha256": "1638ae448e63099748d8ea3127ea5803a5354c64631062898c35857e26c0bafa",
+  "sets_json_sha256": "1638ae448e63099748d8ea3127ea5803a5354c64631062898c35857e26c0bafa",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-119",
+  "image_file": "119.png",
+  "image_sha256": "ba41005fbbfd3a6c1487c7d9e66ba62484b10dde15a4563a2aef5e9ff3dc1590",
+  "sets_json_sha256": "ba41005fbbfd3a6c1487c7d9e66ba62484b10dde15a4563a2aef5e9ff3dc1590",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-12",
+  "image_file": "12.jpg",
+  "image_sha256": "768b4b122ef6daed0ae4fa10a2c2b77366e4e89d5bc1b30bdfee4774905f1c09",
+  "sets_json_sha256": "768b4b122ef6daed0ae4fa10a2c2b77366e4e89d5bc1b30bdfee4774905f1c09",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-120",
+  "image_file": "120.png",
+  "image_sha256": "dd25c0cc4ad083acb0132cbfd7d153e2d680e93c70f39ff7a4df0115a4ff54ac",
+  "sets_json_sha256": "dd25c0cc4ad083acb0132cbfd7d153e2d680e93c70f39ff7a4df0115a4ff54ac",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-121",
+  "image_file": "121.png",
+  "image_sha256": "a9faf986f1ae851391b96e04eb35cf333e78ea583ff71c5afc8d60ec112ab09c",
+  "sets_json_sha256": "a9faf986f1ae851391b96e04eb35cf333e78ea583ff71c5afc8d60ec112ab09c",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-122",
+  "image_file": "122.png",
+  "image_sha256": "fb035c6ad5469ed0515cf35af750a648d205e5945ebf0c498161c4dcf6067577",
+  "sets_json_sha256": "fb035c6ad5469ed0515cf35af750a648d205e5945ebf0c498161c4dcf6067577",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-123",
+  "image_file": "123.png",
+  "image_sha256": "2187b618df6912a599fab2eebad204ac5e981187a64c0f61962443559ed8c6d2",
+  "sets_json_sha256": "2187b618df6912a599fab2eebad204ac5e981187a64c0f61962443559ed8c6d2",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-124",
+  "image_file": "124.png",
+  "image_sha256": "3e7db432070b8487d36d7a617b45ba42ff8e6cd1a7e4e176261ad30323382b30",
+  "sets_json_sha256": "3e7db432070b8487d36d7a617b45ba42ff8e6cd1a7e4e176261ad30323382b30",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-126",
+  "image_file": "126.png",
+  "image_sha256": "5c65781298f4eb14faa0b7a745237799832e70400f8b0c512c06ceb2dbee45f9",
+  "sets_json_sha256": "5c65781298f4eb14faa0b7a745237799832e70400f8b0c512c06ceb2dbee45f9",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-127",
+  "image_file": "127.png",
+  "image_sha256": "c767295a63d06fe4fcc3a13ffedbeadbb17c146f4c10b957091b9b2718e0e87b",
+  "sets_json_sha256": "c767295a63d06fe4fcc3a13ffedbeadbb17c146f4c10b957091b9b2718e0e87b",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-128",
+  "image_file": "128.png",
+  "image_sha256": "396382a80b2e87e5892070c0138ef19be5251aa35323f7269cd13cdc6d36a289",
+  "sets_json_sha256": "396382a80b2e87e5892070c0138ef19be5251aa35323f7269cd13cdc6d36a289",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-129",
+  "image_file": "129.png",
+  "image_sha256": "517c563ff8e452869cec733c420567fc95c34320385361e119ed87f40a09a033",
+  "sets_json_sha256": "517c563ff8e452869cec733c420567fc95c34320385361e119ed87f40a09a033",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-130",
+  "image_file": "130.png",
+  "image_sha256": "c219e5a293a20ae458fe6461448c974bf42f015ad93f5bfcef84e69c91d07ab5",
+  "sets_json_sha256": "c219e5a293a20ae458fe6461448c974bf42f015ad93f5bfcef84e69c91d07ab5",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-131",
+  "image_file": "131.png",
+  "image_sha256": "0f61ab757498fcf0163815b5c8b77cb2b3820a4625998c3bbd008debe97e7619",
+  "sets_json_sha256": "0f61ab757498fcf0163815b5c8b77cb2b3820a4625998c3bbd008debe97e7619",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-132",
+  "image_file": "132.png",
+  "image_sha256": "3416857efa9d91039a695c13e744002aca416ff71f66d66ca72a4ac25dec3c63",
+  "sets_json_sha256": "3416857efa9d91039a695c13e744002aca416ff71f66d66ca72a4ac25dec3c63",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-133",
+  "image_file": "133.png",
+  "image_sha256": "e1ec11f1f76922e784e279a451528339de7feb3f8ac02b32357543bb304092bd",
+  "sets_json_sha256": "e1ec11f1f76922e784e279a451528339de7feb3f8ac02b32357543bb304092bd",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-134",
+  "image_file": "134.jpeg",
+  "image_sha256": "61e5325ac0d03f77abab79cfbae93991d914a78d2c5241712dc5f4c57e63ca90",
+  "sets_json_sha256": "61e5325ac0d03f77abab79cfbae93991d914a78d2c5241712dc5f4c57e63ca90",
+  "qualified": true,
+  "format": "PHOTO_RECEIPT"
+ },
+ {
+  "id": "omni-137",
+  "image_file": "137.png",
+  "image_sha256": "58bc9d213a7d4d677c15f463f03780e6e51033ea89f46d1e33362adba0c46606",
+  "sets_json_sha256": "58bc9d213a7d4d677c15f463f03780e6e51033ea89f46d1e33362adba0c46606",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-139",
+  "image_file": "139.png",
+  "image_sha256": "8be8b2f27e462d487b0659d419b30f8692e51c61771f8da5ff792b7cce8a7496",
+  "sets_json_sha256": "8be8b2f27e462d487b0659d419b30f8692e51c61771f8da5ff792b7cce8a7496",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-143",
+  "image_file": "143.png",
+  "image_sha256": "bb5d695d0b62f6d6f47e0b30bafb1cef2197529ee9722c4ab03eb57857f2bc64",
+  "sets_json_sha256": "bb5d695d0b62f6d6f47e0b30bafb1cef2197529ee9722c4ab03eb57857f2bc64",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-145",
+  "image_file": "145.png",
+  "image_sha256": "9ee14183c68cbf70a544c531ae6611a42d61376f729f592a0e1e8f213b214223",
+  "sets_json_sha256": "9ee14183c68cbf70a544c531ae6611a42d61376f729f592a0e1e8f213b214223",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-146",
+  "image_file": "146.png",
+  "image_sha256": "c99eba1269bdabaa2f7891aa517c8d4e66131ef655fa6cae5d5d40304a614c9b",
+  "sets_json_sha256": "c99eba1269bdabaa2f7891aa517c8d4e66131ef655fa6cae5d5d40304a614c9b",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-150",
+  "image_file": "150.png",
+  "image_sha256": "7690707eb86a1bd80954ecfb427684b182499ec57d24cb97d29c5ec3577684d0",
+  "sets_json_sha256": "7690707eb86a1bd80954ecfb427684b182499ec57d24cb97d29c5ec3577684d0",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-152",
+  "image_file": "152.png",
+  "image_sha256": "f4d4e430819300b1df9ea77073c3e7a57f0658f8d992e3bff6a0e1807c7119b1",
+  "sets_json_sha256": "f4d4e430819300b1df9ea77073c3e7a57f0658f8d992e3bff6a0e1807c7119b1",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-153",
+  "image_file": "153.png",
+  "image_sha256": "6d30bafd743de22865ed0a779cb0f3dc38db3337bf3a464df0c4b0932fdccdd6",
+  "sets_json_sha256": "6d30bafd743de22865ed0a779cb0f3dc38db3337bf3a464df0c4b0932fdccdd6",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-154",
+  "image_file": "154.png",
+  "image_sha256": "bf95d12c8594e16c4351c95ec88beb17a569c2eb50019923649e74d4d8132f2e",
+  "sets_json_sha256": "bf95d12c8594e16c4351c95ec88beb17a569c2eb50019923649e74d4d8132f2e",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-157",
+  "image_file": "157.png",
+  "image_sha256": "dfb931ab0752c6929f3fe2a1c738cfec0e0950d106883b107d68eca5f867a13b",
+  "sets_json_sha256": "dfb931ab0752c6929f3fe2a1c738cfec0e0950d106883b107d68eca5f867a13b",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-159",
+  "image_file": "159.png",
+  "image_sha256": "79cc1ff408d113da3d33e3158dc93ab43848f733e7a7662f0a97a46503341450",
+  "sets_json_sha256": "79cc1ff408d113da3d33e3158dc93ab43848f733e7a7662f0a97a46503341450",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-160",
+  "image_file": "160.png",
+  "image_sha256": "be08dfed9c99d501bbbed2be68b1991f289dfba2913f66886ca9780b5797d601",
+  "sets_json_sha256": "be08dfed9c99d501bbbed2be68b1991f289dfba2913f66886ca9780b5797d601",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-165",
+  "image_file": "165.png",
+  "image_sha256": "4420af9cc1c9927b6944900c41ca066351efc35c40b55ab9ae85652e4f7ebce5",
+  "sets_json_sha256": "4420af9cc1c9927b6944900c41ca066351efc35c40b55ab9ae85652e4f7ebce5",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-166",
+  "image_file": "166.png",
+  "image_sha256": "5d33c7074f2bf2fb472660f759ca0402288713f8c350806dd27e3c8658afc86d",
+  "sets_json_sha256": "5d33c7074f2bf2fb472660f759ca0402288713f8c350806dd27e3c8658afc86d",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-167",
+  "image_file": "167.png",
+  "image_sha256": "a757c60ae57709575a7e697b5e7ef101f76e095687655c0dc14145ec7e2df9ea",
+  "sets_json_sha256": "a757c60ae57709575a7e697b5e7ef101f76e095687655c0dc14145ec7e2df9ea",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-168",
+  "image_file": "168.png",
+  "image_sha256": "1a648e44d94628fdf43724d0f5562e52d4600f63502d436f5961456722a99842",
+  "sets_json_sha256": "1a648e44d94628fdf43724d0f5562e52d4600f63502d436f5961456722a99842",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-17",
+  "image_file": "17.jpg",
+  "image_sha256": "04fd82cfebb7e343c0a3cf91a996b962fb20d2f2dd1087213c7b0a863399648c",
+  "sets_json_sha256": "04fd82cfebb7e343c0a3cf91a996b962fb20d2f2dd1087213c7b0a863399648c",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-170",
+  "image_file": "170.png",
+  "image_sha256": "d18582f8325ea956e2ae9beb5fb684fc4778f2ccc5dc63fc3dc6f7bec39be9ee",
+  "sets_json_sha256": "d18582f8325ea956e2ae9beb5fb684fc4778f2ccc5dc63fc3dc6f7bec39be9ee",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-173",
+  "image_file": "173.png",
+  "image_sha256": "b7999991c7cd343d589551b55710a315a7e1596fb924945e54dc23277c36db08",
+  "sets_json_sha256": "b7999991c7cd343d589551b55710a315a7e1596fb924945e54dc23277c36db08",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-175",
+  "image_file": "175.png",
+  "image_sha256": "60c6ef53166bfae86bdf82ed1f99cf9460d29a5795dd01bfe837fa412b62ce8f",
+  "sets_json_sha256": "60c6ef53166bfae86bdf82ed1f99cf9460d29a5795dd01bfe837fa412b62ce8f",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-176",
+  "image_file": "176.png",
+  "image_sha256": "380d564d6e341bcc7b4a0536e2490815d4548b256ff152047ea28291d3034aed",
+  "sets_json_sha256": "380d564d6e341bcc7b4a0536e2490815d4548b256ff152047ea28291d3034aed",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-177",
+  "image_file": "177.png",
+  "image_sha256": "094d21e58a310eee7af019e497485c89a4ec8eff2afe0e9aa8ab6bee3c9820c3",
+  "sets_json_sha256": "094d21e58a310eee7af019e497485c89a4ec8eff2afe0e9aa8ab6bee3c9820c3",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-179",
+  "image_file": "179.png",
+  "image_sha256": "4aa9f12f6e34f39887ed50d5edf21b9cab417509b4a000dbcff36d38b8da664c",
+  "sets_json_sha256": "4aa9f12f6e34f39887ed50d5edf21b9cab417509b4a000dbcff36d38b8da664c",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-180",
+  "image_file": "180.png",
+  "image_sha256": "e14de3a7fef29551861ba8400316aa7ced2d895d89d746708a9c76e1915f3621",
+  "sets_json_sha256": "e14de3a7fef29551861ba8400316aa7ced2d895d89d746708a9c76e1915f3621",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-182",
+  "image_file": "182.png",
+  "image_sha256": "0ee2cff60b655c60def2d1d7b5b3d15e1d91c7beba1b8055c498b9f086f03d7b",
+  "sets_json_sha256": "0ee2cff60b655c60def2d1d7b5b3d15e1d91c7beba1b8055c498b9f086f03d7b",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-183",
+  "image_file": "183.png",
+  "image_sha256": "0e60c3518041a5efbecd99faef27469b438911d7bd55aae4ad98695f7cd635b8",
+  "sets_json_sha256": "0e60c3518041a5efbecd99faef27469b438911d7bd55aae4ad98695f7cd635b8",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-186",
+  "image_file": "186.png",
+  "image_sha256": "0c55d24c7d1cc5ed521cdc88161f961c83e709622fb492d89bf8318c700198ae",
+  "sets_json_sha256": "0c55d24c7d1cc5ed521cdc88161f961c83e709622fb492d89bf8318c700198ae",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-187",
+  "image_file": "187.png",
+  "image_sha256": "3bad7cb9c479e57171ba3aebcc8e8cfb6db2f67e73e50886862f948fcb37ad0f",
+  "sets_json_sha256": "3bad7cb9c479e57171ba3aebcc8e8cfb6db2f67e73e50886862f948fcb37ad0f",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-19",
+  "image_file": "19.jpg",
+  "image_sha256": "664d3a80abc8e67fedb1e0fd79ad4fda15f1e2911927e1310928237e9bde9f54",
+  "sets_json_sha256": "664d3a80abc8e67fedb1e0fd79ad4fda15f1e2911927e1310928237e9bde9f54",
+  "qualified": true,
+  "format": "PHOTO_RECEIPT"
+ },
+ {
+  "id": "omni-191",
+  "image_file": "191.png",
+  "image_sha256": "dfe79314a5e60bcc4ab74fa1bd9d828a3952b30788a82c2e005ad1da538e5c08",
+  "sets_json_sha256": "dfe79314a5e60bcc4ab74fa1bd9d828a3952b30788a82c2e005ad1da538e5c08",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-192",
+  "image_file": "192.png",
+  "image_sha256": "f3e9ea5c96287954e1c3791ea486a475d0f528b758bac134d7423ec30412cd10",
+  "sets_json_sha256": "f3e9ea5c96287954e1c3791ea486a475d0f528b758bac134d7423ec30412cd10",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-193",
+  "image_file": "193.png",
+  "image_sha256": "4d5dc70844052910f83ce38309c807f876ece48930aaea845bfc5d15bdaa1ea7",
+  "sets_json_sha256": "4d5dc70844052910f83ce38309c807f876ece48930aaea845bfc5d15bdaa1ea7",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-197",
+  "image_file": "197.png",
+  "image_sha256": "c046d89c33e133286ce208e3a5650dc5739cf1ccd2f6a23b2e9708c20d6c0f0c",
+  "sets_json_sha256": "c046d89c33e133286ce208e3a5650dc5739cf1ccd2f6a23b2e9708c20d6c0f0c",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-199",
+  "image_file": "199.png",
+  "image_sha256": "274ea9de8a068b1acbcdcd836254bc30b1193c4cb7392d3510aafabb10897038",
+  "sets_json_sha256": "274ea9de8a068b1acbcdcd836254bc30b1193c4cb7392d3510aafabb10897038",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-201",
+  "image_file": "201.png",
+  "image_sha256": "0ba8f5f58ccc8a3facd17f2b809498326e26e830d12c665768e7c8fd68008fb0",
+  "sets_json_sha256": "0ba8f5f58ccc8a3facd17f2b809498326e26e830d12c665768e7c8fd68008fb0",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-203",
+  "image_file": "203.png",
+  "image_sha256": "46e642e187b0e006f63a5f445ee993a91a51f8bd07ac3e52777a06696ab62a47",
+  "sets_json_sha256": "46e642e187b0e006f63a5f445ee993a91a51f8bd07ac3e52777a06696ab62a47",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-204",
+  "image_file": "204.png",
+  "image_sha256": "ea2158cc39bdf4c4f1e8f1a0adc90ed36a94ea537f4e4299fbd03d58295c1cc9",
+  "sets_json_sha256": "ea2158cc39bdf4c4f1e8f1a0adc90ed36a94ea537f4e4299fbd03d58295c1cc9",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-206",
+  "image_file": "206.png",
+  "image_sha256": "41815dec668e2e6a149a09b73c9b0e5242c3156d6ffa6b2f192f52018df729f7",
+  "sets_json_sha256": "41815dec668e2e6a149a09b73c9b0e5242c3156d6ffa6b2f192f52018df729f7",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-211",
+  "image_file": "211.png",
+  "image_sha256": "0527670ae54c929771378f78856d2e558a50907bf506fd6240042657951c2617",
+  "sets_json_sha256": "0527670ae54c929771378f78856d2e558a50907bf506fd6240042657951c2617",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-212",
+  "image_file": "212.png",
+  "image_sha256": "6dc73bc8e4c4b687a32c06bc4d379f6002f1ce4e5f8708577f9f288dfffb8361",
+  "sets_json_sha256": "6dc73bc8e4c4b687a32c06bc4d379f6002f1ce4e5f8708577f9f288dfffb8361",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-214",
+  "image_file": "214.png",
+  "image_sha256": "2e8efa6f20d88f6c1657188f2b1344342d4d5760f0293fdef08ebbeffe3a0f61",
+  "sets_json_sha256": "2e8efa6f20d88f6c1657188f2b1344342d4d5760f0293fdef08ebbeffe3a0f61",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-215",
+  "image_file": "215.png",
+  "image_sha256": "6b77bd4e0ffb2badb193cff251c914a71ca2f789ee1e27d03d8a96431db55882",
+  "sets_json_sha256": "6b77bd4e0ffb2badb193cff251c914a71ca2f789ee1e27d03d8a96431db55882",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-217",
+  "image_file": "217.png",
+  "image_sha256": "064543d1751e3b412f54d0505d5ed7ae92193a9dbb2e30528fd088cbca203bef",
+  "sets_json_sha256": "064543d1751e3b412f54d0505d5ed7ae92193a9dbb2e30528fd088cbca203bef",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-219",
+  "image_file": "219.png",
+  "image_sha256": "4042f638d980bac0da1bc43ca0831862afafead1fa13c19b00b12f0cecccc189",
+  "sets_json_sha256": "4042f638d980bac0da1bc43ca0831862afafead1fa13c19b00b12f0cecccc189",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-223",
+  "image_file": "223.png",
+  "image_sha256": "a309bbdb804f3cacc14253aeff80828285293eb5d6ababe583fc943a6a62e9e2",
+  "sets_json_sha256": "a309bbdb804f3cacc14253aeff80828285293eb5d6ababe583fc943a6a62e9e2",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-224",
+  "image_file": "224.png",
+  "image_sha256": "715039d7eebe5af1c9b6664fd25d0331934e63acde3f56ae11942694b80ad687",
+  "sets_json_sha256": "715039d7eebe5af1c9b6664fd25d0331934e63acde3f56ae11942694b80ad687",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-225",
+  "image_file": "225.png",
+  "image_sha256": "254114ec5fce38dbe0a36dd8e8cafbb85e4d6c8cb49a61d2632807132f7bb298",
+  "sets_json_sha256": "254114ec5fce38dbe0a36dd8e8cafbb85e4d6c8cb49a61d2632807132f7bb298",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-228",
+  "image_file": "228.png",
+  "image_sha256": "4c00eb1b57165f4d995f8e9abc450e77e27732dba05878e73cec89f7a3c0980e",
+  "sets_json_sha256": "4c00eb1b57165f4d995f8e9abc450e77e27732dba05878e73cec89f7a3c0980e",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-230",
+  "image_file": "230.png",
+  "image_sha256": "3b8e980800114ab859b20005c6b69c061449189193db7ce78729dbb92dfb8e74",
+  "sets_json_sha256": "3b8e980800114ab859b20005c6b69c061449189193db7ce78729dbb92dfb8e74",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-233",
+  "image_file": "233.png",
+  "image_sha256": "832c16710386dd1b5f5dcdca7be9b8d1122d03741e08f71a314a2acea602b4d0",
+  "sets_json_sha256": "832c16710386dd1b5f5dcdca7be9b8d1122d03741e08f71a314a2acea602b4d0",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-234",
+  "image_file": "234.png",
+  "image_sha256": "9dd8e452719b1b3c98668bc81c83aea8d8bda5572e4de7f3444693b968c5b843",
+  "sets_json_sha256": "9dd8e452719b1b3c98668bc81c83aea8d8bda5572e4de7f3444693b968c5b843",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-237",
+  "image_file": "237.png",
+  "image_sha256": "ef039c6e0a03a08cc05ecad443d2907bea7dfa5755417cd554b2b37fddb116fd",
+  "sets_json_sha256": "ef039c6e0a03a08cc05ecad443d2907bea7dfa5755417cd554b2b37fddb116fd",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-238",
+  "image_file": "238.png",
+  "image_sha256": "07d37c613e82b53d723ca8e5fa525d62fc81a7cfe3c67828d1d9a4ed4f4700c3",
+  "sets_json_sha256": "07d37c613e82b53d723ca8e5fa525d62fc81a7cfe3c67828d1d9a4ed4f4700c3",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-239",
+  "image_file": "239.png",
+  "image_sha256": "6f821b5dd0844fad80fb8df71fd11263e7ebdddfd19774ec89199aef7c3bbda8",
+  "sets_json_sha256": "6f821b5dd0844fad80fb8df71fd11263e7ebdddfd19774ec89199aef7c3bbda8",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-240",
+  "image_file": "240.png",
+  "image_sha256": "5effa522eb31ff3956e7ea4f1db42091118b019c65c2d1c3645a5a080ecd7a42",
+  "sets_json_sha256": "5effa522eb31ff3956e7ea4f1db42091118b019c65c2d1c3645a5a080ecd7a42",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-242",
+  "image_file": "242.png",
+  "image_sha256": "b1f621a65a7b0d55c2fbf939ca73ebfe45af6d4207c18d9704e959ed4c12a43f",
+  "sets_json_sha256": "b1f621a65a7b0d55c2fbf939ca73ebfe45af6d4207c18d9704e959ed4c12a43f",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-244",
+  "image_file": "244.png",
+  "image_sha256": "78039ba4cddeb06225f163a93197841d4c386e7810bf402f419c1a7847633cca",
+  "sets_json_sha256": "78039ba4cddeb06225f163a93197841d4c386e7810bf402f419c1a7847633cca",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-250",
+  "image_file": "250.png",
+  "image_sha256": "84d4ef1314b2a7e057543670ee116f55634f6f166ef4ece7193fde45bf3518f2",
+  "sets_json_sha256": "84d4ef1314b2a7e057543670ee116f55634f6f166ef4ece7193fde45bf3518f2",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-252",
+  "image_file": "252.png",
+  "image_sha256": "8c44b4291500e143ef1ccf91a4006374e21c6c96430bf636f574f31823a319ac",
+  "sets_json_sha256": "8c44b4291500e143ef1ccf91a4006374e21c6c96430bf636f574f31823a319ac",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-253",
+  "image_file": "253.png",
+  "image_sha256": "e817420e1ad180d2dd2c3a0fc14467570cf389222fc92a1dd6719789ace11123",
+  "sets_json_sha256": "e817420e1ad180d2dd2c3a0fc14467570cf389222fc92a1dd6719789ace11123",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-254",
+  "image_file": "254.png",
+  "image_sha256": "3650a618123efa02733d3bdb6c26983f38d380ec475107a34f035d9008c0280b",
+  "sets_json_sha256": "3650a618123efa02733d3bdb6c26983f38d380ec475107a34f035d9008c0280b",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-259",
+  "image_file": "259.png",
+  "image_sha256": "54d1e10a5167711fc726e02a84326f29d5ab5c2ac813c1ac7fd7d3a90e825c55",
+  "sets_json_sha256": "54d1e10a5167711fc726e02a84326f29d5ab5c2ac813c1ac7fd7d3a90e825c55",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-261",
+  "image_file": "261.png",
+  "image_sha256": "c391a2b45aa942856091830be0e08bd1505d96117549552ec4f879d0b47cc842",
+  "sets_json_sha256": "c391a2b45aa942856091830be0e08bd1505d96117549552ec4f879d0b47cc842",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-263",
+  "image_file": "263.png",
+  "image_sha256": "74b055330a17b097170bfd4b6618092e4123c257641f91fee0c117c898ef3126",
+  "sets_json_sha256": "74b055330a17b097170bfd4b6618092e4123c257641f91fee0c117c898ef3126",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-268",
+  "image_file": "268.png",
+  "image_sha256": "88cd44ccb95f3bf1d32b87e5ab46eeaafcdfbedad3f0352895ff9836e9fdb130",
+  "sets_json_sha256": "88cd44ccb95f3bf1d32b87e5ab46eeaafcdfbedad3f0352895ff9836e9fdb130",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-269",
+  "image_file": "269.png",
+  "image_sha256": "4e0434a8a67d5295bd5ceba885b71e6f31c638d2730ec6058e0bc0552a97733e",
+  "sets_json_sha256": "4e0434a8a67d5295bd5ceba885b71e6f31c638d2730ec6058e0bc0552a97733e",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-270",
+  "image_file": "270.png",
+  "image_sha256": "73a14e333ec1ed272db0b1259e670f19d12f704b1726adc775cea4fe48516e09",
+  "sets_json_sha256": "73a14e333ec1ed272db0b1259e670f19d12f704b1726adc775cea4fe48516e09",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-274",
+  "image_file": "274.png",
+  "image_sha256": "44e3817384082abab0fa128e006c2ce9b4bd8ca5732f92a677735f5590fd1c79",
+  "sets_json_sha256": "44e3817384082abab0fa128e006c2ce9b4bd8ca5732f92a677735f5590fd1c79",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-276",
+  "image_file": "276.png",
+  "image_sha256": "701caa2b15cb3554ff3151a992bd51843cf128c6783d61c2cf1b921e29cccf96",
+  "sets_json_sha256": "701caa2b15cb3554ff3151a992bd51843cf128c6783d61c2cf1b921e29cccf96",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-279",
+  "image_file": "279.png",
+  "image_sha256": "a45b7b859248a8aeebfd40b460ed08f084457f0c22d13e384675f9fa5baa3749",
+  "sets_json_sha256": "a45b7b859248a8aeebfd40b460ed08f084457f0c22d13e384675f9fa5baa3749",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-281",
+  "image_file": "281.png",
+  "image_sha256": "aef7e852c18268dafe5a5b5f25e7dc901f066576bb17c6ff3ca73adcd82855eb",
+  "sets_json_sha256": "aef7e852c18268dafe5a5b5f25e7dc901f066576bb17c6ff3ca73adcd82855eb",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-283",
+  "image_file": "283.png",
+  "image_sha256": "9e1c57263b292818900322e678b27a839f7c39310aa8b7b09bded7ee7172b8d7",
+  "sets_json_sha256": "9e1c57263b292818900322e678b27a839f7c39310aa8b7b09bded7ee7172b8d7",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-284",
+  "image_file": "284.png",
+  "image_sha256": "dd79d620d38f5937498167b5b018c3c04054aacfc966e2e55ac673ec0d768491",
+  "sets_json_sha256": "dd79d620d38f5937498167b5b018c3c04054aacfc966e2e55ac673ec0d768491",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-288",
+  "image_file": "288.png",
+  "image_sha256": "252191903f6acb2b06213b4fa623b0b286c25bda590a55e904166294d388767d",
+  "sets_json_sha256": "252191903f6acb2b06213b4fa623b0b286c25bda590a55e904166294d388767d",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-289",
+  "image_file": "289.png",
+  "image_sha256": "c6fa6df35c548731caebcc353aff9cef87cae84c0febdb5e692d9b3bf7747988",
+  "sets_json_sha256": "c6fa6df35c548731caebcc353aff9cef87cae84c0febdb5e692d9b3bf7747988",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-290",
+  "image_file": "290.png",
+  "image_sha256": "1d5d99cfe26e12d470f37a5031bd4bf78b9470772372335a42380b6654b44b46",
+  "sets_json_sha256": "1d5d99cfe26e12d470f37a5031bd4bf78b9470772372335a42380b6654b44b46",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-291",
+  "image_file": "291.png",
+  "image_sha256": "bb5abfe5ed5c176e0835edc9c5be4501a8af722c63f8092cbaa369e91fcb2e82",
+  "sets_json_sha256": "bb5abfe5ed5c176e0835edc9c5be4501a8af722c63f8092cbaa369e91fcb2e82",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-294",
+  "image_file": "294.png",
+  "image_sha256": "3d98aa5df7c3e1971e7a1d998b5bbd278be3fed78ce31fe48157016840406b9a",
+  "sets_json_sha256": "3d98aa5df7c3e1971e7a1d998b5bbd278be3fed78ce31fe48157016840406b9a",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-296",
+  "image_file": "296.png",
+  "image_sha256": "b8db7f80af272117a8f0c7884e9c12f1d7de5fd7b4f793f934d677299871a729",
+  "sets_json_sha256": "b8db7f80af272117a8f0c7884e9c12f1d7de5fd7b4f793f934d677299871a729",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-297",
+  "image_file": "297.png",
+  "image_sha256": "4d83a24ee08f47e475ce9657b03dd01889eb5bbea79e599f95ea9caf88c03b76",
+  "sets_json_sha256": "4d83a24ee08f47e475ce9657b03dd01889eb5bbea79e599f95ea9caf88c03b76",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-298",
+  "image_file": "298.png",
+  "image_sha256": "382cd657332fe54384b1dc43580bdf88b271775dfc6e21c21d85b64ed8c39ecf",
+  "sets_json_sha256": "382cd657332fe54384b1dc43580bdf88b271775dfc6e21c21d85b64ed8c39ecf",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-299",
+  "image_file": "299.png",
+  "image_sha256": "e4d4830f0e58e63bab05d47a946822c59d11c9e8db9f345622e911399a9cfa79",
+  "sets_json_sha256": "e4d4830f0e58e63bab05d47a946822c59d11c9e8db9f345622e911399a9cfa79",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-300",
+  "image_file": "300.png",
+  "image_sha256": "12ef20e8b155876e48498b02e2e9b2e40e3cc8059c4b907bf4a6384adf188a54",
+  "sets_json_sha256": "12ef20e8b155876e48498b02e2e9b2e40e3cc8059c4b907bf4a6384adf188a54",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-301",
+  "image_file": "301.png",
+  "image_sha256": "c886c31fb163d0423df7b2475e861161e00a41c3ec434b8dec665253b1b6ff3d",
+  "sets_json_sha256": "c886c31fb163d0423df7b2475e861161e00a41c3ec434b8dec665253b1b6ff3d",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-302",
+  "image_file": "302.png",
+  "image_sha256": "0f9654d496576404dfcd850cc14dff2eed0c37ac0830943648ab9407502de748",
+  "sets_json_sha256": "0f9654d496576404dfcd850cc14dff2eed0c37ac0830943648ab9407502de748",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-304",
+  "image_file": "304.png",
+  "image_sha256": "d058fb5fa9e35868fcc3db5bc979ff56114ad7ec5a218e3b87eff8fb5ff8260a",
+  "sets_json_sha256": "d058fb5fa9e35868fcc3db5bc979ff56114ad7ec5a218e3b87eff8fb5ff8260a",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-305",
+  "image_file": "305.png",
+  "image_sha256": "b8ad33e442cae2d3a35c4f016d11857b905aa5dab80571cbceb07391c16670ee",
+  "sets_json_sha256": "b8ad33e442cae2d3a35c4f016d11857b905aa5dab80571cbceb07391c16670ee",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-306",
+  "image_file": "306.png",
+  "image_sha256": "8826361a66f4786b34939a4efb91c6367bf12462b27fc7867364f69fb55d711b",
+  "sets_json_sha256": "8826361a66f4786b34939a4efb91c6367bf12462b27fc7867364f69fb55d711b",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-308",
+  "image_file": "308.png",
+  "image_sha256": "37f6ca1984e71a6b30d51773f003a08beffc225ac64c591b602748349ebf663f",
+  "sets_json_sha256": "37f6ca1984e71a6b30d51773f003a08beffc225ac64c591b602748349ebf663f",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-309",
+  "image_file": "309.png",
+  "image_sha256": "3329021ec8785ae6614e4ab42f963dfc9b78a2bae8c89981c908d3167d7a03d0",
+  "sets_json_sha256": "3329021ec8785ae6614e4ab42f963dfc9b78a2bae8c89981c908d3167d7a03d0",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-311",
+  "image_file": "311.png",
+  "image_sha256": "0c58c6948429c47a9c1c04ed255759dad4280bd4cc19f9893c24ae0b1cad11b9",
+  "sets_json_sha256": "0c58c6948429c47a9c1c04ed255759dad4280bd4cc19f9893c24ae0b1cad11b9",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-313",
+  "image_file": "313.png",
+  "image_sha256": "96f6c24f54a0d1366cecbdbd1355e111cb636189cefb0d7d09d0d8a04dc0be78",
+  "sets_json_sha256": "96f6c24f54a0d1366cecbdbd1355e111cb636189cefb0d7d09d0d8a04dc0be78",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-314",
+  "image_file": "314.png",
+  "image_sha256": "c77c763e35eb69c85fd377cac2ef611f05bed581083fbe031d5932057bad2601",
+  "sets_json_sha256": "c77c763e35eb69c85fd377cac2ef611f05bed581083fbe031d5932057bad2601",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-315",
+  "image_file": "315.png",
+  "image_sha256": "bb8e469f1c5e4ca78062d908787ca7c393754eec6de16e6b4fd1a84775e3a2f3",
+  "sets_json_sha256": "bb8e469f1c5e4ca78062d908787ca7c393754eec6de16e6b4fd1a84775e3a2f3",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-318",
+  "image_file": "318.png",
+  "image_sha256": "c5079b7456b20c540331afe4911ade2929a80dffcb2be7708b5e6baf18a24995",
+  "sets_json_sha256": "c5079b7456b20c540331afe4911ade2929a80dffcb2be7708b5e6baf18a24995",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-319",
+  "image_file": "319.png",
+  "image_sha256": "b9159a34a5a6152eaa5bcbc2352247bb467008f81715dc9166ef085d3e268416",
+  "sets_json_sha256": "b9159a34a5a6152eaa5bcbc2352247bb467008f81715dc9166ef085d3e268416",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-32",
+  "image_file": "32.jpg",
+  "image_sha256": "689aa40121764205cd5aaadc346677651f8827285b72becb415da7c2fa8efa7d",
+  "sets_json_sha256": "689aa40121764205cd5aaadc346677651f8827285b72becb415da7c2fa8efa7d",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-320",
+  "image_file": "320.png",
+  "image_sha256": "2cb71cd4f830f39b72d9fbea62ba5dabfd223b62d9ffb2c3d4f42055de878cb9",
+  "sets_json_sha256": "2cb71cd4f830f39b72d9fbea62ba5dabfd223b62d9ffb2c3d4f42055de878cb9",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-322",
+  "image_file": "322.png",
+  "image_sha256": "9fc6dc9c7696c9adfe2fd4179cc32a234cb2a71dc869df3588b1f1d466abb8ad",
+  "sets_json_sha256": "9fc6dc9c7696c9adfe2fd4179cc32a234cb2a71dc869df3588b1f1d466abb8ad",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-324",
+  "image_file": "324.png",
+  "image_sha256": "5fcd22420565ebd620959df19ff2798312af39e4a9dc05df6de9f2d2e32949bc",
+  "sets_json_sha256": "5fcd22420565ebd620959df19ff2798312af39e4a9dc05df6de9f2d2e32949bc",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-326",
+  "image_file": "326.png",
+  "image_sha256": "32cfc937a0ce7b960d1e07f05179d793be084e42d23c01dae81ad9591edfd7dd",
+  "sets_json_sha256": "32cfc937a0ce7b960d1e07f05179d793be084e42d23c01dae81ad9591edfd7dd",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-327",
+  "image_file": "327.png",
+  "image_sha256": "a2a604c71227d010e969145d3ecc7e3655c58000c07ff3521afc46e1df0bb7d6",
+  "sets_json_sha256": "a2a604c71227d010e969145d3ecc7e3655c58000c07ff3521afc46e1df0bb7d6",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-330",
+  "image_file": "330.png",
+  "image_sha256": "bb05358b6914ad38a802d4b4fdbb4ef4b064360d251a0661f9b9f170f6edb370",
+  "sets_json_sha256": "bb05358b6914ad38a802d4b4fdbb4ef4b064360d251a0661f9b9f170f6edb370",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-332",
+  "image_file": "332.png",
+  "image_sha256": "ece2ec05d5c4cf3dd665ce7a482b6c7f3e46cc97b27fc1623c946a4a92866686",
+  "sets_json_sha256": "ece2ec05d5c4cf3dd665ce7a482b6c7f3e46cc97b27fc1623c946a4a92866686",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-334",
+  "image_file": "334.png",
+  "image_sha256": "22b66d3074d98a6bc3bddf243ca45250b964d7f4f3bcace842c4922599693c09",
+  "sets_json_sha256": "22b66d3074d98a6bc3bddf243ca45250b964d7f4f3bcace842c4922599693c09",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-335",
+  "image_file": "335.png",
+  "image_sha256": "b3979b7361b9ed43a444590f565dba1d797af9be4e4efa8c0cf9cf67e6cdac21",
+  "sets_json_sha256": "b3979b7361b9ed43a444590f565dba1d797af9be4e4efa8c0cf9cf67e6cdac21",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-339",
+  "image_file": "339.png",
+  "image_sha256": "b13b2f38bf332da4cefd37498038e00a72411d5635da2fa0c71afe9959187900",
+  "sets_json_sha256": "b13b2f38bf332da4cefd37498038e00a72411d5635da2fa0c71afe9959187900",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-340",
+  "image_file": "340.png",
+  "image_sha256": "35fc12e1a679aa6eb022cc8bb799374b3a462e924baebb22ed8b16eb06461288",
+  "sets_json_sha256": "35fc12e1a679aa6eb022cc8bb799374b3a462e924baebb22ed8b16eb06461288",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-341",
+  "image_file": "341.png",
+  "image_sha256": "900853a52e47a4c52f1f30904c04fdc716527bc6a91879718673693e8ce8372b",
+  "sets_json_sha256": "900853a52e47a4c52f1f30904c04fdc716527bc6a91879718673693e8ce8372b",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-342",
+  "image_file": "342.png",
+  "image_sha256": "7ffa315618bf109bd27f23df8f357835865bfa20574d435dab37cfad8f57ef6f",
+  "sets_json_sha256": "7ffa315618bf109bd27f23df8f357835865bfa20574d435dab37cfad8f57ef6f",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-343",
+  "image_file": "343.png",
+  "image_sha256": "23e3e46b87ebc1de568e90be7764734c07de8c24f173a254f9193e29906ca1a9",
+  "sets_json_sha256": "23e3e46b87ebc1de568e90be7764734c07de8c24f173a254f9193e29906ca1a9",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-344",
+  "image_file": "344.png",
+  "image_sha256": "c32377c1a3c07c5ad7b60154754d383916c3e06fd3ac70052fb30f52ecbd2e90",
+  "sets_json_sha256": "c32377c1a3c07c5ad7b60154754d383916c3e06fd3ac70052fb30f52ecbd2e90",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-345",
+  "image_file": "345.png",
+  "image_sha256": "3e0255b3eda463e6965ebebf6f109e7ac712a585b5b252e25082e6fc94bd432b",
+  "sets_json_sha256": "3e0255b3eda463e6965ebebf6f109e7ac712a585b5b252e25082e6fc94bd432b",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-348",
+  "image_file": "348.png",
+  "image_sha256": "fa73d5a3ab530398ef986bcada4de40665d6c9c77198375d45daf6c9c3faf440",
+  "sets_json_sha256": "fa73d5a3ab530398ef986bcada4de40665d6c9c77198375d45daf6c9c3faf440",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-349",
+  "image_file": "349.png",
+  "image_sha256": "854b9916b19e34c4a917fe1312cc9b5663c993022f742be38f76d8983722a40d",
+  "sets_json_sha256": "854b9916b19e34c4a917fe1312cc9b5663c993022f742be38f76d8983722a40d",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-350",
+  "image_file": "350.png",
+  "image_sha256": "e21ff378d9791f4efc0473b19ee8a00a780ca3bd4f6d669fe7135aee0f65ac28",
+  "sets_json_sha256": "e21ff378d9791f4efc0473b19ee8a00a780ca3bd4f6d669fe7135aee0f65ac28",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-351",
+  "image_file": "351.png",
+  "image_sha256": "585fae894d0d09c7a7f94f50fc7e74192fba873acb41435bb8427cab20efb5c5",
+  "sets_json_sha256": "585fae894d0d09c7a7f94f50fc7e74192fba873acb41435bb8427cab20efb5c5",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-352",
+  "image_file": "352.png",
+  "image_sha256": "937cc11508c0fe45041eaf1728fc78b528fa3b9bf2072541383f29c4316ae269",
+  "sets_json_sha256": "937cc11508c0fe45041eaf1728fc78b528fa3b9bf2072541383f29c4316ae269",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-354",
+  "image_file": "354.png",
+  "image_sha256": "9ad02a7a56884d0b6d7c4310ce56eef60562792d365ff20b6e181d88e7cae25e",
+  "sets_json_sha256": "9ad02a7a56884d0b6d7c4310ce56eef60562792d365ff20b6e181d88e7cae25e",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-357",
+  "image_file": "357.png",
+  "image_sha256": "e1e18b0a8350e93f4c050f015749c111cd5e0db58f1d39fd33cb1438ad00c314",
+  "sets_json_sha256": "e1e18b0a8350e93f4c050f015749c111cd5e0db58f1d39fd33cb1438ad00c314",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-358",
+  "image_file": "358.png",
+  "image_sha256": "2affd06c1bc7e803da246477eeadbe4394162cd34d78196eaa13457616e185b0",
+  "sets_json_sha256": "2affd06c1bc7e803da246477eeadbe4394162cd34d78196eaa13457616e185b0",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-359",
+  "image_file": "359.png",
+  "image_sha256": "91aef465b250f2c0905957c264d94b239ce4029210248d563056d8da25584265",
+  "sets_json_sha256": "91aef465b250f2c0905957c264d94b239ce4029210248d563056d8da25584265",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-360",
+  "image_file": "360.png",
+  "image_sha256": "e28b65de0b9df8564feb541f9065d68ab3560d304ae510cf49b87f97440ffaaa",
+  "sets_json_sha256": "e28b65de0b9df8564feb541f9065d68ab3560d304ae510cf49b87f97440ffaaa",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-361",
+  "image_file": "361.png",
+  "image_sha256": "b1ab5c7330fc6af20e5eb880a080eb11a26850f039218260d7e0755aed6473f9",
+  "sets_json_sha256": "b1ab5c7330fc6af20e5eb880a080eb11a26850f039218260d7e0755aed6473f9",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-362",
+  "image_file": "362.png",
+  "image_sha256": "9b95091b49a08189ea5db8f406d1c538064b545bbb0338601c73e1e15a34cece",
+  "sets_json_sha256": "9b95091b49a08189ea5db8f406d1c538064b545bbb0338601c73e1e15a34cece",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-363",
+  "image_file": "363.png",
+  "image_sha256": "d71ac8e0648233288c76e3c8697e679c47ee763062e27916fa1f84a78f31e2ab",
+  "sets_json_sha256": "d71ac8e0648233288c76e3c8697e679c47ee763062e27916fa1f84a78f31e2ab",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-364",
+  "image_file": "364.png",
+  "image_sha256": "a1cd629f61c6414c6204e3c3065f64ca77c8256a36a4883d0d036c1eb0de13a6",
+  "sets_json_sha256": "a1cd629f61c6414c6204e3c3065f64ca77c8256a36a4883d0d036c1eb0de13a6",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-365",
+  "image_file": "365.png",
+  "image_sha256": "c2e41b6eb316af16336fa4e43673f8c4159235595919eab244dd2a6b5a8d1c53",
+  "sets_json_sha256": "c2e41b6eb316af16336fa4e43673f8c4159235595919eab244dd2a6b5a8d1c53",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-366",
+  "image_file": "366.png",
+  "image_sha256": "33085cfa0e9e1a062f86574333769b7d17126fe009c827cd2ebd6cbb82f3656f",
+  "sets_json_sha256": "33085cfa0e9e1a062f86574333769b7d17126fe009c827cd2ebd6cbb82f3656f",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-368",
+  "image_file": "368.png",
+  "image_sha256": "e0d359c7cbf1fd0351c4127dfd517bee11651816d310ed1cd1cee1dc00208534",
+  "sets_json_sha256": "e0d359c7cbf1fd0351c4127dfd517bee11651816d310ed1cd1cee1dc00208534",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-371",
+  "image_file": "371.jpg",
+  "image_sha256": "956aba832b672ebe88d82de49224c3084dc2df5fede411c0237744be04dc0226",
+  "sets_json_sha256": "956aba832b672ebe88d82de49224c3084dc2df5fede411c0237744be04dc0226",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-372",
+  "image_file": "372.png",
+  "image_sha256": "a65046c23441063e5db97bbdbe7c6f328334b536b82bef89598daeb69aa9a1c6",
+  "sets_json_sha256": "a65046c23441063e5db97bbdbe7c6f328334b536b82bef89598daeb69aa9a1c6",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-375",
+  "image_file": "375.png",
+  "image_sha256": "121e438ac77a4feda15825d59bb7a498c14f53f8dab44d49c5858cf1e9363496",
+  "sets_json_sha256": "121e438ac77a4feda15825d59bb7a498c14f53f8dab44d49c5858cf1e9363496",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-376",
+  "image_file": "376.png",
+  "image_sha256": "c934e4de9e22efa81574000491dfaba9778a55c48e747bc27f05905e2dd55d82",
+  "sets_json_sha256": "c934e4de9e22efa81574000491dfaba9778a55c48e747bc27f05905e2dd55d82",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-377",
+  "image_file": "377.png",
+  "image_sha256": "2127d9f136cc5ccaff487b622526fa6ef965d1c881793a33aef9b42b2d461509",
+  "sets_json_sha256": "2127d9f136cc5ccaff487b622526fa6ef965d1c881793a33aef9b42b2d461509",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-378",
+  "image_file": "378.png",
+  "image_sha256": "741e12156b9f596de3b45c651fb941d255142cbed35ac5d4eb24867486e4be41",
+  "sets_json_sha256": "741e12156b9f596de3b45c651fb941d255142cbed35ac5d4eb24867486e4be41",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-38",
+  "image_file": "38.jpg",
+  "image_sha256": "83c25d02497ae0a27e697fa82eaa67de8cd28dce2fa050d11d30cd49fee64872",
+  "sets_json_sha256": "83c25d02497ae0a27e697fa82eaa67de8cd28dce2fa050d11d30cd49fee64872",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-380",
+  "image_file": "380.png",
+  "image_sha256": "b2efc881377dfb05db19ee2d6a762dc855445bd593ba15dd7fd745692d6fe937",
+  "sets_json_sha256": "b2efc881377dfb05db19ee2d6a762dc855445bd593ba15dd7fd745692d6fe937",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-381",
+  "image_file": "381.png",
+  "image_sha256": "c3376266d2311743b2516bb39c62bfd3b2dcaa30dc8b56e044798ab17802517c",
+  "sets_json_sha256": "c3376266d2311743b2516bb39c62bfd3b2dcaa30dc8b56e044798ab17802517c",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-383",
+  "image_file": "383.png",
+  "image_sha256": "40f8a0b736d2974783f4db029f6b84f17ae5de7889de3bac7b01326fcf04bd6e",
+  "sets_json_sha256": "40f8a0b736d2974783f4db029f6b84f17ae5de7889de3bac7b01326fcf04bd6e",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-386",
+  "image_file": "386.png",
+  "image_sha256": "88bacfa2eaff2cc4c61a9e9a8f6df9c6639d7d988b7a4afdf0a735130cf538af",
+  "sets_json_sha256": "88bacfa2eaff2cc4c61a9e9a8f6df9c6639d7d988b7a4afdf0a735130cf538af",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-387",
+  "image_file": "387.png",
+  "image_sha256": "9f0aacd17011ea3aa0c34bc3ed1951f5409538471bf98995fff86b6c5c9eb8c1",
+  "sets_json_sha256": "9f0aacd17011ea3aa0c34bc3ed1951f5409538471bf98995fff86b6c5c9eb8c1",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-389",
+  "image_file": "389.png",
+  "image_sha256": "22ba8ddd7ccf8a84934ca85c4abd298556c76fa2367b723a3a6b15882fab899f",
+  "sets_json_sha256": "22ba8ddd7ccf8a84934ca85c4abd298556c76fa2367b723a3a6b15882fab899f",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-390",
+  "image_file": "390.png",
+  "image_sha256": "17e0f9f2afa8d6539693d23feb3f6601716c3a598fbdd03d6d8bbc7c369f3491",
+  "sets_json_sha256": "17e0f9f2afa8d6539693d23feb3f6601716c3a598fbdd03d6d8bbc7c369f3491",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-392",
+  "image_file": "392.png",
+  "image_sha256": "597a28cb540793894d9f0943970c7e5a69380471ab286ecc15deaf7f23f91c9c",
+  "sets_json_sha256": "597a28cb540793894d9f0943970c7e5a69380471ab286ecc15deaf7f23f91c9c",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-398",
+  "image_file": "398.png",
+  "image_sha256": "94f489b6e65ccc14b1162908fdd054875dd33ef00e097ef5bef5d2a7d4a78cd7",
+  "sets_json_sha256": "94f489b6e65ccc14b1162908fdd054875dd33ef00e097ef5bef5d2a7d4a78cd7",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-40",
+  "image_file": "40.png",
+  "image_sha256": "0aa6485e15e7b93651a00f8b47c5003fb9649c9dd4aae1402dd118158f729104",
+  "sets_json_sha256": "0aa6485e15e7b93651a00f8b47c5003fb9649c9dd4aae1402dd118158f729104",
+  "qualified": true,
+  "format": "SCANNED_FORM"
+ },
+ {
+  "id": "omni-400",
+  "image_file": "400.png",
+  "image_sha256": "4d4fc7dcd73d230b3e47d3943ff22584246f400bdd0f6cd7f64ab5daa69dff8c",
+  "sets_json_sha256": "4d4fc7dcd73d230b3e47d3943ff22584246f400bdd0f6cd7f64ab5daa69dff8c",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-401",
+  "image_file": "401.png",
+  "image_sha256": "8aa24c0a9e649579ffa933a7f41ea7c7a8c521ad75370890fa94bef5995eda65",
+  "sets_json_sha256": "8aa24c0a9e649579ffa933a7f41ea7c7a8c521ad75370890fa94bef5995eda65",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-402",
+  "image_file": "402.png",
+  "image_sha256": "485465dc7a23146dcea97019102fe48fdc3e792d1e3beac6113fe63a51707f51",
+  "sets_json_sha256": "485465dc7a23146dcea97019102fe48fdc3e792d1e3beac6113fe63a51707f51",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-403",
+  "image_file": "403.png",
+  "image_sha256": "8580696831afd0eed94021b30de66517d6a485c67834223849b0dcbe79dfab2d",
+  "sets_json_sha256": "8580696831afd0eed94021b30de66517d6a485c67834223849b0dcbe79dfab2d",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-404",
+  "image_file": "404.png",
+  "image_sha256": "1f67b74154869ffc56842ac8426b141d1279af5c3fb8647c2baab11ff51dc49d",
+  "sets_json_sha256": "1f67b74154869ffc56842ac8426b141d1279af5c3fb8647c2baab11ff51dc49d",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-405",
+  "image_file": "405.png",
+  "image_sha256": "2a23d42f7b0a4621398bb71885784f13cfeb0aea316d9a65cec487a6839f2a08",
+  "sets_json_sha256": "2a23d42f7b0a4621398bb71885784f13cfeb0aea316d9a65cec487a6839f2a08",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-410",
+  "image_file": "410.png",
+  "image_sha256": "43782aec576c65298251c92ae62f63b9a51372ca3edca7cd6a236f74a9a4eb11",
+  "sets_json_sha256": "43782aec576c65298251c92ae62f63b9a51372ca3edca7cd6a236f74a9a4eb11",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-414",
+  "image_file": "414.png",
+  "image_sha256": "277ce4711b10a114412bd9332cbae1386dc960c5fc82e57e71c019464aa092cf",
+  "sets_json_sha256": "277ce4711b10a114412bd9332cbae1386dc960c5fc82e57e71c019464aa092cf",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-417",
+  "image_file": "417.png",
+  "image_sha256": "9eaca06f340c6503763eef4a5674ecc28e1fd5f9a35f97649e17422d3e33c5be",
+  "sets_json_sha256": "9eaca06f340c6503763eef4a5674ecc28e1fd5f9a35f97649e17422d3e33c5be",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-420",
+  "image_file": "420.png",
+  "image_sha256": "91f797dcf28aad96c9b49013a8793589c6332bde0c1e4ec38d9ae3f53db4e6c8",
+  "sets_json_sha256": "91f797dcf28aad96c9b49013a8793589c6332bde0c1e4ec38d9ae3f53db4e6c8",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-421",
+  "image_file": "421.png",
+  "image_sha256": "b2e24173ec747dedcc8da12620c8cc9d466264921a1479e3ed9fdee637f93882",
+  "sets_json_sha256": "b2e24173ec747dedcc8da12620c8cc9d466264921a1479e3ed9fdee637f93882",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-423",
+  "image_file": "423.png",
+  "image_sha256": "992598f1222e721b2115aeafb33a6d034f352eee2cdf673e2c20f5785edde8f5",
+  "sets_json_sha256": "992598f1222e721b2115aeafb33a6d034f352eee2cdf673e2c20f5785edde8f5",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-424",
+  "image_file": "424.png",
+  "image_sha256": "e6b95dc5d058d62c6d1d396741a5aec5130e55c1aa4233a707e877a513130e7e",
+  "sets_json_sha256": "e6b95dc5d058d62c6d1d396741a5aec5130e55c1aa4233a707e877a513130e7e",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-426",
+  "image_file": "426.png",
+  "image_sha256": "910d300ac5c99d56b71eddf5191c87e844afff441cf538b135e82800aed74187",
+  "sets_json_sha256": "910d300ac5c99d56b71eddf5191c87e844afff441cf538b135e82800aed74187",
+  "qualified": true,
+  "format": "SCANNED_FORM"
+ },
+ {
+  "id": "omni-429",
+  "image_file": "429.png",
+  "image_sha256": "ba4cd8db5578109ca223130ea93c83ade79822fd5d420b918e5fe27538af0b85",
+  "sets_json_sha256": "ba4cd8db5578109ca223130ea93c83ade79822fd5d420b918e5fe27538af0b85",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-43",
+  "image_file": "43.png",
+  "image_sha256": "fd29914a80290994db59fc3b2c2b601905d871902bc4a38ab56423180a973d33",
+  "sets_json_sha256": "fd29914a80290994db59fc3b2c2b601905d871902bc4a38ab56423180a973d33",
+  "qualified": true,
+  "format": "FORM"
+ },
+ {
+  "id": "omni-431",
+  "image_file": "431.png",
+  "image_sha256": "38864bb200e18e6f080fc30ce4135f015dc0b2e684029886b78e03135befa7cc",
+  "sets_json_sha256": "38864bb200e18e6f080fc30ce4135f015dc0b2e684029886b78e03135befa7cc",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-432",
+  "image_file": "432.png",
+  "image_sha256": "8852885969edbef9d39dd52f6db560685ab95b8f1a3367588671d26b85958e97",
+  "sets_json_sha256": "8852885969edbef9d39dd52f6db560685ab95b8f1a3367588671d26b85958e97",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-437",
+  "image_file": "437.png",
+  "image_sha256": "44e80025663ef64b13dbb676bae4acd89cd70919c483a20eaaeda172dbde530a",
+  "sets_json_sha256": "44e80025663ef64b13dbb676bae4acd89cd70919c483a20eaaeda172dbde530a",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-440",
+  "image_file": "440.png",
+  "image_sha256": "65ef73837d415e21fbc800ed43726344923ef3fc043ec8fdbaa3707d35044509",
+  "sets_json_sha256": "65ef73837d415e21fbc800ed43726344923ef3fc043ec8fdbaa3707d35044509",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-444",
+  "image_file": "444.png",
+  "image_sha256": "5bf36b2601ec1275c4c6af2f940d633cee7210042fa43182f2aea4119866a5be",
+  "sets_json_sha256": "5bf36b2601ec1275c4c6af2f940d633cee7210042fa43182f2aea4119866a5be",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-446",
+  "image_file": "446.png",
+  "image_sha256": "cccb1bd832d791ed500ec5c9e8a61e7b1e88c87804ad2875c091db06f4562274",
+  "sets_json_sha256": "cccb1bd832d791ed500ec5c9e8a61e7b1e88c87804ad2875c091db06f4562274",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-447",
+  "image_file": "447.png",
+  "image_sha256": "065191a51c3fea44fa98b0c3c46f6e4ed2a0b0e1873033d3e51dfbb2efc6d8c4",
+  "sets_json_sha256": "065191a51c3fea44fa98b0c3c46f6e4ed2a0b0e1873033d3e51dfbb2efc6d8c4",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-448",
+  "image_file": "448.png",
+  "image_sha256": "64f848f07d6e9ec6ec4513d0fb235aad22fb8900351fc420542d6d80aa77ea78",
+  "sets_json_sha256": "64f848f07d6e9ec6ec4513d0fb235aad22fb8900351fc420542d6d80aa77ea78",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-449",
+  "image_file": "449.png",
+  "image_sha256": "bc3291d1723fb85ebe71f1b738fbcd64e7c16afcabb79c4b8ea044c268d058c5",
+  "sets_json_sha256": "bc3291d1723fb85ebe71f1b738fbcd64e7c16afcabb79c4b8ea044c268d058c5",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-452",
+  "image_file": "452.png",
+  "image_sha256": "d9fe353c789e50c7096685c73cb26922f21491ec22a0febde4b130567ae42d3f",
+  "sets_json_sha256": "d9fe353c789e50c7096685c73cb26922f21491ec22a0febde4b130567ae42d3f",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-453",
+  "image_file": "453.png",
+  "image_sha256": "7d42e51427b76a29a5dd0755aec75f86f64249e92fc7963201889d22828f38f6",
+  "sets_json_sha256": "7d42e51427b76a29a5dd0755aec75f86f64249e92fc7963201889d22828f38f6",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-455",
+  "image_file": "455.png",
+  "image_sha256": "68441241e5ae5190e834b27264c2c919fc483122f81f2a69e21ba5192f316e15",
+  "sets_json_sha256": "68441241e5ae5190e834b27264c2c919fc483122f81f2a69e21ba5192f316e15",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-456",
+  "image_file": "456.png",
+  "image_sha256": "fc0ca6381518d084c4f769e487331715a0b9be78b33162732a7b596ad7f7834a",
+  "sets_json_sha256": "fc0ca6381518d084c4f769e487331715a0b9be78b33162732a7b596ad7f7834a",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-457",
+  "image_file": "457.png",
+  "image_sha256": "986d0f5eaada99136dad4573f77cf7075903a8e19468b3e24bf9527af309ac83",
+  "sets_json_sha256": "986d0f5eaada99136dad4573f77cf7075903a8e19468b3e24bf9527af309ac83",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-458",
+  "image_file": "458.png",
+  "image_sha256": "48cd5ddffe6f50ad1103a7cb0b0fc9ee99730ad4509c1440f54dc9738f8c0a42",
+  "sets_json_sha256": "48cd5ddffe6f50ad1103a7cb0b0fc9ee99730ad4509c1440f54dc9738f8c0a42",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-459",
+  "image_file": "459.png",
+  "image_sha256": "d9b4751044aef798f492b0611eac38251e83e7e1c26fd2abc4fde039adba6407",
+  "sets_json_sha256": "d9b4751044aef798f492b0611eac38251e83e7e1c26fd2abc4fde039adba6407",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-46",
+  "image_file": "46.png",
+  "image_sha256": "26b03123384dc40cbff8730361639464cc7fa3d97ebfc3c663c288da15e8ac4d",
+  "sets_json_sha256": "26b03123384dc40cbff8730361639464cc7fa3d97ebfc3c663c288da15e8ac4d",
+  "qualified": true,
+  "format": "SCANNED_FORM"
+ },
+ {
+  "id": "omni-461",
+  "image_file": "461.png",
+  "image_sha256": "aee99bc3b53d97251522f0d5d0b436c4f4cce031a49eb5182f4d37fe0ba36c95",
+  "sets_json_sha256": "aee99bc3b53d97251522f0d5d0b436c4f4cce031a49eb5182f4d37fe0ba36c95",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-462",
+  "image_file": "462.png",
+  "image_sha256": "23bdbc910dcea9b8fafcc16fc8414a90f6c3448598cbb644ebafcc690660c79e",
+  "sets_json_sha256": "23bdbc910dcea9b8fafcc16fc8414a90f6c3448598cbb644ebafcc690660c79e",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-463",
+  "image_file": "463.png",
+  "image_sha256": "83973736f9e0822c193541a28ecaaa6c879c48d15651c5bcaf8c4f91288a485b",
+  "sets_json_sha256": "83973736f9e0822c193541a28ecaaa6c879c48d15651c5bcaf8c4f91288a485b",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-464",
+  "image_file": "464.png",
+  "image_sha256": "3657458223aaca0a1f8edb19149e7400c528160642e7aadda9a7c45e75043c15",
+  "sets_json_sha256": "3657458223aaca0a1f8edb19149e7400c528160642e7aadda9a7c45e75043c15",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-465",
+  "image_file": "465.png",
+  "image_sha256": "8f7678261aea1a8bfbedca998f0e46e3280529dedfd742244a5332fba203ce3b",
+  "sets_json_sha256": "8f7678261aea1a8bfbedca998f0e46e3280529dedfd742244a5332fba203ce3b",
+  "qualified": true,
+  "format": "FORM"
+ },
+ {
+  "id": "omni-467",
+  "image_file": "467.png",
+  "image_sha256": "27843166ff4054174ca18ee63f897ca659adf0e5ff9f8e5270740ca533655366",
+  "sets_json_sha256": "27843166ff4054174ca18ee63f897ca659adf0e5ff9f8e5270740ca533655366",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-468",
+  "image_file": "468.png",
+  "image_sha256": "c49909146a0cd0cf6aad8a35bed410674d56df4c1b9a550a528fcac53f5ee994",
+  "sets_json_sha256": "c49909146a0cd0cf6aad8a35bed410674d56df4c1b9a550a528fcac53f5ee994",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-471",
+  "image_file": "471.png",
+  "image_sha256": "e9cafbb551b63dd68fc2a8c49aaa6c01096c62b436a206c2f25075a4d31b8c1d",
+  "sets_json_sha256": "e9cafbb551b63dd68fc2a8c49aaa6c01096c62b436a206c2f25075a4d31b8c1d",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-472",
+  "image_file": "472.png",
+  "image_sha256": "990d6e35d7ff201217869307911ed4f936d6ca95de722c24d1c7e9c8573804d5",
+  "sets_json_sha256": "990d6e35d7ff201217869307911ed4f936d6ca95de722c24d1c7e9c8573804d5",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-474",
+  "image_file": "474.png",
+  "image_sha256": "1085efc353f16afc65cde520805a8c4097e4524c964e629ef2a12e27282aa22d",
+  "sets_json_sha256": "1085efc353f16afc65cde520805a8c4097e4524c964e629ef2a12e27282aa22d",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-476",
+  "image_file": "476.png",
+  "image_sha256": "a621dff24b154c9eb5f2596a29812abe0f158a0843358bc1ff49c0c670bc0c7d",
+  "sets_json_sha256": "a621dff24b154c9eb5f2596a29812abe0f158a0843358bc1ff49c0c670bc0c7d",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-477",
+  "image_file": "477.png",
+  "image_sha256": "e7c8c1a06bd3ad34db7be897047c6acb172564c1c72bad2857ff2f057ead5571",
+  "sets_json_sha256": "e7c8c1a06bd3ad34db7be897047c6acb172564c1c72bad2857ff2f057ead5571",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-479",
+  "image_file": "479.png",
+  "image_sha256": "7a7ce2997ca1c9bba8733381c146983c8dfa6605a67d079dbaa96b62b9babc9e",
+  "sets_json_sha256": "7a7ce2997ca1c9bba8733381c146983c8dfa6605a67d079dbaa96b62b9babc9e",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-48",
+  "image_file": "48.png",
+  "image_sha256": "6aec67c3860bdfc6086ff57b42b190ae7d7ac2338b0aa0808ac36e216af86d43",
+  "sets_json_sha256": "6aec67c3860bdfc6086ff57b42b190ae7d7ac2338b0aa0808ac36e216af86d43",
+  "qualified": true,
+  "format": "SCANNED_FORM"
+ },
+ {
+  "id": "omni-481",
+  "image_file": "481.png",
+  "image_sha256": "125e2cc4d37a6234f56936e258d86732ca29cb05980fa2cc5bb55d7294feb003",
+  "sets_json_sha256": "125e2cc4d37a6234f56936e258d86732ca29cb05980fa2cc5bb55d7294feb003",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-483",
+  "image_file": "483.png",
+  "image_sha256": "f38ab7161ead261aaa386d92f253e220fd53308df9926916d8df34bd9f941721",
+  "sets_json_sha256": "f38ab7161ead261aaa386d92f253e220fd53308df9926916d8df34bd9f941721",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-485",
+  "image_file": "485.png",
+  "image_sha256": "0085920d3fe84325b1bb358938b3d3bdfc8f53593a74c4506f2d06fba607f83e",
+  "sets_json_sha256": "0085920d3fe84325b1bb358938b3d3bdfc8f53593a74c4506f2d06fba607f83e",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-486",
+  "image_file": "486.png",
+  "image_sha256": "e89c7ef1843fae8b883b04734490bffc2f45889bfb6c7e6f79eb1af8ce46ddc2",
+  "sets_json_sha256": "e89c7ef1843fae8b883b04734490bffc2f45889bfb6c7e6f79eb1af8ce46ddc2",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-487",
+  "image_file": "487.png",
+  "image_sha256": "cb1641d16161b258c4cdb99fd8f401a504db5a19bc441c7b7c3f9d27fe2591db",
+  "sets_json_sha256": "cb1641d16161b258c4cdb99fd8f401a504db5a19bc441c7b7c3f9d27fe2591db",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-489",
+  "image_file": "489.png",
+  "image_sha256": "1805dbab348d0a16344965fa379a76c00de551f5ccbaa9191cd94bd3af207dec",
+  "sets_json_sha256": "1805dbab348d0a16344965fa379a76c00de551f5ccbaa9191cd94bd3af207dec",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-491",
+  "image_file": "491.png",
+  "image_sha256": "c6e671068959f4dd2390a9cb7a7231f5dc776ad9cb65534d754a1701467c278b",
+  "sets_json_sha256": "c6e671068959f4dd2390a9cb7a7231f5dc776ad9cb65534d754a1701467c278b",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-493",
+  "image_file": "493.png",
+  "image_sha256": "9fd2a060604a8d2fe1e01179ea47e06aa04a2722e6246884f1ecdf7b237f16e7",
+  "sets_json_sha256": "9fd2a060604a8d2fe1e01179ea47e06aa04a2722e6246884f1ecdf7b237f16e7",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-496",
+  "image_file": "496.png",
+  "image_sha256": "364d45e441e1444de1853867fb6cf5d5e19b08aab1d5f9d15d709c484a6c5b14",
+  "sets_json_sha256": "364d45e441e1444de1853867fb6cf5d5e19b08aab1d5f9d15d709c484a6c5b14",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-503",
+  "image_file": "503.png",
+  "image_sha256": "8dfcff3d39511f82f53574030bad191a32df32185f186c0a27eef0d9055b0456",
+  "sets_json_sha256": "8dfcff3d39511f82f53574030bad191a32df32185f186c0a27eef0d9055b0456",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-505",
+  "image_file": "505.jpg",
+  "image_sha256": "6093281cf0e733bdd95e22a3b2d3737dcccc94b780c1367164c939d55bebed03",
+  "sets_json_sha256": "6093281cf0e733bdd95e22a3b2d3737dcccc94b780c1367164c939d55bebed03",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-508",
+  "image_file": "508.png",
+  "image_sha256": "3976078e84ade5d7fe333b18e4adf06688d050024ad968273d622077f7d28cc2",
+  "sets_json_sha256": "3976078e84ade5d7fe333b18e4adf06688d050024ad968273d622077f7d28cc2",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-509",
+  "image_file": "509.png",
+  "image_sha256": "467a30bc22cc57d13dbd6a59ce6892e2a5e0e1d79e4cb93475c007b83cefde62",
+  "sets_json_sha256": "467a30bc22cc57d13dbd6a59ce6892e2a5e0e1d79e4cb93475c007b83cefde62",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-510",
+  "image_file": "510.png",
+  "image_sha256": "415a71dc946fd3e79c22e7873c89fbe4f9563753baa1e072eac113ce85ce47ea",
+  "sets_json_sha256": "415a71dc946fd3e79c22e7873c89fbe4f9563753baa1e072eac113ce85ce47ea",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-511",
+  "image_file": "511.png",
+  "image_sha256": "9d62f909c7d3ebce4bb42fa1998cbcd14551a89c4ed24d9d6c24e5c77e81ea27",
+  "sets_json_sha256": "9d62f909c7d3ebce4bb42fa1998cbcd14551a89c4ed24d9d6c24e5c77e81ea27",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-514",
+  "image_file": "514.png",
+  "image_sha256": "e26492b1a2b52cd76d4dcc7b7c461b6b57b992acf1d064327c4c2e56a501b511",
+  "sets_json_sha256": "e26492b1a2b52cd76d4dcc7b7c461b6b57b992acf1d064327c4c2e56a501b511",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-517",
+  "image_file": "517.jpg",
+  "image_sha256": "aeb7b6f7d5ccc9edeada2a7df0d31624d917653b2e03582a6125591baea975cf",
+  "sets_json_sha256": "aeb7b6f7d5ccc9edeada2a7df0d31624d917653b2e03582a6125591baea975cf",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-518",
+  "image_file": "518.png",
+  "image_sha256": "850c6970431107ef0e197b71c8311647e654bd029792746a5d879a777e338ace",
+  "sets_json_sha256": "850c6970431107ef0e197b71c8311647e654bd029792746a5d879a777e338ace",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-52",
+  "image_file": "52.png",
+  "image_sha256": "136a8c44dda39b96f80787cdba19c267088e8292c9c27cef24abe70f50de4e5a",
+  "sets_json_sha256": "136a8c44dda39b96f80787cdba19c267088e8292c9c27cef24abe70f50de4e5a",
+  "qualified": true,
+  "format": "FORM"
+ },
+ {
+  "id": "omni-520",
+  "image_file": "520.png",
+  "image_sha256": "b9a327d08e5a2f6cbebd06621f4d6b938f0cadfca7a82feebdee5b652bc70645",
+  "sets_json_sha256": "b9a327d08e5a2f6cbebd06621f4d6b938f0cadfca7a82feebdee5b652bc70645",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-521",
+  "image_file": "521.png",
+  "image_sha256": "1e903379ae00ca6b54aa63b175d7a028fac0f029dcd97dda4d13e0d8c205009a",
+  "sets_json_sha256": "1e903379ae00ca6b54aa63b175d7a028fac0f029dcd97dda4d13e0d8c205009a",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-525",
+  "image_file": "525.png",
+  "image_sha256": "78a4786e285bdbd537e407559a60fcab95282e26fc4fb2a257c890f45b4cc18e",
+  "sets_json_sha256": "78a4786e285bdbd537e407559a60fcab95282e26fc4fb2a257c890f45b4cc18e",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-528",
+  "image_file": "528.png",
+  "image_sha256": "b715a2ea1b3651ce5e438ac43d2c23f4615f4e72020892aa4a02c0b17b9cc9d0",
+  "sets_json_sha256": "b715a2ea1b3651ce5e438ac43d2c23f4615f4e72020892aa4a02c0b17b9cc9d0",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-529",
+  "image_file": "529.png",
+  "image_sha256": "3c2f12358f5132d591ebb777da238aad28c0a5779bed377ec3e8c98837506bb3",
+  "sets_json_sha256": "3c2f12358f5132d591ebb777da238aad28c0a5779bed377ec3e8c98837506bb3",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-53",
+  "image_file": "53.png",
+  "image_sha256": "15b288e14f40ad8a59167ecbccf2ed43630d8d31f63befec049da66d4a8bed08",
+  "sets_json_sha256": "15b288e14f40ad8a59167ecbccf2ed43630d8d31f63befec049da66d4a8bed08",
+  "qualified": true,
+  "format": "FORM"
+ },
+ {
+  "id": "omni-530",
+  "image_file": "530.png",
+  "image_sha256": "bdca1654218160064995caa38e7533980feaa625aad390c1682264ac56f3bde4",
+  "sets_json_sha256": "bdca1654218160064995caa38e7533980feaa625aad390c1682264ac56f3bde4",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-531",
+  "image_file": "531.png",
+  "image_sha256": "bea76e25f719a6821e397e054ff9230688bbbcfc65d4508ea65e548187252465",
+  "sets_json_sha256": "bea76e25f719a6821e397e054ff9230688bbbcfc65d4508ea65e548187252465",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-532",
+  "image_file": "532.png",
+  "image_sha256": "969367996cc670ddee6ef601e9096926010ecf03ba1a6c8e40e768b527e54777",
+  "sets_json_sha256": "969367996cc670ddee6ef601e9096926010ecf03ba1a6c8e40e768b527e54777",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-533",
+  "image_file": "533.png",
+  "image_sha256": "d598fe7f50b62b220fc97c8efe91b8a26562b9553b3a5ac2d88dfcdcb2921da6",
+  "sets_json_sha256": "d598fe7f50b62b220fc97c8efe91b8a26562b9553b3a5ac2d88dfcdcb2921da6",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-534",
+  "image_file": "534.png",
+  "image_sha256": "36820b39c6c0a6772b990fae7e596577ad08dfce2314f8d5b55383a46737403e",
+  "sets_json_sha256": "36820b39c6c0a6772b990fae7e596577ad08dfce2314f8d5b55383a46737403e",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-535",
+  "image_file": "535.png",
+  "image_sha256": "48f4e600436e8a0782b4d09ba7b6f60dee65546e9e7e2885f2ae369614cfcb75",
+  "sets_json_sha256": "48f4e600436e8a0782b4d09ba7b6f60dee65546e9e7e2885f2ae369614cfcb75",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-536",
+  "image_file": "536.png",
+  "image_sha256": "6962f6e82d2635555e21a36dee48f2aa1488579812b2a5f164ee770c3d78d617",
+  "sets_json_sha256": "6962f6e82d2635555e21a36dee48f2aa1488579812b2a5f164ee770c3d78d617",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-539",
+  "image_file": "539.png",
+  "image_sha256": "7bf3411ee51ac529e5cbaaeeb0fa3b7ed742f3a022021ba80b79be71726aa93b",
+  "sets_json_sha256": "7bf3411ee51ac529e5cbaaeeb0fa3b7ed742f3a022021ba80b79be71726aa93b",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-540",
+  "image_file": "540.png",
+  "image_sha256": "e82ac54dc2a4f8c4bc4f0fb89fef508b3f7f7fec12ba566218c20aba30e91b37",
+  "sets_json_sha256": "e82ac54dc2a4f8c4bc4f0fb89fef508b3f7f7fec12ba566218c20aba30e91b37",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-542",
+  "image_file": "542.png",
+  "image_sha256": "bec6d9847ea3bfdc8cfe3f278dd6239c70eb69db7acae768c7ce3b8d0f6fad09",
+  "sets_json_sha256": "bec6d9847ea3bfdc8cfe3f278dd6239c70eb69db7acae768c7ce3b8d0f6fad09",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-544",
+  "image_file": "544.png",
+  "image_sha256": "58c3519954fa69ce29548ca0c79217e2b583cace34ed089af6c73287ca280301",
+  "sets_json_sha256": "58c3519954fa69ce29548ca0c79217e2b583cace34ed089af6c73287ca280301",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-545",
+  "image_file": "545.png",
+  "image_sha256": "2e0948c41089348b906724739668a3ee652565b12fd53bc9a6c185e3039c2dc3",
+  "sets_json_sha256": "2e0948c41089348b906724739668a3ee652565b12fd53bc9a6c185e3039c2dc3",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-549",
+  "image_file": "549.png",
+  "image_sha256": "a478fa1d68e0206f7a1cb8dd84dd541b5775ea1a02070eb9eea0160251c4b1a2",
+  "sets_json_sha256": "a478fa1d68e0206f7a1cb8dd84dd541b5775ea1a02070eb9eea0160251c4b1a2",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-550",
+  "image_file": "550.png",
+  "image_sha256": "35ca8198ec3ed3a18fc5e27a15d33f370dda7ad30eaf6b56985e06fcc42f94b1",
+  "sets_json_sha256": "35ca8198ec3ed3a18fc5e27a15d33f370dda7ad30eaf6b56985e06fcc42f94b1",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-551",
+  "image_file": "551.png",
+  "image_sha256": "dfc56895663bae9102b61063f412cc83311ba5df254cecd1440547df3b75bac8",
+  "sets_json_sha256": "dfc56895663bae9102b61063f412cc83311ba5df254cecd1440547df3b75bac8",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-552",
+  "image_file": "552.png",
+  "image_sha256": "0f7338f55a9d4042716aaf5fa82c4ccb4885393de07cb1cd799e86fa95498745",
+  "sets_json_sha256": "0f7338f55a9d4042716aaf5fa82c4ccb4885393de07cb1cd799e86fa95498745",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-553",
+  "image_file": "553.png",
+  "image_sha256": "b3958d6a73cbdb155ddfb7b35933351bb235059a501cd6dda7e43203efa953b1",
+  "sets_json_sha256": "b3958d6a73cbdb155ddfb7b35933351bb235059a501cd6dda7e43203efa953b1",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-554",
+  "image_file": "554.png",
+  "image_sha256": "be9ba0c4657d0c79faae980257e70b82a3eb7547013ae7cda172d241050ecc62",
+  "sets_json_sha256": "be9ba0c4657d0c79faae980257e70b82a3eb7547013ae7cda172d241050ecc62",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-557",
+  "image_file": "557.png",
+  "image_sha256": "a073c07caa00e1c502312487f2a54b5a5d15821c8e66b5e00bbf910cc2c33ee7",
+  "sets_json_sha256": "a073c07caa00e1c502312487f2a54b5a5d15821c8e66b5e00bbf910cc2c33ee7",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-558",
+  "image_file": "558.png",
+  "image_sha256": "74336bab999dd743560c7532b2abb239f3e29bebe07590311fc3baafccd6a992",
+  "sets_json_sha256": "74336bab999dd743560c7532b2abb239f3e29bebe07590311fc3baafccd6a992",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-559",
+  "image_file": "559.png",
+  "image_sha256": "4e96d306ea82ecc6b39f2612b817bb599933376ec7d719ec024f40ee2a8e3f0d",
+  "sets_json_sha256": "4e96d306ea82ecc6b39f2612b817bb599933376ec7d719ec024f40ee2a8e3f0d",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-56",
+  "image_file": "56.jpeg",
+  "image_sha256": "b4eaa8d2144e20b5b3eb6446b01c393a31f524e99fcf6dad6715089a1ae14a1b",
+  "sets_json_sha256": "b4eaa8d2144e20b5b3eb6446b01c393a31f524e99fcf6dad6715089a1ae14a1b",
+  "qualified": true,
+  "format": "PHOTO_RECEIPT"
+ },
+ {
+  "id": "omni-567",
+  "image_file": "567.png",
+  "image_sha256": "83d326dcc239fa54f1da3a85530aad74408804385bfbc00adadcd5f47ab6653e",
+  "sets_json_sha256": "83d326dcc239fa54f1da3a85530aad74408804385bfbc00adadcd5f47ab6653e",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-568",
+  "image_file": "568.png",
+  "image_sha256": "6bf5185f075d42470d3220b083cbdd90a461730b4183251ce46e0de75e9f213f",
+  "sets_json_sha256": "6bf5185f075d42470d3220b083cbdd90a461730b4183251ce46e0de75e9f213f",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-569",
+  "image_file": "569.png",
+  "image_sha256": "f89e8d834f7a7e92a39c18f83615caa816f882941eba6c1a154ab97213e3e74f",
+  "sets_json_sha256": "f89e8d834f7a7e92a39c18f83615caa816f882941eba6c1a154ab97213e3e74f",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-571",
+  "image_file": "571.png",
+  "image_sha256": "b9f1fdaa2a6355975dddce2ec69ecf9f1a3c749210a1f17eb7dd9677a946fc23",
+  "sets_json_sha256": "b9f1fdaa2a6355975dddce2ec69ecf9f1a3c749210a1f17eb7dd9677a946fc23",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-572",
+  "image_file": "572.png",
+  "image_sha256": "d4f6a1738e469e486d5876f32d68b6cdeff14dc16d9c6eadcfde42747b194626",
+  "sets_json_sha256": "d4f6a1738e469e486d5876f32d68b6cdeff14dc16d9c6eadcfde42747b194626",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-574",
+  "image_file": "574.png",
+  "image_sha256": "d7c51c7f0df0a200ef2f2ad3b6895b7265bc4c7ecd4443607372d6a82649a170",
+  "sets_json_sha256": "d7c51c7f0df0a200ef2f2ad3b6895b7265bc4c7ecd4443607372d6a82649a170",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-575",
+  "image_file": "575.png",
+  "image_sha256": "f9deb00b4a8780f24721b0383863be1dd6691281e04ecb741563ab4275fe8607",
+  "sets_json_sha256": "f9deb00b4a8780f24721b0383863be1dd6691281e04ecb741563ab4275fe8607",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-577",
+  "image_file": "577.png",
+  "image_sha256": "8d1130c67bead4b569993a0879f3f54afbef2ee1142ee7296297e0f5b6efe23a",
+  "sets_json_sha256": "8d1130c67bead4b569993a0879f3f54afbef2ee1142ee7296297e0f5b6efe23a",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-581",
+  "image_file": "581.png",
+  "image_sha256": "686a030b41ec950b612caf36c94d643147a4c24aeb472bc9815b9a3946bd6861",
+  "sets_json_sha256": "686a030b41ec950b612caf36c94d643147a4c24aeb472bc9815b9a3946bd6861",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-582",
+  "image_file": "582.png",
+  "image_sha256": "17593851650531fd99adbf06aab0a73040a474beb9198327d42a0bb03bf22deb",
+  "sets_json_sha256": "17593851650531fd99adbf06aab0a73040a474beb9198327d42a0bb03bf22deb",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-583",
+  "image_file": "583.png",
+  "image_sha256": "0e5e732055d118902ee874d50e7cc5fbeef2779de30a550acc528b3acb6e208b",
+  "sets_json_sha256": "0e5e732055d118902ee874d50e7cc5fbeef2779de30a550acc528b3acb6e208b",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-584",
+  "image_file": "584.png",
+  "image_sha256": "3d58c651b6374cc9dcd5aa32bed3776bbda6828bdcaf2ddacf86110056494c6a",
+  "sets_json_sha256": "3d58c651b6374cc9dcd5aa32bed3776bbda6828bdcaf2ddacf86110056494c6a",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-587",
+  "image_file": "587.png",
+  "image_sha256": "24b3e2f24ec58bbb64c9c653e00c76411cdc15e5f0a4400ea3ecf5d3f701d032",
+  "sets_json_sha256": "24b3e2f24ec58bbb64c9c653e00c76411cdc15e5f0a4400ea3ecf5d3f701d032",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-589",
+  "image_file": "589.png",
+  "image_sha256": "67078fe88a064ff524024ce1a20c9c6c12fee4d423728f9f57eaa00419bbf76f",
+  "sets_json_sha256": "67078fe88a064ff524024ce1a20c9c6c12fee4d423728f9f57eaa00419bbf76f",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-59",
+  "image_file": "59.jpg",
+  "image_sha256": "9aa34726df4856aa37ebb66c5eda99c1a49bb10242f74b11c1ca4c0d92dafee2",
+  "sets_json_sha256": "9aa34726df4856aa37ebb66c5eda99c1a49bb10242f74b11c1ca4c0d92dafee2",
+  "qualified": true,
+  "format": "PHOTO_RECEIPT"
+ },
+ {
+  "id": "omni-590",
+  "image_file": "590.png",
+  "image_sha256": "8eec0a1e983b0844d6766fe92fbd0e2e968aef55b1072a622b5d460ad73c8b8e",
+  "sets_json_sha256": "8eec0a1e983b0844d6766fe92fbd0e2e968aef55b1072a622b5d460ad73c8b8e",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-592",
+  "image_file": "592.png",
+  "image_sha256": "c23e9da78f467a227d5d4bf6e2ff910a862d8e4876826613c7841b098209defd",
+  "sets_json_sha256": "c23e9da78f467a227d5d4bf6e2ff910a862d8e4876826613c7841b098209defd",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-594",
+  "image_file": "594.png",
+  "image_sha256": "dbe9cc5dd6adcf887c0f52a1ec493544713202df08b6656b7100d66f315491d2",
+  "sets_json_sha256": "dbe9cc5dd6adcf887c0f52a1ec493544713202df08b6656b7100d66f315491d2",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-595",
+  "image_file": "595.png",
+  "image_sha256": "1e1caf7c89f0f58783c493e781ba887a39d59095f5b1c31906b101835501e2fc",
+  "sets_json_sha256": "1e1caf7c89f0f58783c493e781ba887a39d59095f5b1c31906b101835501e2fc",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-596",
+  "image_file": "596.png",
+  "image_sha256": "b774c66053481707cc3ced7fa80ce12d4ac44e8f70baaf4da2e64eed0f009f03",
+  "sets_json_sha256": "b774c66053481707cc3ced7fa80ce12d4ac44e8f70baaf4da2e64eed0f009f03",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-598",
+  "image_file": "598.png",
+  "image_sha256": "3365a778bc615a68ae5e4ccaa998936150c19c2897a9d2f3ae5d3821273db46d",
+  "sets_json_sha256": "3365a778bc615a68ae5e4ccaa998936150c19c2897a9d2f3ae5d3821273db46d",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-599",
+  "image_file": "599.png",
+  "image_sha256": "1aaa4dc71efd050f0f03605251034dc479ca1acca9ecbe52c947de9033800ee7",
+  "sets_json_sha256": "1aaa4dc71efd050f0f03605251034dc479ca1acca9ecbe52c947de9033800ee7",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-600",
+  "image_file": "600.png",
+  "image_sha256": "1a460782388f1390b5f50fe00ab959b661d0a32cedc7fcd227c9e091bab9f649",
+  "sets_json_sha256": "1a460782388f1390b5f50fe00ab959b661d0a32cedc7fcd227c9e091bab9f649",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-601",
+  "image_file": "601.png",
+  "image_sha256": "2cd3a2f10849452caf1a377664ad22a1506d1fb39d745200024b2c51676c72fe",
+  "sets_json_sha256": "2cd3a2f10849452caf1a377664ad22a1506d1fb39d745200024b2c51676c72fe",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-602",
+  "image_file": "602.png",
+  "image_sha256": "c947afdd34545848a7973b5791a1c672209cbcd37d7bcb7295dda2875202dab9",
+  "sets_json_sha256": "c947afdd34545848a7973b5791a1c672209cbcd37d7bcb7295dda2875202dab9",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-604",
+  "image_file": "604.png",
+  "image_sha256": "57319bd3156330dd416b3390f49312754cc43ff21270074986c3c4719be15fa6",
+  "sets_json_sha256": "57319bd3156330dd416b3390f49312754cc43ff21270074986c3c4719be15fa6",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-605",
+  "image_file": "605.png",
+  "image_sha256": "0f6a190871834a8338fa0aed79a3644097f573f7a6baf6bf94b0aea1ae25bbe3",
+  "sets_json_sha256": "0f6a190871834a8338fa0aed79a3644097f573f7a6baf6bf94b0aea1ae25bbe3",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-606",
+  "image_file": "606.png",
+  "image_sha256": "8659a55d463a3e8f5fce22d23dd43ef0dbf7c58eb552b30e0f4eb12cc697b574",
+  "sets_json_sha256": "8659a55d463a3e8f5fce22d23dd43ef0dbf7c58eb552b30e0f4eb12cc697b574",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-609",
+  "image_file": "609.png",
+  "image_sha256": "fea2fc9c2486039c3ef9f05f5654a495503659ffe0a37146f3654b4c89f983d4",
+  "sets_json_sha256": "fea2fc9c2486039c3ef9f05f5654a495503659ffe0a37146f3654b4c89f983d4",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-611",
+  "image_file": "611.png",
+  "image_sha256": "0e517cd57a97f0676914e0498bb38d5ba6f009f61fa25c9cc5f69249e2242d28",
+  "sets_json_sha256": "0e517cd57a97f0676914e0498bb38d5ba6f009f61fa25c9cc5f69249e2242d28",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-612",
+  "image_file": "612.png",
+  "image_sha256": "c2682ddfc578e95ed366f29c5a269bdbc292b9a2f32fc1b9d8e2ecb920bdf9b3",
+  "sets_json_sha256": "c2682ddfc578e95ed366f29c5a269bdbc292b9a2f32fc1b9d8e2ecb920bdf9b3",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-614",
+  "image_file": "614.png",
+  "image_sha256": "3406051bccd1f28844dd1deccfe724779517aea2fdab32b12e9031f857ff3e08",
+  "sets_json_sha256": "3406051bccd1f28844dd1deccfe724779517aea2fdab32b12e9031f857ff3e08",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-615",
+  "image_file": "615.png",
+  "image_sha256": "6b0dbf5334b65010606c54d4c7cb1392e15fab91a6860a984ffa28dbe30e4e23",
+  "sets_json_sha256": "6b0dbf5334b65010606c54d4c7cb1392e15fab91a6860a984ffa28dbe30e4e23",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-616",
+  "image_file": "616.png",
+  "image_sha256": "0cbda8f23ac63547b791d7625d496c7f50154b931482d8b7dbbd98f978282469",
+  "sets_json_sha256": "0cbda8f23ac63547b791d7625d496c7f50154b931482d8b7dbbd98f978282469",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-618",
+  "image_file": "618.png",
+  "image_sha256": "a56f0748efe469aee5c7d21076df9fb5b89a760e2f53d796661026d835fc623d",
+  "sets_json_sha256": "a56f0748efe469aee5c7d21076df9fb5b89a760e2f53d796661026d835fc623d",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-619",
+  "image_file": "619.png",
+  "image_sha256": "69e7b506a70b0663a40d8ab9ab4c396b962b4920cf9fbf8ea30272dc77e81e84",
+  "sets_json_sha256": "69e7b506a70b0663a40d8ab9ab4c396b962b4920cf9fbf8ea30272dc77e81e84",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-62",
+  "image_file": "62.jpg",
+  "image_sha256": "d0e7a2b5ea35dddc9ee461fae551d7319002cce0e51104df648afa7be35c3707",
+  "sets_json_sha256": "d0e7a2b5ea35dddc9ee461fae551d7319002cce0e51104df648afa7be35c3707",
+  "qualified": true,
+  "format": "PHOTO_RECEIPT"
+ },
+ {
+  "id": "omni-620",
+  "image_file": "620.png",
+  "image_sha256": "3a914a15c9ba780ca11948cf61efbb45be89df3390aeae413d3f1c17a203ca29",
+  "sets_json_sha256": "3a914a15c9ba780ca11948cf61efbb45be89df3390aeae413d3f1c17a203ca29",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-622",
+  "image_file": "622.png",
+  "image_sha256": "1ee3b11f55a97c0fd54c20f3aba4ddb72e7642588a943b39c70c659bb4b45e0f",
+  "sets_json_sha256": "1ee3b11f55a97c0fd54c20f3aba4ddb72e7642588a943b39c70c659bb4b45e0f",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-623",
+  "image_file": "623.png",
+  "image_sha256": "60829168e2eff1273ed304b15c6e878e0fc46c19200cfdb9063ca948faf30515",
+  "sets_json_sha256": "60829168e2eff1273ed304b15c6e878e0fc46c19200cfdb9063ca948faf30515",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-626",
+  "image_file": "626.png",
+  "image_sha256": "5a832dac557f914c441a140e705c3aa37a57f8e530ca8105abb2166b4f09d2af",
+  "sets_json_sha256": "5a832dac557f914c441a140e705c3aa37a57f8e530ca8105abb2166b4f09d2af",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-628",
+  "image_file": "628.png",
+  "image_sha256": "a7703caeee886b8fcc3999b1041db29457dbc2bdc52675f7c5447e3243ba78a8",
+  "sets_json_sha256": "a7703caeee886b8fcc3999b1041db29457dbc2bdc52675f7c5447e3243ba78a8",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-629",
+  "image_file": "629.png",
+  "image_sha256": "77c73f7f728cb0aca57a5f9f115e8ddb1744afb7c01054d1b75807c8df131002",
+  "sets_json_sha256": "77c73f7f728cb0aca57a5f9f115e8ddb1744afb7c01054d1b75807c8df131002",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-631",
+  "image_file": "631.png",
+  "image_sha256": "c8d55ca418d83bc1fe183fa4f9e27a40cb46e7bb96fe643eba7a6bd2802a8499",
+  "sets_json_sha256": "c8d55ca418d83bc1fe183fa4f9e27a40cb46e7bb96fe643eba7a6bd2802a8499",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-633",
+  "image_file": "633.png",
+  "image_sha256": "57bd4c8fb1a4acb76b95e482327aa5eb38a65b4ab70e30cd2527f463f2ad66d1",
+  "sets_json_sha256": "57bd4c8fb1a4acb76b95e482327aa5eb38a65b4ab70e30cd2527f463f2ad66d1",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-635",
+  "image_file": "635.png",
+  "image_sha256": "42fcf087dd19d687c6a6b8103170210df87e7a0a9093098eeb36d03da0eea999",
+  "sets_json_sha256": "42fcf087dd19d687c6a6b8103170210df87e7a0a9093098eeb36d03da0eea999",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-639",
+  "image_file": "639.png",
+  "image_sha256": "f061d6be6a30715da31df9ff423c3155b273929eebc689756483b27cee19217f",
+  "sets_json_sha256": "f061d6be6a30715da31df9ff423c3155b273929eebc689756483b27cee19217f",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-64",
+  "image_file": "64.jpg",
+  "image_sha256": "9119b3484f7ffa3e2086752db573c4d9362145a2818c280609c77e6cce138778",
+  "sets_json_sha256": "9119b3484f7ffa3e2086752db573c4d9362145a2818c280609c77e6cce138778",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-640",
+  "image_file": "640.png",
+  "image_sha256": "02ade8fe3d60ec1e90fcbe4ff95a6a3b264c398e6ee5fe35898d7340068bd3fb",
+  "sets_json_sha256": "02ade8fe3d60ec1e90fcbe4ff95a6a3b264c398e6ee5fe35898d7340068bd3fb",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-641",
+  "image_file": "641.png",
+  "image_sha256": "e01d9c12e4c51c586285a9313891887ac8876224c06d63e3cb33cdf2091472eb",
+  "sets_json_sha256": "e01d9c12e4c51c586285a9313891887ac8876224c06d63e3cb33cdf2091472eb",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-642",
+  "image_file": "642.png",
+  "image_sha256": "d3501a115b18238b24df01bd20c46ad1f42942116d450d1004c490ddc674c296",
+  "sets_json_sha256": "d3501a115b18238b24df01bd20c46ad1f42942116d450d1004c490ddc674c296",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-644",
+  "image_file": "644.png",
+  "image_sha256": "006adf1ebf74611713d3f3c989414230b0d7cb502b34f0abba5a563496301667",
+  "sets_json_sha256": "006adf1ebf74611713d3f3c989414230b0d7cb502b34f0abba5a563496301667",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-645",
+  "image_file": "645.png",
+  "image_sha256": "21e44cf0d3e3a7ed5bcdfcc5c46a7d179920300ccd6c6af3a7f8404d7450b4ae",
+  "sets_json_sha256": "21e44cf0d3e3a7ed5bcdfcc5c46a7d179920300ccd6c6af3a7f8404d7450b4ae",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-646",
+  "image_file": "646.png",
+  "image_sha256": "56bb363a46d54bc21ed40a77a22ddda95a34515c6d19b7ccb88dc67edb522346",
+  "sets_json_sha256": "56bb363a46d54bc21ed40a77a22ddda95a34515c6d19b7ccb88dc67edb522346",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-647",
+  "image_file": "647.png",
+  "image_sha256": "d0109b3a68476d488cfb6c1dc7bd91ecb968b6bbef9a3490359703e5b986f349",
+  "sets_json_sha256": "d0109b3a68476d488cfb6c1dc7bd91ecb968b6bbef9a3490359703e5b986f349",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-648",
+  "image_file": "648.png",
+  "image_sha256": "d8ed29836c6529f6b7a700e70c9b9085e25ef1d68b1fa8dae01413d651c787cb",
+  "sets_json_sha256": "d8ed29836c6529f6b7a700e70c9b9085e25ef1d68b1fa8dae01413d651c787cb",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-650",
+  "image_file": "650.png",
+  "image_sha256": "cd693b2d7a3f134af75b45ddbd42bbe50c57011c27722885de69907733d40670",
+  "sets_json_sha256": "cd693b2d7a3f134af75b45ddbd42bbe50c57011c27722885de69907733d40670",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-651",
+  "image_file": "651.png",
+  "image_sha256": "ab9f8a85392d32413e9f7f3ea8c5c674ac05890cf46b938e05c6e51cf71b05a1",
+  "sets_json_sha256": "ab9f8a85392d32413e9f7f3ea8c5c674ac05890cf46b938e05c6e51cf71b05a1",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-652",
+  "image_file": "652.png",
+  "image_sha256": "06b42b4df96ffac139428bf7c234e6cfe13f483ffa69491b77af3968af06846b",
+  "sets_json_sha256": "06b42b4df96ffac139428bf7c234e6cfe13f483ffa69491b77af3968af06846b",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-654",
+  "image_file": "654.png",
+  "image_sha256": "eff198e890779ae7c28f63b31c2ebe67ed190ff922ba6c58e978c5d0a8a31915",
+  "sets_json_sha256": "eff198e890779ae7c28f63b31c2ebe67ed190ff922ba6c58e978c5d0a8a31915",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-655",
+  "image_file": "655.png",
+  "image_sha256": "952875784eb2c1560494ee7425ca5434e6813e4383d9838291e632c87e51e6b2",
+  "sets_json_sha256": "952875784eb2c1560494ee7425ca5434e6813e4383d9838291e632c87e51e6b2",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-656",
+  "image_file": "656.png",
+  "image_sha256": "fced2a79f14042565063f13d7ec3f26f5b108ca80356549685ea857501a82e2c",
+  "sets_json_sha256": "fced2a79f14042565063f13d7ec3f26f5b108ca80356549685ea857501a82e2c",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-657",
+  "image_file": "657.png",
+  "image_sha256": "12b67b30ff2047b9397d5aa23ab897819a2a8c392b35d6cd3e055e4fafbb0be4",
+  "sets_json_sha256": "12b67b30ff2047b9397d5aa23ab897819a2a8c392b35d6cd3e055e4fafbb0be4",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-659",
+  "image_file": "659.png",
+  "image_sha256": "436abc8373a9594f039e538c7ceba39b041e2e7b7cbff162dfad875bcccf7790",
+  "sets_json_sha256": "436abc8373a9594f039e538c7ceba39b041e2e7b7cbff162dfad875bcccf7790",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-661",
+  "image_file": "661.png",
+  "image_sha256": "3346113daece1e4a203e1f0da418236b11231a59d279ae145b0baf2954be42df",
+  "sets_json_sha256": "3346113daece1e4a203e1f0da418236b11231a59d279ae145b0baf2954be42df",
+  "qualified": true,
+  "format": "SCANNED_FORM"
+ },
+ {
+  "id": "omni-663",
+  "image_file": "663.png",
+  "image_sha256": "da029138234ef5bfb68cbace1bd5e57be728038967e8a738ef2393129c5e7c6a",
+  "sets_json_sha256": "da029138234ef5bfb68cbace1bd5e57be728038967e8a738ef2393129c5e7c6a",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-664",
+  "image_file": "664.jpg",
+  "image_sha256": "7557f02eac30e0e115a65109cdc7f56c7b8c3dd91e745d5bb7d8f3804da1fe2f",
+  "sets_json_sha256": "7557f02eac30e0e115a65109cdc7f56c7b8c3dd91e745d5bb7d8f3804da1fe2f",
+  "qualified": true,
+  "format": "PHOTO_RECEIPT"
+ },
+ {
+  "id": "omni-665",
+  "image_file": "665.png",
+  "image_sha256": "8f96248293c66c84ef0f6f7078e1ba7ff21d7b33a29c39e74776ac7c0a60a31b",
+  "sets_json_sha256": "8f96248293c66c84ef0f6f7078e1ba7ff21d7b33a29c39e74776ac7c0a60a31b",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-666",
+  "image_file": "666.png",
+  "image_sha256": "6e811adc92c13fb1d5525f702249a4615d8d77c9a66c34b2f8a061a00f3e9491",
+  "sets_json_sha256": "6e811adc92c13fb1d5525f702249a4615d8d77c9a66c34b2f8a061a00f3e9491",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-667",
+  "image_file": "667.png",
+  "image_sha256": "ae7b9a892dce1ce05b22ff312122deb21a208c65dd219dba018d065b5aca6b6c",
+  "sets_json_sha256": "ae7b9a892dce1ce05b22ff312122deb21a208c65dd219dba018d065b5aca6b6c",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-668",
+  "image_file": "668.png",
+  "image_sha256": "e79eb2486712c45a027a7f3f21d75b501708e4b80df44e33cd0243a608f46820",
+  "sets_json_sha256": "e79eb2486712c45a027a7f3f21d75b501708e4b80df44e33cd0243a608f46820",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-669",
+  "image_file": "669.png",
+  "image_sha256": "38bdc3d1f61f84068a3cdea1ad980151c673f20fe36a9bcec5639f2eaa68f16c",
+  "sets_json_sha256": "38bdc3d1f61f84068a3cdea1ad980151c673f20fe36a9bcec5639f2eaa68f16c",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-670",
+  "image_file": "670.png",
+  "image_sha256": "b97bd50f13117c7d90e6ea12c4e56005e36783aef5220385bf275a503a5bb094",
+  "sets_json_sha256": "b97bd50f13117c7d90e6ea12c4e56005e36783aef5220385bf275a503a5bb094",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-671",
+  "image_file": "671.png",
+  "image_sha256": "63893f67adc2aa521e8651e798d729d8d70cf43ed01cc3d928c0536a3e662514",
+  "sets_json_sha256": "63893f67adc2aa521e8651e798d729d8d70cf43ed01cc3d928c0536a3e662514",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-673",
+  "image_file": "673.png",
+  "image_sha256": "dede4939ce2dbd54f56500005e727bdf8e7dba2abdf0414b891b72b69a477230",
+  "sets_json_sha256": "dede4939ce2dbd54f56500005e727bdf8e7dba2abdf0414b891b72b69a477230",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-674",
+  "image_file": "674.png",
+  "image_sha256": "7309028a0ffff01484e845a13c096ab3912091be25ac99d79db7a5b09f40ee53",
+  "sets_json_sha256": "7309028a0ffff01484e845a13c096ab3912091be25ac99d79db7a5b09f40ee53",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-676",
+  "image_file": "676.png",
+  "image_sha256": "7df945a6664a6a51b019bf9fdce0c9a8f8858c849988fdb72a4690ff5d14a254",
+  "sets_json_sha256": "7df945a6664a6a51b019bf9fdce0c9a8f8858c849988fdb72a4690ff5d14a254",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-677",
+  "image_file": "677.png",
+  "image_sha256": "5507b06fbb461c9eb27d12681633c4e6724379207e52bad52739db4aedf26b6c",
+  "sets_json_sha256": "5507b06fbb461c9eb27d12681633c4e6724379207e52bad52739db4aedf26b6c",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-678",
+  "image_file": "678.png",
+  "image_sha256": "58b200292b469a69e442052cb5ce252d6af12ae152f6f65133fc4c0265b45d50",
+  "sets_json_sha256": "58b200292b469a69e442052cb5ce252d6af12ae152f6f65133fc4c0265b45d50",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-680",
+  "image_file": "680.png",
+  "image_sha256": "f169a3c8ce2a1f5a78895379ef18fe6aab5cf6a3aedfe7e41292fd0027f34bcc",
+  "sets_json_sha256": "f169a3c8ce2a1f5a78895379ef18fe6aab5cf6a3aedfe7e41292fd0027f34bcc",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-682",
+  "image_file": "682.png",
+  "image_sha256": "c48d7e2399f9b16fb7bc4bdede2f9637c250f68449e263159c2dcfc8224f6549",
+  "sets_json_sha256": "c48d7e2399f9b16fb7bc4bdede2f9637c250f68449e263159c2dcfc8224f6549",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-685",
+  "image_file": "685.png",
+  "image_sha256": "6d463f67b231774ec781a730931786e6b2f36af420d5145c5068befa94c62455",
+  "sets_json_sha256": "6d463f67b231774ec781a730931786e6b2f36af420d5145c5068befa94c62455",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-686",
+  "image_file": "686.png",
+  "image_sha256": "a0d89b1d8a503d8fddc257f72b1fb3bfa17867a9e9294a2534763868cb6d5ecd",
+  "sets_json_sha256": "a0d89b1d8a503d8fddc257f72b1fb3bfa17867a9e9294a2534763868cb6d5ecd",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-688",
+  "image_file": "688.png",
+  "image_sha256": "0673b877fd36e4ad7ab809607c103c93931c87dfe9bd9df283b32a19c310ca3a",
+  "sets_json_sha256": "0673b877fd36e4ad7ab809607c103c93931c87dfe9bd9df283b32a19c310ca3a",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-689",
+  "image_file": "689.png",
+  "image_sha256": "09d524d8f46411d5e21ad4d046753891cbe56ca5a13d041aa5eff3e818fdc1fb",
+  "sets_json_sha256": "09d524d8f46411d5e21ad4d046753891cbe56ca5a13d041aa5eff3e818fdc1fb",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-691",
+  "image_file": "691.png",
+  "image_sha256": "24f739b46db477f528d548bc8f7874935555311f263ec00c72a3beffea6c2c0f",
+  "sets_json_sha256": "24f739b46db477f528d548bc8f7874935555311f263ec00c72a3beffea6c2c0f",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-693",
+  "image_file": "693.png",
+  "image_sha256": "bbb079374d48238a688bbacb5f6f99659cfe98173038de9bd14a8ba9846eaa28",
+  "sets_json_sha256": "bbb079374d48238a688bbacb5f6f99659cfe98173038de9bd14a8ba9846eaa28",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-695",
+  "image_file": "695.png",
+  "image_sha256": "b6d5ea8c72714d1d14b3726a1d3983d6cc8527f4d04cb2410a3d8b92ee67d4db",
+  "sets_json_sha256": "b6d5ea8c72714d1d14b3726a1d3983d6cc8527f4d04cb2410a3d8b92ee67d4db",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-697",
+  "image_file": "697.png",
+  "image_sha256": "7957a7b2f9b3eabe2c7f83ef1f66c0c56848bc24460618f10b1f47af699d7de6",
+  "sets_json_sha256": "7957a7b2f9b3eabe2c7f83ef1f66c0c56848bc24460618f10b1f47af699d7de6",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-698",
+  "image_file": "698.png",
+  "image_sha256": "f5698e72d9fc8e3a4b0481a2a7792df23e85d8a00bbb8df305bafed833d34309",
+  "sets_json_sha256": "f5698e72d9fc8e3a4b0481a2a7792df23e85d8a00bbb8df305bafed833d34309",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-699",
+  "image_file": "699.png",
+  "image_sha256": "bbfc7c53337f3e38a13a1ea748dff55ed0aa92e46f25bf8af76ec1bc61e3b2a0",
+  "sets_json_sha256": "bbfc7c53337f3e38a13a1ea748dff55ed0aa92e46f25bf8af76ec1bc61e3b2a0",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-7",
+  "image_file": "7.png",
+  "image_sha256": "4f0f7489c24670cb0c7e9365b5aff1ae7b772476bd5015d0d3e1db78423b86ef",
+  "sets_json_sha256": "4f0f7489c24670cb0c7e9365b5aff1ae7b772476bd5015d0d3e1db78423b86ef",
+  "qualified": true,
+  "format": "DRIVER_LICENSE"
+ },
+ {
+  "id": "omni-70",
+  "image_file": "70.png",
+  "image_sha256": "e164f60332723630bfcef534512b99995540868d5045dcd3b5330dd25a9b5071",
+  "sets_json_sha256": "e164f60332723630bfcef534512b99995540868d5045dcd3b5330dd25a9b5071",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-701",
+  "image_file": "701.png",
+  "image_sha256": "bee68eb3bf8a8342d50b293e981ab4db695d5d94f7a0a9fd466cbc5dc6ea617e",
+  "sets_json_sha256": "bee68eb3bf8a8342d50b293e981ab4db695d5d94f7a0a9fd466cbc5dc6ea617e",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-702",
+  "image_file": "702.png",
+  "image_sha256": "3a183c3801713db1e9af4bdfcdc970fe5d202702478a094415ed8eb5798517ba",
+  "sets_json_sha256": "3a183c3801713db1e9af4bdfcdc970fe5d202702478a094415ed8eb5798517ba",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-703",
+  "image_file": "703.png",
+  "image_sha256": "adb7de54c9f3d373bbae15a28ffe506e9eb4eed9c9c3018cc85209541ca9d1c9",
+  "sets_json_sha256": "adb7de54c9f3d373bbae15a28ffe506e9eb4eed9c9c3018cc85209541ca9d1c9",
+  "qualified": true,
+  "format": "DRIVER_LICENSE"
+ },
+ {
+  "id": "omni-706",
+  "image_file": "706.png",
+  "image_sha256": "26d9120f9965a2591765faea1de3c63490c5af6985ff92c0b33360e465b79663",
+  "sets_json_sha256": "26d9120f9965a2591765faea1de3c63490c5af6985ff92c0b33360e465b79663",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-707",
+  "image_file": "707.png",
+  "image_sha256": "692eec96971d867ea84520444695cba313b0c196e920b4029c7387a216d8f2d7",
+  "sets_json_sha256": "692eec96971d867ea84520444695cba313b0c196e920b4029c7387a216d8f2d7",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-708",
+  "image_file": "708.png",
+  "image_sha256": "3a17a07b7379b5e5242be211fb5e0add37b9b3f942579b9a51233e1afcbf0b04",
+  "sets_json_sha256": "3a17a07b7379b5e5242be211fb5e0add37b9b3f942579b9a51233e1afcbf0b04",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-71",
+  "image_file": "71.png",
+  "image_sha256": "743f3c1f0018978c3a95fbfb27a5db8bcbdd0d32bd2d0f5717716a2bfd4b9690",
+  "sets_json_sha256": "743f3c1f0018978c3a95fbfb27a5db8bcbdd0d32bd2d0f5717716a2bfd4b9690",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-710",
+  "image_file": "710.png",
+  "image_sha256": "53adcb9b182a60ee1eae5527162e744a7f81f7b91abb9b3ef307f7bd85b0c495",
+  "sets_json_sha256": "53adcb9b182a60ee1eae5527162e744a7f81f7b91abb9b3ef307f7bd85b0c495",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-711",
+  "image_file": "711.png",
+  "image_sha256": "71675877375d3729ae11432cd1ee3791d097b9ab8e586e2a89baea69267810a1",
+  "sets_json_sha256": "71675877375d3729ae11432cd1ee3791d097b9ab8e586e2a89baea69267810a1",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-712",
+  "image_file": "712.png",
+  "image_sha256": "a6c201b14532b634c576e4c1a4c51881bb9f105b94aca45e79eb0831b368c71a",
+  "sets_json_sha256": "a6c201b14532b634c576e4c1a4c51881bb9f105b94aca45e79eb0831b368c71a",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-713",
+  "image_file": "713.png",
+  "image_sha256": "4e987d35c9c9e9bc5e9a6c553df5f77076d5f947b9baf0f4298d3c5ee0b29971",
+  "sets_json_sha256": "4e987d35c9c9e9bc5e9a6c553df5f77076d5f947b9baf0f4298d3c5ee0b29971",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-717",
+  "image_file": "717.png",
+  "image_sha256": "f23948cd1e666a1f2ca9d4c5f89174f03b14b70762074804989afe7fb4846c20",
+  "sets_json_sha256": "f23948cd1e666a1f2ca9d4c5f89174f03b14b70762074804989afe7fb4846c20",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-718",
+  "image_file": "718.png",
+  "image_sha256": "fdc66a9c66871c545c59a65a7068ba122f097bf2c138e72fb7c640b1e8b2ef47",
+  "sets_json_sha256": "fdc66a9c66871c545c59a65a7068ba122f097bf2c138e72fb7c640b1e8b2ef47",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-719",
+  "image_file": "719.png",
+  "image_sha256": "f39ae7a1c02eb7d736b2e6707fab468e4b10f3523a3073e97589d6833797f2ce",
+  "sets_json_sha256": "f39ae7a1c02eb7d736b2e6707fab468e4b10f3523a3073e97589d6833797f2ce",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-72",
+  "image_file": "72.png",
+  "image_sha256": "9fecd1f32c95a671625b3795131bb6c97f04b37835cafc68cf490832933622ac",
+  "sets_json_sha256": "9fecd1f32c95a671625b3795131bb6c97f04b37835cafc68cf490832933622ac",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-723",
+  "image_file": "723.png",
+  "image_sha256": "a558b62e63d67f3b7cd687e3bdfc6309e857c028716f9f1a973ac84c9655a670",
+  "sets_json_sha256": "a558b62e63d67f3b7cd687e3bdfc6309e857c028716f9f1a973ac84c9655a670",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-724",
+  "image_file": "724.png",
+  "image_sha256": "5348da0a6c2ba1a2703257ba6d70fccf55d9b36cebedd30a0b16cb5d92f10bb3",
+  "sets_json_sha256": "5348da0a6c2ba1a2703257ba6d70fccf55d9b36cebedd30a0b16cb5d92f10bb3",
+  "qualified": true,
+  "format": "FORM"
+ },
+ {
+  "id": "omni-725",
+  "image_file": "725.png",
+  "image_sha256": "ee6a322b40ca61745b2980e0955c50e4cd867f9ec5f8ccc82b56c026c397d684",
+  "sets_json_sha256": "ee6a322b40ca61745b2980e0955c50e4cd867f9ec5f8ccc82b56c026c397d684",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-727",
+  "image_file": "727.png",
+  "image_sha256": "18a9809fa5dffae02d22c972bc5626aa1fd83bede91eada9059f5bb743c48879",
+  "sets_json_sha256": "18a9809fa5dffae02d22c972bc5626aa1fd83bede91eada9059f5bb743c48879",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-73",
+  "image_file": "73.png",
+  "image_sha256": "9165218b9ac92eaf74777d6b60663f0238dcf0bbee48e430c263dcae3c392c14",
+  "sets_json_sha256": "9165218b9ac92eaf74777d6b60663f0238dcf0bbee48e430c263dcae3c392c14",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-732",
+  "image_file": "732.png",
+  "image_sha256": "4a4177dc5a9181ee958d057334d737ae8f5914e2a54bc9e560eb8717245ea95c",
+  "sets_json_sha256": "4a4177dc5a9181ee958d057334d737ae8f5914e2a54bc9e560eb8717245ea95c",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-735",
+  "image_file": "735.png",
+  "image_sha256": "b539cbc0d3209d370ec27010e0b3ffdeab3a86dcbf20a08580619f39bd325197",
+  "sets_json_sha256": "b539cbc0d3209d370ec27010e0b3ffdeab3a86dcbf20a08580619f39bd325197",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-736",
+  "image_file": "736.png",
+  "image_sha256": "5f3a880b66d5ec265d37fc53dee5946dcf6d7affb1d6fe0f6fdbaf95fe5dd541",
+  "sets_json_sha256": "5f3a880b66d5ec265d37fc53dee5946dcf6d7affb1d6fe0f6fdbaf95fe5dd541",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-738",
+  "image_file": "738.png",
+  "image_sha256": "a801e05b3e44e3fdfe137773b643d81143c894d8cad85e539912bea0d06882f6",
+  "sets_json_sha256": "a801e05b3e44e3fdfe137773b643d81143c894d8cad85e539912bea0d06882f6",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-739",
+  "image_file": "739.png",
+  "image_sha256": "08b5df55de9aa2bb3b49644a6c8ad58a7701a2a872f9359d11c325b6ad076766",
+  "sets_json_sha256": "08b5df55de9aa2bb3b49644a6c8ad58a7701a2a872f9359d11c325b6ad076766",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-743",
+  "image_file": "743.png",
+  "image_sha256": "cde0e3008ee74c83453fdd3469225cbb30ed9b3da08eed5f9ead8736466b6d1e",
+  "sets_json_sha256": "cde0e3008ee74c83453fdd3469225cbb30ed9b3da08eed5f9ead8736466b6d1e",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-744",
+  "image_file": "744.png",
+  "image_sha256": "5d5aa13008741e907a74ce6ab041f4636e4d3e36951395b7026ac55483d03775",
+  "sets_json_sha256": "5d5aa13008741e907a74ce6ab041f4636e4d3e36951395b7026ac55483d03775",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-745",
+  "image_file": "745.png",
+  "image_sha256": "945456936d04cadc5e7f8d189ddb428bb9d626bfb809d6d2ea8edf3ad3f3bb7f",
+  "sets_json_sha256": "945456936d04cadc5e7f8d189ddb428bb9d626bfb809d6d2ea8edf3ad3f3bb7f",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-748",
+  "image_file": "748.png",
+  "image_sha256": "06a95dab5ea1dbab50221f9f5444c0a7d44d2276a3174034eba9c645c2f817ac",
+  "sets_json_sha256": "06a95dab5ea1dbab50221f9f5444c0a7d44d2276a3174034eba9c645c2f817ac",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-749",
+  "image_file": "749.png",
+  "image_sha256": "c5a90f80e97ed9f745609e873a67e3d56d408210f478fe4b95df336243a931c9",
+  "sets_json_sha256": "c5a90f80e97ed9f745609e873a67e3d56d408210f478fe4b95df336243a931c9",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-750",
+  "image_file": "750.png",
+  "image_sha256": "b20b052bf3bc3d82c92c9c67c969357384b0e0567762fb762bf09a9a0601a175",
+  "sets_json_sha256": "b20b052bf3bc3d82c92c9c67c969357384b0e0567762fb762bf09a9a0601a175",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-751",
+  "image_file": "751.png",
+  "image_sha256": "75acd7022d841a806f2ae6b71f01da80901978d0858beded33ebca23dcf67cc7",
+  "sets_json_sha256": "75acd7022d841a806f2ae6b71f01da80901978d0858beded33ebca23dcf67cc7",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-752",
+  "image_file": "752.png",
+  "image_sha256": "ce777215a385afcc94975c8d3a7bf60df52342b18fdcb805ee1f4ca3410088ad",
+  "sets_json_sha256": "ce777215a385afcc94975c8d3a7bf60df52342b18fdcb805ee1f4ca3410088ad",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-753",
+  "image_file": "753.png",
+  "image_sha256": "71694a7e9ed51b21465a9a1f04fa8393c907ad0cf543989422e51df52b42aa64",
+  "sets_json_sha256": "71694a7e9ed51b21465a9a1f04fa8393c907ad0cf543989422e51df52b42aa64",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-754",
+  "image_file": "754.png",
+  "image_sha256": "e4900634c9e6c602db7bd0bac764f22d0ba0cd1cbad3d90e8d1734a5ef1a6e62",
+  "sets_json_sha256": "e4900634c9e6c602db7bd0bac764f22d0ba0cd1cbad3d90e8d1734a5ef1a6e62",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-755",
+  "image_file": "755.png",
+  "image_sha256": "89987d83e2ee7b690708c04c0d003ce1fc19f7b0d84cbed35ccaab3d95310c1a",
+  "sets_json_sha256": "89987d83e2ee7b690708c04c0d003ce1fc19f7b0d84cbed35ccaab3d95310c1a",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-756",
+  "image_file": "756.png",
+  "image_sha256": "d75023471c9bca800011f0c0ab5d5cf6d001d83ef35305b6c07d90be35d08264",
+  "sets_json_sha256": "d75023471c9bca800011f0c0ab5d5cf6d001d83ef35305b6c07d90be35d08264",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-76",
+  "image_file": "76.png",
+  "image_sha256": "794d29338520f60fe5a1f4abf3b75eb3eeeeff2ff70e5983c15bf6d3654f008d",
+  "sets_json_sha256": "794d29338520f60fe5a1f4abf3b75eb3eeeeff2ff70e5983c15bf6d3654f008d",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-762",
+  "image_file": "762.png",
+  "image_sha256": "e25d81c9f7b8f0ead7b2a6453ed89c28a686321245b6004b71d775dcc24b84ce",
+  "sets_json_sha256": "e25d81c9f7b8f0ead7b2a6453ed89c28a686321245b6004b71d775dcc24b84ce",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-763",
+  "image_file": "763.png",
+  "image_sha256": "2bad9d882537f503db3533969061112156e6f2a407aa4b414ac39571d7108734",
+  "sets_json_sha256": "2bad9d882537f503db3533969061112156e6f2a407aa4b414ac39571d7108734",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-764",
+  "image_file": "764.png",
+  "image_sha256": "9e96d8f0bf5530fb74956402e5b24c821f9a4a2a7fa8f5905229dbe4fbc5f693",
+  "sets_json_sha256": "9e96d8f0bf5530fb74956402e5b24c821f9a4a2a7fa8f5905229dbe4fbc5f693",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-765",
+  "image_file": "765.png",
+  "image_sha256": "5a368ef88b94db5d705c70d6ebc98b7596f86f047ddaa87de46304705b634dc8",
+  "sets_json_sha256": "5a368ef88b94db5d705c70d6ebc98b7596f86f047ddaa87de46304705b634dc8",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-767",
+  "image_file": "767.png",
+  "image_sha256": "9f24270fc54a37bc6a9dda18e6aa93d227f0563d55df3a884debc264d155f44e",
+  "sets_json_sha256": "9f24270fc54a37bc6a9dda18e6aa93d227f0563d55df3a884debc264d155f44e",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-77",
+  "image_file": "77.png",
+  "image_sha256": "b52160ba1224f045985eacd2362ee16c0004e09d931c230b2242ce1f64dddb3b",
+  "sets_json_sha256": "b52160ba1224f045985eacd2362ee16c0004e09d931c230b2242ce1f64dddb3b",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-770",
+  "image_file": "770.png",
+  "image_sha256": "13610c5a019f20aa2e009092ce95bad94f29e8b955d9cf5ef3c64a1c43ed49ce",
+  "sets_json_sha256": "13610c5a019f20aa2e009092ce95bad94f29e8b955d9cf5ef3c64a1c43ed49ce",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-771",
+  "image_file": "771.png",
+  "image_sha256": "91aef1a6a9b1ed8b9bf6aa8c25006dc773d6df5f66a9f951b974d68d77cdb8c2",
+  "sets_json_sha256": "91aef1a6a9b1ed8b9bf6aa8c25006dc773d6df5f66a9f951b974d68d77cdb8c2",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-785",
+  "image_file": "785.png",
+  "image_sha256": "b35a59fc04b4bd20517d374da7e67c18305ae024c1d7ffc29ad11a17a9137871",
+  "sets_json_sha256": "b35a59fc04b4bd20517d374da7e67c18305ae024c1d7ffc29ad11a17a9137871",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-786",
+  "image_file": "786.png",
+  "image_sha256": "0cf76b2e37eb7de89e1f217235bbe7433a6ee2ea34f21302307a1a59cdc97bf2",
+  "sets_json_sha256": "0cf76b2e37eb7de89e1f217235bbe7433a6ee2ea34f21302307a1a59cdc97bf2",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-788",
+  "image_file": "788.png",
+  "image_sha256": "8272d96c8391017a534743cf00448c27709d265d045a7602e3d56b4f0c0480fc",
+  "sets_json_sha256": "8272d96c8391017a534743cf00448c27709d265d045a7602e3d56b4f0c0480fc",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-789",
+  "image_file": "789.png",
+  "image_sha256": "eed1af1a6bc080dcb1bb6371bfb47a62c6931318e32af6406957adb60106fab5",
+  "sets_json_sha256": "eed1af1a6bc080dcb1bb6371bfb47a62c6931318e32af6406957adb60106fab5",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-79",
+  "image_file": "79.png",
+  "image_sha256": "cd076f7a4eb4da7b6e8850d8ec15504e416763b951df95b76e06c0c4daacdcbb",
+  "sets_json_sha256": "cd076f7a4eb4da7b6e8850d8ec15504e416763b951df95b76e06c0c4daacdcbb",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-791",
+  "image_file": "791.png",
+  "image_sha256": "4e556763c56da320147528182f139b08ec15624ff3f6fc8747c475a9808d4a7d",
+  "sets_json_sha256": "4e556763c56da320147528182f139b08ec15624ff3f6fc8747c475a9808d4a7d",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-792",
+  "image_file": "792.png",
+  "image_sha256": "2c6f00918e62751f1eed9bf7317ba8988b61f0df4a123a2c91b46c2b43822663",
+  "sets_json_sha256": "2c6f00918e62751f1eed9bf7317ba8988b61f0df4a123a2c91b46c2b43822663",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-793",
+  "image_file": "793.png",
+  "image_sha256": "716888afc29e199f5c56c56dbea897420464adb82ec1fab68cd02bb63882bc23",
+  "sets_json_sha256": "716888afc29e199f5c56c56dbea897420464adb82ec1fab68cd02bb63882bc23",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-794",
+  "image_file": "794.png",
+  "image_sha256": "508cea5ac90a3588d3bdf9051e3e7300c0afb567d623274a95503ae996ee081f",
+  "sets_json_sha256": "508cea5ac90a3588d3bdf9051e3e7300c0afb567d623274a95503ae996ee081f",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-795",
+  "image_file": "795.png",
+  "image_sha256": "def1de8e6e3e0aa77aa2fc52fdf38bc433dca5c0602b0c38d8f6b786b004d176",
+  "sets_json_sha256": "def1de8e6e3e0aa77aa2fc52fdf38bc433dca5c0602b0c38d8f6b786b004d176",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-798",
+  "image_file": "798.png",
+  "image_sha256": "02b807810e88962d53abbc3122e747abe9d6f602fa23ec18afd84107113af720",
+  "sets_json_sha256": "02b807810e88962d53abbc3122e747abe9d6f602fa23ec18afd84107113af720",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-799",
+  "image_file": "799.png",
+  "image_sha256": "336fea21c795c6dfd6789c77af4322f1452e36285419925668b9f87031b392e1",
+  "sets_json_sha256": "336fea21c795c6dfd6789c77af4322f1452e36285419925668b9f87031b392e1",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-800",
+  "image_file": "800.png",
+  "image_sha256": "3f864f0a08bfe179a629d0e1cbd6f915d4a4244c96279be0ce88489754f6376b",
+  "sets_json_sha256": "3f864f0a08bfe179a629d0e1cbd6f915d4a4244c96279be0ce88489754f6376b",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-801",
+  "image_file": "801.png",
+  "image_sha256": "11751d9aff136de9b9a7fbcb6ab03c7b819869b81179bea452ce1ef00290a6ed",
+  "sets_json_sha256": "11751d9aff136de9b9a7fbcb6ab03c7b819869b81179bea452ce1ef00290a6ed",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-802",
+  "image_file": "802.png",
+  "image_sha256": "79d53830313a528466dde29fd195587d5708e97b5ca7d6f79846c7426951be83",
+  "sets_json_sha256": "79d53830313a528466dde29fd195587d5708e97b5ca7d6f79846c7426951be83",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-803",
+  "image_file": "803.png",
+  "image_sha256": "0ed7c026eece08e72abdeaf5e7e83386184e0c772750920b716f499ab22be8ff",
+  "sets_json_sha256": "0ed7c026eece08e72abdeaf5e7e83386184e0c772750920b716f499ab22be8ff",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-804",
+  "image_file": "804.png",
+  "image_sha256": "5a305b4d07ce87f5972169a39f75dfeb52cff71f7bf2322e86a10ec66470c120",
+  "sets_json_sha256": "5a305b4d07ce87f5972169a39f75dfeb52cff71f7bf2322e86a10ec66470c120",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-805",
+  "image_file": "805.png",
+  "image_sha256": "e2d06073dfbeff7eae4101bf9ae65510f570310517636c0ef8b6631bd9fed959",
+  "sets_json_sha256": "e2d06073dfbeff7eae4101bf9ae65510f570310517636c0ef8b6631bd9fed959",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-807",
+  "image_file": "807.png",
+  "image_sha256": "117743da8212e5aff6b86a0a7355136b21a7da7c2e88408a00b1bca5579cd051",
+  "sets_json_sha256": "117743da8212e5aff6b86a0a7355136b21a7da7c2e88408a00b1bca5579cd051",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-809",
+  "image_file": "809.png",
+  "image_sha256": "e0d048067c32e094c4f538b302201e80f0d4744955a1752bc80203e7fb201382",
+  "sets_json_sha256": "e0d048067c32e094c4f538b302201e80f0d4744955a1752bc80203e7fb201382",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-81",
+  "image_file": "81.png",
+  "image_sha256": "e43f7145aab9e176e03ba58ae2b37f6a380a2bfb4611e873411f7fa513225b6c",
+  "sets_json_sha256": "e43f7145aab9e176e03ba58ae2b37f6a380a2bfb4611e873411f7fa513225b6c",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-810",
+  "image_file": "810.png",
+  "image_sha256": "8535decfc5bd4a5d63b89dda6727e7b2f21cc85f5160f5e44cd6efcb5e91b8d1",
+  "sets_json_sha256": "8535decfc5bd4a5d63b89dda6727e7b2f21cc85f5160f5e44cd6efcb5e91b8d1",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-813",
+  "image_file": "813.png",
+  "image_sha256": "83794f26b21752e6999f1cca28608015c0ea6e51fe5a7535a748d4ac178779a2",
+  "sets_json_sha256": "83794f26b21752e6999f1cca28608015c0ea6e51fe5a7535a748d4ac178779a2",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-817",
+  "image_file": "817.png",
+  "image_sha256": "b6ee3d206681a684ca86489d68cef4ceaab19b4b392ccff0a5cb7b742c9f7d61",
+  "sets_json_sha256": "b6ee3d206681a684ca86489d68cef4ceaab19b4b392ccff0a5cb7b742c9f7d61",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-82",
+  "image_file": "82.png",
+  "image_sha256": "a1eeeb0ba905df437af8c3d2e92c22acd9fa43cadc1ba717b3b7bae047e105ee",
+  "sets_json_sha256": "a1eeeb0ba905df437af8c3d2e92c22acd9fa43cadc1ba717b3b7bae047e105ee",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-825",
+  "image_file": "825.png",
+  "image_sha256": "bf13d0156d8399a7e47f65e25e6ea84d3dbc5bee0f91b4a5ca51e78667d512a7",
+  "sets_json_sha256": "bf13d0156d8399a7e47f65e25e6ea84d3dbc5bee0f91b4a5ca51e78667d512a7",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-826",
+  "image_file": "826.png",
+  "image_sha256": "a066103beb1d550a1765024a45a6e66ffb3b38cf98d4e525fb6b4ce145cc1e72",
+  "sets_json_sha256": "a066103beb1d550a1765024a45a6e66ffb3b38cf98d4e525fb6b4ce145cc1e72",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-830",
+  "image_file": "830.png",
+  "image_sha256": "b701be3ce9fc9fc332641ec7fe2a5efd4ec0d2c2450bb509f0359e9effcfb342",
+  "sets_json_sha256": "b701be3ce9fc9fc332641ec7fe2a5efd4ec0d2c2450bb509f0359e9effcfb342",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-832",
+  "image_file": "832.png",
+  "image_sha256": "4dd6f204d6d8bae148d2b069d2f2299680ff8b2c445f245696f1895f34f1070e",
+  "sets_json_sha256": "4dd6f204d6d8bae148d2b069d2f2299680ff8b2c445f245696f1895f34f1070e",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-834",
+  "image_file": "834.png",
+  "image_sha256": "c7b84431490c1397236fe4a1980bd0a5d353f67cbfa8b98c7ff2d8fa377a8158",
+  "sets_json_sha256": "c7b84431490c1397236fe4a1980bd0a5d353f67cbfa8b98c7ff2d8fa377a8158",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-835",
+  "image_file": "835.png",
+  "image_sha256": "79030f5574987f5c2f8635b62ff02e10e0ca54747a0eb90e045f207afcd28687",
+  "sets_json_sha256": "79030f5574987f5c2f8635b62ff02e10e0ca54747a0eb90e045f207afcd28687",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-836",
+  "image_file": "836.png",
+  "image_sha256": "3b87b2a404cc96d66b377ddfd0308fd14c178f5542d57cc0c9ba5522e95017cb",
+  "sets_json_sha256": "3b87b2a404cc96d66b377ddfd0308fd14c178f5542d57cc0c9ba5522e95017cb",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-837",
+  "image_file": "837.png",
+  "image_sha256": "fa344d46f435c17babee29dd151ae6503a1d976960a33588ddacc1894acdfc78",
+  "sets_json_sha256": "fa344d46f435c17babee29dd151ae6503a1d976960a33588ddacc1894acdfc78",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-838",
+  "image_file": "838.png",
+  "image_sha256": "928dca6bbb1b888f234e4f18cc64293afd95f79318953eb12f7bb9db7a8bf660",
+  "sets_json_sha256": "928dca6bbb1b888f234e4f18cc64293afd95f79318953eb12f7bb9db7a8bf660",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-84",
+  "image_file": "84.png",
+  "image_sha256": "838c8620335e5c1aa7ace058a3eed85c9b23b0d1bab0c9a8b7ebdd988f1952d3",
+  "sets_json_sha256": "838c8620335e5c1aa7ace058a3eed85c9b23b0d1bab0c9a8b7ebdd988f1952d3",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-841",
+  "image_file": "841.png",
+  "image_sha256": "7918b98f47125334a337af9ad4c7bf0fc5450eff3c9ad61203bfbe65bd2065be",
+  "sets_json_sha256": "7918b98f47125334a337af9ad4c7bf0fc5450eff3c9ad61203bfbe65bd2065be",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-843",
+  "image_file": "843.png",
+  "image_sha256": "bed8aaff4d8e2a440a7b63c0e713b0202d432617454dc6d530d95811bd200471",
+  "sets_json_sha256": "bed8aaff4d8e2a440a7b63c0e713b0202d432617454dc6d530d95811bd200471",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-844",
+  "image_file": "844.png",
+  "image_sha256": "77384c0248f05acad1ec66c456bb2d5e34850f45db95803d3f13f67a9ad640b2",
+  "sets_json_sha256": "77384c0248f05acad1ec66c456bb2d5e34850f45db95803d3f13f67a9ad640b2",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-845",
+  "image_file": "845.png",
+  "image_sha256": "c55577f631d91f7bfc2def96aab92bb6abf80230b316e0cfed5dee5d32372fea",
+  "sets_json_sha256": "c55577f631d91f7bfc2def96aab92bb6abf80230b316e0cfed5dee5d32372fea",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-847",
+  "image_file": "847.png",
+  "image_sha256": "7a5940a89d12773ea2bb7947d65daafa45c385de2312020e3bf0fc1c50605f99",
+  "sets_json_sha256": "7a5940a89d12773ea2bb7947d65daafa45c385de2312020e3bf0fc1c50605f99",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-848",
+  "image_file": "848.png",
+  "image_sha256": "efa83912569e4fb734680e79904a19a26b00c8764e23cc0fd38880928ae8271c",
+  "sets_json_sha256": "efa83912569e4fb734680e79904a19a26b00c8764e23cc0fd38880928ae8271c",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-849",
+  "image_file": "849.png",
+  "image_sha256": "870c3a0c64e92ef5bb0a1c340418235b87fe03f704d2917adc39f5ae27988265",
+  "sets_json_sha256": "870c3a0c64e92ef5bb0a1c340418235b87fe03f704d2917adc39f5ae27988265",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-85",
+  "image_file": "85.png",
+  "image_sha256": "fb66439231a8a56fd513b33ac0cf95822a211b704d23f06e7e9d219944cfdd8f",
+  "sets_json_sha256": "fb66439231a8a56fd513b33ac0cf95822a211b704d23f06e7e9d219944cfdd8f",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-852",
+  "image_file": "852.png",
+  "image_sha256": "cf4bda2db903c4ca6b94e6746787aea62a279659048b2bc576585b50a2f396c7",
+  "sets_json_sha256": "cf4bda2db903c4ca6b94e6746787aea62a279659048b2bc576585b50a2f396c7",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-853",
+  "image_file": "853.png",
+  "image_sha256": "d2e1a109ee04adc393d9569c7e734743a501e88764d55d23eef639877f980ba4",
+  "sets_json_sha256": "d2e1a109ee04adc393d9569c7e734743a501e88764d55d23eef639877f980ba4",
+  "qualified": true,
+  "format": "DRIVER_LICENSE"
+ },
+ {
+  "id": "omni-854",
+  "image_file": "854.png",
+  "image_sha256": "eeaad1c63f3d8b9127e90c04e4d93cd2b30cbc90d8adc2a98b15bda868b3f68a",
+  "sets_json_sha256": "eeaad1c63f3d8b9127e90c04e4d93cd2b30cbc90d8adc2a98b15bda868b3f68a",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-857",
+  "image_file": "857.png",
+  "image_sha256": "f95ea2d04fb0d21170d9d991cae1b63c65b812a51ebae93f66314f2443575f23",
+  "sets_json_sha256": "f95ea2d04fb0d21170d9d991cae1b63c65b812a51ebae93f66314f2443575f23",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-858",
+  "image_file": "858.jpg",
+  "image_sha256": "d7466d576e1e9c895b70c055a3fc6c6135eea5d5aca1dc4293bdd336e9810da3",
+  "sets_json_sha256": "d7466d576e1e9c895b70c055a3fc6c6135eea5d5aca1dc4293bdd336e9810da3",
+  "qualified": true,
+  "format": "PHOTO_RECEIPT"
+ },
+ {
+  "id": "omni-859",
+  "image_file": "859.png",
+  "image_sha256": "d8ddf30589868a4824967c801e36b4fdd9aea9e729880b18039d7d922d09657b",
+  "sets_json_sha256": "d8ddf30589868a4824967c801e36b4fdd9aea9e729880b18039d7d922d09657b",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-86",
+  "image_file": "86.png",
+  "image_sha256": "f1edce2ff305e0128a5eac720d0efdce28049ca97a9ed823e8c8737f839979cd",
+  "sets_json_sha256": "f1edce2ff305e0128a5eac720d0efdce28049ca97a9ed823e8c8737f839979cd",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-860",
+  "image_file": "860.png",
+  "image_sha256": "54d7f6af66f5011c7b833b88e3fdb4fca25243cd20c9a328871da9058e2a05ba",
+  "sets_json_sha256": "54d7f6af66f5011c7b833b88e3fdb4fca25243cd20c9a328871da9058e2a05ba",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-862",
+  "image_file": "862.png",
+  "image_sha256": "06cfe6ad216513210ebabdfd11c658145ebf9ebdea7212afd9275febee73bfb8",
+  "sets_json_sha256": "06cfe6ad216513210ebabdfd11c658145ebf9ebdea7212afd9275febee73bfb8",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-864",
+  "image_file": "864.png",
+  "image_sha256": "073c983a114777ea459f48f280396a40c544754c39037a82a0b7c79a39049ed7",
+  "sets_json_sha256": "073c983a114777ea459f48f280396a40c544754c39037a82a0b7c79a39049ed7",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-866",
+  "image_file": "866.png",
+  "image_sha256": "1c886974cf22e072c2ec2503e54c6e06e8fd3d053034c093366fa29f60e1a508",
+  "sets_json_sha256": "1c886974cf22e072c2ec2503e54c6e06e8fd3d053034c093366fa29f60e1a508",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-868",
+  "image_file": "868.png",
+  "image_sha256": "9a8814eead2879bbc39aa56390b4e0bd65be9584855b4eeca901db7340e535e5",
+  "sets_json_sha256": "9a8814eead2879bbc39aa56390b4e0bd65be9584855b4eeca901db7340e535e5",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-87",
+  "image_file": "87.png",
+  "image_sha256": "003cfb17794f1f1b46804bd3f245d395ff28d05affdd664cc0f78956e5657e8f",
+  "sets_json_sha256": "003cfb17794f1f1b46804bd3f245d395ff28d05affdd664cc0f78956e5657e8f",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-870",
+  "image_file": "870.png",
+  "image_sha256": "6431323033fd4f0f385259808e80a36f595b663a4d625f1b54d4e2edf2fa1f5b",
+  "sets_json_sha256": "6431323033fd4f0f385259808e80a36f595b663a4d625f1b54d4e2edf2fa1f5b",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-871",
+  "image_file": "871.png",
+  "image_sha256": "34a4e3726eb25ae275f14301123e1d4cf5c77ca2b9abbd6243b7eea15d7566de",
+  "sets_json_sha256": "34a4e3726eb25ae275f14301123e1d4cf5c77ca2b9abbd6243b7eea15d7566de",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-873",
+  "image_file": "873.png",
+  "image_sha256": "63f6b0738c63d28df5c8f7a7743576773f6ebed0021dfaa674aeecb8c2e2ff6f",
+  "sets_json_sha256": "63f6b0738c63d28df5c8f7a7743576773f6ebed0021dfaa674aeecb8c2e2ff6f",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-874",
+  "image_file": "874.png",
+  "image_sha256": "6a1c34fb4d7dedd11e489a34844c514046987c2bb2873b5d27b09b4013e66eae",
+  "sets_json_sha256": "6a1c34fb4d7dedd11e489a34844c514046987c2bb2873b5d27b09b4013e66eae",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-875",
+  "image_file": "875.png",
+  "image_sha256": "ac706f41f757d3c2a544bbdf065e7e37ab2e3ebdd28f9cba68de4970f6d306b8",
+  "sets_json_sha256": "ac706f41f757d3c2a544bbdf065e7e37ab2e3ebdd28f9cba68de4970f6d306b8",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-876",
+  "image_file": "876.png",
+  "image_sha256": "9da8b54a4b1ba22e0adb10648a5f6c71cac2cde0e037f16e9e997ec780891155",
+  "sets_json_sha256": "9da8b54a4b1ba22e0adb10648a5f6c71cac2cde0e037f16e9e997ec780891155",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-877",
+  "image_file": "877.png",
+  "image_sha256": "10e0de75c0f99480c1a85e65fdb29dddca8ecc97090f12dcb3f640cc24460ae7",
+  "sets_json_sha256": "10e0de75c0f99480c1a85e65fdb29dddca8ecc97090f12dcb3f640cc24460ae7",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-878",
+  "image_file": "878.png",
+  "image_sha256": "5a8261b82f53f6462d2538c8599fb84a2a2c8fb18698ffd51cb59019c212fe30",
+  "sets_json_sha256": "5a8261b82f53f6462d2538c8599fb84a2a2c8fb18698ffd51cb59019c212fe30",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-88",
+  "image_file": "88.png",
+  "image_sha256": "a77d1fe2eb353c142f4f6abad8d5637ed6a50390a000f688d862bb4b54e5e035",
+  "sets_json_sha256": "a77d1fe2eb353c142f4f6abad8d5637ed6a50390a000f688d862bb4b54e5e035",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-881",
+  "image_file": "881.png",
+  "image_sha256": "4a52a6885fb53f7b6957af6a9d6a890af7005fdc7c9f250bf8a036cac20dd46f",
+  "sets_json_sha256": "4a52a6885fb53f7b6957af6a9d6a890af7005fdc7c9f250bf8a036cac20dd46f",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-884",
+  "image_file": "884.png",
+  "image_sha256": "bfd8811d584d70fa8345c73fb7dfbd2b875685ca95ef24d6a3351d2d4a06793e",
+  "sets_json_sha256": "bfd8811d584d70fa8345c73fb7dfbd2b875685ca95ef24d6a3351d2d4a06793e",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-885",
+  "image_file": "885.png",
+  "image_sha256": "30fc9643781533f6efaef53e50709a9a7388dd71002c5852f57ef6494c48bb93",
+  "sets_json_sha256": "30fc9643781533f6efaef53e50709a9a7388dd71002c5852f57ef6494c48bb93",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-887",
+  "image_file": "887.png",
+  "image_sha256": "eee238924d7cff33ceb03b24195ec80e62d2fae7a03026c0d11372586337f614",
+  "sets_json_sha256": "eee238924d7cff33ceb03b24195ec80e62d2fae7a03026c0d11372586337f614",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-889",
+  "image_file": "889.png",
+  "image_sha256": "92e0de8396b63a016bbe4e5697b9a56a4021e280f321bc7e202d1dc34400191c",
+  "sets_json_sha256": "92e0de8396b63a016bbe4e5697b9a56a4021e280f321bc7e202d1dc34400191c",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-891",
+  "image_file": "891.png",
+  "image_sha256": "72c51ddfef3e1f84947f434f1e974f29d3481f2b0b596f5b52cfe3d0d4322c8e",
+  "sets_json_sha256": "72c51ddfef3e1f84947f434f1e974f29d3481f2b0b596f5b52cfe3d0d4322c8e",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-894",
+  "image_file": "894.png",
+  "image_sha256": "13d8bcce129f0cc46dc40f81a66395e1c0cdf88413d9715e7f245ab40d0abd70",
+  "sets_json_sha256": "13d8bcce129f0cc46dc40f81a66395e1c0cdf88413d9715e7f245ab40d0abd70",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-895",
+  "image_file": "895.png",
+  "image_sha256": "2f758fb85b2b2e9cf15cd3ffa10202a9633845686c254eafdba00d377dea0c3e",
+  "sets_json_sha256": "2f758fb85b2b2e9cf15cd3ffa10202a9633845686c254eafdba00d377dea0c3e",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-897",
+  "image_file": "897.png",
+  "image_sha256": "46d19efaf0b4b650bee834d7c5bae18dd1cf25744d6ae8bb14d64c2862c9b6fe",
+  "sets_json_sha256": "46d19efaf0b4b650bee834d7c5bae18dd1cf25744d6ae8bb14d64c2862c9b6fe",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-898",
+  "image_file": "898.png",
+  "image_sha256": "e3377486a4396f3917c1828e4b0c2cb62fa3f8e832fa1f883843b87917cb7e61",
+  "sets_json_sha256": "e3377486a4396f3917c1828e4b0c2cb62fa3f8e832fa1f883843b87917cb7e61",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-899",
+  "image_file": "899.png",
+  "image_sha256": "950c304ce046280122436769451218f55bd1ec87f73973b0a2cb26a01edf468c",
+  "sets_json_sha256": "950c304ce046280122436769451218f55bd1ec87f73973b0a2cb26a01edf468c",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-9",
+  "image_file": "9.jpg",
+  "image_sha256": "6b10944345842f5acb281edee83424468647d30bb468275b991384ace9e09070",
+  "sets_json_sha256": "6b10944345842f5acb281edee83424468647d30bb468275b991384ace9e09070",
+  "qualified": true,
+  "format": "PHOTO_RECEIPT"
+ },
+ {
+  "id": "omni-90",
+  "image_file": "90.png",
+  "image_sha256": "0bafe9e5842808471ceaabc6acfaf1f90b8e83893e3531c46d08fac25c29ffea",
+  "sets_json_sha256": "0bafe9e5842808471ceaabc6acfaf1f90b8e83893e3531c46d08fac25c29ffea",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-900",
+  "image_file": "900.png",
+  "image_sha256": "c7a1556431ab4dbe23cb80dbc157f48e58934a4190b3f69b1d7e43b700383ab1",
+  "sets_json_sha256": "c7a1556431ab4dbe23cb80dbc157f48e58934a4190b3f69b1d7e43b700383ab1",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE"
+ },
+ {
+  "id": "omni-901",
+  "image_file": "901.png",
+  "image_sha256": "cd1b0eeb334410beab609d9c53bb4f6119e2c17057a2269b182032ce472a0d1e",
+  "sets_json_sha256": "cd1b0eeb334410beab609d9c53bb4f6119e2c17057a2269b182032ce472a0d1e",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-902",
+  "image_file": "902.png",
+  "image_sha256": "6935e39b70589b9c60b2fc969a47522db476f7e35401d14186903960edf38bb9",
+  "sets_json_sha256": "6935e39b70589b9c60b2fc969a47522db476f7e35401d14186903960edf38bb9",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-904",
+  "image_file": "904.png",
+  "image_sha256": "513a527c7b9b7cf5a08d96c7f4edfaa2dcb2ec67d148bec5012c5bfa042d2e65",
+  "sets_json_sha256": "513a527c7b9b7cf5a08d96c7f4edfaa2dcb2ec67d148bec5012c5bfa042d2e65",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-905",
+  "image_file": "905.png",
+  "image_sha256": "89b3b1b94101333ce607b042568c9bf77184b7eb398060e8ee3e7db48d61ce75",
+  "sets_json_sha256": "89b3b1b94101333ce607b042568c9bf77184b7eb398060e8ee3e7db48d61ce75",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-906",
+  "image_file": "906.png",
+  "image_sha256": "69d7c62086a27e7140ca0d8a6414d752dbc1c75ab557bb434c1167378c2740ff",
+  "sets_json_sha256": "69d7c62086a27e7140ca0d8a6414d752dbc1c75ab557bb434c1167378c2740ff",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-907",
+  "image_file": "907.png",
+  "image_sha256": "b5a1580a0d987e55bf1441fac7abf7e78fbfb53c74ff09ef0cf96d838830c0df",
+  "sets_json_sha256": "b5a1580a0d987e55bf1441fac7abf7e78fbfb53c74ff09ef0cf96d838830c0df",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-908",
+  "image_file": "908.png",
+  "image_sha256": "c9ca65bd1f233d7947894a47e7b83e48b23ce8b00225f40885bc434c22355eee",
+  "sets_json_sha256": "c9ca65bd1f233d7947894a47e7b83e48b23ce8b00225f40885bc434c22355eee",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-909",
+  "image_file": "909.png",
+  "image_sha256": "e6f33fece1f2ecc8c56a42f84208ba0e9f96b7f4f37d660fe1910d1d47fb6645",
+  "sets_json_sha256": "e6f33fece1f2ecc8c56a42f84208ba0e9f96b7f4f37d660fe1910d1d47fb6645",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-91",
+  "image_file": "91.png",
+  "image_sha256": "c4cf1d7f3675da784405988bdeff1188322f2a28e84323bd33fd34018b81eeac",
+  "sets_json_sha256": "c4cf1d7f3675da784405988bdeff1188322f2a28e84323bd33fd34018b81eeac",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-914",
+  "image_file": "914.png",
+  "image_sha256": "214378e75a6e10be6be518469550d945b14d5359cdbbf6e3f0f82bc9973d41fe",
+  "sets_json_sha256": "214378e75a6e10be6be518469550d945b14d5359cdbbf6e3f0f82bc9973d41fe",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-915",
+  "image_file": "915.png",
+  "image_sha256": "8ff781586d700b5554219a021dca8165902bdefbcd0f52132fa06b6aeccdb08c",
+  "sets_json_sha256": "8ff781586d700b5554219a021dca8165902bdefbcd0f52132fa06b6aeccdb08c",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-916",
+  "image_file": "916.png",
+  "image_sha256": "c9d63c05621f2b7413491ca7851f467420f7a7f4e16dc078cf6a93763cd4e4f6",
+  "sets_json_sha256": "c9d63c05621f2b7413491ca7851f467420f7a7f4e16dc078cf6a93763cd4e4f6",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-918",
+  "image_file": "918.png",
+  "image_sha256": "047b9250dfc63829dba5727eb294a033386d5a2b10afcc08335d1cb80d0f2bf4",
+  "sets_json_sha256": "047b9250dfc63829dba5727eb294a033386d5a2b10afcc08335d1cb80d0f2bf4",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-919",
+  "image_file": "919.png",
+  "image_sha256": "c85da53df809c4da207568519b1059ef6cd70b5c301d5415884013e01539d1de",
+  "sets_json_sha256": "c85da53df809c4da207568519b1059ef6cd70b5c301d5415884013e01539d1de",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-921",
+  "image_file": "921.png",
+  "image_sha256": "c70fc894df759bc2aefb833c3be04383f499710ca9150917d2416a9a7e757c2e",
+  "sets_json_sha256": "c70fc894df759bc2aefb833c3be04383f499710ca9150917d2416a9a7e757c2e",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-923",
+  "image_file": "923.png",
+  "image_sha256": "4aca410c4a92e8d8bf4f7d51321f968a353355db032b1edeb58721c332d4ce0f",
+  "sets_json_sha256": "4aca410c4a92e8d8bf4f7d51321f968a353355db032b1edeb58721c332d4ce0f",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-924",
+  "image_file": "924.png",
+  "image_sha256": "07ce65997427f6d0df92496473a9ae2d24967be7326e225a5f148b57838b0309",
+  "sets_json_sha256": "07ce65997427f6d0df92496473a9ae2d24967be7326e225a5f148b57838b0309",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-925",
+  "image_file": "925.png",
+  "image_sha256": "9297eecbeb848810ac1bffbe520254ed88eb031054edc1e3686727b898351d9b",
+  "sets_json_sha256": "9297eecbeb848810ac1bffbe520254ed88eb031054edc1e3686727b898351d9b",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-926",
+  "image_file": "926.png",
+  "image_sha256": "0407b4053fc81e66f2be873fb1941e12e381eae5c7c82efc7e790100f1ebbc20",
+  "sets_json_sha256": "0407b4053fc81e66f2be873fb1941e12e381eae5c7c82efc7e790100f1ebbc20",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-928",
+  "image_file": "928.png",
+  "image_sha256": "5395e4184d0f246bcf02fb273721b8727892fdb33afe6ebd5bc5fbf49a18a6d1",
+  "sets_json_sha256": "5395e4184d0f246bcf02fb273721b8727892fdb33afe6ebd5bc5fbf49a18a6d1",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-929",
+  "image_file": "929.png",
+  "image_sha256": "c6915866f51c22d821c5572d5e6bfa84b2e11879335c74ddd0467a572a647afc",
+  "sets_json_sha256": "c6915866f51c22d821c5572d5e6bfa84b2e11879335c74ddd0467a572a647afc",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-93",
+  "image_file": "93.png",
+  "image_sha256": "39f4607278a753578bd7b3abc715007e7bf5a600f31cf5c84396bf530a78190c",
+  "sets_json_sha256": "39f4607278a753578bd7b3abc715007e7bf5a600f31cf5c84396bf530a78190c",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-930",
+  "image_file": "930.png",
+  "image_sha256": "825dbd930b329a8355e18a67480a674bf7f126d621f5f6405616d1ec2dc46452",
+  "sets_json_sha256": "825dbd930b329a8355e18a67480a674bf7f126d621f5f6405616d1ec2dc46452",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-933",
+  "image_file": "933.png",
+  "image_sha256": "1379926aa571d65f15d6d01dc4f31bf7820b52584fd18d213fdbc13d2c1cbead",
+  "sets_json_sha256": "1379926aa571d65f15d6d01dc4f31bf7820b52584fd18d213fdbc13d2c1cbead",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-937",
+  "image_file": "937.png",
+  "image_sha256": "f868aaecf330eb4a00f2e8fa40255251060ae3238c3f6d1c3651163176a7e602",
+  "sets_json_sha256": "f868aaecf330eb4a00f2e8fa40255251060ae3238c3f6d1c3651163176a7e602",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-938",
+  "image_file": "938.png",
+  "image_sha256": "082fd1122c48f6ffe25e19e4bba18005df648b7fbfad89e0ebec9801eaa15e07",
+  "sets_json_sha256": "082fd1122c48f6ffe25e19e4bba18005df648b7fbfad89e0ebec9801eaa15e07",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-939",
+  "image_file": "939.png",
+  "image_sha256": "473ecf6cb6c88aaccccf7b89c3636e24208efb70b795676cadd430e442a2340c",
+  "sets_json_sha256": "473ecf6cb6c88aaccccf7b89c3636e24208efb70b795676cadd430e442a2340c",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-94",
+  "image_file": "94.png",
+  "image_sha256": "2b7523f1fe7d24426ccda4ddffadf0fc8f23718f06156266cf70cc6307d15cf7",
+  "sets_json_sha256": "2b7523f1fe7d24426ccda4ddffadf0fc8f23718f06156266cf70cc6307d15cf7",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-940",
+  "image_file": "940.png",
+  "image_sha256": "250ca5e72703cd96f44078a11376eb0f6b436852277ec4c6dd12b748a7912066",
+  "sets_json_sha256": "250ca5e72703cd96f44078a11376eb0f6b436852277ec4c6dd12b748a7912066",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-942",
+  "image_file": "942.png",
+  "image_sha256": "5ec893405921a800bc14b2bb0b828bf1e0ae9605e13884098d9ad0e59dfc5755",
+  "sets_json_sha256": "5ec893405921a800bc14b2bb0b828bf1e0ae9605e13884098d9ad0e59dfc5755",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-943",
+  "image_file": "943.png",
+  "image_sha256": "df156ad98a60927c4be888a0fc889d8be07a9dd4b08ac82a5f5f3cad7528e8d7",
+  "sets_json_sha256": "df156ad98a60927c4be888a0fc889d8be07a9dd4b08ac82a5f5f3cad7528e8d7",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-945",
+  "image_file": "945.png",
+  "image_sha256": "653b757e4e22750b69eddb3b79bd59f0df54a8a968f1bea92bf0e80add9ab396",
+  "sets_json_sha256": "653b757e4e22750b69eddb3b79bd59f0df54a8a968f1bea92bf0e80add9ab396",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-947",
+  "image_file": "947.png",
+  "image_sha256": "9a06d9b9659b8d771cba42fffaf5637d13853c53e9611d310e5d92a8a18af5ce",
+  "sets_json_sha256": "9a06d9b9659b8d771cba42fffaf5637d13853c53e9611d310e5d92a8a18af5ce",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-950",
+  "image_file": "950.png",
+  "image_sha256": "c6d7347a413b7941326f554b64aaa7540d76419a8ce4d1a383fe519f04d4172d",
+  "sets_json_sha256": "c6d7347a413b7941326f554b64aaa7540d76419a8ce4d1a383fe519f04d4172d",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-951",
+  "image_file": "951.png",
+  "image_sha256": "ffd78561223ee2c1f70d6cfc543bebdafaf951aa152c2cede43c9d06e402f0e9",
+  "sets_json_sha256": "ffd78561223ee2c1f70d6cfc543bebdafaf951aa152c2cede43c9d06e402f0e9",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-952",
+  "image_file": "952.png",
+  "image_sha256": "6b6bc051fa0e5aac731e9e143cdba84b8bba6ce8a1c1ea56117d270184932736",
+  "sets_json_sha256": "6b6bc051fa0e5aac731e9e143cdba84b8bba6ce8a1c1ea56117d270184932736",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-956",
+  "image_file": "956.png",
+  "image_sha256": "9c75db9ed5438a75c6ab15d411ced5b14182ce18108a87f91242cd8653a72ce4",
+  "sets_json_sha256": "9c75db9ed5438a75c6ab15d411ced5b14182ce18108a87f91242cd8653a72ce4",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-957",
+  "image_file": "957.png",
+  "image_sha256": "233fd82cb8bf15c9a560f2268bef9f79b51f141c76393572100e8cd3da31fc2b",
+  "sets_json_sha256": "233fd82cb8bf15c9a560f2268bef9f79b51f141c76393572100e8cd3da31fc2b",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-958",
+  "image_file": "958.png",
+  "image_sha256": "7bfb6f897118f4ed2adc4b2c2d671964d036b0639aa1b505b814a26d482ea5b8",
+  "sets_json_sha256": "7bfb6f897118f4ed2adc4b2c2d671964d036b0639aa1b505b814a26d482ea5b8",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-959",
+  "image_file": "959.png",
+  "image_sha256": "4105ef83482281cca97820ca6ccfa8971f98869ff04e397ffc7ffc4e977e7647",
+  "sets_json_sha256": "4105ef83482281cca97820ca6ccfa8971f98869ff04e397ffc7ffc4e977e7647",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-961",
+  "image_file": "961.png",
+  "image_sha256": "9654c75112a8360fbca93d5a791806c430f6a2535a66a7aacd63e7857ce25abc",
+  "sets_json_sha256": "9654c75112a8360fbca93d5a791806c430f6a2535a66a7aacd63e7857ce25abc",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-962",
+  "image_file": "962.png",
+  "image_sha256": "26ff308d7a3736d57057e24c0a5c6bb2a88c38b236b2fb0a6078cfdb97b0c834",
+  "sets_json_sha256": "26ff308d7a3736d57057e24c0a5c6bb2a88c38b236b2fb0a6078cfdb97b0c834",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-966",
+  "image_file": "966.png",
+  "image_sha256": "4d3556061a0dbf6b310f269495f122df9fefdbeda9c988e576cc79c3817f5ace",
+  "sets_json_sha256": "4d3556061a0dbf6b310f269495f122df9fefdbeda9c988e576cc79c3817f5ace",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-969",
+  "image_file": "969.png",
+  "image_sha256": "5a8169af60aaa3f4d9f01fcd55faac167a4ac17183474565e6e30a08e22fe25e",
+  "sets_json_sha256": "5a8169af60aaa3f4d9f01fcd55faac167a4ac17183474565e6e30a08e22fe25e",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-97",
+  "image_file": "97.png",
+  "image_sha256": "9e3dff4e32cee29e65366cd20b681c0ac6b643a7005c798d912b2fcd94004a91",
+  "sets_json_sha256": "9e3dff4e32cee29e65366cd20b681c0ac6b643a7005c798d912b2fcd94004a91",
+  "qualified": true,
+  "format": "PATIENT_INTAKE"
+ },
+ {
+  "id": "omni-972",
+  "image_file": "972.png",
+  "image_sha256": "bd5dd7fbe9d7c8642fb5bfa6c1bca2738b024744763ce6d7831db2557aca5543",
+  "sets_json_sha256": "bd5dd7fbe9d7c8642fb5bfa6c1bca2738b024744763ce6d7831db2557aca5543",
+  "qualified": true,
+  "format": "REAL_ESTATE"
+ },
+ {
+  "id": "omni-973",
+  "image_file": "973.png",
+  "image_sha256": "64150ad17a337a5d61c5d764fd875e3cf72ad1ba8f46336b981e9c08ce9a3a7a",
+  "sets_json_sha256": "64150ad17a337a5d61c5d764fd875e3cf72ad1ba8f46336b981e9c08ce9a3a7a",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-977",
+  "image_file": "977.png",
+  "image_sha256": "5b59a68285c6317aa45f576d6431e171910dea9e291d4a8a37805225b965f0da",
+  "sets_json_sha256": "5b59a68285c6317aa45f576d6431e171910dea9e291d4a8a37805225b965f0da",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-978",
+  "image_file": "978.png",
+  "image_sha256": "1bb414413a12e9275bc82c97f09f5c451ab4de86e1cc8b6036be4d71484995a4",
+  "sets_json_sha256": "1bb414413a12e9275bc82c97f09f5c451ab4de86e1cc8b6036be4d71484995a4",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-979",
+  "image_file": "979.png",
+  "image_sha256": "112fdfba73a0c0fe0010cb9449b9ce4bb9207fd7598a930e9e14da45acba2d21",
+  "sets_json_sha256": "112fdfba73a0c0fe0010cb9449b9ce4bb9207fd7598a930e9e14da45acba2d21",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ },
+ {
+  "id": "omni-98",
+  "image_file": "98.png",
+  "image_sha256": "f300881b6b7581eab6edd7766571116097df765c7a69ba20b8e476b22f6b89e5",
+  "sets_json_sha256": "f300881b6b7581eab6edd7766571116097df765c7a69ba20b8e476b22f6b89e5",
+  "qualified": true,
+  "format": "DELIVERY_NOTE"
+ },
+ {
+  "id": "omni-980",
+  "image_file": "980.png",
+  "image_sha256": "1b6f28c0ca9cf938c500511b2a5da6872dba6e54f82709dc1965bb2e1a235465",
+  "sets_json_sha256": "1b6f28c0ca9cf938c500511b2a5da6872dba6e54f82709dc1965bb2e1a235465",
+  "qualified": true,
+  "format": "PROXY_VOTING"
+ },
+ {
+  "id": "omni-981",
+  "image_file": "981.png",
+  "image_sha256": "9e261a3c029bcd2cdfbe2c51cde9e83b4866ea680cacde5402f86a9918a82327",
+  "sets_json_sha256": "9e261a3c029bcd2cdfbe2c51cde9e83b4866ea680cacde5402f86a9918a82327",
+  "qualified": true,
+  "format": "PAY_IN_SHEET"
+ },
+ {
+  "id": "omni-982",
+  "image_file": "982.png",
+  "image_sha256": "3c8d0b35dd98eb075dcd2e90749799b7962fe9f29a6cff65028814c562d900a6",
+  "sets_json_sha256": "3c8d0b35dd98eb075dcd2e90749799b7962fe9f29a6cff65028814c562d900a6",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-983",
+  "image_file": "983.png",
+  "image_sha256": "92a5a66a4b99ccf1c4717a18536d4d32cbf6a1e7f6644da94bf885e3d66190a5",
+  "sets_json_sha256": "92a5a66a4b99ccf1c4717a18536d4d32cbf6a1e7f6644da94bf885e3d66190a5",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION"
+ },
+ {
+  "id": "omni-984",
+  "image_file": "984.png",
+  "image_sha256": "4c6479a6bc7bdb10ae2abc5df6a1e6eb9b12d7cd1f3ec77870eebef037c69281",
+  "sets_json_sha256": "4c6479a6bc7bdb10ae2abc5df6a1e6eb9b12d7cd1f3ec77870eebef037c69281",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT"
+ },
+ {
+  "id": "omni-987",
+  "image_file": "987.png",
+  "image_sha256": "13f99da788021f4eff4f42920929b9a2ea18240332e93a918b3b81d52f3ebf70",
+  "sets_json_sha256": "13f99da788021f4eff4f42920929b9a2ea18240332e93a918b3b81d52f3ebf70",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-988",
+  "image_file": "988.png",
+  "image_sha256": "6018335ff122593a9105b0eb5adfd18dfcd2be839f80e71d26fed8b55f409b54",
+  "sets_json_sha256": "6018335ff122593a9105b0eb5adfd18dfcd2be839f80e71d26fed8b55f409b54",
+  "qualified": true,
+  "format": "FORM_1040"
+ },
+ {
+  "id": "omni-995",
+  "image_file": "995.png",
+  "image_sha256": "5b8a0f78065c809ef4cefe0a26a5a921da67e4184ab08b8710cd779d8572a5ac",
+  "sets_json_sha256": "5b8a0f78065c809ef4cefe0a26a5a921da67e4184ab08b8710cd779d8572a5ac",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT"
+ },
+ {
+  "id": "omni-996",
+  "image_file": "996.png",
+  "image_sha256": "df2453dc5a8806dc16778c67d699bc216924ef869d1ea700daee04574a2b0b24",
+  "sets_json_sha256": "df2453dc5a8806dc16778c67d699bc216924ef869d1ea700daee04574a2b0b24",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT"
+ },
+ {
+  "id": "omni-998",
+  "image_file": "998.png",
+  "image_sha256": "afa138430e2211b8531d6ea838cb4a024fa552e7538a1c512a0da91d79484cb7",
+  "sets_json_sha256": "afa138430e2211b8531d6ea838cb4a024fa552e7538a1c512a0da91d79484cb7",
+  "qualified": true,
+  "format": "PETITION_FORM"
+ },
+ {
+  "id": "omni-999",
+  "image_file": "999.png",
+  "image_sha256": "b3d7c28d0c1ca867728997fdb49c4016b3c034b609bc00d836a147d8df89fd2d",
+  "sets_json_sha256": "b3d7c28d0c1ca867728997fdb49c4016b3c034b609bc00d836a147d8df89fd2d",
+  "qualified": true,
+  "format": "BANK_CHECK"
+ }
+]

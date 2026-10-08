@@ -1,0 +1,92 @@
+{
+ "omni": {
+  "repo": "getomni-ai/ocr-benchmark",
+  "revision": "4ed0d95271ca00107726230f7a0944ed9e90d897",
+  "license": "MIT",
+  "base_url": "https://huggingface.co/datasets/getomni-ai/ocr-benchmark/resolve/4ed0d95271ca00107726230f7a0944ed9e90d897/test",
+  "metadata": {
+   "path": "metadata.jsonl",
+   "bytes": 8370297,
+   "sha256": "dad8fc254b20fcef351ccfc36add27fc01e2f426944a30f288769ead82e9814b"
+  }
+ },
+ "packet": {
+  "repo": "superlinked/sie-task-evidence",
+  "revision": "f10e813f2206348e31da363da2bc90b06086d7d9",
+  "folder": "doc-field-extraction-native/2026-10-07",
+  "base_url": "https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/f10e813f2206348e31da363da2bc90b06086d7d9/doc-field-extraction-native/2026-10-07",
+  "manifest_sha256": "69823e6d88f3a5dccd0602427be28b65e0fd9641ac02c17b6cf76256389fbad9",
+  "files": {
+   "pilot/grader/A1.jsonl": {
+    "bytes": 230555,
+    "sha256": "01bcac420272ffa2097b349e43feafcd7e37e745afb15329515390fc65a6252d"
+   },
+   "pilot/grader/omni_scores.json": {
+    "bytes": 17760,
+    "sha256": "3cbf515ac15125cfcca56b1d2c4fcb3c3c482b34c4cc73e93ec9f56bfbb97884"
+   },
+   "pilot/requests/A1.bodies.show.jsonl": {
+    "bytes": 745123,
+    "sha256": "5366928b6b6a910c2d19ea4bfdc4e4d77220a207344a3ece59abe0261c38c040"
+   },
+   "pilot/requests/image_manifest.json": {
+    "bytes": 34028,
+    "sha256": "99724cbeaef2f9b27330e375c2a7c095b572588a6f15ea445333747e1c9c14ca"
+   },
+   "confirm/grader/A1.jsonl": {
+    "bytes": 1138350,
+    "sha256": "3cb6dd985c57ab3e67ce707b9fd108fcd35983b5691f52e41742896f5582e809"
+   },
+   "confirm/grader/omni_scores.json": {
+    "bytes": 97585,
+    "sha256": "c4033d5117cfe606f95d4e8a98cb22a465d51a9b67c288e2d0489e2dcb19f03e"
+   },
+   "confirm/requests/A1.confirm.bodies.jsonl.sha256": {
+    "bytes": 65,
+    "sha256": "814f56f27140a65fd415313825454716f93b8a3ff4ca9c4cc30d7cec8ebea607"
+   },
+   "confirm/requests/A1.confirm.bodies.show.jsonl": {
+    "bytes": 3941564,
+    "sha256": "5626ab61415798aac7c1ac3e1f1ff7cd973671ba4be39ba9984119430c35bfe6"
+   },
+   "confirm/requests/image_manifest.json": {
+    "bytes": 153198,
+    "sha256": "c4fbbc931614139167500544c217798acb2bfb5314d669cd0153eeec28bf5e58"
+   }
+  }
+ },
+ "sets": {
+  "pilot": {
+   "image_manifest": "sets/pilot.image_manifest.json",
+   "image_manifest_sha256": "99724cbeaef2f9b27330e375c2a7c095b572588a6f15ea445333747e1c9c14ca",
+   "study_documents": 100,
+   "study_ids_sha256": "6577f0740b076a4c9c21d07743aed14babaaf5c7dfa01446ea376bafc8059b5d",
+   "bodies_rows": 106,
+   "bodies_sha256": "d364ac860a1790772baaa9c343a6bddd6aac055bf06dc45c095d2bd75240396a",
+   "bodies_sha256_note": "sha256 of the pilot bodies file as sent (100 study rows then 6 unscored display rows); the file itself is not published",
+   "bodies_show_sha256": "5366928b6b6a910c2d19ea4bfdc4e4d77220a207344a3ece59abe0261c38c040",
+   "published_mean": 90.15,
+   "derived_images": {
+    "omni-407": {
+     "source_file": "images/407.png",
+     "source_sha256": "34662c3b94518452d8ce47e41e9949ddc8052575037326d9d36db3875fda5474",
+     "transform": "Pillow: Image.open(src).convert('RGB').save(out, 'JPEG', quality=90)",
+     "why": "the source PNG is over 5 MB as base64, so the study re-encoded it once and every arm received the re-encoded bytes",
+     "reproduced_with": "Pillow 12.2.0"
+    }
+   }
+  },
+  "confirm": {
+   "image_manifest": "sets/confirm.image_manifest.json",
+   "image_manifest_sha256": "c4fbbc931614139167500544c217798acb2bfb5314d669cd0153eeec28bf5e58",
+   "study_documents": 546,
+   "study_ids_sha256": "be62dac0164637c6fcae7fc532a63f417b406e11c5f1a60ae4488e8a9d0bef79",
+   "bodies_rows": 546,
+   "bodies_sha256": "8e796736eac72b18e0815a6c62e265c29e154768ced92006140aad50802010d8",
+   "bodies_sha256_note": "published in confirm/requests/A1.confirm.bodies.jsonl.sha256; the bodies file itself is not published",
+   "bodies_show_sha256": "5626ab61415798aac7c1ac3e1f1ff7cd973671ba4be39ba9984119430c35bfe6",
+   "published_mean": 91.03,
+   "derived_images": {}
+  }
+ }
+}

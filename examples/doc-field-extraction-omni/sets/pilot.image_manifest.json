@@ -1,0 +1,1062 @@
+[
+ {
+  "slot": "study",
+  "id": "omni-101",
+  "image_file": "101.png",
+  "image_sha256": "b88a364675d3975830e6616c7581c43da3bc280eab3a0e3432edb17285530ab4",
+  "sets_json_sha256": "b88a364675d3975830e6616c7581c43da3bc280eab3a0e3432edb17285530ab4",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION",
+  "b64_len": 303256
+ },
+ {
+  "slot": "study",
+  "id": "omni-109",
+  "image_file": "109.png",
+  "image_sha256": "8a5587ebc862bd6ee7b85f2532055bdd8cf0cd3d5330385450e33097fce7fe90",
+  "sets_json_sha256": "8a5587ebc862bd6ee7b85f2532055bdd8cf0cd3d5330385450e33097fce7fe90",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT",
+  "b64_len": 523192
+ },
+ {
+  "slot": "study",
+  "id": "omni-117",
+  "image_file": "117.png",
+  "image_sha256": "58c2e25591e394f28a4f5eaae0f19cef17abed0190a7e0d1340dbad442c5e077",
+  "sets_json_sha256": "58c2e25591e394f28a4f5eaae0f19cef17abed0190a7e0d1340dbad442c5e077",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT",
+  "b64_len": 497180
+ },
+ {
+  "slot": "study",
+  "id": "omni-135",
+  "image_file": "135.jpg",
+  "image_sha256": "9aed5de04c6cb19121dc75e9f3f459bcd8952c3c501262b326a8f1b58ebbc67f",
+  "sets_json_sha256": "9aed5de04c6cb19121dc75e9f3f459bcd8952c3c501262b326a8f1b58ebbc67f",
+  "qualified": true,
+  "format": "REAL_ESTATE",
+  "b64_len": 3946540
+ },
+ {
+  "slot": "study",
+  "id": "omni-138",
+  "image_file": "138.png",
+  "image_sha256": "6c3a0f33860356cae39925e58d86364db3d98407d081713f02aeb615684ae442",
+  "sets_json_sha256": "6c3a0f33860356cae39925e58d86364db3d98407d081713f02aeb615684ae442",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION",
+  "b64_len": 374756
+ },
+ {
+  "slot": "study",
+  "id": "omni-140",
+  "image_file": "140.png",
+  "image_sha256": "304011980636621b8ac30950fb60a0d18c5624a8084db81ee860affeb50766db",
+  "sets_json_sha256": "304011980636621b8ac30950fb60a0d18c5624a8084db81ee860affeb50766db",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE",
+  "b64_len": 110000
+ },
+ {
+  "slot": "study",
+  "id": "omni-147",
+  "image_file": "147.png",
+  "image_sha256": "10bf1dfaaefeddfa065160120c478ee915118de61d6c46615e20f840730c2e33",
+  "sets_json_sha256": "10bf1dfaaefeddfa065160120c478ee915118de61d6c46615e20f840730c2e33",
+  "qualified": true,
+  "format": "DELIVERY_NOTE",
+  "b64_len": 440160
+ },
+ {
+  "slot": "study",
+  "id": "omni-149",
+  "image_file": "149.png",
+  "image_sha256": "3e292358891f4788387f1bcf09ebaa3ef1241f1e3f4e8a03c17297829d136b8a",
+  "sets_json_sha256": "3e292358891f4788387f1bcf09ebaa3ef1241f1e3f4e8a03c17297829d136b8a",
+  "qualified": true,
+  "format": "PETITION_FORM",
+  "b64_len": 137788
+ },
+ {
+  "slot": "study",
+  "id": "omni-151",
+  "image_file": "151.png",
+  "image_sha256": "378185e200bd80cfe71a1e4e540abd3135071066d0000c31f9bfe2337a6affd2",
+  "sets_json_sha256": "378185e200bd80cfe71a1e4e540abd3135071066d0000c31f9bfe2337a6affd2",
+  "qualified": true,
+  "format": "PAY_IN_SHEET",
+  "b64_len": 156856
+ },
+ {
+  "slot": "study",
+  "id": "omni-158",
+  "image_file": "158.png",
+  "image_sha256": "38a69c00e3841d44386a72babca9b8f2ca7ea0572a4314746d36c5a83ded62da",
+  "sets_json_sha256": "38a69c00e3841d44386a72babca9b8f2ca7ea0572a4314746d36c5a83ded62da",
+  "qualified": true,
+  "format": "PROXY_VOTING",
+  "b64_len": 119428
+ },
+ {
+  "slot": "study",
+  "id": "omni-181",
+  "image_file": "181.png",
+  "image_sha256": "c1465a3a07c470bab3bfbe6c23867ea6ca6d961f3a9ec9fa3a7964cf4ed80916",
+  "sets_json_sha256": "c1465a3a07c470bab3bfbe6c23867ea6ca6d961f3a9ec9fa3a7964cf4ed80916",
+  "qualified": true,
+  "format": "PAY_IN_SHEET",
+  "b64_len": 129472
+ },
+ {
+  "slot": "study",
+  "id": "omni-184",
+  "image_file": "184.png",
+  "image_sha256": "384944671240ba6820b70919058d4dff5d078ffaf37b40de1cdf7892d6402c02",
+  "sets_json_sha256": "384944671240ba6820b70919058d4dff5d078ffaf37b40de1cdf7892d6402c02",
+  "qualified": true,
+  "format": "PROXY_VOTING",
+  "b64_len": 313712
+ },
+ {
+  "slot": "study",
+  "id": "omni-189",
+  "image_file": "189.png",
+  "image_sha256": "f48dad0ec6eb9d27bb3550097d645f839c6a661e2cc728d7c4c9ac6efe070ff9",
+  "sets_json_sha256": "f48dad0ec6eb9d27bb3550097d645f839c6a661e2cc728d7c4c9ac6efe070ff9",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT",
+  "b64_len": 888100
+ },
+ {
+  "slot": "study",
+  "id": "omni-196",
+  "image_file": "196.png",
+  "image_sha256": "88c260f08349592b663298e1d72edbeafef403ea4583781c58a5deaea63cac7a",
+  "sets_json_sha256": "88c260f08349592b663298e1d72edbeafef403ea4583781c58a5deaea63cac7a",
+  "qualified": true,
+  "format": "REAL_ESTATE",
+  "b64_len": 91556
+ },
+ {
+  "slot": "study",
+  "id": "omni-198",
+  "image_file": "198.png",
+  "image_sha256": "af670b9bd7ec9b508685dcd2f53f0d1d91b261a874a9a8c758ecf819931e0499",
+  "sets_json_sha256": "af670b9bd7ec9b508685dcd2f53f0d1d91b261a874a9a8c758ecf819931e0499",
+  "qualified": true,
+  "format": "PAY_IN_SHEET",
+  "b64_len": 54512
+ },
+ {
+  "slot": "study",
+  "id": "omni-200",
+  "image_file": "200.png",
+  "image_sha256": "d8b0632728a9f69294a3b57e57763fb88a3a3ecd877cfc937ed2e68aef40a8f7",
+  "sets_json_sha256": "d8b0632728a9f69294a3b57e57763fb88a3a3ecd877cfc937ed2e68aef40a8f7",
+  "qualified": true,
+  "format": "PETITION_FORM",
+  "b64_len": 266064
+ },
+ {
+  "slot": "study",
+  "id": "omni-208",
+  "image_file": "208.png",
+  "image_sha256": "f97701f3fa72002142cbc14ab6e98e8a10d408231621e25330af021e3a135b06",
+  "sets_json_sha256": "f97701f3fa72002142cbc14ab6e98e8a10d408231621e25330af021e3a135b06",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT",
+  "b64_len": 482012
+ },
+ {
+  "slot": "study",
+  "id": "omni-209",
+  "image_file": "209.png",
+  "image_sha256": "c3f5a8513c7aaa1ed4611ecc8452c890edf7f641bee7a8c4b284de12e0c44434",
+  "sets_json_sha256": "c3f5a8513c7aaa1ed4611ecc8452c890edf7f641bee7a8c4b284de12e0c44434",
+  "qualified": true,
+  "format": "PATIENT_INTAKE",
+  "b64_len": 247640
+ },
+ {
+  "slot": "study",
+  "id": "omni-213",
+  "image_file": "213.png",
+  "image_sha256": "ccb4319dc1fc2ef766ccc1f2d4255433743f061b58ae246002a7aeac79031ea2",
+  "sets_json_sha256": "ccb4319dc1fc2ef766ccc1f2d4255433743f061b58ae246002a7aeac79031ea2",
+  "qualified": true,
+  "format": "PATIENT_INTAKE",
+  "b64_len": 595616
+ },
+ {
+  "slot": "study",
+  "id": "omni-235",
+  "image_file": "235.png",
+  "image_sha256": "a483243c4345a03256e5de47733b5644aadedfce2058eed896569a2cf3ad70ab",
+  "sets_json_sha256": "a483243c4345a03256e5de47733b5644aadedfce2058eed896569a2cf3ad70ab",
+  "qualified": true,
+  "format": "PAY_IN_SHEET",
+  "b64_len": 114652
+ },
+ {
+  "slot": "study",
+  "id": "omni-236",
+  "image_file": "236.png",
+  "image_sha256": "b35f4dc0f42f409511c38fc38db6b8bfd0470cba1cb5ff8222d1de34f79c949f",
+  "sets_json_sha256": "b35f4dc0f42f409511c38fc38db6b8bfd0470cba1cb5ff8222d1de34f79c949f",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT",
+  "b64_len": 589656
+ },
+ {
+  "slot": "study",
+  "id": "omni-248",
+  "image_file": "248.png",
+  "image_sha256": "3c4184df5017aa7b3f11d0bf466a3e4a08c851d8c58e1e37ecb514e3080c6623",
+  "sets_json_sha256": "3c4184df5017aa7b3f11d0bf466a3e4a08c851d8c58e1e37ecb514e3080c6623",
+  "qualified": true,
+  "format": "PROXY_VOTING",
+  "b64_len": 146376
+ },
+ {
+  "slot": "study",
+  "id": "omni-249",
+  "image_file": "249.png",
+  "image_sha256": "50d4d63f7e2d1a642ff911c20624abf8ef1d2a1eea1a162a97cb9612999d529a",
+  "sets_json_sha256": "50d4d63f7e2d1a642ff911c20624abf8ef1d2a1eea1a162a97cb9612999d529a",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT",
+  "b64_len": 200952
+ },
+ {
+  "slot": "study",
+  "id": "omni-251",
+  "image_file": "251.png",
+  "image_sha256": "430625a31b815d5f4cd8be5d6ecec5fd5a995f165629c785304da9c0da8d1dc1",
+  "sets_json_sha256": "430625a31b815d5f4cd8be5d6ecec5fd5a995f165629c785304da9c0da8d1dc1",
+  "qualified": true,
+  "format": "PROXY_VOTING",
+  "b64_len": 255492
+ },
+ {
+  "slot": "study",
+  "id": "omni-255",
+  "image_file": "255.png",
+  "image_sha256": "2e3c5c2a6e9a4f0978accd588f4a54a9a6282c92a0830666bc74942a5cf69ea6",
+  "sets_json_sha256": "2e3c5c2a6e9a4f0978accd588f4a54a9a6282c92a0830666bc74942a5cf69ea6",
+  "qualified": true,
+  "format": "DELIVERY_NOTE",
+  "b64_len": 845944
+ },
+ {
+  "slot": "study",
+  "id": "omni-26",
+  "image_file": "26.png",
+  "image_sha256": "b85bb307a08b0f06f1b3264b95d753959776a7f4ebda4d390c77f0c7ed65b68b",
+  "sets_json_sha256": "b85bb307a08b0f06f1b3264b95d753959776a7f4ebda4d390c77f0c7ed65b68b",
+  "qualified": true,
+  "format": "SCANNED_FORM",
+  "b64_len": 433088
+ },
+ {
+  "slot": "study",
+  "id": "omni-265",
+  "image_file": "265.png",
+  "image_sha256": "b1d9795713a307e289545a989f61860d86cbe6d4ffcdfddc64d0d76a228ee0fb",
+  "sets_json_sha256": "b1d9795713a307e289545a989f61860d86cbe6d4ffcdfddc64d0d76a228ee0fb",
+  "qualified": true,
+  "format": "FORM_1040",
+  "b64_len": 2053056
+ },
+ {
+  "slot": "study",
+  "id": "omni-277",
+  "image_file": "277.png",
+  "image_sha256": "8da4e4dfba4b0a100db82aac3fabfc803e58eee61043a2c802c52a8097952d4e",
+  "sets_json_sha256": "8da4e4dfba4b0a100db82aac3fabfc803e58eee61043a2c802c52a8097952d4e",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION",
+  "b64_len": 143320
+ },
+ {
+  "slot": "study",
+  "id": "omni-285",
+  "image_file": "285.png",
+  "image_sha256": "a6192f6d16f2dca33f8597015f05d01779c5c288289b2292f9804bf07f815e56",
+  "sets_json_sha256": "a6192f6d16f2dca33f8597015f05d01779c5c288289b2292f9804bf07f815e56",
+  "qualified": true,
+  "format": "BANK_CHECK",
+  "b64_len": 328460
+ },
+ {
+  "slot": "study",
+  "id": "omni-286",
+  "image_file": "286.png",
+  "image_sha256": "83ccc2a1b7a2eaaf138ce60172992ed5c1608593d8a7f27baf4024b1b2718b22",
+  "sets_json_sha256": "83ccc2a1b7a2eaaf138ce60172992ed5c1608593d8a7f27baf4024b1b2718b22",
+  "qualified": true,
+  "format": "PETITION_FORM",
+  "b64_len": 361272
+ },
+ {
+  "slot": "study",
+  "id": "omni-292",
+  "image_file": "292.png",
+  "image_sha256": "4d56e4e2b29d9d87d7e81346ea5e11089bf520917c69fba8bfa0ddfd4b773192",
+  "sets_json_sha256": "4d56e4e2b29d9d87d7e81346ea5e11089bf520917c69fba8bfa0ddfd4b773192",
+  "qualified": true,
+  "format": "BANK_CHECK",
+  "b64_len": 142120
+ },
+ {
+  "slot": "study",
+  "id": "omni-30",
+  "image_file": "30.png",
+  "image_sha256": "279654591d7de3745e5efaf39d3be413baab267be7170082d1922690566c5ad1",
+  "sets_json_sha256": "279654591d7de3745e5efaf39d3be413baab267be7170082d1922690566c5ad1",
+  "qualified": true,
+  "format": "FORM",
+  "b64_len": 148108
+ },
+ {
+  "slot": "study",
+  "id": "omni-316",
+  "image_file": "316.png",
+  "image_sha256": "0177ba27abd1782e70eb36b95b73e7679e247fb32424582b5f9934cb820f09ed",
+  "sets_json_sha256": "0177ba27abd1782e70eb36b95b73e7679e247fb32424582b5f9934cb820f09ed",
+  "qualified": true,
+  "format": "DELIVERY_NOTE",
+  "b64_len": 386780
+ },
+ {
+  "slot": "study",
+  "id": "omni-321",
+  "image_file": "321.png",
+  "image_sha256": "27e113dc04005fc9ff5dae3d72e007e361d00d4fc8f5e534fd57b8837d931da9",
+  "sets_json_sha256": "27e113dc04005fc9ff5dae3d72e007e361d00d4fc8f5e534fd57b8837d931da9",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT",
+  "b64_len": 149320
+ },
+ {
+  "slot": "study",
+  "id": "omni-328",
+  "image_file": "328.png",
+  "image_sha256": "968ea3b10f6263e4540e828348234ee3e0b77fde84469e5091947b8e63cb2f03",
+  "sets_json_sha256": "968ea3b10f6263e4540e828348234ee3e0b77fde84469e5091947b8e63cb2f03",
+  "qualified": true,
+  "format": "FORM_1040",
+  "b64_len": 2006948
+ },
+ {
+  "slot": "study",
+  "id": "omni-333",
+  "image_file": "333.png",
+  "image_sha256": "167491a6a588f6a3e6820d845714a463d459475d5087d953f84c0db674ba84e5",
+  "sets_json_sha256": "167491a6a588f6a3e6820d845714a463d459475d5087d953f84c0db674ba84e5",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT",
+  "b64_len": 454996
+ },
+ {
+  "slot": "study",
+  "id": "omni-338",
+  "image_file": "338.png",
+  "image_sha256": "4d5b2e0c9a0fe30554b6f227e8491d1e689fa50197619a1ec8427bca12dbbf98",
+  "sets_json_sha256": "4d5b2e0c9a0fe30554b6f227e8491d1e689fa50197619a1ec8427bca12dbbf98",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT",
+  "b64_len": 147628
+ },
+ {
+  "slot": "study",
+  "id": "omni-347",
+  "image_file": "347.png",
+  "image_sha256": "40db1b5502bdd96d5832642479024c780a167a1f2425efd1b61398a4afc4c274",
+  "sets_json_sha256": "40db1b5502bdd96d5832642479024c780a167a1f2425efd1b61398a4afc4c274",
+  "qualified": true,
+  "format": "FORM_1040",
+  "b64_len": 743208
+ },
+ {
+  "slot": "study",
+  "id": "omni-353",
+  "image_file": "353.png",
+  "image_sha256": "461642416683e70b4d092b6fb24568f2496de85d41cc4dfbb402a0ea9209f416",
+  "sets_json_sha256": "461642416683e70b4d092b6fb24568f2496de85d41cc4dfbb402a0ea9209f416",
+  "qualified": true,
+  "format": "PROXY_VOTING",
+  "b64_len": 252364
+ },
+ {
+  "slot": "study",
+  "id": "omni-355",
+  "image_file": "355.png",
+  "image_sha256": "d935a41575c2411de9791891a4e7c2393a2689dc68307f290e4d99d941ecf406",
+  "sets_json_sha256": "d935a41575c2411de9791891a4e7c2393a2689dc68307f290e4d99d941ecf406",
+  "qualified": true,
+  "format": "BANK_CHECK",
+  "b64_len": 643240
+ },
+ {
+  "slot": "study",
+  "id": "omni-369",
+  "image_file": "369.png",
+  "image_sha256": "a3e52479bbabc0dea5147c20637abe815e9d04cfe9d3431252ee23401ad351e7",
+  "sets_json_sha256": "a3e52479bbabc0dea5147c20637abe815e9d04cfe9d3431252ee23401ad351e7",
+  "qualified": true,
+  "format": "BANK_CHECK",
+  "b64_len": 792992
+ },
+ {
+  "slot": "study",
+  "id": "omni-384",
+  "image_file": "384.png",
+  "image_sha256": "45210207e77bb09b77101fb066fe389fdecb5936bacbeeee35f81df925657306",
+  "sets_json_sha256": "45210207e77bb09b77101fb066fe389fdecb5936bacbeeee35f81df925657306",
+  "qualified": true,
+  "format": "PETITION_FORM",
+  "b64_len": 314976
+ },
+ {
+  "slot": "study",
+  "id": "omni-388",
+  "image_file": "388.png",
+  "image_sha256": "9cfe98c401da955f2572c594ca73b36ce4c84edf8e3b5d0a7979da66c6a19fc1",
+  "sets_json_sha256": "9cfe98c401da955f2572c594ca73b36ce4c84edf8e3b5d0a7979da66c6a19fc1",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT",
+  "b64_len": 386580
+ },
+ {
+  "slot": "study",
+  "id": "omni-396",
+  "image_file": "396.png",
+  "image_sha256": "da06b384f5aa77040490f4eb7a20ac213e819b40c025ec90789ab808e8b437d4",
+  "sets_json_sha256": "da06b384f5aa77040490f4eb7a20ac213e819b40c025ec90789ab808e8b437d4",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT",
+  "b64_len": 473800
+ },
+ {
+  "slot": "study",
+  "id": "omni-406",
+  "image_file": "406.png",
+  "image_sha256": "27b935488ab492a0195de097a75f83b59431e2b5c15b0e0386e7ea8b4f744e8d",
+  "sets_json_sha256": "27b935488ab492a0195de097a75f83b59431e2b5c15b0e0386e7ea8b4f744e8d",
+  "qualified": true,
+  "format": "PETITION_FORM",
+  "b64_len": 432948
+ },
+ {
+  "slot": "study",
+  "id": "omni-407",
+  "image_file": "407.q90.jpg",
+  "image_sha256": "6aa2cf6ee1fc490d41b887c7a3d13614f063374574acecad7055df3e90339ead",
+  "sets_json_sha256": "6aa2cf6ee1fc490d41b887c7a3d13614f063374574acecad7055df3e90339ead",
+  "qualified": true,
+  "format": "DRIVER_LICENSE",
+  "b64_len": 847844
+ },
+ {
+  "slot": "study",
+  "id": "omni-408",
+  "image_file": "408.png",
+  "image_sha256": "5e1725fe6e1456263bb36900ccb46e7856c2aa145949ab71c8b0f34d084c477a",
+  "sets_json_sha256": "5e1725fe6e1456263bb36900ccb46e7856c2aa145949ab71c8b0f34d084c477a",
+  "qualified": true,
+  "format": "BANK_CHECK",
+  "b64_len": 344968
+ },
+ {
+  "slot": "study",
+  "id": "omni-416",
+  "image_file": "416.png",
+  "image_sha256": "ebca2e19c3194fe622b0d71f1cdcaa597ed75ddd4bb8b87eb912e342473e1401",
+  "sets_json_sha256": "ebca2e19c3194fe622b0d71f1cdcaa597ed75ddd4bb8b87eb912e342473e1401",
+  "qualified": true,
+  "format": "REAL_ESTATE",
+  "b64_len": 311196
+ },
+ {
+  "slot": "study",
+  "id": "omni-418",
+  "image_file": "418.png",
+  "image_sha256": "a98ea40e356bc1c3cecb8478e8b48e1cc93700cec36ed3c1d79ffb8720a36708",
+  "sets_json_sha256": "a98ea40e356bc1c3cecb8478e8b48e1cc93700cec36ed3c1d79ffb8720a36708",
+  "qualified": true,
+  "format": "PROXY_VOTING",
+  "b64_len": 573756
+ },
+ {
+  "slot": "study",
+  "id": "omni-434",
+  "image_file": "434.png",
+  "image_sha256": "5046912baea67ae22aa1bdeca5cc3544eb68fad53376bd09158d1ab38d18429d",
+  "sets_json_sha256": "5046912baea67ae22aa1bdeca5cc3544eb68fad53376bd09158d1ab38d18429d",
+  "qualified": true,
+  "format": "PATIENT_INTAKE",
+  "b64_len": 167364
+ },
+ {
+  "slot": "study",
+  "id": "omni-451",
+  "image_file": "451.png",
+  "image_sha256": "a03d1e69d0a89a60b5fdd0e92fdfa4b8282cebfd20289e53462e80123ece589c",
+  "sets_json_sha256": "a03d1e69d0a89a60b5fdd0e92fdfa4b8282cebfd20289e53462e80123ece589c",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION",
+  "b64_len": 487232
+ },
+ {
+  "slot": "study",
+  "id": "omni-454",
+  "image_file": "454.png",
+  "image_sha256": "b156a9119872fe04f3eda70c0ee95de0762b4fc50a101fbc993ebaea7a7544cc",
+  "sets_json_sha256": "b156a9119872fe04f3eda70c0ee95de0762b4fc50a101fbc993ebaea7a7544cc",
+  "qualified": true,
+  "format": "REAL_ESTATE",
+  "b64_len": 203264
+ },
+ {
+  "slot": "study",
+  "id": "omni-473",
+  "image_file": "473.png",
+  "image_sha256": "587b01e8f64fdb1df928b603d54b522d23190e2e4b1d081e79cdac714ce59d9c",
+  "sets_json_sha256": "587b01e8f64fdb1df928b603d54b522d23190e2e4b1d081e79cdac714ce59d9c",
+  "qualified": true,
+  "format": "DELIVERY_NOTE",
+  "b64_len": 241928
+ },
+ {
+  "slot": "study",
+  "id": "omni-492",
+  "image_file": "492.png",
+  "image_sha256": "242bf9c376201327c0bb5b6225ceae20308a7a8ca87dae8dd087e63e44f177ab",
+  "sets_json_sha256": "242bf9c376201327c0bb5b6225ceae20308a7a8ca87dae8dd087e63e44f177ab",
+  "qualified": true,
+  "format": "REAL_ESTATE",
+  "b64_len": 304632
+ },
+ {
+  "slot": "study",
+  "id": "omni-495",
+  "image_file": "495.png",
+  "image_sha256": "4a81b0c72dd2d4421d56dea7283b4ab7fcd022ed5edbcf285f1a02f950a6c55b",
+  "sets_json_sha256": "4a81b0c72dd2d4421d56dea7283b4ab7fcd022ed5edbcf285f1a02f950a6c55b",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE",
+  "b64_len": 397204
+ },
+ {
+  "slot": "study",
+  "id": "omni-504",
+  "image_file": "504.png",
+  "image_sha256": "eccfa2124a2f5160f3bb5949ebb0ad3657c09ec095e7bf7be8897912fab0d3ca",
+  "sets_json_sha256": "eccfa2124a2f5160f3bb5949ebb0ad3657c09ec095e7bf7be8897912fab0d3ca",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT",
+  "b64_len": 409320
+ },
+ {
+  "slot": "study",
+  "id": "omni-516",
+  "image_file": "516.png",
+  "image_sha256": "44fefc28eeaee93d2daddb53c29e0ab0f4616fa7dc934b608b48a137117e0858",
+  "sets_json_sha256": "44fefc28eeaee93d2daddb53c29e0ab0f4616fa7dc934b608b48a137117e0858",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT",
+  "b64_len": 798800
+ },
+ {
+  "slot": "study",
+  "id": "omni-526",
+  "image_file": "526.png",
+  "image_sha256": "3b0aa8355b2d07e599eb56608914f2728bb615d2279d67e31e2c0596d8072d1f",
+  "sets_json_sha256": "3b0aa8355b2d07e599eb56608914f2728bb615d2279d67e31e2c0596d8072d1f",
+  "qualified": true,
+  "format": "PETITION_FORM",
+  "b64_len": 214468
+ },
+ {
+  "slot": "study",
+  "id": "omni-556",
+  "image_file": "556.png",
+  "image_sha256": "051167c6fbaf089603216e9417537108a777077fce8aabc254561a4f268ad531",
+  "sets_json_sha256": "051167c6fbaf089603216e9417537108a777077fce8aabc254561a4f268ad531",
+  "qualified": true,
+  "format": "PATIENT_INTAKE",
+  "b64_len": 138576
+ },
+ {
+  "slot": "study",
+  "id": "omni-586",
+  "image_file": "586.png",
+  "image_sha256": "25ef0182813679c69242bf0549325fa2b46cabf39080c8eb1e75816cf26f2c1b",
+  "sets_json_sha256": "25ef0182813679c69242bf0549325fa2b46cabf39080c8eb1e75816cf26f2c1b",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE",
+  "b64_len": 80780
+ },
+ {
+  "slot": "study",
+  "id": "omni-593",
+  "image_file": "593.png",
+  "image_sha256": "9972eba203e83612c20ab1e7609a7b4f9b4f705836be2ac010725ccddd2d7cdb",
+  "sets_json_sha256": "9972eba203e83612c20ab1e7609a7b4f9b4f705836be2ac010725ccddd2d7cdb",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT",
+  "b64_len": 433888
+ },
+ {
+  "slot": "study",
+  "id": "omni-607",
+  "image_file": "607.png",
+  "image_sha256": "087e416493efa0a3ea079eb5076f85be9a0ae5bf1bbe91e143d749bf5c6872be",
+  "sets_json_sha256": "087e416493efa0a3ea079eb5076f85be9a0ae5bf1bbe91e143d749bf5c6872be",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION",
+  "b64_len": 250072
+ },
+ {
+  "slot": "study",
+  "id": "omni-632",
+  "image_file": "632.png",
+  "image_sha256": "87a2223884a92ac54e0b89612847ca4ce9cb0f6a1e97b903e89c462ed693b588",
+  "sets_json_sha256": "87a2223884a92ac54e0b89612847ca4ce9cb0f6a1e97b903e89c462ed693b588",
+  "qualified": true,
+  "format": "PAY_IN_SHEET",
+  "b64_len": 144240
+ },
+ {
+  "slot": "study",
+  "id": "omni-662",
+  "image_file": "662.png",
+  "image_sha256": "a0dfe2c82cd41c0740772a3305a11ac8b16cbda0dadbe3341431e3a041c67795",
+  "sets_json_sha256": "a0dfe2c82cd41c0740772a3305a11ac8b16cbda0dadbe3341431e3a041c67795",
+  "qualified": true,
+  "format": "REAL_ESTATE",
+  "b64_len": 183328
+ },
+ {
+  "slot": "study",
+  "id": "omni-683",
+  "image_file": "683.png",
+  "image_sha256": "55354100a56f8a72878a9c8fefb990b26870be3614e884771ae8735cfa300b9f",
+  "sets_json_sha256": "55354100a56f8a72878a9c8fefb990b26870be3614e884771ae8735cfa300b9f",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE",
+  "b64_len": 770972
+ },
+ {
+  "slot": "study",
+  "id": "omni-696",
+  "image_file": "696.png",
+  "image_sha256": "9b18458d2cc0602004de215b63770a914861433123b92cb03035d0a2d8cf7111",
+  "sets_json_sha256": "9b18458d2cc0602004de215b63770a914861433123b92cb03035d0a2d8cf7111",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT",
+  "b64_len": 245892
+ },
+ {
+  "slot": "study",
+  "id": "omni-705",
+  "image_file": "705.png",
+  "image_sha256": "541b2056893db3d71cd0e829af251cc035f43c333eabb73b21018e6448d3098d",
+  "sets_json_sha256": "541b2056893db3d71cd0e829af251cc035f43c333eabb73b21018e6448d3098d",
+  "qualified": true,
+  "format": "REAL_ESTATE",
+  "b64_len": 79012
+ },
+ {
+  "slot": "study",
+  "id": "omni-721",
+  "image_file": "721.png",
+  "image_sha256": "e682242939bf375c71de20bcea7768b2eb8b4f0c4be7dd62515b33c6f3e2edd6",
+  "sets_json_sha256": "e682242939bf375c71de20bcea7768b2eb8b4f0c4be7dd62515b33c6f3e2edd6",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT",
+  "b64_len": 264928
+ },
+ {
+  "slot": "study",
+  "id": "omni-726",
+  "image_file": "726.png",
+  "image_sha256": "70211b7ba96493bf3629a9e5bdb91b7841a4dd704bfeafa2b4e5c6ef5f305e58",
+  "sets_json_sha256": "70211b7ba96493bf3629a9e5bdb91b7841a4dd704bfeafa2b4e5c6ef5f305e58",
+  "qualified": true,
+  "format": "PATIENT_INTAKE",
+  "b64_len": 200108
+ },
+ {
+  "slot": "study",
+  "id": "omni-729",
+  "image_file": "729.png",
+  "image_sha256": "daa3b51b8cb7806c339651f961af5ced64439f0d33823d46d7e0f80cd97060e1",
+  "sets_json_sha256": "daa3b51b8cb7806c339651f961af5ced64439f0d33823d46d7e0f80cd97060e1",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT",
+  "b64_len": 328732
+ },
+ {
+  "slot": "study",
+  "id": "omni-734",
+  "image_file": "734.png",
+  "image_sha256": "6eb2f434063679efab0d9760c4716a6f9f3aa7621165ccd9381bdf62386dd50c",
+  "sets_json_sha256": "6eb2f434063679efab0d9760c4716a6f9f3aa7621165ccd9381bdf62386dd50c",
+  "qualified": true,
+  "format": "PROXY_VOTING",
+  "b64_len": 448716
+ },
+ {
+  "slot": "study",
+  "id": "omni-757",
+  "image_file": "757.png",
+  "image_sha256": "c5423f82b29fb53ce830bc1026fcdee04b24d75d00f9df67be28e299dad9765f",
+  "sets_json_sha256": "c5423f82b29fb53ce830bc1026fcdee04b24d75d00f9df67be28e299dad9765f",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT",
+  "b64_len": 347812
+ },
+ {
+  "slot": "study",
+  "id": "omni-761",
+  "image_file": "761.png",
+  "image_sha256": "c9c57f5bbefb1e1822812066cc4c836b9414e0d2e8c7729b6cd592b6d38cbd66",
+  "sets_json_sha256": "c9c57f5bbefb1e1822812066cc4c836b9414e0d2e8c7729b6cd592b6d38cbd66",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT",
+  "b64_len": 1086864
+ },
+ {
+  "slot": "study",
+  "id": "omni-772",
+  "image_file": "772.jpg",
+  "image_sha256": "956b508edbb17623de5c2f910340f342f3be106f15b6910b68ddfcc3c2a05f44",
+  "sets_json_sha256": "956b508edbb17623de5c2f910340f342f3be106f15b6910b68ddfcc3c2a05f44",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE",
+  "b64_len": 542104
+ },
+ {
+  "slot": "study",
+  "id": "omni-773",
+  "image_file": "773.png",
+  "image_sha256": "e11ce5b77eea042e4dfb384be163f04fe66a2b37cce79c41cc9111eb29694c03",
+  "sets_json_sha256": "e11ce5b77eea042e4dfb384be163f04fe66a2b37cce79c41cc9111eb29694c03",
+  "qualified": true,
+  "format": "PATIENT_INTAKE",
+  "b64_len": 317152
+ },
+ {
+  "slot": "study",
+  "id": "omni-775",
+  "image_file": "775.png",
+  "image_sha256": "e813f3af00a5c3b2b236a958dd89c3b27c2561d8e5010989c2330442c8726e50",
+  "sets_json_sha256": "e813f3af00a5c3b2b236a958dd89c3b27c2561d8e5010989c2330442c8726e50",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT",
+  "b64_len": 271116
+ },
+ {
+  "slot": "study",
+  "id": "omni-776",
+  "image_file": "776.png",
+  "image_sha256": "a5cefb3e8ae8954be65e38ddde27ec6b939c0ea990adc20a50ad421600894272",
+  "sets_json_sha256": "a5cefb3e8ae8954be65e38ddde27ec6b939c0ea990adc20a50ad421600894272",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT",
+  "b64_len": 176300
+ },
+ {
+  "slot": "study",
+  "id": "omni-778",
+  "image_file": "778.png",
+  "image_sha256": "51433eb7efec7238243759559329db257485861cf5c070dcecd004db19269a6c",
+  "sets_json_sha256": "51433eb7efec7238243759559329db257485861cf5c070dcecd004db19269a6c",
+  "qualified": true,
+  "format": "PATIENT_INTAKE",
+  "b64_len": 308524
+ },
+ {
+  "slot": "study",
+  "id": "omni-781",
+  "image_file": "781.png",
+  "image_sha256": "668864638ab0f79040bc81eff61409df8a85f9bade7c52fb5c1c394ddd97401f",
+  "sets_json_sha256": "668864638ab0f79040bc81eff61409df8a85f9bade7c52fb5c1c394ddd97401f",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION",
+  "b64_len": 210944
+ },
+ {
+  "slot": "study",
+  "id": "omni-796",
+  "image_file": "796.png",
+  "image_sha256": "b761c3314c5f0e29fea0a93b29b0c02aa7f82bda0acc90f4cca66fe6a450acf0",
+  "sets_json_sha256": "b761c3314c5f0e29fea0a93b29b0c02aa7f82bda0acc90f4cca66fe6a450acf0",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT",
+  "b64_len": 777720
+ },
+ {
+  "slot": "study",
+  "id": "omni-797",
+  "image_file": "797.png",
+  "image_sha256": "9a027214b153b82752b1a7cc0ac3e4bbdb6c0ff8ac753ebbe68f14dee2e1eb8f",
+  "sets_json_sha256": "9a027214b153b82752b1a7cc0ac3e4bbdb6c0ff8ac753ebbe68f14dee2e1eb8f",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT",
+  "b64_len": 205732
+ },
+ {
+  "slot": "study",
+  "id": "omni-814",
+  "image_file": "814.png",
+  "image_sha256": "6cc49991d988ad741af404e6be37baa3501a1673fb0f97bc8aaac733d77b81f6",
+  "sets_json_sha256": "6cc49991d988ad741af404e6be37baa3501a1673fb0f97bc8aaac733d77b81f6",
+  "qualified": true,
+  "format": "EQUIPMENT_INSPECTION",
+  "b64_len": 804636
+ },
+ {
+  "slot": "study",
+  "id": "omni-816",
+  "image_file": "816.png",
+  "image_sha256": "3cefb4f4c7084598aaf4579c3d1206ef5cfc5f31c26608243eb651731ab786e9",
+  "sets_json_sha256": "3cefb4f4c7084598aaf4579c3d1206ef5cfc5f31c26608243eb651731ab786e9",
+  "qualified": true,
+  "format": "COMMERCIAL_LEASE_AGREEMENT",
+  "b64_len": 544328
+ },
+ {
+  "slot": "study",
+  "id": "omni-821",
+  "image_file": "821.png",
+  "image_sha256": "199a61a42e062b5bd21c7772bba54ffc21524a2a005d9ebb0f205ad939b46a6a",
+  "sets_json_sha256": "199a61a42e062b5bd21c7772bba54ffc21524a2a005d9ebb0f205ad939b46a6a",
+  "qualified": true,
+  "format": "PAY_IN_SHEET",
+  "b64_len": 135436
+ },
+ {
+  "slot": "study",
+  "id": "omni-83",
+  "image_file": "83.png",
+  "image_sha256": "01a035ba8fb0ab627670b22d327d8732b749b861a4b2f5c1896b9363fd952604",
+  "sets_json_sha256": "01a035ba8fb0ab627670b22d327d8732b749b861a4b2f5c1896b9363fd952604",
+  "qualified": true,
+  "format": "PROXY_VOTING",
+  "b64_len": 376760
+ },
+ {
+  "slot": "study",
+  "id": "omni-840",
+  "image_file": "840.png",
+  "image_sha256": "b2c2b06e92bf657da6bb8fcb5c64c432c5e898b3bb911d14605d994ce336286c",
+  "sets_json_sha256": "b2c2b06e92bf657da6bb8fcb5c64c432c5e898b3bb911d14605d994ce336286c",
+  "qualified": true,
+  "format": "SHIPPING_INVOICE",
+  "b64_len": 166196
+ },
+ {
+  "slot": "study",
+  "id": "omni-846",
+  "image_file": "846.png",
+  "image_sha256": "79edf7340f10efeb72ed8421cf0c850a774b173b3cb20e476f3872700cc9238a",
+  "sets_json_sha256": "79edf7340f10efeb72ed8421cf0c850a774b173b3cb20e476f3872700cc9238a",
+  "qualified": true,
+  "format": "REAL_ESTATE",
+  "b64_len": 194320
+ },
+ {
+  "slot": "study",
+  "id": "omni-855",
+  "image_file": "855.jpg",
+  "image_sha256": "7ef3c4be3a65ba7fde9dc7adfc9d552613422be61f9305aed6e9d83ac6ca1e23",
+  "sets_json_sha256": "7ef3c4be3a65ba7fde9dc7adfc9d552613422be61f9305aed6e9d83ac6ca1e23",
+  "qualified": true,
+  "format": "PATIENT_INTAKE",
+  "b64_len": 543340
+ },
+ {
+  "slot": "study",
+  "id": "omni-861",
+  "image_file": "861.png",
+  "image_sha256": "2624f6adb44fcc38ad5bff480462c2e8066a705a92fea56b4e9f6f37339626e6",
+  "sets_json_sha256": "2624f6adb44fcc38ad5bff480462c2e8066a705a92fea56b4e9f6f37339626e6",
+  "qualified": true,
+  "format": "PETITION_FORM",
+  "b64_len": 513092
+ },
+ {
+  "slot": "study",
+  "id": "omni-872",
+  "image_file": "872.png",
+  "image_sha256": "da8aaa78eb3026397995c80e9e4592ab8c7f281978bb3fd32ed25d6ff0ad705a",
+  "sets_json_sha256": "da8aaa78eb3026397995c80e9e4592ab8c7f281978bb3fd32ed25d6ff0ad705a",
+  "qualified": true,
+  "format": "BANK_CHECK",
+  "b64_len": 87444
+ },
+ {
+  "slot": "study",
+  "id": "omni-882",
+  "image_file": "882.png",
+  "image_sha256": "d90b24db406a0fbf042f925b20486ee939bbddfd5757fe61e35b4a070998042d",
+  "sets_json_sha256": "d90b24db406a0fbf042f925b20486ee939bbddfd5757fe61e35b4a070998042d",
+  "qualified": true,
+  "format": "REAL_ESTATE",
+  "b64_len": 425640
+ },
+ {
+  "slot": "study",
+  "id": "omni-888",
+  "image_file": "888.png",
+  "image_sha256": "0da510fb711e1f512d6f84a93c6b1706b5bb90c447310359e30731befb427f91",
+  "sets_json_sha256": "0da510fb711e1f512d6f84a93c6b1706b5bb90c447310359e30731befb427f91",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT",
+  "b64_len": 263744
+ },
+ {
+  "slot": "study",
+  "id": "omni-903",
+  "image_file": "903.png",
+  "image_sha256": "a9f40cc55d5d239775fe739bf48e1d2461a43a5113e2b5e215cd0a389001e1fa",
+  "sets_json_sha256": "a9f40cc55d5d239775fe739bf48e1d2461a43a5113e2b5e215cd0a389001e1fa",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT",
+  "b64_len": 695284
+ },
+ {
+  "slot": "study",
+  "id": "omni-922",
+  "image_file": "922.png",
+  "image_sha256": "ddd2719b03d01d442d6d189fd483d7a42d09b60ba186109766e8fe60c42eac2e",
+  "sets_json_sha256": "ddd2719b03d01d442d6d189fd483d7a42d09b60ba186109766e8fe60c42eac2e",
+  "qualified": true,
+  "format": "FORM_1040",
+  "b64_len": 231776
+ },
+ {
+  "slot": "study",
+  "id": "omni-941",
+  "image_file": "941.png",
+  "image_sha256": "ea81007eab5fcd69e6e2313b5a743ae67a8c307429bce55fb0d391b1a47f0de0",
+  "sets_json_sha256": "ea81007eab5fcd69e6e2313b5a743ae67a8c307429bce55fb0d391b1a47f0de0",
+  "qualified": true,
+  "format": "BANK_CHECK",
+  "b64_len": 403208
+ },
+ {
+  "slot": "study",
+  "id": "omni-948",
+  "image_file": "948.png",
+  "image_sha256": "1afee544103a76b688f931efb27618add747ca1b67b1d862a7d70f49cb5c9fe4",
+  "sets_json_sha256": "1afee544103a76b688f931efb27618add747ca1b67b1d862a7d70f49cb5c9fe4",
+  "qualified": true,
+  "format": "FORM_1040",
+  "b64_len": 781596
+ },
+ {
+  "slot": "study",
+  "id": "omni-963",
+  "image_file": "963.png",
+  "image_sha256": "29d61cfc3f35b24c42e8f45c1673259eedd3eeec8abef93dd21ab433c2e3e905",
+  "sets_json_sha256": "29d61cfc3f35b24c42e8f45c1673259eedd3eeec8abef93dd21ab433c2e3e905",
+  "qualified": true,
+  "format": "PAY_IN_SHEET",
+  "b64_len": 417888
+ },
+ {
+  "slot": "study",
+  "id": "omni-967",
+  "image_file": "967.png",
+  "image_sha256": "4208b6ded7a245f8f7b124dee37658e107f6f08d93b704b15a6000c2f2a1ec46",
+  "sets_json_sha256": "4208b6ded7a245f8f7b124dee37658e107f6f08d93b704b15a6000c2f2a1ec46",
+  "qualified": true,
+  "format": "ACCOUNT_STATEMENT",
+  "b64_len": 308332
+ },
+ {
+  "slot": "study",
+  "id": "omni-974",
+  "image_file": "974.png",
+  "image_sha256": "1ccd7326e03dfd09bc34085a8829083d0b46f9d79ca11c7d2b2996f2897070a9",
+  "sets_json_sha256": "1ccd7326e03dfd09bc34085a8829083d0b46f9d79ca11c7d2b2996f2897070a9",
+  "qualified": true,
+  "format": "FORM_1040",
+  "b64_len": 541568
+ },
+ {
+  "slot": "study",
+  "id": "omni-994",
+  "image_file": "994.png",
+  "image_sha256": "4c68f3c8df7d3d779c6cb05313157842dfcfc21a795b2c66d855666d725edc8e",
+  "sets_json_sha256": "4c68f3c8df7d3d779c6cb05313157842dfcfc21a795b2c66d855666d725edc8e",
+  "qualified": true,
+  "format": "BANK_CHECK",
+  "b64_len": 125304
+ },
+ {
+  "slot": "display",
+  "id": "omni-326",
+  "image_file": "326.png",
+  "image_sha256": "32cfc937a0ce7b960d1e07f05179d793be084e42d23c01dae81ad9591edfd7dd",
+  "sets_json_sha256": "32cfc937a0ce7b960d1e07f05179d793be084e42d23c01dae81ad9591edfd7dd",
+  "qualified": true,
+  "format": "DELIVERY_NOTE",
+  "b64_len": 518632
+ },
+ {
+  "slot": "display",
+  "id": "omni-508",
+  "image_file": "508.png",
+  "image_sha256": "3976078e84ade5d7fe333b18e4adf06688d050024ad968273d622077f7d28cc2",
+  "sets_json_sha256": "3976078e84ade5d7fe333b18e4adf06688d050024ad968273d622077f7d28cc2",
+  "qualified": true,
+  "format": "BANK_CHECK",
+  "b64_len": 142972
+ },
+ {
+  "slot": "display",
+  "id": "omni-159",
+  "image_file": "159.png",
+  "image_sha256": "79cc1ff408d113da3d33e3158dc93ab43848f733e7a7662f0a97a46503341450",
+  "sets_json_sha256": "79cc1ff408d113da3d33e3158dc93ab43848f733e7a7662f0a97a46503341450",
+  "qualified": true,
+  "format": "BANK_CHECK",
+  "b64_len": 2749288
+ },
+ {
+  "slot": "display",
+  "id": "omni-150",
+  "image_file": "150.png",
+  "image_sha256": "7690707eb86a1bd80954ecfb427684b182499ec57d24cb97d29c5ec3577684d0",
+  "sets_json_sha256": "7690707eb86a1bd80954ecfb427684b182499ec57d24cb97d29c5ec3577684d0",
+  "qualified": true,
+  "format": "FORM_1040",
+  "b64_len": 2015912
+ },
+ {
+  "slot": "display",
+  "id": "omni-128",
+  "image_file": "128.png",
+  "image_sha256": "396382a80b2e87e5892070c0138ef19be5251aa35323f7269cd13cdc6d36a289",
+  "sets_json_sha256": "396382a80b2e87e5892070c0138ef19be5251aa35323f7269cd13cdc6d36a289",
+  "qualified": true,
+  "format": "CREDIT_CARD_STATEMENT",
+  "b64_len": 621272
+ },
+ {
+  "slot": "display",
+  "id": "omni-404",
+  "image_file": "404.png",
+  "image_sha256": "1f67b74154869ffc56842ac8426b141d1279af5c3fb8647c2baab11ff51dc49d",
+  "sets_json_sha256": "1f67b74154869ffc56842ac8426b141d1279af5c3fb8647c2baab11ff51dc49d",
+  "qualified": true,
+  "format": "BANK_CHECK",
+  "b64_len": 1847120
+ }
+]
