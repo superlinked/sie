@@ -404,8 +404,18 @@ impl AdaptiveBatchController {
     /// defaults plus operator env tuning in one shot.
     #[must_use]
     pub fn from_batch_config_and_env(cfg: &BatchConfig) -> Self {
+        Self::from_batch_config_and_lookup(cfg, &|var| std::env::var(var).ok())
+    }
+
+    /// [`Self::from_batch_config_and_env`] reading the `SIE_ADAPTIVE_BATCH_*`
+    /// overrides through `lookup`.
+    #[must_use]
+    pub fn from_batch_config_and_lookup(
+        cfg: &BatchConfig,
+        lookup: &dyn Fn(&str) -> Option<String>,
+    ) -> Self {
         let mut c = Self::from_batch_config(cfg);
-        Self::apply_env_overrides(&mut c, |var| std::env::var(var).ok());
+        Self::apply_env_overrides(&mut c, lookup);
 
         tracing::info!(
             min_wait_ms = c.min_wait_ms,

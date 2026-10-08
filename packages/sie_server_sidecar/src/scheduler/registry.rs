@@ -28,7 +28,10 @@
 //!    config's cap, 16384.
 //!
 //! `SIE_ADAPTIVE_BATCH_*` overrides still apply on top of whichever
-//! budget wins; see [`crate::scheduler::AdaptiveBatchController::from_batch_config_and_env`].
+//! budget wins (see
+//! [`crate::scheduler::AdaptiveBatchController::from_batch_config_and_env`]),
+//! and the static cost cap starts at the controller's starting cost, so an
+//! overridden cost range holds from a scheduler's first batch.
 //!
 //! There is no per-model scheduler env list any more. Active models route
 //! through the Rust scheduler when their worker pool is the sidecar pool.
@@ -45,7 +48,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
 
-use super::batch_config::BatchConfig;
+use super::batch_config::{process_env, BatchConfig, EnvLookup};
 use super::batch_former::HasCost;
 use super::engine::Scheduler;
 
@@ -60,6 +63,8 @@ pub struct SchedulerRegistry<I: HasCost, T> {
     /// (`SIE_BATCHER_MAX_BATCH_COST`): reported model budgets are
     /// ignored and every scheduler keeps `default_config.max_batch_cost`.
     cost_pinned: bool,
+    /// Where the schedulers read their `SIE_ADAPTIVE_BATCH_*` overrides.
+    env: EnvLookup,
     schedulers: RwLock<HashMap<String, Arc<Scheduler<I, T>>>>,
 }
 
@@ -87,6 +92,7 @@ where
         Self {
             default_config,
             cost_pinned: false,
+            env: process_env(),
             schedulers: RwLock::new(HashMap::new()),
         }
     }
@@ -95,8 +101,19 @@ where
     /// exactly when `SIE_BATCHER_MAX_BATCH_COST` is set.
     #[must_use]
     pub fn from_env() -> Self {
-        Self::new(BatchConfig::from_env_or_default())
-            .with_cost_pinned(BatchConfig::max_batch_cost_env_override().is_some())
+        Self::from_lookup(process_env())
+    }
+
+    /// [`Self::from_env`] reading variables through `env`, which the
+    /// schedulers also use for their `SIE_ADAPTIVE_BATCH_*` overrides.
+    #[must_use]
+    pub fn from_lookup(env: EnvLookup) -> Self {
+        Self {
+            default_config: BatchConfig::from_lookup(&*env),
+            cost_pinned: BatchConfig::max_batch_cost_override(&*env).is_some(),
+            env,
+            schedulers: RwLock::new(HashMap::new()),
+        }
     }
 
     /// Pin every scheduler to `default_config.max_batch_cost`, ignoring
@@ -156,13 +173,20 @@ where
         } else {
             "default"
         };
+        let sched = Arc::new(
+            Scheduler::builder()
+                .config(config)
+                .env_lookup(Arc::clone(&self.env))
+                .build(),
+        );
+        let max_batch_cost = sched.config().await.max_batch_cost;
         info!(
             model = %model_id,
-            max_batch_cost = config.max_batch_cost,
+            budget = config.max_batch_cost,
             source,
+            max_batch_cost,
             "rust-scheduler: scheduler created"
         );
-        let sched = Arc::new(Scheduler::new(config));
         map.insert(model_id.to_owned(), Arc::clone(&sched));
         (sched, true)
     }
@@ -173,10 +197,12 @@ where
         };
         let previous = sched.cost_budget();
         if sched.adopt_cost_budget(budget).await {
+            let max_batch_cost = sched.config().await.max_batch_cost;
             info!(
                 model = %model_id,
-                previous_max_batch_cost = previous,
-                max_batch_cost = budget,
+                previous_budget = previous,
+                budget,
+                max_batch_cost,
                 "rust-scheduler: batch cost budget changed; caps and adaptive range re-based"
             );
         }
@@ -387,6 +413,80 @@ mod tests {
         // A further change re-bases again.
         let _ = reg.get_or_create(WHISPER, Some(4_096)).await;
         assert_eq!(cost_state(&sched).await, (4_096, 4_096, 4_096));
+    }
+
+    /// An environment holding exactly `pairs`.
+    fn env_table(pairs: &'static [(&'static str, &'static str)]) -> EnvLookup {
+        Arc::new(move |var| {
+            pairs
+                .iter()
+                .find(|(name, _)| *name == var)
+                .map(|(_, value)| (*value).to_string())
+        })
+    }
+
+    #[tokio::test]
+    async fn env_cost_cap_wins_over_reported_budgets() {
+        // Set: every model keeps the operator's cap and the range it derives.
+        let reg: SchedulerRegistry<StubItem, ()> =
+            SchedulerRegistry::from_lookup(env_table(&[("SIE_BATCHER_MAX_BATCH_COST", "32768")]));
+        let (sched, _) = reg.get_or_create(WHISPER, Some(720_000)).await;
+        assert_eq!(cost_state(&sched).await, (32_768, 32_768, 32_768));
+        let (sched, _) = reg.get_or_create("text-model", None).await;
+        assert_eq!(cost_state(&sched).await, (32_768, 32_768, 32_768));
+
+        // Unset or unparseable: the reported budget applies, else 16384.
+        for pairs in [&[][..], &[("SIE_BATCHER_MAX_BATCH_COST", "16k")][..]] {
+            let reg: SchedulerRegistry<StubItem, ()> =
+                SchedulerRegistry::from_lookup(env_table(pairs));
+            let (sched, _) = reg.get_or_create(WHISPER, Some(720_000)).await;
+            assert_eq!(
+                cost_state(&sched).await,
+                (720_000, 720_000, 720_000),
+                "{pairs:?}"
+            );
+            let (sched, _) = reg.get_or_create("text-model", None).await;
+            assert_eq!(
+                cost_state(&sched).await,
+                (16_384, 16_384, 16_384),
+                "{pairs:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn adaptive_cost_ceiling_bounds_batches_from_the_first_one() {
+        // `SIE_ADAPTIVE_BATCH_MAX_COST` holds before any controller step:
+        // after creation and after a re-base, not only after a completion.
+        let reg: SchedulerRegistry<SchedulerItem, String> =
+            SchedulerRegistry::from_lookup(env_table(&[("SIE_ADAPTIVE_BATCH_MAX_COST", "65536")]));
+        let base = LoraKey::base;
+        let clips = || {
+            (0..12)
+                .map(|i| (audio(25_000), format!("clip-{i}")))
+                .collect::<Vec<_>>()
+        };
+
+        let (sched, _) = reg.get_or_create(WHISPER, Some(720_000)).await;
+        assert_eq!(cost_state(&sched).await, (720_000, 65_536, 65_536));
+        sched.submit_many(Op::Extract, base(), clips()).await;
+        let first = sched
+            .try_drain_same(Op::Extract, base())
+            .await
+            .expect("clips pending");
+        assert_eq!((first.size(), first.total_cost), (2, 50_000));
+
+        // Re-based from the default budget onto the model's.
+        let (other, _) = reg.get_or_create("other-speech-model", None).await;
+        assert_eq!(cost_state(&other).await, (16_384, 16_384, 16_384));
+        other.submit_many(Op::Extract, base(), clips()).await;
+        let _ = reg.get_or_create("other-speech-model", Some(720_000)).await;
+        assert_eq!(cost_state(&other).await, (720_000, 65_536, 65_536));
+        let batch = other
+            .try_drain_same(Op::Extract, base())
+            .await
+            .expect("clips pending");
+        assert_eq!((batch.size(), batch.total_cost), (2, 50_000));
     }
 
     // ---- The clip-starvation case behind per-model budgets ----

@@ -48,7 +48,7 @@ use tokio::sync::{Mutex, Notify, RwLock};
 use crate::latency::LatencyTracker;
 
 use super::adaptive::AdaptiveBatchController;
-use super::batch_config::BatchConfig;
+use super::batch_config::{process_env, BatchConfig, EnvLookup};
 use super::batch_former::{BatchFormer, FormattedBatch, HasCost};
 use super::trackers::BatchEfficiencyTracker;
 
@@ -198,6 +198,9 @@ pub struct Scheduler<I: HasCost, T> {
     /// the adaptive cost range currently derive from. Written only while
     /// the controller lock is held; read lock-free on the hot path.
     cost_budget: AtomicU64,
+    /// Where the `SIE_ADAPTIVE_BATCH_*` overrides are read when the
+    /// controller is derived from a budget, at build time and on re-base.
+    env: EnvLookup,
     /// Fired on every submit that inserts into a previously empty
     /// batcher. [`Scheduler::consume_next`] uses this to wake its
     /// FCFS scan without polling.
@@ -248,12 +251,14 @@ where
     /// batch cost budget (`max_batch_tokens`).
     ///
     /// A no-op returning `false` when the budget is unchanged, which is
-    /// every call after the first in steady state. Otherwise the static
-    /// cost cap becomes `max_batch_tokens`, the adaptive controller is
-    /// rebuilt from it exactly as [`SchedulerBuilder::build`] builds one
-    /// (Python's production range plus `SIE_ADAPTIVE_BATCH_*` overrides),
-    /// the fill-ratio window restarts, and every live batcher gets the
-    /// new caps. The rebuilt controller re-calibrates its latency target.
+    /// every call after the first in steady state. Otherwise the adaptive
+    /// controller is rebuilt from `max_batch_tokens` exactly as
+    /// [`SchedulerBuilder::build`] builds one (Python's production range
+    /// plus `SIE_ADAPTIVE_BATCH_*` overrides), the static cost cap becomes
+    /// the rebuilt controller's starting cost (the budget, unless an
+    /// override clamps it), the fill-ratio window restarts, and every live
+    /// batcher gets the new caps. The rebuilt controller re-calibrates its
+    /// latency target.
     ///
     /// This runs when the backend reports a different budget for a model
     /// whose scheduler already exists, for example after the engine
@@ -269,11 +274,18 @@ where
         if self.cost_budget() == max_batch_tokens {
             return false;
         }
-        let new_cfg = BatchConfig {
+        let budget_cfg = BatchConfig {
             max_batch_cost: max_batch_tokens,
             ..self.initial_config
         };
-        *controller = AdaptiveBatchController::from_batch_config_and_env(&new_cfg);
+        *controller =
+            AdaptiveBatchController::from_batch_config_and_lookup(&budget_cfg, &*self.env);
+        // Batches formed before the first controller step already honour
+        // the operator's `SIE_ADAPTIVE_BATCH_*_COST` range.
+        let new_cfg = BatchConfig {
+            max_batch_cost: controller.current_batch_cost(),
+            ..budget_cfg
+        };
         *self.config.write().await = new_cfg;
         self.efficiency.lock().await.reset();
         self.cost_budget.store(max_batch_tokens, Ordering::Release);
@@ -620,6 +632,7 @@ impl<I: HasCost, T> std::fmt::Debug for Scheduler<I, T> {
 pub struct SchedulerBuilder<I: HasCost, T> {
     config: BatchConfig,
     controller: Option<AdaptiveBatchController>,
+    env: Option<EnvLookup>,
     latency_window: usize,
     latency_min_samples: usize,
     efficiency_window: usize,
@@ -631,6 +644,7 @@ impl<I: HasCost, T> Default for SchedulerBuilder<I, T> {
         Self {
             config: BatchConfig::default(),
             controller: None,
+            env: None,
             // Python's `LatencyTracker(window_size=200, min_samples=10)`.
             latency_window: 200,
             latency_min_samples: 10,
@@ -657,6 +671,16 @@ where
     #[must_use]
     pub fn controller(mut self, ctrl: AdaptiveBatchController) -> Self {
         self.controller = Some(ctrl);
+        self
+    }
+
+    /// Read the `SIE_ADAPTIVE_BATCH_*` overrides through `env` instead of
+    /// the process environment. They apply when the builder derives the
+    /// controller (no [`Self::controller`] supplied) and when the scheduler
+    /// re-bases on a new budget.
+    #[must_use]
+    pub fn env_lookup(mut self, env: EnvLookup) -> Self {
+        self.env = Some(env);
         self
     }
 
@@ -691,24 +715,36 @@ where
         // worker has been deploying.
         //
         // `SIE_ADAPTIVE_BATCH_*` env vars override on top, so
-        // operators can pin individual knobs without a recompile.
+        // operators can pin individual knobs without a recompile, and
+        // the static cost cap starts at the derived controller's starting
+        // cost, so batches formed before the first controller step honour
+        // an overridden range too. Without overrides that is the configured
+        // cost cap itself.
         // Tests using `.controller(...)` continue to bypass both env
         // and BatchConfig derivation entirely (deterministic).
-        let cfg = self.config;
+        let env = self.env.unwrap_or_else(process_env);
+        let mut config = self.config;
+        let controller = match self.controller {
+            Some(controller) => controller,
+            None => {
+                let derived =
+                    AdaptiveBatchController::from_batch_config_and_lookup(&self.config, &*env);
+                config.max_batch_cost = derived.current_batch_cost();
+                derived
+            }
+        };
         Scheduler {
             batchers: RwLock::new(HashMap::new()),
-            controller: Mutex::new(
-                self.controller
-                    .unwrap_or_else(|| AdaptiveBatchController::from_batch_config_and_env(&cfg)),
-            ),
+            controller: Mutex::new(controller),
             latency: Mutex::new(LatencyTracker::new(
                 self.latency_window,
                 self.latency_min_samples,
             )),
             efficiency: Mutex::new(BatchEfficiencyTracker::new(self.efficiency_window)),
-            config: RwLock::new(self.config),
+            config: RwLock::new(config),
             initial_config: self.config,
             cost_budget: AtomicU64::new(self.config.max_batch_cost),
+            env,
             new_item: Notify::new(),
             epoch: Instant::now(),
         }
