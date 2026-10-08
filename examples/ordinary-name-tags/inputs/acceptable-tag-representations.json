@@ -1,0 +1,254 @@
+[
+  {
+    "id": "ordinary-science-02",
+    "reason": "City/jurisdiction combined versus split source-literal representation; neither is a fabricated fact.",
+    "acceptable_tag_sets": [
+      [
+        {
+          "text": "RESTON",
+          "type": "location"
+        },
+        {
+          "text": "U.S.",
+          "type": "location"
+        },
+        {
+          "text": "U.S. Geological Survey",
+          "type": "organization"
+        },
+        {
+          "text": "Va.",
+          "type": "location"
+        }
+      ],
+      [
+        {
+          "text": "RESTON, Va.",
+          "type": "location"
+        },
+        {
+          "text": "U.S.",
+          "type": "location"
+        },
+        {
+          "text": "U.S. Geological Survey",
+          "type": "organization"
+        }
+      ]
+    ]
+  },
+  {
+    "id": "ordinary-transport-01",
+    "reason": "City/jurisdiction combined versus split source-literal representation; neither is a fabricated fact.",
+    "acceptable_tag_sets": [
+      [
+        {
+          "text": "Atmos Energy Corporation",
+          "type": "organization"
+        },
+        {
+          "text": "Jackson",
+          "type": "location"
+        },
+        {
+          "text": "Mississippi",
+          "type": "location"
+        },
+        {
+          "text": "National Transportation Safety Board",
+          "type": "organization"
+        },
+        {
+          "text": "WASHINGTON",
+          "type": "location"
+        }
+      ],
+      [
+        {
+          "text": "Atmos Energy Corporation",
+          "type": "organization"
+        },
+        {
+          "text": "Jackson, Mississippi",
+          "type": "location"
+        },
+        {
+          "text": "National Transportation Safety Board",
+          "type": "organization"
+        },
+        {
+          "text": "WASHINGTON",
+          "type": "location"
+        }
+      ]
+    ]
+  },
+  {
+    "id": "ordinary-transport-03",
+    "reason": "City/jurisdiction combined versus split source-literal representation; neither is a fabricated fact.",
+    "acceptable_tag_sets": [
+      [
+        {
+          "text": "Millstone",
+          "type": "location"
+        },
+        {
+          "text": "National Transportation Safety Board",
+          "type": "organization"
+        },
+        {
+          "text": "WASHINGTON",
+          "type": "location"
+        },
+        {
+          "text": "West Virginia",
+          "type": "location"
+        }
+      ],
+      [
+        {
+          "text": "Millstone, West Virginia",
+          "type": "location"
+        },
+        {
+          "text": "National Transportation Safety Board",
+          "type": "organization"
+        },
+        {
+          "text": "WASHINGTON",
+          "type": "location"
+        }
+      ]
+    ]
+  },
+  {
+    "id": "ordinary-science-06",
+    "reason": "Prospective independent-review scope choice; the geographic-region/manufacturer reading is legitimate, not a fabricated fact.",
+    "acceptable_tag_sets": [
+      [
+        {
+          "text": "Jennifer Curtis",
+          "type": "person"
+        },
+        {
+          "text": "USGS",
+          "type": "organization"
+        }
+      ],
+      [
+        {
+          "text": "Jennifer Curtis",
+          "type": "person"
+        },
+        {
+          "text": "USGS",
+          "type": "organization"
+        },
+        {
+          "text": "West",
+          "type": "location"
+        }
+      ]
+    ]
+  },
+  {
+    "id": "ordinary-transport-04",
+    "reason": "Prospective independent-review scope choice; the geographic-region/manufacturer reading is legitimate, not a fabricated fact.",
+    "acceptable_tag_sets": [
+      [
+        {
+          "text": "Louis Armstrong New Orleans International Airport",
+          "type": "location"
+        },
+        {
+          "text": "NTSB",
+          "type": "organization"
+        },
+        {
+          "text": "Southwest Airlines",
+          "type": "organization"
+        }
+      ],
+      [
+        {
+          "text": "Boeing",
+          "type": "organization"
+        },
+        {
+          "text": "Louis Armstrong New Orleans International Airport",
+          "type": "location"
+        },
+        {
+          "text": "NTSB",
+          "type": "organization"
+        },
+        {
+          "text": "Southwest Airlines",
+          "type": "organization"
+        }
+      ]
+    ]
+  },
+  {
+    "id": "ordinary-software-04",
+    "reason": "HackerOne may refer to company or reporting platform; software/project exclusions stay for Node.js and Slack.",
+    "acceptable_tag_sets": [
+      [
+        {
+          "text": "HackerOne",
+          "type": "organization"
+        },
+        {
+          "text": "OpenJS Foundation",
+          "type": "organization"
+        }
+      ],
+      [
+        {
+          "text": "OpenJS Foundation",
+          "type": "organization"
+        }
+      ]
+    ]
+  },
+  {
+    "id": "ordinary-standards-03",
+    "reason": "The named hosting unit supports organization typing; the generic team descriptor and separately written parenthetical alias are finite boundary conventions. Arbitrary shortening is excluded.",
+    "acceptable_tag_sets": [
+      [
+        {
+          "text": "NIST",
+          "type": "organization"
+        },
+        {
+          "text": "NIST Multi-Party Threshold Cryptography (MPTC) team",
+          "type": "organization"
+        }
+      ],
+      [
+        {
+          "text": "NIST",
+          "type": "organization"
+        },
+        {
+          "text": "NIST Multi-Party Threshold Cryptography (MPTC)",
+          "type": "organization"
+        }
+      ],
+      [
+        {
+          "text": "MPTC",
+          "type": "organization"
+        },
+        {
+          "text": "NIST",
+          "type": "organization"
+        },
+        {
+          "text": "NIST Multi-Party Threshold Cryptography",
+          "type": "organization"
+        }
+      ]
+    ]
+  }
+]

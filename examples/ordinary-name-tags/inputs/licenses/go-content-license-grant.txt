@@ -1,0 +1,8 @@
+Official Go website content permission
+Source: https://go.dev/copyright
+Captured page SHA256: 5f861a1bb90231397c2ec57a5ef607bf4128d488663ddb6477bc2316b22d8539
+
+Except as noted , the contents of this site are licensed under the Creative Commons Attribution 4.0 License , and code is licensed under a BSD license .
+
+Content license: https://creativecommons.org/licenses/by/4.0/
+This excerpt normalizes HTML presentation. Full selected title/author/source credit and modification notice are in ATTRIBUTION.md.
