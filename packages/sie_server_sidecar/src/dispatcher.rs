@@ -2540,7 +2540,9 @@ impl Dispatcher {
         //
         // Registry absent ⇒ legacy path unchanged. Only unit tests
         // exercise that branch today.
-        let scheduler_opt = self.resolve_scheduler(model_id).await;
+        let scheduler_opt = self
+            .resolve_scheduler(model_id, readiness_resp.max_batch_tokens)
+            .await;
         let encode_fut = async {
             if encode_items.is_empty() {
                 return Ok(());
@@ -3704,13 +3706,21 @@ impl Dispatcher {
     /// old eager-at-startup `spawn_scheduler_drains`. Schedulers are
     /// now materialised only for active models that land on a sidecar
     /// worker, so boot does not need a model list to iterate.
+    ///
+    /// `model_max_batch_tokens` is the model's batch cost budget from the
+    /// `EnsureModelReady` answer for this group; the registry sizes the
+    /// scheduler's cost cap and adaptive range from it (see
+    /// [`crate::scheduler::SchedulerRegistry::get_or_create`]).
     async fn resolve_scheduler(
         self: &Arc<Self>,
         model_id: &str,
+        model_max_batch_tokens: Option<u64>,
     ) -> Option<Arc<ProductionScheduler>> {
         let registry = self.scheduler_registry.as_ref()?;
         let shutdown = self.shutdown.as_ref()?;
-        let (sched, created) = registry.get_or_create(model_id).await;
+        let (sched, created) = registry
+            .get_or_create(model_id, model_max_batch_tokens)
+            .await;
         if created {
             let mut handles = self.scheduler_drain_handles.lock().await;
             // Double-check under the lock: a concurrent `resolve_scheduler`
@@ -6446,11 +6456,13 @@ mod tests {
     /// Reports `LoadingInProgress` for one model until `loaded` is set and
     /// `Ready` for every other model; records which models were encoded.
     /// When `later_probe_delay` is set, every readiness call for the loading
-    /// model after the first takes that long.
+    /// model after the first takes that long. Every readiness answer reports
+    /// `max_batch_tokens` as the model's batch cost budget.
     struct LoadingModelBackend {
         loading_model: &'static str,
         loaded: AtomicBool,
         later_probe_delay: Option<Duration>,
+        max_batch_tokens: Option<u64>,
         probes: std::sync::atomic::AtomicUsize,
         encoded_models: std::sync::Mutex<Vec<String>>,
     }
@@ -6464,10 +6476,26 @@ mod tests {
             loading_model: &'static str,
             later_probe_delay: Option<Duration>,
         ) -> Arc<Self> {
+            Self::build(loading_model, later_probe_delay, None)
+        }
+
+        fn with_max_batch_tokens(
+            loading_model: &'static str,
+            max_batch_tokens: Option<u64>,
+        ) -> Arc<Self> {
+            Self::build(loading_model, None, max_batch_tokens)
+        }
+
+        fn build(
+            loading_model: &'static str,
+            later_probe_delay: Option<Duration>,
+            max_batch_tokens: Option<u64>,
+        ) -> Arc<Self> {
             Arc::new(Self {
                 loading_model,
                 loaded: AtomicBool::new(false),
                 later_probe_delay,
+                max_batch_tokens,
                 probes: std::sync::atomic::AtomicUsize::new(0),
                 encoded_models: std::sync::Mutex::new(Vec::new()),
             })
@@ -6506,6 +6534,7 @@ mod tests {
                 state,
                 batch_budget: None,
                 descriptor: None,
+                max_batch_tokens: self.max_batch_tokens,
             })
         }
 
@@ -6697,6 +6726,7 @@ mod tests {
                 state: ReadinessState::Ready,
                 batch_budget: None,
                 descriptor: None,
+                max_batch_tokens: None,
             })
         }
 
@@ -7712,6 +7742,39 @@ mod tests {
             "the aborted parked task must have released the dispatcher"
         );
         assert!(retried_slots(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn scheduler_takes_the_cost_budget_the_backend_reports_for_its_model() {
+        for (reported, expected) in [(Some(720_000), 720_000), (None, 16_384)] {
+            let backend = LoadingModelBackend::with_max_batch_tokens("cold", reported);
+            let registry = Arc::new(ProductionSchedulerRegistry::new(
+                crate::scheduler::BatchConfig::default(),
+            ));
+            let shutdown = Arc::new(Shutdown::new());
+            let mut dispatcher = dispatcher_with_backend(backend.clone());
+            let mutable = Arc::get_mut(&mut dispatcher).unwrap();
+            mutable.scheduler_registry = Some(Arc::clone(&registry));
+            mutable.shutdown = Some(Arc::clone(&shutdown));
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+            dispatcher
+                .dispatch_decoded(local_group("req", "warm", 0..2, &tx), 2, Instant::now())
+                .await;
+
+            let (sched, created) = registry.get_or_create("warm", None).await;
+            assert!(!created, "the group created the model's scheduler");
+            assert_eq!(sched.cost_budget(), expected, "reported {reported:?}");
+            assert_eq!(
+                sched.config().await.max_batch_cost,
+                expected,
+                "reported {reported:?}"
+            );
+            shutdown.fire();
+            for handle in dispatcher.take_scheduler_drain_handles().await {
+                handle.abort();
+            }
+        }
     }
 
     #[test]

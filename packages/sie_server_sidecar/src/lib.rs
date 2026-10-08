@@ -441,17 +441,18 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
     // traffic inside `Dispatcher::resolve_scheduler`; the shutdown
     // path below awaits every handle collected along the way so
     // final-drain windows have a chance to complete.
+    //
+    // BatchConfig pulls `SIE_BATCHER_*` overrides; the controller
+    // (constructed lazily per model in `Scheduler::builder().build()`)
+    // pulls `SIE_ADAPTIVE_BATCH_*` overrides — see the doc comments on
+    // `BatchConfig::from_env_or_default` and
+    // `AdaptiveBatchController::from_env_or_default` for the full list.
+    // Each model's cost cap and adaptive cost range come from the
+    // `max_batch_tokens` its backend reports with `EnsureModelReady`,
+    // unless `SIE_BATCHER_MAX_BATCH_COST` pins them for every model
+    // (see `SchedulerRegistry::from_env`).
     let scheduler_registry: Arc<crate::scheduler::ProductionSchedulerRegistry> =
-        Arc::new(crate::scheduler::ProductionSchedulerRegistry::new(
-            // BatchConfig pulls `SIE_BATCHER_*` overrides; the
-            // controller (constructed lazily per model in
-            // `Scheduler::builder().build()`) pulls
-            // `SIE_ADAPTIVE_BATCH_*` overrides — see the doc comments
-            // on `BatchConfig::from_env_or_default` and
-            // `AdaptiveBatchController::from_env_or_default` for the
-            // full list.
-            crate::scheduler::BatchConfig::from_env_or_default(),
-        ));
+        Arc::new(crate::scheduler::ProductionSchedulerRegistry::from_env());
     info!("rust-scheduler: enabled for every model (per-model drain loops spawn on first traffic)");
 
     let config_apply_state = Arc::new(ConfigApplyState::new(config.bundle_config_hash.clone()));
@@ -844,9 +845,7 @@ pub async fn run_local(config: WorkerConfig) -> anyhow::Result<()> {
     let tokenizer_registry = TokenizerRegistry::empty();
 
     let scheduler_registry: Arc<crate::scheduler::ProductionSchedulerRegistry> =
-        Arc::new(crate::scheduler::ProductionSchedulerRegistry::new(
-            crate::scheduler::BatchConfig::from_env_or_default(),
-        ));
+        Arc::new(crate::scheduler::ProductionSchedulerRegistry::from_env());
     let config_apply_state = Arc::new(ConfigApplyState::new(config.bundle_config_hash.clone()));
     let loaded_models = config_apply_state.loaded_models();
     let latency_tracker = Arc::new(Mutex::new(LatencyTracker::new(200, 10)));

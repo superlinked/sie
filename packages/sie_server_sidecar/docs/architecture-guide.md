@@ -514,9 +514,12 @@ canonical facade. It projects to `sie.worker.ipc.response.chunks` (outcomes
 `sie.worker.ipc.response.chunk.reserved`. The sidecar does not emit a second
 Prometheus-shaped copy.
 
-`EnsureModelReady` returns readiness state and an optional `ModelDescriptor`.
-The descriptor carries tokenizer path, tokenizer content hash, maximum sequence
-length, output types, default text templates, and `supports_run_batch`.
+`EnsureModelReady` returns readiness state, an optional `ModelDescriptor`, and,
+once the model is ready, its `max_batch_tokens`: the batch cost budget from the
+model's profile, in the model's cost units (tokens for text, milliseconds for
+audio). The descriptor carries tokenizer path, tokenizer content hash, maximum
+sequence length, output types, default text templates, and
+`supports_run_batch`.
 `loading_started` and `loading_in_progress` mean the same worker is actively
 loading the model; the dispatcher progress-ACKs and rechecks instead of NAKing
 those deliveries. `retry_later` remains a NAK path.
@@ -534,6 +537,25 @@ Batching keys include operation and LoRA key. Batch formation uses item cost,
 request count, coalescing windows, adaptive pull timing, and model-specific
 scheduler state. Oversize items flush alone. Per-item outcomes are published
 without dropping the rest of the batch.
+
+Each model's scheduler sizes its cost cap from the model's own
+`max_batch_tokens`, as the Python worker does for its own batcher: the static
+cost cap starts at that budget, and the adaptive cost range runs from
+`min(max(256, budget / 4), budget)` to `4 * budget`. A speech model with a
+720000 ms budget can therefore fill a clip batch up to the request count cap,
+while a text model keeps its token budget. Precedence:
+
+1. `SIE_BATCHER_MAX_BATCH_COST`, when set, pins the cap and the range for every
+   model, as before per-model budgets.
+2. Otherwise the budget `EnsureModelReady` reports for the model.
+3. Otherwise, with a backend that does not report one, 16384.
+
+`SIE_ADAPTIVE_BATCH_MIN_COST`, `SIE_ADAPTIVE_BATCH_MAX_COST`, and
+`SIE_ADAPTIVE_BATCH_INITIAL_COST` still override the range for every model.
+The request count cap and the hard audio duration cap per batch do not change.
+When a ready model later reports a different budget, for example after the
+backend restarts with a changed profile, its scheduler adopts the new budget
+and restarts its adaptive controller.
 
 Encode cost uses prepared-token length when available. Score tokenization stays
 backend-owned, so its scheduler wrapper caches the same model-independent proxy
