@@ -399,3 +399,76 @@ profiles:
           min_new_tokens: 1
         stop_tokens:
           - "<end_of_turn>"
+  # Document-reading variant of ``h100-96k``: the same H100 launch with a
+  # larger per-image vision budget. SGLang passes ``--mm-process-config``
+  # ``image`` entries to the Hugging Face processor as ``images_kwargs``, and
+  # the Gemma 4 image processor accepts ``max_soft_tokens`` in
+  # {70, 140, 280, 560, 1120}. The checkpoint default of 280 encodes a dense
+  # full-page scan in about 260 visual tokens; 1120, the largest supported
+  # budget, reads it at roughly twice the linear resolution. 1120 stays below
+  # the worker's 1,280-token per-image reservation, so admission is unchanged.
+  # Answer-only (``enable_thinking: false``) with the bare 4,096-token output
+  # cap, like ``h100-96k``.
+  h100-96k-hires:
+    max_batch_tokens: 98304
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.gemma:SGLangGemmaAdapter
+    grammar_profile: h100-96k-hires-no-spec
+    kv_budget_tokens: 98304
+    adapter_options:
+      loadtime:
+        max_seq_length: 98304
+        mem_fraction_static: 0.90
+        served_model_name: google/gemma-4-31B-it
+        attention_backend: triton
+        grammar_backend: xgrammar
+        reasoning_parser: gemma4
+        tool_call_parser: gemma4
+        speculative_needs_extra_buffer: false
+        speculative:
+          enabled: true
+          algorithm: nextn
+          num_steps: 3
+          eagle_topk: 1
+          num_draft_tokens: 4
+          draft_model: google/gemma-4-31B-it-assistant
+          draft_model_revision: 627c5ec1458b9086b841a91e0512fd31fd2fbbf1
+        extra_launch_args:
+          - "--quantization"
+          - "fp8"
+          - "--kv-cache-dtype"
+          - "fp8_e4m3"
+          - "--mm-process-config"
+          - '{"image":{"max_soft_tokens":1120}}'
+      runtime:
+        first_chunk_timeout_s: 900
+        inter_chunk_timeout_s: 30
+        overall_timeout_s: 1800
+        default_sampling:
+          temperature: 1.0
+          top_p: 0.95
+          top_k: 64
+          min_new_tokens: 1
+        stop_tokens:
+          - "<end_of_turn>"
+  h100-96k-hires-no-spec:
+    extends: h100-96k-hires
+    adapter_options:
+      loadtime:
+        max_seq_length: 98304
+        mem_fraction_static: 0.90
+        served_model_name: google/gemma-4-31B-it
+        attention_backend: triton
+        grammar_backend: xgrammar
+        reasoning_parser: gemma4
+        tool_call_parser: gemma4
+        speculative_needs_extra_buffer: false
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--quantization"
+          - "fp8"
+          - "--kv-cache-dtype"
+          - "fp8_e4m3"
+          - "--mm-process-config"
+          - '{"image":{"max_soft_tokens":1120}}'
