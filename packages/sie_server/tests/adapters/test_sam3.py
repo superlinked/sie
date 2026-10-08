@@ -38,21 +38,28 @@ def _score(logit: float) -> float:
 class _FakeProcessor:
     """Sam3Processor's text tokenization and box post-processing, without assets."""
 
+    START, END = 49406, 49407
+
     def __init__(self) -> None:
         self.image_processor = MagicMock()
         self.image_processor.size = {"height": 1008, "width": 1008}
         self.texts: list[str] = []
         self.postprocess_calls: list[dict[str, Any]] = []
+        self._vocab: dict[str, int] = {}
+        self.prompts: dict[tuple[int, ...], str] = {}
 
     def __call__(self, *, text: str, return_tensors: str) -> dict[str, torch.Tensor]:
+        """One id per lowercased word between start and end tokens, padded to 32, like the CLIP tokenizer."""
         assert return_tensors == "pt"
         self.texts.append(text)
-        n_tokens = 2 + len(text.split())
-        width = max(32, n_tokens)
-        input_ids = torch.zeros(1, width, dtype=torch.long)
-        input_ids[0, :n_tokens] = torch.arange(1, n_tokens + 1)
+        words = text.lower().split()
+        ids = [self.START, *(self._vocab.setdefault(word, len(self._vocab) + 1) for word in words), self.END]
+        self.prompts[tuple(ids)] = " ".join(words)
+        width = max(32, len(ids))
+        input_ids = torch.full((1, width), self.END, dtype=torch.long)
+        input_ids[0, : len(ids)] = torch.tensor(ids)
         attention_mask = torch.zeros(1, width, dtype=torch.long)
-        attention_mask[0, :n_tokens] = 1
+        attention_mask[0, : len(ids)] = 1
         return {"input_ids": input_ids, "attention_mask": attention_mask}
 
     def post_process_object_detection(self, outputs, threshold=0.3, target_sizes=None):
@@ -90,9 +97,8 @@ def _detections(rows: list[tuple[float, list[float]]]) -> tuple[list[float], lis
 def _loaded(per_label: dict[str, list[list[tuple[float, list[float]]]]] | None = None) -> Sam3Adapter:
     """A loaded adapter whose model returns ``per_label[prompt][image]`` detections.
 
-    The forward pass sees which label it was given through the first token
-    after the start token, which the fake processor sets from the prompt's
-    position in ``per_label``.
+    The forward pass reads which prompt it was given back from its token ids,
+    so ``per_label`` is keyed by the lowercased prompt the model sees.
     """
     per_label = per_label or {}
     adapter = Sam3Adapter(MODEL)
@@ -101,7 +107,9 @@ def _loaded(per_label: dict[str, list[list[tuple[float, list[float]]]]] | None =
     model.get_vision_features.return_value = SimpleNamespace(name="vision-embeds")
 
     def forward(*, vision_embeds, input_ids, attention_mask):
-        prompt = processor.texts[len(model.call_args_list) - 1]
+        tokens = input_ids[0][attention_mask[0].bool()].tolist()
+        assert all(row[attention_mask[0].bool()].tolist() == tokens for row in input_ids)
+        prompt = processor.prompts[tuple(tokens)]
         batch = per_label.get(prompt, [[] for _ in range(input_ids.shape[0])])
         rows = [_detections(image_rows) for image_rows in batch]
         return SimpleNamespace(
@@ -307,6 +315,24 @@ def test_labels_are_returned_verbatim_prompted_stripped_and_deduplicated() -> No
     assert adapter._model.call_count == 1
     assert output.objects == [
         [{"label": " traffic light ", "score": pytest.approx(_score(1.5)), "bbox": [0, 0, 10, 20]}]
+    ]
+
+
+def test_labels_that_tokenize_identically_are_prompted_once_under_the_first_label() -> None:
+    adapter = _loaded({"cat": [[(2.0, [0.0, 0.0, 0.5, 0.5])]], "remote control": [[(1.0, [0.5, 0.5, 1.0, 1.0])]]})
+    output = adapter.extract(
+        [Item()],
+        labels=["Cat", "cat", "remote control", "CAT ", "Remote Control"],
+        prepared_items=_prepared([(100, 100)]),
+    )
+    # Every label is tokenized (and checked for length); each distinct model input runs once.
+    assert adapter._processor.texts == ["Cat", "cat", "remote control", "CAT", "Remote Control"]
+    assert adapter._model.call_count == 2
+    assert _objects(output) == [
+        [
+            {"label": "Cat", "score": pytest.approx(_score(2.0)), "bbox": [0, 0, 50, 50]},
+            {"label": "remote control", "score": pytest.approx(_score(1.0)), "bbox": [50, 50, 50, 50]},
+        ]
     ]
 
 

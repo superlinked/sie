@@ -84,7 +84,8 @@ def _label_prompts(labels: list[str] | None) -> list[tuple[str, str]]:
     """``(label, prompt)`` for each distinct caller label, in request order.
 
     The prompt is the label with surrounding whitespace removed; the label is
-    returned to the caller unchanged. A repeated label is prompted once.
+    returned to the caller unchanged. A repeated label is prompted once (see
+    ``Sam3Adapter._tokenize`` for labels that tokenize identically).
     """
     if not labels:
         raise ValueError(_ERR_NO_LABELS)
@@ -304,13 +305,17 @@ class Sam3Adapter(BaseAdapter):
         return ExtractOutput(entities=[[] for _ in range(n_items)], objects=all_objects)
 
     def _tokenize(self, prompts: list[tuple[str, str]]) -> list[tuple[str, torch.Tensor, torch.Tensor]]:
-        """``(label, input_ids, attention_mask)`` per label, each ``[1, seq_len]``.
+        """``(label, input_ids, attention_mask)`` per distinct prompt, each ``[1, seq_len]``.
 
         Uses the processor's own text path, which pads every prompt to the
         text encoder's 32 positions. A longer prompt is rejected, not
-        truncated: SAM 3 is prompted with short noun phrases.
+        truncated: SAM 3 is prompted with short noun phrases. The CLIP
+        tokenizer lowercases, so labels that differ only in case ("Cat" and
+        "cat") are the same model input. Such a prompt runs once, and its
+        detections carry the first of those labels in request order.
         """
         tokenized: list[tuple[str, torch.Tensor, torch.Tensor]] = []
+        seen: set[tuple[int, ...]] = set()
         with self._tokenizer_guard():
             for label, prompt in prompts:
                 encoded = self._processor(text=prompt, return_tensors="pt")
@@ -323,6 +328,10 @@ class Sam3Adapter(BaseAdapter):
                         f"{self._text_positions}. Use a short noun phrase."
                     )
                     raise ValueError(msg)
+                key = tuple(input_ids[0][attention_mask[0].bool()].tolist())
+                if key in seen:
+                    continue
+                seen.add(key)
                 tokenized.append((label, input_ids, attention_mask))
         return tokenized
 
