@@ -568,11 +568,14 @@ sidecar decoded the item's audio, and unit cost otherwise.
 
 Prepared audio longer than 30 s (Whisper's feature window) never shares a
 batch, whatever the model. Such recordings are served one per batch in arrival
-order, and while other items are pending too the two kinds take turns: a
-cost-sorted batch of the other items, then the oldest long recording. When no
-long recording is pending, batch formation is unchanged. The Python batcher
-applies the same rule, but there only the Whisper adapter flags audio as
-long-form.
+order, and while other items are pending too the two kinds take turns: a turn
+of the other items, then the oldest long recording. A turn of other items
+serves the items pending when it began, cheapest first, up to the cost cap, as
+one batch does in Python. The request count cap (12 by default, against
+Python's 64) can split the turn into several batches. Items that arrive during
+a turn wait for the next one. Outside these turns batch formation is
+unchanged. The Python batcher applies the same rule, but there only the
+Whisper adapter flags audio as long-form, and a turn is always one batch.
 
 A model whose descriptor reports `max_concurrent_dispatch` above 1 fronts an
 engine that batches continuously, such as SGLang serving an OCR model. A shared
