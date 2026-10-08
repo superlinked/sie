@@ -32,6 +32,7 @@ MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
             [
                 "--mm-process-config",
                 '{"image":{"min_pixels":65536,"max_pixels":1003520}}',
+                "--constrained-json-disable-any-whitespace",
                 "--quantization",
                 "fp8",
             ],

@@ -6,6 +6,7 @@ from pathlib import Path
 import yaml
 from PIL import Image
 from sie_server.config.model import ModelConfig, ResolvedProfile
+from sie_server.core.loader import expand_profile_variants, load_model_config
 from transformers import Qwen2VLImageProcessorFast
 
 _QWEN35_MODEL_PATH = Path(__file__).resolve().parents[2] / "models" / "Qwen__Qwen3.5-4B.yaml"
@@ -210,6 +211,25 @@ def test_all_qwen_vlm_profiles_pair_pinned_image_bounds() -> None:
                     "max_pixels": _QWEN_IMAGE_MAX_PIXELS,
                 }
             }
+
+
+def test_qwen36_35b_profiles_compile_compact_json_grammars() -> None:
+    # Pretty-printed json_schema replies spent about a quarter of their
+    # characters on indentation and neared the output cap on dense screens.
+    configs = expand_profile_variants([load_model_config(_QWEN36_35B_MODEL_PATH)])
+    variants = {name for name in configs if name.startswith("Qwen/Qwen3.6-35B-A3B")}
+    assert {
+        "Qwen/Qwen3.6-35B-A3B",
+        "Qwen/Qwen3.6-35B-A3B:h100-fp8",
+        "Qwen/Qwen3.6-35B-A3B:long-context",
+        "Qwen/Qwen3.6-35B-A3B:h100-256k",
+    } <= variants
+    for name in variants:
+        loadtime = configs[name].resolve_profile("default").loadtime
+        # sglang 0.5.10.post1 applies the flag on the xgrammar and llguidance
+        # backends only.
+        assert loadtime["grammar_backend"] == "xgrammar", name
+        assert loadtime["extra_launch_args"].count("--constrained-json-disable-any-whitespace") == 1, name
 
 
 def test_qwen36_native_window_uses_measured_cuda13_eagle_shape() -> None:

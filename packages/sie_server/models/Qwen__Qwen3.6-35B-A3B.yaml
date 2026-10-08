@@ -23,6 +23,12 @@ tasks:
     chat_template_kwargs:
       enable_thinking: false
 max_sequence_length: 8192
+# Every profile compiles JSON-schema grammars without free whitespace
+# (--constrained-json-disable-any-whitespace, which sglang 0.5.10.post1
+# declares and applies to the xgrammar backend). With free whitespace the model
+# pretty-prints a json_schema reply, so indentation spends output tokens and
+# pushes dense replies toward max_output_tokens, where a truncated reply is not
+# valid JSON. Compact replies remain valid under the same schema.
 profiles:
   # Correctness-first H100 FP8 bootstrap: no NEXTN and no CUDA graphs until
   # the online-FP8 smoke validates the MoE kernels and memory envelope.
@@ -47,6 +53,7 @@ profiles:
         extra_launch_args:
           - "--mm-process-config"
           - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
           - "--quantization"
           - "fp8"
       runtime:
@@ -112,6 +119,7 @@ profiles:
         extra_launch_args:
           - "--mm-process-config"
           - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
           - "--quantization"
           - "fp8"
       runtime:
