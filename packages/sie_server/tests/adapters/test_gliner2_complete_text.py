@@ -75,7 +75,10 @@ def _request(task: str, texts: list[str]) -> tuple[list[Item], dict[str, Any]]:
 
 
 @pytest.mark.parametrize("task", ["entities", "relations", "structured"])
-def test_overlong_items_fail_without_losing_short_items_or_their_positions(task: str) -> None:
+def test_overlong_items_fail_without_losing_short_items_or_their_positions(
+    task: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("sie_server.adapters.gliner2.adapter._MAX_EXTRACT_WINDOWS", 2)
     adapter, model = _adapter()
     long = "Alice Acme " + "word " * 20
     items, kwargs = _request(task, ["Alice Acme", long, "Bob Acme", long])
@@ -117,7 +120,8 @@ def test_overlong_items_fail_without_losing_short_items_or_their_positions(task:
 
 
 @pytest.mark.parametrize("task", ["entities", "relations", "structured"])
-def test_an_all_overlong_batch_never_calls_the_model(task: str) -> None:
+def test_an_all_overlong_batch_never_calls_the_model(task: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sie_server.adapters.gliner2.adapter._MAX_EXTRACT_WINDOWS", 2)
     adapter, model = _adapter()
     items, kwargs = _request(task, ["Alice Acme " + "word " * 20] * 2)
     output = adapter.extract(items, **kwargs)
@@ -132,34 +136,36 @@ def test_an_all_overlong_batch_never_calls_the_model(task: str) -> None:
 
 @pytest.mark.parametrize("lower", [False, True])
 @pytest.mark.parametrize(
-    ("text", "max_words", "max_subwords", "too_long"),
+    ("text", "max_words", "max_subwords"),
     [
-        ("one two three", 3, 1000, False),  # only the package's synthetic dot is unread
-        ("one two three   \t\n", 3, 1000, False),
-        ("one two three.", 3, 1000, True),  # the caller's punctuation is real input
-        ("one two three four", 3, 1000, True),
-        ("\u0130stanbul Ankara Izmir", 2, 1000, True),  # lowercase expands offsets
-        ("\u039f\u0394\u039f\u03a3'\u0391 next", 1, 1000, True),
-        ("x" * 513, 2, 1000, True),  # cut is the original word end, beyond the last read piece
-        ("abc " * 7, 8, 3, True),  # fewer than max_words, but the subword budget is full
+        ("one two three", 3, 1000),  # only the package's synthetic dot is unread
+        ("one two three   \t\n", 3, 1000),
+        ("one two three.", 3, 1000),
+        ("one two three four", 3, 1000),
+        ("\u0130stanbul Ankara Izmir", 2, 1000),  # lowercase expands offsets
+        ("\u039f\u0394\u039f\u03a3'\u0391 next", 1, 1000),
+        ("x" * 513, 2, 1000),  # a long word is read in pieces across windows
+        ("abc " * 7, 8, 3),  # the subword budget bounds each window's words
     ],
 )
-def test_completeness_uses_the_actual_word_window(
-    text: str, max_words: int, max_subwords: int, too_long: bool, lower: bool
+def test_a_long_text_is_read_in_windows_without_an_error(
+    text: str, max_words: int, max_subwords: int, lower: bool
 ) -> None:
     adapter, model = _adapter(lower=lower, max_words=max_words, max_subwords=max_subwords)
     model.extract_entities.side_effect = None
     model.extract_entities.return_value = {"entities": {}}
     output = adapter.extract([Item(text=text)], labels=["person"])
-    if too_long:
+    if lower and text.startswith("\u0130"):
+        # Lowercasing the text changes its length, so its windows' spans cannot be moved back to it.
         assert output.errors is not None
         assert output.errors[0] is not None
         assert output.errors[0].code == "INPUT_TOO_LONG"
         assert output.input_token_counts == [0]
         model.extract_entities.assert_not_called()
-    else:
-        assert output.errors is None
-        model.extract_entities.assert_called_once()
+        model.batch_extract_entities.assert_not_called()
+        return
+    assert output.errors is None
+    assert model.extract_entities.called or model.batch_extract_entities.called
 
 
 def test_invalid_request_parameters_are_still_validated_before_item_length_errors() -> None:
@@ -170,13 +176,14 @@ def test_invalid_request_parameters_are_still_validated_before_item_length_error
 
 
 @pytest.mark.parametrize("index", [0, 1])
-def test_queue_outcome_preserves_length_error_and_zero_billing(index: int) -> None:
+def test_queue_outcome_preserves_length_error_and_zero_billing(index: int, monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
 
     import msgpack
     from sie_server.ipc_types import ExtractBatchItem
     from sie_server.queue_executor import _extract_success_outcome
 
+    monkeypatch.setattr("sie_server.adapters.gliner2.adapter._MAX_EXTRACT_WINDOWS", 2)
     adapter, _ = _adapter()
     items = [Item(text="word " * 20), Item(text="Alice Acme")]
     output = adapter.extract(items, labels=["person"])
@@ -206,13 +213,14 @@ def test_queue_outcome_preserves_length_error_and_zero_billing(index: int) -> No
         assert outcome.units.input_tokens == 4
 
 
-def test_queue_length_error_keeps_zero_billing_when_sibling_metering_fails() -> None:
+def test_queue_length_error_keeps_zero_billing_when_sibling_metering_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
 
     import msgpack
     from sie_server.ipc_types import ExtractBatchItem
     from sie_server.queue_executor import _extract_success_outcome
 
+    monkeypatch.setattr("sie_server.adapters.gliner2.adapter._MAX_EXTRACT_WINDOWS", 2)
     adapter, _ = _adapter()
     adapter._doc_input_token_counts = lambda _texts: None
     items = [Item(text="word " * 20), Item(text="Alice Acme")]
@@ -243,13 +251,16 @@ def test_queue_length_error_keeps_zero_billing_when_sibling_metering_fails() -> 
 
 
 @pytest.mark.parametrize(("error_code", "expected_input_tokens"), [("INPUT_TOO_LONG", 0), ("INFERENCE_ERROR", 7)])
-def test_queue_length_error_overrides_reported_positive_billing(error_code: str, expected_input_tokens: int) -> None:
+def test_queue_length_error_overrides_reported_positive_billing(
+    error_code: str, expected_input_tokens: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from types import SimpleNamespace
 
     import msgpack
     from sie_server.ipc_types import ExtractBatchItem
     from sie_server.queue_executor import _extract_success_outcome
 
+    monkeypatch.setattr("sie_server.adapters.gliner2.adapter._MAX_EXTRACT_WINDOWS", 2)
     adapter, _ = _adapter()
     items = [Item(text="word " * 20), Item(text="Alice Acme")]
     output = adapter.extract(items, labels=["person"])
