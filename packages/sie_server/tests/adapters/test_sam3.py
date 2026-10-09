@@ -1,10 +1,10 @@
 """CPU contract tests for the SAM 3 detection adapter.
 
-Pretrained loading and the model forward pass are mocked. The fake processor's
-``post_process_object_detection`` reproduces Transformers 5.19's
-``Sam3ImageProcessor.post_process_object_detection``: score = sigmoid(logit) x
-sigmoid(presence), kept when strictly above the threshold, and relative
-``xyxy`` boxes scaled to ``(height, width)``.
+Pretrained loading and the model forward pass are mocked. The adapter scores
+detections as Transformers 5.19's
+``Sam3ImageProcessor.post_process_object_detection`` does: score =
+sigmoid(logit) x sigmoid(presence), kept when strictly above the threshold, and
+relative ``xyxy`` boxes scaled to the image's ``(width, height)``.
 """
 
 from __future__ import annotations
@@ -18,7 +18,13 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from PIL import Image
-from sie_server.adapters.sam3.adapter import DEFAULT_SCORE_THRESHOLD, Sam3Adapter, _to_objects
+from sie_server.adapters.sam3.adapter import (
+    _MAX_PAIRS_PER_FORWARD,
+    DEFAULT_SCORE_THRESHOLD,
+    Sam3Adapter,
+    _NoMasks,
+    _to_objects,
+)
 from sie_server.core.inference_output import ExtractOutput
 from sie_server.core.prepared import DetectionPayload, PreparedItem
 from sie_server.core.preprocessor import DetectionPreprocessor
@@ -36,7 +42,7 @@ def _score(logit: float) -> float:
 
 
 class _FakeProcessor:
-    """Sam3Processor's text tokenization and box post-processing, without assets."""
+    """Sam3Processor's text tokenization, without assets."""
 
     START, END = 49406, 49407
 
@@ -44,7 +50,6 @@ class _FakeProcessor:
         self.image_processor = MagicMock()
         self.image_processor.size = {"height": 1008, "width": 1008}
         self.texts: list[str] = []
-        self.postprocess_calls: list[dict[str, Any]] = []
         self._vocab: dict[str, int] = {}
         self.prompts: dict[tuple[int, ...], str] = {}
 
@@ -62,26 +67,6 @@ class _FakeProcessor:
         attention_mask[0, : len(ids)] = 1
         return {"input_ids": input_ids, "attention_mask": attention_mask}
 
-    def post_process_object_detection(self, outputs, threshold=0.3, target_sizes=None):
-        self.postprocess_calls.append(
-            {
-                "threshold": threshold,
-                "target_sizes": target_sizes,
-                "dtypes": {name: getattr(outputs, name).dtype for name in ("pred_logits", "pred_boxes")},
-            }
-        )
-        scores = outputs.pred_logits.sigmoid() * outputs.presence_logits.sigmoid()
-        boxes = outputs.pred_boxes
-        if target_sizes is not None:
-            heights = torch.tensor([size[0] for size in target_sizes], dtype=boxes.dtype)
-            widths = torch.tensor([size[1] for size in target_sizes], dtype=boxes.dtype)
-            boxes = boxes * torch.stack([widths, heights, widths, heights], dim=1).unsqueeze(1)
-        results = []
-        for image_scores, image_boxes in zip(scores, boxes, strict=True):
-            keep = image_scores > threshold
-            results.append({"scores": image_scores[keep], "boxes": image_boxes[keep]})
-        return results
-
 
 def _detections(rows: list[tuple[float, list[float]]]) -> tuple[list[float], list[list[float]]]:
     """Pad ``(logit, relative xyxy box)`` rows to ``QUERIES`` with queries that score near zero.
@@ -97,29 +82,51 @@ def _detections(rows: list[tuple[float, list[float]]]) -> tuple[list[float], lis
 def _loaded(per_label: dict[str, list[list[tuple[float, list[float]]]]] | None = None) -> Sam3Adapter:
     """A loaded adapter whose model returns ``per_label[prompt][image]`` detections.
 
-    The forward pass reads which prompt it was given back from its token ids,
-    so ``per_label`` is keyed by the lowercased prompt the model sees.
+    The fake text encoder returns a label's token ids as its features and the
+    fake vision encoder returns each image's index as its features, so every
+    row of a detector forward pass can be traced back to its (image, label)
+    pair. ``per_label`` is keyed by the lowercased prompt the model sees.
     """
     per_label = per_label or {}
     adapter = Sam3Adapter(MODEL)
     processor = _FakeProcessor()
     model = MagicMock()
-    model.get_vision_features.return_value = SimpleNamespace(name="vision-embeds")
+    adapter.forwards = []  # type: ignore[attr-defined]
 
-    def forward(*, vision_embeds, input_ids, attention_mask):
-        tokens = input_ids[0][attention_mask[0].bool()].tolist()
-        assert all(row[attention_mask[0].bool()].tolist() == tokens for row in input_ids)
-        prompt = processor.prompts[tuple(tokens)]
-        batch = per_label.get(prompt, [[] for _ in range(input_ids.shape[0])])
-        rows = [_detections(image_rows) for image_rows in batch]
+    def vision(*, pixel_values):
+        # _prepared fills image i's pixels with i, so the features carry each image's index.
+        index = pixel_values[:, 0, 0, 0].float().view(-1, 1)
+        # Four FPN levels as Sam3VisionModel returns them; the detector reads the third.
+        levels = (torch.full_like(index, -1.0), torch.full_like(index, -2.0), index, torch.full_like(index, -4.0))
+        return SimpleNamespace(fpn_hidden_states=levels, fpn_position_encoding=levels)
+
+    def text(*, input_ids, attention_mask, return_dict):
+        assert return_dict is True
+        assert input_ids.shape[0] == attention_mask.shape[0] == 1
+        return SimpleNamespace(pooler_output=input_ids.float().unsqueeze(-1))
+
+    def forward(*, vision_embeds, text_embeds, attention_mask):
+        features, last = vision_embeds.fpn_hidden_states
+        assert last is None
+        images = [int(value) for value in features[:, 0].tolist()]
+        rows = []
+        for row, image in enumerate(images):
+            ids = text_embeds.pooler_output[row, :, 0].long()
+            tokens = ids[attention_mask[row].bool()].tolist()
+            prompt = processor.prompts[tuple(tokens)]
+            batch = per_label.get(prompt, [])
+            rows.append(_detections(batch[image] if image < len(batch) else []))
+        adapter.forwards.append(len(images))  # type: ignore[attr-defined]
         return SimpleNamespace(
             pred_logits=torch.tensor([logits for logits, _ in rows], dtype=torch.bfloat16),
             pred_boxes=torch.tensor([boxes for _, boxes in rows], dtype=torch.bfloat16),
             # A certain presence (sigmoid(30) is 1.0 in float32): the score is sigmoid(logit).
             presence_logits=torch.full((len(rows), 1), 30.0, dtype=torch.bfloat16),
-            pred_masks=torch.zeros(len(rows), QUERIES, 2, 2),
+            pred_masks=None,
         )
 
+    model.get_vision_features.side_effect = vision
+    model.get_text_features.side_effect = text
     model.side_effect = forward
     adapter._model = model
     adapter._processor = processor
@@ -201,6 +208,9 @@ def test_load_uses_sam3_classes_revision_and_dtype(monkeypatch, device, precisio
     assert adapter.is_loaded()
     assert adapter._model_dtype is dtype
     assert adapter._text_positions == 32
+    # Masks are not returned, so the mask decoder is not run.
+    assert isinstance(model.mask_decoder, _NoMasks)
+    assert model.mask_decoder(decoder_queries=None).pred_masks is None
     preprocessor = adapter.get_preprocessor()
     assert isinstance(preprocessor, DetectionPreprocessor)
     # Photos far larger than the 1008 px model input are shrunk on the CPU first.
@@ -232,7 +242,7 @@ def test_unload_clears_loaded_state() -> None:
 # -- Detection ----------------------------------------------------------------
 
 
-def test_one_vision_encoding_and_one_prompt_per_label_over_the_batch() -> None:
+def test_one_encoding_per_image_and_label_and_one_pass_per_pair() -> None:
     adapter = _loaded(
         {
             "cat": [
@@ -252,24 +262,18 @@ def test_one_vision_encoding_and_one_prompt_per_label_over_the_batch() -> None:
     )
 
     model = adapter._model
-    model.get_vision_features.assert_called_once()
-    pixel_values = model.get_vision_features.call_args.kwargs["pixel_values"]
-    assert pixel_values.shape == (2, 3, 4, 4)
-    assert pixel_values.dtype == torch.float32
-    assert model.call_count == 2
-    vision_embeds = model.get_vision_features.return_value
-    for call in model.call_args_list:
-        assert call.kwargs["vision_embeds"] is vision_embeds
-        # The label's tokens are repeated for every image in the batch.
-        assert call.kwargs["input_ids"].shape == (2, 32)
-        assert torch.equal(call.kwargs["input_ids"][0], call.kwargs["input_ids"][1])
-        assert call.kwargs["attention_mask"].shape == (2, 32)
+    # Each image is encoded once, on its own.
+    assert model.get_vision_features.call_count == 2
+    for call in model.get_vision_features.call_args_list:
+        assert call.kwargs["pixel_values"].shape == (1, 3, 4, 4)
+        assert call.kwargs["pixel_values"].dtype == torch.float32
+    # Each label is encoded once, and each (image, label) pair runs the detector once.
+    assert model.get_text_features.call_count == 2
+    assert adapter.forwards == [1, 1, 1, 1]
+    call = model.call_args
+    assert call.kwargs["attention_mask"].shape == (1, 32)
+    assert call.kwargs["text_embeds"].pooler_output.shape == (1, 32, 1)
     assert adapter._processor.texts == ["cat", "remote control"]
-    for call in adapter._processor.postprocess_calls:
-        assert call["threshold"] == 0.3
-        assert call["target_sizes"] == [(480, 640), (400, 200)]
-        # Scores are computed in float32 even when the forward pass ran in bfloat16.
-        assert call["dtypes"] == {"pred_logits": torch.float32, "pred_boxes": torch.float32}
 
     assert output.entities == [[], []]
     first, second = _objects(output)
@@ -281,6 +285,34 @@ def test_one_vision_encoding_and_one_prompt_per_label_over_the_batch() -> None:
     ]
     assert [found["score"] for found in first] == pytest.approx([_score(2.0), _score(0.5), _score(-0.5)])
     assert second == [{"label": "remote control", "score": pytest.approx(_score(3.0)), "bbox": [100, 100, 100, 100]}]
+
+
+@pytest.mark.parametrize("pairs_per_forward", [_MAX_PAIRS_PER_FORWARD, 32])
+def test_pairs_are_split_into_forward_passes_and_keep_their_detections(pairs_per_forward: int) -> None:
+    labels = [f"thing{index}" for index in range(9)]
+    images = 4
+    per_label = {label: [[(1.0 + image, [0.0, 0.0, 0.5, 0.5])] for image in range(images)] for label in labels}
+    adapter = _loaded(per_label)
+    adapter._max_pairs_per_forward = pairs_per_forward
+    output = adapter.extract(
+        [Item() for _ in range(images)], labels=labels, prepared_items=_prepared([(100, 100)] * images)
+    )
+
+    pairs = len(labels) * images
+    full, rest = divmod(pairs, pairs_per_forward)
+    assert adapter.forwards == [pairs_per_forward] * full + ([rest] if rest else [])
+    for image, found in enumerate(_objects(output)):
+        assert [item["label"] for item in found] == labels
+        assert [item["score"] for item in found] == pytest.approx([_score(1.0 + image)] * len(labels))
+
+
+def test_label_encodings_are_reused_across_requests() -> None:
+    adapter = _loaded({"cat": [[(2.0, [0.0, 0.0, 0.5, 0.5])]]})
+    first = adapter.extract([Item()], labels=["cat", "dog"], prepared_items=_prepared([(10, 10)]))
+    second = adapter.extract([Item()], labels=["dog", "cat"], prepared_items=_prepared([(10, 10)]))
+
+    assert adapter._model.get_text_features.call_count == 2
+    assert first.objects == second.objects
 
 
 def test_default_threshold_and_request_options_that_override_it() -> None:
@@ -312,7 +344,8 @@ def test_labels_are_returned_verbatim_prompted_stripped_and_deduplicated() -> No
         prepared_items=_prepared([(10, 20)]),
     )
     assert adapter._processor.texts == ["traffic light"]
-    assert adapter._model.call_count == 1
+    assert adapter._model.get_text_features.call_count == 1
+    assert adapter.forwards == [1]
     assert output.objects == [
         [{"label": " traffic light ", "score": pytest.approx(_score(1.5)), "bbox": [0, 0, 10, 20]}]
     ]
@@ -327,7 +360,8 @@ def test_labels_that_tokenize_identically_are_prompted_once_under_the_first_labe
     )
     # Every label is tokenized (and checked for length); each distinct model input runs once.
     assert adapter._processor.texts == ["Cat", "cat", "remote control", "CAT", "Remote Control"]
-    assert adapter._model.call_count == 2
+    assert adapter._model.get_text_features.call_count == 2
+    assert adapter.forwards == [1, 1]
     assert _objects(output) == [
         [
             {"label": "Cat", "score": pytest.approx(_score(2.0)), "bbox": [0, 0, 50, 50]},
@@ -369,7 +403,6 @@ def test_inline_images_use_the_image_processor_and_their_own_sizes() -> None:
     image_call = adapter._processor.image_processor.call_args
     assert [image.size for image in image_call.kwargs["images"]] == [(300, 120)]
     assert image_call.kwargs["return_tensors"] == "pt"
-    assert adapter._processor.postprocess_calls[0]["target_sizes"] == [(120, 300)]
     assert output.objects == [[{"label": "square", "score": pytest.approx(_score(2.0)), "bbox": [75, 60, 150, 60]}]]
 
 
@@ -446,6 +479,12 @@ def test_invalid_threshold_never_reaches_the_model(options) -> None:
     with pytest.raises(ValueError, match="score_threshold must be"):
         adapter.extract([Item()], labels=["cat"], options=options, prepared_items=_prepared([(10, 10)]))
     adapter._model.get_vision_features.assert_not_called()
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 2.0])
+def test_invalid_pairs_per_forward_is_rejected(value) -> None:
+    with pytest.raises(ValueError, match="max_pairs_per_forward must be a positive integer"):
+        Sam3Adapter(MODEL, max_pairs_per_forward=value)
 
 
 @pytest.mark.parametrize("value", [True, -1, 2.0, float("inf")])

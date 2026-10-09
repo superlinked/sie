@@ -2,17 +2,20 @@
 
 SAM 3 (Segment Anything Model 3, Meta) finds every instance of a concept given
 as a short noun phrase ("yellow school bus"). Each caller label is one concept
-prompt. The adapter encodes each image once and runs the detector once per
-label against those shared vision features, the multi-prompt pattern the
-Transformers documentation describes.
+prompt. The adapter encodes each image once, encodes each label once (and
+keeps recent label encodings), then runs the detector for every
+(image, label) pair against those shared features, ``max_pairs_per_forward``
+pairs per forward pass.
 
 Scores come from ``Sam3Processor.post_process_object_detection``: the
 per-instance probability multiplied by the per-prompt presence probability.
 A detection is kept when its score is strictly above ``score_threshold``.
 
 SAM 3 also predicts an instance mask for each detection. This adapter does not
-return masks. It returns the standard ``objects`` list (label, score and an
-``[x, y, w, h]`` box in integer pixels of the original image).
+return masks, so it does not compute them: the mask decoder is replaced by a
+stub at load. Boxes and scores come from the detector before the mask decoder,
+so they are unchanged. It returns the standard ``objects`` list (label, score
+and an ``[x, y, w, h]`` box in integer pixels of the original image).
 
 Target model: facebook/sam3 (SAM License, gated on the Hugging Face Hub).
 It needs Transformers 5 (``Sam3Model`` and ``Sam3Processor``).
@@ -31,7 +34,9 @@ from __future__ import annotations
 
 import logging
 import math
+from collections import OrderedDict
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
@@ -58,9 +63,14 @@ DEFAULT_SCORE_THRESHOLD = 0.3
 _DEFAULT_IMAGE_SIDE = 1008
 # Sam3Config's CLIP text encoder has 32 positions. Sam3Processor pads every prompt to 32 tokens.
 _DEFAULT_TEXT_POSITIONS = 32
-# Fields of a Sam3 output that post-processing reads. They are scored in float32 so that
-# a bfloat16 forward pass does not quantise scores near the threshold.
-_SCORED_OUTPUTS = ("pred_logits", "pred_boxes", "presence_logits")
+# (image, label) pairs in one detector forward pass. One pair per pass is the
+# per-label forward of a single image exactly, so a request's boxes and scores are
+# bit-identical to running each label alone. More pairs per pass (the loadtime
+# option max_pairs_per_forward) run faster under concurrency, but bfloat16 GEMMs
+# over a different batch shape move scores slightly, as batching images does.
+_MAX_PAIRS_PER_FORWARD = 1
+# Label encodings kept between requests (each 32 x 256 values; labels repeat across images).
+_TEXT_CACHE_SIZE = 1024
 
 _ERR_NO_LABELS = "Sam3Adapter requires labels: one short noun phrase per kind of object to detect"
 _ERR_BAD_LABEL = "Sam3Adapter labels must be non-empty strings"
@@ -104,13 +114,16 @@ def _image_side(image_processor: Any) -> int:
     return int(side) if side else _DEFAULT_IMAGE_SIDE
 
 
-def _scored_in_float32(outputs: Any) -> Any:
-    """``outputs`` with the fields post-processing reads cast to float32."""
-    for name in _SCORED_OUTPUTS:
-        value = getattr(outputs, name, None)
-        if isinstance(value, torch.Tensor):
-            setattr(outputs, name, value.float())
-    return outputs
+class _NoMasks(torch.nn.Module):
+    """Stands in for ``Sam3Model.mask_decoder``: masks are not returned, so they are not computed.
+
+    ``Sam3Model.forward`` calls the mask decoder after the boxes, logits and
+    presence scores are final, so skipping it leaves those outputs unchanged.
+    """
+
+    def forward(self, *args: Any, **kwargs: Any) -> SimpleNamespace:
+        del args, kwargs
+        return SimpleNamespace(pred_masks=None, semantic_seg=None, attentions=None)
 
 
 def _to_objects(result: dict[str, Any], label: str, size: tuple[int, int]) -> list[DetectedObject]:
@@ -155,6 +168,7 @@ class Sam3Adapter(BaseAdapter):
         "_compute_precision",
         "_device",
         "_device_type",
+        "_max_pairs_per_forward",
         "_model",
         "_model_dtype",
         "_model_name_or_path",
@@ -162,6 +176,7 @@ class Sam3Adapter(BaseAdapter):
         "_processor",
         "_revision",
         "_score_threshold",
+        "_text_cache",
         "_text_positions",
     )
 
@@ -172,6 +187,7 @@ class Sam3Adapter(BaseAdapter):
         compute_precision: ComputePrecision = "bfloat16",
         revision: str | None = None,
         score_threshold: float = DEFAULT_SCORE_THRESHOLD,
+        max_pairs_per_forward: int = _MAX_PAIRS_PER_FORWARD,
         **kwargs: Any,
     ) -> None:
         del kwargs
@@ -179,6 +195,14 @@ class Sam3Adapter(BaseAdapter):
         self._compute_precision = compute_precision
         self._revision = revision
         self._score_threshold = _score_threshold(score_threshold)
+        if (
+            isinstance(max_pairs_per_forward, bool)
+            or not isinstance(max_pairs_per_forward, int)
+            or max_pairs_per_forward < 1
+        ):
+            msg = "max_pairs_per_forward must be a positive integer"
+            raise ValueError(msg)
+        self._max_pairs_per_forward = max_pairs_per_forward
 
         self._model: Any = None
         self._processor: Any = None
@@ -187,6 +211,8 @@ class Sam3Adapter(BaseAdapter):
         self._device_type: str = "cpu"
         self._model_dtype: torch.dtype = torch.float32
         self._text_positions: int = _DEFAULT_TEXT_POSITIONS
+        # Prompt token ids -> the text encoder's output for that prompt ([1, 32, 256]).
+        self._text_cache: OrderedDict[tuple[int, ...], torch.Tensor] = OrderedDict()
 
     def load(self, device: str) -> None:
         import transformers
@@ -210,7 +236,9 @@ class Sam3Adapter(BaseAdapter):
         self._model = model_class.from_pretrained(self._model_name_or_path, dtype=dtype, **shared_kwargs)
         self._model.to(device)
         self._model.eval()
+        self._model.mask_decoder = _NoMasks()
         self._model_dtype = dtype
+        self._text_cache.clear()
 
         text_config = getattr(self._model.config, "text_config", None)
         positions = getattr(text_config, "max_position_embeddings", None)
@@ -342,7 +370,13 @@ class Sam3Adapter(BaseAdapter):
         text_inputs: list[tuple[str, torch.Tensor, torch.Tensor]],
         score_threshold: float,
     ) -> list[list[DetectedObject]]:
-        """Detect each label in a batch of images, encoding the images once.
+        """Detect each label in a batch of images, encoding each image once.
+
+        Every (image, label) pair goes through the detector, up to
+        ``max_pairs_per_forward`` pairs per pass, with the image's vision
+        features and the label's text features. Scores and boxes are computed
+        as ``Sam3Processor.post_process_object_detection`` computes them, in
+        float32, and copied to the host once.
 
         Args:
             pixel_values: Processed images ``[B, 3, H, W]``.
@@ -354,12 +388,12 @@ class Sam3Adapter(BaseAdapter):
             One list of detections per image, highest score first.
         """
         model = self._model
-        processor = self._processor
         device = self._device
         batch_size = pixel_values.shape[0]
-        # post_process_object_detection takes (height, width).
-        target_sizes = [(height, width) for width, height in original_sizes]
         detections: list[list[DetectedObject]] = [[] for _ in range(batch_size)]
+        pairs = [
+            (label_index, image_index) for label_index in range(len(text_inputs)) for image_index in range(batch_size)
+        ]
 
         with (
             torch.inference_mode(),
@@ -369,24 +403,79 @@ class Sam3Adapter(BaseAdapter):
                 enabled=(self._device_type == "cuda"),
             ),
         ):
-            vision_embeds = model.get_vision_features(pixel_values=pixel_values.to(device, dtype=self._model_dtype))
-            for label, input_ids, attention_mask in text_inputs:
+            # Each image is encoded on its own. Images share nothing in the vision
+            # encoder, and a batch of one keeps every convolution at one input shape,
+            # so cuDNN's autotuning (enabled server-wide) runs once rather than again
+            # for every new batch size. The detector reads one FPN level, the last
+            # one Sam3Model.forward keeps (the others feed only the mask decoder).
+            features_parts: list[torch.Tensor] = []
+            positions_parts: list[torch.Tensor] = []
+            vision_outputs: list[type] = []
+            for index in range(batch_size):
+                vision = model.get_vision_features(
+                    pixel_values=pixel_values[index : index + 1].to(device, dtype=self._model_dtype)
+                )
+                features_parts.append(vision.fpn_hidden_states[:-1][-1])
+                positions_parts.append(vision.fpn_position_encoding[:-1][-1])
+                vision_outputs.append(type(vision))
+            # A pair's vision input: its image's features at that level. Sam3Model.forward drops the
+            # last entry of each tuple and reads the one before it, so (features, None) is that level.
+            vision_output = vision_outputs[0]
+            features = torch.cat(features_parts)
+            positions = torch.cat(positions_parts)
+            text_embeds = torch.cat([self._text_embedding(ids, mask) for _, ids, mask in text_inputs])
+            text_masks = torch.cat([mask for _, _, mask in text_inputs]).to(device)
+            # post_process_object_detection scales relative xyxy boxes by (width, height, width, height).
+            scale = torch.tensor(
+                [[width, height, width, height] for width, height in original_sizes], dtype=torch.float32, device=device
+            )
+            scores_parts: list[torch.Tensor] = []
+            boxes_parts: list[torch.Tensor] = []
+            for start in range(0, len(pairs), self._max_pairs_per_forward):
+                chunk = pairs[start : start + self._max_pairs_per_forward]
+                label_rows = torch.tensor([label_index for label_index, _ in chunk], device=device)
+                image_rows = torch.tensor([image_index for _, image_index in chunk], device=device)
                 outputs = model(
-                    vision_embeds=vision_embeds,
-                    input_ids=input_ids.to(device).repeat(batch_size, 1),
-                    attention_mask=attention_mask.to(device).repeat(batch_size, 1),
+                    vision_embeds=vision_output(
+                        fpn_hidden_states=(features[image_rows], None),
+                        fpn_position_encoding=(positions[image_rows], None),
+                    ),
+                    text_embeds=SimpleNamespace(pooler_output=text_embeds[label_rows]),
+                    attention_mask=text_masks[label_rows],
                 )
-                results = processor.post_process_object_detection(
-                    _scored_in_float32(outputs),
-                    threshold=score_threshold,
-                    target_sizes=target_sizes,
-                )
-                for index, result in enumerate(results):
-                    detections[index].extend(_to_objects(result, label, original_sizes[index]))
+                scores = outputs.pred_logits.float().sigmoid()
+                if outputs.presence_logits is not None:
+                    scores = scores * outputs.presence_logits.float().sigmoid()
+                scores_parts.append(scores)
+                boxes_parts.append(outputs.pred_boxes.float() * scale[image_rows].unsqueeze(1))
+            all_scores = torch.cat(scores_parts).cpu()
+            all_boxes = torch.cat(boxes_parts).cpu()
+
+        for row, (label_index, image_index) in enumerate(pairs):
+            keep = all_scores[row] > score_threshold
+            result = {"scores": all_scores[row][keep], "boxes": all_boxes[row][keep]}
+            detections[image_index].extend(
+                _to_objects(result, text_inputs[label_index][0], original_sizes[image_index])
+            )
 
         for found in detections:
             found.sort(key=lambda detected: detected["score"], reverse=True)
         return detections
+
+    def _text_embedding(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        """The text encoder's output for one tokenized label (``[1, seq_len, hidden]``), cached by token ids."""
+        key = tuple(input_ids[0].tolist()) + tuple(attention_mask[0].tolist())
+        cached = self._text_cache.get(key)
+        if cached is not None:
+            self._text_cache.move_to_end(key)
+            return cached
+        encoded = self._model.get_text_features(
+            input_ids=input_ids.to(self._device), attention_mask=attention_mask.to(self._device), return_dict=True
+        ).pooler_output
+        self._text_cache[key] = encoded
+        if len(self._text_cache) > _TEXT_CACHE_SIZE:
+            self._text_cache.popitem(last=False)
+        return encoded
 
     def _extract_image(self, item: Item, *, item_index: int | None = None) -> Image | None:
         """The item's first image as RGB, or ``None`` when it has none.
