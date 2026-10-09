@@ -311,6 +311,7 @@ mod tests {
             bundle: "sglang".into(),
             bundle_config_hash: "hash".into(),
             loaded_models: vec![],
+            loading_models: Vec::new(),
             models: vec![],
             gpus: vec![],
             queue_depth: None,

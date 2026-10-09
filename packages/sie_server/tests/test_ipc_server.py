@@ -613,6 +613,7 @@ def _make_executor() -> tuple[QueueExecutor, MagicMock]:
     reg.model_names = ["test/model"]
     reg.device = "cpu"
     reg.loaded_model_names = ["test/model"]
+    reg.loading_model_names = []
     reg.is_loaded.return_value = True
     reg.is_loading.return_value = False
     reg._config_version = 0
@@ -972,6 +973,7 @@ class TestFraming:
             assert resp["body"]["ready"] is False
             assert resp["body"]["bundle_config_hash"] == ""
             assert resp["body"]["loaded_models"] == ["test/model"]
+            assert resp["body"]["loading_models"] == []
             assert srv.is_heartbeat_fresh()
         finally:
             await client.close()
@@ -1045,6 +1047,24 @@ class TestFraming:
             health.assert_awaited_once_with()
         finally:
             await client.close()
+
+    @pytest.mark.asyncio
+    async def test_ping_reports_models_in_loading_and_omits_them_after_clear(self) -> None:
+        registry = ModelRegistry(enable_hot_reload=False)
+        registry._loading.add("org/loading-model")
+        executor = QueueExecutor(registry)
+        sock = _short_sock_path()
+        async with IpcServer(sock, executor, worker_id="w"):
+            client = await _Client.connect(sock)
+            try:
+                loading = await client.rpc("Ping", {"timestamp_ms": 1.0}, request_id="load")
+                assert loading["ok"] is True
+                assert loading["body"]["loading_models"] == ["org/loading-model"]
+                registry._loading.discard("org/loading-model")
+                cleared = await client.rpc("Ping", {"timestamp_ms": 2.0}, request_id="clear")
+                assert cleared["body"]["loading_models"] == []
+            finally:
+                await client.close()
 
     @pytest.mark.asyncio
     async def test_multiple_requests_on_one_connection(self, server_and_path) -> None:

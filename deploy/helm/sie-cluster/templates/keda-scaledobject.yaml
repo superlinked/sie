@@ -226,6 +226,19 @@ data:
         - type: prometheus
           metadata:
             serverAddress: {{ $promAddr }}
+            # Generation MODEL_LOADING deliveries stay acknowledged, so queue
+            # depth can be 0 while a model is still loading. The gateway emits
+            # 1 for a fresh worker with a non-empty loading set and an explicit
+            # 0 when the lane has no live workers. The same capacity-snapshot
+            # freshness guard rejects a stale gateway sample.
+            metricName: sie_gateway_model_loads_in_progress_{{ $poolName }}_{{ $bundleName }}
+            query: (max(sie_gateway_model_loads_in_progress{ {{- $gatewayTarget -}}, pool="{{ $queuePool }}", machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"} and on(producer_instance,collector_generation) {{ $freshGatewayInstances }}) and on() {{ $controlReady }})
+            ignoreNullValues: "false"
+            threshold: "1"
+            activationThreshold: "0"
+        - type: prometheus
+          metadata:
+            serverAddress: {{ $promAddr }}
             metricName: sie_gateway_active_lease_gpus_{{ $poolName }}_{{ $bundleName }}
             # The gateway has already deduplicated assigned workers for this
             # physical lane; max only removes replicated gateway observations.

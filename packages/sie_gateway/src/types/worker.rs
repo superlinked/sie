@@ -41,6 +41,9 @@ pub struct WorkerState {
     /// Diagnostic observations only; never sufficient for numerical admission.
     pub numerical_process_inventory: Option<Arc<NumericalProcessInventory>>,
     pub models: Vec<String>,
+    /// Model ids the worker reported as still loading. Empty when the field
+    /// is absent, which is what an older worker publishes.
+    pub loading_models: Vec<String>,
     pub queue_depth: i32,
     pub pending_cost: i64,
     pub inflight_batches: i32,
@@ -229,6 +232,9 @@ pub struct WorkerStatusMessage {
     pub supports_numerical_admission_subject_v1: bool,
     #[serde(default)]
     pub loaded_models: Vec<String>,
+    /// In-progress model loads. Absent on workers that predate the field.
+    #[serde(default)]
+    pub loading_models: Vec<String>,
     #[serde(default)]
     pub models: Vec<ModelStatus>,
     #[serde(default)]
@@ -763,6 +769,7 @@ mod tests {
             supports_numerical_admission_subject_v1: false,
             numerical_process_inventory: None,
             models: vec![],
+            loading_models: Vec::new(),
             queue_depth: 0,
             pending_cost: 0,
             inflight_batches: 0,
@@ -832,6 +839,10 @@ mod tests {
         assert_eq!(
             serde_json::json!(msg.loaded_models),
             example["loaded_models"]
+        );
+        assert_eq!(
+            serde_json::json!(msg.loading_models),
+            example["loading_models"]
         );
         assert_eq!(
             msg.queue_depth,
@@ -934,6 +945,7 @@ mod tests {
         assert_eq!(msg.total_gpu_slots, None);
         assert_eq!(msg.ready_gpu_slots, None);
         assert!(msg.loaded_models.is_empty());
+        assert!(msg.loading_models.is_empty());
         assert!(msg.models.is_empty());
         assert!(msg.gpus.is_empty());
         assert_eq!(msg.pending_cost, None);

@@ -19731,6 +19731,7 @@ mod tests {
                     bundle: "default".to_string(),
                     bundle_config_hash: "h1".to_string(),
                     loaded_models: Vec::new(),
+                    loading_models: Vec::new(),
                     models: Vec::new(),
                     gpus: Vec::new(),
                     queue_depth: None,
@@ -23969,6 +23970,7 @@ mod tests {
             bundle: bundle.into(),
             bundle_config_hash: "abc".into(),
             loaded_models: vec![],
+            loading_models: Vec::new(),
             models: vec![ModelStatus { queue_depth: 0 }],
             gpus: vec![GpuStatus {
                 memory_used_bytes: 0,

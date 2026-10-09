@@ -49,6 +49,7 @@ pub struct ConfigApplyState {
     /// cannot serve. Committed together with the hash.
     unsupported_models: SharedUnsupportedModels,
     loaded_models: SharedLoadedModels,
+    loading_models: SharedLoadedModels,
     /// Config mutation is exclusive while inference takes a shared guard.
     /// This binds each execution to one stable backend registry revision.
     execution_barrier: AsyncRwLock<()>,
@@ -61,6 +62,7 @@ impl ConfigApplyState {
             bundle_config_hash: Arc::new(RwLock::new(initial_bundle_config_hash)),
             unsupported_models: Arc::new(RwLock::new(Vec::new())),
             loaded_models: Arc::new(RwLock::new(Vec::new())),
+            loading_models: Arc::new(RwLock::new(Vec::new())),
             execution_barrier: AsyncRwLock::new(()),
         }
     }
@@ -75,6 +77,10 @@ impl ConfigApplyState {
 
     pub fn loaded_models(&self) -> SharedLoadedModels {
         Arc::clone(&self.loaded_models)
+    }
+
+    pub fn loading_models(&self) -> SharedLoadedModels {
+        Arc::clone(&self.loading_models)
     }
 
     pub fn unsupported_models(&self) -> SharedUnsupportedModels {
@@ -217,6 +223,30 @@ impl ConfigApplyState {
         }
         guard.push(model_id.to_string());
         guard.sort();
+    }
+
+    /// Replace the in-progress load set. Returns whether the published list
+    /// changed so the health heartbeat can go out before the next interval.
+    pub fn set_loading_models<I>(&self, models: I) -> bool
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let mut deduped: Vec<String> = models
+            .into_iter()
+            .map(|model| model.trim().to_string())
+            .filter(|model| !model.is_empty())
+            .collect();
+        deduped.sort();
+        deduped.dedup();
+        let mut guard = self
+            .loading_models
+            .write()
+            .expect("loading models lock poisoned");
+        if *guard == deduped {
+            return false;
+        }
+        *guard = deduped;
+        true
     }
 
     fn mark_applied(
@@ -1239,6 +1269,24 @@ mod tests {
         assert!(state.mark_export_reconciled(4, Some(String::new()), Vec::new(), false));
         assert_eq!(state.epoch(), 4);
         assert_eq!(state.bundle_config_hash().read().unwrap().as_str(), "");
+    }
+
+    #[test]
+    fn set_loading_models_reports_change_and_normalizes() {
+        let state = ConfigApplyState::new("initial".into());
+        assert!(state.set_loading_models(vec![
+            "model/b".into(),
+            " model/a ".into(),
+            "".into(),
+            "model/b".into(),
+        ]));
+        assert_eq!(
+            state.loading_models().read().unwrap().as_slice(),
+            ["model/a".to_string(), "model/b".to_string()]
+        );
+        assert!(!state.set_loading_models(vec!["model/b".into(), "model/a".into()]));
+        assert!(state.set_loading_models(Vec::new()));
+        assert!(state.loading_models().read().unwrap().is_empty());
     }
 
     #[test]

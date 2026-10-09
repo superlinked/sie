@@ -38,6 +38,13 @@
 //! signal. Backends that need explicit residency, such as Candle, must only
 //! publish models here after their readiness handshake has made them serveable.
 //!
+//! `loading_models` is the engine's in-progress load set from the latest
+//! successful IPC ping. It rides this same heartbeat. The publisher also
+//! sends the payload immediately when that set changes, so the wait is the
+//! IPC ping interval rather than another full health period. A failed ping
+//! keeps the previous set; the gateway drops a worker after the normal
+//! heartbeat timeout instead of letting a dead publisher pin a lane.
+//!
 //! [`WorkerStatusMessage`]: https://github.com/superlinked/sie/blob/main/packages/sie_gateway/src/types/worker.rs
 //! [`resolve_queue_route`]: https://github.com/superlinked/sie/blob/main/packages/sie_gateway/src/state/worker_registry.rs
 
@@ -49,6 +56,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_nats::Client;
 use serde::Serialize;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tokio::time::interval;
 use tracing::{debug, info, warn};
@@ -205,6 +213,11 @@ pub struct HealthPublisherConfig {
     /// Models the colocated backend reports as loaded. Updated by the IPC
     /// heartbeat, not by config apply.
     pub loaded_models: SharedLoadedModels,
+    /// Models the backend still has in `_loading`. Same update path as
+    /// `loaded_models`, plus an immediate republish when the set changes.
+    pub loading_models: SharedLoadedModels,
+    /// Wakes [`spawn`] to publish the current payload before `interval` elapses.
+    pub publish_now: Arc<Notify>,
     /// Independently polled process diagnostics; never grants routing authority.
     pub numerical_process_inventory: SharedNumericalInventory,
     /// Positive only when every backend child supports the method fence.
@@ -257,6 +270,7 @@ struct WorkerStatusPayload<'a> {
     bundle: &'a str,
     bundle_config_hash: &'a str,
     loaded_models: &'a [String],
+    loading_models: &'a [String],
     queue_depth: i32,
     pending_cost: i64,
     inflight_batches: i32,
@@ -284,6 +298,17 @@ fn encode_payload(
         }
     };
     let loaded_models = match &loaded_models_guard {
+        Some(guard) => guard.as_slice(),
+        None => &[],
+    };
+    let loading_models_guard = match config.loading_models.read() {
+        Ok(guard) => Some(guard),
+        Err(_) => {
+            warn!("loading_models lock poisoned; publishing an empty in-progress load set");
+            None
+        }
+    };
+    let loading_models = match &loading_models_guard {
         Some(guard) => guard.as_slice(),
         None => &[],
     };
@@ -360,6 +385,7 @@ fn encode_payload(
         bundle: &config.bundle,
         bundle_config_hash: hash.as_str(),
         loaded_models,
+        loading_models,
         queue_depth,
         pending_cost,
         inflight_batches,
@@ -426,9 +452,72 @@ pub async fn publish_tombstone(
     Ok(())
 }
 
+async fn publish_heartbeat(
+    nats: &Client,
+    config: &HealthPublisherConfig,
+    readiness: &Readiness,
+    subject: &str,
+    consecutive_failures: &mut u64,
+) {
+    let snap = readiness.snapshot();
+    let ready = snap.is_ready();
+    let bytes = match encode_payload(config, ready, false) {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(
+                error = %e,
+                "nats-health: serde_json encode failed (unexpected for static shape)"
+            );
+            return;
+        }
+    };
+    match nats.publish(subject.to_string(), bytes.into()).await {
+        Ok(_) => {
+            if *consecutive_failures > 0 {
+                info!(
+                    consecutive_failures,
+                    subject = %subject,
+                    "nats-health: publish recovered"
+                );
+            }
+            *consecutive_failures = 0;
+            debug!(subject = %subject, ready, "nats-health: heartbeat published");
+        }
+        Err(e) => {
+            *consecutive_failures = consecutive_failures.saturating_add(1);
+            // Same warn cadence as `spawn_heartbeat`:
+            // first failure, then 5 / 30 / every 120
+            // so a sustained NATS outage doesn't
+            // drown the log file.
+            if *consecutive_failures == 1
+                || *consecutive_failures == 5
+                || *consecutive_failures == 30
+                || consecutive_failures.is_multiple_of(120)
+            {
+                warn!(
+                    consecutive_failures,
+                    subject = %subject,
+                    error = %e,
+                    "nats-health: publish failed"
+                );
+            } else {
+                debug!(
+                    consecutive_failures,
+                    subject = %subject,
+                    error = %e,
+                    "nats-health: publish still failing"
+                );
+            }
+        }
+    }
+}
+
 /// Spawn the heartbeat-publisher loop. The returned [`JoinHandle`]
 /// is owned by `run()` so shutdown can `.abort()` it after the
 /// pull loop exits — same lifecycle as `crate::spawn_heartbeat`.
+///
+/// `config.publish_now` republishes the same payload as soon as the
+/// in-progress load set changes. That is not a second broker subject.
 ///
 /// Failure modes (non-fatal):
 ///
@@ -461,6 +550,7 @@ pub fn spawn(
         let mut consecutive_failures: u64 = 0;
         loop {
             let wait = shutdown.wait();
+            let publish_now = config.publish_now.notified();
             tokio::select! {
                 biased;
                 _ = wait => {
@@ -475,57 +565,10 @@ pub fn spawn(
                     return;
                 }
                 _ = tick.tick() => {
-                    let snap = readiness.snapshot();
-                    let ready = snap.is_ready();
-                    let bytes = match encode_payload(&config, ready, false) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            warn!(
-                                error = %e,
-                                "nats-health: serde_json encode failed (unexpected for static shape)"
-                            );
-                            continue;
-                        }
-                    };
-                    match nats.publish(subject.clone(), bytes.into()).await {
-                        Ok(_) => {
-                            if consecutive_failures > 0 {
-                                info!(
-                                    consecutive_failures,
-                                    subject = %subject,
-                                    "nats-health: publish recovered"
-                                );
-                            }
-                            consecutive_failures = 0;
-                            debug!(subject = %subject, ready, "nats-health: heartbeat published");
-                        }
-                        Err(e) => {
-                            consecutive_failures = consecutive_failures.saturating_add(1);
-                            // Same warn cadence as `spawn_heartbeat`:
-                            // first failure, then 5 / 30 / every 120
-                            // so a sustained NATS outage doesn't
-                            // drown the log file.
-                            if consecutive_failures == 1
-                                || consecutive_failures == 5
-                                || consecutive_failures == 30
-                                || consecutive_failures.is_multiple_of(120)
-                            {
-                                warn!(
-                                    consecutive_failures,
-                                    subject = %subject,
-                                    error = %e,
-                                    "nats-health: publish failed"
-                                );
-                            } else {
-                                debug!(
-                                    consecutive_failures,
-                                    subject = %subject,
-                                    error = %e,
-                                    "nats-health: publish still failing"
-                                );
-                            }
-                        }
-                    }
+                    publish_heartbeat(&nats, &config, &readiness, &subject, &mut consecutive_failures).await;
+                }
+                _ = publish_now => {
+                    publish_heartbeat(&nats, &config, &readiness, &subject, &mut consecutive_failures).await;
                 }
             }
         }
@@ -552,6 +595,8 @@ mod tests {
             bundle_config_hash: Arc::new(RwLock::new("hash-abc".into())),
             unsupported_models: Arc::new(RwLock::new(Vec::new())),
             loaded_models: Arc::new(RwLock::new(Vec::new())),
+            loading_models: Arc::new(RwLock::new(Vec::new())),
+            publish_now: Arc::new(Notify::new()),
             numerical_process_inventory: Arc::new(RwLock::new(None)),
             execution_authority_v1: Arc::new(AtomicBool::new(false)),
             numerical_admission_v1: Arc::new(AtomicBool::new(false)),
@@ -802,6 +847,7 @@ mod tests {
                 inflight_batches: 0,
                 saturated: false,
                 loaded_models: &[],
+                loading_models: &[],
                 unsupported_models: &[],
                 numerical_process_inventory: None,
             };
@@ -852,6 +898,7 @@ mod tests {
                 inflight_batches: 0,
                 saturated: false,
                 loaded_models: &[],
+                loading_models: &[],
                 unsupported_models: &[],
                 numerical_process_inventory: None,
             };
@@ -873,6 +920,20 @@ mod tests {
             json["loaded_models"],
             serde_json::json!(["model/a", "model/b"])
         );
+        assert_eq!(json["loading_models"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn payload_reads_updated_loading_models() {
+        let c = cfg();
+        {
+            let mut models = c.loading_models.write().unwrap();
+            *models = vec!["org/loading".into()];
+        }
+        let json: serde_json::Value =
+            serde_json::from_slice(&encode_payload(&c, true, false).unwrap()).unwrap();
+        assert_eq!(json["loading_models"], serde_json::json!(["org/loading"]));
+        assert_eq!(json["loaded_models"], serde_json::json!([]));
     }
 
     #[test]

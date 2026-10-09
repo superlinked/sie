@@ -90,6 +90,10 @@ class PingResponse(msgspec.Struct):
     ready: bool = False
     bundle_config_hash: str = ""
     loaded_models: list[str] = msgspec.field(default_factory=list)
+    # In-progress registry loads. Defaulted so an older peer that omits the
+    # field still decodes; Ready, Failed, and Cancelled clear it because the
+    # registry drops the id from ``_loading`` in ``finally``.
+    loading_models: list[str] = msgspec.field(default_factory=list)
 
 
 # -----------------------------------------------------------------------------

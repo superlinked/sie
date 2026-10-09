@@ -19,7 +19,7 @@ use crate::state::demand_tracker::{DemandTracker, PhysicalLane, PhysicalLaneCata
 use crate::state::model_registry::ModelRegistry;
 use crate::state::pool_manager::{CapacityPoolSnapshot, PoolManager, DEFAULT_POOL_NAME};
 use crate::state::worker_registry::WorkerRegistry;
-use crate::types::PoolState;
+use crate::types::{PoolState, WorkerState};
 use tracing::warn;
 
 /// A model served from a dedicated sandbox rather than a catalog bundle (#1841).
@@ -360,7 +360,48 @@ pub(crate) async fn keda_capacity_snapshot(
     }
     let pools = state.pool_manager.capacity_pools().await;
     let pending_lanes = state.demand_tracker.active_lanes();
-    build_keda_capacity_snapshot(catalog, &lane_backlogs, &pools, pending_lanes)
+    let workers = state.registry.workers().await;
+    let loading_workers =
+        worker_loading_reports(workers.values(), state.registry.heartbeat_timeout());
+    build_keda_capacity_snapshot(
+        catalog,
+        &lane_backlogs,
+        &pools,
+        pending_lanes,
+        &loading_workers,
+    )
+}
+
+/// One worker's contribution to `sie.gateway.model_loads_in_progress`.
+///
+/// `heartbeat_fresh` is the normal heartbeat timeout. A stale worker stays in
+/// the registry until a later eviction, but it must not keep a lane at 1.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WorkerLoadingReport {
+    pool: String,
+    machine_profile: String,
+    bundle: String,
+    loading: bool,
+    heartbeat_fresh: bool,
+}
+
+fn worker_loading_reports<'a>(
+    workers: impl IntoIterator<Item = &'a WorkerState>,
+    heartbeat_timeout: Duration,
+) -> Vec<WorkerLoadingReport> {
+    workers
+        .into_iter()
+        .map(|worker| WorkerLoadingReport {
+            pool: worker.pool_name.clone(),
+            machine_profile: worker.machine_profile.clone(),
+            bundle: worker.bundle.clone(),
+            loading: worker
+                .loading_models
+                .iter()
+                .any(|model| !model.trim().is_empty()),
+            heartbeat_fresh: worker.last_heartbeat.elapsed() <= heartbeat_timeout,
+        })
+        .collect()
 }
 
 fn build_keda_capacity_snapshot(
@@ -368,6 +409,7 @@ fn build_keda_capacity_snapshot(
     lane_backlogs: &LaneBacklogSnapshot,
     pools: &[CapacityPoolSnapshot],
     pending_lanes: Vec<PhysicalLane>,
+    loading_workers: &[WorkerLoadingReport],
 ) -> Result<telemetry::KedaCapacitySnapshot, String> {
     if lane_backlogs
         .values()
@@ -421,6 +463,38 @@ fn build_keda_capacity_snapshot(
         lane_queue_depth,
         active_lease_gpus: active_lease_values(pools, catalog, &catalog_lanes),
         pool_warm_floor,
+        model_loads_in_progress: model_loads_in_progress(catalog, &catalog_lanes, loading_workers),
+    })
+}
+
+/// 1 when any fresh worker in the catalog lane is loading a model, else 0.
+///
+/// Queue depth is intentionally not an input: generation `MODEL_LOADING`
+/// deliveries stay acknowledged, so the lane queue can be empty while this
+/// gauge holds the replica. Every configured lane is present, including an
+/// explicit 0 when the lane has no live workers.
+fn model_loads_in_progress(
+    catalog: &PhysicalLaneCatalog,
+    catalog_lanes: &[PhysicalLane],
+    loading_workers: &[WorkerLoadingReport],
+) -> Vec<telemetry::LaneSnapshot> {
+    let mut loading_lanes = HashSet::new();
+    for worker in loading_workers {
+        if !worker.heartbeat_fresh || !worker.loading {
+            continue;
+        }
+        let Some(lane) = catalog.resolve(&worker.pool, &worker.machine_profile, &worker.bundle)
+        else {
+            continue;
+        };
+        loading_lanes.insert(lane);
+    }
+    complete_lane_snapshot(catalog_lanes, |lane| {
+        if loading_lanes.contains(lane) {
+            1.0
+        } else {
+            0.0
+        }
     })
 }
 
@@ -736,6 +810,7 @@ mod capacity_snapshot_tests {
             &LaneBacklogSnapshot::default(),
             &[],
             Vec::new(),
+            &[],
         )
         .unwrap();
         let expected = vec![
@@ -756,10 +831,159 @@ mod capacity_snapshot_tests {
         assert_eq!(snapshot.pending_demand, expected);
         assert_eq!(snapshot.active_lease_gpus, expected);
         assert_eq!(snapshot.pool_warm_floor, expected);
+        assert_eq!(snapshot.model_loads_in_progress, expected);
         assert!(snapshot.lane_queue_depth.is_empty());
 
         let (_, exported_points) = telemetry::benchmark_keda_capacity_emit_export(&snapshot);
-        assert_eq!(exported_points, catalog.len() * 3);
+        assert_eq!(exported_points, catalog.len() * 4);
+    }
+
+    fn loading_worker(
+        pool: &str,
+        machine_profile: &str,
+        bundle: &str,
+        models: &[&str],
+        fresh: bool,
+    ) -> WorkerLoadingReport {
+        WorkerLoadingReport {
+            pool: pool.to_string(),
+            machine_profile: machine_profile.to_string(),
+            bundle: bundle.to_string(),
+            loading: models.iter().any(|model| !model.trim().is_empty()),
+            heartbeat_fresh: fresh,
+        }
+    }
+
+    #[test]
+    fn loading_models_hold_the_lane_at_one_when_queue_depth_is_zero() {
+        let catalog = lane_catalog(&[("default", "l4", "default"), ("shared", "h100", "sglang")]);
+        let idle = catalog.resolve("default", "l4", "default").unwrap();
+        let backlogs = LaneBacklogSnapshot::from([(idle, 0)]);
+        let snapshot = build_keda_capacity_snapshot(
+            &catalog,
+            &backlogs,
+            &[],
+            Vec::new(),
+            &[
+                loading_worker("DEFAULT", "L4", "DEFAULT", &["org/loading"], true),
+                loading_worker("shared", "h100", "sglang", &[], true),
+                loading_worker("shared", "h100", "sglang", &["   "], true),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.lane_queue_depth[0].value, 0.0);
+        assert_eq!(
+            snapshot.model_loads_in_progress,
+            vec![
+                telemetry::LaneSnapshot {
+                    pool: "default".to_string(),
+                    machine_profile: "l4".to_string(),
+                    bundle: "default".to_string(),
+                    value: 1.0,
+                },
+                telemetry::LaneSnapshot {
+                    pool: "shared".to_string(),
+                    machine_profile: "h100".to_string(),
+                    bundle: "sglang".to_string(),
+                    value: 0.0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn stale_or_absent_workers_emit_explicit_zero_for_model_loads() {
+        let catalog = lane_catalog(&[("default", "l4", "default")]);
+        let expected = vec![telemetry::LaneSnapshot {
+            pool: "default".to_string(),
+            machine_profile: "l4".to_string(),
+            bundle: "default".to_string(),
+            value: 0.0,
+        }];
+        let stale = build_keda_capacity_snapshot(
+            &catalog,
+            &LaneBacklogSnapshot::default(),
+            &[],
+            Vec::new(),
+            &[loading_worker(
+                "default",
+                "l4",
+                "default",
+                &["org/loading"],
+                false,
+            )],
+        )
+        .unwrap();
+        let none = build_keda_capacity_snapshot(
+            &catalog,
+            &LaneBacklogSnapshot::default(),
+            &[],
+            Vec::new(),
+            &[],
+        )
+        .unwrap();
+        let foreign = build_keda_capacity_snapshot(
+            &catalog,
+            &LaneBacklogSnapshot::default(),
+            &[],
+            Vec::new(),
+            &[loading_worker(
+                "attacker",
+                "l4",
+                "default",
+                &["org/loading"],
+                true,
+            )],
+        )
+        .unwrap();
+
+        assert_eq!(stale.model_loads_in_progress, expected);
+        assert_eq!(none.model_loads_in_progress, expected);
+        assert_eq!(foreign.model_loads_in_progress, expected);
+    }
+
+    #[test]
+    fn heartbeat_timeout_marks_a_loading_worker_stale() {
+        let timeout = Duration::from_secs(30);
+        let mut fresh = crate::types::WorkerState {
+            url: "http://fresh".into(),
+            name: "fresh".into(),
+            health: crate::types::WorkerHealth::Healthy,
+            gpu_count: 1,
+            ready_gpu_slots: 1,
+            machine_profile: "l4".into(),
+            bundle: "default".into(),
+            bundle_config_hash: String::new(),
+            supports_execution_authority_v1: false,
+            supports_numerical_admission_v1: false,
+            supports_numerical_admission_subject_v1: false,
+            numerical_process_inventory: None,
+            models: vec![],
+            loading_models: vec!["org/loading".into()],
+            queue_depth: 0,
+            pending_cost: 0,
+            inflight_batches: 0,
+            memory_used_bytes: 0,
+            memory_total_bytes: 0,
+            last_heartbeat: Instant::now(),
+            pool_name: "default".into(),
+            saturated: false,
+            unsupported_models: std::sync::Arc::from([]),
+            unsupported_overflow: false,
+        };
+        let mut stale = fresh.clone();
+        stale.url = "http://stale".into();
+        stale.queue_depth = 40;
+        stale.last_heartbeat = Instant::now()
+            .checked_sub(timeout + Duration::from_secs(1))
+            .unwrap();
+        let reports = worker_loading_reports([&fresh, &stale], timeout);
+        assert!(reports[0].heartbeat_fresh && reports[0].loading);
+        assert!(!reports[1].heartbeat_fresh);
+        fresh.loading_models.clear();
+        let cleared = worker_loading_reports([&fresh], timeout);
+        assert!(!cleared[0].loading);
     }
 
     #[test]
@@ -776,7 +1000,8 @@ mod capacity_snapshot_tests {
             ),
         ]);
 
-        let snapshot = build_keda_capacity_snapshot(&catalog, &backlogs, &[], Vec::new()).unwrap();
+        let snapshot =
+            build_keda_capacity_snapshot(&catalog, &backlogs, &[], Vec::new(), &[]).unwrap();
         assert_eq!(
             snapshot.lane_queue_depth,
             vec![
@@ -804,6 +1029,7 @@ mod capacity_snapshot_tests {
             &LaneBacklogSnapshot::default(),
             &[],
             Vec::new(),
+            &[],
         )
         .unwrap();
         assert!(snapshot.lane_queue_depth.is_empty());
@@ -818,6 +1044,7 @@ mod capacity_snapshot_tests {
             &LaneBacklogSnapshot::default(),
             &[],
             vec![lane],
+            &[],
         )
         .unwrap();
 
@@ -832,7 +1059,7 @@ mod capacity_snapshot_tests {
             PhysicalLane::try_new("attacker", "l4", "default").unwrap(),
             99,
         )]);
-        assert!(build_keda_capacity_snapshot(&catalog, &foreign, &[], Vec::new()).is_err());
+        assert!(build_keda_capacity_snapshot(&catalog, &foreign, &[], Vec::new(), &[]).is_err());
     }
 
     #[test]
@@ -843,7 +1070,8 @@ mod capacity_snapshot_tests {
         let partial = LaneBacklogSnapshot::from([(healthy, 4)]);
 
         let snapshot =
-            build_keda_capacity_snapshot(&catalog, &partial, &[], vec![corrupt.clone()]).unwrap();
+            build_keda_capacity_snapshot(&catalog, &partial, &[], vec![corrupt.clone()], &[])
+                .unwrap();
 
         assert_eq!(
             snapshot.lane_queue_depth,
@@ -929,6 +1157,7 @@ mod capacity_snapshot_tests {
                 black_box(&backlog_view),
                 black_box(&pool_view),
                 black_box(lanes.clone()),
+                black_box(&[]),
             )
             .unwrap();
 
@@ -941,6 +1170,7 @@ mod capacity_snapshot_tests {
                     black_box(&backlog_view),
                     black_box(&pool_view),
                     black_box(lanes.clone()),
+                    black_box(&[]),
                 )
                 .unwrap();
             }
@@ -950,14 +1180,15 @@ mod capacity_snapshot_tests {
         assert_eq!(snapshot.lane_queue_depth.len(), LANES);
         assert_eq!(snapshot.active_lease_gpus.len(), LANES);
         assert_eq!(snapshot.pool_warm_floor.len(), LANES);
+        assert_eq!(snapshot.model_loads_in_progress.len(), LANES);
 
         let mut emit_export_samples = [0.0; SAMPLES];
         for sample in &mut emit_export_samples {
             let (_, warmup_points) = telemetry::benchmark_keda_capacity_emit_export(&snapshot);
-            assert_eq!(warmup_points, LANES * 5);
+            assert_eq!(warmup_points, LANES * 6);
             let (elapsed, exported_points) =
                 telemetry::benchmark_keda_capacity_emit_export(&snapshot);
-            assert_eq!(exported_points, LANES * 5);
+            assert_eq!(exported_points, LANES * 6);
             *sample = elapsed.as_secs_f64() * 1_000.0;
         }
         let build_median_ms = telemetry::telemetry_benchmark_median(build_samples);
@@ -966,7 +1197,7 @@ mod capacity_snapshot_tests {
             "gateway_keda_capacity_build_emit_export lanes={LANES} broker_lane_values={} logical_pools={} samples={SAMPLES} build_iterations_per_sample={BUILD_ITERATIONS} compact_clone_and_build_ms_per_snapshot={build_samples:?} compact_clone_and_build_median_ms_per_snapshot={build_median_ms:.3} emit_and_force_flush_ms={emit_export_samples:?} emit_and_force_flush_median_ms={emit_export_median_ms:.3} exported_points={} lock_wait=excluded allocation_measurement=not_instrumented",
             backlogs.len(),
             pools.len(),
-            LANES * 5,
+            LANES * 6,
         );
     }
 }

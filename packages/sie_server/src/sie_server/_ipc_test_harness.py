@@ -145,6 +145,9 @@ class _StubExecutor:
     def loaded_model_names(self) -> list[str]:
         return []
 
+    def loading_model_names(self) -> list[str]:
+        return []
+
     async def set_pinned_models(self, req: SetPinnedModelsRequest) -> SetPinnedModelsResponse:
         self._pinned_models = frozenset(model.strip() for model in req.models if model.strip())
         return SetPinnedModelsResponse(applied=True, pinned_count=len(self._pinned_models))

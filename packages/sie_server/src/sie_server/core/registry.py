@@ -672,6 +672,11 @@ class ModelRegistry:
         return list(self._loaded.keys())
 
     @property
+    def loading_model_names(self) -> list[str]:
+        """Return model ids whose load is still in ``_loading``."""
+        return list(self._loading)
+
+    @property
     def loaded_model_memory_bytes(self) -> dict[str, int]:
         """Snapshot resident model memory for post-snapshot metric replay."""
         return {name: loaded.memory_bytes for name, loaded in self._loaded.items()}

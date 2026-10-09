@@ -349,6 +349,10 @@ impl WorkerRegistry {
         self.workers.read().await.clone()
     }
 
+    pub fn heartbeat_timeout(&self) -> Duration {
+        self.heartbeat_timeout
+    }
+
     pub async fn healthy_workers(&self) -> Vec<WorkerState> {
         self.snapshot.load().all_healthy.clone()
     }
@@ -374,6 +378,7 @@ impl WorkerRegistry {
                     supports_numerical_admission_subject_v1: false,
                     numerical_process_inventory: None,
                     models: Vec::new(),
+                    loading_models: Vec::new(),
                     queue_depth: 0,
                     pending_cost: 0,
                     inflight_batches: 0,
@@ -433,6 +438,7 @@ impl WorkerRegistry {
             w.machine_profile = msg.machine_profile.clone();
             w.pool_name = msg.pool_name.clone();
             w.models = msg.loaded_models.clone();
+            w.loading_models = msg.loading_models.clone();
 
             // Aggregate queue depth from models (fallback to compact top-level field)
             w.queue_depth = if !msg.models.is_empty() {
@@ -1371,6 +1377,7 @@ mod tests {
             bundle: "default".into(),
             bundle_config_hash: "abc123".into(),
             loaded_models: vec!["BAAI/bge-m3".into()],
+            loading_models: Vec::new(),
             models: vec![ModelStatus { queue_depth: 2 }],
             gpus: vec![GpuStatus {
                 memory_used_bytes: 1000,
@@ -2350,6 +2357,7 @@ mod tests {
             bundle: "default".into(),
             bundle_config_hash: String::new(),
             loaded_models: vec![],
+            loading_models: Vec::new(),
             models: vec![], // empty — should use compact fallback
             gpus: vec![],   // empty — should use compact fallback
             queue_depth: Some(7),
@@ -2390,6 +2398,7 @@ mod tests {
             bundle: "default".into(),
             bundle_config_hash: String::new(),
             loaded_models: vec![],
+            loading_models: Vec::new(),
             models: vec![],
             gpus: vec![],
             queue_depth: None,
@@ -3068,6 +3077,7 @@ mod tests {
             bundle: "default".into(),
             bundle_config_hash: String::new(),
             loaded_models: models.iter().map(|s| (*s).into()).collect(),
+            loading_models: Vec::new(),
             models: vec![],
             gpus: vec![],
             queue_depth: None,

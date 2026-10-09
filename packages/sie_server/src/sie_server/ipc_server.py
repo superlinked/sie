@@ -688,12 +688,18 @@ class IpcServer:
             loaded_models = self._executor.loaded_model_names()
         except Exception:  # noqa: BLE001
             logger.debug("Could not compute loaded_models for ping", exc_info=True)
+        loading_models: list[str] = []
+        try:
+            loading_models = self._executor.loading_model_names()
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not compute loading_models for ping", exc_info=True)
         return PingResponse(
             timestamp_ms=req.timestamp_ms,
             worker_id=self._worker_id,
             ready=ready,
             bundle_config_hash=bundle_config_hash,
             loaded_models=loaded_models,
+            loading_models=loading_models,
         )
 
     async def _handle_ensure_ready(self, req: EnsureModelReadyRequest) -> EnsureModelReadyResponse:

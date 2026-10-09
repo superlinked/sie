@@ -6,7 +6,7 @@
 {{- range $bundleCfg := $pool.bundles -}}
 {{- if dig "enabled" true $bundleCfg -}}
 {{- $expectedScaledObjects = add1 $expectedScaledObjects -}}
-{{- $expectedExternalMetrics = add $expectedExternalMetrics 5 -}}
+{{- $expectedExternalMetrics = add $expectedExternalMetrics 6 -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -59,7 +59,7 @@ rules:
   # populate trigger health even while the HPA is disabled at zero. The
   # aggregated API authorizes an exact-metric response as a namespaced list on
   # its wildcard resource; strict path/catalog validation below narrows use to
-  # the five chart-owned metric names.
+  # the six chart-owned worker metric names, plus the gateway trigger.
   - apiGroups: ["external.metrics.k8s.io"]
     resources: ["*"]
     verbs: ["list"]
@@ -232,9 +232,9 @@ spec:
                   ([.items[].spec.triggers[]] | length == $expected_metrics) and
                   all(.items[];
                     (.metadata.name | dns_label) and
-                    (.spec.triggers | type == "array" and length >= 1 and length <= 5) and
+                    (.spec.triggers | type == "array" and length >= 1 and length <= 6) and
                     all(.spec.triggers | to_entries[];
-                      .key >= 0 and .key <= 4 and .value.type == "prometheus"
+                      .key >= 0 and .key <= 5 and .value.type == "prometheus"
                     )
                   )
                 ' "$SCALEDOBJECTS_FILE" >/dev/null; then

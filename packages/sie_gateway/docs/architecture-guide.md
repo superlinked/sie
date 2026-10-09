@@ -600,10 +600,10 @@ Prometheus client, host an application `/metrics` route, or choose a backend.
 The collector owns Prometheus exposition for OSS/KEDA and OTLP routing for
 remote telemetry. The checked-in source of truth is `telemetry/contract.yaml`.
 
-The gateway contract contains request count/duration/admission, five lane-value
-families (pending demand, durable lane queue depth, active lease GPUs, pool warm
-floor, and scale-worthy rejected requests), a local capacity-reconciliation
-timestamp, and a same-label queue-snapshot timestamp.
+The gateway contract contains request count/duration/admission, six lane-value
+families (pending demand, durable lane queue depth, in-progress model loads,
+active lease GPUs, pool warm floor, and scale-worthy rejected requests), a local
+capacity-reconciliation timestamp, and a same-label queue-snapshot timestamp.
 KEDA state refreshes independently of HTTP at least every five seconds.
 The physical catalog is frozen for the bounded process lifetime; physical lane
 labels are `pool`, `machine_profile`, and `bundle`. For every catalog lane, the gateway reads the
@@ -623,7 +623,14 @@ to a stable offset within the five-second cadence, preventing rollout-aligned
 replicas from scanning in one burst. Helm caps metrics-enabled gateway replicas
 at ten, and the live broker benchmark covers the resulting maximum 10,240
 lookups per interval. Worker identity and heartbeat queue depth never enter
-this KEDA series.
+the queue-depth series. `sie.gateway.model_loads_in_progress` is separate: it
+is 1 when any worker in the catalog lane has a heartbeat inside the normal
+timeout and a non-empty `loading_models` set, and an explicit 0 otherwise,
+including a lane with no live workers. Queue depth is not an input. Generation
+`MODEL_LOADING` deliveries stay acknowledged, so the lane queue can be 0 while
+this gauge holds the replica. A stale worker cannot pin the lane, and the KEDA
+query uses the same capacity-snapshot freshness guard as the other non-queue
+gauges.
 
 Prometheus target labels bind every query to one Helm release; the queue gauge
 is sent to Better Stack under its canonical dotted name and naturally exports

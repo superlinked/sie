@@ -47,7 +47,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use futures_util::StreamExt;
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::{interval, sleep, timeout};
 use tracing::{debug, info, warn};
@@ -456,6 +456,7 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
 
     let config_apply_state = Arc::new(ConfigApplyState::new(config.bundle_config_hash.clone()));
     let loaded_models = config_apply_state.loaded_models();
+    let health_publish_now = Arc::new(Notify::new());
     let batch_cancel_state = BatchCancelState::default();
     let request_cancel_state = RequestCancelState::new(work_cancel_tombstone_ttl());
 
@@ -536,6 +537,7 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
         Arc::clone(&readiness),
         Arc::clone(&config_apply_state),
         Arc::clone(&loaded_models),
+        Arc::clone(&health_publish_now),
         shutdown.clone(),
     );
 
@@ -570,6 +572,8 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
             bundle_config_hash: config_apply_state.bundle_config_hash(),
             unsupported_models: config_apply_state.unsupported_models(),
             loaded_models: Arc::clone(&loaded_models),
+            loading_models: config_apply_state.loading_models(),
+            publish_now: Arc::clone(&health_publish_now),
             numerical_process_inventory,
             execution_authority_v1: worker_pool.execution_authority_v1(),
             numerical_admission_v1: worker_pool.numerical_admission_v1(),
@@ -849,6 +853,7 @@ pub async fn run_local(config: WorkerConfig) -> anyhow::Result<()> {
         ));
     let config_apply_state = Arc::new(ConfigApplyState::new(config.bundle_config_hash.clone()));
     let loaded_models = config_apply_state.loaded_models();
+    let health_publish_now = Arc::new(Notify::new());
     let latency_tracker = Arc::new(Mutex::new(LatencyTracker::new(200, 10)));
 
     let dispatcher = Arc::new(Dispatcher::new(
@@ -879,6 +884,7 @@ pub async fn run_local(config: WorkerConfig) -> anyhow::Result<()> {
         Arc::clone(&readiness),
         Arc::clone(&config_apply_state),
         Arc::clone(&loaded_models),
+        health_publish_now,
         shutdown.clone(),
     );
 
@@ -1520,6 +1526,7 @@ fn spawn_heartbeat(
     readiness: Arc<Readiness>,
     config_apply_state: Arc<ConfigApplyState>,
     loaded_models: crate::health_publisher::SharedLoadedModels,
+    health_publish_now: Arc<Notify>,
     shutdown: Arc<Shutdown>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -1542,11 +1549,27 @@ fn spawn_heartbeat(
                     let ping_results = worker_pool.ping_all(ts).await;
                     let ready_children = worker_pool.ready_child_count();
                     crate::health_publisher::record_runtime_telemetry(&runtime_state);
-                    let successful_ready: Vec<_> = ping_results
+                    let successful: Vec<_> = ping_results
                         .iter()
                         .filter_map(|(_index, result)| result.as_ref().ok())
+                        .collect();
+                    let successful_ready: Vec<_> = successful
+                        .iter()
+                        .copied()
                         .filter(|resp| resp.ready)
                         .collect();
+                    // Any successful ping, ready or not, refreshes the load set.
+                    // A failed ping keeps the previous set; the gateway ages the
+                    // worker out on the normal heartbeat timeout.
+                    if !successful.is_empty() {
+                        let mut merged_loading_models = Vec::new();
+                        for resp in &successful {
+                            merged_loading_models.extend(resp.loading_models.iter().cloned());
+                        }
+                        if config_apply_state.set_loading_models(merged_loading_models) {
+                            health_publish_now.notify_one();
+                        }
+                    }
                     if let Some(resp) = (ready_children > 0).then(|| successful_ready.first()).flatten() {
                         config_apply_state.adopt_backend_hash_if_unset(&resp.bundle_config_hash);
                         let mut merged_loaded_models = Vec::new();

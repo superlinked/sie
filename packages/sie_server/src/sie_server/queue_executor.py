@@ -632,6 +632,10 @@ class QueueExecutor:
         """Return sorted currently loaded model ids for sidecar health heartbeats."""
         return sorted(self._registry.loaded_model_names)
 
+    def loading_model_names(self) -> list[str]:
+        """Return sorted model ids currently in ``_loading`` for health heartbeats."""
+        return sorted(self._registry.loading_model_names)
+
     def invalidate_model_descriptor(self, model_id: str) -> None:
         """Drop the cached descriptor for ``model_id``.
 

@@ -761,6 +761,7 @@ mod route_tests {
             bundle_config_hash: String::new(),
             ready: true,
             loaded_models,
+            loading_models: Vec::new(),
             queue_depth: Some(0),
             pending_cost: None,
             inflight_batches: None,

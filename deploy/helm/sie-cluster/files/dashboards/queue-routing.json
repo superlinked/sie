@@ -1193,6 +1193,11 @@
           "refId": "D"
         },
         {
+          "expr": "max by (pool, machine_profile, bundle) (sie_gateway_model_loads_in_progress{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"})",
+          "legendFormat": "loads in progress {{pool}} / {{machine_profile}} / {{bundle}}",
+          "refId": "G"
+        },
+        {
           "expr": "max by (producer_instance) (sie_gateway_capacity_snapshot_timestamp_seconds{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-gateway\"})",
           "legendFormat": "capacity snapshot {{producer_instance}}",
           "refId": "E"

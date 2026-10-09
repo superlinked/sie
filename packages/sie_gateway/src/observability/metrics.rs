@@ -37,6 +37,7 @@ pub const LANE_QUEUE_SNAPSHOT_TIMESTAMP_METRIC_NAME: &str =
     "sie.gateway.lane.queue.snapshot.timestamp";
 pub const ACTIVE_LEASE_GPUS_METRIC_NAME: &str = "sie.gateway.active_lease.gpus";
 pub const POOL_WARM_FLOOR_METRIC_NAME: &str = "sie.gateway.pool.warm_floor";
+pub const MODEL_LOADS_IN_PROGRESS_METRIC_NAME: &str = "sie.gateway.model_loads_in_progress";
 pub const POOL_PINNED_MODEL_LOADED_METRIC_NAME: &str = "sie.gateway.pool.pinned_model.loaded";
 pub const REJECTED_REQUESTS_METRIC_NAME: &str = "sie.gateway.rejected.requests";
 pub const CAPACITY_SNAPSHOT_TIMESTAMP_METRIC_NAME: &str = "sie.gateway.capacity.snapshot.timestamp";
@@ -760,15 +761,17 @@ pub(crate) struct LaneSnapshot {
 
 /// Gateway-owned KEDA state captured by one business reconciliation.
 ///
-/// The three registry families are complete snapshots. `lane_queue_depth` is
-/// intentionally a set of successful per-lane broker updates: omitted lanes
-/// retain their last value but do not receive a new lane freshness timestamp.
+/// The registry families and `model_loads_in_progress` are complete snapshots.
+/// `lane_queue_depth` is intentionally a set of successful per-lane broker
+/// updates: omitted lanes retain their last value but do not receive a new
+/// lane freshness timestamp.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct KedaCapacitySnapshot {
     pub pending_demand: Vec<LaneSnapshot>,
     pub lane_queue_depth: Vec<LaneSnapshot>,
     pub active_lease_gpus: Vec<LaneSnapshot>,
     pub pool_warm_floor: Vec<LaneSnapshot>,
+    pub model_loads_in_progress: Vec<LaneSnapshot>,
 }
 
 /// One current pinned-model readiness value for a logical pool.
@@ -861,6 +864,7 @@ struct GatewayTelemetry {
     lane_queue_snapshot_timestamp: Gauge<f64>,
     active_lease_gpus: Gauge<f64>,
     pool_warm_floor: Gauge<f64>,
+    model_loads_in_progress: Gauge<f64>,
     #[allow(dead_code)] // Retains the observable callback registration.
     pool_pinned_model_loaded: ObservableGauge<u64>,
     rejected_requests: Counter<u64>,
@@ -903,6 +907,7 @@ struct GatewayTelemetry {
     previous_pending_lanes: Mutex<HashSet<LaneKey>>,
     previous_lease_lanes: Mutex<HashSet<LaneKey>>,
     previous_warm_floor_lanes: Mutex<HashSet<LaneKey>>,
+    previous_model_load_lanes: Mutex<HashSet<LaneKey>>,
     pinned_model_state: Arc<Mutex<PinnedModelObservableState>>,
 }
 
@@ -986,6 +991,13 @@ impl GatewayTelemetry {
                 .f64_gauge(POOL_WARM_FLOOR_METRIC_NAME)
                 .with_description("Configured minimum warm workers for one physical lane.")
                 .with_unit("{worker}")
+                .build(),
+            model_loads_in_progress: meter
+                .f64_gauge(MODEL_LOADS_IN_PROGRESS_METRIC_NAME)
+                .with_description(
+                    "Whether a fresh worker in the physical lane is loading a model. Queue depth is not an input.",
+                )
+                .with_unit("1")
                 .build(),
             pool_pinned_model_loaded: meter
                 .u64_observable_gauge(POOL_PINNED_MODEL_LOADED_METRIC_NAME)
@@ -1232,6 +1244,7 @@ impl GatewayTelemetry {
             previous_pending_lanes: Mutex::new(HashSet::new()),
             previous_lease_lanes: Mutex::new(HashSet::new()),
             previous_warm_floor_lanes: Mutex::new(HashSet::new()),
+            previous_model_load_lanes: Mutex::new(HashSet::new()),
             pinned_model_state,
         }
     }
@@ -1526,6 +1539,14 @@ impl GatewayTelemetry {
         );
     }
 
+    fn set_model_loads_in_progress_snapshot(&self, values: &[LaneSnapshot]) {
+        set_lane_snapshot(
+            &self.model_loads_in_progress,
+            &self.previous_model_load_lanes,
+            values,
+        );
+    }
+
     fn set_pool_pinned_model_loaded_snapshot(&self, values: &[PinnedModelSnapshot]) {
         let current_values: HashMap<PinnedModelKey, bool> = values
             .iter()
@@ -1588,6 +1609,7 @@ trait KedaSnapshotSink {
     fn record_lane_queue_timestamp(&self, values: &[LaneSnapshot], unix_time_s: f64);
     fn record_active_lease_gpus(&self, values: &[LaneSnapshot]);
     fn record_pool_warm_floor(&self, values: &[LaneSnapshot]);
+    fn record_model_loads_in_progress(&self, values: &[LaneSnapshot]);
     fn record_timestamp(&self, unix_time_s: f64);
 }
 
@@ -1610,6 +1632,10 @@ impl KedaSnapshotSink for GatewayTelemetry {
 
     fn record_pool_warm_floor(&self, values: &[LaneSnapshot]) {
         self.set_pool_warm_floor_snapshot(values);
+    }
+
+    fn record_model_loads_in_progress(&self, values: &[LaneSnapshot]) {
+        self.set_model_loads_in_progress_snapshot(values);
     }
 
     fn record_timestamp(&self, unix_time_s: f64) {
@@ -2332,6 +2358,7 @@ fn record_keda_capacity_snapshot_to(
     target.record_lane_queue_timestamp(&snapshot.lane_queue_depth, unix_time_s);
     target.record_active_lease_gpus(&snapshot.active_lease_gpus);
     target.record_pool_warm_floor(&snapshot.pool_warm_floor);
+    target.record_model_loads_in_progress(&snapshot.model_loads_in_progress);
     target.record_timestamp(unix_time_s);
     true
 }
@@ -2340,7 +2367,7 @@ fn record_keda_capacity_snapshot_to(
 /// `snapshot_started_unix_time_s` before async state collection; this facade
 /// records it after all state values so a slow build ages out rather than
 /// refreshing stale capacity. Synchronous OTel gauge collection is not claimed
-/// to be export-atomic across the five instruments.
+/// to be export-atomic across the instruments.
 pub(crate) fn record_keda_capacity_snapshot(
     snapshot: &KedaCapacitySnapshot,
     snapshot_started_unix_time_s: f64,
@@ -2405,6 +2432,7 @@ pub(crate) fn benchmark_keda_capacity_emit_export(
                     | LANE_QUEUE_SNAPSHOT_TIMESTAMP_METRIC_NAME
                     | ACTIVE_LEASE_GPUS_METRIC_NAME
                     | POOL_WARM_FLOOR_METRIC_NAME
+                    | MODEL_LOADS_IN_PROGRESS_METRIC_NAME
             )
         })
         .map(|metric| match metric.data() {
@@ -3824,6 +3852,7 @@ mod tests {
             lane_queue_depth: vec![lane(3.0)],
             active_lease_gpus: vec![lane(1.0)],
             pool_warm_floor: vec![lane(2.0)],
+            model_loads_in_progress: vec![lane(1.0)],
         };
         assert!(record_keda_capacity_snapshot_to(
             Some(&telemetry),
@@ -3860,6 +3889,7 @@ mod tests {
                 LANE_QUEUE_SNAPSHOT_TIMESTAMP_METRIC_NAME.to_string(),
                 ACTIVE_LEASE_GPUS_METRIC_NAME.to_string(),
                 POOL_WARM_FLOOR_METRIC_NAME.to_string(),
+                MODEL_LOADS_IN_PROGRESS_METRIC_NAME.to_string(),
                 REJECTED_REQUESTS_METRIC_NAME.to_string(),
                 CAPACITY_SNAPSHOT_TIMESTAMP_METRIC_NAME.to_string(),
             ])
@@ -3878,6 +3908,7 @@ mod tests {
             (LANE_QUEUE_SNAPSHOT_TIMESTAMP_METRIC_NAME, "s"),
             (ACTIVE_LEASE_GPUS_METRIC_NAME, "{gpu}"),
             (POOL_WARM_FLOOR_METRIC_NAME, "{worker}"),
+            (MODEL_LOADS_IN_PROGRESS_METRIC_NAME, "1"),
             (REJECTED_REQUESTS_METRIC_NAME, "{request}"),
             (CAPACITY_SNAPSHOT_TIMESTAMP_METRIC_NAME, "s"),
         ] {
@@ -3941,6 +3972,7 @@ mod tests {
             PENDING_DEMAND_METRIC_NAME,
             ACTIVE_LEASE_GPUS_METRIC_NAME,
             POOL_WARM_FLOOR_METRIC_NAME,
+            MODEL_LOADS_IN_PROGRESS_METRIC_NAME,
         ] {
             let metric = by_name[name];
             let AggregatedMetrics::F64(MetricData::Gauge(gauge)) = metric.data() else {
@@ -4145,7 +4177,8 @@ mod tests {
             pending_demand: lanes.clone(),
             lane_queue_depth: lanes.clone(),
             active_lease_gpus: lanes.clone(),
-            pool_warm_floor: lanes,
+            pool_warm_floor: lanes.clone(),
+            model_loads_in_progress: lanes,
         };
 
         assert!(record_keda_capacity_snapshot_to(
@@ -4162,6 +4195,7 @@ mod tests {
             LANE_QUEUE_SNAPSHOT_TIMESTAMP_METRIC_NAME,
             ACTIVE_LEASE_GPUS_METRIC_NAME,
             POOL_WARM_FLOOR_METRIC_NAME,
+            MODEL_LOADS_IN_PROGRESS_METRIC_NAME,
         ] {
             let metric = resource_metrics
                 .iter()
@@ -4312,13 +4346,17 @@ mod tests {
             self.push("pool_warm_floor");
         }
 
+        fn record_model_loads_in_progress(&self, _values: &[LaneSnapshot]) {
+            self.push("model_loads_in_progress");
+        }
+
         fn record_timestamp(&self, _unix_time_s: f64) {
             self.push("timestamp");
         }
     }
 
     #[test]
-    fn capacity_timestamp_is_recorded_after_all_four_state_families() {
+    fn capacity_timestamp_is_recorded_after_the_state_families() {
         let sink = RecordingKedaSink::default();
         assert!(record_keda_capacity_snapshot_to(
             Some(&sink),
@@ -4336,6 +4374,7 @@ mod tests {
                 "lane_queue_timestamp",
                 "active_lease_gpus",
                 "pool_warm_floor",
+                "model_loads_in_progress",
                 "timestamp",
             ]
         );
@@ -4445,7 +4484,8 @@ mod tests {
             pending_demand: lanes.clone(),
             lane_queue_depth: lanes.clone(),
             active_lease_gpus: lanes.clone(),
-            pool_warm_floor: lanes,
+            pool_warm_floor: lanes.clone(),
+            model_loads_in_progress: lanes,
         };
         let (telemetry, _exporter, provider) = metric_points();
 
@@ -4488,7 +4528,7 @@ mod tests {
         println!(
             "gateway_keda_capacity_emit lanes={} gauge_points_per_emit={} samples={SAMPLES} disabled_public_ns_per_emit={disabled_samples:?} disabled_median_ns_per_emit={disabled_median_ns:.2} enabled_instrumented_ms_per_emit={enabled_samples:?} enabled_median_ms_per_emit={enabled_median_ms:.3} snapshot_build=excluded exporter_flush=excluded allocation_measurement=not_instrumented",
             crate::state::demand_tracker::MAX_CONFIGURED_PHYSICAL_LANES,
-            crate::state::demand_tracker::MAX_CONFIGURED_PHYSICAL_LANES * 4,
+            crate::state::demand_tracker::MAX_CONFIGURED_PHYSICAL_LANES * 5,
         );
         let disabled_budget = telemetry_performance_budget("gateway_keda_disabled_ns_per_snapshot");
         assert!(
