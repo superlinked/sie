@@ -1515,8 +1515,8 @@ fn request_id_from_cancel_subject(subject: &str) -> Option<String> {
 }
 
 /// Gateway `WorkerRegistry` heartbeat timeout (`packages/sie_gateway/src/main.rs`).
-/// Health publication continues while IPC pings fail, so a loading set older
-/// than this is cleared instead of holding the lane until liveness restarts it.
+/// Health publication continues while IPC pings fail, so a child's loading list
+/// older than this is cleared instead of holding the lane until liveness restarts it.
 const GATEWAY_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Published in-progress loads after one IPC ping round.
@@ -1526,26 +1526,144 @@ enum LoadingSetUpdate {
     Keep,
 }
 
-/// A successful round replaces the set from those responses, including an
-/// empty one. A round where every ping fails keeps the previous set until
-/// `last_success_age` is older than the gateway heartbeat timeout.
+/// Last loading list from one adapter child, and when that child last reported it.
+#[derive(Clone, Debug)]
+struct ChildLoadingMemory {
+    models: Vec<String>,
+    reported_at: Instant,
+}
+
+/// Last successful loading report from one adapter child, aged at decision time.
+/// An age equal to the heartbeat timeout is still fresh; only an older report expires.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ChildLoadingSnapshot {
+    models: Vec<String>,
+    age: Duration,
+}
+
+/// One child's ping in this round.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ChildPingRound {
+    /// The child responded. An empty list clears only this child.
+    Reported(Vec<String>),
+    /// The ping failed. `None` means this child has never reported.
+    Failed(Option<ChildLoadingSnapshot>),
+}
+
+fn loading_report_expired(age: Duration, heartbeat_timeout: Duration) -> bool {
+    age > heartbeat_timeout
+}
+
+/// Models this child still contributes. A report replaces only that child's
+/// list, including when the list is empty. A failed ping contributes the stored
+/// list until that child's own report expires.
+fn retained_loading_models(
+    round: &ChildPingRound,
+    heartbeat_timeout: Duration,
+) -> Option<&[String]> {
+    match round {
+        ChildPingRound::Reported(models) => Some(models.as_slice()),
+        ChildPingRound::Failed(Some(snapshot))
+            if !loading_report_expired(snapshot.age, heartbeat_timeout) =>
+        {
+            Some(snapshot.models.as_slice())
+        }
+        ChildPingRound::Failed(_) => None,
+    }
+}
+
+/// Merge per-child loading reports.
+///
+/// Another child's success does not clear a child whose ping failed. A round
+/// where every ping fails keeps each unexpired list (`Keep` when nothing
+/// expired). A stored report older than `heartbeat_timeout` is dropped on its
+/// own clock, including when some other child answered.
 fn loading_set_after_ping_round(
-    successful_loading_models: Option<&[&[String]]>,
-    last_success_age: Option<Duration>,
+    children: &[ChildPingRound],
     heartbeat_timeout: Duration,
 ) -> LoadingSetUpdate {
-    if let Some(responses) = successful_loading_models {
-        let mut merged = Vec::new();
-        for models in responses {
+    let every_ping_failed = children
+        .iter()
+        .all(|child| matches!(child, ChildPingRound::Failed(_)));
+    let any_expired = children.iter().any(|child| {
+        matches!(
+            child,
+            ChildPingRound::Failed(Some(snapshot))
+                if loading_report_expired(snapshot.age, heartbeat_timeout)
+        )
+    });
+    if every_ping_failed && !any_expired {
+        return LoadingSetUpdate::Keep;
+    }
+    let mut merged = Vec::new();
+    for child in children {
+        if let Some(models) = retained_loading_models(child, heartbeat_timeout) {
             merged.extend(models.iter().cloned());
         }
-        return LoadingSetUpdate::Replace(merged);
     }
-    if last_success_age.is_some_and(|age| age > heartbeat_timeout) {
-        LoadingSetUpdate::Replace(Vec::new())
-    } else {
-        LoadingSetUpdate::Keep
+    LoadingSetUpdate::Replace(merged)
+}
+
+fn store_child_loading_report(
+    memory: &mut Option<ChildLoadingMemory>,
+    round: &ChildPingRound,
+    now: Instant,
+    heartbeat_timeout: Duration,
+) {
+    match round {
+        ChildPingRound::Reported(models) => {
+            *memory = Some(ChildLoadingMemory {
+                models: models.clone(),
+                reported_at: now,
+            });
+        }
+        ChildPingRound::Failed(_) => {
+            if retained_loading_models(round, heartbeat_timeout).is_none() {
+                *memory = None;
+            }
+        }
     }
+}
+
+/// Record this round's per-child reports and return the set to publish.
+/// A missing ping result is a failure for that child and keeps its stored list
+/// until that list's own age exceeds `heartbeat_timeout`.
+fn apply_loading_ping_round<E>(
+    child_count: usize,
+    ping_results: &[(usize, Result<crate::ipc_types::PingResponse, E>)],
+    memory: &mut Vec<Option<ChildLoadingMemory>>,
+    now: Instant,
+    heartbeat_timeout: Duration,
+) -> LoadingSetUpdate {
+    if memory.len() < child_count {
+        memory.resize_with(child_count, || None);
+    }
+    let mut reported: Vec<Option<Vec<String>>> = vec![None; child_count];
+    for (index, result) in ping_results {
+        if let Some(slot) = reported.get_mut(*index) {
+            *slot = result
+                .as_ref()
+                .ok()
+                .map(|response| response.loading_models.clone());
+        }
+    }
+    let mut rounds = Vec::with_capacity(child_count);
+    for (index, reported_models) in reported.into_iter().enumerate() {
+        rounds.push(match reported_models {
+            Some(models) => ChildPingRound::Reported(models),
+            None => {
+                ChildPingRound::Failed(memory[index].as_ref().map(|stored| ChildLoadingSnapshot {
+                    models: stored.models.clone(),
+                    age: now.saturating_duration_since(stored.reported_at),
+                }))
+            }
+        });
+    }
+    let update = loading_set_after_ping_round(&rounds, heartbeat_timeout);
+    for (index, round) in rounds.iter().enumerate() {
+        store_child_loading_report(&mut memory[index], round, now, heartbeat_timeout);
+    }
+    update
 }
 
 /// Ping every adapter IPC server on a ticker. A failure is logged but
@@ -1553,6 +1671,7 @@ fn loading_set_after_ping_round(
 /// EnsureModelReady / Process* errors.
 ///
 /// Each successful ready ping refreshes the [`Readiness`] heartbeat timestamp.
+#[allow(clippy::too_many_arguments)] // each arg is a distinct dependency
 fn spawn_heartbeat(
     worker_pool: Arc<AdapterWorkerPool>,
     runtime_state: Arc<RuntimeState>,
@@ -1570,7 +1689,7 @@ fn spawn_heartbeat(
         // (0 -> 1 "heartbeat broke", N -> 0 "heartbeat recovered")
         // without spamming once per tick while the backend is down.
         let mut consecutive_failures: u64 = 0;
-        let mut last_loading_ping: Option<Instant> = None;
+        let mut last_loading_by_child: Vec<Option<ChildLoadingMemory>> = Vec::new();
         loop {
             let wait = shutdown.wait();
             tokio::select! {
@@ -1593,22 +1712,19 @@ fn spawn_heartbeat(
                         .copied()
                         .filter(|resp| resp.ready)
                         .collect();
-                    // Any successful ping, ready or not, refreshes the load set.
-                    // Every ping failing keeps the previous set until that
-                    // success is older than the gateway heartbeat timeout.
-                    // Heartbeats continue, so the gateway would not age it out.
-                    let lists: Vec<&[String]> = successful
-                        .iter()
-                        .map(|resp| resp.loading_models.as_slice())
-                        .collect();
-                    let update = loading_set_after_ping_round(
-                        (!lists.is_empty()).then_some(lists.as_slice()),
-                        last_loading_ping.map(|at| at.elapsed()),
+                    // A child's list is replaced only when that child responds,
+                    // including with an empty list. A failed ping keeps that
+                    // child's list until its own report is older than the
+                    // gateway heartbeat timeout. Another child's success must
+                    // not clear it. Heartbeats continue, so the gateway would
+                    // not age the lane out on its own.
+                    let update = apply_loading_ping_round(
+                        worker_pool.child_count(),
+                        &ping_results,
+                        &mut last_loading_by_child,
+                        Instant::now(),
                         GATEWAY_HEARTBEAT_TIMEOUT,
                     );
-                    if !lists.is_empty() {
-                        last_loading_ping = Some(Instant::now());
-                    }
                     if let LoadingSetUpdate::Replace(models) = update {
                         if config_apply_state.set_loading_models(models) {
                             health_publish_now.notify_one();
@@ -2015,6 +2131,10 @@ async fn run_pull_loop(
 mod tests {
     use super::*;
 
+    fn failed_at(models: Vec<String>, age: Duration) -> ChildPingRound {
+        ChildPingRound::Failed(Some(ChildLoadingSnapshot { models, age }))
+    }
+
     #[test]
     fn failed_ping_round_keeps_loading_models_until_heartbeat_timeout() {
         let timeout = GATEWAY_HEARTBEAT_TIMEOUT;
@@ -2022,32 +2142,78 @@ mod tests {
         let other = vec!["org/other".to_string()];
         assert_eq!(
             loading_set_after_ping_round(
-                Some(&[loading.as_slice(), other.as_slice()]),
-                Some(timeout + Duration::from_secs(1)),
+                &[
+                    ChildPingRound::Reported(loading.clone()),
+                    ChildPingRound::Reported(other.clone()),
+                ],
                 timeout,
             ),
             LoadingSetUpdate::Replace(vec!["org/loading".into(), "org/other".into()])
         );
-        let empty: &[String] = &[];
         assert_eq!(
-            loading_set_after_ping_round(Some(&[empty]), Some(Duration::from_millis(1)), timeout),
+            loading_set_after_ping_round(&[ChildPingRound::Reported(Vec::new())], timeout),
             LoadingSetUpdate::Replace(vec![])
         );
         assert_eq!(
-            loading_set_after_ping_round(None, Some(timeout), timeout),
+            loading_set_after_ping_round(&[failed_at(loading.clone(), timeout)], timeout),
             LoadingSetUpdate::Keep
         );
         assert_eq!(
-            loading_set_after_ping_round(None, Some(Duration::from_secs(1)), timeout),
+            loading_set_after_ping_round(
+                &[failed_at(loading.clone(), Duration::from_secs(1))],
+                timeout,
+            ),
             LoadingSetUpdate::Keep
         );
         assert_eq!(
-            loading_set_after_ping_round(None, None, timeout),
+            loading_set_after_ping_round(&[ChildPingRound::Failed(None)], timeout),
             LoadingSetUpdate::Keep
         );
         assert_eq!(
-            loading_set_after_ping_round(None, Some(timeout + Duration::from_nanos(1)), timeout),
+            loading_set_after_ping_round(
+                &[failed_at(
+                    loading.clone(),
+                    timeout + Duration::from_nanos(1)
+                )],
+                timeout,
+            ),
             LoadingSetUpdate::Replace(vec![])
+        );
+        assert_eq!(
+            loading_set_after_ping_round(
+                &[
+                    failed_at(loading, Duration::from_secs(1)),
+                    failed_at(other, timeout + Duration::from_nanos(1)),
+                ],
+                timeout,
+            ),
+            LoadingSetUpdate::Replace(vec!["org/loading".into()])
+        );
+    }
+
+    #[test]
+    fn sibling_ping_does_not_clear_a_child_whose_ping_failed() {
+        let timeout = GATEWAY_HEARTBEAT_TIMEOUT;
+        let loading = vec!["org/loading".to_string()];
+        assert_eq!(
+            loading_set_after_ping_round(
+                &[
+                    failed_at(loading.clone(), Duration::from_secs(1)),
+                    ChildPingRound::Reported(Vec::new()),
+                ],
+                timeout,
+            ),
+            LoadingSetUpdate::Replace(loading.clone())
+        );
+        assert_eq!(
+            loading_set_after_ping_round(
+                &[
+                    failed_at(loading, timeout + Duration::from_nanos(1)),
+                    ChildPingRound::Reported(Vec::new()),
+                ],
+                timeout,
+            ),
+            LoadingSetUpdate::Replace(Vec::new())
         );
     }
 
