@@ -52,7 +52,7 @@ Two model additions drive the pipeline:
 ### 1. Build a custom sie-server image
 
 Everything the pipeline needs on the server side is packaged in
-[`server-plugin/`](./server-plugin): the patch, the adapter, the YAMLs.
+[`server-plugin/`](./server-plugin): the custom adapter and the model YAMLs.
 
 ```bash
 # From this directory
@@ -109,7 +109,6 @@ regulatory-rag/
 └── server-plugin/
     ├── README.md            # What the plugin does, how to extend it
     ├── Dockerfile           # Builds sie-server with the extensions baked in
-    ├── encode_lora_routing.patch
     ├── adapters/
     │   └── stablebridge_pruner/
     │       └── __init__.py  # Custom ModelAdapter, 659 lines
