@@ -38,9 +38,6 @@ export async function runPipeline({
     data: { extractor: nerModel, recognition: recognitionModel, structured: structuredModel },
   });
 
-  // Recognition. Empty when the running image cannot serve these models
-  // (the CPU default bundle). Skipping keeps Donut runnable there. NER still
-  // sees only real recognition text, not the placeholder.
   let markdown = "";
   let recognitionMs = 0;
   if (recognitionModel) {
@@ -61,9 +58,7 @@ export async function runPipeline({
   emit({
     type: "recognition_done",
     data: {
-      markdown: recognitionModel
-        ? markdown
-        : "Recognition models load on the GPU sglang-vision-extract image, not on this server.",
+      markdown: recognitionModel ? markdown : "No recognition model selected.",
       ms: recognitionMs,
     },
   });
@@ -87,7 +82,6 @@ export async function runPipeline({
   }
   emit({ type: "donut_done", data: { entities: donut.entities, rawData: donut.data, ms: donutMs } });
 
-  // NER (GLiNER variants). Needs recognition text, which only the GPU image produces.
   let fields: { label: string; text: string; score: number }[] = [];
   let glinerMs = 0;
   if (nerModel) {

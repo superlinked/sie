@@ -25,7 +25,7 @@ let donutBuf = { entities: [], data: null };
 let glinerBuf = [];
 let modelConfig = null;
 let registeredSet = new Set();
-let cudaAvailable = false;
+let cudaAvailable = null;
 let availabilityUnavailable = false;
 
 function setBadge(text, cls) {
@@ -97,7 +97,7 @@ function updateSnippets() {
 
 function clearAvailability() {
   registeredSet = new Set();
-  cudaAvailable = false;
+  cudaAvailable = null;
   availabilityUnavailable = true;
 }
 
@@ -105,9 +105,9 @@ function optionAvailable(opt) {
   if (availabilityUnavailable) {
     return { inCatalog: false, blockedByCuda: false, available: false };
   }
-  const serverKnown = registeredSet.size > 0 || cudaAvailable;
+  const serverKnown = registeredSet.size > 0 || cudaAvailable === true;
   const inCatalog = !serverKnown || registeredSet.has(opt.id);
-  const blockedByCuda = opt.gpuRequired && serverKnown && !cudaAvailable;
+  const blockedByCuda = Boolean(opt.gpuRequired) && cudaAvailable === false;
   return { inCatalog, blockedByCuda, available: inCatalog && !blockedByCuda };
 }
 
@@ -225,7 +225,7 @@ async function syncAvailability() {
       return false;
     }
     registeredSet = new Set(j.registered ?? []);
-    cudaAvailable = !!j.cuda;
+    cudaAvailable = j.cuda === true ? true : j.cuda === false ? false : null;
     availabilityUnavailable = false;
     els.sieState.textContent = `SIE healthy · ${j.registeredModels} models registered`;
     return true;

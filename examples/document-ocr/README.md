@@ -6,9 +6,9 @@ Three different model architectures, one SDK call. This demo is a working
 browser UI that runs document images through a recognition model, a
 fine-tuned document model, and a zero-shot NER, all behind the same
 `client.extract(...)` API. Pick a model from any of the three dropdowns; watch
-the pipeline run again with that one identifier swapped. Recognition and the
-Donut/GLiNER stages do not share an image: their adapters live in different
-bundles, so the two compose files start different SIE images.
+the pipeline run again with that one identifier swapped. The CPU compose
+serves all three stages from the default image. The GPU compose is a separate
+recognition path for LightOnOCR and GLM-OCR.
 
 <!-- Drop screenshots or a GIF here. Suggested:
      docs/cover.png  (the browser UI mid-run)
@@ -26,9 +26,10 @@ bundles, so the two compose files start different SIE images.
 
 OCR is almost never a single-model problem. A real pipeline has three concerns:
 
-1. **Recognition** (image to text). VLM-OCRs such as LightOnOCR, GLM-OCR, and
-   PaddleOCR-VL take a whole document and emit Markdown. They load on the GPU
-   image only.
+1. **Recognition** (image to text). VLM-OCRs such as PaddleOCR-VL, LightOnOCR,
+   and GLM-OCR take a whole document and emit Markdown. The CPU default image
+   preloads PaddleOCR-VL-1.5's `transformers` profile. LightOnOCR and GLM-OCR
+   stay on the GPU sglang-vision image.
 2. **Structured extraction** (image to JSON). End-to-end document models like
    Donut on CORD skip the text intermediate entirely and emit nested JSON
    directly: `{ "total": { "total_price": "28.52" }, ... }`.
@@ -38,15 +39,16 @@ OCR is almost never a single-model problem. A real pipeline has three concerns:
 
 The SIE pitch this demo makes visceral: **all three are the same SDK call,
 the same auth, the same rate-limit budget.** Only the model ID changes.
-One image does not serve Donut and LightOnOCR together. Donut and GLiNER
-load on the CPU `default` bundle; LightOnOCR, GLM-OCR, and PaddleOCR-VL load
-on the GPU `sglang-vision-extract` bundle.
+The CPU image (`latest-cpu-default`) serves PaddleOCR-VL, Donut, and GLiNER
+together. LightOnOCR and GLM-OCR need the GPU `sglang-vision-extract` image,
+which does not serve Donut or GLiNER.
 
 ```python
-# Recognition: VLM-OCR, returns Markdown
+# Recognition on the CPU default image: transformers profile, returns Markdown
 client.extract(
-    "lightonai/LightOnOCR-2-1B",
+    "PaddlePaddle/PaddleOCR-VL-1.5:transformers",
     Item(images=[image_bytes]),
+    options={"task": "ocr"},
 )
 
 # Structured: end-to-end Donut, returns JSON tree
@@ -63,8 +65,9 @@ client.extract(
 )
 ```
 
-The first call needs the GPU compose (`latest-cuda12-sglang-vision-extract`).
-The Donut and GLiNER calls need the CPU compose (`latest-cpu-default`).
+Those three calls run on the CPU compose (`latest-cpu-default`). LightOnOCR
+(`lightonai/LightOnOCR-2-1B`) and GLM-OCR need the GPU compose
+(`latest-cuda12-sglang-vision-extract`).
 
 Each cell in the demo's UI has a **"See the SIE call"** disclosure that shows
 the exact line of code that just ran. Swap a dropdown, the snippet updates with
@@ -88,10 +91,11 @@ npm start
 ```
 
 `npm start` runs `docker compose up -d` (boots `ghcr.io/superlinked/sie-server:latest-cpu-default`,
-preloads Donut on CORD, Donut on DocVQA, and `urchade/gliner_multi-v2.1`), then starts a Node UI
-server and opens http://localhost:3032. It does not preload LightOnOCR, GLM-OCR, or PaddleOCR-VL.
+preloads `PaddlePaddle/PaddleOCR-VL-1.5:transformers`, Donut on CORD, Donut on DocVQA, and
+`urchade/gliner_multi-v2.1`), then starts a Node UI server and opens http://localhost:3032.
+It does not preload LightOnOCR or GLM-OCR.
 
-- **First start**: the image downloads the Donut and GLiNER weights from Hugging Face into a Docker volume.
+- **First start**: the image downloads the PaddleOCR-VL, Donut, and GLiNER weights from Hugging Face into a Docker volume.
 - **Subsequent restarts**: weights are cached in `/app/.cache/huggingface` inside the `sie-cache` Docker volume.
 - **Apple Silicon**: the image is `linux/amd64` and runs through Rosetta, so calls are slower than on native x86_64.
 
@@ -99,7 +103,7 @@ server and opens http://localhost:3032. It does not preload LightOnOCR, GLM-OCR,
 docker compose down   # when done
 ```
 
-**GPU variant** (Linux + NVIDIA). Preloads only LightOnOCR-2-1B, the recognition default. GLM-OCR and PaddleOCR-VL-1.5 stay selectable in the UI and load on demand; they are not preloaded together because they do not fit on one GPU with LightOnOCR. This image does not serve Donut or GLiNER.
+**GPU variant** (Linux + NVIDIA). Preloads only LightOnOCR-2-1B. GLM-OCR stays selectable and loads on demand; it is not preloaded with LightOnOCR because the two do not fit on one GPU. This image does not serve Donut, GLiNER, or the PaddleOCR-VL transformers profile.
 
 ```bash
 npm run start:gpu     # uses compose.gpu.yml + latest-cuda12-sglang-vision-extract
@@ -113,26 +117,24 @@ The UI itself surfaces these as a "Try these moments" strip above the panels,
 so a visitor sees the prompts even without reading the README. The same four
 moments, with a little more context:
 
-1. **On the CPU compose, click any sample → open the "See the SIE call"
-   disclosure under "Structured".** You'll see `client.extract(...)` with
-   the Donut CORD model id. Recognition stays disabled: those models are
-   not on this image.
+1. **On the CPU compose, click any sample.** Recognition, structured
+   extraction, and NER all run. Open the Recognition disclosure: the call
+   uses `PaddlePaddle/PaddleOCR-VL-1.5:transformers`. The Structured
+   disclosure uses the Donut CORD model id.
 2. **Switch the Structured dropdown** from `donut-cord-v2` to
    `donut-docvqa`. Same Donut architecture, different fine-tuning. The
    output shape changes from a CORD-shaped JSON tree to a DocVQA answer.
    Same model class, same SDK call, different output.
 3. **Switch the NER dropdown** from `gliner_multi-v2.1` to `NuNER_Zero`
    on the CPU image. Different model family (NuMind vs urchade), same SDK
-   call, same labels. NER reads recognition Markdown, and this image has
-   no recognition model, so the NER panel stays empty until you point the
-   UI at text from the GPU image.
+   call, same labels, same recognition Markdown from this image.
 4. **On the GPU compose, open the Recognition disclosure.** The call uses
-   `lightonai/LightOnOCR-2-1B` unless you switch to GLM-OCR or
-   PaddleOCR-VL-1.5. Those two stay in the dropdown and load on demand; they
-   are not preloaded together because they do not fit on one GPU with
-   LightOnOCR. Donut and GLiNER are not registered on that image.
-   Compare `receipt.png` with `letter.png` on the CPU image instead: Donut
-   on CORD fits the receipt and emits a CORD-shaped tree for the letter too.
+   `lightonai/LightOnOCR-2-1B` unless you switch to GLM-OCR. GLM-OCR stays
+   in the dropdown and loads on demand; it is not preloaded with LightOnOCR
+   because the two do not fit on one GPU. Donut, GLiNER, and the PaddleOCR-VL
+   transformers profile are not registered on that image. Compare
+   `receipt.png` with `letter.png` on the CPU image instead: Donut on CORD
+   fits the receipt and emits a CORD-shaped tree for the letter too.
 
 Each of these illustrates a concrete SIE pitch: model swap, output-shape
 swap, quality swap, document-type fit.
@@ -179,7 +181,7 @@ SIE collapses that into one process:
                                  │
                   ┌──────────────▼──────────────┐
                   │   client.extract(model_id)  │
-                  │   (two images, one call)    │
+                  │   (one CPU image, one call) │
                   └──┬───────────┬───────────┬──┘
                      │           │           │
               ┌──────▼──┐  ┌─────▼─────┐  ┌──▼──────┐
@@ -191,29 +193,33 @@ SIE collapses that into one process:
 
 The Node server in `web/server.ts` chains the calls the running image can
 serve and streams progress via Server-Sent Events. The browser renders each
-panel as the corresponding event lands. VLM-OCR is the GPU image; Donut and
-GLiNER are the CPU image.
+panel as the corresponding event lands. The CPU image runs PaddleOCR-VL,
+Donut, and GLiNER. The GPU image runs LightOnOCR and GLM-OCR.
 
 ---
 
 ## Model lineup
 
 The dropdowns expose nine models across three categories. The UI disables
-anything the running server's `/v1/models` catalog does not list, and it
-disables recognition models on the CPU compose (`gpuRequired`). No single
-image serves both columns.
+anything the running server's `/v1/models` catalog does not list. A
+`gpuRequired` model is disabled only when that response positively reports
+that CUDA is unavailable — `/v1/models` has no device field, so an unknown
+device does not hide LightOnOCR on the GPU compose. The CPU image serves
+recognition, structured extraction, and NER. The GPU image serves the two
+sglang recognition models and not the other stages.
 
 | Stage | CPU compose `latest-cpu-default` | GPU compose `latest-cuda12-sglang-vision-extract` |
 |---|---|---|
-| Recognition | not served (dropdown disabled) | preloaded: `lightonai/LightOnOCR-2-1B`. On demand, not preloaded together (they do not fit on one GPU with LightOnOCR): `zai-org/GLM-OCR`, `PaddlePaddle/PaddleOCR-VL-1.5` |
+| Recognition | preloaded: `PaddlePaddle/PaddleOCR-VL-1.5:transformers` | preloaded: `lightonai/LightOnOCR-2-1B`. On demand, not preloaded with LightOnOCR (they do not fit on one GPU): `zai-org/GLM-OCR` |
 | Structured | preloaded: `naver-clova-ix/donut-base-finetuned-cord-v2` (default) and `naver-clova-ix/donut-base-finetuned-docvqa` | not served |
 | Zero-shot NER | preloaded: `urchade/gliner_multi-v2.1`. Lazy-loaded alternates: `urchade/gliner_large-v2.1`, `urchade/gliner_multi_pii-v1`, `numind/NuNER_Zero` | not served |
 
-Defaults for the CPU image are pinned in [`src/config.ts`](src/config.ts):
-Donut on CORD and `urchade/gliner_multi-v2.1`. Recognition defaults are
-marked `gpuRequired` so the CPU UI does not treat them as local. To add a
-model, add a `ModelOption` whose default adapter is in the bundle of the
-compose that should serve it.
+Defaults are pinned in [`src/config.ts`](src/config.ts):
+`PaddlePaddle/PaddleOCR-VL-1.5:transformers`, Donut on CORD, and
+`urchade/gliner_multi-v2.1`. LightOnOCR and GLM-OCR are `gpuRequired`.
+To add a model, add a `ModelOption` whose profile adapter is in the bundle
+of the compose that should serve it. Profile-qualified preloads use
+`model:profile`.
 
 ---
 
@@ -272,14 +278,14 @@ HTML + CSS + JavaScript driven by `EventSource` for the SSE stream from SIE.
 ## Honest scope and known limits
 
 - **Apple Silicon runs the CPU image through Rosetta.** That image is
-  `linux/amd64` only, so Donut and GLiNER are slower than on native x86_64.
-- **LightOnOCR, GLM-OCR, and PaddleOCR-VL-1.5 are on the GPU image only.**
-  Their default profile is `sglang_vision_extract`. The CPU compose lists
-  them and disables them. `compose.gpu.yml` uses
-  `latest-cuda12-sglang-vision-extract` and does not load Donut or GLiNER.
-  It preloads only LightOnOCR-2-1B. GLM-OCR and PaddleOCR-VL-1.5 load on
-  demand and are not preloaded together because they do not fit on one GPU
-  with LightOnOCR.
+  `linux/amd64` only, so PaddleOCR-VL, Donut, and GLiNER are slower than on
+  native x86_64. The transformers profile runs, using fp32 off CUDA.
+- **LightOnOCR and GLM-OCR are the GPU-only sglang choices.** Their default
+  profile is `sglang_vision_extract`, which the CPU image does not ship.
+  `compose.gpu.yml` uses `latest-cuda12-sglang-vision-extract` and does not
+  load Donut, GLiNER, or `PaddleOCR-VL-1.5:transformers`. It preloads only
+  LightOnOCR-2-1B. GLM-OCR loads on demand and is not preloaded with
+  LightOnOCR because the two do not fit on one GPU.
 - **This is a demo, not a production OCR pipeline.** The bundled sample
   images are synthetic; production OCR needs real-world layout coverage,
   per-merchant tuning, and human review hooks.
@@ -290,6 +296,8 @@ HTML + CSS + JavaScript driven by `EventSource` for the SSE stream from SIE.
 
 - [SIE](https://github.com/superlinked/sie) (Apache 2.0): the inference
   engine that hosts all three model classes
+- [PaddleOCR-VL-1.5](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.5):
+  Paddle's 0.9B OCR VLM, `transformers` profile on the CPU image
 - [LightOnOCR-2-1B](https://huggingface.co/lightonai/LightOnOCR-2-1B)
   (Apache 2.0): LightOn's Pixtral+Qwen3 OCR-VLM
 - [Donut](https://huggingface.co/naver-clova-ix/donut-base-finetuned-cord-v2)

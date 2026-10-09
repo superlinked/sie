@@ -1,30 +1,20 @@
-"""document-ocr must only preload models the image it starts can load.
-
-``sie-server serve --preload`` checks the selected profile (the default
-profile for a bare id) against the image bundle. This test parses the example
-compose files and ``src/config.ts`` and fails when a preloaded adapter is not
-in that image's bundle, when a compose preload list drifts from the documented
-set, or when a listed model id is not a catalog ``sie_id``.
-"""
-
 from __future__ import annotations
 
 import re
 from pathlib import Path
 
 import yaml
+from sie_sdk.bundle_utils import match_bundle_models
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _EXAMPLE = _REPO_ROOT / "examples" / "document-ocr"
 _COMPOSE_FILES = (_EXAMPLE / "compose.yml", _EXAMPLE / "compose.gpu.yml")
-# GPU compose preloads only the recognition default. GLM-OCR is about 9B, so
-# GLM-OCR and PaddleOCR-VL-1.5 are not preloaded with LightOnOCR; they stay in
-# the UI and load on demand. The CPU compose is unchanged.
 _EXPECTED_PRELOADS = {
     "compose.yml": [
         "naver-clova-ix/donut-base-finetuned-cord-v2",
         "naver-clova-ix/donut-base-finetuned-docvqa",
         "urchade/gliner_multi-v2.1",
+        "PaddlePaddle/PaddleOCR-VL-1.5:transformers",
     ],
     "compose.gpu.yml": ["lightonai/LightOnOCR-2-1B"],
 }
@@ -39,9 +29,11 @@ _IMAGE_BUNDLE_SUFFIXES = (
     ("-default", "default.yaml"),
 )
 
-# Quoted org/name strings. A path like "data/samples" has neither a digit nor
-# a hyphen/underscore, which every catalog id in this example does.
-_QUOTED_MODEL_ID = re.compile(r"""["']([A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*)["']""")
+# Quoted org/name ids, optionally ``model:profile``. A path like "data/samples"
+# has neither a digit nor a hyphen/underscore, which every catalog id here does.
+_QUOTED_MODEL_ID = re.compile(
+    r"""["']([A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*(?::[A-Za-z0-9][A-Za-z0-9_.-]*)?)["']"""
+)
 _MODEL_ID_MARK = re.compile(r"[-_0-9]")
 
 
@@ -66,16 +58,6 @@ def _bundle_filename_for_image(image: str) -> str:
     raise AssertionError(msg)
 
 
-def _bundle_adapters(filename: str) -> set[str]:
-    path = _BUNDLES_DIR / filename
-    data = yaml.safe_load(path.read_text()) or {}
-    adapters = data.get("adapters") or []
-    if not isinstance(adapters, list):
-        msg = f"{filename} adapters is not a list"
-        raise AssertionError(msg)
-    return {item for item in adapters if isinstance(item, str)}
-
-
 def _preload_ids(command: object) -> list[str]:
     if isinstance(command, str):
         parts = command.split()
@@ -92,27 +74,8 @@ def _preload_ids(command: object) -> list[str]:
     return found
 
 
-def _bare_id_and_profile(preload_id: str) -> tuple[str, str]:
-    base, separator, profile = preload_id.partition(":")
-    if separator and profile and profile != "default":
-        return base, profile
-    return base, "default"
-
-
-def _profile_adapter_module(model: dict[str, object], profile: str) -> str:
-    profiles = model.get("profiles")
-    if not isinstance(profiles, dict) or profile not in profiles:
-        msg = f"profile {profile!r} missing from model profiles"
-        raise AssertionError(msg)
-    body = profiles[profile] or {}
-    if not isinstance(body, dict):
-        msg = f"profile {profile!r} is not a mapping"
-        raise AssertionError(msg)
-    adapter_path = body.get("adapter_path")
-    if not isinstance(adapter_path, str) or not adapter_path:
-        msg = f"profile {profile!r} has no adapter_path"
-        raise AssertionError(msg)
-    return adapter_path.split(":", 1)[0]
+def _bundle_model_ids(bundle_filename: str) -> set[str]:
+    return set(match_bundle_models(_BUNDLES_DIR / bundle_filename, _MODELS_DIR))
 
 
 def _compose_image_and_preloads(path: Path) -> tuple[str, list[str]]:
@@ -134,9 +97,8 @@ def _compose_image_and_preloads(path: Path) -> tuple[str, list[str]]:
 
 
 def test_document_ocr_preloaded_models_match_image_bundles() -> None:
-    models = _models_by_id()
-    assert models, f"No model YAML files found in {_MODELS_DIR}"
     assert _CONFIG_TS.is_file()
+    config_text = _CONFIG_TS.read_text()
 
     problems: list[str] = []
     for compose in _COMPOSE_FILES:
@@ -146,19 +108,15 @@ def test_document_ocr_preloaded_models_match_image_bundles() -> None:
         if preloads != expected:
             problems.append(f"{compose.name} preloads {preloads!r}, expected {expected!r}")
         bundle_name = _bundle_filename_for_image(image)
-        adapters = _bundle_adapters(bundle_name)
-        assert adapters, f"{bundle_name} declares no adapters"
+        matched = _bundle_model_ids(bundle_name)
+        assert matched, f"{bundle_name} matches no models"
         for preload_id in preloads:
-            bare_id, profile = _bare_id_and_profile(preload_id)
-            model = models.get(bare_id)
-            if model is None:
-                problems.append(f"{compose.name} preloads {preload_id!r}, which has no model yaml")
-                continue
-            module = _profile_adapter_module(model, profile)
-            if module not in adapters:
+            if preload_id not in config_text:
+                problems.append(f"{compose.name} preloads {preload_id!r}, which src/config.ts does not list")
+            if preload_id not in matched:
                 problems.append(
-                    f"{compose.name} image {image} ({bundle_name}) preloads {preload_id!r} "
-                    f"via {module}, which that bundle does not list"
+                    f"{compose.name} image {image} ({bundle_name}) preloads {preload_id!r}, "
+                    "which match_bundle_models does not return for that bundle"
                 )
 
     assert not problems, "document-ocr preloads models its image cannot load:\n  " + "\n  ".join(problems)
@@ -167,9 +125,23 @@ def test_document_ocr_preloaded_models_match_image_bundles() -> None:
 def test_document_ocr_config_model_ids_exist() -> None:
     models = _models_by_id()
     assert models, f"No model YAML files found in {_MODELS_DIR}"
+    served: set[str] = set()
+    for compose in _COMPOSE_FILES:
+        image, _preloads = _compose_image_and_preloads(compose)
+        served.update(_bundle_model_ids(_bundle_filename_for_image(image)))
     text = _CONFIG_TS.read_text()
     config_ids = [model_id for model_id in _QUOTED_MODEL_ID.findall(text) if _MODEL_ID_MARK.search(model_id)]
     assert len(config_ids) >= 5, "config.ts scanner found too few model ids — the pattern has rotted"
 
-    unknown = sorted({model_id for model_id in config_ids if model_id not in models})
-    assert not unknown, "document-ocr config.ts ids that are not catalog sie_ids:\n  " + "\n  ".join(unknown)
+    unknown: list[str] = []
+    for model_id in sorted(set(config_ids)):
+        base, separator, profile = model_id.partition(":")
+        if separator and profile and profile != "default":
+            if base not in models or model_id not in served:
+                unknown.append(model_id)
+        elif model_id not in models:
+            unknown.append(model_id)
+    assert not unknown, (
+        "document-ocr config.ts ids that are not catalog sie_ids "
+        "or bundle-matched profile ids:\n  " + "\n  ".join(unknown)
+    )

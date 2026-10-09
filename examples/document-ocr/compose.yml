@@ -1,9 +1,9 @@
 services:
   sie:
-    # CPU compose uses the default bundle. That bundle includes the donut and
-    # gliner adapters, so the preloaded Donut and GLiNER models load here.
-    # LightOnOCR, GLM-OCR, and PaddleOCR-VL default to sglang_vision_extract,
-    # which this image does not ship — use compose.gpu.yml for those.
+    # CPU default bundle includes donut, gliner, and paddleocr_vl. Preload
+    # Donut, GLiNER, and PaddleOCR-VL-1.5:transformers so recognition,
+    # structured extraction, and NER all come from this image. LightOnOCR and
+    # GLM-OCR use sglang_vision_extract — see compose.gpu.yml.
     image: ghcr.io/superlinked/sie-server:latest-cpu-default
     # linux/amd64 is a no-op on x86_64 Linux hosts; on Apple Silicon it forces
     # Rosetta translation (slower but works for local testing).
@@ -13,7 +13,7 @@ services:
       - --port
       - "8080"
       - --preload
-      - naver-clova-ix/donut-base-finetuned-cord-v2,naver-clova-ix/donut-base-finetuned-docvqa,urchade/gliner_multi-v2.1
+      - naver-clova-ix/donut-base-finetuned-cord-v2,naver-clova-ix/donut-base-finetuned-docvqa,urchade/gliner_multi-v2.1,PaddlePaddle/PaddleOCR-VL-1.5:transformers
     ports:
       - "8080:8080"
     restart: unless-stopped

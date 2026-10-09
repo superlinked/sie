@@ -29,11 +29,11 @@
       <div class="hero-text">
         <p>
           OCR is rarely a single-model problem. This demo runs three model
-          classes through the <strong>same SIE call</strong>. VLM-OCR
-          (LightOnOCR, PaddleOCR-VL, GLM-OCR) loads on the GPU
-          sglang-vision image. Donut and GLiNER load on the CPU default
-          image. One image does not serve both. Pick a sample on the left
-          and swap a model with <em>one identifier change</em>.
+          classes through the <strong>same SIE call</strong>. The CPU default
+          image serves PaddleOCR-VL (transformers profile), Donut, and GLiNER
+          together. LightOnOCR and GLM-OCR load on the GPU sglang-vision
+          image, which does not serve Donut or GLiNER. Pick a sample on the
+          left and swap a model with <em>one identifier change</em>.
         </p>
       </div>
       <div class="hero-diagram">
@@ -45,7 +45,7 @@
             <span>↓</span><span>↓</span><span>↓</span>
           </div>
           <div class="diagram-models">
-            <div class="diagram-box diagram-recognition">VLM-OCR<br><span>(LightOnOCR-2-1B, PaddleOCR-VL, GLM-OCR)</span></div>
+            <div class="diagram-box diagram-recognition">VLM-OCR<br><span>(PaddleOCR-VL, LightOnOCR, GLM-OCR)</span></div>
             <div class="diagram-box diagram-structured">Donut<br><span>(end-to-end JSON)</span></div>
             <div class="diagram-box diagram-ner">GLiNER<br><span>(zero-shot NER)</span></div>
           </div>

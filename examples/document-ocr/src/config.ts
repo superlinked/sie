@@ -9,25 +9,24 @@ export type ModelOption = {
 
 export const RECOGNITION_MODELS: ModelOption[] = [
   {
+    id: "PaddlePaddle/PaddleOCR-VL-1.5:transformers",
+    label: "PaddleOCR-VL-1.5",
+    description:
+      "Paddle's VLM-OCR, 0.9B, transformers profile. Preloaded on the CPU default image with Donut and GLiNER. Six task modes. Falls back to fp32 off CUDA.",
+    options: { task: "ocr" },
+  },
+  {
     id: "lightonai/LightOnOCR-2-1B",
     label: "LightOnOCR-2-1B",
     description:
-      "Pixtral encoder + Qwen3 decoder, 2.1B. Strong Markdown output across dense layouts. Served by the GPU compose (sglang vision image), not the CPU default image.",
-    gpuRequired: true,
-  },
-  {
-    id: "PaddlePaddle/PaddleOCR-VL-1.5",
-    label: "PaddleOCR-VL-1.5",
-    description:
-      "Paddle's VLM-OCR, 0.9B. Six task modes. Served by the GPU compose (sglang vision image), not the CPU default image.",
-    options: { task: "ocr" },
+      "Pixtral encoder + Qwen3 decoder, 2.1B. Strong Markdown output across dense layouts. GPU sglang-vision image only.",
     gpuRequired: true,
   },
   {
     id: "zai-org/GLM-OCR",
     label: "GLM-OCR",
     description:
-      "CogViT + GLM-0.5B decoder, 9B in bfloat16. Premium quality, needs ~18 GB VRAM. Served by the GPU compose (sglang vision image), not the CPU default image.",
+      "CogViT + GLM-0.5B decoder, 9B in bfloat16. Premium quality, needs ~18 GB VRAM. GPU sglang-vision image only; not preloaded with LightOnOCR.",
     gpuRequired: true,
   },
 ];

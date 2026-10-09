@@ -49,20 +49,19 @@ function setupSse(res: http.ServerResponse) {
   };
 }
 
-async function fetchModels(): Promise<{ ok: boolean; names: string[]; cuda: boolean }> {
+async function fetchModels(): Promise<{ ok: boolean; names: string[]; cuda: boolean | null }> {
   try {
     const r = await fetch(`${config.sieUrl}/v1/models`, { signal: AbortSignal.timeout(3000) });
-    if (!r.ok) return { ok: false, names: [], cuda: false };
-    const json = (await r.json()) as {
-      models?: { name: string; device?: string; state?: string }[];
-    };
-    const models = json.models ?? [];
-    // GPU compose preloads GPU-only models. If any catalog entry is currently
-    // loaded on a non-cpu device, treat this server as GPU-capable.
-    const cuda = models.some((m) => (m.device ?? "").toLowerCase().includes("cuda"));
-    return { ok: true, names: models.map((m) => m.name), cuda };
+    if (!r.ok) return { ok: false, names: [], cuda: null };
+    const json = (await r.json()) as { models?: { name?: string }[] };
+    const names = (json.models ?? [])
+      .map((model) => model.name)
+      .filter((name): name is string => typeof name === "string" && name.length > 0);
+    // ModelInfo and the health probes do not report a device. null is unknown,
+    // not "CUDA unavailable"; only an explicit false blocks a gpuRequired model.
+    return { ok: true, names, cuda: null };
   } catch {
-    return { ok: false, names: [], cuda: false };
+    return { ok: false, names: [], cuda: null };
   }
 }
 

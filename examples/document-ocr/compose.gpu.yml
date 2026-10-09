@@ -1,12 +1,11 @@
 services:
   sie:
-    # GPU compose uses the sglang-vision-extract bundle. The default profile
-    # of LightOnOCR-2-1B, GLM-OCR, and PaddleOCR-VL-1.5 is sglang_vision_extract,
-    # which is the only adapter this image ships. Donut and GLiNER are not in
-    # this bundle — use compose.yml for those.
-    # Preload only LightOnOCR-2-1B, the recognition default. GLM-OCR and
-    # PaddleOCR-VL-1.5 stay selectable in the UI and load on demand. They are
-    # not preloaded together because they do not fit on one GPU with LightOnOCR.
+    # GPU compose uses the sglang-vision-extract bundle. LightOnOCR-2-1B and
+    # GLM-OCR use that adapter. Donut, GLiNER, and PaddleOCR-VL's transformers
+    # profile are not in this bundle — use compose.yml for those.
+    # Preload only LightOnOCR-2-1B. GLM-OCR stays selectable and loads on
+    # demand; it is not preloaded with LightOnOCR because the two do not fit
+    # on one GPU.
     image: ghcr.io/superlinked/sie-server:latest-cuda12-sglang-vision-extract
     command:
       - serve
