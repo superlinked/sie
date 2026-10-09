@@ -1,5 +1,5 @@
 # Financial sentiment (positive, negative, neutral), BERT fine-tuned on Financial PhraseBank.
-# The Hugging Face card declares no license; the upstream project (github.com/ProsusAI/finBERT) is Apache-2.0.
+# Apache-2.0 (license of the FinBERT project, github.com/ProsusAI/finBERT).
 sie_id: ProsusAI/finbert
 hf_id: ProsusAI/finbert
 hf_revision: 4556d13015211d73dccd3fdd39d39232506f3e43
