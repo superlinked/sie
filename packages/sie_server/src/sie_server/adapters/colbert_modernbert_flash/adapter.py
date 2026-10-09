@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -338,12 +339,13 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
                 self._max_seq_length,
             )
 
-        encodings = self._tokenize_inputs(texts, max_length)
-        seq_lengths = [enc["input_ids"].shape[1] for enc in encodings]
+        token_ids = self._tokenize_inputs(texts, max_length)
+        seq_lengths = [len(ids) for ids in token_ids]
+        flat_ids = np.fromiter(itertools.chain.from_iterable(token_ids), dtype=np.int64, count=sum(seq_lengths))
 
-        multivectors = self._encode_graphed(encodings, seq_lengths, is_query=is_query)
+        multivectors = self._encode_graphed(flat_ids, seq_lengths, is_query=is_query)
         if multivectors is None:
-            multivectors = self._encode_eager(encodings, seq_lengths, is_query=is_query)
+            multivectors = self._encode_eager(flat_ids, seq_lengths, is_query=is_query)
 
         return EncodeOutput(
             multivector=multivectors,
@@ -354,7 +356,7 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         )
 
     def _encode_graphed(
-        self, encodings: list[Any], seq_lengths: list[int], *, is_query: bool
+        self, flat_ids: np.ndarray, seq_lengths: list[int], *, is_query: bool
     ) -> list[np.ndarray] | None:
         """Token vectors from a replayed CUDA graph; None when the forward runs eagerly.
 
@@ -363,7 +365,6 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         """
         if self._graphs is None or self._peft_model is not None:
             return None
-        flat_ids = torch.cat([enc["input_ids"].squeeze(0) for enc in encodings]).numpy()
 
         def head(packed: PackedForward) -> list[np.ndarray]:
             return self._token_vectors(
@@ -373,24 +374,20 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         with torch.inference_mode():
             return self._graphs.run(flat_ids, seq_lengths, head)
 
-    def _encode_eager(self, encodings: list[Any], seq_lengths: list[int], *, is_query: bool) -> list[np.ndarray]:
+    def _encode_eager(self, flat_ids: np.ndarray, seq_lengths: list[int], *, is_query: bool) -> list[np.ndarray]:
         """Token vectors from an eager forward over the packed rows."""
         # Build packed representation
         total_tokens = sum(seq_lengths)
         max_seqlen = max(seq_lengths)
         num_seqs = len(seq_lengths)
 
-        # Pack input_ids
-        input_ids_packed = torch.cat([enc["input_ids"].squeeze(0) for enc in encodings]).to(self._device)
-
-        # Build cu_seqlens (cumulative sequence lengths)
-        cu_seqlens = torch.zeros(num_seqs + 1, dtype=torch.int32, device=self._device)
-        for i, length in enumerate(seq_lengths):
-            cu_seqlens[i + 1] = cu_seqlens[i] + length
+        # Pack input_ids, and the cumulative sequence lengths, on the host: one copy each.
+        input_ids_packed = torch.from_numpy(flat_ids).to(self._device)
+        cu_seqlens = torch.from_numpy(np.concatenate(([0], np.cumsum(seq_lengths))).astype(np.int32)).to(self._device)
 
         with torch.inference_mode():
-            # Build position IDs for RoPE
-            position_ids_packed = self._build_position_ids(cu_seqlens, num_seqs)
+            # Build position IDs for RoPE (the host-known total avoids a device sync)
+            position_ids_packed = self._build_position_ids(cu_seqlens, num_seqs, total_tokens=total_tokens)
 
             # Run embeddings
             hidden = self._run_embeddings(input_ids_packed)
@@ -445,20 +442,22 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             is_query=is_query,
         )
 
-    def _tokenize_inputs(self, texts: list[str], max_length: int) -> list[Any]:
-        """Tokenize packed inputs without racing metering tokenization."""
+    def _tokenize_inputs(self, texts: list[str], max_length: int) -> list[list[int]]:
+        """Token ids of each text, without racing metering tokenization.
+
+        One batched call: the fast tokenizer encodes the texts in parallel and
+        returns, per text, exactly the ids a call on that text alone returns.
+        """
         if self._tokenizer is None:
             raise RuntimeError(ERR_NOT_LOADED)
         with self._tokenizer_guard():
-            return [
-                self._tokenizer(
-                    text,
-                    max_length=max_length,
-                    truncation=True,
-                    return_tensors="pt",
-                )
-                for text in texts
-            ]
+            return self._tokenizer(
+                texts,
+                max_length=max_length,
+                truncation=True,
+                return_attention_mask=False,
+                return_token_type_ids=False,
+            )["input_ids"]
 
     def score(
         self,
@@ -587,9 +586,11 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             return None
         return [query + doc for query, doc in zip(query_counts, doc_counts, strict=True)]
 
-    def _build_position_ids(self, cu_seqlens: torch.Tensor, num_seqs: int) -> torch.Tensor:
+    def _build_position_ids(
+        self, cu_seqlens: torch.Tensor, num_seqs: int, *, total_tokens: int | None = None
+    ) -> torch.Tensor:
         """Build position IDs for packed sequences."""
-        return build_position_ids(cu_seqlens)
+        return build_position_ids(cu_seqlens, total_tokens=total_tokens)
 
     def _compute_rope(
         self,
