@@ -8,8 +8,7 @@ from typing import Any
 
 import pytest
 import torch
-from sie_server.adapters import qwen2_flash
-from sie_server.adapters.qwen2_flash import Qwen2FlashAdapter
+from sie_server.adapters.qwen2_flash import Qwen2FlashAdapter, _fused_layers
 from sie_server.core.loader import load_model_config
 
 _MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
@@ -33,28 +32,34 @@ def test_fused_kernels_are_off_unless_a_profile_asks() -> None:
     assert Qwen2FlashAdapter("unused")._fused_kernels is False
 
 
-def test_fused_kernels_need_a_silu_mlp() -> None:
-    assert not qwen2_flash._fused_kernels_supported(SimpleNamespace(hidden_act="gelu"))
-    assert qwen2_flash._fused_kernels_supported(SimpleNamespace(hidden_act="silu")) is _HAS_TRITON
-
-
-def test_fused_kernels_need_the_qwen_layer_layout() -> None:
+def _small_qwen3(layers: int = 1) -> Any:
     from transformers import Qwen3Config, Qwen3Model
 
     config = Qwen3Config(
         vocab_size=16,
         hidden_size=32,
         intermediate_size=64,
-        num_hidden_layers=1,
+        num_hidden_layers=layers,
         num_attention_heads=2,
         num_key_value_heads=1,
         head_dim=16,
     )
-    layers = Qwen3Model(config).layers
-    assert qwen2_flash._fused_layer_layout(layers)
-    assert not qwen2_flash._fused_layer_layout(torch.nn.ModuleList())
+    return Qwen3Model(config)
+
+
+def test_fused_kernels_need_a_silu_mlp() -> None:
+    model = _small_qwen3()
+    assert _fused_layers.supported(model) is _HAS_TRITON
+    model.config.hidden_act = "gelu"
+    assert not _fused_layers.supported(model)
+
+
+def test_fused_kernels_need_the_qwen_layer_layout() -> None:
+    layers = _small_qwen3().layers
+    assert _fused_layers._layer_layout(layers)
+    assert not _fused_layers._layer_layout(torch.nn.ModuleList())
     del layers[0].mlp.gate_proj  # e.g. a remote-code layer with a fused gate_up_proj
-    assert not qwen2_flash._fused_layer_layout(layers)
+    assert not _fused_layers._layer_layout(layers)
 
 
 @needs_cuda_triton

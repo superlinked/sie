@@ -21,6 +21,7 @@ from sie_server.adapters._utils import (
     validate_output_types,
 )
 from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin
+from sie_server.adapters.qwen2_flash import _fused_layers
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.types.inputs import Item
 
@@ -30,35 +31,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _ERR_CPU_NOT_SUPPORTED = "Qwen2FlashAdapter requires CUDA. Use sentence_transformer adapter for CPU."
-
-
-def _fused_kernels_supported(config: Any) -> bool:
-    """Whether ``_fused_ops`` can run this model: Triton importable and a SiLU-gated MLP."""
-    if getattr(config, "hidden_act", None) != "silu":
-        return False
-    try:
-        import triton  # ty: ignore[unresolved-import]
-    except ImportError:
-        return False
-    return True
-
-
-def _fused_layer_layout(layers: Any) -> bool:
-    """Whether the decoder layers have the modules ``_run_transformer_fused`` reads.
-
-    Checks the first layer: separate gate/up/down projections and RMSNorms that
-    expose ``weight`` and ``variance_epsilon`` (a remote-code variant with a fused
-    ``gate_up_proj`` or a norm with ``eps`` keeps the eager layers).
-    """
-    if not len(layers):
-        return False
-    layer = layers[0]
-    norms = [layer.input_layernorm, layer.post_attention_layernorm]
-    attn = layer.self_attn
-    norms += [getattr(attn, name) for name in ("q_norm", "k_norm") if hasattr(attn, name)]
-    return all(hasattr(layer.mlp, name) for name in ("gate_proj", "up_proj", "down_proj")) and all(
-        hasattr(norm, "weight") and hasattr(norm, "variance_epsilon") for norm in norms
-    )
 
 
 class Qwen2FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
@@ -206,9 +178,7 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         self._model.to(device)
         self._model.eval()
 
-        if self._fused_kernels and not (
-            _fused_kernels_supported(self._model.config) and _fused_layer_layout(self._model.layers)
-        ):
+        if self._fused_kernels and not _fused_layers.supported(self._model):
             logger.warning(
                 "fused_kernels needs Triton and Qwen2/Qwen3 layers with a SiLU-gated MLP; "
                 "%s runs the eager layers instead",
@@ -544,61 +514,14 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         total_tokens: int,
         position_ids: torch.Tensor,
     ) -> torch.Tensor:
-        """The layers of ``_run_transformer_flash`` with the elementwise work in fused kernels.
-
-        Each residual add is folded into the next RMSNorm, q/k-norm is one
-        kernel per tensor, the rotary embedding one in-place kernel per tensor
-        and the MLP's ``silu(gate) * up`` one kernel (see ``_fused_ops``). The
-        kernels round where the eager ops round, so the result matches the
-        eager path; the projections and attention are the same calls. Returns
-        the residual stream before the final norm, as the eager path does.
-        """
-        from flash_attn import flash_attn_varlen_func
-
-        from sie_server.adapters.qwen2_flash._fused_ops import rms_norm, rotary_, silu_mul
-
-        config = self._model.config
-        num_heads = config.num_attention_heads
-        num_kv_heads = config.num_key_value_heads
-        head_dim = getattr(config, "head_dim", config.hidden_size // num_heads)
-        softmax_scale = 1.0 / (head_dim**0.5)
-
+        """The layers of ``_run_transformer_flash`` with the elementwise work in fused kernels (``_fused_layers``)."""
         rotary_emb = (
             self._model.rotary_emb if hasattr(self._model, "rotary_emb") else self._model.layers[0].self_attn.rotary_emb
         )
         cos, sin = self._compute_rope(rotary_emb, position_ids, max_seqlen)
-        cos, sin = cos.contiguous(), sin.contiguous()
-
-        residual: torch.Tensor | None = None
-        for layer in self._model.layers:
-            attn = layer.self_attn
-            norm = layer.input_layernorm
-            normed, residual = rms_norm(hidden, norm.weight, norm.variance_epsilon, residual)
-            query = attn.q_proj(normed).view(total_tokens, num_heads, head_dim)
-            key = attn.k_proj(normed).view(total_tokens, num_kv_heads, head_dim)
-            value = attn.v_proj(normed).view(total_tokens, num_kv_heads, head_dim)
-            if hasattr(attn, "q_norm"):
-                query, _ = rms_norm(query, attn.q_norm.weight, attn.q_norm.variance_epsilon)
-            if hasattr(attn, "k_norm"):
-                key, _ = rms_norm(key, attn.k_norm.weight, attn.k_norm.variance_epsilon)
-            query = rotary_(query.contiguous(), cos, sin)
-            key = rotary_(key.contiguous(), cos, sin)
-            attn_out = flash_attn_varlen_func(
-                query,
-                key,
-                value,
-                cu_seqlens_q=cu_seqlens,
-                cu_seqlens_k=cu_seqlens,
-                max_seqlen_q=max_seqlen,
-                max_seqlen_k=max_seqlen,
-                causal=self._causal,
-                softmax_scale=softmax_scale,
-            ).reshape(total_tokens, num_heads * head_dim)
-            norm = layer.post_attention_layernorm
-            normed, residual = rms_norm(attn.o_proj(attn_out), norm.weight, norm.variance_epsilon, residual)
-            mlp = layer.mlp
-            hidden = mlp.down_proj(silu_mul(mlp.gate_proj(normed), mlp.up_proj(normed)))
-        return hidden if residual is None else residual + hidden
+        return _fused_layers.run_layers(
+            self._model, hidden, cu_seqlens, max_seqlen, total_tokens, cos, sin, causal=self._causal
+        )
 
     def _pool_embeddings(
         self,
