@@ -43,6 +43,24 @@ def _fused_kernels_supported(config: Any) -> bool:
     return True
 
 
+def _fused_layer_layout(layers: Any) -> bool:
+    """Whether the decoder layers have the modules ``_run_transformer_fused`` reads.
+
+    Checks the first layer: separate gate/up/down projections and RMSNorms that
+    expose ``weight`` and ``variance_epsilon`` (a remote-code variant with a fused
+    ``gate_up_proj`` or a norm with ``eps`` keeps the eager layers).
+    """
+    if not len(layers):
+        return False
+    layer = layers[0]
+    norms = [layer.input_layernorm, layer.post_attention_layernorm]
+    attn = layer.self_attn
+    norms += [getattr(attn, name) for name in ("q_norm", "k_norm") if hasattr(attn, name)]
+    return all(hasattr(layer.mlp, name) for name in ("gate_proj", "up_proj", "down_proj")) and all(
+        hasattr(norm, "weight") and hasattr(norm, "variance_epsilon") for norm in norms
+    )
+
+
 class Qwen2FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
     """Qwen2-based encoder adapter using Flash Attention 2 with variable-length sequences.
 
@@ -188,9 +206,12 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         self._model.to(device)
         self._model.eval()
 
-        if self._fused_kernels and not _fused_kernels_supported(self._model.config):
+        if self._fused_kernels and not (
+            _fused_kernels_supported(self._model.config) and _fused_layer_layout(self._model.layers)
+        ):
             logger.warning(
-                "fused_kernels needs Triton and a SiLU MLP; %s runs the eager layers instead",
+                "fused_kernels needs Triton and Qwen2/Qwen3 layers with a SiLU-gated MLP; "
+                "%s runs the eager layers instead",
                 self._model_name_or_path,
             )
             self._fused_kernels = False

@@ -172,11 +172,15 @@ def _rotary_kernel(x_ptr, cos_ptr, sin_ptr, stride_token, stride_head, stride_ta
 def rotary_(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """Rotate ``x`` (``[tokens, heads, head_dim]``) in place by per-token ``cos``/``sin`` (``[tokens, head_dim]``)."""
     tokens, heads, head_dim = x.shape
+    half = head_dim // 2
+    if cos.shape != (tokens, head_dim) or sin.shape != cos.shape or head_dim % 2 or half & (half - 1):
+        msg = "rotary_ needs cos/sin of shape [tokens, head_dim] and a head_dim that is twice a power of two"
+        raise ValueError(msg)
     if x.stride(-1) != 1 or cos.stride(-1) != 1 or sin.stride(-1) != 1 or cos.stride(0) != sin.stride(0):
         msg = "rotary_ needs a contiguous last dimension and matching cos/sin layouts"
         raise ValueError(msg)
     if tokens:
-        _rotary_kernel[(tokens, heads)](x, cos, sin, x.stride(0), x.stride(1), cos.stride(0), half=head_dim // 2)
+        _rotary_kernel[(tokens, heads)](x, cos, sin, x.stride(0), x.stride(1), cos.stride(0), half=half)
     return x
 
 

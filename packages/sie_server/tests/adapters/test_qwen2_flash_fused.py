@@ -38,6 +38,35 @@ def test_fused_kernels_need_a_silu_mlp() -> None:
     assert qwen2_flash._fused_kernels_supported(SimpleNamespace(hidden_act="silu")) is _HAS_TRITON
 
 
+def test_fused_kernels_need_the_qwen_layer_layout() -> None:
+    from transformers import Qwen3Config, Qwen3Model
+
+    config = Qwen3Config(
+        vocab_size=16,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=16,
+    )
+    layers = Qwen3Model(config).layers
+    assert qwen2_flash._fused_layer_layout(layers)
+    assert not qwen2_flash._fused_layer_layout(torch.nn.ModuleList())
+    del layers[0].mlp.gate_proj  # e.g. a remote-code layer with a fused gate_up_proj
+    assert not qwen2_flash._fused_layer_layout(layers)
+
+
+@needs_cuda_triton
+def test_rotary_rejects_tables_that_do_not_match_the_input() -> None:
+    from sie_server.adapters.qwen2_flash._fused_ops import rotary_
+
+    x = torch.zeros(4, 2, 8, device="cuda", dtype=torch.bfloat16)
+    table = torch.zeros(3, 8, device="cuda", dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="rotary_ needs"):
+        rotary_(x, table, table)
+
+
 def test_the_option_routes_the_layers_to_the_fused_path(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter = Qwen2FlashAdapter("unused", fused_kernels=True)
     calls: list[tuple[Any, ...]] = []
