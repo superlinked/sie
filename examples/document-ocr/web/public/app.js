@@ -26,6 +26,7 @@ let glinerBuf = [];
 let modelConfig = null;
 let registeredSet = new Set();
 let cudaAvailable = false;
+let availabilityUnavailable = false;
 
 function setBadge(text, cls) {
   els.badge.textContent = text;
@@ -94,7 +95,16 @@ function updateSnippets() {
   els.snippetNer.innerHTML = snippetNer(els.selectNer.value, activeSample);
 }
 
+function clearAvailability() {
+  registeredSet = new Set();
+  cudaAvailable = false;
+  availabilityUnavailable = true;
+}
+
 function optionAvailable(opt) {
+  if (availabilityUnavailable) {
+    return { inCatalog: false, blockedByCuda: false, available: false };
+  }
   const serverKnown = registeredSet.size > 0 || cudaAvailable;
   const inCatalog = !serverKnown || registeredSet.has(opt.id);
   const blockedByCuda = opt.gpuRequired && serverKnown && !cudaAvailable;
@@ -210,14 +220,19 @@ async function syncAvailability() {
     const j = await r.json();
     els.sieUrl.textContent = j.sieUrl;
     if (!j.sie) {
+      clearAvailability();
       els.sieState.textContent = "SIE not reachable yet (still preloading models?)";
-      return;
+      return false;
     }
-    els.sieState.textContent = `SIE healthy · ${j.registeredModels} models registered`;
     registeredSet = new Set(j.registered ?? []);
     cudaAvailable = !!j.cuda;
+    availabilityUnavailable = false;
+    els.sieState.textContent = `SIE healthy · ${j.registeredModels} models registered`;
+    return true;
   } catch {
+    clearAvailability();
     els.sieState.textContent = "could not reach the local server";
+    return false;
   }
 }
 
@@ -230,8 +245,12 @@ function applyModelMenus() {
 }
 
 async function runSample(sampleId) {
-  await syncAvailability();
+  const availabilityOk = await syncAvailability();
   applyModelMenus();
+  if (!availabilityOk) {
+    setBadge("error", "red");
+    return;
+  }
   activeSampleId = sampleId;
   setBadge("running", "running");
   els.recognition.innerHTML = '<p class="hint">running recognition...</p>';

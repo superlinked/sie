@@ -99,7 +99,7 @@ server and opens http://localhost:3032. It does not preload LightOnOCR, GLM-OCR,
 docker compose down   # when done
 ```
 
-**GPU variant** (Linux + NVIDIA). Preloads LightOnOCR-2-1B, GLM-OCR, and PaddleOCR-VL-1.5. This image does not serve Donut or GLiNER.
+**GPU variant** (Linux + NVIDIA). Preloads only LightOnOCR-2-1B, the recognition default. GLM-OCR and PaddleOCR-VL-1.5 stay selectable in the UI and load on demand; they are not preloaded together because they do not fit on one GPU with LightOnOCR. This image does not serve Donut or GLiNER.
 
 ```bash
 npm run start:gpu     # uses compose.gpu.yml + latest-cuda12-sglang-vision-extract
@@ -128,7 +128,9 @@ moments, with a little more context:
    UI at text from the GPU image.
 4. **On the GPU compose, open the Recognition disclosure.** The call uses
    `lightonai/LightOnOCR-2-1B` unless you switch to GLM-OCR or
-   PaddleOCR-VL-1.5. Donut and GLiNER are not registered on that image.
+   PaddleOCR-VL-1.5. Those two stay in the dropdown and load on demand; they
+   are not preloaded together because they do not fit on one GPU with
+   LightOnOCR. Donut and GLiNER are not registered on that image.
    Compare `receipt.png` with `letter.png` on the CPU image instead: Donut
    on CORD fits the receipt and emits a CORD-shaped tree for the letter too.
 
@@ -203,7 +205,7 @@ image serves both columns.
 
 | Stage | CPU compose `latest-cpu-default` | GPU compose `latest-cuda12-sglang-vision-extract` |
 |---|---|---|
-| Recognition | not served (dropdown disabled) | preloaded: `lightonai/LightOnOCR-2-1B`, `zai-org/GLM-OCR`, `PaddlePaddle/PaddleOCR-VL-1.5` |
+| Recognition | not served (dropdown disabled) | preloaded: `lightonai/LightOnOCR-2-1B`. On demand, not preloaded together (they do not fit on one GPU with LightOnOCR): `zai-org/GLM-OCR`, `PaddlePaddle/PaddleOCR-VL-1.5` |
 | Structured | preloaded: `naver-clova-ix/donut-base-finetuned-cord-v2` (default) and `naver-clova-ix/donut-base-finetuned-docvqa` | not served |
 | Zero-shot NER | preloaded: `urchade/gliner_multi-v2.1`. Lazy-loaded alternates: `urchade/gliner_large-v2.1`, `urchade/gliner_multi_pii-v1`, `numind/NuNER_Zero` | not served |
 
@@ -275,6 +277,9 @@ HTML + CSS + JavaScript driven by `EventSource` for the SSE stream from SIE.
   Their default profile is `sglang_vision_extract`. The CPU compose lists
   them and disables them. `compose.gpu.yml` uses
   `latest-cuda12-sglang-vision-extract` and does not load Donut or GLiNER.
+  It preloads only LightOnOCR-2-1B. GLM-OCR and PaddleOCR-VL-1.5 load on
+  demand and are not preloaded together because they do not fit on one GPU
+  with LightOnOCR.
 - **This is a demo, not a production OCR pipeline.** The bundled sample
   images are synthetic; production OCR needs real-world layout coverage,
   per-merchant tuning, and human review hooks.

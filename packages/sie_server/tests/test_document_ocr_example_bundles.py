@@ -3,7 +3,8 @@
 ``sie-server serve --preload`` checks the selected profile (the default
 profile for a bare id) against the image bundle. This test parses the example
 compose files and ``src/config.ts`` and fails when a preloaded adapter is not
-in that image's bundle, or when a listed model id is not a catalog ``sie_id``.
+in that image's bundle, when a compose preload list drifts from the documented
+set, or when a listed model id is not a catalog ``sie_id``.
 """
 
 from __future__ import annotations
@@ -16,6 +17,17 @@ import yaml
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _EXAMPLE = _REPO_ROOT / "examples" / "document-ocr"
 _COMPOSE_FILES = (_EXAMPLE / "compose.yml", _EXAMPLE / "compose.gpu.yml")
+# GPU compose preloads only the recognition default. GLM-OCR is about 9B, so
+# GLM-OCR and PaddleOCR-VL-1.5 are not preloaded with LightOnOCR; they stay in
+# the UI and load on demand. The CPU compose is unchanged.
+_EXPECTED_PRELOADS = {
+    "compose.yml": [
+        "naver-clova-ix/donut-base-finetuned-cord-v2",
+        "naver-clova-ix/donut-base-finetuned-docvqa",
+        "urchade/gliner_multi-v2.1",
+    ],
+    "compose.gpu.yml": ["lightonai/LightOnOCR-2-1B"],
+}
 _CONFIG_TS = _EXAMPLE / "src" / "config.ts"
 _BUNDLES_DIR = _REPO_ROOT / "packages" / "sie_server" / "bundles"
 _MODELS_DIR = _REPO_ROOT / "packages" / "sie_server" / "models"
@@ -130,6 +142,9 @@ def test_document_ocr_preloaded_models_match_image_bundles() -> None:
     for compose in _COMPOSE_FILES:
         assert compose.is_file(), compose
         image, preloads = _compose_image_and_preloads(compose)
+        expected = _EXPECTED_PRELOADS[compose.name]
+        if preloads != expected:
+            problems.append(f"{compose.name} preloads {preloads!r}, expected {expected!r}")
         bundle_name = _bundle_filename_for_image(image)
         adapters = _bundle_adapters(bundle_name)
         assert adapters, f"{bundle_name} declares no adapters"

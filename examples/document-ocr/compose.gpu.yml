@@ -4,13 +4,16 @@ services:
     # of LightOnOCR-2-1B, GLM-OCR, and PaddleOCR-VL-1.5 is sglang_vision_extract,
     # which is the only adapter this image ships. Donut and GLiNER are not in
     # this bundle — use compose.yml for those.
+    # Preload only LightOnOCR-2-1B, the recognition default. GLM-OCR and
+    # PaddleOCR-VL-1.5 stay selectable in the UI and load on demand. They are
+    # not preloaded together because they do not fit on one GPU with LightOnOCR.
     image: ghcr.io/superlinked/sie-server:latest-cuda12-sglang-vision-extract
     command:
       - serve
       - --port
       - "8080"
       - --preload
-      - lightonai/LightOnOCR-2-1B,zai-org/GLM-OCR,PaddlePaddle/PaddleOCR-VL-1.5
+      - lightonai/LightOnOCR-2-1B
     ports:
       - "8080:8080"
     restart: unless-stopped
