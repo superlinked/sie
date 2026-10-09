@@ -1,6 +1,8 @@
 """Tests for the FastAPI app factory."""
 
+import inspect
 import logging
+import os
 import uuid
 from collections.abc import AsyncGenerator
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +15,7 @@ import numpy as np
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sie_server import main
 from sie_server.app.app_factory import AppFactory
 from sie_server.app.app_state_config import AppStateConfig
 from sie_server.config.model import EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
@@ -65,8 +68,10 @@ class TestAppLifespanState:
         registry = MagicMock()
         ipc_server = MagicMock()
 
+        monkeypatch.delenv("SIE_DISABLE_CUDNN_SDP", raising=False)
         monkeypatch.setattr(AppFactory, "_configure_torch_threads", MagicMock())
         monkeypatch.setattr(AppFactory, "_configure_cuda_defaults", MagicMock())
+        monkeypatch.setattr(AppFactory, "_configure_sdpa_backends", MagicMock())
         monkeypatch.setattr(AppFactory, "_nvml", MagicMock(return_value=_async_value()))
         monkeypatch.setattr(AppFactory, "_model_registry", MagicMock(return_value=_async_value(registry)))
         monkeypatch.setattr(AppFactory, "_ipc_server", MagicMock(return_value=_async_value(ipc_server)))
@@ -608,6 +613,268 @@ class TestModelRegistryConfig:
             pass
 
         assert created_kwargs["pinned_models"] == ["model-x", "model-y"]
+
+
+class TestConfigureSdpaBackends:
+    _ENV_NAMES = (
+        "SIE_DISABLE_CUDNN_SDP",
+        "SIE_DEVICE",
+        "SIE_DEVICES",
+        "SIE_MODELS_DIR",
+        "SIE_MODEL_FILTER",
+        "SIE_PRELOAD_MODELS",
+        "SIE_PINNED_MODELS",
+        "SIE_POOL",
+        "SIE_UPSTREAMS_FILE",
+        "SIE_REMOTE_SERVING",
+    )
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for name in self._ENV_NAMES:
+            # Track absent keys too: factory serialization writes os.environ directly.
+            monkeypatch.setenv(name, "")
+            monkeypatch.delenv(name)
+
+    @pytest.mark.parametrize("initial_value", [None, "original"])
+    def test_clean_env_restores_factory_writes(
+        self, monkeypatch: pytest.MonkeyPatch, initial_value: str | None
+    ) -> None:
+        with monkeypatch.context() as baseline_patch:
+            for name in self._ENV_NAMES:
+                if initial_value is None:
+                    baseline_patch.delenv(name, raising=False)
+                else:
+                    baseline_patch.setenv(name, initial_value)
+
+            with pytest.MonkeyPatch.context() as fixture_patch:
+                inspect.unwrap(type(self)._clean_env)(self, fixture_patch)
+                fixture_patch.setattr(main.uvicorn, "run", MagicMock())
+                config = AppStateConfig(preload_models=["preloaded-model"], pinned_models=["pinned-model"])
+
+                main.run_server(host="127.0.0.1", port=8080, reload=False, config=config)
+
+                assert os.environ["SIE_DEVICE"] == "cpu"
+                assert os.environ["SIE_PRELOAD_MODELS"] == "preloaded-model"
+                assert os.environ["SIE_PINNED_MODELS"] == "pinned-model"
+                assert os.environ["SIE_REMOTE_SERVING"] == "1"
+
+            assert {name: os.environ.get(name) for name in self._ENV_NAMES} == dict.fromkeys(
+                self._ENV_NAMES, initial_value
+            )
+
+    @pytest.fixture
+    def sdpa_backend(self, monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, dict[str, bool]]:
+        state = {"enabled": True}
+
+        def set_enabled(enabled: bool) -> None:
+            state["enabled"] = enabled
+
+        setter = MagicMock(side_effect=set_enabled)
+        cuda_backend = MagicMock(spec_set=["enable_cudnn_sdp"])
+        cuda_backend.enable_cudnn_sdp = setter
+        backends = MagicMock(spec_set=["cuda"])
+        backends.cuda = cuda_backend
+        fake_torch = MagicMock(spec_set=["backends"])
+        fake_torch.backends = backends
+        monkeypatch.setattr("sie_server.app.app_factory.torch", fake_torch)
+        return setter, state
+
+    @pytest.fixture
+    def startup_events(self, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+        events: list[str] = []
+        monkeypatch.setattr(AppFactory, "_configure_torch_threads", lambda: events.append("threads"))
+        monkeypatch.setattr(AppFactory, "_configure_cuda_defaults", lambda: events.append("cuda_defaults"))
+        for name in ("_tracing", "_metrics", "_nvml"):
+            monkeypatch.setattr(AppFactory, name, _async_value)
+        monkeypatch.setattr("sie_server.app.app_factory.telemetry_sender", _async_value)
+        monkeypatch.setattr("sie_server.app.app_factory.setup_tracing", MagicMock())
+        monkeypatch.setattr("sie_server.app.app_factory.setup_worker_telemetry", MagicMock())
+        monkeypatch.setattr("sie_server.app.app_factory.configure_worker_metric_context", MagicMock())
+        monkeypatch.setattr(AppFactory, "_graceful_shutdown", lambda _state: _async_value())
+        monkeypatch.setattr("sie_server.app.app_factory.mark_ready", lambda: events.append("ready"))
+        monkeypatch.setattr("sie_server.app.app_factory.mark_not_ready", lambda: events.append("not_ready"))
+
+        @asynccontextmanager
+        async def ipc_server(_registry: Any) -> AsyncGenerator[object, None]:
+            events.append("ipc")
+            yield object()
+
+        monkeypatch.setattr(AppFactory, "_ipc_server", ipc_server)
+
+        class FakeRegistry(TestModelRegistryConfig._FakeRegistry):
+            async def load_async(self, name: str, device: str) -> None:
+                events.append(f"load:{name}")
+
+        def create_registry(**_kwargs: Any) -> FakeRegistry:
+            events.append("registry")
+            return FakeRegistry()
+
+        monkeypatch.setattr("sie_server.app.app_factory.ModelRegistry", create_registry)
+        return events
+
+    @pytest.mark.parametrize("value", [None, "", " \t ", "0", "false", " FaLsE ", "no", "off", " OFF "])
+    def test_false_flag_preserves_disabled_backend(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sdpa_backend: tuple[MagicMock, dict[str, bool]],
+        value: str | None,
+    ) -> None:
+        setter, state = sdpa_backend
+        state["enabled"] = False
+        if value is not None:
+            monkeypatch.setenv("SIE_DISABLE_CUDNN_SDP", value)
+
+        AppFactory._configure_sdpa_backends()
+
+        setter.assert_not_called()
+        assert state["enabled"] is False
+
+    def test_false_flag_needs_no_torch_backend_api(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SIE_DISABLE_CUDNN_SDP", "0")
+        monkeypatch.setattr("sie_server.app.app_factory.torch", object())
+
+        AppFactory._configure_sdpa_backends()
+
+    @pytest.mark.parametrize("value", ["1", "true", " TrUe ", "yes", "on"])
+    def test_true_flag_calls_only_cudnn_sdp_setter(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sdpa_backend: tuple[MagicMock, dict[str, bool]],
+        value: str,
+    ) -> None:
+        setter, state = sdpa_backend
+        monkeypatch.setenv("SIE_DISABLE_CUDNN_SDP", value)
+
+        AppFactory._configure_sdpa_backends()
+
+        setter.assert_called_once_with(False)
+        assert state["enabled"] is False
+
+    @pytest.mark.asyncio
+    async def test_lifespan_disables_before_registry_loading_and_readiness_without_restoring(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sdpa_backend: tuple[MagicMock, dict[str, bool]],
+        startup_events: list[str],
+    ) -> None:
+        setter, state = sdpa_backend
+        monkeypatch.setenv("SIE_DISABLE_CUDNN_SDP", "1")
+
+        def disable(enabled: bool) -> None:
+            state["enabled"] = enabled
+            startup_events.append("disable")
+
+        setter.side_effect = disable
+        config = AppStateConfig(preload_models=["preloaded-model"], pinned_models=["pinned-model"])
+        app = AppFactory.create_app(config)
+        app.openapi()
+        setter.assert_not_called()
+
+        async with app.router.lifespan_context(app):
+            assert startup_events == [
+                "threads",
+                "cuda_defaults",
+                "disable",
+                "registry",
+                "load:preloaded-model",
+                "load:pinned-model",
+                "ipc",
+                "ready",
+            ]
+            await app.state.registry.load_async("lazy-model", "cpu")
+            assert startup_events[-1] == "load:lazy-model"
+            assert state["enabled"] is False
+
+        setter.assert_called_once_with(False)
+        assert startup_events[-1] == "not_ready"
+        for value in ("0", None):
+            if value is None:
+                monkeypatch.delenv("SIE_DISABLE_CUDNN_SDP")
+            else:
+                monkeypatch.setenv("SIE_DISABLE_CUDNN_SDP", value)
+            AppFactory._configure_sdpa_backends()
+        setter.assert_called_once_with(False)
+        assert state["enabled"] is False
+
+    @pytest.mark.asyncio
+    async def test_requested_setter_failure_aborts_before_startup_contexts(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sdpa_backend: tuple[MagicMock, dict[str, bool]],
+        startup_events: list[str],
+    ) -> None:
+        setter, _state = sdpa_backend
+        monkeypatch.setenv("SIE_DISABLE_CUDNN_SDP", "1")
+        setter.side_effect = RuntimeError("backend setter failed")
+        app = AppFactory.create_app(AppStateConfig(preload_models=["preloaded-model"], pinned_models=["pinned-model"]))
+
+        with pytest.raises(RuntimeError, match="backend setter failed"):
+            async with app.router.lifespan_context(app):
+                pytest.fail("startup must fail before serving")
+
+        setter.assert_called_once_with(False)
+        assert startup_events == ["threads", "cuda_defaults"]
+
+    @pytest.mark.asyncio
+    async def test_missing_requested_setter_aborts_startup(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        startup_events: list[str],
+    ) -> None:
+        monkeypatch.setenv("SIE_DISABLE_CUDNN_SDP", "1")
+        cuda_backend = MagicMock(spec_set=[])
+        backends = MagicMock(spec_set=["cuda"])
+        backends.cuda = cuda_backend
+        fake_torch = MagicMock(spec_set=["backends"])
+        fake_torch.backends = backends
+        monkeypatch.setattr("sie_server.app.app_factory.torch", fake_torch)
+        app = AppFactory.create_app(AppStateConfig())
+
+        with pytest.raises(AttributeError, match="enable_cudnn_sdp"):
+            async with app.router.lifespan_context(app):
+                pytest.fail("startup must fail before serving")
+
+        assert startup_events == ["threads", "cuda_defaults"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("reload", [False, True])
+    async def test_run_server_factory_preserves_policy_with_and_without_reload(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sdpa_backend: tuple[MagicMock, dict[str, bool]],
+        startup_events: list[str],
+        reload: bool,
+    ) -> None:
+        setter, state = sdpa_backend
+        monkeypatch.setenv("SIE_DISABLE_CUDNN_SDP", "1")
+        uvicorn_run = MagicMock()
+        monkeypatch.setattr(main.uvicorn, "run", uvicorn_run)
+        config = AppStateConfig(preload_models=["preloaded-model"], pinned_models=["pinned-model"])
+
+        main.run_server(host="127.0.0.1", port=8080, reload=reload, config=config)
+
+        uvicorn_run.assert_called_once()
+        assert uvicorn_run.call_args.args == ("sie_server.main:_create_app_from_env",)
+        assert uvicorn_run.call_args.kwargs["factory"] is True
+        assert uvicorn_run.call_args.kwargs["reload"] is reload
+        assert os.environ["SIE_DISABLE_CUDNN_SDP"] == "1"
+        app = main._create_app_from_env()
+        setter.assert_not_called()
+
+        async with app.router.lifespan_context(app):
+            setter.assert_called_once_with(False)
+            assert state["enabled"] is False
+            assert startup_events == [
+                "threads",
+                "cuda_defaults",
+                "registry",
+                "load:preloaded-model",
+                "load:pinned-model",
+                "ipc",
+                "ready",
+            ]
+        setter.assert_called_once_with(False)
 
 
 class TestConfigureTorchThreads:

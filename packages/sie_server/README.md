@@ -789,6 +789,15 @@ auto-retries; see `packages/sie_sdk/README.md` for client-side controls.
 |--|--|--|
 | `SIE_DEFAULT_COMPUTE_PRECISION` | `float16` | One of `float16`, `bfloat16`, `float32`. |
 | `SIE_ATTENTION_BACKEND` | `auto` | One of `auto`, `flash_attention_2`, `sdpa`, `eager`. |
+| `SIE_DISABLE_CUDNN_SDP` | unset (off) | Set `1` to disable cuDNN for Torch scaled dot-product attention at Python worker startup. Unset or `0` leaves the current backend policy alone. |
+
+This startup policy applies throughout the Python worker process, across all
+models that use Torch SDPA. Other eligible SDPA backends remain available; it
+does not guarantee Flash attention or better performance and does not disable
+cuDNN generally. The policy is applied before model loading and readiness and
+is not restored at shutdown. Start a fresh worker process with the variable
+unset or `0` to restore Torch's defaults; unset or `0` does not reset a backend
+already changed in the same interpreter.
 
 ### Diagnostics
 

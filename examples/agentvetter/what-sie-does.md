@@ -1,14 +1,14 @@
-# What SIE does in Tripwire
+# What SIE does in AgentVetter
 
-Tripwire discovers AI skills and MCP servers, runs isolated safety scanners
+AgentVetter discovers AI skills and MCP servers, runs isolated safety scanners
 (Modal + Cisco / Snyk / Tessl, etc.), stores findings in Supabase, and shows them
 in one dashboard. **SIE is a post-scan tiered router**, not part of the core
 scan path.
 
 **Upstream deep-links:**
-[sie-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/sie-setup.md) ·
-[model-studio-setup.md](https://github.com/neomatrix369/tripwire/blob/main/docs/user-guide/model-studio-setup.md) ·
-[ADR-0016](https://github.com/neomatrix369/tripwire/blob/main/docs/adr/0016-tiered-router-sie-model-studio.md).
+[SIE setup](https://github.com/neomatrix369/AgentVetter/blob/main/docs/user-guide/tiered-router-setup.md#part-a--superlinked-sie-required-for-routing) ·
+[Model Studio setup](https://github.com/neomatrix369/AgentVetter/blob/main/docs/user-guide/tiered-router-setup.md#part-b--alibaba-cloud-model-studio-escalation-only) ·
+[ADR-0016](https://github.com/neomatrix369/AgentVetter/blob/main/docs/adr/0016-tiered-router-sie-model-studio.md).
 Those setup pages may still label Model Studio as optional; for current CLI
 routing prerequisites use [SIE integration](./sie-integration.md).
 
@@ -44,13 +44,13 @@ rollups — triage is separate from scanner severity.
 |---|---|
 | Mock demo | No |
 | Live scan + dashboard | No |
-| Auto-route / `tripwire route` | Yes — `SIE_*` plus Model Studio keys (validated up front) |
+| Auto-route / `agentvetter route` | Yes — `SIE_*` plus Model Studio keys (validated up front) |
 | Model Studio second hop | Same keys; Alibaba called only when SIE escalates |
 
 ## Sample prototypes
 
-- [prototypes/sie-studio](https://github.com/neomatrix369/tripwire/tree/main/prototypes/sie-studio) — list / generate against SIE
-- [prototypes/model-studio](https://github.com/neomatrix369/tripwire/tree/main/prototypes/model-studio) — escalation sample
+- [prototypes/sie-studio](https://github.com/neomatrix369/AgentVetter/tree/main/prototypes/sie-studio) — list / generate against SIE
+- [prototypes/model-studio](https://github.com/neomatrix369/AgentVetter/tree/main/prototypes/model-studio) — escalation sample
 
 ## Next
 
