@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import itertools
 import json
 import logging
 import math
@@ -12,6 +13,7 @@ import torch
 
 from sie_server.adapters._flash_base import FlashBaseAdapter
 from sie_server.adapters._flash_pack import build_position_ids
+from sie_server.adapters._sparse_rows import sparse_rows
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters._utils import extract_texts, resolve_query_instruction, validate_output_types
@@ -327,22 +329,22 @@ class SPLADEFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         total_tokens = sum(seq_lengths)
         max_seqlen = max(seq_lengths)
 
-        input_ids_packed = torch.tensor(
-            [tok_id for ids in batch_encoding["input_ids"] for tok_id in ids],
-            dtype=torch.long,
-            device=self._device,
+        flat_ids = np.fromiter(
+            itertools.chain.from_iterable(batch_encoding["input_ids"]), dtype=np.int64, count=total_tokens
         )
-
-        cu_seqlens = torch.zeros(len(texts) + 1, dtype=torch.int32, device=self._device)
-        cu_seqlens[1:] = torch.tensor(seq_lengths, dtype=torch.int32, device=self._device).cumsum(0)
+        input_ids_packed = torch.from_numpy(flat_ids).to(self._device)
+        cu_seqlens = torch.from_numpy(np.concatenate(([0], np.cumsum(seq_lengths))).astype(np.int32)).to(self._device)
 
         with torch.inference_mode():
-            position_ids_packed = self._build_position_ids(cu_seqlens)
+            position_ids_packed = self._build_position_ids(cu_seqlens, total_tokens=total_tokens)
             hidden = self._run_embeddings(input_ids_packed, position_ids_packed)
             hidden = self._run_transformer_flash(hidden, cu_seqlens, max_seqlen, total_tokens)
             logits = self._run_mlm_head(hidden)
-            weights = torch.log1p(torch.relu_(logits))
-            sparse_list = self._aggregate_sparse(weights, cu_seqlens, seq_lengths)
+            # Max-pool the logits over each sequence's tokens, then activate the
+            # pooled [B, V] rows. log1p(relu(.)) is monotone, so this is the max
+            # of the activated tokens without activating [total_tokens, V].
+            pooled = torch.segment_reduce(logits, "max", offsets=cu_seqlens)
+            sparse_list = sparse_rows(torch.log1p(torch.relu_(pooled)))
 
         return sparse_list, seq_lengths
 
@@ -350,7 +352,7 @@ class SPLADEFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
     # Flash path internals
     # ------------------------------------------------------------------
 
-    def _build_position_ids(self, cu_seqlens: torch.Tensor) -> torch.Tensor:
+    def _build_position_ids(self, cu_seqlens: torch.Tensor, *, total_tokens: int | None = None) -> torch.Tensor:
         """Build position IDs for packed sequences, restarting per sequence.
 
         BERT/DistilBERT use 0-based positions; RoBERTa offsets each sequence by
@@ -363,7 +365,7 @@ class SPLADEFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         offset = 0
         if self._arch == "roberta":
             offset = self._get_base_model().embeddings.padding_idx + 1
-        return build_position_ids(cu_seqlens, offset=offset)
+        return build_position_ids(cu_seqlens, offset=offset, total_tokens=total_tokens)
 
     def _get_base_model(self) -> Any:
         if self._arch == "bert":
@@ -481,36 +483,13 @@ class SPLADEFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         seq_lengths: list[int],
     ) -> list[SparseVector]:
         """Max-pool packed token weights into per-sequence sparse vectors."""
-        num_seqs = len(seq_lengths)
-        max_weights = torch.segment_reduce(weights, "max", offsets=cu_seqlens)
-        dense = max_weights.cpu().float().numpy()
-        results: list[SparseVector] = []
-        for i in range(num_seqs):
-            row = dense[i]
-            mask = row > 0
-            results.append(
-                SparseVector(
-                    indices=np.where(mask)[0].astype(np.int32),
-                    values=row[mask],
-                )
-            )
-        return results
+        del seq_lengths  # The offsets carry the sequence boundaries.
+        return sparse_rows(torch.segment_reduce(weights, "max", offsets=cu_seqlens))
 
     @staticmethod
     def _dense_to_sparse_list(max_weights: torch.Tensor) -> list[SparseVector]:
         """Convert dense [batch, vocab_size] weights to a list of SparseVector."""
-        dense = max_weights.cpu().float().numpy()
-        results: list[SparseVector] = []
-        for i in range(dense.shape[0]):
-            row = dense[i]
-            mask = row > 0
-            results.append(
-                SparseVector(
-                    indices=np.where(mask)[0].astype(np.int32),
-                    values=row[mask],
-                )
-            )
-        return results
+        return sparse_rows(max_weights)
 
     # ------------------------------------------------------------------
     # IDF / query-weight utilities

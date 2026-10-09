@@ -954,7 +954,8 @@ def _merge_adaptive_params(
     if profile is None:
         return engine
     return AdaptiveBatchingParams(
-        enabled=engine.enabled,
+        # A profile can turn adaptive batching off for its model, never on.
+        enabled=engine.enabled and profile.enabled is not False,
         target_p50_ms=profile.target_p50_ms if profile.target_p50_ms is not None else engine.target_p50_ms,
         calibration_multiplier=profile.calibration_multiplier
         if profile.calibration_multiplier is not None

@@ -18,6 +18,12 @@ max_sequence_length: 512
 profiles:
   default:
     max_batch_tokens: 16384
+    # Document expansion is bulk work. Under load the adaptive controller sees
+    # request latency (queue time included) above its target and cuts the batch
+    # budget to a quarter, which made document expansion about 1.6x slower on an
+    # H100; this profile keeps the fixed 16,384-token budget instead.
+    adaptive_batching:
+      enabled: false
     compute_precision: null
     adapter_path: sie_server.adapters.splade_flash.adapter:SPLADEFlashAdapter
     adapter_options:

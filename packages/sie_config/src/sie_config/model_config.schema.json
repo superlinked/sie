@@ -252,6 +252,18 @@
       "additionalProperties": false,
       "description": "Per-model adaptive batching overrides.\n\nAll fields are optional. None means inherit from engine config or parent\nprofile. This enables fieldwise merge: a child profile can override one\nfield while inheriting the rest from the parent or engine defaults.",
       "properties": {
+        "enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Enabled"
+        },
         "target_p50_ms": {
           "anyOf": [
             {

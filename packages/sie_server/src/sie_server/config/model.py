@@ -503,6 +503,11 @@ class ProfileAdaptiveBatching(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # False turns adaptive batching off for this model; None or True keeps the
+    # server-wide setting. Encoders that serve large offline batches can be held
+    # back by the controller, which shrinks the batch budget whenever request
+    # latency (queue time included) is above target, as it always is under load.
+    enabled: bool | None = None
     target_p50_ms: float | None = None
     calibration_multiplier: float | None = None
     min_target_p50_ms: float | None = None
@@ -833,6 +838,7 @@ def _merge_profile_adaptive_batching(
 
     # Fieldwise merge: child overrides parent per-field
     return ProfileAdaptiveBatching(
+        enabled=child.enabled if child.enabled is not None else parent.enabled,
         target_p50_ms=child.target_p50_ms if child.target_p50_ms is not None else parent.target_p50_ms,
         calibration_multiplier=child.calibration_multiplier
         if child.calibration_multiplier is not None

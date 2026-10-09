@@ -945,7 +945,28 @@ class TestProfileAdaptiveBatchingMerge:
         assert result.target_p50_ms == 25.0  # from profile
         assert result.gain == 0.3  # from engine
         assert result.integral_gain == 0.05  # from engine
-        assert result.enabled is True  # always from engine
+        assert result.enabled is True  # the profile does not set enabled
+
+    @pytest.mark.parametrize(
+        ("engine_enabled", "profile_enabled", "expected"),
+        [(True, False, False), (True, True, True), (True, None, True), (False, True, False), (False, None, False)],
+    )
+    def test_profile_can_turn_adaptive_batching_off_but_not_on(
+        self, engine_enabled: bool, profile_enabled: bool | None, expected: bool
+    ) -> None:
+        from sie_server.config.model import ProfileAdaptiveBatching
+        from sie_server.core.model_loader import _merge_adaptive_params
+
+        engine = AdaptiveBatchingParams(enabled=engine_enabled, target_p50_ms=None, gain=0.3)
+        result = _merge_adaptive_params(engine, ProfileAdaptiveBatching(enabled=profile_enabled))
+        assert result.enabled is expected
+
+    def test_child_profile_inherits_and_overrides_enabled(self) -> None:
+        from sie_server.config.model import ProfileAdaptiveBatching, _merge_profile_adaptive_batching
+
+        parent = ProfileAdaptiveBatching(enabled=False, gain=0.3)
+        assert _merge_profile_adaptive_batching(parent, ProfileAdaptiveBatching(gain=0.2)).enabled is False
+        assert _merge_profile_adaptive_batching(parent, ProfileAdaptiveBatching(enabled=True)).enabled is True
 
     def test_engine_merge_none_profile(self) -> None:
         """No profile overrides → engine params unchanged."""

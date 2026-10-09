@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import itertools
 import logging
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
@@ -8,6 +9,7 @@ import numpy as np
 import torch
 
 from sie_server.adapters._flash_base import FlashBaseAdapter
+from sie_server.adapters._sparse_rows import sparse_rows
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters._utils import (
@@ -236,11 +238,18 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
 
         # Inference-free query encoding via IDF lookup (doc-* checkpoint pattern)
         if is_query and self._idf is not None:
-            return self._encode_query_idf(texts, is_query)
-
-        if self._use_flash:
-            return self._encode_flash(texts, is_query)
-        return self._encode_native(texts, is_query)
+            output = self._encode_query_idf(texts, is_query)
+        elif self._use_flash:
+            output = self._encode_flash(texts, is_query)
+        else:
+            return self._encode_native(texts, is_query)
+        # The token counts this adapter just produced are the metering counts
+        # (``count_input_tokens`` re-tokenizes each item's text the same way)
+        # only when no template changed the text; otherwise leave metering to
+        # that hook, as before, instead of tokenizing every document twice.
+        if any(text != item.text for text, item in zip(texts, items, strict=True)):
+            output.extra.pop("input_token_counts", None)
+        return output
 
     def _encode_native(self, texts: list[str], is_query: bool) -> EncodeOutput:
         """Encode using native forward pass (for CPU or fallback)."""
@@ -304,20 +313,16 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         total_tokens = sum(seq_lengths)
         max_seqlen = max(seq_lengths)
 
-        # Pack input_ids into a single 1-D tensor
-        input_ids_packed = torch.tensor(
-            [tok_id for ids in batch_encoding["input_ids"] for tok_id in ids],
-            dtype=torch.long,
-            device=self._device,
+        # Pack input_ids and cu_seqlens on the host: one copy each
+        flat_ids = np.fromiter(
+            itertools.chain.from_iterable(batch_encoding["input_ids"]), dtype=np.int64, count=total_tokens
         )
-
-        # Build cu_seqlens using cumsum
-        cu_seqlens = torch.zeros(len(texts) + 1, dtype=torch.int32, device=self._device)
-        cu_seqlens[1:] = torch.tensor(seq_lengths, dtype=torch.int32, device=self._device).cumsum(0)
+        input_ids_packed = torch.from_numpy(flat_ids).to(self._device)
+        cu_seqlens = torch.from_numpy(np.concatenate(([0], np.cumsum(seq_lengths))).astype(np.int32)).to(self._device)
 
         with torch.inference_mode():
-            # Build position IDs for RoPE
-            position_ids = self._build_position_ids(cu_seqlens)
+            # Build position IDs for RoPE (the host-known total avoids a device sync)
+            position_ids = self._build_position_ids(cu_seqlens, total_tokens=total_tokens)
 
             # Compute RoPE cos/sin
             cos, sin = self._compute_rope(position_ids, max_seqlen)
@@ -333,21 +338,26 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             # Run MLM head
             logits = self._model.lm_head(hidden)  # [total_tokens, V]
 
-            # Compute activation weights on full tensor
-            weights = self._sparse_activation(logits.float())
+            # Max-pool the logits over each sequence's tokens, then activate the
+            # pooled [B, V] rows, as the native path does. The activation is
+            # monotone, so this is the max of the activated tokens without
+            # upcasting and activating the whole [total_tokens, V] tensor.
+            pooled = torch.segment_reduce(logits, "max", offsets=cu_seqlens)
+            sparse_list = self._pooled_to_sparse(self._sparse_activation(pooled.float()))
 
-            # Max-pool over tokens per sequence to get sparse vectors
-            sparse_list = self._aggregate_sparse(weights, cu_seqlens, seq_lengths)
+        output = EncodeOutput(sparse=sparse_list, batch_size=len(texts), is_query=is_query)
+        output.extra["input_token_counts"] = [int(n) for n in seq_lengths]
+        return output
 
-        return EncodeOutput(sparse=sparse_list, batch_size=len(texts), is_query=is_query)
-
-    def _build_position_ids(self, cu_seqlens: torch.Tensor) -> torch.Tensor:
+    def _build_position_ids(self, cu_seqlens: torch.Tensor, *, total_tokens: int | None = None) -> torch.Tensor:
         """Build position IDs for packed sequences (each starts from 0)."""
-        total_tokens = int(cu_seqlens[-1].item())
+        if total_tokens is None:
+            total_tokens = int(cu_seqlens[-1].item())
         positions = torch.arange(total_tokens, device=self._device)
         offsets = torch.repeat_interleave(
             cu_seqlens[:-1],
             cu_seqlens[1:] - cu_seqlens[:-1],
+            output_size=total_tokens,
         )
         return positions - offsets
 
@@ -358,22 +368,14 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         seq_lengths: list[int],
     ) -> list[SparseVector]:
         """Aggregate token weights to sparse vectors via max-pooling."""
-        num_seqs = len(seq_lengths)
-        max_weights = torch.segment_reduce(weights, "max", offsets=cu_seqlens)
+        del seq_lengths  # The offsets carry the sequence boundaries.
+        return self._pooled_to_sparse(torch.segment_reduce(weights, "max", offsets=cu_seqlens))
+
+    def _pooled_to_sparse(self, max_weights: torch.Tensor) -> list[SparseVector]:
+        """Per-sequence sparse vectors from pooled ``[B, V]`` weights, special tokens zeroed."""
         if self._special_token_ids:
             max_weights[:, self._special_token_ids] = 0.0
-        dense = max_weights.cpu().float().numpy()
-        results: list[SparseVector] = []
-        for i in range(num_seqs):
-            row = dense[i]
-            mask = row > 0
-            results.append(
-                SparseVector(
-                    indices=np.where(mask)[0].astype(np.int32),
-                    values=row[mask],
-                )
-            )
-        return results
+        return sparse_rows(max_weights)
 
     def _compute_rope(
         self,
@@ -591,4 +593,6 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
                 )
             )
 
-        return EncodeOutput(sparse=sparse_list, batch_size=len(texts), is_query=is_query)
+        output = EncodeOutput(sparse=sparse_list, batch_size=len(texts), is_query=is_query)
+        output.extra["input_token_counts"] = [len(input_ids) for input_ids in batch_encoding["input_ids"]]
+        return output
