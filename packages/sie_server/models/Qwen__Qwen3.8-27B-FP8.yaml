@@ -59,7 +59,11 @@ tasks:
 max_sequence_length: 8192
 profiles:
   # Correctness-first bare route: official FP8 weights, BF16 KV, FP32 GDN
-  # state, no speculation, CUDA graphs disabled, and an 8K admission window.
+  # state, no speculation, and an 8K admission window. Decode runs on CUDA
+  # graphs (SGLang's default; prefill graphs stay off on this engine). At one
+  # request in flight the graphs replay the same kernels, so greedy replies
+  # are byte-identical to the eager launch: 60 of 60 page extractions and
+  # photo questions matched, while GPU-seconds per extraction fell 6.4x.
   default:
     max_batch_tokens: 16384
     compute_precision: bfloat16
@@ -71,7 +75,6 @@ profiles:
           SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
         mem_fraction_static: 0.85
         served_model_name: Qwen/Qwen3.8-27B-FP8
-        disable_cuda_graph: true
         attention_backend: flashinfer
         grammar_backend: xgrammar
         json_number_max_digits: 19
@@ -208,13 +211,19 @@ profiles:
           - "1"
 
   # H100-80GB batch lane: the h100-256k launch shape without speculation,
-  # admitting up to 16 running requests with CUDA graphs captured for every
-  # decode batch size through 16. Speculation stays off so xgrammar enforces
+  # admitting up to 32 running requests with CUDA graphs captured for every
+  # decode batch size through 32. Speculation stays off so xgrammar enforces
   # every constrained token, which makes this the concurrent grammar-safe
   # native-window lane. Measured on one H100 80GB with a ~670-token json_schema
   # request: 72 tok/s decode at batch 1 against 11.6 on the bare route, and
   # 148 requests/min at 8 in flight against 44. Standalone so its grammar twin
   # inherits only this shape.
+  # Unlike the single-admission native-window pairs it keeps SGLang's overlap
+  # scheduler: those pairs disable it for the speculative-V2 overlap crash on
+  # hybrid Mamba, which does not apply to a non-speculative launch. On 222
+  # page-image json_schema extractions, overlap plus 32 admissions cut
+  # GPU-seconds per request by 10% at 1 in flight, 12% at 8 and 25% at 32,
+  # with the extraction score unchanged.
   h100-256k-batch:
     grammar_profile: h100-256k-batch-no-spec
     max_output_tokens: 32768
@@ -246,7 +255,6 @@ profiles:
           - "bfloat16"
           - "--mamba-radix-cache-strategy"
           - "extra_buffer"
-          - "--disable-overlap-schedule"
           - "--page-size"
           - "64"
           - "--chunked-prefill-size"
@@ -254,9 +262,9 @@ profiles:
           - "--max-prefill-tokens"
           - "32768"
           - "--max-running-requests"
-          - "16"
+          - "32"
           - "--cuda-graph-max-bs-decode"
-          - "16"
+          - "32"
       runtime:
         first_chunk_timeout_s: 900
         inter_chunk_timeout_s: 30

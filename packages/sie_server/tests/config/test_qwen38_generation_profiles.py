@@ -73,7 +73,9 @@ def test_qwen38_default_is_a_conservative_non_speculative_route() -> None:
     assert default.max_batch_tokens == 16384
     assert default.kv_budget_tokens == 8192
     assert default.loadtime["mem_fraction_static"] == 0.85
-    assert default.loadtime["disable_cuda_graph"] is True
+    # Decode CUDA graphs are on: at one request in flight they replay the
+    # eager kernels, so greedy replies are unchanged while decode is ~6x faster.
+    assert "disable_cuda_graph" not in default.loadtime
     assert default.loadtime["speculative"] == {"enabled": False}
     assert default.loadtime["attention_backend"] == "flashinfer"
     assert default.loadtime["extra_env"] == {"SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS": "3211264"}
@@ -221,7 +223,7 @@ class _ConfigRegistry:
         return self._configs[name]
 
 
-def test_qwen38_h100_batch_profile_is_the_native_no_spec_launch_with_sixteen_graphed_requests() -> None:
+def test_qwen38_h100_batch_profile_is_the_native_no_spec_launch_with_32_graphed_overlapped_requests() -> None:
     config = load_model_config(_MODEL_PATH)
     configs = expand_profile_variants([config])
     single = config.resolve_profile("h100-256k-no-spec")
@@ -239,11 +241,15 @@ def test_qwen38_h100_batch_profile_is_the_native_no_spec_launch_with_sixteen_gra
     assert batch.runtime == single.runtime
 
     # The only launch differences from the single-admission H100 lane: up to
-    # 16 running requests, with decode CUDA graphs captured through batch 16.
+    # 32 running requests, decode CUDA graphs captured through batch 32, and
+    # SGLang's overlap scheduler left on. The single-admission lane disables
+    # overlap for its speculative twin; this lane never speculates.
     args = list(batch.loadtime["extra_launch_args"])
-    assert args[args.index("--max-running-requests") + 1] == "16"
-    assert args[args.index("--cuda-graph-max-bs-decode") + 1] == "16"
+    assert args[args.index("--max-running-requests") + 1] == "32"
+    assert args[args.index("--cuda-graph-max-bs-decode") + 1] == "32"
+    assert "--disable-overlap-schedule" not in args
     single_args = list(single.loadtime["extra_launch_args"])
+    single_args.remove("--disable-overlap-schedule")
     for flag in ("--max-running-requests", "--cuda-graph-max-bs-decode"):
         args[args.index(flag) + 1] = single_args[single_args.index(flag) + 1]
     assert args == single_args
