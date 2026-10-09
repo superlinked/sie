@@ -111,17 +111,50 @@ def test_buffered_chat_refuses_invalid_choices(choices: list[dict]) -> None:
 def test_multiple_choices_must_all_finish() -> None:
     parser = ChatStreamParser("model", choices=2)
     parser.parse(wire([choice(index=0, stream=True)]))
+    early = parser.parse(wire([], usage=USAGE))
+    assert early is not None
+    assert "usage" not in early
     with pytest.raises(RemoteUpstreamError):
-        parser.parse(wire([], usage=USAGE))
+        parser.parse(b"[DONE]")
 
 
-def test_duplicate_finished_choice_and_duplicate_usage_fail() -> None:
+def test_duplicate_finished_choice_fails() -> None:
     parser = ChatStreamParser("model")
     parser.parse(wire([choice(stream=True)], usage=USAGE))
     with pytest.raises(RemoteUpstreamError):
         parser.parse(wire([choice(stream=True)]))
+
+
+def test_running_usage_is_not_final_and_the_last_usage_after_every_finish_stands() -> None:
+    parser = ChatStreamParser("model")
+    running = {"prompt_tokens": 37, "completion_tokens": 1, "total_tokens": 38}
+    final = {**USAGE, "prompt_tokens_details": {"cached_tokens": 3}}
+    first = parser.parse(wire([choice(stream=True, finish=None, content="ans")], usage=running))
+    finished = parser.parse(wire([choice(stream=True, content="wer")], usage=USAGE))
+    trailing = parser.parse(wire([], usage=final))
+    assert first is not None
+    assert "usage" not in first
+    assert finished is not None
+    assert finished["usage"] == USAGE
+    assert trailing is not None
+    assert trailing["usage"] == final
+    assert parser.parse(b"[DONE]") is None
+    parser.finish()
+
+
+def test_running_usage_cannot_stand_in_for_the_final_usage() -> None:
+    parser = ChatStreamParser("model")
+    parser.parse(wire([choice(stream=True, finish=None)], usage=USAGE))
+    parser.parse(wire([choice(stream=True)]))
     with pytest.raises(RemoteUpstreamError):
-        parser.parse(wire([], usage=USAGE))
+        parser.parse(b"[DONE]")
+
+
+def test_invalid_usage_after_every_finish_fails() -> None:
+    parser = ChatStreamParser("model")
+    parser.parse(wire([choice(stream=True)], usage=USAGE))
+    with pytest.raises(RemoteUpstreamError):
+        parser.parse(wire([], usage={**USAGE, "total_tokens": 40}))
 
 
 def test_tool_calls_preserve_only_function_wire_fields() -> None:
