@@ -36,6 +36,7 @@ from sie_server.api.helpers import (
     oom_retry_after_from_registry,
     openai_error_response,
     upstream_unavailable_exception,
+    validated_total,
 )
 from sie_server.api.options import resolve_runtime_options_with_profile
 from sie_server.api.routing import error_code, fallback_refusal, remote_routing, route_request
@@ -43,6 +44,7 @@ from sie_server.api.validation import validate_machine_profile_header
 from sie_server.core.encode_pipeline import EncodePipeline, resolve_encode_output_types
 from sie_server.core.model_suggestions import suggestion_suffix
 from sie_server.core.oom import is_oom_error
+from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import QueueFullError
 from sie_server.core.worker.types import WorkerDrainedError
 from sie_server.observability.tracing import tracer
@@ -122,6 +124,10 @@ class OpenAIUsage(BaseModel):
 
     prompt_tokens: Annotated[int, Field(description="Number of tokens in the input")]
     total_tokens: Annotated[int, Field(description="Total tokens (same as prompt_tokens for embeddings)")]
+    sie_token_source: Annotated[
+        Literal["worker", "character_estimate"],
+        Field(description="Whether the token count is measured by the worker or estimated from input character length"),
+    ]
 
 
 class OpenAIEmbeddingResponse(BaseModel):
@@ -255,6 +261,7 @@ def _build_embeddings_response(
     texts: list[str],
     model: str,
     encoding_format: str,
+    timing: RequestTiming | None = None,
 ) -> OpenAIEmbeddingResponse:
     """Build OpenAI-format response from encoding results.
 
@@ -263,6 +270,7 @@ def _build_embeddings_response(
         texts: Input texts
         model: Model name
         encoding_format: "float" or "base64"
+        timing: Request timing carrying the worker's measured input-token counts
     """
     embeddings_data: list[OpenAIEmbeddingData] = []
 
@@ -299,7 +307,11 @@ def _build_embeddings_response(
             )
         )
 
-    token_count = _estimate_tokens(texts)
+    token_counts = timing.input_token_counts if timing is not None else None
+    measured_tokens = validated_total(token_counts, len(texts))
+    if measured_tokens is not None and token_counts is not None and any(count < 0 for count in token_counts):
+        measured_tokens = None
+    token_count = measured_tokens if measured_tokens is not None else _estimate_tokens(texts)
 
     return OpenAIEmbeddingResponse(
         object="list",
@@ -308,6 +320,7 @@ def _build_embeddings_response(
         usage=OpenAIUsage(
             prompt_tokens=token_count,
             total_tokens=token_count,
+            sie_token_source="worker" if measured_tokens is not None else "character_estimate",
         ),
     )
 
@@ -660,4 +673,4 @@ async def _create_embeddings(
                 units=units,
             )
         response.headers.update(route.headers())
-        return _build_embeddings_response(results, texts, model, encoding_format)
+        return _build_embeddings_response(results, texts, model, encoding_format, timing)

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+from sie_server.adapters._prompt_limit import MAX_LABEL_CHARS
 from sie_server.adapters.gliner_bi import GLiNERBiAdapter
-from sie_server.types.inputs import Item
+from sie_server.types.inputs import InvalidInputError, Item
 
 
 class _FakeBiEncoder:
@@ -37,3 +39,24 @@ def test_reordered_labels_get_their_own_embeddings() -> None:
         assert embeds == [f"embedding of {label}" for label in labels]
     # The third request repeats the first label order and reuses its cached embeddings.
     assert model.encoded == [["person", "city"], ["city", "person"]]
+
+
+def test_bi_encoder_rejects_a_label_over_128_characters() -> None:
+    adapter = GLiNERBiAdapter("test-model", precompute_labels=True)
+    model = _FakeBiEncoder()
+    adapter._model = model
+    adapter._device = "cpu"
+    item = Item(text="Ada lives in Paris")
+
+    with pytest.raises(
+        InvalidInputError, match=f"GLiNER bi-encoder labels may have at most {MAX_LABEL_CHARS} characters"
+    ):
+        adapter.extract([item], labels=["x" * (MAX_LABEL_CHARS + 1)])
+    assert model.encoded == []
+    assert model.predicted == []
+
+    accepted = "y" * MAX_LABEL_CHARS
+    output = adapter.extract([item], labels=[accepted])
+    assert output.errors is None
+    assert model.encoded == [[accepted]]
+    assert model.predicted[0][1] == [accepted]

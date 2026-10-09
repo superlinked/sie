@@ -18,6 +18,7 @@ from sie_server.core.oom import ResourceExhausted, ResourceExhaustedError
 from sie_server.core.postprocessor_registry import PostprocessorRegistry
 from sie_server.core.preprocessor_registry import PreprocessorRegistry
 from sie_server.core.registry import ModelRegistry
+from sie_server.core.timing import RequestTiming
 from sie_server.types.inputs import MAX_ITEM_TEXT_BYTES
 
 # A fake embedder whose vector depends on the runtime options it receives, so a
@@ -120,6 +121,49 @@ def client(mock_registry: MagicMock) -> TestClient:
 
 class TestOpenAIEmbeddings:
     """Test OpenAI-compatible /v1/embeddings endpoint."""
+
+    @pytest.mark.parametrize(
+        ("counts", "expected_tokens", "expected_source"),
+        [
+            ([3, 7], 10, "worker"),
+            ([0, 0], 0, "worker"),
+            (None, 1, "character_estimate"),
+            ([], 1, "character_estimate"),
+            ([3], 1, "character_estimate"),
+            ([3, 7, 4], 1, "character_estimate"),
+            ([-1, -2], 1, "character_estimate"),
+            ([-1, 3], 1, "character_estimate"),
+            ([-3, 3], 1, "character_estimate"),
+            ([True, 2], 1, "character_estimate"),
+        ],
+    )
+    def test_usage_reports_worker_counts_or_labels_the_estimate(
+        self,
+        client: TestClient,
+        counts: list[int] | None,
+        expected_tokens: int,
+        expected_source: str,
+    ) -> None:
+        """Only complete, valid worker counts can reconcile with metered usage."""
+        results = [{"dense": np.array([0.1, 0.2, 0.3], dtype=np.float32)} for _ in range(2)]
+        timing = RequestTiming(input_token_counts=counts)
+        with patch(
+            "sie_server.api.openai_compat.EncodePipeline.run_encode",
+            new=AsyncMock(return_value=(results, timing)),
+        ):
+            response = client.post(
+                "/v1/embeddings",
+                json={"model": "text-embedding-3-small", "input": ["x", "y"]},
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert [item["index"] for item in data["data"]] == [0, 1]
+        assert data["usage"] == {
+            "prompt_tokens": expected_tokens,
+            "total_tokens": expected_tokens,
+            "sie_token_source": expected_source,
+        }
 
     def test_single_text_input(self, client: TestClient) -> None:
         """Test embedding a single text string."""
@@ -539,7 +583,7 @@ class TestOpenAIResponseFormat:
         assert item["object"] == "embedding"
 
         # Usage fields
-        assert set(data["usage"].keys()) == {"prompt_tokens", "total_tokens"}
+        assert set(data["usage"].keys()) == {"prompt_tokens", "total_tokens", "sie_token_source"}
 
     def test_embedding_indices_sequential(self, client: TestClient) -> None:
         """Verify embedding indices are sequential starting from 0."""

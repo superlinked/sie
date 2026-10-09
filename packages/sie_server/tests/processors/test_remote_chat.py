@@ -227,6 +227,35 @@ async def test_truncated_chat_never_settles_as_success(remote: tuple, missing: s
     assert stream.closed
 
 
+def running(completion_tokens: int) -> dict:
+    return {"prompt_tokens": 37, "completion_tokens": completion_tokens, "total_tokens": 37 + completion_tokens}
+
+
+async def test_running_usage_on_every_chunk_settles_on_the_last_final_usage(remote: tuple) -> None:
+    frames: list[dict | str] = [
+        {**choice(""), "usage": running(0)},
+        {**choice(), "usage": running(1)},
+        {**choice("", finish="stop"), "usage": running(1)},
+        {"choices": [], "usage": USAGE},
+        "[DONE]",
+    ]
+    respond(remote, frames=frames)
+    msg, chunks = await run(remote)
+    assert "".join(chunk.get("text_delta", "") for chunk in chunks) == "answer"
+    assert chunks[-1]["done"]
+    assert chunks[-1]["finish_reason"] == "stop"
+    assert chunks[-1]["usage"] == USAGE
+    msg.ack.assert_awaited_once()
+
+
+async def test_running_usage_without_a_final_usage_never_settles(remote: tuple) -> None:
+    frames: list[dict | str] = [{**choice(), "usage": running(1)}, choice("", finish="stop"), "[DONE]"]
+    respond(remote, frames=frames)
+    _msg, chunks = await run(remote)
+    assert chunks[-1]["finish_reason"] == "error"
+    assert chunks[-1]["error"]["code"] == "inference_error"
+
+
 async def test_cancel_closes_upstream_and_settles_once(remote: tuple) -> None:
     stream = respond(remote, stream=ChatStream([choice()], hold=True))
     task = asyncio.create_task(run(remote))

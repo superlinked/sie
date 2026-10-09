@@ -218,9 +218,9 @@ class ChatStreamParser:
         payload = _json(data, max_bytes=_MAX_EVENT_BYTES)
         choices = self._parse_choices(payload.get("choices"), stream=True)
         clean = self._envelope(choices, stream=True)
-        if payload.get("usage") is not None:
-            if len(self._finished) != self.choices or self._usage is not None:
-                raise _invalid()
+        # Upstreams may stream a running count on every chunk. Only the last
+        # usage after every choice finishes is the request's usage.
+        if payload.get("usage") is not None and len(self._finished) == self.choices:
             self._usage = _usage(payload["usage"])
             clean["usage"] = self._usage
         return clean
