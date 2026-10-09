@@ -409,6 +409,15 @@ profiles:
   # the worker's 1,280-token per-image reservation, so admission is unchanged.
   # Answer-only (``enable_thinking: false``) with the bare 4,096-token output
   # cap, like ``h100-96k``.
+  # The hi-res family also compiles JSON-schema grammars without free
+  # whitespace (``--constrained-json-disable-any-whitespace``) and bounds each
+  # JSON number to 19 integer and 19 fractional digits
+  # (``json_number_max_digits``), as the Qwen3.8 and Qwen3.6-35B profiles do.
+  # With free whitespace a third of greedy page extractions carried newlines or
+  # stray spaces, and a speculative decode filled one reply's 8,192-token cap
+  # with whitespace. Compact replies stay valid under the same schema; on 222
+  # page extractions the score was unchanged within run-to-run noise while
+  # output tokens fell 9% and GPU-seconds per request up to 11%.
   h100-96k-hires:
     max_batch_tokens: 98304
     compute_precision: bfloat16
@@ -422,6 +431,7 @@ profiles:
         served_model_name: google/gemma-4-31B-it
         attention_backend: triton
         grammar_backend: xgrammar
+        json_number_max_digits: 19
         reasoning_parser: gemma4
         tool_call_parser: gemma4
         speculative_needs_extra_buffer: false
@@ -440,6 +450,7 @@ profiles:
           - "fp8_e4m3"
           - "--mm-process-config"
           - '{"image":{"max_soft_tokens":1120}}'
+          - "--constrained-json-disable-any-whitespace"
       runtime:
         first_chunk_timeout_s: 900
         inter_chunk_timeout_s: 30
@@ -460,6 +471,7 @@ profiles:
         served_model_name: google/gemma-4-31B-it
         attention_backend: triton
         grammar_backend: xgrammar
+        json_number_max_digits: 19
         reasoning_parser: gemma4
         tool_call_parser: gemma4
         speculative_needs_extra_buffer: false
@@ -472,6 +484,7 @@ profiles:
           - "fp8_e4m3"
           - "--mm-process-config"
           - '{"image":{"max_soft_tokens":1120}}'
+          - "--constrained-json-disable-any-whitespace"
   # ``h100-96k-hires`` with a longer answer budget. The profile-level
   # ``max_output_tokens`` raises the bare 4,096-token cap to 8,192, because
   # extracting every row of a dense multi-column page can need more than 4,096
@@ -493,6 +506,7 @@ profiles:
         served_model_name: google/gemma-4-31B-it
         attention_backend: triton
         grammar_backend: xgrammar
+        json_number_max_digits: 19
         reasoning_parser: gemma4
         tool_call_parser: gemma4
         speculative_needs_extra_buffer: false
@@ -505,3 +519,4 @@ profiles:
           - "fp8_e4m3"
           - "--mm-process-config"
           - '{"image":{"max_soft_tokens":1120}}'
+          - "--constrained-json-disable-any-whitespace"

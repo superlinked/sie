@@ -14,7 +14,17 @@ MODEL_ID = "google/gemma-4-31B-it"
 
 # Budgets accepted by the Gemma 4 image processor's ``max_soft_tokens``.
 _GEMMA4_SUPPORTED_SOFT_TOKENS = (70, 140, 280, 560, 1120)
-_HIRES_ARGS = ["--mm-process-config", '{"image":{"max_soft_tokens":1120}}']
+_HIRES_ARGS = [
+    "--mm-process-config",
+    '{"image":{"max_soft_tokens":1120}}',
+    "--constrained-json-disable-any-whitespace",
+]
+_HIRES_PROFILES = (
+    "h100-96k-hires",
+    "h100-96k-hires-no-spec",
+    "h100-96k-hires-out8k",
+    "h100-96k-hires-out8k-no-spec",
+)
 
 
 def _mm_process_config(extra_launch_args: list[str]) -> dict:
@@ -34,13 +44,17 @@ def test_hires_profiles_set_a_supported_image_budget_within_the_reservation() ->
         assert budget + 2 <= _VISION_TOKENS_PER_IMAGE_ESTIMATE
 
 
-def test_hires_profiles_match_h100_96k_except_the_image_budget() -> None:
+def test_hires_profiles_match_h100_96k_except_the_image_budget_and_compact_json() -> None:
     config = load_model_config(MODEL_FILE)
     for hires_name, base_name in (("h100-96k-hires", "h100-96k"), ("h100-96k-hires-no-spec", "h100-96k-no-spec")):
         hires = config.resolve_profile(hires_name)
         base = config.resolve_profile(base_name)
         assert hires.loadtime["extra_launch_args"] == [*base.loadtime["extra_launch_args"], *_HIRES_ARGS]
-        assert hires.loadtime | {"extra_launch_args": None} == base.loadtime | {"extra_launch_args": None}
+        assert "json_number_max_digits" not in base.loadtime
+        assert hires.loadtime | {"extra_launch_args": None, "json_number_max_digits": None} == base.loadtime | {
+            "extra_launch_args": None,
+            "json_number_max_digits": None,
+        }
         assert hires.runtime == base.runtime
         assert hires.adapter_path == base.adapter_path
         assert hires.compute_precision == base.compute_precision
@@ -120,3 +134,16 @@ def test_hires_out8k_grammar_requests_route_to_the_non_speculative_sibling() -> 
     assert source.loadtime["speculative"] == config.resolve_profile("h100-96k").loadtime["speculative"]
     assert fallback.loadtime["speculative"] == {"enabled": False}
     assert source.loadtime | {"speculative": None} == fallback.loadtime | {"speculative": None}
+
+
+def test_hires_profiles_compile_compact_bounded_json_grammars() -> None:
+    # With free whitespace, greedy page extractions carried newlines and stray
+    # spaces, and a speculative decode filled one reply's output cap with
+    # whitespace. Every hi-res launch, including each grammar twin, compiles
+    # compact JSON-schema grammars and bounds JSON number digits on xgrammar.
+    config = load_model_config(MODEL_FILE)
+    for name in _HIRES_PROFILES:
+        loadtime = config.resolve_profile(name).loadtime
+        assert loadtime["grammar_backend"] == "xgrammar", name
+        assert loadtime["json_number_max_digits"] == 19, name
+        assert loadtime["extra_launch_args"].count("--constrained-json-disable-any-whitespace") == 1, name
