@@ -24,10 +24,10 @@ MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
         (
             "Qwen__Qwen3.6-35B-A3B.yaml",
             "Qwen/Qwen3.6-35B-A3B",
-            "sie_server.adapters.sglang.generation:SGLangGenerationAdapter",
+            "sie_server.adapters.sglang.cuda13:SGLangCuda13Adapter",
             "xgrammar",
             None,
-            True,
+            None,
             {"enabled": False},
             [
                 "--mm-process-config",
@@ -35,6 +35,8 @@ MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
                 "--constrained-json-disable-any-whitespace",
                 "--quantization",
                 "fp8",
+                "--mamba-radix-cache-strategy",
+                "extra_buffer",
             ],
         ),
         (

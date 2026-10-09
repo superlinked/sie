@@ -4,7 +4,10 @@ hf_revision: 995ad96eacd98c81ed38be0c5b274b04031597b0
 # Qwen3.6-35B-A3B is the Qwen3.5-compatible hybrid VLM/MoE architecture
 # (35B total / 3B active). Its 66.97 GiB BF16 checkpoint fits the existing
 # SGLang 0.5.10+ family adapter, but a single H100-80GB needs online FP8 weight
-# quantization to preserve activation and KV headroom.
+# quantization to preserve activation and KV headroom. The bare/default route
+# (and its h100-fp8 alias) runs on the CUDA 13 SGLang engine of the
+# ``sglang-cu130`` bundle; the native-window and thinking profiles stay on the
+# shared CUDA 12 engine.
 inputs:
   text: true
   image: true
@@ -24,25 +27,31 @@ tasks:
       enable_thinking: false
 max_sequence_length: 8192
 # Every profile compiles JSON-schema grammars without free whitespace
-# (--constrained-json-disable-any-whitespace, which sglang 0.5.10.post1
-# declares and applies to the xgrammar backend). With free whitespace the model
+# (--constrained-json-disable-any-whitespace, which both pinned SGLang engines
+# declare and apply to the xgrammar backend). With free whitespace the model
 # pretty-prints a json_schema reply, so indentation spends output tokens and
 # pushes dense replies toward max_output_tokens, where a truncated reply is not
 # valid JSON. Compact replies remain valid under the same schema.
 profiles:
-  # Correctness-first H100 FP8 bootstrap: no NEXTN and no CUDA graphs until
-  # the online-FP8 smoke validates the MoE kernels and memory envelope.
+  # H100-80GB online-FP8 route on the CUDA 13 engine with decode CUDA graphs,
+  # FlashAttention 3 and the extra-buffer Mamba radix cache, which lets the
+  # engine keep its overlap scheduler on this hybrid model. NEXTN stays off:
+  # grammar requests run on this profile. The original bootstrap (CUDA 12
+  # engine, triton attention, CUDA graphs off) decoded about 15 tokens/s on one
+  # request. On one H100 80GB with page-image json_schema extractions this
+  # launch reached 210 tokens/s on one request and cut GPU-seconds per
+  # extraction 13x at 1 in flight, 8x at 8 and 5x at 32, with the extraction
+  # score unchanged.
   default:
     max_batch_tokens: 16384
     compute_precision: bfloat16
-    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+    adapter_path: sie_server.adapters.sglang.cuda13:SGLangCuda13Adapter
     kv_budget_tokens: 8192
     adapter_options:
       loadtime:
         mem_fraction_static: 0.90
         served_model_name: Qwen/Qwen3.6-35B-A3B
-        disable_cuda_graph: true
-        attention_backend: triton
+        attention_backend: fa3
         # Outlines fails at request time on this hybrid architecture because
         # its backend lacks the vocabulary-mask API used by the scheduler.
         grammar_backend: xgrammar
@@ -56,6 +65,8 @@ profiles:
           - "--constrained-json-disable-any-whitespace"
           - "--quantization"
           - "fp8"
+          - "--mamba-radix-cache-strategy"
+          - "extra_buffer"
       runtime:
         first_chunk_timeout_s: 90
         inter_chunk_timeout_s: 15
