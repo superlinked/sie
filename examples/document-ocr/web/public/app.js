@@ -26,6 +26,7 @@ let glinerBuf = [];
 let modelConfig = null;
 let registeredSet = new Set();
 let cudaAvailable = null;
+let catalogKnown = false;
 let availabilityUnavailable = false;
 
 function setBadge(text, cls) {
@@ -98,6 +99,7 @@ function updateSnippets() {
 function clearAvailability() {
   registeredSet = new Set();
   cudaAvailable = null;
+  catalogKnown = false;
   availabilityUnavailable = true;
 }
 
@@ -105,7 +107,8 @@ function optionAvailable(opt) {
   if (availabilityUnavailable) {
     return { inCatalog: false, blockedByCuda: false, available: false };
   }
-  const serverKnown = registeredSet.size > 0 || cudaAvailable === true;
+  // Empty successful catalogs are known. A failed fetch leaves catalogKnown false.
+  const serverKnown = catalogKnown;
   const inCatalog = !serverKnown || registeredSet.has(opt.id);
   const blockedByCuda = Boolean(opt.gpuRequired) && cudaAvailable === false;
   return { inCatalog, blockedByCuda, available: inCatalog && !blockedByCuda };
@@ -219,13 +222,17 @@ async function syncAvailability() {
     const r = await fetch("/api/health");
     const j = await r.json();
     els.sieUrl.textContent = j.sieUrl;
-    if (!j.sie) {
+    if (j.catalogKnown !== true) {
       clearAvailability();
-      els.sieState.textContent = "SIE not reachable yet (still preloading models?)";
+      els.sieState.textContent =
+        j.sie === true
+          ? "model catalog unavailable"
+          : "SIE not reachable yet (still preloading models?)";
       return false;
     }
     registeredSet = new Set(j.registered ?? []);
     cudaAvailable = j.cuda === true ? true : j.cuda === false ? false : null;
+    catalogKnown = true;
     availabilityUnavailable = false;
     els.sieState.textContent = `SIE healthy · ${j.registeredModels} models registered`;
     return true;

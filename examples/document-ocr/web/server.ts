@@ -144,6 +144,9 @@ const server = http.createServer(async (req, res) => {
         registeredModels: names.length,
         registered: names,
         cuda,
+        // True only when /v1/models succeeded, including an empty list.
+        // The page must not infer this from sie; that flag can be another probe.
+        catalogKnown: ok,
       }),
       "application/json",
     );
