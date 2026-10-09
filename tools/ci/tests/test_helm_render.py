@@ -146,6 +146,49 @@ def hook_events(tmp_path: Path, values: dict, template: str) -> dict[tuple[str, 
     }
 
 
+def test_worker_scaledobject_appends_the_sixth_trigger(tmp_path: Path) -> None:
+    values = {**L4_POOL, **AUTOSCALING_VALUES}
+    rendered = render_template(tmp_path, values, KEDA_APPLY_TEMPLATE)
+    assert rendered.returncode == 0, rendered.stderr
+    scaled_objects = [
+        manifest
+        for doc in yaml.safe_load_all(rendered.stdout)
+        if doc and doc.get("kind") == "ConfigMap"
+        for manifest in yaml.safe_load_all(doc.get("data", {}).get("scaledobjects.yaml", ""))
+        if manifest and manifest.get("kind") == "ScaledObject"
+    ]
+    (worker,) = [
+        scaled_object
+        for scaled_object in scaled_objects
+        if scaled_object["spec"]["scaleTargetRef"]["kind"] == "StatefulSet"
+    ]
+    triggers = worker["spec"]["triggers"]
+    assert [trigger["type"] for trigger in triggers] == ["prometheus"] * 6
+    # Indexes 0-4 match the pre-#293 HPA names. The loading trigger is last.
+    assert [trigger["metadata"]["metricName"] for trigger in triggers] == [
+        "sie_gateway_pending_demand_l4_default",
+        "sie_gateway_queue_depth_l4_default",
+        "sie_gateway_active_lease_gpus_l4_default",
+        "sie_gateway_pool_warm_floor_l4_default",
+        "sie_gateway_rejected_rate_l4_default",
+        "sie_gateway_model_loads_in_progress_l4_default",
+    ]
+
+    hook = render_template(tmp_path, values, "templates/hooks/keda-ready-test.yaml")
+    assert hook.returncode == 0, hook.stderr
+    (job,) = [doc for doc in yaml.safe_load_all(hook.stdout) if doc and doc.get("kind") == "Job"]
+    script = job["spec"]["template"]["spec"]["containers"][0]["args"][0]
+    assert "EXPECTED_METRIC_COUNT=7" in script
+    # 1-based probe count: 6 is trigger index 5 and is allowed; 7 is rejected.
+    assert re.search(r'\[ "\$object_metric_index" -lt 1 \] \|\| \[ "\$object_metric_index" -gt 6 \]', script)
+    assert re.search(r"\.key >= 0 and \.key <= 5\b", script)
+    scaled_objects_count = 2
+    probe_batches = (scaled_objects_count + 16 - 1) // 16
+    timeout = (30 * 3) + (probe_batches * 6 * 5 * 3) + 180
+    assert f"TIMEOUT={timeout}" in script
+    assert job["spec"]["activeDeadlineSeconds"] == timeout + 60
+
+
 def test_scaledobject_apply_hook_also_runs_on_rollback(tmp_path: Path) -> None:
     hooks = hook_events(tmp_path, AUTOSCALING_VALUES, KEDA_APPLY_TEMPLATE)
 

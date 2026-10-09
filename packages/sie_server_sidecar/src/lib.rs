@@ -1514,6 +1514,40 @@ fn request_id_from_cancel_subject(subject: &str) -> Option<String> {
     }
 }
 
+/// Gateway `WorkerRegistry` heartbeat timeout (`packages/sie_gateway/src/main.rs`).
+/// Health publication continues while IPC pings fail, so a loading set older
+/// than this is cleared instead of holding the lane until liveness restarts it.
+const GATEWAY_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Published in-progress loads after one IPC ping round.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LoadingSetUpdate {
+    Replace(Vec<String>),
+    Keep,
+}
+
+/// A successful round replaces the set from those responses, including an
+/// empty one. A round where every ping fails keeps the previous set until
+/// `last_success_age` is older than the gateway heartbeat timeout.
+fn loading_set_after_ping_round(
+    successful_loading_models: Option<&[&[String]]>,
+    last_success_age: Option<Duration>,
+    heartbeat_timeout: Duration,
+) -> LoadingSetUpdate {
+    if let Some(responses) = successful_loading_models {
+        let mut merged = Vec::new();
+        for models in responses {
+            merged.extend(models.iter().cloned());
+        }
+        return LoadingSetUpdate::Replace(merged);
+    }
+    if last_success_age.is_some_and(|age| age > heartbeat_timeout) {
+        LoadingSetUpdate::Replace(Vec::new())
+    } else {
+        LoadingSetUpdate::Keep
+    }
+}
+
 /// Ping every adapter IPC server on a ticker. A failure is logged but
 /// non-fatal — the consumer loop will surface real problems via
 /// EnsureModelReady / Process* errors.
@@ -1536,6 +1570,7 @@ fn spawn_heartbeat(
         // (0 -> 1 "heartbeat broke", N -> 0 "heartbeat recovered")
         // without spamming once per tick while the backend is down.
         let mut consecutive_failures: u64 = 0;
+        let mut last_loading_ping: Option<Instant> = None;
         loop {
             let wait = shutdown.wait();
             tokio::select! {
@@ -1559,14 +1594,23 @@ fn spawn_heartbeat(
                         .filter(|resp| resp.ready)
                         .collect();
                     // Any successful ping, ready or not, refreshes the load set.
-                    // A failed ping keeps the previous set; the gateway ages the
-                    // worker out on the normal heartbeat timeout.
-                    if !successful.is_empty() {
-                        let mut merged_loading_models = Vec::new();
-                        for resp in &successful {
-                            merged_loading_models.extend(resp.loading_models.iter().cloned());
-                        }
-                        if config_apply_state.set_loading_models(merged_loading_models) {
+                    // Every ping failing keeps the previous set until that
+                    // success is older than the gateway heartbeat timeout.
+                    // Heartbeats continue, so the gateway would not age it out.
+                    let lists: Vec<&[String]> = successful
+                        .iter()
+                        .map(|resp| resp.loading_models.as_slice())
+                        .collect();
+                    let update = loading_set_after_ping_round(
+                        (!lists.is_empty()).then_some(lists.as_slice()),
+                        last_loading_ping.map(|at| at.elapsed()),
+                        GATEWAY_HEARTBEAT_TIMEOUT,
+                    );
+                    if !lists.is_empty() {
+                        last_loading_ping = Some(Instant::now());
+                    }
+                    if let LoadingSetUpdate::Replace(models) = update {
+                        if config_apply_state.set_loading_models(models) {
                             health_publish_now.notify_one();
                         }
                     }
@@ -1970,6 +2014,42 @@ async fn run_pull_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_ping_round_keeps_loading_models_until_heartbeat_timeout() {
+        let timeout = GATEWAY_HEARTBEAT_TIMEOUT;
+        let loading = vec!["org/loading".to_string()];
+        let other = vec!["org/other".to_string()];
+        assert_eq!(
+            loading_set_after_ping_round(
+                Some(&[loading.as_slice(), other.as_slice()]),
+                Some(timeout + Duration::from_secs(1)),
+                timeout,
+            ),
+            LoadingSetUpdate::Replace(vec!["org/loading".into(), "org/other".into()])
+        );
+        let empty: &[String] = &[];
+        assert_eq!(
+            loading_set_after_ping_round(Some(&[empty]), Some(Duration::from_millis(1)), timeout),
+            LoadingSetUpdate::Replace(vec![])
+        );
+        assert_eq!(
+            loading_set_after_ping_round(None, Some(timeout), timeout),
+            LoadingSetUpdate::Keep
+        );
+        assert_eq!(
+            loading_set_after_ping_round(None, Some(Duration::from_secs(1)), timeout),
+            LoadingSetUpdate::Keep
+        );
+        assert_eq!(
+            loading_set_after_ping_round(None, None, timeout),
+            LoadingSetUpdate::Keep
+        );
+        assert_eq!(
+            loading_set_after_ping_round(None, Some(timeout + Duration::from_nanos(1)), timeout),
+            LoadingSetUpdate::Replace(vec![])
+        );
+    }
 
     #[test]
     fn pull_loop_inflight_defaults_are_positive() {

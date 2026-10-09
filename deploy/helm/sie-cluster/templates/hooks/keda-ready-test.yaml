@@ -18,7 +18,7 @@
 {{- $probeConcurrency := 16 -}}
 {{- $probeRequestTimeout := 5 -}}
 {{- $probeBatches := div (add $expectedScaledObjects (sub $probeConcurrency 1)) $probeConcurrency -}}
-{{- $probeRoundBudget := mul $probeBatches (mul 5 $probeRequestTimeout) -}}
+{{- $probeRoundBudget := mul $probeBatches (mul 6 $probeRequestTimeout) -}}
 {{- $probeBudget := mul $probeRoundBudget $failureThreshold -}}
 {{- $timeout := add (add $validationWindow $probeBudget) 180 -}}
 {{- $activeDeadline := add $timeout 60 -}}
@@ -312,7 +312,7 @@ spec:
                         exit 1
                       fi
                     done < "$EXTERNAL_METRICS_FILE"
-                    if [ "$object_metric_index" -lt 1 ] || [ "$object_metric_index" -gt 5 ]; then
+                    if [ "$object_metric_index" -lt 1 ] || [ "$object_metric_index" -gt 6 ]; then
                       exit 1
                     fi
                   ) &

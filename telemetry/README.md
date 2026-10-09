@@ -37,7 +37,11 @@ Topology determines whether a durable-queue observation exists. The OSS
 Kubernetes gateway has an exact JetStream consumer authority and emits queue
 depth plus lane freshness. Managed Modal dispatch has no JetStream queue, so it
 omits those two families without warning; it still emits the same canonical
-pending-demand, active-lease, warm-floor, and rejection state over OTLP. An
+pending-demand, active-lease, warm-floor, model-load, and rejection state over
+OTLP. `sie.gateway.model_loads_in_progress` is 1 while any fresh worker in the
+lane is loading a model and an explicit 0 otherwise, including a lane with no
+live workers. It uses the same capacity-snapshot freshness guard as the other
+non-queue gauges. See #293 for why queue depth does not cover that window. An
 absent managed queue series therefore means “not applicable,” never a measured
 zero and never a broken duplicate metric path.
 
@@ -575,15 +579,16 @@ All Prometheus triggers set `ignoreNullValues: "false"`, so KEDA advances its
 failure threshold and uses the ScaledObject's bounded fallback instead of
 interpreting the failure as zero demand.
 
-The four current-state families use synchronous last-value gauges. Broker,
-pool, and demand reads are independently reconciled, and the OTel reader may
-collect instruments while a reconciliation is recording, so this contract is
+The current-state families, including `sie.gateway.model_loads_in_progress`,
+use synchronous last-value gauges. Broker, pool, and demand reads are
+independently reconciled, and the OTel reader may collect instruments while a
+reconciliation is recording, so this contract is
 explicitly eventually consistent rather than cross-family export-atomic. Using
 reconciliation *start* time makes a slow build age out instead of falsely
 refreshing old state. Broker success is lane-scoped: one consumer failure
 updates neither that lane's queue value nor its freshness timestamp, while
-successful lanes and the independent global demand/lease/floor state keep
-refreshing. The retained queue value becomes unusable when its timestamp ages
+successful lanes and the independent global demand, lease, floor, and
+model-load state keep refreshing. The retained queue value becomes unusable when its timestamp ages
 out; it is never rewritten to a false zero. The five-second loop skips missed
 ticks rather than queueing catch-up work. Each process hashes its process-start
 UUID to a stable offset within that interval, so rollout-coincident replicas

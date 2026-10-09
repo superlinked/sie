@@ -623,14 +623,11 @@ to a stable offset within the five-second cadence, preventing rollout-aligned
 replicas from scanning in one burst. Helm caps metrics-enabled gateway replicas
 at ten, and the live broker benchmark covers the resulting maximum 10,240
 lookups per interval. Worker identity and heartbeat queue depth never enter
-the queue-depth series. `sie.gateway.model_loads_in_progress` is separate: it
-is 1 when any worker in the catalog lane has a heartbeat inside the normal
-timeout and a non-empty `loading_models` set, and an explicit 0 otherwise,
-including a lane with no live workers. Queue depth is not an input. Generation
-`MODEL_LOADING` deliveries stay acknowledged, so the lane queue can be 0 while
-this gauge holds the replica. A stale worker cannot pin the lane, and the KEDA
-query uses the same capacity-snapshot freshness guard as the other non-queue
-gauges.
+the queue-depth series. `sie.gateway.model_loads_in_progress` is 1 when any
+fresh worker in the catalog lane is loading a model, and an explicit 0
+otherwise, including a lane with no live workers. Queue depth is not an input
+(#293). A stale worker cannot pin the lane. The KEDA query uses the same
+capacity-snapshot freshness guard as the other non-queue gauges.
 
 Prometheus target labels bind every query to one Helm release; the queue gauge
 is sent to Better Stack under its canonical dotted name and naturally exports

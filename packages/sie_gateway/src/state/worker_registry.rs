@@ -378,7 +378,7 @@ impl WorkerRegistry {
                     supports_numerical_admission_subject_v1: false,
                     numerical_process_inventory: None,
                     models: Vec::new(),
-                    loading_models: Vec::new(),
+                    model_load_in_progress: false,
                     queue_depth: 0,
                     pending_cost: 0,
                     inflight_batches: 0,
@@ -412,6 +412,8 @@ impl WorkerRegistry {
                 msg.supports_execution_authority_v1 && msg.supports_numerical_admission_v1;
             w.supports_numerical_admission_subject_v1 =
                 w.supports_numerical_admission_v1 && msg.supports_numerical_admission_subject_v1;
+            // Keep a flag, not the reported ids. The list is unbounded.
+            let model_load_in_progress = msg.model_load_in_progress();
             // Replace on every heartbeat: legacy or invalid observations clear
             // the previous process inventory rather than retaining stale IDs.
             w.numerical_process_inventory = msg
@@ -438,7 +440,7 @@ impl WorkerRegistry {
             w.machine_profile = msg.machine_profile.clone();
             w.pool_name = msg.pool_name.clone();
             w.models = msg.loaded_models.clone();
-            w.loading_models = msg.loading_models.clone();
+            w.model_load_in_progress = model_load_in_progress;
 
             // Aggregate queue depth from models (fallback to compact top-level field)
             w.queue_depth = if !msg.models.is_empty() {
@@ -1397,6 +1399,20 @@ mod tests {
 
     fn registry() -> WorkerRegistry {
         WorkerRegistry::new(Duration::from_secs(30), None)
+    }
+
+    #[tokio::test]
+    async fn loading_models_collapse_to_a_per_worker_flag() {
+        let reg = registry();
+        let mut loading = make_msg(true);
+        loading.loading_models = vec!["org/loading".into(), "  ".into(), "org/other".into()];
+        reg.update_worker("http://w1", loading).await;
+        assert!(reg.workers().await["http://w1"].model_load_in_progress);
+
+        let mut cleared = make_msg(true);
+        cleared.loading_models.clear();
+        reg.update_worker("http://w1", cleared).await;
+        assert!(!reg.workers().await["http://w1"].model_load_in_progress);
     }
 
     #[tokio::test]

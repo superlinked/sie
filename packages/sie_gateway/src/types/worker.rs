@@ -41,9 +41,9 @@ pub struct WorkerState {
     /// Diagnostic observations only; never sufficient for numerical admission.
     pub numerical_process_inventory: Option<Arc<NumericalProcessInventory>>,
     pub models: Vec<String>,
-    /// Model ids the worker reported as still loading. Empty when the field
-    /// is absent, which is what an older worker publishes.
-    pub loading_models: Vec<String>,
+    /// True when the latest heartbeat listed a model still loading. The wire
+    /// field stays a list; the registry keeps only this flag.
+    pub model_load_in_progress: bool,
     pub queue_depth: i32,
     pub pending_cost: i64,
     pub inflight_batches: i32,
@@ -232,7 +232,8 @@ pub struct WorkerStatusMessage {
     pub supports_numerical_admission_subject_v1: bool,
     #[serde(default)]
     pub loaded_models: Vec<String>,
-    /// In-progress model loads. Absent on workers that predate the field.
+    /// In-progress model loads. Absent on workers that predate the field,
+    /// which deserializes to empty and is not a load in progress.
     #[serde(default)]
     pub loading_models: Vec<String>,
     #[serde(default)]
@@ -275,6 +276,16 @@ pub struct WorkerStatusMessage {
     /// Optional bounded diagnostics. Invalid metadata must not drop health.
     #[serde(default, deserialize_with = "deserialize_numerical_inventory")]
     pub numerical_process_inventory: Option<NumericalProcessInventory>,
+}
+
+impl WorkerStatusMessage {
+    /// Whether the heartbeat names a model that is still loading.
+    #[must_use]
+    pub fn model_load_in_progress(&self) -> bool {
+        self.loading_models
+            .iter()
+            .any(|model| !model.trim().is_empty())
+    }
 }
 
 /// Wire budget shared with the sidecar publisher. Never truncate a fleet.
@@ -769,7 +780,7 @@ mod tests {
             supports_numerical_admission_subject_v1: false,
             numerical_process_inventory: None,
             models: vec![],
-            loading_models: Vec::new(),
+            model_load_in_progress: false,
             queue_depth: 0,
             pending_cost: 0,
             inflight_batches: 0,
@@ -946,11 +957,25 @@ mod tests {
         assert_eq!(msg.ready_gpu_slots, None);
         assert!(msg.loaded_models.is_empty());
         assert!(msg.loading_models.is_empty());
+        assert!(!msg.model_load_in_progress());
         assert!(msg.models.is_empty());
         assert!(msg.gpus.is_empty());
         assert_eq!(msg.pending_cost, None);
         assert_eq!(msg.inflight_batches, None);
         assert!(!msg.terminated);
+    }
+
+    #[test]
+    fn loading_models_default_false_and_ignore_blank_names() {
+        let omitted: WorkerStatusMessage = serde_json::from_str("{}").unwrap();
+        assert!(omitted.loading_models.is_empty());
+        assert!(!omitted.model_load_in_progress());
+        let blank: WorkerStatusMessage =
+            serde_json::from_str(r#"{"loading_models":["","  "]}"#).unwrap();
+        assert!(!blank.model_load_in_progress());
+        let loading: WorkerStatusMessage =
+            serde_json::from_str(r#"{"loading_models":["org/loading"]}"#).unwrap();
+        assert!(loading.model_load_in_progress());
     }
 
     #[test]

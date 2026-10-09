@@ -433,7 +433,7 @@ label that KEDA cannot match.
 |--------|--------|---------|
 | `sie_gateway_pending_demand` | Gateway | Trigger scale from 0 |
 | `sie_gateway_lane_queue_depth` | Gateway JetStream backlog reconciler | Scale up on exact durable-consumer `num_pending + num_ack_pending`, including work held by a dead/loading worker |
-| `sie_gateway_model_loads_in_progress` | Gateway worker heartbeats | Hold the lane at 1 while a fresh worker is loading a model. Generation `MODEL_LOADING` deliveries stay acknowledged, so queue depth can be 0. A lane with no live workers is an explicit 0 |
+| `sie_gateway_model_loads_in_progress` | Gateway worker heartbeats | Hold the lane at 1 while a fresh worker is loading a model, and emit 0 when the lane has no live workers. See #293 |
 | `sie_gateway_lane_queue_snapshot_timestamp_seconds` | Gateway JetStream backlog reconciler | Prove that the exact lane queue value, including zero, came from a fresh successful broker read |
 | `sie_gateway_active_lease_gpus` | Gateway pool manager | Hold distinct assigned-worker capacity for active pool leases in the exact pool/profile/bundle lane |
 | `sie_gateway_pool_warm_floor` | Gateway pool manager | Enforce a configured per-lane minimum without bypassing KEDA |

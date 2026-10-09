@@ -2723,10 +2723,10 @@ metrics:
     facade_event: gateway.capacity_state_changed
     type: gauge
     unit: "1"
-    # 1 while any fresh worker in the lane reports a non-empty loading set.
-    # Generation MODEL_LOADING deliveries stay acknowledged, so lane queue
-    # depth can be 0 while this gauge holds the replica. A stale worker is
-    # excluded after the normal heartbeat timeout. Configured lanes with no
+    # 1 while any fresh worker in the lane is loading a model, else 0.
+    # Generation MODEL_LOADING deliveries stay acknowledged (#293), so lane
+    # queue depth can be 0 while this gauge holds the replica. A stale worker
+    # is excluded after the normal heartbeat timeout. Configured lanes with no
     # live workers emit an explicit 0. The KEDA query uses the same capacity
     # snapshot freshness guard as the other non-queue gauges.
     attributes: keda_lane

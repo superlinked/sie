@@ -38,12 +38,12 @@
 //! signal. Backends that need explicit residency, such as Candle, must only
 //! publish models here after their readiness handshake has made them serveable.
 //!
-//! `loading_models` is the engine's in-progress load set from the latest
-//! successful IPC ping. It rides this same heartbeat. The publisher also
-//! sends the payload immediately when that set changes, so the wait is the
-//! IPC ping interval rather than another full health period. A failed ping
-//! keeps the previous set; the gateway drops a worker after the normal
-//! heartbeat timeout instead of letting a dead publisher pin a lane.
+//! `loading_models` is the engine's in-progress load set. It rides this same
+//! heartbeat, and the publisher sends the payload immediately when that set
+//! changes. A failed IPC ping keeps the previous set until the last successful
+//! ping is older than the gateway heartbeat timeout; the sidecar then clears
+//! it. Heartbeats continue either way, so a wedged engine must not hold the
+//! lane until liveness restarts the container.
 //!
 //! [`WorkerStatusMessage`]: https://github.com/superlinked/sie/blob/main/packages/sie_gateway/src/types/worker.rs
 //! [`resolve_queue_route`]: https://github.com/superlinked/sie/blob/main/packages/sie_gateway/src/state/worker_registry.rs

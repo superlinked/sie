@@ -226,19 +226,6 @@ data:
         - type: prometheus
           metadata:
             serverAddress: {{ $promAddr }}
-            # Generation MODEL_LOADING deliveries stay acknowledged, so queue
-            # depth can be 0 while a model is still loading. The gateway emits
-            # 1 for a fresh worker with a non-empty loading set and an explicit
-            # 0 when the lane has no live workers. The same capacity-snapshot
-            # freshness guard rejects a stale gateway sample.
-            metricName: sie_gateway_model_loads_in_progress_{{ $poolName }}_{{ $bundleName }}
-            query: (max(sie_gateway_model_loads_in_progress{ {{- $gatewayTarget -}}, pool="{{ $queuePool }}", machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"} and on(producer_instance,collector_generation) {{ $freshGatewayInstances }}) and on() {{ $controlReady }})
-            ignoreNullValues: "false"
-            threshold: "1"
-            activationThreshold: "0"
-        - type: prometheus
-          metadata:
-            serverAddress: {{ $promAddr }}
             metricName: sie_gateway_active_lease_gpus_{{ $poolName }}_{{ $bundleName }}
             # The gateway has already deduplicated assigned workers for this
             # physical lane; max only removes replicated gateway observations.
@@ -266,6 +253,15 @@ data:
             # The gateway emits only the four declared scale-worthy reasons
             # into this control counter; every other rejection is omitted.
             query: ((sum(rate(sie_gateway_rejected_requests_total{ {{- $gatewayTarget -}}, pool="{{ $queuePool }}", machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}", scaling_action="scale_up"}[2m]) and on(producer_instance,collector_generation) {{ $freshGatewayInstances }}) or on() {{ $freshGatewayZero }}) and on() {{ $controlReady }})
+            ignoreNullValues: "false"
+            threshold: "1"
+            activationThreshold: "0"
+        - type: prometheus
+          metadata:
+            serverAddress: {{ $promAddr }}
+            # Appended last so existing HPA metric indexes stay stable. See #293.
+            metricName: sie_gateway_model_loads_in_progress_{{ $poolName }}_{{ $bundleName }}
+            query: (max(sie_gateway_model_loads_in_progress{ {{- $gatewayTarget -}}, pool="{{ $queuePool }}", machine_profile="{{ $machineProfile }}", bundle="{{ $bundle }}"} and on(producer_instance,collector_generation) {{ $freshGatewayInstances }}) and on() {{ $controlReady }})
             ignoreNullValues: "false"
             threshold: "1"
             activationThreshold: "0"

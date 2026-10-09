@@ -395,10 +395,7 @@ fn worker_loading_reports<'a>(
             pool: worker.pool_name.clone(),
             machine_profile: worker.machine_profile.clone(),
             bundle: worker.bundle.clone(),
-            loading: worker
-                .loading_models
-                .iter()
-                .any(|model| !model.trim().is_empty()),
+            loading: worker.model_load_in_progress,
             heartbeat_fresh: worker.last_heartbeat.elapsed() <= heartbeat_timeout,
         })
         .collect()
@@ -469,10 +466,8 @@ fn build_keda_capacity_snapshot(
 
 /// 1 when any fresh worker in the catalog lane is loading a model, else 0.
 ///
-/// Queue depth is intentionally not an input: generation `MODEL_LOADING`
-/// deliveries stay acknowledged, so the lane queue can be empty while this
-/// gauge holds the replica. Every configured lane is present, including an
-/// explicit 0 when the lane has no live workers.
+/// Queue depth is not an input (#293). Every configured lane is present,
+/// including an explicit 0 when the lane has no live workers.
 fn model_loads_in_progress(
     catalog: &PhysicalLaneCatalog,
     catalog_lanes: &[PhysicalLane],
@@ -960,7 +955,7 @@ mod capacity_snapshot_tests {
             supports_numerical_admission_subject_v1: false,
             numerical_process_inventory: None,
             models: vec![],
-            loading_models: vec!["org/loading".into()],
+            model_load_in_progress: true,
             queue_depth: 0,
             pending_cost: 0,
             inflight_batches: 0,
@@ -981,7 +976,7 @@ mod capacity_snapshot_tests {
         let reports = worker_loading_reports([&fresh, &stale], timeout);
         assert!(reports[0].heartbeat_fresh && reports[0].loading);
         assert!(!reports[1].heartbeat_fresh);
-        fresh.loading_models.clear();
+        fresh.model_load_in_progress = false;
         let cleared = worker_loading_reports([&fresh], timeout);
         assert!(!cleared[0].loading);
     }
