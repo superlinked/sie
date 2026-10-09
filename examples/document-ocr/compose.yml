@@ -1,10 +1,10 @@
 services:
   sie:
-    # transformers5 bundle so LightOnOCR-2-1B (the recognition default) loads.
-    # Florence-2 family is incompatible with transformers>=5 (tokenizer API
-    # change), so the UI auto-disables those entries on this image. Use the
-    # default bundle when testing Florence-2 models.
-    image: ghcr.io/superlinked/sie-server:latest-cpu-transformers5
+    # CPU compose uses the default bundle. That bundle includes the donut and
+    # gliner adapters, so the preloaded Donut and GLiNER models load here.
+    # LightOnOCR, GLM-OCR, and PaddleOCR-VL default to sglang_vision_extract,
+    # which this image does not ship — use compose.gpu.yml for those.
+    image: ghcr.io/superlinked/sie-server:latest-cpu-default
     # linux/amd64 is a no-op on x86_64 Linux hosts; on Apple Silicon it forces
     # Rosetta translation (slower but works for local testing).
     platform: linux/amd64
@@ -13,7 +13,7 @@ services:
       - --port
       - "8080"
       - --preload
-      - lightonai/LightOnOCR-2-1B,naver-clova-ix/donut-base-finetuned-cord-v2,urchade/gliner_multi-v2.1
+      - naver-clova-ix/donut-base-finetuned-cord-v2,naver-clova-ix/donut-base-finetuned-docvqa,urchade/gliner_multi-v2.1
     ports:
       - "8080:8080"
     restart: unless-stopped

@@ -29,19 +29,18 @@
       <div class="hero-text">
         <p>
           OCR is rarely a single-model problem. This demo runs three model
-          classes through <strong>one SIE server</strong>: a VLM-OCR recognizes
-          the document into Markdown, a fine-tuned Donut emits a JSON tree
-          directly, and a zero-shot NER (GLiNER) pulls typed fields out of
-          the recognition output. Pick a sample on the left, swap any of the
-          three models in the dropdowns, watch SIE hot-swap them with
-          <em>one identifier change</em>.
+          classes through the <strong>same SIE call</strong>. VLM-OCR
+          (LightOnOCR, PaddleOCR-VL, GLM-OCR) loads on the GPU
+          sglang-vision image. Donut and GLiNER load on the CPU default
+          image. One image does not serve both. Pick a sample on the left
+          and swap a model with <em>one identifier change</em>.
         </p>
       </div>
       <div class="hero-diagram">
         <div class="diagram">
           <div class="diagram-input">image</div>
           <div class="diagram-arrow">↓</div>
-          <div class="diagram-server">one SIE server · <code>client.extract(model_id, item)</code></div>
+          <div class="diagram-server">one SIE call · <code>client.extract(model_id, item)</code></div>
           <div class="diagram-arrows">
             <span>↓</span><span>↓</span><span>↓</span>
           </div>
@@ -70,9 +69,9 @@
       <h3>Try these moments</h3>
       <ol class="tour-list">
         <li>
-          <strong>Click any sample on the left.</strong> All three models run
-          in one pipeline. The footer prints per-stage timings as each one
-          lands.
+          <strong>Click any sample on the left.</strong> The stages that this
+          image can serve run, and the others stay disabled. The footer prints
+          per-stage timings as each one lands.
         </li>
         <li>
           <strong>Open "See the SIE call"</strong> in any panel, then swap the

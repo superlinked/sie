@@ -38,53 +38,72 @@ export async function runPipeline({
     data: { extractor: nerModel, recognition: recognitionModel, structured: structuredModel },
   });
 
-  // Recognition
-  const recOpt = lookup(RECOGNITION_MODELS, recognitionModel);
-  emit({ type: "recognition_start", data: { model: recognitionModel } });
-  const tRec = Date.now();
+  // Recognition. Empty when the running image cannot serve these models
+  // (the CPU default bundle). Skipping keeps Donut runnable there. NER still
+  // sees only real recognition text, not the placeholder.
   let markdown = "";
-  try {
-    markdown = await recognize(client, recOpt.id, imageBytes, recOpt.options);
-  } catch (err) {
-    emit({
-      type: "error",
-      data: { stage: "recognition", message: `${recognitionModel} failed: ${(err as Error).message}` },
-    });
-    throw err;
+  let recognitionMs = 0;
+  if (recognitionModel) {
+    const recOpt = lookup(RECOGNITION_MODELS, recognitionModel);
+    emit({ type: "recognition_start", data: { model: recognitionModel } });
+    const tRec = Date.now();
+    try {
+      markdown = await recognize(client, recOpt.id, imageBytes, recOpt.options);
+    } catch (err) {
+      emit({
+        type: "error",
+        data: { stage: "recognition", message: `${recognitionModel} failed: ${(err as Error).message}` },
+      });
+      throw err;
+    }
+    recognitionMs = Date.now() - tRec;
   }
-  const recognitionMs = Date.now() - tRec;
-  emit({ type: "recognition_done", data: { markdown, ms: recognitionMs } });
+  emit({
+    type: "recognition_done",
+    data: {
+      markdown: recognitionModel
+        ? markdown
+        : "Recognition models load on the GPU sglang-vision-extract image, not on this server.",
+      ms: recognitionMs,
+    },
+  });
 
   // Structured (Donut variants, etc.)
-  const strOpt = lookup(STRUCTURED_MODELS, structuredModel);
-  emit({ type: "donut_start" });
-  const tDon = Date.now();
   let donut = { entities: [] as { label: string; text: string }[], data: undefined as unknown };
-  try {
-    donut = await structuredExtract(client, strOpt.id, imageBytes, strOpt.options);
-  } catch (err) {
-    emit({
-      type: "error",
-      data: { stage: "donut", message: `${structuredModel} failed: ${(err as Error).message}` },
-    });
+  let donutMs = 0;
+  if (structuredModel) {
+    const strOpt = lookup(STRUCTURED_MODELS, structuredModel);
+    emit({ type: "donut_start" });
+    const tDon = Date.now();
+    try {
+      donut = await structuredExtract(client, strOpt.id, imageBytes, strOpt.options);
+    } catch (err) {
+      emit({
+        type: "error",
+        data: { stage: "donut", message: `${structuredModel} failed: ${(err as Error).message}` },
+      });
+    }
+    donutMs = Date.now() - tDon;
   }
-  const donutMs = Date.now() - tDon;
   emit({ type: "donut_done", data: { entities: donut.entities, rawData: donut.data, ms: donutMs } });
 
-  // NER (GLiNER variants)
-  const nerOpt = lookup(NER_MODELS, nerModel);
-  emit({ type: "gliner_start", data: { labels: sample.labels } });
-  const tGli = Date.now();
+  // NER (GLiNER variants). Needs recognition text, which only the GPU image produces.
   let fields: { label: string; text: string; score: number }[] = [];
-  try {
-    fields = await extractFields(client, nerOpt.id, markdown, sample.labels);
-  } catch (err) {
-    emit({
-      type: "error",
-      data: { stage: "gliner", message: `${nerModel} failed: ${(err as Error).message}` },
-    });
+  let glinerMs = 0;
+  if (nerModel) {
+    const nerOpt = lookup(NER_MODELS, nerModel);
+    emit({ type: "gliner_start", data: { labels: sample.labels } });
+    const tGli = Date.now();
+    try {
+      fields = await extractFields(client, nerOpt.id, markdown, sample.labels);
+    } catch (err) {
+      emit({
+        type: "error",
+        data: { stage: "gliner", message: `${nerModel} failed: ${(err as Error).message}` },
+      });
+    }
+    glinerMs = Date.now() - tGli;
   }
-  const glinerMs = Date.now() - tGli;
   emit({ type: "gliner_done", data: { fields, ms: glinerMs } });
 
   const totalMs = Date.now() - t0;
