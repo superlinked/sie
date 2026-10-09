@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
+import numpy as np
 import torch
 from torch.nn import functional
 
@@ -28,6 +30,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _ERR_CPU_NOT_SUPPORTED = "Qwen2FlashAdapter requires CUDA. Use sentence_transformer adapter for CPU."
+
+
+def _fused_kernels_supported(config: Any) -> bool:
+    """Whether ``_fused_ops`` can run this model: Triton importable and a SiLU-gated MLP."""
+    if getattr(config, "hidden_act", None) != "silu":
+        return False
+    try:
+        import triton  # ty: ignore[unresolved-import]
+    except ImportError:
+        return False
+    return True
 
 
 class Qwen2FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
@@ -61,6 +74,7 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         uses_legacy_transformers_cache: bool = False,
         dense_projection_path: str | None = None,
         causal: bool = False,
+        fused_kernels: bool = False,
         **kwargs: Any,
     ) -> None:
         """Initialize the adapter.
@@ -84,6 +98,11 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             causal: If True, use causal (autoregressive) attention instead of
                 bidirectional. Required for decoder-based embedding models like
                 Qwen3-Embedding that use last-token pooling with causal masking.
+            fused_kernels: If True, run each layer's residual add + RMSNorm,
+                q/k RMSNorm, rotary embedding and SiLU-gated MLP product as
+                single Triton kernels (``_fused_ops``) instead of chains of
+                elementwise PyTorch ops. The kernels round where the eager ops
+                round, so embeddings match the eager path.
         """
         _ = kwargs
         self._model_name_or_path = str(model_name_or_path)
@@ -95,6 +114,7 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         self._query_template = query_template
         self._doc_template = doc_template
         self._causal = causal
+        self._fused_kernels = fused_kernels
         self._uses_legacy_transformers_cache = uses_legacy_transformers_cache
         self._dense_projection_path = dense_projection_path
 
@@ -167,6 +187,13 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
 
         self._model.to(device)
         self._model.eval()
+
+        if self._fused_kernels and not _fused_kernels_supported(self._model.config):
+            logger.warning(
+                "fused_kernels needs Triton and a SiLU MLP; %s runs the eager layers instead",
+                self._model_name_or_path,
+            )
+            self._fused_kernels = False
 
         self._dense_dim = self._model.config.hidden_size
 
@@ -285,32 +312,29 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             err_msg="Qwen2FlashAdapter requires text input",
         )
 
-        # Tokenize each sequence individually (no padding)
-        encodings = [
-            self._tokenizer(
-                text,
-                max_length=self._max_seq_length,
-                truncation=True,
-                return_tensors="pt",
-            )
-            for text in texts
-        ]
+        # Tokenize every sequence (no padding) in one batched call: the fast
+        # tokenizer encodes the texts in parallel and returns, per text, exactly
+        # the ids a call on that text alone returns.
+        token_ids = self._tokenizer(
+            texts,
+            max_length=self._max_seq_length,
+            truncation=True,
+            return_attention_mask=False,
+        )["input_ids"]
 
         # Build packed representation
-        seq_lengths = [enc["input_ids"].shape[1] for enc in encodings]
+        seq_lengths = [len(ids) for ids in token_ids]
         total_tokens = sum(seq_lengths)
         max_seqlen = max(seq_lengths)
 
-        # Pack input_ids
-        input_ids_packed = torch.cat([enc["input_ids"].squeeze(0) for enc in encodings]).to(self._device)
-
-        # Build cu_seqlens using cumsum (no Python loop, no GPU sync points)
-        cu_seqlens = torch.zeros(len(texts) + 1, dtype=torch.int32, device=self._device)
-        cu_seqlens[1:] = torch.cumsum(torch.tensor(seq_lengths, dtype=torch.int32, device=self._device), dim=0)
+        # Pack input_ids and cu_seqlens on the host: one copy each, no GPU sync points
+        flat_ids = np.fromiter(itertools.chain.from_iterable(token_ids), dtype=np.int64, count=total_tokens)
+        input_ids_packed = torch.from_numpy(flat_ids).to(self._device)
+        cu_seqlens = torch.from_numpy(np.concatenate(([0], np.cumsum(seq_lengths))).astype(np.int32)).to(self._device)
 
         with torch.inference_mode():
-            # Build position IDs for RoPE
-            position_ids_packed = self._build_position_ids(cu_seqlens, len(texts))
+            # Build position IDs for RoPE (the host-known total avoids a device sync)
+            position_ids_packed = self._build_position_ids(cu_seqlens, len(texts), total_tokens=total_tokens)
 
             # Get word embeddings (Qwen2 has no position embeddings - uses RoPE)
             hidden = self._model.embed_tokens(input_ids_packed)
@@ -349,9 +373,11 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         output.extra["input_token_counts"] = [int(n) for n in seq_lengths]
         return output
 
-    def _build_position_ids(self, cu_seqlens: torch.Tensor, num_seqs: int) -> torch.Tensor:
+    def _build_position_ids(
+        self, cu_seqlens: torch.Tensor, num_seqs: int, *, total_tokens: int | None = None
+    ) -> torch.Tensor:
         """Build position IDs for packed sequences (each restarts at 0)."""
-        return build_position_ids(cu_seqlens)
+        return build_position_ids(cu_seqlens, total_tokens=total_tokens)
 
     def _compute_rope(
         self,
@@ -415,6 +441,9 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         - GQA (grouped query attention with fewer KV heads)
         - Separate Q/K/V projections
         """
+        if self._fused_kernels:
+            return self._run_transformer_fused(hidden, cu_seqlens, max_seqlen, total_tokens, position_ids)
+
         from flash_attn import flash_attn_varlen_func
 
         num_heads = self._model.config.num_attention_heads
@@ -485,6 +514,70 @@ class Qwen2FlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             hidden = hidden + mlp_out
 
         return hidden
+
+    def _run_transformer_fused(
+        self,
+        hidden: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+        total_tokens: int,
+        position_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """The layers of ``_run_transformer_flash`` with the elementwise work in fused kernels.
+
+        Each residual add is folded into the next RMSNorm, q/k-norm is one
+        kernel per tensor, the rotary embedding one in-place kernel per tensor
+        and the MLP's ``silu(gate) * up`` one kernel (see ``_fused_ops``). The
+        kernels round where the eager ops round, so the result matches the
+        eager path; the projections and attention are the same calls. Returns
+        the residual stream before the final norm, as the eager path does.
+        """
+        from flash_attn import flash_attn_varlen_func
+
+        from sie_server.adapters.qwen2_flash._fused_ops import rms_norm, rotary_, silu_mul
+
+        config = self._model.config
+        num_heads = config.num_attention_heads
+        num_kv_heads = config.num_key_value_heads
+        head_dim = getattr(config, "head_dim", config.hidden_size // num_heads)
+        softmax_scale = 1.0 / (head_dim**0.5)
+
+        rotary_emb = (
+            self._model.rotary_emb if hasattr(self._model, "rotary_emb") else self._model.layers[0].self_attn.rotary_emb
+        )
+        cos, sin = self._compute_rope(rotary_emb, position_ids, max_seqlen)
+        cos, sin = cos.contiguous(), sin.contiguous()
+
+        residual: torch.Tensor | None = None
+        for layer in self._model.layers:
+            attn = layer.self_attn
+            norm = layer.input_layernorm
+            normed, residual = rms_norm(hidden, norm.weight, norm.variance_epsilon, residual)
+            query = attn.q_proj(normed).view(total_tokens, num_heads, head_dim)
+            key = attn.k_proj(normed).view(total_tokens, num_kv_heads, head_dim)
+            value = attn.v_proj(normed).view(total_tokens, num_kv_heads, head_dim)
+            if hasattr(attn, "q_norm"):
+                query, _ = rms_norm(query, attn.q_norm.weight, attn.q_norm.variance_epsilon)
+            if hasattr(attn, "k_norm"):
+                key, _ = rms_norm(key, attn.k_norm.weight, attn.k_norm.variance_epsilon)
+            query = rotary_(query.contiguous(), cos, sin)
+            key = rotary_(key.contiguous(), cos, sin)
+            attn_out = flash_attn_varlen_func(
+                query,
+                key,
+                value,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seqlen,
+                max_seqlen_k=max_seqlen,
+                causal=self._causal,
+                softmax_scale=softmax_scale,
+            ).reshape(total_tokens, num_heads * head_dim)
+            norm = layer.post_attention_layernorm
+            normed, residual = rms_norm(attn.o_proj(attn_out), norm.weight, norm.variance_epsilon, residual)
+            mlp = layer.mlp
+            hidden = mlp.down_proj(silu_mul(mlp.gate_proj(normed), mlp.up_proj(normed)))
+        return hidden if residual is None else residual + hidden
 
     def _pool_embeddings(
         self,

@@ -36,9 +36,9 @@ class _RecordingTokenizer:
     def __init__(self) -> None:
         self.texts: list[str] = []
 
-    def __call__(self, text: str, **_: Any) -> dict[str, torch.Tensor]:
-        self.texts.append(text)
-        return {"input_ids": torch.zeros((1, len(text)), dtype=torch.long)}
+    def __call__(self, texts: list[str], **_: Any) -> dict[str, list[list[int]]]:
+        self.texts.extend(texts)
+        return {"input_ids": [[0] * len(text) for text in texts]}
 
 
 def _config(model_file: str) -> ModelConfig:
