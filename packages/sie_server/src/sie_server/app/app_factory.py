@@ -144,6 +144,7 @@ class AppFactory:
             init_server_start_time()
             cls._configure_torch_threads()
             cls._configure_cuda_defaults()
+            cls._configure_sdpa_backends()
             async with (
                 # First to enter → last to tear down, so spans emitted during
                 # other stages' shutdown (model unload, drain) are still flushed.
@@ -407,6 +408,12 @@ class AppFactory:
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cudnn.benchmark = True
         logger.info("CUDA defaults: TF32 enabled, cudnn.benchmark enabled")
+
+    @staticmethod
+    def _configure_sdpa_backends() -> None:
+        if not _env_flag("SIE_DISABLE_CUDNN_SDP"):
+            return
+        torch.backends.cuda.enable_cudnn_sdp(False)
 
     @staticmethod
     def _configure_torch_threads() -> None:
