@@ -23,6 +23,10 @@ profiles:
     adapter_options:
       loadtime:
         mem_fraction_static: 0.85
+        # Up to four batches in flight to SGLang at once, so the GPU keeps working
+        # while a batch waits on its HTTP round trips: about 1.5x the documents per
+        # second at 8 and 32 in flight on an H100.
+        max_concurrent_dispatch: 4
       runtime:
         pooling: last_token
         normalize: true
