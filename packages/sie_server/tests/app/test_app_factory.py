@@ -1,5 +1,6 @@
 """Tests for the FastAPI app factory."""
 
+import inspect
 import logging
 import os
 import uuid
@@ -615,21 +616,52 @@ class TestModelRegistryConfig:
 
 
 class TestConfigureSdpaBackends:
+    _ENV_NAMES = (
+        "SIE_DISABLE_CUDNN_SDP",
+        "SIE_DEVICE",
+        "SIE_DEVICES",
+        "SIE_MODELS_DIR",
+        "SIE_MODEL_FILTER",
+        "SIE_PRELOAD_MODELS",
+        "SIE_PINNED_MODELS",
+        "SIE_POOL",
+        "SIE_UPSTREAMS_FILE",
+        "SIE_REMOTE_SERVING",
+    )
+
     @pytest.fixture(autouse=True)
     def _clean_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for name in (
-            "SIE_DISABLE_CUDNN_SDP",
-            "SIE_DEVICE",
-            "SIE_DEVICES",
-            "SIE_MODELS_DIR",
-            "SIE_MODEL_FILTER",
-            "SIE_PRELOAD_MODELS",
-            "SIE_PINNED_MODELS",
-            "SIE_POOL",
-            "SIE_UPSTREAMS_FILE",
-            "SIE_REMOTE_SERVING",
-        ):
-            monkeypatch.delenv(name, raising=False)
+        for name in self._ENV_NAMES:
+            # Track absent keys too: factory serialization writes os.environ directly.
+            monkeypatch.setenv(name, "")
+            monkeypatch.delenv(name)
+
+    @pytest.mark.parametrize("initial_value", [None, "original"])
+    def test_clean_env_restores_factory_writes(
+        self, monkeypatch: pytest.MonkeyPatch, initial_value: str | None
+    ) -> None:
+        with monkeypatch.context() as baseline_patch:
+            for name in self._ENV_NAMES:
+                if initial_value is None:
+                    baseline_patch.delenv(name, raising=False)
+                else:
+                    baseline_patch.setenv(name, initial_value)
+
+            with pytest.MonkeyPatch.context() as fixture_patch:
+                inspect.unwrap(type(self)._clean_env)(self, fixture_patch)
+                fixture_patch.setattr(main.uvicorn, "run", MagicMock())
+                config = AppStateConfig(preload_models=["preloaded-model"], pinned_models=["pinned-model"])
+
+                main.run_server(host="127.0.0.1", port=8080, reload=False, config=config)
+
+                assert os.environ["SIE_DEVICE"] == "cpu"
+                assert os.environ["SIE_PRELOAD_MODELS"] == "preloaded-model"
+                assert os.environ["SIE_PINNED_MODELS"] == "pinned-model"
+                assert os.environ["SIE_REMOTE_SERVING"] == "1"
+
+            assert {name: os.environ.get(name) for name in self._ENV_NAMES} == dict.fromkeys(
+                self._ENV_NAMES, initial_value
+            )
 
     @pytest.fixture
     def sdpa_backend(self, monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, dict[str, bool]]:
