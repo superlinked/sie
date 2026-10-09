@@ -21,10 +21,14 @@ def _reference(weights: torch.Tensor) -> list[SparseVector]:
     return out
 
 
+@pytest.mark.parametrize(
+    "device",
+    ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA"))],
+)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
-def test_sparse_rows_matches_dense_conversion(dtype: torch.dtype) -> None:
+def test_sparse_rows_matches_dense_conversion(dtype: torch.dtype, device: str) -> None:
     torch.manual_seed(3)
-    weights = torch.relu(torch.randn(6, 97)).to(dtype)
+    weights = torch.relu(torch.randn(6, 97)).to(device, dtype)
     weights[2] = 0  # a row with no nonzero entry
     actual = sparse_rows(weights)
     expected = _reference(weights)
