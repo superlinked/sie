@@ -9,6 +9,7 @@ from typing import Any, ClassVar
 import torch
 
 from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._prompt_limit import check_label_chars
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters._word_window import (
@@ -227,6 +228,7 @@ class GLiNERBiAdapter(BaseAdapter):
 
         if not labels:
             raise InvalidInputError(_ERR_REQUIRES_LABELS)
+        check_label_chars("GLiNER bi-encoder", "labels", labels)
 
         opts = options or {}
         if opts.get("relation_labels"):
