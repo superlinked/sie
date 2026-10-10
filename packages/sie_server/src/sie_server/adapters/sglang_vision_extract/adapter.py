@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -70,6 +71,10 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
         meter_pages: bool = False,
         task_labels: dict[str, str] | None = None,
         max_concurrent_requests: int = 4,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        allowed_instructions: list[str] | None = None,
         disable_cuda_graph: bool = False,
         attention_backend: str | None = None,
         extra_launch_args: list[str] | None = None,
@@ -104,6 +109,16 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
         self._meter_pages = meter_pages
         self._task_labels = dict(task_labels or {})
         self._max_concurrent_requests = max(1, max_concurrent_requests)
+        if isinstance(temperature, bool) or not math.isfinite(temperature) or temperature < 0:
+            msg = "temperature must be a finite non-negative number"
+            raise ValueError(msg)
+        if isinstance(top_p, bool) or not math.isfinite(top_p) or not 0 < top_p <= 1:
+            msg = "top_p must be in (0, 1]"
+            raise ValueError(msg)
+        self._temperature = float(temperature)
+        self._top_p = float(top_p)
+        self._chat_template_kwargs = dict(chat_template_kwargs or {})
+        self._allowed_instructions = None if allowed_instructions is None else frozenset(allowed_instructions)
         # One bound across every batch in flight, created on the request loop.
         self._request_slots: asyncio.Semaphore | None = None
         self._processor: Any = None
@@ -276,6 +291,9 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
                 raise ValueError(_ERR_NO_IMAGES)
             images.append(item.images[0])
 
+        if instruction and self._allowed_instructions is not None and instruction not in self._allowed_instructions:
+            msg = f"instruction must be omitted or one of {sorted(self._allowed_instructions)}"
+            raise ValueError(msg)
         prompt_text, entity_label = self._resolve_prompt_and_label(instruction, runtime)
         prompt = self._build_prompt(prompt_text)
         future = asyncio.run_coroutine_threadsafe(
@@ -314,6 +332,7 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
             messages,
             add_generation_prompt=True,
             tokenize=False,
+            **self._chat_template_kwargs,
         )
 
     async def _extract_async(
@@ -333,8 +352,8 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
                     self.generate(
                         prompt,
                         max_new_tokens=max_new_tokens,
-                        temperature=0.0,
-                        top_p=1.0,
+                        temperature=self._temperature,
+                        top_p=self._top_p,
                         images=[image],
                     )
                 )

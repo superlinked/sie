@@ -28,12 +28,41 @@ tasks:
 # Output cap: 12,288 new tokens, the upstream benchmark's max_tokens, in a 24,576-token context.
 # A request can lower it.
 #
-# Normalization: none. The entity text is the raw decoded output, grounding markers included.
-# The upstream client repairs escaped math dollars by default. Upstream's published olmOCR-bench
-# scores also drop header/footer/page-number blocks and apply its Markdown post-processing.
+# Normalization: none beyond trimming leading and trailing whitespace, which the default SGLang
+# profile applies; grounding markers are kept. The `transformers` profile returns the decoded text
+# untrimmed. The upstream client repairs escaped math dollars by default. Upstream's published
+# olmOCR-bench scores also drop header/footer/page-number blocks and apply its Markdown
+# post-processing.
+#
+# Serving: the default profile runs the checkpoint on SGLang (sglang-vision-extract bundle) with
+# continuous batching, no system prompt, the chat template's enable_thinking=False, and only the
+# two trained prompts accepted. The `transformers` profile runs the same contract in-process in the
+# transformers5 bundle.
 max_sequence_length: 24576
 profiles:
   default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang_vision_extract.adapter:SGLangVisionExtractAdapter
+    adapter_options:
+      loadtime:
+        mem_fraction_static: 0.85
+        served_model_name: lightonai/LightOnOCR-3-4B
+        trust_remote_code: false
+        max_concurrent_requests: 32
+        meter_pages: true
+        max_new_tokens: 12288
+        temperature: 0.1
+        top_p: 1.0
+        chat_template_kwargs:
+          enable_thinking: false
+        allowed_instructions:
+          - grounding
+        attention_backend: triton
+      runtime:
+        max_new_tokens: 12288
+        num_beams: 1
+  transformers:
     max_batch_tokens: 16384
     compute_precision: bfloat16
     adapter_path: sie_server.adapters.lighton_ocr.adapter:LightOnOCR3Adapter

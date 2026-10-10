@@ -81,6 +81,15 @@ default). The returned `markdown` entity preserves raw decoded text, including
 grounding markers and whitespace; margin filtering or Markdown cleanup must
 be applied separately. Each image is metered as one page.
 
+The catalog's `lightonai/LightOnOCR-3-4B` default profile serves the same
+contract through `SGLangVisionExtractAdapter` in the `sglang-vision-extract`
+bundle, with continuous batching. Its loadtime options set `temperature: 0.1`,
+`top_p: 1.0`, `chat_template_kwargs: {enable_thinking: false}`, no system
+prompt and `allowed_instructions: [grounding]`. That adapter trims leading and
+trailing whitespace from the decoded text. The `transformers` profile keeps
+`LightOnOCR3Adapter`. Other `SGLangVisionExtractAdapter` profiles keep greedy
+decoding (`temperature: 0.0`) and accept any instruction.
+
 See the [official LightOnOCR-3 model card](https://huggingface.co/lightonai/LightOnOCR-3-4B)
 for the trained input and output formats. The existing `LightOnOCRAdapter`
 continues to serve LightOnOCR-2 with its own processor and generation behavior.

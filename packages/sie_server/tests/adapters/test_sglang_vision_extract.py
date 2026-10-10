@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -614,3 +615,97 @@ def test_a_new_request_loop_gets_a_new_request_bound(adapter: SGLangVisionExtrac
         loop = adapter._request_loop
         assert loop is not None
         loop.call_soon_threadsafe(loop.stop)
+
+
+class _KwargsProcessor(_FakeProcessor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.template_kwargs: dict[str, Any] = {}
+
+    def apply_chat_template(  # ty: ignore[invalid-method-override]
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        add_generation_prompt: bool,
+        tokenize: bool,
+        **kwargs: Any,
+    ) -> str:
+        self.template_kwargs = kwargs
+        return super().apply_chat_template(messages, add_generation_prompt=add_generation_prompt, tokenize=tokenize)
+
+
+_LIGHTONOCR3 = "lightonai/LightOnOCR-3-4B"
+
+
+def _lightonocr3_default_adapter() -> SGLangVisionExtractAdapter:
+    model_path = Path(__file__).resolve().parents[2] / "models" / "lightonai__LightOnOCR-3-4B.yaml"
+    config = ModelConfig.model_validate(yaml.safe_load(model_path.read_text()))
+    profile = config.resolve_profile("default")
+    assert profile.adapter_path == "sie_server.adapters.sglang_vision_extract.adapter:SGLangVisionExtractAdapter"
+    loadtime: dict[str, Any] = dict(profile.loadtime)
+    instance = SGLangVisionExtractAdapter(_LIGHTONOCR3, revision=config.hf_revision, **loadtime)
+    instance._processor = _KwargsProcessor()
+    instance._server_url = "http://sglang.test"
+    return instance
+
+
+@pytest.mark.parametrize("instruction", [None, "", "grounding"])
+def test_lightonocr3_profile_uses_trained_prompts_without_system_or_thinking(instruction: str | None) -> None:
+    instance = _lightonocr3_default_adapter()
+    prompt, label = instance._resolve_prompt_and_label(instruction, {})
+    assert label == "markdown"
+    instance._build_prompt(prompt)
+    assert instance._processor.template_kwargs == {"enable_thinking": False}
+    assert instance._processor.messages == [
+        {
+            "role": "user",
+            "content": [{"type": "image"}] + ([{"type": "text", "text": "grounding"}] if instruction else []),
+        }
+    ]
+
+
+@pytest.mark.parametrize("instruction", ["Grounding", "Text Recognition:", "Extract tables only"])
+def test_lightonocr3_profile_rejects_untrained_instructions(instruction: str) -> None:
+    instance = _lightonocr3_default_adapter()
+    instance._request_loop = MagicMock()
+    with pytest.raises(ValueError, match="instruction must be omitted or one of"):
+        instance.extract([Item(images=[_image("page")])], instruction=instruction)
+
+
+@pytest.mark.asyncio
+async def test_lightonocr3_profile_sampling_reaches_sglang_request() -> None:
+    instance = _lightonocr3_default_adapter()
+    bodies: list[dict[str, Any]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"text": "page", "meta_info": {"prompt_tokens": 10, '
+                b'"completion_tokens": 1, "finish_reason": {"type": "stop"}}}\n\n'
+            ),
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    instance._http_client = client
+    await instance._extract_async("rendered prompt", [_image("page")], max_new_tokens=12288)
+    await client.aclose()
+
+    sampling = bodies[0]["sampling_params"]
+    assert sampling["temperature"] == 0.1
+    assert sampling["top_p"] == 1.0
+    assert sampling["max_new_tokens"] == 12288
+
+
+def test_sampling_defaults_stay_greedy(adapter: SGLangVisionExtractAdapter) -> None:
+    assert (adapter._temperature, adapter._top_p, adapter._chat_template_kwargs) == (0.0, 1.0, {})
+    assert adapter._allowed_instructions is None
+
+
+@pytest.mark.parametrize(
+    "options", [{"temperature": -0.1}, {"temperature": float("nan")}, {"top_p": 0.0}, {"top_p": 1.5}]
+)
+def test_invalid_sampling_options_rejected(options: dict[str, Any]) -> None:
+    with pytest.raises(ValueError, match=r"temperature|top_p"):
+        SGLangVisionExtractAdapter("lightonai/LightOnOCR-3-4B", **options)
