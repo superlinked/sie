@@ -76,8 +76,8 @@ class TestWorkerConfig:
         assert config.max_batch_wait_ms == 15
         assert config.coalesce_ms == 15.0
         assert config.coalesce_ratio == 0.5
-        # Idle accumulation window (#2874): single-digit ms by default so an
-        # idle worker fuses bursts without materially delaying lone requests.
+        # Tail window for a staggered burst (#2874, #373). Default stays
+        # non-zero; a lone request is not charged it.
         assert config.idle_coalesce_ms == 3.0
 
     def test_custom_values(self) -> None:
@@ -586,11 +586,12 @@ class TestModelWorker:
 
     @pytest.mark.asyncio
     async def test_staggered_burst_fuses_with_idle_window(self, mock_adapter: MagicMock) -> None:
-        """#2874: a burst arriving at an IDLE worker fuses into one batch.
+        """#373: the head runs alone, and a still-pending tail fuses behind it.
 
-        Before the idle accumulation window, an idle worker dispatched
-        immediately with whatever was pending, so staggered arrivals became a
-        train of serialized batch-of-1 forwards (the was_idle degeneracy).
+        The head is not charged ``idle_coalesce_ms``. A finished request does
+        not hold the next one. Two requests queued on the same batcher are a
+        tail, so the idle window holds them and a third arrival inside the
+        window joins that forward: two forwards, not one per request.
         """
         call_sizes: list[int] = []
 
@@ -607,12 +608,85 @@ class TestModelWorker:
             max_batch_tokens=1000,
             max_batch_requests=64,
             max_batch_wait_ms=500,
-            coalesce_ms=200,
-            coalesce_ratio=0.5,
-            idle_coalesce_ms=60,
+            coalesce_ms=400,
+            coalesce_ratio=1.0,
+            idle_coalesce_ms=200,
         )
         worker = ModelWorker(mock_adapter, config)
         await worker.start()
+
+        try:
+            started = time.monotonic()
+            first = await worker.submit(
+                [make_text_item([1, 2], 0)],
+                [Item(text="text 0")],
+                ["dense"],
+            )
+            await asyncio.wait_for(first, timeout=2.0)
+            head_ms = (time.monotonic() - started) * 1000
+            # Must not have slept the 200ms window. 50ms leaves room for CI noise.
+            assert head_ms < 50, f"lone head waited {head_ms:.1f}ms"
+            assert call_sizes == [1], f"expected the head to run alone, got: {call_sizes}"
+
+            # The head has finished, so it must not hold these. Queue two
+            # before the loop selects, then one more inside the 200ms window.
+            second = await worker.submit(
+                [make_text_item([1, 2], 0)],
+                [Item(text="text 1")],
+                ["dense"],
+            )
+            third = await worker.submit(
+                [make_text_item([1, 2], 0)],
+                [Item(text="text 2")],
+                ["dense"],
+            )
+            assert worker.pending_count == 2
+            await asyncio.sleep(0.01)
+            assert worker.pending_count == 2, "tail was dispatched instead of held"
+            fourth = await worker.submit(
+                [make_text_item([1, 2], 0)],
+                [Item(text="text 3")],
+                ["dense"],
+            )
+
+            await asyncio.gather(second, third, fourth)
+
+            assert sum(call_sizes) == 4
+            assert call_sizes == [1, 3], f"expected the tail to fuse, got: {call_sizes}"
+
+        finally:
+            await worker.stop()
+
+    @pytest.mark.asyncio
+    async def test_already_queued_burst_fuses(self, mock_adapter: MagicMock) -> None:
+        """Several items already pending when an idle worker selects still fuse.
+
+        Queued before the process loop runs, so selection sees the whole
+        burst rather than a request that arrived alone (#373).
+        """
+        call_sizes: list[int] = []
+
+        def counting_encode(items, output_types, **kwargs):
+            call_sizes.append(len(items))
+            return EncodeOutput(
+                dense=np.array([[0.1, 0.2, 0.3]] * len(items)),
+                batch_size=len(items),
+            )
+
+        mock_adapter.encode.side_effect = counting_encode
+
+        config = WorkerConfig(
+            max_batch_tokens=1000,
+            max_batch_requests=64,
+            max_batch_wait_ms=500,
+            coalesce_ms=400,
+            coalesce_ratio=1.0,
+            idle_coalesce_ms=200,
+        )
+        worker = ModelWorker(mock_adapter, config)
+        await worker.start()
+        start_loop = worker._ensure_process_loop_started
+        worker._ensure_process_loop_started = lambda: None  # type: ignore[method-assign]
 
         try:
             futures = []
@@ -623,12 +697,12 @@ class TestModelWorker:
                     ["dense"],
                 )
                 futures.append(future)
-                # Stagger arrivals well inside the 60ms idle window.
-                await asyncio.sleep(0.005)
+            assert worker.pending_count == 4
 
+            del worker._ensure_process_loop_started
+            start_loop()
             await asyncio.gather(*futures)
 
-            # All four staggered requests fused into a single forward.
             assert sum(call_sizes) == 4
             assert call_sizes == [4], f"expected one fused batch, got: {call_sizes}"
 
@@ -637,11 +711,14 @@ class TestModelWorker:
 
     @pytest.mark.asyncio
     async def test_staggered_burst_shreds_without_idle_window(self, mock_adapter: MagicMock) -> None:
-        """Contrast for the test above: ``idle_coalesce_ms=0`` restores the
-        legacy immediate idle dispatch, and the same staggered burst shreds
-        into multiple small forwards. This is the mutation the idle window
-        exists to kill — if the window stops being applied, the fusing test
-        above degrades into THIS shape and fails.
+        """``idle_coalesce_ms=0`` does not hold the queued tail the window fuses.
+
+        Same shape as ``test_staggered_burst_fuses_with_idle_window``: the
+        head runs alone, two requests are already queued before the loop
+        selects, and one more arrives 10ms later. With the window off that
+        pair is dispatched immediately, so the later arrival does not join
+        it (``[1, 2, 1]``). With the window on the same tail is held and
+        fuses (``[1, 3]``). This is the escape hatch, not the default.
         """
         call_sizes: list[int] = []
 
@@ -658,38 +735,61 @@ class TestModelWorker:
             max_batch_tokens=1000,
             max_batch_requests=64,
             max_batch_wait_ms=500,
-            coalesce_ms=200,
-            coalesce_ratio=0.5,
+            coalesce_ms=400,
+            coalesce_ratio=1.0,
             idle_coalesce_ms=0,
         )
         worker = ModelWorker(mock_adapter, config)
         await worker.start()
 
         try:
-            futures = []
-            for i in range(4):
-                future = await worker.submit(
-                    [make_text_item([1, 2], 0)],
-                    [Item(text=f"text {i}")],
-                    ["dense"],
-                )
-                futures.append(future)
-                await asyncio.sleep(0.005)
+            started = time.monotonic()
+            first = await worker.submit(
+                [make_text_item([1, 2], 0)],
+                [Item(text="text 0")],
+                ["dense"],
+            )
+            await asyncio.wait_for(first, timeout=2.0)
+            head_ms = (time.monotonic() - started) * 1000
+            assert head_ms < 50, f"lone head waited {head_ms:.1f}ms"
+            assert call_sizes == [1], f"expected the head to run alone, got: {call_sizes}"
 
-            await asyncio.gather(*futures)
+            # Same already-queued tail as the fusing test. The window is 0,
+            # so the pair must leave before the later arrival instead of being held.
+            second = await worker.submit(
+                [make_text_item([1, 2], 0)],
+                [Item(text="text 1")],
+                ["dense"],
+            )
+            third = await worker.submit(
+                [make_text_item([1, 2], 0)],
+                [Item(text="text 2")],
+                ["dense"],
+            )
+            assert worker.pending_count == 2
+            await asyncio.sleep(0.01)
+            assert worker.pending_count == 0, "tail was held instead of dispatched"
+            fourth = await worker.submit(
+                [make_text_item([1, 2], 0)],
+                [Item(text="text 3")],
+                ["dense"],
+            )
+
+            await asyncio.gather(second, third, fourth)
 
             assert sum(call_sizes) == 4
-            # The first arrival dispatches alone (immediate idle dispatch), so
-            # the burst cannot land in a single forward.
-            assert len(call_sizes) >= 2, f"expected shredded batches without the window, got: {call_sizes}"
+            assert call_sizes == [1, 2, 1], f"expected the queued tail to shred, got: {call_sizes}"
 
         finally:
             await worker.stop()
 
     @pytest.mark.asyncio
-    async def test_lone_request_waits_only_the_idle_window(self, mock_adapter: MagicMock) -> None:
-        """A lone request must not wait the busy-path coalesce/batch windows —
-        only the small idle accumulation window bounds its dispatch latency.
+    async def test_lone_request_does_not_wait_the_idle_window(self, mock_adapter: MagicMock) -> None:
+        """A request that stays alone is not held for ``idle_coalesce_ms`` (#373).
+
+        The busy-path coalesce and batch windows are also not charged. The
+        bound is loose on purpose: a hard 1ms assert flakes under CI noise,
+        but it must finish far below the 200ms idle window.
         """
         mock_adapter.encode.return_value = EncodeOutput(
             dense=np.array([[0.1, 0.2, 0.3]]),
@@ -702,7 +802,7 @@ class TestModelWorker:
             max_batch_wait_ms=500,
             coalesce_ms=400,
             coalesce_ratio=1.0,
-            idle_coalesce_ms=5,
+            idle_coalesce_ms=200,
         )
         worker = ModelWorker(mock_adapter, config)
         await worker.start()
@@ -717,9 +817,136 @@ class TestModelWorker:
             await asyncio.wait_for(future, timeout=2.0)
             elapsed_ms = (time.monotonic() - start) * 1000
 
-            # ~5ms idle window + mock inference; far below the 400ms coalesce
-            # and 500ms batch windows.
-            assert elapsed_ms < 200
+            assert elapsed_ms < 50, f"lone request waited {elapsed_ms:.1f}ms"
+
+        finally:
+            await worker.stop()
+
+    @pytest.mark.asyncio
+    async def test_multi_item_request_does_not_wait_the_idle_window(self, mock_adapter: MagicMock) -> None:
+        """One submit of two items is one request and skips ``idle_coalesce_ms`` (#373)."""
+        call_sizes: list[int] = []
+
+        def counting_encode(items, output_types, **kwargs):
+            call_sizes.append(len(items))
+            return EncodeOutput(
+                dense=np.array([[0.1, 0.2, 0.3]] * len(items)),
+                batch_size=len(items),
+            )
+
+        mock_adapter.encode.side_effect = counting_encode
+
+        config = WorkerConfig(
+            max_batch_tokens=1000,
+            max_batch_requests=64,
+            max_batch_wait_ms=500,
+            coalesce_ms=400,
+            coalesce_ratio=1.0,
+            idle_coalesce_ms=200,
+        )
+        worker = ModelWorker(mock_adapter, config)
+        await worker.start()
+
+        try:
+            start = time.monotonic()
+            future = await worker.submit(
+                [make_text_item([1, 2], 0), make_text_item([3, 4], 1)],
+                [Item(text="hello-0"), Item(text="hello-1")],
+                ["dense"],
+            )
+            await asyncio.wait_for(future, timeout=2.0)
+            elapsed_ms = (time.monotonic() - start) * 1000
+
+            assert elapsed_ms < 50, f"multi-item request waited {elapsed_ms:.1f}ms"
+            assert call_sizes == [2]
+
+        finally:
+            await worker.stop()
+
+    @pytest.mark.asyncio
+    async def test_sequential_request_does_not_wait_the_idle_window(self, mock_adapter: MagicMock) -> None:
+        """A finished request does not make the next submit wait (#373).
+
+        The second request is sent as soon as the first has been awaited, well
+        inside ``idle_coalesce_ms``. It is not a tail: nothing is still pending
+        on this batcher.
+        """
+        mock_adapter.encode.return_value = EncodeOutput(
+            dense=np.array([[0.1, 0.2, 0.3]]),
+            batch_size=1,
+        )
+
+        config = WorkerConfig(
+            max_batch_tokens=1000,
+            max_batch_requests=64,
+            max_batch_wait_ms=500,
+            coalesce_ms=400,
+            coalesce_ratio=1.0,
+            idle_coalesce_ms=200,
+        )
+        worker = ModelWorker(mock_adapter, config)
+        await worker.start()
+
+        try:
+            first = await worker.submit(
+                [make_text_item([1, 2], 0)],
+                [Item(text="first")],
+                ["dense"],
+            )
+            await asyncio.wait_for(first, timeout=2.0)
+
+            start = time.monotonic()
+            second = await worker.submit(
+                [make_text_item([1, 2], 0)],
+                [Item(text="second")],
+                ["dense"],
+            )
+            await asyncio.wait_for(second, timeout=2.0)
+            elapsed_ms = (time.monotonic() - start) * 1000
+
+            assert elapsed_ms < 50, f"sequential request waited {elapsed_ms:.1f}ms"
+
+        finally:
+            await worker.stop()
+
+    @pytest.mark.asyncio
+    async def test_other_lora_arrival_does_not_hold_this_batcher(self, mock_adapter: MagicMock) -> None:
+        """A different LoRA's arrival does not make this batcher wait (#373)."""
+        mock_adapter.encode.return_value = EncodeOutput(
+            dense=np.array([[0.1, 0.2, 0.3]]),
+            batch_size=1,
+        )
+
+        config = WorkerConfig(
+            max_batch_tokens=1000,
+            max_batch_requests=64,
+            max_batch_wait_ms=500,
+            coalesce_ms=400,
+            coalesce_ratio=1.0,
+            idle_coalesce_ms=200,
+        )
+        worker = ModelWorker(mock_adapter, config)
+        await worker.start()
+
+        try:
+            other = await worker.submit(
+                [make_text_item([1, 2], 0)],
+                [Item(text="lora")],
+                ["dense"],
+                options={"lora": "adapter-a"},
+            )
+            await asyncio.wait_for(other, timeout=2.0)
+
+            start = time.monotonic()
+            base = await worker.submit(
+                [make_text_item([1, 2], 0)],
+                [Item(text="base")],
+                ["dense"],
+            )
+            await asyncio.wait_for(base, timeout=2.0)
+            elapsed_ms = (time.monotonic() - start) * 1000
+
+            assert elapsed_ms < 50, f"other LoRA held this batcher for {elapsed_ms:.1f}ms"
 
         finally:
             await worker.stop()

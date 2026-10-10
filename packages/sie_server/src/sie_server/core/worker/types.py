@@ -199,15 +199,13 @@ class WorkerConfig:
     # instead of being shredded into several half-full ones.
     coalesce_ms: float = 15.0
     coalesce_ratio: float = 0.5
-    # Idle-dispatch accumulation window (#2874). An idle worker used to
-    # dispatch IMMEDIATELY with whatever was pending, so a burst arriving at
-    # an idle worker degenerated into a train of small serialized forwards
-    # (many batch-of-1 dispatches instead of one fused batch). With this
-    # window, the first batch after idleness coalesces arrivals until the
-    # queue has been quiet for ``idle_coalesce_ms`` (or the batch fills, or
-    # ``max_batch_wait_ms`` elapses since the first request). A lone request
-    # therefore waits at most this window — single-digit ms — before
-    # dispatch, and ``0`` restores the legacy immediate dispatch.
+    # Idle-dispatch tail window (#2874, #373). One request pending on an
+    # idle batcher is dispatched immediately, however many items it carries,
+    # and is not held for this long. A follow-up waits only while another
+    # request on that same batcher is still pending. A finished request does
+    # not hold the next one, and another LoRA's arrival does not hold this
+    # batcher. Several requests already pending when a batch is selected
+    # still form one batch. ``0`` dispatches every idle arrival immediately.
     idle_coalesce_ms: float = 3.0
     max_queue_size: int = 1000  # Maximum pending items in queue (0 = unlimited)
     instrumentation: bool = False

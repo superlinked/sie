@@ -303,13 +303,16 @@ class EngineConfig(BaseSettings):
         Field(
             ge=0.0,
             description=(
-                "Accumulation window for the FIRST batch after a worker was "
-                "idle (#2874). An idle worker used to dispatch immediately "
-                "with whatever was pending, shredding bursty arrivals into a "
-                "train of small serialized forwards. With this window the "
-                "batcher coalesces until arrivals have been quiet for this "
-                "long (bounded by max_batch_wait_ms), so a lone request waits "
-                "at most this window. 0 restores immediate idle dispatch."
+                "Tail window for a burst that reaches an idle worker "
+                "(#2874, #373). One request pending on a batcher is "
+                "dispatched immediately, however many items it carries, and "
+                "is not held for this long. A follow-up waits only while "
+                "another request on that same batcher is still pending. A "
+                "finished request does not hold the next one, and another "
+                "LoRA's arrival does not hold this batcher. Several requests "
+                "already pending still form one batch. Bounded by "
+                "max_batch_wait_ms. 0 dispatches every idle arrival "
+                "immediately."
             ),
         ),
     ] = 3.0

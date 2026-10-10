@@ -237,8 +237,21 @@ class BatchFormer[I: HasCost, T]:
 
     @property
     def pending_count(self) -> int:
-        """Return number of pending requests."""
+        """Return number of pending items.
+
+        One submitted request occupies one entry per item.
+        """
         return len(self._pending)
+
+    @property
+    def pending_request_count(self) -> int:
+        """Return number of distinct pending requests.
+
+        ``submit_many`` appends one entry per item and reuses one metadata
+        object, so ``pending_count`` counts items. Callers that mean "one
+        request" (idle dispatch, #373) use this.
+        """
+        return len({id(request.metadata) for request in self._pending})
 
     @property
     def pending_cost(self) -> int:

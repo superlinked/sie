@@ -46,9 +46,10 @@ def _parked_config() -> WorkerConfig:
     """Config whose batcher never yields a batch during a test.
 
     Every dispatch trigger (cost limit, request limit, first-request timeout,
-    coalesce window, idle accumulation window) is pushed far out of reach, so
-    submitted items stay queued in the ``BatchFormer`` for the whole test and
-    the drain is the only thing that can complete them. This is the state a
+    coalesce window, idle tail window) is pushed far out of reach. A lone
+    idle request is still dispatched immediately (#373), so ``_submit`` queues
+    a second request on the same batcher and the tail window holds the burst.
+    The drain is the only thing that can complete it. This is the state a
     real worker is in whenever it is evicted with a backlog.
     """
     return WorkerConfig(
@@ -122,19 +123,38 @@ def _item(index: int = 0) -> TextPreparedItem:
     return make_text_item([1, 2, 3, 4, 5], index)
 
 
+def _retrieve_exception(future: asyncio.Future[Any]) -> None:
+    """Retrieve a parked partner's error so a drained future does not warn."""
+    if not future.cancelled():
+        future.exception()
+
+
 async def _submit(
     worker: ModelWorker,
     *,
     count: int = 1,
     options: dict[str, Any] | None = None,
 ) -> asyncio.Future[WorkerResult]:
-    """Queue one request of ``count`` items and let the process loop park."""
+    """Queue one request of ``count`` items and let the process loop park.
+
+    A lone idle request, including one submit of several items, is dispatched
+    without waiting ``idle_coalesce_ms`` (#373). A second request on the same
+    batcher is submitted through the public API before the loop selects, so
+    the burst is a tail and the parked window holds both inside ``get_batch``.
+    """
     future = await worker.submit(
         [_item(i) for i in range(count)],
         [Item(text=f"hello-{i}") for i in range(count)],
         ["dense"],
         options=options,
     )
+    partner = await worker.submit(
+        [_item(count)],
+        [Item(text="park")],
+        ["dense"],
+        options=options,
+    )
+    partner.add_done_callback(_retrieve_exception)
     # Give the process loop a chance to start and block on the batcher, so
     # the drain is exercised against a live (not merely un-started) loop.
     await asyncio.sleep(0)
@@ -149,7 +169,8 @@ class TestStopDrainsQueuedRequests:
         worker = ModelWorker(mock_adapter, _parked_config(), model_name="test-model")
         await worker.start()
         future = await _submit(worker)
-        assert worker.pending_count == 1
+        # The request under test plus the one-item request that holds the window.
+        assert worker.pending_count == 2
         assert not future.done()
 
         await worker.stop()
@@ -170,7 +191,8 @@ class TestStopDrainsQueuedRequests:
         lora_a = await _submit(worker, options={"lora": "adapter-a"})
         lora_b = await _submit(worker, options={"lora": "adapter-b"})
         assert set(worker._batchers) == {None, "adapter-a", "adapter-b"}
-        assert worker.pending_count == 3
+        # Each batcher has the request under test and the request that holds it.
+        assert worker.pending_count == 6
 
         await worker.stop()
 
@@ -191,7 +213,8 @@ class TestStopDrainsQueuedRequests:
         worker = ModelWorker(mock_adapter, _parked_config(), model_name="test-model")
         await worker.start()
         future = await _submit(worker, count=4)
-        assert worker.pending_count == 4
+        # Four items share the future under test; one more item holds the window.
+        assert worker.pending_count == 5
 
         await worker.stop()
 
