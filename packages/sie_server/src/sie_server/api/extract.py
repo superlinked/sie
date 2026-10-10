@@ -17,7 +17,11 @@ from sie_server.api.options import resolve_runtime_options
 from sie_server.api.routing import remote_routing, route_request
 from sie_server.api.serialization import MsgPackResponse
 from sie_server.api.validation import validate_machine_profile_header
-from sie_server.core.extract_cost import adapter_extract_item_costs, build_extract_prepared_items
+from sie_server.core.extract_cost import (
+    adapter_extract_item_costs,
+    build_extract_prepared_items,
+    dispatches_items_alone,
+)
 from sie_server.core.inference_output import ExtractOutput
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import QueueFullError, WorkerResult
@@ -157,7 +161,11 @@ async def _extract_via_worker(
             instruction=instruction,
             options=options,
         )
-        prepared_items = build_extract_prepared_items(items, item_costs=item_costs)
+        prepared_items = build_extract_prepared_items(
+            items,
+            item_costs=item_costs,
+            runs_alone=dispatches_items_alone(adapter),
+        )
 
     timing.end_tokenization()
 

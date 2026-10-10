@@ -23,15 +23,18 @@ from sie_server.config.model import (
     ProfileConfig,
     Tasks,
 )
+from sie_server.core.batcher import BatchConfig, BatchFormer
 from sie_server.core.extract_cost import (
     MAX_EXTRACT_LABELS,
     MAX_OUTPUT_SCHEMA_DEPTH,
     MAX_OUTPUT_SCHEMA_VALUES,
     build_extract_prepared_items,
+    dispatches_items_alone,
     extract_item_cost,
     output_schema_shape_error,
 )
 from sie_server.core.inference_output import ExtractItemError, ExtractOutput
+from sie_server.core.prepared import ExtractPreparedItem
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import WorkerResult
@@ -1162,6 +1165,11 @@ class TestExtractCost:
         ]
         prepared = build_extract_prepared_items(items)
         assert [(p.cost, p.original_index) for p in prepared] == [(3, 0), (11, 1)]
+        assert not any(p.runs_alone for p in prepared)
+
+    def test_build_extract_prepared_items_can_flag_items_to_run_alone(self) -> None:
+        prepared = build_extract_prepared_items([Item(text="a"), Item(text="bb")], runs_alone=True)
+        assert [(p.cost, p.original_index, p.runs_alone) for p in prepared] == [(1, 0, True), (2, 1, True)]
 
 
 class _PlainExtractAdapter(BaseAdapter):
@@ -1210,6 +1218,54 @@ def _cost_capture_registry(adapter: BaseAdapter) -> tuple[MagicMock, MagicMock]:
     worker.submit_extract = AsyncMock(side_effect=submit_extract)
     registry.start_worker = AsyncMock(return_value=worker)
     return registry, worker
+
+
+class _EngineBatchedAdapter(_PlainExtractAdapter):
+    """Declares concurrent dispatch, like SGLangVisionExtractAdapter: its engine batches continuously."""
+
+    def max_concurrent_dispatch(self) -> int:
+        return 64
+
+
+class _BrokenDispatchHintAdapter(_PlainExtractAdapter):
+    def max_concurrent_dispatch(self) -> int:
+        raise RuntimeError("no hint")
+
+
+class TestEngineBatchedExtractItemsRunAlone:
+    """Items of an engine-batched adapter each get a worker batch, so none waits on a slower batch-mate."""
+
+    @pytest.mark.asyncio
+    async def test_engine_batched_adapter_flags_every_item(self) -> None:
+        registry, worker = _cost_capture_registry(_EngineBatchedAdapter())
+
+        await _extract_via_worker(registry, "m", [Item(text="a"), Item(text="bb")])
+
+        prepared = worker.submit_extract.await_args.kwargs["prepared_items"]
+        assert [(p.cost, p.runs_alone) for p in prepared] == [(1, True), (2, True)]
+
+    @pytest.mark.asyncio
+    async def test_single_dispatch_adapter_keeps_shared_batches(self) -> None:
+        registry, worker = _cost_capture_registry(_PlainExtractAdapter())
+
+        await _extract_via_worker(registry, "m", [Item(text="a"), Item(text="bb")])
+
+        prepared = worker.submit_extract.await_args.kwargs["prepared_items"]
+        assert [p.runs_alone for p in prepared] == [False, False]
+
+    def test_dispatch_hint_never_raises(self) -> None:
+        assert dispatches_items_alone(_BrokenDispatchHintAdapter()) is False
+        assert dispatches_items_alone(None) is False
+        assert dispatches_items_alone(_EngineBatchedAdapter()) is True
+
+    def test_flagged_items_are_dispatched_one_per_batch_in_arrival_order(self) -> None:
+        batcher: BatchFormer[ExtractPreparedItem, int] = BatchFormer(BatchConfig())
+        items = [Item(text="long page"), Item(text="x"), Item(text="mid")]
+        for index, prepared in enumerate(build_extract_prepared_items(items, runs_alone=True)):
+            batcher._append_item(prepared, index)
+
+        assert [batcher._extract_batch().metadata for _ in items] == [[0], [1], [2]]
+        assert batcher.pending_count == 0
 
 
 class TestExtractItemCostHook:

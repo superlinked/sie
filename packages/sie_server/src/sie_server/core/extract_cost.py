@@ -124,6 +124,7 @@ def build_extract_prepared_items(
     *,
     decoder_max_output_tokens: int = 0,
     item_costs: list[int] | None = None,
+    runs_alone: bool = False,
 ) -> list[ExtractPreparedItem]:
     """Build PreparedItems for a batch of extract items.
 
@@ -137,6 +138,9 @@ def build_extract_prepared_items(
     forward row per (item, question) pair. It is ignored unless it holds one
     non-negative integer per item, so a malformed estimate falls back to the
     character count rather than mis-sizing a batch.
+
+    ``runs_alone`` flags every item to be dispatched in a batch of its own
+    (see :func:`dispatches_items_alone`).
     """
     usable_costs = _usable_item_costs(item_costs, len(items))
     prepared: list[ExtractPreparedItem] = []
@@ -145,7 +149,7 @@ def build_extract_prepared_items(
             cost = extract_item_cost(item, decoder_max_output_tokens=decoder_max_output_tokens)
         else:
             cost = usable_costs[i] + max(decoder_max_output_tokens, 0)
-        prepared.append(ExtractPreparedItem(cost=cost, original_index=i))
+        prepared.append(ExtractPreparedItem(cost=cost, original_index=i, runs_alone=runs_alone))
     return prepared
 
 
@@ -178,3 +182,22 @@ def _usable_item_costs(costs: object, expected_len: int) -> list[int] | None:
             return None
         usable.append(cost)
     return usable
+
+
+def dispatches_items_alone(adapter: object) -> bool:
+    """Whether ``adapter``'s extract items should each get a worker batch of their own.
+
+    True for adapters that declare ``max_concurrent_dispatch() > 1``: their
+    out-of-process engine (SGLang) batches continuously, so a shared worker
+    batch adds only head-of-line blocking. The batch answers when its slowest
+    item finishes, and a caller waiting on that answer cannot send its next
+    request. Must not raise.
+    """
+    declared = getattr(adapter, "max_concurrent_dispatch", None)
+    if not callable(declared):
+        return False
+    try:
+        width = int(declared())
+    except Exception:  # noqa: BLE001 - a dispatch hint must never fail the request
+        return False
+    return width > 1
