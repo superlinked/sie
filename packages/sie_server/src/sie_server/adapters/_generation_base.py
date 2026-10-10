@@ -35,6 +35,10 @@ _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
 _GEMMA_CHANNEL_OPEN = "<" + "|channel" + ">"
 _GEMMA_CHANNEL_CLOSE = "<" + "channel|" + ">"
+_GEMMA_THINK = "<" + "|think|" + ">"
+_GEMMA_TURN = "<" + "|turn" + ">"
+_GEMMA_SYSTEM_TURN = _GEMMA_TURN + "system\n"
+_GEMMA_MODEL_TURN = _GEMMA_TURN + "model\n"
 
 ReasoningFormat = Literal["qwen3", "gemma4"]
 _REASONING_BOUNDARIES: dict[ReasoningFormat, tuple[str, str]] = {
@@ -813,6 +817,30 @@ def reasoning_starts_in_prompt(prompt: str, reasoning_format: ReasoningFormat) -
         # that split boundary as open so the reasoning body stays private.
         opening_at = len(prompt) - len(_GEMMA_CHANNEL_OPEN)
     return opening_at > prompt.rfind(closing)
+
+
+def reasoning_expected_after_prompt(prompt: str, reasoning_format: ReasoningFormat) -> bool:
+    """Return whether the engine should expect private reasoning before the answer.
+
+    True when the rendered prompt ends inside a reasoning boundary, or when a
+    Gemma 4 prompt enables thinking without seeding the channel. With
+    ``enable_thinking`` Gemma's template puts ``<|think|>`` at the top of the
+    first system turn and ends the prompt at an open ``<|turn>model``; the
+    model then opens the ``thought`` channel itself. A grammar must wait for
+    that channel to close, as SGLang's chat endpoint arranges from the same
+    template, or it constrains the first generated token and no reasoning
+    happens. Other reasoning formats keep the prompt-boundary rule.
+    """
+    if reasoning_starts_in_prompt(prompt, reasoning_format):
+        return True
+    return reasoning_format == "gemma4" and _gemma_prompt_enables_thinking(prompt)
+
+
+def _gemma_prompt_enables_thinking(prompt: str) -> bool:
+    system_at = prompt.find(_GEMMA_SYSTEM_TURN)
+    if system_at < 0 or prompt.find(_GEMMA_TURN) != system_at or not prompt.endswith(_GEMMA_MODEL_TURN):
+        return False
+    return prompt.startswith(_GEMMA_THINK, system_at + len(_GEMMA_SYSTEM_TURN))
 
 
 def thinking_mode_is_enabled(config: Any) -> bool:
