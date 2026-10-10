@@ -504,6 +504,108 @@ def test_record_text_is_bounded_per_document() -> None:
     assert structuring_decoding._within_word_limit(slots, 50) == [(0, []), (1, [])]
 
 
+def test_record_text_is_bounded_by_characters() -> None:
+    span = upstream.Span
+    # One word each. The long token is under the word cap and over the character cap.
+    long = span(start=0, end=0, entity_type="a", score=0.9)
+    short = span(start=1, end=1, entity_type="b", score=0.4)
+    slots = [(0, [long]), (1, [short])]
+    tokens = ["x" * 30, "ok"]
+    assert structuring_decoding.MAX_RECORD_CHARS == structuring_decoding.MAX_RECORD_WORDS * 32
+    assert structuring_decoding._within_word_limit(slots, 10, tokens=tokens, max_chars=40) is slots
+    # Best first is the 30-character token. It does not fit in 20, so taking stops
+    # and the later short span is dropped too, as an over-word span would be.
+    assert structuring_decoding._within_word_limit(slots, 10, tokens=tokens, max_chars=20) == [(0, []), (1, [])]
+    # A normal short span still passes; the long token ranked after it does not.
+    passing = [
+        (0, [span(start=1, end=1, entity_type="b", score=0.9)]),
+        (1, [span(start=0, end=0, entity_type="a", score=0.4)]),
+    ]
+    kept = structuring_decoding._within_word_limit(passing, 10, tokens=tokens, max_chars=10)
+    assert [(slot, [(item.start, item.end) for item in spans]) for slot, spans in kept] == [(0, [(1, 1)]), (1, [])]
+    # Decoded text joins tokens with spaces, so two short words can still exceed the character cap.
+    spaced = [(0, [span(start=0, end=1, entity_type="a", score=0.9)])]
+    assert structuring_decoding._within_word_limit(spaced, 10, tokens=["abcd", "ef"], max_chars=6) == [(0, [])]
+    assert structuring_decoding._within_word_limit(spaced, 10, tokens=["abcd", "ef"], max_chars=7) is spaced
+
+
+def test_ordinary_words_reach_the_word_cap_before_the_character_cap() -> None:
+    """A document of short words reaches the word cap before the character cap.
+
+    Eight letters plus the joining space average under 31 characters a word,
+    so that document stays under the character cap. Words averaging more than
+    32 characters hit the character cap first.
+    """
+    ordinary = 8
+    words = structuring_decoding.MAX_RECORD_WORDS
+    # A full word cap of 8-letter words, plus the joining spaces, stays under the character cap.
+    joined = words * ordinary + (words - 1)
+    assert joined < structuring_decoding.MAX_RECORD_CHARS
+    assert (
+        relation_decoding.MAX_RELATION_WORDS * ordinary + (relation_decoding.MAX_RELATION_WORDS - 1)
+        < relation_decoding.MAX_RELATION_CHARS
+    )
+    # The same number of words, averaging more than 32 characters, exceeds the character cap first.
+    assert words * (32 + 1) > structuring_decoding.MAX_RECORD_CHARS
+    assert relation_decoding.MAX_RELATION_WORDS * (32 + 1) > relation_decoding.MAX_RELATION_CHARS
+    assert relation_decoding.MAX_RELATION_CHARS == relation_decoding.MAX_RELATION_WORDS * 32
+
+
+class _TracingTokens(list[str]):
+    def __init__(self, items: list[str]) -> None:
+        super().__init__(items)
+        self.reads: list[object] = []
+
+    def __getitem__(self, item: object) -> object:
+        self.reads.append(item)
+        return super().__getitem__(item)  # type: ignore[index]
+
+
+def test_word_cap_rejection_does_not_read_the_rejected_tail() -> None:
+    span = upstream.Span
+    tokens = _TracingTokens(["ok", "z" * 100_000])
+    slots = [
+        (0, [span(start=0, end=0, entity_type="a", score=0.9)]),
+        (1, [span(start=1, end=1, entity_type="b", score=0.1)]),
+    ]
+    kept = structuring_decoding._within_word_limit(slots, 1, tokens=tokens, max_chars=10**9)
+    assert [(slot, [(item.start, item.end) for item in spans]) for slot, spans in kept] == [(0, [(0, 0)]), (1, [])]
+    assert not any(isinstance(read, slice) and read.start == 1 for read in tokens.reads)
+
+
+def _record_fields(records: list) -> list[dict]:
+    return [field for group in records[0] for record in group for field in record]
+
+
+def test_decoded_record_text_is_bounded_by_characters() -> None:
+    decode = structuring_decoding.make_structuring_decode(
+        upstream.Span,
+        structuring_decoder.unflatten_by_batch_origin,
+        max_words=100,
+        max_chars=10,
+    )
+    decoder = structuring_decoder.StructuringDecoder(SimpleNamespace())
+
+    def output(short_logit: float, long_logit: float) -> SimpleNamespace:
+        return SimpleNamespace(
+            structuring_logits=torch.tensor([[[short_logit, long_logit]]]),
+            structuring_field_logits=torch.tensor([[[6.0], [6.0]]]),
+            structuring_span_idx=torch.tensor([[[0, 0], [1, 1]]]),
+            structuring_span_mask=torch.tensor([[True, True]]),
+            structuring_batch_origin=torch.arange(1),
+            batch_size=1,
+        )
+
+    long_text = "z" * 30
+    # The long token is one word, so the word cap would keep it. Ranked first, it
+    # misses the character cap and taking stops, dropping the short span too.
+    assert _record_fields(decode(decoder, output(2.0, 6.0), threshold=0.1, texts=[["ok", long_text]])) == []
+    fields = _record_fields(decode(decoder, output(6.0, 2.0), threshold=0.1, texts=[["ok", long_text]]))
+    assert [field["text"] for field in fields] == ["ok"]
+    fields = _record_fields(decode(decoder, output(2.0, 6.0), threshold=0.1, texts=[["ok", "yo"]]))
+    assert [field["text"] for field in fields] == ["ok", "yo"]
+
+
 def test_fully_nested_records_stay_within_the_text_bound() -> None:
     spans = [(i, 8190 - i) for i in range(4095)]
     count = len(spans)
@@ -518,7 +620,9 @@ def test_fully_nested_records_stay_within_the_text_bound() -> None:
     records = _STRUCTURING.decode(output, threshold=0.1, flat_ner=False, texts=[[f"w{i}" for i in range(8191)]])
     fields = [field for group in records[0] for record in group for field in record]
     words = sum(field["end"] - field["start"] + 1 for field in fields)
+    chars = sum(len(field["text"]) for field in fields)
     assert 0 < words <= structuring_decoding.MAX_RECORD_WORDS
+    assert 0 < chars <= structuring_decoding.MAX_RECORD_CHARS
 
 
 def test_record_spans_within_an_allowance_keep_each_slots_best_spans() -> None:
@@ -848,6 +952,107 @@ def test_relation_text_is_bounded_per_document() -> None:
         taken.add(index)
     assert capped == [triple for index, triple in enumerate(full) if index in taken]
     assert 0 < len(capped) < len(full)
+
+
+def test_relation_text_is_bounded_by_characters() -> None:
+    span = upstream.Span
+    long = span(start=0, end=0, entity_type="a", score=1.0)
+    short = span(start=1, end=1, entity_type="b", score=1.0)
+    entities = [long, short]
+    texts = [["y" * 30, "ok"]]
+    assert relation_decoding.MAX_RELATION_CHARS == relation_decoding.MAX_RELATION_WORDS * 32
+
+    def rows(scores: list[float], *, max_chars: int, max_words: int = 10, row_texts: list[list[str]] = texts) -> list:
+        return relation_decoding._row_relations(
+            _RELATIONS,
+            torch.tensor([[score] for score in scores], dtype=torch.float32),
+            torch.tensor([[0, 1], [1, 1]]),
+            None,
+            0.5,
+            {0: "links"},
+            None,
+            entities,
+            row_texts,
+            0,
+            allowance=None,
+            max_relations=10,
+            max_words=max_words,
+            max_chars=max_chars,
+        )
+
+    # 30 + 2 characters and 2 words, then 2 + 2. Under both caps.
+    both = rows([0.9, 0.6], max_chars=40)
+    assert [(item["head"]["text"], item["tail"]["text"]) for item in both] == [("y" * 30, "ok"), ("ok", "ok")]
+    # Best relation is two words (under the word cap) and 32 characters. It does not
+    # fit in 20, so taking stops and the later short relation is dropped too.
+    assert rows([0.9, 0.6], max_chars=20) == []
+    # A normal short relation still passes; the long one ranked after it does not.
+    kept = rows([0.6, 0.9], max_chars=10)
+    assert [(item["head"]["text"], item["tail"]["text"]) for item in kept] == [("ok", "ok")]
+    # Joined tokens count the space: "abcd ef" is 7 characters and 2 words.
+    wide = [span(start=0, end=1, entity_type="a", score=1.0)]
+    spaced = relation_decoding._row_relations(
+        _RELATIONS,
+        torch.tensor([[0.9]], dtype=torch.float32),
+        torch.tensor([[0, 0]]),
+        None,
+        0.5,
+        {0: "links"},
+        None,
+        wide,
+        [["abcd", "ef"]],
+        0,
+        allowance=None,
+        max_relations=10,
+        max_words=10,
+        max_chars=6,
+    )
+    assert spaced == []
+    fitting = relation_decoding._row_relations(
+        _RELATIONS,
+        torch.tensor([[0.9]], dtype=torch.float32),
+        torch.tensor([[0, 0]]),
+        None,
+        0.5,
+        {0: "links"},
+        None,
+        wide,
+        [["abcd", "ef"]],
+        0,
+        allowance=None,
+        max_relations=10,
+        max_words=10,
+        max_chars=14,
+    )
+    assert fitting[0]["head"]["text"] == "abcd ef"
+    assert len(fitting[0]["head"]["text"]) + len(fitting[0]["tail"]["text"]) == 14
+
+
+def test_relation_word_cap_does_not_read_the_rejected_endpoint() -> None:
+    span = upstream.Span
+    tokens = _TracingTokens(["ok", "z" * 100_000])
+    entities = [
+        span(start=0, end=0, entity_type="a", score=1.0),
+        span(start=1, end=1, entity_type="b", score=1.0),
+    ]
+    rows = relation_decoding._row_relations(
+        _RELATIONS,
+        torch.tensor([[0.9], [0.6]], dtype=torch.float32),
+        torch.tensor([[0, 0], [1, 1]]),
+        None,
+        0.5,
+        {0: "links"},
+        None,
+        entities,
+        [tokens],
+        0,
+        allowance=None,
+        max_relations=10,
+        max_words=2,
+        max_chars=10**9,
+    )
+    assert [(item["head"]["text"], item["tail"]["text"]) for item in rows] == [("ok", "ok")]
+    assert not any(isinstance(read, slice) and read.start == 1 for read in tokens.reads)
 
 
 def test_relations_within_an_allowance_keep_the_best_first_prefix() -> None:
