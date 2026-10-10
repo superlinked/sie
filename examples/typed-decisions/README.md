@@ -5,6 +5,10 @@ yes-or-no check. Every answer comes back with a probability a program can
 branch on. This example measures how well models served by SIE answer those
 questions about public CVE records, against the NVD analysts' own assessments.
 It covers zero-shot label classifiers, typed decision models and a small LLM.
+Its results are published on
+[superlinked.com/typed-decisions](https://superlinked.com/typed-decisions),
+whose sources are in its
+[SOURCES.md](https://superlinked.com/reference/typed-decisions/SOURCES.md).
 
 Everything that decides what is reported was fixed on 224 earlier records and
 committed before the 160 test records were sent, in
