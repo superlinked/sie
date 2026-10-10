@@ -1956,6 +1956,32 @@ def _with_audio_ms(units: UnitCounts | None, audio_ms: int | None) -> UnitCounts
     )
 
 
+def _output_token_total(counts: Any, expected_len: int) -> int | None:
+    """Sum adapter-surfaced per-item generated-token counts for one work item.
+
+    ``None`` -- the dimension stays unset, never estimated -- unless the list
+    is aligned 1:1 with the item's outputs and holds non-negative ints.
+    """
+    if not isinstance(counts, list) or len(counts) != expected_len:
+        return None
+    if not all(isinstance(c, int) and not isinstance(c, bool) and c >= 0 for c in counts):
+        return None
+    return sum(counts)
+
+
+def _with_output_tokens(units: UnitCounts | None, output_tokens: int | None) -> UnitCounts | None:
+    """Fold an authoritative generated-token count into ``UnitCounts``.
+
+    ``None`` is a no-op. A zero is kept: an extractor that decoded nothing for
+    the item made a real observation.
+    """
+    if output_tokens is None:
+        return units
+    if units is None:
+        return UnitCounts(output_tokens=output_tokens)
+    return msgspec.structs.replace(units, output_tokens=output_tokens)
+
+
 def _page_total(pages: Any, expected_len: int) -> int | None:
     """Sum an adapter-surfaced per-item page list (``ExtractOutput.pages``) into a
     single billable page count for the work item.
@@ -2199,6 +2225,13 @@ def _extract_success_outcome(
     # rounded to seconds or minutes.
     if bi.prepared_audio is not None:
         units = _with_audio_ms(units, bi.prepared_audio.duration_ms)
+    # Generative extract (SGLang vision OCR) also reports the tokens the engine
+    # decoded. Folded last because the page/image/audio folds above rebuild
+    # ``UnitCounts`` from the legacy fields only.
+    units = _with_output_tokens(
+        units,
+        _output_token_total(getattr(extract_output, "output_token_counts", None), extract_output.batch_size),
+    )
 
     extraction_results = ExtractHandler.format_output(extract_output)
     if not extraction_results:

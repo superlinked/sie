@@ -953,6 +953,7 @@ mod tests {
             input_tokens: None,
             pairs: None,
             content_input_tokens: None,
+            output_tokens: None,
             pages: Some(3),
             images: None,
             audio_ms: None,
@@ -962,6 +963,27 @@ mod tests {
         assert_eq!(r.error.as_deref(), Some("kapow"));
         assert_eq!(r.error_code.as_deref(), Some("INTERNAL"));
         assert_eq!(r.units.and_then(|units| units.pages), Some(3));
+    }
+
+    #[test]
+    fn extract_output_tokens_pass_through_to_the_work_result() {
+        let mut outcome = outcome();
+        outcome.units = Some(UnitCounts {
+            input_tokens: Some(2_590),
+            pairs: None,
+            content_input_tokens: None,
+            output_tokens: Some(836),
+            pages: Some(1),
+            images: None,
+            audio_ms: None,
+        });
+        let r = build_work_result(&outcome, "w", None, false, None);
+        let bytes = rmp_serde::to_vec_named(&r).unwrap();
+        let back: WorkResult = rmp_serde::from_slice(&bytes).unwrap();
+        let units = back.units.expect("units");
+        assert_eq!(units.input_tokens, Some(2_590));
+        assert_eq!(units.output_tokens, Some(836));
+        assert_eq!(units.pages, Some(1));
     }
 
     #[test]
@@ -978,6 +1000,7 @@ mod tests {
             input_tokens: None,
             pairs: None,
             content_input_tokens: None,
+            output_tokens: None,
             pages: None,
             images: None,
             audio_ms: Some(1_001),

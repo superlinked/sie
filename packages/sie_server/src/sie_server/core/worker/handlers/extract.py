@@ -129,6 +129,10 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
         # attributed to the right work item under cross-request fusion.
         pages = output.pages
         sliced_pages = [pages[index]] if pages is not None and 0 <= index < len(pages) else None
+        output_counts = output.output_token_counts
+        sliced_output_counts = (
+            [output_counts[index]] if output_counts is not None and 0 <= index < len(output_counts) else None
+        )
         return ExtractOutput(
             entities=[output.entities[index]],
             classifications=classifications,
@@ -139,6 +143,7 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
             batch_size=1,
             input_token_counts=sliced_counts,
             pages=sliced_pages,
+            output_token_counts=sliced_output_counts,
         )
 
     def assemble_output(
@@ -229,6 +234,15 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
                 break
             assembled_pages.append(partial_pages[0])
 
+        # Generated-token counts follow the same all-or-nothing contract.
+        assembled_output_counts: list[int] = []
+        for i in range(batch_size):
+            partial_output_counts = partials[i].output_token_counts
+            if not (isinstance(partial_output_counts, list) and len(partial_output_counts) == 1):
+                assembled_output_counts = []
+                break
+            assembled_output_counts.append(partial_output_counts[0])
+
         return ExtractOutput(
             entities=entities,
             classifications=classifications,
@@ -239,6 +253,7 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
             batch_size=batch_size,
             input_token_counts=assembled_counts or None,
             pages=assembled_pages or None,
+            output_token_counts=assembled_output_counts or None,
         )
 
     @classmethod

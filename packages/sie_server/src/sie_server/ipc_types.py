@@ -593,6 +593,9 @@ class UnitCounts(msgspec.Struct):
     # tokenized alone), excluding prompt-template tokens. Never above
     # ``input_tokens``. Additive tail field, like ``pairs``.
     content_input_tokens: int | None = None
+    # Extract only: tokens a generative extractor decoded for the item (the
+    # SGLang vision OCR adapter's completion tokens). Additive tail field.
+    output_tokens: int | None = None
 
 
 class ItemOutcome(msgspec.Struct):

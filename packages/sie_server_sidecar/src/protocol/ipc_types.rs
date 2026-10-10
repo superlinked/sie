@@ -948,6 +948,10 @@ pub struct UnitCounts {
     /// excluding prompt-template tokens. Never above `input_tokens`.
     #[serde(default)]
     pub content_input_tokens: Option<u64>,
+    /// Extract only: tokens a generative extractor decoded for the item. The
+    /// gateway's `UnitCounts` already carries `output_tokens` by name.
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -302,7 +302,16 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
         )
         results = future.result()
         entities = [[Entity(text=result.text.strip(), label=entity_label, score=1.0)] for result in results]
-        return ExtractOutput(entities=entities, pages=[1 for _ in results] if self._meter_pages else None)
+        # SGLang reports each request's prompt tokens (chat template plus the
+        # image's vision tokens) and the completion tokens it decoded. Both are
+        # reported alongside the page or image count, which stays unchanged;
+        # the commercial book decides which of these dimensions it prices.
+        return ExtractOutput(
+            entities=entities,
+            pages=[1 for _ in results] if self._meter_pages else None,
+            input_token_counts=[result.prompt_tokens for result in results],
+            output_token_counts=[result.completion_tokens for result in results],
+        )
 
     def _resolve_prompt_and_label(
         self,

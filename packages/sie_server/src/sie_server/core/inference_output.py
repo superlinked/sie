@@ -230,6 +230,15 @@ class ExtractOutput:
     # its token/reserve basis. Sliced/assembled positionally with ``entities``.
     pages: list[int] | None = None
 
+    # Unit-meter seam (§7): authoritative per-item GENERATED-token counts,
+    # aligned 1:1 with ``entities``. Generative extractors (the SGLang vision
+    # OCR adapter) report the completion tokens the engine decoded for each
+    # item, which the queue executor folds into ``ItemOutcome.units.
+    # output_tokens``. ``None`` for extractors that decode nothing (GLiNER,
+    # docling) or cannot count: the dimension is then absent, never estimated.
+    # Sliced/assembled positionally with ``entities``.
+    output_token_counts: list[int] | None = None
+
     def __post_init__(self) -> None:
         """Validate consistency of output fields."""
         if self.batch_size == 0:
@@ -264,4 +273,8 @@ class ExtractOutput:
 
         if self.input_token_counts is not None and len(self.input_token_counts) != self.batch_size:
             msg = f"input_token_counts length {len(self.input_token_counts)} != batch_size {self.batch_size}"
+            raise ValueError(msg)
+
+        if self.output_token_counts is not None and len(self.output_token_counts) != self.batch_size:
+            msg = f"output_token_counts length {len(self.output_token_counts)} != batch_size {self.batch_size}"
             raise ValueError(msg)

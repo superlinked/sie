@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 import yaml
-from sie_server.adapters._generation_base import GenerationChunk
+from sie_server.adapters._generation_base import GenerationChunk, GenerationResult
 from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
 from sie_server.adapters.sglang_vision_extract.adapter import SGLangVisionExtractAdapter
 from sie_server.config.model import ModelConfig
@@ -403,7 +403,9 @@ def test_page_metering_replaces_image_units_and_stamps_successes() -> None:
     instance._request_loop = MagicMock()
     items = [Item(images=[_image("page")])]
     future = MagicMock()
-    future.result.return_value = [MagicMock(text="# page")]
+    future.result.return_value = [
+        GenerationResult(text="# page", finish_reason="stop", prompt_tokens=2590, completion_tokens=836)
+    ]
 
     def submit(coroutine: Any, loop: Any) -> MagicMock:
         del loop
@@ -419,6 +421,38 @@ def test_page_metering_replaces_image_units_and_stamps_successes() -> None:
     assert instance.count_input_images(items) is None
     assert out.pages == [1]
     assert out.entities[0][0]["text"] == "# page"
+    # Token counts ride alongside the unchanged page meter.
+    assert out.input_token_counts == [2590]
+    assert out.output_token_counts == [836]
+
+
+def test_image_metering_reports_engine_prompt_and_completion_tokens_per_item() -> None:
+    instance = SGLangVisionExtractAdapter("zai-org/GLM-OCR")
+    instance._processor = _FakeProcessor()
+    instance._request_loop = MagicMock()
+    items = [Item(images=[_image("receipt")]), Item(images=[_image("note")])]
+    future = MagicMock()
+    future.result.return_value = [
+        GenerationResult(text="TOTAL 9.99", finish_reason="stop", prompt_tokens=1835, completion_tokens=203),
+        GenerationResult(text="call mum", finish_reason="length", prompt_tokens=264, completion_tokens=12),
+    ]
+
+    def submit(coroutine: Any, loop: Any) -> MagicMock:
+        del loop
+        coroutine.close()
+        return future
+
+    with patch(
+        "sie_server.adapters.sglang_vision_extract.adapter.asyncio.run_coroutine_threadsafe",
+        side_effect=submit,
+    ):
+        out = instance.extract(items)
+
+    # The image meter is unchanged; the per-item token counts stay aligned.
+    assert instance.count_input_images(items) == [1, 1]
+    assert out.pages is None
+    assert out.input_token_counts == [1835, 264]
+    assert out.output_token_counts == [203, 12]
 
 
 def test_load_resolves_processor_to_pinned_snapshot() -> None:
