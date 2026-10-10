@@ -522,6 +522,12 @@ profiles:
           - "--constrained-json-disable-any-whitespace"
   # Repeat the full non-speculative launch because load-time overrides
   # replace the parent's block rather than merging it.
+  # ``mem_fraction_static`` is 0.88 here, not the family's 0.90. Thinking
+  # requests are long, so a lane runs many at once, and a burst of screenshot
+  # prefills needs more activation memory than 0.90 leaves on an 80 GB H100.
+  # With 32 image requests in flight at 0.90, SGLang hit CUDA OOM in the vision
+  # path and failed requests; at 0.88 the same burst completed cleanly. The KV
+  # pool shrinks from about 107.9K to 103.4K tokens.
   h100-96k-hires-thinking-no-spec:
     extends: h100-96k-hires
     max_output_tokens: 32768
@@ -530,7 +536,7 @@ profiles:
     adapter_options:
       loadtime:
         max_seq_length: 98304
-        mem_fraction_static: 0.90
+        mem_fraction_static: 0.88
         served_model_name: google/gemma-4-31B-it
         attention_backend: triton
         grammar_backend: xgrammar
