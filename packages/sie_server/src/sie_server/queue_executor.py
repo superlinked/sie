@@ -942,6 +942,8 @@ class QueueExecutor:
           authoritative gate. Future work can populate from
           ``adapter.supported_output_types`` if/when adapters expose it.
         * ``supports_run_batch`` — every Python adapter does.
+        * ``max_concurrent_dispatch`` — the worker's dispatch width (see
+          ``ModelWorker.dispatch_width``).
 
         Cached after the first successful build; the dispatcher
         re-handshakes on every batch and we don't want to re-stat the
@@ -1008,11 +1010,18 @@ class QueueExecutor:
         # follow the convention silently degrade the same way.
         default_query_template: str | None = None
         default_doc_template: str | None = None
+        max_concurrent_dispatch: int | None = None
         try:
             worker = self._registry.get_worker(model_id)
             adapter = worker.adapter if worker is not None else None
         except Exception:  # noqa: BLE001
+            worker = None
             adapter = None
+        # The worker's own dispatch width: above 1 only for an adapter that
+        # declares ``max_concurrent_dispatch() > 1`` and has no LoRA state.
+        width = getattr(worker, "dispatch_width", None)
+        if isinstance(width, int) and not isinstance(width, bool) and width > 0:
+            max_concurrent_dispatch = width
         if adapter is not None:
             qt = getattr(adapter, "_query_template", None)
             if isinstance(qt, str):
@@ -1029,6 +1038,7 @@ class QueueExecutor:
             supports_run_batch=True,
             default_query_template=default_query_template,
             default_doc_template=default_doc_template,
+            max_concurrent_dispatch=max_concurrent_dispatch,
         )
         self._descriptor_cache[model_id] = descriptor
         return descriptor
