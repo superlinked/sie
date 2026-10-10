@@ -1232,6 +1232,12 @@ class _BrokenDispatchHintAdapter(_PlainExtractAdapter):
         raise RuntimeError("no hint")
 
 
+class _RaisingDispatchHintProperty:
+    @property
+    def max_concurrent_dispatch(self) -> Any:
+        raise RuntimeError("no hint")
+
+
 class TestEngineBatchedExtractItemsRunAlone:
     """Items of an engine-batched adapter each get a worker batch, so none waits on a slower batch-mate."""
 
@@ -1255,6 +1261,7 @@ class TestEngineBatchedExtractItemsRunAlone:
 
     def test_dispatch_hint_never_raises(self) -> None:
         assert dispatches_items_alone(_BrokenDispatchHintAdapter()) is False
+        assert dispatches_items_alone(_RaisingDispatchHintProperty()) is False
         assert dispatches_items_alone(None) is False
         assert dispatches_items_alone(_EngineBatchedAdapter()) is True
 

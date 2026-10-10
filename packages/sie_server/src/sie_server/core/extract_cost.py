@@ -193,10 +193,10 @@ def dispatches_items_alone(adapter: object) -> bool:
     item finishes, and a caller waiting on that answer cannot send its next
     request. Must not raise.
     """
-    declared = getattr(adapter, "max_concurrent_dispatch", None)
-    if not callable(declared):
-        return False
     try:
+        declared = getattr(adapter, "max_concurrent_dispatch", None)
+        if not callable(declared):
+            return False
         width = int(declared())
     except Exception:  # noqa: BLE001 - a dispatch hint must never fail the request
         return False
