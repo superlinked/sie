@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,7 @@ import msgpack
 import pytest
 from sie_sdk import RequestError
 
+from document_to_markdown import ocr
 from document_to_markdown.ocr import convert_image
 
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN3cAAAAASUVORK5CYII=")
@@ -66,3 +68,37 @@ def test_terminal_error_closes_client(monkeypatch: pytest.MonkeyPatch, tmp_path:
     with pytest.raises(RequestError):
         convert_image(image, sie_url="https://chosen.example")
     assert clients[0].is_closed
+
+
+def test_cli_failed_conversion_removes_new_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    output = tmp_path / "page.md"
+    monkeypatch.setattr(sys, "argv", ["convert-image", str(tmp_path / "missing.png"), "--out", str(output)])
+    with pytest.raises(FileNotFoundError):
+        ocr.main()
+    assert not output.exists()
+
+
+def test_cli_existing_output_preserved_without_dispatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    output = tmp_path / "page.md"
+    output.write_text("existing result", encoding="utf-8")
+    calls: list[Path] = []
+
+    def convert(image: Path, **kwargs: Any) -> str:
+        calls.append(image)
+        return "replacement"
+
+    monkeypatch.setattr(ocr, "convert_image", convert)
+    monkeypatch.setattr(sys, "argv", ["convert-image", "page.png", "--out", str(output)])
+    with pytest.raises(FileExistsError):
+        ocr.main()
+    assert output.read_text(encoding="utf-8") == "existing result"
+    assert calls == []
+
+
+def test_cli_success_preserves_markdown(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    output = tmp_path / "page.md"
+    markdown = "# Résumé\n\n| A | B |\n|---|---|\n"
+    monkeypatch.setattr(ocr, "convert_image", lambda *args, **kwargs: markdown)
+    monkeypatch.setattr(sys, "argv", ["convert-image", "page.png", "--out", str(output)])
+    ocr.main()
+    assert output.read_text(encoding="utf-8") == markdown

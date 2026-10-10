@@ -42,9 +42,14 @@ def main() -> None:
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
     # Reserve the output before dispatch so an existing result is never replaced.
-    with args.out.open("x", encoding="utf-8") as output:
-        markdown = convert_image(args.image, sie_url=args.sie_url, model=args.model, timeout_s=args.timeout)
-        output.write(markdown)
+    output = args.out.open("x", encoding="utf-8")
+    try:
+        with output:
+            markdown = convert_image(args.image, sie_url=args.sie_url, model=args.model, timeout_s=args.timeout)
+            output.write(markdown)
+    except BaseException:
+        args.out.unlink(missing_ok=True)
+        raise
 
 
 if __name__ == "__main__":
