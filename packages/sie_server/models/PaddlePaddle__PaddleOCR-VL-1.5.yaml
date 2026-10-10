@@ -34,9 +34,9 @@ profiles:
         mem_fraction_static: 0.85
         served_model_name: PaddlePaddle/PaddleOCR-VL-1.5
         max_concurrent_requests: 64
-        # SGLang's default fast (torch) image processor. The slow PIL processor runs
-        # single-threaded in SGLang's tokenizer process and capped throughput on a
-        # 4-vCPU lane.
+        processor_use_fast: false
+        extra_launch_args:
+          - --disable-fast-image-processor
         default_task: ocr
         task_prompts:
           ocr: "OCR:"

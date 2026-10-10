@@ -1,16 +1,14 @@
-"""SGLang OCR profiles keep SGLang's fast image processor."""
+"""GLM-OCR's SGLang profile keeps SGLang's fast image processor."""
 
 from pathlib import Path
 
-import pytest
 import yaml
 
-_MODELS = Path(__file__).resolve().parents[2] / "models"
+_CONFIG = Path(__file__).resolve().parents[2] / "models" / "zai-org__GLM-OCR.yaml"
 
 
-@pytest.mark.parametrize("config", ["zai-org__GLM-OCR.yaml", "PaddlePaddle__PaddleOCR-VL-1.5.yaml"])
-def test_default_profile_uses_the_fast_image_processor(config: str) -> None:
-    default = yaml.safe_load((_MODELS / config).read_text())["profiles"]["default"]
+def test_glm_ocr_default_profile_uses_the_fast_image_processor() -> None:
+    default = yaml.safe_load(_CONFIG.read_text())["profiles"]["default"]
     assert default["adapter_path"].endswith(":SGLangVisionExtractAdapter")
     loadtime = default["adapter_options"]["loadtime"]
     assert "--disable-fast-image-processor" not in loadtime.get("extra_launch_args", [])
