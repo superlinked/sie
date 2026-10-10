@@ -1,0 +1,3294 @@
+[
+ {
+  "id": "4320211",
+  "company": "Monro Inc",
+  "sector": "Consumer Goods",
+  "quarter": 3,
+  "source": {
+   "file": "earnings21/test-00000-of-00010.parquet",
+   "row_group": 0,
+   "row": 0,
+   "member": "4320211.wav",
+   "wav_bytes": 105146190,
+   "wav_sha256": "a6050511806f16d02362d2fe926adc534a1999aa80b3e86726bb0646ee3cfbc9",
+   "samples": 52573056,
+   "duration_s": 3285.816,
+   "dataset_audio_length": 3285.848,
+   "original_sample_rate": 24000
+  },
+  "reference": {
+   "text_sha256": "9a2d2015ac5a89e0d53cfc6cf2db9039915cb7c34ff8c16191dcaa18dfb1f2ce",
+   "chars": 50968,
+   "words": 8711
+  },
+  "mp3": {
+   "file": "4320211.mp3",
+   "bytes": 13143800,
+   "sha256": "e40f07763038c098de18ecf3160967c45c56e522690a45ff35cbfadaa101b11a"
+  },
+  "decoded": {
+   "samples": 52573056,
+   "duration_s": 3285.816,
+   "pcm_s16le_sha256": "1be6a3966dcc99b4dfdd05cb6f13badb29c51f0b0baac28ce5496bc956d2c851"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11458400,
+    "start_s": 0.0,
+    "end_s": 716.15,
+    "wav_bytes": 22916844,
+    "wav_sha256": "b6a5c73a66bc050810a0ca370d12ac3c90e557f83e25e18e1b8eeff7263734cd"
+   },
+   {
+    "start_sample": 11458400,
+    "end_sample": 22967680,
+    "start_s": 716.15,
+    "end_s": 1435.48,
+    "wav_bytes": 23018604,
+    "wav_sha256": "a7000f72b489fada690dbbc9678e4d1bcfc555a474dcad93905e474f65505db6"
+   },
+   {
+    "start_sample": 22967680,
+    "end_sample": 34443680,
+    "start_s": 1435.48,
+    "end_s": 2152.73,
+    "wav_bytes": 22952044,
+    "wav_sha256": "5874552007ce647d5742e5d6fc976601bd007842e6a21d44dbc697a35cb03189"
+   },
+   {
+    "start_sample": 34443680,
+    "end_sample": 45945600,
+    "start_s": 2152.73,
+    "end_s": 2871.6,
+    "wav_bytes": 23003884,
+    "wav_sha256": "d14e0f87bc1e8001619388c2780450f0b7894e6a5936da1ab494af8d2bc68d72"
+   },
+   {
+    "start_sample": 45945600,
+    "end_sample": 52573056,
+    "start_s": 2871.6,
+    "end_s": 3285.816,
+    "wav_bytes": 13254956,
+    "wav_sha256": "d4e8a66d3b9b9178a80c69bd48207555d90fbebce4bb4ab926804ff1c2b85200"
+   }
+  ]
+ },
+ {
+  "id": "4330115",
+  "company": "Culp Inc",
+  "sector": "Industrial Goods",
+  "quarter": 3,
+  "source": {
+   "file": "earnings21/test-00000-of-00010.parquet",
+   "row_group": 0,
+   "row": 1,
+   "member": "4330115.wav",
+   "wav_bytes": 78683982,
+   "wav_sha256": "9b84dbf1de01bc95c91ab918dc7ee0ecaa254754e0b09fb55a56f026d0c1dceb",
+   "samples": 39341952,
+   "duration_s": 2458.872,
+   "dataset_audio_length": 2458.904,
+   "original_sample_rate": 24000
+  },
+  "reference": {
+   "text_sha256": "88efec9b0d70fbd3a0a732c000273d03a803e5b9d5510c17dc252eed66fd7c8b",
+   "chars": 39454,
+   "words": 6602
+  },
+  "mp3": {
+   "file": "4330115.mp3",
+   "bytes": 9835976,
+   "sha256": "f350c97b348e73a6e25e0e8e63fad59cff626ec539b7ea4f25656ca5d1336fc0"
+  },
+  "decoded": {
+   "samples": 39341952,
+   "duration_s": 2458.872,
+   "pcm_s16le_sha256": "d02fb5a4bc6a97a4f3d841c6b7baf4b2cc312d2266b23e3db7608260c050554b"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11474720,
+    "start_s": 0.0,
+    "end_s": 717.17,
+    "wav_bytes": 22949484,
+    "wav_sha256": "47c57ecec4d8d30412caa38f9bb9fe642151e5fbda090a693bf0c57dcc35e58e"
+   },
+   {
+    "start_sample": 11474720,
+    "end_sample": 22978240,
+    "start_s": 717.17,
+    "end_s": 1436.14,
+    "wav_bytes": 23007084,
+    "wav_sha256": "4d15df504094c8aab8ced7f0386b67a31ddb9ca381065adc74b613007c455eca"
+   },
+   {
+    "start_sample": 22978240,
+    "end_sample": 34451680,
+    "start_s": 1436.14,
+    "end_s": 2153.23,
+    "wav_bytes": 22946924,
+    "wav_sha256": "bd4dcb5d1395765556c032f79837246f73196b81d3262aa9553b6310c6f67c31"
+   },
+   {
+    "start_sample": 34451680,
+    "end_sample": 39341952,
+    "start_s": 2153.23,
+    "end_s": 2458.872,
+    "wav_bytes": 9780588,
+    "wav_sha256": "17141401e1c4d2a72afe55d673decbf869bb54fd35021baebf345b03fbf41b40"
+   }
+  ]
+ },
+ {
+  "id": "4341191",
+  "company": "General Electric",
+  "sector": "Conglomerate",
+  "quarter": 1,
+  "source": {
+   "file": "earnings21/test-00000-of-00010.parquet",
+   "row_group": 0,
+   "row": 2,
+   "member": "4341191.wav",
+   "wav_bytes": 183699534,
+   "wav_sha256": "271e8e00b952dfce89c62628be6eb96a09f8f946a2eb595b11d63e81c6e2c749",
+   "samples": 91849728,
+   "duration_s": 5740.608,
+   "dataset_audio_length": 5740.64,
+   "original_sample_rate": 24000
+  },
+  "reference": {
+   "text_sha256": "6da7ff67dd4fd4e56d74fd6d636d4dee15fdb1c4615f00b3c0e64af22318626b",
+   "chars": 84287,
+   "words": 14593
+  },
+  "mp3": {
+   "file": "4341191.mp3",
+   "bytes": 22963016,
+   "sha256": "dae4cd5ab605e5b7103bc18e4171465864936e122922040d3432147ae7555318"
+  },
+  "decoded": {
+   "samples": 91849728,
+   "duration_s": 5740.608,
+   "pcm_s16le_sha256": "6c911f0fd2efa332af5c085c0a5e80549fb160fc3d96af2b37c6197d5009c7f6"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11502240,
+    "start_s": 0.0,
+    "end_s": 718.89,
+    "wav_bytes": 23004524,
+    "wav_sha256": "6a9100bd57b1d2566b50d3ec1793e45294ec3beaaa58c17c4b273d33427076a8"
+   },
+   {
+    "start_sample": 11502240,
+    "end_sample": 22999040,
+    "start_s": 718.89,
+    "end_s": 1437.44,
+    "wav_bytes": 22993644,
+    "wav_sha256": "a715cb2b1507ac913ba5abe32c1f35051b20dd2f0046e7955f82427343b4d52a"
+   },
+   {
+    "start_sample": 22999040,
+    "end_sample": 34516960,
+    "start_s": 1437.44,
+    "end_s": 2157.31,
+    "wav_bytes": 23035884,
+    "wav_sha256": "23ba22f83a06c5ad9cf10f6a2bf3aaba4d2c52f49e4cd827a54fa1367afa3e97"
+   },
+   {
+    "start_sample": 34516960,
+    "end_sample": 46030720,
+    "start_s": 2157.31,
+    "end_s": 2876.92,
+    "wav_bytes": 23027564,
+    "wav_sha256": "68d2c9d8515a41b50af176fc2e5f67a1ec67c7146f8ebfdc4e0f7381686162de"
+   },
+   {
+    "start_sample": 46030720,
+    "end_sample": 57522720,
+    "start_s": 2876.92,
+    "end_s": 3595.17,
+    "wav_bytes": 22984044,
+    "wav_sha256": "a6d2ea1e6d7f0567133755b921c0d3c371bd0f73f4e021c8bee99fd35bbd019a"
+   },
+   {
+    "start_sample": 57522720,
+    "end_sample": 69009280,
+    "start_s": 3595.17,
+    "end_s": 4313.08,
+    "wav_bytes": 22973164,
+    "wav_sha256": "78272eb41334ece6215c1e7fe164cc0c836fee564353fd51f3c8489cb448fe26"
+   },
+   {
+    "start_sample": 69009280,
+    "end_sample": 80492640,
+    "start_s": 4313.08,
+    "end_s": 5030.79,
+    "wav_bytes": 22966764,
+    "wav_sha256": "9422f2e4533b8f27ccfbb8b30bd6b159d3dc3cf07ffada319c6213e4a22d7599"
+   },
+   {
+    "start_sample": 80492640,
+    "end_sample": 91849728,
+    "start_s": 5030.79,
+    "end_s": 5740.608,
+    "wav_bytes": 22714220,
+    "wav_sha256": "e77eb262e16bba2aa66a87f4692cbae16c464e5b088bf6c8b59f32bfa6c3332b"
+   }
+  ]
+ },
+ {
+  "id": "4344338",
+  "company": "Danaher Corp",
+  "sector": "Conglomerate",
+  "quarter": 1,
+  "source": {
+   "file": "earnings21/test-00000-of-00010.parquet",
+   "row_group": 0,
+   "row": 3,
+   "member": "4344338.wav",
+   "wav_bytes": 87069336,
+   "wav_sha256": "ff07006a4666ccab880dcbbf13a889c82a79b6091d083a8c3d94b1e4984c1edb",
+   "samples": 43534629,
+   "duration_s": 2720.9143125,
+   "dataset_audio_length": 2721.169,
+   "original_sample_rate": 44100
+  },
+  "reference": {
+   "text_sha256": "db8da1133f723f34421329eb7975f2442ede5afe8bd1ccbc960ba34feb390d76",
+   "chars": 40872,
+   "words": 6957
+  },
+  "mp3": {
+   "file": "4344338.mp3",
+   "bytes": 10884152,
+   "sha256": "26c24dd4b4eb41c371d300a296b7f604e5458af97600d5996d4f804d7cf7db8b"
+  },
+  "decoded": {
+   "samples": 43534629,
+   "duration_s": 2720.9143125,
+   "pcm_s16le_sha256": "a528579406a9790327c1440d701a6d61ec12b4f9a998874bdb668ecf1343219b"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11513760,
+    "start_s": 0.0,
+    "end_s": 719.61,
+    "wav_bytes": 23027564,
+    "wav_sha256": "56d4bcf07b94b94743a16f286d5ca856c5adb1de6eb1e58d981681d4c06d7e78"
+   },
+   {
+    "start_sample": 11513760,
+    "end_sample": 22995200,
+    "start_s": 719.61,
+    "end_s": 1437.2,
+    "wav_bytes": 22962924,
+    "wav_sha256": "df22ece02b070001b53fc8bdefc534657cd26622eb597d1b5e231b3b632d15e9"
+   },
+   {
+    "start_sample": 22995200,
+    "end_sample": 34453280,
+    "start_s": 1437.2,
+    "end_s": 2153.33,
+    "wav_bytes": 22916204,
+    "wav_sha256": "20d8f9d1d007d483e083983495b8e01e0ff4328522adca1931246f1db32e8f4f"
+   },
+   {
+    "start_sample": 34453280,
+    "end_sample": 43534629,
+    "start_s": 2153.33,
+    "end_s": 2720.9143125,
+    "wav_bytes": 18162742,
+    "wav_sha256": "6e970576431b35ada2bc93a08cff93ed219107bfb720f92ff34a375cb14f57cf"
+   }
+  ]
+ },
+ {
+  "id": "4344866",
+  "company": "Spire Inc",
+  "sector": "Utilities",
+  "quarter": 2,
+  "source": {
+   "file": "earnings21/test-00000-of-00010.parquet",
+   "row_group": 0,
+   "row": 4,
+   "member": "4344866.wav",
+   "wav_bytes": 104813646,
+   "wav_sha256": "d38c7bcc90edee4f756807231bedeb2297fa01c11f585da7fd27266a0a38f6cb",
+   "samples": 52406784,
+   "duration_s": 3275.424,
+   "dataset_audio_length": 3275.456,
+   "original_sample_rate": 24000
+  },
+  "reference": {
+   "text_sha256": "b22f21f6fcc91cad1bbe3a714d462d32204cd6e21cc84cec11a760dc607904da",
+   "chars": 52810,
+   "words": 9119
+  },
+  "mp3": {
+   "file": "4344866.mp3",
+   "bytes": 13102184,
+   "sha256": "0b76de603a8c152307d4840ba268d7ee7988bde3f2628676e37e285811d24635"
+  },
+  "decoded": {
+   "samples": 52406784,
+   "duration_s": 3275.424,
+   "pcm_s16le_sha256": "fba436aa344d25ac8076d46f7d8897f0cc6136410642d84e85eb54921e1a1ef3"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11516000,
+    "start_s": 0.0,
+    "end_s": 719.75,
+    "wav_bytes": 23032044,
+    "wav_sha256": "1059af898b170ab26e325320073c222033b05954d05157f34425b43b74f8cf85"
+   },
+   {
+    "start_sample": 11516000,
+    "end_sample": 22981440,
+    "start_s": 719.75,
+    "end_s": 1436.34,
+    "wav_bytes": 22930924,
+    "wav_sha256": "fd6fdda43b90bacf36d13b36963c6eeaaa2a6bc7b4c46e90b07ffc79d02f1978"
+   },
+   {
+    "start_sample": 22981440,
+    "end_sample": 34470560,
+    "start_s": 1436.34,
+    "end_s": 2154.41,
+    "wav_bytes": 22978284,
+    "wav_sha256": "091d8acf7930025aaba60dcdbbc95e97b382d49804a0242053a7cbfff6721d49"
+   },
+   {
+    "start_sample": 34470560,
+    "end_sample": 45939840,
+    "start_s": 2154.41,
+    "end_s": 2871.24,
+    "wav_bytes": 22938604,
+    "wav_sha256": "98193933c954175f68c49071c34b6647acb82ccb3e097cdb52b2c8cc7317b3e5"
+   },
+   {
+    "start_sample": 45939840,
+    "end_sample": 52406784,
+    "start_s": 2871.24,
+    "end_s": 3275.424,
+    "wav_bytes": 12933932,
+    "wav_sha256": "5f360815dfa582006db1936c85bc806a223b04de4f80f7070ea5525007805b94"
+   }
+  ]
+ },
+ {
+  "id": "4346818",
+  "company": "Ingersoll Rand",
+  "sector": "Industrial Goods",
+  "quarter": 1,
+  "source": {
+   "file": "earnings21/test-00001-of-00010.parquet",
+   "row_group": 0,
+   "row": 0,
+   "member": "4346818.wav",
+   "wav_bytes": 127103276,
+   "wav_sha256": "f84bc30467ac04f2a9922d0187f0289e507b872cedbd6210f84beb8605a11ab5",
+   "samples": 63551599,
+   "duration_s": 3971.9749375,
+   "dataset_audio_length": 3972.022,
+   "original_sample_rate": 11025
+  },
+  "reference": {
+   "text_sha256": "f6402bfdcfd47d6baecb6a5d167c74ce27f77eb3977f045abb874491f0df42ca",
+   "chars": 62936,
+   "words": 11115
+  },
+  "mp3": {
+   "file": "4346818.mp3",
+   "bytes": 15888440,
+   "sha256": "d2aa9dea72e4056930e3d74198cf1d97ad569a0e643cafea8d400db7e1edce2b"
+  },
+  "decoded": {
+   "samples": 63551599,
+   "duration_s": 3971.9749375,
+   "pcm_s16le_sha256": "ff91030689791b72210cb96e51aedda3d38c4edfe62132faaffeb357cc2dd854"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11472800,
+    "start_s": 0.0,
+    "end_s": 717.05,
+    "wav_bytes": 22945644,
+    "wav_sha256": "375c3ca38a7a871e916c50411f49fbfaf891e7d49e32c69321f197e7ff647489"
+   },
+   {
+    "start_sample": 11472800,
+    "end_sample": 22989120,
+    "start_s": 717.05,
+    "end_s": 1436.82,
+    "wav_bytes": 23032684,
+    "wav_sha256": "a75af24dcd4aee8db47542814409a961c19ef48691c69a8f3e14fad504fb4d24"
+   },
+   {
+    "start_sample": 22989120,
+    "end_sample": 34508320,
+    "start_s": 1436.82,
+    "end_s": 2156.77,
+    "wav_bytes": 23038444,
+    "wav_sha256": "b8a1fdc32c9561fba6897eea10ae2c632e398ccd1e60ed8932a86804562b85ad"
+   },
+   {
+    "start_sample": 34508320,
+    "end_sample": 45970240,
+    "start_s": 2156.77,
+    "end_s": 2873.14,
+    "wav_bytes": 22923884,
+    "wav_sha256": "f593c644749adfa3807cc1bc8f53fef969736633bb5dd4be1bc3918cd21d7fd9"
+   },
+   {
+    "start_sample": 45970240,
+    "end_sample": 57455520,
+    "start_s": 2873.14,
+    "end_s": 3590.97,
+    "wav_bytes": 22970604,
+    "wav_sha256": "30b1fda7b50ff991c953b4bc1d33aac3e9bcebf2ff6dcee24cacd606561acf80"
+   },
+   {
+    "start_sample": 57455520,
+    "end_sample": 63551599,
+    "start_s": 3590.97,
+    "end_s": 3971.9749375,
+    "wav_bytes": 12192202,
+    "wav_sha256": "b6f1660d489b2027831dbdaa45e0b933ec1ea6b1d2f20d8ea13fc62d6790bb04"
+   }
+  ]
+ },
+ {
+  "id": "4346923",
+  "company": "Cementos Argos",
+  "sector": "Industrial Goods",
+  "quarter": 1,
+  "source": {
+   "file": "earnings21/test-00001-of-00010.parquet",
+   "row_group": 0,
+   "row": 1,
+   "member": "4346923.wav",
+   "wav_bytes": 150700110,
+   "wav_sha256": "775c8aade3c83425c483c68437b0267de21ba3f22f1876d07ca7869c17dc790f",
+   "samples": 75350016,
+   "duration_s": 4709.376,
+   "dataset_audio_length": 4709.418,
+   "original_sample_rate": 16000
+  },
+  "reference": {
+   "text_sha256": "e385d33e2bfb7f06a8b76c03a273b97880370f7229527f0448ca74b5aefe09f1",
+   "chars": 58875,
+   "words": 10436
+  },
+  "mp3": {
+   "file": "4346923.mp3",
+   "bytes": 18837992,
+   "sha256": "4099a6201e0f9fea512e747d34d39e0b008ab735aac7e19ea6554c65482779a0"
+  },
+  "decoded": {
+   "samples": 75350016,
+   "duration_s": 4709.376,
+   "pcm_s16le_sha256": "c868278b783a3a02cf0adf809463db094ee8157ed73884446fb4714fb7f7c0e3"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11458720,
+    "start_s": 0.0,
+    "end_s": 716.17,
+    "wav_bytes": 22917484,
+    "wav_sha256": "f4b4523c1f177841c59af728a9b0138bb626683a6b756ca46cf024e9b6637dc4"
+   },
+   {
+    "start_sample": 11458720,
+    "end_sample": 22948480,
+    "start_s": 716.17,
+    "end_s": 1434.28,
+    "wav_bytes": 22979564,
+    "wav_sha256": "ff37c71cccec809e41f6ea631a4ee40557cad11f35d90eddf3dc2a592bb476b2"
+   },
+   {
+    "start_sample": 22948480,
+    "end_sample": 34412000,
+    "start_s": 1434.28,
+    "end_s": 2150.75,
+    "wav_bytes": 22927084,
+    "wav_sha256": "4577e78930fc871c1beb49081299fcda79cb40ce5335c93f53e785543768a5cc"
+   },
+   {
+    "start_sample": 34412000,
+    "end_sample": 45901440,
+    "start_s": 2150.75,
+    "end_s": 2868.84,
+    "wav_bytes": 22978924,
+    "wav_sha256": "f45193c446a7b7137097aab15e1a49c72dfa56474f30de3fb1dc671998d1d685"
+   },
+   {
+    "start_sample": 45901440,
+    "end_sample": 57389920,
+    "start_s": 2868.84,
+    "end_s": 3586.87,
+    "wav_bytes": 22977004,
+    "wav_sha256": "7dd42023ab18a363dcc8673b4879b443ff56a0b78ba251544246c53c095798eb"
+   },
+   {
+    "start_sample": 57389920,
+    "end_sample": 68858240,
+    "start_s": 3586.87,
+    "end_s": 4303.64,
+    "wav_bytes": 22936684,
+    "wav_sha256": "bee0e7aa506f3506f416fd0af8f70347f3581fc65f08bcac13adc8264851880a"
+   },
+   {
+    "start_sample": 68858240,
+    "end_sample": 75350016,
+    "start_s": 4303.64,
+    "end_s": 4709.376,
+    "wav_bytes": 12983596,
+    "wav_sha256": "5ba485ceaec47621a454fc7984dbcc9c47099d842386fa904c6ffc96f8dee23d"
+   }
+  ]
+ },
+ {
+  "id": "4359732",
+  "company": "Kuehne Nagel International",
+  "sector": "Services",
+  "quarter": 2,
+  "source": {
+   "file": "earnings21/test-00001-of-00010.parquet",
+   "row_group": 0,
+   "row": 2,
+   "member": "4359732.wav",
+   "wav_bytes": 156384138,
+   "wav_sha256": "67a91cf5c71ea7405925f6b151be0e9243f4cccd33483aaff43cd068c6d6512d",
+   "samples": 78192030,
+   "duration_s": 4887.001875,
+   "dataset_audio_length": 4887.498,
+   "original_sample_rate": 44100
+  },
+  "reference": {
+   "text_sha256": "a078e7b1bfe6cab2157424b5db0990b86c0ed0b5f4514ee01773cc842053dfdc",
+   "chars": 67803,
+   "words": 12269
+  },
+  "mp3": {
+   "file": "4359732.mp3",
+   "bytes": 19548632,
+   "sha256": "8c6571d1930ea90b5893d5a787d50d5e1d6c44735b428b52d70f240d4bd84981"
+  },
+  "decoded": {
+   "samples": 78192047,
+   "duration_s": 4887.0029375,
+   "pcm_s16le_sha256": "649878d9f08c56f792d395d5e82f7a409f4375d026328628d0226414602f8ba4"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11459040,
+    "start_s": 0.0,
+    "end_s": 716.19,
+    "wav_bytes": 22918124,
+    "wav_sha256": "fc2aa896f05835a23b7869ba0a6053c68961bc177323d8a2aa7d3d02f0b565e1"
+   },
+   {
+    "start_sample": 11459040,
+    "end_sample": 22951040,
+    "start_s": 716.19,
+    "end_s": 1434.44,
+    "wav_bytes": 22984044,
+    "wav_sha256": "01262d72b2dcdf10d11db56793b537978d6295cad216316208452a9c3f4a3eaf"
+   },
+   {
+    "start_sample": 22951040,
+    "end_sample": 34436960,
+    "start_s": 1434.44,
+    "end_s": 2152.31,
+    "wav_bytes": 22971884,
+    "wav_sha256": "2ba214dd57eec8d09287963d54afd5f1089254a3ad1a253298c208da3ddce989"
+   },
+   {
+    "start_sample": 34436960,
+    "end_sample": 45930240,
+    "start_s": 2152.31,
+    "end_s": 2870.64,
+    "wav_bytes": 22986604,
+    "wav_sha256": "f7e702cb95d4b36f3001972f2ef94ad48edb38f0226e53cece1b3769d7bbbfa0"
+   },
+   {
+    "start_sample": 45930240,
+    "end_sample": 57427360,
+    "start_s": 2870.64,
+    "end_s": 3589.21,
+    "wav_bytes": 22994284,
+    "wav_sha256": "d86c13c8e6f6bf34eb2e7d03acf303b5a1fec6e045ac9fb015aca93375b7cd4c"
+   },
+   {
+    "start_sample": 57427360,
+    "end_sample": 68908160,
+    "start_s": 3589.21,
+    "end_s": 4306.76,
+    "wav_bytes": 22961644,
+    "wav_sha256": "990ef6e1612f328735ce2b23486c3be37998031558873b1f0002a6894b4b327d"
+   },
+   {
+    "start_sample": 68908160,
+    "end_sample": 78192047,
+    "start_s": 4306.76,
+    "end_s": 4887.0029375,
+    "wav_bytes": 18567818,
+    "wav_sha256": "cd7e37913f1c9fd1633607b9314a79e2f20eff5d1190878dda515b053d85f7b1"
+   }
+  ]
+ },
+ {
+  "id": "4359971",
+  "company": "Constellium",
+  "sector": "Industrial Goods",
+  "quarter": 2,
+  "source": {
+   "file": "earnings21/test-00001-of-00010.parquet",
+   "row_group": 0,
+   "row": 3,
+   "member": "4359971.wav",
+   "wav_bytes": 120317262,
+   "wav_sha256": "a9e658e63eed78d5be2ead4c886105f47ad96c7c2d10ac18b2e7a35b277fcffe",
+   "samples": 60158592,
+   "duration_s": 3759.912,
+   "dataset_audio_length": 3759.944,
+   "original_sample_rate": 24000
+  },
+  "reference": {
+   "text_sha256": "c44218155c0235b704139975d28df6254c91d98245de7558a63427a6a1871018",
+   "chars": 53643,
+   "words": 9597
+  },
+  "mp3": {
+   "file": "4359971.mp3",
+   "bytes": 15040136,
+   "sha256": "9f70592b8f623c5299912d7a7bba5c66e730c42e2f028e10a4fdff64b4f46ce8"
+  },
+  "decoded": {
+   "samples": 60158592,
+   "duration_s": 3759.912,
+   "pcm_s16le_sha256": "9e4af5ce45968ae3ab2be303f87854749a10a66efd892f56a4e6b55ade1ec156"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11519840,
+    "start_s": 0.0,
+    "end_s": 719.99,
+    "wav_bytes": 23039724,
+    "wav_sha256": "d3f6765d434edb8eae2ec5f13aeaddfdfcded6182b3ba3482efb1a318f72bd4d"
+   },
+   {
+    "start_sample": 11519840,
+    "end_sample": 23012160,
+    "start_s": 719.99,
+    "end_s": 1438.26,
+    "wav_bytes": 22984684,
+    "wav_sha256": "151b134a1da2393d50f6bcf54f5ff5803600b08b92ec51c72aee3ba079439b0e"
+   },
+   {
+    "start_sample": 23012160,
+    "end_sample": 34474400,
+    "start_s": 1438.26,
+    "end_s": 2154.65,
+    "wav_bytes": 22924524,
+    "wav_sha256": "782d4204432c15d9d00260bd8d40068a16de0fd4047e68d25dcb34d5b2170e4f"
+   },
+   {
+    "start_sample": 34474400,
+    "end_sample": 45983680,
+    "start_s": 2154.65,
+    "end_s": 2873.98,
+    "wav_bytes": 23018604,
+    "wav_sha256": "b7a659ed39e36ed66e0d84cfeacab44683957a3684ad744b87dc014ee35ee79e"
+   },
+   {
+    "start_sample": 45983680,
+    "end_sample": 57503200,
+    "start_s": 2873.98,
+    "end_s": 3593.95,
+    "wav_bytes": 23039084,
+    "wav_sha256": "93666756b97b79d8f25093c7feedd2d1415570ee169938e5c5a4b8fb4af62fda"
+   },
+   {
+    "start_sample": 57503200,
+    "end_sample": 60158592,
+    "start_s": 3593.95,
+    "end_s": 3759.912,
+    "wav_bytes": 5310828,
+    "wav_sha256": "b566ae374fbbe57661a334219b6edd612e89b9c7030c4d258416da4b5bdd1462"
+   }
+  ]
+ },
+ {
+  "id": "4360366",
+  "company": "Travelers Companies Inc",
+  "sector": "Financial",
+  "quarter": 2,
+  "source": {
+   "file": "earnings21/test-00001-of-00010.parquet",
+   "row_group": 0,
+   "row": 4,
+   "member": "4360366.wav",
+   "wav_bytes": 125015206,
+   "wav_sha256": "f8486ea7248c12c07bebda863acbbe8bf684f4afad8902cefc0ca3117d027404",
+   "samples": 62507520,
+   "duration_s": 3906.72,
+   "dataset_audio_length": 3906.752,
+   "original_sample_rate": 24000
+  },
+  "reference": {
+   "text_sha256": "2e846592569426ebbd15cf2391acd57f027b39bec1d6f38d6b6a94f54a70d609",
+   "chars": 60894,
+   "words": 10368
+  },
+  "mp3": {
+   "file": "4360366.mp3",
+   "bytes": 15627368,
+   "sha256": "a4d98e8391fe3d436e28f66ddc78c28eb983d27cc890124bce79ee70323828e8"
+  },
+  "decoded": {
+   "samples": 62507520,
+   "duration_s": 3906.72,
+   "pcm_s16le_sha256": "76c8c7d1d1843e14d6a66f990fbb8bc54cd9f41e2e221abc16f491930f7622bc"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11519840,
+    "start_s": 0.0,
+    "end_s": 719.99,
+    "wav_bytes": 23039724,
+    "wav_sha256": "8850f070ddc7a65a3544c7266bcccc23bf360ebe35197b75184151402aaf64d6"
+   },
+   {
+    "start_sample": 11519840,
+    "end_sample": 23016000,
+    "start_s": 719.99,
+    "end_s": 1438.5,
+    "wav_bytes": 22992364,
+    "wav_sha256": "72e5eee78cd74afcec934dd7623c995ef6df7d9cba258aea836684b571576441"
+   },
+   {
+    "start_sample": 23016000,
+    "end_sample": 34483040,
+    "start_s": 1438.5,
+    "end_s": 2155.19,
+    "wav_bytes": 22934124,
+    "wav_sha256": "712f77e1fe031db3196910f4842722b3c363e7fff867f1e4ab0c9aa5ab3b543b"
+   },
+   {
+    "start_sample": 34483040,
+    "end_sample": 45939200,
+    "start_s": 2155.19,
+    "end_s": 2871.2,
+    "wav_bytes": 22912364,
+    "wav_sha256": "87d94bf551ea02bb38daa5a5acbd9c9fec79050ab42db8e63ebd9a445001bdf5"
+   },
+   {
+    "start_sample": 45939200,
+    "end_sample": 57434720,
+    "start_s": 2871.2,
+    "end_s": 3589.67,
+    "wav_bytes": 22991084,
+    "wav_sha256": "de2bcd2953f4a0e34f6ba74385306347528ef3ac464ad73ce8f142346461c758"
+   },
+   {
+    "start_sample": 57434720,
+    "end_sample": 62507520,
+    "start_s": 3589.67,
+    "end_s": 3906.72,
+    "wav_bytes": 10145644,
+    "wav_sha256": "567702fe91390d95855af12e6dc3a2e8db076bac4ea4a4d02c73699a4ac99d9a"
+   }
+  ]
+ },
+ {
+  "id": "4360674",
+  "company": "Nextera Energy Inc",
+  "sector": "Utilities",
+  "quarter": 2,
+  "source": {
+   "file": "earnings21/test-00002-of-00010.parquet",
+   "row_group": 0,
+   "row": 0,
+   "member": "4360674.wav",
+   "wav_bytes": 115039420,
+   "wav_sha256": "e5de8e244408511570894679c095c997536dfe5897cbe072771362d9ac173609",
+   "samples": 57519612,
+   "duration_s": 3594.97575,
+   "dataset_audio_length": 3595.023,
+   "original_sample_rate": 11025
+  },
+  "reference": {
+   "text_sha256": "d379e22d89394896aa5e1ba52a3f8497b2636fd116f5e6d0ac64e47b936f498d",
+   "chars": 58264,
+   "words": 9603
+  },
+  "mp3": {
+   "file": "4360674.mp3",
+   "bytes": 14380472,
+   "sha256": "d625f2e68adb2f7a1ea8001b3a6b95379830f1a0768e0b44f09f2a0895490305"
+  },
+  "decoded": {
+   "samples": 57519612,
+   "duration_s": 3594.97575,
+   "pcm_s16le_sha256": "383023bb0fa293a5484f65c591887d2a87271e1c49a9c0695c57e3ce37b250a0"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11478240,
+    "start_s": 0.0,
+    "end_s": 717.39,
+    "wav_bytes": 22956524,
+    "wav_sha256": "42c0eb13714937eda1779f7af4df1bf572ce7c1ae73a2de5af5a46ecbc498887"
+   },
+   {
+    "start_sample": 11478240,
+    "end_sample": 22940160,
+    "start_s": 717.39,
+    "end_s": 1433.76,
+    "wav_bytes": 22923884,
+    "wav_sha256": "2fb684d82db80154570e9bd5b1cd695c80052edd5cc6226a6fdca8b491c46ba7"
+   },
+   {
+    "start_sample": 22940160,
+    "end_sample": 34427360,
+    "start_s": 1433.76,
+    "end_s": 2151.71,
+    "wav_bytes": 22974444,
+    "wav_sha256": "0e3fa0cbca5538a739e7c92c1e29360010af911df6bb34a674c99fb9617dd063"
+   },
+   {
+    "start_sample": 34427360,
+    "end_sample": 45940800,
+    "start_s": 2151.71,
+    "end_s": 2871.3,
+    "wav_bytes": 23026924,
+    "wav_sha256": "58965dcd09217a80b37accd462ccc3cde112e96340162ac9c41a722e36aa9ff1"
+   },
+   {
+    "start_sample": 45940800,
+    "end_sample": 57460000,
+    "start_s": 2871.3,
+    "end_s": 3591.25,
+    "wav_bytes": 23038444,
+    "wav_sha256": "4be88b657d566ae1968d2d1627760d0b1b2933d1b11bc2aae272f8882f5ef7c8"
+   },
+   {
+    "start_sample": 57460000,
+    "end_sample": 57519612,
+    "start_s": 3591.25,
+    "end_s": 3594.97575,
+    "wav_bytes": 119268,
+    "wav_sha256": "c92b911eae49cb4bb57a52243c64780d32bcc8b658ad0ef3b30faed0d269c50a"
+   }
+  ]
+ },
+ {
+  "id": "4360717",
+  "company": "Fomento Economico Mexicano",
+  "sector": "Consumer Goods",
+  "quarter": 2,
+  "source": {
+   "file": "earnings21/test-00002-of-00010.parquet",
+   "row_group": 0,
+   "row": 1,
+   "member": "4360717.wav",
+   "wav_bytes": 144361216,
+   "wav_sha256": "411a57ec5d83a2cb19b13468277f43709e7c1edaa9910ff3dfcac8d2ed2edd19",
+   "samples": 72180480,
+   "duration_s": 4511.28,
+   "dataset_audio_length": 4511.312,
+   "original_sample_rate": 24000
+  },
+  "reference": {
+   "text_sha256": "d3565cf14f2efdbeb2465fcf1fee203dcaa1b463459d290734bbc66f3b4427ce",
+   "chars": 68427,
+   "words": 12460
+  },
+  "mp3": {
+   "file": "4360717.mp3",
+   "bytes": 18045704,
+   "sha256": "399d0f6d5a00c0eb3f779b4054f807a89d399eaf381068a5b8f2e3e3eb30db10"
+  },
+  "decoded": {
+   "samples": 72180480,
+   "duration_s": 4511.28,
+   "pcm_s16le_sha256": "9e7f638863e8a5eaa6719bde7ba19ff12ad63ea4f03cb3a7ab53e9905cf3637d"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11465760,
+    "start_s": 0.0,
+    "end_s": 716.61,
+    "wav_bytes": 22931564,
+    "wav_sha256": "526e6074ecc36c5ec5b8fbbb245e8578db878e5af217cf1e6a41a375415d8561"
+   },
+   {
+    "start_sample": 11465760,
+    "end_sample": 22979840,
+    "start_s": 716.61,
+    "end_s": 1436.24,
+    "wav_bytes": 23028204,
+    "wav_sha256": "8184077cb6e3ca538fb6ed57711e2d42b9400b68d908eba7f90efc5e6c07cb6f"
+   },
+   {
+    "start_sample": 22979840,
+    "end_sample": 34453280,
+    "start_s": 1436.24,
+    "end_s": 2153.33,
+    "wav_bytes": 22946924,
+    "wav_sha256": "6b4492e79fa6c065d8fe7e10737bd384bd6542fd6ebf714648171dd55507083a"
+   },
+   {
+    "start_sample": 34453280,
+    "end_sample": 45962240,
+    "start_s": 2153.33,
+    "end_s": 2872.64,
+    "wav_bytes": 23017964,
+    "wav_sha256": "504e7829a112bd5c5a8820e5a38eca03297fe48722195ea61958ab91605da022"
+   },
+   {
+    "start_sample": 45962240,
+    "end_sample": 57470560,
+    "start_s": 2872.64,
+    "end_s": 3591.91,
+    "wav_bytes": 23016684,
+    "wav_sha256": "8a2ef1cf81a48500213368963e053337f12644bf1f366d7a5b8ff8c1b802a2f7"
+   },
+   {
+    "start_sample": 57470560,
+    "end_sample": 68937920,
+    "start_s": 3591.91,
+    "end_s": 4308.62,
+    "wav_bytes": 22934764,
+    "wav_sha256": "5d9de46a1fecb4688ad6667ae258b5509ecb309ec3929729742628e9f817d116"
+   },
+   {
+    "start_sample": 68937920,
+    "end_sample": 72180480,
+    "start_s": 4308.62,
+    "end_s": 4511.28,
+    "wav_bytes": 6485164,
+    "wav_sha256": "afa7b4a706d27400460609550e197ce41e884227cf65c8e5f7b8ac020da7d7ac"
+   }
+  ]
+ },
+ {
+  "id": "4361631",
+  "company": "Enagas",
+  "sector": "Utilities",
+  "quarter": 2,
+  "source": {
+   "file": "earnings21/test-00002-of-00010.parquet",
+   "row_group": 0,
+   "row": 2,
+   "member": "4361631.wav",
+   "wav_bytes": 141165794,
+   "wav_sha256": "b37f9c2e184ab9b3731be6f6d1ac9057d45ea2ef1fda79f6c32695a393b37573",
+   "samples": 70582858,
+   "duration_s": 4411.428625,
+   "dataset_audio_length": 4411.446,
+   "original_sample_rate": 22050
+  },
+  "reference": {
+   "text_sha256": "c0bcc98ed7ea9deae733ed03622e6b93e40ff6566cb29ed1129240c1e990aa76",
+   "chars": 50891,
+   "words": 8916
+  },
+  "mp3": {
+   "file": "4361631.mp3",
+   "bytes": 17646248,
+   "sha256": "3108457e3865fcd5d44285f914290f0b5560dbccf786b004538f0fb24fc30308"
+  },
+  "decoded": {
+   "samples": 70582858,
+   "duration_s": 4411.428625,
+   "pcm_s16le_sha256": "917fd8770bed4627c6fb98279e5b991f500bfa3783196f96598f9df2f45f5480"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11481440,
+    "start_s": 0.0,
+    "end_s": 717.59,
+    "wav_bytes": 22962924,
+    "wav_sha256": "41dcaf6d5480cb009c8d4e03f5ff23e3b9abacbbcf14c8ee53b238cd3a7edd87"
+   },
+   {
+    "start_sample": 11481440,
+    "end_sample": 22992960,
+    "start_s": 717.59,
+    "end_s": 1437.06,
+    "wav_bytes": 23023084,
+    "wav_sha256": "a54de2b21ada7a273b62b26a1d5aefa5ada739165333ea307875d28c9984f152"
+   },
+   {
+    "start_sample": 22992960,
+    "end_sample": 34483040,
+    "start_s": 1437.06,
+    "end_s": 2155.19,
+    "wav_bytes": 22980204,
+    "wav_sha256": "707dd443dba85f8bf1ddc8ef810deddbe632b99639257ff9cc78f8f409192e3c"
+   },
+   {
+    "start_sample": 34483040,
+    "end_sample": 45968960,
+    "start_s": 2155.19,
+    "end_s": 2873.06,
+    "wav_bytes": 22971884,
+    "wav_sha256": "e8bd239947e5259294cf4b1a78e739013dac1a4fefcbbf29bddb5da93e2faeb9"
+   },
+   {
+    "start_sample": 45968960,
+    "end_sample": 57435360,
+    "start_s": 2873.06,
+    "end_s": 3589.71,
+    "wav_bytes": 22932844,
+    "wav_sha256": "fa5539a81bf64e32adcb066490b40551c1c113e4ce25b49ea846b0d72d438a5c"
+   },
+   {
+    "start_sample": 57435360,
+    "end_sample": 68925120,
+    "start_s": 3589.71,
+    "end_s": 4307.82,
+    "wav_bytes": 22979564,
+    "wav_sha256": "f7b3b828fc2e75520d80d78377883b42a38c5e682e743639eb91544102cacfa5"
+   },
+   {
+    "start_sample": 68925120,
+    "end_sample": 70582858,
+    "start_s": 4307.82,
+    "end_s": 4411.428625,
+    "wav_bytes": 3315520,
+    "wav_sha256": "8048a06374b9eb1c59858d28d768ad2aa177ddd753c34ad6d721c33516b575db"
+   }
+  ]
+ },
+ {
+  "id": "4363614",
+  "company": "Banco Santander",
+  "sector": "Financial",
+  "quarter": 2,
+  "source": {
+   "file": "earnings21/test-00002-of-00010.parquet",
+   "row_group": 0,
+   "row": 3,
+   "member": "4363614.wav",
+   "wav_bytes": 178791314,
+   "wav_sha256": "84628c7994ba49645105cba43c2cfafa3d0fb95f108d1bfd556e398230c77a2f",
+   "samples": 89395618,
+   "duration_s": 5587.226125,
+   "dataset_audio_length": 5586.921,
+   "original_sample_rate": 11025
+  },
+  "reference": {
+   "text_sha256": "820bd1ed1bc7a0e49d968da8bd2ebf2ea5fae0b6343e772b458ffb062f68d3f8",
+   "chars": 78487,
+   "words": 13653
+  },
+  "mp3": {
+   "file": "4363614.mp3",
+   "bytes": 22349432,
+   "sha256": "31cd2c15ee428ed667977dd05e235658bfcdfeb198c5633bfc41bdeb5c745585"
+  },
+  "decoded": {
+   "samples": 89395618,
+   "duration_s": 5587.226125,
+   "pcm_s16le_sha256": "2969e8ce57e0977347f3022839f6966bc90bc2bc1ebf2dd7fe413a0fb806f3e5"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11456160,
+    "start_s": 0.0,
+    "end_s": 716.01,
+    "wav_bytes": 22912364,
+    "wav_sha256": "3248dcb1a633170853e993e243afb3d5c1eae264436703676ba8b799c9ecd0ef"
+   },
+   {
+    "start_sample": 11456160,
+    "end_sample": 22948800,
+    "start_s": 716.01,
+    "end_s": 1434.3,
+    "wav_bytes": 22985324,
+    "wav_sha256": "28171bce68d335b4a7229bc3c517cbb5f2c8d162067cd8ce9a1199cbcb32b5cd"
+   },
+   {
+    "start_sample": 22948800,
+    "end_sample": 34429280,
+    "start_s": 1434.3,
+    "end_s": 2151.83,
+    "wav_bytes": 22961004,
+    "wav_sha256": "b90a50cce027907e32dcc76fef180b70c89a94bc4f99ddec6fed43d095bc1651"
+   },
+   {
+    "start_sample": 34429280,
+    "end_sample": 45885440,
+    "start_s": 2151.83,
+    "end_s": 2867.84,
+    "wav_bytes": 22912364,
+    "wav_sha256": "f0c9c28ed7dab540ba43c5d59689b8ae13ee6cf9c6b613f5a45100c603e5f907"
+   },
+   {
+    "start_sample": 45885440,
+    "end_sample": 57367200,
+    "start_s": 2867.84,
+    "end_s": 3585.45,
+    "wav_bytes": 22963564,
+    "wav_sha256": "83c08d5ff827118fd67e19f55a7f9b5c709ebb474700c02d2419b2164f97333f"
+   },
+   {
+    "start_sample": 57367200,
+    "end_sample": 68837440,
+    "start_s": 3585.45,
+    "end_s": 4302.34,
+    "wav_bytes": 22940524,
+    "wav_sha256": "cf0b33629642fbed17a4c78fcadf8ec4a608f6a97053a0df86613d9e722fd9d5"
+   },
+   {
+    "start_sample": 68837440,
+    "end_sample": 80352480,
+    "start_s": 4302.34,
+    "end_s": 5022.03,
+    "wav_bytes": 23030124,
+    "wav_sha256": "9c1fbb450fa3d735599b70aca0e6e2cefc220123120bb11e19bc2f5516786a28"
+   },
+   {
+    "start_sample": 80352480,
+    "end_sample": 89395618,
+    "start_s": 5022.03,
+    "end_s": 5587.226125,
+    "wav_bytes": 18086320,
+    "wav_sha256": "240344f325987d6e12009b162a6e16501ba237a6b5bbc988458d506cd6b7ac90"
+   }
+  ]
+ },
+ {
+  "id": "4364366",
+  "company": "Mosaic Company",
+  "sector": "Basic Materials",
+  "quarter": 2,
+  "source": {
+   "file": "earnings21/test-00002-of-00010.parquet",
+   "row_group": 0,
+   "row": 4,
+   "member": "4364366.wav",
+   "wav_bytes": 112192282,
+   "wav_sha256": "523e9a6317d07ec0fd4c7d0893335d019025f1ce18c86d95af4b012c741d1d1c",
+   "samples": 56096043,
+   "duration_s": 3506.0026875,
+   "dataset_audio_length": 3506.05,
+   "original_sample_rate": 11025
+  },
+  "reference": {
+   "text_sha256": "5a29edbea14e3b793fa0f7d736909a3cbcb8515906c9c3dbc9d59e8fa6840f72",
+   "chars": 47592,
+   "words": 8253
+  },
+  "mp3": {
+   "file": "4364366.mp3",
+   "bytes": 14024504,
+   "sha256": "b8e84846b3f758564857ad9fd364af07cb0dae6be44a8611be671db98689c190"
+  },
+  "decoded": {
+   "samples": 56096043,
+   "duration_s": 3506.0026875,
+   "pcm_s16le_sha256": "7b8b028227730f5a4b8577d47cef45f2ca53ccff409f4a2040663f49b855cd7d"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11463520,
+    "start_s": 0.0,
+    "end_s": 716.47,
+    "wav_bytes": 22927084,
+    "wav_sha256": "8f4a231ade9c2f1d4a6aa8b2691139fb555adea3e8215b9a827529ffcc22b682"
+   },
+   {
+    "start_sample": 11463520,
+    "end_sample": 22920640,
+    "start_s": 716.47,
+    "end_s": 1432.54,
+    "wav_bytes": 22914284,
+    "wav_sha256": "7a7e1ba0894cadf08758259e7b9653f1b136e3730735050b6e83402ad11dd85f"
+   },
+   {
+    "start_sample": 22920640,
+    "end_sample": 34390240,
+    "start_s": 1432.54,
+    "end_s": 2149.39,
+    "wav_bytes": 22939244,
+    "wav_sha256": "12c09eb0f47477f39b10b87346903d705bf018aaacebf7d975c5bd1fa0f83c83"
+   },
+   {
+    "start_sample": 34390240,
+    "end_sample": 45887360,
+    "start_s": 2149.39,
+    "end_s": 2867.96,
+    "wav_bytes": 22994284,
+    "wav_sha256": "6a743cc3bf6e10d3979123a062ba74f4d5c13b32467fc03ff0fb953434b0d43c"
+   },
+   {
+    "start_sample": 45887360,
+    "end_sample": 56096043,
+    "start_s": 2867.96,
+    "end_s": 3506.0026875,
+    "wav_bytes": 20417410,
+    "wav_sha256": "c44db4402cbeb25ee8121a6f90b339be605cc4ce2dc28f5c6a41f9554527b23b"
+   }
+  ]
+ },
+ {
+  "id": "4365024",
+  "company": "Nextar Media Group",
+  "sector": "Services",
+  "quarter": 2,
+  "source": {
+   "file": "earnings21/test-00003-of-00010.parquet",
+   "row_group": 0,
+   "row": 0,
+   "member": "4365024.wav",
+   "wav_bytes": 138517710,
+   "wav_sha256": "8dd93a1618991f0809067514c8ee746c6242066a7f587d9013c38c3ac471281c",
+   "samples": 69258816,
+   "duration_s": 4328.676,
+   "dataset_audio_length": 4328.676,
+   "original_sample_rate": 16000
+  },
+  "reference": {
+   "text_sha256": "1a5f7cdd250c842e05199f61e031917c99dce03140728fb2542257a3b2717956",
+   "chars": 68621,
+   "words": 11773
+  },
+  "mp3": {
+   "file": "4365024.mp3",
+   "bytes": 17315192,
+   "sha256": "83cecab66e607e2fd5c85011db6798bad07099cf2a5e17dd37f7594d92c40ccf"
+  },
+  "decoded": {
+   "samples": 69258816,
+   "duration_s": 4328.676,
+   "pcm_s16le_sha256": "f23ece2a01c74edc7715aa2a46807139234f126e0daa0fd4304ccffd56c170cb"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11510880,
+    "start_s": 0.0,
+    "end_s": 719.43,
+    "wav_bytes": 23021804,
+    "wav_sha256": "d1e417bddb3c2e7ebc95221add9b2d996dbab9b2c25ac94702d469dae6120493"
+   },
+   {
+    "start_sample": 11510880,
+    "end_sample": 23029760,
+    "start_s": 719.43,
+    "end_s": 1439.36,
+    "wav_bytes": 23037804,
+    "wav_sha256": "02c63d9530359bb2d5a9aa0c43a811b66d7b542ee716670a6ebf51ddaa9f3f08"
+   },
+   {
+    "start_sample": 23029760,
+    "end_sample": 34522400,
+    "start_s": 1439.36,
+    "end_s": 2157.65,
+    "wav_bytes": 22985324,
+    "wav_sha256": "9a1f1b09c90a191ae51656944b99a1e02a318ec287de10abb3b93488344fcd56"
+   },
+   {
+    "start_sample": 34522400,
+    "end_sample": 45978560,
+    "start_s": 2157.65,
+    "end_s": 2873.66,
+    "wav_bytes": 22912364,
+    "wav_sha256": "9c3be3314d7295bc6474ae8ecd1f66a877829544e60b2c4900e163b6aa5ecf7f"
+   },
+   {
+    "start_sample": 45978560,
+    "end_sample": 57443040,
+    "start_s": 2873.66,
+    "end_s": 3590.19,
+    "wav_bytes": 22929004,
+    "wav_sha256": "8cbd09e7f43fa8f912628bd6760d7c7816af7b2116630ca9139a0ab8ad8fca7f"
+   },
+   {
+    "start_sample": 57443040,
+    "end_sample": 68920960,
+    "start_s": 3590.19,
+    "end_s": 4307.56,
+    "wav_bytes": 22955884,
+    "wav_sha256": "23602c0decd6a462a392cc2997d0428ce2eaf8e160b4dce0c2b8486d9f97613a"
+   },
+   {
+    "start_sample": 68920960,
+    "end_sample": 69258816,
+    "start_s": 4307.56,
+    "end_s": 4328.676,
+    "wav_bytes": 675756,
+    "wav_sha256": "0de0ab0c349c8c250f5fade502da67d81f0ed6e525eb9f0440618c7f80956569"
+   }
+  ]
+ },
+ {
+  "id": "4365948",
+  "company": "GCP Applied Technologies",
+  "sector": "Basic Materials",
+  "quarter": 2,
+  "source": {
+   "file": "earnings21/test-00003-of-00010.parquet",
+   "row_group": 0,
+   "row": 1,
+   "member": "4365948.wav",
+   "wav_bytes": 80607688,
+   "wav_sha256": "92da7c9f597cf3b288db062be4ecac193ac99cc6fe7c3d591eae9c37efa8dff1",
+   "samples": 40303805,
+   "duration_s": 2518.9878125,
+   "dataset_audio_length": 2519.009,
+   "original_sample_rate": 22050
+  },
+  "reference": {
+   "text_sha256": "b2b8c7e35cd6c2f783af37ed10bb1a57a15c24de9efb905e068604d51bff4d14",
+   "chars": 39909,
+   "words": 6718
+  },
+  "mp3": {
+   "file": "4365948.mp3",
+   "bytes": 10076456,
+   "sha256": "daf716fdeff7c9eefea8002607b4d2b193ca3a9e2f14e49f10ec2331683a80db"
+  },
+  "decoded": {
+   "samples": 40303805,
+   "duration_s": 2518.9878125,
+   "pcm_s16le_sha256": "d4268a24de7cb4707638083a385eea5cc12190af3d611d92b511712c31613424"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11519840,
+    "start_s": 0.0,
+    "end_s": 719.99,
+    "wav_bytes": 23039724,
+    "wav_sha256": "4f864579292dc3cbde6588f12b020fcb029061345a89ef843a6312b31f91c678"
+   },
+   {
+    "start_sample": 11519840,
+    "end_sample": 23037120,
+    "start_s": 719.99,
+    "end_s": 1439.82,
+    "wav_bytes": 23034604,
+    "wav_sha256": "2b1032fe58fb4a63c99b3244743ee1d1cf8a0c9f1a4e04470308d34cf16b4102"
+   },
+   {
+    "start_sample": 23037120,
+    "end_sample": 34498400,
+    "start_s": 1439.82,
+    "end_s": 2156.15,
+    "wav_bytes": 22922604,
+    "wav_sha256": "cd934eaaa0da29b966df220652e985c7e831f7a3c45b6522b8590b0abd623a1d"
+   },
+   {
+    "start_sample": 34498400,
+    "end_sample": 40303805,
+    "start_s": 2156.15,
+    "end_s": 2518.9878125,
+    "wav_bytes": 11610854,
+    "wav_sha256": "71fb5a8d1805c0635d6b0f79fc26b0bdfa89d617e2cc41dabaf34820c6165d45"
+   }
+  ]
+ },
+ {
+  "id": "4366302",
+  "company": "Healthcare Realty Trusts",
+  "sector": "Financial",
+  "quarter": 2,
+  "source": {
+   "file": "earnings21/test-00003-of-00010.parquet",
+   "row_group": 0,
+   "row": 2,
+   "member": "4366302.wav",
+   "wav_bytes": 115040478,
+   "wav_sha256": "6907b57e52bbf65f1a2344e5a07afea6be3c6ea04b65999aa5d662aa154be77c",
+   "samples": 57520187,
+   "duration_s": 3595.0116875,
+   "dataset_audio_length": 3595.049,
+   "original_sample_rate": 44100
+  },
+  "reference": {
+   "text_sha256": "8c1531813b7ee4e7368cdf2d63536958463ec06c7b99ef37219052167398b29a",
+   "chars": 55690,
+   "words": 9869
+  },
+  "mp3": {
+   "file": "4366302.mp3",
+   "bytes": 14380616,
+   "sha256": "66580af0ca9a931461190ef3c26d58b3f2bde785b055263e0f2d4dae36c69837"
+  },
+  "decoded": {
+   "samples": 57520187,
+   "duration_s": 3595.0116875,
+   "pcm_s16le_sha256": "bf14add5c17d7db500faa0f4f3e9ae8b80ae9094fabd7d1b5386b383938e538a"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11469600,
+    "start_s": 0.0,
+    "end_s": 716.85,
+    "wav_bytes": 22939244,
+    "wav_sha256": "fcb1be65731c1eac1322f28ab399f82e6295bcf818e3a0efd4cdf1e487aa98b5"
+   },
+   {
+    "start_sample": 11469600,
+    "end_sample": 22970880,
+    "start_s": 716.85,
+    "end_s": 1435.68,
+    "wav_bytes": 23002604,
+    "wav_sha256": "c0bd69b3975e4b726dc5a09e0c9221dbe3e18abd54a805ea11fe031c4fa14b20"
+   },
+   {
+    "start_sample": 22970880,
+    "end_sample": 34429920,
+    "start_s": 1435.68,
+    "end_s": 2151.87,
+    "wav_bytes": 22918124,
+    "wav_sha256": "0e581b3e344959e6ef0a4fdae2a9edc3f7cf107cb18072836d914015a7249f1f"
+   },
+   {
+    "start_sample": 34429920,
+    "end_sample": 45919360,
+    "start_s": 2151.87,
+    "end_s": 2869.96,
+    "wav_bytes": 22978924,
+    "wav_sha256": "7a0a3ca32364eebd6b7a4c42450c306aa34d148713ee185e1083246d2dffd14f"
+   },
+   {
+    "start_sample": 45919360,
+    "end_sample": 57438560,
+    "start_s": 2869.96,
+    "end_s": 3589.91,
+    "wav_bytes": 23038444,
+    "wav_sha256": "f3427cecc164e3b57317afca0e77b5a725a8d5aa17176586e1a20a80aa5dda93"
+   },
+   {
+    "start_sample": 57438560,
+    "end_sample": 57520187,
+    "start_s": 3589.91,
+    "end_s": 3595.0116875,
+    "wav_bytes": 163298,
+    "wav_sha256": "d4ade15c0a3a0b1fe617bcd1e03d10654fd9273ea06047d7a4594b1e99072d35"
+   }
+  ]
+ },
+ {
+  "id": "4366429",
+  "company": "Dentsply Sironas XRay",
+  "sector": "Healthcare",
+  "quarter": 2,
+  "source": {
+   "file": "earnings21/test-00003-of-00010.parquet",
+   "row_group": 0,
+   "row": 3,
+   "member": "4366429.wav",
+   "wav_bytes": 128335468,
+   "wav_sha256": "e7c50e6bf0c980ab448fa4576a111cd740533104f8bfb2079101018ec101330d",
+   "samples": 64167695,
+   "duration_s": 4010.4809375,
+   "dataset_audio_length": 4010.929,
+   "original_sample_rate": 44100
+  },
+  "reference": {
+   "text_sha256": "c2dc8f303885817132979ed96223519d48052e48903c1154249e744c0f02d1af",
+   "chars": 64269,
+   "words": 11371
+  },
+  "mp3": {
+   "file": "4366429.mp3",
+   "bytes": 16042520,
+   "sha256": "a46e57247be8a13071317766f0c25ddfb270cbcf6321ce598760443cef0c13a5"
+  },
+  "decoded": {
+   "samples": 64167695,
+   "duration_s": 4010.4809375,
+   "pcm_s16le_sha256": "1c20392e5d0923142f21456b0dabe0d589171c4823a02e23270d7259fed685dd"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11516640,
+    "start_s": 0.0,
+    "end_s": 719.79,
+    "wav_bytes": 23033324,
+    "wav_sha256": "9dd835c19cb35e634bb45b11689e9c2c28ee0a5ba19de03e077f3a73c5473711"
+   },
+   {
+    "start_sample": 11516640,
+    "end_sample": 23029120,
+    "start_s": 719.79,
+    "end_s": 1439.32,
+    "wav_bytes": 23025004,
+    "wav_sha256": "5c5a8deb34cc4148e3117999e0950797b3406ce66afb9015272e6e6efe5a1679"
+   },
+   {
+    "start_sample": 23029120,
+    "end_sample": 34544160,
+    "start_s": 1439.32,
+    "end_s": 2159.01,
+    "wav_bytes": 23030124,
+    "wav_sha256": "a365b2f0c01aca1e1d6c59420a968101309035057ed151e3d837a58bbe7b65c1"
+   },
+   {
+    "start_sample": 34544160,
+    "end_sample": 46008000,
+    "start_s": 2159.01,
+    "end_s": 2875.5,
+    "wav_bytes": 22927724,
+    "wav_sha256": "08dc5cdbf4a2dc2c2faf4c6497d4d6afed569eb732d122d137f352202fe232de"
+   },
+   {
+    "start_sample": 46008000,
+    "end_sample": 57524320,
+    "start_s": 2875.5,
+    "end_s": 3595.27,
+    "wav_bytes": 23032684,
+    "wav_sha256": "47581a9f65a8fe02b48233474aaa7a8a6f790cd35ef450c1aaa9a035e0b8b6e7"
+   },
+   {
+    "start_sample": 57524320,
+    "end_sample": 64167695,
+    "start_s": 3595.27,
+    "end_s": 4010.4809375,
+    "wav_bytes": 13286794,
+    "wav_sha256": "6f0cd879ec2ca1c1e2e32710e51de523a27587b8e96531076c3841c9f84dbefb"
+   }
+  ]
+ },
+ {
+  "id": "4366522",
+  "company": "Aldeyra Therapeutics Inc",
+  "sector": "Healthcare",
+  "quarter": 2,
+  "source": {
+   "file": "earnings21/test-00003-of-00010.parquet",
+   "row_group": 0,
+   "row": 4,
+   "member": "4366522.wav",
+   "wav_bytes": 58167458,
+   "wav_sha256": "5bd816dd701c6cb3c2a057decad38276ac07b6173c214153ceb583c25b84127e",
+   "samples": 29083690,
+   "duration_s": 1817.730625,
+   "dataset_audio_length": 1817.901,
+   "original_sample_rate": 22050
+  },
+  "reference": {
+   "text_sha256": "5bd50482e2ec7766c50bfb144df1029f253aef66901bc0fb7eaadc5a8d15baf8",
+   "chars": 25250,
+   "words": 4166
+  },
+  "mp3": {
+   "file": "4366522.mp3",
+   "bytes": 7271480,
+   "sha256": "7093716a4fdffd5a74dcb8cce2a4d3dbcaa250d6dce8de87d3ef38b8dc141774"
+  },
+  "decoded": {
+   "samples": 29083690,
+   "duration_s": 1817.730625,
+   "pcm_s16le_sha256": "01834ab7a21c565ac14a081d5f027ef69b6b50a4ff5d5daac136993af8be162e"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11466400,
+    "start_s": 0.0,
+    "end_s": 716.65,
+    "wav_bytes": 22932844,
+    "wav_sha256": "5fdec6a90244f2f6f54092e09a786d4cc0ecabfca7cb031aa8972fcb28916b90"
+   },
+   {
+    "start_sample": 11466400,
+    "end_sample": 22972480,
+    "start_s": 716.65,
+    "end_s": 1435.78,
+    "wav_bytes": 23012204,
+    "wav_sha256": "aef881d4000790db01c1145bcf0a31b3b4eaaea38eddbfe0ab22a791491a1e43"
+   },
+   {
+    "start_sample": 22972480,
+    "end_sample": 29083690,
+    "start_s": 1435.78,
+    "end_s": 1817.730625,
+    "wav_bytes": 12222464,
+    "wav_sha256": "dce6af31e3c226c6369e1a78288b4fc329826873b3082a9da83ab55fb2980276"
+   }
+  ]
+ },
+ {
+  "id": "4366893",
+  "company": "Earthstone Energy Inc",
+  "sector": "Basic Materials",
+  "quarter": 2,
+  "source": {
+   "file": "earnings21/test-00004-of-00010.parquet",
+   "row_group": 0,
+   "row": 0,
+   "member": "4366893.wav",
+   "wav_bytes": 75723342,
+   "wav_sha256": "265e42fe57f8ed0b5b31b1974951df7505e4e3de489042f6e331a848efb2337b",
+   "samples": 37861632,
+   "duration_s": 2366.352,
+   "dataset_audio_length": 2366.394,
+   "original_sample_rate": 16000
+  },
+  "reference": {
+   "text_sha256": "5f32dfcf7341d1a1fd5fddcc97049074d95969c00c23f3c37385912360374083",
+   "chars": 36157,
+   "words": 6414
+  },
+  "mp3": {
+   "file": "4366893.mp3",
+   "bytes": 9465896,
+   "sha256": "150ca751435175b32516ad8b71e3aeeb3e2cb4217e85d26b5a72e9df9a107f75"
+  },
+  "decoded": {
+   "samples": 37861632,
+   "duration_s": 2366.352,
+   "pcm_s16le_sha256": "723bb778b0676ff06c6ed384ecfd4aabfd0341c871c72b69483f45b4f448d644"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11518240,
+    "start_s": 0.0,
+    "end_s": 719.89,
+    "wav_bytes": 23036524,
+    "wav_sha256": "a568c1f3117c073b26287ab4b2abf61481eb07315d59f4a2893728754ac80aa3"
+   },
+   {
+    "start_sample": 11518240,
+    "end_sample": 23034560,
+    "start_s": 719.89,
+    "end_s": 1439.66,
+    "wav_bytes": 23032684,
+    "wav_sha256": "aec0313bbc9f50a6f94accb2aef13737bba6c2fd5b398fd2e23b6719091498e9"
+   },
+   {
+    "start_sample": 23034560,
+    "end_sample": 34497440,
+    "start_s": 1439.66,
+    "end_s": 2156.09,
+    "wav_bytes": 22925804,
+    "wav_sha256": "207390c6a41cd298419ab036a4d32cf601ce3be18fe7d859dac321a7edb340de"
+   },
+   {
+    "start_sample": 34497440,
+    "end_sample": 37861632,
+    "start_s": 2156.09,
+    "end_s": 2366.352,
+    "wav_bytes": 6728428,
+    "wav_sha256": "8d0c2a87dc52c198ed67afd3ac74aaa993967da43a4970c4816737a80774f1f3"
+   }
+  ]
+ },
+ {
+  "id": "4367318",
+  "company": "AcelRX Pharmaceuticals Inc",
+  "sector": "Healthcare",
+  "quarter": 2,
+  "source": {
+   "file": "earnings21/test-00004-of-00010.parquet",
+   "row_group": 0,
+   "row": 1,
+   "member": "4367318.wav",
+   "wav_bytes": 55065678,
+   "wav_sha256": "30ef65d47b656642ed283ea8f22929f6097f3fdaebf3858361c81a7916a33362",
+   "samples": 27532800,
+   "duration_s": 1720.8,
+   "dataset_audio_length": 1720.832,
+   "original_sample_rate": 24000
+  },
+  "reference": {
+   "text_sha256": "dedc7d884096c902e21fbe5007f7a578616895392f84c195fd9a8240c30a8d94",
+   "chars": 26131,
+   "words": 4323
+  },
+  "mp3": {
+   "file": "4367318.mp3",
+   "bytes": 6883688,
+   "sha256": "ee3003a31074a461ab466e7727c1dbd59dc5d67b2b7b0131cc5edd8f9e389926"
+  },
+  "decoded": {
+   "samples": 27532800,
+   "duration_s": 1720.8,
+   "pcm_s16le_sha256": "c58e498b42de5294dbac915246ba758d81e2bce388d3bfe6a3995e8e0f75c0ab"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11492000,
+    "start_s": 0.0,
+    "end_s": 718.25,
+    "wav_bytes": 22984044,
+    "wav_sha256": "b32b964f260ef868878ff734061772d1db62301c55294f643063e39c13331d90"
+   },
+   {
+    "start_sample": 11492000,
+    "end_sample": 22978560,
+    "start_s": 718.25,
+    "end_s": 1436.16,
+    "wav_bytes": 22973164,
+    "wav_sha256": "d5682406ab7c792ca4ba5b0cf4bff0dec04c4d851925d59f06d9bdc3977a6c55"
+   },
+   {
+    "start_sample": 22978560,
+    "end_sample": 27532800,
+    "start_s": 1436.16,
+    "end_s": 1720.8,
+    "wav_bytes": 9108524,
+    "wav_sha256": "f54ba0838489cd4c71a799aee264f976750f6f12526bfeda784cf0c19430b93b"
+   }
+  ]
+ },
+ {
+  "id": "4367535",
+  "company": "Affimed",
+  "sector": "Healthcare",
+  "quarter": 2,
+  "source": {
+   "file": "earnings21/test-00004-of-00010.parquet",
+   "row_group": 0,
+   "row": 2,
+   "member": "4367535.wav",
+   "wav_bytes": 101609550,
+   "wav_sha256": "bd178ecd77b53042b5e6773c283dc82a9a1901c9d51d66c4485b9c5d04ab7be5",
+   "samples": 50804736,
+   "duration_s": 3175.296,
+   "dataset_audio_length": 3175.328,
+   "original_sample_rate": 24000
+  },
+  "reference": {
+   "text_sha256": "9f2f70d7c68033eb61d858ca9ba37ef26aa2042aef3b5bb89eaeb6decce8b890",
+   "chars": 41724,
+   "words": 7111
+  },
+  "mp3": {
+   "file": "4367535.mp3",
+   "bytes": 12701720,
+   "sha256": "7250e572a2b109402a99b3261556abcb3fba67cacc9a158bc8a858f459233eff"
+  },
+  "decoded": {
+   "samples": 50804736,
+   "duration_s": 3175.296,
+   "pcm_s16le_sha256": "f3734327c355531d46fb8f8353675ce9e9a7fa8ec16dfac28a7f339376742ce0"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11484960,
+    "start_s": 0.0,
+    "end_s": 717.81,
+    "wav_bytes": 22969964,
+    "wav_sha256": "4755adfe8f638dcfece615d1afb163cdf0958c8987d0e469f1f81236644abe78"
+   },
+   {
+    "start_sample": 11484960,
+    "end_sample": 23002880,
+    "start_s": 717.81,
+    "end_s": 1437.68,
+    "wav_bytes": 23035884,
+    "wav_sha256": "9db98308becc92efc54d3716f72a7c040f1e9e3e52efc5302cd7f9adf4098b17"
+   },
+   {
+    "start_sample": 23002880,
+    "end_sample": 34514080,
+    "start_s": 1437.68,
+    "end_s": 2157.13,
+    "wav_bytes": 23022444,
+    "wav_sha256": "a27a6bf6f6b47b92ba4740ef186329a8c0b4f7212c54b356882348a052386405"
+   },
+   {
+    "start_sample": 34514080,
+    "end_sample": 46004800,
+    "start_s": 2157.13,
+    "end_s": 2875.3,
+    "wav_bytes": 22981484,
+    "wav_sha256": "a84e3c73810db1837d789bc643cbd74e1d881dc95537a21ba739f049d9538ba6"
+   },
+   {
+    "start_sample": 46004800,
+    "end_sample": 50804736,
+    "start_s": 2875.3,
+    "end_s": 3175.296,
+    "wav_bytes": 9599916,
+    "wav_sha256": "8979ab52b73649ec2e1ee50295e25e9a0c38cdfd7728a3d8aad39123e7e61fa0"
+   }
+  ]
+ },
+ {
+  "id": "4368670",
+  "company": "RWE Aktiengesellschaft",
+  "sector": "Utilities",
+  "quarter": 2,
+  "source": {
+   "file": "earnings21/test-00004-of-00010.parquet",
+   "row_group": 0,
+   "row": 3,
+   "member": "4368670.wav",
+   "wav_bytes": 135103714,
+   "wav_sha256": "da5863478831a0037432288374d7ac61b6af6f54fe7717dbdb180663375940e2",
+   "samples": 67551818,
+   "duration_s": 4221.988625,
+   "dataset_audio_length": 4222.006,
+   "original_sample_rate": 22050
+  },
+  "reference": {
+   "text_sha256": "60401c83ba5d60433763e1771710a4199e86a8cfd78f2650b4bf630c296eafbf",
+   "chars": 62904,
+   "words": 11427
+  },
+  "mp3": {
+   "file": "4368670.mp3",
+   "bytes": 16888520,
+   "sha256": "2e5d23204406a21a21653f04dee76be20ec9058e9e3dbafbf5f7f2d5e61ab81f"
+  },
+  "decoded": {
+   "samples": 67551818,
+   "duration_s": 4221.988625,
+   "pcm_s16le_sha256": "3fe4db63c0952d695ee119ed8fd855de9a84c7c66840a1a064a214e25954c4da"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11488480,
+    "start_s": 0.0,
+    "end_s": 718.03,
+    "wav_bytes": 22977004,
+    "wav_sha256": "c00518b4adafc212b3d859c3af094ea4c48aa897db6d1aa07adebd1e18939c12"
+   },
+   {
+    "start_sample": 11488480,
+    "end_sample": 23004800,
+    "start_s": 718.03,
+    "end_s": 1437.8,
+    "wav_bytes": 23032684,
+    "wav_sha256": "c0d4642cb644e060c02301ccae2c69bbc61ff0f5b9fc1c926731717e98dadb47"
+   },
+   {
+    "start_sample": 23004800,
+    "end_sample": 34464160,
+    "start_s": 1437.8,
+    "end_s": 2154.01,
+    "wav_bytes": 22918764,
+    "wav_sha256": "67d31075b52eaaf09f9d0bc05cb870acd152c6645faa3238343f437c55426e43"
+   },
+   {
+    "start_sample": 34464160,
+    "end_sample": 45949120,
+    "start_s": 2154.01,
+    "end_s": 2871.82,
+    "wav_bytes": 22969964,
+    "wav_sha256": "bb8e58fb98681318059bd3c8764cd3c3b3b6c3f7cadd862d8de15e25bc0a5a44"
+   },
+   {
+    "start_sample": 45949120,
+    "end_sample": 57419680,
+    "start_s": 2871.82,
+    "end_s": 3588.73,
+    "wav_bytes": 22941164,
+    "wav_sha256": "860b7cdfc0c48e10be4d1c06367ea581d5f3ab5fa0c4b6a6214b2df169a3a10f"
+   },
+   {
+    "start_sample": 57419680,
+    "end_sample": 67551818,
+    "start_s": 3588.73,
+    "end_s": 4221.988625,
+    "wav_bytes": 20264320,
+    "wav_sha256": "5a9d1adf6c6f42dcf258dfb17019a56aa154a5f3b162302546593c0578d6dd85"
+   }
+  ]
+ },
+ {
+  "id": "4374910",
+  "company": "American Express Company",
+  "sector": "Financial",
+  "quarter": 3,
+  "source": {
+   "file": "earnings21/test-00005-of-00010.parquet",
+   "row_group": 0,
+   "row": 0,
+   "member": "4374910.wav",
+   "wav_bytes": 64912206,
+   "wav_sha256": "7db0aa60e1d12a38959a343657cb5ff2c2a787392bface76622b7de88a5cee7a",
+   "samples": 32456064,
+   "duration_s": 2028.504,
+   "dataset_audio_length": 2028.536,
+   "original_sample_rate": 24000
+  },
+  "reference": {
+   "text_sha256": "5d924722c3718269aa3d8545ef2330092f2ac50c8b23aeeb82eb2b4c46eba260",
+   "chars": 27490,
+   "words": 4902
+  },
+  "mp3": {
+   "file": "4374910.mp3",
+   "bytes": 8114600,
+   "sha256": "ffab9d0b832eece4b4c397b4162f25861173063f30739bd086b841ce4cd84d8a"
+  },
+  "decoded": {
+   "samples": 32456064,
+   "duration_s": 2028.504,
+   "pcm_s16le_sha256": "28412cd47866b9b3eec11bd37755f2c1a756065aef5f45c016367774aa88453c"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11477920,
+    "start_s": 0.0,
+    "end_s": 717.37,
+    "wav_bytes": 22955884,
+    "wav_sha256": "342ab17be8b2e5ecae3f94b8cdcfab12946d52c0f56b9be3c1481a4628d230c6"
+   },
+   {
+    "start_sample": 11477920,
+    "end_sample": 22953600,
+    "start_s": 717.37,
+    "end_s": 1434.6,
+    "wav_bytes": 22951404,
+    "wav_sha256": "4ed267d3784e62be704bddacd222bf8372305e439d784f414e699ac74b6a4975"
+   },
+   {
+    "start_sample": 22953600,
+    "end_sample": 32456064,
+    "start_s": 1434.6,
+    "end_s": 2028.504,
+    "wav_bytes": 19004972,
+    "wav_sha256": "fa2b6abdb14eb7efd4d72118deed9f33068f02d6f4ce1d9df82e9328ff8cc385"
+   }
+  ]
+ },
+ {
+  "id": "4375653",
+  "company": "Illumina",
+  "sector": "Healthcare",
+  "quarter": 3,
+  "source": {
+   "file": "earnings21/test-00005-of-00010.parquet",
+   "row_group": 0,
+   "row": 1,
+   "member": "4375653.wav",
+   "wav_bytes": 111109014,
+   "wav_sha256": "61465b1e1c86f212c6502cecc412fc2e8f6a1fde14113b95a27f081ed75724d5",
+   "samples": 55554432,
+   "duration_s": 3472.152,
+   "dataset_audio_length": 3472.184,
+   "original_sample_rate": 24000
+  },
+  "reference": {
+   "text_sha256": "eca28b371f19257c1566cacefdb0af765ba50a70205c3902a8146d313029cc45",
+   "chars": 54501,
+   "words": 9430
+  },
+  "mp3": {
+   "file": "4375653.mp3",
+   "bytes": 13889144,
+   "sha256": "f66ffd5d5042fb458bffd5a104406fea2061b05e45c14f026946277567560e67"
+  },
+  "decoded": {
+   "samples": 55554432,
+   "duration_s": 3472.152,
+   "pcm_s16le_sha256": "8e07fcb646d2bc08f66fea94d38016a44f3dbb99c3ce322cf47dee5bc452b1b4"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11471200,
+    "start_s": 0.0,
+    "end_s": 716.95,
+    "wav_bytes": 22942444,
+    "wav_sha256": "ed773ce5cbb10d31938b6b7a3f1287b02418f7d20103999d5b929659527ca7db"
+   },
+   {
+    "start_sample": 11471200,
+    "end_sample": 22970560,
+    "start_s": 716.95,
+    "end_s": 1435.66,
+    "wav_bytes": 22998764,
+    "wav_sha256": "491514c54a34107378f65ac3f5607c2528f6a635d52cae5555f0ad9c2debad5a"
+   },
+   {
+    "start_sample": 22970560,
+    "end_sample": 34479520,
+    "start_s": 1435.66,
+    "end_s": 2154.97,
+    "wav_bytes": 23017964,
+    "wav_sha256": "ea003c2163f5b83a88efbbd7c7ca092933015ca3003b76b89d33fdf282b92dea"
+   },
+   {
+    "start_sample": 34479520,
+    "end_sample": 45936640,
+    "start_s": 2154.97,
+    "end_s": 2871.04,
+    "wav_bytes": 22914284,
+    "wav_sha256": "306cdcd6060f24766fa76b3854f2aee4de433c5b468b3bfe9e641f4f756c5222"
+   },
+   {
+    "start_sample": 45936640,
+    "end_sample": 55554432,
+    "start_s": 2871.04,
+    "end_s": 3472.152,
+    "wav_bytes": 19235628,
+    "wav_sha256": "ee2ec6e8d748dd340f7c220f4991ca410c2fb0c8d892d2af033cd6bee2470cef"
+   }
+  ]
+ },
+ {
+  "id": "4382825",
+  "company": "Conocophillips",
+  "sector": "Basic Materials",
+  "quarter": 3,
+  "source": {
+   "file": "earnings21/test-00005-of-00010.parquet",
+   "row_group": 0,
+   "row": 2,
+   "member": "4382825.wav",
+   "wav_bytes": 121443598,
+   "wav_sha256": "9f7af5deaf8ef6dbb1427d5d20069977b917a29c268f90d6ed14f7a458b24747",
+   "samples": 60721754,
+   "duration_s": 3795.109625,
+   "dataset_audio_length": 3795.147,
+   "original_sample_rate": 44100
+  },
+  "reference": {
+   "text_sha256": "16af7e5f1120553730acb17f10efff32613497310955c44e913038df29838c20",
+   "chars": 60107,
+   "words": 10685
+  },
+  "mp3": {
+   "file": "4382825.mp3",
+   "bytes": 15180968,
+   "sha256": "28b53615dcf23ba7e879bb87dec802351a61dd7770bae89a4b1fae92ead252a9"
+  },
+  "decoded": {
+   "samples": 60721754,
+   "duration_s": 3795.109625,
+   "pcm_s16le_sha256": "77c5e482dd4abfa9c8fe4696031885c4421d56cdde47ed9d897cc04bd0b1e717"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11457120,
+    "start_s": 0.0,
+    "end_s": 716.07,
+    "wav_bytes": 22914284,
+    "wav_sha256": "69dd296cd8926e81f69a186291e1832cba5b1cd1dd59a4c83ca35cbab37706e1"
+   },
+   {
+    "start_sample": 11457120,
+    "end_sample": 22961600,
+    "start_s": 716.07,
+    "end_s": 1435.1,
+    "wav_bytes": 23009004,
+    "wav_sha256": "cd4b51a62ab8d793532f6fa9164941b62a05142183bf8639a458d37e5d9f13cd"
+   },
+   {
+    "start_sample": 22961600,
+    "end_sample": 34420320,
+    "start_s": 1435.1,
+    "end_s": 2151.27,
+    "wav_bytes": 22917484,
+    "wav_sha256": "a0cc7bce9836039a507ffaf27e28e9b234ae561520a6f67225a1b060f45f913b"
+   },
+   {
+    "start_sample": 34420320,
+    "end_sample": 45885760,
+    "start_s": 2151.27,
+    "end_s": 2867.86,
+    "wav_bytes": 22930924,
+    "wav_sha256": "4e7e9f4ca776ed706cef62dcce24b939c874bd53784cc04a9bd0056dbf269c25"
+   },
+   {
+    "start_sample": 45885760,
+    "end_sample": 57400800,
+    "start_s": 2867.86,
+    "end_s": 3587.55,
+    "wav_bytes": 23030124,
+    "wav_sha256": "d3badeed8da65e89347331ab0498b8a452fdf4d86a17c9206d849f145fc61fbd"
+   },
+   {
+    "start_sample": 57400800,
+    "end_sample": 60721754,
+    "start_s": 3587.55,
+    "end_s": 3795.109625,
+    "wav_bytes": 6641952,
+    "wav_sha256": "71411e36b3a5bd3a8f6cc0bc04354ef2ec3940c2faeb813530a7e86c6720122c"
+   }
+  ]
+ },
+ {
+  "id": "4383161",
+  "company": "Pilgrims Pride Corp",
+  "sector": "Consumer Goods",
+  "quarter": 3,
+  "source": {
+   "file": "earnings21/test-00005-of-00010.parquet",
+   "row_group": 0,
+   "row": 3,
+   "member": "4383161.wav",
+   "wav_bytes": 108053838,
+   "wav_sha256": "7f6e451c02143ad46c865dfa3e5198ac0eb850e11cc399db621e3964f61107ba",
+   "samples": 54026880,
+   "duration_s": 3376.68,
+   "dataset_audio_length": 3376.712,
+   "original_sample_rate": 24000
+  },
+  "reference": {
+   "text_sha256": "4fa10e3931dbe2b7beafe88b3c942849af132ef3a26d23d5661ffa0eb9912f6e",
+   "chars": 52711,
+   "words": 8967
+  },
+  "mp3": {
+   "file": "4383161.mp3",
+   "bytes": 13507256,
+   "sha256": "acd08b7c0c3fdc39a269c36b42f3cdba3129ad360d04e72a929b3a4c2c866893"
+  },
+  "decoded": {
+   "samples": 54026880,
+   "duration_s": 3376.68,
+   "pcm_s16le_sha256": "2daea9a0a7deb6dac6d6f4b5c7b85b14ea2d249af7b611e0805bc92a73fd5155"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11457440,
+    "start_s": 0.0,
+    "end_s": 716.09,
+    "wav_bytes": 22914924,
+    "wav_sha256": "ac9bb0ad357d0281f370dde02be3b4cc4831f2fb6ed549dbf2a6765fa24574f4"
+   },
+   {
+    "start_sample": 11457440,
+    "end_sample": 22961600,
+    "start_s": 716.09,
+    "end_s": 1435.1,
+    "wav_bytes": 23008364,
+    "wav_sha256": "0292d4d1cc1e753faaf398f9fb0c9a02c9757dac7e5f96fb468f149c585bc98b"
+   },
+   {
+    "start_sample": 22961600,
+    "end_sample": 34441760,
+    "start_s": 1435.1,
+    "end_s": 2152.61,
+    "wav_bytes": 22960364,
+    "wav_sha256": "8e2e3dc7f864e33c3f935fad5443c6ba968085b84bf733c03837ab6b4be6065a"
+   },
+   {
+    "start_sample": 34441760,
+    "end_sample": 45919680,
+    "start_s": 2152.61,
+    "end_s": 2869.98,
+    "wav_bytes": 22955884,
+    "wav_sha256": "ce75fb368152c50f017543771a698eb9adfd60d3670aef73920bec48bb9ff89f"
+   },
+   {
+    "start_sample": 45919680,
+    "end_sample": 54026880,
+    "start_s": 2869.98,
+    "end_s": 3376.68,
+    "wav_bytes": 16214444,
+    "wav_sha256": "b1c392e74802c3571c5bc4050746eca38973f17d8e98a9c756fc9f511b2a6842"
+   }
+  ]
+ },
+ {
+  "id": "4384198",
+  "company": "New Home Company Inc",
+  "sector": "Industrial Goods",
+  "quarter": 3,
+  "source": {
+   "file": "earnings21/test-00006-of-00010.parquet",
+   "row_group": 0,
+   "row": 0,
+   "member": "4384198.wav",
+   "wav_bytes": 84363084,
+   "wav_sha256": "40e6a12a2c89de58e731ece180e81173b96fccc1462b5311d31d8f97f0bf7263",
+   "samples": 42181503,
+   "duration_s": 2636.3439375,
+   "dataset_audio_length": 2636.382,
+   "original_sample_rate": 44100
+  },
+  "reference": {
+   "text_sha256": "39d84aa97d207292c9a5c46e42905952232b5ecf89e43d0de50b6812d3497545",
+   "chars": 37337,
+   "words": 6541
+  },
+  "mp3": {
+   "file": "4384198.mp3",
+   "bytes": 10545896,
+   "sha256": "08e686916451ae3bd7bfacc1618801ac26deb6029a04915494823850af3a3f99"
+  },
+  "decoded": {
+   "samples": 42181503,
+   "duration_s": 2636.3439375,
+   "pcm_s16le_sha256": "b2bf8340aa21035bfc9e6934e7b821c9df6b32303a3adce63436c9d6cfef5d61"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11504800,
+    "start_s": 0.0,
+    "end_s": 719.05,
+    "wav_bytes": 23009644,
+    "wav_sha256": "482caf9584f93cef30663b36c27cfb584b5ebff7f1ecd5886d9b636c2abc34ee"
+   },
+   {
+    "start_sample": 11504800,
+    "end_sample": 23021760,
+    "start_s": 719.05,
+    "end_s": 1438.86,
+    "wav_bytes": 23033964,
+    "wav_sha256": "e5e0645db8e1f1ebc2ca680e4f8d53df6b6b0e66ad2996c237e000711ae69dfe"
+   },
+   {
+    "start_sample": 23021760,
+    "end_sample": 34538080,
+    "start_s": 1438.86,
+    "end_s": 2158.63,
+    "wav_bytes": 23032684,
+    "wav_sha256": "c279cc5c7e56a6e9d4c8127c5b1dba579ccf94e94d0fec5efa9eada3a6c4e96b"
+   },
+   {
+    "start_sample": 34538080,
+    "end_sample": 42181503,
+    "start_s": 2158.63,
+    "end_s": 2636.3439375,
+    "wav_bytes": 15286890,
+    "wav_sha256": "9029195f654309429af8ff309ce5d1cd3ca684500b80174a70b385da38f2d2a3"
+   }
+  ]
+ },
+ {
+  "id": "4384683",
+  "company": "One Gas Inc",
+  "sector": "Basic Materials",
+  "quarter": 3,
+  "source": {
+   "file": "earnings21/test-00006-of-00010.parquet",
+   "row_group": 0,
+   "row": 1,
+   "member": "4384683.wav",
+   "wav_bytes": 47255886,
+   "wav_sha256": "5b233481d46a6a5769d8d3f272f22b830490d4001c0007744e315ef982a6c0d0",
+   "samples": 23627904,
+   "duration_s": 1476.744,
+   "dataset_audio_length": 1476.776,
+   "original_sample_rate": 24000
+  },
+  "reference": {
+   "text_sha256": "59490a5076292c677b72432134f91305b59fe0d9baf8e6aae01bbb3fd094d3aa",
+   "chars": 21300,
+   "words": 3604
+  },
+  "mp3": {
+   "file": "4384683.mp3",
+   "bytes": 5907512,
+   "sha256": "6aec645174a1103ad7a00cf39f6d04efe73192b327370985a1d332a5fc8dfbd1"
+  },
+  "decoded": {
+   "samples": 23627904,
+   "duration_s": 1476.744,
+   "pcm_s16le_sha256": "0c7ebb19955529dd961176ff67c65733015404152142d7ef406dec210f125060"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11468320,
+    "start_s": 0.0,
+    "end_s": 716.77,
+    "wav_bytes": 22936684,
+    "wav_sha256": "961ad0e4fc43b8ee7ada1826140fd2d91e15512ea4dfe791dd83bdd4c3e4c245"
+   },
+   {
+    "start_sample": 11468320,
+    "end_sample": 22960640,
+    "start_s": 716.77,
+    "end_s": 1435.04,
+    "wav_bytes": 22984684,
+    "wav_sha256": "e458b38b1192f04c2d34d20873563d037acf52836dcd5e573d0680c89940797b"
+   },
+   {
+    "start_sample": 22960640,
+    "end_sample": 23627904,
+    "start_s": 1435.04,
+    "end_s": 1476.744,
+    "wav_bytes": 1334572,
+    "wav_sha256": "b9d75a621c0b22f6801974b549a1787b9ca0fdbbb720c7f39fc09dd0355879cf"
+   }
+  ]
+ },
+ {
+  "id": "4384744",
+  "company": "Adtran Inc",
+  "sector": "Technology",
+  "quarter": 3,
+  "source": {
+   "file": "earnings21/test-00006-of-00010.parquet",
+   "row_group": 0,
+   "row": 2,
+   "member": "4384744.wav",
+   "wav_bytes": 104703054,
+   "wav_sha256": "8a0e74629023a7c58efec235687a2758fed0f0d04b4bb53c7019b83b10f7a67a",
+   "samples": 52351488,
+   "duration_s": 3271.968,
+   "dataset_audio_length": 3272.0,
+   "original_sample_rate": 16000
+  },
+  "reference": {
+   "text_sha256": "ae70b73a25ddd3f9910a88e48bfbae2b918bb87cf1e7dfcaf567d026d6898661",
+   "chars": 46018,
+   "words": 8095
+  },
+  "mp3": {
+   "file": "4384744.mp3",
+   "bytes": 13088360,
+   "sha256": "be0af068f8c3ca4192d2c4a5a8358d3e5dbe616e9f2e87e47bf36c8d60f0f796"
+  },
+  "decoded": {
+   "samples": 52351488,
+   "duration_s": 3271.968,
+   "pcm_s16le_sha256": "85bec24393ebf698b72504c66f17e79261a27040ba864e580456eaaa79a041cf"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11477600,
+    "start_s": 0.0,
+    "end_s": 717.35,
+    "wav_bytes": 22955244,
+    "wav_sha256": "1d6ad3c85971a1a9416567d3338e100aaf197004ef755fc564447ba0fab0173e"
+   },
+   {
+    "start_sample": 11477600,
+    "end_sample": 22968000,
+    "start_s": 717.35,
+    "end_s": 1435.5,
+    "wav_bytes": 22980844,
+    "wav_sha256": "bf75feeb5abcbe1e5d8c82b3c395ac2def9716639f8b4c2845d8eaa646d07e34"
+   },
+   {
+    "start_sample": 22968000,
+    "end_sample": 34470880,
+    "start_s": 1435.5,
+    "end_s": 2154.43,
+    "wav_bytes": 23005804,
+    "wav_sha256": "0b9da1fc6a8ef2ebfbd60f4846ed62a4230c38f9d3e18626c7b411594d6e476f"
+   },
+   {
+    "start_sample": 34470880,
+    "end_sample": 45951040,
+    "start_s": 2154.43,
+    "end_s": 2871.94,
+    "wav_bytes": 22960364,
+    "wav_sha256": "7f3d4f160b730ff1b4888eff90b89a71fb92ab26d8194d9f32d38f204296a551"
+   },
+   {
+    "start_sample": 45951040,
+    "end_sample": 52351488,
+    "start_s": 2871.94,
+    "end_s": 3271.968,
+    "wav_bytes": 12800940,
+    "wav_sha256": "75730f05fde744c5887d71ea73d83b416c7896031d07bc8d57afd51e71c29435"
+   }
+  ]
+ },
+ {
+  "id": "4384964",
+  "company": "Eversource",
+  "sector": "Utilities",
+  "quarter": 3,
+  "source": {
+   "file": "earnings21/test-00006-of-00010.parquet",
+   "row_group": 0,
+   "row": 3,
+   "member": "4384964.wav",
+   "wav_bytes": 128723022,
+   "wav_sha256": "cf46760c6dabf851158deb6e39276d3e920c22a040378e0a8e82a25403178eaf",
+   "samples": 64361472,
+   "duration_s": 4022.592,
+   "dataset_audio_length": 4022.624,
+   "original_sample_rate": 24000
+  },
+  "reference": {
+   "text_sha256": "ae0e0ac65f4cd41f0a1c929560fea8ade35b39fc5b6f096a0eef878224760822",
+   "chars": 57334,
+   "words": 10265
+  },
+  "mp3": {
+   "file": "4384964.mp3",
+   "bytes": 16090904,
+   "sha256": "a7aec1aac7d71e2c73eef1c58f6e39bd2242922fe39c48521159ff80655c8b65"
+  },
+  "decoded": {
+   "samples": 64361472,
+   "duration_s": 4022.592,
+   "pcm_s16le_sha256": "a6b11c7abb4eddfd9f589ee9d2ff51e5a7bd96e680b075f5b23feff376fc0a10"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11487520,
+    "start_s": 0.0,
+    "end_s": 717.97,
+    "wav_bytes": 22975084,
+    "wav_sha256": "9a7b21725f5d8cd513d64df893679afce43456df43b9dcb0db74bf548a922339"
+   },
+   {
+    "start_sample": 11487520,
+    "end_sample": 23000320,
+    "start_s": 717.97,
+    "end_s": 1437.52,
+    "wav_bytes": 23025644,
+    "wav_sha256": "77843bd1a74f6c349a20310ce529c2326c9a8b7f02ce70a46a5d122519510696"
+   },
+   {
+    "start_sample": 23000320,
+    "end_sample": 34473440,
+    "start_s": 1437.52,
+    "end_s": 2154.59,
+    "wav_bytes": 22946284,
+    "wav_sha256": "fbece553ae38a04ac70d08e1978e8cbed9ceb40e1a401540a1542f2e8f562baa"
+   },
+   {
+    "start_sample": 34473440,
+    "end_sample": 45941120,
+    "start_s": 2154.59,
+    "end_s": 2871.32,
+    "wav_bytes": 22935404,
+    "wav_sha256": "9b0567a7e17822592adca032403f4ea1d34483f3b50d0fdac809d3690b430e4b"
+   },
+   {
+    "start_sample": 45941120,
+    "end_sample": 57428000,
+    "start_s": 2871.32,
+    "end_s": 3589.25,
+    "wav_bytes": 22973804,
+    "wav_sha256": "74512775c0b8b9ae0a63cc486b299101a260f4fa4ce9364bc53bd48db61b543e"
+   },
+   {
+    "start_sample": 57428000,
+    "end_sample": 64361472,
+    "start_s": 3589.25,
+    "end_s": 4022.592,
+    "wav_bytes": 13866988,
+    "wav_sha256": "1e35f2f8a07a8eaec40efcd59a57693d3c7aff2ca975c6a3dec3fa8ed9caf48d"
+   }
+  ]
+ },
+ {
+  "id": "4385072",
+  "company": "Sitime Corp",
+  "sector": "Technology",
+  "quarter": 3,
+  "source": {
+   "file": "earnings21/test-00007-of-00010.parquet",
+   "row_group": 0,
+   "row": 0,
+   "member": "4385072.wav",
+   "wav_bytes": 81919630,
+   "wav_sha256": "76931df64d047f83ff5fabd8dffe44717c8b3f2d01229e4725d35aa888b17cd3",
+   "samples": 40959776,
+   "duration_s": 2559.986,
+   "dataset_audio_length": 2560.008,
+   "original_sample_rate": 24000
+  },
+  "reference": {
+   "text_sha256": "95256c791f3ce18ea48161b31ec67b99c7d9b91a28409b1716e1bc5ca0556aca",
+   "chars": 37474,
+   "words": 6551
+  },
+  "mp3": {
+   "file": "4385072.mp3",
+   "bytes": 10240472,
+   "sha256": "40c0a8e7257bbb9470152628dd1fd45f07a15b8e2babf068af08a28a036eace6"
+  },
+  "decoded": {
+   "samples": 40959776,
+   "duration_s": 2559.986,
+   "pcm_s16le_sha256": "7cad855dac5ed56734b8f7a358a9572e762a66757f943044e39e0438d474763d"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11511520,
+    "start_s": 0.0,
+    "end_s": 719.47,
+    "wav_bytes": 23023084,
+    "wav_sha256": "cdbec651e54d5f2cf2cd02d6b2a2feecf5e2a46eaa0aa5188d7e1578dcf861ba"
+   },
+   {
+    "start_sample": 11511520,
+    "end_sample": 23000000,
+    "start_s": 719.47,
+    "end_s": 1437.5,
+    "wav_bytes": 22977004,
+    "wav_sha256": "1b78979d616cec7d3320b48b9e853bb8a4b23b55c74e0a4e0b2907de3f93126d"
+   },
+   {
+    "start_sample": 23000000,
+    "end_sample": 34493920,
+    "start_s": 1437.5,
+    "end_s": 2155.87,
+    "wav_bytes": 22987884,
+    "wav_sha256": "147355e09ced763fddf0d4407fce34ba4c2f717a2b2422d609d531734313b0d9"
+   },
+   {
+    "start_sample": 34493920,
+    "end_sample": 40959776,
+    "start_s": 2155.87,
+    "end_s": 2559.986,
+    "wav_bytes": 12931756,
+    "wav_sha256": "aa378e134f95c66bc1c452405ef1f3283ec16c018c968b315007108b754df878"
+   }
+  ]
+ },
+ {
+  "id": "4385388",
+  "company": "Yeti Holdings",
+  "sector": "Consumer Goods",
+  "quarter": 3,
+  "source": {
+   "file": "earnings21/test-00007-of-00010.parquet",
+   "row_group": 0,
+   "row": 1,
+   "member": "4385388.wav",
+   "wav_bytes": 139072270,
+   "wav_sha256": "a0b471f0b5fe82ca180c74875126de2a8314a995037b6ea8c6994c988f2c98a2",
+   "samples": 69536096,
+   "duration_s": 4346.006,
+   "dataset_audio_length": 4346.451,
+   "original_sample_rate": 44100
+  },
+  "reference": {
+   "text_sha256": "400596c85ac674dbe378852faaa04a28b97bc9fc7a4c7feedb32ff01bf4a9de4",
+   "chars": 65658,
+   "words": 11329
+  },
+  "mp3": {
+   "file": "4385388.mp3",
+   "bytes": 17384600,
+   "sha256": "1a4a9eeed5831607a299c67eb75d5bca6f4f133b4a002c7b8226c96f59224223"
+  },
+  "decoded": {
+   "samples": 69536096,
+   "duration_s": 4346.006,
+   "pcm_s16le_sha256": "ca7a51c523b0a2a11fe1d3a1b7ebb5b74f3e513d7eb886667d86d08a151c8663"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11476000,
+    "start_s": 0.0,
+    "end_s": 717.25,
+    "wav_bytes": 22952044,
+    "wav_sha256": "01240fbdab9d71d6c065d5d52f842d95a41a91395eb3bdcc324673777deaa7de"
+   },
+   {
+    "start_sample": 11476000,
+    "end_sample": 22944000,
+    "start_s": 717.25,
+    "end_s": 1434.0,
+    "wav_bytes": 22936044,
+    "wav_sha256": "dadfdf5e24e11edfe3e041d2b0131fab89a59cc67f5681f03e44964ea71e2c27"
+   },
+   {
+    "start_sample": 22944000,
+    "end_sample": 34460000,
+    "start_s": 1434.0,
+    "end_s": 2153.75,
+    "wav_bytes": 23032044,
+    "wav_sha256": "593fed530743577cb7f6c268baabf51e74b4015bb10b219b296c565bb37279f2"
+   },
+   {
+    "start_sample": 34460000,
+    "end_sample": 45978560,
+    "start_s": 2153.75,
+    "end_s": 2873.66,
+    "wav_bytes": 23037164,
+    "wav_sha256": "a3ce3d97671bba97489456ed63e9f246c25c0273f6f77f66a9c11be2dc63690a"
+   },
+   {
+    "start_sample": 45978560,
+    "end_sample": 57439520,
+    "start_s": 2873.66,
+    "end_s": 3589.97,
+    "wav_bytes": 22921964,
+    "wav_sha256": "de5f37947b2b20ae0f74c29b2fa40a1343213f808407be07db72d53acf36bea1"
+   },
+   {
+    "start_sample": 57439520,
+    "end_sample": 68932800,
+    "start_s": 3589.97,
+    "end_s": 4308.3,
+    "wav_bytes": 22986604,
+    "wav_sha256": "eaae636a765f3eea6ebcaf36cbbccc4f3f6baf48113cfd51955291f4cee4d2e2"
+   },
+   {
+    "start_sample": 68932800,
+    "end_sample": 69536096,
+    "start_s": 4308.3,
+    "end_s": 4346.006,
+    "wav_bytes": 1206636,
+    "wav_sha256": "9564d414b2098c91799a90af33ed78ed469a3d6489ed9a317861cae82536f7b7"
+   }
+  ]
+ },
+ {
+  "id": "4385939",
+  "company": "Hershey Company",
+  "sector": "Consumer Goods",
+  "quarter": 3,
+  "source": {
+   "file": "earnings21/test-00007-of-00010.parquet",
+   "row_group": 0,
+   "row": 2,
+   "member": "4385939.wav",
+   "wav_bytes": 97593678,
+   "wav_sha256": "b149701e73e39f7b252cee1369c51ea83e085f7355e55887c0f468e9f9a6980e",
+   "samples": 48796800,
+   "duration_s": 3049.8,
+   "dataset_audio_length": 3049.832,
+   "original_sample_rate": 24000
+  },
+  "reference": {
+   "text_sha256": "6e4ac8052ef21b5abcd8b42f088de8a7ec6d5e20a77220b763534372d365ba09",
+   "chars": 50410,
+   "words": 9009
+  },
+  "mp3": {
+   "file": "4385939.mp3",
+   "bytes": 12199736,
+   "sha256": "59c0fc87a84501e9cc7ec43ede1d9abff1268fc90d9a1a1cd5828ecbba14df4b"
+  },
+  "decoded": {
+   "samples": 48796800,
+   "duration_s": 3049.8,
+   "pcm_s16le_sha256": "1e9613a046d4a7aca8f2064d3cd72ed6a8e37fbe36c3d6216d200463ec08d8b3"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11513440,
+    "start_s": 0.0,
+    "end_s": 719.59,
+    "wav_bytes": 23026924,
+    "wav_sha256": "c83e10438f9692f1f06328b3d27b13a4c407f607704cc24a8dd4ebaf92bc2cfb"
+   },
+   {
+    "start_sample": 11513440,
+    "end_sample": 22979200,
+    "start_s": 719.59,
+    "end_s": 1436.2,
+    "wav_bytes": 22931564,
+    "wav_sha256": "72243f76ccb37121ce2f78729bca865fd83bcbb57d556b8388b57036958b21f3"
+   },
+   {
+    "start_sample": 22979200,
+    "end_sample": 34482400,
+    "start_s": 1436.2,
+    "end_s": 2155.15,
+    "wav_bytes": 23006444,
+    "wav_sha256": "c86c7fd967acc8433d665571d7a2160054823a34c387040be6fb9c52b89369ca"
+   },
+   {
+    "start_sample": 34482400,
+    "end_sample": 45975360,
+    "start_s": 2155.15,
+    "end_s": 2873.46,
+    "wav_bytes": 22985964,
+    "wav_sha256": "7f0c40d813a4f3a5addd3df4fe4d8b871ba35593d1e0bd5632e053d53721a1e5"
+   },
+   {
+    "start_sample": 45975360,
+    "end_sample": 48796800,
+    "start_s": 2873.46,
+    "end_s": 3049.8,
+    "wav_bytes": 5642924,
+    "wav_sha256": "ccf1d2379a1c4ec0a958f4021d63fd3f2ef6e7dce524e3a8bef1f806ba583eb1"
+   }
+  ]
+ },
+ {
+  "id": "4386541",
+  "company": "Cumulus Media Inc",
+  "sector": "Services",
+  "quarter": 3,
+  "source": {
+   "file": "earnings21/test-00007-of-00010.parquet",
+   "row_group": 0,
+   "row": 3,
+   "member": "4386541.wav",
+   "wav_bytes": 35107278,
+   "wav_sha256": "2a35554e4bfa121d99a8ba8c299b758dc548b3e187f5f81e93c6fca37e504729",
+   "samples": 17553600,
+   "duration_s": 1097.1,
+   "dataset_audio_length": 1097.1,
+   "original_sample_rate": 16000
+  },
+  "reference": {
+   "text_sha256": "183e16bafae118617112362a41467efa6b458e56fd795f9d930901836bdd0f06",
+   "chars": 16437,
+   "words": 2715
+  },
+  "mp3": {
+   "file": "4386541.mp3",
+   "bytes": 4388888,
+   "sha256": "7f92471d7555ca0032522ecbe052df634d2313aa4f6fad5a16391051c76f9331"
+  },
+  "decoded": {
+   "samples": 17553600,
+   "duration_s": 1097.1,
+   "pcm_s16le_sha256": "e3c138782ff93be7b40953fef0f51071346c6813dc2afd8c36b97b4bae14c8ad"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11487520,
+    "start_s": 0.0,
+    "end_s": 717.97,
+    "wav_bytes": 22975084,
+    "wav_sha256": "f84295b127c34061ff944b1368f5efd6af720b4a62e38dddfdbc284739e191ae"
+   },
+   {
+    "start_sample": 11487520,
+    "end_sample": 17553600,
+    "start_s": 717.97,
+    "end_s": 1097.1,
+    "wav_bytes": 12132204,
+    "wav_sha256": "990836e85b544722f03524c82271fc1cb22d481459400c0b3527eb3cbfd3d2fa"
+   }
+  ]
+ },
+ {
+  "id": "4387332",
+  "company": "Zagg Inc",
+  "sector": "Services",
+  "quarter": 3,
+  "source": {
+   "file": "earnings21/test-00008-of-00010.parquet",
+   "row_group": 0,
+   "row": 0,
+   "member": "4387332.wav",
+   "wav_bytes": 41925198,
+   "wav_sha256": "0a839dcd5bdafb42854052e6e783836c347a7afedc5bd309372c35a59ffec69c",
+   "samples": 20962560,
+   "duration_s": 1310.16,
+   "dataset_audio_length": 1310.192,
+   "original_sample_rate": 24000
+  },
+  "reference": {
+   "text_sha256": "f0d5dbabc1c1aa9c4794c8dc43d76563ca4ce61af0e39489ddc6314aada0bf0d",
+   "chars": 23880,
+   "words": 3969
+  },
+  "mp3": {
+   "file": "4387332.mp3",
+   "bytes": 5241224,
+   "sha256": "18351e27b13fe308c545e036be8074b069e2dd1918ae4b4e82e4c9f30e52d14a"
+  },
+  "decoded": {
+   "samples": 20962560,
+   "duration_s": 1310.16,
+   "pcm_s16le_sha256": "f638e7a5b58e99ced1e04f3163ca78ef4252e59ea72b62055497d0bbab07ddcf"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11471200,
+    "start_s": 0.0,
+    "end_s": 716.95,
+    "wav_bytes": 22942444,
+    "wav_sha256": "fc59ccf5a93adf123c6658a8525a75e48d1bd24df5037f5de4babc3269d9d552"
+   },
+   {
+    "start_sample": 11471200,
+    "end_sample": 20962560,
+    "start_s": 716.95,
+    "end_s": 1310.16,
+    "wav_bytes": 18982764,
+    "wav_sha256": "39faf7e3f7f93657436dbee94cc3dbc757b7ae6b19d617f0d16dba52ac542d02"
+   }
+  ]
+ },
+ {
+  "id": "4387383",
+  "company": "Clipper Realty Inc",
+  "sector": "Financial",
+  "quarter": 3,
+  "source": {
+   "file": "earnings21/test-00008-of-00010.parquet",
+   "row_group": 0,
+   "row": 1,
+   "member": "4387383.wav",
+   "wav_bytes": 69057804,
+   "wav_sha256": "fa856a7ee620c45b00decd989812954e566d22a654f1ce614d1f1d4f01099dbb",
+   "samples": 34528863,
+   "duration_s": 2158.0539375,
+   "dataset_audio_length": 2158.072,
+   "original_sample_rate": 22050
+  },
+  "reference": {
+   "text_sha256": "ab0e5c24465d189944d4c7e194ae256921deec4d6cbd3ec065d930032ec264ce",
+   "chars": 21464,
+   "words": 3627
+  },
+  "mp3": {
+   "file": "4387383.mp3",
+   "bytes": 8632712,
+   "sha256": "c72a6709e47422bd9e3560212caa4fd4e6213c5ab253ea14e8fb5f795866ad67"
+  },
+  "decoded": {
+   "samples": 34528863,
+   "duration_s": 2158.0539375,
+   "pcm_s16le_sha256": "1f8abe439f066cc3a3e5c8f6b6413b58b3a19ed96f83b263cbd326909a607eaa"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11507680,
+    "start_s": 0.0,
+    "end_s": 719.23,
+    "wav_bytes": 23015404,
+    "wav_sha256": "c8efd7baff88186f2b6c0bd573cf97a011fbf64b6019f29b3c35c20a40de5592"
+   },
+   {
+    "start_sample": 11507680,
+    "end_sample": 22991360,
+    "start_s": 719.23,
+    "end_s": 1436.96,
+    "wav_bytes": 22967404,
+    "wav_sha256": "8035b125fe26026ec486990066de9e3081ef8d084ead2ee1b4c42518aa6144a3"
+   },
+   {
+    "start_sample": 22991360,
+    "end_sample": 34496160,
+    "start_s": 1436.96,
+    "end_s": 2156.01,
+    "wav_bytes": 23009644,
+    "wav_sha256": "2099e92273f2a8a523d066fa17fb4e4b12fdf25b20e8c3c7d77ca27a5507c54d"
+   },
+   {
+    "start_sample": 34496160,
+    "end_sample": 34528863,
+    "start_s": 2156.01,
+    "end_s": 2158.0539375,
+    "wav_bytes": 65450,
+    "wav_sha256": "ceede2d6a06b1d7573f2850e54130e819fe6533cd2b2ac7ffca5973309444739"
+   }
+  ]
+ },
+ {
+  "id": "4387865",
+  "company": "Indentiv Inc",
+  "sector": "Technology",
+  "quarter": 3,
+  "source": {
+   "file": "earnings21/test-00008-of-00010.parquet",
+   "row_group": 0,
+   "row": 2,
+   "member": "4387865.wav",
+   "wav_bytes": 69202528,
+   "wav_sha256": "84998c4a375c00b40363991b42e65814ab89099378d7e6b4e30211f668804a3d",
+   "samples": 34601169,
+   "duration_s": 2162.5730625,
+   "dataset_audio_length": 2162.637,
+   "original_sample_rate": 11025
+  },
+  "reference": {
+   "text_sha256": "765f2eece629e59f51bada6763b300ab9e30f05748d60d910dcca92404ac037f",
+   "chars": 34136,
+   "words": 5871
+  },
+  "mp3": {
+   "file": "4387865.mp3",
+   "bytes": 8650856,
+   "sha256": "20ff46e94cd4af586acb2b2e1780c9122d7fe2c4e28c44c4ad6d4edc35b717d8"
+  },
+  "decoded": {
+   "samples": 34601169,
+   "duration_s": 2162.5730625,
+   "pcm_s16le_sha256": "ad5aefcd97e29a5b5a126753d75197c52c3c68f2a62f3f2af725be324367200e"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11484320,
+    "start_s": 0.0,
+    "end_s": 717.77,
+    "wav_bytes": 22968684,
+    "wav_sha256": "74f370ea1056c64a7cbbb572a9acda002eb7ab52ae42898d833baa2e14355a89"
+   },
+   {
+    "start_sample": 11484320,
+    "end_sample": 22969280,
+    "start_s": 717.77,
+    "end_s": 1435.58,
+    "wav_bytes": 22969964,
+    "wav_sha256": "a5d46d47354d5637cf30c42cd7581a880655f879b48c355dd80b0f5e4d6b881c"
+   },
+   {
+    "start_sample": 22969280,
+    "end_sample": 34464480,
+    "start_s": 1435.58,
+    "end_s": 2154.03,
+    "wav_bytes": 22990444,
+    "wav_sha256": "df125c52f85f03c326a63fc7be1681bc9e9cf1963cd3fac128fb1d7a229db005"
+   },
+   {
+    "start_sample": 34464480,
+    "end_sample": 34601169,
+    "start_s": 2154.03,
+    "end_s": 2162.5730625,
+    "wav_bytes": 273422,
+    "wav_sha256": "3ed7d6c24265b41edb9855d774724d2e88b61e4a849fdf14cf00256f74d5bbb4"
+   }
+  ]
+ },
+ {
+  "id": "4389907",
+  "company": "Pheonix New Media Ltd",
+  "sector": "Technology",
+  "quarter": 3,
+  "source": {
+   "file": "earnings21/test-00008-of-00010.parquet",
+   "row_group": 0,
+   "row": 3,
+   "member": "4389907.wav",
+   "wav_bytes": 65882190,
+   "wav_sha256": "a2589b5008764011d76d955c90e448e5b52d0318ccb63b21bd23fd2400aa883e",
+   "samples": 32941056,
+   "duration_s": 2058.816,
+   "dataset_audio_length": 2058.848,
+   "original_sample_rate": 24000
+  },
+  "reference": {
+   "text_sha256": "d5b5c51fb00c270ab5bfa4ef9fec423922e5ef42796779ed7477c9a02923ada7",
+   "chars": 25249,
+   "words": 4089
+  },
+  "mp3": {
+   "file": "4389907.mp3",
+   "bytes": 8235848,
+   "sha256": "83b469455093e9fab6f3e891c11dd866b48e2d5868ddd0f4a1c2909046f7fc22"
+  },
+  "decoded": {
+   "samples": 32941056,
+   "duration_s": 2058.816,
+   "pcm_s16le_sha256": "5a7ab3950654ac7cacf853cdbbdd8ffe20776f445d5727d8fc90d67ada4b6f21"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11472160,
+    "start_s": 0.0,
+    "end_s": 717.01,
+    "wav_bytes": 22944364,
+    "wav_sha256": "edf3f847b1a7d054145494d1ff110253b166683db4a68bbb04064ac0a2e4be46"
+   },
+   {
+    "start_sample": 11472160,
+    "end_sample": 22943360,
+    "start_s": 717.01,
+    "end_s": 1433.96,
+    "wav_bytes": 22942444,
+    "wav_sha256": "bc019efcb815f70f446756df877e498349899d0a4c344d274a18ea56c18df503"
+   },
+   {
+    "start_sample": 22943360,
+    "end_sample": 32941056,
+    "start_s": 1433.96,
+    "end_s": 2058.816,
+    "wav_bytes": 19995436,
+    "wav_sha256": "b6a3b2cba2ed29fbb9ff4225b31593491e685bb22a0a84038ee99816168a85c8"
+   }
+  ]
+ },
+ {
+  "id": "4392809",
+  "company": "Lands End Inc",
+  "sector": "Services",
+  "quarter": 3,
+  "source": {
+   "file": "earnings21/test-00009-of-00010.parquet",
+   "row_group": 0,
+   "row": 0,
+   "member": "4392809.wav",
+   "wav_bytes": 46016334,
+   "wav_sha256": "613c0575d2290e8e5dc76c3c0e1ad03cfcfa842f58ef4d98b2ae52807ce3242e",
+   "samples": 23008128,
+   "duration_s": 1438.008,
+   "dataset_audio_length": 1438.04,
+   "original_sample_rate": 24000
+  },
+  "reference": {
+   "text_sha256": "dcc43cddde96fb2167d9d12a6f7fa4239c175a36c01d8cbe8b22b7e7f3c6605d",
+   "chars": 24225,
+   "words": 4025
+  },
+  "mp3": {
+   "file": "4392809.mp3",
+   "bytes": 5752568,
+   "sha256": "586bfc0bc33301e99e83be69e8a768dc1f8daa7ec7d10f3f465fc57e7e3258d9"
+  },
+  "decoded": {
+   "samples": 23008128,
+   "duration_s": 1438.008,
+   "pcm_s16le_sha256": "62f640513f5b9f5701d58ac6839e628e3c06b2676b944ce145f0072c5e912d61"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11491040,
+    "start_s": 0.0,
+    "end_s": 718.19,
+    "wav_bytes": 22982124,
+    "wav_sha256": "4a657ffd8f119c09e8e1c008f336d24ca28abcaac73b22cff742fe69d17adbe6"
+   },
+   {
+    "start_sample": 11491040,
+    "end_sample": 23008128,
+    "start_s": 718.19,
+    "end_s": 1438.008,
+    "wav_bytes": 23034220,
+    "wav_sha256": "7816f7a9126211c63b71cd283bc01e3a60c21d1f576058d308ab847399a1b617"
+   }
+  ]
+ },
+ {
+  "id": "4394084",
+  "company": "Innovative Solutions and Support Inc",
+  "sector": "Technology",
+  "quarter": 4,
+  "source": {
+   "file": "earnings21/test-00009-of-00010.parquet",
+   "row_group": 0,
+   "row": 1,
+   "member": "4394084.wav",
+   "wav_bytes": 56256846,
+   "wav_sha256": "69af115d3fb1b18f8f4cb68d4ac5446b578dc5adc403372f77c19d77959ff916",
+   "samples": 28128384,
+   "duration_s": 1758.024,
+   "dataset_audio_length": 1758.024,
+   "original_sample_rate": 16000
+  },
+  "reference": {
+   "text_sha256": "15ba566e8c5b1386109f88e26babb1ce46e12b6c394db8048ad8a842408c4b98",
+   "chars": 21753,
+   "words": 3604
+  },
+  "mp3": {
+   "file": "4394084.mp3",
+   "bytes": 7032584,
+   "sha256": "8ce9309dd08c39f750d658cfe1c3c52ebdbb2a514d49f2b436f67f2d40c5a244"
+  },
+  "decoded": {
+   "samples": 28128384,
+   "duration_s": 1758.024,
+   "pcm_s16le_sha256": "76509def02d98df4c4a34b7b758c0cb87c6eb720a3282e51a679c50e4aae25e2"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11495840,
+    "start_s": 0.0,
+    "end_s": 718.49,
+    "wav_bytes": 22991724,
+    "wav_sha256": "c545b91b96bbe94ce8419a2849a440d4d9aec69c478b186aa1e6daac9f6116d3"
+   },
+   {
+    "start_sample": 11495840,
+    "end_sample": 22991360,
+    "start_s": 718.49,
+    "end_s": 1436.96,
+    "wav_bytes": 22991084,
+    "wav_sha256": "2e52ac05eea4290d4a96fa0dd670e091e9839336f13c4754121d9e3f1097574d"
+   },
+   {
+    "start_sample": 22991360,
+    "end_sample": 28128384,
+    "start_s": 1436.96,
+    "end_s": 1758.024,
+    "wav_bytes": 10274092,
+    "wav_sha256": "73c7528700f61725800048e23278b49aa0fe8038bc71c56e96d07b5cbfd25bf6"
+   }
+  ]
+ },
+ {
+  "id": "4397800",
+  "company": "Rev Group Inc",
+  "sector": "Conglomerate",
+  "quarter": 4,
+  "source": {
+   "file": "earnings21/test-00009-of-00010.parquet",
+   "row_group": 0,
+   "row": 2,
+   "member": "4397800.wav",
+   "wav_bytes": 88692558,
+   "wav_sha256": "9e5ac2a1e0b413dc1b3a7f59da7825ce6d20c8875a29bd1c3a366f1d99f683bb",
+   "samples": 44346240,
+   "duration_s": 2771.64,
+   "dataset_audio_length": 2771.672,
+   "original_sample_rate": 24000
+  },
+  "reference": {
+   "text_sha256": "3afefdcdc763ee65d7f7de0dc76466240cf417e7938c39a3fed7bf33b057d0fd",
+   "chars": 46911,
+   "words": 7923
+  },
+  "mp3": {
+   "file": "4397800.mp3",
+   "bytes": 11087048,
+   "sha256": "ee4d7ed85de0bc9c6a49738b8e8a27e691a17876f767c5867f8d1a34042a5ae8"
+  },
+  "decoded": {
+   "samples": 44346240,
+   "duration_s": 2771.64,
+   "pcm_s16le_sha256": "aeb067fd8cb84ea9ccc9bb8538d788e55af80a6e5a863afe983ed01d04894cfa"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11499040,
+    "start_s": 0.0,
+    "end_s": 718.69,
+    "wav_bytes": 22998124,
+    "wav_sha256": "1b02bb915850a07c6a9d170ae644c273aaa45fd0683fb591ab0f45967be28018"
+   },
+   {
+    "start_sample": 11499040,
+    "end_sample": 22969920,
+    "start_s": 718.69,
+    "end_s": 1435.62,
+    "wav_bytes": 22941804,
+    "wav_sha256": "1932409dd7af17c0801221899da4bb1b9c17069948366af93336b8c08887a28d"
+   },
+   {
+    "start_sample": 22969920,
+    "end_sample": 34438240,
+    "start_s": 1435.62,
+    "end_s": 2152.39,
+    "wav_bytes": 22936684,
+    "wav_sha256": "572b6efa9ced9ba9144103b3fec8ab36381fa50ee67c804ec5699286687eb88b"
+   },
+   {
+    "start_sample": 34438240,
+    "end_sample": 44346240,
+    "start_s": 2152.39,
+    "end_s": 2771.64,
+    "wav_bytes": 19816044,
+    "wav_sha256": "3a8258719fc2ce85203420a0d260a94e611adff4ee4f3cec7d19f5defa9fd594"
+   }
+  ]
+ },
+ {
+  "id": "4397829",
+  "company": "Bed Bath and Beyond Inc",
+  "sector": "Conglomerate",
+  "quarter": 3,
+  "source": {
+   "file": "earnings21/test-00009-of-00010.parquet",
+   "row_group": 0,
+   "row": 3,
+   "member": "4397829.wav",
+   "wav_bytes": 143127630,
+   "wav_sha256": "30003d85b67b27751e65e3ed93c8f5af8a67ce4e79c4bdd01b9e6601f4f6b0c0",
+   "samples": 71563776,
+   "duration_s": 4472.736,
+   "dataset_audio_length": 4472.768,
+   "original_sample_rate": 24000
+  },
+  "reference": {
+   "text_sha256": "0e4604573fd4e0cfd5de0b2c0aa9c9e9729ee0e720c9bac847a5ed6413c2c254",
+   "chars": 66737,
+   "words": 11326
+  },
+  "mp3": {
+   "file": "4397829.mp3",
+   "bytes": 17891480,
+   "sha256": "e26ccf2dd4c7d404b9ee6e848d866ef865c251fa2caef6355cb47242c80eb6e1"
+  },
+  "decoded": {
+   "samples": 71563776,
+   "duration_s": 4472.736,
+   "pcm_s16le_sha256": "8ef78cbd7e2d48e2aaea5484a0a85687379bf021fab2209abdba799e706c90c2"
+  },
+  "sie_pieces": [
+   {
+    "start_sample": 0,
+    "end_sample": 11476320,
+    "start_s": 0.0,
+    "end_s": 717.27,
+    "wav_bytes": 22952684,
+    "wav_sha256": "4fb85be74c940eb375ec2dd944b9e355107a7c13e81a4c351593e20d8f219000"
+   },
+   {
+    "start_sample": 11476320,
+    "end_sample": 22987520,
+    "start_s": 717.27,
+    "end_s": 1436.72,
+    "wav_bytes": 23022444,
+    "wav_sha256": "289593d91874ef50de0de4ac7ed8e57b1d60a636b924ff97856783e42f01bc64"
+   },
+   {
+    "start_sample": 22987520,
+    "end_sample": 34484320,
+    "start_s": 1436.72,
+    "end_s": 2155.27,
+    "wav_bytes": 22993644,
+    "wav_sha256": "1b38ced1900e4b3e1435ca17d851bf1f70e49f349a22332cc94f60555455adb7"
+   },
+   {
+    "start_sample": 34484320,
+    "end_sample": 45942400,
+    "start_s": 2155.27,
+    "end_s": 2871.4,
+    "wav_bytes": 22916204,
+    "wav_sha256": "f5143900f75a7934016c897041076cfd35d6936cea0bf95579b2b3e204246eff"
+   },
+   {
+    "start_sample": 45942400,
+    "end_sample": 57461280,
+    "start_s": 2871.4,
+    "end_s": 3591.33,
+    "wav_bytes": 23037804,
+    "wav_sha256": "4072d6685d70906c4ad7f5ae657b9bb9695277078a3b00af90a0d6a9db793013"
+   },
+   {
+    "start_sample": 57461280,
+    "end_sample": 68919360,
+    "start_s": 3591.33,
+    "end_s": 4307.46,
+    "wav_bytes": 22916204,
+    "wav_sha256": "2057b7657e8e73ddcabff02ced4b4258202f529479483b631d09db9a36b2ad04"
+   },
+   {
+    "start_sample": 68919360,
+    "end_sample": 71563776,
+    "start_s": 4307.46,
+    "end_s": 4472.736,
+    "wav_bytes": 5288876,
+    "wav_sha256": "a00d44141668662890df153d999a825e9359803d686cdfa567b8a10546f0c469"
+   }
+  ]
+ }
+]
