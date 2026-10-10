@@ -545,6 +545,26 @@ class Controls(unittest.TestCase):
         self.assertNotEqual(record["stored_sha256"], record["decoded_sha256"])
         self.assertEqual(row["status"], "failed")
 
+    def test_complete_flag_without_durable_digest_marker_stays_unknown(self):
+        original = common.save_new
+
+        def interrupted_marker(path, raw):
+            if path.name == "wire-000-complete.json":
+                raise PersistenceFailure("injected pre-marker interruption")
+            original(path, raw)
+
+        with patch("transport.save_new", side_effect=interrupted_marker):
+            row, folder, halt = self.worker(lambda _: terminal_response())
+        self.assertEqual(row["status"], "UNKNOWN")
+        self.assertTrue(halt.is_set())
+        (folder / "terminal.json").unlink()
+        self.assertEqual(transport.recover(folder)["status"], "UNKNOWN")
+        (folder / "wire-000-complete.json").write_bytes(canonical({"complete": True, "response_sha256": "wrong"}))
+        self.assertEqual(transport.recover(folder)["status"], "UNKNOWN")
+        raw = (folder / "wire-000.json").read_bytes()
+        (folder / "wire-000-complete.json").write_bytes(canonical({"complete": True, "response_sha256": sha256(raw)}))
+        self.assertEqual(transport.recover(folder)["status"], "ok")
+
     def test_direct_fence_rejects_unrelated_requests(self):
         folder = self.root / "fence"
         folder.mkdir()

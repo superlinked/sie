@@ -232,6 +232,12 @@ class OnePost(httpx.BaseTransport):
                 monotonic_body_end=time.monotonic(),
             )
             self.evidence(f"wire-{index:03d}.json", record)
+            if record["complete"]:
+                # This marker can only exist after the response file and its directory were fsynced.
+                self.evidence(
+                    f"wire-{index:03d}-complete.json",
+                    {"response_sha256": sha256(canonical(record)), "complete": True},
+                )
             self.wire.append(record)
             if not record["complete"]:
                 self.halt.set()
@@ -277,7 +283,18 @@ def recover(folder: Path) -> dict:
     records = []
     for path in sorted(folder.glob("wire-[0-9][0-9][0-9].json")):
         try:
-            records.append(json.loads(path.read_bytes()))
+            raw = path.read_bytes()
+            record = json.loads(raw)
+            if record["complete"]:
+                marker = path.with_name(f"{path.stem}-complete.json")
+                try:
+                    proof = json.loads(marker.read_bytes())
+                    verified = proof.get("complete") is True and proof.get("response_sha256") == sha256(raw)
+                except (ValueError, OSError):
+                    verified = False
+                if not verified:
+                    record.update(body_complete=True, complete=False, reason="CompletionNotDurable")
+            records.append(record)
         except (ValueError, OSError):
             continue
     result = {"status": "known_unattempted", "text": "", "halt": True}

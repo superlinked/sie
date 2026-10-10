@@ -78,7 +78,9 @@ Every worker durably records an exclusive POST intent before physical egress.
 A transport fence rejects every second POST, including SDK model-loading and
 admission retries. Complete responses are persisted with actual status, safe
 headers, body representation, digests, and an explicit completion flag before
-the SDK interprets them. Gzip/deflate expansion is bounded. The unchanged SDK
+the SDK interprets them. Recovery requires a matching digest marker created
+after the response file and directory fsync succeed. Gzip/deflate expansion is
+bounded. The unchanged SDK
 return is saved separately. Known API-key redactions are marked; authentication
 headers and continuation tokens are omitted from evidence.
 
