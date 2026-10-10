@@ -57,6 +57,7 @@ def settings(**updates) -> dict:
         "max_completion_tokens": 32768,
         "thinking": "on",
         "temperature": 1.0,
+        "top_k": 64,
         **updates,
     }
 
@@ -245,6 +246,76 @@ class SourceAndFrameTests(unittest.TestCase):
         self.assertEqual(plan["decoding"]["temperature"], 0.0)
         self.assertEqual(execute.call_args.args[2]["temperature"], 0.0)
 
+    def test_explicit_top_k_is_recorded_and_dispatched(self) -> None:
+        execute = mock.Mock(return_value={"status": "ok", "physical_sends": 1})
+        self.frame(execute, top_k=20)
+        plan = json.loads((self.root / "out" / "plan.json").read_bytes())
+        self.assertEqual(plan["decoding"]["top_k"], 20)
+        self.assertEqual(execute.call_count, 32)
+        self.assertTrue(all(call.args[2]["top_k"] == 20 for call in execute.call_args_list))
+
+    def test_invalid_top_k_rejected_before_inputs_output_or_dispatch(self) -> None:
+        for value in [True, False, 20.0, 1.5, "20", None, 0, -1, 2**32]:
+            with self.subTest(top_k=value), mock.patch.object(run, "load_inputs") as load:
+                execute = mock.Mock()
+                with self.assertRaisesRegex(ValueError, "Top-k must be an integer from 1 to 4294967295"):
+                    self.frame(execute, top_k=value)
+                load.assert_not_called()
+                execute.assert_not_called()
+                self.assertFalse((self.root / "out").exists())
+
+    def test_top_k_range_boundaries_are_accepted(self) -> None:
+        for value in [1, 2**32 - 1]:
+            with self.subTest(top_k=value), contextlib.redirect_stdout(io.StringIO()):
+                execute = mock.Mock(return_value={"status": "failed", "physical_sends": 1})
+                out = self.root / f"out-{value}"
+                run.run_frame(
+                    self.inputs,
+                    out,
+                    url="https://example.test/base",
+                    model="public/model",
+                    top_k=value,
+                    execute=execute,
+                )
+                self.assertEqual(execute.call_args.args[2]["top_k"], value)
+                self.assertEqual(json.loads((out / "plan.json").read_bytes())["decoding"]["top_k"], value)
+
+
+class CliTests(unittest.TestCase):
+    def test_explicit_and_default_top_k_are_forwarded(self) -> None:
+        for arguments, expected in [(["--top-k", "20"], 20), ([], 64)]:
+            with (
+                self.subTest(arguments=arguments),
+                mock.patch.object(run, "run_frame", return_value=[{"status": "ok"}]) as frame,
+            ):
+                status = run.main(["--url", "https://example.test/base", "--model", "public/model", *arguments])
+                self.assertEqual(status, 0)
+                frame.assert_called_once_with(
+                    Path("data/inputs.json"),
+                    Path("run-output"),
+                    url="https://example.test/base",
+                    model="public/model",
+                    timeout_s=1800,
+                    max_completion_tokens=32768,
+                    thinking="on",
+                    temperature=1.0,
+                    top_k=expected,
+                )
+
+    def test_noninteger_top_k_is_rejected_without_calling_frame(self) -> None:
+        with mock.patch.object(run, "run_frame") as frame, contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                run.main(["--url", "https://example.test/base", "--model", "public/model", "--top-k", "1.5"])
+            self.assertEqual(caught.exception.code, 2)
+            frame.assert_not_called()
+
+    def test_nonpositive_top_k_is_rejected_before_input_loading(self) -> None:
+        for value in ["0", "-1"]:
+            with self.subTest(top_k=value), mock.patch.object(run, "load_inputs") as load:
+                with self.assertRaises(ValueError):
+                    run.main(["--url", "https://example.test/base", "--model", "public/model", "--top-k", value])
+                load.assert_not_called()
+
 
 class TransportTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -268,6 +339,7 @@ class TransportTests(unittest.TestCase):
             requests.append(request)
             self.assertEqual(request.url.path, "/base/v1/chat/completions")
             self.assertEqual(json.loads(request.read()), self.expected)
+            self.assertEqual(json.loads(request.read())["top_k"], 64)
             self.assertEqual(request.headers["accept-encoding"], "gzip, identity")
             self.assertTrue((self.folder / "sent.json").exists())
             return httpx.Response(
@@ -295,6 +367,23 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(terminal["status"], "ok")
         self.assertEqual(bodies, [run.request_body(self.case, settings(temperature=0.0))])
         self.assertEqual(bodies[0]["temperature"], 0.0)
+
+    def test_explicit_top_k_reaches_the_wire_once(self) -> None:
+        bodies = []
+
+        def handler(request):
+            self.assertEqual(request.method, "POST")
+            bodies.append(json.loads(request.read()))
+            return httpx.Response(
+                200, stream=httpx.ByteStream(run.canonical(reply())), headers={"content-type": "application/json"}
+            )
+
+        terminal = self.worker(handler, top_k=20)
+        self.assertEqual(terminal["status"], "ok")
+        self.assertEqual(terminal["finish_reason"], "stop")
+        self.assertEqual(terminal["physical_sends"], 1)
+        self.assertEqual(bodies, [run.request_body(self.case, settings(top_k=20))])
+        self.assertEqual(bodies[0]["top_k"], 20)
 
     def test_capacity_rejection_never_retries(self) -> None:
         requests = []
