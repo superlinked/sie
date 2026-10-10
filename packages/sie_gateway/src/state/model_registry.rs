@@ -1352,6 +1352,8 @@ impl ModelRegistry {
     /// that preserves its context/hardware/thinking launch shape while
     /// disabling speculation. A compatible default profile, or a safe variant
     /// that directly inherits the model-wide grammar profile, remains selected.
+    /// A non-speculative derivative compatible with its parent's declared
+    /// grammar-safe sibling also keeps its own launch and generation settings.
     ///
     /// The routing target is resolved off the request's *base* model, so the
     /// rewrite applies to incompatible defaults and explicit variants:
@@ -1429,6 +1431,17 @@ impl ModelRegistry {
             .and_then(|profile| profile.grammar_profile.clone());
         if let Some(scoped) = scoped {
             return Some((base.to_string(), scoped));
+        }
+        let parent_grammar_profile = base_entry
+            .info_extras
+            .profile_parents
+            .get(source_profile)
+            .and_then(|parent| base_entry.profile_configs.get(parent))
+            .and_then(|parent| parent.grammar_profile.as_deref());
+        if parent_grammar_profile.is_some_and(|parent_grammar_profile| {
+            Self::profile_is_grammar_compatible(base_entry, source_profile, parent_grammar_profile)
+        }) {
+            return Some((base.to_string(), source_profile.to_string()));
         }
         let gp = base_entry.info_extras.grammar_profile.clone()?;
         let target_profile = if base_entry
@@ -3779,6 +3792,233 @@ mod tests {
         assert_eq!(
             registry.grammar_route_variant("org/scoped-only:safe"),
             GrammarRoute::Keep
+        );
+    }
+
+    #[test]
+    fn test_gemma_catalog_grammar_routes_preserve_existing_profiles_and_thinking() {
+        let (_dir, registry) = gemma_grammar_fixture(gemma_grammar_config());
+        for (profile, serving) in [
+            ("", "no-spec"),
+            ("no-spec", "no-spec"),
+            ("h100-fp8", "no-spec"),
+            ("thinking", "h100-96k-thinking-no-spec"),
+            ("long-context", "long-context-no-spec"),
+            ("long-context-no-spec", "long-context-no-spec"),
+            ("long-context-thinking", "long-context-thinking-no-spec"),
+            (
+                "long-context-thinking-no-spec",
+                "long-context-thinking-no-spec",
+            ),
+            ("h200-256k", "long-context-no-spec"),
+            ("h200-256k-thinking", "long-context-thinking-no-spec"),
+            ("h100-96k", "h100-96k-no-spec"),
+            ("h100-96k-no-spec", "h100-96k-no-spec"),
+            ("h100-96k-thinking", "h100-96k-thinking-no-spec"),
+            ("h100-96k-thinking-no-spec", "h100-96k-thinking-no-spec"),
+            ("h100-96k-hires", "h100-96k-hires-no-spec"),
+            ("h100-96k-hires-no-spec", "h100-96k-hires-no-spec"),
+            ("h100-96k-hires-out8k", "h100-96k-hires-out8k-no-spec"),
+            (
+                "h100-96k-hires-out8k-no-spec",
+                "h100-96k-hires-out8k-no-spec",
+            ),
+            (
+                "h100-96k-hires-thinking-no-spec",
+                "h100-96k-hires-thinking-no-spec",
+            ),
+        ] {
+            let requested = if profile.is_empty() {
+                "google/gemma-4-31B-it".to_string()
+            } else {
+                format!("google/gemma-4-31B-it:{profile}")
+            };
+            let expected = if profile == serving {
+                GrammarRoute::Keep
+            } else {
+                GrammarRoute::Rewrite(format!("google/gemma-4-31B-it:{serving}"))
+            };
+            assert_eq!(
+                registry.grammar_route_variant(&requested),
+                expected,
+                "{profile}"
+            );
+        }
+        let thinking = registry
+            .get_model_info("google/gemma-4-31B-it:h100-96k-hires-thinking-no-spec")
+            .unwrap();
+        assert_eq!(thinking.effective_max_output_tokens(), Some(32768));
+        assert_eq!(thinking.info_extras.max_sequence_length, Some(98304));
+        assert_eq!(
+            thinking.profile_configs["default"].chat_template_kwargs,
+            Some(serde_json::json!({"enable_thinking": true}))
+        );
+        assert_eq!(
+            registry.grammar_route_variant("GOOGLE/GEMMA-4-31B-IT:H100-96K-HIRES-THINKING-NO-SPEC"),
+            GrammarRoute::Keep
+        );
+    }
+
+    fn gemma_grammar_config() -> ModelConfig {
+        serde_yaml::from_str(include_str!(
+            "../../../sie_server/models/google__gemma-4-31B-it.yaml"
+        ))
+        .unwrap()
+    }
+
+    fn gemma_grammar_fixture(config: ModelConfig) -> (TempDir, ModelRegistry) {
+        let (dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            "name: default\npriority: 10\nadapters:\n  - sie_server.adapters.sglang.gemma\n  - sie_server.adapters.fake.adapter\n",
+        )
+        .unwrap();
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        registry.add_model_config(config).unwrap();
+        (dir, registry)
+    }
+
+    fn remove_grammar_model(registry: &ModelRegistry, model: &str) {
+        let mut snapshot = (*registry.snapshot.load_full()).clone();
+        snapshot.models.remove(model);
+        snapshot.model_names_lower.remove(&model.to_lowercase());
+        registry.snapshot.store(Arc::new(snapshot));
+    }
+
+    #[test]
+    fn test_gemma_hires_thinking_keeps_its_route_without_served_siblings_or_base() {
+        let (_dir, registry) = gemma_grammar_fixture(gemma_grammar_config());
+        let requested = "google/gemma-4-31B-it:h100-96k-hires-thinking-no-spec";
+        for model in registry.list_models() {
+            if model != "google/gemma-4-31B-it" && model != requested {
+                remove_grammar_model(&registry, &model);
+            }
+        }
+        assert_eq!(
+            registry.grammar_route_variant(requested),
+            GrammarRoute::Keep
+        );
+        remove_grammar_model(&registry, "google/gemma-4-31B-it");
+        assert_eq!(
+            registry.grammar_route_variant(requested),
+            GrammarRoute::Keep
+        );
+    }
+
+    #[test]
+    fn test_parent_grammar_hint_rejects_incompatible_gemma_children() {
+        let config = gemma_grammar_config();
+        let profile_name = "h100-96k-hires-thinking-no-spec";
+        let profile = config.profiles[profile_name].clone();
+        let mut cases = Vec::new();
+        let mut different_adapter = profile.clone();
+        different_adapter.adapter_path =
+            Some("sie_server.adapters.fake.adapter:FakeAdapter".to_string());
+        cases.push(("adapter-mismatch", different_adapter));
+        for (name, field, value) in [
+            (
+                "backend-mismatch",
+                "grammar_backend",
+                serde_json::json!("outlines"),
+            ),
+            (
+                "speculation-enabled",
+                "speculative",
+                serde_json::json!({"enabled": true}),
+            ),
+            (
+                "speculation-malformed",
+                "speculative",
+                serde_json::json!({"enabled": "false"}),
+            ),
+            ("speculation-absent", "speculative", serde_json::Value::Null),
+        ] {
+            let mut profile = profile.clone();
+            let loadtime = profile.adapter_options.as_mut().unwrap()["loadtime"]
+                .as_object_mut()
+                .unwrap();
+            if value.is_null() {
+                loadtime.remove(field);
+            } else {
+                loadtime.insert(field.to_string(), value);
+            }
+            cases.push((name, profile));
+        }
+        for (name, args) in [
+            (
+                "raw-speculation",
+                serde_json::json!(["--speculative-algo", "NEXTN"]),
+            ),
+            (
+                "raw-speculation-equals",
+                serde_json::json!(["--speculative-algo=NEXTN"]),
+            ),
+            (
+                "raw-eagle",
+                serde_json::json!(["--enable-multi-layer-eagle"]),
+            ),
+            (
+                "raw-config",
+                serde_json::json!(["--config", "overrides.json"]),
+            ),
+            (
+                "raw-backend",
+                serde_json::json!(["--grammar-backend", "outlines"]),
+            ),
+            (
+                "extra-launch-mismatch",
+                serde_json::json!(["--log-level", "debug"]),
+            ),
+        ] {
+            let mut profile = profile.clone();
+            profile.adapter_options.as_mut().unwrap()["loadtime"]["extra_launch_args"]
+                .as_array_mut()
+                .unwrap()
+                .extend(args.as_array().unwrap().iter().cloned());
+            cases.push((name, profile));
+        }
+        for (name, profile) in cases {
+            let mut config = config.clone();
+            config.profiles.insert(profile_name.to_string(), profile);
+            let (_dir, registry) = gemma_grammar_fixture(config);
+            let requested = format!("google/gemma-4-31B-it:{profile_name}");
+            assert_eq!(
+                registry.grammar_route_variant(&requested),
+                GrammarRoute::Rewrite("google/gemma-4-31B-it:no-spec".to_string()),
+                "{name}"
+            );
+            remove_grammar_model(&registry, "google/gemma-4-31B-it:no-spec");
+            assert_eq!(
+                registry.grammar_route_variant(&requested),
+                GrammarRoute::MissingVariant("no-spec".to_string()),
+                "{name}: missing fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn test_explicit_gemma_child_grammar_fallback_precedes_parent_hint() {
+        let mut config = gemma_grammar_config();
+        let profile_name = "h100-96k-hires-thinking-no-spec";
+        let fallback_name = "hires-thinking-scoped-safe";
+        let fallback = config.profiles[profile_name].clone();
+        config.profiles.insert(fallback_name.to_string(), fallback);
+        config
+            .profiles
+            .get_mut(profile_name)
+            .unwrap()
+            .grammar_profile = Some(fallback_name.to_string());
+        let (_dir, registry) = gemma_grammar_fixture(config);
+        let requested = format!("google/gemma-4-31B-it:{profile_name}");
+        let fallback = format!("google/gemma-4-31B-it:{fallback_name}");
+        assert_eq!(
+            registry.grammar_route_variant(&requested),
+            GrammarRoute::Rewrite(fallback.clone())
+        );
+        remove_grammar_model(&registry, &fallback);
+        assert_eq!(
+            registry.grammar_route_variant(&requested),
+            GrammarRoute::MissingVariant(fallback_name.to_string())
         );
     }
 

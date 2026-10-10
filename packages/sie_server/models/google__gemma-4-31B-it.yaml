@@ -520,3 +520,31 @@ profiles:
           - "--mm-process-config"
           - '{"image":{"max_soft_tokens":1120}}'
           - "--constrained-json-disable-any-whitespace"
+  # Repeat the full non-speculative launch because load-time overrides
+  # replace the parent's block rather than merging it.
+  h100-96k-hires-thinking-no-spec:
+    extends: h100-96k-hires
+    max_output_tokens: 32768
+    chat_template_kwargs:
+      enable_thinking: true
+    adapter_options:
+      loadtime:
+        max_seq_length: 98304
+        mem_fraction_static: 0.90
+        served_model_name: google/gemma-4-31B-it
+        attention_backend: triton
+        grammar_backend: xgrammar
+        json_number_max_digits: 19
+        reasoning_parser: gemma4
+        tool_call_parser: gemma4
+        speculative_needs_extra_buffer: false
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--quantization"
+          - "fp8"
+          - "--kv-cache-dtype"
+          - "fp8_e4m3"
+          - "--mm-process-config"
+          - '{"image":{"max_soft_tokens":1120}}'
+          - "--constrained-json-disable-any-whitespace"

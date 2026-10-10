@@ -49,6 +49,7 @@ _HARDWARE_THINKING_PROFILES = {
         "h200-256k-thinking",
         "long-context-thinking-no-spec",
         "h100-96k-thinking-no-spec",
+        "h100-96k-hires-thinking-no-spec",
     ),
 }
 

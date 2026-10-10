@@ -15,6 +15,8 @@ The rules mirror the gateway's ``ModelRegistry::grammar_route_variant``:
 - a request that names the grammar-safe variant keeps its id;
 - a variant that directly extends the grammar profile and is grammar
   compatible keeps its id;
+- a non-speculative variant compatible with its parent's declared grammar
+  profile keeps its id;
 - otherwise the request moves to ``{base}:{grammar_profile}``, and fails with
   ``unsupported_field`` when that variant is not served.
 """
@@ -92,6 +94,12 @@ def _grammar_target(registry: ModelConfigSource, model_id: str) -> tuple[str, st
         return None
     if source_config.grammar_profile is not None:
         return base_id, source_config.grammar_profile
+    parent = profiles.get(source_config.extends)
+    parent_grammar_profile = None if parent is None else parent.grammar_profile
+    if parent_grammar_profile is not None and _profile_is_grammar_compatible(
+        base, source_profile, parent_grammar_profile
+    ):
+        return base_id, source_profile
     grammar_profile = _model_grammar_profile(base)
     if grammar_profile is None:
         return None
