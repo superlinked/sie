@@ -674,6 +674,38 @@ pub struct Dispatcher {
     /// `EnsureModelReady` (`ModelDescriptor::max_concurrent_dispatch`).
     /// Only widths above 1 are kept; see [`Dispatcher::dispatch_width`].
     dispatch_widths: Arc<std::sync::RwLock<HashMap<String, usize>>>,
+    /// Each model's scheduler pipeline, shared with its drain loop so a
+    /// larger width reported after the loop started can widen it.
+    pipelines: Arc<std::sync::Mutex<HashMap<String, Arc<ModelPipeline>>>>,
+}
+
+/// In-flight batch permits of one model's scheduler drain loop. The depth
+/// only grows: a later `EnsureModelReady` that reports a larger dispatch
+/// width adds permits to the running loop.
+struct ModelPipeline {
+    permits: Arc<Semaphore>,
+    depth: std::sync::atomic::AtomicUsize,
+}
+
+impl ModelPipeline {
+    fn new(depth: usize) -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(depth)),
+            depth: std::sync::atomic::AtomicUsize::new(depth),
+        }
+    }
+
+    fn depth(&self) -> usize {
+        self.depth.load(Ordering::Acquire)
+    }
+
+    /// Raise the depth to `depth`; never lowers it.
+    fn grow_to(&self, depth: usize) {
+        let previous = self.depth.fetch_max(depth, Ordering::AcqRel);
+        if depth > previous {
+            self.permits.add_permits(depth - previous);
+        }
+    }
 }
 
 impl Dispatcher {
@@ -701,11 +733,32 @@ impl Dispatcher {
             widths.remove(model_id);
         }
         drop(widths);
+        // A drain loop that is already running keeps its semaphore; widen it.
+        let pipeline = self
+            .pipelines
+            .lock()
+            .expect("pipeline map lock poisoned")
+            .get(model_id)
+            .cloned();
+        if let Some(pipeline) = pipeline {
+            pipeline.grow_to(self.pipeline_depth_for(model_id));
+        }
         info!(
             model = %model_id,
             dispatch_width = width,
             "rust-scheduler: backend dispatch width recorded",
         );
+    }
+
+    /// The pipeline of `model_id`'s drain loop, created at
+    /// [`Self::pipeline_depth_for`] on first use.
+    fn model_pipeline(&self, model_id: &str) -> Arc<ModelPipeline> {
+        let mut pipelines = self.pipelines.lock().expect("pipeline map lock poisoned");
+        Arc::clone(
+            pipelines
+                .entry(model_id.to_owned())
+                .or_insert_with(|| Arc::new(ModelPipeline::new(self.pipeline_depth_for(model_id)))),
+        )
     }
 
     /// Batches the backend runs through `model_id`'s adapter at once
@@ -812,6 +865,7 @@ impl Dispatcher {
             request_cancel_state,
             work_deadline: WorkDeadlinePolicy::from_env(),
             dispatch_widths: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            pipelines: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 }
@@ -6130,9 +6184,11 @@ pub(crate) async fn scheduler_drain_loop(
     scheduler: Arc<ProductionScheduler>,
     shutdown: Arc<Shutdown>,
 ) {
-    // Fixed for the loop's life: the loop starts after the model's first
-    // `EnsureModelReady`, which reports its dispatch width.
-    let depth = dispatcher.pipeline_depth_for(&model_id);
+    // The loop starts after the model's first `EnsureModelReady`, which
+    // reports its dispatch width; a larger width reported later widens the
+    // pipeline in place (see `Dispatcher::record_dispatch_width`).
+    let pipeline = dispatcher.model_pipeline(&model_id);
+    let depth = pipeline.depth();
     let idle_bypass_enabled = scheduler_idle_bypass_enabled();
     info!(
         model = %model_id,
@@ -6164,7 +6220,7 @@ pub(crate) async fn scheduler_drain_loop(
     // dispatch (one outstanding IPC roundtrip). At very high
     // concurrency, operators may prefer `1` to avoid parking a second
     // frame behind a long GPU forward pass.
-    let pipeline_sem = Arc::new(Semaphore::new(depth));
+    let pipeline_sem = Arc::clone(&pipeline.permits);
 
     // Idle-bypass + continuous-batching state. On the queue path,
     // Python's `model_worker.py::_process_loop` is bypassed and the Rust
@@ -6336,13 +6392,17 @@ pub(crate) async fn scheduler_drain_loop(
         was_idle = !drained_any && initial_batch_size <= 1;
     }
 
-    // Quiesce the pipeline: acquire all `depth` permits so every
+    // Quiesce the pipeline: acquire all of its permits so every
     // spawned dispatch task has finished its IPC roundtrip and
     // released its permit. Only then do we enter synchronous shutdown
     // drain below. Without this the final-drain loop
     // could race with still-in-flight pipelined batches and double-
     // submit work to Python.
-    if let Ok(permits) = pipeline_sem.clone().acquire_many_owned(depth as u32).await {
+    if let Ok(permits) = pipeline_sem
+        .clone()
+        .acquire_many_owned(pipeline.depth() as u32)
+        .await
+    {
         // Hold the permits for the rest of the function so no further
         // spawns can sneak in (`spawn_pipelined_batch` is no longer
         // called past this point, but defence-in-depth).
@@ -7379,10 +7439,10 @@ mod tests {
     }
 
     /// Ready backend whose descriptor reports `width`. Holds every
-    /// `RunBatch` until `release` has a permit, recording each batch's size
-    /// and the most batches in flight at once.
+    /// `RunBatch` until `release` has a permit for it, recording each
+    /// batch's size and the most batches in flight at once.
     struct EngineBatchedBackend {
-        width: Option<u32>,
+        width: std::sync::Mutex<Option<u32>>,
         sizes: std::sync::Mutex<Vec<usize>>,
         active: std::sync::atomic::AtomicUsize,
         peak: std::sync::atomic::AtomicUsize,
@@ -7392,12 +7452,18 @@ mod tests {
     impl EngineBatchedBackend {
         fn new(width: Option<u32>) -> Arc<Self> {
             Arc::new(Self {
-                width,
+                width: std::sync::Mutex::new(width),
                 sizes: std::sync::Mutex::new(Vec::new()),
                 active: std::sync::atomic::AtomicUsize::new(0),
                 peak: std::sync::atomic::AtomicUsize::new(0),
                 release: Semaphore::new(0),
             })
+        }
+
+        /// Batch sizes and peak in flight since the last call.
+        fn take_observations(&self) -> (Vec<usize>, usize) {
+            let sizes = std::mem::take(&mut *self.sizes.lock().unwrap());
+            (sizes, self.peak.swap(0, Ordering::SeqCst))
         }
     }
 
@@ -7420,7 +7486,7 @@ mod tests {
                 batch_budget: None,
                 descriptor: Some(ModelDescriptor {
                     supports_run_batch: true,
-                    max_concurrent_dispatch: self.width,
+                    max_concurrent_dispatch: *self.width.lock().unwrap(),
                     ..Default::default()
                 }),
             })
@@ -7451,7 +7517,11 @@ mod tests {
             self.sizes.lock().unwrap().push(req.items.len());
             let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(now, Ordering::SeqCst);
-            drop(self.release.acquire().await.expect("release stays open"));
+            self.release
+                .acquire()
+                .await
+                .expect("release stays open")
+                .forget();
             self.active.fetch_sub(1, Ordering::SeqCst);
             let outcomes = req
                 .items
@@ -7473,40 +7543,63 @@ mod tests {
         }
     }
 
-    /// Dispatch `items` single-page extract requests for one model, let the
-    /// scheduler send all it will, and return the `RunBatch` sizes and the
-    /// peak in flight before any batch finished.
-    async fn run_extract_group(width: Option<u32>, items: u32) -> (Vec<usize>, usize, usize) {
-        let backend = EngineBatchedBackend::new(width);
-        let mut dispatcher = dispatcher_with_backend(backend.clone());
+    /// A dispatcher with the production scheduler wired in.
+    fn scheduled_dispatcher(
+        backend: Arc<EngineBatchedBackend>,
+    ) -> (Arc<Dispatcher>, Arc<Shutdown>) {
+        let mut dispatcher = dispatcher_with_backend(backend);
         let shutdown = Arc::new(Shutdown::new());
         let mutable = Arc::get_mut(&mut dispatcher).unwrap();
         mutable.scheduler_registry = Some(Arc::new(ProductionSchedulerRegistry::new(
             crate::scheduler::BatchConfig::default(),
         )));
         mutable.shutdown = Some(Arc::clone(&shutdown));
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let group = (0..items)
+        (dispatcher, shutdown)
+    }
+
+    /// Send `slots` one-page extract requests for model "ocr", then give the
+    /// scheduler time to send all it will while the backend holds them.
+    async fn send_extract_pages(
+        dispatcher: &Arc<Dispatcher>,
+        prefix: &str,
+        slots: std::ops::Range<u32>,
+        tx: &tokio::sync::mpsc::UnboundedSender<crate::delivery::LocalDeliveryEvent>,
+    ) {
+        let count = slots.len();
+        let group = slots
             .map(|slot| {
                 (
-                    wi(&format!("page-{slot}"), 0, "ocr", "extract"),
+                    wi(&format!("{prefix}-{slot}"), 0, "ocr", "extract"),
                     Delivery::Local(LocalDelivery::new(slot as usize, 0, tx.clone())),
                 )
             })
             .collect();
         dispatcher
-            .dispatch_decoded(group, items as usize, Instant::now())
+            .dispatch_decoded(group, count, Instant::now())
             .await;
         tokio::time::sleep(Duration::from_secs(1)).await;
-        let sizes = backend.sizes.lock().unwrap().clone();
-        let peak = backend.peak.load(Ordering::SeqCst);
-        let depth = dispatcher.pipeline_depth_for("ocr");
-        backend.release.add_permits(1);
-        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    async fn stop_scheduled(dispatcher: &Arc<Dispatcher>, shutdown: &Shutdown) {
         shutdown.fire();
         for handle in dispatcher.take_scheduler_drain_handles().await {
             handle.abort();
         }
+    }
+
+    /// Dispatch `items` single-page extract requests for one model and
+    /// return the `RunBatch` sizes, the peak in flight before any batch
+    /// finished, and the model's pipeline depth.
+    async fn run_extract_group(width: Option<u32>, items: u32) -> (Vec<usize>, usize, usize) {
+        let backend = EngineBatchedBackend::new(width);
+        let (dispatcher, shutdown) = scheduled_dispatcher(backend.clone());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        send_extract_pages(&dispatcher, "page", 0..items, &tx).await;
+        let (sizes, peak) = backend.take_observations();
+        let depth = dispatcher.model_pipeline("ocr").depth();
+        backend.release.add_permits(items as usize);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        stop_scheduled(&dispatcher, &shutdown).await;
         (sizes, peak, depth)
     }
 
@@ -7525,6 +7618,34 @@ mod tests {
         assert_eq!(sizes.iter().sum::<usize>(), 6);
         assert!(sizes.iter().any(|&size| size > 1), "sizes {sizes:?}");
         assert!(peak <= pipeline_depth(), "peak {peak}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_larger_width_reported_later_widens_the_running_pipeline() {
+        let backend = EngineBatchedBackend::new(None);
+        let (dispatcher, shutdown) = scheduled_dispatcher(backend.clone());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // First traffic starts the drain loop at the default depth. One page
+        // keeps the loop idle afterwards, so the next group flushes at once
+        // instead of on the batch former's wall-clock windows.
+        send_extract_pages(&dispatcher, "before", 0..1, &tx).await;
+        backend.release.add_permits(1);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(dispatcher.model_pipeline("ocr").depth(), pipeline_depth());
+        backend.take_observations();
+
+        // A reload reports width 8: the same loop now runs every page at once.
+        *backend.width.lock().unwrap() = Some(8);
+        send_extract_pages(&dispatcher, "after", 1..7, &tx).await;
+        let (sizes, peak) = backend.take_observations();
+        assert_eq!(dispatcher.model_pipeline("ocr").depth(), 8);
+        assert_eq!(sizes, vec![1; 6]);
+        assert_eq!(peak, 6);
+
+        backend.release.add_permits(6);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        stop_scheduled(&dispatcher, &shutdown).await;
     }
 
     #[test]
