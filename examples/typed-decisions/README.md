@@ -454,3 +454,11 @@ and changes no text. It has no dev split and is not tuned.
   tokens.
 - **Nothing about calibration for `laya-multilingual`.** It is defined in
   `run.py` but not in the plan, and it ships no temperature table.
+
+## Run the separate Workflow DEV32 source
+
+[Workflow32](workflow32/) sends all 32 structured workflow requests through any
+compatible SIE URL, records full responses and errors, and uses the pinned
+public exact-field scorer. This is a separate development set with eight
+episodes; its scope and unresolved source-ancestry exclusions are documented
+in that example. It does not change the CVE or LocalLLaMA recordings above.

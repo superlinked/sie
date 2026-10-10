@@ -1,0 +1,45 @@
+{
+  "dataset": "superlinked/sie-task-evidence",
+  "revision": "6ca14001c2b6287473d89da72e549702a9b9343c",
+  "prefix": "typed-decisions/2026-10-09/gemma31b-fresh-workflow32-source-v2",
+  "scope": "DEV only; eight unresolved semantic ancestry exclusions",
+  "upstream_revision": "253c741573559c8167863f172001e478575b0dde",
+  "cases": 32,
+  "episodes": 8,
+  "controls": 8,
+  "required_fields": 208,
+  "files": {
+    "LICENSE": {
+      "bytes": 1068,
+      "sha256": "37b5ce2661ee148b3d0e1da88b350723bd0df509e78cd02d4d26ce90f8a18755"
+    },
+    "gold.json": {
+      "bytes": 68336,
+      "sha256": "9351aab849d9ca061bb9e61d8f2c1543e8ab44a038aab2ab78482d3b33a268c4"
+    },
+    "inputs.json": {
+      "bytes": 457692,
+      "sha256": "173b6db5b94f4cb5497ae2a52d03dd17e0c4df15e0ec096f191b8e31203875dd"
+    },
+    "lineage.json": {
+      "bytes": 9437,
+      "sha256": "9d96b9bbb1461997b76120659ad6c0350a14bd686e8b209255ed624b433984c8"
+    },
+    "protocol.json": {
+      "bytes": 2489,
+      "sha256": "ddb29d3f5c4d4dd1ebe019ab846999105ce92c44bfb2fe338f18c7fa4ac4a860"
+    },
+    "score.py": {
+      "bytes": 3990,
+      "sha256": "e5d9407e0943263dff16bd3456943588d0e93bbf4e30d659062f1c72c39fc211"
+    },
+    "upstream/LICENSE": {
+      "bytes": 1069,
+      "sha256": "ae9d93137ddf162fa78fdf15f2ce301eb1a7731faa52469800974d9a7956f218"
+    },
+    "upstream/src/streamdecisionbench/lite/core.py": {
+      "bytes": 8292,
+      "sha256": "93ed536d194e77355db77addd879a6406e89cbbbb91e967db4c56a796b1955a4"
+    }
+  }
+}
