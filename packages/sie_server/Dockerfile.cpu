@@ -129,13 +129,20 @@ FROM base AS builder
 
 ARG BUNDLE
 
+# Ranged bundle deps are constrained to uv.lock. Exact pins and URL/VCS specs stay overrides.
+COPY uv.lock /tmp/uv.lock
+
 RUN .venv/bin/python -m sie_server.cli resolve-deps \
     --bundle "${BUNDLE}" \
     --models-dir models \
     --cpu \
+    --lock /tmp/uv.lock \
+    --constraints-output /tmp/bundle-constraints.txt \
     > /tmp/bundle-requirements.txt \
     && echo "Bundle ${BUNDLE} requirements:" \
-    && cat /tmp/bundle-requirements.txt
+    && cat /tmp/bundle-requirements.txt \
+    && echo "Bundle ${BUNDLE} lock constraints:" \
+    && cat /tmp/bundle-constraints.txt
 
 # Bundle-specific deps land in a separate site-packages tree so the shared
 # venv layer stays byte-identical across bundles of the same platform.
@@ -149,6 +156,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
             --extra-index-url https://pypi.org/simple \
             --target=/app/bundle-libs \
             --no-compile \
+            -c /tmp/bundle-constraints.txt \
             -r /tmp/bundle-requirements.txt; \
     fi
 
@@ -163,7 +171,9 @@ RUN set -eux; \
         rm -rf torch/test torch/utils/tensorboard torch/utils/bottleneck 2>/dev/null || true; \
         find torch -type f -name '*.a' -delete 2>/dev/null || true; \
     fi; \
-    find /app/bundle-libs -exec touch -h -d @0 {} + 2>/dev/null || true
+    find /app/bundle-libs -exec touch -h -d @0 {} + 2>/dev/null || true; \
+    /app/.venv/bin/pip freeze --path /app/bundle-libs > /app/bundle-libs-freeze.txt; \
+    touch -d @0 /app/bundle-libs-freeze.txt
 
 # =============================================================================
 # Runtime image
@@ -219,6 +229,7 @@ COPY --link --from=base --chown=1000:1000 /app/models /app/models
 COPY --link --from=base --chown=1000:1000 /app/bundles /app/bundles
 # Bundle-specific extras — last layer so shared layers above stay cached.
 COPY --link --from=builder --chown=1000:1000 /app/bundle-libs /app/bundle-libs
+COPY --link --from=builder --chown=1000:1000 /app/bundle-libs-freeze.txt /app/bundle-libs-freeze.txt
 
 RUN mkdir -p /app/evals /app/.cache/huggingface && chown -R sie:sie /app/evals /app/.cache
 

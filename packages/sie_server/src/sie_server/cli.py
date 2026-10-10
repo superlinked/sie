@@ -207,6 +207,12 @@ def resolve_deps(
     models_dir: str = typer.Option(DEFAULT_MODELS_DIR, "--models-dir", help="Models directory"),
     output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
     cpu: bool = typer.Option(False, "--cpu", help="Exclude CUDA-only dependencies (flash-attn)"),
+    lock: Path | None = typer.Option(None, "--lock", help="uv.lock used to pin ranged bundle dependencies"),  # noqa: B008
+    constraints_output: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--constraints-output",
+        help="Write uv.lock constraints for the bundle's locked transitive closure",
+    ),
 ) -> None:
     """Resolve and print dependencies for a bundle or model list.
 
@@ -215,8 +221,24 @@ def resolve_deps(
 
     Use --cpu flag when building CPU-only images to exclude flash-attn
     and other CUDA-only dependencies.
+
+    ``--lock`` and ``--constraints-output`` together write a constraints file
+    that pins ranged dependencies and their locked transitive closure to
+    ``uv.lock``. Lines are ``name==version`` only (pip rejects extras). Exact
+    pins, URL/VCS specs, and ranges that do not contain the locked version are
+    not tightened. The file starts with a comment that the pins can install an
+    older release than an unconstrained build of the same commit. Stdout stays
+    the bundle requirements.
     """
+    from sie_server.bundle_requirements import lock_constraint_lines, parse_uv_lock
     from sie_server.core.deps import collect_bundle_deps
+
+    if (lock is None) != (constraints_output is None):
+        typer.echo("Error: --lock and --constraints-output must be used together", err=True)
+        raise typer.Exit(1)
+    if output_json and constraints_output is not None:
+        typer.echo("Error: --constraints-output cannot be combined with --json", err=True)
+        raise typer.Exit(1)
 
     models_path = Path(models_dir).resolve()
     bundles_dir = _DEFAULT_BUNDLES_DIR
@@ -253,6 +275,15 @@ def resolve_deps(
             for conflict in result.conflicts:
                 typer.echo(f"  - {conflict}", err=True)
         raise typer.Exit(1)
+
+    if constraints_output is not None and lock is not None:
+        try:
+            parsed_lock = parse_uv_lock(lock)
+        except (OSError, ValueError) as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        body = "\n".join(lock_constraint_lines(result.requirements, parsed_lock))
+        constraints_output.write_text(f"{body}\n" if body else "", encoding="utf-8")
 
     if output_json:
         import json

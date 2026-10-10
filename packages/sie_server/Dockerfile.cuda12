@@ -148,12 +148,19 @@ FROM base AS builder
 
 ARG BUNDLE
 
+# Ranged bundle deps are constrained to uv.lock. Exact pins and URL/VCS specs stay overrides.
+COPY uv.lock /tmp/uv.lock
+
 RUN .venv/bin/python -m sie_server.cli resolve-deps \
     --bundle "${BUNDLE}" \
     --models-dir models \
+    --lock /tmp/uv.lock \
+    --constraints-output /tmp/bundle-constraints.txt \
     > /tmp/bundle-requirements.txt \
     && echo "Bundle ${BUNDLE} requirements:" \
-    && cat /tmp/bundle-requirements.txt
+    && cat /tmp/bundle-requirements.txt \
+    && echo "Bundle ${BUNDLE} lock constraints:" \
+    && cat /tmp/bundle-constraints.txt
 
 # Bundle-specific deps go into a separate site-packages tree (``bundle-libs``,
 # prepended to sys.path via a .pth) so the shared venv layer stays
@@ -177,11 +184,13 @@ RUN --mount=type=cache,target=/root/.cache/pip \
                 --target=/app/bundle-libs \
                 --no-compile \
                 --extra-index-url https://docs.sglang.ai/whl/cu129/ \
+                -c /tmp/bundle-constraints.txt \
                 -r /tmp/bundle-requirements.txt ;; \
         *) \
             .venv/bin/pip install \
                 --target=/app/bundle-libs \
                 --no-compile \
+                -c /tmp/bundle-constraints.txt \
                 -r /tmp/bundle-requirements.txt ;; \
         esac; \
     fi
@@ -201,7 +210,9 @@ RUN set -eux; \
         find nvidia -type f -name '*.a' -delete 2>/dev/null || true; \
     fi; \
     # Normalize mtimes so rebuilds of the same bundle produce identical layer bytes.
-    find /app/bundle-libs -exec touch -h -d @0 {} + 2>/dev/null || true
+    find /app/bundle-libs -exec touch -h -d @0 {} + 2>/dev/null || true; \
+    /app/.venv/bin/pip freeze --path /app/bundle-libs > /app/bundle-libs-freeze.txt; \
+    touch -d @0 /app/bundle-libs-freeze.txt
 
 # =============================================================================
 # Runtime image
@@ -307,6 +318,7 @@ COPY --link --from=base --chown=1000:1000 /app/bundles /app/bundles
 # Bundle-specific extras — last layer so shared layers above stay cached.
 # A `.pth` file in the shared venv puts /app/bundle-libs at sys.path[0] at startup.
 COPY --link --from=builder --chown=1000:1000 /app/bundle-libs /app/bundle-libs
+COPY --link --from=builder --chown=1000:1000 /app/bundle-libs-freeze.txt /app/bundle-libs-freeze.txt
 
 RUN mkdir -p /app/evals /app/.cache/huggingface /app/.cache/sie-kernels \
     && chown -R sie:sie /app/evals /app/.cache

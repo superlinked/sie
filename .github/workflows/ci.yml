@@ -85,6 +85,27 @@ jobs:
           mise run helm -- dependencies
           mise exec -- uv run --frozen --project . --no-sync pytest -q -m docker tools/ci/tests/test_collector_*privacy.py
 
+  bundle-resolution:
+    name: CI / Bundle resolution
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.5.5
+          install_args: --jobs=1
+          cache: false
+      - run: mise run sync
+      - name: Resolve release bundle constraints
+        env:
+          SIE_RUN_IMAGE_RESOLUTION: "1"
+        run: >-
+          mise exec -- uv run --frozen --project . --no-sync pytest -q
+          packages/sie_server/tests/core/test_bundle_image_resolution.py
+
   typescript:
     name: CI / TypeScript
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -267,7 +288,7 @@ jobs:
   required:
     name: CI / Required
     if: ${{ always() }}
-    needs: [policy, bootstrap, python, typescript, rust, contracts, helm, live-sdk, cpu-stack, python-distributions, npm-distributions]
+    needs: [policy, bootstrap, python, bundle-resolution, typescript, rust, contracts, helm, live-sdk, cpu-stack, python-distributions, npm-distributions]
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:

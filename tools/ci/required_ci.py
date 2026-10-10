@@ -10,6 +10,7 @@ MANDATORY_JOBS = (
     "policy",
     "bootstrap",
     "python",
+    "bundle-resolution",
     "typescript",
     "rust",
     "contracts",

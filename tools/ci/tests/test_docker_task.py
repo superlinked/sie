@@ -244,6 +244,52 @@ def test_complete_set_verified_before_alias_commands(complete_source, monkeypatc
     assert commands == []
 
 
+def _dockerfile_logical_lines(text: str) -> list[str]:
+    logical: list[str] = []
+    buffer = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        buffer = f"{buffer} {stripped}".strip() if buffer else stripped
+        if buffer.endswith("\\"):
+            buffer = buffer[:-1].rstrip()
+            continue
+        logical.append(buffer)
+        buffer = ""
+    if buffer:
+        logical.append(buffer)
+    return logical
+
+
+@pytest.mark.parametrize(
+    "dockerfile",
+    ["Dockerfile.cpu", "Dockerfile.cuda12", "Dockerfile.cuda13"],
+)
+def test_bundle_image_installs_are_constrained_to_the_lock(dockerfile: str) -> None:
+    text = (Path(__file__).resolve().parents[3] / "packages" / "sie_server" / dockerfile).read_text()
+    assert "COPY uv.lock /tmp/uv.lock" in text
+    assert "--constraints-output /tmp/bundle-constraints.txt" in text
+    assert "pip freeze --path /app/bundle-libs > /app/bundle-libs-freeze.txt" in text
+    assert "/app/bundle-libs-freeze.txt /app/bundle-libs-freeze.txt" in text
+    installs = [
+        line
+        for line in _dockerfile_logical_lines(text)
+        if "-r /tmp/bundle-requirements.txt" in line and ("pip install" in line or "uv pip install" in line)
+    ]
+    assert installs
+    constraints_file = "/tmp/bundle-constraints.txt"  # noqa: S108
+    # A case/if arm ends at `;;`. One logical RUN can hold both CUDA 12
+    # branches, so each install command is checked on its own.
+    commands = [
+        part.strip()
+        for line in installs
+        for part in line.split(";;")
+        if "-r /tmp/bundle-requirements.txt" in part and ("pip install" in part or "uv pip install" in part)
+    ]
+    assert commands
+    for command in commands:
+        assert f"-c {constraints_file}" in command or f"--constraint {constraints_file}" in command
+
+
 def test_expected_release_set_has_sixteen_tags_and_six_names(complete_source):
     images = docker_task.expected_versioned_images("ghcr.io/superlinked", VERSION, complete_source)
     assert len(images) == len(set(images)) == 16
