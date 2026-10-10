@@ -39,6 +39,7 @@ adapters:
 - sie_server.adapters.xlm_roberta_flash
 - sie_server.adapters.nli_classification
 - sie_server.adapters.nli_classification_flash
+- sie_server.adapters.sequence_classification.adapter
 - sie_server.adapters.gliner
 - sie_server.adapters.gliner2.adapter
 - sie_server.adapters.gliner_bi

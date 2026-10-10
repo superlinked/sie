@@ -1,0 +1,22 @@
+# GoEmotions: 27 emotions plus neutral (multi-label sigmoid), RoBERTa-base. MIT.
+sie_id: SamLowe/roberta-base-go_emotions
+hf_id: SamLowe/roberta-base-go_emotions
+hf_revision: d75048347613a25d77de8cf6412eaae9fa7b26be
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 512
+profiles:
+  default:
+    max_batch_tokens: 65536
+    compute_precision: null
+    adapter_path: sie_server.adapters.sequence_classification.adapter:SequenceClassificationAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}

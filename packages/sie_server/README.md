@@ -134,6 +134,79 @@ item, the tokens of all its pairs after truncation to the model's
 count each (query, document) pair. An item classified against n labels
 therefore counts its text n times. A request may carry at most 1,000 labels.
 
+### Fixed-head classification
+
+Fine-tuned classifiers, Hugging Face `AutoModelForSequenceClassification`
+checkpoints, serve through `extract` with the `sequence_classification`
+adapter. Their classes are the checkpoint's `config.id2label`, so a request
+sends no labels. The shipped profiles cover financial sentiment
+(`ProsusAI/finbert`), prompt injection
+(`protectai/deberta-v3-base-prompt-injection-v2`), toxicity
+(`unitary/toxic-bert`), emotions (`SamLowe/roberta-base-go_emotions`), language
+identification (`papluca/xlm-roberta-base-language-detection`) and refusal
+detection (`NousResearch/Minos-v1`). The adapter is in both the default and the
+`transformers5` bundles.
+
+```python
+from sie_sdk import SIEClient
+from sie_sdk.types import Item
+
+with SIEClient("http://localhost:8080") as client:
+    result = client.extract(
+        "unitary/toxic-bert",
+        Item(text="You are a complete idiot."),
+        options={"threshold": 0.5},
+    )
+    print(result["classifications"])
+    # [{'label': 'toxic', 'score': 0.988}, {'label': 'insult', 'score': 0.956}, {'label': 'obscene', 'score': 0.775}]
+```
+
+Scores are those of transformers' `text-classification` pipeline with
+`top_k=None`: a softmax over every class for a single-label head, an
+independent sigmoid per class for a head whose `problem_type` is
+`multi_label_classification` (and for a head with one class). Classes come back
+best first. Optional controls:
+
+- `labels`: return only these classes. They must be names from
+  `config.id2label`; scores are still computed over every class and are not
+  renormalized.
+- `options.multi_label`: `true` for a sigmoid per class, `false` for a softmax,
+  overriding the checkpoint's `problem_type`.
+- `options.top_k`: at most this many classes. `options.threshold`: drop classes
+  scoring below this value in [0, 1].
+- `options.overflow_policy`: `default` and `truncate_text` read the first
+  `max_sequence_length` tokens, like the pipeline with `truncation=True`;
+  `error` fails an item that does not fit whole with a per-item
+  `INPUT_TOO_LONG` while the other items succeed.
+
+`usage.input_tokens` counts the tokens the model reads for each item, special
+tokens included, after truncation; failed items count nothing. Regression heads
+are refused at load. To serve your own fine-tune, add a model YAML that points
+`hf_id` (or `weights_path`, for a local directory) at the checkpoint:
+
+```yaml
+sie_id: acme/contract-clause-classifier
+weights_path: /models/contract-clause-classifier
+inputs:
+  text: true
+tasks:
+  extract: {}
+profiles:
+  default:
+    max_batch_tokens: 65536
+    adapter_path: sie_server.adapters.sequence_classification.adapter:SequenceClassificationAdapter
+```
+
+Without `max_sequence_length`, the window is the smaller of the tokenizer's
+`model_max_length` and the position table. Texts are sorted by length and run
+in forward passes of at most `max_forward_tokens` padded tokens (a load-time
+option, 16,384 by default); a pass stops taking shorter texts once padding
+would exceed a quarter of it, so short texts are not padded to long ones.
+Attention is the transformers default (SDPA where the architecture supports
+it); the load-time `attn_implementation` option overrides it. On CUDA the
+weights run in float16 unless the profile sets `compute_precision`; scores are
+computed in float32.
+
 ### GLiClass usage
 
 The shipped GLiClass and Opir profiles read a 1,024-token window
