@@ -10,6 +10,7 @@ import multiprocessing
 import os
 import tempfile
 import time
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -91,6 +92,41 @@ def request_body(case: dict, settings: dict) -> dict:
     return body
 
 
+def bounded_body(response: httpx.Response) -> bytes:
+    if response.is_stream_consumed:
+        body = response.content
+        if len(body) > MAX_RESPONSE_BYTES:
+            raise ValueError("Response exceeds the recorded byte bound")
+        return body
+    encoding = response.headers.get("content-encoding", "identity").strip().lower()
+    if encoding not in {"", "identity", "gzip"}:
+        raise ValueError("Unsupported response content encoding")
+    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS) if encoding == "gzip" else None
+    body = bytearray()
+    encoded_bytes = 0
+    for chunk in response.iter_raw(chunk_size=64 * 1024):
+        encoded_bytes += len(chunk)
+        if encoded_bytes > MAX_RESPONSE_BYTES:
+            raise ValueError("Encoded response exceeds the recorded byte bound")
+        pending = chunk
+        while pending:
+            remaining = MAX_RESPONSE_BYTES - len(body)
+            if decoder is None:
+                decoded = pending
+                pending = b""
+            else:
+                if decoder.eof:
+                    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                decoded = decoder.decompress(pending, remaining + 1)
+                pending = decoder.unused_data
+            if len(decoded) > remaining:
+                raise ValueError("Decoded response exceeds the recorded byte bound")
+            body.extend(decoded)
+    if decoder is not None and not decoder.eof:
+        raise ValueError("Truncated gzip response")
+    return bytes(body)
+
+
 class OnePost(httpx.BaseTransport):
     """One physical chat POST; metadata/completion GETs keep separate evidence."""
 
@@ -117,12 +153,7 @@ class OnePost(httpx.BaseTransport):
             raise ValueError("Unexpected request method")
         response = self.inner.handle_request(request)
         try:
-            raw = bytearray()
-            for chunk in response.iter_bytes():
-                if len(raw) + len(chunk) > MAX_RESPONSE_BYTES:
-                    raise ValueError("Response exceeds the recorded byte bound")
-                raw.extend(chunk)
-            body = bytes(raw)
+            body = bounded_body(response)
             name = f"wire-{len(self.wire):02d}-{request.method}.json"
             save_new(self.folder / name, body)
             self.wire.append(
@@ -186,7 +217,13 @@ def case_worker(case: dict, folder: Path, settings: dict, inner: httpx.BaseTrans
     terminal: dict = {"status": "attempt_status_unknown", "halt": True}
     reply = None
     started = time.monotonic()
-    http = httpx.Client(base_url=settings["url"], transport=transport, follow_redirects=False, trust_env=False)
+    http = httpx.Client(
+        base_url=settings["url"],
+        headers={"Accept-Encoding": "gzip, identity"},
+        transport=transport,
+        follow_redirects=False,
+        trust_env=False,
+    )
     try:
         with SIEClient(
             settings["url"],

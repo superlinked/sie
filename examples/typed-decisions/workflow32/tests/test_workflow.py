@@ -9,6 +9,7 @@ import multiprocessing
 import tempfile
 import time
 import unittest
+import zlib
 from pathlib import Path
 from unittest import mock
 
@@ -256,8 +257,11 @@ class TransportTests(unittest.TestCase):
             requests.append(request)
             self.assertEqual(request.url.path, "/base/v1/chat/completions")
             self.assertEqual(json.loads(request.read()), self.expected)
+            self.assertEqual(request.headers["accept-encoding"], "gzip, identity")
             self.assertTrue((self.folder / "sent.json").exists())
-            return httpx.Response(200, json=reply())
+            return httpx.Response(
+                200, stream=httpx.ByteStream(run.canonical(reply())), headers={"content-type": "application/json"}
+            )
 
         terminal = self.worker(handler)
         self.assertEqual(len(requests), 1)
@@ -287,7 +291,7 @@ class TransportTests(unittest.TestCase):
             encoded = gzip.compress(body)
             return httpx.Response(
                 200,
-                content=encoded,
+                stream=httpx.ByteStream(encoded),
                 headers={
                     "content-type": "application/json",
                     "content-encoding": "gzip",
@@ -302,6 +306,53 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(terminal["wire"][0]["body_representation"], "decoded")
         self.assertEqual(terminal["wire"][0]["content_encoding"], "gzip")
         self.assertEqual(json.loads((self.folder / "sdk.json").read_bytes()), reply())
+
+    def test_gzip_expansion_is_bounded_before_allocation_and_stops(self) -> None:
+        bound = 4096
+        encoded = gzip.compress(b"x" * (128 * 1024))
+        produced = []
+        limits = []
+        original = zlib.decompressobj
+
+        class ObservedDecoder:
+            def __init__(self, *args, **kwargs):
+                self.decoder = original(*args, **kwargs)
+
+            def decompress(self, data, max_length=0):
+                limits.append(max_length)
+                output = self.decoder.decompress(data, max_length)
+                produced.append(len(output))
+                return output
+
+            def __getattr__(self, name):
+                return getattr(self.decoder, name)
+
+        self.assertLess(len(encoded), bound)
+        with (
+            mock.patch.object(run, "MAX_RESPONSE_BYTES", bound),
+            mock.patch.object(zlib, "decompressobj", ObservedDecoder),
+        ):
+            terminal = self.worker(
+                lambda request: httpx.Response(
+                    200, stream=httpx.ByteStream(encoded), headers={"content-encoding": "gzip"}
+                )
+            )
+        self.assertEqual(terminal["status"], "attempt_status_unknown")
+        self.assertEqual(terminal["physical_sends"], 1)
+        self.assertTrue(terminal["halt"])
+        self.assertTrue(limits)
+        self.assertTrue(all(0 < limit <= bound + 1 for limit in limits))
+        self.assertLessEqual(max(produced), bound + 1)
+        self.assertEqual(terminal["wire"], [])
+
+    def test_truncated_gzip_reply_stays_unresolved(self) -> None:
+        encoded = gzip.compress(run.canonical(reply()))[:-8]
+        terminal = self.worker(
+            lambda request: httpx.Response(200, stream=httpx.ByteStream(encoded), headers={"content-encoding": "gzip"})
+        )
+        self.assertEqual(terminal["status"], "attempt_status_unknown")
+        self.assertEqual(terminal["physical_sends"], 1)
+        self.assertTrue(terminal["halt"])
 
     def test_metadata_get_cannot_qualify_unknown_post_and_second_post_is_refused(self) -> None:
         requests = []

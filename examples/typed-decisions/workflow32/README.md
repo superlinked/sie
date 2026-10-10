@@ -76,7 +76,8 @@ usage and terminal outcome when available. HTTP evidence records the original
 content encoding separately; response bodies are decoded once. No credential
 or authorization header is recorded. The full SDK
 result preserves reported reasoning/usage rather than estimating cost from
-visible JSON. The HTTP-response bound is 16 MiB per response; exceeding it
+visible JSON. Encoded and decoded HTTP responses are each limited to 16 MiB;
+gzip decompression is bounded as it produces output. Exceeding either bound
 leaves an unresolved attempt and stops continuation.
 
 For **your new rerun**, invoke the fetched, unchanged scorer:
