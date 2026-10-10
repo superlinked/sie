@@ -33,9 +33,9 @@ use crate::delivery::Delivery;
 use crate::ipc_client::IpcError;
 use crate::ipc_types::{
     BatchOutcome, BatchedF16MultivectorOutput, Disposition, EncodeBatchItem, ExtractBatchItem,
-    GenerateEvent, ItemOutcome, PreparedAudioPcm16, PreparedTokens, ProcessEncodeBatchRequest,
-    ProcessExtractBatchRequest, ProcessGenerateRequest, ProcessScoreBatchRequest, ReadinessState,
-    RunBatchRequest, ScoreBatchItem,
+    GenerateEvent, ItemOutcome, ModelDescriptor, PreparedAudioPcm16, PreparedTokens,
+    ProcessEncodeBatchRequest, ProcessExtractBatchRequest, ProcessGenerateRequest,
+    ProcessScoreBatchRequest, ReadinessState, RunBatchRequest, ScoreBatchItem,
 };
 use crate::latency::LatencyTracker;
 use crate::log_util::ErrChain;
@@ -670,9 +670,70 @@ pub struct Dispatcher {
     pub request_cancel_state: RequestCancelState,
     /// Gateway-stamped deadline enforcement, read from env at construction.
     pub work_deadline: WorkDeadlinePolicy,
+    /// Dispatch width each model's backend reported on its last
+    /// `EnsureModelReady` (`ModelDescriptor::max_concurrent_dispatch`).
+    /// Only widths above 1 are kept; see [`Dispatcher::dispatch_width`].
+    dispatch_widths: Arc<std::sync::RwLock<HashMap<String, usize>>>,
 }
 
 impl Dispatcher {
+    /// Keep the dispatch width a model's backend reported on
+    /// `EnsureModelReady`. A width above 1 means the adapter fronts an
+    /// engine that batches continuously (SGLang): Python runs that many
+    /// batches through it at once, so the scheduler sends each extract
+    /// item alone and keeps up to that many in flight for the model.
+    fn record_dispatch_width(&self, model_id: &str, descriptor: Option<&ModelDescriptor>) {
+        let width = descriptor
+            .and_then(|d| d.max_concurrent_dispatch)
+            .map_or(1, |w| {
+                (w as usize).clamp(1, MAX_ENGINE_BATCHED_PIPELINE_DEPTH)
+            });
+        if self.dispatch_width(model_id) == width {
+            return;
+        }
+        let mut widths = self
+            .dispatch_widths
+            .write()
+            .expect("dispatch width lock poisoned");
+        if width > 1 {
+            widths.insert(model_id.to_owned(), width);
+        } else {
+            widths.remove(model_id);
+        }
+        drop(widths);
+        info!(
+            model = %model_id,
+            dispatch_width = width,
+            "rust-scheduler: backend dispatch width recorded",
+        );
+    }
+
+    /// Batches the backend runs through `model_id`'s adapter at once
+    /// (1 unless its last `EnsureModelReady` reported more).
+    pub(crate) fn dispatch_width(&self, model_id: &str) -> usize {
+        self.dispatch_widths
+            .read()
+            .expect("dispatch width lock poisoned")
+            .get(model_id)
+            .copied()
+            .unwrap_or(1)
+    }
+
+    /// True when `op` items of `model_id` go to the backend one per
+    /// `RunBatch`. For an engine that batches continuously, a shared
+    /// `RunBatch` only makes every item wait for the slowest one before any
+    /// result is published (the Python worker flags the same items
+    /// `runs_alone` on its direct path).
+    fn dispatches_items_alone(&self, model_id: &str, op: SchedOp) -> bool {
+        op == SchedOp::Extract && self.dispatch_width(model_id) > 1
+    }
+
+    /// Scheduler pipeline depth for `model_id`: the configured depth, or the
+    /// backend's dispatch width when that is larger.
+    fn pipeline_depth_for(&self, model_id: &str) -> usize {
+        pipeline_depth().max(self.dispatch_width(model_id))
+    }
+
     fn execution_hash_is_current(&self, wi: &WorkItem) -> bool {
         !wi.bundle_config_hash.is_empty()
             && self.config_apply_state.is_some()
@@ -750,6 +811,7 @@ impl Dispatcher {
             batch_cancel_state,
             request_cancel_state,
             work_deadline: WorkDeadlinePolicy::from_env(),
+            dispatch_widths: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
 }
@@ -2429,6 +2491,7 @@ impl Dispatcher {
         // re-handshake — the registry hashes the loaded
         // tokenizer.json and short-circuits if the declared
         // `tokenizer_id` already matches what's cached.
+        self.record_dispatch_width(model_id, readiness_resp.descriptor.as_ref());
         if let Some(descriptor) = readiness_resp.descriptor.as_ref() {
             match self
                 .tokenizer_registry
@@ -5859,6 +5922,10 @@ fn decrement_gauge(gauge: &RuntimeGauge, value: i64) {
 /// conservative: Python inference is still serialized by the adapter's
 /// single CUDA stream, so large depths mainly park decoded batches on
 /// the lock and inflate per-batch latency.
+/// Ceiling on a model's pipeline depth when its backend reports a dispatch
+/// width (see [`Dispatcher::pipeline_depth_for`]).
+const MAX_ENGINE_BATCHED_PIPELINE_DEPTH: usize = 1024;
+
 fn pipeline_depth() -> usize {
     std::env::var("SIE_RUST_PIPELINE_DEPTH")
         .ok()
@@ -5921,6 +5988,95 @@ fn spawn_pipelined_batch_with_permit(
     });
 }
 
+/// Spawn a formed scheduler batch on `permit`, or, when the model's backend
+/// takes these items one at a time (see
+/// [`Dispatcher::dispatches_items_alone`]), spawn each item as its own batch.
+/// Every item after the first waits for its own pipeline slot, so a model
+/// never has more than its pipeline depth in flight. If shutdown wins that
+/// wait, the remaining items run here as one batch: they have already left
+/// the scheduler, so the final drain would not see them.
+#[allow(clippy::too_many_arguments)]
+async fn spawn_scheduler_batch(
+    model_id: &str,
+    dispatcher: &Arc<Dispatcher>,
+    scheduler: &Arc<ProductionScheduler>,
+    pipeline_sem: &Arc<Semaphore>,
+    shutdown: &Shutdown,
+    permit: OwnedSemaphorePermit,
+    op: SchedOp,
+    lora: crate::scheduler::LoraKey,
+    batch: crate::scheduler::FormattedBatch<SchedulerItem, SchedulerMeta>,
+    role: WaveRole,
+) {
+    if batch.items.len() <= 1 || !dispatcher.dispatches_items_alone(model_id, op) {
+        spawn_pipelined_batch_with_permit(
+            model_id, dispatcher, scheduler, permit, op, lora, batch, role,
+        );
+        return;
+    }
+    let flush_reason = batch.flush_reason;
+    let mut singles = batch
+        .items
+        .into_iter()
+        .zip(batch.metadata)
+        .map(|(item, meta)| crate::scheduler::FormattedBatch {
+            total_cost: item.cost(),
+            items: vec![item],
+            metadata: vec![meta],
+            flush_reason,
+        });
+    let first = singles.next().expect("a batch of two or more items");
+    spawn_pipelined_batch_with_permit(
+        model_id,
+        dispatcher,
+        scheduler,
+        permit,
+        op,
+        lora.clone(),
+        first,
+        role,
+    );
+    while let Some(single) = singles.next() {
+        let Some(permit) = reserve_pipeline_slot(pipeline_sem, shutdown).await else {
+            let rest = std::iter::once(single).chain(singles).fold(
+                crate::scheduler::FormattedBatch {
+                    items: Vec::new(),
+                    metadata: Vec::new(),
+                    total_cost: 0,
+                    flush_reason,
+                },
+                |mut acc, one| {
+                    acc.total_cost += one.total_cost;
+                    acc.items.extend(one.items);
+                    acc.metadata.extend(one.metadata);
+                    acc
+                },
+            );
+            process_scheduler_batch(
+                model_id,
+                dispatcher,
+                scheduler,
+                op,
+                lora,
+                rest,
+                WaveRole::Drain,
+            )
+            .await;
+            return;
+        };
+        spawn_pipelined_batch_with_permit(
+            model_id,
+            dispatcher,
+            scheduler,
+            permit,
+            op,
+            lora.clone(),
+            single,
+            WaveRole::Drain,
+        );
+    }
+}
+
 /// Reserve one pipeline slot unless shutdown wins first.
 ///
 /// Every scheduler extract is preceded by this wait. While all slots are
@@ -5974,7 +6130,9 @@ pub(crate) async fn scheduler_drain_loop(
     scheduler: Arc<ProductionScheduler>,
     shutdown: Arc<Shutdown>,
 ) {
-    let depth = pipeline_depth();
+    // Fixed for the loop's life: the loop starts after the model's first
+    // `EnsureModelReady`, which reports its dispatch width.
+    let depth = dispatcher.pipeline_depth_for(&model_id);
     let idle_bypass_enabled = scheduler_idle_bypass_enabled();
     info!(
         model = %model_id,
@@ -6074,16 +6232,19 @@ pub(crate) async fn scheduler_drain_loop(
 
         let initial_batch_size = batch.items.len();
         // First batch in the wave drives the controller step.
-        spawn_pipelined_batch_with_permit(
+        spawn_scheduler_batch(
             &model_id,
             &dispatcher,
             &scheduler,
+            &pipeline_sem,
+            &shutdown,
             primary_permit,
             op,
             lora.clone(),
             batch,
             WaveRole::Primary,
-        );
+        )
+        .await;
 
         // Wait for the first continuation slot before snapshotting the drain
         // budget. At saturation this is when one active backend call finishes,
@@ -6145,16 +6306,19 @@ pub(crate) async fn scheduler_drain_loop(
             drained_any = true;
             // Drains continue the wave: feed inference + latency samples, but
             // no controller step.
-            spawn_pipelined_batch_with_permit(
+            spawn_scheduler_batch(
                 &model_id,
                 &dispatcher,
                 &scheduler,
+                &pipeline_sem,
+                &shutdown,
                 permit,
                 op,
                 lora.clone(),
                 drain_batch,
                 WaveRole::Drain,
-            );
+            )
+            .await;
 
             if drain_budget > 0 {
                 let Some(next_permit) = reserve_pipeline_slot(&pipeline_sem, &shutdown).await
@@ -7212,6 +7376,175 @@ mod tests {
             .await;
         assert_eq!(backend.probes.load(Ordering::SeqCst), 0);
         assert!(backend.encoded_models().is_empty());
+    }
+
+    /// Ready backend whose descriptor reports `width`. Holds every
+    /// `RunBatch` until `release` has a permit, recording each batch's size
+    /// and the most batches in flight at once.
+    struct EngineBatchedBackend {
+        width: Option<u32>,
+        sizes: std::sync::Mutex<Vec<usize>>,
+        active: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+        release: Semaphore,
+    }
+
+    impl EngineBatchedBackend {
+        fn new(width: Option<u32>) -> Arc<Self> {
+            Arc::new(Self {
+                width,
+                sizes: std::sync::Mutex::new(Vec::new()),
+                active: std::sync::atomic::AtomicUsize::new(0),
+                peak: std::sync::atomic::AtomicUsize::new(0),
+                release: Semaphore::new(0),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::backend::InferenceBackend for EngineBatchedBackend {
+        fn name(&self) -> &'static str {
+            "engine-batched"
+        }
+
+        fn supports(&self, _model_id: &str) -> bool {
+            true
+        }
+
+        async fn ensure_model_ready(
+            &self,
+            _model_id: &str,
+        ) -> Result<crate::ipc_types::EnsureModelReadyResponse, BackendError> {
+            Ok(crate::ipc_types::EnsureModelReadyResponse {
+                state: ReadinessState::Ready,
+                batch_budget: None,
+                descriptor: Some(ModelDescriptor {
+                    supports_run_batch: true,
+                    max_concurrent_dispatch: self.width,
+                    ..Default::default()
+                }),
+            })
+        }
+
+        async fn process_encode_batch(
+            &self,
+            _req: ProcessEncodeBatchRequest,
+        ) -> Result<BatchOutcome, BackendError> {
+            Err(BackendError::UnsupportedModel("encode".into()))
+        }
+
+        async fn process_score_batch(
+            &self,
+            _req: ProcessScoreBatchRequest,
+        ) -> Result<BatchOutcome, BackendError> {
+            Err(BackendError::UnsupportedModel("score".into()))
+        }
+
+        async fn process_extract_batch(
+            &self,
+            _req: ProcessExtractBatchRequest,
+        ) -> Result<BatchOutcome, BackendError> {
+            Err(BackendError::UnsupportedModel("extract".into()))
+        }
+
+        async fn run_batch(&self, req: RunBatchRequest) -> Result<BatchOutcome, BackendError> {
+            self.sizes.lock().unwrap().push(req.items.len());
+            let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            drop(self.release.acquire().await.expect("release stays open"));
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            let outcomes = req
+                .items
+                .iter()
+                .map(|item| {
+                    outcome(
+                        &item.request_id,
+                        item.item_index,
+                        Disposition::NakRetry,
+                        None,
+                        None,
+                    )
+                })
+                .collect();
+            Ok(BatchOutcome {
+                outcomes,
+                batched_f16_multivectors: Vec::new(),
+            })
+        }
+    }
+
+    /// Dispatch `items` single-page extract requests for one model, let the
+    /// scheduler send all it will, and return the `RunBatch` sizes and the
+    /// peak in flight before any batch finished.
+    async fn run_extract_group(width: Option<u32>, items: u32) -> (Vec<usize>, usize, usize) {
+        let backend = EngineBatchedBackend::new(width);
+        let mut dispatcher = dispatcher_with_backend(backend.clone());
+        let shutdown = Arc::new(Shutdown::new());
+        let mutable = Arc::get_mut(&mut dispatcher).unwrap();
+        mutable.scheduler_registry = Some(Arc::new(ProductionSchedulerRegistry::new(
+            crate::scheduler::BatchConfig::default(),
+        )));
+        mutable.shutdown = Some(Arc::clone(&shutdown));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let group = (0..items)
+            .map(|slot| {
+                (
+                    wi(&format!("page-{slot}"), 0, "ocr", "extract"),
+                    Delivery::Local(LocalDelivery::new(slot as usize, 0, tx.clone())),
+                )
+            })
+            .collect();
+        dispatcher
+            .dispatch_decoded(group, items as usize, Instant::now())
+            .await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let sizes = backend.sizes.lock().unwrap().clone();
+        let peak = backend.peak.load(Ordering::SeqCst);
+        let depth = dispatcher.pipeline_depth_for("ocr");
+        backend.release.add_permits(1);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        shutdown.fire();
+        for handle in dispatcher.take_scheduler_drain_handles().await {
+            handle.abort();
+        }
+        (sizes, peak, depth)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn engine_batched_extract_items_run_alone_and_all_at_once() {
+        let (sizes, peak, depth) = run_extract_group(Some(8), 6).await;
+        assert_eq!(depth, 8, "the model's pipeline depth follows its width");
+        assert_eq!(sizes, vec![1; 6], "each page is its own RunBatch");
+        assert_eq!(peak, 6, "every page is in flight before any finishes");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn extract_items_still_share_batches_without_a_dispatch_width() {
+        let (sizes, peak, depth) = run_extract_group(None, 6).await;
+        assert_eq!(depth, pipeline_depth());
+        assert_eq!(sizes.iter().sum::<usize>(), 6);
+        assert!(sizes.iter().any(|&size| size > 1), "sizes {sizes:?}");
+        assert!(peak <= pipeline_depth(), "peak {peak}");
+    }
+
+    #[test]
+    fn only_extract_on_an_engine_batched_model_dispatches_alone() {
+        let dispatcher = dispatcher_with_backend(EngineBatchedBackend::new(None));
+        let wide = ModelDescriptor {
+            max_concurrent_dispatch: Some(128),
+            ..Default::default()
+        };
+        dispatcher.record_dispatch_width("ocr", Some(&wide));
+        assert_eq!(dispatcher.dispatch_width("ocr"), 128);
+        assert!(dispatcher.dispatches_items_alone("ocr", SchedOp::Extract));
+        assert!(!dispatcher.dispatches_items_alone("ocr", SchedOp::Encode));
+        assert!(!dispatcher.dispatches_items_alone("other", SchedOp::Extract));
+
+        // A reload that no longer reports a width restores batching.
+        dispatcher.record_dispatch_width("ocr", Some(&ModelDescriptor::default()));
+        assert_eq!(dispatcher.dispatch_width("ocr"), 1);
+        assert!(!dispatcher.dispatches_items_alone("ocr", SchedOp::Extract));
+        assert_eq!(dispatcher.pipeline_depth_for("ocr"), pipeline_depth());
     }
 
     #[tokio::test]

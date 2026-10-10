@@ -516,7 +516,9 @@ Prometheus-shaped copy.
 
 `EnsureModelReady` returns readiness state and an optional `ModelDescriptor`.
 The descriptor carries tokenizer path, tokenizer content hash, maximum sequence
-length, output types, default text templates, and `supports_run_batch`.
+length, output types, default text templates, `supports_run_batch`, and
+`max_concurrent_dispatch` (the batches the backend runs through the model's
+adapter at once; see Scheduling).
 `loading_started` and `loading_in_progress` mean the same worker is actively
 loading the model; the dispatcher progress-ACKs and rechecks instead of NAKing
 those deliveries. `retry_later` remains a NAK path.
@@ -541,6 +543,15 @@ as Python: Unicode character count plus 1024 per media input, summed once per
 query/document pair. The cached score estimate never enters the IPC schema,
 never mutates or truncates inputs, and is not an authoritative token or billing
 count. Extract currently uses unit cost.
+
+A model whose descriptor reports `max_concurrent_dispatch` above 1 fronts an
+engine that batches continuously, such as SGLang serving an OCR model. A shared
+`RunBatch` would only make each item wait for the slowest one, so the drain
+loop sends each of that model's extract items in a `RunBatch` of its own. The
+model's pipeline depth becomes the larger of `SIE_RUST_PIPELINE_DEPTH` and that
+width, and the IPC client grows its slot pool by the same width when the model
+becomes ready, so the pool is not the limit. The Python worker's direct path
+makes the same choice: it serves these items one per batch.
 
 Routing remains gateway-owned. The sidecar does not keep a separate local
 active-model routing list.
