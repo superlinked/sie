@@ -46,7 +46,7 @@ One SIE cluster runs the inference behind a whole agent. Each task is a handful 
 | Task | What it does | Models |
 |---|---|---|
 | **Search** | Embed, match, and rerank to retrieve the right context. | [`bge-m3`](packages/sie_server/models/BAAI__bge-m3.yaml), [`splade-v3`](packages/sie_server/models/naver__splade-v3.yaml), [`colbertv2`](packages/sie_server/models/colbert-ir__colbertv2.0.yaml), [`qwen3-reranker`](packages/sie_server/models/Qwen__Qwen3-Reranker-4B.yaml) |
-| **Document to markdown** | PDFs, Office files, and scans become clean markdown. | [`lightonocr`](packages/sie_server/models/lightonai__LightOnOCR-2-1B.yaml), [`glm-ocr`](packages/sie_server/models/zai-org__GLM-OCR.yaml), [`mineru`](packages/sie_server/models/opendatalab__MinerU2.5-Pro-2604-1.2B.yaml), [`paddleocr-vl`](packages/sie_server/models/PaddlePaddle__PaddleOCR-VL-1.5.yaml), [`docling`](packages/sie_server/models/docling.yaml) |
+| **Document to markdown** | PDFs, Office files, and scans become clean markdown. | [`lightonocr-3`](packages/sie_server/models/lightonai__LightOnOCR-3-4B.yaml), [`lightonocr`](packages/sie_server/models/lightonai__LightOnOCR-2-1B.yaml), [`glm-ocr`](packages/sie_server/models/zai-org__GLM-OCR.yaml), [`mineru`](packages/sie_server/models/opendatalab__MinerU2.5-Pro-2604-1.2B.yaml), [`paddleocr-vl`](packages/sie_server/models/PaddlePaddle__PaddleOCR-VL-1.5.yaml), [`docling`](packages/sie_server/models/docling.yaml) |
 | **Structured output** | Schema-valid JSON, extracted or generated. | [`gliner2`](packages/sie_server/models/fastino__gliner2-large-v1.yaml), [`gliner-relex`](packages/sie_server/models/knowledgator__gliner-relex-large-v1.0.yaml), [`gliformer`](packages/sie_server/models/knowledgator__gliformer-large-v1.yaml), [`nuner-zero`](packages/sie_server/models/numind__NuNER_Zero.yaml), [`qwen3.8-27b`](packages/sie_server/models/Qwen__Qwen3.8-27B-FP8.yaml), [`qwen3.6-27b`](packages/sie_server/models/Qwen__Qwen3.6-27B.yaml) |
 | **Decide** | Choice, yes/no, and score answers with probabilities to typed questions about a text or JSON state. | [`laya`](packages/sie_server/models/convaiinnovations__laya.yaml), [`laya-multilingual`](packages/sie_server/models/convaiinnovations__laya-multilingual.yaml), [`laya-typed-decisions`](packages/sie_server/models/convaiinnovations__laya-typed-decisions.yaml), [`gliner2.5-decide`](packages/sie_server/models/fastino__GLiNER2.5-Decide.yaml), [`gliner2.5-multi-decide`](packages/sie_server/models/fastino__GLiNER2.5-multi-Decide.yaml), [`gliner2.5-decide-1b`](packages/sie_server/models/fastino__GLiNER2.5-Decide-1B.yaml) |
 | **Classify** | Zero-shot labels, with several label groups answered in one call. The instruct models also follow a task instruction and few-shot examples. | [`gliclass-large-v3`](packages/sie_server/models/knowledgator__gliclass-large-v3.0.yaml), [`gliclass-instruct-large`](packages/sie_server/models/knowledgator__gliclass-instruct-large-v1.0.yaml), [`gliclass-multilang-mini`](packages/sie_server/models/knowledgator__gliclass-multilang-mini.yaml) |
@@ -71,7 +71,7 @@ docker run --gpus all -p 8080:8080 \
   -v sie-hf-cache:/app/.cache/huggingface \
   ghcr.io/superlinked/sie-server:latest-cuda12-default
 
-# Linux, NVIDIA GPU: Transformers 5 models (LightOnOCR, GLM-OCR, GLiNER2.5-Decide, and TopK-Embed-V1)
+# Linux, NVIDIA GPU: Transformers 5 models (LightOnOCR-3, LightOnOCR, GLM-OCR, GLiNER2.5-Decide, and TopK-Embed-V1)
 docker run --gpus all -p 8080:8080 \
   -v sie-hf-cache:/app/.cache/huggingface \
   ghcr.io/superlinked/sie-server:latest-cuda12-transformers5
@@ -88,8 +88,8 @@ docker run -p 8080:8080 \
 ```
 
 Docker images are bundle-specific so dependency-incompatible model families stay isolated. Use the
-`sglang-vision-extract` image for LightOnOCR, GLM-OCR, and PaddleOCR-VL, or the `transformers5` image for the
-`:transformers` profiles of LightOnOCR and GLM-OCR, the GLiNER2.5-Decide models, and the TopK-Embed-V1 models; the
+`sglang-vision-extract` image for LightOnOCR-2, GLM-OCR, and PaddleOCR-VL, or the `transformers5` image for LightOnOCR-3,
+the `:transformers` profiles of LightOnOCR-2 and GLM-OCR, the GLiNER2.5-Decide models, and the TopK-Embed-V1 models; the
 `default` image intentionally does not advertise them.
 
 ```bash

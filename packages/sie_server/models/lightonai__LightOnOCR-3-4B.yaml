@@ -1,0 +1,45 @@
+sie_id: lightonai/LightOnOCR-3-4B
+hf_id: lightonai/LightOnOCR-3-4B
+hf_revision: b71010f095dc3735de7ee6b9969bff8f8f50b39a
+inputs:
+  text: false
+  image: true
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+# Settings follow github.com/lightonai/LightOnOCR at 36755d461be079737860a5f03ae0c803501269e9
+# (README, lightonocr/models.py and render.py, benchmarks/ocr_bench/providers/__init__.py) and the model card.
+#
+# Mode: omit `instruction` for plain Markdown transcription. Send exactly `grounding` to get a
+# `![label](x1,y1,x2,y2)` block marker, in 0-1000 page coordinates, before each layout block.
+# These are the only two trained prompts. The adapter rejects any other prompt and thinking.
+#
+# Page image: the processor resizes only outside 65,536-16,777,216 pixels, so the model sees the
+# page as sent. Render PDF pages at 400 DPI and downscale to a 2048 px longest edge, as the
+# model card and the upstream client do. Upstream's published benchmark scores used 400 DPI pages
+# capped at 5 MP.
+#
+# Sampling: temperature 0.1, top_p 1.0, one beam. The upstream README says "use temperature 0.1,
+# not greedy decoding", and the benchmark pipeline uses 0.1. The model card examples use 0.2.
+#
+# Output cap: 12,288 new tokens, the upstream benchmark's max_tokens, in a 24,576-token context.
+# A request can lower it.
+#
+# Normalization: none. The entity text is the raw decoded output, grounding markers included.
+# The upstream client repairs escaped math dollars by default. Upstream's published olmOCR-bench
+# scores also drop header/footer/page-number blocks and apply its Markdown post-processing.
+max_sequence_length: 24576
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.lighton_ocr.adapter:LightOnOCR3Adapter
+    adapter_options:
+      loadtime:
+        max_new_tokens: 12288
+        temperature: 0.1
+        top_p: 1.0
+      runtime: {}
