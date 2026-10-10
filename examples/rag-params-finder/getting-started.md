@@ -40,7 +40,7 @@ You should see the server healthy. With default `.env`, SIE reports as
 
 | Path | When | Doc |
 |---|---|---|
-| Atlas cloud | You already have `MONGODB_URI` | [QUICKSTART Path B](https://github.com/neomatrix369/rag-params-finder/blob/main/QUICKSTART.md) |
+| Atlas cloud | You already have `MONGODB_ATLAS_CLOUD_URI` | [QUICKSTART Path B](https://github.com/neomatrix369/rag-params-finder/blob/main/QUICKSTART.md) |
 | Postgres / pgvector | Prefer Supabase or local Postgres | [Postgres setup](https://github.com/neomatrix369/rag-params-finder/blob/main/docs/user-guide/postgres-setup.md) |
 | Manual two-terminal | No Docker for the app | [QUICKSTART Path C](https://github.com/neomatrix369/rag-params-finder/blob/main/QUICKSTART.md) |
 
@@ -49,4 +49,12 @@ Step-by-step install and first experiment:
 
 ## Next
 
-Wire SIE and run one sweep: [SIE integration](./sie-integration.md).
+Before the host CLI / SIE handoff, export the URI the startup script printed
+(leave `.env` placeholders unchanged for Atlas Local):
+
+```bash
+# value also printed by ./start-services.sh --mongodb-local
+export MONGODB_ATLAS_LOCAL_URI="mongodb://localhost:27017/rag_params_finder?directConnection=true"
+```
+
+Then wire SIE and run one sweep: [SIE integration](./sie-integration.md).

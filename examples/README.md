@@ -73,6 +73,8 @@ benchmark and evaluation examples for deeper technical users.
 
 We welcome contributions. To add your project to the gallery:
 
+### Runnable examples (default)
+
 1. **Create a subdirectory** with a short, descriptive name (e.g. `wikipedia-search/`, `pdf-rag/`)
 2. **Include a README** that covers:
    - What the project does
@@ -80,6 +82,14 @@ We welcome contributions. To add your project to the gallery:
    - Which SIE features it uses (encode, score, extract, cluster, etc.)
 3. **Keep it self-contained** - include a `requirements.txt` or `package.json`, a docker-compose if needed, and sample data or instructions to fetch it
 4. **Open a PR** against `main`
+
+### External project guides
+
+Use this path only when vendoring a runnable copy is impractical (large multi-service
+apps). Ship a thin `examples/<name>/` landing (README + short sibling pages) that
+deep-links to the external repo’s QUICKSTART/SIE setup, set Status to
+**External project guide**, and do **not** require in-tree `requirements.txt` /
+compose / sample data. See `examples/rag-params-finder/` for the shape.
 
 ### Recorded evidence
 
