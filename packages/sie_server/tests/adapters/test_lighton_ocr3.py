@@ -240,15 +240,10 @@ def test_native_loader_pins_processor_and_qwen35_without_remote_code(
         Qwen3_5ForConditionalGeneration=SimpleNamespace(from_pretrained=load_model),
     )
     monkeypatch.setitem(sys.modules, "transformers", transformers)
-    rebound: list[tuple[Any, str]] = []
-    monkeypatch.setattr(
-        "sie_server.adapters.lighton_ocr.adapter.rebind_vision_patch_embed",
-        lambda module, label: rebound.append((module, label)),
-    )
+    monkeypatch.setattr("sie_server.adapters.lighton_ocr.adapter.rebind_vision_patch_embed", lambda *_: None)
     revision = "a" * 40
     value = LightOnOCR3Adapter(model, revision=revision)
     value.load("cpu")
-    assert rebound == [(loaded_model, "lighton_ocr3")]
     assert calls == [
         ("processor", model, {"trust_remote_code": False, "revision": revision}),
         (
@@ -271,6 +266,55 @@ def test_native_loader_pins_processor_and_qwen35_without_remote_code(
     assert value.get_preprocessor() is None
     with pytest.raises(RuntimeError, match="not loaded"):
         value.extract([_item()])
+
+
+class _PatchEmbed(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.proj = torch.nn.Conv3d(3, 8, kernel_size=(2, 16, 16), stride=(2, 16, 16))
+
+
+class _Visual(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.patch_embed = _PatchEmbed()
+
+
+class _Inner(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.visual = _Visual()
+
+
+class _Qwen35VisionModel(torch.nn.Module):
+    """The Qwen3.5 module path the rebind helper must find: model.visual.patch_embed.proj."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = _Inner()
+
+
+def test_load_rebinds_qwen35_patch_embed_to_equivalent_linear(monkeypatch: pytest.MonkeyPatch) -> None:
+    torch.manual_seed(0)
+    loaded_model = _Qwen35VisionModel()
+    conv = loaded_model.model.visual.patch_embed.proj
+    patches = torch.randn(5, 3, 2, 16, 16)
+    with torch.inference_mode():
+        expected = conv(patches).clone()
+    transformers = ModuleType("transformers")
+    transformers.__dict__.update(
+        AutoProcessor=SimpleNamespace(from_pretrained=lambda *_, **__: _Processor()),
+        Qwen3_5ForConditionalGeneration=SimpleNamespace(from_pretrained=lambda *_, **__: loaded_model),
+    )
+    monkeypatch.setitem(sys.modules, "transformers", transformers)
+
+    LightOnOCR3Adapter("lightonai/LightOnOCR-3-4B", revision="a" * 40).load("cpu")
+
+    assert "forward" in vars(conv)
+    with torch.inference_mode():
+        got = conv(patches)
+    assert got.shape == expected.shape
+    assert torch.allclose(got, expected, atol=1e-4, rtol=1e-4)
 
 
 @pytest.mark.parametrize(
