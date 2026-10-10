@@ -234,7 +234,7 @@ class SourceAndFrameTests(unittest.TestCase):
         for seconds in [float("nan"), float("inf"), 0, -1]:
             with self.subTest(seconds=seconds), self.assertRaises(ValueError):
                 self.frame(mock.Mock(), timeout_s=seconds)
-        for temperature in [float("nan"), float("inf"), -0.1, 2.5]:
+        for temperature in [float("nan"), float("inf"), -0.1, 2.5, True, "0"]:
             with self.subTest(temperature=temperature), self.assertRaises(ValueError):
                 self.frame(mock.Mock(), temperature=temperature)
 

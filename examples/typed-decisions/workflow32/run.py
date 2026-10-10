@@ -325,8 +325,13 @@ def run_frame(
 ) -> list[dict]:
     if not math.isfinite(timeout_s) or timeout_s <= 0 or max_completion_tokens <= 0:
         raise ValueError("Positive finite case timeout and completion token cap are required")
-    if not math.isfinite(temperature) or not 0 <= temperature <= 2:
-        raise ValueError("Temperature must be a finite value from 0 to 2")
+    if (
+        isinstance(temperature, bool)
+        or not isinstance(temperature, (int, float))
+        or not math.isfinite(temperature)
+        or not 0 <= temperature <= 2
+    ):
+        raise ValueError("Temperature must be a finite number from 0 to 2")
     address = httpx.URL(url)
     if (
         address.scheme not in {"http", "https"}
@@ -346,7 +351,7 @@ def run_frame(
         "timeout_s": timeout_s,
         "max_completion_tokens": max_completion_tokens,
         "thinking": thinking,
-        "temperature": temperature,
+        "temperature": float(temperature),
     }
     out.mkdir(parents=True, exist_ok=False)
     sync_directory(out.parent)
