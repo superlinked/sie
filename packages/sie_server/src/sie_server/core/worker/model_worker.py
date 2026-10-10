@@ -20,11 +20,12 @@ import functools
 import logging
 import os
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
+from sie_server.adapters.base import released_bytes
 from sie_server.core.adaptive_batching import (
     AdaptiveBatchController,
     AdaptiveBatchState,
@@ -108,6 +109,58 @@ class _InFlightBatch:
         # unwinding — reachable because ``_do_unload`` runs ``stop()`` under
         # ``asyncio.wait_for``, whose timeout can fire first.
         return owner is None or owner.done() or owner.cancelling() > 0
+
+
+def _has_releasable_memory(adapter: object) -> bool:
+    """Lock-free adapter predicate. False when release would free nothing."""
+    predicate = getattr(adapter, "has_releasable_memory", None)
+    if not callable(predicate):
+        return False
+    try:
+        return bool(predicate())
+    except Exception:
+        logger.exception("has_releasable_memory failed; treating the adapter as holding nothing")
+        return False
+
+
+def _optional_memory_release_hook(adapter: object) -> Callable[[], int] | None:
+    """Bound ``release_optional_memory``, or None when the adapter has none.
+
+    Duck-typed adapters are not all ``ModelAdapter`` subclasses. A missing
+    hook means there is nothing to release, and callers must not call it.
+    """
+    hook = getattr(adapter, "release_optional_memory", None)
+    if not callable(hook):
+        return None
+    return cast("Callable[[], int]", hook)
+
+
+def _lock_can_acquire_now(lock: asyncio.Lock) -> bool:
+    """Whether ``await lock.acquire()`` would return without suspending.
+
+    ``Lock.locked()`` is false in the window after ``release()`` where a
+    waiter has been woken but has not resumed and taken the lock.
+    ``acquire()`` still waits behind that waiter. asyncio has no public
+    try-acquire; this matches the fast path in CPython's ``Lock.acquire``.
+    """
+    if lock.locked():
+        return False
+    waiters = getattr(lock, "_waiters", None)
+    return waiters is None or all(waiter.cancelled() for waiter in waiters)
+
+
+def _slots_can_acquire_all(slots: asyncio.Semaphore, needed: int) -> bool:
+    """Whether ``needed`` semaphore permits can be taken without suspending.
+
+    ``Semaphore.locked()`` is true when the value is zero or a waiter is
+    queued, so it does not say that every permit is free. A positive value
+    with a waiter still blocks in ``acquire``.
+    """
+    waiters = getattr(slots, "_waiters", None)
+    if waiters and any(not waiter.cancelled() for waiter in waiters):
+        return False
+    available = getattr(slots, "_value", None)
+    return isinstance(available, int) and not isinstance(available, bool) and available >= needed
 
 
 def _dispatch_width(adapter: object) -> int:
@@ -300,6 +353,11 @@ class ModelWorker:
             registry=self._registry_callbacks,
             config=self._config.oom_recovery,
             stats=self._stats.oom_recoveries,
+            # Recovery already holds the dispatch lock (or the forward that
+            # just failed has left the inference thread idle), so the adapter
+            # method itself is the right call — re-entering release_optional_memory()
+            # here would wait on that same lock. No hook means nothing to release.
+            release_optional_memory=_optional_memory_release_hook(adapter),
         )
 
     # =========================================================================
@@ -490,6 +548,66 @@ class ModelWorker:
             with contextlib.suppress(BaseException):
                 await asyncio.shield(join)
             raise
+
+    async def release_optional_memory(self) -> int:
+        """Drop optional device memory on an inference thread.
+
+        Returns before taking the dispatch lock when the adapter has nothing
+        to release, so a no-op adapter is never locked on a monitor tick.
+        Serialized with forwards once a release does run: the adapter dispatch
+        lock when one batch runs at a time, and every dispatch slot when
+        several do. Never waits. A busy model is skipped, so a caller that
+        already holds another model's lock cannot deadlock against this one,
+        and the memory monitor is not stalled behind an in-flight batch.
+
+        Returns:
+            Best-effort bytes released, or 0 when there is nothing to drop,
+            the worker is busy, or the executor has shut down.
+        """
+        if not _has_releasable_memory(self._adapter):
+            return 0
+        if self._dispatch_width > 1:
+            return await self._release_optional_memory_with_slots()
+        if not _lock_can_acquire_now(self._adapter_dispatch_lock):
+            return 0
+        await self._adapter_dispatch_lock.acquire()
+        try:
+            return await self._invoke_release_optional_memory()
+        finally:
+            self._adapter_dispatch_lock.release()
+
+    async def _release_optional_memory_with_slots(self) -> int:
+        if not _slots_can_acquire_all(self._dispatch_slots, self._dispatch_width):
+            return 0
+        acquired = 0
+        try:
+            for _ in range(self._dispatch_width):
+                await self._dispatch_slots.acquire()
+                acquired += 1
+            return await self._invoke_release_optional_memory()
+        finally:
+            for _ in range(acquired):
+                self._dispatch_slots.release()
+
+    async def _invoke_release_optional_memory(self) -> int:
+        hook = _optional_memory_release_hook(self._adapter)
+        if hook is None:
+            return 0
+        loop = asyncio.get_running_loop()
+        try:
+            released = await loop.run_in_executor(
+                self._inference_executor,
+                hook,
+            )
+        except RuntimeError as exc:
+            if "shutdown" not in str(exc).lower():
+                raise
+            logger.warning(
+                "Skipping optional-memory release for %s; inference executor is shut down",
+                self._model_name,
+            )
+            return 0
+        return released_bytes(released)
 
     def _fail_queued_requests(self) -> int:
         """Fail every request the worker still owes an answer. Returns the count.

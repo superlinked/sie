@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import torch
 
+from sie_server.adapters.base import released_bytes
 from sie_server.core.oom import (
     OomRecoveryAction,
     OomRecoveryConfig,
@@ -57,6 +58,15 @@ class RegistryCallbacks(Protocol):
         """
         ...
 
+    async def release_optional_memory(self, exclude_name: str) -> int:
+        """Release optional device memory held by models other than ``exclude_name``.
+
+        Least recently used first, on the caller's device. Returns the
+        best-effort number of bytes released. Zero means nothing was released;
+        callers must not skip ``EVICT_LRU`` because of that.
+        """
+        ...
+
 
 # Type for the dispatch callable injected by the worker for a single config
 # group. Returns the typed adapter output for the supplied batch slice. The
@@ -95,6 +105,7 @@ class BatchExecutor:
         registry: RegistryCallbacks | None,
         config: OomRecoveryConfig,
         stats: OomRecoveryStats,
+        release_optional_memory: Callable[[], int] | None = None,
     ) -> None:
         """Initialise the executor.
 
@@ -106,6 +117,9 @@ class BatchExecutor:
                 no-op (treated as "no candidate").
             config: Recovery configuration.
             stats: Mutable counters; updated in-place as recovery proceeds.
+            release_optional_memory: Drops the worker's own optional device
+                memory (CUDA graphs and similar). ``None`` releases nothing.
+                A 0 return must not skip ``EVICT_LRU``.
 
         Raises:
             ValueError: If ``config.strategy`` contains an action that this
@@ -123,6 +137,10 @@ class BatchExecutor:
         self._registry = registry
         self._config = config
         self._stats = stats
+        # The worker's own adapter. Called while recovery already excludes
+        # other forwards (the adapter dispatch lock, or the inference thread
+        # is idle after the failed forward).
+        self._release_optional_memory = release_optional_memory
 
     async def run(
         self,
@@ -192,10 +210,16 @@ class BatchExecutor:
                 if pending_oom_strategy is not None:
                     self._record_recovery(pending_oom_strategy, "failed")
                     pending_oom_strategy = None
+                # Sibling graphs keep their pools alive across empty_cache.
+                # Drop them before the local reclaim so the retry can fit.
+                await self._release_sibling_optional_memory()
                 self._cache_clear()
                 self._stats.cache_clears += 1
 
             elif action is OomRecoveryAction.EVICT_LRU:
+                # A zero return must not skip eviction.
+                await self._release_sibling_optional_memory()
+                self._release_own_optional_memory()
                 evicted = await self._try_evict_lru()
                 if not evicted:
                     # No-op for this strategy; don't bother retrying the
@@ -408,7 +432,7 @@ class BatchExecutor:
     # ------------------------------------------------------------------
 
     def _cache_clear(self) -> None:
-        """Full reclaim: Python GC + CUDA cache drop.
+        """Full reclaim: optional caches, then Python GC + CUDA cache drop.
 
         Used after eviction-style mitigations (or the initial OOM) where
         Python references may still hold tensor weights. ``gc.collect()``
@@ -416,18 +440,70 @@ class BatchExecutor:
         so it is *not* used between split halves; see
         :meth:`_empty_cuda_cache` for the cheap variant.
 
-        Both reclaim calls are wrapped in defensive ``try/except`` so a
-        failure here cannot leak unset futures: the pre-PR behaviour was
-        for an exception in the recovery primitives to escape
-        ``BatchExecutor.run`` and leave the per-request futures pending
-        until the HTTP-layer timeout. Now we log and continue with the
-        next strategy.
+        CUDA graph pools stay allocated until the graphs are dropped, so
+        optional memory is released before ``empty_cache()``. A zero return
+        does not change the strategy: the retry still runs, and a later
+        ``EVICT_LRU`` is not skipped.
+
+        Reclaim calls are wrapped in defensive ``try/except`` so a failure
+        here cannot leak unset futures: the pre-PR behaviour was for an
+        exception in the recovery primitives to escape ``BatchExecutor.run``
+        and leave the per-request futures pending until the HTTP-layer
+        timeout. Now we log and continue with the next strategy.
         """
+        self._release_own_optional_memory()
         try:
             gc.collect()
         except Exception:
             logger.exception("OOM recovery: gc.collect() raised; continuing")
         self._empty_cuda_cache()
+
+    def _release_own_optional_memory(self) -> int:
+        """Drop this worker's optional device memory. Zero if there is none."""
+        release = self._release_optional_memory
+        if release is None:
+            return 0
+        try:
+            released = released_bytes(release())
+        except Exception:
+            logger.exception("OOM recovery: release_optional_memory raised; continuing")
+            return 0
+        if released <= 0:
+            return 0
+        logger.info(
+            "OOM recovery: released %d bytes of optional memory for model=%s",
+            released,
+            self._model_name,
+        )
+        return released
+
+    async def _release_sibling_optional_memory(self) -> int:
+        """Ask the registry to drop other models' optional memory.
+
+        The caller's own adapter is excluded: recovery already holds its
+        dispatch lock, and :meth:`_release_own_optional_memory` covers it.
+        A missing registry or a non-integer result releases nothing and
+        does not skip eviction.
+        """
+        registry = self._registry
+        if registry is None:
+            return 0
+        try:
+            released = released_bytes(await registry.release_optional_memory(self._model_name))
+        except Exception:
+            logger.exception(
+                "OOM recovery: release_optional_memory failed for siblings of %s; continuing",
+                self._model_name,
+            )
+            return 0
+        if released <= 0:
+            return 0
+        logger.info(
+            "OOM recovery: released %d bytes of optional memory from siblings of %s",
+            released,
+            self._model_name,
+        )
+        return released
 
     def _empty_cuda_cache(self) -> None:
         """Drop CUDA's caching allocator's free blocks.

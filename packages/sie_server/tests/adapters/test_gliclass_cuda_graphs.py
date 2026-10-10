@@ -871,6 +871,67 @@ class TestOperatorSetting:
         assert len(runner.replayed) == replays
 
 
+def test_release_optional_memory_without_a_runner_does_not_touch_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Graphs that were never recorded release nothing and do not need a GPU."""
+    adapter = GLiClassAdapter("tiny", cuda_graphs="off")
+    emptied: list[str] = []
+
+    def unavailable() -> bool:
+        raise AssertionError("CUDA must not be probed when no runner exists")
+
+    monkeypatch.setattr(torch.cuda, "is_available", unavailable)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: emptied.append("emptied"))
+
+    assert adapter._graphs is None
+    assert adapter.has_releasable_memory() is False
+    assert adapter.release_optional_memory() == 0
+    assert emptied == []
+
+
+def test_release_optional_memory_with_an_idle_runner_does_not_empty_the_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A runner that holds no graphs does not call ``empty_cache``."""
+    runner = _Runner()
+    runner.buffers_alive = True
+    adapter = _adapter_with(runner)
+    emptied: list[str] = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: emptied.append("emptied"))
+
+    assert runner.graph_count == 0
+    assert runner.held_bytes == 0
+    assert adapter.has_releasable_memory() is False
+    assert adapter.release_optional_memory() == 0
+    assert runner.buffers_alive is True
+    assert emptied == []
+
+
+@pytest.mark.parametrize("cuda", [False, True])
+def test_release_optional_memory_clears_the_runner(monkeypatch: pytest.MonkeyPatch, cuda: bool) -> None:
+    """The adapter clear path drops the runner and reports its accounted bytes.
+
+    ``held_bytes`` is the runner's own tally, not a device measurement: without
+    a GPU that is all that is available, and a successful clear leaves it at 0.
+    ``empty_cache`` runs only when CUDA is available.
+    """
+    runner = _Runner()
+    runner._device_bytes = 4096
+    runner.buffers_alive = True
+    adapter = _adapter_with(runner)
+    emptied: list[str] = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: cuda)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: emptied.append("emptied"))
+
+    assert adapter.has_releasable_memory() is True
+    assert adapter.release_optional_memory() == 4096
+    assert adapter.has_releasable_memory() is False
+    assert runner.graph_count == 0
+    assert runner.buffers_alive is False
+    assert runner.held_bytes == 0
+    assert emptied == (["emptied"] if cuda else [])
+
+
 def test_shipped_profiles_enable_bucketed_graphs_only_where_measured() -> None:
     configs = load_model_configs(_MODELS_DIR)
     # Named profiles (``model:profile``) inherit the default profile's load-time options.

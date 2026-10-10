@@ -415,6 +415,32 @@ async def test_evict_lru_excluding_evicts_sibling(mock_load_adapter: MagicMock) 
 
 @pytest.mark.asyncio
 @patch("sie_server.core.model_loader.load_adapter")
+async def test_evict_lru_excluding_skips_an_inflight_release(mock_load_adapter: MagicMock) -> None:
+    """A sibling whose graph release is still running is not unloaded."""
+    adapters = [MagicMock(), MagicMock(), MagicMock()]
+    for adapter in adapters:
+        adapter.capabilities.outputs = ["dense"]
+    mock_load_adapter.side_effect = adapters
+
+    reg = _build_registry(idle_evict_s=None)
+    reg.add_config(_make_config(name="releasing"))
+    reg.add_config(_make_config(name="free"))
+    reg.add_config(_make_config(name="keep-me"))
+    await reg.load_async("releasing", device="cpu")
+    await reg.load_async("free", device="cpu")
+    await reg.load_async("keep-me", device="cpu")
+
+    reg._optional_release_tasks["releasing"] = asyncio.create_task(asyncio.sleep(60), name="optional-memory-releasing")
+    reg._do_unload = AsyncMock()
+    try:
+        assert await reg.evict_lru_excluding("keep-me") is EvictionResult.EVICTED
+        reg._do_unload.assert_awaited_once_with("free", reason="oom_recovery")
+    finally:
+        reg._optional_release_tasks["releasing"].cancel()
+
+
+@pytest.mark.asyncio
+@patch("sie_server.core.model_loader.load_adapter")
 async def test_evict_lru_excluding_unload_failure(mock_load_adapter: MagicMock) -> None:
     """If the chosen candidate's unload raises → UNLOAD_FAILED."""
     adapters = [MagicMock(), MagicMock()]

@@ -53,14 +53,17 @@ def select_eviction_candidate(
     is_pinned: Callable[[str], bool],
     loaded: Container[str],
     unloading: Container[str],
+    releasing: Container[str] = (),
 ) -> str | None:
     """Pick the first LRU-ordered model eligible for eviction, or ``None``.
 
     Walks ``lru_order`` (least-recently-used first) and returns the first entry
     that is not the caller's own ``exclude_name``, not pinned, still ``loaded``,
-    and not already ``unloading``. Pure decision — no I/O, no unload — so the
-    OOM-recovery eviction *policy* is testable in isolation and lives in one
-    place instead of inline in ``ModelRegistry.evict_lru_excluding``.
+    not already ``unloading``, and not in ``releasing``. A name in ``releasing``
+    still has an optional-memory release on its inference thread. Unload would
+    wait for that thread with no deadline. Pure decision — no I/O, no unload —
+    so the OOM-recovery eviction *policy* is testable in isolation and lives in
+    one place instead of inline in ``ModelRegistry.evict_lru_excluding``.
 
     The registry state is injected (``is_pinned`` predicate, ``loaded`` /
     ``unloading`` containers) so this stays free of any registry import — the
@@ -75,6 +78,8 @@ def select_eviction_candidate(
         if candidate not in loaded:
             continue
         if candidate in unloading:
+            continue
+        if candidate.lower() in releasing:
             continue
         return candidate
     return None

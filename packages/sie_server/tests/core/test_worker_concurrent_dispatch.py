@@ -182,3 +182,25 @@ async def test_concurrent_dispatch_steps_the_adaptive_controller() -> None:
         assert sum(steps) == 3
     finally:
         await worker.stop()
+
+
+@pytest.mark.asyncio
+async def test_worker_without_a_release_hook_builds_and_releases_nothing() -> None:
+    """Duck-typed adapters with no release hook still build a worker.
+
+    ``_GatedAdapter`` has neither hook. ``_ClaimsMemory`` says it holds
+    memory but still has no hook, so the invoke path must return 0 instead
+    of calling a missing method.
+    """
+
+    class _ClaimsMemory:
+        def has_releasable_memory(self) -> bool:
+            return True
+
+    for adapter in (_GatedAdapter(1), _ClaimsMemory()):
+        worker = ModelWorker(adapter, _config())
+        try:
+            assert worker._batch_executor._release_optional_memory is None
+            assert await asyncio.wait_for(worker.release_optional_memory(), 0.5) == 0
+        finally:
+            worker._inference_executor.shutdown(wait=False, cancel_futures=True)
