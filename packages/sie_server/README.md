@@ -502,6 +502,38 @@ space is read only in its last 4,096 characters, and reading stops there. An ite
 not fit whole with `options={"overflow_policy": "error"}`, returns a per-item
 `INPUT_TOO_LONG` error while the other items succeed.
 
+### GLiNER competitor labels and uppercase filter
+
+Classic GLiNER models (`GLiNERAdapter`) take two opt-in output filters. Both are
+off by default, and a request without them is unchanged.
+
+```python
+from sie_sdk import SIEClient
+
+with SIEClient("http://localhost:8080") as client:
+    result = client.extract(
+        "gliner-community/gliner_medium-v2.5",
+        {"text": "The government asked NIST to test Firefox in Zürich."},
+        labels=["person name", "organization name", "location name"],
+        options={
+            "threshold": 0.85,
+            "exclude_labels": ["software or product name", "job title or role"],
+            "require_uppercase": True,
+        },
+    )
+    print(result["entities"])  # only the three requested labels, each span with an uppercase letter
+```
+
+`options.exclude_labels` adds competitor labels to the model's label prompt.
+With `flat_ner` (the default) each span goes to its best-scoring label, and
+spans that land on an excluded label are removed from the reply. Excluded
+labels must be unique, must not repeat `labels`, count toward the label limit
+and the label prompt budget, and cannot be combined with `relation_labels`.
+`options.require_uppercase` removes spans whose text contains no uppercase
+character, for example `government` or `military`. Both filters run after
+long-document windows are merged, keep the remaining spans' offsets unchanged,
+and do not change usage, which counts document tokens only.
+
 ### GLiNER2.5 entity extraction
 
 `fastino/gliner2.5-base-v1`, `fastino/gliner2.5-small-v1`, and
