@@ -55,8 +55,23 @@ An alternative endpoint can be supplied with `--sie-url`. Choose a model already
 served there and freeze its checkpoint/runtime configuration separately. For
 models with a plain default OCR task, omit `--instruction`; do not carry a
 Florence task token into another model. The collector sends each full JPEG,
-original item ID, `profile=default`, `max_new_tokens=8192` and `num_beams=1`.
-`--max-new-tokens` accepts a smaller predeclared limit, never a larger one.
+original item ID, `profile=default` and `num_beams=1`. Its default output limit is
+8192 tokens; `--max-new-tokens` accepts up to 12288 for
+`lightonai/LightOnOCR-3-4B`, and up to 8192 for other models.
+
+The [recorded LightOnOCR-3-4B comparison](https://huggingface.co/datasets/superlinked/sie-task-evidence/tree/37c4f1efdfdca1c6459849ae1b02bec62156fe65/ocr-photo24-native-results/2026-10-10/addendum-03)
+used the plain default task with no instruction and a 12288-token output limit.
+To collect with those request controls against your `SIE_URL`:
+
+```bash
+python collect.py data native-lighton \
+  --model lightonai/LightOnOCR-3-4B \
+  --max-new-tokens 12288
+```
+
+The linked evidence records the checkpoint, runtime and review used for that
+comparison. The command collects new transcriptions; review them as described
+below before scoring. It does not rerun the saved provider arms or their reviews.
 
 The public SDK uses an injected HTTP transport to save the actual MessagePack
 request and reply bodies. It records at most one inference POST attempt per

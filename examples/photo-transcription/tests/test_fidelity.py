@@ -166,7 +166,13 @@ def mock_transport(monkeypatch, handler):
 
 
 @pytest.mark.parametrize("base_url", ["https://ocr.example.test", "https://ocr.example.test/prefix"])
-def test_actual_sdk_sends_full_jpeg_and_exact_controls_once(packet, tmp_path, monkeypatch, base_url):
+@pytest.mark.parametrize(
+    ("model", "instruction", "max_new_tokens"),
+    [("test/native", "Text Recognition:", 8192), ("lightonai/LightOnOCR-3-4B", None, 12288)],
+)
+def test_actual_sdk_sends_full_jpeg_and_exact_controls_once(
+    packet, tmp_path, monkeypatch, base_url, model, instruction, max_new_tokens
+):
     seen = []
 
     def handle(request):
@@ -174,7 +180,7 @@ def test_actual_sdk_sends_full_jpeg_and_exact_controls_once(packet, tmp_path, mo
         payload = msgpack.unpackb(request.content, raw=False)
         item = payload["items"][0]
         body = {
-            "model": "test/native",
+            "model": model,
             "items": [
                 {"id": item["id"], "entities": [{"text": "Full source transcript", "label": "text", "score": 1.0}]}
             ],
@@ -187,7 +193,7 @@ def test_actual_sdk_sends_full_jpeg_and_exact_controls_once(packet, tmp_path, mo
     monkeypatch.setenv("SIE_BASE_URL", base_url)
     monkeypatch.setenv("SIE_API_KEY", "synthetic-fixture-credential")
     output = tmp_path / "run"
-    report = collector.collect(packet, output, "test/native", base_url, "Text Recognition:")
+    report = collector.collect(packet, output, model, base_url, instruction, max_new_tokens)
     assert report["physical_inference_posts"] == 24
     assert len(seen) == 24
     manifest, _ = load_packet(packet)
@@ -195,18 +201,47 @@ def test_actual_sdk_sends_full_jpeg_and_exact_controls_once(packet, tmp_path, mo
         body = msgpack.unpackb(request.content, raw=False)
         assert body["items"][0]["id"] == source["id"]
         assert body["items"][0]["images"][0]["data"] == (packet / source["input_image"]["path"]).read_bytes()
-        assert body["params"] == {
-            "instruction": "Text Recognition:",
-            "options": {"profile": "default", "max_new_tokens": 8192, "num_beams": 1},
-        }
+        assert body["items"][0]["images"][0]["format"] == "jpeg"
+        expected_params = {"options": {"profile": "default", "max_new_tokens": max_new_tokens, "num_beams": 1}}
+        if instruction is not None:
+            expected_params["instruction"] = instruction
+        assert body["params"] == expected_params
     assert (output / "wire/00-request.msgpack").read_bytes() == seen[0].content
     assert seen[0].headers["Authorization"] == "Bearer synthetic-fixture-credential"
     assert all(b"synthetic-fixture-credential" not in path.read_bytes() for path in output.rglob("*") if path.is_file())
     calls = [json.loads(line) for line in (output / "calls.jsonl").read_text().splitlines()]
-    assert all(row["returned_model"] == "test/native" for row in calls)
+    assert all(row["returned_model"] == model for row in calls)
     assert len(json.loads((output / "review-template.json").read_text())) == 24
     with pytest.raises(FileExistsError):
         collector.collect(packet, output, "test/native", "https://ocr.example.test")
+
+
+@pytest.mark.parametrize(
+    ("model", "max_new_tokens", "limit"),
+    [
+        ("lightonai/LightOnOCR-3-4B", 12289, 12288),
+        ("lightonai/LightOnOCR-3-4B", 0, 12288),
+        ("zai-org/GLM-OCR", 8193, 8192),
+        ("lightonai/LightOnOCR-3-4B-other", 12288, 8192),
+        ("test/native", 0, 8192),
+        ("", 8192, 8192),
+    ],
+)
+def test_model_output_bounds_fail_before_transport_or_output(
+    packet, tmp_path, monkeypatch, model, max_new_tokens, limit
+):
+    seen = []
+
+    def handle(request):
+        seen.append(request)
+        raise AssertionError("Invalid controls must not reach the endpoint")
+
+    mock_transport(monkeypatch, handle)
+    output = tmp_path / "invalid"
+    with pytest.raises(ValueError, match=f"between 1 and {limit}"):
+        collector.collect(packet, output, model, "https://ocr.example.test", max_new_tokens=max_new_tokens)
+    assert seen == []
+    assert not output.exists()
 
 
 def test_loading_error_is_one_post_and_preserves_all_remaining_cases(packet, tmp_path, monkeypatch):

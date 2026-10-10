@@ -27,8 +27,9 @@ def collect(
     import httpx  # Optional: only native collection needs the SDK transport.
     from sie_sdk import SIEClient  # Optional for the offline scorer.
 
-    if not model or not 1 <= max_new_tokens <= 8192:
-        raise ValueError("A model and a bounded output limit are required")
+    output_limit = 12288 if model == "lightonai/LightOnOCR-3-4B" else 8192
+    if not model or not 1 <= max_new_tokens <= output_limit:
+        raise ValueError(f"A model and an output limit between 1 and {output_limit} are required")
     manifest, _ = load_packet(packet)
     output.mkdir(parents=True, exist_ok=False)
     calls: list[dict[str, Any]] = []
@@ -150,7 +151,9 @@ def main() -> None:
     parser.add_argument("--model", required=True)
     parser.add_argument("--sie-url", default=os.environ.get("SIE_URL"))
     parser.add_argument("--instruction")
-    parser.add_argument("--max-new-tokens", type=int, default=8192)
+    parser.add_argument(
+        "--max-new-tokens", type=int, default=8192, help="Up to 12288 for LightOnOCR-3-4B; up to 8192 for other models"
+    )
     args = parser.parse_args()
     if not args.sie_url:
         parser.error("Provide --sie-url or SIE_URL for an existing remote deployment")
