@@ -18,9 +18,11 @@ from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters._word_window import (
     MAX_WORD_CHARS,
+    DocumentWindow,
     SubwordCounter,
     Window,
     WindowedSplitter,
+    merge_window_spans,
     plan_forwards,
     quadratic_attention,
     subword_budget,
@@ -73,6 +75,10 @@ _CLASSIFY_OVERLAP_WORDS = 64
 # A longer text is rejected with INVALID_INPUT rather than classified in part,
 # since a verdict on part of a text reads as a verdict on all of it.
 _MAX_CLASSIFY_WINDOWS = 128
+# Most windows one text is extracted in. A longer text is not read in part
+# either: that item comes back with the per-item ``INPUT_TOO_LONG`` error and
+# no extraction, and the other items of the request are unaffected.
+_MAX_EXTRACT_WINDOWS = 128
 # Characters of the rest of a text read to find its next window, doubled until
 # the window ends at least MAX_WORD_CHARS before them (or the text ends), so a
 # window is found without copying the rest of a long text each time.
@@ -99,11 +105,14 @@ class GLiNER2Adapter(BaseAdapter):
     2048), and each label, task name, field name or choice at most 128
     characters; a longer prompt is rejected with ``INVALID_INPUT``.
 
-    gliner2 reads at most ``max_seq_length`` words of a document. Entity,
-    relation and structured extraction read that first window. Classification
-    reads all of a longer text, as overlapping windows of that many words, and
-    pools the windows' results into one (see ``pool_window_classifications``);
-    a text that fits one window is classified exactly as before.
+    gliner2 reads at most ``max_seq_length`` words of a document. Every task
+    reads all of a longer text, as overlapping windows of that many words: the
+    windows' classifications are pooled into one (see
+    ``pool_window_classifications``), and the windows' extractions are merged
+    into one result at document offsets. A text that fits one window is read
+    exactly as before, in the same call. A text that takes more than
+    ``_MAX_EXTRACT_WINDOWS`` windows of extraction comes back with a per-item
+    ``INPUT_TOO_LONG`` error rather than being read in part.
 
     Reference models:
     - fastino/gliner2-base-v1
@@ -277,9 +286,7 @@ class GLiNER2Adapter(BaseAdapter):
         """Extract entities, relations, classifications, or flat structured data."""
         self._check_loaded()
         texts = [self._extract_text(item) for item in items]
-        # gliner2 reads a bounded window of words: pass it only the prefix holding them.
         reads = [self._read(text) for text in texts]
-        windows = [(model_text, subwords) for model_text, subwords, _ in reads]
         opts = options or {}
         effective_threshold = self._validate_threshold(opts.get("threshold", self._threshold))
         classification_task = opts.get("classification_task", self._classification_task)
@@ -302,12 +309,10 @@ class GLiNER2Adapter(BaseAdapter):
             check_label_chars("GLiNER2", "output_schema property names", output_schema["properties"])
             check_label_chars("GLiNER2", "output_schema enum values", choices)
             prompt = self._prompt_tokens(specs, key=("json", tuple(specs)), extra=len(choices))
-            rows = self._row_tokens(windows, prompt)
             with torch.inference_mode():
-                raw_results, errors, input_token_counts = self._run_complete(
+                raw_results, errors, input_token_counts = self._run_whole(
                     texts,
                     reads,
-                    rows,
                     lambda batch: self._model.batch_extract_json(
                         batch,
                         structures,
@@ -318,7 +323,9 @@ class GLiNER2Adapter(BaseAdapter):
                         max_len=self._max_seq_length,
                     ),
                     input_token_counts=input_token_counts,
+                    prompt=prompt,
                     rows_per_pass=len(texts),
+                    merge=lambda _, __, ___, results: self._merge_structured(results),
                 )
             return ExtractOutput(
                 entities=[[] for _ in texts],
@@ -347,12 +354,10 @@ class GLiNER2Adapter(BaseAdapter):
             prompt = self._prompt_tokens(
                 normalized_labels, per_entry=_PROMPT_TOKENS_PER_RELATION, key=("relations", tuple(normalized_labels))
             )
-            rows = self._row_tokens(windows, prompt)
             with torch.inference_mode():
-                raw_results, errors, input_token_counts = self._run_complete(
+                raw_results, errors, input_token_counts = self._run_whole(
                     texts,
                     reads,
-                    rows,
                     lambda batch: self._model.batch_extract_relations(
                         batch,
                         normalized_labels,
@@ -363,7 +368,11 @@ class GLiNER2Adapter(BaseAdapter):
                         max_len=self._max_seq_length,
                     ),
                     input_token_counts=input_token_counts,
+                    prompt=prompt,
                     rows_per_pass=len(texts),
+                    merge=lambda index, text, plan, results: self._merge_relations(
+                        text, plan, results, normalized_entities[index]
+                    ),
                 )
             return ExtractOutput(
                 entities=[
@@ -426,72 +435,247 @@ class GLiNER2Adapter(BaseAdapter):
         check_label_chars("GLiNER2", "labels", normalized_labels)
         prompt = self._prompt_tokens(normalized_labels, key=("entities", tuple(normalized_labels)))
         with torch.inference_mode():
-            raw_results, errors, input_token_counts = self._run_complete(
+            raw_results, errors, input_token_counts = self._run_whole(
                 texts,
                 reads,
-                self._row_tokens(windows, prompt),
                 extract_entities,
                 input_token_counts=input_token_counts,
-                rows_per_pass=1 if len(texts) == 1 else _PACKAGE_BATCH_SIZE,
+                prompt=prompt,
+                rows_per_pass=_PACKAGE_BATCH_SIZE,
+                merge=lambda _, text, plan, results: self._merge_entities(text, plan, results),
             )
 
         all_entities = [self._flatten_entities(result, text=text) for text, result in zip(texts, raw_results)]
         return ExtractOutput(entities=all_entities, errors=errors, input_token_counts=input_token_counts)
 
-    def _run_complete(
+    def _run_whole(
         self,
         texts: list[str],
         reads: list[tuple[str, int | None, Window | None]],
-        rows: list[int] | None,
         run: Callable[[list[str]], list[Any]],
         *,
+        prompt: int | None,
         input_token_counts: list[int] | None,
         rows_per_pass: int,
+        merge: Callable[[int, str, tuple[list[int], list[int], list[tuple[str, int | None]]], list[Any]], Any],
     ) -> tuple[list[Any], list[ExtractItemError | None] | None, list[int] | None]:
-        """Run extraction only for items whose entire text fits the model's word/subword window.
+        """Run extraction over every window of each item's text and merge the windows' results.
 
-        Classification has its own whole-document windowing. Entity, relation,
-        and structured extraction must fail an overlong item rather than return
-        a successful partial prediction. Inspect the last piece actually read:
-        a long word's ``cut`` can be beyond that piece, and lowercase offsets
-        need not index the original text. The package's synthetic sentence end
-        and trailing whitespace are not unread user content.
+        Every window of every item runs in the same planned batch as one row
+        (see ``_run_planned``), and ``merge`` builds one item's result from its
+        windows' (``_merge_entities``, ``_merge_relations`` or
+        ``_merge_structured``). A text that fits the model's window is read as
+        that one window, exactly as before. A text taking more than
+        ``_MAX_EXTRACT_WINDOWS`` windows, or one whose windows' spans cannot be
+        moved back to it, comes back with the per-item ``INPUT_TOO_LONG``
+        error, is not inferred and is metered at zero; the other items of the
+        request are unaffected.
         """
+        plans: list[tuple[list[int], list[int], list[tuple[str, int | None]]] | None] = []
         errors: list[ExtractItemError | None] = []
-        for text, (_, _, window) in zip(texts, reads, strict=True):
-            source = text.lower() if self._lower_text_first else text
-            incomplete = (
-                window is not None
-                and window.cut is not None
-                and bool(window.words)
-                and _NON_SPACE.search(source, window.words[-1][2]) is not None
-            )
-            errors.append(
-                ExtractItemError(
-                    code="INPUT_TOO_LONG",
-                    message="GLiNER2 extraction requires the entire text to fit one word/subword window. "
-                    "Split the text into smaller items.",
+        for text, read in zip(texts, reads, strict=True):
+            plan = self._windows(text, read, limit=_MAX_EXTRACT_WINDOWS)
+            if plan is None:
+                errors.append(
+                    ExtractItemError(
+                        code="INPUT_TOO_LONG",
+                        message=f"GLiNER2 reads a text in at most {_MAX_EXTRACT_WINDOWS} windows of "
+                        f"{self._max_seq_length or _DEFAULT_MAX_WORDS} words. Split the text into smaller items.",
+                    )
                 )
-                if incomplete
-                else None
-            )
-        accepted = [index for index, error in enumerate(errors) if error is None]
+                plans.append(None)
+                continue
+            source = text.lower() if self._lower_text_first else text
+            if len(plan[2]) > 1 and len(source) != len(text):
+                errors.append(
+                    ExtractItemError(
+                        code="INPUT_TOO_LONG",
+                        message="GLiNER2 lowercases this text before reading it, and lowercasing changes its "
+                        "length, so the spans of its windows cannot be moved back to the text. "
+                        "Split the text into smaller items.",
+                    )
+                )
+                plans.append(None)
+                continue
+            errors.append(None)
+            plans.append(plan)
+        flat = [window for plan in plans if plan is not None for window in plan[2]]
         results: list[Any] = [{} for _ in texts]
-        if accepted:
+        if flat:
             raw = self._run_planned(
-                [reads[index][0] for index in accepted],
-                [rows[index] for index in accepted] if rows is not None else None,
+                [model_text for model_text, _ in flat],
+                self._row_tokens(flat, prompt),
                 run,
-                rows_per_pass=rows_per_pass,
+                rows_per_pass=1 if len(flat) == 1 else rows_per_pass,
             )
-            for index, result in zip(accepted, raw, strict=True):
-                results[index] = result
-        counts = (
-            [count if error is None else 0 for count, error in zip(input_token_counts, errors, strict=True)]
-            if input_token_counts is not None
-            else ([0] * len(texts) if not accepted else None)
-        )
-        return results, errors if len(accepted) != len(texts) else None, counts
+            if len(raw) != len(flat):
+                raise ValueError("GLiNER2 returned results for a different number of items")
+            offset = 0
+            for index, plan in enumerate(plans):
+                if plan is None:
+                    continue
+                window_results = raw[offset : offset + len(plan[2])]
+                offset += len(plan[2])
+                results[index] = (
+                    merge(index, texts[index], plan, window_results) if len(plan[2]) > 1 else window_results[0]
+                )
+        if any(plan is not None and len(plan[2]) > 1 for plan in plans):
+            counts = self._windowed_input_token_counts(texts, [plan[2] if plan is not None else [] for plan in plans])
+        else:
+            counts = (
+                [count if error is None else 0 for count, error in zip(input_token_counts, errors, strict=True)]
+                if input_token_counts is not None
+                else ([0] * len(texts) if all(plan is None for plan in plans) else None)
+            )
+        return results, errors if any(error is not None for error in errors) else None, counts
+
+    def _merge_entities(
+        self,
+        text: str,
+        plan: tuple[list[int], list[int], list[tuple[str, int | None]]],
+        results: list[Any],
+    ) -> dict[str, Any]:
+        """One text's entities from the entities found in each of its windows.
+
+        Each window's spans move back to the text by the window's start, and
+        the windows' spans merge as the GLiNER adapters merge theirs (see
+        ``_word_window.merge_window_spans``): a span cut at a window's edge
+        gives way when the window next to it read that region whole and found
+        an overlapping span of the same label, the same span keeps its highest
+        score, and overlapping spans resolve highest score first. A span's text
+        is re-read from the text, so it keeps its case whatever the windows
+        were read from.
+        """
+        starts, read_ends, windows = plan
+        found: list[list[dict[str, Any]]] = []
+        for result in results:
+            spans: list[dict[str, Any]] = []
+            for label, label_spans in (result.get("entities") or {}).items():
+                if not isinstance(label_spans, list):
+                    continue
+                for span in label_spans:
+                    if isinstance(span, dict):
+                        spans.append(
+                            {
+                                "start": span.get("start"),
+                                "end": span.get("end"),
+                                "label": label,
+                                "score": span.get("confidence", 0.0),
+                                "text": span.get("text", ""),
+                            }
+                        )
+            found.append(spans)
+        document = [
+            DocumentWindow(start, start + len(model_text), read_end, None)
+            for start, read_end, (model_text, _) in zip(starts, read_ends, windows, strict=True)
+        ]
+        merged = merge_window_spans(document, found, text, flat_ner=False, multi_label=True)
+        entities: dict[str, Any] = {}
+        for span in merged:
+            entities.setdefault(span["label"], []).append(
+                {"text": span["text"], "start": span["start"], "end": span["end"], "confidence": span["score"]}
+            )
+        return {"entities": entities}
+
+    def _merge_relations(
+        self,
+        text: str,
+        plan: tuple[list[int], list[int], list[tuple[str, int | None]]],
+        results: list[Any],
+        entities: list[Entity],
+    ) -> dict[str, Any]:
+        """One text's relations from the relations found in each of its windows.
+
+        A relation found by several windows is kept once per (head, tail,
+        relation) at its highest score, and a relation's head and tail are
+        moved back to the text: their spans move by the window's start and the
+        text is re-read there, or an endpoint's text matches an entity's text
+        case-insensitively when it carries no span. A relation whose head or
+        tail is none of ``entities`` is dropped, as in one window. A relation
+        whose head and tail no single window holds together is not found.
+        """
+        starts = plan[0]
+        originals = {entity["text"] for entity in entities}
+        by_lower: dict[str, str] = {}
+        for original_text in originals:
+            by_lower.setdefault(original_text.lower(), original_text)
+
+        def original(endpoint: Any, offset: int) -> str | None:
+            if not isinstance(endpoint, dict):
+                return None
+            found = endpoint.get("text")
+            if not isinstance(found, str):
+                return None
+            if found in originals:
+                return found
+            start, end = endpoint.get("start"), endpoint.get("end")
+            if (
+                isinstance(start, int)
+                and not isinstance(start, bool)
+                and isinstance(end, int)
+                and not isinstance(end, bool)
+            ):
+                moved_start, moved_end = offset + start, offset + end
+                if 0 <= moved_start < moved_end <= len(text) and text[moved_start:moved_end].lower() == found.lower():
+                    return text[moved_start:moved_end]
+            return by_lower.get(found.lower())
+
+        best: dict[tuple[str, str, str], tuple[float, dict[str, Any]]] = {}
+        for offset, result in zip(starts, results, strict=True):
+            by_type = result.get("relation_extraction") or {}
+            if not isinstance(by_type, dict):
+                continue
+            for relation_type, candidates in by_type.items():
+                if not isinstance(relation_type, str) or not isinstance(candidates, list):
+                    continue
+                for candidate in candidates:
+                    if not isinstance(candidate, dict):
+                        continue
+                    head, tail = candidate.get("head"), candidate.get("tail")
+                    resolved_head, resolved_tail = original(head, offset), original(tail, offset)
+                    if resolved_head is None or resolved_tail is None:
+                        continue
+                    head_confidence = head.get("confidence", 0.0) if isinstance(head, dict) else 0.0
+                    tail_confidence = tail.get("confidence", 0.0) if isinstance(tail, dict) else 0.0
+                    score = min(head_confidence, tail_confidence)
+                    key = (resolved_head, resolved_tail, relation_type)
+                    if key not in best or score > best[key][0]:
+                        best[key] = (
+                            score,
+                            {
+                                "head": {"text": resolved_head, "confidence": head_confidence},
+                                "tail": {"text": resolved_tail, "confidence": tail_confidence},
+                            },
+                        )
+        extraction: dict[str, Any] = {}
+        for (_, _, relation_type), (_, candidate) in best.items():
+            extraction.setdefault(relation_type, []).append(candidate)
+        return {"relation_extraction": extraction}
+
+    def _merge_structured(self, results: list[Any]) -> dict[str, Any]:
+        """One text's structured data from the data extracted from each of its windows.
+
+        A string field takes the first window that found a value for it, and a
+        list field takes every window's values in window order, once each. A
+        field no window found stays missing.
+        """
+        merged: dict[str, Any] = {}
+        for result in results:
+            values = result.get(_STRUCTURE_NAME) or []
+            if not isinstance(values, list):
+                continue
+            for record in values:
+                if not isinstance(record, dict):
+                    continue
+                for field, value in record.items():
+                    if isinstance(value, list):
+                        kept = merged.setdefault(field, [])
+                        for one in value:
+                            if one not in kept:
+                                kept.append(one)
+                    elif value is not None and value != "" and merged.get(field) is None:
+                        merged[field] = value
+        return {_STRUCTURE_NAME: [merged]}
 
     def _classify(
         self,
@@ -1059,43 +1243,64 @@ class GLiNER2Adapter(BaseAdapter):
         """The windows ``text`` is classified in, as ``(model text, subwords)``.
 
         ``first`` is ``_read(text)``, the window gliner2 reads of ``text``. A
-        text all of whose words it reads is one window, the text as before.
-        Otherwise each next window starts at the start of the last
-        ``_CLASSIFY_OVERLAP_WORDS`` words the one before it read (at most half
-        of them, so every window reads new words), and is read as gliner2
-        reads a text starting there: at most ``max_seq_length`` words within
-        the subword budget. A window after the first is cut from the text as
-        the splitter reads it (lowercased first by gliner2 1.x, which
-        lowercases it again to the same text), so that the words' offsets
-        index it.
+        text all of whose words it reads is one window, the text as before;
+        a longer text is read as the windows of ``_windows``.
 
         Raises:
             InvalidInputError: The text takes more than ``_MAX_CLASSIFY_WINDOWS`` windows.
         """
+        windows = self._windows(text, first, limit=_MAX_CLASSIFY_WINDOWS)
+        if windows is None:
+            raise InvalidInputError(
+                f"GLiNER2 classifies a text in at most {_MAX_CLASSIFY_WINDOWS} windows of "
+                f"{self._max_seq_length or _DEFAULT_MAX_WORDS} words; this text needs more. "
+                "Split it into several items."
+            )
+        return windows[2]
+
+    def _windows(
+        self, text: str, first: tuple[str, int | None, Window | None], *, limit: int
+    ) -> tuple[list[int], list[int], list[tuple[str, int | None]]] | None:
+        """``(starts, read ends, windows)``: every window ``text`` is read in.
+
+        Each window is ``(model text, subwords)`` as ``_read`` returns it, so a
+        text all of whose words gliner2 reads is one window, the text as
+        before. ``first`` is ``_read(text)``. Otherwise each next window starts
+        at the start of the last ``_CLASSIFY_OVERLAP_WORDS`` words the one
+        before it read (at most half of them, so every window reads new
+        words), and is read as gliner2 reads a text starting there: at most
+        ``max_seq_length`` words within the subword budget. A window after the
+        first is cut from the text as the splitter reads it (lowercased first
+        by gliner2 1.x, which lowercases it again to the same text), so that
+        the words' offsets index it. ``starts[i]`` is where window ``i`` begins
+        in ``text`` and ``read ends[i]`` is where its last word ends there, so
+        a span found in window ``i`` moves back to the text by ``starts[i]``.
+
+        Returns ``None`` when the text takes more than ``limit`` windows.
+        """
         model_text, subwords, window = first
         windows = [(model_text, subwords)]
+        starts = [0]
+        read_ends = [window.words[-1][2] if window is not None and window.words else 0]
         if window is None or window.cut is None:
-            return windows
+            return starts, read_ends, windows
         source = text.lower() if self._lower_text_first else text
         start = 0
         while True:
             words = window.words
             read_end = start + words[-1][2]
             if _NON_SPACE.search(source, read_end) is None:
-                # Only the "." gliner2 appends, or nothing, is left unread.
-                return windows
-            if len(windows) >= _MAX_CLASSIFY_WINDOWS:
-                raise InvalidInputError(
-                    f"GLiNER2 classifies a text in at most {_MAX_CLASSIFY_WINDOWS} windows of "
-                    f"{self._max_seq_length or _DEFAULT_MAX_WORDS} words; this text needs more. "
-                    "Split it into several items."
-                )
+                return starts, read_ends, windows
+            if len(windows) >= limit:
+                return None
             shared = min(_CLASSIFY_OVERLAP_WORDS, len(words) // 2)
             start = start + words[len(words) - shared][1] if shared else read_end
             model_text, subwords, window = self._read_from(source, start)
             windows.append((model_text, subwords))
+            starts.append(start)
+            read_ends.append(start + (window.words[-1][2] if window is not None and window.words else 0))
             if window is None or window.cut is None:
-                return windows
+                return starts, read_ends, windows
 
     def _read_from(self, source: str, start: int) -> tuple[str, int | None, Window | None]:
         """``_read`` of ``source[start:]``, from a slice of it long enough to give the same window.

@@ -21,7 +21,12 @@ from unittest.mock import MagicMock
 
 import pytest
 from sie_server.adapters._word_window import ATTENTION_BUDGET, MAX_WORD_CHARS, WindowedSplitter, subword_budget
-from sie_server.adapters.gliner2.adapter import _PROMPT_TOKENS_PER_RELATION, _SUBWORDS_PER_WORD, GLiNER2Adapter
+from sie_server.adapters.gliner2.adapter import (
+    _MAX_EXTRACT_WINDOWS,
+    _PROMPT_TOKENS_PER_RELATION,
+    _SUBWORDS_PER_WORD,
+    GLiNER2Adapter,
+)
 from sie_server.adapters.gliner2.classification import GLiNER2ClassificationAdapter
 from sie_server.adapters.gliner2.words import PACKAGE_PATTERN, LinearWordSplitter
 from sie_server.types.inputs import InvalidInputError, Item
@@ -795,21 +800,279 @@ def test_positive_label_is_validated() -> None:
 
 
 @pytest.mark.parametrize("task", ["entities", "relations", "structured"])
-def test_long_item_rejection_uses_the_pinned_package_processor(task: str) -> None:
+def test_a_long_item_is_read_whole_with_the_pinned_package_processor(task: str) -> None:
     adapter, model = make_adapter()
-    text = " ".join(["word"] * 512 + ["Alice"])
+    text = " ".join(["word"] * 512 + ["Alice", "met", "Bob"])
     kwargs: dict[str, Any] = {"labels": ["person"]}
     item = Item(text=text)
     if task == "structured":
         kwargs = {"output_schema": {"type": "object", "properties": {"name": {"type": "string"}}}}
     elif task == "relations":
         kwargs = {"labels": ["knows"]}
-        item = Item(text=text, metadata={"entities": [{"text": "Alice", "start": len(text) - 5, "end": len(text)}]})
+        item = Item(
+            text=text,
+            metadata={
+                "entities": [
+                    {"text": "Alice", "start": text.index("Alice"), "end": text.index("Alice") + 5},
+                    {"text": "Bob", "start": text.index("Bob"), "end": text.index("Bob") + 3},
+                ]
+            },
+        )
 
     output = adapter.extract([item], **kwargs)
 
+    assert output.errors is None
+    assert output.input_token_counts is not None
+    assert output.input_token_counts[0] > 0
+    (batch,) = model.inputs
+    assert len(batch.text_tokens) == 2
+    assert "alice" in batch.text_tokens[-1]
+
+
+# --- Extraction of texts longer than one window -------------------------------------------------
+
+
+class SpanModel(PackageModel):
+    """gliner2's preprocessing, with a stand-in extractor: a window yields the person it reads.
+
+    Records each window's text. A window holding the whole name yields it as
+    one span at the window's offsets; a window cut inside the name yields the
+    word of it that window holds whole, as a model cut at an edge would.
+    """
+
+    def __init__(self, processor: Any, target: str = "priya raman") -> None:
+        super().__init__(processor)
+        self.target = target
+        self.rows: list[str] = []
+
+    def batch_extract_entities(
+        self, texts: list[str], labels: list[str], *, max_len: int | None, **_: Any
+    ) -> list[Any]:
+        self._collate(texts, gliner2_engine.Schema().entities(labels), max_len)
+        results = []
+        for text in texts:
+            self.rows.append(text)
+            lower = text.lower()
+            start = lower.find(self.target)
+            length = len(self.target)
+            if start < 0:
+                start = lower.find(self.target.split()[0])
+                length = len(self.target.split()[0])
+            if start < 0:
+                results.append({"entities": {}})
+                continue
+            results.append(
+                {
+                    "entities": {
+                        "person": [
+                            {
+                                "text": text[start : start + length],
+                                "start": start,
+                                "end": start + length,
+                                "confidence": 0.9,
+                            }
+                        ]
+                    }
+                }
+            )
+        return results
+
+
+def make_span(*, max_seq_length: int = 512, target: str = "priya raman") -> tuple[GLiNER2Adapter, SpanModel]:
+    adapter = GLiNER2Adapter("fake/gliner2", max_seq_length=max_seq_length)
+    model = SpanModel(make_processor(), target=target)
+    adapter._use_linear_word_splitter(model.processor)
+    adapter._model = model
+    return adapter, model
+
+
+def document(words: int, planted_at: int | None = None) -> str:
+    """An ordinary document of ``words`` words, with the name planted ``planted_at`` words in.
+
+    No punctuation, so that gliner2 reads exactly these words (and the "." it appends).
+    """
+    out = benign_email(words).split()
+    if planted_at is not None:
+        out[planted_at : planted_at + 2] = ["Priya", "Raman"]
+    return " ".join(out)
+
+
+def test_an_entity_past_the_first_window_is_extracted_at_its_document_offsets() -> None:
+    text = document(1500, planted_at=1420)
+    adapter, model = make_span()
+    assert "priya raman" not in adapter._model_text(text).lower()
+
+    output = adapter.extract([Item(text=text)], labels=["person"])
+
+    start = text.index("Priya")
+    assert output.errors is None
+    assert output.entities == [
+        [{"text": "Priya Raman", "label": "person", "score": 0.9, "start": start, "end": start + len("Priya Raman")}]
+    ]
+    # 1,500 words (and gliner2's ".") in windows of 512 that start 448 words apart, as classification's.
+    assert len(model.rows) == 4
+    for before, after in zip(model.rows, model.rows[1:], strict=False):
+        assert before.split()[-64:] == after.split()[:64]
+    assert [len(row.split()) for row in model.rows] == [512, 512, 512, 156]
+
+
+def test_an_entity_straddling_a_window_edge_is_found_once_whole() -> None:
+    # The name starts on the first window's last word and ends on the next one's first.
+    text = document(900, planted_at=511)
+    adapter, model = make_span()
+
+    output = adapter.extract([Item(text=text)], labels=["person"])
+
+    start = text.index("Priya")
+    assert output.errors is None
+    assert output.entities == [
+        [{"text": "Priya Raman", "label": "person", "score": 0.9, "start": start, "end": start + len("Priya Raman")}]
+    ]
+    assert "priya raman" not in model.rows[0].lower()
+    assert "priya" in model.rows[0].lower()
+
+
+def test_a_batch_of_long_and_short_documents_keeps_its_positions() -> None:
+    adapter, model = make_span()
+    texts = [document(1500, planted_at=1420), "Priya Raman works at Novartis.", document(900, planted_at=800)]
+
+    output = adapter.extract([Item(text=text) for text in texts], labels=["person"])
+
+    assert output.errors is None
+    assert [len(found) for found in output.entities] == [1, 1, 1]
+    assert output.entities[1][0]["text"] == "Priya Raman"
+    assert output.entities[1][0]["start"] == 0
+    assert len(model.rows) == 4 + 1 + 2
+
+
+def test_extraction_metering_counts_every_window() -> None:
+    text = document(1500, planted_at=1420)
+    adapter, _ = make_span()
+    windows = adapter._windows(text, adapter._read(text), limit=_MAX_EXTRACT_WINDOWS)
+    assert windows is not None
+    per_window = adapter._doc_input_token_counts([model_text for model_text, _ in windows[2]])
+    assert per_window is not None
+
+    output = adapter.extract([Item(text=text), Item(text="Priya Raman works at Novartis.")], labels=["person"])
+
+    assert output.input_token_counts == [
+        sum(per_window),
+        adapter._doc_input_token_counts(["Priya Raman works at Novartis."])[0],
+    ]
+    assert per_window == [512, 512, 512, per_window[-1]]
+    assert 0 < per_window[-1] < 512
+
+
+def test_a_text_longer_than_the_extraction_cap_errors_per_item(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sie_server.adapters.gliner2.adapter._MAX_EXTRACT_WINDOWS", 3)
+    adapter, model = make_span(max_seq_length=8)
+    # Windows of 8 words, 4 apart: three windows read 16 words (and gliner2's appended ".").
+    fits = document(15)
+    too_long = document(17)
+
+    output = adapter.extract([Item(text=fits), Item(text=too_long)], labels=["person"])
+
     assert output.errors is not None
-    assert output.errors[0] is not None
-    assert output.errors[0].code == "INPUT_TOO_LONG"
-    assert output.input_token_counts == [0]
-    assert not model.inputs
+    assert output.errors[0] is None
+    assert output.errors[1] is not None
+    assert output.errors[1].code == "INPUT_TOO_LONG"
+    assert output.entities[1] == []
+    assert output.input_token_counts is not None
+    assert output.input_token_counts[1] == 0
+    assert output.input_token_counts[0] > 0
+    assert len(model.rows) == 3
+
+
+class WorksForModel(SpanModel):
+    """A window holds the works-for relation when it reads both the person and the employer."""
+
+    def batch_extract_relations(
+        self, texts: list[str], labels: list[str], *, max_len: int | None, **_: Any
+    ) -> list[Any]:
+        self._collate(texts, gliner2_engine.Schema().relations(labels), max_len)
+        results = []
+        for text in texts:
+            self.rows.append(text)
+            lower = text.lower()
+            person, employer = lower.find("priya raman"), lower.find("novartis")
+            if person < 0 or employer < 0:
+                results.append({"relation_extraction": {}})
+                continue
+            results.append(
+                {
+                    "relation_extraction": {
+                        "works_for": [
+                            {
+                                "head": {
+                                    "text": text[person : person + 11],
+                                    "confidence": 0.9,
+                                    "start": person,
+                                    "end": person + 11,
+                                },
+                                "tail": {
+                                    "text": text[employer : employer + 8],
+                                    "confidence": 0.8,
+                                    "start": employer,
+                                    "end": employer + 8,
+                                },
+                            }
+                        ]
+                    }
+                }
+            )
+        return results
+
+
+def employment(planted_at: int) -> str:
+    out = benign_email(1500).split()
+    out[planted_at : planted_at + 5] = ["Priya", "Raman", "works", "at", "Novartis"]
+    return " ".join(out)
+
+
+def test_a_relation_past_the_first_window_keeps_the_document_case() -> None:
+    text = employment(1420)
+    adapter = GLiNER2Adapter("fake/gliner2", max_seq_length=512)
+    model = WorksForModel(make_processor(), target="priya raman works at novartis")
+    adapter._use_linear_word_splitter(model.processor)
+    adapter._model = model
+    entities = [
+        {"text": "Priya Raman", "start": text.index("Priya Raman"), "end": text.index("Priya Raman") + 11},
+        {"text": "Novartis", "start": text.index("Novartis"), "end": text.index("Novartis") + 8},
+    ]
+
+    output = adapter.extract([Item(text=text, metadata={"entities": entities})], labels=["works_for"])
+
+    assert output.errors is None
+    assert output.relations == [[{"head": "Priya Raman", "tail": "Novartis", "relation": "works_for", "score": 0.8}]]
+
+
+class EmployerModel(PackageModel):
+    """A window names the employer when it reads the person."""
+
+    def batch_extract_json(
+        self, texts: list[str], structures: dict[str, list[str]], *, max_len: int | None, **_: Any
+    ) -> list[Any]:
+        self._collate(texts, gliner2_engine.Schema().structure("_sie_root").field("employer", dtype="str"), max_len)
+        results = []
+        for text in texts:
+            if "priya raman" in text.lower():
+                results.append({"_sie_root": [{"employer": "Novartis"}]})
+            else:
+                results.append({"_sie_root": [{"employer": None}]})
+        return results
+
+
+def test_a_structured_field_past_the_first_window_is_extracted() -> None:
+    text = document(1500, planted_at=1420)
+    adapter = GLiNER2Adapter("fake/gliner2", max_seq_length=512)
+    model = EmployerModel(make_processor())
+    adapter._use_linear_word_splitter(model.processor)
+    adapter._model = model
+
+    output = adapter.extract(
+        [Item(text=text)],
+        output_schema={"type": "object", "properties": {"employer": {"type": "string"}}},
+    )
+
+    assert output.errors is None
+    assert output.data == [{"employer": "Novartis"}]
