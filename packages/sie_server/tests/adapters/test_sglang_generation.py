@@ -1072,6 +1072,87 @@ def test_generate_requires_reasoning_after_a_seeded_gemma_channel(mock_async_cli
     assert body["require_reasoning"] is True
 
 
+_GEMMA_TURN = "<" + "|turn" + ">"
+_GEMMA_END = "<" + "turn|" + ">"
+_GEMMA_THINKING_PROMPT = (
+    "<bos>"
+    + _GEMMA_TURN
+    + "system\n"
+    + "<"
+    + "|think|"
+    + ">"
+    + "\nExtract the fields."
+    + _GEMMA_END
+    + "\n"
+    + _GEMMA_TURN
+    + "user\nRead it."
+    + _GEMMA_END
+    + "\n"
+    + _GEMMA_TURN
+    + "model\n"
+)
+_GEMMA_ANSWER_ONLY_PROMPT = (
+    "<bos>"
+    + _GEMMA_TURN
+    + "system\nExtract the fields."
+    + _GEMMA_END
+    + "\n"
+    + _GEMMA_TURN
+    + "user\nRead it."
+    + _GEMMA_END
+    + "\n"
+    + _GEMMA_TURN
+    + "model\n"
+    + "<"
+    + "|channel"
+    + ">"
+    + "thought\n"
+    + "<"
+    + "channel|"
+    + ">"
+)
+
+
+@pytest.mark.parametrize(("n", "stream"), [(None, False), (None, True), (2, True), (2, False)])
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_requires_reasoning_when_gemma_enables_thinking(
+    mock_async_client: MagicMock, n: int | None, stream: bool
+) -> None:
+    # Gemma 4 with enable_thinking leaves the model to open the thought channel,
+    # so a json_schema grammar must wait for it rather than bind the first token.
+    body = _posted_generate_body(
+        mock_async_client, _GEMMA_THINKING_PROMPT, reasoning_parser="gemma4", n=n, stream=stream
+    )
+
+    assert body["require_reasoning"] is True
+
+
+@pytest.mark.parametrize(
+    ("prompt", "reasoning_parser"),
+    [
+        (_GEMMA_ANSWER_ONLY_PROMPT, "gemma4"),
+        (_GEMMA_THINKING_PROMPT, None),
+        # Qwen3.x keeps the prompt-boundary rule: an unseeded assistant turn is
+        # left to the engine default even if a Gemma thinking token appears.
+        ("<|im_start|>system\n" + "<" + "|think|" + ">" + "<|im_end|>\n<|im_start|>assistant\n", "qwen3"),
+    ],
+)
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_leaves_reasoning_unrequired_without_gemma_thinking(
+    mock_async_client: MagicMock, prompt: str, reasoning_parser: str | None
+) -> None:
+    body = _posted_generate_body(mock_async_client, prompt, reasoning_parser=reasoning_parser)
+
+    assert "require_reasoning" not in body
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_keeps_requiring_reasoning_for_a_seeded_qwen_think_block(mock_async_client: MagicMock) -> None:
+    body = _posted_generate_body(mock_async_client, "<|im_start|>assistant\n<think>\n", reasoning_parser="qwen3")
+
+    assert body["require_reasoning"] is True
+
+
 @patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
 def test_generate_logprobs_request_sets_return_text_in_logprobs(mock_async_client: MagicMock, adapter) -> None:
     """A logprobs request must ask SGLang for decoded token TEXT.

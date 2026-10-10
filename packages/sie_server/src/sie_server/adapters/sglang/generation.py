@@ -46,7 +46,7 @@ from sie_server.adapters._generation_base import (
     GenerationError,
     GenerationInvalidRequestError,
     GenerationResult,
-    reasoning_starts_in_prompt,
+    reasoning_expected_after_prompt,
     resolve_reasoning_format,
 )
 from sie_server.adapters._spec import AdapterSpec
@@ -1436,8 +1436,10 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # SGLang's native /generate treats a request as non-reasoning unless it
         # says otherwise: a grammar then constrains the open thinking block and
         # --enable-strict-thinking never engages. Its chat endpoint derives this
-        # from the chat template; here the rendered prompt carries it.
-        require_reasoning = self._reasoning_parser is not None and reasoning_starts_in_prompt(
+        # from the chat template; here the rendered prompt carries it, either as
+        # an open reasoning boundary or, for Gemma 4, as the thinking token of a
+        # prompt that leaves the model to open the thought channel.
+        require_reasoning = self._reasoning_parser is not None and reasoning_expected_after_prompt(
             prompt, resolve_reasoning_format(None, self)
         )
         video_data = _encode_video_data(videos)
