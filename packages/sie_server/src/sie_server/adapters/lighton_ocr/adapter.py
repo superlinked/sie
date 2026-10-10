@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import torch
 import torch.nn.functional as F
 
+from sie_server.adapters._vision_patch_embed import rebind_vision_patch_embed
 from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
 from sie_server.core.inference_output import EncodeOutput, ExtractOutput
 from sie_server.core.prepared import LightOnOCR3Payload, LightOnOCRPayload, PreparedItem
@@ -579,6 +580,7 @@ class LightOnOCR3Adapter(LightOnOCRAdapter):
         )
         self._model.to(device)
         self._model.eval()
+        rebind_vision_patch_embed(self._model, "lighton_ocr3")
         self._device = device
         self._create_preprocessor()
 

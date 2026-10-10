@@ -240,9 +240,15 @@ def test_native_loader_pins_processor_and_qwen35_without_remote_code(
         Qwen3_5ForConditionalGeneration=SimpleNamespace(from_pretrained=load_model),
     )
     monkeypatch.setitem(sys.modules, "transformers", transformers)
+    rebound: list[tuple[Any, str]] = []
+    monkeypatch.setattr(
+        "sie_server.adapters.lighton_ocr.adapter.rebind_vision_patch_embed",
+        lambda module, label: rebound.append((module, label)),
+    )
     revision = "a" * 40
     value = LightOnOCR3Adapter(model, revision=revision)
     value.load("cpu")
+    assert rebound == [(loaded_model, "lighton_ocr3")]
     assert calls == [
         ("processor", model, {"trust_remote_code": False, "revision": revision}),
         (
