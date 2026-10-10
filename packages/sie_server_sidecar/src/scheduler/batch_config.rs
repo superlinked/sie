@@ -21,6 +21,19 @@
 //! are documented on [`BatchConfig::default`] and locked by the
 //! `defaults_diverge_from_python_intentionally` test below.
 
+use std::sync::Arc;
+
+/// Reads one environment variable. Production schedulers read the process
+/// environment ([`process_env`]); tests pass a fixed table so they never
+/// mutate the environment other tests read.
+pub type EnvLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+/// [`EnvLookup`] over the process environment.
+#[must_use]
+pub fn process_env() -> EnvLookup {
+    Arc::new(|var| std::env::var(var).ok())
+}
+
 /// Batch formation caps.
 ///
 /// Ported from `sie_server.core.batcher.BatchConfig`.
@@ -73,7 +86,7 @@ impl BatchConfig {
     /// | Var                                 | Field                | Default | Notes |
     /// |-------------------------------------|----------------------|---------|-------|
     /// | `SIE_BATCHER_MAX_BATCH_WAIT_MS`     | `max_batch_wait_ms`  | 15.0    | Static flush-trigger ceiling — `AdaptiveBatchController` overwrites this on every step but the initial value matters during cold-start (see Python `core/batcher.py:BatchConfig`). |
-    /// | `SIE_BATCHER_MAX_BATCH_COST`        | `max_batch_cost`     | 16384   | Static cost cap initial value. |
+    /// | `SIE_BATCHER_MAX_BATCH_COST`        | `max_batch_cost`     | 16384   | Static cost cap initial value. When set, it pins every model's cap and adaptive cost range; unset, each model uses its profile's `max_batch_tokens` (see [`crate::scheduler::SchedulerRegistry`]), else 16384. |
     /// | `SIE_BATCHER_MAX_BATCH_REQUESTS`    | `max_batch_requests` | **12**  | Hard count cap (controller does not move). **Diverges from Python's 64** — see [`BatchConfig::default`] for the runtime rationale. |
     /// | `SIE_BATCHER_COALESCE_MS`           | `coalesce_ms`        | **5.0** | Coalesce window ceiling. **Diverges from Python's 15.0** — see [`BatchConfig::default`] for the runtime rationale. |
     /// | `SIE_BATCHER_COALESCE_RATIO`        | `coalesce_ratio`     | 0.5     | Coalesce as fraction of `max_batch_wait_ms`. |
@@ -82,10 +95,16 @@ impl BatchConfig {
     /// the default — never crash the registry init.
     #[must_use]
     pub fn from_env_or_default() -> Self {
+        Self::from_lookup(&|var| std::env::var(var).ok())
+    }
+
+    /// [`Self::from_env_or_default`] reading variables through `lookup`.
+    #[must_use]
+    pub fn from_lookup(lookup: &dyn Fn(&str) -> Option<String>) -> Self {
         let mut c = Self::default();
 
-        fn get_f64(var: &str) -> Option<f64> {
-            std::env::var(var).ok().and_then(|s| {
+        let get_f64 = |var: &str| -> Option<f64> {
+            lookup(var).and_then(|s| {
                 s.parse::<f64>().ok().filter(|v| v.is_finite()).or_else(|| {
                     tracing::warn!(
                         var = var,
@@ -95,20 +114,13 @@ impl BatchConfig {
                     None
                 })
             })
-        }
-        fn get_u64(var: &str) -> Option<u64> {
-            std::env::var(var).ok().and_then(|s| s.parse::<u64>().ok())
-        }
-        fn get_usize(var: &str) -> Option<usize> {
-            std::env::var(var)
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-        }
+        };
+        let get_usize = |var: &str| -> Option<usize> { lookup(var).and_then(|s| s.parse().ok()) };
 
         if let Some(v) = get_f64("SIE_BATCHER_MAX_BATCH_WAIT_MS") {
             c.max_batch_wait_ms = v;
         }
-        if let Some(v) = get_u64("SIE_BATCHER_MAX_BATCH_COST") {
+        if let Some(v) = Self::max_batch_cost_override(lookup) {
             c.max_batch_cost = v;
         }
         if let Some(v) = get_usize("SIE_BATCHER_MAX_BATCH_REQUESTS") {
@@ -133,6 +145,19 @@ impl BatchConfig {
         c
     }
 
+    /// The operator's static cost cap, `SIE_BATCHER_MAX_BATCH_COST`, when
+    /// `lookup` finds it set to an unsigned integer.
+    ///
+    /// When present it wins over each model's own `max_batch_tokens`: the
+    /// scheduler registry is then built cost-pinned and every model keeps
+    /// this cap and the adaptive range derived from it, as before per-model
+    /// budgets existed. Unparseable values are ignored, as in
+    /// [`Self::from_env_or_default`].
+    #[must_use]
+    pub fn max_batch_cost_override(lookup: &dyn Fn(&str) -> Option<String>) -> Option<u64> {
+        parse_max_batch_cost(lookup("SIE_BATCHER_MAX_BATCH_COST").as_deref())
+    }
+
     /// Effective coalesce window used by the batcher.
     ///
     /// Mirrors Python's
@@ -153,6 +178,10 @@ impl BatchConfig {
     pub fn max_batch_tokens(&self) -> u64 {
         self.max_batch_cost
     }
+}
+
+fn parse_max_batch_cost(raw: Option<&str>) -> Option<u64> {
+    raw.and_then(|s| s.parse::<u64>().ok())
 }
 
 impl Default for BatchConfig {
@@ -234,6 +263,45 @@ mod tests {
         };
         // ceiling wins because 2.0 < 50.0
         assert!((c.effective_coalesce_ms() - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn max_batch_cost_override_parses_only_unsigned_integers() {
+        // Same acceptance as the `max_batch_cost` field of
+        // `from_env_or_default`: anything else leaves the cap unpinned.
+        assert_eq!(parse_max_batch_cost(Some("720000")), Some(720_000));
+        assert_eq!(parse_max_batch_cost(Some("16384")), Some(16_384));
+        assert_eq!(parse_max_batch_cost(None), None);
+        assert_eq!(parse_max_batch_cost(Some("")), None);
+        assert_eq!(parse_max_batch_cost(Some("-1")), None);
+        assert_eq!(parse_max_batch_cost(Some("16k")), None);
+    }
+
+    #[test]
+    fn from_lookup_reads_each_batcher_variable() {
+        let lookup = |var: &str| -> Option<String> {
+            match var {
+                "SIE_BATCHER_MAX_BATCH_WAIT_MS" => Some("20".into()),
+                "SIE_BATCHER_MAX_BATCH_COST" => Some("32768".into()),
+                "SIE_BATCHER_MAX_BATCH_REQUESTS" => Some("64".into()),
+                "SIE_BATCHER_COALESCE_MS" => Some("3".into()),
+                "SIE_BATCHER_COALESCE_RATIO" => Some("NaN".into()),
+                _ => None,
+            }
+        };
+        assert_eq!(
+            BatchConfig::from_lookup(&lookup),
+            BatchConfig {
+                max_batch_cost: 32_768,
+                max_batch_requests: 64,
+                max_batch_wait_ms: 20.0,
+                coalesce_ms: 3.0,
+                ..BatchConfig::default()
+            }
+        );
+        assert_eq!(BatchConfig::max_batch_cost_override(&lookup), Some(32_768));
+        assert_eq!(BatchConfig::from_lookup(&|_| None), BatchConfig::default());
+        assert_eq!(BatchConfig::max_batch_cost_override(&|_| None), None);
     }
 
     #[test]

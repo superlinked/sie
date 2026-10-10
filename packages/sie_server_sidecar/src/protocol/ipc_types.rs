@@ -308,6 +308,15 @@ pub struct EnsureModelReadyResponse {
     /// fallback policy.
     #[serde(default)]
     pub descriptor: Option<ModelDescriptor>,
+    /// The model's batch cost budget from its profile (`max_batch_tokens`),
+    /// in the model's cost units: tokens for text, milliseconds for audio.
+    /// Mirrors `sie_server.ipc_types.EnsureModelReadyResponse.max_batch_tokens`;
+    /// the Candle worker sends it too. Only populated when `state == Ready`.
+    /// The scheduler sizes the model's cost cap and adaptive cost range from
+    /// it; backends that do not send it leave the scheduler on its default
+    /// budget.
+    #[serde(default)]
+    pub max_batch_tokens: Option<u64>,
 }
 
 // -----------------------------------------------------------------------------
@@ -1307,6 +1316,41 @@ mod tests {
         let bytes = rmp_serde::to_vec_named(&ReadinessState::Failed).unwrap();
         let back: ReadinessState = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(back, ReadinessState::Failed);
+    }
+
+    /// Encode an `EnsureModelReadyResponse` the way Python's msgspec does: a
+    /// map of the fields it knows, so an older engine omits `max_batch_tokens`.
+    fn ensure_ready_response_bytes(max_batch_tokens: Option<u64>) -> Vec<u8> {
+        let mut buf = Vec::new();
+        rmp::encode::write_map_len(&mut buf, 3 + u32::from(max_batch_tokens.is_some())).unwrap();
+        rmp::encode::write_str(&mut buf, "state").unwrap();
+        rmp::encode::write_str(&mut buf, "ready").unwrap();
+        rmp::encode::write_str(&mut buf, "batch_budget").unwrap();
+        rmp::encode::write_uint(&mut buf, 64).unwrap();
+        rmp::encode::write_str(&mut buf, "descriptor").unwrap();
+        rmp::encode::write_nil(&mut buf).unwrap();
+        if let Some(value) = max_batch_tokens {
+            rmp::encode::write_str(&mut buf, "max_batch_tokens").unwrap();
+            rmp::encode::write_uint(&mut buf, value).unwrap();
+        }
+        buf
+    }
+
+    #[test]
+    fn ensure_ready_response_without_max_batch_tokens_decodes_to_none() {
+        let back: EnsureModelReadyResponse =
+            rmp_serde::from_slice(&ensure_ready_response_bytes(None))
+                .expect("a response from an engine without the field must decode");
+        assert_eq!(back.state, ReadinessState::Ready);
+        assert_eq!(back.batch_budget, Some(64));
+        assert_eq!(back.max_batch_tokens, None);
+    }
+
+    #[test]
+    fn ensure_ready_response_carries_max_batch_tokens() {
+        let back: EnsureModelReadyResponse =
+            rmp_serde::from_slice(&ensure_ready_response_bytes(Some(720_000))).unwrap();
+        assert_eq!(back.max_batch_tokens, Some(720_000));
     }
 
     #[test]

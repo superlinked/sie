@@ -1199,6 +1199,7 @@ impl CandleBackend {
                 state: ReadinessState::RetryLater,
                 batch_budget: None,
                 descriptor: None,
+                max_batch_tokens: None,
             };
         }
 
@@ -1211,6 +1212,7 @@ impl CandleBackend {
                 state: ReadinessState::RetryLater,
                 batch_budget: Some(self.config.batch_budget),
                 descriptor: None,
+                max_batch_tokens: None,
             };
         };
 
@@ -1221,6 +1223,7 @@ impl CandleBackend {
                 state: ReadinessState::RetryLater,
                 batch_budget: None,
                 descriptor: None,
+                max_batch_tokens: None,
             };
         }
 
@@ -1231,6 +1234,7 @@ impl CandleBackend {
                     state,
                     batch_budget: None,
                     descriptor: None,
+                    max_batch_tokens: None,
                 };
             }
             Err(error) => {
@@ -1243,6 +1247,7 @@ impl CandleBackend {
                     state: ReadinessState::RetryLater,
                     batch_budget: None,
                     descriptor: None,
+                    max_batch_tokens: None,
                 };
             }
         }
@@ -1253,12 +1258,14 @@ impl CandleBackend {
                 state: ReadinessState::LoadingInProgress,
                 batch_budget: None,
                 descriptor: None,
+                max_batch_tokens: None,
             };
         };
 
         EnsureModelReadyResponse {
             state: ReadinessState::Ready,
             batch_budget: Some(self.config.batch_budget),
+            max_batch_tokens: ready_max_batch_tokens(&defaults),
             descriptor: Some(ModelDescriptor {
                 tokenizer_path: Some(tokenizer_path),
                 tokenizer_id: Some(tokenizer_id),
@@ -3805,6 +3812,14 @@ fn candle_slow_forward_log_threshold_ms() -> Option<f64> {
             Err(_) | Ok(_) => Some(DEFAULT_SLOW_FORWARD_LOG_MS),
         }
     })
+}
+
+/// The profile budget a ready model reports with `EnsureModelReady`: the
+/// effective `max_batch_tokens` of the profile `model_id` routes to.
+fn ready_max_batch_tokens(defaults: &RuntimeDefaults) -> Option<u64> {
+    defaults
+        .max_batch_tokens
+        .and_then(|budget| u64::try_from(budget).ok())
 }
 
 fn selected_runtime_defaults(
@@ -7058,6 +7073,39 @@ profiles:
         let defaults = backend.runtime_defaults_for("prithivida/Splade_PP_en_v2:candle", None);
         assert_eq!(defaults.pooling.as_deref(), Some("splade"));
         assert_eq!(defaults.normalize, Some(false));
+    }
+
+    #[test]
+    fn ready_budget_is_the_routed_profile_max_batch_tokens() {
+        let backend = CandleBackend::new(CandleBackendConfig::new(64, true, 1));
+        for (model_id, model_config) in [
+            (
+                "prithivida/Splade_PP_en_v2",
+                include_str!("../../sie_server/models/prithivida__Splade_PP_en_v2.yaml"),
+            ),
+            (
+                "topk-io/Iso-ModernColBERT",
+                include_str!("../../sie_server/models/topk-io__Iso-ModernColBERT.yaml"),
+            ),
+        ] {
+            backend
+                .apply_model_config(&ApplyModelConfigRequest {
+                    bundle_id: "candle".to_string(),
+                    model_id: model_id.to_string(),
+                    epoch: 1,
+                    bundle_config_hash: "hash".to_string(),
+                    profiles_added: vec!["candle".to_string()],
+                    model_config: model_config.to_string(),
+                })
+                .expect("apply Candle model config");
+        }
+
+        // SPLADE's `candle` profile extends `default`, which sets 8192.
+        let budget =
+            |model_id| ready_max_batch_tokens(&backend.runtime_defaults_for(model_id, None));
+        assert_eq!(budget("prithivida/Splade_PP_en_v2:candle"), Some(8192));
+        assert_eq!(budget("topk-io/Iso-ModernColBERT:candle"), Some(16384));
+        assert_eq!(budget("unknown/model:candle"), None);
     }
 
     #[test]

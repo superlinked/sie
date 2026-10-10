@@ -178,6 +178,12 @@ class EnsureModelReadyResponse(msgspec.Struct):
     # HF fast tokeniser + structured ``output_types``; ``None`` for non-text /
     # image / audio adapters that do not emit it.
     descriptor: ModelDescriptor | None = None
+    # The model's batch cost budget from its profile (``max_batch_tokens``), in
+    # the model's cost units: tokens for text, milliseconds for audio. The
+    # worker-sidecar sizes the model's batch cost cap and adaptive cost range
+    # from it, as ``ModelWorker`` does for its own batcher. ``None`` when the
+    # model is not ready.
+    max_batch_tokens: int | None = None
 
 
 # -----------------------------------------------------------------------------

@@ -704,18 +704,21 @@ class IpcServer:
 
     async def _handle_ensure_ready(self, req: EnsureModelReadyRequest) -> EnsureModelReadyResponse:
         state = await self._executor.ensure_model_ready(req.model_id)
-        # Only populate batch_budget + descriptor on the "ready" path — the
-        # worker isn't guaranteed to exist in other states and the Rust
-        # side will re-query after the NAK delay anyway.
+        # Only populate batch_budget, descriptor and max_batch_tokens on the
+        # "ready" path — the worker isn't guaranteed to exist in other states
+        # and the Rust side will re-query after the NAK delay anyway.
         batch_budget: int | None = None
         descriptor = None
+        max_batch_tokens: int | None = None
         if state == "ready":
             batch_budget = self._executor.get_batch_budget(req.model_id)
             descriptor = self._executor.get_model_descriptor(req.model_id)
+            max_batch_tokens = self._executor.get_max_batch_tokens(req.model_id)
         return EnsureModelReadyResponse(
             state=state,
             batch_budget=batch_budget,
             descriptor=descriptor,
+            max_batch_tokens=max_batch_tokens,
         )
 
     async def _handle_process_encode(self, req: ProcessEncodeBatchRequest) -> BatchOutcome:

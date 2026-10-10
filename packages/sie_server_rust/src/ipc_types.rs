@@ -130,6 +130,12 @@ pub struct EnsureModelReadyResponse {
     pub batch_budget: Option<u32>,
     #[serde(default)]
     pub descriptor: Option<ModelDescriptor>,
+    /// The model's batch cost budget from its profile (`max_batch_tokens`).
+    /// Only populated when `state == Ready`. The worker-sidecar sizes the
+    /// model's batch cost cap and adaptive cost range from it, as it does
+    /// for the Python server's `EnsureModelReadyResponse.max_batch_tokens`.
+    #[serde(default)]
+    pub max_batch_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -716,6 +722,31 @@ mod tests {
         assert_eq!(sparse.indices, vec![7, 29_522]);
         assert_eq!(sparse.values, vec![0.25, 3.5]);
         assert_eq!(sparse.dims, Some(30_522));
+    }
+
+    #[test]
+    fn ensure_ready_response_carries_max_batch_tokens_as_a_named_field() {
+        let response = EnsureModelReadyResponse {
+            state: ReadinessState::Ready,
+            batch_budget: Some(64),
+            descriptor: None,
+            max_batch_tokens: Some(8192),
+        };
+
+        let bytes = rmp_serde::to_vec_named(&response).unwrap();
+        let map: std::collections::BTreeMap<String, serde_json::Value> =
+            rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(map["max_batch_tokens"].as_u64(), Some(8192));
+
+        // A response without the field still decodes.
+        let old_wire = rmp_serde::to_vec_named(&serde_json::json!({
+            "state": "ready",
+            "batch_budget": 64,
+            "descriptor": null,
+        }))
+        .unwrap();
+        let back: EnsureModelReadyResponse = rmp_serde::from_slice(&old_wire).unwrap();
+        assert_eq!(back.max_batch_tokens, None);
     }
 
     #[test]
