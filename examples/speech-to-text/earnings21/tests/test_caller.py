@@ -248,6 +248,22 @@ class Controls(unittest.TestCase):
             fetch.fetch_file("https://never-called.invalid", destination, pin, source)
         self.assertFalse(destination.exists())
 
+    def test_local_fetch_sync_failures_do_not_report_success(self):
+        source = self.root / "source"
+        source.write_bytes(b"fixture")
+        pin = {"bytes": 7, "sha256": sha256(b"fixture")}
+        for target in ("fetch.os.fsync", "fetch.sync_directory"):
+            with self.subTest(target=target):
+                destination = self.root / target / "fetched"
+                with patch(target, side_effect=OSError("fixture sync failure")):
+                    with self.assertRaises(OSError):
+                        fetch.fetch_file("https://never-called.invalid", destination, pin, source)
+                if target == "fetch.os.fsync":
+                    self.assertEqual(list(destination.parent.iterdir()), [])
+                else:
+                    self.assertEqual(list(destination.parent.iterdir()), [destination])
+                    common.verify_file(destination, pin)
+
     def test_source_reference_hash_and_manifest_checks(self):
         evidence = self.root / "evidence"
         evidence.mkdir()

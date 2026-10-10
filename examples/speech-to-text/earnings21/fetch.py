@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import os
 import tempfile
 from pathlib import Path
 from urllib.request import urlopen
 
-from common import SOURCE, load_frame, verify_file
+from common import SOURCE, load_frame, sync_directory, verify_file
 
 
 def copy_pinned(source, destination, expected_bytes: int) -> None:
@@ -34,8 +35,10 @@ def fetch_file(url: str, destination: Path, pin: dict, local: Path | None = None
                 with urlopen(url, timeout=60) as source:
                     copy_pinned(source, stream, pin["bytes"])
             stream.flush()
+            os.fsync(stream.fileno())
             verify_file(temporary, pin)
             temporary.replace(destination)
+            sync_directory(destination.parent)
         finally:
             temporary.unlink(missing_ok=True)
 
