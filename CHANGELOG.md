@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.1](https://github.com/superlinked/sie/compare/v0.10.0...v0.10.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* **server:** accept running usage in remote chat streams ([#662](https://github.com/superlinked/sie/issues/662)) ([d8053bd](https://github.com/superlinked/sie/commit/d8053bd4deb3c9c062ce319415d2ce5ee9de1369))
+
 ## [0.10.0](https://github.com/superlinked/sie/compare/v0.9.0...v0.10.0) (2026-10-09)
 
 
