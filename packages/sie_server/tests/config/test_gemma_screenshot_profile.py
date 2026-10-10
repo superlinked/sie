@@ -16,7 +16,13 @@ def test_hires_thinking_profile_preserves_the_non_speculative_document_launch() 
     thinking = config.resolve_profile(PROFILE)
     answer_only = config.resolve_profile("h100-96k-hires-no-spec")
 
-    assert thinking.loadtime == answer_only.loadtime
+    thinking_launch = dict(thinking.loadtime)
+    answer_only_launch = dict(answer_only.loadtime)
+    # Only the static memory fraction differs: the thinking profile leaves more
+    # activation headroom for bursts of concurrent screenshot prefills.
+    assert thinking_launch.pop("mem_fraction_static") == 0.88
+    assert answer_only_launch.pop("mem_fraction_static") == 0.90
+    assert thinking_launch == answer_only_launch
     assert thinking.runtime == answer_only.runtime
     assert thinking.adapter_path == answer_only.adapter_path
     assert thinking.compute_precision == answer_only.compute_precision == "bfloat16"
