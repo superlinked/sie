@@ -195,6 +195,57 @@ and `top_p=1.0`, and saves returned Markdown unchanged. The endpoint can be
 hosted anywhere; an API key is optional when the endpoint permits it. This
 single-image convenience command uses the SDK's normal capacity handling.
 
+### Run a frozen page frame
+
+`convert-frame` takes a page manifest and original PNGs, then calls any
+compatible SIE endpoint. It uses the ordinary `SIEClient.extract` API and
+requires only this example's dependencies. Choose the endpoint through
+`SIE_URL` or `--sie-url`, with `SIE_API_KEY` when required:
+
+```bash
+export SIE_URL=https://your-sie-server.example
+uv run convert-frame frame-manifest.json --input-root ./inputs --out runs/frame-01
+```
+
+The manifest has a `pages` list. Each page needs a relative `pdf` ID, a relative
+`png` path, and `png_sha256`. Optional `png_bytes`, `category`, and `family`
+fields are retained. Pages with `role: "frame"`, or no role, are selected;
+smoke, quote, and excluded pages are skipped. For example:
+
+```json
+{"pages": [{"pdf": "tables/page.pdf", "png": "pngs/tables/page.png", "png_sha256": "<SHA-256 of the original PNG>", "role": "frame"}]}
+```
+
+For a prespecified comparison subset, pass `--selection selected-pdfs.json`,
+a JSON list such as `["tables/page.pdf"]`. Choose it before inspecting either
+arm's outputs, use the same list for both arms, and retain that full planned
+denominator. The runner validates every selected image before dispatch and
+sends its encoded bytes unchanged. It defaults to `lightonai/LightOnOCR-3-4B`
+with `max_new_tokens=12288`, `temperature=0.1`, and `top_p=1.0`; `--model`
+selects another compatible extraction model. The single-image command above
+keeps its separate 4096-token default.
+
+Each run writes `plan.json`, `rows.jsonl`, pre-send `intents/`, raw
+`responses/`, parsed `sdk/` replies, and unchanged `markdown/` files, using
+the PDF IDs for Markdown paths. The HTTP transport enforces one extraction
+POST per page, including possible SDK retries, and disables redirects. It
+counts a complete but empty or errored model output as one failed page and
+continues independent pages. An unknown, transport, admission, protocol, or
+persistence failure stops new calls and preserves the untouched tail. Any
+nonreceived page produces exit status 1. Existing run directories are refused;
+interrupted or unknown requests are never automatically resent. Only the
+extraction POST's reply is stored as raw response evidence.
+
+For benchmark scoring, failed, empty, capped, and planned unattempted pages
+must remain in the denominator according to the frozen study's rules. A
+received reply alone does not prove factual correctness or that an output cap
+was avoided; keep the raw response and score the original annotations. This
+runner does not score or replace the study's scorer. Recorded client wall time
+includes endpoint and network overhead; the endpoint does not determine
+whether it is a valid measure of model-serving latency. Optional
+`--served-revision` records an operator declaration, rather than verifying the
+deployment's checkpoint.
+
 The separate [fixed 24-page evaluation kit](https://huggingface.co/datasets/superlinked/sie-task-evidence/tree/8f287c3789438c81b4f094e8a96861d5805b101d/document-to-markdown/2026-10-09/lightonocr3-fixed24-completion-diagnostic-v1)
 contains exact PNG/PDF inputs, source attribution, both annotation views,
 saved Markdown, quality scores, and portable rerun and scoring scripts. It

@@ -8,13 +8,14 @@ dependencies = [
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
     "rich>=13.7",
-    "sie-sdk>=0.6.23",
+    "sie-sdk>=0.10.0",
 ]
 
 [project.scripts]
 fetch-documents = "document_to_markdown.fetch:main"
 convert-documents = "document_to_markdown.convert:main"
 convert-image = "document_to_markdown.ocr:main"
+convert-frame = "document_to_markdown.frame:main"
 eval-documents = "document_to_markdown.evaluate:main"
 verify-run = "document_to_markdown.verify:main"
 
