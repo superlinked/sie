@@ -553,6 +553,58 @@ description prefixes. Inputs beyond these character and word bounds fail
 explicitly before collation or inference. Descriptions also count toward the
 actual 2,048-token prompt and complete 4,096-token row; they are not truncated.
 
+### Fixed-head OntoNotes extraction
+
+`learnrr/roberta-large-ontonotes5-ner` uses the default bundle and its pinned
+RoBERTa token-classification checkpoint. It accepts `person`, `organization`,
+and `location`; omitted or empty wire `labels` selects all three. A nonempty
+list must be a unique subset of those exact labels. Labels filter the trained
+head rather than define new entity types. PERSON maps to
+person, ORG to organization, and GPE/LOC/FAC to location. Other OntoNotes types
+are excluded. Custom or duplicate labels, instructions, output schemas, and
+runtime options (including confidence thresholds) are rejected.
+
+```python
+import os
+
+from sie_sdk import SIEClient
+
+text = "Ada joined Acme in London."
+with SIEClient(os.environ["SIE_URL"], api_key=os.environ.get("SIE_API_KEY")) as client:
+    result = client.extract(
+        "learnrr/roberta-large-ontonotes5-ner",
+        {"text": text},
+        labels=["person", "organization", "location"],
+    )
+    for entity in result["entities"]:
+        assert entity["text"] == text[entity["start"] : entity["end"]]
+        print(entity)
+```
+
+The explicit default precision is float32. Complete documents are read in
+512-token windows, including special tokens, with 128-token overlap. The
+load-time `max_document_tokens` defaults to 16,384 and may be lowered; larger
+documents fail with `INPUT_TOO_LONG` before inference. SIMPLE BIO grouping
+uses argmax over the full 37-label head with no additional confidence cutoff.
+Overlapping detections prefer the longer span, then the higher score, retaining
+the first exact tie. This rule runs before the type map and label filter.
+Entities crossing a window may remain fragments; the adapter does not union
+fragments or repair word boundaries.
+
+Offsets are Python character indexes into the exact submitted string and entity
+text is its original slice, including punctuation selected by the head. No
+normalization, article or possessive stripping is applied. The API takes text,
+not a webpage URL: any client-side text retrieval must define the exact string
+whose offsets it uses. Usage counts all forwarded window tokens, including
+special tokens and repeated overlap, excluding padding. An item failing after
+a forward retains that usage and returns an error without partial entities.
+
+The [pinned publisher card](https://huggingface.co/learnrr/roberta-large-ontonotes5-ner/blob/696d6693ee55790dfc2d600e63d105d68a24a33e/README.md)
+declares MIT and OntoNotes training. This describes the publisher's declaration,
+not an independent licensing review or permission to redistribute training
+data. This adapter addition includes no measured quality, latency, or memory
+results for the checkpoint.
+
 ### Privacy Filter extraction
 
 `openai/privacy-filter` uses the official OPF runtime and the pinned

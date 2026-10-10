@@ -35,6 +35,7 @@ adapters:
 - sie_server.adapters.siglip.adapter
 - sie_server.adapters.splade_flash.adapter
 - sie_server.adapters.stablebridge_pruner
+- sie_server.adapters.token_classification.adapter
 - sie_server.adapters.whisper.adapter
 - sie_server.adapters.xlm_roberta_flash
 - sie_server.adapters.nli_classification

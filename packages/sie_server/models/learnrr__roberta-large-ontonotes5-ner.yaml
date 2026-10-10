@@ -1,0 +1,25 @@
+sie_id: learnrr/roberta-large-ontonotes5-ner
+hf_id: learnrr/roberta-large-ontonotes5-ner
+hf_revision: 696d6693ee55790dfc2d600e63d105d68a24a33e
+hf_tokenizer_dependencies:
+  learnrr/roberta-large-ontonotes5-ner: 696d6693ee55790dfc2d600e63d105d68a24a33e
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 512
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: float32
+    adapter_path: sie_server.adapters.token_classification.adapter:OntoNotesTokenClassificationAdapter
+    adapter_options:
+      loadtime:
+        window_overlap: 128
+        max_document_tokens: 16384
+      runtime: {}
