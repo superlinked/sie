@@ -35,3 +35,12 @@ def test_select_documents_keeps_requested_order() -> None:
 def test_select_documents_rejects_unknown_slug() -> None:
     with pytest.raises(ValueError, match="Unknown document slug"):
         select_documents(load_config(), ["missing"])
+
+
+def test_sie_url_takes_precedence_with_legacy_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SIE_CLUSTER_URL", "https://legacy.example/prefix/")
+    monkeypatch.setenv("SIE_URL", "https://chosen.example/gateway/")
+    assert load_config().cluster.url == "https://chosen.example/gateway"
+
+    monkeypatch.delenv("SIE_URL")
+    assert load_config().cluster.url == "https://legacy.example/prefix"

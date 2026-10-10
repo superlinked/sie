@@ -99,7 +99,7 @@ def load_config() -> AppConfig:
     raw = _load_yaml()
     cluster_raw = raw["cluster"]
     cluster = ClusterConfig(
-        url=os.environ.get("SIE_CLUSTER_URL", cluster_raw["url"]).rstrip("/"),
+        url=os.environ.get("SIE_URL", os.environ.get("SIE_CLUSTER_URL", cluster_raw["url"])).rstrip("/"),
         api_key=os.environ.get("SIE_API_KEY", cluster_raw.get("api_key", "")),
         model=str(cluster_raw["model"]),
         profile=str(cluster_raw.get("profile", "default")),

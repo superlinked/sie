@@ -170,12 +170,60 @@ pip install "sie-server[local]"
 sie-server serve
 ```
 
-For SIE Cloud, change only the endpoint and key:
+To use another SIE deployment, change only the endpoint and optional key:
 
 ```bash
-SIE_CLUSTER_URL=https://api.superlinked.com
+SIE_URL=https://your-sie-server.example
 SIE_API_KEY=...
 ```
+
+`SIE_URL` takes precedence over the supported legacy `SIE_CLUSTER_URL` variable.
+
+## Page-image OCR and a reproducible 24-page evaluation
+
+To convert an image through the ordinary public SDK:
+
+```bash
+export SIE_URL=https://your-sie-server.example
+uv run convert-image page.png --out page.md
+```
+
+The command uses `SIEClient.extract`, the original encoded image bytes, and
+`lightonai/LightOnOCR-3-4B` by default. Use `--model` for another compatible
+Markdown extraction model. It passes `max_new_tokens=4096`, `temperature=0.1`,
+and `top_p=1.0`, and saves returned Markdown unchanged. The endpoint can be
+hosted anywhere; an API key is optional when the endpoint permits it. This
+single-image convenience command uses the SDK's normal capacity handling.
+
+The separate [fixed 24-page evaluation kit](https://huggingface.co/datasets/superlinked/sie-task-evidence/tree/8f287c3789438c81b4f094e8a96861d5805b101d/document-to-markdown/2026-10-09/lightonocr3-fixed24-completion-diagnostic-v1)
+contains exact PNG/PDF inputs, source attribution, both annotation views,
+saved Markdown, quality scores, and portable rerun and scoring scripts. It
+covers 24 document families, with 49 reading-order and 51 table checks.
+The correlated checks are averaged within each page, then equally across all
+24 pages. The saved SIE result is **81.25% against unchanged original gold**
+and **87.5% against the separately pinned, source-checked annotation view**.
+Three unknown outcomes remain in both denominators. Saved comparator coverage
+differs, so the kit does not establish a fair headline ranking or a native
+retail cost ratio. It keeps the measured checkpoint separate from later
+public revisions whose equivalence remains unresolved.
+
+Download the archive at its immutable dataset revision and check its digest:
+
+```bash
+curl -fL 'https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/8f287c3789438c81b4f094e8a96861d5805b101d/document-to-markdown/2026-10-09/lightonocr3-fixed24-completion-diagnostic-v1/markdown24-portable-kit.tar.gz' -o markdown24-portable-kit.tar.gz
+printf '%s  %s\n' '329b6b8a8c58fd8bf0c1d917cc8d736093041f900a348383a59424111972c9ab' 'markdown24-portable-kit.tar.gz' | sha256sum --check
+mkdir markdown24-kit
+tar -xzf markdown24-portable-kit.tar.gz -C markdown24-kit
+```
+
+Follow the kit's README for the pinned Python 3.12 SDK and genuine
+`olmocr==0.4.27` scoring environment. Its `rerun_sie.py` accepts `SIE_URL`
+and uses one physical extraction POST per page, with no warmup or automatic
+resending of unknown outcomes. It records all 24 outcomes and stops after a
+nonreceived result. Its scorer explicitly selects original or source-valid
+gold; downloaded saved scores need no model or scoring run to inspect.
+The 24-page OCR evaluation is independent of the four-PDF Docling
+demonstration and its 25 checks above.
 
 ## Source and result layout
 

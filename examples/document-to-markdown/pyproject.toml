@@ -14,6 +14,7 @@ dependencies = [
 [project.scripts]
 fetch-documents = "document_to_markdown.fetch:main"
 convert-documents = "document_to_markdown.convert:main"
+convert-image = "document_to_markdown.ocr:main"
 eval-documents = "document_to_markdown.evaluate:main"
 verify-run = "document_to_markdown.verify:main"
 
