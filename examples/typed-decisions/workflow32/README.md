@@ -45,9 +45,10 @@ budget covers reasoning as well as the final JSON. `--thinking on` requests
 may override that request. The runner records caller settings without claiming
 to verify actual server configuration. Use `--thinking off` or
 `--thinking server` to record a different configuration; the latter omits the
-template override. `--max-completion-tokens` and `--timeout` are explicit
-overrides and remain visible in `plan.json`. Results with different settings
-are different runs.
+template override. `--max-completion-tokens`, `--timeout` and `--temperature`
+are explicit overrides and remain visible in `plan.json`; `--temperature 0`
+reproduces the separately published temperature-0 treatment. Results with
+different settings are different runs.
 
 Every case runs once, in source order, with no truncation, tools, retry,
 synthetic probe or warmup. The first ordinary case gates continuation on a

@@ -83,7 +83,7 @@ def request_body(case: dict, settings: dict) -> dict:
         "model": settings["model"],
         **case["request"],
         "max_completion_tokens": settings["max_completion_tokens"],
-        "temperature": 1.0,
+        "temperature": settings["temperature"],
         "top_p": 0.95,
         "top_k": 64,
     }
@@ -241,7 +241,7 @@ def case_worker(case: dict, folder: Path, settings: dict, inner: httpx.BaseTrans
                 case["request"]["messages"],
                 response_format=case["request"]["response_format"],
                 max_completion_tokens=settings["max_completion_tokens"],
-                temperature=1.0,
+                temperature=settings["temperature"],
                 top_p=0.95,
                 top_k=64,
                 extra_body=extra,
@@ -320,10 +320,18 @@ def run_frame(
     timeout_s: float = 1800,
     max_completion_tokens: int = 32768,
     thinking: str = "on",
+    temperature: float = 1.0,
     execute=run_case,
 ) -> list[dict]:
     if not math.isfinite(timeout_s) or timeout_s <= 0 or max_completion_tokens <= 0:
         raise ValueError("Positive finite case timeout and completion token cap are required")
+    if (
+        isinstance(temperature, bool)
+        or not isinstance(temperature, (int, float))
+        or not math.isfinite(temperature)
+        or not 0 <= temperature <= 2
+    ):
+        raise ValueError("Temperature must be a finite number from 0 to 2")
     address = httpx.URL(url)
     if (
         address.scheme not in {"http", "https"}
@@ -343,6 +351,7 @@ def run_frame(
         "timeout_s": timeout_s,
         "max_completion_tokens": max_completion_tokens,
         "thinking": thinking,
+        "temperature": float(temperature),
     }
     out.mkdir(parents=True, exist_ok=False)
     sync_directory(out.parent)
@@ -409,6 +418,7 @@ if __name__ == "__main__":
     parser.add_argument("--timeout", type=float, default=1800)
     parser.add_argument("--max-completion-tokens", type=int, default=32768)
     parser.add_argument("--thinking", choices=("on", "off", "server"), default="on")
+    parser.add_argument("--temperature", type=float, default=1.0)
     args = parser.parse_args()
     if not args.url:
         parser.error("Set SIE_URL or pass --url")
@@ -420,5 +430,6 @@ if __name__ == "__main__":
         timeout_s=args.timeout,
         max_completion_tokens=args.max_completion_tokens,
         thinking=args.thinking,
+        temperature=args.temperature,
     )
     raise SystemExit(1 if any(row.get("halt") for row in outcomes) or outcomes[0]["status"] != "ok" else 0)

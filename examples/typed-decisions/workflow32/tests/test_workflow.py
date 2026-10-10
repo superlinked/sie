@@ -56,6 +56,7 @@ def settings(**updates) -> dict:
         "timeout_s": 10,
         "max_completion_tokens": 32768,
         "thinking": "on",
+        "temperature": 1.0,
         **updates,
     }
 
@@ -233,6 +234,16 @@ class SourceAndFrameTests(unittest.TestCase):
         for seconds in [float("nan"), float("inf"), 0, -1]:
             with self.subTest(seconds=seconds), self.assertRaises(ValueError):
                 self.frame(mock.Mock(), timeout_s=seconds)
+        for temperature in [float("nan"), float("inf"), -0.1, 2.5, True, "0"]:
+            with self.subTest(temperature=temperature), self.assertRaises(ValueError):
+                self.frame(mock.Mock(), temperature=temperature)
+
+    def test_explicit_temperature_is_recorded_in_the_plan(self) -> None:
+        execute = mock.Mock(return_value={"status": "ok", "physical_sends": 1})
+        self.frame(execute, temperature=0.0)
+        plan = json.loads((self.root / "out" / "plan.json").read_bytes())
+        self.assertEqual(plan["decoding"]["temperature"], 0.0)
+        self.assertEqual(execute.call_args.args[2]["temperature"], 0.0)
 
 
 class TransportTests(unittest.TestCase):
@@ -270,6 +281,20 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(json.loads((self.folder / "sdk.json").read_bytes())["usage"], reply()["usage"])
         self.assertEqual(terminal["wire"][0]["method"], "POST")
         self.assertEqual(json.loads((self.folder / terminal["wire"][0]["file"]).read_bytes()), reply())
+
+    def test_explicit_temperature_reaches_the_wire(self) -> None:
+        bodies = []
+
+        def handler(request):
+            bodies.append(json.loads(request.read()))
+            return httpx.Response(
+                200, stream=httpx.ByteStream(run.canonical(reply())), headers={"content-type": "application/json"}
+            )
+
+        terminal = self.worker(handler, temperature=0.0)
+        self.assertEqual(terminal["status"], "ok")
+        self.assertEqual(bodies, [run.request_body(self.case, settings(temperature=0.0))])
+        self.assertEqual(bodies[0]["temperature"], 0.0)
 
     def test_capacity_rejection_never_retries(self) -> None:
         requests = []
