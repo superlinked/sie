@@ -998,7 +998,11 @@ mod tests {
             (std::time::Duration::from_secs(45), "45"),
         ] {
             let gateway = TestGateway::new(&[HYBRID_EXTRACT_MODEL]).await;
-            gateway.dispatcher.estimate_provisioning(LOCAL_LANE, local);
+            // A cold lookup without a machine profile is about every machine
+            // profile of the pool.
+            for lane in [LOCAL_LANE, (LOCAL_LANE.0, REMOTE_LANE.1, LOCAL_LANE.2)] {
+                gateway.dispatcher.estimate_provisioning(lane, local);
+            }
             let (content_type, body) =
                 multipart_body(&[("model", "acme/extract")], "clip.wav", b"RIFFtest");
             let request = Request::builder()

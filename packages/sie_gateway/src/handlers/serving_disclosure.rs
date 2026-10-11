@@ -5206,6 +5206,62 @@ profiles:
         }
     }
 
+    /// A cold lookup on a route that wraps a native route caps the estimate
+    /// that the native route keeps.
+    #[tokio::test]
+    async fn a_cold_lookup_caps_the_estimate_on_the_routes_that_wrap_a_native_route() {
+        // Without a machine profile, a cold lookup is about every machine
+        // profile of the pool.
+        let cold_lanes = [LOCAL_LANE, (LOCAL_LANE.0, REMOTE_LANE.1, LOCAL_LANE.2)];
+        for (estimate, native, compatibility) in [
+            (Duration::from_secs(95), "95", "60"),
+            (Duration::from_secs(40), "40", "40"),
+        ] {
+            let gateway = TestGateway::new(&[LOCAL_ENCODE_MODEL]).await;
+            for lane in cold_lanes {
+                gateway.dispatcher.estimate_provisioning(lane, estimate);
+            }
+            let state = || State(Arc::clone(&gateway.state));
+            let responses = [
+                (
+                    "encode",
+                    native,
+                    proxy_request(
+                        state(),
+                        json_request(
+                            "/v1/encode/acme/local",
+                            json!({"items": [{"text": "hello"}]}),
+                        ),
+                        "encode",
+                    )
+                    .await,
+                ),
+                (
+                    "embeddings",
+                    compatibility,
+                    proxy_openai_embeddings(
+                        state(),
+                        json_request(
+                            "/v1/embeddings",
+                            json!({"model": "acme/local", "input": "hello"}),
+                        ),
+                    )
+                    .await,
+                ),
+            ];
+            for (case, retry_after, response) in responses {
+                let case = format!("{case} {estimate:?}");
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{case}");
+                assert_eq!(response.headers()["retry-after"], retry_after, "{case}");
+                assert_eq!(
+                    response.headers()["x-sie-error-code"],
+                    "PROVISIONING",
+                    "{case}"
+                );
+            }
+        }
+    }
+
     /// A score model served locally, with a numerical bridge to its remote
     /// profile on `team-sie`.
     const HYBRID_SCORE_MODEL: &str = "\
