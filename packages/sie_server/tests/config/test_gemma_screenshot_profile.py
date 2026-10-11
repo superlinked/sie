@@ -61,3 +61,32 @@ def test_hires_thinking_variant_keeps_stock_sampling_and_the_bare_contract() -> 
     assert bare_generate.max_output_tokens == 4096
     assert bare_generate.context_length == 8192
     assert bare_generate.chat_template_kwargs == {"enable_thinking": False}
+
+
+BUDGET_PROFILE = "h100-96k-hires-thinking-budget512-no-spec"
+
+
+def test_budget_profile_is_the_thinking_launch_with_a_512_token_reasoning_cap() -> None:
+    config = load_model_config(MODEL_FILE)
+    budget = config.resolve_profile(BUDGET_PROFILE)
+    thinking = config.resolve_profile(PROFILE)
+
+    budget_launch = dict(budget.loadtime)
+    assert budget_launch.pop("thinking_budget") == 512
+    assert "thinking_budget" not in thinking.loadtime
+    assert budget_launch == thinking.loadtime
+    assert budget.runtime == thinking.runtime
+    assert budget.adapter_path == thinking.adapter_path
+    assert budget.max_output_tokens == thinking.max_output_tokens == 32768
+    assert budget.chat_template_kwargs == thinking.chat_template_kwargs == {"enable_thinking": True}
+    assert budget.max_batch_tokens == budget.kv_budget_tokens == 98304
+
+
+def test_budget_variant_materializes_the_thinking_generation_contract() -> None:
+    configs = expand_profile_variants([load_model_config(MODEL_FILE)])
+    budget = configs[f"{MODEL_ID}:{BUDGET_PROFILE}"]
+    thinking = configs[f"{MODEL_ID}:{PROFILE}"]
+
+    assert budget.tasks.generate == thinking.tasks.generate
+    assert thinking_mode_is_enabled(budget)
+    assert thinking_blocks_must_be_hidden(budget)

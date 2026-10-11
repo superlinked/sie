@@ -45,6 +45,11 @@ _REASONING_BOUNDARIES: dict[ReasoningFormat, tuple[str, str]] = {
     "qwen3": (_THINK_OPEN, _THINK_CLOSE),
     "gemma4": (_GEMMA_CHANNEL_OPEN + "thought\n", _GEMMA_CHANNEL_CLOSE),
 }
+# The single control tokens that open and close each family's reasoning block.
+REASONING_CONTROL_TOKENS: dict[ReasoningFormat, tuple[str, str]] = {
+    "qwen3": (_THINK_OPEN, _THINK_CLOSE),
+    "gemma4": (_GEMMA_CHANNEL_OPEN, _GEMMA_CHANNEL_CLOSE),
+}
 
 
 # Finish reason values surfaced to gateway / client. ``cancelled`` lands when

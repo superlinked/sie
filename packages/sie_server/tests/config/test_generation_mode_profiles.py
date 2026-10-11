@@ -50,6 +50,7 @@ _HARDWARE_THINKING_PROFILES = {
         "long-context-thinking-no-spec",
         "h100-96k-thinking-no-spec",
         "h100-96k-hires-thinking-no-spec",
+        "h100-96k-hires-thinking-budget512-no-spec",
     ),
 }
 

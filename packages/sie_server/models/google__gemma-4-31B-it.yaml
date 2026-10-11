@@ -561,3 +561,37 @@ profiles:
           - "--mm-process-config"
           - '{"image":{"max_soft_tokens":1120}}'
           - "--constrained-json-disable-any-whitespace"
+  # ``h100-96k-hires-thinking-no-spec`` with private reasoning capped at 512
+  # tokens: the adapter closes the thought channel there and the json_schema
+  # grammar then constrains the answer. The launch is otherwise identical, so
+  # grammar requests keep this profile. On the 24 Screenshot DEV24 screens
+  # (two passes each, default sampling) a 512-token cap matched uncapped
+  # thinking, 32/48 complete records against 32/48 and 96.9% of fields against
+  # 96.9%, with about 45% fewer output tokens per screen.
+  h100-96k-hires-thinking-budget512-no-spec:
+    extends: h100-96k-hires
+    max_output_tokens: 32768
+    chat_template_kwargs:
+      enable_thinking: true
+    adapter_options:
+      loadtime:
+        max_seq_length: 98304
+        mem_fraction_static: 0.88
+        thinking_budget: 512
+        served_model_name: google/gemma-4-31B-it
+        attention_backend: triton
+        grammar_backend: xgrammar
+        json_number_max_digits: 19
+        reasoning_parser: gemma4
+        tool_call_parser: gemma4
+        speculative_needs_extra_buffer: false
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--quantization"
+          - "fp8"
+          - "--kv-cache-dtype"
+          - "fp8_e4m3"
+          - "--mm-process-config"
+          - '{"image":{"max_soft_tokens":1120}}'
+          - "--constrained-json-disable-any-whitespace"
