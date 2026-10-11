@@ -377,16 +377,19 @@ impl RetryAfter {
 /// asynchronous job. Keep the Retry-After hint within the range common OpenAI
 /// SDKs honor directly.
 pub(crate) const PROVISIONING_RETRY_AFTER: &str = RetryAfter::DEFAULT.provisioning;
+/// [`PROVISIONING_RETRY_AFTER`] in whole seconds: what a lane counts as when
+/// the transport gives no estimate for it.
+const PROVISIONING_RETRY_AFTER_DEFAULT_S: u64 = 60;
 /// Bounds, in whole seconds, on a transport's `Retry-After` estimate for a
 /// provisioning answer ([`WorkDispatcher::provisioning_retry_after`]). The
 /// floor is the gateway's short transient-retry hint. The ceiling depends on
-/// the [`RouteKind`]: on a native route it is the 15-minute default
-/// provisioning budget of the Python and TypeScript SDKs, and on a
-/// compatibility route it is the 60 seconds up to which the OpenAI clients
-/// honor `Retry-After`. Above that they ignore it and retry on their own
-/// short backoff.
+/// the [`RouteKind`]. On a native route it is 300 seconds, well inside the
+/// 15-minute default provisioning budget of the Python and TypeScript SDKs,
+/// so that one hint cannot use up that budget. On a compatibility route it is
+/// the 60 seconds up to which the OpenAI clients honor `Retry-After`. Above
+/// that they ignore it and retry on their own short backoff.
 const PROVISIONING_RETRY_AFTER_MIN_S: u64 = 5;
-const NATIVE_PROVISIONING_RETRY_AFTER_MAX_S: u64 = 900;
+const NATIVE_PROVISIONING_RETRY_AFTER_MAX_S: u64 = 300;
 const COMPATIBILITY_PROVISIONING_RETRY_AFTER_MAX_S: u64 = 60;
 const BACKPRESSURE_RETRY_AFTER: &str = RetryAfter::DEFAULT.backpressure;
 const GATEWAY_TIMEOUT_RETRY_AFTER: &str = RetryAfter::DEFAULT.gateway_timeout;
@@ -864,16 +867,13 @@ async fn demand_profiles_for_pool(
     }
 }
 
-/// The message of a `503 PROVISIONING` answer. It names the requested model
-/// only: machine profiles and bundles are deployment detail.
-fn provisioning_message(model: &str) -> String {
-    if model.is_empty() {
-        "Capacity is starting. Retry after the number of seconds in Retry-After.".to_string()
-    } else {
-        format!(
-            "Capacity for model '{model}' is starting. Retry after the number of seconds in Retry-After."
-        )
-    }
+/// The message of a `503 PROVISIONING` answer. It names the model as the
+/// caller sent it, never what routing resolved it to: machine profiles,
+/// bundles and alias targets are deployment detail.
+fn provisioning_message(requested_model: &str) -> String {
+    format!(
+        "Capacity for model '{requested_model}' is starting. Retry after the number of seconds in Retry-After."
+    )
 }
 
 /// A transport's provisioning estimate in whole seconds, rounded up and
@@ -889,30 +889,54 @@ fn bounded_provisioning_retry_after_s(estimate: Duration, route: RouteKind) -> u
         .clamp(PROVISIONING_RETRY_AFTER_MIN_S, ceiling)
 }
 
-/// The `Retry-After` of a `503 PROVISIONING` answer on a `route` about the
-/// lanes `targets` name, each a lane's pool target as [`lane_wake_target`]
-/// builds it. It is the soonest estimate the transport gives for any of them,
-/// bounded by [`bounded_provisioning_retry_after_s`], or the 60-second default
-/// when it gives none.
-pub(crate) fn provisioning_retry_after(
-    state: &AppState,
-    targets: &[publisher::PublishTarget],
+/// What the `Retry-After` of a `503 PROVISIONING` answer is estimated from:
+/// the lanes the answer is about, each a lane's pool target as
+/// [`lane_wake_target`] builds it, and the kind of route it answers. The
+/// answer carries it in its extensions, so an answer held through a remote
+/// attempt is estimated again when it is restored.
+#[derive(Clone)]
+pub(crate) struct ProvisioningEstimate {
+    dispatcher: Option<Arc<dyn WorkDispatcher>>,
+    targets: Vec<publisher::PublishTarget>,
     route: RouteKind,
-) -> HeaderValue {
-    state
-        .work_publisher
-        .as_deref()
-        .and_then(|dispatcher| {
-            targets
-                .iter()
-                .filter_map(|target| dispatcher.provisioning_retry_after(target))
-                .map(|estimate| bounded_provisioning_retry_after_s(estimate, route))
-                .min()
-        })
-        .map_or_else(
-            || HeaderValue::from_static(PROVISIONING_RETRY_AFTER),
-            HeaderValue::from,
-        )
+}
+
+impl ProvisioningEstimate {
+    pub(crate) fn new(
+        state: &AppState,
+        targets: Vec<publisher::PublishTarget>,
+        route: RouteKind,
+    ) -> Self {
+        Self {
+            dispatcher: state.work_publisher.clone(),
+            targets,
+            route,
+        }
+    }
+
+    /// The soonest estimate the transport now gives for any of the lanes,
+    /// bounded by [`bounded_provisioning_retry_after_s`]. A lane without an
+    /// estimate counts as the 60-second default, and so does an answer about
+    /// no lane.
+    pub(crate) fn retry_after(&self) -> HeaderValue {
+        let seconds = self
+            .dispatcher
+            .as_deref()
+            .and_then(|dispatcher| {
+                self.targets
+                    .iter()
+                    .map(|target| {
+                        dispatcher
+                            .provisioning_retry_after(target)
+                            .map_or(PROVISIONING_RETRY_AFTER_DEFAULT_S, |estimate| {
+                                bounded_provisioning_retry_after_s(estimate, self.route)
+                            })
+                    })
+                    .min()
+            })
+            .unwrap_or(PROVISIONING_RETRY_AFTER_DEFAULT_S);
+        HeaderValue::from(seconds)
+    }
 }
 
 fn add_provisioning_headers(resp: &mut Response, retry_after: HeaderValue) {
@@ -1099,23 +1123,24 @@ pub(crate) fn monitor_dispatch_durability(
 /// [`provisioning_response`], counted as a provisioning response for
 /// `surface`.
 fn build_provisioning_response_for_surface(
-    model: &str,
-    retry_after: HeaderValue,
+    requested_model: &str,
+    estimate: ProvisioningEstimate,
     surface: ProvisioningSurface,
 ) -> Response {
     record_provisioning_response(surface, StatusCode::SERVICE_UNAVAILABLE);
-    provisioning_response(model, retry_after, surface)
+    provisioning_response(requested_model, estimate, surface)
 }
 
-/// The `503 PROVISIONING` answer for `model`, with the `Retry-After` from
-/// [`provisioning_retry_after`]. Unlike
-/// [`build_provisioning_response_for_surface`], it does not count the answer.
+/// The `503 PROVISIONING` answer for the model the caller sent as
+/// `requested_model`, with the `Retry-After` of `estimate`, which it carries.
+/// Unlike [`build_provisioning_response_for_surface`], it does not count the
+/// answer.
 pub(crate) fn provisioning_response(
-    model: &str,
-    retry_after: HeaderValue,
+    requested_model: &str,
+    estimate: ProvisioningEstimate,
     surface: ProvisioningSurface,
 ) -> Response {
-    let message = provisioning_message(model);
+    let message = provisioning_message(requested_model);
     let mut resp = match surface {
         ProvisioningSurface::Native => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1138,11 +1163,12 @@ pub(crate) fn provisioning_response(
         )
             .into_response(),
     };
-    add_provisioning_headers(&mut resp, retry_after);
+    add_provisioning_headers(&mut resp, estimate.retry_after());
     resp.headers_mut().insert(
         HeaderName::from_static("x-sie-error-code"),
         HeaderValue::from_static(err_code::PROVISIONING),
     );
+    resp.extensions_mut().insert(estimate);
     resp
 }
 
@@ -1192,8 +1218,8 @@ fn provisioning_surface_for_endpoint(endpoint: &str) -> ProvisioningSurface {
     }
 }
 
-/// `model` is the model the caller asked for. `dispatch_model` is the route
-/// the lane serves.
+/// `requested_model` is the model as the caller sent it. `dispatch_model` is
+/// the route the lane serves.
 #[allow(clippy::too_many_arguments)]
 async fn capped_lane_admission_response(
     state: &AppState,
@@ -1201,7 +1227,7 @@ async fn capped_lane_admission_response(
     demand_pool: &str,
     machine_profile: &str,
     bundle: &str,
-    model: &str,
+    requested_model: &str,
     dispatch_model: &str,
     provisioning_surface: ProvisioningSurface,
     route: RouteKind,
@@ -1264,9 +1290,9 @@ async fn capped_lane_admission_response(
         {
             state.demand_tracker.record(&lane);
         }
-        let retry_after = provisioning_retry_after(
+        let estimate = ProvisioningEstimate::new(
             state,
-            &[lane_wake_target(
+            vec![lane_wake_target(
                 demand_pool,
                 machine_profile,
                 bundle,
@@ -1275,8 +1301,8 @@ async fn capped_lane_admission_response(
             route,
         );
         return Some(build_provisioning_response_for_surface(
-            model,
-            retry_after,
+            requested_model,
+            estimate,
             provisioning_surface,
         ));
     }
@@ -2082,6 +2108,8 @@ fn bridged_fallback_reason(ext: &axum::http::Extensions) -> Option<FallbackTrigg
 /// and engine. Produced by [`resolve_routing`].
 struct RoutingResult {
     caller_selected_route: bool,
+    /// The model as the caller sent it, before alias, case or `__` resolution.
+    requested_model: String,
     model_name: String,
     dispatch_model: String,
     bundle: String,
@@ -2197,6 +2225,7 @@ async fn resolve_routing(
         debug_assert_eq!(route.engine, "sealed");
         return Ok(RoutingResult {
             caller_selected_route,
+            requested_model: model,
             dispatch_model: model_name.clone(),
             model_name,
             bundle: route.bundle,
@@ -2215,6 +2244,7 @@ async fn resolve_routing(
         };
         return Ok(RoutingResult {
             caller_selected_route,
+            requested_model: model,
             model_name,
             dispatch_model: plan.model.clone(),
             bundle: plan.bundle.clone(),
@@ -2428,6 +2458,7 @@ async fn resolve_routing(
 
     Ok(RoutingResult {
         caller_selected_route,
+        requested_model: model,
         model_name,
         dispatch_model,
         bundle,
@@ -3200,6 +3231,7 @@ async fn proxy_request_inner(
 
     let RoutingResult {
         caller_selected_route,
+        requested_model,
         model_name,
         dispatch_model,
         bundle,
@@ -3473,9 +3505,9 @@ async fn proxy_request_inner(
                 &admission_pool,
             )
             .await;
-            let retry_after = provisioning_retry_after(
+            let estimate = ProvisioningEstimate::new(
                 &state,
-                &cold_lane_targets(
+                cold_lane_targets(
                     &demand_pool,
                     &pending_demand_profiles,
                     &bundle,
@@ -3484,8 +3516,8 @@ async fn proxy_request_inner(
                 route_kind(req.extensions()),
             );
             let refusal = build_provisioning_response_for_surface(
-                &model_name,
-                retry_after,
+                &requested_model,
+                estimate,
                 provisioning_surface,
             );
             match begin_native_fallback(
@@ -3545,7 +3577,7 @@ async fn proxy_request_inner(
         &demand_pool,
         effective_machine_profile,
         &bundle,
-        &model_name,
+        &requested_model,
         &dispatch_model,
         provisioning_surface,
         route_kind(req.extensions()),
@@ -3581,16 +3613,9 @@ async fn proxy_request_inner(
             &bundle,
             &dispatch_model,
         );
-        let refusal = build_provisioning_response_for_surface(
-            &model_name,
-            provisioning_retry_after(
-                &state,
-                std::slice::from_ref(&target),
-                route_kind(req.extensions()),
-            ),
-            provisioning_surface,
-        );
-        if !warm_local_model(
+        let estimate =
+            ProvisioningEstimate::new(&state, vec![target.clone()], route_kind(req.extensions()));
+        let woken = warm_local_model(
             &state,
             work_publisher.as_ref(),
             &physical_lane,
@@ -3598,8 +3623,13 @@ async fn proxy_request_inner(
             &engine,
             &bundle_config_hash,
         )
-        .await
-        {
+        .await;
+        let refusal = build_provisioning_response_for_surface(
+            &requested_model,
+            estimate,
+            provisioning_surface,
+        );
+        if !woken {
             return refusal;
         }
         let Some(plan) = native_bridge_plan(
@@ -3846,9 +3876,9 @@ async fn proxy_request_inner(
             Ok(target) => Some(target),
             Err(()) => {
                 state.demand_tracker.record(&physical_lane);
-                let retry_after = provisioning_retry_after(
+                let estimate = ProvisioningEstimate::new(
                     &state,
-                    &[lane_wake_target(
+                    vec![lane_wake_target(
                         effective_pool,
                         effective_machine_profile,
                         &bundle,
@@ -3857,8 +3887,8 @@ async fn proxy_request_inner(
                     route_kind(req.extensions()),
                 );
                 return build_provisioning_response_for_surface(
-                    &model_name,
-                    retry_after,
+                    &requested_model,
+                    estimate,
                     provisioning_surface,
                 );
             }
@@ -3920,6 +3950,7 @@ async fn proxy_request_inner(
         &state,
         Arc::clone(work_publisher),
         endpoint,
+        &requested_model,
         &model_name,
         &dispatch_model,
         &bundle,
@@ -4404,6 +4435,7 @@ async fn queue_mode_proxy(
     state: &AppState,
     work_publisher: Arc<dyn WorkDispatcher>,
     endpoint: &str,
+    requested_model: &str,
     display_model: &str,
     model: &str,
     bundle: &str,
@@ -4490,6 +4522,7 @@ async fn queue_mode_proxy(
                 state,
                 work_publisher: work_publisher_arc,
                 physical_lane: physical_lane.clone(),
+                requested_model: requested_model.to_string(),
                 model: display_model.to_string(),
                 dispatch_model: model.to_string(),
                 bundle: bundle.to_string(),
@@ -4500,6 +4533,7 @@ async fn queue_mode_proxy(
                 bundle_config_hash: bundle_config_hash.to_string(),
                 work_params: params,
                 endpoint: super::sse::SseEndpoint::Generate,
+                route: route_kind(request_extensions),
             })
             .await;
         }
@@ -4507,6 +4541,7 @@ async fn queue_mode_proxy(
             state,
             work_publisher_arc,
             physical_lane,
+            requested_model,
             display_model,
             model,
             bundle,
@@ -4521,6 +4556,7 @@ async fn queue_mode_proxy(
             token_id,
             content_length,
             start,
+            route_kind(request_extensions),
         )
         .await;
     }
@@ -4577,14 +4613,14 @@ async fn queue_mode_proxy(
                     physical_lane,
                     "no_consumers",
                 );
-                let retry_after = provisioning_retry_after(
+                let estimate = ProvisioningEstimate::new(
                     state,
-                    &[lane_wake_target(pool, gpu, bundle, model)],
+                    vec![lane_wake_target(pool, gpu, bundle, model)],
                     route_kind(request_extensions),
                 );
                 return build_provisioning_response_for_surface(
-                    display_model,
-                    retry_after,
+                    requested_model,
+                    estimate,
                     provisioning_surface_for_endpoint(endpoint),
                 );
             }
@@ -5391,10 +5427,10 @@ pub(crate) enum StreamingDriverErr {
         retry_after: Option<&'static str>,
     },
     /// The publish found no capacity ready on the lane (``no consumers``):
-    /// a ``503 PROVISIONING`` answer for the requested ``model``.
+    /// a ``503 PROVISIONING`` answer for the model the caller sent.
     Provisioning {
-        model: String,
-        retry_after: HeaderValue,
+        requested_model: String,
+        estimate: ProvisioningEstimate,
     },
     /// Initial publish submission returned, but the transport later rejected
     /// or abandoned its durable-acceptance acknowledgement.
@@ -5455,7 +5491,9 @@ pub(crate) async fn run_streaming_generate(
     state: &AppState,
     work_publisher: Arc<dyn WorkDispatcher>,
     physical_lane: &PhysicalLane,
-    // DISPLAY id (the requested model) — drives metric labels + the cancel
+    // The model as the caller sent it, which a provisioning answer names.
+    requested_model: &str,
+    // DISPLAY id (the resolved model) — drives metric labels + the cancel
     // guard. ``dispatch_model`` below is the id actually published to NATS /
     // the work item (the grammar ``:no-spec`` variant when routing fired);
     // they are equal for non-routed requests. See ``route_grammar_to_profile``.
@@ -5598,15 +5636,15 @@ pub(crate) async fn run_streaming_generate(
                     "no_consumers",
                 );
                 return Err(StreamingDriverErr::Provisioning {
-                    model: model.to_string(),
-                    retry_after: provisioning_retry_after(
+                    requested_model: requested_model.to_string(),
+                    estimate: ProvisioningEstimate::new(
                         state,
-                        &[lane_wake_target(pool, gpu, bundle, dispatch_model)],
+                        vec![lane_wake_target(pool, gpu, bundle, dispatch_model)],
                         route,
                     ),
                 });
             }
-            // backpressure (records demand for KEDA) / generic failure. #1568
+            // backpressure (records demand for KEDA) / generic failure.
             return Err(StreamingDriverErr::PublishFailed {
                 message: e,
                 retry_after: record_publish_failure(state, physical_lane, &lower),
@@ -6050,9 +6088,12 @@ fn build_streaming_error_response(err: &StreamingDriverErr) -> Response {
             message,
             retry_after,
         } => build_streaming_publish_failed_for_sse(message, *retry_after),
-        StreamingDriverErr::Provisioning { model, retry_after } => provisioning_response(
-            model,
-            retry_after.clone(),
+        StreamingDriverErr::Provisioning {
+            requested_model,
+            estimate,
+        } => provisioning_response(
+            requested_model,
+            estimate.clone(),
             ProvisioningSurface::OpenAiCompat,
         ),
         StreamingDriverErr::DurabilityFailed { message } => (
@@ -6233,7 +6274,9 @@ async fn queue_mode_streaming_generate(
     state: &AppState,
     work_publisher: Arc<dyn WorkDispatcher>,
     physical_lane: &PhysicalLane,
-    // DISPLAY id (requested model) — response body, success metrics, audit log.
+    // The model as the caller sent it, which a provisioning answer names.
+    requested_model: &str,
+    // DISPLAY id (resolved model) — response body, success metrics, audit log.
     model: &str,
     // DISPATCH id (grammar ``:no-spec`` variant when routed) — NATS subject +
     // work item. Equal to ``model`` for non-routed requests.
@@ -6250,11 +6293,13 @@ async fn queue_mode_streaming_generate(
     token_id: &str,
     content_length: i64,
     start: Instant,
+    route: RouteKind,
 ) -> Response {
     let driver = run_streaming_generate(
         state,
         work_publisher,
         physical_lane,
+        requested_model,
         model,
         dispatch_model,
         bundle,
@@ -6264,7 +6309,7 @@ async fn queue_mode_streaming_generate(
         admission_pool,
         bundle_config_hash,
         params,
-        RouteKind::Native,
+        route,
     )
     .await;
 
@@ -8509,12 +8554,14 @@ struct ResolvedRoute {
 /// Resolve GPU/pool routing from headers, validate them, pick the effective
 /// pool (or surface an OpenAI-shaped 503 provisioning response), and bind the
 /// work publisher. Shared by the chat + completions handlers; the OpenAI-shaped
-/// errors are identical across both.
+/// errors are identical across both. `requested_model` is the model as the
+/// caller sent it, which a provisioning response names.
 #[allow(clippy::result_large_err, clippy::too_many_arguments)]
 async fn resolve_generation_route(
     state: &AppState,
     hdr: &HeaderMap,
     bundle: &str,
+    requested_model: &str,
     customer_model: &str,
     dispatch_model: &str,
     request_intent: GenerationRequestIntent,
@@ -8750,6 +8797,7 @@ async fn resolve_generation_route(
             state,
             hdr,
             &bundle,
+            requested_model,
             customer_model,
             dispatch_model,
             request_intent,
@@ -8802,9 +8850,9 @@ async fn resolve_generation_route(
                 &admission_pool,
             )
             .await;
-            let retry_after = provisioning_retry_after(
+            let estimate = ProvisioningEstimate::new(
                 state,
-                &cold_lane_targets(
+                cold_lane_targets(
                     &demand_pool,
                     &pending_demand_profiles,
                     &bundle,
@@ -8813,8 +8861,8 @@ async fn resolve_generation_route(
                 RouteKind::Compatibility,
             );
             let refusal = build_provisioning_response_for_surface(
-                customer_model,
-                retry_after,
+                requested_model,
+                estimate,
                 ProvisioningSurface::OpenAiCompat,
             );
             let attempt = ext.get::<FallbackAttempt>();
@@ -8839,6 +8887,7 @@ async fn resolve_generation_route(
                 state,
                 hdr,
                 &plan.bundle,
+                requested_model,
                 customer_model,
                 &plan.model,
                 request_intent,
@@ -8893,7 +8942,7 @@ async fn resolve_generation_route(
         &demand_pool,
         &effective_machine_profile,
         &bundle,
-        customer_model,
+        requested_model,
         dispatch_model,
         ProvisioningSurface::OpenAiCompat,
         RouteKind::Compatibility,
@@ -8926,16 +8975,9 @@ async fn resolve_generation_route(
                 &bundle,
                 dispatch_model,
             );
-            let refusal = build_provisioning_response_for_surface(
-                customer_model,
-                provisioning_retry_after(
-                    state,
-                    std::slice::from_ref(&target),
-                    RouteKind::Compatibility,
-                ),
-                ProvisioningSurface::OpenAiCompat,
-            );
-            if !warm_local_model(
+            let estimate =
+                ProvisioningEstimate::new(state, vec![target.clone()], RouteKind::Compatibility);
+            let woken = warm_local_model(
                 state,
                 work_publisher_arc.as_ref(),
                 &physical_lane,
@@ -8943,8 +8985,13 @@ async fn resolve_generation_route(
                 &engine,
                 &bundle_config_hash,
             )
-            .await
-            {
+            .await;
+            let refusal = build_provisioning_response_for_surface(
+                requested_model,
+                estimate,
+                ProvisioningSurface::OpenAiCompat,
+            );
+            if !woken {
                 return Err(refusal);
             }
             let attempt = ext
@@ -8957,6 +9004,7 @@ async fn resolve_generation_route(
                 state,
                 hdr,
                 &plan.bundle,
+                requested_model,
                 customer_model,
                 &plan.model,
                 request_intent,
@@ -9025,6 +9073,7 @@ async fn resolve_generation_route(
                     state,
                     hdr,
                     &plan.bundle,
+                    requested_model,
                     customer_model,
                     &plan.model,
                     request_intent,
@@ -9101,6 +9150,7 @@ async fn resolve_generation_route(
                     state,
                     hdr,
                     &plan.bundle,
+                    requested_model,
                     customer_model,
                     &plan.model,
                     request_intent,
@@ -9589,6 +9639,7 @@ async fn proxy_chat_inner(
         &state,
         &hdr,
         &bundle,
+        &params.model,
         &model_name,
         &dispatch_model,
         if params.grammar.is_some() {
@@ -9610,6 +9661,7 @@ async fn proxy_chat_inner(
     let start = Instant::now();
 
     // Copied out BEFORE the params are consumed into `WorkParams` below.
+    let requested_model = params.model.clone();
     let stream = params.stream;
     let stream_include_usage = params.stream_include_usage;
     let mut work_params = params.into_work_params();
@@ -9634,6 +9686,7 @@ async fn proxy_chat_inner(
             state: state.as_ref(),
             work_publisher: work_publisher_arc,
             physical_lane: physical_lane.clone(),
+            requested_model,
             model: model_name.clone(),
             dispatch_model: dispatch_model.clone(),
             bundle: bundle.clone(),
@@ -9646,6 +9699,7 @@ async fn proxy_chat_inner(
             endpoint: super::sse::SseEndpoint::Chat {
                 include_usage: stream_include_usage,
             },
+            route: RouteKind::Compatibility,
         })
         .await;
     }
@@ -9654,6 +9708,7 @@ async fn proxy_chat_inner(
         &state,
         work_publisher_arc,
         &physical_lane,
+        &requested_model,
         &model_name,
         &dispatch_model,
         &bundle,
@@ -10271,6 +10326,7 @@ async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response
         &state,
         &hdr,
         &bundle,
+        &params.model,
         &model_name,
         &model_name,
         GenerationRequestIntent::Default,
@@ -10288,6 +10344,7 @@ async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response
     let start = Instant::now();
 
     // Copied out BEFORE the params are consumed into `WorkParams` below.
+    let requested_model = params.model.clone();
     let stream = params.stream;
     let stream_include_usage = params.stream_include_usage;
     let mut work_params = params.into_work_params();
@@ -10306,6 +10363,7 @@ async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response
             state: state.as_ref(),
             work_publisher: work_publisher_arc,
             physical_lane: physical_lane.clone(),
+            requested_model,
             model: model_name.clone(),
             // /v1/completions does not accept grammar, so it never routes:
             // dispatch == display.
@@ -10320,6 +10378,7 @@ async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response
             endpoint: super::sse::SseEndpoint::Completion {
                 include_usage: stream_include_usage,
             },
+            route: RouteKind::Compatibility,
         })
         .await;
     }
@@ -10328,6 +10387,7 @@ async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response
         &state,
         work_publisher_arc,
         &physical_lane,
+        &requested_model,
         &model_name,
         &dispatch_model,
         &bundle,
@@ -10938,6 +10998,7 @@ async fn proxy_responses_inner(state: Arc<AppState>, req: Request) -> Response {
         &state,
         &hdr,
         &bundle,
+        &params.model,
         &model_name,
         &model_name,
         GenerationRequestIntent::Default,
@@ -10954,6 +11015,7 @@ async fn proxy_responses_inner(state: Arc<AppState>, req: Request) -> Response {
     };
     let start = Instant::now();
 
+    let requested_model = params.model.clone();
     let mut work_params = params.into_work_params();
     work_params.require_execution_authority_v1 = require_execution_authority_v1;
     work_params.fallback_reason = fallback_reason;
@@ -10962,6 +11024,7 @@ async fn proxy_responses_inner(state: Arc<AppState>, req: Request) -> Response {
         &state,
         work_publisher_arc,
         &physical_lane,
+        &requested_model,
         &model_name,
         &dispatch_model,
         &bundle,
@@ -17132,6 +17195,7 @@ mod tests {
         // literal (not against `RetryAfter::DEFAULT.*`, which would be a
         // tautological `x == x`), so a broken alias is actually caught.
         assert_eq!(PROVISIONING_RETRY_AFTER, "60");
+        assert_eq!(PROVISIONING_RETRY_AFTER_DEFAULT_S, 60);
         assert_eq!(BACKPRESSURE_RETRY_AFTER, "5");
         assert_eq!(GATEWAY_TIMEOUT_RETRY_AFTER, "5");
         assert_eq!(MODEL_LOADING_RETRY_AFTER, "5");
@@ -19683,6 +19747,297 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_capped_lane_admission_estimates_its_demand_lane_for_the_route() {
+        use crate::handlers::test_support::RecordingDispatcher;
+
+        let pm = Arc::new(PoolManager::new(vec!["l4".to_string()]));
+        pm.create_pool_with_caps(
+            "tenant",
+            std::collections::HashMap::from([("l4".to_string(), 0)]),
+            std::collections::HashMap::from([("l4".to_string(), 1)]),
+            None,
+            None,
+            0,
+            vec![],
+        )
+        .await
+        .unwrap();
+        let mut state = admission_test_state(Arc::clone(&pm));
+        let dispatcher = Arc::new(RecordingDispatcher::default());
+        state.work_publisher = Some(dispatcher.clone());
+        let demand_pool = "test-zero-assigned-native";
+        let bundle = "test-zero-assigned-native-bundle";
+        dispatcher.estimate_provisioning(("tenant", "l4", bundle), Duration::from_secs(280));
+
+        for (estimate, native, compatibility) in [
+            (Duration::from_secs(95), "95", "60"),
+            (Duration::from_secs(40), "40", "40"),
+        ] {
+            dispatcher.estimate_provisioning((demand_pool, "l4", bundle), estimate);
+            for (route, surface, retry_after) in [
+                (RouteKind::Native, ProvisioningSurface::Native, native),
+                (
+                    RouteKind::Compatibility,
+                    ProvisioningSurface::OpenAiCompat,
+                    compatibility,
+                ),
+            ] {
+                let case = format!("{route:?} {estimate:?}");
+                let resp = capped_lane_admission_response(
+                    &state,
+                    "tenant",
+                    demand_pool,
+                    "l4",
+                    bundle,
+                    "speech",
+                    "acme/extract:remote",
+                    surface,
+                    route,
+                )
+                .await
+                .expect("a capped lane without an admitted worker provisions");
+                assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE, "{case}");
+                assert_eq!(resp.headers()["retry-after"], retry_after, "{case}");
+                let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+                let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    value["error"]["message"],
+                    "Capacity for model 'speech' is starting. Retry after the number of seconds in Retry-After.",
+                    "{case}"
+                );
+            }
+        }
+        let lane = state
+            .demand_tracker
+            .resolve_lane(demand_pool, "l4", bundle)
+            .unwrap();
+        state.demand_tracker.clear(&lane);
+    }
+
+    /// A gateway whose logical pool `tenant` caps the local lane's machine
+    /// profile at one worker and admits the `assigned` workers, while a healthy
+    /// worker of the default pool serves the local lane. The transport
+    /// estimates the local lane `local`, and the same lane of `tenant` 280
+    /// seconds. `vectors` and `assistant` are aliases of its two models.
+    async fn capped_tenant_gateway(assigned: &[&str], local: Duration) -> TestGateway {
+        let mut gateway = TestGateway::new(&[
+            crate::handlers::test_support::LOCAL_ENCODE_MODEL,
+            HYBRID_GENERATE_MODEL,
+        ])
+        .await;
+        gateway.add_model_alias("vectors", "acme/local");
+        gateway.add_model_alias("assistant", "acme/chat");
+        gateway
+            .add_worker("local-1", LOCAL_LANE, &["acme/local", "acme/chat"])
+            .await;
+        let pools = &gateway.state.pool_manager;
+        pools
+            .create_pool_with_caps(
+                "tenant",
+                std::collections::HashMap::from([(LOCAL_LANE.1.to_string(), 0)]),
+                std::collections::HashMap::from([(LOCAL_LANE.1.to_string(), 1)]),
+                None,
+                None,
+                0,
+                vec![],
+            )
+            .await
+            .unwrap();
+        let workers: Vec<_> = assigned
+            .iter()
+            .map(|name| {
+                (
+                    name.to_string(),
+                    format!("http://{name}:8080"),
+                    LOCAL_LANE.1.to_string(),
+                    LOCAL_LANE.2.to_string(),
+                    LOCAL_LANE.0.to_string(),
+                )
+            })
+            .collect();
+        pools.assign_workers("tenant", &workers).await;
+        assert_eq!(
+            pools
+                .capped_lane_status("tenant", LOCAL_LANE.1, LOCAL_LANE.2)
+                .await
+                .unwrap()
+                .assigned_count,
+            assigned.len()
+        );
+        gateway.dispatcher.estimate_provisioning(LOCAL_LANE, local);
+        gateway.dispatcher.estimate_provisioning(
+            ("tenant", LOCAL_LANE.1, LOCAL_LANE.2),
+            Duration::from_secs(280),
+        );
+        gateway
+    }
+
+    fn tenant_request(uri: &str, body: serde_json::Value) -> Request {
+        let mut request = json_request(uri, body);
+        request
+            .headers_mut()
+            .insert("x-sie-pool", HeaderValue::from_static("tenant"));
+        request
+    }
+
+    /// A capped lane that admits no worker answers provisioning with the
+    /// estimate of the queue pool's lane, bounded by each request's route.
+    #[tokio::test]
+    async fn a_capped_lane_without_an_admitted_worker_answers_with_its_lane_estimate() {
+        for (local, native, compatibility) in [
+            (Duration::from_secs(95), "95", "60"),
+            (Duration::from_secs(40), "40", "40"),
+        ] {
+            let gateway = capped_tenant_gateway(&[], local).await;
+            let state = || State(Arc::clone(&gateway.state));
+            let responses = [
+                (
+                    "encode",
+                    "vectors",
+                    native,
+                    proxy_request(
+                        state(),
+                        tenant_request(
+                            "/v1/encode/vectors",
+                            serde_json::json!({"items": [{"text": "hello"}]}),
+                        ),
+                        "encode",
+                    )
+                    .await,
+                ),
+                (
+                    "generate",
+                    "assistant",
+                    native,
+                    proxy_request(
+                        state(),
+                        tenant_request(
+                            "/v1/generate/assistant",
+                            serde_json::json!({"prompt": "hello", "max_new_tokens": 4}),
+                        ),
+                        "generate",
+                    )
+                    .await,
+                ),
+                (
+                    "embeddings",
+                    "vectors",
+                    compatibility,
+                    proxy_openai_embeddings(
+                        state(),
+                        tenant_request(
+                            "/v1/embeddings",
+                            serde_json::json!({"model": "vectors", "input": "hello"}),
+                        ),
+                    )
+                    .await,
+                ),
+                (
+                    "chat",
+                    "assistant",
+                    compatibility,
+                    proxy_chat(
+                        state(),
+                        tenant_request(
+                            "/v1/chat/completions",
+                            serde_json::json!({
+                                "model": "assistant",
+                                "messages": [{"role": "user", "content": "hello"}],
+                            }),
+                        ),
+                    )
+                    .await,
+                ),
+            ];
+            for (case, model, retry_after, response) in responses {
+                assert_capped_provisioning(
+                    response,
+                    &format!("{case} {local:?}"),
+                    model,
+                    retry_after,
+                )
+                .await;
+            }
+            assert!(gateway.dispatcher.dispatched().is_empty());
+        }
+    }
+
+    async fn assert_capped_provisioning(
+        response: Response,
+        case: &str,
+        model: &str,
+        retry_after: &str,
+    ) {
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{case}");
+        assert_eq!(response.headers()["retry-after"], retry_after, "{case}");
+        assert_eq!(
+            response.headers()["x-sie-error-code"],
+            err_code::PROVISIONING,
+            "{case}"
+        );
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            value["error"]["message"],
+            format!(
+                "Capacity for model '{model}' is starting. Retry after the number of seconds in Retry-After."
+            ),
+            "{case}"
+        );
+    }
+
+    /// A capped lane whose admitted workers are not registered has no worker
+    /// to publish to, and answers provisioning with the estimate of the queue
+    /// pool's lane, bounded by each request's route.
+    #[tokio::test]
+    async fn a_capped_lane_without_a_registered_admitted_worker_answers_with_its_lane_estimate() {
+        for (local, native, compatibility) in [
+            (Duration::from_secs(95), "95", "60"),
+            (Duration::from_secs(40), "40", "40"),
+        ] {
+            let gateway = capped_tenant_gateway(&["assigned-elsewhere"], local).await;
+            let state = || State(Arc::clone(&gateway.state));
+            let responses = [
+                (
+                    "encode",
+                    native,
+                    proxy_request(
+                        state(),
+                        tenant_request(
+                            "/v1/encode/vectors",
+                            serde_json::json!({"items": [{"text": "hello"}]}),
+                        ),
+                        "encode",
+                    )
+                    .await,
+                ),
+                (
+                    "embeddings",
+                    compatibility,
+                    proxy_openai_embeddings(
+                        state(),
+                        tenant_request(
+                            "/v1/embeddings",
+                            serde_json::json!({"model": "vectors", "input": "hello"}),
+                        ),
+                    )
+                    .await,
+                ),
+            ];
+            for (case, retry_after, response) in responses {
+                assert_capped_provisioning(
+                    response,
+                    &format!("{case} {local:?}"),
+                    "vectors",
+                    retry_after,
+                )
+                .await;
+            }
+            assert!(gateway.dispatcher.dispatched().is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn test_record_publish_failure_backpressure_records_demand() {
         // Backpressure (a present-but-saturated worker) must record pending
         // demand so KEDA scales the lane; a generic publish failure must not.
@@ -19935,11 +20290,24 @@ mod tests {
         }
     }
 
+    /// A provisioning estimate of `seconds` for one lane on a native route.
+    fn provisioning_estimate_of(seconds: u64) -> ProvisioningEstimate {
+        let dispatcher = Arc::new(crate::handlers::test_support::RecordingDispatcher::default());
+        dispatcher
+            .estimate_provisioning(("default", "l4", "default"), Duration::from_secs(seconds));
+        ProvisioningEstimate {
+            dispatcher: Some(dispatcher),
+            targets: vec![lane_wake_target("default", "l4", "default", "acme/m")],
+            route: RouteKind::Native,
+        }
+    }
+
     #[tokio::test]
-    async fn test_openai_provisioning_response_without_model_is_retryable_503() {
+    async fn test_openai_provisioning_response_is_retryable_503() {
+        let state = admission_test_state(Arc::new(PoolManager::new(vec!["l4".to_string()])));
         let resp = build_provisioning_response_for_surface(
-            "",
-            HeaderValue::from_static(PROVISIONING_RETRY_AFTER),
+            "acme/m",
+            ProvisioningEstimate::new(&state, Vec::new(), RouteKind::Compatibility),
             ProvisioningSurface::OpenAiCompat,
         );
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -19962,7 +20330,7 @@ mod tests {
         assert_eq!(value["error"]["code"], oai_code::PROVISIONING);
         assert_eq!(
             value["error"]["message"],
-            "Capacity is starting. Retry after the number of seconds in Retry-After."
+            "Capacity for model 'acme/m' is starting. Retry after the number of seconds in Retry-After."
         );
     }
 
@@ -19975,11 +20343,12 @@ mod tests {
             (Duration::from_millis(5_001), 6, 6),
             (Duration::from_millis(59_001), 60, 60),
             (Duration::from_secs(61), 61, 60),
-            (Duration::from_secs(660), 660, 60),
-            (Duration::from_millis(899_001), 900, 60),
-            (Duration::from_secs(900), 900, 60),
-            (Duration::from_secs(901), 900, 60),
-            (Duration::MAX, 900, 60),
+            (Duration::from_secs(240), 240, 60),
+            (Duration::from_millis(299_001), 300, 60),
+            (Duration::from_secs(300), 300, 60),
+            (Duration::from_secs(301), 300, 60),
+            (Duration::from_secs(900), 300, 60),
+            (Duration::MAX, 300, 60),
         ] {
             assert_eq!(
                 bounded_provisioning_retry_after_s(estimate, RouteKind::Native),
@@ -19995,59 +20364,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_provisioning_retry_after_takes_the_soonest_transport_estimate() {
+    async fn test_provisioning_retry_after_takes_the_soonest_lane_value() {
         use crate::handlers::test_support::RecordingDispatcher;
 
         let pm = Arc::new(PoolManager::new(vec!["l4".to_string()]));
         let mut state = admission_test_state(pm);
-        let lane = |profile: &str| lane_wake_target("default", profile, "default", "acme/m");
+        let retry_after = |state: &AppState, profiles: &[&str], route| {
+            let lanes = profiles
+                .iter()
+                .map(|profile| lane_wake_target("default", profile, "default", "acme/m"))
+                .collect();
+            ProvisioningEstimate::new(state, lanes, route).retry_after()
+        };
         let default = HeaderValue::from_static(PROVISIONING_RETRY_AFTER);
         let routes = [RouteKind::Native, RouteKind::Compatibility];
 
         for route in routes {
-            assert_eq!(
-                provisioning_retry_after(&state, &[lane("l4")], route),
-                default
-            );
+            assert_eq!(retry_after(&state, &["l4"], route), default);
         }
 
         let dispatcher = Arc::new(RecordingDispatcher::default());
         state.work_publisher = Some(dispatcher.clone());
         for route in routes {
-            assert_eq!(
-                provisioning_retry_after(&state, &[lane("l4")], route),
-                default
-            );
-            assert_eq!(provisioning_retry_after(&state, &[], route), default);
+            assert_eq!(retry_after(&state, &["l4"], route), default);
+            assert_eq!(retry_after(&state, &[], route), default);
         }
 
-        dispatcher.estimate_provisioning(("default", "l4", "default"), Duration::from_secs(680));
+        dispatcher.estimate_provisioning(("default", "l4", "default"), Duration::from_secs(280));
         dispatcher.estimate_provisioning(
             ("default", "h100", "default"),
             Duration::from_millis(240_500),
         );
-        let lanes = [lane("l4"), lane("h100"), lane("a10g")];
+        assert_eq!(retry_after(&state, &["l4"], RouteKind::Native), "280");
         assert_eq!(
-            provisioning_retry_after(&state, &[lane("l4")], RouteKind::Native),
-            "680"
-        );
-        assert_eq!(
-            provisioning_retry_after(&state, &lanes, RouteKind::Native),
+            retry_after(&state, &["l4", "h100"], RouteKind::Native),
             "241"
         );
+        assert_eq!(retry_after(&state, &["l4"], RouteKind::Compatibility), "60");
         assert_eq!(
-            provisioning_retry_after(&state, &[lane("l4")], RouteKind::Compatibility),
-            "60"
-        );
-        assert_eq!(
-            provisioning_retry_after(&state, &lanes, RouteKind::Compatibility),
+            retry_after(&state, &["l4", "h100"], RouteKind::Compatibility),
             "60"
         );
         for route in routes {
             assert_eq!(
-                provisioning_retry_after(&state, &[lane("a10g")], route),
-                default
+                retry_after(&state, &["l4", "h100", "a10g"], route),
+                default,
+                "a lane without an estimate counts as the default"
             );
+            assert_eq!(retry_after(&state, &["a10g"], route), default);
         }
 
         dispatcher.estimate_provisioning(
@@ -20055,18 +20419,12 @@ mod tests {
             Duration::from_millis(30_200),
         );
         for route in routes {
-            assert_eq!(provisioning_retry_after(&state, &lanes, route), "31");
+            assert_eq!(retry_after(&state, &["l4", "h100", "a10g"], route), "31");
         }
 
         dispatcher.estimate_provisioning(("default", "l4", "default"), Duration::from_secs(7_200));
-        assert_eq!(
-            provisioning_retry_after(&state, &[lane("l4")], RouteKind::Native),
-            "900"
-        );
-        assert_eq!(
-            provisioning_retry_after(&state, &[lane("l4")], RouteKind::Compatibility),
-            "60"
-        );
+        assert_eq!(retry_after(&state, &["l4"], RouteKind::Native), "300");
+        assert_eq!(retry_after(&state, &["l4"], RouteKind::Compatibility), "60");
     }
 
     #[tokio::test]
@@ -20075,9 +20433,9 @@ mod tests {
             ProvisioningSurface::Native,
             ProvisioningSurface::OpenAiCompat,
         ] {
-            let resp = provisioning_response("acme/m", HeaderValue::from_static("680"), surface);
+            let resp = provisioning_response("acme/m", provisioning_estimate_of(280), surface);
             assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-            assert_eq!(resp.headers()["retry-after"], "680");
+            assert_eq!(resp.headers()["retry-after"], "280");
             assert_eq!(resp.headers()["x-sie-error-code"], err_code::PROVISIONING);
             let body = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
             let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -21652,13 +22010,13 @@ mod tests {
     async fn test_translate_inner_compat_provisioning_error_to_openai_503() {
         let resp = provisioning_response(
             "acme/m",
-            HeaderValue::from_static("680"),
+            provisioning_estimate_of(280),
             ProvisioningSurface::Native,
         );
 
         let out = translate_inner_compat_error(resp).await;
         assert_eq!(out.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(out.headers().get("retry-after").unwrap(), "680");
+        assert_eq!(out.headers().get("retry-after").unwrap(), "280");
         assert_eq!(
             out.headers().get("x-sie-error-code").unwrap(),
             err_code::PROVISIONING
@@ -27916,12 +28274,12 @@ mod tests {
     #[tokio::test]
     async fn test_build_streaming_error_response_provisioning_is_provisioning() {
         let err = StreamingDriverErr::Provisioning {
-            model: "acme/m".to_string(),
-            retry_after: HeaderValue::from_static("680"),
+            requested_model: "acme/m".to_string(),
+            estimate: provisioning_estimate_of(280),
         };
         let resp = build_streaming_error_response(&err);
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(resp.headers().get("retry-after").unwrap(), "680");
+        assert_eq!(resp.headers().get("retry-after").unwrap(), "280");
         assert_eq!(
             resp.headers().get("x-sie-error-code").unwrap(),
             err_code::PROVISIONING

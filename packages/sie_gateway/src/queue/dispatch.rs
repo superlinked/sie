@@ -203,9 +203,12 @@ pub trait WorkDispatcher: Send + Sync {
     /// `503 PROVISIONING` for that lane, on the request path, so it must not
     /// block. `target` is the lane's pool target, with no worker pinned. The
     /// gateway sends the estimate as `Retry-After`, rounded up to whole
-    /// seconds and clamped to 5 to 900 seconds on the native routes and to 5
+    /// seconds and clamped to 5 to 300 seconds on the native routes and to 5
     /// to 60 seconds on the OpenAI-compatible and other compatibility routes.
-    /// `None` keeps the gateway's 60-second default on both.
+    /// `None` counts as the gateway's 60-second default on both, and an
+    /// answer about several lanes sends the soonest of their values. The
+    /// gateway reads the estimate again when it restores a provisioning
+    /// answer it held through a remote attempt.
     fn provisioning_retry_after(&self, _target: &PublishTarget) -> Option<Duration> {
         None
     }

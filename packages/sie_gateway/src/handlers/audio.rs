@@ -1022,6 +1022,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn audio_transcriptions_cap_a_transport_cold_lane_estimate() {
+        let config = format!(
+            "{HYBRID_EXTRACT_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        for (local, retry_after) in [
+            (std::time::Duration::from_secs(95), "60"),
+            (std::time::Duration::from_secs(40), "40"),
+        ] {
+            let gateway = TestGateway::new(&[&config]).await;
+            gateway
+                .add_verified_worker("local-1", LOCAL_LANE, &["acme/extract"])
+                .await;
+            gateway
+                .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                .await;
+            gateway.dispatcher.report_cold_local_lane();
+            gateway.dispatcher.refuse_model_loads();
+            gateway.dispatcher.estimate_provisioning(LOCAL_LANE, local);
+            gateway
+                .dispatcher
+                .estimate_provisioning(REMOTE_LANE, std::time::Duration::from_secs(280));
+            let (content_type, body) =
+                multipart_body(&[("model", "acme/extract")], "clip.wav", b"RIFFtest");
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/audio/transcriptions")
+                .header(header::CONTENT_TYPE, content_type)
+                .body(Body::from(body))
+                .unwrap();
+
+            let response =
+                proxy_openai_transcription(State(Arc::clone(&gateway.state)), request).await;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{local:?}"
+            );
+            assert_eq!(response.headers()["retry-after"], retry_after, "{local:?}");
+            assert_eq!(response.headers()["x-sie-error-code"], "PROVISIONING");
+            let woken = gateway.dispatcher.dispatched();
+            assert_eq!(woken.len(), 1, "{woken:?}");
+            assert_eq!(woken[0].endpoint, "load");
+            assert_eq!(woken[0].bundle, LOCAL_LANE.2);
+        }
+    }
+
+    #[tokio::test]
     async fn audio_cluster_fallback_preserves_bridge_and_restored_refusal_headers() {
         let config = format!(
             "{HYBRID_EXTRACT_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
