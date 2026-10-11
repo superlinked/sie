@@ -302,6 +302,7 @@ from .errors import (
     ModelLoadingError,
     ProvisioningError,
     RateLimitError,
+    RelayUnavailableError,
     RequestError,
     ResourceExhaustedError,
     ServerError,
@@ -575,6 +576,18 @@ KEY_SPEND_LIMIT_EXCEEDED_ERROR_CODE = "KEY_SPEND_LIMIT_EXCEEDED"
 ACCOUNT_SUSPENDED_ERROR_CODE = "ACCOUNT_SUSPENDED"
 ACCOUNT_PENDING_REVIEW_ERROR_CODE = "ACCOUNT_PENDING_REVIEW"
 ACCOUNT_STATE_UNAVAILABLE_ERROR_CODE = "ACCOUNT_STATE_UNAVAILABLE"
+# SIE Cloud refuses a request it would serve through SIE Relay, its partner
+# capacity, with one of these 403 codes. Terminal like the account errors above.
+THIRD_PARTY_SERVING_DISABLED_ERROR_CODE = "THIRD_PARTY_SERVING_DISABLED"
+THIRD_PARTY_RUNTIME_UNLISTED_ERROR_CODE = "THIRD_PARTY_RUNTIME_UNLISTED"
+THIRD_PARTY_REGION_UNAVAILABLE_ERROR_CODE = "THIRD_PARTY_REGION_UNAVAILABLE"
+RELAY_UNAVAILABLE_ERROR_CODES = frozenset(
+    {
+        THIRD_PARTY_SERVING_DISABLED_ERROR_CODE,
+        THIRD_PARTY_RUNTIME_UNLISTED_ERROR_CODE,
+        THIRD_PARTY_REGION_UNAVAILABLE_ERROR_CODE,
+    }
+)
 
 # Retry jitter. Fixed / pure-exponential backoff makes every client that
 # lost a worker at the same instant (cluster cold start, rolling restart)
@@ -1351,6 +1364,8 @@ def handle_error(response: _HttpResponse) -> NoReturn:
             failures (terminal — never retried).
         AccountInactiveError: For 403 account suspended / pending review
             (terminal — never retried).
+        RelayUnavailableError: For 403 SIE Relay refusals (terminal — never
+            retried).
         AccountStateUnavailableError: For 503 ACCOUNT_STATE_UNAVAILABLE.
         RequestError: For other 4xx responses.
         ServerError: For other 5xx responses.
@@ -1358,6 +1373,7 @@ def handle_error(response: _HttpResponse) -> NoReturn:
     code = None
     param = None
     message = f"HTTP {response.status_code}"
+    fields: dict[str, Any] = {}
 
     try:
         # Try msgpack first
@@ -1369,6 +1385,7 @@ def handle_error(response: _HttpResponse) -> NoReturn:
         if "error" in data:
             error = data["error"]
             if isinstance(error, dict):
+                fields = error
                 code = error.get("code")
                 message = error.get("message", message)
                 error_param = error.get("param")
@@ -1379,6 +1396,7 @@ def handle_error(response: _HttpResponse) -> NoReturn:
         elif "detail" in data:
             detail = data["detail"]
             if isinstance(detail, dict):
+                fields = detail
                 code = detail.get("code")
                 message = detail.get("message", str(detail))
                 detail_param = detail.get("param")
@@ -1422,6 +1440,17 @@ def handle_error(response: _HttpResponse) -> NoReturn:
         ACCOUNT_PENDING_REVIEW_ERROR_CODE,
     ):
         raise AccountInactiveError(message, code=code, param=param, request=request)
+    if response.status_code == HTTP_FORBIDDEN and code in RELAY_UNAVAILABLE_ERROR_CODES:
+        key_region = fields.get("key_region")
+        deployment_region = fields.get("deployment_region")
+        raise RelayUnavailableError(
+            message,
+            code=code,
+            key_region=key_region if isinstance(key_region, str) else None,
+            deployment_region=deployment_region if isinstance(deployment_region, str) else None,
+            param=param,
+            request=request,
+        )
     if response.status_code == HTTP_SERVICE_UNAVAILABLE and code == ACCOUNT_STATE_UNAVAILABLE_ERROR_CODE:
         raise AccountStateUnavailableError(message, retry_after=get_retry_after(response), param=param, request=request)
     if response.status_code >= HTTP_SERVER_ERROR:

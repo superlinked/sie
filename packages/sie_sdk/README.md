@@ -323,9 +323,13 @@ use local/PVC, S3, GCS, or Azure storage for that store.
 
 Server-reported errors are raised as typed exceptions from
 `sie_sdk.client.errors`; all inherit from `SIEError`, and errors that
-carry a server response expose `.code` and `.status_code`. Invalid
-client-side arguments (for example, a bad `base_url_headers` value)
-raise ordinary Python exceptions such as `ValueError`.
+carry a server response expose `.code` and `.status_code`. `RequestError`
+and `ServerError` also expose `.request`, the request metadata of the
+error response when it carried any: for example `served_by`,
+`fallback_reason` and `fallback_error` on a local refusal that answers a
+failed remote attempt. Invalid client-side arguments (for example, a bad
+`base_url_headers` value) raise ordinary Python exceptions such as
+`ValueError`.
 
 Several `503` codes are transient and retried automatically (see the
 next section for the `RESOURCE_EXHAUSTED` budget):
@@ -353,6 +357,18 @@ a `503 QUEUE_UNAVAILABLE` that carries `Retry-After`. A
 [`packages/wire-fixtures/retry_classification.json`](../wire-fixtures/retry_classification.json)
 lists how each response is classified; the Python and TypeScript SDKs
 both test against it.
+
+SIE Cloud answers `403` when it will not serve a request through SIE
+Relay, its partner capacity. The SDK raises `RelayUnavailableError`, a
+`RequestError` subclass that carries the server's message, and never
+retries it. Branch on `.code`:
+
+- `THIRD_PARTY_SERVING_DISABLED` — serving through SIE Relay is disabled.
+- `THIRD_PARTY_RUNTIME_UNLISTED` — the SIE Relay runtime that would serve
+  the model is not listed.
+- `THIRD_PARTY_REGION_UNAVAILABLE` — SIE Relay cannot serve the model in
+  the API key's region. `.key_region` and `.deployment_region` name the
+  regions when the response includes them.
 
 ### Timeouts
 

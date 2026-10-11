@@ -79,9 +79,9 @@ import {
   parseEncodeResults,
   parseExtractResults,
   parseGenerateResult,
+  parseRequestMetadata,
   parseScoreResult,
   readRequestId,
-  settledChargeFields,
   throwIfEstimateUnroutable,
   throwIfInputTooLong,
   throwIfModelLoadFailed,
@@ -149,14 +149,6 @@ import type {
   StatusMessage,
   StreamGenerateOptions,
   WireModelInfo,
-} from "./types.js";
-import {
-  FALLBACK_ERROR_PATTERN,
-  FALLBACK_REASONS,
-  type FallbackReason,
-  SERVED_BY_VALUES,
-  type ServedBy,
-  UPSTREAM_NAME_PATTERN,
 } from "./types.js";
 import { SDK_VERSION } from "./version.js";
 
@@ -414,11 +406,15 @@ async function parseTerminalJsonObject(
   owner: string,
 ): Promise<Record<string, unknown>> {
   const body = new Uint8Array(await response.arrayBuffer());
+  const request = parseRequestMetadata(response.headers);
   if (!response.ok) {
     throw new RequestError(
       `Unexpected ${owner} HTTP response (${terminalResponseDiagnostic(response, body.byteLength)})`,
       undefined,
       response.status,
+      undefined,
+      undefined,
+      request,
     );
   }
   let data: unknown;
@@ -429,6 +425,9 @@ async function parseTerminalJsonObject(
       `Malformed ${owner} JSON response (${terminalResponseDiagnostic(response, body.byteLength)})`,
       undefined,
       response.status,
+      undefined,
+      undefined,
+      request,
     );
   }
   if (data === null || typeof data !== "object" || Array.isArray(data)) {
@@ -436,120 +435,15 @@ async function parseTerminalJsonObject(
       `Unexpected ${owner} response shape (${terminalResponseDiagnostic(response, body.byteLength)})`,
       undefined,
       response.status,
+      undefined,
+      undefined,
+      request,
     );
   }
   return data as Record<string, unknown>;
 }
 
-function parseNonnegativeMeterHeader(headers: Headers, name: string): number | undefined {
-  const raw = headers.get(name);
-  if (raw === null || !/^(0|[1-9]\d*)$/.test(raw)) return undefined;
-  const parsed = Number(raw);
-  return Number.isSafeInteger(parsed) ? parsed : undefined;
-}
-
 const REMOTE_HEADER = "X-SIE-Remote";
-
-/**
- * Parse optional request-scoped metadata from one successful terminal response.
- *
- * `body` is the decoded response envelope, when the caller has one. The settled
- * charge is read from its `usage` block FIRST and falls back to the
- * `x-sie-credits-debited` header, which is the only source on a gateway that
- * predates in-body surfacing (#2434). The two always agree when both are
- * present; the body additionally names the rate book, which no header does.
- */
-function parseRequestMetadata(headers: Headers, body?: unknown): RequestMetadata | undefined {
-  const metadata: RequestMetadata = {};
-  const requestId = headers.get("x-sie-request-id");
-  if (
-    requestId !== null &&
-    requestId.length > 0 &&
-    requestId.length <= 256 &&
-    requestId === requestId.trim() &&
-    /^[\x20-\x7e]+$/.test(requestId)
-  ) {
-    metadata.id = requestId;
-  }
-  const executionIdentitySha256 = headers.get("x-sie-execution-identity-sha256");
-  if (executionIdentitySha256 !== null && /^[0-9a-f]{64}$/.test(executionIdentitySha256)) {
-    metadata.executionIdentitySha256 = executionIdentitySha256;
-  }
-  const executionBindingSha256 = headers.get("x-sie-execution-binding-sha256");
-  if (executionBindingSha256 !== null && /^[0-9a-f]{64}$/.test(executionBindingSha256)) {
-    metadata.executionBindingSha256 = executionBindingSha256;
-  }
-  const servedBy = headers.get("x-sie-served-by");
-  const runtimeInstance = headers.get("x-sie-runtime-instance");
-  if (runtimeInstance !== null && /^[0-9a-f]{64}$/.test(runtimeInstance)) {
-    metadata.runtimeInstanceId = runtimeInstance;
-  }
-  if (servedBy !== null && (SERVED_BY_VALUES as readonly string[]).includes(servedBy)) {
-    metadata.servedBy = servedBy as ServedBy;
-  }
-  const upstream = headers.get("x-sie-upstream");
-  if (upstream !== null && UPSTREAM_NAME_PATTERN.test(upstream)) {
-    metadata.upstream = upstream;
-  }
-  const fallbackReason = headers.get("x-sie-fallback-reason");
-  if (fallbackReason !== null && (FALLBACK_REASONS as readonly string[]).includes(fallbackReason)) {
-    metadata.fallbackReason = fallbackReason as FallbackReason;
-  }
-  const fallbackError = headers.get("x-sie-fallback-error");
-  if (fallbackError !== null && FALLBACK_ERROR_PATTERN.test(fallbackError)) {
-    metadata.fallbackError = fallbackError;
-  }
-
-  const usageHeaders = {
-    inputTokens: "x-sie-units-input-tokens",
-    pairs: "x-sie-units-pairs",
-    contentInputTokens: "x-sie-units-content-input-tokens",
-    images: "x-sie-units-images",
-    pages: "x-sie-units-pages",
-    outputTokens: "x-sie-units-output-tokens",
-    audioMs: "x-sie-units-audio-ms",
-  } as const;
-  const usage: NonNullable<RequestMetadata["usage"]> = {};
-  for (const [field, header] of Object.entries(usageHeaders) as [
-    keyof typeof usageHeaders,
-    string,
-  ][]) {
-    const value = parseNonnegativeMeterHeader(headers, header);
-    if (value !== undefined) usage[field] = value;
-  }
-
-  const settled = settledChargeFromBody(body);
-  if (settled !== undefined) {
-    usage.creditsCharged = settled.creditsCharged;
-    usage.rateBookVersion = settled.rateBookVersion;
-    metadata.creditsDebited = settled.creditsCharged;
-    metadata.rateBookVersion = settled.rateBookVersion;
-  } else {
-    const creditsDebited = parseNonnegativeMeterHeader(headers, "x-sie-credits-debited");
-    if (creditsDebited !== undefined) metadata.creditsDebited = creditsDebited;
-  }
-  if (Object.keys(usage).length > 0) metadata.usage = usage;
-  return Object.keys(metadata).length > 0 ? metadata : undefined;
-}
-
-/**
- * The settled charge from a response envelope's `usage` block (#2434).
- *
- * Shares `settledChargeFields`' validation so the metadata path and the result
- * parsers can never disagree about what counts as a publishable charge.
- * Anything malformed is treated as absent, so the header fallback still
- * applies.
- */
-function settledChargeFromBody(
-  body: unknown,
-): { creditsCharged: number; rateBookVersion: string } | undefined {
-  if (typeof body !== "object" || body === null || Array.isArray(body)) return undefined;
-  const { creditsCharged, rateBookVersion } = settledChargeFields(
-    (body as Record<string, unknown>).usage,
-  );
-  if (creditsCharged === undefined || rateBookVersion === undefined) return undefined;
-  return { creditsCharged, rateBookVersion };
-}
 
 function attachRequestMetadata<T extends { request?: RequestMetadata }>(
   results: T[],
@@ -1977,6 +1871,7 @@ export class SIEClient {
                   model,
                   retries: oomRetries,
                   param: await getErrorParam(attemptResponse.clone()),
+                  request: parseRequestMetadata(attemptResponse.headers),
                 },
               );
             }
@@ -1988,6 +1883,7 @@ export class SIEClient {
               provisionTimeoutMs: this.provisionTimeout,
               model,
               param: await getErrorParam(attemptResponse.clone()),
+              request: parseRequestMetadata(attemptResponse.headers),
             });
             oomRetries += 1;
             if (await abortableSleep(delay, controller.signal)) {
@@ -2020,6 +1916,7 @@ export class SIEClient {
             HTTP_GATEWAY_TIMEOUT,
             readRequestId(attemptResponse),
             await getErrorParam(attemptResponse.clone()),
+            parseRequestMetadata(attemptResponse.headers),
           );
         }
 

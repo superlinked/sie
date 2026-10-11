@@ -389,6 +389,44 @@ class AccountInactiveError(RequestError):
         super().__init__(message, code=code, status_code=403, param=param, request=request)
 
 
+class RelayUnavailableError(RequestError):
+    """Error when SIE Cloud will not serve the request through SIE Relay.
+
+    Raised when SIE Cloud returns HTTP ``403 FORBIDDEN`` with code
+    ``THIRD_PARTY_SERVING_DISABLED``, ``THIRD_PARTY_RUNTIME_UNLISTED`` or
+    ``THIRD_PARTY_REGION_UNAVAILABLE``. These codes concern serving through
+    SIE Relay, the service's partner capacity. This is a TERMINAL failure —
+    the SDK never retries it, because retrying the same request gets the
+    same answer.
+
+    Subclass of :class:`RequestError` so existing 4xx handlers keep working;
+    new code can catch :class:`RelayUnavailableError` and branch on
+    :attr:`code`. The message is the server's.
+
+    Attributes:
+        key_region: The API key's region, which a
+            ``THIRD_PARTY_REGION_UNAVAILABLE`` refusal names when the key has
+            one. ``None`` otherwise.
+        deployment_region: The deployment's region, which a
+            ``THIRD_PARTY_REGION_UNAVAILABLE`` refusal names. ``None`` when
+            the response does not name it.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        key_region: str | None = None,
+        deployment_region: str | None = None,
+        param: str | None = None,
+        request: RequestMetadata | None = None,
+    ) -> None:
+        super().__init__(message, code=code, status_code=403, param=param, request=request)
+        self.key_region = key_region
+        self.deployment_region = deployment_region
+
+
 class AccountStateUnavailableError(ServerError):
     """Error when the gateway cannot resolve the account's admission state.
 

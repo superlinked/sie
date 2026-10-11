@@ -203,6 +203,7 @@ export {
   InsufficientCreditsError,
   SpendLimitError,
   AccountInactiveError,
+  RelayUnavailableError,
   AccountStateUnavailableError,
 } from "./errors.js";
 

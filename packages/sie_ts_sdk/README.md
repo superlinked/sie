@@ -118,7 +118,11 @@ for await (const chunk of client.streamGenerate(
 All errors extend `SIEError` and are exported from the package root.
 Server-reported errors carry `.code` and `.statusCode`, plus
 `.requestId` (the gateway `x-sie-request-id`) when the gateway included
-one in the response — check it before using it.
+one in the response — check it before using it. `RequestError` and
+`ServerError` also carry `.request`, the request metadata of the error
+response when it carried any: for example `servedBy`, `fallbackReason`
+and `fallbackError` on a local refusal that answers a failed remote
+attempt.
 
 ```typescript
 import {
@@ -163,6 +167,18 @@ gateway's queue backpressure, a `503 QUEUE_UNAVAILABLE` that carries
 [`packages/wire-fixtures/retry_classification.json`](../wire-fixtures/retry_classification.json)
 lists how each response is classified; the TypeScript and Python SDKs
 both test against it.
+
+SIE Cloud answers `403` when it will not serve a request through SIE
+Relay, its partner capacity. The SDK throws `RelayUnavailableError`, a
+`RequestError` subclass that carries the server's message, and never
+retries it. Branch on `.code`:
+
+- `THIRD_PARTY_SERVING_DISABLED` — serving through SIE Relay is disabled.
+- `THIRD_PARTY_RUNTIME_UNLISTED` — the SIE Relay runtime that would serve
+  the model is not listed.
+- `THIRD_PARTY_REGION_UNAVAILABLE` — SIE Relay cannot serve the model in
+  the API key's region. `.keyRegion` and `.deploymentRegion` name the
+  regions when the response includes them.
 
 Each attempt waits up to `timeoutMs` (default 150000 ms, longer than the
 gateway's default 120 s request deadline) for a response. A timed-out

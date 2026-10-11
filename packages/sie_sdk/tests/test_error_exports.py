@@ -80,6 +80,7 @@ _NON_CLIENT_ERRORS = frozenset({"GatedModelError", "MalformedChunkError"})
         "PoolError",
         "ProvisioningError",
         "RateLimitError",
+        "RelayUnavailableError",
         "RequestError",
         "ResourceExhaustedError",
         "SIEConnectionError",
