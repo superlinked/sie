@@ -51,10 +51,10 @@ def test_hires_profiles_match_h100_96k_except_the_image_budget_and_compact_json(
         base = config.resolve_profile(base_name)
         assert hires.loadtime["extra_launch_args"] == [*base.loadtime["extra_launch_args"], *_HIRES_ARGS]
         assert "json_number_max_digits" not in base.loadtime
-        assert hires.loadtime | {"extra_launch_args": None, "json_number_max_digits": None} == base.loadtime | {
-            "extra_launch_args": None,
-            "json_number_max_digits": None,
-        }
+        assert hires.loadtime["mem_fraction_static"] == 0.85
+        assert base.loadtime["mem_fraction_static"] == 0.90
+        unchanged = {"extra_launch_args": None, "json_number_max_digits": None, "mem_fraction_static": None}
+        assert hires.loadtime | unchanged == base.loadtime | unchanged
         assert hires.runtime == base.runtime
         assert hires.adapter_path == base.adapter_path
         assert hires.compute_precision == base.compute_precision
@@ -147,3 +147,14 @@ def test_hires_profiles_compile_compact_bounded_json_grammars() -> None:
         assert loadtime["grammar_backend"] == "xgrammar", name
         assert loadtime["json_number_max_digits"] == 19, name
         assert loadtime["extra_launch_args"].count("--constrained-json-disable-any-whitespace") == 1, name
+
+
+def test_answer_only_hires_profiles_leave_headroom_for_page_image_resizes() -> None:
+    # SGLang's fast image processor resizes each page on the serving GPU from
+    # the tokenizer process, outside the static pool. Concurrent full-page
+    # documents on an 80 GB H100 hit CUDA OOM there at 0.90 and 0.88.
+    config = load_model_config(MODEL_FILE)
+    for name in _HIRES_PROFILES:
+        assert config.resolve_profile(name).loadtime["mem_fraction_static"] == 0.85, name
+    assert config.resolve_profile("h100-96k-hires-thinking-no-spec").loadtime["mem_fraction_static"] == 0.88
+    assert config.resolve_profile("h100-96k").loadtime["mem_fraction_static"] == 0.90

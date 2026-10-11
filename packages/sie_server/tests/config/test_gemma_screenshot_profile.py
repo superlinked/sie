@@ -18,10 +18,10 @@ def test_hires_thinking_profile_preserves_the_non_speculative_document_launch() 
 
     thinking_launch = dict(thinking.loadtime)
     answer_only_launch = dict(answer_only.loadtime)
-    # Only the static memory fraction differs: the thinking profile leaves more
-    # activation headroom for bursts of concurrent screenshot prefills.
+    # Only the static memory fraction differs: each was measured against its
+    # own burst of concurrent image prefills (screenshots, full-page documents).
     assert thinking_launch.pop("mem_fraction_static") == 0.88
-    assert answer_only_launch.pop("mem_fraction_static") == 0.90
+    assert answer_only_launch.pop("mem_fraction_static") == 0.85
     assert thinking_launch == answer_only_launch
     assert thinking.runtime == answer_only.runtime
     assert thinking.adapter_path == answer_only.adapter_path
