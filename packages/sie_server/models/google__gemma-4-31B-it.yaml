@@ -565,9 +565,9 @@ profiles:
   # tokens: the adapter closes the thought channel there and the json_schema
   # grammar then constrains the answer. The launch is otherwise identical, so
   # grammar requests keep this profile. On the 24 Screenshot DEV24 screens
-  # (two passes each, default sampling) a 512-token cap matched uncapped
-  # thinking, 32/48 complete records against 32/48 and 96.9% of fields against
-  # 96.9%, with about 45% fewer output tokens per screen.
+  # (two passes per run, default sampling) two 512-token runs scored 32/48
+  # complete records at 96.9% of fields and 30/48 at 96.1%, against 32/48 at
+  # 96.9% uncapped, with about 45% fewer output tokens per screen.
   h100-96k-hires-thinking-budget512-no-spec:
     extends: h100-96k-hires
     max_output_tokens: 32768
