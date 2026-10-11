@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -659,6 +660,29 @@ def test_the_queue_path_answers_a_refused_item_at_once_with_the_wait(refusal: st
 
     assert (outcome.disposition, outcome.nak_delay_ms) == ("publish_error_and_ack", None)
     assert (outcome.error_code, outcome.retry_after_s) == ("QUEUE_FULL", 40)
+
+
+def test_an_upstream_missing_from_the_configuration_is_named_only_in_the_log(
+    adapter_over: Callable[..., remote_sie.SieUpstreamAdapter], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING)
+    recorder = Recorder(dense_answer)
+    adapter = adapter_over(recorder)
+    install_upstreams({})
+    item = EncodeBatchItem(
+        work_item_id="w.0", request_id="w", item_index=0, total_items=1, timestamp=0.0, item={"text": "a"}
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        adapter.encode([Item(text="a")], ["dense"])
+    outcome = _inference_exception_outcome(item, raised.value)
+
+    assert recorder.requests == []
+    assert (outcome.error_code, outcome.error) == (
+        "inference_error",
+        "this remote profile's upstream is not defined in the startup configuration",
+    )
+    assert f"upstream {UPSTREAM!r} is not defined in the startup configuration" in caplog.text
 
 
 @pytest.mark.parametrize("reason", ["rate_cap", "concurrency_cap", "breaker_open", "half_open", "probe_active"])
