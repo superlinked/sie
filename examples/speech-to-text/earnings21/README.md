@@ -105,6 +105,13 @@ Successful text survives in a partly failed call, with separate error and
 completeness metadata. Exit 0 means all pieces succeeded, 1 means retained
 incomplete/failed results, and 2 means a caller/setup failure.
 
+When provided by the server, response evidence also retains `X-Queue-Time`,
+`X-Tokenization-Time`, `X-Inference-Time`, `X-Postprocessing-Time` and
+`X-Total-Time`, in milliseconds. These help separate queueing, preparation and
+handler inference within a request. Handler inference can include processor,
+model generation and decoding work; interpreting hardware performance requires
+the serving implementation and profile. Missing timing headers remain absent.
+
 The frozen primary comparator is P2, `gpt-transcribe` on the same piece bytes;
 whole-call P1 is secondary. If a separately obtained P2 call JSONL is available,
 run the unchanged scorer explicitly:

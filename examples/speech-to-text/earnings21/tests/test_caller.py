@@ -341,6 +341,30 @@ class Controls(unittest.TestCase):
         self.assertFalse(halt.is_set())
         self.assertEqual(json.loads((folder / "sdk-result.json").read_bytes())["data"]["text"], "fixture text")
 
+    def test_server_stage_timings_survive_saved_response_evidence(self):
+        timings = {
+            "X-Queue-Time": "12.25",
+            "X-Tokenization-Time": "3.50",
+            "X-Inference-Time": "8.00",
+            "X-Postprocessing-Time": "0.75",
+            "X-Total-Time": "25.00",
+        }
+        response = terminal_response()
+        response.headers.update(timings)
+        response.headers.update(
+            {"Set-Cookie": "private-cookie", "Authorization": "private-token", "X-Internal-Debug": "private-detail"}
+        )
+        row, folder, halt = self.worker(lambda _: response)
+        self.assertEqual(row["status"], "ok")
+        self.assertEqual(row["physical_posts"], 1)
+        self.assertFalse(halt.is_set())
+        for name in ("wire-000-headers.json", "wire-000.json"):
+            headers = json.loads((folder / name).read_bytes())["headers"]
+            for key, value in timings.items():
+                self.assertEqual(headers[key.lower()], value)
+            for key in ("set-cookie", "authorization", "x-internal-debug"):
+                self.assertNotIn(key, headers)
+
     def test_absent_api_key_does_not_read_ambient_sdk_key(self):
         self.settings["api_key"] = ""
         with patch.dict(os.environ, {"SIE_API_KEY": "unintended-ambient-key"}):

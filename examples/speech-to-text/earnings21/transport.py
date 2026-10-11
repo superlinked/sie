@@ -29,6 +29,11 @@ SAFE_HEADERS = {
     "x-sie-units-input-tokens",
     "x-sie-units-output-tokens",
     "x-sie-units-audio-ms",
+    "x-queue-time",
+    "x-tokenization-time",
+    "x-inference-time",
+    "x-postprocessing-time",
+    "x-total-time",
 }
 
 
