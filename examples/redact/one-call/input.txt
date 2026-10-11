@@ -1,0 +1,33 @@
+------------------------------------------------------------------------------------------------------------------
+
+Trade Confirmation
+
+Trade Date: 05/12/2023
+Portfolio: Vintage Cars
+Confirmation: 123456789
+
+Securities: 1 x 1963 Chevrolet Corvette Stingray (Restored)
+Quantity: 1
+Price: $50,000.00
+Settlement Date: 10/08/2024
+
+Swift BIC Code: FRZIUSNZ985
+SSN: 324-78-5893
+Name: Alejandra Santamaría-Castilla
+Street Address: 6074 Chaney Dam, Apt. 293
+
+Delivery Instructions:
+- Securities will be delivered to the above mentioned address
+- Funds will be remitted to the bank specified in the Swift BIC Code
+
+------------------------------------------------------------------------------------------------------------------
+
+Please contact us if you have any questions or concerns regarding this trade confirmation.
+
+Sincerely,
+
+[Trading Firm Name]
+[Trading Firm Address]
+[Trading Firm City, State, Zip Code]
+[Trading Firm Phone Number]
+[Trading Firm Email Address]
