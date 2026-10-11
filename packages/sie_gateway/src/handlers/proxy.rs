@@ -379,10 +379,15 @@ impl RetryAfter {
 pub(crate) const PROVISIONING_RETRY_AFTER: &str = RetryAfter::DEFAULT.provisioning;
 /// Bounds, in whole seconds, on a transport's `Retry-After` estimate for a
 /// provisioning answer ([`WorkDispatcher::provisioning_retry_after`]). The
-/// floor is the gateway's short transient-retry hint. The ceiling is the
-/// 15-minute default provisioning budget of the Python and TypeScript SDKs.
+/// floor is the gateway's short transient-retry hint. The ceiling depends on
+/// the [`RouteKind`]: on a native route it is the 15-minute default
+/// provisioning budget of the Python and TypeScript SDKs, and on a
+/// compatibility route it is the 60 seconds up to which the OpenAI clients
+/// honor `Retry-After`. Above that they ignore it and retry on their own
+/// short backoff.
 const PROVISIONING_RETRY_AFTER_MIN_S: u64 = 5;
-const PROVISIONING_RETRY_AFTER_MAX_S: u64 = 900;
+const NATIVE_PROVISIONING_RETRY_AFTER_MAX_S: u64 = 900;
+const COMPATIBILITY_PROVISIONING_RETRY_AFTER_MAX_S: u64 = 60;
 const BACKPRESSURE_RETRY_AFTER: &str = RetryAfter::DEFAULT.backpressure;
 const GATEWAY_TIMEOUT_RETRY_AFTER: &str = RetryAfter::DEFAULT.gateway_timeout;
 const MODEL_LOADING_RETRY_AFTER: &str = RetryAfter::DEFAULT.model_loading;
@@ -547,6 +552,32 @@ enum PoolResolution {
 pub(crate) enum ProvisioningSurface {
     Native,
     OpenAiCompat,
+}
+
+/// The kind of route a request arrived on, which sets the ceiling on a
+/// transport's provisioning `Retry-After` estimate. Distinct from
+/// [`ProvisioningSurface`], the error envelope: native `/v1/generate`
+/// answers in the OpenAI envelope but is a native route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RouteKind {
+    /// `/v1/encode`, `/v1/score`, `/v1/extract` and `/v1/generate`.
+    Native,
+    /// The OpenAI-compatible routes and the other compatibility routes
+    /// (`/v1/rerank`, `/v2/rerank`), including those that wrap a native route.
+    Compatibility,
+}
+
+/// Marks the inner native request of a compatibility route. The gateway
+/// creates it; a caller cannot supply it.
+#[derive(Clone, Copy)]
+pub(crate) struct CompatibilityRoute;
+
+fn route_kind(extensions: &Extensions) -> RouteKind {
+    if extensions.get::<CompatibilityRoute>().is_some() {
+        RouteKind::Compatibility
+    } else {
+        RouteKind::Native
+    }
 }
 
 /// Result of `resolve_effective_pool` — bundles the routing decision
@@ -844,25 +875,27 @@ fn provisioning_message(model: &str) -> String {
 }
 
 /// A transport's provisioning estimate in whole seconds, rounded up and
-/// clamped to the provisioning `Retry-After` bounds.
-fn bounded_provisioning_retry_after_s(estimate: Duration) -> u64 {
+/// clamped to the provisioning `Retry-After` bounds of `route`.
+fn bounded_provisioning_retry_after_s(estimate: Duration, route: RouteKind) -> u64 {
+    let ceiling = match route {
+        RouteKind::Native => NATIVE_PROVISIONING_RETRY_AFTER_MAX_S,
+        RouteKind::Compatibility => COMPATIBILITY_PROVISIONING_RETRY_AFTER_MAX_S,
+    };
     estimate
         .as_secs()
         .saturating_add(u64::from(estimate.subsec_nanos() > 0))
-        .clamp(
-            PROVISIONING_RETRY_AFTER_MIN_S,
-            PROVISIONING_RETRY_AFTER_MAX_S,
-        )
+        .clamp(PROVISIONING_RETRY_AFTER_MIN_S, ceiling)
 }
 
-/// The `Retry-After` of a `503 PROVISIONING` answer about the lanes `targets`
-/// name, each a lane's pool target as [`lane_wake_target`] builds it. It is
-/// the soonest estimate the transport gives for any of them, bounded by
-/// [`bounded_provisioning_retry_after_s`], or the 60-second default when it
-/// gives none.
+/// The `Retry-After` of a `503 PROVISIONING` answer on a `route` about the
+/// lanes `targets` name, each a lane's pool target as [`lane_wake_target`]
+/// builds it. It is the soonest estimate the transport gives for any of them,
+/// bounded by [`bounded_provisioning_retry_after_s`], or the 60-second default
+/// when it gives none.
 pub(crate) fn provisioning_retry_after(
     state: &AppState,
     targets: &[publisher::PublishTarget],
+    route: RouteKind,
 ) -> HeaderValue {
     state
         .work_publisher
@@ -871,7 +904,7 @@ pub(crate) fn provisioning_retry_after(
             targets
                 .iter()
                 .filter_map(|target| dispatcher.provisioning_retry_after(target))
-                .map(bounded_provisioning_retry_after_s)
+                .map(|estimate| bounded_provisioning_retry_after_s(estimate, route))
                 .min()
         })
         .map_or_else(
@@ -1167,6 +1200,7 @@ async fn capped_lane_admission_response(
     model: &str,
     dispatch_model: &str,
     provisioning_surface: ProvisioningSurface,
+    route: RouteKind,
 ) -> Option<Response> {
     let admission = state
         .pool_manager
@@ -1234,6 +1268,7 @@ async fn capped_lane_admission_response(
                 bundle,
                 dispatch_model,
             )],
+            route,
         );
         return Some(build_provisioning_response_for_surface(
             model,
@@ -3442,6 +3477,7 @@ async fn proxy_request_inner(
                     &bundle,
                     &dispatch_model,
                 ),
+                route_kind(req.extensions()),
             );
             let refusal = build_provisioning_response_for_surface(
                 &model_name,
@@ -3508,6 +3544,7 @@ async fn proxy_request_inner(
         &model_name,
         &dispatch_model,
         provisioning_surface,
+        route_kind(req.extensions()),
     )
     .await
     {
@@ -3542,7 +3579,11 @@ async fn proxy_request_inner(
         );
         let refusal = build_provisioning_response_for_surface(
             &model_name,
-            provisioning_retry_after(&state, std::slice::from_ref(&target)),
+            provisioning_retry_after(
+                &state,
+                std::slice::from_ref(&target),
+                route_kind(req.extensions()),
+            ),
             provisioning_surface,
         );
         if !warm_local_model(
@@ -3809,6 +3850,7 @@ async fn proxy_request_inner(
                         &bundle,
                         &dispatch_model,
                     )],
+                    route_kind(req.extensions()),
                 );
                 return build_provisioning_response_for_surface(
                     &model_name,
@@ -4531,8 +4573,11 @@ async fn queue_mode_proxy(
                     physical_lane,
                     "no_consumers",
                 );
-                let retry_after =
-                    provisioning_retry_after(state, &[lane_wake_target(pool, gpu, bundle, model)]);
+                let retry_after = provisioning_retry_after(
+                    state,
+                    &[lane_wake_target(pool, gpu, bundle, model)],
+                    route_kind(request_extensions),
+                );
                 return build_provisioning_response_for_surface(
                     display_model,
                     retry_after,
@@ -5419,6 +5464,7 @@ pub(crate) async fn run_streaming_generate(
     admission_pool: &str,
     bundle_config_hash: &str,
     params: &publisher::WorkParams,
+    route: RouteKind,
 ) -> Result<StreamingDriverOk, StreamingDriverErr> {
     let publish_start = Instant::now();
     // Resolve the routing key, build the pressure-aware routing snapshot,
@@ -5552,6 +5598,7 @@ pub(crate) async fn run_streaming_generate(
                     retry_after: provisioning_retry_after(
                         state,
                         &[lane_wake_target(pool, gpu, bundle, dispatch_model)],
+                        route,
                     ),
                 });
             }
@@ -6213,6 +6260,7 @@ async fn queue_mode_streaming_generate(
         admission_pool,
         bundle_config_hash,
         params,
+        RouteKind::Native,
     )
     .await;
 
@@ -8758,6 +8806,7 @@ async fn resolve_generation_route(
                     &bundle,
                     dispatch_model,
                 ),
+                RouteKind::Compatibility,
             );
             let refusal = build_provisioning_response_for_surface(
                 customer_model,
@@ -8843,6 +8892,7 @@ async fn resolve_generation_route(
         customer_model,
         dispatch_model,
         ProvisioningSurface::OpenAiCompat,
+        RouteKind::Compatibility,
     )
     .await
     {
@@ -8874,7 +8924,11 @@ async fn resolve_generation_route(
             );
             let refusal = build_provisioning_response_for_surface(
                 customer_model,
-                provisioning_retry_after(state, std::slice::from_ref(&target)),
+                provisioning_retry_after(
+                    state,
+                    std::slice::from_ref(&target),
+                    RouteKind::Compatibility,
+                ),
                 ProvisioningSurface::OpenAiCompat,
             );
             if !warm_local_model(
@@ -9605,6 +9659,7 @@ async fn proxy_chat_inner(
         &admission_pool,
         &bundle_config_hash,
         &work_params,
+        RouteKind::Compatibility,
     )
     .await;
 
@@ -10278,6 +10333,7 @@ async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response
         &admission_pool,
         &bundle_config_hash,
         &work_params,
+        RouteKind::Compatibility,
     )
     .await;
 
@@ -10911,6 +10967,7 @@ async fn proxy_responses_inner(state: Arc<AppState>, req: Request) -> Response {
         &admission_pool,
         &bundle_config_hash,
         &work_params,
+        RouteKind::Compatibility,
     )
     .await;
     let StreamingDriverOk {
@@ -15336,6 +15393,7 @@ pub async fn proxy_openai_embeddings(State(state): State<Arc<AppState>>, req: Re
         }
     };
     *inner_req.extensions_mut() = extensions;
+    inner_req.extensions_mut().insert(CompatibilityRoute);
     let resp = proxy_request(State(state.clone()), inner_req, "encode").await;
     let inner_status = resp.status();
     if inner_status != StatusCode::OK {
@@ -15916,6 +15974,7 @@ async fn proxy_rerank_inner(
         }
     };
     *inner.extensions_mut() = parts.extensions;
+    inner.extensions_mut().insert(CompatibilityRoute);
     let response = proxy_request(State(state), inner, "score").await;
     if response.status() != StatusCode::OK {
         return translate_inner_rerank_error(response).await;
@@ -19464,6 +19523,7 @@ mod tests {
             "BAAI/bge-m3",
             "BAAI/bge-m3",
             ProvisioningSurface::Native,
+            RouteKind::Native,
         )
         .await
         .expect("zero-cap lane should fail fast");
@@ -19494,6 +19554,7 @@ mod tests {
             "BAAI/bge-m3",
             "BAAI/bge-m3",
             ProvisioningSurface::OpenAiCompat,
+            RouteKind::Compatibility,
         )
         .await
         .expect("zero-cap lane should fail fast");
@@ -19533,6 +19594,7 @@ mod tests {
             "BAAI/bge-m3",
             "BAAI/bge-m3",
             ProvisioningSurface::Native,
+            RouteKind::Native,
         )
         .await
         .expect("capped lane with no admitted workers should provision");
@@ -19586,6 +19648,7 @@ mod tests {
             "BAAI/bge-m3",
             "BAAI/bge-m3",
             ProvisioningSurface::OpenAiCompat,
+            RouteKind::Compatibility,
         )
         .await
         .expect("OpenAI-compatible capped lane should provision");
@@ -19900,22 +19963,28 @@ mod tests {
     }
 
     #[test]
-    fn test_provisioning_retry_after_estimate_rounds_up_and_is_clamped() {
-        for (estimate, expected) in [
-            (Duration::ZERO, 5),
-            (Duration::from_millis(1), 5),
-            (Duration::from_secs(5), 5),
-            (Duration::from_millis(5_001), 6),
-            (Duration::from_secs(61), 61),
-            (Duration::from_secs(660), 660),
-            (Duration::from_millis(899_001), 900),
-            (Duration::from_secs(900), 900),
-            (Duration::from_secs(901), 900),
-            (Duration::MAX, 900),
+    fn test_provisioning_retry_after_estimate_rounds_up_and_is_clamped_per_route() {
+        for (estimate, native, compatibility) in [
+            (Duration::ZERO, 5, 5),
+            (Duration::from_millis(1), 5, 5),
+            (Duration::from_secs(5), 5, 5),
+            (Duration::from_millis(5_001), 6, 6),
+            (Duration::from_millis(59_001), 60, 60),
+            (Duration::from_secs(61), 61, 60),
+            (Duration::from_secs(660), 660, 60),
+            (Duration::from_millis(899_001), 900, 60),
+            (Duration::from_secs(900), 900, 60),
+            (Duration::from_secs(901), 900, 60),
+            (Duration::MAX, 900, 60),
         ] {
             assert_eq!(
-                bounded_provisioning_retry_after_s(estimate),
-                expected,
+                bounded_provisioning_retry_after_s(estimate, RouteKind::Native),
+                native,
+                "{estimate:?}"
+            );
+            assert_eq!(
+                bounded_provisioning_retry_after_s(estimate, RouteKind::Compatibility),
+                compatibility,
                 "{estimate:?}"
             );
         }
@@ -19929,28 +19998,71 @@ mod tests {
         let mut state = admission_test_state(pm);
         let lane = |profile: &str| lane_wake_target("default", profile, "default", "acme/m");
         let default = HeaderValue::from_static(PROVISIONING_RETRY_AFTER);
+        let routes = [RouteKind::Native, RouteKind::Compatibility];
 
-        assert_eq!(provisioning_retry_after(&state, &[lane("l4")]), default);
+        for route in routes {
+            assert_eq!(
+                provisioning_retry_after(&state, &[lane("l4")], route),
+                default
+            );
+        }
 
         let dispatcher = Arc::new(RecordingDispatcher::default());
         state.work_publisher = Some(dispatcher.clone());
-        assert_eq!(provisioning_retry_after(&state, &[lane("l4")]), default);
-        assert_eq!(provisioning_retry_after(&state, &[]), default);
+        for route in routes {
+            assert_eq!(
+                provisioning_retry_after(&state, &[lane("l4")], route),
+                default
+            );
+            assert_eq!(provisioning_retry_after(&state, &[], route), default);
+        }
 
         dispatcher.estimate_provisioning(("default", "l4", "default"), Duration::from_secs(680));
         dispatcher.estimate_provisioning(
             ("default", "h100", "default"),
             Duration::from_millis(240_500),
         );
-        assert_eq!(provisioning_retry_after(&state, &[lane("l4")]), "680");
+        let lanes = [lane("l4"), lane("h100"), lane("a10g")];
         assert_eq!(
-            provisioning_retry_after(&state, &[lane("l4"), lane("h100"), lane("a10g")]),
+            provisioning_retry_after(&state, &[lane("l4")], RouteKind::Native),
+            "680"
+        );
+        assert_eq!(
+            provisioning_retry_after(&state, &lanes, RouteKind::Native),
             "241"
         );
-        assert_eq!(provisioning_retry_after(&state, &[lane("a10g")]), default);
+        assert_eq!(
+            provisioning_retry_after(&state, &[lane("l4")], RouteKind::Compatibility),
+            "60"
+        );
+        assert_eq!(
+            provisioning_retry_after(&state, &lanes, RouteKind::Compatibility),
+            "60"
+        );
+        for route in routes {
+            assert_eq!(
+                provisioning_retry_after(&state, &[lane("a10g")], route),
+                default
+            );
+        }
+
+        dispatcher.estimate_provisioning(
+            ("default", "a10g", "default"),
+            Duration::from_millis(30_200),
+        );
+        for route in routes {
+            assert_eq!(provisioning_retry_after(&state, &lanes, route), "31");
+        }
 
         dispatcher.estimate_provisioning(("default", "l4", "default"), Duration::from_secs(7_200));
-        assert_eq!(provisioning_retry_after(&state, &[lane("l4")]), "900");
+        assert_eq!(
+            provisioning_retry_after(&state, &[lane("l4")], RouteKind::Native),
+            "900"
+        );
+        assert_eq!(
+            provisioning_retry_after(&state, &[lane("l4")], RouteKind::Compatibility),
+            "60"
+        );
     }
 
     #[tokio::test]

@@ -24,7 +24,7 @@ use super::serving_disclosure::{DeferredFallbackFinish, FallbackAttempt};
 use super::proxy::{
     invalid_remote_header_response, is_openai_compat_forwarded_header,
     is_openai_compat_inner_request_header, is_valid_compat_model_id, proxy_request,
-    translate_inner_compat_error,
+    translate_inner_compat_error, CompatibilityRoute,
 };
 
 const MAX_AUDIO_FILE_BYTES: usize = 24 * 1024 * 1024;
@@ -675,6 +675,7 @@ pub async fn proxy_openai_transcription(
     inner_request
         .extensions_mut()
         .insert(DeferredFallbackFinish);
+    inner_request.extensions_mut().insert(CompatibilityRoute);
     let native_response = proxy_request(State(state), inner_request, "extract").await;
     let native_headers = native_response.headers().clone();
     let mut response = async {
@@ -988,6 +989,36 @@ mod tests {
         }
         let error = FormError::payload_too_large(Some("file"), "too large");
         assert_eq!(error.code, oai_code::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn audio_transcriptions_cap_the_provisioning_estimate() {
+        for (local, retry_after) in [
+            (std::time::Duration::from_secs(680), "60"),
+            (std::time::Duration::from_secs(45), "45"),
+        ] {
+            let gateway = TestGateway::new(&[HYBRID_EXTRACT_MODEL]).await;
+            gateway.dispatcher.estimate_provisioning(LOCAL_LANE, local);
+            let (content_type, body) =
+                multipart_body(&[("model", "acme/extract")], "clip.wav", b"RIFFtest");
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/audio/transcriptions")
+                .header(header::CONTENT_TYPE, content_type)
+                .body(Body::from(body))
+                .unwrap();
+
+            let response =
+                proxy_openai_transcription(State(Arc::clone(&gateway.state)), request).await;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{local:?}"
+            );
+            assert_eq!(response.headers()["retry-after"], retry_after, "{local:?}");
+            assert_eq!(response.headers()["x-sie-error-code"], "PROVISIONING");
+        }
     }
 
     #[tokio::test]

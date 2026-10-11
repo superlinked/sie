@@ -1574,7 +1574,8 @@ mod tests {
     }
 
     use crate::handlers::proxy::{
-        proxy_chat, proxy_completions, proxy_openai_embeddings, proxy_request, proxy_responses,
+        proxy_chat, proxy_completions, proxy_openai_embeddings, proxy_request, proxy_rerank,
+        proxy_rerank_v2, proxy_responses,
     };
     use crate::handlers::test_support::{
         Dispatched, TestGateway, HYBRID_ENCODE_MODEL, HYBRID_EXTRACT_MODEL, HYBRID_GENERATE_MODEL,
@@ -4746,53 +4747,64 @@ mod tests {
         serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"]["message"].clone()
     }
 
+    /// Each case runs with an estimate above the 60-second ceiling of the
+    /// compatibility routes, which caps it there, and with one below it, which
+    /// those routes then send unchanged.
     #[tokio::test]
     async fn a_cold_lane_answers_provisioning_with_its_transport_estimate() {
-        let gateway = transport_cold_gateway(None).await;
-        gateway.dispatcher.refuse_model_loads();
-        gateway
-            .dispatcher
-            .estimate_provisioning(LOCAL_LANE, Duration::from_millis(659_200));
+        for (estimate, native, compatibility) in [
+            (Duration::from_millis(659_200), "660", "60"),
+            (Duration::from_millis(44_200), "45", "45"),
+        ] {
+            let gateway = transport_cold_gateway(None).await;
+            gateway.dispatcher.refuse_model_loads();
+            gateway
+                .dispatcher
+                .estimate_provisioning(LOCAL_LANE, estimate);
 
-        let extraction = extract(&gateway, extraction_request(false, json!({}))).await;
-        let chat = buffered_surface(&gateway, "chat", json!({})).await;
-        for (model, response) in [("acme/extract", extraction), ("acme/chat", chat)] {
-            assert_eq!(
-                response.status(),
-                StatusCode::SERVICE_UNAVAILABLE,
-                "{model}"
-            );
-            assert_eq!(response.headers()["retry-after"], "660", "{model}");
-            assert_eq!(response.headers()["x-sie-error-code"], "PROVISIONING");
-            assert!(!response.headers().contains_key("x-sie-fallback-reason"));
-            assert_eq!(error_message(response).await, starting_message(model));
+            let extraction = extract(&gateway, extraction_request(false, json!({}))).await;
+            let chat = buffered_surface(&gateway, "chat", json!({})).await;
+            for (model, response, retry_after) in [
+                ("acme/extract", extraction, native),
+                ("acme/chat", chat, compatibility),
+            ] {
+                let case = format!("{model} {estimate:?}");
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{case}");
+                assert_eq!(response.headers()["retry-after"], retry_after, "{case}");
+                assert_eq!(response.headers()["x-sie-error-code"], "PROVISIONING");
+                assert!(!response.headers().contains_key("x-sie-fallback-reason"));
+                assert_eq!(error_message(response).await, starting_message(model));
+            }
         }
     }
 
     #[tokio::test]
     async fn a_remote_lane_still_starting_restores_the_local_lane_estimate() {
-        let gateway = transport_cold_gateway(None).await;
-        gateway.dispatcher.report_remote_lane_starting();
-        gateway
-            .dispatcher
-            .estimate_provisioning(LOCAL_LANE, Duration::from_secs(680));
-        gateway
-            .dispatcher
-            .estimate_provisioning(REMOTE_LANE, Duration::from_secs(30));
+        for (local, native, compatibility) in [
+            (Duration::from_secs(680), "680", "60"),
+            (Duration::from_secs(45), "45", "45"),
+        ] {
+            let gateway = transport_cold_gateway(None).await;
+            gateway.dispatcher.report_remote_lane_starting();
+            gateway.dispatcher.estimate_provisioning(LOCAL_LANE, local);
+            gateway
+                .dispatcher
+                .estimate_provisioning(REMOTE_LANE, Duration::from_secs(30));
 
-        let extraction = extract(&gateway, extraction_request(false, json!({}))).await;
-        let chat = buffered_surface(&gateway, "chat", json!({})).await;
-        for (model, response) in [("acme/extract", extraction), ("acme/chat", chat)] {
-            assert_eq!(
-                response.status(),
-                StatusCode::SERVICE_UNAVAILABLE,
-                "{model}"
-            );
-            assert_eq!(response.headers()["retry-after"], "680", "{model}");
-            assert_eq!(response.headers()["x-sie-error-code"], "PROVISIONING");
-            assert_eq!(response.headers()["x-sie-fallback-error"], "QUEUE_FULL");
-            assert_eq!(stamped(&response), (Some("local"), None), "{model}");
-            assert_eq!(error_message(response).await, starting_message(model));
+            let extraction = extract(&gateway, extraction_request(false, json!({}))).await;
+            let chat = buffered_surface(&gateway, "chat", json!({})).await;
+            for (model, response, retry_after) in [
+                ("acme/extract", extraction, native),
+                ("acme/chat", chat, compatibility),
+            ] {
+                let case = format!("{model} {local:?}");
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{case}");
+                assert_eq!(response.headers()["retry-after"], retry_after, "{case}");
+                assert_eq!(response.headers()["x-sie-error-code"], "PROVISIONING");
+                assert_eq!(response.headers()["x-sie-fallback-error"], "QUEUE_FULL");
+                assert_eq!(stamped(&response), (Some("local"), None), "{case}");
+                assert_eq!(error_message(response).await, starting_message(model));
+            }
         }
     }
 
@@ -4801,134 +4813,245 @@ mod tests {
         let generation = format!(
             "{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
         );
-        for (surface, stream) in [
-            ("native", false),
-            ("chat", false),
-            ("completions", false),
-            ("responses", false),
-            ("native", true),
-            ("chat", true),
-            ("completions", true),
+        for (local, native, compatibility) in [
+            (Duration::from_secs(680), "680", "60"),
+            (Duration::from_secs(45), "45", "45"),
         ] {
-            let case = format!("{surface} stream={stream}");
-            let gateway = TestGateway::new(&[&generation]).await;
-            gateway
-                .add_verified_worker("remote-1", REMOTE_LANE, &[])
-                .await;
-            gateway
-                .dispatcher
-                .refuse_remote_work("RESOURCE_EXHAUSTED", Some(7));
-            gateway
-                .dispatcher
-                .estimate_provisioning(LOCAL_LANE, Duration::from_secs(680));
-            gateway
-                .dispatcher
-                .estimate_provisioning(REMOTE_LANE, Duration::from_secs(30));
+            for (surface, stream) in [
+                ("native", false),
+                ("chat", false),
+                ("completions", false),
+                ("responses", false),
+                ("native", true),
+                ("chat", true),
+                ("completions", true),
+            ] {
+                let case = format!("{surface} stream={stream} {local:?}");
+                let gateway = TestGateway::new(&[&generation]).await;
+                gateway
+                    .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                    .await;
+                gateway
+                    .dispatcher
+                    .refuse_remote_work("RESOURCE_EXHAUSTED", Some(7));
+                gateway.dispatcher.estimate_provisioning(LOCAL_LANE, local);
+                gateway
+                    .dispatcher
+                    .estimate_provisioning(REMOTE_LANE, Duration::from_secs(30));
 
-            let response = if stream {
-                streaming_surface(&gateway, surface, json!({})).await
-            } else {
-                buffered_surface(&gateway, surface, json!({})).await
-            };
+                let response = if stream {
+                    streaming_surface(&gateway, surface, json!({})).await
+                } else {
+                    buffered_surface(&gateway, surface, json!({})).await
+                };
 
-            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{case}");
-            assert_eq!(response.headers()["retry-after"], "680", "{case}");
-            assert_eq!(stamped(&response), (Some("local"), None), "{case}");
-            assert_eq!(
-                response.headers()["x-sie-fallback-reason"],
-                "provisioning",
-                "{case}"
-            );
-            assert_eq!(
-                response.headers()["x-sie-fallback-error"],
-                "RESOURCE_EXHAUSTED",
-                "{case}"
-            );
-            assert_eq!(
-                error_message(response).await,
-                starting_message("acme/chat"),
-                "{case}"
-            );
+                let retry_after = if surface == "native" {
+                    native
+                } else {
+                    compatibility
+                };
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{case}");
+                assert_eq!(response.headers()["retry-after"], retry_after, "{case}");
+                assert_eq!(stamped(&response), (Some("local"), None), "{case}");
+                assert_eq!(
+                    response.headers()["x-sie-fallback-reason"],
+                    "provisioning",
+                    "{case}"
+                );
+                assert_eq!(
+                    response.headers()["x-sie-fallback-error"],
+                    "RESOURCE_EXHAUSTED",
+                    "{case}"
+                );
+                assert_eq!(
+                    error_message(response).await,
+                    starting_message("acme/chat"),
+                    "{case}"
+                );
+            }
         }
     }
 
     #[tokio::test]
     async fn a_publish_refused_while_its_lane_starts_answers_with_that_lane_estimate() {
-        let gateway = gateway().await;
-        gateway.dispatcher.report_remote_lane_starting();
-        gateway
-            .dispatcher
-            .estimate_provisioning(REMOTE_LANE, Duration::from_secs(95));
-        gateway
-            .dispatcher
-            .estimate_provisioning(LOCAL_LANE, Duration::from_secs(680));
-        let state = || State(Arc::clone(&gateway.state));
-        let messages = json!([{"role": "user", "content": "hello"}]);
+        for (remote, native, compatibility) in [
+            (Duration::from_secs(95), "95", "60"),
+            (Duration::from_secs(40), "40", "40"),
+        ] {
+            let gateway = gateway().await;
+            gateway.dispatcher.report_remote_lane_starting();
+            gateway
+                .dispatcher
+                .estimate_provisioning(REMOTE_LANE, remote);
+            gateway
+                .dispatcher
+                .estimate_provisioning(LOCAL_LANE, Duration::from_secs(680));
+            let state = || State(Arc::clone(&gateway.state));
+            let messages = json!([{"role": "user", "content": "hello"}]);
 
-        let responses = [
-            (
-                "encode",
-                "acme/remote",
-                proxy_request(
-                    state(),
-                    json_request(
-                        "/v1/encode/acme/remote",
-                        json!({"items": [{"text": "hello"}]}),
-                    ),
+            let responses = [
+                (
                     "encode",
-                )
-                .await,
-            ),
-            (
-                "embeddings",
-                "acme/remote",
-                proxy_openai_embeddings(
-                    state(),
-                    json_request(
-                        "/v1/embeddings",
-                        json!({"model": "acme/remote", "input": "hello"}),
-                    ),
-                )
-                .await,
-            ),
-            (
-                "chat",
-                "acme/chat:remote",
-                proxy_chat(
-                    state(),
-                    json_request(
-                        "/v1/chat/completions",
-                        json!({"model": "acme/chat:remote", "messages": messages}),
-                    ),
-                )
-                .await,
-            ),
-            (
-                "chat stream",
-                "acme/chat:remote",
-                proxy_chat(
-                    state(),
-                    json_request(
-                        "/v1/chat/completions",
-                        json!({"model": "acme/chat:remote", "messages": messages, "stream": true}),
-                    ),
-                )
-                .await,
-            ),
-        ];
-        for (case, model, response) in responses {
-            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{case}");
-            assert_eq!(response.headers()["retry-after"], "95", "{case}");
-            assert_eq!(
-                response.headers()["x-sie-error-code"],
-                "PROVISIONING",
-                "{case}"
-            );
-            assert_eq!(
-                error_message(response).await,
-                starting_message(model),
-                "{case}"
-            );
+                    "acme/remote",
+                    native,
+                    proxy_request(
+                        state(),
+                        json_request(
+                            "/v1/encode/acme/remote",
+                            json!({"items": [{"text": "hello"}]}),
+                        ),
+                        "encode",
+                    )
+                    .await,
+                ),
+                (
+                    "native generate",
+                    "acme/chat:remote",
+                    native,
+                    proxy_request(
+                        state(),
+                        json_request(
+                            "/v1/generate/acme__chat:remote",
+                            json!({"prompt": "hello", "max_new_tokens": 4}),
+                        ),
+                        "generate",
+                    )
+                    .await,
+                ),
+                (
+                    "native generate stream",
+                    "acme/chat:remote",
+                    native,
+                    proxy_request(
+                        state(),
+                        json_request(
+                            "/v1/generate/acme__chat:remote",
+                            json!({"prompt": "hello", "max_new_tokens": 4, "stream": true}),
+                        ),
+                        "generate",
+                    )
+                    .await,
+                ),
+                (
+                    "embeddings",
+                    "acme/remote",
+                    compatibility,
+                    proxy_openai_embeddings(
+                        state(),
+                        json_request(
+                            "/v1/embeddings",
+                            json!({"model": "acme/remote", "input": "hello"}),
+                        ),
+                    )
+                    .await,
+                ),
+                (
+                    "chat",
+                    "acme/chat:remote",
+                    compatibility,
+                    proxy_chat(
+                        state(),
+                        json_request(
+                            "/v1/chat/completions",
+                            json!({"model": "acme/chat:remote", "messages": messages}),
+                        ),
+                    )
+                    .await,
+                ),
+                (
+                    "chat stream",
+                    "acme/chat:remote",
+                    compatibility,
+                    proxy_chat(
+                        state(),
+                        json_request(
+                            "/v1/chat/completions",
+                            json!({"model": "acme/chat:remote", "messages": messages, "stream": true}),
+                        ),
+                    )
+                    .await,
+                ),
+            ];
+            for (case, model, retry_after, response) in responses {
+                let case = format!("{case} {remote:?}");
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{case}");
+                assert_eq!(response.headers()["retry-after"], retry_after, "{case}");
+                assert_eq!(
+                    response.headers()["x-sie-error-code"],
+                    "PROVISIONING",
+                    "{case}"
+                );
+                assert_eq!(
+                    error_message(response).await,
+                    starting_message(model),
+                    "{case}"
+                );
+            }
+        }
+    }
+
+    /// A score model with no local weights, served on the remote lane.
+    const REMOTE_SCORE_MODEL: &str = "\
+sie_id: acme/remote-score
+remote_backed: true
+tasks:
+  score: {}
+profiles:
+  default:
+    adapter_path: sie_server.adapters.remote.sie:SieUpstreamAdapter
+    max_batch_tokens: 8192
+    adapter_options:
+      loadtime:
+        upstream: team-sie
+        upstream_model: acme/remote-score
+";
+
+    #[tokio::test]
+    async fn the_rerank_routes_cap_the_estimate_that_native_score_keeps() {
+        for (remote, native, compatibility) in [
+            (Duration::from_secs(95), "95", "60"),
+            (Duration::from_secs(40), "40", "40"),
+        ] {
+            let gateway = TestGateway::new(&[REMOTE_SCORE_MODEL]).await;
+            gateway.add_worker("remote-1", REMOTE_LANE, &[]).await;
+            gateway.dispatcher.report_remote_lane_starting();
+            gateway
+                .dispatcher
+                .estimate_provisioning(REMOTE_LANE, remote);
+            let state = || State(Arc::clone(&gateway.state));
+            let rerank =
+                json!({"model": "acme/remote-score", "query": "hello", "documents": ["world"]});
+
+            let responses = [
+                (
+                    "score",
+                    native,
+                    proxy_request(
+                        state(),
+                        json_request(
+                            "/v1/score/acme/remote-score",
+                            json!({"query": {"text": "hello"}, "items": [{"text": "world"}]}),
+                        ),
+                        "score",
+                    )
+                    .await,
+                ),
+                (
+                    "rerank",
+                    compatibility,
+                    proxy_rerank(state(), json_request("/v1/rerank", rerank.clone())).await,
+                ),
+                (
+                    "rerank v2",
+                    compatibility,
+                    proxy_rerank_v2(state(), json_request("/v2/rerank", rerank.clone())).await,
+                ),
+            ];
+            for (case, retry_after, response) in responses {
+                let case = format!("{case} {remote:?}");
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{case}");
+                assert_eq!(response.headers()["retry-after"], retry_after, "{case}");
+            }
         }
     }
 

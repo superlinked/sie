@@ -1098,12 +1098,21 @@ lane. It is `false` by default and is a non-publishing hint.
   worker for it. A transport that never reports cold lanes can still give
   the estimate.
   - The estimate becomes `Retry-After`, rounded up to whole seconds and
-    clamped to 5 to 900 seconds. The floor is the gateway's short
-    transient-retry hint and the ceiling is the 15-minute default
-    provisioning budget of the Python and TypeScript SDKs, which wait for
-    `Retry-After` within that budget. Common OpenAI clients honor a
-    `Retry-After` of up to 60 seconds and fall back to their own backoff
-    above it.
+    clamped by the kind of route the request arrived on. The floor is
+    always 5 seconds, the gateway's short transient-retry hint.
+    - On the native routes (`/v1/encode`, `/v1/score`, `/v1/extract`,
+      `/v1/generate`) the ceiling is 900 seconds: the 15-minute default
+      provisioning budget of the Python and TypeScript SDKs, which wait for
+      `Retry-After` within that budget.
+    - On the OpenAI-compatible routes (`/v1/chat/completions`,
+      `/v1/completions`, `/v1/responses`, `/v1/embeddings`,
+      `/v1/audio/transcriptions`) and the rerank routes (`/v1/rerank`,
+      `/v2/rerank`) the ceiling is 60 seconds. The OpenAI Python client
+      honors `Retry-After` only when it is greater than 0 and at most 60
+      seconds. Above that it ignores the header and retries on its own
+      short backoff, so a client with many retries would spend them within
+      seconds. A compatibility route that wraps a native one keeps this
+      ceiling.
   - A request that may be served by several cold lanes, such as one without
     a machine profile, gets the soonest estimate among them.
   - Without an estimate, `Retry-After` stays 60 seconds.

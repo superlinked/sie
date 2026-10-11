@@ -258,6 +258,12 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
                     &physical_lane,
                     "no_consumers",
                 );
+                let route = match endpoint {
+                    SseEndpoint::Generate => crate::handlers::proxy::RouteKind::Native,
+                    SseEndpoint::Chat { .. } | SseEndpoint::Completion { .. } => {
+                        crate::handlers::proxy::RouteKind::Compatibility
+                    }
+                };
                 let retry_after = crate::handlers::proxy::provisioning_retry_after(
                     state,
                     &[crate::handlers::proxy::lane_wake_target(
@@ -266,6 +272,7 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
                         &bundle,
                         &dispatch_model,
                     )],
+                    route,
                 );
                 return crate::handlers::proxy::provisioning_response(
                     &model,
