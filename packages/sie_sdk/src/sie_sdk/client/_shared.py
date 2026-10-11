@@ -434,6 +434,16 @@ def resolve_timeouts(
     return connect, read
 
 
+def attempt_timeout_cap(remaining: float) -> float:
+    """Seconds that cap the timeouts of one attempt.
+
+    Attempts are capped by the remaining provisioning budget. The final
+    attempt, made after a capacity wait that used up the budget, is not capped
+    and runs with the client's own timeouts.
+    """
+    return remaining if remaining > 0 else math.inf
+
+
 # Pool settings
 DEFAULT_LEASE_RENEWAL_INTERVAL_S = 60.0  # Renew lease every 60s (lease is 1200s)
 
