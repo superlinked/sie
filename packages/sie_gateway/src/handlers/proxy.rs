@@ -572,6 +572,8 @@ pub(crate) enum RouteKind {
 #[derive(Clone, Copy)]
 pub(crate) struct CompatibilityRoute;
 
+/// A request's route kind: a compatibility route when its wrapper marked it
+/// with [`CompatibilityRoute`], a native route otherwise.
 fn route_kind(extensions: &Extensions) -> RouteKind {
     if extensions.get::<CompatibilityRoute>().is_some() {
         RouteKind::Compatibility
@@ -1094,6 +1096,8 @@ pub(crate) fn monitor_dispatch_durability(
     completion_rx
 }
 
+/// [`provisioning_response`], counted as a provisioning response for
+/// `surface`.
 fn build_provisioning_response_for_surface(
     model: &str,
     retry_after: HeaderValue,
