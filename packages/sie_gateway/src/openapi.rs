@@ -775,6 +775,18 @@ fn patch_chat_request_schema(value: &mut Value) {
             "type": ["boolean", "null"],
         }),
     );
+    properties.insert(
+        "schema_in_prompt".to_string(),
+        json!({
+            "description": "SIE extension. A `json_schema` `response_format` constrains \
+                            decoding and, as with OpenAI, is also shown to the model: it is \
+                            appended to the system message as a `# Response Formats` section \
+                            with the compact schema, unless a message already contains the \
+                            schema as JSON. `false` leaves the prompt as sent (the grammar \
+                            still applies). Absent: the serving profile decides (default on).",
+            "type": ["boolean", "null"],
+        }),
+    );
     // response_format: {type:"text"|"json_object"|"json_schema", json_schema?:{...}}.
     properties.insert(
         "response_format".to_string(),
@@ -2335,6 +2347,14 @@ pub struct ChatCompletionRequest {
     /// competing grammars on one request reject with 400 ``invalid_request``.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_format: Option<Value>,
+    /// SIE extension. A ``json_schema`` ``response_format`` constrains
+    /// decoding and, as with OpenAI, is also shown to the model: it is
+    /// appended to the system message as a ``# Response Formats`` section
+    /// with the compact schema, unless a message already contains the schema
+    /// as JSON. ``false`` leaves the prompt as sent (the grammar still
+    /// applies). Absent: the serving profile decides (default on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_in_prompt: Option<bool>,
     /// SSE streaming. When ``true``, the response is a stream of
     /// ``chat.completion.chunk`` events terminated by ``data: [DONE]``.
     /// For ``n > 1``, per-``choice_index`` delta chunks include a per-choice

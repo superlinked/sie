@@ -6386,6 +6386,11 @@ struct ChatRequestParams {
     /// :func:`chat_params_from_json`. ``None`` when the request omits
     /// ``response_format``.
     grammar: Option<publisher::GrammarSpec>,
+    /// SIE extension ``schema_in_prompt``: ``false`` stops the worker
+    /// from also writing a ``json_schema`` response format into the
+    /// rendered prompt. ``None`` leaves it to the serving profile
+    /// (default on).
+    schema_in_prompt: Option<bool>,
     /// OpenAI ``stream`` flag. ``true`` switches the handler to the
     /// SSE response branch; ``false`` (default) uses the existing
     /// aggregating path. Parsed by :func:`chat_params_from_json`;
@@ -6468,6 +6473,7 @@ impl ChatRequestParams {
                 min_tokens: self.min_tokens,
                 chat_template_kwargs: self.chat_template_kwargs,
                 grammar: self.grammar,
+                schema_in_prompt: self.schema_in_prompt,
                 routing_key: self.routing_key.clone(),
                 prompt_cache_key: self.prompt_cache_key.clone(),
                 tools: self.tools,
@@ -7717,6 +7723,20 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
             );
         }
     };
+    // SIE extension: ``schema_in_prompt: false`` keeps a ``json_schema``
+    // response format out of the rendered prompt (the grammar still
+    // constrains decoding). Absent or ``null`` → the profile decides.
+    let schema_in_prompt = match obj.get("schema_in_prompt") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Bool(b)) => Some(*b),
+        Some(_) => {
+            return bad(
+                "'schema_in_prompt' must be a boolean",
+                Some("schema_in_prompt"),
+                oai_code::INVALID_REQUEST,
+            );
+        }
+    };
     // ``tool_choice`` without ``tools`` is meaningless; OpenAI itself
     // returns a 400 in that case. We mirror the behaviour so SDKs that
     // accidentally send ``tool_choice: "auto"`` on a plain chat call
@@ -7790,6 +7810,7 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
         "prompt_cache_key",
         "routing_key",
         "response_format",
+        "schema_in_prompt",
         "stream",
         "tools",
         "tool_choice",
@@ -7840,6 +7861,7 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
         routing_key,
         prompt_cache_key,
         grammar,
+        schema_in_prompt,
         stream,
         stream_include_usage,
         tools,
@@ -13999,6 +14021,9 @@ fn generate_params_from_json(
         min_tokens: None,
         chat_template_kwargs: None,
         grammar,
+        // The native route is a thin wrapper over the caller's prompt: a
+        // grammar constrains decoding but is not written into the prompt.
+        schema_in_prompt: Some(false),
         routing_key,
         prompt_cache_key,
         // OpenAI tool-calling fields are exposed only via the chat
@@ -14428,6 +14453,9 @@ fn generate_params_from_rmpv(
         min_tokens: None,
         chat_template_kwargs: None,
         grammar,
+        // The native route is a thin wrapper over the caller's prompt: a
+        // grammar constrains decoding but is not written into the prompt.
+        schema_in_prompt: Some(false),
         routing_key,
         prompt_cache_key,
         tools: None,
@@ -25203,6 +25231,67 @@ mod tests {
         assert_eq!(p.messages[0].role, "user");
         assert_eq!(p.messages[0].content, "Hi");
         assert_eq!(p.max_new_tokens, 32);
+    }
+
+    // ── schema_in_prompt: json_schema response formats shown to the model ──
+
+    #[test]
+    fn test_chat_schema_in_prompt_is_forwarded_and_defaults_to_the_profile() {
+        let mut body = _chat_body_min("m");
+        body["response_format"] = serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {"name": "cvss", "schema": {"type": "object", "properties": {
+                "weakness": {"type": "string", "enum": ["cross-site scripting", "SQL injection"]}
+            }}},
+        });
+        let default = _expect_chat_ok(body.clone()).into_work_params();
+        let generate = default.generate.expect("generate params");
+        assert_eq!(generate.schema_in_prompt, None);
+        assert!(matches!(
+            generate.grammar,
+            Some(publisher::GrammarSpec::JsonSchema { .. })
+        ));
+        let wire = serde_json::to_value(&generate).unwrap();
+        assert!(wire.get("schema_in_prompt").is_none());
+
+        for (value, expected) in [
+            (serde_json::json!(false), Some(false)),
+            (serde_json::json!(true), Some(true)),
+            (serde_json::Value::Null, None),
+        ] {
+            body["schema_in_prompt"] = value;
+            let generate = _expect_chat_ok(body.clone())
+                .into_work_params()
+                .generate
+                .expect("generate params");
+            assert_eq!(generate.schema_in_prompt, expected);
+        }
+        body["schema_in_prompt"] = serde_json::json!(false);
+        let generate = _expect_chat_ok(body).into_work_params().generate.unwrap();
+        let wire = serde_json::to_value(&generate).unwrap();
+        assert_eq!(wire["schema_in_prompt"], serde_json::json!(false));
+    }
+
+    #[tokio::test]
+    async fn test_chat_schema_in_prompt_must_be_a_boolean() {
+        let mut body = _chat_body_min("m");
+        body["schema_in_prompt"] = serde_json::json!("no");
+        let err = _expect_chat_err(body).await;
+        assert_eq!(err["error"]["param"], "schema_in_prompt");
+        assert_eq!(err["error"]["code"], "invalid_request");
+    }
+
+    #[test]
+    fn test_native_generate_keeps_the_grammar_out_of_the_prompt() {
+        let body = serde_json::json!({
+            "prompt": "Pick one.",
+            "max_new_tokens": 8,
+            "grammar": {"json_schema": {"type": "object", "properties": {
+                "label": {"type": "string", "enum": ["a", "b"]}
+            }}},
+        });
+        let params = _expect_generate_ok(&body);
+        assert_eq!(params.schema_in_prompt, Some(false));
     }
 
     // ── chat response_format regex/EBNF + developer role (roadmap 1.7) ──

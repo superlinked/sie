@@ -519,6 +519,13 @@
               "null"
             ]
           },
+          "schema_in_prompt": {
+            "description": "SIE extension. A `json_schema` `response_format` constrains decoding and, as with OpenAI, is also shown to the model: it is appended to the system message as a `# Response Formats` section with the compact schema, unless a message already contains the schema as JSON. `false` leaves the prompt as sent (the grammar still applies). Absent: the serving profile decides (default on).",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "seed": {
             "description": "Optional signed 64-bit per-request sampling seed. Reproducibility is best effort, not guaranteed, and depends on the active generation backend and deployment configuration. Non-integer or out-of-range values reject with 400 invalid_request.",
             "format": "int64",
