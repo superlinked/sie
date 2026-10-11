@@ -337,11 +337,13 @@ use local/PVC, S3, GCS, or Azure storage for that store.
 
 Server-reported errors are raised as typed exceptions from
 `sie_sdk.client.errors`; all inherit from `SIEError`, and errors that
-carry a server response expose `.code` and `.status_code`. `RequestError`
-and `ServerError` also expose `.request`, the request metadata of the
+carry a server response expose `.code` and `.status_code`. `RequestError`,
+`ServerError`, `ProvisioningError`, `ModelLoadingError` and
+`LoraLoadingError` also expose `.request`, the request metadata of the
 error response when it carried any: for example `served_by`,
 `fallback_reason` and `fallback_error` on a local refusal that answers a
-failed remote attempt. Invalid client-side arguments (for example, a bad
+failed remote attempt. When a retry budget runs out, it describes the
+last refusal. Invalid client-side arguments (for example, a bad
 `base_url_headers` value) raise ordinary Python exceptions such as
 `ValueError`.
 

@@ -491,7 +491,7 @@ export async function handleError(response: Response, gpu?: string): Promise<nev
 
   if (status === 503 && code === PROVISIONING_ERROR_CODE) {
     const retryAfter = getRetryAfter(response);
-    throw new ProvisioningError(message, gpu, retryAfter, param);
+    throw new ProvisioningError(message, gpu, retryAfter, param, request);
   }
 
   // Rate limit (pass-2 audit B1). Retried on the admission ladder in the
@@ -754,7 +754,7 @@ export function validateBatchResultCount(
   submitted: readonly unknown[],
   model: string,
   operation: "encode" | "extract",
-  requestId?: string,
+  request?: RequestMetadata,
 ): void {
   if (results.length === submitted.length) {
     return;
@@ -774,7 +774,7 @@ export function validateBatchResultCount(
     code,
     model,
     missingIds,
-    requestId,
+    request,
     results,
   });
 }

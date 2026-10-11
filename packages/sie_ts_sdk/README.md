@@ -131,11 +131,13 @@ for await (const chunk of client.streamGenerate(
 All errors extend `SIEError` and are exported from the package root.
 Server-reported errors carry `.code` and `.statusCode`, plus
 `.requestId` (the gateway `x-sie-request-id`) when the gateway included
-one in the response — check it before using it. `RequestError` and
-`ServerError` also carry `.request`, the request metadata of the error
-response when it carried any: for example `servedBy`, `fallbackReason`
-and `fallbackError` on a local refusal that answers a failed remote
-attempt.
+one in the response — check it before using it. `RequestError`,
+`ServerError`, `ProvisioningError`, `ModelLoadingError` and
+`LoraLoadingError` also carry `.request`, the request metadata of the
+error response when it carried any: for example `servedBy`,
+`fallbackReason` and `fallbackError` on a local refusal that answers a
+failed remote attempt. When a retry budget runs out, it describes the
+last refusal.
 
 ```typescript
 import {

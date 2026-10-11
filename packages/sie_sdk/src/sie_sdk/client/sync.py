@@ -1512,7 +1512,12 @@ class SIEClient:
                         # Extract lora from options for error message
                         lora_name = resolved_options.get("lora") if resolved_options else None
                         msg = f"LoRA loading timeout after {lora_retries} retries"
-                        raise LoraLoadingError(msg, lora=str(lora_name) if lora_name else None, model=model)
+                        raise LoraLoadingError(
+                            msg,
+                            lora=str(lora_name) if lora_name else None,
+                            model=model,
+                            request=parse_request_metadata(response.headers),
+                        )
 
                     # Wait and retry
                     retry_after = get_retry_after(response)
@@ -1532,7 +1537,7 @@ class SIEClient:
                     elapsed = time.monotonic() - start_time
                     if elapsed >= timeout:
                         msg = f"Model loading timeout after {elapsed:.1f}s for '{model}'"
-                        raise ModelLoadingError(msg, model=model)
+                        raise ModelLoadingError(msg, model=model, request=parse_request_metadata(response.headers))
 
                     # Wait and retry, respecting remaining time
                     retry_after = get_retry_after(response)
@@ -2363,7 +2368,7 @@ class SIEClient:
                     elapsed = time.monotonic() - start_time
                     if elapsed >= timeout:
                         msg = f"Model loading timeout after {elapsed:.1f}s for '{model}'"
-                        raise ModelLoadingError(msg, model=model)
+                        raise ModelLoadingError(msg, model=model, request=parse_request_metadata(response.headers))
 
                     # Wait and retry, respecting remaining time
                     retry_after = get_retry_after(response)
@@ -2676,7 +2681,7 @@ class SIEClient:
                     elapsed = time.monotonic() - start_time
                     if elapsed >= timeout:
                         msg = f"Model loading timeout after {elapsed:.1f}s for '{model}'"
-                        raise ModelLoadingError(msg, model=model)
+                        raise ModelLoadingError(msg, model=model, request=parse_request_metadata(response.headers))
                     retry_after = get_retry_after(response)
                     delay = retry_after_or_default(retry_after, MODEL_LOADING_DEFAULT_DELAY_S)
                     remaining = timeout - elapsed
@@ -2688,7 +2693,7 @@ class SIEClient:
                             f"Model loading retry delay ({delay:.1f}s) would exceed the "
                             f"provision timeout ({timeout:.1f}s, {elapsed:.1f}s elapsed) for '{model}'"
                         )
-                        raise ModelLoadingError(msg, model=model)
+                        raise ModelLoadingError(msg, model=model, request=parse_request_metadata(response.headers))
                     self._record_retry()
                     time.sleep(delay)
                     continue
@@ -3652,7 +3657,7 @@ class SIEClient:
                     elapsed = time.monotonic() - start_time
                     if elapsed >= timeout:
                         msg = f"Model loading timeout after {elapsed:.1f}s for '{model}'"
-                        raise ModelLoadingError(msg, model=model)
+                        raise ModelLoadingError(msg, model=model, request=parse_request_metadata(response.headers))
 
                     # Wait and retry, respecting remaining time
                     retry_after = get_retry_after(response)

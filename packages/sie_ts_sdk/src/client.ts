@@ -1131,7 +1131,7 @@ export class SIEClient {
       itemsArray,
       model,
       "encode",
-      response.headers.get("x-sie-request-id") ?? undefined,
+      parseRequestMetadata(response.headers),
     );
 
     if (isSingleItem) {
@@ -1844,6 +1844,7 @@ export class SIEClient {
                 gpu,
                 getRetryAfter(attemptResponse),
                 await getErrorParam(attemptResponse.clone()),
+                parseRequestMetadata(attemptResponse.headers),
               );
             }
             const elapsed = Date.now() - startTime;
@@ -1853,6 +1854,7 @@ export class SIEClient {
                 gpu,
                 getRetryAfter(attemptResponse),
                 await getErrorParam(attemptResponse.clone()),
+                parseRequestMetadata(attemptResponse.headers),
               );
             }
             const retryAfter = getRetryAfter(attemptResponse);
@@ -1877,6 +1879,7 @@ export class SIEClient {
                 `Model loading timeout for '${model}'`,
                 model,
                 await getErrorParam(attemptResponse.clone()),
+                parseRequestMetadata(attemptResponse.headers),
               );
             }
             const delay = getRetryAfter(attemptResponse) ?? MODEL_LOADING_DEFAULT_DELAY;
@@ -2138,7 +2141,7 @@ export class SIEClient {
       itemsArray,
       model,
       "extract",
-      response.headers.get("x-sie-request-id") ?? undefined,
+      parseRequestMetadata(response.headers),
     );
 
     if (isSingleItem) {
@@ -2710,6 +2713,7 @@ export class SIEClient {
               gpu,
               retryAfter,
               await getErrorParam(response.clone()),
+              parseRequestMetadata(response.headers),
             );
           }
 
@@ -2720,6 +2724,7 @@ export class SIEClient {
               gpu,
               retryAfter,
               await getErrorParam(response.clone()),
+              parseRequestMetadata(response.headers),
             );
           }
 
@@ -2739,6 +2744,7 @@ export class SIEClient {
               undefined, // We don't have lora name at this level
               model,
               await getErrorParam(response.clone()),
+              parseRequestMetadata(response.headers),
             );
           }
 
@@ -2757,6 +2763,7 @@ export class SIEClient {
               `Model loading timeout after ${(elapsed / 1000).toFixed(1)}s for '${model}'`,
               model,
               await getErrorParam(response.clone()),
+              parseRequestMetadata(response.headers),
             );
           }
 
@@ -2782,6 +2789,7 @@ export class SIEClient {
             provisionTimeoutMs: this.provisionTimeout,
             model,
             param: await getErrorParam(response.clone()),
+            request: parseRequestMetadata(response.headers),
           });
           oomRetries += 1;
           await sleep(delay);

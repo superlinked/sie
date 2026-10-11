@@ -1435,7 +1435,7 @@ def handle_error(response: _HttpResponse) -> NoReturn:
     # Fallback dispatch — ``model`` is only attached by the helper-style
     # short-circuit (``raise_if_input_too_long``) on the extract path.
     if response.status_code == HTTP_SERVICE_UNAVAILABLE and code == PROVISIONING_ERROR_CODE:
-        raise ProvisioningError(message, retry_after=get_retry_after(response), param=param)
+        raise ProvisioningError(message, retry_after=get_retry_after(response), param=param, request=request)
     if response.status_code == HTTP_CLIENT_ERROR and code == INPUT_TOO_LONG_ERROR_CODE:
         raise InputTooLongError(message, param=param, request=request)
     # Rate limit (pass-2 audit B1). Retried on the admission ladder in the
@@ -1495,11 +1495,15 @@ def provisioning_retry_delay(
     param = get_error_param(response)
     if not wait_for_capacity:
         msg = f"No capacity available for GPU '{gpu}'. Server is provisioning."
-        raise ProvisioningError(msg, gpu=gpu, retry_after=retry_after, param=param)
+        raise ProvisioningError(
+            msg, gpu=gpu, retry_after=retry_after, param=param, request=parse_request_metadata(response.headers)
+        )
     elapsed = time.monotonic() - start_time
     if elapsed >= timeout:
         msg = f"Provisioning timeout after {elapsed:.1f}s waiting for GPU '{gpu}'"
-        raise ProvisioningError(msg, gpu=gpu, retry_after=retry_after, param=param)
+        raise ProvisioningError(
+            msg, gpu=gpu, retry_after=retry_after, param=param, request=parse_request_metadata(response.headers)
+        )
     remaining = timeout - elapsed
     if retry_after is not None:
         return min(retry_after, remaining)
@@ -1640,7 +1644,7 @@ def next_stream_retry_delay(
         if code == MODEL_LOADING_ERROR_CODE:
             if elapsed >= timeout:
                 msg = f"Model loading timeout after {elapsed:.1f}s for '{model}'"
-                raise ModelLoadingError(msg, model=model)
+                raise ModelLoadingError(msg, model=model, request=parse_request_metadata(response.headers))
             retry_after = get_retry_after(response)
             delay = retry_after_or_default(retry_after, MODEL_LOADING_DEFAULT_DELAY_S)
             return min(delay, timeout - elapsed), oom_retries

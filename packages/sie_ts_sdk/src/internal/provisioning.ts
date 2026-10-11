@@ -282,6 +282,7 @@ export async function withProvisioningRetry(
             opts.gpu,
             getRetryAfter(response),
             await getErrorParam(response.clone()),
+            parseRequestMetadata(response.headers),
           );
         }
         const elapsed = Date.now() - startTime;
@@ -291,6 +292,7 @@ export async function withProvisioningRetry(
             opts.gpu,
             getRetryAfter(response),
             await getErrorParam(response.clone()),
+            parseRequestMetadata(response.headers),
           );
         }
         const retryAfter = getRetryAfter(response);
@@ -305,6 +307,7 @@ export async function withProvisioningRetry(
             `Model loading timeout for '${opts.model}'`,
             opts.model,
             await getErrorParam(response.clone()),
+            parseRequestMetadata(response.headers),
           );
         }
         const delay = getRetryAfter(response) ?? MODEL_LOADING_DEFAULT_DELAY;
