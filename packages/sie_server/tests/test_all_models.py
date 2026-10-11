@@ -1328,6 +1328,25 @@ def test_urchade_gliner_multi_pii_v1_extract() -> None:
     _assert_extract("urchade/gliner_multi_pii-v1", _NER_LABELS, ["location", "organization", "person"])
 
 
+def test_superlinked_pii_redact_extract() -> None:
+    # The profile's runtime options (default labels, 0.6 floor, name
+    # propagation) reach the adapter as request options, as the server merges them.
+    adapter = _get_adapter("superlinked/pii-redact")
+    options = dict(load_model_configs(MODELS_DIR)["superlinked/pii-redact"].resolve_profile("default").runtime)
+    text = "Ann Lee wrote from ann.lee@example.com. Call Lee on +1 415 555 0100."
+    output = adapter.extract([Item(text=text)], options=options)
+    found = {(text[e["start"] : e["end"]], e["label"]) for e in output.entities[0]}
+    assert {
+        ("Ann Lee", "person"),
+        ("ann.lee@example.com", "email address"),
+        ("Lee", "person"),  # the second mention, masked by name propagation
+        ("+1 415 555 0100", "phone number"),
+    } <= found
+    assert all(e["score"] >= 0.6 for e in output.entities[0])
+    assert output.input_token_counts is not None
+    assert output.input_token_counts[0] > 0
+
+
 def test_urchade_gliner_multi_v2_1_extract() -> None:
     _assert_extract("urchade/gliner_multi-v2.1", _NER_LABELS, ["location", "organization", "person"])
 

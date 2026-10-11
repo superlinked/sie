@@ -1,0 +1,1225 @@
+{
+ "source": "Recorded rows of the PII redaction study (examples/redact): Hugging Face dataset superlinked/sie-task-evidence at revision 31383ae9986d9dc9edd4e3a06ee9fb40b223d6fb, task redact, documents from gretelai/synthetic_pii_finance_multilingual (synthetic data). 'expected' is examples/redact/score.py compose() on these rows; derived name spans have a null score.",
+ "models": [
+  "urchade/gliner_multi_pii-v1",
+  "numind/NuNER_Zero"
+ ],
+ "documents": [
+  {
+   "index": 1628,
+   "uid": "gretel-en-47114",
+   "text": "HEALTH INSURANCE CLAIM FORM\n\nDate: March 15, 2023\n\nClaimant Information:\nName: Kata Thea Heintze\nSSN: 766-73-8435\nDate of Birth: 03/09/2006\nAddress: 71859 William Rapids, 72006, Richardport\n\nHealthcare Provider Information:\nName: Richmond Medical Equipment\nAddress: 8921 Elm Street, Richmond, RI 73211\nPhone: (800) 123-4567\n\nMedical Equipment Claim Information:\nType of Equipment: Power Wheelchair\nBrand: QuickRoll\nModel: QR-500\nItem Description: The power wheelchair is designed for both indoor and outdoor use, with a maximum weight capacity of 300 lbs. It features a captain's seat, adjustable armrests, and an easy-to-use joystick for smooth navigation.\n\nPrescription Information:\nDate of Prescription: 03/10/2023\nPrescribing Physician: Dr. Samuel Jones\nAddress: 221 Maple Ave, Richmond, RI 73211\nPhone: (800) 987-6543\n\nAdditional Information:\nThe power wheelchair was delivered on March 14, 2023. It was recommended by Dr. Samuel Jones to improve the claimant's mobility due to a recent medical condition. The claimant has been properly trained on the safe usage of the equipment.\n\nSignature: \nKata Thea Heintze\n\nDate: \n03/15/2023",
+   "windows": [
+    {
+     "start": 0,
+     "end": 1135,
+     "entities": {
+      "urchade/gliner_multi_pii-v1": [
+       {
+        "start": 79,
+        "end": 96,
+        "label": "person",
+        "score": 0.99951171875
+       },
+       {
+        "start": 102,
+        "end": 113,
+        "label": "social security number",
+        "score": 0.99609375
+       },
+       {
+        "start": 129,
+        "end": 139,
+        "label": "date of birth",
+        "score": 0.99755859375
+       },
+       {
+        "start": 149,
+        "end": 189,
+        "label": "street address",
+        "score": 0.78271484375
+       },
+       {
+        "start": 266,
+        "end": 301,
+        "label": "street address",
+        "score": 0.81005859375
+       },
+       {
+        "start": 309,
+        "end": 323,
+        "label": "phone number",
+        "score": 0.99462890625
+       },
+       {
+        "start": 741,
+        "end": 757,
+        "label": "person",
+        "score": 0.99951171875
+       },
+       {
+        "start": 767,
+        "end": 800,
+        "label": "street address",
+        "score": 0.77734375
+       },
+       {
+        "start": 808,
+        "end": 822,
+        "label": "phone number",
+        "score": 0.99609375
+       },
+       {
+        "start": 924,
+        "end": 940,
+        "label": "person",
+        "score": 0.99951171875
+       },
+       {
+        "start": 1099,
+        "end": 1116,
+        "label": "person",
+        "score": 0.99853515625
+       }
+      ],
+      "numind/NuNER_Zero": [
+       {
+        "start": 79,
+        "end": 88,
+        "label": "person",
+        "score": 0.51513671875
+       },
+       {
+        "start": 102,
+        "end": 113,
+        "label": "social security number",
+        "score": 0.91943359375
+       },
+       {
+        "start": 129,
+        "end": 139,
+        "label": "date of birth",
+        "score": 0.97265625
+       },
+       {
+        "start": 149,
+        "end": 177,
+        "label": "street address",
+        "score": 0.8974609375
+       },
+       {
+        "start": 266,
+        "end": 282,
+        "label": "street address",
+        "score": 0.92626953125
+       },
+       {
+        "start": 291,
+        "end": 295,
+        "label": "street address",
+        "score": 0.509765625
+       },
+       {
+        "start": 309,
+        "end": 323,
+        "label": "phone number",
+        "score": 0.85791015625
+       },
+       {
+        "start": 767,
+        "end": 781,
+        "label": "street address",
+        "score": 0.94921875
+       },
+       {
+        "start": 790,
+        "end": 800,
+        "label": "street address",
+        "score": 0.60009765625
+       },
+       {
+        "start": 808,
+        "end": 822,
+        "label": "phone number",
+        "score": 0.88720703125
+       },
+       {
+        "start": 1099,
+        "end": 1116,
+        "label": "person",
+        "score": 0.63330078125
+       }
+      ]
+     }
+    }
+   ],
+   "expected": [
+    {
+     "start": 79,
+     "end": 96,
+     "label": "person",
+     "score": 0.99951171875
+    },
+    {
+     "start": 102,
+     "end": 113,
+     "label": "social security number",
+     "score": 0.99609375
+    },
+    {
+     "start": 129,
+     "end": 139,
+     "label": "date of birth",
+     "score": 0.99755859375
+    },
+    {
+     "start": 149,
+     "end": 177,
+     "label": "street address",
+     "score": 0.8974609375
+    },
+    {
+     "start": 149,
+     "end": 189,
+     "label": "street address",
+     "score": 0.78271484375
+    },
+    {
+     "start": 266,
+     "end": 282,
+     "label": "street address",
+     "score": 0.92626953125
+    },
+    {
+     "start": 266,
+     "end": 301,
+     "label": "street address",
+     "score": 0.81005859375
+    },
+    {
+     "start": 309,
+     "end": 323,
+     "label": "phone number",
+     "score": 0.99462890625
+    },
+    {
+     "start": 741,
+     "end": 757,
+     "label": "person",
+     "score": 0.99951171875
+    },
+    {
+     "start": 767,
+     "end": 781,
+     "label": "street address",
+     "score": 0.94921875
+    },
+    {
+     "start": 767,
+     "end": 800,
+     "label": "street address",
+     "score": 0.77734375
+    },
+    {
+     "start": 790,
+     "end": 800,
+     "label": "street address",
+     "score": 0.60009765625
+    },
+    {
+     "start": 808,
+     "end": 822,
+     "label": "phone number",
+     "score": 0.99609375
+    },
+    {
+     "start": 924,
+     "end": 940,
+     "label": "person",
+     "score": 0.99951171875
+    },
+    {
+     "start": 1099,
+     "end": 1116,
+     "label": "person",
+     "score": 0.99853515625
+    }
+   ]
+  },
+  {
+   "index": 240,
+   "uid": "gretel-en-34966",
+   "text": "------------------------------------------------------------------------------------------------------------------\n\nTrade Confirmation\n\nTrade Date: 05/12/2023\nPortfolio: Vintage Cars\nConfirmation: 123456789\n\nSecurities: 1 x 1963 Chevrolet Corvette Stingray (Restored)\nQuantity: 1\nPrice: $50,000.00\nSettlement Date: 10/08/2024\n\nSwift BIC Code: FRZIUSNZ985\nSSN: 324-78-5893\nName: Alejandra Santamaría-Castilla\nStreet Address: 6074 Chaney Dam, Apt. 293\n\nDelivery Instructions:\n- Securities will be delivered to the above mentioned address\n- Funds will be remitted to the bank specified in the Swift BIC Code\n\n------------------------------------------------------------------------------------------------------------------\n\nPlease contact us if you have any questions or concerns regarding this trade confirmation.\n\nSincerely,\n\n[Trading Firm Name]\n[Trading Firm Address]\n[Trading Firm City, State, Zip Code]\n[Trading Firm Phone Number]\n[Trading Firm Email Address]",
+   "windows": [
+    {
+     "start": 0,
+     "end": 696,
+     "entities": {
+      "urchade/gliner_multi_pii-v1": [
+       {
+        "start": 224,
+        "end": 267,
+        "label": "license plate",
+        "score": 0.62744140625
+       },
+       {
+        "start": 360,
+        "end": 371,
+        "label": "social security number",
+        "score": 0.99560546875
+       },
+       {
+        "start": 378,
+        "end": 407,
+        "label": "person",
+        "score": 0.99609375
+       },
+       {
+        "start": 424,
+        "end": 449,
+        "label": "street address",
+        "score": 0.9462890625
+       }
+      ],
+      "numind/NuNER_Zero": [
+       {
+        "start": 343,
+        "end": 354,
+        "label": "api key",
+        "score": 0.54736328125
+       },
+       {
+        "start": 355,
+        "end": 358,
+        "label": "social security number",
+        "score": 0.56103515625
+       },
+       {
+        "start": 360,
+        "end": 371,
+        "label": "social security number",
+        "score": 0.83544921875
+       },
+       {
+        "start": 378,
+        "end": 407,
+        "label": "person",
+        "score": 0.65185546875
+       },
+       {
+        "start": 424,
+        "end": 449,
+        "label": "street address",
+        "score": 0.990234375
+       }
+      ]
+     }
+    },
+    {
+     "start": 646,
+     "end": 962,
+     "entities": {
+      "urchade/gliner_multi_pii-v1": [
+       {
+        "start": 180,
+        "end": 198,
+        "label": "person",
+        "score": 0.66162109375
+       },
+       {
+        "start": 237,
+        "end": 241,
+        "label": "city",
+        "score": 0.548828125
+       },
+       {
+        "start": 274,
+        "end": 286,
+        "label": "phone number",
+        "score": 0.93212890625
+       },
+       {
+        "start": 288,
+        "end": 315,
+        "label": "email address",
+        "score": 0.7255859375
+       }
+      ],
+      "numind/NuNER_Zero": [
+       {
+        "start": 237,
+        "end": 241,
+        "label": "city",
+        "score": 0.5693359375
+       },
+       {
+        "start": 243,
+        "end": 248,
+        "label": "postal code",
+        "score": 0.55224609375
+       },
+       {
+        "start": 250,
+        "end": 258,
+        "label": "postal code",
+        "score": 0.85498046875
+       },
+       {
+        "start": 261,
+        "end": 286,
+        "label": "phone number",
+        "score": 0.88525390625
+       },
+       {
+        "start": 289,
+        "end": 315,
+        "label": "email address",
+        "score": 0.93212890625
+       }
+      ]
+     }
+    }
+   ],
+   "expected": [
+    {
+     "start": 224,
+     "end": 267,
+     "label": "license plate",
+     "score": 0.62744140625
+    },
+    {
+     "start": 360,
+     "end": 371,
+     "label": "social security number",
+     "score": 0.99560546875
+    },
+    {
+     "start": 372,
+     "end": 376,
+     "label": "person",
+     "score": null
+    },
+    {
+     "start": 378,
+     "end": 407,
+     "label": "person",
+     "score": 0.99609375
+    },
+    {
+     "start": 424,
+     "end": 449,
+     "label": "street address",
+     "score": 0.990234375
+    },
+    {
+     "start": 826,
+     "end": 844,
+     "label": "person",
+     "score": 0.66162109375
+    },
+    {
+     "start": 847,
+     "end": 854,
+     "label": "person",
+     "score": null
+    },
+    {
+     "start": 855,
+     "end": 859,
+     "label": "person",
+     "score": null
+    },
+    {
+     "start": 870,
+     "end": 877,
+     "label": "person",
+     "score": null
+    },
+    {
+     "start": 878,
+     "end": 882,
+     "label": "person",
+     "score": null
+    },
+    {
+     "start": 896,
+     "end": 904,
+     "label": "postal code",
+     "score": 0.85498046875
+    },
+    {
+     "start": 907,
+     "end": 932,
+     "label": "phone number",
+     "score": 0.88525390625
+    },
+    {
+     "start": 920,
+     "end": 932,
+     "label": "phone number",
+     "score": 0.93212890625
+    },
+    {
+     "start": 934,
+     "end": 961,
+     "label": "email address",
+     "score": 0.7255859375
+    },
+    {
+     "start": 935,
+     "end": 961,
+     "label": "email address",
+     "score": 0.93212890625
+    }
+   ]
+  },
+  {
+   "index": 2880,
+   "uid": "gretel-en-43041",
+   "text": "------------------------------------------------------------------\nCustomer Support Conversational Log\n------------------------------------------------------------------\n\nTimestamp: 2022-03-15 10:00:00\nCustomer: Rita Venier\nAgent: Chris\n\nAgent: Hello Rita, welcome to our technical training session. How can I assist you today?\n\nCustomer: Hi Chris, I'm having trouble using the virtual wallet feature on my credit card.\n\nAgent: I'd be happy to help you with that, Rita. Can you please confirm your credit card security code for verification purposes?\n\nCustomer: Sure, it's 789.\n\nAgent: Thank you, Rita. I've verified your card. Now, let's move on to the virtual wallet feature. You can access it through our mobile app. Do you have the app installed?\n\nCustomer: Yes, I do.\n\nAgent: Great. Please log in and navigate to the \"Cards\" section. There, you should see an option to add a new card.\n\nCustomer: Okay, I see it now. But it's asking for my street address. What should I enter?\n\nAgent: Please enter your street address as it appears on your credit card statement, Rita. For example, you can enter \"02491 Kevin Mission, South James\".\n\nCustomer: Got it, thank you Chris. I'll try that now.\n\nAgent: You're welcome, Rita. Feel free to reach out if you need any further assistance. Have a great day!\n\nCustomer: You too, Chris. Goodbye!\n\nAgent: Goodbye, Rita. Take care!\n\n------------------------------------------------------------------\nEnd of Conversational Log\n------------------------------------------------------------------",
+   "windows": [
+    {
+     "start": 0,
+     "end": 870,
+     "entities": {
+      "urchade/gliner_multi_pii-v1": [
+       {
+        "start": 212,
+        "end": 223,
+        "label": "person",
+        "score": 0.96142578125
+       },
+       {
+        "start": 231,
+        "end": 236,
+        "label": "person",
+        "score": 0.708984375
+       },
+       {
+        "start": 342,
+        "end": 347,
+        "label": "person",
+        "score": 0.802734375
+       },
+       {
+        "start": 573,
+        "end": 576,
+        "label": "credit card number",
+        "score": 0.513671875
+       }
+      ],
+      "numind/NuNER_Zero": [
+       {
+        "start": 212,
+        "end": 223,
+        "label": "customer id",
+        "score": 0.794921875
+       }
+      ]
+     }
+    },
+    {
+     "start": 654,
+     "end": 1519,
+     "entities": {
+      "urchade/gliner_multi_pii-v1": [
+       {
+        "start": 98,
+        "end": 106,
+        "label": "person",
+        "score": 0.9736328125
+       },
+       {
+        "start": 120,
+        "end": 125,
+        "label": "person",
+        "score": 0.97802734375
+       },
+       {
+        "start": 237,
+        "end": 245,
+        "label": "person",
+        "score": 0.99169921875
+       },
+       {
+        "start": 328,
+        "end": 333,
+        "label": "person",
+        "score": 0.9765625
+       },
+       {
+        "start": 413,
+        "end": 417,
+        "label": "person",
+        "score": 0.9755859375
+       },
+       {
+        "start": 447,
+        "end": 479,
+        "label": "street address",
+        "score": 0.9853515625
+       },
+       {
+        "start": 483,
+        "end": 491,
+        "label": "person",
+        "score": 0.98583984375
+       },
+       {
+        "start": 511,
+        "end": 516,
+        "label": "person",
+        "score": 0.98193359375
+       },
+       {
+        "start": 538,
+        "end": 543,
+        "label": "person",
+        "score": 0.95849609375
+       },
+       {
+        "start": 561,
+        "end": 565,
+        "label": "person",
+        "score": 0.9755859375
+       },
+       {
+        "start": 645,
+        "end": 653,
+        "label": "person",
+        "score": 0.97265625
+       },
+       {
+        "start": 664,
+        "end": 669,
+        "label": "person",
+        "score": 0.98291015625
+       },
+       {
+        "start": 681,
+        "end": 686,
+        "label": "person",
+        "score": 0.9716796875
+       },
+       {
+        "start": 697,
+        "end": 701,
+        "label": "person",
+        "score": 0.962890625
+       }
+      ],
+      "numind/NuNER_Zero": [
+       {
+        "start": 447,
+        "end": 479,
+        "label": "street address",
+        "score": 0.984375
+       },
+       {
+        "start": 511,
+        "end": 516,
+        "label": "person",
+        "score": 0.51953125
+       },
+       {
+        "start": 664,
+        "end": 669,
+        "label": "person",
+        "score": 0.53173828125
+       }
+      ]
+     }
+    },
+    {
+     "start": 1469,
+     "end": 1528,
+     "entities": {
+      "urchade/gliner_multi_pii-v1": [],
+      "numind/NuNER_Zero": []
+     }
+    }
+   ],
+   "expected": [
+    {
+     "start": 67,
+     "end": 75,
+     "label": "person",
+     "score": null
+    },
+    {
+     "start": 202,
+     "end": 210,
+     "label": "person",
+     "score": null
+    },
+    {
+     "start": 212,
+     "end": 223,
+     "label": "person",
+     "score": 0.96142578125
+    },
+    {
+     "start": 212,
+     "end": 223,
+     "label": "customer id",
+     "score": 0.794921875
+    },
+    {
+     "start": 224,
+     "end": 229,
+     "label": "person",
+     "score": null
+    },
+    {
+     "start": 231,
+     "end": 236,
+     "label": "person",
+     "score": 0.708984375
+    },
+    {
+     "start": 238,
+     "end": 243,
+     "label": "person",
+     "score": null
+    },
+    {
+     "start": 251,
+     "end": 255,
+     "label": "person",
+     "score": null
+    },
+    {
+     "start": 329,
+     "end": 337,
+     "label": "person",
+     "score": null
+    },
+    {
+     "start": 342,
+     "end": 347,
+     "label": "person",
+     "score": 0.802734375
+    },
+    {
+     "start": 421,
+     "end": 426,
+     "label": "person",
+     "score": null
+    },
+    {
+     "start": 464,
+     "end": 468,
+     "label": "person",
+     "score": null
+    },
+    {
+     "start": 552,
+     "end": 560,
+     "label": "person",
+     "score": null
+    },
+    {
+     "start": 579,
+     "end": 584,
+     "label": "person",
+     "score": null
+    },
+    {
+     "start": 597,
+     "end": 601,
+     "label": "person",
+     "score": null
+    },
+    {
+     "start": 752,
+     "end": 760,
+     "label": "person",
+     "score": 0.9736328125
+    },
+    {
+     "start": 774,
+     "end": 779,
+     "label": "person",
+     "score": 0.97802734375
+    },
+    {
+     "start": 891,
+     "end": 899,
+     "label": "person",
+     "score": 0.99169921875
+    },
+    {
+     "start": 982,
+     "end": 987,
+     "label": "person",
+     "score": 0.9765625
+    },
+    {
+     "start": 1067,
+     "end": 1071,
+     "label": "person",
+     "score": 0.9755859375
+    },
+    {
+     "start": 1101,
+     "end": 1133,
+     "label": "street address",
+     "score": 0.9853515625
+    },
+    {
+     "start": 1137,
+     "end": 1145,
+     "label": "person",
+     "score": 0.98583984375
+    },
+    {
+     "start": 1165,
+     "end": 1170,
+     "label": "person",
+     "score": 0.98193359375
+    },
+    {
+     "start": 1192,
+     "end": 1197,
+     "label": "person",
+     "score": 0.95849609375
+    },
+    {
+     "start": 1215,
+     "end": 1219,
+     "label": "person",
+     "score": 0.9755859375
+    },
+    {
+     "start": 1299,
+     "end": 1307,
+     "label": "person",
+     "score": 0.97265625
+    },
+    {
+     "start": 1318,
+     "end": 1323,
+     "label": "person",
+     "score": 0.98291015625
+    },
+    {
+     "start": 1335,
+     "end": 1340,
+     "label": "person",
+     "score": 0.9716796875
+    },
+    {
+     "start": 1351,
+     "end": 1355,
+     "label": "person",
+     "score": 0.962890625
+    }
+   ]
+  },
+  {
+   "index": 835,
+   "uid": "gretel-en-36588",
+   "text": "----------------------------------------------------------------------------------------------------------------------------------\n\nUNIVERSITY BANK\n2251 University Ave, San Diego, CA 92104\n\nTAX WITHHOLDING STATEMENT\n\nName: Marcial P. Sola\nAddress: 094 Oconnor Mission, Apt.  SD, CA 92104, USA\nAccount: 2235564545\n\n----------------------------------------------------------------------------------------------------------------------------------\n\n**WITHHOLDING SUMMARY FOR TAX YEAR 2022:\n\n| Date | Description | Withheld Amount | Running Balance |\n| --- | --- | --- | --- |\n| 01/05/202 Federal Income Tax | | $1,200.00 | $1,200. |\n| 01/15/202 Social Security Tax | | $222.22 | $977.78 |\n| 01/30/202 Employee Portion of Medicare Tax | | $55.55 | $922.23 |\n| 02/15/202 State Disability Insurance | | $11.11 | $911.12 |\n\n----------------------------------------------------------------------------------------------------------------------------------\n\n**EMPLOYER DETAILS:\nEmployer Name: University Inc.\nAddress: 2311 Summerfield Rd, San Diego, CA 92104\nEmployer's Federal EIN: 123456789\n\n----------------------------------------------------------------------------------------------------------------------------------\n\n**EMPLOYEE DETAILS:\nName: Marcial P. Sola\nAddress: 094 Oconn Passport: 148184631\nCity: San Diego State: CA ZIP: 92104\n\n----------------------------------------------------------------------------------------------------------------------------------\n\n*PLEASE RETAIN THIS STATEMENT FOR YOUR TAX RECORDS*\n\n----------------------------------------------------------------------------------------------------------------------------------\n\n*NOTE: This is a computer-generated statement. If you have any questions, please contact University Bank at (80",
+   "windows": [
+    {
+     "start": 0,
+     "end": 459,
+     "entities": {
+      "urchade/gliner_multi_pii-v1": [
+       {
+        "start": 223,
+        "end": 238,
+        "label": "person",
+        "score": 0.998046875
+       },
+       {
+        "start": 302,
+        "end": 312,
+        "label": "account number",
+        "score": 0.95166015625
+       }
+      ],
+      "numind/NuNER_Zero": [
+       {
+        "start": 148,
+        "end": 168,
+        "label": "street address",
+        "score": 0.912109375
+       },
+       {
+        "start": 169,
+        "end": 178,
+        "label": "city",
+        "score": 0.82958984375
+       },
+       {
+        "start": 180,
+        "end": 188,
+        "label": "postal code",
+        "score": 0.8623046875
+       },
+       {
+        "start": 223,
+        "end": 238,
+        "label": "person",
+        "score": 0.70703125
+       },
+       {
+        "start": 248,
+        "end": 273,
+        "label": "street address",
+        "score": 0.95263671875
+       },
+       {
+        "start": 275,
+        "end": 281,
+        "label": "street address",
+        "score": 0.8701171875
+       },
+       {
+        "start": 282,
+        "end": 287,
+        "label": "postal code",
+        "score": 0.82568359375
+       },
+       {
+        "start": 289,
+        "end": 292,
+        "label": "street address",
+        "score": 0.53759765625
+       },
+       {
+        "start": 302,
+        "end": 312,
+        "label": "account number",
+        "score": 0.98583984375
+       }
+      ]
+     }
+    },
+    {
+     "start": 397,
+     "end": 944,
+     "entities": {
+      "urchade/gliner_multi_pii-v1": [
+       {
+        "start": 178,
+        "end": 187,
+        "label": "date of birth",
+        "score": 0.5537109375
+       },
+       {
+        "start": 291,
+        "end": 300,
+        "label": "date of birth",
+        "score": 0.7177734375
+       }
+      ],
+      "numind/NuNER_Zero": []
+     }
+    },
+    {
+     "start": 894,
+     "end": 1396,
+     "entities": {
+      "urchade/gliner_multi_pii-v1": [
+       {
+        "start": 115,
+        "end": 134,
+        "label": "street address",
+        "score": 0.763671875
+       },
+       {
+        "start": 147,
+        "end": 149,
+        "label": "city",
+        "score": 0.53564453125
+       },
+       {
+        "start": 150,
+        "end": 155,
+        "label": "county",
+        "score": 0.64111328125
+       },
+       {
+        "start": 180,
+        "end": 189,
+        "label": "national id number",
+        "score": 0.60888671875
+       },
+       {
+        "start": 349,
+        "end": 364,
+        "label": "person",
+        "score": 0.99951171875
+       },
+       {
+        "start": 394,
+        "end": 403,
+        "label": "passport number",
+        "score": 0.9296875
+       },
+       {
+        "start": 410,
+        "end": 419,
+        "label": "city",
+        "score": 0.84033203125
+       },
+       {
+        "start": 427,
+        "end": 429,
+        "label": "city",
+        "score": 0.54833984375
+       },
+       {
+        "start": 435,
+        "end": 440,
+        "label": "county",
+        "score": 0.6376953125
+       }
+      ],
+      "numind/NuNER_Zero": [
+       {
+        "start": 115,
+        "end": 134,
+        "label": "street address",
+        "score": 0.984375
+       },
+       {
+        "start": 136,
+        "end": 145,
+        "label": "city",
+        "score": 0.96875
+       },
+       {
+        "start": 150,
+        "end": 155,
+        "label": "postal code",
+        "score": 0.85986328125
+       },
+       {
+        "start": 167,
+        "end": 178,
+        "label": "tax id number",
+        "score": 0.76025390625
+       },
+       {
+        "start": 180,
+        "end": 189,
+        "label": "tax id number",
+        "score": 0.6259765625
+       },
+       {
+        "start": 349,
+        "end": 364,
+        "label": "employee id",
+        "score": 0.91357421875
+       },
+       {
+        "start": 374,
+        "end": 383,
+        "label": "street address",
+        "score": 0.716796875
+       },
+       {
+        "start": 394,
+        "end": 403,
+        "label": "passport number",
+        "score": 0.96875
+       },
+       {
+        "start": 410,
+        "end": 419,
+        "label": "city",
+        "score": 0.97900390625
+       },
+       {
+        "start": 430,
+        "end": 433,
+        "label": "postal code",
+        "score": 0.509765625
+       },
+       {
+        "start": 435,
+        "end": 440,
+        "label": "postal code",
+        "score": 0.92529296875
+       }
+      ]
+     }
+    },
+    {
+     "start": 1346,
+     "end": 1764,
+     "entities": {
+      "urchade/gliner_multi_pii-v1": [],
+      "numind/NuNER_Zero": []
+     }
+    }
+   ],
+   "expected": [
+    {
+     "start": 148,
+     "end": 168,
+     "label": "street address",
+     "score": 0.912109375
+    },
+    {
+     "start": 169,
+     "end": 178,
+     "label": "city",
+     "score": 0.82958984375
+    },
+    {
+     "start": 180,
+     "end": 188,
+     "label": "postal code",
+     "score": 0.8623046875
+    },
+    {
+     "start": 223,
+     "end": 238,
+     "label": "person",
+     "score": 0.998046875
+    },
+    {
+     "start": 248,
+     "end": 273,
+     "label": "street address",
+     "score": 0.95263671875
+    },
+    {
+     "start": 275,
+     "end": 281,
+     "label": "street address",
+     "score": 0.8701171875
+    },
+    {
+     "start": 282,
+     "end": 287,
+     "label": "postal code",
+     "score": 0.82568359375
+    },
+    {
+     "start": 302,
+     "end": 312,
+     "label": "account number",
+     "score": 0.98583984375
+    },
+    {
+     "start": 688,
+     "end": 697,
+     "label": "date of birth",
+     "score": 0.7177734375
+    },
+    {
+     "start": 1009,
+     "end": 1028,
+     "label": "street address",
+     "score": 0.984375
+    },
+    {
+     "start": 1030,
+     "end": 1039,
+     "label": "city",
+     "score": 0.96875
+    },
+    {
+     "start": 1044,
+     "end": 1049,
+     "label": "county",
+     "score": 0.64111328125
+    },
+    {
+     "start": 1044,
+     "end": 1049,
+     "label": "postal code",
+     "score": 0.85986328125
+    },
+    {
+     "start": 1061,
+     "end": 1072,
+     "label": "tax id number",
+     "score": 0.76025390625
+    },
+    {
+     "start": 1074,
+     "end": 1083,
+     "label": "national id number",
+     "score": 0.60888671875
+    },
+    {
+     "start": 1074,
+     "end": 1083,
+     "label": "tax id number",
+     "score": 0.6259765625
+    },
+    {
+     "start": 1243,
+     "end": 1258,
+     "label": "person",
+     "score": 0.99951171875
+    },
+    {
+     "start": 1243,
+     "end": 1258,
+     "label": "employee id",
+     "score": 0.91357421875
+    },
+    {
+     "start": 1268,
+     "end": 1277,
+     "label": "street address",
+     "score": 0.716796875
+    },
+    {
+     "start": 1288,
+     "end": 1297,
+     "label": "passport number",
+     "score": 0.96875
+    },
+    {
+     "start": 1304,
+     "end": 1313,
+     "label": "city",
+     "score": 0.97900390625
+    },
+    {
+     "start": 1329,
+     "end": 1334,
+     "label": "county",
+     "score": 0.6376953125
+    },
+    {
+     "start": 1329,
+     "end": 1334,
+     "label": "postal code",
+     "score": 0.92529296875
+    }
+   ]
+  },
+  {
+   "index": 957,
+   "uid": "gretel-en-54927",
+   "text": "BAISETNO,101\nBBYMDA,20220301\nBBYMID,FVPN193",
+   "windows": [
+    {
+     "start": 0,
+     "end": 43,
+     "entities": {
+      "urchade/gliner_multi_pii-v1": [
+       {
+        "start": 0,
+        "end": 8,
+        "label": "url",
+        "score": 0.50048828125
+       }
+      ],
+      "numind/NuNER_Zero": []
+     }
+    }
+   ],
+   "expected": []
+  }
+ ]
+}

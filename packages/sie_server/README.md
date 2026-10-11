@@ -599,6 +599,45 @@ native runtime does not produce span confidence scores: response
 `data.confidence_scores_available` is false, and the HTTP API's existing
 `score=1.0` default denotes an unscored detection rather than a probability.
 
+### PII redaction with GLiNER PII and NuNER Zero
+
+`superlinked/pii-redact` serves `urchade/gliner_multi_pii-v1` and
+`numind/NuNER_Zero` as one extract model. It composes them as the PII redaction
+study in `examples/redact` does:
+
+- A document of more than 300 words, counted as GLiNER splits words, is read
+  as 300-word windows sharing 50 words.
+- Both models read every window with the request's labels. Spans scoring below
+  0.6 are dropped.
+- The two models' spans are unioned: one span per start, end and label, at the
+  higher score.
+- Every other whole-word, case-sensitive occurrence of a token of three or more
+  letters from a `person` span is returned as a `person` span too, unless it is
+  already inside a span. It scores as the best `person` span it came from.
+
+A request without `labels` uses the study's 36 personal-data types. Spans can
+overlap, so mask their union:
+
+```python
+import re
+
+from sie_sdk import SIEClient
+
+text = "Ann Lee wrote from ann.lee@example.com. Call Lee back."
+with SIEClient("http://localhost:8080") as client:
+    result = client.extract("superlinked/pii-redact", {"text": text})
+hidden = [False] * len(text)
+for e in result["entities"]:
+    hidden[e["start"] : e["end"]] = [True] * (e["end"] - e["start"])
+print(re.sub("\0+", "[REDACTED]", "".join("\0" if h else c for c, h in zip(text, hidden))))
+```
+
+A request may override `score_floor`, `window_words`, `window_overlap`,
+`propagate_label` (`null` turns name propagation off), `name_min_letters` and
+`default_labels` in `options`. Both models always run at their own defaults.
+Usage counts each model's input tokens for every window it reads, so a word
+two windows share is counted in both.
+
 ### ModernBERT CUDA graphs
 
 The ModernBERT flash-attention adapters, for dense embeddings
