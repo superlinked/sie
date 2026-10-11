@@ -251,14 +251,15 @@ class GLiNERUnionAdapter(BaseAdapter):
     def load(self, device: str) -> None:
         """Load every member onto ``device``.
 
-        If a member fails to load, the members already loaded are unloaded
-        before the error is raised, so a failed load holds no device memory.
+        If a member fails to load, it and the members loaded before it are
+        unloaded before the error is raised, so a failed load holds no device
+        memory. A member is unloaded even if it failed partway through loading.
         """
         loaded: list[GLiNERAdapter] = []
         try:
             for member in self._members:
-                member.load(device)
                 loaded.append(member)
+                member.load(device)
         except BaseException:
             for member in reversed(loaded):
                 member.unload()

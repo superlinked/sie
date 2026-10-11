@@ -261,7 +261,7 @@ def test_load_unload_and_footprint_cover_every_member() -> None:
         adapter.extract([Item(text="Ann Lee")], labels=LABELS)
 
 
-def test_a_failed_member_load_unloads_the_members_already_loaded() -> None:
+def test_a_failed_member_load_unloads_it_and_the_members_loaded_before_it() -> None:
     events: list[str] = []
 
     class Member:
@@ -282,7 +282,8 @@ def test_a_failed_member_load_unloads_the_members_already_loaded() -> None:
     with pytest.raises(MemoryError, match="c does not fit"):
         adapter.load("cuda:0")
 
-    assert events == ["load a", "load b", "unload b", "unload a"]
+    # The failed member is unloaded too: GLiNERAdapter may hold its model before the device transfer fails.
+    assert events == ["load a", "load b", "unload c", "unload b", "unload a"]
     with pytest.raises(RuntimeError, match="not loaded"):
         adapter.extract([Item(text="Ann Lee")], labels=LABELS)
 
