@@ -112,7 +112,7 @@ function parseNonnegativeMeterHeader(headers: Headers, name: string): number | u
  * `body` is the decoded response envelope, when the caller has one. The settled
  * charge is read from its `usage` block FIRST and falls back to the
  * `x-sie-credits-debited` header, which is the only source on a gateway that
- * predates in-body surfacing (#2434). The two always agree when both are
+ * predates in-body surfacing. The two always agree when both are
  * present; the body additionally names the rate book, which no header does.
  */
 export function parseRequestMetadata(
@@ -192,7 +192,7 @@ export function parseRequestMetadata(
 }
 
 /**
- * The settled charge from a response envelope's `usage` block (#2434).
+ * The settled charge from a response envelope's `usage` block.
  *
  * Shares `settledChargeFields`' validation so the metadata path and the result
  * parsers can never disagree about what counts as a publishable charge.

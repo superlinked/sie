@@ -453,7 +453,7 @@ LORA_LOADING_DEFAULT_DELAY_S = 1.0  # Default retry delay if no Retry-After head
 LORA_LOADING_ERROR_CODE = "LORA_LOADING"  # Error code from server
 
 # Model loading retry settings
-MODEL_LOADING_MAX_RETRIES = 60  # Max retries (60 * 5s = 5 min, matches provision timeout)
+MODEL_LOADING_MAX_RETRIES = 60  # Max retries (60 * 5s = 5 min)
 MODEL_LOADING_DEFAULT_DELAY_S = 5.0  # Default retry delay (model loads take longer than LoRA)
 MODEL_LOADING_ERROR_CODE = "MODEL_LOADING"  # Error code from server
 PROVISIONING_ERROR_CODE = "PROVISIONING"  # Gateway scale-from-zero / worker provisioning
@@ -1299,7 +1299,7 @@ def raise_if_model_load_failed(response: _HttpResponse, model: str | None = None
     Used by the SDK retry loops to short-circuit *before* checking the
     ``MODEL_LOADING`` retry budget. The server returns this on the very
     first request when it has a recorded terminal failure for the
-    model, so the caller should fail fast instead of retrying for 5
+    model, so the caller should fail fast instead of retrying for 15
     minutes.
 
     Args:

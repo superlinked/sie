@@ -1486,7 +1486,7 @@ class SIEClient:
             # Short-circuit terminal load failures BEFORE engaging the
             # MODEL_LOADING retry budget. The server emits 502
             # MODEL_LOAD_FAILED for permanent classes (gated repos,
-            # missing deps) — retrying would waste 5 minutes on a
+            # missing deps) — retrying would waste 15 minutes on a
             # known-bad configuration.
             raise_if_model_load_failed(response, model=model)
 
@@ -2100,7 +2100,7 @@ class SIEClient:
             gpu: GPU type to wait for (e.g., "l4", "a100-80gb").
             model: Optional model to use for warmup request. If provided, sends
                 a warmup encode request which may trigger model loading.
-            timeout_s: Maximum time to wait for capacity. Default: 300s (5 min).
+            timeout_s: Maximum time to wait for capacity. Default: 900s (15 min).
             poll_interval_s: How often to check capacity. Default: 5s.
 
         Returns:
