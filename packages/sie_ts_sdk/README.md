@@ -95,6 +95,8 @@ profile. `score` also takes an `instruction`. Each `encode` result names the
 ## Extraction
 
 ```typescript
+import { readFile } from "node:fs/promises";
+
 // Entities for the labels you pass
 const result = await client.extract(
   "urchade/gliner_multi-v2.1",
@@ -106,8 +108,9 @@ for (const entity of result.entities) {
 }
 
 // No options for models that take none: OCR, document parsing, speech to text
+const pngBytes = await readFile("page.png");
 const page = await client.extract("lightonai/LightOnOCR-2-1B", { images: [pngBytes] });
-console.log(page.data);
+console.log(page.entities[0]?.text); // the page as Markdown
 
 // Typed decisions: questions go in outputSchema, answers come back in data
 const decision = await client.extract(

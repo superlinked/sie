@@ -1015,8 +1015,13 @@ export class SIEClient {
         `Invalid baseUrl "${url}": must be an absolute http(s) URL with a host, e.g. "http://localhost:8080".`,
       );
     }
-    // Remove trailing slashes
-    this.baseUrl = url.replace(/\/+$/, "");
+    // Remove trailing slashes, without a regex: `/\/+$/` backtracks
+    // quadratically on a long run of slashes that is not at the end.
+    let end = url.length;
+    while (end > 0 && url.charCodeAt(end - 1) === 0x2f) {
+      end -= 1;
+    }
+    this.baseUrl = url.slice(0, end);
     // `timeoutMs` is the unit-encoded name; `timeout` is a deprecated alias
     // for the same MILLISECONDS value. `timeoutMs` wins if both are set.
     this.timeout = options.timeoutMs ?? options.timeout ?? DEFAULT_TIMEOUT;
@@ -1169,7 +1174,7 @@ export class SIEClient {
     const timing = timingFromWire(data.timing);
     for (const result of results) {
       if (typeof data.model === "string" && data.model) result.model = data.model;
-      if (timing !== undefined) result.timing = timing;
+      if (timing !== undefined) result.timing = { ...timing };
     }
     attachRequestMetadata(results, response.headers, data);
     // Guard the 1:1 input-to-output contract before any positional access
