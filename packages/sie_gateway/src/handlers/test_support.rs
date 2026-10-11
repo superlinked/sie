@@ -177,9 +177,19 @@ pub(crate) struct RecordingDispatcher {
     fallback_reasons: Mutex<Vec<Option<FallbackTrigger>>>,
     numerical_admissions: Mutex<Vec<Option<String>>>,
     on_model_load: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    provisioning_estimates: Mutex<HashMap<LaneKey, Duration>>,
 }
 
 impl RecordingDispatcher {
+    /// Estimate that the `(pool, machine_profile, bundle)` lane needs
+    /// `estimate` before it can accept work.
+    pub(crate) fn estimate_provisioning(&self, lane: (&str, &str, &str), estimate: Duration) {
+        self.provisioning_estimates
+            .lock()
+            .unwrap()
+            .insert(LaneKey::new(lane.0, lane.1, lane.2), estimate);
+    }
+
     /// Run `action` once, when the next load-only item is published.
     pub(crate) fn on_model_load(&self, action: Box<dyn FnOnce() + Send>) {
         *self.on_model_load.lock().unwrap() = Some(action);
@@ -409,6 +419,15 @@ impl WorkDispatcher for RecordingDispatcher {
     fn lane_provisioning(&self, lane: &LaneKey, _model: &str) -> bool {
         self.local_lane_cold.load(Ordering::SeqCst)
             && lane == &LaneKey::new(LOCAL_LANE.0, LOCAL_LANE.1, LOCAL_LANE.2)
+    }
+
+    fn provisioning_retry_after(&self, target: &PublishTarget) -> Option<Duration> {
+        assert!(matches!(target, PublishTarget::Pool { .. }));
+        self.provisioning_estimates
+            .lock()
+            .unwrap()
+            .get(&target.lane())
+            .copied()
     }
 
     fn pre_dispatch_backpressure(&self, lane: &LaneKey) -> Result<(), DispatchBackpressure> {

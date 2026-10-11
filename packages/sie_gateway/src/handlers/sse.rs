@@ -250,22 +250,35 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
         Err(e) => {
             // Pre-stream publish failure — surface as a regular JSON
             // error response (mirrors `build_streaming_error_response`
-            // for the `PublishFailed` arm).
+            // for the `Provisioning` and `PublishFailed` arms).
             let lower = e.to_lowercase();
-            let retry_after = if lower.contains("no consumers") {
+            if lower.contains("no consumers") {
                 telemetry::record_rejected_request(
                     state.demand_tracker.as_ref(),
                     &physical_lane,
                     "no_consumers",
                 );
-                Some(crate::handlers::proxy::PROVISIONING_RETRY_AFTER)
-            } else {
-                // Shared with the buffered and streaming paths rather than
-                // re-derived here: this arm used to match only "backpressure"
-                // and so missed the broker's own stream-full rejection, which
-                // means the same thing.
-                crate::handlers::proxy::record_publish_failure(state, &physical_lane, &lower)
-            };
+                let retry_after = crate::handlers::proxy::provisioning_retry_after(
+                    state,
+                    &[crate::handlers::proxy::lane_wake_target(
+                        &pool,
+                        &gpu,
+                        &bundle,
+                        &dispatch_model,
+                    )],
+                );
+                return crate::handlers::proxy::provisioning_response(
+                    &model,
+                    retry_after,
+                    crate::handlers::proxy::ProvisioningSurface::OpenAiCompat,
+                );
+            }
+            // Shared with the buffered and streaming paths rather than
+            // re-derived here: this arm used to match only "backpressure"
+            // and so missed the broker's own stream-full rejection, which
+            // means the same thing.
+            let retry_after =
+                crate::handlers::proxy::record_publish_failure(state, &physical_lane, &lower);
             return crate::handlers::proxy::build_streaming_publish_failed_for_sse(&e, retry_after);
         }
     };

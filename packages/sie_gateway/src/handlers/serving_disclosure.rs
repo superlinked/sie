@@ -4733,6 +4733,205 @@ mod tests {
         assert_eq!(response.headers()["x-sie-fallback-error"], "QUEUE_FULL");
     }
 
+    fn starting_message(model: &str) -> String {
+        format!(
+            "Capacity for model '{model}' is starting. Retry after the number of seconds in Retry-After."
+        )
+    }
+
+    async fn error_message(response: Response) -> serde_json::Value {
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"]["message"].clone()
+    }
+
+    #[tokio::test]
+    async fn a_cold_lane_answers_provisioning_with_its_transport_estimate() {
+        let gateway = transport_cold_gateway(None).await;
+        gateway.dispatcher.refuse_model_loads();
+        gateway
+            .dispatcher
+            .estimate_provisioning(LOCAL_LANE, Duration::from_millis(659_200));
+
+        let extraction = extract(&gateway, extraction_request(false, json!({}))).await;
+        let chat = buffered_surface(&gateway, "chat", json!({})).await;
+        for (model, response) in [("acme/extract", extraction), ("acme/chat", chat)] {
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{model}"
+            );
+            assert_eq!(response.headers()["retry-after"], "660", "{model}");
+            assert_eq!(response.headers()["x-sie-error-code"], "PROVISIONING");
+            assert!(!response.headers().contains_key("x-sie-fallback-reason"));
+            assert_eq!(error_message(response).await, starting_message(model));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_remote_lane_still_starting_restores_the_local_lane_estimate() {
+        let gateway = transport_cold_gateway(None).await;
+        gateway.dispatcher.report_remote_lane_starting();
+        gateway
+            .dispatcher
+            .estimate_provisioning(LOCAL_LANE, Duration::from_secs(680));
+        gateway
+            .dispatcher
+            .estimate_provisioning(REMOTE_LANE, Duration::from_secs(30));
+
+        let extraction = extract(&gateway, extraction_request(false, json!({}))).await;
+        let chat = buffered_surface(&gateway, "chat", json!({})).await;
+        for (model, response) in [("acme/extract", extraction), ("acme/chat", chat)] {
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{model}"
+            );
+            assert_eq!(response.headers()["retry-after"], "680", "{model}");
+            assert_eq!(response.headers()["x-sie-error-code"], "PROVISIONING");
+            assert_eq!(response.headers()["x-sie-fallback-error"], "QUEUE_FULL");
+            assert_eq!(stamped(&response), (Some("local"), None), "{model}");
+            assert_eq!(error_message(response).await, starting_message(model));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_restored_cold_refusal_keeps_the_estimate_it_was_built_with() {
+        let generation = format!(
+            "{HYBRID_GENERATE_MODEL}\nrouting:\n  policy: fallback\n  fallback_profile: remote\n"
+        );
+        for (surface, stream) in [
+            ("native", false),
+            ("chat", false),
+            ("completions", false),
+            ("responses", false),
+            ("native", true),
+            ("chat", true),
+            ("completions", true),
+        ] {
+            let case = format!("{surface} stream={stream}");
+            let gateway = TestGateway::new(&[&generation]).await;
+            gateway
+                .add_verified_worker("remote-1", REMOTE_LANE, &[])
+                .await;
+            gateway
+                .dispatcher
+                .refuse_remote_work("RESOURCE_EXHAUSTED", Some(7));
+            gateway
+                .dispatcher
+                .estimate_provisioning(LOCAL_LANE, Duration::from_secs(680));
+            gateway
+                .dispatcher
+                .estimate_provisioning(REMOTE_LANE, Duration::from_secs(30));
+
+            let response = if stream {
+                streaming_surface(&gateway, surface, json!({})).await
+            } else {
+                buffered_surface(&gateway, surface, json!({})).await
+            };
+
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{case}");
+            assert_eq!(response.headers()["retry-after"], "680", "{case}");
+            assert_eq!(stamped(&response), (Some("local"), None), "{case}");
+            assert_eq!(
+                response.headers()["x-sie-fallback-reason"],
+                "provisioning",
+                "{case}"
+            );
+            assert_eq!(
+                response.headers()["x-sie-fallback-error"],
+                "RESOURCE_EXHAUSTED",
+                "{case}"
+            );
+            assert_eq!(
+                error_message(response).await,
+                starting_message("acme/chat"),
+                "{case}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_publish_refused_while_its_lane_starts_answers_with_that_lane_estimate() {
+        let gateway = gateway().await;
+        gateway.dispatcher.report_remote_lane_starting();
+        gateway
+            .dispatcher
+            .estimate_provisioning(REMOTE_LANE, Duration::from_secs(95));
+        gateway
+            .dispatcher
+            .estimate_provisioning(LOCAL_LANE, Duration::from_secs(680));
+        let state = || State(Arc::clone(&gateway.state));
+        let messages = json!([{"role": "user", "content": "hello"}]);
+
+        let responses = [
+            (
+                "encode",
+                "acme/remote",
+                proxy_request(
+                    state(),
+                    json_request(
+                        "/v1/encode/acme/remote",
+                        json!({"items": [{"text": "hello"}]}),
+                    ),
+                    "encode",
+                )
+                .await,
+            ),
+            (
+                "embeddings",
+                "acme/remote",
+                proxy_openai_embeddings(
+                    state(),
+                    json_request(
+                        "/v1/embeddings",
+                        json!({"model": "acme/remote", "input": "hello"}),
+                    ),
+                )
+                .await,
+            ),
+            (
+                "chat",
+                "acme/chat:remote",
+                proxy_chat(
+                    state(),
+                    json_request(
+                        "/v1/chat/completions",
+                        json!({"model": "acme/chat:remote", "messages": messages}),
+                    ),
+                )
+                .await,
+            ),
+            (
+                "chat stream",
+                "acme/chat:remote",
+                proxy_chat(
+                    state(),
+                    json_request(
+                        "/v1/chat/completions",
+                        json!({"model": "acme/chat:remote", "messages": messages, "stream": true}),
+                    ),
+                )
+                .await,
+            ),
+        ];
+        for (case, model, response) in responses {
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{case}");
+            assert_eq!(response.headers()["retry-after"], "95", "{case}");
+            assert_eq!(
+                response.headers()["x-sie-error-code"],
+                "PROVISIONING",
+                "{case}"
+            );
+            assert_eq!(
+                error_message(response).await,
+                starting_message(model),
+                "{case}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_cold_lane_bridge_that_admission_refuses_dispatches_locally_without_a_wake() {
         let config = format!("{HYBRID_ENCODE_MODEL}{NUMERICAL_FALLBACK}");

@@ -312,7 +312,8 @@ describe("handleError (gateway / FastAPI bodies)", () => {
       JSON.stringify({
         error: {
           code: "PROVISIONING",
-          message: "No worker available for GPU type 'l4'. Provisioning in progress.",
+          message:
+            "Capacity for model 'BAAI/bge-m3' is starting. Retry after the number of seconds in Retry-After.",
         },
       }),
       {
@@ -322,7 +323,8 @@ describe("handleError (gateway / FastAPI bodies)", () => {
     );
     await expect(handleError(res, "l4")).rejects.toMatchObject({
       name: "ProvisioningError",
-      message: "No worker available for GPU type 'l4'. Provisioning in progress.",
+      message:
+        "Capacity for model 'BAAI/bge-m3' is starting. Retry after the number of seconds in Retry-After.",
       gpu: "l4",
       retryAfter: 5000,
     });
