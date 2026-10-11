@@ -146,17 +146,33 @@ def validate_base_url(base_url: str) -> None:
 
 SIE_BASE_URL_ENV = "SIE_BASE_URL"
 SIE_API_KEY_ENV = "SIE_API_KEY"
+# SIE Serverless: the base URL of a client given an API key but no base URL,
+# and the origin ``SIE_API_KEY`` is scoped to while ``SIE_BASE_URL`` is unset.
+SIE_SERVERLESS_BASE_URL = "https://api.superlinked.com"
 
 
-def resolve_base_url(base_url: str | None) -> str:
-    """Return ``base_url``, or the ``SIE_BASE_URL`` environment variable when it is omitted."""
+def resolve_base_url(base_url: str | None, api_key: str | None = None) -> str:
+    """Return the base URL a client connects to.
+
+    Precedence: ``base_url``, then the ``SIE_BASE_URL`` environment variable,
+    then SIE Serverless when an API key is available: a non-empty ``api_key``,
+    or ``SIE_API_KEY`` when ``api_key`` is omitted. Without any of these,
+    construction fails instead of guessing a local server, so a deployment
+    missing its key reports that at once rather than retrying connections.
+    """
     if base_url is not None:
         return base_url
     env_base_url = os.environ.get(SIE_BASE_URL_ENV, "").strip()
-    if not env_base_url:
-        msg = f"base_url is required: pass it explicitly or set {SIE_BASE_URL_ENV}"
-        raise ValueError(msg)
-    return env_base_url
+    if env_base_url:
+        return env_base_url
+    has_api_key = bool(api_key) if api_key is not None else bool(os.environ.get(SIE_API_KEY_ENV, "").strip())
+    if has_api_key:
+        return SIE_SERVERLESS_BASE_URL
+    msg = (
+        f"base_url is required: pass it explicitly, set {SIE_BASE_URL_ENV}, "
+        f"or set {SIE_API_KEY_ENV} to use SIE Serverless ({SIE_SERVERLESS_BASE_URL})"
+    )
+    raise ValueError(msg)
 
 
 def _url_origin(url: str) -> tuple[str, str, int] | None:
@@ -176,21 +192,22 @@ def resolve_api_key(api_key: str | None, base_url: str, control_plane_url: str |
 
     An explicit value, including an empty string, always wins, so a caller can
     opt out of the environment credential. The environment key is scoped to
-    the origin named by ``SIE_BASE_URL``: a client built for any other URL
-    does not select it, and a client whose ``control_plane_url`` names another
-    origin must pass its key explicitly, because connection requests reuse the
+    the origin named by ``SIE_BASE_URL``, or to SIE Serverless while
+    ``SIE_BASE_URL`` is unset: a client built for any other URL does not
+    select it, and a client whose ``control_plane_url`` names another origin
+    must pass its key explicitly, because connection requests reuse the
     client's key.
     """
     if api_key is not None:
         return api_key
     env_api_key = os.environ.get(SIE_API_KEY_ENV, "").strip()
-    env_origin = _url_origin(os.environ.get(SIE_BASE_URL_ENV, "").strip())
+    env_origin = _url_origin(os.environ.get(SIE_BASE_URL_ENV, "").strip() or SIE_SERVERLESS_BASE_URL)
     if not env_api_key or env_origin is None or _url_origin(base_url) != env_origin:
         return None
     if control_plane_url and _url_origin(control_plane_url) != env_origin:
         msg = (
-            f"{SIE_API_KEY_ENV} is scoped to the {SIE_BASE_URL_ENV} origin and is not sent to "
-            "control_plane_url on another origin; pass api_key explicitly"
+            f"{SIE_API_KEY_ENV} is scoped to the {SIE_BASE_URL_ENV} origin (SIE Serverless when unset) "
+            "and is not sent to control_plane_url on another origin; pass api_key explicitly"
         )
         raise ValueError(msg)
     return env_api_key

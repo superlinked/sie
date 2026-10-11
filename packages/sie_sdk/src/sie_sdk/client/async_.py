@@ -426,14 +426,18 @@ class SIEAsyncClient:
 
     Args:
         base_url: Base URL of the SIE server (e.g., "http://localhost:8080").
-            Defaults to the ``SIE_BASE_URL`` environment variable when omitted.
+            When omitted, the ``SIE_BASE_URL`` environment variable is used;
+            without it, SIE Serverless (``https://api.superlinked.com``) is
+            used when an API key is available (``api_key`` or ``SIE_API_KEY``).
+            With neither a base URL nor a key, construction raises ``ValueError``.
         timeout_s: One per-attempt limit in seconds for both connecting and
             waiting for response data. Sets ``connect_timeout_s`` and
             ``read_timeout_s`` together; either of those overrides it.
         api_key: Optional API key for authentication (sent as Bearer token).
             When omitted, the ``SIE_API_KEY`` environment variable is used only if
             ``base_url`` has the same origin as ``SIE_BASE_URL`` (including when
-            ``base_url`` itself comes from ``SIE_BASE_URL``); with a
+            ``base_url`` itself comes from ``SIE_BASE_URL``), or the SIE
+            Serverless origin while ``SIE_BASE_URL`` is unset; with a
             ``control_plane_url`` on another origin the key must be passed
             explicitly. Pass ``""`` to send no credential.
         gpu: GPU type for requests (e.g., "l4", "a100-80gb"). Can be overridden per-call.
@@ -500,7 +504,7 @@ class SIEAsyncClient:
         read_timeout_s: float | None = None,
         remote: Literal["forbid"] | None = None,
     ) -> None:
-        base_url = resolve_base_url(base_url)
+        base_url = resolve_base_url(base_url, api_key)
         api_key = resolve_api_key(api_key, base_url, control_plane_url)
         # Normalize base_url (remove trailing slash)
         validate_base_url(base_url)

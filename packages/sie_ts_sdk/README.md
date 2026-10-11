@@ -14,23 +14,36 @@ npm install @superlinked/sie-sdk
 ```typescript
 import { SIEClient } from "@superlinked/sie-sdk";
 
-// Local server
-const client = new SIEClient("http://localhost:8080");
+// SIE Serverless (https://api.superlinked.com). Server-side only, see below.
+const client = new SIEClient(); // reads SIE_API_KEY
 
-// Managed SIE gateway: pass the gateway URL and your API key
+// Local server
+const local = new SIEClient("http://localhost:8080");
+
+// Another SIE gateway: pass its URL and your API key
 // (sent as a Bearer token). Server-side code only — see below.
 const managed = new SIEClient("https://your-gateway.example.com", {
   apiKey: "YOUR_API_KEY",
 });
 ```
 
-In Node.js, an omitted `baseUrl` falls back to `SIE_BASE_URL`. An omitted
-`apiKey` selects `SIE_API_KEY` only for a base URL with the same origin as
-`SIE_BASE_URL`; a client for any other URL does not pick it up. An explicit
-value always wins; `apiKey: ""` sends no credential. The `connections`
-namespace reuses the client's key on requests to an explicitly configured
-`controlPlaneUrl`, so a client whose `controlPlaneUrl` is on another origin
-must pass `apiKey` explicitly rather than rely on `SIE_API_KEY`.
+The client takes its base URL from `baseUrl`, then `SIE_BASE_URL` (in
+Node.js), then SIE Serverless when an API key is available (`apiKey`, or
+`SIE_API_KEY` when `apiKey` is omitted), so
+`new SIEClient(undefined, { apiKey })` also targets SIE Serverless. With none
+of these it throws a `TypeError`; it does not assume a local server. Keys
+issued for the EU region use `https://eu.api.superlinked.com`; set
+`SIE_BASE_URL` to it. Set `SIE_BASE_URL` alongside a key for your own gateway
+too, or `new SIEClient()` sends that key to SIE Serverless.
+
+An omitted `apiKey` selects `SIE_API_KEY` only for a base URL with the same
+origin as `SIE_BASE_URL`, or as SIE Serverless while `SIE_BASE_URL` is unset;
+a client for any other URL, such as `http://localhost:8080`, does not pick it
+up. An explicit value always wins; `apiKey: ""` sends no credential and does
+not select SIE Serverless. The `connections` namespace reuses the client's key
+on requests to an explicitly configured `controlPlaneUrl`, so a client whose
+`controlPlaneUrl` is on another origin must pass `apiKey` explicitly rather
+than rely on `SIE_API_KEY`.
 
 > **Warning:** only pass `apiKey` in server-side code. Shipping it in a
 > browser bundle exposes the bearer key to anyone who loads the page.

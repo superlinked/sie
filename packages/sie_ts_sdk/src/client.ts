@@ -342,6 +342,11 @@ function sleep(ms: number): Promise<void> {
 
 const SIE_BASE_URL_ENV = "SIE_BASE_URL";
 const SIE_API_KEY_ENV = "SIE_API_KEY";
+/**
+ * SIE Serverless: the base URL of a client given an API key but no base URL,
+ * and the origin `SIE_API_KEY` is scoped to while `SIE_BASE_URL` is unset.
+ */
+const SIE_SERVERLESS_BASE_URL = "https://api.superlinked.com";
 
 /**
  * Read a non-blank environment variable. Undefined outside Node-like runtimes
@@ -367,19 +372,44 @@ function urlOrigin(url: string): string | undefined {
 }
 
 /**
- * `SIE_API_KEY`, scoped to the origin named by `SIE_BASE_URL`. Connection
- * requests reuse the client's key, so a control-plane URL on another origin
- * requires an explicit key.
+ * The base URL a client connects to: `baseUrl`, then `SIE_BASE_URL`, then SIE
+ * Serverless when an API key is available (a non-empty `apiKey`, or
+ * `SIE_API_KEY` when `apiKey` is omitted). Without any of these, construction
+ * fails instead of guessing a local server, so a deployment missing its key
+ * reports that at once rather than retrying connections.
+ */
+function resolveBaseUrl(baseUrl: string | undefined, apiKey: string | undefined): string {
+  if (baseUrl !== undefined) {
+    return baseUrl;
+  }
+  const envBaseUrl = readEnv(SIE_BASE_URL_ENV);
+  if (envBaseUrl !== undefined) {
+    return envBaseUrl;
+  }
+  const hasApiKey = apiKey !== undefined ? apiKey !== "" : readEnv(SIE_API_KEY_ENV) !== undefined;
+  if (hasApiKey) {
+    return SIE_SERVERLESS_BASE_URL;
+  }
+  throw new TypeError(
+    `baseUrl is required: pass it explicitly, set ${SIE_BASE_URL_ENV}, or set ${SIE_API_KEY_ENV} to use SIE Serverless (${SIE_SERVERLESS_BASE_URL}).`,
+  );
+}
+
+/**
+ * `SIE_API_KEY`, scoped to the origin named by `SIE_BASE_URL`, or to SIE
+ * Serverless while `SIE_BASE_URL` is unset. Connection requests reuse the
+ * client's key, so a control-plane URL on another origin requires an explicit
+ * key.
  */
 function envApiKeyFor(baseUrl: string, controlPlaneUrl: string | undefined): string | undefined {
   const apiKey = readEnv(SIE_API_KEY_ENV);
-  const envOrigin = urlOrigin(readEnv(SIE_BASE_URL_ENV) ?? "");
+  const envOrigin = urlOrigin(readEnv(SIE_BASE_URL_ENV) ?? SIE_SERVERLESS_BASE_URL);
   if (!apiKey || envOrigin === undefined || urlOrigin(baseUrl) !== envOrigin) {
     return undefined;
   }
   if (controlPlaneUrl && urlOrigin(controlPlaneUrl) !== envOrigin) {
     throw new TypeError(
-      `${SIE_API_KEY_ENV} is scoped to the ${SIE_BASE_URL_ENV} origin and is not sent to controlPlaneUrl on another origin; pass apiKey explicitly.`,
+      `${SIE_API_KEY_ENV} is scoped to the ${SIE_BASE_URL_ENV} origin (SIE Serverless when unset) and is not sent to controlPlaneUrl on another origin; pass apiKey explicitly.`,
     );
   }
   return apiKey;
@@ -911,14 +941,14 @@ export class SIEClient {
    * Create a new SIE client.
    *
    * @param baseUrl - Base URL of the SIE server (e.g., "http://localhost:8080").
-   *   Defaults to the `SIE_BASE_URL` environment variable when omitted.
+   *   When omitted, the `SIE_BASE_URL` environment variable is used; without
+   *   it, SIE Serverless (`https://api.superlinked.com`) is used when an API
+   *   key is available (`options.apiKey` or `SIE_API_KEY`). With neither a
+   *   base URL nor a key, construction throws a `TypeError`.
    * @param options - Client options
    */
   constructor(baseUrl?: string, options: SIEClientOptions = {}) {
-    const url = baseUrl ?? readEnv(SIE_BASE_URL_ENV);
-    if (url === undefined) {
-      throw new TypeError(`baseUrl is required: pass it explicitly or set ${SIE_BASE_URL_ENV}.`);
-    }
+    const url = resolveBaseUrl(baseUrl, options.apiKey);
     // Validate eagerly: a scheme-less baseUrl ("localhost:8080") would
     // otherwise only surface at request time as a fetch `TypeError`.
     let parsed: URL | undefined;

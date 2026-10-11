@@ -250,30 +250,44 @@ Private reasoning is hidden on both input surfaces. If it consumes the entire
 generation budget without usable output, the request fails with
 `empty_model_output`.
 
-## Connecting to a managed SIE platform
+## Connecting to SIE Serverless or a managed gateway
 
-The examples above target a local server. For a managed SIE gateway,
-pass the gateway URL as `base_url` and your API key (sent as a Bearer
-token):
+The examples above target a local server. Given an API key and no base URL,
+the client connects to SIE Serverless at `https://api.superlinked.com`:
 
 ```python
 from sie_sdk import SIEClient
 
+client = SIEClient()  # reads SIE_API_KEY
+```
+
+`SIEClient(api_key="sk-sie-...")` does the same with an explicit key. Keys
+issued for the EU region use `https://eu.api.superlinked.com`; set
+`SIE_BASE_URL` to it. Set `SIE_BASE_URL` alongside a key for your own gateway
+too, or `SIEClient()` sends that key to SIE Serverless. For another SIE
+gateway, pass its URL as `base_url` and your API key (sent as a Bearer token):
+
+```python
 client = SIEClient(
     "https://your-gateway.example.com",
     api_key="YOUR_API_KEY",
 )
 ```
 
-When `base_url` is omitted, the client reads `SIE_BASE_URL`. When `api_key` is
-omitted, it selects `SIE_API_KEY` only for a base URL with the same origin as
-`SIE_BASE_URL`; a client for any other URL does not pick it up. Set both
-variables to let code and integrations that construct a client without
-credentials use a gateway with token auth. An explicit argument always wins;
-`api_key=""` sends no credential. The `connections` namespace reuses the
-client's key on requests to an explicitly configured `control_plane_url`, so a
-client whose `control_plane_url` is on another origin must pass `api_key`
-explicitly rather than rely on `SIE_API_KEY`.
+The client takes its base URL from `base_url`, then `SIE_BASE_URL`, then SIE
+Serverless when an API key is available (`api_key`, or `SIE_API_KEY` when
+`api_key` is omitted). With none of these it raises `ValueError`; it does not
+assume a local server, so pass `"http://localhost:8080"` or set `SIE_BASE_URL`
+for one. When `api_key` is omitted, the client selects `SIE_API_KEY` only for a
+base URL with the same origin as `SIE_BASE_URL`, or as SIE Serverless while
+`SIE_BASE_URL` is unset; a client for any other URL, such as
+`http://localhost:8080`, does not pick it up. Set both variables to let code
+and integrations that construct a client without credentials use a gateway
+with token auth. An explicit argument always wins; `api_key=""` sends no
+credential and does not select SIE Serverless. The `connections` namespace
+reuses the client's key on requests to an explicitly configured
+`control_plane_url`, so a client whose `control_plane_url` is on another
+origin must pass `api_key` explicitly rather than rely on `SIE_API_KEY`.
 
 ## Generation execution evidence
 
