@@ -88,6 +88,10 @@ profiles:
       loadtime:
         mem_fraction_static: 0.85
         served_model_name: Qwen/Qwen3Guard-Gen-4B
+        # Same streaming cadence as the default profile.
+        extra_launch_args:
+          - --stream-interval
+          - "16"
       runtime:
         first_chunk_timeout_s: 30
         inter_chunk_timeout_s: 10
