@@ -261,6 +261,32 @@ def test_load_unload_and_footprint_cover_every_member() -> None:
         adapter.extract([Item(text="Ann Lee")], labels=LABELS)
 
 
+def test_a_failed_member_load_unloads_the_members_already_loaded() -> None:
+    events: list[str] = []
+
+    class Member:
+        def __init__(self, name: str, *, fails: bool = False) -> None:
+            self.name, self.fails = name, fails
+
+        def load(self, device: str) -> None:
+            if self.fails:
+                raise MemoryError(f"{self.name} does not fit on {device}")
+            events.append(f"load {self.name}")
+
+        def unload(self) -> None:
+            events.append(f"unload {self.name}")
+
+    adapter = GLiNERUnionAdapter(FIRST, members=[{"model": SECOND, "revision": NUNER_REVISION}])
+    adapter._members = cast("list[Any]", [Member("a"), Member("b"), Member("c", fails=True)])
+
+    with pytest.raises(MemoryError, match="c does not fit"):
+        adapter.load("cuda:0")
+
+    assert events == ["load a", "load b", "unload b", "unload a"]
+    with pytest.raises(RuntimeError, match="not loaded"):
+        adapter.extract([Item(text="Ann Lee")], labels=LABELS)
+
+
 def test_pii_redact_is_the_studied_composition() -> None:
     config = load_model_configs(MODELS)["superlinked/pii-redact"]
     profile = config.resolve_profile("default")
