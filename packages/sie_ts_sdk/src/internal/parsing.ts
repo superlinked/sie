@@ -630,7 +630,7 @@ interface WireDetectedObject {
 
 interface WireExtractResult {
   id?: string;
-  entities: WireEntity[];
+  entities?: WireEntity[];
   relations?: WireRelation[];
   classifications?: WireClassification[];
   objects?: WireDetectedObject[];
@@ -856,7 +856,7 @@ function parseExtractItemError(data: unknown): ExtractItemError | undefined {
 export function parseExtractResult(data: WireExtractResult): ExtractResult {
   return {
     id: data.id,
-    entities: data.entities.map(parseEntity),
+    entities: (data.entities ?? []).map(parseEntity),
     relations: (data.relations ?? []).map(
       (r: WireRelation): Relation => ({
         head: r.head,

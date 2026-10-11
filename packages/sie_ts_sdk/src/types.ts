@@ -199,6 +199,8 @@ export interface RequestMetadata {
  * depending on what was requested via outputTypes.
  */
 export interface EncodeResult {
+  /** Model identity returned by the server */
+  model?: string;
   /** Item ID (echoed from request if provided) */
   id?: string;
   /** Dense embedding vector, shape [dims] */
@@ -555,6 +557,8 @@ export interface ExtractItemError {
  * Result of extraction for a single item.
  */
 export interface ExtractResult {
+  /** Model identity returned by the server */
+  model?: string;
   /** Item ID (echoed from request if provided) */
   id?: string;
   /** List of extracted entities */
@@ -1057,6 +1061,13 @@ export interface EncodeOptions {
   isQuery?: boolean;
   /** Output dtype for quantization */
   outputDtype?: DType;
+  /**
+   * Runtime options forwarded to the server as `params.options`: `profile` to
+   * select a named model profile, or adapter options such as `muvera`, `smve`
+   * or `normalize`. `isQuery` wins over an `is_query` entry here. This is the
+   * Python SDK's `options` keyword argument.
+   */
+  adapterOptions?: Record<string, unknown>;
   /** GPU type for this request (overrides client default) */
   gpu?: string;
   /** Whether to wait for capacity (overrides client default) */
@@ -1067,6 +1078,14 @@ export interface EncodeOptions {
  * Options for score operation.
  */
 export interface ScoreOptions {
+  /** Instruction for instruction-tuned rerankers */
+  instruction?: string;
+  /**
+   * Runtime options forwarded to the server as `options`, such as `profile`
+   * to select a named model profile. This is the Python SDK's `options`
+   * keyword argument.
+   */
+  adapterOptions?: Record<string, unknown>;
   /** GPU type for this request */
   gpu?: string;
   /** Whether to wait for capacity */
@@ -1307,7 +1326,7 @@ export type ChatFinishReason = "stop" | "length" | "tool_calls" | "content_filte
  * The gateway honours: `model`, `messages`, `max_tokens` /
  * `max_completion_tokens`, `temperature`, `top_p`, `top_k`, `stop`, `stream`,
  * `stream_options`, `tools`, `tool_choice`, `parallel_tool_calls`,
- * `response_format`, `frequency_penalty`, `presence_penalty` (each in
+ * `response_format`, `schema_in_prompt`, `frequency_penalty`, `presence_penalty` (each in
  * `[-2, 2]`), `repetition_penalty`, `n`, `best_of`, `logprobs`,
  * `top_logprobs`, `logit_bias`, `seed`, `user`, `safety_identifier`,
  * `lora_adapter`, `routing_key`, and `prompt_cache_key`. Unknown fields
@@ -1342,6 +1361,12 @@ export interface ChatCompletionRequest {
   /** OpenAI parallel-tool-calls toggle (default `true`). */
   parallel_tool_calls?: boolean;
   response_format?: ResponseFormat;
+  /**
+   * SIE extension. A `json_schema` response format constrains decoding and is
+   * also shown to the model. `false` leaves the prompt as sent; the grammar
+   * still applies. Absent, the serving profile decides (default on).
+   */
+  schema_in_prompt?: boolean;
   /** Accepted in the OpenAI range [-2, 2]; out-of-range values are rejected. */
   frequency_penalty?: number;
   presence_penalty?: number;
@@ -1585,20 +1610,30 @@ export interface GenerateChunk {
  * Options for extract operation.
  */
 export interface ExtractOptions {
-  /** Entity labels to extract (e.g., ["person", "organization"]) */
-  labels: string[];
-  /** Minimum confidence threshold (0-1) */
+  /**
+   * Labels to extract or classify against (e.g., ["person", "organization"]).
+   * Omit for models that take none, such as OCR, document parsing, speech to
+   * text, and typed-decision models driven by `outputSchema`.
+   */
+  labels?: string[];
+  /** JSON schema, or a typed-decision question mapping, for structured output */
+  outputSchema?: Record<string, unknown>;
+  /** Task instruction for models trained to follow one */
+  instruction?: string;
+  /**
+   * Minimum confidence (0-1), sent as the `threshold` runtime option in
+   * `params.options`. Wins over a `threshold` entry in `adapterOptions`.
+   */
   threshold?: number;
   /** GPU type for this request */
   gpu?: string;
   /** Whether to wait for capacity */
   waitForCapacity?: boolean;
   /**
-   * Adapter-specific runtime options forwarded to the server as
-   * `params.options`. Used for adapter knobs that aren't part of the
-   * core extract API — e.g. `{ overflow_policy: "error" }` for
-   * gliclass token-budget control. Mirrors the Python SDK's `options`
-   * keyword argument.
+   * Runtime options forwarded to the server as `params.options`: `profile`
+   * to select a named model profile, or adapter options such as
+   * `{ overflow_policy: "error" }` for gliclass token-budget control. This is
+   * the Python SDK's `options` keyword argument.
    */
   adapterOptions?: Record<string, unknown>;
 }

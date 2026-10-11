@@ -41,7 +41,7 @@ import {
   SIEStreamError,
   ServerError,
 } from "./errors.js";
-import { toImageWireFormat } from "./images.js";
+import { detectImageFormat, toImageBytes } from "./images.js";
 import type { ImageInput, ImageWireFormat } from "./images.js";
 import {
   DEFAULT_JOB_WAIT_POLL,
@@ -148,6 +148,7 @@ import type {
   ScoreResult,
   StatusMessage,
   StreamGenerateOptions,
+  TimingInfo,
   WireModelInfo,
 } from "./types.js";
 import { SDK_VERSION } from "./version.js";
@@ -602,11 +603,18 @@ function isImageWireFormat(image: ImageInput | ImageWireFormat): image is ImageW
   return typeof image === "object" && image !== null && "data" in image;
 }
 
+/**
+ * Wrap image bytes with the format their signature names, as the Python SDK
+ * does. Bytes with an unrecognized signature keep the historical `jpeg` label;
+ * the server reads the label as a hint and inspects the bytes itself.
+ */
 async function imageForWire(image: ImageInput | ImageWireFormat): Promise<ImageWireFormat> {
   if (isImageWireFormat(image)) {
     return image;
   }
-  return toImageWireFormat(image);
+  const data = await toImageBytes(image);
+  const detected = detectImageFormat(data);
+  return { data, format: detected === "unknown" ? "jpeg" : detected };
 }
 
 function imageBytesToBase64(data: Uint8Array): string {
@@ -862,6 +870,40 @@ function requireVisibleManualRedirect(response: Response): void {
   }
 }
 
+/**
+ * `params.options` for a native primitive: the caller's runtime options with
+ * the typed fields laid over them, or `undefined` when neither is set so the
+ * member stays off the wire.
+ */
+function runtimeOptions(
+  adapterOptions: Record<string, unknown> | undefined,
+  typed: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const set = Object.fromEntries(Object.entries(typed).filter(([, value]) => value !== undefined));
+  if (adapterOptions === undefined && Object.keys(set).length === 0) {
+    return undefined;
+  }
+  return { ...adapterOptions, ...set };
+}
+
+/** The response-level timing block, in the camelCase `TimingInfo` shape. */
+function timingFromWire(timing: unknown): TimingInfo | undefined {
+  if (typeof timing !== "object" || timing === null || Array.isArray(timing)) {
+    return undefined;
+  }
+  const wire = timing as Record<string, unknown>;
+  const ms = (key: string): number | undefined => {
+    const value = wire[key];
+    return typeof value === "number" ? value : undefined;
+  };
+  return {
+    totalMs: ms("total_ms"),
+    queueMs: ms("queue_ms"),
+    tokenizationMs: ms("tokenization_ms"),
+    inferenceMs: ms("inference_ms"),
+  };
+}
+
 /** SIE-native chunk variant — see `sse.rs::build_generate_chunk_event`. */
 function extractGenerateChunkError(chunk: GenerateChunk): SIEStreamError | null {
   if (!chunk.error) return null;
@@ -973,8 +1015,8 @@ export class SIEClient {
         `Invalid baseUrl "${url}": must be an absolute http(s) URL with a host, e.g. "http://localhost:8080".`,
       );
     }
-    // Remove trailing slash
-    this.baseUrl = url.replace(/\/$/, "");
+    // Remove trailing slashes
+    this.baseUrl = url.replace(/\/+$/, "");
     // `timeoutMs` is the unit-encoded name; `timeout` is a deprecated alias
     // for the same MILLISECONDS value. `timeoutMs` wins if both are set.
     this.timeout = options.timeoutMs ?? options.timeout ?? DEFAULT_TIMEOUT;
@@ -1088,8 +1130,9 @@ export class SIEClient {
     if (options.instruction !== undefined) {
       params.instruction = options.instruction;
     }
-    if (options.isQuery !== undefined) {
-      params.options = { is_query: options.isQuery };
+    const encodeOptions = runtimeOptions(options.adapterOptions, { is_query: options.isQuery });
+    if (encodeOptions !== undefined) {
+      params.options = encodeOptions;
     }
     if (options.outputDtype !== undefined) {
       params.output_dtype = options.outputDtype;
@@ -1111,15 +1154,23 @@ export class SIEClient {
       model,
     );
 
-    // Wire format response: {"items": [...], "timing": {...}}
+    // Wire format response: {"model": "...", "items": [...], "timing": {...}}
     interface WireResponse {
+      model?: unknown;
       items: unknown[];
-      timing?: Record<string, unknown>;
+      timing?: unknown;
     }
 
     const data = unpackMessage<WireResponse>(new Uint8Array(await response.arrayBuffer()));
 
     const results = parseEncodeResults(data.items);
+    // The model and the timing breakdown describe the whole response; repeat
+    // them on each result, as the Python SDK does.
+    const timing = timingFromWire(data.timing);
+    for (const result of results) {
+      if (typeof data.model === "string" && data.model) result.model = data.model;
+      if (timing !== undefined) result.timing = timing;
+    }
     attachRequestMetadata(results, response.headers, data);
     // Guard the 1:1 input-to-output contract before any positional access
     // (`results[0]` below, or index-based reassembly in callers). The queue
@@ -2022,6 +2073,12 @@ export class SIEClient {
       query: queryForWire,
       items: itemsForWire,
     };
+    if (options.instruction !== undefined) {
+      body.instruction = options.instruction;
+    }
+    if (options.adapterOptions !== undefined) {
+      body.options = options.adapterOptions;
+    }
 
     const waitForCapacity = options.waitForCapacity ?? this.defaultWaitForCapacity;
     const { pool, gpu } = this.parseGpuParam(options.gpu);
@@ -2044,31 +2101,34 @@ export class SIEClient {
   }
 
   /**
-   * Extract entities from a single item.
+   * Extract entities or structured data from a single item.
    *
    * @param model - Model name (e.g., "urchade/gliner_multi-v2.1")
    * @param item - Item to extract from
-   * @param options - Extract options with labels
-   * @returns Extract result with entities
+   * @param options - Extract options: labels, output schema, instruction
+   * @returns Extract result
    */
-  async extract(model: string, item: ExtractItem, options: ExtractOptions): Promise<ExtractResult>;
+  async extract(model: string, item: ExtractItem, options?: ExtractOptions): Promise<ExtractResult>;
 
   /**
-   * Extract entities from multiple items.
+   * Extract entities or structured data from multiple items.
    *
    * @param model - Model name (e.g., "urchade/gliner_multi-v2.1")
    * @param items - Items to extract from
-   * @param options - Extract options with labels
+   * @param options - Extract options: labels, output schema, instruction
    * @returns Array of extract results in same order as input
    */
   async extract(
     model: string,
     items: ExtractItem[],
-    options: ExtractOptions,
+    options?: ExtractOptions,
   ): Promise<ExtractResult[]>;
 
   /**
-   * Extract entities from one or more items.
+   * Extract entities or structured data from one or more items.
+   *
+   * `options` may be omitted for models that take no labels, such as OCR,
+   * document parsing and speech to text.
    *
    * @example
    * ```typescript
@@ -2089,7 +2149,7 @@ export class SIEClient {
   async extract(
     model: string,
     items: ExtractItem | ExtractItem[],
-    options: ExtractOptions,
+    options: ExtractOptions = {},
   ): Promise<ExtractResult | ExtractResult[]> {
     const isSingleItem = !Array.isArray(items);
     const itemsArray = isSingleItem ? [items] : items;
@@ -2100,17 +2160,28 @@ export class SIEClient {
       items: itemsForWire,
     };
 
-    // Add params
-    const params: Record<string, unknown> = {
-      labels: options.labels,
-    };
-    if (options.threshold !== undefined) {
-      params.threshold = options.threshold;
+    // Add params if any are specified
+    const params: Record<string, unknown> = {};
+    if (options.labels !== undefined) {
+      params.labels = options.labels;
     }
-    if (options.adapterOptions !== undefined) {
-      params.options = options.adapterOptions;
+    if (options.outputSchema !== undefined) {
+      params.output_schema = options.outputSchema;
     }
-    body.params = params;
+    if (options.instruction !== undefined) {
+      params.instruction = options.instruction;
+    }
+    // `threshold` is a runtime option: the server reads it from
+    // `params.options` and ignores a `params.threshold` member.
+    const extractOptions = runtimeOptions(options.adapterOptions, {
+      threshold: options.threshold,
+    });
+    if (extractOptions !== undefined) {
+      params.options = extractOptions;
+    }
+    if (Object.keys(params).length > 0) {
+      body.params = params;
+    }
 
     const waitForCapacity = options.waitForCapacity ?? this.defaultWaitForCapacity;
     const { pool, gpu } = this.parseGpuParam(options.gpu);
@@ -2124,14 +2195,18 @@ export class SIEClient {
       model,
     );
 
-    // Wire format response: {"items": [...]}
+    // Wire format response: {"model": "...", "items": [...]}
     interface WireResponse {
+      model?: unknown;
       items: unknown[];
     }
 
     const data = unpackMessage<WireResponse>(new Uint8Array(await response.arrayBuffer()));
 
     const results = parseExtractResults(data.items);
+    if (typeof data.model === "string" && data.model) {
+      for (const result of results) result.model = data.model;
+    }
     attachRequestMetadata(results, response.headers, data);
     // Same positional contract as encode: `results[0]` below and index-based
     // reassembly in batch callers both assume one result per input, and the
