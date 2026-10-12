@@ -19,7 +19,7 @@
  * }
  */
 
-import type { EncodeResult, ExtractResult } from "./types.js";
+import type { EncodeResult, ExtractResult, RequestMetadata } from "./types.js";
 
 /**
  * Base error for all SIE SDK errors.
@@ -85,6 +85,13 @@ export class RequestError extends SIEError {
   readonly requestId: string | undefined;
   /** Offending request field from the server error envelope, when known. */
   readonly param: string | null | undefined;
+  /**
+   * Request metadata parsed from the error response's headers, when it
+   * carried any: for example `servedBy`, `fallbackReason` and `fallbackError`
+   * on a local refusal that answers a failed remote attempt. Mirrors the
+   * Python SDK's `RequestError.request`.
+   */
+  readonly request: RequestMetadata | undefined;
 
   constructor(
     message: string,
@@ -92,13 +99,15 @@ export class RequestError extends SIEError {
     statusCode?: number,
     requestId?: string,
     param?: string | null,
+    request?: RequestMetadata,
   ) {
     super(message);
     this.name = "RequestError";
     this.code = code;
     this.statusCode = statusCode;
-    this.requestId = requestId;
+    this.requestId = requestId ?? request?.id;
     this.param = param;
+    this.request = request;
   }
 }
 
@@ -124,6 +133,13 @@ export class ServerError extends SIEError {
   readonly requestId: string | undefined;
   /** Offending request field from the server error envelope, when known. */
   readonly param: string | null | undefined;
+  /**
+   * Request metadata parsed from the error response's headers, when it
+   * carried any: for example `servedBy`, `fallbackReason` and `fallbackError`
+   * on a local refusal that answers a failed remote attempt. Mirrors the
+   * Python SDK's `ServerError.request`.
+   */
+  readonly request: RequestMetadata | undefined;
 
   constructor(
     message: string,
@@ -131,13 +147,15 @@ export class ServerError extends SIEError {
     statusCode?: number,
     requestId?: string,
     param?: string | null,
+    request?: RequestMetadata,
   ) {
     super(message);
     this.name = "ServerError";
     this.code = code;
     this.statusCode = statusCode;
-    this.requestId = requestId;
+    this.requestId = requestId ?? request?.id;
     this.param = param;
+    this.request = request;
   }
 }
 
@@ -158,13 +176,28 @@ export class ProvisioningError extends SIEError {
   readonly retryAfter: number | undefined;
   /** Offending request field from the server error envelope, when known. */
   readonly param: string | null | undefined;
+  /**
+   * Request metadata of the refusal, when it carried any: for example
+   * `servedBy`, `fallbackReason` and `fallbackError` on a local refusal that
+   * answers a failed remote attempt. When the provisioning budget runs out,
+   * the metadata of the last refusal. Mirrors the Python SDK's
+   * `ProvisioningError.request`.
+   */
+  readonly request: RequestMetadata | undefined;
 
-  constructor(message: string, gpu?: string, retryAfter?: number, param?: string | null) {
+  constructor(
+    message: string,
+    gpu?: string,
+    retryAfter?: number,
+    param?: string | null,
+    request?: RequestMetadata,
+  ) {
     super(message);
     this.name = "ProvisioningError";
     this.gpu = gpu;
     this.retryAfter = retryAfter;
     this.param = param;
+    this.request = request;
   }
 }
 
@@ -208,13 +241,22 @@ export class LoraLoadingError extends SIEError {
   readonly model: string | undefined;
   /** Offending request field from the server error envelope, when known. */
   readonly param: string | null | undefined;
+  /** Request metadata of the last refusal, when it carried any (see {@link ProvisioningError}). */
+  readonly request: RequestMetadata | undefined;
 
-  constructor(message: string, lora?: string, model?: string, param?: string | null) {
+  constructor(
+    message: string,
+    lora?: string,
+    model?: string,
+    param?: string | null,
+    request?: RequestMetadata,
+  ) {
     super(message);
     this.name = "LoraLoadingError";
     this.lora = lora;
     this.model = model;
     this.param = param;
+    this.request = request;
   }
 }
 
@@ -233,12 +275,15 @@ export class ModelLoadingError extends SIEError {
   readonly model: string | undefined;
   /** Offending request field from the server error envelope, when known. */
   readonly param: string | null | undefined;
+  /** Request metadata of the last refusal, when it carried any (see {@link ProvisioningError}). */
+  readonly request: RequestMetadata | undefined;
 
-  constructor(message: string, model?: string, param?: string | null) {
+  constructor(message: string, model?: string, param?: string | null, request?: RequestMetadata) {
     super(message);
     this.name = "ModelLoadingError";
     this.model = model;
     this.param = param;
+    this.request = request;
   }
 }
 
@@ -264,9 +309,14 @@ export class ResourceExhaustedError extends ServerError {
 
   constructor(
     message: string,
-    options?: { model?: string; retries?: number; param?: string | null },
+    options?: {
+      model?: string;
+      retries?: number;
+      param?: string | null;
+      request?: RequestMetadata;
+    },
   ) {
-    super(message, "RESOURCE_EXHAUSTED", 503, undefined, options?.param);
+    super(message, "RESOURCE_EXHAUSTED", 503, undefined, options?.param, options?.request);
     this.name = "ResourceExhaustedError";
     this.model = options?.model;
     this.retries = options?.retries ?? 0;
@@ -360,9 +410,10 @@ export class ModelLoadFailedError extends ServerError {
       permanent?: boolean;
       attempts?: number;
       param?: string | null;
+      request?: RequestMetadata;
     },
   ) {
-    super(message, "MODEL_LOAD_FAILED", 502, undefined, options?.param);
+    super(message, "MODEL_LOAD_FAILED", 502, undefined, options?.param, options?.request);
     this.name = "ModelLoadFailedError";
     this.model = options?.model;
     this.errorClass = options?.errorClass;
@@ -388,8 +439,11 @@ export class InputTooLongError extends RequestError {
   /** The model that was requested */
   readonly model: string | undefined;
 
-  constructor(message: string, options?: { model?: string; param?: string | null }) {
-    super(message, "INPUT_TOO_LONG", 400, undefined, options?.param);
+  constructor(
+    message: string,
+    options?: { model?: string; param?: string | null; request?: RequestMetadata },
+  ) {
+    super(message, "INPUT_TOO_LONG", 400, undefined, options?.param, options?.request);
     this.name = "InputTooLongError";
     this.model = options?.model;
   }
@@ -454,10 +508,11 @@ export class IncompleteBatchError extends ServerError {
       missingIds?: string[];
       requestId?: string;
       param?: string | null;
+      request?: RequestMetadata;
       results?: readonly (EncodeResult | ExtractResult)[];
     },
   ) {
-    super(message, options.code, 200, options.requestId, options.param);
+    super(message, options.code, 200, options.requestId, options.param, options.request);
     this.name = "IncompleteBatchError";
     this.expected = options.expected;
     this.received = options.received;
@@ -548,8 +603,8 @@ export class MalformedChunkError extends SIEError {
  * Subclass of {@link ServerError} so existing 5xx handlers keep working.
  */
 export class EstimateUnroutableError extends ServerError {
-  constructor(message: string, code?: string, param?: string | null) {
-    super(message, code, 503, undefined, param);
+  constructor(message: string, code?: string, param?: string | null, request?: RequestMetadata) {
+    super(message, code, 503, undefined, param, request);
     this.name = "EstimateUnroutableError";
   }
 }
@@ -574,9 +629,22 @@ export class RateLimitError extends RequestError {
 
   constructor(
     message: string,
-    options?: { retryAfter?: number; code?: string; requestId?: string; param?: string | null },
+    options?: {
+      retryAfter?: number;
+      code?: string;
+      requestId?: string;
+      param?: string | null;
+      request?: RequestMetadata;
+    },
   ) {
-    super(message, options?.code ?? "RATE_LIMIT", 429, options?.requestId, options?.param);
+    super(
+      message,
+      options?.code ?? "RATE_LIMIT",
+      429,
+      options?.requestId,
+      options?.param,
+      options?.request,
+    );
     this.name = "RateLimitError";
     this.retryAfter = options?.retryAfter;
   }
@@ -593,8 +661,18 @@ export class RateLimitError extends RequestError {
  * Mirrors the Python SDK's `InsufficientCreditsError`.
  */
 export class InsufficientCreditsError extends RequestError {
-  constructor(message: string, options?: { requestId?: string; param?: string | null }) {
-    super(message, "INSUFFICIENT_CREDITS", 402, options?.requestId, options?.param);
+  constructor(
+    message: string,
+    options?: { requestId?: string; param?: string | null; request?: RequestMetadata },
+  ) {
+    super(
+      message,
+      "INSUFFICIENT_CREDITS",
+      402,
+      options?.requestId,
+      options?.param,
+      options?.request,
+    );
     this.name = "InsufficientCreditsError";
   }
 }
@@ -611,8 +689,18 @@ export class InsufficientCreditsError extends RequestError {
  * Mirrors the Python SDK's `SpendLimitError`.
  */
 export class SpendLimitError extends RequestError {
-  constructor(message: string, options?: { requestId?: string; param?: string | null }) {
-    super(message, "KEY_SPEND_LIMIT_EXCEEDED", 402, options?.requestId, options?.param);
+  constructor(
+    message: string,
+    options?: { requestId?: string; param?: string | null; request?: RequestMetadata },
+  ) {
+    super(
+      message,
+      "KEY_SPEND_LIMIT_EXCEEDED",
+      402,
+      options?.requestId,
+      options?.param,
+      options?.request,
+    );
     this.name = "SpendLimitError";
   }
 }
@@ -630,9 +718,58 @@ export class SpendLimitError extends RequestError {
  * Mirrors the Python SDK's `AccountInactiveError`.
  */
 export class AccountInactiveError extends RequestError {
-  constructor(message: string, code?: string, requestId?: string, param?: string | null) {
-    super(message, code, 403, requestId, param);
+  constructor(
+    message: string,
+    code?: string,
+    requestId?: string,
+    param?: string | null,
+    request?: RequestMetadata,
+  ) {
+    super(message, code, 403, requestId, param, request);
     this.name = "AccountInactiveError";
+  }
+}
+
+/**
+ * Error when SIE Cloud will not serve the request through SIE Relay.
+ *
+ * Thrown when SIE Cloud returns HTTP `403 FORBIDDEN` with code
+ * `THIRD_PARTY_SERVING_DISABLED`, `THIRD_PARTY_RUNTIME_UNLISTED` or
+ * `THIRD_PARTY_REGION_UNAVAILABLE`. These codes concern serving through SIE
+ * Relay, the service's partner capacity. This is a TERMINAL failure — the SDK
+ * never retries it, because retrying the same request gets the same answer.
+ * Branch on `code`; the message is the server's.
+ *
+ * Subclass of {@link RequestError} so existing 4xx handlers keep working.
+ * Mirrors the Python SDK's `RelayUnavailableError`.
+ */
+export class RelayUnavailableError extends RequestError {
+  /**
+   * The API key's region, which a `THIRD_PARTY_REGION_UNAVAILABLE` refusal
+   * names when the key has one.
+   */
+  readonly keyRegion: string | undefined;
+  /**
+   * The deployment's region, which a `THIRD_PARTY_REGION_UNAVAILABLE` refusal
+   * names.
+   */
+  readonly deploymentRegion: string | undefined;
+
+  constructor(
+    message: string,
+    options?: {
+      code?: string;
+      keyRegion?: string;
+      deploymentRegion?: string;
+      requestId?: string;
+      param?: string | null;
+      request?: RequestMetadata;
+    },
+  ) {
+    super(message, options?.code, 403, options?.requestId, options?.param, options?.request);
+    this.name = "RelayUnavailableError";
+    this.keyRegion = options?.keyRegion;
+    this.deploymentRegion = options?.deploymentRegion;
   }
 }
 
@@ -650,8 +787,13 @@ export class AccountInactiveError extends RequestError {
  * Mirrors the Python SDK's `AccountStateUnavailableError`.
  */
 export class AccountStateUnavailableError extends ServerError {
-  constructor(message: string, requestId?: string, param?: string | null) {
-    super(message, "ACCOUNT_STATE_UNAVAILABLE", 503, requestId, param);
+  constructor(
+    message: string,
+    requestId?: string,
+    param?: string | null,
+    request?: RequestMetadata,
+  ) {
+    super(message, "ACCOUNT_STATE_UNAVAILABLE", 503, requestId, param, request);
     this.name = "AccountStateUnavailableError";
   }
 }

@@ -374,8 +374,9 @@ def test_an_upstream_without_usage_is_served_on_score_and_rerank_without_usage(
 
 
 def test_an_operation_the_upstream_does_not_declare_is_refused_before_sending(
-    fake_openai: FakeOpenAI, openai_app: Callable[..., FastAPI]
+    fake_openai: FakeOpenAI, openai_app: Callable[..., FastAPI], caplog: pytest.LogCaptureFixture
 ) -> None:
+    caplog.set_level(logging.WARNING)
     with TestClient(openai_app(fake_openai.url, endpoints=("embeddings",))) as client:
         response = post(
             client, fake_openai, f"/v1/score/{MODEL}", {"query": {"text": "red"}, "items": [{"text": "red wine"}]}
@@ -383,7 +384,10 @@ def test_an_operation_the_upstream_does_not_declare_is_refused_before_sending(
 
     assert response.status_code == 400, response.text
     assert error_code(response) == "INVALID_INPUT"
-    assert "declares no rerank endpoint" in response.text
+    assert "this remote profile cannot score: its upstream declares no rerank endpoint" in response.text
+    assert "open-host" not in response.text
+    assert "x-sie-upstream" not in response.headers
+    assert "upstream 'open-host' declares no rerank endpoint" in caplog.text
     assert fake_openai.calls == []
 
 
@@ -625,15 +629,21 @@ def test_extraction_is_refused(adapter: OpenAIUpstreamAdapter, fake_openai: Fake
     assert fake_openai.calls == []
 
 
-def test_a_profile_on_an_upstream_of_another_kind_does_not_load(fake_openai: FakeOpenAI) -> None:
+def test_a_profile_on_an_upstream_of_another_kind_does_not_load(
+    fake_openai: FakeOpenAI, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING)
     install_upstreams(
         {"open-host": Upstream.model_validate({"kind": "sie", "base_url": fake_openai.url, "rate_cap": RATE_CAP})}
     )
     try:
-        with pytest.raises(UpstreamConfigError, match="is not of kind 'openai'"):
+        with pytest.raises(UpstreamConfigError, match="is not of kind 'openai'") as raised:
             OpenAIUpstreamAdapter(upstream="open-host", upstream_model=UPSTREAM_MODEL).load("cpu")
     finally:
         install_upstreams({})
+
+    assert "open-host" not in str(raised.value)
+    assert "upstream 'open-host' is not of kind 'openai'" in caplog.text
 
 
 def test_an_unloaded_adapter_sends_nothing(adapter: OpenAIUpstreamAdapter, fake_openai: FakeOpenAI) -> None:

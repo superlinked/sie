@@ -10,6 +10,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SIEClient } from "../src/client.js";
+import { ModelLoadFailedError, RequestError, ServerError } from "../src/errors.js";
+import { handleError } from "../src/internal/parsing.js";
 import { packMessage } from "../src/msgpack.js";
 import {
   FALLBACK_ERROR_PATTERN,
@@ -77,6 +79,15 @@ async function call(client: SIEClient, operation: Operation): Promise<RequestMet
     .request;
 }
 
+async function rejection(promise: Promise<unknown>): Promise<unknown> {
+  return promise.then(
+    () => {
+      throw new Error("expected a rejection");
+    },
+    (error: unknown) => error,
+  );
+}
+
 function sentHeaders(): Record<string, string> {
   return mockFetch.mock.calls[0]?.[1]?.headers as Record<string, string>;
 }
@@ -142,6 +153,101 @@ describe("remote serving", () => {
     const options = { remote: "allow" } as unknown as SIEClientOptions;
 
     expect(() => new SIEClient("http://localhost:8080", options)).toThrow(TypeError);
+  });
+
+  it("a local refusal after a failed remote attempt carries both outcomes on the error", async () => {
+    const response = new Response(
+      JSON.stringify({
+        detail: { code: "MODEL_LOADING", message: "Model 'm' is loading, please retry" },
+      }),
+      {
+        status: 503,
+        headers: {
+          "Content-Type": "application/json",
+          "Retry-After": "5",
+          [header.fallback_reason.name]: "model_loading",
+          [header.fallback_error.name]: "INFERENCE_ERROR",
+        },
+      },
+    );
+
+    const error = await rejection(handleError(response));
+
+    expect(error).toBeInstanceOf(ServerError);
+    expect((error as ServerError).request).toEqual({
+      fallbackReason: "model_loading",
+      fallbackError: "INFERENCE_ERROR",
+    });
+  });
+
+  it.each(OPERATIONS)(
+    "a restored refusal to %s exposes which side answered on the thrown error",
+    async (operation) => {
+      mockFetch.mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            detail: { code: "MODEL_LOAD_FAILED", message: "load failed", permanent: true },
+          }),
+          {
+            status: 502,
+            headers: {
+              "Content-Type": "application/json",
+              "X-SIE-Request-ID": "req-restored",
+              [header.served_by.name]: "local",
+              [header.fallback_reason.name]: "unhealthy",
+              [header.fallback_error.name]: "INFERENCE_ERROR",
+            },
+          },
+        ),
+      );
+      const client = new SIEClient("http://localhost:8080");
+
+      const error = await rejection(call(client, operation));
+
+      expect(error).toBeInstanceOf(ModelLoadFailedError);
+      expect((error as ModelLoadFailedError).requestId).toBe("req-restored");
+      expect((error as ModelLoadFailedError).request).toEqual({
+        id: "req-restored",
+        servedBy: "local",
+        fallbackReason: "unhealthy",
+        fallbackError: "INFERENCE_ERROR",
+      });
+    },
+  );
+
+  it("a terminal streaming answer exposes which side answered on the thrown error", async () => {
+    mockFetch.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ error: { code: "GATEWAY_TIMEOUT", message: "result deadline" } }),
+        {
+          status: 504,
+          headers: {
+            "Content-Type": "application/json",
+            [header.served_by.name]: "remote",
+            [header.upstream.name]: "team-sie",
+          },
+        },
+      ),
+    );
+    const client = new SIEClient("http://localhost:8080");
+
+    const error = await rejection(client.streamGenerate("m", "hi", { maxNewTokens: 4 }).next());
+
+    expect(error).toBeInstanceOf(ServerError);
+    expect((error as ServerError).request).toEqual({ servedBy: "remote", upstream: "team-sie" });
+  });
+
+  it("an error without disclosure headers carries no request metadata", async () => {
+    const response = new Response(
+      JSON.stringify({ detail: { code: "INVALID_INPUT", message: "bad" } }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+
+    const error = await rejection(handleError(response));
+
+    expect(error).toBeInstanceOf(RequestError);
+    expect((error as RequestError).request).toBeUndefined();
+    expect((error as RequestError).requestId).toBeUndefined();
   });
 
   it.each([

@@ -91,6 +91,14 @@ from sie_server.processors.grammar_cache import GrammarLRU
 from sie_server.processors.grammar_compile import compile_outlines
 from sie_server.processors.hybrid_usage import HybridCount, count_hybrid_usage
 from sie_server.processors.remote_chat import remote_chat_chunks
+from sie_server.processors.schema_prompt import (
+    profile_schema_in_prompt,
+    renders_system_role,
+    response_format_section,
+    schema_in_messages,
+    starts_with_system_message,
+    with_response_format,
+)
 from sie_server.processors.strict_grammar import enforce_strict_grammar
 from sie_server.processors.tool_call_grammar import (
     ToolChoiceError,
@@ -766,6 +774,11 @@ class _GenerateRequestParams:
     # defaults apply.
     chat_template_kwargs: dict[str, Any] | None = None
     grammar: GrammarSpec | None = None
+    # Whether a ``json_schema`` grammar is also shown to the model in the
+    # rendered prompt (see :mod:`sie_server.processors.schema_prompt`). The
+    # request's ``schema_in_prompt`` wins over the profile's
+    # ``adapter_options.runtime.schema_in_prompt``; both default to on.
+    schema_in_prompt: bool = True
     # OpenAI tools / tool_choice. The gateway has already shape-validated
     # the schemas; the worker uses ``tools is not None`` as the flag that
     # turns on :func:`parse_tool_call_stream` between the adapter and the
@@ -955,6 +968,10 @@ class StreamingProcessor:
         # plain dict lookups (no contention).
         self._tokenizers: dict[str, TokenizerLike] = {}
         self._tokenizer_lock = asyncio.Lock()
+        # Per-model answer to "does the chat template render a system
+        # message?", probed once when a response format has to be shown to
+        # the model and the request has no system message of its own.
+        self._renders_system_role: dict[str, bool] = {}
         # Per-process LRU of validated grammar compiles. The
         # default cap (64) is plenty for realistic workloads — schemas
         # tend to concentrate on a handful of canonical shapes. Inject
@@ -1998,6 +2015,7 @@ class StreamingProcessor:
                 params.input.messages,
                 effective_tools,
                 request_kwargs=params.chat_template_kwargs,
+                response_format=params.grammar if params.schema_in_prompt else None,
             )
             if isinstance(rendered, _ValidationError):
                 await self._terminal_error_then_settle(
@@ -3429,6 +3447,17 @@ class StreamingProcessor:
                 message="'chat_template_kwargs' must be an object",
             )
 
+        # Whether a ``json_schema`` grammar is also written into the prompt.
+        # An explicit request value wins; otherwise the profile decides.
+        schema_in_prompt_raw = params.get("schema_in_prompt")
+        if schema_in_prompt_raw is not None and not isinstance(schema_in_prompt_raw, bool):
+            return _ValidationError(code="invalid_request", message="'schema_in_prompt' must be a boolean")
+        schema_in_prompt = (
+            schema_in_prompt_raw
+            if schema_in_prompt_raw is not None
+            else (config is None or profile_schema_in_prompt(config))
+        )
+
         # OpenAI ``seed`` / ``logit_bias`` / ``logprobs`` / ``top_logprobs``
         # round-trips. Gateway is the authority for shape validation
         # (signed i64 / range / cap); the worker only coerces defensively.
@@ -3552,6 +3581,7 @@ class StreamingProcessor:
             min_tokens=min_tokens,
             chat_template_kwargs=chat_template_kwargs,
             grammar=grammar,
+            schema_in_prompt=schema_in_prompt,
             tools=tools,
             tool_choice=tool_choice,
             parallel_tool_calls=parallel_tool_calls,
@@ -3636,6 +3666,7 @@ class StreamingProcessor:
         messages: tuple[_ChatMessage, ...],
         tools: tuple[dict[str, Any], ...] | None = None,
         request_kwargs: dict[str, Any] | None = None,
+        response_format: GrammarSpec | None = None,
     ) -> str | _ValidationError:
         """Render a chat-message list into a prompt string via the tokenizer's
         chat template. Returns the rendered string or a validation error
@@ -3655,6 +3686,12 @@ class StreamingProcessor:
         reasoning on a one-off basis). The YAML wins on conflict —
         operator config is authoritative; per-request overrides only
         fill in keys the YAML didn't set.
+
+        ``response_format`` is a ``json_schema`` grammar to show the model:
+        it is written into the system message as a ``# Response Formats``
+        section (see :mod:`sie_server.processors.schema_prompt`) unless a
+        message already contains the schema. ``None`` leaves the messages
+        as sent.
         """
         try:
             tok = await self._get_tokenizer(model_id)
@@ -3735,24 +3772,34 @@ class StreamingProcessor:
         # ``parse_tool_call_stream`` then converts to OpenAI tool_calls.
         if tools:
             kwargs["tools"] = list(tools)
+        section = response_format_section(response_format)
+        system_role = True
+        if section is not None and not starts_with_system_message(message_dicts):
+            system_role = await self._template_renders_system_role(model_id, tok)
+
+        def _render() -> Any:
+            rendered_messages: list[dict[str, Any]] = message_dicts
+            if (
+                section is not None
+                and isinstance(response_format, GrammarSpec)
+                and isinstance(response_format.value, dict)
+                and not schema_in_messages(message_dicts, response_format.value)
+            ):
+                rendered_messages = with_response_format(message_dicts, section, system_role=system_role)
+            return tok.apply_chat_template(
+                rendered_messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                **kwargs,
+            )
+
         try:
             # Route through the bounded ``_GRAMMAR_EXECUTOR`` rather than
             # the shared default ``asyncio.to_thread`` pool: this call is
             # CPU-bound and input-sized, so a burst on the default pool
             # could starve the rest of the worker (tokenizer loads, etc.).
-            # ``run_in_executor`` takes no kwargs, so bind them in a
-            # closure (matching the ``lambda`` style in
-            # ``_check_context_length``).
             loop = asyncio.get_running_loop()
-            rendered = await loop.run_in_executor(
-                _GRAMMAR_EXECUTOR,
-                lambda: tok.apply_chat_template(
-                    message_dicts,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                    **kwargs,
-                ),
-            )
+            rendered = await loop.run_in_executor(_GRAMMAR_EXECUTOR, _render)
         except Exception:  # noqa: BLE001
             logger.warning(
                 "Chat template render failed for %s",
@@ -3769,6 +3816,16 @@ class StreamingProcessor:
                 message="chat template did not return a string (tokenize=False)",
             )
         return rendered
+
+    async def _template_renders_system_role(self, model_id: str, tok: TokenizerLike) -> bool:
+        """Probe once per model whether its chat template keeps a system message."""
+        cached = self._renders_system_role.get(model_id)
+        if cached is not None:
+            return cached
+        loop = asyncio.get_running_loop()
+        supported = await loop.run_in_executor(_GRAMMAR_EXECUTOR, renders_system_role, tok.apply_chat_template)
+        self._renders_system_role[model_id] = supported
+        return supported
 
     async def _check_request_videos(self, model_id: str, videos: list[VideoInput]) -> _ValidationError | None:
         """Gate video on ``inputs.video`` and bound the runtime's decode work.

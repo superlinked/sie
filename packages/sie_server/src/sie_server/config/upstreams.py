@@ -20,6 +20,7 @@ from __future__ import annotations
 import copy
 import ipaddress
 import json
+import logging
 import math
 import os
 import re
@@ -39,6 +40,8 @@ from sie_server.config.model import UPSTREAM_NAME_PATTERN, is_remote_adapter_pat
 
 if TYPE_CHECKING:
     from sie_server.config.model import ModelConfig
+
+logger = logging.getLogger(__name__)
 
 UPSTREAMS_FILE_ENV = "SIE_UPSTREAMS_FILE"
 REMOTE_SERVING_ENV = "SIE_REMOTE_SERVING"
@@ -484,7 +487,8 @@ def upstream_for_serving(name: str) -> Upstream:
         raise RemoteServingDisabledError(f"remote serving is switched off ({REMOTE_SERVING_ENV})")
     upstream = _INSTALLED.upstreams.get(name)
     if upstream is None:
-        raise UpstreamConfigError(f"upstream {name!r} is not defined in the startup configuration")
+        logger.warning("upstream %r is not defined in the startup configuration", name)
+        raise UpstreamConfigError("this remote profile's upstream is not defined in the startup configuration")
     return upstream
 
 

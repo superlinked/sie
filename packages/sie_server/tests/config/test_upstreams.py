@@ -12,7 +12,9 @@ from sie_server.config.upstreams import (
     UpstreamConfigError,
     UpstreamCredentialError,
     UpstreamKind,
+    install_upstreams,
     load_upstreams,
+    upstream_for_serving,
     validate_upstream_url,
 )
 
@@ -210,3 +212,14 @@ def test_the_credential_is_read_by_reference_when_needed(monkeypatch: pytest.Mon
     assert upstream.api_key() == CANARY
     for rendering in (repr(upstream), str(upstream), upstream.model_dump_json(), str(upstream.model_dump())):
         assert CANARY not in rendering
+
+
+def test_an_upstream_missing_at_serving_time_is_named_only_in_the_log(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING)
+    install_upstreams({})
+
+    with pytest.raises(UpstreamConfigError) as raised:
+        upstream_for_serving("team-sie")
+
+    assert str(raised.value) == "this remote profile's upstream is not defined in the startup configuration"
+    assert "upstream 'team-sie' is not defined in the startup configuration" in caplog.text

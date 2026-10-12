@@ -433,6 +433,14 @@ pub struct GenerateParams {
     /// after all gateway-side safety caps have passed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grammar: Option<GrammarSpec>,
+    /// Whether the worker also writes a ``json_schema`` grammar into the
+    /// chat prompt it renders, so the model reads the schema it must
+    /// follow (OpenAI ``response_format`` semantics). ``None`` leaves it to
+    /// the serving profile (default on); chat sends the caller's
+    /// ``schema_in_prompt``; the native ``/v1/generate`` route sends
+    /// ``Some(false)`` because its caller owns the prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_in_prompt: Option<bool>,
     /// Caller-supplied routing affinity hint. Highest-priority input
     /// to the HRW key resolution in `crate::routing::key`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

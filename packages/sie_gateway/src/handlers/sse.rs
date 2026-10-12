@@ -100,7 +100,9 @@ pub struct SseParams<'a> {
     pub state: &'a AppState,
     pub work_publisher: Arc<dyn WorkDispatcher>,
     pub physical_lane: PhysicalLane,
-    /// DISPLAY id (the requested model) — surfaced in the streamed chunk
+    /// The model as the caller sent it, which a provisioning answer names.
+    pub requested_model: String,
+    /// DISPLAY id (the resolved model) — surfaced in the streamed chunk
     /// ``model`` field and the routing/timeout metric labels.
     pub model: String,
     /// DISPATCH id — the grammar ``:no-spec`` variant when routing fired,
@@ -116,6 +118,8 @@ pub struct SseParams<'a> {
     pub bundle_config_hash: String,
     pub work_params: publisher::WorkParams,
     pub endpoint: SseEndpoint,
+    /// The kind of route the request arrived on.
+    pub(crate) route: crate::handlers::proxy::RouteKind,
 }
 
 /// Build the SSE response. Publishes the work item, subscribes to
@@ -135,6 +139,7 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
         state,
         work_publisher,
         physical_lane,
+        requested_model,
         model,
         dispatch_model,
         bundle,
@@ -145,6 +150,7 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
         bundle_config_hash,
         work_params,
         endpoint,
+        route,
     } = params;
 
     // Resolve the routing key & target the same way
@@ -250,22 +256,36 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
         Err(e) => {
             // Pre-stream publish failure — surface as a regular JSON
             // error response (mirrors `build_streaming_error_response`
-            // for the `PublishFailed` arm).
+            // for the `Provisioning` and `PublishFailed` arms).
             let lower = e.to_lowercase();
-            let retry_after = if lower.contains("no consumers") {
+            if lower.contains("no consumers") {
                 telemetry::record_rejected_request(
                     state.demand_tracker.as_ref(),
                     &physical_lane,
                     "no_consumers",
                 );
-                Some(crate::handlers::proxy::PROVISIONING_RETRY_AFTER)
-            } else {
-                // Shared with the buffered and streaming paths rather than
-                // re-derived here: this arm used to match only "backpressure"
-                // and so missed the broker's own stream-full rejection, which
-                // means the same thing.
-                crate::handlers::proxy::record_publish_failure(state, &physical_lane, &lower)
-            };
+                let estimate = crate::handlers::proxy::ProvisioningEstimate::new(
+                    state,
+                    vec![crate::handlers::proxy::lane_wake_target(
+                        &pool,
+                        &gpu,
+                        &bundle,
+                        &dispatch_model,
+                    )],
+                    route,
+                );
+                return crate::handlers::proxy::provisioning_response(
+                    &requested_model,
+                    estimate,
+                    crate::handlers::proxy::ProvisioningSurface::OpenAiCompat,
+                );
+            }
+            // Shared with the buffered and streaming paths rather than
+            // re-derived here: this arm used to match only "backpressure"
+            // and so missed the broker's own stream-full rejection, which
+            // means the same thing.
+            let retry_after =
+                crate::handlers::proxy::record_publish_failure(state, &physical_lane, &lower);
             return crate::handlers::proxy::build_streaming_publish_failed_for_sse(&e, retry_after);
         }
     };

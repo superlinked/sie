@@ -146,17 +146,33 @@ def validate_base_url(base_url: str) -> None:
 
 SIE_BASE_URL_ENV = "SIE_BASE_URL"
 SIE_API_KEY_ENV = "SIE_API_KEY"
+# SIE Serverless: the base URL of a client given an API key but no base URL,
+# and the origin ``SIE_API_KEY`` is scoped to while ``SIE_BASE_URL`` is unset.
+SIE_SERVERLESS_BASE_URL = "https://api.superlinked.com"
 
 
-def resolve_base_url(base_url: str | None) -> str:
-    """Return ``base_url``, or the ``SIE_BASE_URL`` environment variable when it is omitted."""
+def resolve_base_url(base_url: str | None, api_key: str | None = None) -> str:
+    """Return the base URL a client connects to.
+
+    Precedence: ``base_url``, then the ``SIE_BASE_URL`` environment variable,
+    then SIE Serverless when an API key is available: a non-empty ``api_key``,
+    or ``SIE_API_KEY`` when ``api_key`` is omitted. Without any of these,
+    construction fails instead of guessing a local server, so a deployment
+    missing its key reports that at once rather than retrying connections.
+    """
     if base_url is not None:
         return base_url
     env_base_url = os.environ.get(SIE_BASE_URL_ENV, "").strip()
-    if not env_base_url:
-        msg = f"base_url is required: pass it explicitly or set {SIE_BASE_URL_ENV}"
-        raise ValueError(msg)
-    return env_base_url
+    if env_base_url:
+        return env_base_url
+    has_api_key = bool(api_key) if api_key is not None else bool(os.environ.get(SIE_API_KEY_ENV, "").strip())
+    if has_api_key:
+        return SIE_SERVERLESS_BASE_URL
+    msg = (
+        f"base_url is required: pass it explicitly, set {SIE_BASE_URL_ENV}, "
+        f"or set {SIE_API_KEY_ENV} to use SIE Serverless ({SIE_SERVERLESS_BASE_URL})"
+    )
+    raise ValueError(msg)
 
 
 def _url_origin(url: str) -> tuple[str, str, int] | None:
@@ -176,21 +192,22 @@ def resolve_api_key(api_key: str | None, base_url: str, control_plane_url: str |
 
     An explicit value, including an empty string, always wins, so a caller can
     opt out of the environment credential. The environment key is scoped to
-    the origin named by ``SIE_BASE_URL``: a client built for any other URL
-    does not select it, and a client whose ``control_plane_url`` names another
-    origin must pass its key explicitly, because connection requests reuse the
+    the origin named by ``SIE_BASE_URL``, or to SIE Serverless while
+    ``SIE_BASE_URL`` is unset: a client built for any other URL does not
+    select it, and a client whose ``control_plane_url`` names another origin
+    must pass its key explicitly, because connection requests reuse the
     client's key.
     """
     if api_key is not None:
         return api_key
     env_api_key = os.environ.get(SIE_API_KEY_ENV, "").strip()
-    env_origin = _url_origin(os.environ.get(SIE_BASE_URL_ENV, "").strip())
+    env_origin = _url_origin(os.environ.get(SIE_BASE_URL_ENV, "").strip() or SIE_SERVERLESS_BASE_URL)
     if not env_api_key or env_origin is None or _url_origin(base_url) != env_origin:
         return None
     if control_plane_url and _url_origin(control_plane_url) != env_origin:
         msg = (
-            f"{SIE_API_KEY_ENV} is scoped to the {SIE_BASE_URL_ENV} origin and is not sent to "
-            "control_plane_url on another origin; pass api_key explicitly"
+            f"{SIE_API_KEY_ENV} is scoped to the {SIE_BASE_URL_ENV} origin (SIE Serverless when unset) "
+            "and is not sent to control_plane_url on another origin; pass api_key explicitly"
         )
         raise ValueError(msg)
     return env_api_key
@@ -302,6 +319,7 @@ from .errors import (
     ModelLoadingError,
     ProvisioningError,
     RateLimitError,
+    RelayUnavailableError,
     RequestError,
     ResourceExhaustedError,
     ServerError,
@@ -416,6 +434,16 @@ def resolve_timeouts(
     return connect, read
 
 
+def attempt_timeout_cap(remaining: float) -> float:
+    """Seconds that cap the timeouts of one attempt.
+
+    Attempts are capped by the remaining provisioning budget. The final
+    attempt, made after a capacity wait that used up the budget, is not capped
+    and runs with the client's own timeouts.
+    """
+    return remaining if remaining > 0 else math.inf
+
+
 # Pool settings
 DEFAULT_LEASE_RENEWAL_INTERVAL_S = 60.0  # Renew lease every 60s (lease is 1200s)
 
@@ -425,7 +453,7 @@ LORA_LOADING_DEFAULT_DELAY_S = 1.0  # Default retry delay if no Retry-After head
 LORA_LOADING_ERROR_CODE = "LORA_LOADING"  # Error code from server
 
 # Model loading retry settings
-MODEL_LOADING_MAX_RETRIES = 60  # Max retries (60 * 5s = 5 min, matches provision timeout)
+MODEL_LOADING_MAX_RETRIES = 60  # Max retries (60 * 5s = 5 min)
 MODEL_LOADING_DEFAULT_DELAY_S = 5.0  # Default retry delay (model loads take longer than LoRA)
 MODEL_LOADING_ERROR_CODE = "MODEL_LOADING"  # Error code from server
 PROVISIONING_ERROR_CODE = "PROVISIONING"  # Gateway scale-from-zero / worker provisioning
@@ -575,6 +603,18 @@ KEY_SPEND_LIMIT_EXCEEDED_ERROR_CODE = "KEY_SPEND_LIMIT_EXCEEDED"
 ACCOUNT_SUSPENDED_ERROR_CODE = "ACCOUNT_SUSPENDED"
 ACCOUNT_PENDING_REVIEW_ERROR_CODE = "ACCOUNT_PENDING_REVIEW"
 ACCOUNT_STATE_UNAVAILABLE_ERROR_CODE = "ACCOUNT_STATE_UNAVAILABLE"
+# SIE Cloud refuses a request it would serve through SIE Relay, its partner
+# capacity, with one of these 403 codes. Terminal like the account errors above.
+THIRD_PARTY_SERVING_DISABLED_ERROR_CODE = "THIRD_PARTY_SERVING_DISABLED"
+THIRD_PARTY_RUNTIME_UNLISTED_ERROR_CODE = "THIRD_PARTY_RUNTIME_UNLISTED"
+THIRD_PARTY_REGION_UNAVAILABLE_ERROR_CODE = "THIRD_PARTY_REGION_UNAVAILABLE"
+RELAY_UNAVAILABLE_ERROR_CODES = frozenset(
+    {
+        THIRD_PARTY_SERVING_DISABLED_ERROR_CODE,
+        THIRD_PARTY_RUNTIME_UNLISTED_ERROR_CODE,
+        THIRD_PARTY_REGION_UNAVAILABLE_ERROR_CODE,
+    }
+)
 
 # Retry jitter. Fixed / pure-exponential backoff makes every client that
 # lost a worker at the same instant (cluster cold start, rolling restart)
@@ -1259,7 +1299,7 @@ def raise_if_model_load_failed(response: _HttpResponse, model: str | None = None
     Used by the SDK retry loops to short-circuit *before* checking the
     ``MODEL_LOADING`` retry budget. The server returns this on the very
     first request when it has a recorded terminal failure for the
-    model, so the caller should fail fast instead of retrying for 5
+    model, so the caller should fail fast instead of retrying for 15
     minutes.
 
     Args:
@@ -1351,6 +1391,8 @@ def handle_error(response: _HttpResponse) -> NoReturn:
             failures (terminal — never retried).
         AccountInactiveError: For 403 account suspended / pending review
             (terminal — never retried).
+        RelayUnavailableError: For 403 SIE Relay refusals (terminal — never
+            retried).
         AccountStateUnavailableError: For 503 ACCOUNT_STATE_UNAVAILABLE.
         RequestError: For other 4xx responses.
         ServerError: For other 5xx responses.
@@ -1358,6 +1400,7 @@ def handle_error(response: _HttpResponse) -> NoReturn:
     code = None
     param = None
     message = f"HTTP {response.status_code}"
+    fields: dict[str, Any] = {}
 
     try:
         # Try msgpack first
@@ -1369,6 +1412,7 @@ def handle_error(response: _HttpResponse) -> NoReturn:
         if "error" in data:
             error = data["error"]
             if isinstance(error, dict):
+                fields = error
                 code = error.get("code")
                 message = error.get("message", message)
                 error_param = error.get("param")
@@ -1379,6 +1423,7 @@ def handle_error(response: _HttpResponse) -> NoReturn:
         elif "detail" in data:
             detail = data["detail"]
             if isinstance(detail, dict):
+                fields = detail
                 code = detail.get("code")
                 message = detail.get("message", str(detail))
                 detail_param = detail.get("param")
@@ -1400,7 +1445,7 @@ def handle_error(response: _HttpResponse) -> NoReturn:
     # Fallback dispatch — ``model`` is only attached by the helper-style
     # short-circuit (``raise_if_input_too_long``) on the extract path.
     if response.status_code == HTTP_SERVICE_UNAVAILABLE and code == PROVISIONING_ERROR_CODE:
-        raise ProvisioningError(message, retry_after=get_retry_after(response), param=param)
+        raise ProvisioningError(message, retry_after=get_retry_after(response), param=param, request=request)
     if response.status_code == HTTP_CLIENT_ERROR and code == INPUT_TOO_LONG_ERROR_CODE:
         raise InputTooLongError(message, param=param, request=request)
     # Rate limit (pass-2 audit B1). Retried on the admission ladder in the
@@ -1422,6 +1467,17 @@ def handle_error(response: _HttpResponse) -> NoReturn:
         ACCOUNT_PENDING_REVIEW_ERROR_CODE,
     ):
         raise AccountInactiveError(message, code=code, param=param, request=request)
+    if response.status_code == HTTP_FORBIDDEN and code in RELAY_UNAVAILABLE_ERROR_CODES:
+        key_region = fields.get("key_region")
+        deployment_region = fields.get("deployment_region")
+        raise RelayUnavailableError(
+            message,
+            code=code,
+            key_region=key_region if isinstance(key_region, str) else None,
+            deployment_region=deployment_region if isinstance(deployment_region, str) else None,
+            param=param,
+            request=request,
+        )
     if response.status_code == HTTP_SERVICE_UNAVAILABLE and code == ACCOUNT_STATE_UNAVAILABLE_ERROR_CODE:
         raise AccountStateUnavailableError(message, retry_after=get_retry_after(response), param=param, request=request)
     if response.status_code >= HTTP_SERVER_ERROR:
@@ -1449,11 +1505,15 @@ def provisioning_retry_delay(
     param = get_error_param(response)
     if not wait_for_capacity:
         msg = f"No capacity available for GPU '{gpu}'. Server is provisioning."
-        raise ProvisioningError(msg, gpu=gpu, retry_after=retry_after, param=param)
+        raise ProvisioningError(
+            msg, gpu=gpu, retry_after=retry_after, param=param, request=parse_request_metadata(response.headers)
+        )
     elapsed = time.monotonic() - start_time
     if elapsed >= timeout:
         msg = f"Provisioning timeout after {elapsed:.1f}s waiting for GPU '{gpu}'"
-        raise ProvisioningError(msg, gpu=gpu, retry_after=retry_after, param=param)
+        raise ProvisioningError(
+            msg, gpu=gpu, retry_after=retry_after, param=param, request=parse_request_metadata(response.headers)
+        )
     remaining = timeout - elapsed
     if retry_after is not None:
         return min(retry_after, remaining)
@@ -1594,7 +1654,7 @@ def next_stream_retry_delay(
         if code == MODEL_LOADING_ERROR_CODE:
             if elapsed >= timeout:
                 msg = f"Model loading timeout after {elapsed:.1f}s for '{model}'"
-                raise ModelLoadingError(msg, model=model)
+                raise ModelLoadingError(msg, model=model, request=parse_request_metadata(response.headers))
             retry_after = get_retry_after(response)
             delay = retry_after_or_default(retry_after, MODEL_LOADING_DEFAULT_DELAY_S)
             return min(delay, timeout - elapsed), oom_retries

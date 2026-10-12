@@ -148,10 +148,14 @@ class ExtractPreparedItem:
     Attributes:
         cost: Character count of the text (approximate batching budget).
         original_index: Position in original request for result reordering.
+        runs_alone: Never batched with other items (see ``PreparedItem.runs_alone``).
+            Set for adapters whose engine batches continuously, where a shared
+            worker batch only makes each item wait for its slowest batch-mate.
     """
 
     cost: int
     original_index: int
+    runs_alone: bool = False
 
 
 @dataclass(slots=True)

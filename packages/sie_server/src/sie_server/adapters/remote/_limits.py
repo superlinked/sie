@@ -39,6 +39,7 @@ like an inference call.
 from __future__ import annotations
 
 import contextvars
+import logging
 import math
 import threading
 import time
@@ -55,6 +56,8 @@ from sie_server.adapters.errors import (
 )
 from sie_server.config.upstreams import RateCap, Upstream, installed_upstreams
 from sie_server.observability.worker_telemetry import worker_telemetry
+
+logger = logging.getLogger(__name__)
 
 _SLOT_RETRY_AFTER_S = 1
 
@@ -306,7 +309,8 @@ def _installed_limiter(
 ) -> UpstreamLimiter:
     upstream = installed_upstreams().get(name)
     if upstream is None:
-        raise RuntimeError(f"upstream {name!r} is not defined in the startup configuration")
+        logger.warning("upstream %r is not defined in the startup configuration", name)
+        raise RuntimeError("this remote profile's upstream is not defined in the startup configuration")
     with _REGISTRY_LOCK:
         entry = limiters.get(name)
         if entry is None or entry[0] is not upstream:

@@ -7,7 +7,14 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 from sie_sdk.client._shared import get_retry_after, handle_error
-from sie_sdk.client.errors import AccountStateUnavailableError, RequestError, ServerError
+from sie_sdk.client.errors import (
+    AccountStateUnavailableError,
+    LoraLoadingError,
+    ModelLoadingError,
+    ProvisioningError,
+    RequestError,
+    ServerError,
+)
 
 
 def _error_response(status_code: int, headers: dict[str, str]) -> MagicMock:
@@ -71,6 +78,50 @@ def test_error_constructor_positional_compatibility_and_missing_metadata() -> No
 
     assert (request_error.code, request_error.status_code, request_error.request) == ("legacy_code", 400, None)
     assert (server_error.code, server_error.status_code, server_error.request) == ("legacy_code", 500, None)
+
+
+def test_capacity_error_constructors_keep_their_arguments_and_default_to_no_metadata() -> None:
+    provisioning = ProvisioningError("no capacity", gpu="l4", retry_after=30.0, param="model")
+    model_loading = ModelLoadingError("loading", model="m")
+    lora_loading = LoraLoadingError("lora loading", lora="adapter", model="m")
+
+    assert (str(provisioning), provisioning.gpu, provisioning.retry_after, provisioning.param) == (
+        "no capacity",
+        "l4",
+        30.0,
+        "model",
+    )
+    assert (str(model_loading), model_loading.model) == ("loading", "m")
+    assert (str(lora_loading), lora_loading.lora, lora_loading.model) == ("lora loading", "adapter", "m")
+    assert provisioning.request is None
+    assert model_loading.request is None
+    assert lora_loading.request is None
+
+
+def test_provisioning_refusal_retains_request_metadata() -> None:
+    response = httpx.Response(
+        503,
+        headers={
+            "Retry-After": "60",
+            "X-SIE-Request-ID": "req-provisioning",
+            "X-SIE-Served-By": "local",
+            "X-SIE-Fallback-Reason": "provisioning",
+            "X-SIE-Fallback-Error": "QUEUE_FULL",
+        },
+        json={"error": {"code": "PROVISIONING", "message": "Capacity for model 'm' is starting."}},
+    )
+
+    with pytest.raises(ProvisioningError) as excinfo:
+        handle_error(response)
+
+    assert str(excinfo.value) == "Capacity for model 'm' is starting."
+    assert excinfo.value.retry_after == 60.0
+    assert excinfo.value.request == {
+        "id": "req-provisioning",
+        "served_by": "local",
+        "fallback_reason": "provisioning",
+        "fallback_error": "QUEUE_FULL",
+    }
 
 
 @pytest.mark.parametrize("status_code", [500, 503, 504])

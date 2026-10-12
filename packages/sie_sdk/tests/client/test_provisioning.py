@@ -1,10 +1,111 @@
+import asyncio
 import json
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
+import httpx
 import msgpack
 import numpy as np
 import pytest
-from sie_sdk import ServerError, SIEAsyncClient, SIEClient
+from sie_sdk import LoraLoadingError, ModelLoadingError, ProvisioningError, ServerError, SIEAsyncClient, SIEClient
+from sie_sdk.client._shared import (
+    DEFAULT_CONNECT_TIMEOUT_S,
+    DEFAULT_PROVISION_TIMEOUT_S,
+    DEFAULT_READ_TIMEOUT_S,
+    LORA_LOADING_MAX_RETRIES,
+)
+from sie_sdk.client.async_ import _AioResponse
+
+_REFUSAL_HEADERS = {
+    "X-SIE-Request-ID": "req-refused",
+    "X-SIE-Served-By": "local",
+    "X-SIE-Fallback-Reason": "provisioning",
+    "X-SIE-Fallback-Error": "QUEUE_FULL",
+}
+_REFUSAL_METADATA = {
+    "id": "req-refused",
+    "served_by": "local",
+    "fallback_reason": "provisioning",
+    "fallback_error": "QUEUE_FULL",
+}
+_CAPACITY_READY_AT_S = 700.0
+
+
+class _Clock:
+    """Monotonic clock that advances only when the client sleeps."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+class _ClockAsyncio:
+    """The ``asyncio`` module as the async client sees it, sleeping on the fake clock."""
+
+    def __init__(self, clock: _Clock) -> None:
+        self._clock = clock
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(asyncio, name)
+
+    async def sleep(self, seconds: float, result: Any = None) -> Any:
+        self._clock.sleep(seconds)
+        return result
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
+    fake = _Clock()
+    monkeypatch.setattr("sie_sdk.client.sync.time", fake)
+    monkeypatch.setattr("sie_sdk.client.async_.time", fake)
+    monkeypatch.setattr("sie_sdk.client._shared.time", fake)
+    monkeypatch.setattr("sie_sdk.client.async_.asyncio", _ClockAsyncio(fake))
+    return fake
+
+
+def _refusal_body(code: str) -> dict[str, Any]:
+    return {"error": {"code": code, "message": "Capacity for model 'bge-m3' is starting."}}
+
+
+def _sync_refusal(code: str, retry_after: str = "900") -> MagicMock:
+    response = MagicMock()
+    response.status_code = 503
+    response.headers = {"content-type": "application/json", "Retry-After": retry_after, **_REFUSAL_HEADERS}
+    response.json.return_value = _refusal_body(code)
+    response.content = json.dumps(_refusal_body(code)).encode()
+    return response
+
+
+def _sync_encoded() -> MagicMock:
+    response = MagicMock()
+    response.status_code = 200
+    response.headers = {"content-type": "application/msgpack"}
+    response.content = msgpack.packb({"items": [{"dense": {"dims": 4, "values": np.zeros(4)}}]}, use_bin_type=True)
+    return response
+
+
+def _async_refusal(code: str, retry_after: str = "900") -> _AioResponse:
+    return _AioResponse(
+        503,
+        json.dumps(_refusal_body(code)).encode(),
+        {"content-type": "application/json", "Retry-After": retry_after, **_REFUSAL_HEADERS},
+    )
+
+
+def _async_encoded() -> _AioResponse:
+    return _AioResponse(
+        200,
+        msgpack.packb({"items": [{"dense": {"dims": 4, "values": np.zeros(4)}}]}, use_bin_type=True),
+        {"content-type": "application/msgpack"},
+    )
 
 
 class TestProvisioningRetry:
@@ -366,4 +467,161 @@ class TestAsyncModelLoadingRetry:
             await client.encode("bge-m3", {"text": "hello"}, provision_timeout_s=0.05)
 
         assert "timeout" in str(exc_info.value).lower()
+        await client.close()
+
+
+class TestFinalAttemptAtBudgetEnd:
+    """A capacity wait that reaches the end of the budget is followed by one final attempt."""
+
+    @pytest.mark.parametrize("code", ["PROVISIONING", "MODEL_LOADING"])
+    def test_sync_capacity_ready_during_the_last_wait_is_used(self, clock: _Clock, code: str) -> None:
+        def post(*_args: object, **_kwargs: object) -> MagicMock:
+            return _sync_encoded() if clock.now >= _CAPACITY_READY_AT_S else _sync_refusal(code)
+
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            mock_client.return_value.post = MagicMock(side_effect=post)
+            client = SIEClient("http://localhost:8080")
+
+            result = client.encode("bge-m3", {"text": "hello"})
+
+            assert "dense" in result
+            assert clock.sleeps == [DEFAULT_PROVISION_TIMEOUT_S]
+            assert mock_client.return_value.post.call_count == 2
+            assert client.last_retry_count == 1
+            final_attempt = mock_client.return_value.post.call_args
+            assert final_attempt.kwargs["timeout"] == httpx.Timeout(
+                DEFAULT_READ_TIMEOUT_S, connect=DEFAULT_CONNECT_TIMEOUT_S
+            )
+            client.close()
+
+    @pytest.mark.parametrize("code", ["PROVISIONING", "MODEL_LOADING"])
+    async def test_async_capacity_ready_during_the_last_wait_is_used(self, clock: _Clock, code: str) -> None:
+        async def post(*_args: object, **_kwargs: object) -> _AioResponse:
+            return _async_encoded() if clock.now >= _CAPACITY_READY_AT_S else _async_refusal(code)
+
+        client = SIEAsyncClient("http://localhost:8080")
+        client._post = AsyncMock(side_effect=post)  # type: ignore[method-assign]
+
+        result = await client.encode("bge-m3", {"text": "hello"})
+
+        assert "dense" in result
+        assert clock.sleeps == [DEFAULT_PROVISION_TIMEOUT_S]
+        assert client._post.call_count == 2
+        assert client.last_retry_count == 1
+        assert client._post.call_args.kwargs["client_timeout"] == aiohttp.ClientTimeout(
+            total=DEFAULT_READ_TIMEOUT_S,
+            connect=DEFAULT_READ_TIMEOUT_S,
+            sock_connect=DEFAULT_CONNECT_TIMEOUT_S,
+            sock_read=DEFAULT_READ_TIMEOUT_S,
+        )
+        await client.close()
+
+    def test_sync_final_attempt_still_provisioning_raises_provisioning_error(self, clock: _Clock) -> None:
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            mock_client.return_value.post = MagicMock(side_effect=lambda *_a, **_k: _sync_refusal("PROVISIONING"))
+            client = SIEClient("http://localhost:8080")
+
+            with pytest.raises(ProvisioningError) as excinfo:
+                client.encode("bge-m3", {"text": "hello"}, gpu="l4")
+
+            assert mock_client.return_value.post.call_count == 2
+            client.close()
+
+        assert clock.sleeps == [DEFAULT_PROVISION_TIMEOUT_S]
+        error = excinfo.value
+        assert str(error) == "Provisioning timeout after 900.0s waiting for GPU 'l4'"
+        assert (error.gpu, error.retry_after, error.request) == ("l4", 900.0, _REFUSAL_METADATA)
+
+    async def test_async_final_attempt_still_provisioning_raises_provisioning_error(self, clock: _Clock) -> None:
+        client = SIEAsyncClient("http://localhost:8080")
+        client._post = AsyncMock(side_effect=lambda *_a, **_k: _async_refusal("PROVISIONING"))  # type: ignore[method-assign]
+
+        with pytest.raises(ProvisioningError) as excinfo:
+            await client.encode("bge-m3", {"text": "hello"}, gpu="l4")
+
+        assert client._post.call_count == 2
+        assert clock.sleeps == [DEFAULT_PROVISION_TIMEOUT_S]
+        error = excinfo.value
+        assert str(error) == "Provisioning timeout after 900.0s waiting for GPU 'l4'"
+        assert (error.gpu, error.retry_after, error.request) == ("l4", 900.0, _REFUSAL_METADATA)
+        await client.close()
+
+    def test_sync_final_attempt_still_loading_raises_model_loading_error(self, clock: _Clock) -> None:
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            mock_client.return_value.post = MagicMock(side_effect=lambda *_a, **_k: _sync_refusal("MODEL_LOADING"))
+            client = SIEClient("http://localhost:8080")
+
+            with pytest.raises(ModelLoadingError) as excinfo:
+                client.encode("bge-m3", {"text": "hello"})
+
+            assert mock_client.return_value.post.call_count == 2
+            client.close()
+
+        assert clock.sleeps == [DEFAULT_PROVISION_TIMEOUT_S]
+        assert (excinfo.value.model, excinfo.value.request) == ("bge-m3", _REFUSAL_METADATA)
+
+    async def test_async_final_attempt_still_loading_raises_model_loading_error(self, clock: _Clock) -> None:
+        client = SIEAsyncClient("http://localhost:8080")
+        client._post = AsyncMock(side_effect=lambda *_a, **_k: _async_refusal("MODEL_LOADING"))  # type: ignore[method-assign]
+
+        with pytest.raises(ModelLoadingError) as excinfo:
+            await client.encode("bge-m3", {"text": "hello"})
+
+        assert client._post.call_count == 2
+        assert clock.sleeps == [DEFAULT_PROVISION_TIMEOUT_S]
+        assert (excinfo.value.model, excinfo.value.request) == ("bge-m3", _REFUSAL_METADATA)
+        await client.close()
+
+
+class TestRefusalRequestMetadata:
+    """Provisioning, model-loading and LoRA-loading errors carry the refusal's request metadata."""
+
+    def test_sync_provisioning_without_waiting(self) -> None:
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            mock_client.return_value.post = MagicMock(return_value=_sync_refusal("PROVISIONING", retry_after="30"))
+            client = SIEClient("http://localhost:8080")
+
+            with pytest.raises(ProvisioningError) as excinfo:
+                client.encode("bge-m3", {"text": "hello"}, wait_for_capacity=False)
+
+            assert mock_client.return_value.post.call_count == 1
+            client.close()
+
+        assert (excinfo.value.retry_after, excinfo.value.request) == (30.0, _REFUSAL_METADATA)
+
+    async def test_async_provisioning_without_waiting(self) -> None:
+        client = SIEAsyncClient("http://localhost:8080")
+        client._post = AsyncMock(return_value=_async_refusal("PROVISIONING", retry_after="30"))  # type: ignore[method-assign]
+
+        with pytest.raises(ProvisioningError) as excinfo:
+            await client.encode("bge-m3", {"text": "hello"}, wait_for_capacity=False)
+
+        assert client._post.call_count == 1
+        assert (excinfo.value.retry_after, excinfo.value.request) == (30.0, _REFUSAL_METADATA)
+        await client.close()
+
+    def test_sync_lora_loading_retries_exhausted(self, clock: _Clock) -> None:
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            mock_client.return_value.post = MagicMock(side_effect=lambda *_a, **_k: _sync_refusal("LORA_LOADING", "1"))
+            client = SIEClient("http://localhost:8080")
+
+            with pytest.raises(LoraLoadingError) as excinfo:
+                client.encode("bge-m3", {"text": "hello"}, options={"lora": "adapter-a"})
+
+            assert mock_client.return_value.post.call_count == LORA_LOADING_MAX_RETRIES + 1
+            client.close()
+
+        error = excinfo.value
+        assert (error.lora, error.model, error.request) == ("adapter-a", "bge-m3", _REFUSAL_METADATA)
+
+    async def test_async_lora_loading_retries_exhausted(self, clock: _Clock) -> None:
+        client = SIEAsyncClient("http://localhost:8080")
+        client._post = AsyncMock(side_effect=lambda *_a, **_k: _async_refusal("LORA_LOADING", "1"))  # type: ignore[method-assign]
+
+        with pytest.raises(LoraLoadingError) as excinfo:
+            await client.encode("bge-m3", {"text": "hello"}, options={"lora": "adapter-a"})
+
+        assert client._post.call_count == LORA_LOADING_MAX_RETRIES + 1
+        error = excinfo.value
+        assert (error.lora, error.model, error.request) == ("adapter-a", "bge-m3", _REFUSAL_METADATA)
         await client.close()

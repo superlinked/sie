@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import hashlib
 import os
+import socket
 import struct
 import tempfile
 import threading
@@ -3330,6 +3331,39 @@ class TestDrainDeadline:
             assert srv._drain_deadline_s == pytest.approx(1.0)
         finally:
             await client.close()
+
+
+# -----------------------------------------------------------------------------
+# Listen backlog
+# -----------------------------------------------------------------------------
+
+
+def _somaxconn() -> int:
+    try:
+        return int(Path("/proc/sys/net/core/somaxconn").read_text())
+    except (OSError, ValueError):
+        return 0
+
+
+@pytest.mark.skipif(_somaxconn() < 300, reason="needs Linux with net.core.somaxconn >= 300")
+@pytest.mark.asyncio
+async def test_burst_of_connects_fits_the_listen_backlog(server_and_path) -> None:
+    """The sidecar opens one connection per generation stream, so a burst of
+    streams connects before the event loop can accept any of them. asyncio's
+    default backlog (100) refuses the 101st such connect with EAGAIN.
+    """
+    _srv, sock = server_and_path
+    clients: list[socket.socket] = []
+    try:
+        # No await between connects: the server cannot accept during the burst.
+        for _ in range(300):
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.setblocking(False)
+            clients.append(client)
+            client.connect(str(sock))
+    finally:
+        for client in clients:
+            client.close()
 
 
 # -----------------------------------------------------------------------------

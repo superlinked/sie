@@ -71,6 +71,11 @@ def test_dispatch_width_is_one_for_lora_adapters() -> None:
     assert _dispatch_width(_GatedAdapter(8, lora=True)) == 1
 
 
+def test_worker_exposes_its_dispatch_width() -> None:
+    assert ModelWorker(_GatedAdapter(8), _config()).dispatch_width == 8
+    assert ModelWorker(_GatedAdapter(8, lora=True), _config()).dispatch_width == 1
+
+
 @pytest.mark.asyncio
 async def test_batches_overlap_up_to_the_declared_width() -> None:
     adapter = _GatedAdapter(3)

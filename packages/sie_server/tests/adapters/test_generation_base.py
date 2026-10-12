@@ -15,12 +15,16 @@ from sie_server.adapters._generation_base import (
     client_safe_generation_error_message,
     client_safe_generation_error_param,
     collect_generation,
+    reasoning_expected_after_prompt,
     reasoning_starts_in_prompt,
     suppress_thinking_blocks,
 )
 
 _GEMMA_OPEN = "<" + "|channel" + ">" + "thought\n"
 _GEMMA_CLOSE = "<" + "channel|" + ">"
+_GEMMA_THINK = "<" + "|think|" + ">"
+_GEMMA_TURN = "<" + "|turn" + ">"
+_GEMMA_END = "<" + "turn|" + ">"
 
 
 class _FutureUnsupportedFieldError(GenerationUnsupportedFieldError):
@@ -373,6 +377,51 @@ async def test_suppress_gemma_thinking_normalizes_blocking_candidate() -> None:
     assert normalized.candidates is not None
     assert normalized.candidates[0]["text"] == "Visible answer"
     assert normalized.candidates[0]["logprobs"] is None
+
+
+def _gemma_prompt(*, thinking: bool, system: bool = True, user: str = "Read it.") -> str:
+    head = ""
+    if system:
+        head = (
+            _GEMMA_TURN
+            + "system\n"
+            + (_GEMMA_THINK + "\n" if thinking else "")
+            + "Extract the fields."
+            + _GEMMA_END
+            + "\n"
+        )
+    prompt = "<bos>" + head + _GEMMA_TURN + "user\n" + user + _GEMMA_END + "\n" + _GEMMA_TURN + "model\n"
+    # With thinking off, Gemma's template closes an empty thought channel itself.
+    return prompt if thinking else prompt + _GEMMA_OPEN + _GEMMA_CLOSE
+
+
+def test_reasoning_is_expected_when_gemma_enables_thinking_without_seeding_the_channel() -> None:
+    prompt = _gemma_prompt(thinking=True)
+    # The model opens the thought channel itself, so the prompt is not inside one.
+    assert reasoning_starts_in_prompt(prompt, "gemma4") is False
+    assert reasoning_expected_after_prompt(prompt, "gemma4") is True
+
+
+def test_reasoning_is_not_expected_for_gemma_without_the_system_thinking_token() -> None:
+    assert reasoning_expected_after_prompt(_gemma_prompt(thinking=False), "gemma4") is False
+    # The token counts only at the top of the first system turn, not in user text.
+    in_user = _gemma_prompt(thinking=False, system=False, user="Please " + _GEMMA_THINK + " hard")
+    assert reasoning_expected_after_prompt(in_user.removesuffix(_GEMMA_OPEN + _GEMMA_CLOSE), "gemma4") is False
+    # A seeded channel keeps the existing rule.
+    assert reasoning_expected_after_prompt("prefix" + _GEMMA_OPEN, "gemma4") is True
+
+
+@pytest.mark.parametrize(
+    ("prompt", "expected"),
+    [
+        ("<|im_start|>assistant\n<think>\n", True),
+        ("<|im_start|>assistant\n<think>\n\n</think>\n\n", False),
+        ("<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n", False),
+        ("<|im_start|>system\n" + _GEMMA_THINK + "\n<|im_end|>\n<|im_start|>assistant\n", False),
+    ],
+)
+def test_qwen3_reasoning_expectation_keeps_the_prompt_boundary_rule(prompt: str, expected: bool) -> None:
+    assert reasoning_expected_after_prompt(prompt, "qwen3") is reasoning_starts_in_prompt(prompt, "qwen3") is expected
 
 
 def test_reasoning_starts_in_prompt_uses_family_specific_unmatched_boundary() -> None:

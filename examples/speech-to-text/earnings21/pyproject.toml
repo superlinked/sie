@@ -1,0 +1,16 @@
+[project]
+name = "sie-earnings21-example"
+version = "0.1.0"
+description = "Submit all 219 frozen Earnings21 pieces to a SIE URL"
+requires-python = ">=3.12,<3.13"
+dependencies = ["sie-sdk==0.10.0", "httpx==0.28.1", "msgpack>=1.2.1,<2", "numpy==2.3.3"]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = ["ruff>=0.14"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"

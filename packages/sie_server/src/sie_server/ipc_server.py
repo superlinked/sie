@@ -90,6 +90,10 @@ _LEN_BYTES = _LEN_STRUCT.size
 # any decoded WorkItem batch we would send in-band — large payloads arrive
 # via the payload store, not via IPC.
 _MAX_FRAME_BYTES = 32 * 1024 * 1024
+# The sidecar opens one connection per generation stream. asyncio's default
+# listen backlog (100) refuses connects beyond it with EAGAIN when a burst of
+# streams starts at once; the kernel still caps this at net.core.somaxconn.
+_LISTEN_BACKLOG = 1024
 _NUMERICAL_ADMISSION_RETRY_MS = 1000
 _UNVERIFIED_ADMISSION = "this method does not verify numerical admissions"
 _ADMISSION_CHECK_FAILED = "numerical admission check failed"
@@ -288,6 +292,7 @@ class IpcServer:
         self._server = await asyncio.start_unix_server(
             self._handle_connection,
             path=str(self._socket_path),
+            backlog=_LISTEN_BACKLOG,
         )
         try:
             self._socket_path.chmod(0o600)

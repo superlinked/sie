@@ -41,7 +41,7 @@ import {
   SIEStreamError,
   ServerError,
 } from "./errors.js";
-import { toImageWireFormat } from "./images.js";
+import { detectImageFormat, toImageBytes } from "./images.js";
 import type { ImageInput, ImageWireFormat } from "./images.js";
 import {
   DEFAULT_JOB_WAIT_POLL,
@@ -79,9 +79,9 @@ import {
   parseEncodeResults,
   parseExtractResults,
   parseGenerateResult,
+  parseRequestMetadata,
   parseScoreResult,
   readRequestId,
-  settledChargeFields,
   throwIfEstimateUnroutable,
   throwIfInputTooLong,
   throwIfModelLoadFailed,
@@ -148,15 +148,8 @@ import type {
   ScoreResult,
   StatusMessage,
   StreamGenerateOptions,
+  TimingInfo,
   WireModelInfo,
-} from "./types.js";
-import {
-  FALLBACK_ERROR_PATTERN,
-  FALLBACK_REASONS,
-  type FallbackReason,
-  SERVED_BY_VALUES,
-  type ServedBy,
-  UPSTREAM_NAME_PATTERN,
 } from "./types.js";
 import { SDK_VERSION } from "./version.js";
 
@@ -350,6 +343,11 @@ function sleep(ms: number): Promise<void> {
 
 const SIE_BASE_URL_ENV = "SIE_BASE_URL";
 const SIE_API_KEY_ENV = "SIE_API_KEY";
+/**
+ * SIE Serverless: the base URL of a client given an API key but no base URL,
+ * and the origin `SIE_API_KEY` is scoped to while `SIE_BASE_URL` is unset.
+ */
+const SIE_SERVERLESS_BASE_URL = "https://api.superlinked.com";
 
 /**
  * Read a non-blank environment variable. Undefined outside Node-like runtimes
@@ -375,19 +373,44 @@ function urlOrigin(url: string): string | undefined {
 }
 
 /**
- * `SIE_API_KEY`, scoped to the origin named by `SIE_BASE_URL`. Connection
- * requests reuse the client's key, so a control-plane URL on another origin
- * requires an explicit key.
+ * The base URL a client connects to: `baseUrl`, then `SIE_BASE_URL`, then SIE
+ * Serverless when an API key is available (a non-empty `apiKey`, or
+ * `SIE_API_KEY` when `apiKey` is omitted). Without any of these, construction
+ * fails instead of guessing a local server, so a deployment missing its key
+ * reports that at once rather than retrying connections.
+ */
+function resolveBaseUrl(baseUrl: string | undefined, apiKey: string | undefined): string {
+  if (baseUrl !== undefined) {
+    return baseUrl;
+  }
+  const envBaseUrl = readEnv(SIE_BASE_URL_ENV);
+  if (envBaseUrl !== undefined) {
+    return envBaseUrl;
+  }
+  const hasApiKey = apiKey !== undefined ? apiKey !== "" : readEnv(SIE_API_KEY_ENV) !== undefined;
+  if (hasApiKey) {
+    return SIE_SERVERLESS_BASE_URL;
+  }
+  throw new TypeError(
+    `baseUrl is required: pass it explicitly, set ${SIE_BASE_URL_ENV}, or set ${SIE_API_KEY_ENV} to use SIE Serverless (${SIE_SERVERLESS_BASE_URL}).`,
+  );
+}
+
+/**
+ * `SIE_API_KEY`, scoped to the origin named by `SIE_BASE_URL`, or to SIE
+ * Serverless while `SIE_BASE_URL` is unset. Connection requests reuse the
+ * client's key, so a control-plane URL on another origin requires an explicit
+ * key.
  */
 function envApiKeyFor(baseUrl: string, controlPlaneUrl: string | undefined): string | undefined {
   const apiKey = readEnv(SIE_API_KEY_ENV);
-  const envOrigin = urlOrigin(readEnv(SIE_BASE_URL_ENV) ?? "");
+  const envOrigin = urlOrigin(readEnv(SIE_BASE_URL_ENV) ?? SIE_SERVERLESS_BASE_URL);
   if (!apiKey || envOrigin === undefined || urlOrigin(baseUrl) !== envOrigin) {
     return undefined;
   }
   if (controlPlaneUrl && urlOrigin(controlPlaneUrl) !== envOrigin) {
     throw new TypeError(
-      `${SIE_API_KEY_ENV} is scoped to the ${SIE_BASE_URL_ENV} origin and is not sent to controlPlaneUrl on another origin; pass apiKey explicitly.`,
+      `${SIE_API_KEY_ENV} is scoped to the ${SIE_BASE_URL_ENV} origin (SIE Serverless when unset) and is not sent to controlPlaneUrl on another origin; pass apiKey explicitly.`,
     );
   }
   return apiKey;
@@ -414,11 +437,15 @@ async function parseTerminalJsonObject(
   owner: string,
 ): Promise<Record<string, unknown>> {
   const body = new Uint8Array(await response.arrayBuffer());
+  const request = parseRequestMetadata(response.headers);
   if (!response.ok) {
     throw new RequestError(
       `Unexpected ${owner} HTTP response (${terminalResponseDiagnostic(response, body.byteLength)})`,
       undefined,
       response.status,
+      undefined,
+      undefined,
+      request,
     );
   }
   let data: unknown;
@@ -429,6 +456,9 @@ async function parseTerminalJsonObject(
       `Malformed ${owner} JSON response (${terminalResponseDiagnostic(response, body.byteLength)})`,
       undefined,
       response.status,
+      undefined,
+      undefined,
+      request,
     );
   }
   if (data === null || typeof data !== "object" || Array.isArray(data)) {
@@ -436,120 +466,15 @@ async function parseTerminalJsonObject(
       `Unexpected ${owner} response shape (${terminalResponseDiagnostic(response, body.byteLength)})`,
       undefined,
       response.status,
+      undefined,
+      undefined,
+      request,
     );
   }
   return data as Record<string, unknown>;
 }
 
-function parseNonnegativeMeterHeader(headers: Headers, name: string): number | undefined {
-  const raw = headers.get(name);
-  if (raw === null || !/^(0|[1-9]\d*)$/.test(raw)) return undefined;
-  const parsed = Number(raw);
-  return Number.isSafeInteger(parsed) ? parsed : undefined;
-}
-
 const REMOTE_HEADER = "X-SIE-Remote";
-
-/**
- * Parse optional request-scoped metadata from one successful terminal response.
- *
- * `body` is the decoded response envelope, when the caller has one. The settled
- * charge is read from its `usage` block FIRST and falls back to the
- * `x-sie-credits-debited` header, which is the only source on a gateway that
- * predates in-body surfacing (#2434). The two always agree when both are
- * present; the body additionally names the rate book, which no header does.
- */
-function parseRequestMetadata(headers: Headers, body?: unknown): RequestMetadata | undefined {
-  const metadata: RequestMetadata = {};
-  const requestId = headers.get("x-sie-request-id");
-  if (
-    requestId !== null &&
-    requestId.length > 0 &&
-    requestId.length <= 256 &&
-    requestId === requestId.trim() &&
-    /^[\x20-\x7e]+$/.test(requestId)
-  ) {
-    metadata.id = requestId;
-  }
-  const executionIdentitySha256 = headers.get("x-sie-execution-identity-sha256");
-  if (executionIdentitySha256 !== null && /^[0-9a-f]{64}$/.test(executionIdentitySha256)) {
-    metadata.executionIdentitySha256 = executionIdentitySha256;
-  }
-  const executionBindingSha256 = headers.get("x-sie-execution-binding-sha256");
-  if (executionBindingSha256 !== null && /^[0-9a-f]{64}$/.test(executionBindingSha256)) {
-    metadata.executionBindingSha256 = executionBindingSha256;
-  }
-  const servedBy = headers.get("x-sie-served-by");
-  const runtimeInstance = headers.get("x-sie-runtime-instance");
-  if (runtimeInstance !== null && /^[0-9a-f]{64}$/.test(runtimeInstance)) {
-    metadata.runtimeInstanceId = runtimeInstance;
-  }
-  if (servedBy !== null && (SERVED_BY_VALUES as readonly string[]).includes(servedBy)) {
-    metadata.servedBy = servedBy as ServedBy;
-  }
-  const upstream = headers.get("x-sie-upstream");
-  if (upstream !== null && UPSTREAM_NAME_PATTERN.test(upstream)) {
-    metadata.upstream = upstream;
-  }
-  const fallbackReason = headers.get("x-sie-fallback-reason");
-  if (fallbackReason !== null && (FALLBACK_REASONS as readonly string[]).includes(fallbackReason)) {
-    metadata.fallbackReason = fallbackReason as FallbackReason;
-  }
-  const fallbackError = headers.get("x-sie-fallback-error");
-  if (fallbackError !== null && FALLBACK_ERROR_PATTERN.test(fallbackError)) {
-    metadata.fallbackError = fallbackError;
-  }
-
-  const usageHeaders = {
-    inputTokens: "x-sie-units-input-tokens",
-    pairs: "x-sie-units-pairs",
-    contentInputTokens: "x-sie-units-content-input-tokens",
-    images: "x-sie-units-images",
-    pages: "x-sie-units-pages",
-    outputTokens: "x-sie-units-output-tokens",
-    audioMs: "x-sie-units-audio-ms",
-  } as const;
-  const usage: NonNullable<RequestMetadata["usage"]> = {};
-  for (const [field, header] of Object.entries(usageHeaders) as [
-    keyof typeof usageHeaders,
-    string,
-  ][]) {
-    const value = parseNonnegativeMeterHeader(headers, header);
-    if (value !== undefined) usage[field] = value;
-  }
-
-  const settled = settledChargeFromBody(body);
-  if (settled !== undefined) {
-    usage.creditsCharged = settled.creditsCharged;
-    usage.rateBookVersion = settled.rateBookVersion;
-    metadata.creditsDebited = settled.creditsCharged;
-    metadata.rateBookVersion = settled.rateBookVersion;
-  } else {
-    const creditsDebited = parseNonnegativeMeterHeader(headers, "x-sie-credits-debited");
-    if (creditsDebited !== undefined) metadata.creditsDebited = creditsDebited;
-  }
-  if (Object.keys(usage).length > 0) metadata.usage = usage;
-  return Object.keys(metadata).length > 0 ? metadata : undefined;
-}
-
-/**
- * The settled charge from a response envelope's `usage` block (#2434).
- *
- * Shares `settledChargeFields`' validation so the metadata path and the result
- * parsers can never disagree about what counts as a publishable charge.
- * Anything malformed is treated as absent, so the header fallback still
- * applies.
- */
-function settledChargeFromBody(
-  body: unknown,
-): { creditsCharged: number; rateBookVersion: string } | undefined {
-  if (typeof body !== "object" || body === null || Array.isArray(body)) return undefined;
-  const { creditsCharged, rateBookVersion } = settledChargeFields(
-    (body as Record<string, unknown>).usage,
-  );
-  if (creditsCharged === undefined || rateBookVersion === undefined) return undefined;
-  return { creditsCharged, rateBookVersion };
-}
 
 function attachRequestMetadata<T extends { request?: RequestMetadata }>(
   results: T[],
@@ -678,11 +603,18 @@ function isImageWireFormat(image: ImageInput | ImageWireFormat): image is ImageW
   return typeof image === "object" && image !== null && "data" in image;
 }
 
+/**
+ * Wrap image bytes with the format their signature names, as the Python SDK
+ * does. Bytes with an unrecognized signature keep the historical `jpeg` label;
+ * the server reads the label as a hint and inspects the bytes itself.
+ */
 async function imageForWire(image: ImageInput | ImageWireFormat): Promise<ImageWireFormat> {
   if (isImageWireFormat(image)) {
     return image;
   }
-  return toImageWireFormat(image);
+  const data = await toImageBytes(image);
+  const detected = detectImageFormat(data);
+  return { data, format: detected === "unknown" ? "jpeg" : detected };
 }
 
 function imageBytesToBase64(data: Uint8Array): string {
@@ -938,6 +870,40 @@ function requireVisibleManualRedirect(response: Response): void {
   }
 }
 
+/**
+ * `params.options` for a native primitive: the caller's runtime options with
+ * the typed fields laid over them, or `undefined` when neither is set so the
+ * member stays off the wire.
+ */
+function runtimeOptions(
+  adapterOptions: Record<string, unknown> | undefined,
+  typed: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const set = Object.fromEntries(Object.entries(typed).filter(([, value]) => value !== undefined));
+  if (adapterOptions === undefined && Object.keys(set).length === 0) {
+    return undefined;
+  }
+  return { ...adapterOptions, ...set };
+}
+
+/** The response-level timing block, in the camelCase `TimingInfo` shape. */
+function timingFromWire(timing: unknown): TimingInfo | undefined {
+  if (typeof timing !== "object" || timing === null || Array.isArray(timing)) {
+    return undefined;
+  }
+  const wire = timing as Record<string, unknown>;
+  const ms = (key: string): number | undefined => {
+    const value = wire[key];
+    return typeof value === "number" ? value : undefined;
+  };
+  return {
+    totalMs: ms("total_ms"),
+    queueMs: ms("queue_ms"),
+    tokenizationMs: ms("tokenization_ms"),
+    inferenceMs: ms("inference_ms"),
+  };
+}
+
 /** SIE-native chunk variant — see `sse.rs::build_generate_chunk_event`. */
 function extractGenerateChunkError(chunk: GenerateChunk): SIEStreamError | null {
   if (!chunk.error) return null;
@@ -1017,14 +983,14 @@ export class SIEClient {
    * Create a new SIE client.
    *
    * @param baseUrl - Base URL of the SIE server (e.g., "http://localhost:8080").
-   *   Defaults to the `SIE_BASE_URL` environment variable when omitted.
+   *   When omitted, the `SIE_BASE_URL` environment variable is used; without
+   *   it, SIE Serverless (`https://api.superlinked.com`) is used when an API
+   *   key is available (`options.apiKey` or `SIE_API_KEY`). With neither a
+   *   base URL nor a key, construction throws a `TypeError`.
    * @param options - Client options
    */
   constructor(baseUrl?: string, options: SIEClientOptions = {}) {
-    const url = baseUrl ?? readEnv(SIE_BASE_URL_ENV);
-    if (url === undefined) {
-      throw new TypeError(`baseUrl is required: pass it explicitly or set ${SIE_BASE_URL_ENV}.`);
-    }
+    const url = resolveBaseUrl(baseUrl, options.apiKey);
     // Validate eagerly: a scheme-less baseUrl ("localhost:8080") would
     // otherwise only surface at request time as a fetch `TypeError`.
     let parsed: URL | undefined;
@@ -1049,8 +1015,13 @@ export class SIEClient {
         `Invalid baseUrl "${url}": must be an absolute http(s) URL with a host, e.g. "http://localhost:8080".`,
       );
     }
-    // Remove trailing slash
-    this.baseUrl = url.replace(/\/$/, "");
+    // Remove trailing slashes, without a regex: `/\/+$/` backtracks
+    // quadratically on a long run of slashes that is not at the end.
+    let end = url.length;
+    while (end > 0 && url.charCodeAt(end - 1) === 0x2f) {
+      end -= 1;
+    }
+    this.baseUrl = url.slice(0, end);
     // `timeoutMs` is the unit-encoded name; `timeout` is a deprecated alias
     // for the same MILLISECONDS value. `timeoutMs` wins if both are set.
     this.timeout = options.timeoutMs ?? options.timeout ?? DEFAULT_TIMEOUT;
@@ -1164,8 +1135,9 @@ export class SIEClient {
     if (options.instruction !== undefined) {
       params.instruction = options.instruction;
     }
-    if (options.isQuery !== undefined) {
-      params.options = { is_query: options.isQuery };
+    const encodeOptions = runtimeOptions(options.adapterOptions, { is_query: options.isQuery });
+    if (encodeOptions !== undefined) {
+      params.options = encodeOptions;
     }
     if (options.outputDtype !== undefined) {
       params.output_dtype = options.outputDtype;
@@ -1187,15 +1159,23 @@ export class SIEClient {
       model,
     );
 
-    // Wire format response: {"items": [...], "timing": {...}}
+    // Wire format response: {"model": "...", "items": [...], "timing": {...}}
     interface WireResponse {
+      model?: unknown;
       items: unknown[];
-      timing?: Record<string, unknown>;
+      timing?: unknown;
     }
 
     const data = unpackMessage<WireResponse>(new Uint8Array(await response.arrayBuffer()));
 
     const results = parseEncodeResults(data.items);
+    // The model and the timing breakdown describe the whole response; repeat
+    // them on each result, as the Python SDK does.
+    const timing = timingFromWire(data.timing);
+    for (const result of results) {
+      if (typeof data.model === "string" && data.model) result.model = data.model;
+      if (timing !== undefined) result.timing = { ...timing };
+    }
     attachRequestMetadata(results, response.headers, data);
     // Guard the 1:1 input-to-output contract before any positional access
     // (`results[0]` below, or index-based reassembly in callers). The queue
@@ -1207,7 +1187,7 @@ export class SIEClient {
       itemsArray,
       model,
       "encode",
-      response.headers.get("x-sie-request-id") ?? undefined,
+      parseRequestMetadata(response.headers),
     );
 
     if (isSingleItem) {
@@ -1920,6 +1900,7 @@ export class SIEClient {
                 gpu,
                 getRetryAfter(attemptResponse),
                 await getErrorParam(attemptResponse.clone()),
+                parseRequestMetadata(attemptResponse.headers),
               );
             }
             const elapsed = Date.now() - startTime;
@@ -1929,6 +1910,7 @@ export class SIEClient {
                 gpu,
                 getRetryAfter(attemptResponse),
                 await getErrorParam(attemptResponse.clone()),
+                parseRequestMetadata(attemptResponse.headers),
               );
             }
             const retryAfter = getRetryAfter(attemptResponse);
@@ -1953,6 +1935,7 @@ export class SIEClient {
                 `Model loading timeout for '${model}'`,
                 model,
                 await getErrorParam(attemptResponse.clone()),
+                parseRequestMetadata(attemptResponse.headers),
               );
             }
             const delay = getRetryAfter(attemptResponse) ?? MODEL_LOADING_DEFAULT_DELAY;
@@ -1977,6 +1960,7 @@ export class SIEClient {
                   model,
                   retries: oomRetries,
                   param: await getErrorParam(attemptResponse.clone()),
+                  request: parseRequestMetadata(attemptResponse.headers),
                 },
               );
             }
@@ -1988,6 +1972,7 @@ export class SIEClient {
               provisionTimeoutMs: this.provisionTimeout,
               model,
               param: await getErrorParam(attemptResponse.clone()),
+              request: parseRequestMetadata(attemptResponse.headers),
             });
             oomRetries += 1;
             if (await abortableSleep(delay, controller.signal)) {
@@ -2020,6 +2005,7 @@ export class SIEClient {
             HTTP_GATEWAY_TIMEOUT,
             readRequestId(attemptResponse),
             await getErrorParam(attemptResponse.clone()),
+            parseRequestMetadata(attemptResponse.headers),
           );
         }
 
@@ -2092,6 +2078,12 @@ export class SIEClient {
       query: queryForWire,
       items: itemsForWire,
     };
+    if (options.instruction !== undefined) {
+      body.instruction = options.instruction;
+    }
+    if (options.adapterOptions !== undefined) {
+      body.options = options.adapterOptions;
+    }
 
     const waitForCapacity = options.waitForCapacity ?? this.defaultWaitForCapacity;
     const { pool, gpu } = this.parseGpuParam(options.gpu);
@@ -2114,31 +2106,34 @@ export class SIEClient {
   }
 
   /**
-   * Extract entities from a single item.
+   * Extract entities or structured data from a single item.
    *
    * @param model - Model name (e.g., "urchade/gliner_multi-v2.1")
    * @param item - Item to extract from
-   * @param options - Extract options with labels
-   * @returns Extract result with entities
+   * @param options - Extract options: labels, output schema, instruction
+   * @returns Extract result
    */
-  async extract(model: string, item: ExtractItem, options: ExtractOptions): Promise<ExtractResult>;
+  async extract(model: string, item: ExtractItem, options?: ExtractOptions): Promise<ExtractResult>;
 
   /**
-   * Extract entities from multiple items.
+   * Extract entities or structured data from multiple items.
    *
    * @param model - Model name (e.g., "urchade/gliner_multi-v2.1")
    * @param items - Items to extract from
-   * @param options - Extract options with labels
+   * @param options - Extract options: labels, output schema, instruction
    * @returns Array of extract results in same order as input
    */
   async extract(
     model: string,
     items: ExtractItem[],
-    options: ExtractOptions,
+    options?: ExtractOptions,
   ): Promise<ExtractResult[]>;
 
   /**
-   * Extract entities from one or more items.
+   * Extract entities or structured data from one or more items.
+   *
+   * `options` may be omitted for models that take no labels, such as OCR,
+   * document parsing and speech to text.
    *
    * @example
    * ```typescript
@@ -2159,7 +2154,7 @@ export class SIEClient {
   async extract(
     model: string,
     items: ExtractItem | ExtractItem[],
-    options: ExtractOptions,
+    options: ExtractOptions = {},
   ): Promise<ExtractResult | ExtractResult[]> {
     const isSingleItem = !Array.isArray(items);
     const itemsArray = isSingleItem ? [items] : items;
@@ -2170,17 +2165,28 @@ export class SIEClient {
       items: itemsForWire,
     };
 
-    // Add params
-    const params: Record<string, unknown> = {
-      labels: options.labels,
-    };
-    if (options.threshold !== undefined) {
-      params.threshold = options.threshold;
+    // Add params if any are specified
+    const params: Record<string, unknown> = {};
+    if (options.labels !== undefined) {
+      params.labels = options.labels;
     }
-    if (options.adapterOptions !== undefined) {
-      params.options = options.adapterOptions;
+    if (options.outputSchema !== undefined) {
+      params.output_schema = options.outputSchema;
     }
-    body.params = params;
+    if (options.instruction !== undefined) {
+      params.instruction = options.instruction;
+    }
+    // `threshold` is a runtime option: the server reads it from
+    // `params.options` and ignores a `params.threshold` member.
+    const extractOptions = runtimeOptions(options.adapterOptions, {
+      threshold: options.threshold,
+    });
+    if (extractOptions !== undefined) {
+      params.options = extractOptions;
+    }
+    if (Object.keys(params).length > 0) {
+      body.params = params;
+    }
 
     const waitForCapacity = options.waitForCapacity ?? this.defaultWaitForCapacity;
     const { pool, gpu } = this.parseGpuParam(options.gpu);
@@ -2194,14 +2200,18 @@ export class SIEClient {
       model,
     );
 
-    // Wire format response: {"items": [...]}
+    // Wire format response: {"model": "...", "items": [...]}
     interface WireResponse {
+      model?: unknown;
       items: unknown[];
     }
 
     const data = unpackMessage<WireResponse>(new Uint8Array(await response.arrayBuffer()));
 
     const results = parseExtractResults(data.items);
+    if (typeof data.model === "string" && data.model) {
+      for (const result of results) result.model = data.model;
+    }
     attachRequestMetadata(results, response.headers, data);
     // Same positional contract as encode: `results[0]` below and index-based
     // reassembly in batch callers both assume one result per input, and the
@@ -2211,7 +2221,7 @@ export class SIEClient {
       itemsArray,
       model,
       "extract",
-      response.headers.get("x-sie-request-id") ?? undefined,
+      parseRequestMetadata(response.headers),
     );
 
     if (isSingleItem) {
@@ -2783,6 +2793,7 @@ export class SIEClient {
               gpu,
               retryAfter,
               await getErrorParam(response.clone()),
+              parseRequestMetadata(response.headers),
             );
           }
 
@@ -2793,6 +2804,7 @@ export class SIEClient {
               gpu,
               retryAfter,
               await getErrorParam(response.clone()),
+              parseRequestMetadata(response.headers),
             );
           }
 
@@ -2812,6 +2824,7 @@ export class SIEClient {
               undefined, // We don't have lora name at this level
               model,
               await getErrorParam(response.clone()),
+              parseRequestMetadata(response.headers),
             );
           }
 
@@ -2830,6 +2843,7 @@ export class SIEClient {
               `Model loading timeout after ${(elapsed / 1000).toFixed(1)}s for '${model}'`,
               model,
               await getErrorParam(response.clone()),
+              parseRequestMetadata(response.headers),
             );
           }
 
@@ -2855,6 +2869,7 @@ export class SIEClient {
             provisionTimeoutMs: this.provisionTimeout,
             model,
             param: await getErrorParam(response.clone()),
+            request: parseRequestMetadata(response.headers),
           });
           oomRetries += 1;
           await sleep(delay);

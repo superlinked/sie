@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -75,6 +76,8 @@ if TYPE_CHECKING:
     from sie_server.core.inference_output import ExtractOutput
     from sie_server.types.grammar import GrammarSpec
     from sie_server.types.inputs import ImageInput, Item, VideoInput
+
+logger = logging.getLogger(__name__)
 
 _JSON = "application/json"
 REQUEST_DEADLINE_S = 60.0
@@ -127,7 +130,8 @@ class OpenAIUpstreamAdapter(BaseAdapter, GenerationAdapter):
     def load(self, device: str) -> None:
         upstream = upstream_for_serving(self._upstream_name)
         if upstream.kind is not UpstreamKind.OPENAI:
-            raise UpstreamConfigError(f"upstream {self._upstream_name!r} is not of kind 'openai'")
+            logger.warning("upstream %r is not of kind 'openai'", self._upstream_name)
+            raise UpstreamConfigError("this remote profile's upstream is not of kind 'openai'")
         self._upstream = upstream
         self._client = upstream_sync_client(upstream)
         self._executor = ThreadPoolExecutor(
@@ -455,9 +459,14 @@ class OpenAIUpstreamAdapter(BaseAdapter, GenerationAdapter):
         if self._client is None or self._executor is None or self._upstream is None:
             raise RuntimeError(ERR_NOT_LOADED)
         if endpoint not in self._upstream.endpoints:
+            logger.warning(
+                "upstream %r declares no %s endpoint, so its remote profile cannot %s",
+                self._upstream_name,
+                endpoint.value,
+                operation,
+            )
             raise InvalidInputError(
-                f"upstream {self._upstream_name!r} declares no {endpoint.value} endpoint, "
-                f"so this profile cannot {operation}"
+                f"this remote profile cannot {operation}: its upstream declares no {endpoint.value} endpoint"
             )
         return self._executor, self._upstream
 

@@ -1072,6 +1072,87 @@ def test_generate_requires_reasoning_after_a_seeded_gemma_channel(mock_async_cli
     assert body["require_reasoning"] is True
 
 
+_GEMMA_TURN = "<" + "|turn" + ">"
+_GEMMA_END = "<" + "turn|" + ">"
+_GEMMA_THINKING_PROMPT = (
+    "<bos>"
+    + _GEMMA_TURN
+    + "system\n"
+    + "<"
+    + "|think|"
+    + ">"
+    + "\nExtract the fields."
+    + _GEMMA_END
+    + "\n"
+    + _GEMMA_TURN
+    + "user\nRead it."
+    + _GEMMA_END
+    + "\n"
+    + _GEMMA_TURN
+    + "model\n"
+)
+_GEMMA_ANSWER_ONLY_PROMPT = (
+    "<bos>"
+    + _GEMMA_TURN
+    + "system\nExtract the fields."
+    + _GEMMA_END
+    + "\n"
+    + _GEMMA_TURN
+    + "user\nRead it."
+    + _GEMMA_END
+    + "\n"
+    + _GEMMA_TURN
+    + "model\n"
+    + "<"
+    + "|channel"
+    + ">"
+    + "thought\n"
+    + "<"
+    + "channel|"
+    + ">"
+)
+
+
+@pytest.mark.parametrize(("n", "stream"), [(None, False), (None, True), (2, True), (2, False)])
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_requires_reasoning_when_gemma_enables_thinking(
+    mock_async_client: MagicMock, n: int | None, stream: bool
+) -> None:
+    # Gemma 4 with enable_thinking leaves the model to open the thought channel,
+    # so a json_schema grammar must wait for it rather than bind the first token.
+    body = _posted_generate_body(
+        mock_async_client, _GEMMA_THINKING_PROMPT, reasoning_parser="gemma4", n=n, stream=stream
+    )
+
+    assert body["require_reasoning"] is True
+
+
+@pytest.mark.parametrize(
+    ("prompt", "reasoning_parser"),
+    [
+        (_GEMMA_ANSWER_ONLY_PROMPT, "gemma4"),
+        (_GEMMA_THINKING_PROMPT, None),
+        # Qwen3.x keeps the prompt-boundary rule: an unseeded assistant turn is
+        # left to the engine default even if a Gemma thinking token appears.
+        ("<|im_start|>system\n" + "<" + "|think|" + ">" + "<|im_end|>\n<|im_start|>assistant\n", "qwen3"),
+    ],
+)
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_leaves_reasoning_unrequired_without_gemma_thinking(
+    mock_async_client: MagicMock, prompt: str, reasoning_parser: str | None
+) -> None:
+    body = _posted_generate_body(mock_async_client, prompt, reasoning_parser=reasoning_parser)
+
+    assert "require_reasoning" not in body
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_generate_keeps_requiring_reasoning_for_a_seeded_qwen_think_block(mock_async_client: MagicMock) -> None:
+    body = _posted_generate_body(mock_async_client, "<|im_start|>assistant\n<think>\n", reasoning_parser="qwen3")
+
+    assert body["require_reasoning"] is True
+
+
 @patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
 def test_generate_logprobs_request_sets_return_text_in_logprobs(mock_async_client: MagicMock, adapter) -> None:
     """A logprobs request must ask SGLang for decoded token TEXT.
@@ -3907,3 +3988,204 @@ def test_generate_n_gt_one_reports_cached_tokens_with_prompt_tokens(mock_async_c
     (term,) = asyncio.run(_collect())
     assert term.prompt_tokens == 40
     assert term.cached_tokens == 32
+
+
+_BUDGET_TOKENS = {"open": 100, "close": 101, "newline": 107}
+
+
+@pytest.mark.parametrize("value", [0, -1, True, "512", 1.5])
+def test_thinking_budget_must_be_a_positive_integer(value: object) -> None:
+    with pytest.raises(ValueError, match="thinking_budget must be a positive integer"):
+        SGLangGenerationAdapter(
+            model_name_or_path="google/gemma-4-31B-it", reasoning_parser="gemma4", thinking_budget=value
+        )
+
+
+@pytest.mark.parametrize("reasoning_parser", [None, "glm45"])
+def test_thinking_budget_needs_known_reasoning_control_tokens(reasoning_parser: str | None) -> None:
+    with pytest.raises(ValueError, match="thinking_budget needs a reasoning_parser"):
+        SGLangGenerationAdapter(
+            model_name_or_path="google/gemma-4-31B-it", reasoning_parser=reasoning_parser, thinking_budget=512
+        )
+
+
+@pytest.mark.parametrize("thinking_budget", [None, 512])
+@patch("sie_server.adapters.sglang.generation._reasoning_control_token_ids", return_value=_BUDGET_TOKENS)
+@patch("sie_server.adapters.sglang._server.subprocess.Popen")
+@patch("sie_server.adapters.sglang._server.requests.get")
+@patch("sie_server.adapters.sglang._server.find_free_port")
+def test_load_enables_custom_logit_processors_only_for_a_thinking_budget(
+    mock_find_port: MagicMock,
+    mock_requests_get: MagicMock,
+    mock_popen: MagicMock,
+    mock_token_ids: MagicMock,
+    thinking_budget: int | None,
+) -> None:
+    mock_find_port.return_value = 30005
+    mock_process = MagicMock()
+    mock_process.poll.return_value = None
+    mock_popen.return_value = mock_process
+    mock_requests_get.return_value = MagicMock(status_code=200)
+    adapter = SGLangGemmaAdapter(
+        model_name_or_path="google/gemma-4-31B-it",
+        served_model_name="google/gemma-4-31B-it",
+        reasoning_parser="gemma4",
+        grammar_backend="xgrammar",
+        thinking_budget=thinking_budget,
+    )
+
+    adapter.load("cuda:0")
+
+    cmd = mock_popen.call_args[0][0]
+    assert ("--enable-custom-logit-processor" in cmd) is (thinking_budget is not None)
+    assert mock_token_ids.called is (thinking_budget is not None)
+    if thinking_budget is not None:
+        assert mock_token_ids.call_args.kwargs["reasoning_format"] == "gemma4"
+
+
+def _posted_budget_body(
+    mock_async_client: MagicMock,
+    prompt: str,
+    *,
+    reasoning_parser: str,
+    thinking_budget: int | None = 512,
+    n: int | None = None,
+    stream: bool = False,
+) -> dict[str, Any]:
+    finish = '"meta_info": {"prompt_tokens": 1, "completion_tokens": 1, "finish_reason": {"type": "stop"}}'
+    if n is not None and not stream:
+        response = MagicMock()
+        response.json = MagicMock(
+            return_value=[
+                {
+                    "text": "{}",
+                    "meta_info": {"finish_reason": {"type": "stop"}, "completion_tokens": 1, "prompt_tokens": 1},
+                }
+            ]
+            * n
+        )
+        response.raise_for_status = MagicMock()
+        response.aread = AsyncMock()
+        response.__aenter__ = AsyncMock(return_value=response)
+        client_instance = _make_client_with_stream(_FakeStreamingResponse([]))
+        client_instance.stream.return_value = response
+    elif n is not None:
+        lines = [f'data: {{"index": {index}, "text": "{{}}", {finish}}}' for index in range(n)] + ["data: [DONE]"]
+        client_instance = _make_client_with_stream(_FakeStreamingResponse(lines))
+    else:
+        client_instance = _make_client_with_stream(_FakeStreamingResponse([f'data: {{"text": "{{}}", {finish}}}']))
+    mock_async_client.return_value = client_instance
+    adapter = SGLangGemmaAdapter(
+        model_name_or_path="google/gemma-4-31B-it",
+        served_model_name="google/gemma-4-31B-it",
+        reasoning_parser=reasoning_parser,
+        grammar_backend="xgrammar",
+        thinking_budget=thinking_budget,
+    )
+    adapter._server_url = "http://localhost:30005"
+    if thinking_budget is not None:
+        adapter._thinking_budget_tokens = dict(_BUDGET_TOKENS)
+    grammar = GrammarSpec(kind="json_schema", value={"type": "object", "properties": {"a": {"type": "string"}}})
+
+    async def _drain() -> None:
+        async for _ in adapter.generate(prompt=prompt, max_new_tokens=64, n=n, stream=stream, grammar=grammar):
+            pass
+
+    asyncio.run(_drain())
+    return client_instance.stream.call_args.kwargs["json"]
+
+
+@pytest.mark.parametrize(("n", "stream"), [(None, True), (2, True), (2, False)])
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_a_thinking_budget_rides_with_the_reasoning_aware_grammar(
+    mock_async_client: MagicMock, n: int | None, stream: bool
+) -> None:
+    body = _posted_budget_body(mock_async_client, _GEMMA_THINKING_PROMPT, reasoning_parser="gemma4", n=n, stream=stream)
+
+    # The grammar still applies: SGLang constrains the answer once the closing
+    # token the budget forces (or the model emits) ends the reasoning block.
+    assert body["require_reasoning"] is True
+    assert json.loads(body["sampling_params"]["json_schema"])["type"] == "object"
+    assert body["custom_logit_processor"] == generation_module.THINKING_BUDGET_PROCESSOR
+    assert body["sampling_params"]["custom_params"] == {
+        generation_module.THINKING_BUDGET_PARAM: {
+            "budget": 512,
+            "open": 100,
+            "close": 101,
+            "newline": 107,
+            "open_in_prompt": False,
+        }
+    }
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_a_thinking_budget_counts_from_a_block_the_prompt_opened(mock_async_client: MagicMock) -> None:
+    body = _posted_budget_body(
+        mock_async_client, "<|im_start|>assistant\n<think>\n", reasoning_parser="qwen3", stream=True
+    )
+
+    assert body["sampling_params"]["custom_params"][generation_module.THINKING_BUDGET_PARAM]["open_in_prompt"] is True
+
+
+@pytest.mark.parametrize(
+    ("prompt", "thinking_budget"),
+    [(_GEMMA_ANSWER_ONLY_PROMPT, 512), (_GEMMA_THINKING_PROMPT, None)],
+)
+@patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
+def test_no_budget_fields_without_reasoning_or_without_a_budget(
+    mock_async_client: MagicMock, prompt: str, thinking_budget: int | None
+) -> None:
+    body = _posted_budget_body(
+        mock_async_client, prompt, reasoning_parser="gemma4", thinking_budget=thinking_budget, stream=True
+    )
+
+    assert "custom_logit_processor" not in body
+    assert "custom_params" not in body["sampling_params"]
+
+
+class _FakeTokenizer:
+    def __init__(self, vocab: dict[str, list[int]]) -> None:
+        self._vocab = vocab
+
+    def encode(self, text: str, add_special_tokens: bool = True) -> list[int]:
+        assert add_special_tokens is False
+        return self._vocab[text]
+
+
+@pytest.mark.parametrize(
+    ("reasoning_format", "vocab", "expected"),
+    [
+        (
+            "gemma4",
+            {"<" + "|channel" + ">": [100], "<" + "channel|" + ">": [101], "\n": [107]},
+            {"open": 100, "close": 101, "newline": 107},
+        ),
+        (
+            "qwen3",
+            {"<think>": [151667], "</think>": [151668], "\n": [198]},
+            {"open": 151667, "close": 151668, "newline": 198},
+        ),
+        ("qwen3", {"<think>": [1], "</think>": [2], "\n": [3, 4]}, {"open": 1, "close": 2, "newline": None}),
+    ],
+)
+def test_reasoning_control_token_ids_come_from_the_tokenizer(
+    reasoning_format: str, vocab: dict[str, list[int]], expected: dict[str, int | None]
+) -> None:
+    with patch("transformers.AutoTokenizer.from_pretrained", return_value=_FakeTokenizer(vocab)) as loader:
+        ids = generation_module._reasoning_control_token_ids(
+            "org/model", revision="abc", trust_remote_code=True, reasoning_format=reasoning_format
+        )
+
+    assert ids == expected
+    assert loader.call_args.kwargs == {"revision": "abc", "trust_remote_code": True}
+
+
+def test_reasoning_control_tokens_must_be_single_tokens() -> None:
+    vocab = {"<think>": [1, 2], "</think>": [3], "\n": [4]}
+    with (
+        patch("transformers.AutoTokenizer.from_pretrained", return_value=_FakeTokenizer(vocab)),
+        pytest.raises(ValueError, match="to be one token"),
+    ):
+        generation_module._reasoning_control_token_ids(
+            "org/model", revision=None, trust_remote_code=False, reasoning_format="qwen3"
+        )

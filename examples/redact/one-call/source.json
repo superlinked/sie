@@ -1,0 +1,249 @@
+{
+  "input": {
+    "file": "input.txt",
+    "index": 240,
+    "uid": "gretel-en-34966",
+    "sha256": "94ec9f7160c81390866958d9b33c2c5a9e98f854782eafc938f4e57418adfc62",
+    "utf8_bytes": 963,
+    "code_points": 962,
+    "copy_policy": "Complete original text; no final newline added, normalization, stripping or caller windows."
+  },
+  "sources": {
+    "fixture": {
+      "repository": "https://github.com/superlinked/sie",
+      "revision": "9f9eaa3d74684c081fce45386ec91ac137f3ac1a",
+      "path": "packages/sie_server/tests/adapters/fixtures/gliner_union/redact-documents.json",
+      "sha256": "27a46485552385b096933d05eb4e96722e0914becae5261645c2ad9daea42677",
+      "url": "https://github.com/superlinked/sie/blob/9f9eaa3d74684c081fce45386ec91ac137f3ac1a/packages/sie_server/tests/adapters/fixtures/gliner_union/redact-documents.json"
+    },
+    "retained_study": {
+      "dataset": "superlinked/sie-task-evidence",
+      "revision": "31383ae9986d9dc9edd4e3a06ee9fb40b223d6fb",
+      "input_path": "redact/inputs/gretel-main.jsonl",
+      "url": "https://huggingface.co/datasets/superlinked/sie-task-evidence/blob/31383ae9986d9dc9edd4e3a06ee9fb40b223d6fb/redact/inputs/gretel-main.jsonl"
+    },
+    "upstream": {
+      "dataset": "gretelai/synthetic_pii_finance_multilingual",
+      "url": "https://huggingface.co/datasets/gretelai/synthetic_pii_finance_multilingual",
+      "description": "Synthetic financial text; Apache-2.0 attribution from the public recorded study.",
+      "full_upstream_revision": null
+    }
+  },
+  "expected_model_configuration": {
+    "sie_id": "superlinked/pii-redact",
+    "source_revision": "9f9eaa3d74684c081fce45386ec91ac137f3ac1a",
+    "path": "packages/sie_server/models/superlinked__pii-redact.yaml",
+    "sha256": "7637549f4036cc91dc342fcfd19abb8218cb444673b5091968f80f993ea06f57",
+    "url": "https://github.com/superlinked/sie/blob/9f9eaa3d74684c081fce45386ec91ac137f3ac1a/packages/sie_server/models/superlinked__pii-redact.yaml",
+    "first_checkpoint": {
+      "model": "urchade/gliner_multi_pii-v1",
+      "revision": "1fcf13e85f4eef5394e1fcd406cf2ca9ea82351d"
+    },
+    "members": [
+      {
+        "model": "numind/NuNER_Zero",
+        "revision": "c90187673f464518dca09f41689184ed6976242c",
+        "options": {
+          "merge_adjacent_entities": true
+        }
+      }
+    ],
+    "tokenizer_dependencies": {
+      "microsoft/mdeberta-v3-base": "a0484667b22365f84929a935b5e50a51f71f159d",
+      "microsoft/deberta-v3-large": "64a8c8eab3e352a784c658aef62be1662607476f"
+    },
+    "profile": "default",
+    "adapter": "sie_server.adapters.gliner_union.adapter:GLiNERUnionAdapter",
+    "runtime": {
+      "score_floor": 0.6,
+      "window_words": 300,
+      "window_overlap": 50,
+      "propagate_label": "person",
+      "name_min_letters": 3,
+      "default_labels": [
+        "person",
+        "street address",
+        "city",
+        "county",
+        "postal code",
+        "gps coordinates",
+        "date of birth",
+        "phone number",
+        "fax number",
+        "email address",
+        "url",
+        "ip address",
+        "mac address",
+        "social security number",
+        "national id number",
+        "tax id number",
+        "medical record number",
+        "health plan beneficiary number",
+        "account number",
+        "credit card number",
+        "cvv",
+        "pin",
+        "password",
+        "api key",
+        "http cookie",
+        "username",
+        "customer id",
+        "employee id",
+        "certificate or license number",
+        "license plate",
+        "vehicle identification number",
+        "device identifier",
+        "biometric identifier",
+        "unique identifier",
+        "passport number",
+        "driver's license number"
+      ]
+    },
+    "word_counting": "GLiNER splitter, including punctuation; not text.split().",
+    "composition": "Both detectors run in server windows. Identical (start,end,label) spans keep the maximum score; differently labelled and overlapping spans remain. Case-sensitive whole-word person tokens of at least three letters propagate. Offsets refer to the original document.",
+    "usage": "Input tokens count each detector and each overlapping server window."
+  },
+  "sdk": {
+    "source_project_version": "0.10.0",
+    "source_revision": "9f9eaa3d74684c081fce45386ec91ac137f3ac1a",
+    "dependency_contract": "Root Python workspace uv.lock"
+  },
+  "logical_request": {
+    "method": "POST",
+    "path": "/v1/extract/superlinked/pii-redact",
+    "body": {
+      "items": [
+        {
+          "text": "------------------------------------------------------------------------------------------------------------------\n\nTrade Confirmation\n\nTrade Date: 05/12/2023\nPortfolio: Vintage Cars\nConfirmation: 123456789\n\nSecurities: 1 x 1963 Chevrolet Corvette Stingray (Restored)\nQuantity: 1\nPrice: $50,000.00\nSettlement Date: 10/08/2024\n\nSwift BIC Code: FRZIUSNZ985\nSSN: 324-78-5893\nName: Alejandra Santamaría-Castilla\nStreet Address: 6074 Chaney Dam, Apt. 293\n\nDelivery Instructions:\n- Securities will be delivered to the above mentioned address\n- Funds will be remitted to the bank specified in the Swift BIC Code\n\n------------------------------------------------------------------------------------------------------------------\n\nPlease contact us if you have any questions or concerns regarding this trade confirmation.\n\nSincerely,\n\n[Trading Firm Name]\n[Trading Firm Address]\n[Trading Firm City, State, Zip Code]\n[Trading Firm Phone Number]\n[Trading Firm Email Address]"
+        }
+      ],
+      "params": {
+        "options": {
+          "profile": "default"
+        }
+      }
+    },
+    "wire_format": "MessagePack; this JSON is a logical display."
+  },
+  "saved_composition": {
+    "evidence": "saved composition replay; not a one-call HTTP recording",
+    "origin": "The public fixture expected spans: caller composition of two saved model responses from the recorded study.",
+    "score_note": "Propagated reference spans can have score null; no live score equality is implied.",
+    "entities": [
+      {
+        "start": 224,
+        "end": 267,
+        "label": "license plate",
+        "score": 0.62744140625,
+        "text": "1963 Chevrolet Corvette Stingray (Restored)"
+      },
+      {
+        "start": 360,
+        "end": 371,
+        "label": "social security number",
+        "score": 0.99560546875,
+        "text": "324-78-5893"
+      },
+      {
+        "start": 372,
+        "end": 376,
+        "label": "person",
+        "score": null,
+        "text": "Name"
+      },
+      {
+        "start": 378,
+        "end": 407,
+        "label": "person",
+        "score": 0.99609375,
+        "text": "Alejandra Santamaría-Castilla"
+      },
+      {
+        "start": 424,
+        "end": 449,
+        "label": "street address",
+        "score": 0.990234375,
+        "text": "6074 Chaney Dam, Apt. 293"
+      },
+      {
+        "start": 826,
+        "end": 844,
+        "label": "person",
+        "score": 0.66162109375,
+        "text": "[Trading Firm Name"
+      },
+      {
+        "start": 847,
+        "end": 854,
+        "label": "person",
+        "score": null,
+        "text": "Trading"
+      },
+      {
+        "start": 855,
+        "end": 859,
+        "label": "person",
+        "score": null,
+        "text": "Firm"
+      },
+      {
+        "start": 870,
+        "end": 877,
+        "label": "person",
+        "score": null,
+        "text": "Trading"
+      },
+      {
+        "start": 878,
+        "end": 882,
+        "label": "person",
+        "score": null,
+        "text": "Firm"
+      },
+      {
+        "start": 896,
+        "end": 904,
+        "label": "postal code",
+        "score": 0.85498046875,
+        "text": "Zip Code"
+      },
+      {
+        "start": 907,
+        "end": 932,
+        "label": "phone number",
+        "score": 0.88525390625,
+        "text": "Trading Firm Phone Number"
+      },
+      {
+        "start": 920,
+        "end": 932,
+        "label": "phone number",
+        "score": 0.93212890625,
+        "text": "Phone Number"
+      },
+      {
+        "start": 934,
+        "end": 961,
+        "label": "email address",
+        "score": 0.7255859375,
+        "text": "[Trading Firm Email Address"
+      },
+      {
+        "start": 935,
+        "end": 961,
+        "label": "email address",
+        "score": 0.93212890625,
+        "text": "Trading Firm Email Address"
+      }
+    ]
+  },
+  "live_recording": null,
+  "deployment_runtime": {
+    "served_configuration": "unknown until observed",
+    "runtime_version": "unknown",
+    "installed_distribution_version": "unknown",
+    "device": "unknown",
+    "returned_revision_metadata": "unknown",
+    "checkpoint_load_receipts": "unknown"
+  }
+}
