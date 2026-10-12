@@ -33,7 +33,7 @@ use crate::server::AppState;
 use crate::state::model_registry::ResolveError;
 
 fn yaml_response<T: Serialize>(status: StatusCode, value: &T) -> Response {
-    let body = match serde_yaml::to_string(value) {
+    let body = match serde_saphyr::to_string(value) {
         Ok(body) => body,
         Err(e) => {
             return (
@@ -664,10 +664,53 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "application/x-yaml");
         let body = String::from_utf8(body_bytes(response).await).unwrap();
-        assert!(body.contains("name: default"));
-        assert!(body.contains("engine: pytorch"));
-        assert!(body.contains("source: gateway-registry"));
+        let document: serde_json::Value = serde_saphyr::from_str(&body).unwrap();
+        assert_eq!(
+            document,
+            json!({
+                "name": "default",
+                "engine": "pytorch",
+                "priority": 100,
+                "source": "gateway-registry",
+                "adapters": ["module"],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn test_model_config_yaml_preserves_scalar_like_names() {
+        let bundles_dir = tempfile::TempDir::new().unwrap();
+        let models_dir = tempfile::TempDir::new().unwrap();
+        let (app, state) = build_test_router_with_state(&bundles_dir, &models_dir).await;
+        for name in ["null", "true", "1e3", "model: name", "model#tag"] {
+            seed_model(&state, name);
+            let encoded =
+                percent_encoding::utf8_percent_encode(name, percent_encoding::NON_ALPHANUMERIC);
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/configs/models/{encoded}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["content-type"], "application/x-yaml");
+            let body = String::from_utf8(body_bytes(response).await).unwrap();
+            let document: serde_json::Value = serde_saphyr::from_str(&body).unwrap();
+            assert_eq!(
+                document,
+                json!({
+                    "sie_id": name,
+                    "source": "gateway-registry",
+                    "bundles": ["default"],
+                })
+            );
+        }
     }
 
     #[tokio::test]

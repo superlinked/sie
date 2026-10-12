@@ -101,16 +101,14 @@ impl ModelInfoExtras {
     /// Best-effort extraction from a raw model YAML document (same files as
     /// ``sie_server`` / ``sie-config``). Missing sections fall back to
     /// conservative defaults so the JSON shape stays valid.
-    pub fn from_yaml_raw(raw: &serde_yaml::Value) -> Self {
+    pub fn from_yaml_raw(raw: &serde_json::Value) -> Self {
         let mut extras = Self::default();
 
-        if let serde_yaml::Value::Mapping(m) = raw.get("inputs").unwrap_or(&serde_yaml::Value::Null)
+        if let serde_json::Value::Object(m) = raw.get("inputs").unwrap_or(&serde_json::Value::Null)
         {
             for (k, v) in m {
-                let Some(ks) = k.as_str() else {
-                    continue;
-                };
-                if matches!(v, serde_yaml::Value::Bool(true)) {
+                let ks = k.as_str();
+                if matches!(v, serde_json::Value::Bool(true)) {
                     extras.inputs.push(ks.to_string());
                 }
             }
@@ -128,22 +126,20 @@ impl ModelInfoExtras {
 
         extras.routing = raw
             .get("routing")
-            .and_then(|value| serde_yaml::from_value(value.clone()).ok());
+            .and_then(|value| serde_json::from_value(value.clone()).ok());
 
         let tasks = raw.get("tasks");
         if let Some(enc) = tasks.and_then(|t| match t.get("encode")? {
-            serde_yaml::Value::Mapping(m) => Some(m),
+            serde_json::Value::Object(m) => Some(m),
             _ => None,
         }) {
             for (k, v) in enc {
-                let Some(key) = k.as_str() else {
-                    continue;
-                };
+                let key = k.as_str();
                 if key.is_empty() {
                     continue;
                 }
                 match v {
-                    serde_yaml::Value::Mapping(vm) => {
+                    serde_json::Value::Object(vm) => {
                         if let Some(dim) = vm.get("dim").and_then(|d| {
                             d.as_u64().or_else(|| d.as_i64().map(|i| i.max(0) as u64))
                         }) {
@@ -153,7 +149,7 @@ impl ModelInfoExtras {
                             extras.outputs.push(key.to_string());
                         }
                     }
-                    serde_yaml::Value::Null => {}
+                    serde_json::Value::Null => {}
                     _ => {
                         extras.outputs.push(key.to_string());
                     }
@@ -164,13 +160,13 @@ impl ModelInfoExtras {
         // Non-encode tasks contribute output kinds too, mirroring
         // ``ModelConfig.outputs`` in ``packages/sie_server/src/sie_server/config/model.py``.
         if let Some(t) = tasks {
-            if matches!(t.get("score"), Some(serde_yaml::Value::Mapping(_))) {
+            if matches!(t.get("score"), Some(serde_json::Value::Object(_))) {
                 extras.outputs.push("score".to_string());
             }
-            if matches!(t.get("extract"), Some(serde_yaml::Value::Mapping(_))) {
+            if matches!(t.get("extract"), Some(serde_json::Value::Object(_))) {
                 extras.outputs.push("json".to_string());
             }
-            if let Some(serde_yaml::Value::Mapping(gen)) = t.get("generate") {
+            if let Some(serde_json::Value::Object(gen)) = t.get("generate") {
                 extras.outputs.push("tokens".to_string());
                 // Surface the per-request cap so
                 // ``proxy_chat`` can reject overflowing
@@ -192,13 +188,13 @@ impl ModelInfoExtras {
                 // None`` so non-generation endpoints don't fail the
                 // gate.
                 let capabilities = gen.get("capabilities").and_then(|c| match c {
-                    serde_yaml::Value::Mapping(m) => Some(m),
+                    serde_json::Value::Object(m) => Some(m),
                     _ => None,
                 });
                 let grammar = capabilities
                     .and_then(|m| m.get("grammar"))
                     .and_then(|g| match g {
-                        serde_yaml::Value::Sequence(seq) => Some(
+                        serde_json::Value::Array(seq) => Some(
                             seq.iter()
                                 .filter_map(|v| v.as_str().map(String::from))
                                 .collect::<Vec<String>>(),
@@ -249,12 +245,10 @@ impl ModelInfoExtras {
             }
         }
 
-        if let Some(serde_yaml::Value::Mapping(profiles)) = raw.get("profiles") {
+        if let Some(serde_json::Value::Object(profiles)) = raw.get("profiles") {
             for (profile_name, profile) in profiles {
-                let (Some(profile_name), Some(parent_name)) = (
-                    profile_name.as_str(),
-                    profile.get("extends").and_then(serde_yaml::Value::as_str),
-                ) else {
+                let Some(parent_name) = profile.get("extends").and_then(serde_json::Value::as_str)
+                else {
                     continue;
                 };
                 extras
@@ -263,27 +257,27 @@ impl ModelInfoExtras {
             }
 
             fn resolve_profile_output_cap(
-                profiles: &serde_yaml::Mapping,
+                profiles: &serde_json::Map<String, serde_json::Value>,
                 profile_name: &str,
                 seen: &mut HashSet<String>,
             ) -> Option<u32> {
                 if !seen.insert(profile_name.to_string()) {
                     return None;
                 }
-                let profile = profiles.get(profile_name)?.as_mapping()?;
+                let profile = profiles.get(profile_name)?.as_object()?;
                 if let Some(cap) = profile
                     .get("max_output_tokens")
-                    .and_then(serde_yaml::Value::as_u64)
+                    .and_then(serde_json::Value::as_u64)
                     .filter(|value| *value > 0)
                     .and_then(|value| u32::try_from(value).ok())
                 {
                     return Some(cap);
                 }
-                let parent = profile.get("extends").and_then(serde_yaml::Value::as_str)?;
+                let parent = profile.get("extends").and_then(serde_json::Value::as_str)?;
                 resolve_profile_output_cap(profiles, parent, seen)
             }
 
-            for profile_name in profiles.keys().filter_map(serde_yaml::Value::as_str) {
+            for profile_name in profiles.keys() {
                 if let Some(cap) =
                     resolve_profile_output_cap(profiles, profile_name, &mut HashSet::new())
                 {
@@ -300,27 +294,23 @@ impl ModelInfoExtras {
         // against; the union is preserved for back-compat on /v1/models.
         // Only the public served-names are advertised — never the source
         // HF-ids/paths.
-        if let Some(serde_yaml::Value::Mapping(profiles)) = raw.get("profiles") {
+        if let Some(serde_json::Value::Object(profiles)) = raw.get("profiles") {
             let mut per_profile: HashMap<String, Vec<String>> = HashMap::new();
             let mut union_names: Vec<String> = Vec::new();
             for (pname, pcfg) in profiles {
-                let Some(profile_name) = pname.as_str() else {
-                    continue;
-                };
+                let profile_name = pname.as_str();
                 let lora_paths = pcfg
                     .get("adapter_options")
                     .and_then(|a| a.get("loadtime"))
                     .and_then(|l| l.get("lora_paths"));
                 let mut profile_names: Vec<String> = Vec::new();
-                if let Some(serde_yaml::Value::Mapping(m)) = lora_paths {
+                if let Some(serde_json::Value::Object(m)) = lora_paths {
                     for k in m.keys() {
-                        if let Some(s) = k.as_str() {
-                            if !profile_names.iter().any(|n| n == s) {
-                                profile_names.push(s.to_string());
-                            }
-                            if !union_names.iter().any(|n| n == s) {
-                                union_names.push(s.to_string());
-                            }
+                        if !profile_names.contains(k) {
+                            profile_names.push(k.clone());
+                        }
+                        if !union_names.contains(k) {
+                            union_names.push(k.clone());
                         }
                     }
                 }
@@ -337,8 +327,8 @@ impl ModelInfoExtras {
         }
 
         let tasks_absent_or_empty = match tasks {
-            None | Some(serde_yaml::Value::Null) => true,
-            Some(serde_yaml::Value::Mapping(m)) => m.is_empty(),
+            None | Some(serde_json::Value::Null) => true,
+            Some(serde_json::Value::Object(m)) => m.is_empty(),
             _ => false,
         };
         if extras.outputs.is_empty() && tasks_absent_or_empty {
@@ -349,7 +339,7 @@ impl ModelInfoExtras {
     }
 
     pub fn from_model_config(config: &ModelConfig) -> Self {
-        let mut extras = match serde_yaml::to_value(config) {
+        let mut extras = match serde_json::to_value(config) {
             Ok(v) => Self::from_yaml_raw(&v),
             Err(_) => Self {
                 inputs: vec!["text".to_string()],
@@ -580,7 +570,7 @@ pub struct ModelConfig {
     pub max_sequence_length: Option<u64>,
     /// Full ``tasks:`` tree from YAML (encode outputs / dims).
     #[serde(default)]
-    pub tasks: Option<serde_yaml::Value>,
+    pub tasks: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1101,7 +1091,7 @@ profiles:
     max_batch_tokens: 4096
 pool: customer-a
 "#;
-        let config: ModelConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: ModelConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.name, "BAAI/bge-m3");
         assert_eq!(config.pool, Some("customer-a".into()));
         assert_eq!(config.profiles.len(), 1);
@@ -1160,7 +1150,7 @@ pool: customer-a
                 "{wire}"
             );
         }
-        assert!(serde_yaml::from_str::<RoutingConfig>(
+        assert!(serde_saphyr::from_str::<RoutingConfig>(
             "policy: threshold\nfallback_profile: remote\nwake_above: .inf\nsleep_below: 1\nwindow_s: 1\ncooldown_s: 1\n"
         ).is_err());
         let threshold: RoutingConfig = serde_json::from_value(json!({"policy":"threshold",
@@ -1191,8 +1181,8 @@ profiles:
         upstream: team-sie
         upstream_model: acme/hybrid
 "#;
-        let from_yaml: ModelConfig = serde_yaml::from_str(yaml).unwrap();
-        let value: serde_json::Value = serde_yaml::from_str(yaml).unwrap();
+        let from_yaml: ModelConfig = serde_saphyr::from_str(yaml).unwrap();
+        let value: serde_json::Value = serde_saphyr::from_str(yaml).unwrap();
         let from_json: ModelConfig = serde_json::from_value(value).unwrap();
         for config in [from_yaml, from_json] {
             assert_eq!(config.name, "acme/hybrid");
@@ -1210,7 +1200,7 @@ profiles:
 
     #[test]
     fn test_profile_output_caps_are_inheritance_resolved_and_route_scoped() {
-        let raw: serde_yaml::Value = serde_yaml::from_str(
+        let raw: serde_json::Value = serde_saphyr::from_str(
             r#"
 sie_id: acme/generator
 tasks:
@@ -1273,7 +1263,7 @@ profiles:
 sie_id: my/model
 profiles: {}
 "#;
-        let config: ModelConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: ModelConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.name, "my/model");
     }
 
@@ -1301,7 +1291,7 @@ profiles: {}
 
     #[test]
     fn test_model_info_extras_defaults_dense_when_tasks_absent() {
-        let raw: serde_yaml::Value = serde_yaml::from_str(
+        let raw: serde_json::Value = serde_saphyr::from_str(
             r#"
 name: example/model
 inputs:
@@ -1321,7 +1311,7 @@ inputs:
         // ``packages/sie_server/src/sie_server/config/model.py``), *not* a
         // synthesized ``"dense"``. ``dims`` stays empty because score has no
         // dimension to advertise.
-        let raw: serde_yaml::Value = serde_yaml::from_str(
+        let raw: serde_json::Value = serde_saphyr::from_str(
             r#"
 name: example/reranker
 inputs:
@@ -1345,7 +1335,7 @@ tasks:
         // scoping). The precise per-profile breakdown lives alongside
         // in ``profile_lora_adapters`` and is what the validation gate
         // checks (see ``test_per_profile_lora_capabilities_isolates_profiles``).
-        let raw: serde_yaml::Value = serde_yaml::from_str(
+        let raw: serde_json::Value = serde_saphyr::from_str(
             r#"
 name: acme/qwen-lora
 inputs:
@@ -1383,7 +1373,7 @@ profiles:
         // per declared profile, never collapse to the union. Profile A
         // carries [a1, a2]; profile B carries [b1]; the per-profile map
         // returns ONLY that profile's adapters on lookup.
-        let raw: serde_yaml::Value = serde_yaml::from_str(
+        let raw: serde_json::Value = serde_saphyr::from_str(
             r#"
 name: acme/multi-profile-lora
 inputs:
@@ -1444,8 +1434,8 @@ profiles:
 
     #[test]
     fn test_model_info_extras_no_lora_adapters_when_absent() {
-        let raw: serde_yaml::Value =
-            serde_yaml::from_str("name: m\ninputs:\n  text: true\ntasks:\n  generate: {}\n")
+        let raw: serde_json::Value =
+            serde_saphyr::from_str("name: m\ninputs:\n  text: true\ntasks:\n  generate: {}\n")
                 .unwrap();
         let extras = ModelInfoExtras::from_yaml_raw(&raw);
         assert!(extras.lora_adapters.is_none());
@@ -1454,7 +1444,7 @@ profiles:
 
     #[test]
     fn test_model_info_extras_tools_capability_parsed() {
-        let raw: serde_yaml::Value = serde_yaml::from_str(
+        let raw: serde_json::Value = serde_saphyr::from_str(
             r#"
 name: Qwen/Qwen3-4B-Instruct-2507
 inputs:
@@ -1475,12 +1465,12 @@ tasks:
 
     #[test]
     fn test_model_info_extras_streaming_capability_is_resolved_and_advertised() {
-        let disabled: serde_yaml::Value = serde_yaml::from_str(
+        let disabled: serde_json::Value = serde_saphyr::from_str(
             "name: m\ntasks:\n  generate:\n    capabilities:\n      streaming: false\n",
         )
         .unwrap();
-        let defaulted: serde_yaml::Value =
-            serde_yaml::from_str("name: m\ntasks:\n  generate: {}\n").unwrap();
+        let defaulted: serde_json::Value =
+            serde_saphyr::from_str("name: m\ntasks:\n  generate: {}\n").unwrap();
 
         let disabled_extras = ModelInfoExtras::from_yaml_raw(&disabled);
         let defaulted_extras = ModelInfoExtras::from_yaml_raw(&defaulted);
@@ -1509,7 +1499,7 @@ tasks:
         // Qwen3-4B-Instruct-2507 advertises code + sql (and tools); it is
         // not a guard model. Mirrors
         // ``packages/sie_server/models/Qwen__Qwen3-4B-Instruct-2507.yaml``.
-        let raw: serde_yaml::Value = serde_yaml::from_str(
+        let raw: serde_json::Value = serde_saphyr::from_str(
             r#"
 name: Qwen/Qwen3-4B-Instruct-2507
 inputs:
@@ -1533,7 +1523,7 @@ tasks:
 
         // Qwen3.6-27B also advertises code + sql. Mirrors
         // ``packages/sie_server/models/Qwen__Qwen3.6-27B.yaml``.
-        let raw: serde_yaml::Value = serde_yaml::from_str(
+        let raw: serde_json::Value = serde_saphyr::from_str(
             r#"
 name: Qwen/Qwen3.6-27B
 inputs:
@@ -1557,7 +1547,7 @@ tasks:
 
         // Granite Guardian 3.0-2b advertises guard only. Mirrors
         // ``packages/sie_server/models/ibm-granite__granite-guardian-3.0-2b.yaml``.
-        let raw: serde_yaml::Value = serde_yaml::from_str(
+        let raw: serde_json::Value = serde_saphyr::from_str(
             r#"
 name: ibm-granite/granite-guardian-3.0-2b
 inputs:
@@ -1582,7 +1572,7 @@ tasks:
     #[test]
     fn test_model_info_extras_code_sql_guard_default_false_when_absent() {
         // No ``capabilities`` block at all — all three default to false.
-        let raw: serde_yaml::Value = serde_yaml::from_str(
+        let raw: serde_json::Value = serde_saphyr::from_str(
             r#"
 name: m
 inputs:
@@ -1604,7 +1594,7 @@ tasks:
     fn test_to_model_info_value_surfaces_code_sql_guard_flags() {
         // The three flags must surface inside the same ``capabilities``
         // JSON object as ``grammar``/``tools``, using snake_case wire keys.
-        let raw: serde_yaml::Value = serde_yaml::from_str(
+        let raw: serde_json::Value = serde_saphyr::from_str(
             r#"
 name: Qwen/Qwen3-4B-Instruct-2507
 inputs:
@@ -1645,7 +1635,7 @@ tasks:
 
     #[test]
     fn test_model_info_extras_tools_capability_defaults_to_false() {
-        let raw: serde_yaml::Value = serde_yaml::from_str(
+        let raw: serde_json::Value = serde_saphyr::from_str(
             r#"
 name: m
 inputs:
@@ -1667,7 +1657,7 @@ tasks:
         // ``GET /v1/models`` advertises the capability accurately. Without
         // this, generate-only models report ``outputs=[]`` and downstream
         // clients can't tell what the model produces.
-        let raw: serde_yaml::Value = serde_yaml::from_str(
+        let raw: serde_json::Value = serde_saphyr::from_str(
             r#"
 name: Qwen/Qwen3-4B-Instruct
 inputs:
@@ -1687,19 +1677,19 @@ tasks:
     #[test]
     fn test_supports_video_generation_requires_video_and_generate() {
         let video_gen = ModelInfoExtras::from_yaml_raw(
-            &serde_yaml::from_str(
+            &serde_saphyr::from_str(
                 "name: m\ninputs:\n  text: true\n  video: true\ntasks:\n  generate: {}\n",
             )
             .unwrap(),
         );
         assert!(video_gen.supports_video_generation());
         let video_encode = ModelInfoExtras::from_yaml_raw(
-            &serde_yaml::from_str("name: m\ninputs:\n  video: true\ntasks:\n  encode: {}\n")
+            &serde_saphyr::from_str("name: m\ninputs:\n  video: true\ntasks:\n  encode: {}\n")
                 .unwrap(),
         );
         assert!(!video_encode.supports_video_generation());
         let image_gen = ModelInfoExtras::from_yaml_raw(
-            &serde_yaml::from_str("name: m\ninputs:\n  image: true\ntasks:\n  generate: {}\n")
+            &serde_saphyr::from_str("name: m\ninputs:\n  image: true\ntasks:\n  generate: {}\n")
                 .unwrap(),
         );
         assert!(!image_gen.supports_video_generation());
@@ -1709,7 +1699,7 @@ tasks:
     fn test_supports_vision_generation_requires_image_and_generate() {
         // Vision-capable generation model (image input + generate task).
         let vlm = ModelInfoExtras::from_yaml_raw(
-            &serde_yaml::from_str(
+            &serde_saphyr::from_str(
                 "name: m\ninputs:\n  text: true\n  image: true\ntasks:\n  generate: {}\n",
             )
             .unwrap(),
@@ -1719,7 +1709,7 @@ tasks:
         // Encode-only image model (CLIP/SigLIP-style: image input, no generate
         // task) must NOT pass the vision-generation gate.
         let encode_only = ModelInfoExtras::from_yaml_raw(
-            &serde_yaml::from_str(
+            &serde_saphyr::from_str(
                 "name: m\ninputs:\n  text: true\n  image: true\ntasks:\n  encode: {}\n",
             )
             .unwrap(),
@@ -1728,7 +1718,7 @@ tasks:
 
         // Text-only generation model: generates but no image input.
         let text_gen = ModelInfoExtras::from_yaml_raw(
-            &serde_yaml::from_str("name: m\ninputs:\n  text: true\ntasks:\n  generate: {}\n")
+            &serde_saphyr::from_str("name: m\ninputs:\n  text: true\ntasks:\n  generate: {}\n")
                 .unwrap(),
         );
         assert!(!text_gen.supports_vision_generation());
@@ -1740,7 +1730,7 @@ tasks:
         // primitive — must hand back ONLY the requested profile's
         // adapters even when sibling profiles declare different ones.
         // This is the seam the proxy.rs lora_adapter gate consumes.
-        let raw: serde_yaml::Value = serde_yaml::from_str(
+        let raw: serde_json::Value = serde_saphyr::from_str(
             r#"
 name: acme/multi-profile-lora
 inputs:
@@ -1796,7 +1786,7 @@ profiles:
         // the per-profile map (G-M10). Vanilla OpenAI clients keep
         // reading the union; consumers that need precise routing scope
         // read the per-profile breakdown without reverse-engineering it.
-        let raw: serde_yaml::Value = serde_yaml::from_str(
+        let raw: serde_json::Value = serde_saphyr::from_str(
             r#"
 name: acme/multi-profile-lora
 inputs:
@@ -1980,11 +1970,11 @@ profiles:
 
     #[test]
     fn test_every_remote_bundle_adapter_names_its_upstream_kind() {
-        let bundle: serde_yaml::Value =
-            serde_yaml::from_str(include_str!("../../../sie_server/bundles/remote.yaml"))
+        let bundle: serde_json::Value =
+            serde_saphyr::from_str(include_str!("../../../sie_server/bundles/remote.yaml"))
                 .expect("valid remote bundle YAML");
         let adapters: Vec<&str> = bundle["adapters"]
-            .as_sequence()
+            .as_array()
             .expect("remote bundle lists adapters")
             .iter()
             .map(|adapter| adapter.as_str().expect("adapter module name"))

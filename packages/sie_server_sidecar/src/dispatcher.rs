@@ -8977,6 +8977,265 @@ mod tests {
         drop(next_permit);
     }
 
+    /// Holds actual RunBatch calls until the test completes them. The real
+    /// scheduler/drain/settlement paths decide which requests reach it.
+    struct HeldScoreBackend {
+        started: tokio::sync::mpsc::UnboundedSender<(String, tokio::sync::oneshot::Sender<()>)>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::backend::InferenceBackend for HeldScoreBackend {
+        fn name(&self) -> &'static str {
+            "held-score"
+        }
+
+        fn supports(&self, _model_id: &str) -> bool {
+            true
+        }
+
+        async fn ensure_model_ready(
+            &self,
+            _model_id: &str,
+        ) -> Result<crate::ipc_types::EnsureModelReadyResponse, BackendError> {
+            Ok(crate::ipc_types::EnsureModelReadyResponse {
+                state: ReadinessState::Ready,
+                batch_budget: None,
+                descriptor: None,
+            })
+        }
+
+        async fn process_encode_batch(
+            &self,
+            _req: ProcessEncodeBatchRequest,
+        ) -> Result<BatchOutcome, BackendError> {
+            Err(BackendError::UnsupportedModel("encode".into()))
+        }
+
+        async fn process_score_batch(
+            &self,
+            _req: ProcessScoreBatchRequest,
+        ) -> Result<BatchOutcome, BackendError> {
+            Err(BackendError::UnsupportedModel("score".into()))
+        }
+
+        async fn process_extract_batch(
+            &self,
+            _req: ProcessExtractBatchRequest,
+        ) -> Result<BatchOutcome, BackendError> {
+            Err(BackendError::UnsupportedModel("extract".into()))
+        }
+
+        async fn run_batch(&self, req: RunBatchRequest) -> Result<BatchOutcome, BackendError> {
+            // Every short item costs 9 against a cap of 16, so these batches
+            // must be singletons even with an eight-item count limit.
+            assert_eq!(req.items.len(), 1);
+            let item = &req.items[0];
+            assert_eq!(item.op, "score");
+            let (release, held) = tokio::sync::oneshot::channel();
+            self.started
+                .send((item.request_id.clone(), release))
+                .unwrap();
+            held.await.expect("the test releases every backend call");
+            let mut result = outcome(
+                &item.request_id,
+                item.item_index,
+                Disposition::PublishAndAck,
+                Some(1.0),
+                None,
+            );
+            result.result_msgpack = rmp_serde::to_vec_named(&item.request_id).unwrap();
+            Ok(BatchOutcome {
+                outcomes: vec![result],
+                batched_f16_multivectors: Vec::new(),
+            })
+        }
+    }
+
+    fn score_client_work(
+        slot: usize,
+        cost: usize,
+        tx: &tokio::sync::mpsc::UnboundedSender<crate::delivery::LocalDeliveryEvent>,
+    ) -> (WorkItem, Delivery) {
+        let mut work = wi(&format!("score-{slot}"), 0, "reranker", "score");
+        work.query_item = Some(text_item("q"));
+        work.score_items = Some(vec![text_item(&"x".repeat(cost - 1))]);
+        (
+            work,
+            Delivery::Local(LocalDelivery::new(slot, 0, tx.clone())),
+        )
+    }
+
+    #[tokio::test]
+    async fn aged_score_requests_progress_under_closed_loop_c8_replenishment() {
+        // Both an in-cap large request and a single oversize request must
+        // progress. Eight clients each submit their next request only after
+        // the previous one settles; the seven cheap clients replenish demand.
+        for large_cost in [12, 24] {
+            let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+            let dispatcher = dispatcher_with_backend(Arc::new(HeldScoreBackend {
+                started: started_tx,
+            }));
+            // Pin the production pipeline without changing process-global env.
+            dispatcher
+                .pipelines
+                .lock()
+                .unwrap()
+                .insert("reranker".into(), Arc::new(ModelPipeline::new(2)));
+            let controller = crate::scheduler::AdaptiveBatchController::builder()
+                .target_p50_ms(Some(100.0))
+                .min_wait_ms(20.0)
+                .max_wait_ms(20.0)
+                .initial_wait_ms(20.0)
+                .min_batch_cost(16)
+                .max_batch_cost(16)
+                .initial_batch_cost(16)
+                .starvation_recovery_enabled(false)
+                .build();
+            let scheduler = Arc::new(
+                ProductionScheduler::builder()
+                    .config(BatchConfig {
+                        max_batch_cost: 16,
+                        max_batch_requests: 8,
+                        max_batch_wait_ms: 20.0,
+                        ..BatchConfig::default()
+                    })
+                    .controller(controller)
+                    .build(),
+            );
+            let shutdown = Arc::new(Shutdown::new());
+            let drain = tokio::spawn(scheduler_drain_loop(
+                "reranker".into(),
+                dispatcher.clone(),
+                scheduler.clone(),
+                shutdown.clone(),
+            ));
+            let streams: Vec<_> = (0..8)
+                .map(|_| tokio::sync::mpsc::unbounded_channel())
+                .collect();
+
+            // Occupy the first slot before atomically queuing the large item
+            // and six cheap ones. A second dispatch can overtake it while
+            // unaged, then both pipeline slots remain held during aging.
+            dispatcher
+                .enqueue_score_into_scheduler(
+                    "reranker",
+                    &scheduler,
+                    vec![score_client_work(0, 9, &streams[0].0)],
+                )
+                .await;
+            let first = tokio::time::timeout(Duration::from_secs(2), started_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(first.0, "score-0");
+            dispatcher
+                .enqueue_score_into_scheduler(
+                    "reranker",
+                    &scheduler,
+                    (1..8)
+                        .map(|client| {
+                            let cost = if client == 1 { large_cost } else { 9 };
+                            score_client_work(client, cost, &streams[client].0)
+                        })
+                        .collect(),
+                )
+                .await;
+            let second = tokio::time::timeout(Duration::from_secs(2), started_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+
+            let mut clients = tokio::task::JoinSet::new();
+            for (client, (tx, mut rx)) in streams.into_iter().enumerate() {
+                let dispatcher = dispatcher.clone();
+                let scheduler = scheduler.clone();
+                clients.spawn(async move {
+                    let mut settled = Vec::new();
+                    for round in 0..8 {
+                        let expected_slot = round * 8 + client;
+                        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                            .await
+                            .expect("every submitted request must settle")
+                            .unwrap();
+                        let crate::delivery::LocalDeliveryEvent::Result { slot, result } = event
+                        else {
+                            panic!("fake backend must not cause redelivery");
+                        };
+                        assert_eq!(slot, expected_slot, "once-only settlement in client order");
+                        assert!(result.success);
+                        assert_eq!(result.request_id, format!("score-{slot}"));
+                        assert_eq!(
+                            rmp_serde::from_slice::<String>(&result.result_msgpack).unwrap(),
+                            result.request_id,
+                            "backend output stays paired with its request"
+                        );
+                        settled.push(slot);
+                        if round < 7 {
+                            dispatcher
+                                .enqueue_score_into_scheduler(
+                                    "reranker",
+                                    &scheduler,
+                                    vec![score_client_work(expected_slot + 8, 9, &tx)],
+                                )
+                                .await;
+                        }
+                    }
+                    (settled, rx)
+                });
+            }
+
+            // This is real wall time: BatchFormer uses std::Instant. Nothing
+            // can be extracted while both actual pipeline permits are held.
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            let mut dispatched = vec![first.0, second.0];
+            first.1.send(()).unwrap();
+            let third = tokio::time::timeout(Duration::from_secs(2), started_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if dispatched[1] != "score-1" {
+                assert_eq!(third.0, "score-1", "aged request gets the next open slot");
+            }
+            dispatched.push(third.0);
+            second.1.send(()).unwrap();
+            third.1.send(()).unwrap();
+            for _ in 3..64 {
+                let (request, release) =
+                    tokio::time::timeout(Duration::from_secs(2), started_rx.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                dispatched.push(request);
+                release.send(()).unwrap();
+            }
+
+            let mut settled = Vec::new();
+            let mut receivers = Vec::new();
+            while let Some(client) = clients.join_next().await {
+                let (slots, rx) = client.unwrap();
+                settled.extend(slots);
+                receivers.push(rx);
+            }
+            settled.sort_unstable();
+            assert_eq!(settled, (0..64).collect::<Vec<_>>());
+            dispatched.sort();
+            let mut expected: Vec<_> = (0..64).map(|slot| format!("score-{slot}")).collect();
+            expected.sort();
+            assert_eq!(dispatched, expected, "every request runs exactly once");
+            assert_eq!(scheduler.total_pending_count().await, 0);
+            shutdown.fire();
+            tokio::time::timeout(Duration::from_secs(2), drain)
+                .await
+                .expect("owned drain loop exits after all work settles")
+                .unwrap();
+            assert!(started_rx.try_recv().is_err());
+            for mut rx in receivers {
+                assert!(rx.try_recv().is_err(), "no duplicate terminal result");
+            }
+            assert_eq!(dispatcher.runtime_state.inflight_batches.get(), 0);
+        }
+    }
+
     #[tokio::test]
     async fn shutdown_cancels_pipeline_wait_without_extracting_pending_tail() {
         let scheduler = Scheduler::<PipelineTestItem, usize>::new(BatchConfig::default());
