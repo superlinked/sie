@@ -226,6 +226,20 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
+The `yaml_compatibility` integration test loads every shipped model and bundle,
+including filesystem bootstrap and config-delta registry states. To compare
+the parser migration against a revision that still uses `serde_yaml`, run from
+the repository root:
+
+```bash
+mise exec -- python tools/test_yaml_compatibility.py --baseline-ref f1702697f6ff6024d3f215b982c8b7f8444aace5
+```
+
+The runner builds that revision in a temporary checkout and compares parsed
+documents, expanded profiles, capabilities, and bundle/pool hashes against the
+current code using the same current catalog. The old parser is never added to
+the current dependency graph.
+
 ## Project Structure
 
 ```text
@@ -278,4 +292,4 @@ src/
 - [async-nats](https://github.com/nats-io/nats.rs) — NATS/JetStream client
 - [kube](https://github.com/kube-rs/kube) — Kubernetes client
 - [OpenTelemetry](https://opentelemetry.io/) — canonical OTLP telemetry
-- `serde`, `serde_json`, `serde_yaml` — config and payload serialization
+- `serde`, `serde_json`, `serde-saphyr` — config and payload serialization

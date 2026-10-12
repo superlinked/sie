@@ -741,7 +741,7 @@ mod route_tests {
                 pool: None,
                 profiles,
                 inputs: None,
-                tasks: Some(serde_yaml::from_str("generate: {}").unwrap()),
+                tasks: Some(serde_saphyr::from_str("generate: {}").unwrap()),
                 max_sequence_length: None,
             })
             .unwrap();
