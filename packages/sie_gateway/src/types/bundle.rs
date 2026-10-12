@@ -111,7 +111,7 @@ adapters:
   - sie_server.adapters.cross_encoder
 default: true
 "#;
-        let config: BundleConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: BundleConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.name, "default");
         assert_eq!(config.priority, 10);
         assert_eq!(config.adapters.len(), 2);
@@ -121,7 +121,7 @@ default: true
     #[test]
     fn test_bundle_config_defaults() {
         let yaml = r#"name: minimal"#;
-        let config: BundleConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: BundleConfig = serde_saphyr::from_str(yaml).unwrap();
         assert_eq!(config.priority, 100); // default_priority()
         assert!(config.adapters.is_empty());
         assert!(!config.default);

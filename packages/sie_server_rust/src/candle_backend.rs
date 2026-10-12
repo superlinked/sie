@@ -3838,7 +3838,7 @@ fn parse_runtime_config(
     if model_config.trim().is_empty() {
         anyhow::bail!("model_config is required");
     }
-    let model_config: ModelConfigYaml = serde_yaml::from_str(model_config)
+    let model_config: ModelConfigYaml = serde_saphyr::from_str(model_config)
         .with_context(|| format!("invalid model_config for {expected_model_id}"))?;
     if !expected_model_id.is_empty() && model_config.sie_id != expected_model_id {
         anyhow::bail!(

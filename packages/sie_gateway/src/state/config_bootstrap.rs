@@ -473,7 +473,7 @@ impl BootstrapClient {
             }
             let yaml = resp.text().await?;
             let spec: BundleSpec =
-                serde_yaml::from_str(&yaml).map_err(|e| BootstrapError::BadStatus {
+                serde_saphyr::from_str(&yaml).map_err(|e| BootstrapError::BadStatus {
                     status: 200,
                     url: yaml_url.clone(),
                     body: format!("malformed bundle YAML: {}", e),
@@ -645,7 +645,7 @@ fn parse_exported_model(model: &ExportedModel) -> Result<Option<ModelConfig>, St
     if let Some(yaml) = model.raw_yaml.as_deref() {
         let trimmed = yaml.trim();
         if !trimmed.is_empty() {
-            return serde_yaml::from_str::<ModelConfig>(trimmed)
+            return serde_saphyr::from_str::<ModelConfig>(trimmed)
                 .map(Some)
                 .map_err(|e| e.to_string());
         }
@@ -1686,7 +1686,7 @@ mod tests {
 
         let config = parse_exported_model(&model).unwrap().unwrap();
         assert_eq!(config.pool, Some("customer-a".to_string()));
-        let yaml = serde_yaml::to_string(&config).unwrap();
+        let yaml = serde_saphyr::to_string(&config).unwrap();
         assert!(yaml.contains("pool: customer-a"));
     }
 

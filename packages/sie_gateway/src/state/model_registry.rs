@@ -460,7 +460,7 @@ impl ModelRegistry {
 
     fn load_bundle_file(path: &Path) -> Result<BundleInfo, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
-        let data: serde_yaml::Value = serde_yaml::from_str(&content)?;
+        let data: serde_json::Value = serde_saphyr::from_str(&content)?;
 
         let name = data
             .get("name")
@@ -477,7 +477,7 @@ impl ModelRegistry {
 
         let adapters: Vec<String> = data
             .get("adapters")
-            .and_then(|v| v.as_sequence())
+            .and_then(|v| v.as_array())
             .map(|seq| {
                 seq.iter()
                     .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -544,7 +544,7 @@ impl ModelRegistry {
         threshold_enabled: bool,
     ) -> Result<Vec<ModelEntry>, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
-        let config: ModelConfig = serde_yaml::from_str(&content)?;
+        let config: ModelConfig = serde_saphyr::from_str(&content)?;
 
         Self::expand_model_config_with_threshold(&config, threshold_enabled).map_err(|message| {
             Box::new(std::io::Error::new(
@@ -3115,13 +3115,13 @@ mod tests {
             }))
             .unwrap(),
         );
-        config.tasks = Some(serde_yaml::from_str("generate: {}\n").unwrap());
+        config.tasks = Some(serde_saphyr::from_str("generate: {}\n").unwrap());
         registry
             .replace_model_configs_authoritative(vec![config.clone()])
             .unwrap();
         assert_eq!(registry.threshold_targets(1).unwrap().1.len(), 1);
         assert!(registry.threshold_targets(0).is_err());
-        config.tasks = Some(serde_yaml::from_str("encode:\n  dense:\n    dim: 2\n").unwrap());
+        config.tasks = Some(serde_saphyr::from_str("encode:\n  dense:\n    dim: 2\n").unwrap());
         registry
             .replace_model_configs_authoritative(vec![config])
             .unwrap();
@@ -3384,7 +3384,7 @@ mod tests {
     #[test]
     fn fallback_plan_requires_bare_model_trigger_and_fresh_remote_contract() {
         let (_dir, registry, mut config) = remote_routing_fixture();
-        config.tasks = Some(serde_yaml::from_str("generate: {}\n").unwrap());
+        config.tasks = Some(serde_saphyr::from_str("generate: {}\n").unwrap());
         config.routing = Some(
             serde_json::from_value(serde_json::json!({
                 "policy":"fallback", "fallback_profile":"remote"
@@ -3428,7 +3428,7 @@ mod tests {
             }))
             .unwrap(),
         );
-        config.tasks = Some(serde_yaml::from_str("encode:\n  dense:\n    dim: 2\n").unwrap());
+        config.tasks = Some(serde_saphyr::from_str("encode:\n  dense:\n    dim: 2\n").unwrap());
         registry.add_model_config(config.clone()).unwrap();
         let plan = registry
             .remote_fallback_plan("acme/hybrid", FallbackTrigger::Provisioning)
@@ -3675,8 +3675,8 @@ mod tests {
         profiles.insert("h200-256k-no-spec".to_string(), scoped_fallback);
         // ``tasks.generate.grammar_profile: no-spec`` is the routing hint the
         // gateway reads off the base entry.
-        let tasks: serde_yaml::Value =
-            serde_yaml::from_str("generate:\n  grammar_profile: no-spec\n").unwrap();
+        let tasks: serde_json::Value =
+            serde_saphyr::from_str("generate:\n  grammar_profile: no-spec\n").unwrap();
         registry
             .add_model_config(ModelConfig {
                 name: "org/g".to_string(),
@@ -3770,7 +3770,7 @@ mod tests {
             },
         }));
         profiles.insert("safe".to_string(), safe);
-        let tasks: serde_yaml::Value = serde_yaml::from_str("generate: {}\n").unwrap();
+        let tasks: serde_json::Value = serde_saphyr::from_str("generate: {}\n").unwrap();
         registry
             .add_model_config(ModelConfig {
                 name: "org/scoped-only".to_string(),
@@ -3860,7 +3860,7 @@ mod tests {
     }
 
     fn gemma_grammar_config() -> ModelConfig {
-        serde_yaml::from_str(include_str!(
+        serde_saphyr::from_str(include_str!(
             "../../../sie_server/models/google__gemma-4-31B-it.yaml"
         ))
         .unwrap()
@@ -4024,7 +4024,7 @@ mod tests {
 
     #[test]
     fn test_grammar_route_variant_default_profile() {
-        let config: ModelConfig = serde_yaml::from_str(
+        let config: ModelConfig = serde_saphyr::from_str(
             r#"
 name: org/grammar-model
 tasks:
@@ -4147,7 +4147,7 @@ profiles:
 
     #[test]
     fn test_grammar_profiles_reject_matching_raw_speculative_overrides() {
-        let config: ModelConfig = serde_yaml::from_str(
+        let config: ModelConfig = serde_saphyr::from_str(
             r#"
 name: org/grammar-model
 profiles:
@@ -4185,7 +4185,7 @@ profiles:
                 "matching launch overrides must not establish grammar compatibility: {args}"
             );
             config.tasks =
-                Some(serde_yaml::from_str("generate:\n  grammar_profile: safe\n").unwrap());
+                Some(serde_saphyr::from_str("generate:\n  grammar_profile: safe\n").unwrap());
             let error = ModelRegistry::model_entry_from_config(&config).unwrap_err();
             assert!(
                 error.contains("must not enable speculation"),
@@ -4205,7 +4205,7 @@ profiles:
 
     #[test]
     fn test_grammar_target_rejects_raw_speculation_without_typed_settings() {
-        let config: ModelConfig = serde_yaml::from_str(
+        let config: ModelConfig = serde_saphyr::from_str(
             r#"
 name: org/grammar-model
 tasks:
@@ -4228,7 +4228,7 @@ profiles:
 
     #[test]
     fn test_grammar_route_variant_matching_benign_launch_args() {
-        let config: ModelConfig = serde_yaml::from_str(
+        let config: ModelConfig = serde_saphyr::from_str(
             r#"
 name: org/grammar-model
 tasks:
@@ -4353,8 +4353,8 @@ profiles:
         let mut profiles = StdHashMap::new();
         profiles.insert("default".to_string(), profile(true, 8192));
         profiles.insert("unsafe".to_string(), profile(true, 8192));
-        let tasks: serde_yaml::Value =
-            serde_yaml::from_str("generate:\n  grammar_profile: unsafe\n").unwrap();
+        let tasks: serde_json::Value =
+            serde_saphyr::from_str("generate:\n  grammar_profile: unsafe\n").unwrap();
         let error = registry
             .add_model_config(ModelConfig {
                 name: "org/unsafe-global-target".to_string(),
@@ -4575,8 +4575,8 @@ profiles:
                 extends: None,
             },
         );
-        let tasks: serde_yaml::Value =
-            serde_yaml::from_str("generate:\n  grammar_profile: ghost\n").unwrap();
+        let tasks: serde_json::Value =
+            serde_saphyr::from_str("generate:\n  grammar_profile: ghost\n").unwrap();
         registry
             .add_model_config(ModelConfig {
                 name: "org/g".to_string(),
@@ -4826,7 +4826,7 @@ profiles:
                 profiles,
                 inputs: None,
                 tasks: Some(
-                    serde_yaml::from_str("encode:\n  dense:\n    dim: 384\n")
+                    serde_saphyr::from_str("encode:\n  dense:\n    dim: 384\n")
                         .expect("valid task fixture"),
                 ),
                 max_sequence_length: Some(512),
@@ -5003,7 +5003,7 @@ profiles:
 
     #[test]
     fn test_candle_sparse_only_profile_narrows_outputs_to_sparse() {
-        let config: ModelConfig = serde_yaml::from_str(
+        let config: ModelConfig = serde_saphyr::from_str(
             r#"
 sie_id: acme/sparse
 tasks:
@@ -5035,7 +5035,7 @@ profiles:
 
     #[test]
     fn test_candle_multivector_profile_drops_unsupported_sparse_output() {
-        let config: ModelConfig = serde_yaml::from_str(
+        let config: ModelConfig = serde_saphyr::from_str(
             r#"
 sie_id: acme/sparse-multivector
 tasks:
@@ -5073,7 +5073,7 @@ profiles:
 
     #[test]
     fn test_candle_multivector_score_requires_resolved_colbert_maxsim_strategy() {
-        let config: ModelConfig = serde_yaml::from_str(
+        let config: ModelConfig = serde_saphyr::from_str(
             r#"
 sie_id: acme/multivector
 tasks:
@@ -5146,7 +5146,7 @@ profiles:
 
     #[test]
     fn test_profile_variant_advertises_profile_max_sequence_length() {
-        let config: ModelConfig = serde_yaml::from_str(include_str!(
+        let config: ModelConfig = serde_saphyr::from_str(include_str!(
             "../../../sie_server/models/topk-io__Iso-ModernColBERT.yaml"
         ))
         .unwrap();
@@ -5639,7 +5639,7 @@ adapters:
                 inputs: None,
                 max_sequence_length: Some(512),
                 tasks: Some(
-                    serde_yaml::from_str(
+                    serde_saphyr::from_str(
                         r#"
 encode:
   dense:
@@ -5698,7 +5698,7 @@ encode:
                 inputs: None,
                 max_sequence_length: Some(1024),
                 tasks: Some(
-                    serde_yaml::from_str(
+                    serde_saphyr::from_str(
                         r#"
 encode:
   sparse:
@@ -5752,7 +5752,7 @@ encode:
                 inputs: None,
                 max_sequence_length: None,
                 tasks: Some(
-                    serde_yaml::from_str("generate:\n  capabilities:\n    streaming: false\n")
+                    serde_saphyr::from_str("generate:\n  capabilities:\n    streaming: false\n")
                         .unwrap(),
                 ),
             })
@@ -5786,7 +5786,7 @@ encode:
                     inputs: None,
                     max_sequence_length: None,
                     tasks: Some(
-                        serde_yaml::from_str(&format!(
+                        serde_saphyr::from_str(&format!(
                             "generate:\n  capabilities:\n    streaming: {streaming}\n"
                         ))
                         .unwrap(),
@@ -5856,7 +5856,7 @@ adapters:
                 inputs: None,
                 max_sequence_length: Some(512),
                 tasks: Some(
-                    serde_yaml::from_str(
+                    serde_saphyr::from_str(
                         r#"
 encode:
   dense:
@@ -6429,7 +6429,7 @@ adapters:
 
         // Seed: ``default`` plus the grammar-safe parent. The later delta only
         // carries the child, so ``no-spec`` exists solely in stored state.
-        let seed: ModelConfig = serde_yaml::from_str(
+        let seed: ModelConfig = serde_saphyr::from_str(
             r#"
 sie_id: test/model
 tasks: {generate: {grammar_profile: no-spec, max_output_tokens: 4096}}
@@ -6450,7 +6450,7 @@ profiles:
         // Delta: a second config bringing only ``h100-fp8`` which extends
         // ``no-spec``. ``no-spec`` lives only in ``existing.profile_configs``
         // at this point.
-        let delta: ModelConfig = serde_yaml::from_str(
+        let delta: ModelConfig = serde_saphyr::from_str(
             r#"
 sie_id: test/model
 profiles:
