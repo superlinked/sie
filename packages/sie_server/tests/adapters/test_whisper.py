@@ -216,6 +216,61 @@ def test_extract_requests_segment_timestamps_for_short_audio() -> None:
     assert output.data[0]["segments"] == [{"id": 0, "start": 0.0, "end": 0.9, "text": "hello"}]
 
 
+def _switch_to_eager_like_whisper_generate(
+    adapter: WhisperAdapter,
+    seen: list[str],
+    *,
+    error: Exception | None = None,
+) -> Any:
+    """Pipeline stand-in that changes the config the way Whisper's generate() does for token timestamps."""
+
+    def run(inputs: list[dict[str, Any]], **kwargs: Any) -> list[dict[str, Any]]:
+        config = adapter._model.config
+        seen.append(config._attn_implementation)
+        if kwargs["return_timestamps"] == "word":
+            config._attn_implementation = "eager"
+        if error is not None:
+            raise error
+        return [{"text": "hello", "chunks": []} for _ in inputs]
+
+    return run
+
+
+def test_extract_restores_attention_after_word_timestamps() -> None:
+    adapter, pipeline = _loaded_adapter(None)
+    adapter._model = SimpleNamespace(config=SimpleNamespace(_attn_implementation="sdpa"))
+    seen: list[str] = []
+    pipeline.side_effect = _switch_to_eager_like_whisper_generate(adapter, seen)
+    short, long = _payload(duration_ms=1_000), _payload(duration_ms=31_000)
+    prepared = [
+        PreparedItem(payload=short, cost=short.duration_ms, original_index=0),
+        PreparedItem(payload=long, cost=long.duration_ms, original_index=1),
+    ]
+
+    adapter.extract([Item(), Item()], options={"timestamp_granularities": ["word"]}, prepared_items=prepared)
+    assert adapter._model.config._attn_implementation == "sdpa"
+    adapter.extract([Item(), Item()], prepared_items=prepared)
+
+    # Each word-timestamp call starts on sdpa, and so do the plain calls after them.
+    assert seen == ["sdpa", "sdpa", "sdpa", "sdpa"]
+    assert adapter._model.config._attn_implementation == "sdpa"
+
+
+def test_extract_restores_attention_when_word_timestamps_fail() -> None:
+    adapter, pipeline = _loaded_adapter(None)
+    adapter._model = SimpleNamespace(config=SimpleNamespace(_attn_implementation="sdpa"))
+    pipeline.side_effect = _switch_to_eager_like_whisper_generate(adapter, [], error=RuntimeError("decode failed"))
+
+    with pytest.raises(RuntimeError, match="decode failed"):
+        adapter.extract(
+            [Item()],
+            options={"timestamp_granularities": ["word"]},
+            prepared_items=[PreparedItem(payload=_payload(), cost=1, original_index=0)],
+        )
+
+    assert adapter._model.config._attn_implementation == "sdpa"
+
+
 @pytest.mark.parametrize(
     ("options", "message"),
     [
