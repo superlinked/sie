@@ -572,12 +572,24 @@ Prepared audio longer than 30 s (Whisper's feature window) never shares a
 batch, whatever the model. Such recordings are served one per batch in arrival
 order, and while other items are pending too the two kinds take turns: a turn
 of the other items, then the oldest long recording. A turn of other items
-serves the items pending when it began, cheapest first, up to the cost cap, as
-one batch does in Python. The request count cap (12 by default, against
-Python's 64) can split the turn into several batches. Items that arrive during
-a turn wait for the next one. Outside these turns batch formation is
-unchanged. The Python batcher applies the same rule, but there only the
-Whisper adapter flags audio as long-form, and a turn is always one batch.
+serves the items pending when it began, as one batch does in Python. The
+request count cap (12 by default, against Python's 64) can split the turn into
+several batches. Items that arrive during a turn wait for the next one. A turn
+owes the items earlier turns left over: the oldest whatever its length, and
+more of them, oldest first, while they fit the cost cap together. Its budget is
+the cost cap plus the oldest one's cost, and it serves its other items
+cheapest first with the rest, so a long left-over clip does not take the turn
+from shorter ones. Short clips that keep arriving therefore cannot pass a
+longer clip over turn after turn: every turn serves the oldest left-over item,
+and an item is served within the first `n + 1` turns that begin after it
+arrives, where `n` counts it and the older items still pending when the first
+of them ended. Batches stay in cost order. Each batch keeps the request count
+cap and the hard audio duration cap, and the cost cap unless it is a single
+item above it, which runs alone. Batch formation is unchanged outside these
+turns, which run only while a long recording is pending or has just run. The
+Python batcher applies the same rule, but there only the Whisper adapter flags
+audio as long-form, a turn is always one batch, and it is ordered by cost
+alone.
 
 A model whose descriptor reports `max_concurrent_dispatch` above 1 fronts an
 engine that batches continuously, such as SGLang serving an OCR model. A shared
