@@ -42,6 +42,7 @@ adapters:
 - sie_server.adapters.gliner
 - sie_server.adapters.gliner2.adapter
 - sie_server.adapters.gliner_bi
+- sie_server.adapters.gliner_union.adapter
 - sie_server.adapters.glirel
 - sie_server.adapters.gliclass
 - sie_server.adapters.laya.adapter

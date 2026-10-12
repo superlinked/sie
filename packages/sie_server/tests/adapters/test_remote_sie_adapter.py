@@ -26,7 +26,7 @@ from sie_server.adapters.remote import _http as remote_http
 from sie_server.adapters.remote import sie as remote_sie
 from sie_server.app.app_factory import AppFactory
 from sie_server.app.app_state_config import AppStateConfig
-from sie_server.config.upstreams import Upstream, install_upstreams
+from sie_server.config.upstreams import Upstream, UpstreamConfigError, install_upstreams
 from sie_server.core.oom import is_oom_error
 from sie_server.core.upstream_client import upstream_sync_client
 from sie_server.types.inputs import InvalidInputError, Item
@@ -186,6 +186,27 @@ def test_with_the_switch_off_a_stale_upstream_name_does_not_stop_startup(
 
     assert response.status_code == 502, response.text
     assert "remote serving is switched off" in response.text
+
+
+def test_a_profile_on_an_upstream_of_another_kind_does_not_load(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING)
+    upstream = Upstream.model_validate(
+        {
+            "kind": "openai",
+            "base_url": "https://openai.example.internal/v1",
+            "endpoints": ["embeddings"],
+            "rate_cap": {"requests_per_minute": 60, "max_concurrency": 4},
+        }
+    )
+    install_upstreams({"team-sie": upstream})
+    try:
+        with pytest.raises(UpstreamConfigError, match="is not of kind 'sie'") as raised:
+            remote_sie.SieUpstreamAdapter(upstream="team-sie", upstream_model="sie-fake").load("cpu")
+    finally:
+        install_upstreams({})
+
+    assert "team-sie" not in str(raised.value)
+    assert "upstream 'team-sie' is not of kind 'sie'" in caplog.text
 
 
 class Recorder:

@@ -43,6 +43,9 @@ def test_catalog_pins_checkpoint_and_upstream_generation() -> None:
     assert loadtime["allowed_instructions"] == ["grounding"]
     assert loadtime["trust_remote_code"] is False
     assert loadtime["meter_pages"] is True
+    assert loadtime["max_concurrent_requests"] == 128
+    assert loadtime["attention_backend"] == "flashinfer"
+    assert loadtime["extra_launch_args"] == ["--disable-radix-cache"]
     assert "system_prompt" not in loadtime
     assert "extra_env" not in loadtime
     assert default["adapter_options"]["runtime"] == {"max_new_tokens": 12288, "num_beams": 1}
@@ -68,6 +71,8 @@ def test_loader_builds_pinned_sglang_default(monkeypatch: pytest.MonkeyPatch) ->
     assert (adapter._temperature, adapter._top_p) == (0.1, 1.0)
     assert adapter._system_prompt is None
     assert adapter._trust_remote_code is False
+    assert adapter.max_concurrent_dispatch() == 128
+    assert adapter._extra_launch_args == ["--disable-radix-cache"]
     engine_load.assert_not_called()
 
 

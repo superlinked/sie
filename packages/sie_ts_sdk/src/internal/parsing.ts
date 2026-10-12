@@ -12,25 +12,33 @@ import {
   ModelLoadFailedError,
   ProvisioningError,
   RateLimitError,
+  RelayUnavailableError,
   RequestError,
   ServerError,
   SpendLimitError,
 } from "../errors.js";
 import { unpackMessage } from "../msgpack.js";
-import type {
-  CapacityInfo,
-  Classification,
-  DetectedObject,
-  EncodeResult,
-  Entity,
-  ExtractItemError,
-  ExtractResult,
-  FinishReason,
-  GenerateResult,
-  Relation,
-  ScoreEntry,
-  ScoreResult,
-  WorkerInfo,
+import {
+  type CapacityInfo,
+  type Classification,
+  type DetectedObject,
+  type EncodeResult,
+  type Entity,
+  type ExtractItemError,
+  type ExtractResult,
+  FALLBACK_ERROR_PATTERN,
+  FALLBACK_REASONS,
+  type FallbackReason,
+  type FinishReason,
+  type GenerateResult,
+  type Relation,
+  type RequestMetadata,
+  SERVED_BY_VALUES,
+  type ScoreEntry,
+  type ScoreResult,
+  type ServedBy,
+  UPSTREAM_NAME_PATTERN,
+  type WorkerInfo,
 } from "../types.js";
 import {
   ACCOUNT_PENDING_REVIEW_ERROR_CODE,
@@ -47,6 +55,7 @@ import {
   KEY_SPEND_LIMIT_EXCEEDED_ERROR_CODE,
   MSGPACK_CONTENT_TYPE,
   PROVISIONING_ERROR_CODE,
+  RELAY_UNAVAILABLE_ERROR_CODES,
 } from "./constants.js";
 
 import { getRetryAfter as getRetryAfterFromHeader } from "./retry.js";
@@ -87,6 +96,118 @@ export function validateRequestId(value: unknown): string | undefined {
     return value;
   }
   return undefined;
+}
+
+function parseNonnegativeMeterHeader(headers: Headers, name: string): number | undefined {
+  const raw = headers.get(name);
+  if (raw === null || !/^(0|[1-9]\d*)$/.test(raw)) return undefined;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+/**
+ * Parse optional request-scoped metadata from one terminal response, successful
+ * or not: an error response's metadata rides on the thrown error's `request`.
+ *
+ * `body` is the decoded response envelope, when the caller has one. The settled
+ * charge is read from its `usage` block FIRST and falls back to the
+ * `x-sie-credits-debited` header, which is the only source on a gateway that
+ * predates in-body surfacing. The two always agree when both are
+ * present; the body additionally names the rate book, which no header does.
+ */
+export function parseRequestMetadata(
+  headers: Headers,
+  body?: unknown,
+): RequestMetadata | undefined {
+  const metadata: RequestMetadata = {};
+  const requestId = headers.get("x-sie-request-id");
+  if (
+    requestId !== null &&
+    requestId.length > 0 &&
+    requestId.length <= 256 &&
+    requestId === requestId.trim() &&
+    /^[\x20-\x7e]+$/.test(requestId)
+  ) {
+    metadata.id = requestId;
+  }
+  const executionIdentitySha256 = headers.get("x-sie-execution-identity-sha256");
+  if (executionIdentitySha256 !== null && /^[0-9a-f]{64}$/.test(executionIdentitySha256)) {
+    metadata.executionIdentitySha256 = executionIdentitySha256;
+  }
+  const executionBindingSha256 = headers.get("x-sie-execution-binding-sha256");
+  if (executionBindingSha256 !== null && /^[0-9a-f]{64}$/.test(executionBindingSha256)) {
+    metadata.executionBindingSha256 = executionBindingSha256;
+  }
+  const servedBy = headers.get("x-sie-served-by");
+  const runtimeInstance = headers.get("x-sie-runtime-instance");
+  if (runtimeInstance !== null && /^[0-9a-f]{64}$/.test(runtimeInstance)) {
+    metadata.runtimeInstanceId = runtimeInstance;
+  }
+  if (servedBy !== null && (SERVED_BY_VALUES as readonly string[]).includes(servedBy)) {
+    metadata.servedBy = servedBy as ServedBy;
+  }
+  const upstream = headers.get("x-sie-upstream");
+  if (upstream !== null && UPSTREAM_NAME_PATTERN.test(upstream)) {
+    metadata.upstream = upstream;
+  }
+  const fallbackReason = headers.get("x-sie-fallback-reason");
+  if (fallbackReason !== null && (FALLBACK_REASONS as readonly string[]).includes(fallbackReason)) {
+    metadata.fallbackReason = fallbackReason as FallbackReason;
+  }
+  const fallbackError = headers.get("x-sie-fallback-error");
+  if (fallbackError !== null && FALLBACK_ERROR_PATTERN.test(fallbackError)) {
+    metadata.fallbackError = fallbackError;
+  }
+
+  const usageHeaders = {
+    inputTokens: "x-sie-units-input-tokens",
+    pairs: "x-sie-units-pairs",
+    contentInputTokens: "x-sie-units-content-input-tokens",
+    images: "x-sie-units-images",
+    pages: "x-sie-units-pages",
+    outputTokens: "x-sie-units-output-tokens",
+    audioMs: "x-sie-units-audio-ms",
+  } as const;
+  const usage: NonNullable<RequestMetadata["usage"]> = {};
+  for (const [field, header] of Object.entries(usageHeaders) as [
+    keyof typeof usageHeaders,
+    string,
+  ][]) {
+    const value = parseNonnegativeMeterHeader(headers, header);
+    if (value !== undefined) usage[field] = value;
+  }
+
+  const settled = settledChargeFromBody(body);
+  if (settled !== undefined) {
+    usage.creditsCharged = settled.creditsCharged;
+    usage.rateBookVersion = settled.rateBookVersion;
+    metadata.creditsDebited = settled.creditsCharged;
+    metadata.rateBookVersion = settled.rateBookVersion;
+  } else {
+    const creditsDebited = parseNonnegativeMeterHeader(headers, "x-sie-credits-debited");
+    if (creditsDebited !== undefined) metadata.creditsDebited = creditsDebited;
+  }
+  if (Object.keys(usage).length > 0) metadata.usage = usage;
+  return Object.keys(metadata).length > 0 ? metadata : undefined;
+}
+
+/**
+ * The settled charge from a response envelope's `usage` block.
+ *
+ * Shares `settledChargeFields`' validation so the metadata path and the result
+ * parsers can never disagree about what counts as a publishable charge.
+ * Anything malformed is treated as absent, so the header fallback still
+ * applies.
+ */
+function settledChargeFromBody(
+  body: unknown,
+): { creditsCharged: number; rateBookVersion: string } | undefined {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return undefined;
+  const { creditsCharged, rateBookVersion } = settledChargeFields(
+    (body as Record<string, unknown>).usage,
+  );
+  if (creditsCharged === undefined || rateBookVersion === undefined) return undefined;
+  return { creditsCharged, rateBookVersion };
 }
 
 /**
@@ -210,6 +331,7 @@ export async function throwIfModelLoadFailed(response: Response, model?: string)
     permanent,
     attempts,
     param: errorParamFromDetail(detail),
+    request: parseRequestMetadata(response.headers),
   });
 }
 
@@ -233,7 +355,11 @@ export async function throwIfInputTooLong(response: Response, model?: string): P
     typeof detail.message === "string"
       ? detail.message
       : "Input exceeds the model's maximum token capacity";
-  throw new InputTooLongError(message, { model, param: errorParamFromDetail(detail) });
+  throw new InputTooLongError(message, {
+    model,
+    param: errorParamFromDetail(detail),
+    request: parseRequestMetadata(response.headers),
+  });
 }
 
 /** The one exact path of the cost-estimate dry run (#2435). */
@@ -310,7 +436,12 @@ export async function throwIfEstimateUnroutable(response: Response): Promise<voi
     detail && typeof detail.message === "string"
       ? detail.message
       : "the active rate book cannot price this request";
-  throw new EstimateUnroutableError(message, code, errorParamFromDetail(detail));
+  throw new EstimateUnroutableError(
+    message,
+    code,
+    errorParamFromDetail(detail),
+    parseRequestMetadata(response.headers),
+  );
 }
 
 /**
@@ -356,10 +487,11 @@ export async function handleError(response: Response, gpu?: string): Promise<nev
   }
   code = response.headers.get(SIE_ERROR_CODE_HEADER) ?? normalizeErrorCode(code);
   const requestId = readRequestId(response);
+  const request = parseRequestMetadata(response.headers);
 
   if (status === 503 && code === PROVISIONING_ERROR_CODE) {
     const retryAfter = getRetryAfter(response);
-    throw new ProvisioningError(message, gpu, retryAfter, param);
+    throw new ProvisioningError(message, gpu, retryAfter, param, request);
   }
 
   // Rate limit (pass-2 audit B1). Retried on the admission ladder in the
@@ -372,6 +504,7 @@ export async function handleError(response: Response, gpu?: string): Promise<nev
       code,
       requestId,
       param,
+      request,
     });
   }
 
@@ -380,34 +513,45 @@ export async function handleError(response: Response, gpu?: string): Promise<nev
   // first response. Unrecognised 402/403 codes stay generic RequestError.
   if (status === HTTP_PAYMENT_REQUIRED) {
     if (code === INSUFFICIENT_CREDITS_ERROR_CODE)
-      throw new InsufficientCreditsError(message, { requestId, param });
+      throw new InsufficientCreditsError(message, { requestId, param, request });
     if (code === KEY_SPEND_LIMIT_EXCEEDED_ERROR_CODE)
-      throw new SpendLimitError(message, { requestId, param });
+      throw new SpendLimitError(message, { requestId, param, request });
   }
   if (
     status === HTTP_FORBIDDEN &&
     (code === ACCOUNT_SUSPENDED_ERROR_CODE || code === ACCOUNT_PENDING_REVIEW_ERROR_CODE)
   ) {
-    throw new AccountInactiveError(message, code, requestId, param);
+    throw new AccountInactiveError(message, code, requestId, param, request);
+  }
+  if (status === HTTP_FORBIDDEN && code !== undefined && RELAY_UNAVAILABLE_ERROR_CODES.has(code)) {
+    throw new RelayUnavailableError(message, {
+      code,
+      keyRegion: typeof detail?.key_region === "string" ? detail.key_region : undefined,
+      deploymentRegion:
+        typeof detail?.deployment_region === "string" ? detail.deployment_region : undefined,
+      requestId,
+      param,
+      request,
+    });
   }
   if (status === 503 && code === ACCOUNT_STATE_UNAVAILABLE_ERROR_CODE) {
-    throw new AccountStateUnavailableError(message, requestId, param);
+    throw new AccountStateUnavailableError(message, requestId, param, request);
   }
 
   if (status >= HTTP_CLIENT_ERROR_MIN && status <= HTTP_CLIENT_ERROR_MAX) {
     if (status === 400 && code === "INPUT_TOO_LONG") {
       // Fallback dispatch — ``model`` is only attached by the helper-style
       // short-circuit (``throwIfInputTooLong``) on the extract path.
-      throw new InputTooLongError(message, { param });
+      throw new InputTooLongError(message, { param, request });
     }
-    throw new RequestError(message, code, status, requestId, param);
+    throw new RequestError(message, code, status, requestId, param, request);
   }
 
   if (status >= HTTP_SERVER_ERROR_MIN && status <= HTTP_SERVER_ERROR_MAX) {
-    throw new ServerError(message, code, status, requestId, param);
+    throw new ServerError(message, code, status, requestId, param, request);
   }
 
-  throw new ServerError(message, code, status, requestId, param);
+  throw new ServerError(message, code, status, requestId, param, request);
 }
 
 // Wire format types (what server sends)
@@ -486,7 +630,7 @@ interface WireDetectedObject {
 
 interface WireExtractResult {
   id?: string;
-  entities: WireEntity[];
+  entities?: WireEntity[];
   relations?: WireRelation[];
   classifications?: WireClassification[];
   objects?: WireDetectedObject[];
@@ -610,7 +754,7 @@ export function validateBatchResultCount(
   submitted: readonly unknown[],
   model: string,
   operation: "encode" | "extract",
-  requestId?: string,
+  request?: RequestMetadata,
 ): void {
   if (results.length === submitted.length) {
     return;
@@ -630,7 +774,7 @@ export function validateBatchResultCount(
     code,
     model,
     missingIds,
-    requestId,
+    request,
     results,
   });
 }
@@ -712,7 +856,7 @@ function parseExtractItemError(data: unknown): ExtractItemError | undefined {
 export function parseExtractResult(data: WireExtractResult): ExtractResult {
   return {
     id: data.id,
-    entities: data.entities.map(parseEntity),
+    entities: (data.entities ?? []).map(parseEntity),
     relations: (data.relations ?? []).map(
       (r: WireRelation): Relation => ({
         head: r.head,

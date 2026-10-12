@@ -28,9 +28,9 @@
 //! `SIE_MAX_CONCURRENT_BATCHES` so the dispatcher's concurrency limit
 //! is the binding one, not this socket mutex.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -48,12 +48,13 @@ use crate::ipc_types::{
     EnsureModelReadyRequest, EnsureModelReadyResponse, GenerateEvent,
     NumericalProfileSnapshotRequest, NumericalProfileSnapshotResponse, PingRequest, PingResponse,
     ProcessEncodeBatchRequest, ProcessExtractBatchRequest, ProcessGenerateRequest,
-    ProcessScoreBatchRequest, ReplaceModelConfigsRequest, ReplaceModelConfigsResponse,
-    RequestEnvelope, ResponseEnvelope, RunBatchRequest, SetPinnedModelsRequest,
-    SetPinnedModelsResponse, SignalGenerateCancelRequest, SignalGenerateCancelResponse,
-    WorkerCapabilitiesRequest, WorkerCapabilitiesResponse, IPC_VERSION, METHOD_APPLY_MODEL_CONFIG,
-    METHOD_DRAIN, METHOD_ENSURE_MODEL_READY, METHOD_NUMERICAL_PROFILE_SNAPSHOT, METHOD_PING,
-    METHOD_PROCESS_ENCODE_BATCH, METHOD_PROCESS_EXTRACT_BATCH, METHOD_PROCESS_GENERATE,
+    ProcessScoreBatchRequest, ReadinessState, ReplaceModelConfigsRequest,
+    ReplaceModelConfigsResponse, RequestEnvelope, ResponseEnvelope, RunBatchRequest,
+    SetPinnedModelsRequest, SetPinnedModelsResponse, SignalGenerateCancelRequest,
+    SignalGenerateCancelResponse, WorkerCapabilitiesRequest, WorkerCapabilitiesResponse,
+    IPC_VERSION, METHOD_APPLY_MODEL_CONFIG, METHOD_DRAIN, METHOD_ENSURE_MODEL_READY,
+    METHOD_NUMERICAL_PROFILE_SNAPSHOT, METHOD_PING, METHOD_PROCESS_ENCODE_BATCH,
+    METHOD_PROCESS_EXTRACT_BATCH, METHOD_PROCESS_GENERATE,
     METHOD_PROCESS_GENERATE_WITH_EXECUTION_AUTHORITY_V1, METHOD_PROCESS_SCORE_BATCH,
     METHOD_REPLACE_MODEL_CONFIGS, METHOD_RUN_BATCH, METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1,
     METHOD_RUN_BATCH_WITH_NUMERICAL_ADMISSION_V1, METHOD_SET_PINNED_MODELS,
@@ -263,7 +264,8 @@ impl Slot {
 /// idle. Checkout-and-return gives strict fairness and head-of-line
 /// isolation.
 struct Pool {
-    capacity: usize,
+    /// Slots in the pool. Only grows (see [`Self::grow_to`]).
+    capacity: AtomicUsize,
     slots: StdMutex<VecDeque<Slot>>,
     permits: Arc<Semaphore>,
     telemetry: Option<SidecarTelemetry>,
@@ -277,11 +279,34 @@ impl Pool {
             slots.push_back(Slot::new(id));
         }
         Self {
-            capacity,
+            capacity: AtomicUsize::new(capacity),
             slots: StdMutex::new(slots),
             permits: Arc::new(Semaphore::new(capacity)),
             telemetry,
         }
+    }
+
+    fn capacity(&self) -> usize {
+        self.capacity.load(Ordering::Acquire)
+    }
+
+    /// Add slots until the pool holds `capacity`, returning the previous
+    /// capacity, or `None` when the pool is already that large. New slots
+    /// are queued before their permits are released, which keeps the
+    /// invariant that a woken waiter always finds a slot.
+    fn grow_to(&self, capacity: usize) -> Option<usize> {
+        let mut q = self.slots.lock().expect("pool slot mutex poisoned");
+        let current = self.capacity();
+        if capacity <= current {
+            return None;
+        }
+        for id in current..capacity {
+            q.push_back(Slot::new(id));
+        }
+        self.capacity.store(capacity, Ordering::Release);
+        drop(q);
+        self.permits.add_permits(capacity - current);
+        Some(current)
     }
 
     /// Wait for a free slot. Returns an RAII guard that returns the slot
@@ -440,7 +465,15 @@ pub struct IpcClient {
     /// cannot reserve unbounded sidecar heap.
     response_chunk_budget: Arc<ResponseChunkBudget>,
     response_chunk_limits: ResponseChunkLimits,
+    /// Pool size before any engine-batched model asked for more.
+    configured_pool_size: usize,
+    /// Dispatch width above 1 that each ready model reported (see
+    /// [`Self::ensure_model_ready`]).
+    model_dispatch_widths: StdMutex<HashMap<String, usize>>,
 }
+
+/// Ceiling on the dispatch width one model can add to the pool.
+const MAX_MODEL_DISPATCH_WIDTH: usize = 1024;
 
 impl IpcClient {
     /// Create a single-connection client. Equivalent to the pre-pool
@@ -477,6 +510,8 @@ impl IpcClient {
             mux,
             response_chunk_budget,
             response_chunk_limits: ResponseChunkLimits::production(),
+            configured_pool_size: capacity,
+            model_dispatch_widths: StdMutex::new(HashMap::new()),
         }
     }
 
@@ -494,20 +529,20 @@ impl IpcClient {
     /// observation per RPC and negotiated response-chunk transfer.
     pub fn with_telemetry(mut self, telemetry: SidecarTelemetry) -> Self {
         if !telemetry.is_enabled() {
-            self.pool = Arc::new(Pool::new(self.pool.capacity, None));
+            self.pool = Arc::new(Pool::new(self.pool.capacity(), None));
             self.telemetry = None;
             return self;
         }
         if let Some(mux) = &self.mux {
             // The slot pool is inactive in mux mode. Keep it telemetry-free so
             // dashboards never show capacity for a transport that cannot run.
-            self.pool = Arc::new(Pool::new(self.pool.capacity, None));
+            self.pool = Arc::new(Pool::new(self.pool.capacity(), None));
             mux.attach_telemetry(telemetry.clone());
         } else {
             self.response_chunk_budget
                 .attach_telemetry(telemetry.clone());
-            self.pool = Arc::new(Pool::new(self.pool.capacity, Some(telemetry.clone())));
-            telemetry.ipc_transport_registered("pool", self.pool.capacity);
+            self.pool = Arc::new(Pool::new(self.pool.capacity(), Some(telemetry.clone())));
+            telemetry.ipc_transport_registered("pool", self.pool.capacity());
         }
         self.telemetry = Some(telemetry);
         self
@@ -517,8 +552,9 @@ impl IpcClient {
     /// parsed from env in `main.rs` after `IpcClient::new` was chosen
     /// for a reasonable default. Clamped to `>= 1`.
     pub fn with_pool_size(mut self, pool_size: usize) -> Self {
-        let previous_capacity = self.pool.capacity;
+        let previous_capacity = self.pool.capacity();
         let capacity = pool_size.max(1);
+        self.configured_pool_size = capacity;
         let pool_telemetry = if self.mux.is_none() {
             self.telemetry.clone()
         } else {
@@ -537,9 +573,10 @@ impl IpcClient {
         &self.socket_path
     }
 
-    /// Configured pool capacity (≥ 1).
+    /// Current pool capacity (≥ 1): the configured size plus the slots added
+    /// for engine-batched models (see [`Self::ensure_model_ready`]).
     pub fn pool_size(&self) -> usize {
-        self.pool.capacity
+        self.pool.capacity()
     }
 
     /// Drop every idle pooled socket. Used on shutdown or after a hard
@@ -1021,18 +1058,69 @@ impl IpcClient {
         self.call(METHOD_PING, PingRequest { timestamp_ms }).await
     }
 
+    /// Ask the backend to make `model_id` ready.
+    ///
+    /// A ready model whose descriptor reports `max_concurrent_dispatch`
+    /// above 1 fronts an engine that batches continuously; the dispatcher
+    /// then keeps that many single-item `RunBatch` calls in flight for it.
+    /// Each pooled call holds a connection, so the pool grows to its
+    /// configured size plus every such model's width. It never shrinks.
     pub async fn ensure_model_ready(
         &self,
         model_id: impl Into<String>,
     ) -> Result<EnsureModelReadyResponse, IpcError> {
-        self.call_with_timeout(
-            METHOD_ENSURE_MODEL_READY,
-            EnsureModelReadyRequest {
-                model_id: model_id.into(),
-            },
-            self.model_ready_timeout,
-        )
-        .await
+        let model_id = model_id.into();
+        let response: EnsureModelReadyResponse = self
+            .call_with_timeout(
+                METHOD_ENSURE_MODEL_READY,
+                EnsureModelReadyRequest {
+                    model_id: model_id.clone(),
+                },
+                self.model_ready_timeout,
+            )
+            .await?;
+        if response.state == ReadinessState::Ready {
+            let width = response
+                .descriptor
+                .as_ref()
+                .and_then(|d| d.max_concurrent_dispatch)
+                .map_or(1, |w| (w as usize).clamp(1, MAX_MODEL_DISPATCH_WIDTH));
+            self.size_pool_for_model(&model_id, width);
+        }
+        Ok(response)
+    }
+
+    /// Keep the pool at its configured size plus the dispatch width of
+    /// every ready engine-batched model. The multiplexed transport has no
+    /// slots to size.
+    fn size_pool_for_model(&self, model_id: &str, width: usize) {
+        if self.mux.is_some() {
+            return;
+        }
+        let target = {
+            let mut widths = self
+                .model_dispatch_widths
+                .lock()
+                .expect("model dispatch width mutex poisoned");
+            if width > 1 {
+                widths.insert(model_id.to_owned(), width);
+            } else {
+                widths.remove(model_id);
+            }
+            self.configured_pool_size + widths.values().sum::<usize>()
+        };
+        if let Some(previous) = self.pool.grow_to(target) {
+            info!(
+                model = %model_id,
+                dispatch_width = width,
+                previous,
+                capacity = target,
+                "ipc_client: pool grown for an engine-batched model"
+            );
+            if let Some(telemetry) = &self.telemetry {
+                telemetry.ipc_transport_resized("pool", previous, target);
+            }
+        }
     }
 
     pub async fn worker_capabilities(&self) -> Result<WorkerCapabilitiesResponse, IpcError> {
@@ -1626,6 +1714,68 @@ mod tests {
         let response = client.ping(42.0).await.unwrap();
         assert_eq!(response.worker_id, "chunked-pool");
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pool_grows_for_engine_batched_models_and_never_shrinks() {
+        let client = IpcClient::new_pool(short_sock_path(), 4);
+        client.size_pool_for_model("ocr", 128);
+        assert_eq!(client.pool_size(), 132);
+        client.size_pool_for_model("glm", 16);
+        assert_eq!(client.pool_size(), 148, "widths add up across models");
+        client.size_pool_for_model("ocr", 1);
+        assert_eq!(client.pool_size(), 148, "the pool never shrinks");
+        client.size_pool_for_model("ocr", 64);
+        assert_eq!(client.pool_size(), 148, "4 + 16 + 64 fits the grown pool");
+
+        // Every slot can be checked out at once, and each holds its own id.
+        let guards = tokio::time::timeout(
+            Duration::from_secs(5),
+            futures_util::future::join_all((0..148).map(|_| client.pool.acquire())),
+        )
+        .await
+        .expect("all 148 slots are free");
+        let mut ids: Vec<usize> = guards
+            .into_iter()
+            .map(|mut guard| guard.slot_mut().id)
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, (0..148).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn ready_model_with_a_dispatch_width_grows_the_pool() {
+        let path = short_sock_path();
+        let _server = spawn_echo(path.clone(), |req_bytes| {
+            let req: serde_json::Value = rmp_serde::from_slice(req_bytes).unwrap();
+            let model_id = req["body"]["model_id"].as_str().unwrap().to_string();
+            let descriptor = match model_id.as_str() {
+                "ocr" => {
+                    serde_json::json!({"supports_run_batch": true, "max_concurrent_dispatch": 128})
+                }
+                _ => serde_json::json!({"supports_run_batch": true}),
+            };
+            let envelope = serde_json::json!({
+                "version": IPC_VERSION,
+                "request_id": req["request_id"],
+                "ok": true,
+                "body": {"state": "ready", "batch_budget": 12, "descriptor": descriptor},
+                "error": serde_json::Value::Null,
+            });
+            rmp_serde::to_vec_named(&envelope).unwrap()
+        })
+        .await;
+        tokio::task::yield_now().await;
+
+        let client = IpcClient::new_pool(path, 4);
+        client.ensure_model_ready("encoder").await.unwrap();
+        assert_eq!(client.pool_size(), 4, "no width, no growth");
+        let ready = client.ensure_model_ready("ocr").await.unwrap();
+        assert_eq!(
+            ready.descriptor.and_then(|d| d.max_concurrent_dispatch),
+            Some(128)
+        );
+        assert_eq!(client.pool_size(), 132);
     }
 
     #[tokio::test]

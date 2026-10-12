@@ -1,4 +1,4 @@
-use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
 use crate::http_error::{code as err_code, json_detail};
@@ -9,9 +9,6 @@ pub enum AppError {
     #[error("no healthy workers available")]
     NoWorkerAvailable,
 
-    #[error("GPU provisioning in progress: {0}")]
-    GpuProvisioning(String),
-
     #[error("worker connection error: {0}")]
     UpstreamConnection(String),
 
@@ -21,16 +18,10 @@ pub enum AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let is_gpu_provisioning = matches!(self, AppError::GpuProvisioning(_));
         let (status, code, message) = match &self {
             AppError::NoWorkerAvailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 err_code::QUEUE_UNAVAILABLE,
-                self.to_string(),
-            ),
-            AppError::GpuProvisioning(_) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                err_code::PROVISIONING,
                 self.to_string(),
             ),
             AppError::UpstreamConnection(_) => (
@@ -46,26 +37,7 @@ impl IntoResponse for AppError {
         };
 
         let body = json_detail(code, message);
-        let mut response = (status, axum::Json(body)).into_response();
-        if is_gpu_provisioning {
-            response.headers_mut().insert(
-                HeaderName::from_static("retry-after"),
-                HeaderValue::from_static("60"),
-            );
-            response.headers_mut().insert(
-                HeaderName::from_static("x-sie-error-code"),
-                HeaderValue::from_static(err_code::PROVISIONING),
-            );
-            response.headers_mut().insert(
-                HeaderName::from_static("x-sie-version"),
-                HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
-            );
-            response.headers_mut().insert(
-                HeaderName::from_static("x-sie-server-version"),
-                HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
-            );
-        }
-        response
+        (status, axum::Json(body)).into_response()
     }
 }
 
@@ -83,26 +55,6 @@ mod tests {
             response_status(AppError::NoWorkerAvailable),
             StatusCode::SERVICE_UNAVAILABLE
         );
-    }
-
-    #[test]
-    fn test_gpu_provisioning_is_503() {
-        assert_eq!(
-            response_status(AppError::GpuProvisioning("l4".into())),
-            StatusCode::SERVICE_UNAVAILABLE
-        );
-    }
-
-    #[test]
-    fn test_gpu_provisioning_has_retry_headers() {
-        let response = AppError::GpuProvisioning("l4".into()).into_response();
-        assert_eq!(response.headers().get("retry-after").unwrap(), "60");
-        assert_eq!(
-            response.headers().get("x-sie-error-code").unwrap(),
-            err_code::PROVISIONING
-        );
-        assert!(response.headers().get("x-sie-version").is_some());
-        assert!(response.headers().get("x-sie-server-version").is_some());
     }
 
     #[test]
@@ -126,10 +78,6 @@ mod tests {
         assert_eq!(
             AppError::NoWorkerAvailable.to_string(),
             "no healthy workers available"
-        );
-        assert_eq!(
-            AppError::GpuProvisioning("l4".into()).to_string(),
-            "GPU provisioning in progress: l4"
         );
     }
 }

@@ -1,0 +1,76 @@
+sie_id: superlinked/pii-redact
+# urchade/gliner_multi_pii-v1 and numind/NuNER_Zero, composed as the PII
+# redaction study composes them (examples/redact): 300-word windows sharing 50
+# words, spans scoring 0.6 or more, the two models' spans unioned, and every
+# other whole-word occurrence of a name found masked too. A request without
+# labels uses the study's 36 personal-data types.
+hf_id: urchade/gliner_multi_pii-v1
+hf_revision: 1fcf13e85f4eef5394e1fcd406cf2ca9ea82351d
+hf_tokenizer_dependencies:
+  microsoft/mdeberta-v3-base: a0484667b22365f84929a935b5e50a51f71f159d
+  microsoft/deberta-v3-large: 64a8c8eab3e352a784c658aef62be1662607476f
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 384
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: null
+    adapter_path: sie_server.adapters.gliner_union.adapter:GLiNERUnionAdapter
+    adapter_options:
+      loadtime:
+        members:
+        - model: numind/NuNER_Zero
+          revision: c90187673f464518dca09f41689184ed6976242c
+          options:
+            merge_adjacent_entities: true
+      runtime:
+        score_floor: 0.6
+        window_words: 300
+        window_overlap: 50
+        propagate_label: person
+        name_min_letters: 3
+        default_labels:
+        - person
+        - street address
+        - city
+        - county
+        - postal code
+        - gps coordinates
+        - date of birth
+        - phone number
+        - fax number
+        - email address
+        - url
+        - ip address
+        - mac address
+        - social security number
+        - national id number
+        - tax id number
+        - medical record number
+        - health plan beneficiary number
+        - account number
+        - credit card number
+        - cvv
+        - pin
+        - password
+        - api key
+        - http cookie
+        - username
+        - customer id
+        - employee id
+        - certificate or license number
+        - license plate
+        - vehicle identification number
+        - device identifier
+        - biometric identifier
+        - unique identifier
+        - passport number
+        - driver's license number

@@ -43,6 +43,8 @@ _DECLARED_IN_PINNED_ENGINE = frozenset(
         "--context-length",
         "--disable-cuda-graph",
         "--dtype",
+        # Emitted only when a profile sets ``thinking_budget``.
+        "--enable-custom-logit-processor",
         "--enable-lora",
         "--grammar-backend",
         "--is-embedding",

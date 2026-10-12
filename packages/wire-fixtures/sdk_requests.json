@@ -1,0 +1,457 @@
+{
+  "description": "The HTTP request each SDK sends for the same call to a native primitive or the chat route. Every SDK replays every case through its real client and compares what reached the wire. A case an SDK cannot express fails that SDK's test.",
+  "client": {
+    "api_key": "sk-sie-fixture"
+  },
+  "media": {
+    "png": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+    "wav": "UklGRiwAAABXQVZFZm10IBAAAAABAAEAgD4AAAB9AAACABAAZGF0YQgAAAAAAOgDAAAY/A==",
+    "pdf": "JVBERi0xLjQKJSVFT0YK"
+  },
+  "comparison": {
+    "path": "Compared after percent-decoding: `/v1/encode/BAAI%2Fbge-m3` and `/v1/encode/BAAI/bge-m3` reach the same route.",
+    "headers": "The headers listed in `compared_headers` must equal the case's `headers`; one the case does not list must be absent. Every request also carries a non-empty `x-sie-sdk-version`.",
+    "body": "Decoded from MessagePack or JSON by content type. A `null` member equals an absent one. `{\"$media\": name}` stands for the raw bytes of `media[name]`, and `{\"$media_base64\": name}` for its base64 text.",
+    "may_send_default": "Members an SDK may send or omit. When sent, the value must equal the one listed, which is the server's default."
+  },
+  "compared_headers": [
+    "accept",
+    "authorization",
+    "content-type",
+    "x-sie-machine-profile",
+    "x-sie-pool",
+    "x-sie-remote"
+  ],
+  "cases": [
+    {
+      "id": "encode_single_text",
+      "summary": "encode one text item with no options",
+      "request": {
+        "method": "POST",
+        "path": "/v1/encode/BAAI/bge-m3",
+        "headers": {
+          "accept": "application/msgpack",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/msgpack"
+        },
+        "body": {
+          "items": [{ "text": "hello" }]
+        }
+      }
+    },
+    {
+      "id": "encode_batch_all_params",
+      "summary": "encode a batch with output types, instruction, output dtype and the query role",
+      "request": {
+        "method": "POST",
+        "path": "/v1/encode/BAAI/bge-m3",
+        "headers": {
+          "accept": "application/msgpack",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/msgpack"
+        },
+        "body": {
+          "items": [
+            { "id": "a", "text": "first" },
+            { "id": "b", "text": "second" }
+          ],
+          "params": {
+            "output_types": ["dense", "sparse"],
+            "instruction": "Represent the query",
+            "output_dtype": "float16",
+            "options": { "is_query": true }
+          }
+        }
+      }
+    },
+    {
+      "id": "encode_profile_option",
+      "summary": "encode with a named profile selected through runtime options, as a document",
+      "request": {
+        "method": "POST",
+        "path": "/v1/encode/lightonai/GTE-ModernColBERT-v1",
+        "headers": {
+          "accept": "application/msgpack",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/msgpack"
+        },
+        "body": {
+          "items": [{ "text": "a long document" }],
+          "params": {
+            "output_types": ["multivector"],
+            "options": { "profile": "long_context", "is_query": false }
+          }
+        }
+      }
+    },
+    {
+      "id": "encode_model_profile_id",
+      "summary": "encode addressing a profile as model:profile",
+      "request": {
+        "method": "POST",
+        "path": "/v1/encode/BAAI/bge-m3:sparse",
+        "headers": {
+          "accept": "application/msgpack",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/msgpack"
+        },
+        "body": {
+          "items": [{ "text": "hello" }]
+        }
+      }
+    },
+    {
+      "id": "encode_image",
+      "summary": "encode PNG bytes; the image carries the format its signature names",
+      "request": {
+        "method": "POST",
+        "path": "/v1/encode/google/siglip2-base-patch16-224",
+        "headers": {
+          "accept": "application/msgpack",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/msgpack"
+        },
+        "body": {
+          "items": [{ "images": [{ "data": { "$media": "png" }, "format": "png" }] }]
+        }
+      }
+    },
+    {
+      "id": "encode_pool_and_gpu",
+      "summary": "encode routed to a pool and machine profile with gpu \"eval-bench/l4\"",
+      "request": {
+        "method": "POST",
+        "path": "/v1/encode/BAAI/bge-m3",
+        "headers": {
+          "accept": "application/msgpack",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/msgpack",
+          "x-sie-machine-profile": "l4",
+          "x-sie-pool": "eval-bench"
+        },
+        "body": {
+          "items": [{ "text": "hello" }]
+        }
+      }
+    },
+    {
+      "id": "encode_client_defaults",
+      "summary": "encode through a client built with a default gpu and remote \"forbid\"",
+      "client": { "gpu": "l4", "remote": "forbid" },
+      "request": {
+        "method": "POST",
+        "path": "/v1/encode/BAAI/bge-m3",
+        "headers": {
+          "accept": "application/msgpack",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/msgpack",
+          "x-sie-machine-profile": "l4",
+          "x-sie-remote": "forbid"
+        },
+        "body": {
+          "items": [{ "text": "hello" }]
+        }
+      }
+    },
+    {
+      "id": "score_basic",
+      "summary": "score two documents against a query",
+      "request": {
+        "method": "POST",
+        "path": "/v1/score/BAAI/bge-reranker-v2-m3",
+        "headers": {
+          "accept": "application/msgpack",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/msgpack"
+        },
+        "body": {
+          "query": { "text": "What is machine learning?" },
+          "items": [
+            { "id": "doc-1", "text": "Machine learning is a subfield of AI." },
+            { "id": "doc-2", "text": "Python is a programming language." }
+          ]
+        }
+      }
+    },
+    {
+      "id": "score_instruction_and_options",
+      "summary": "score with an instruction and a named profile",
+      "request": {
+        "method": "POST",
+        "path": "/v1/score/Qwen/Qwen3-Reranker-4B",
+        "headers": {
+          "accept": "application/msgpack",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/msgpack"
+        },
+        "body": {
+          "query": { "text": "What is machine learning?" },
+          "items": [
+            { "id": "doc-1", "text": "Machine learning is a subfield of AI." },
+            { "id": "doc-2", "text": "Python is a programming language." }
+          ],
+          "instruction": "Rank passages that answer the question",
+          "options": { "profile": "default" }
+        }
+      }
+    },
+    {
+      "id": "extract_labels",
+      "summary": "extract entities for two labels",
+      "request": {
+        "method": "POST",
+        "path": "/v1/extract/urchade/gliner_multi-v2.1",
+        "headers": {
+          "accept": "application/msgpack",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/msgpack"
+        },
+        "body": {
+          "items": [{ "text": "Apple was founded by Steve Jobs." }],
+          "params": { "labels": ["person", "organization"] }
+        }
+      }
+    },
+    {
+      "id": "extract_threshold",
+      "summary": "extract with a confidence threshold, which is a runtime option",
+      "request": {
+        "method": "POST",
+        "path": "/v1/extract/urchade/gliner_multi-v2.1",
+        "headers": {
+          "accept": "application/msgpack",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/msgpack"
+        },
+        "body": {
+          "items": [{ "text": "Apple was founded by Steve Jobs." }],
+          "params": {
+            "labels": ["person", "organization"],
+            "options": { "threshold": 0.75 }
+          }
+        }
+      }
+    },
+    {
+      "id": "extract_image_without_params",
+      "summary": "extract from an image with no labels or options, as OCR does",
+      "request": {
+        "method": "POST",
+        "path": "/v1/extract/lightonai/LightOnOCR-2-1B",
+        "headers": {
+          "accept": "application/msgpack",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/msgpack"
+        },
+        "body": {
+          "items": [{ "images": [{ "data": { "$media": "png" }, "format": "png" }] }]
+        }
+      }
+    },
+    {
+      "id": "extract_output_schema_and_instruction",
+      "summary": "extract typed decisions with an output schema, an instruction and runtime options",
+      "request": {
+        "method": "POST",
+        "path": "/v1/extract/fastino/GLiNER2.5-Decide",
+        "headers": {
+          "accept": "application/msgpack",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/msgpack"
+        },
+        "body": {
+          "items": [{ "text": "Get me a person. This is the third time." }],
+          "params": {
+            "output_schema": {
+              "handoff": { "type": "noul", "instructions": "Should a person take over?" }
+            },
+            "instruction": "Triage the support ticket.",
+            "options": { "overflow_policy": "truncate_text" }
+          }
+        }
+      }
+    },
+    {
+      "id": "extract_audio",
+      "summary": "extract from encoded audio with a format and sample rate",
+      "request": {
+        "method": "POST",
+        "path": "/v1/extract/openai/whisper-large-v3-turbo",
+        "headers": {
+          "accept": "application/msgpack",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/msgpack"
+        },
+        "body": {
+          "items": [{ "audio": { "data": { "$media": "wav" }, "format": "wav", "sample_rate": 16000 } }]
+        }
+      }
+    },
+    {
+      "id": "extract_document",
+      "summary": "extract from a PDF document",
+      "request": {
+        "method": "POST",
+        "path": "/v1/extract/docling",
+        "headers": {
+          "accept": "application/msgpack",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/msgpack"
+        },
+        "body": {
+          "items": [{ "document": { "data": { "$media": "pdf" }, "format": "pdf" } }]
+        }
+      }
+    },
+    {
+      "id": "generate_basic",
+      "summary": "generate with a token cap and a temperature",
+      "request": {
+        "method": "POST",
+        "path": "/v1/generate/Qwen__Qwen3-4B-Instruct-2507",
+        "headers": {
+          "accept": "application/json",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/json"
+        },
+        "body": {
+          "prompt": "Write a haiku about the sea.",
+          "max_new_tokens": 64,
+          "temperature": 0.7
+        }
+      }
+    },
+    {
+      "id": "generate_all_fields",
+      "summary": "generate on a model:profile identity with every sampler, grammar and routing field",
+      "request": {
+        "method": "POST",
+        "path": "/v1/generate/google__gemma-4-31B-it:h100-96k-hires-thinking-budget512-no-spec",
+        "headers": {
+          "accept": "application/json",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/json"
+        },
+        "body": {
+          "prompt": "Extract the invoice.",
+          "max_new_tokens": 256,
+          "temperature": 0,
+          "top_p": 0.9,
+          "stop": ["\n\n"],
+          "frequency_penalty": 0.5,
+          "presence_penalty": 0.25,
+          "grammar": {
+            "json_schema": {
+              "type": "object",
+              "properties": { "vendor": { "type": "string" }, "total": { "type": "number" } },
+              "required": ["vendor", "total"]
+            },
+            "strict": true
+          },
+          "seed": 7,
+          "logit_bias": { "42": -1.5 },
+          "routing_key": "tenant-1",
+          "prompt_cache_key": "invoice-v1",
+          "safety_identifier": "user-9",
+          "lora_adapter": "invoices",
+          "options": { "overall_timeout_s": 30 }
+        }
+      }
+    },
+    {
+      "id": "generate_image",
+      "summary": "generate from a prompt and a PNG image",
+      "request": {
+        "method": "POST",
+        "path": "/v1/generate/Qwen__Qwen3-VL-8B-Instruct",
+        "headers": {
+          "accept": "application/json",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/json"
+        },
+        "body": {
+          "prompt": "Describe the image.",
+          "max_new_tokens": 32,
+          "images": [{ "data": { "$media_base64": "png" }, "format": "png" }]
+        }
+      }
+    },
+    {
+      "id": "stream_generate",
+      "summary": "stream a generation with log probabilities",
+      "request": {
+        "method": "POST",
+        "path": "/v1/generate/Qwen__Qwen3-4B-Instruct-2507",
+        "headers": {
+          "accept": "text/event-stream",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/json"
+        },
+        "body": {
+          "prompt": "Write a haiku.",
+          "max_new_tokens": 64,
+          "stream": true,
+          "temperature": 0.7,
+          "logprobs": true,
+          "top_logprobs": 2
+        }
+      }
+    },
+    {
+      "id": "chat_completions",
+      "summary": "chat completion with a json_schema response format kept out of the prompt",
+      "request": {
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "headers": {
+          "accept": "application/json",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/json"
+        },
+        "body": {
+          "model": "Qwen/Qwen3-4B-Instruct-2507",
+          "messages": [
+            { "role": "system", "content": "Answer in JSON." },
+            { "role": "user", "content": "Extract the invoice fields." }
+          ],
+          "max_completion_tokens": 256,
+          "temperature": 0,
+          "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+              "name": "invoice",
+              "strict": true,
+              "schema": {
+                "type": "object",
+                "properties": { "vendor": { "type": "string" }, "total": { "type": "number" } },
+                "required": ["vendor", "total"]
+              }
+            }
+          },
+          "schema_in_prompt": false
+        },
+        "may_send_default": { "stream": false }
+      }
+    },
+    {
+      "id": "stream_chat_completions",
+      "summary": "stream a chat completion with a final usage chunk",
+      "request": {
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "headers": {
+          "accept": "text/event-stream",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/json"
+        },
+        "body": {
+          "model": "Qwen/Qwen3-4B-Instruct-2507",
+          "messages": [{ "role": "user", "content": "Count to ten." }],
+          "stream": true,
+          "max_completion_tokens": 64,
+          "stream_options": { "include_usage": true }
+        }
+      }
+    }
+  ]
+}

@@ -32,6 +32,7 @@ import {
   ResourceExhaustedError,
   ServerError,
 } from "../errors.js";
+import type { RequestMetadata } from "../types.js";
 import {
   BACKPRESSURE_503_DEFAULT_DELAY,
   BACKPRESSURE_503_ERROR_CODES,
@@ -51,6 +52,7 @@ import {
   getErrorParam,
   getRetryAfter,
   handleError,
+  parseRequestMetadata,
   readRequestId,
   throwIfModelLoadFailed,
 } from "./parsing.js";
@@ -119,16 +121,25 @@ export function nextOomRetryDelay(opts: {
   provisionTimeoutMs: number;
   model: string;
   param?: string | null;
+  request?: RequestMetadata;
 }): number {
-  const { retryAfter, oomRetries, maxOomRetries, elapsedMs, provisionTimeoutMs, model, param } =
-    opts;
+  const {
+    retryAfter,
+    oomRetries,
+    maxOomRetries,
+    elapsedMs,
+    provisionTimeoutMs,
+    model,
+    param,
+    request,
+  } = opts;
   const message = `Server resource exhausted after ${oomRetries} retry attempt(s) for model '${model}'`;
   if (oomRetries >= maxOomRetries || elapsedMs >= provisionTimeoutMs) {
-    throw new ResourceExhaustedError(message, { model, retries: oomRetries, param });
+    throw new ResourceExhaustedError(message, { model, retries: oomRetries, param, request });
   }
   const delay = computeOomBackoff(retryAfter, oomRetries);
   if (delay >= provisionTimeoutMs - elapsedMs) {
-    throw new ResourceExhaustedError(message, { model, retries: oomRetries, param });
+    throw new ResourceExhaustedError(message, { model, retries: oomRetries, param, request });
   }
   return delay;
 }
@@ -194,6 +205,7 @@ export async function admissionRetryDelay(
           retryAfter,
           requestId: readRequestId(response),
           param: await getErrorParam(response.clone()),
+          request: parseRequestMetadata(response.headers),
         },
       );
     }
@@ -270,6 +282,7 @@ export async function withProvisioningRetry(
             opts.gpu,
             getRetryAfter(response),
             await getErrorParam(response.clone()),
+            parseRequestMetadata(response.headers),
           );
         }
         const elapsed = Date.now() - startTime;
@@ -279,6 +292,7 @@ export async function withProvisioningRetry(
             opts.gpu,
             getRetryAfter(response),
             await getErrorParam(response.clone()),
+            parseRequestMetadata(response.headers),
           );
         }
         const retryAfter = getRetryAfter(response);
@@ -293,6 +307,7 @@ export async function withProvisioningRetry(
             `Model loading timeout for '${opts.model}'`,
             opts.model,
             await getErrorParam(response.clone()),
+            parseRequestMetadata(response.headers),
           );
         }
         const delay = getRetryAfter(response) ?? MODEL_LOADING_DEFAULT_DELAY;
@@ -310,6 +325,7 @@ export async function withProvisioningRetry(
           provisionTimeoutMs: opts.provisionTimeoutMs,
           model: opts.model,
           param: await getErrorParam(response.clone()),
+          request: parseRequestMetadata(response.headers),
         });
         oomRetries += 1;
         await sleep(delay);
@@ -348,6 +364,7 @@ export async function withProvisioningRetry(
         HTTP_GATEWAY_TIMEOUT,
         readRequestId(response),
         await getErrorParam(response.clone()),
+        parseRequestMetadata(response.headers),
       );
     }
 

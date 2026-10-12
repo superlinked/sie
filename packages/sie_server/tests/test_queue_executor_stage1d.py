@@ -634,6 +634,28 @@ class TestGetModelDescriptor:
         # hash this on load and reconcile against ``tokenizer_id``.
         assert Path(descriptor.tokenizer_path).read_bytes() == canonical
 
+    @pytest.mark.parametrize(("width", "expected"), [(128, 128), (1, 1), (None, None)])
+    def test_descriptor_reports_the_worker_dispatch_width(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        width: int | None,
+        expected: int | None,
+    ) -> None:
+        monkeypatch.setattr(
+            "sie_server.queue_executor._TOKENIZER_STAGING_DIR",
+            tmp_path,
+        )
+        reg = self._descriptor_registry(tokenizer_id="abc", max_len=128, canonical=b'{"version":"1.0"}')
+        worker = MagicMock()
+        worker.dispatch_width = width
+        reg.get_worker.return_value = worker
+
+        descriptor = QueueExecutor(reg).get_model_descriptor(MODEL_ID)
+
+        assert descriptor is not None
+        assert descriptor.max_concurrent_dispatch == expected
+
     def test_descriptor_is_cached_per_model(
         self,
         monkeypatch: pytest.MonkeyPatch,

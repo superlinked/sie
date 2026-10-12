@@ -662,8 +662,10 @@ pool subject. Its work item names the trigger in `fallback_reason`, so the remot
 worker answers it at once whenever it cannot serve it now, rather than
 redelivering it until the gateway's request timeout. Remote failure restores the
 original local refusal body and `Retry-After`, with `X-SIE-Fallback-Reason` and
-`X-SIE-Fallback-Error`; success discloses the remote profile's upstream. The
-customer model name remains the requested model.
+`X-SIE-Fallback-Error`; a restored `PROVISIONING` refusal takes its
+`Retry-After` from the transport's estimate at that moment. Success discloses
+the remote profile's upstream. The customer model name remains the requested
+model.
 
 The gateway derives `X-SIE-Fallback-Error` from the remote worker's error code
 as a single node derives it from its remote attempt, with one difference. When

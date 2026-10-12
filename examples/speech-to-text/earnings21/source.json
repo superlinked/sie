@@ -1,0 +1,73 @@
+{
+  "repository": "superlinked/sie-task-evidence",
+  "revision": "457c33de3d7188db55e0fb74b17f9f43c34c49c5",
+  "manifest_prefix": "speech-to-text-e21/2026-10-08-amendment-4/manifest",
+  "audio_prefix": "speech-to-text-e21/2026-10-07/audio",
+  "raw_base": "https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/457c33de3d7188db55e0fb74b17f9f43c34c49c5",
+  "decoder_notes_url": "https://huggingface.co/datasets/superlinked/sie-task-evidence/tree/fba647ac74876f960f8e8840831bd9745562e748/speech-to-text-e21/2026-10-10/reproducibility",
+  "dataset": "hf-audio/asr-leaderboard-longform",
+  "dataset_revision": "d6797370d3189c618e722721ab5b6c9be78c022c",
+  "dataset_config": "earnings21",
+  "dataset_split": "test",
+  "license": "CC BY-SA 4.0",
+  "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+  "calls": 44,
+  "pieces": 219,
+  "expected_model": "Qwen/Qwen3-ASR-1.7B-hf",
+  "expected_model_revision": "bcd2b5b7f32b480ab5790554cfa8347f246a14f3",
+  "historical_sie_revision": "b1104d2d20e6800fa68a6283b65f796a2526195e",
+  "files": {
+    "AMENDMENT-3.md": {
+      "bytes": 5468,
+      "sha256": "7b63118a5b4a842951aa1cedc3fb61f8b1bda25340d55e5eaf3169f92f03b866"
+    },
+    "AMENDMENT-4.md": {
+      "bytes": 3229,
+      "sha256": "7b0b184d6ae671d3bfb2bac659ef61a41b2452ef5aedaf2d983ce0ec99af447a"
+    },
+    "README.md": {
+      "bytes": 16471,
+      "sha256": "052c30d172d72c243d5477bd999e1fb6c8184b01d49797461247c4a9a5cc4149"
+    },
+    "all_ids.txt": {
+      "bytes": 352,
+      "sha256": "4103791fdd59a97b1b505ee8e4d5ecb99df6bcb404266e0ea6adb93f51f31c42"
+    },
+    "calls.json": {
+      "bytes": 90508,
+      "sha256": "d59f6365bf9008a56365136fb049d025a992fa125e01bdbd82c891d7b06811b0"
+    },
+    "make_pieces.py": {
+      "bytes": 2237,
+      "sha256": "c882d4abb2ac7dbb2ca63aa60621560ecfc6de9bfccd0df177b660b59b39952b"
+    },
+    "manifest.json": {
+      "bytes": 1971,
+      "sha256": "5f0137f9bb77b200573810323916b537e9975d7c444a12feb772b47427448bfa"
+    },
+    "references.jsonl": {
+      "bytes": 2090829,
+      "sha256": "958fde0e339873376c221a3af6570345be8972f9b30573998cdf85bb76a89438"
+    },
+    "scoring/content_score.py": {
+      "bytes": 4464,
+      "sha256": "427ca1ff495b750057912e44a0b181e9796280bc2ae50b08df023de48fb2d2ea"
+    },
+    "scoring/e21_score.py": {
+      "bytes": 8102,
+      "sha256": "9f4fa3110b20b55bed119a4c92b001af18770cef9acca8e842bc217e0ec9b6fd"
+    },
+    "scoring/normalizer.json": {
+      "bytes": 52666,
+      "sha256": "bf1c507dc8724ca9cf9903640dacfb69dae2f00edee4f21ceba106a7392f26dd"
+    },
+    "scoring/whisper_normalizer.py": {
+      "bytes": 21848,
+      "sha256": "87b4f48f0637d807fd5af78e605fc8214fec0e228b8186ec7a83bbdc6f23a420"
+    },
+    "screen_ids.txt": {
+      "bytes": 80,
+      "sha256": "707845f1c2cc2bdad58a1a8d7cfc9d849bacc14c8625b7742398711785567ff0"
+    }
+  }
+}

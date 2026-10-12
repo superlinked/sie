@@ -48,6 +48,7 @@ from sie_server.core.score_cost import MAX_SCORE_ITEMS, build_score_prepared_ite
 from sie_server.core.timing import RequestTiming
 from sie_server.core.video_frames import VideoDecodeError
 from sie_server.core.worker.handlers.encode import EncodeHandler
+from sie_server.core.worker.handlers.extract import ExtractHandler
 from sie_server.core.worker.handlers.score import ScoreHandler
 from sie_server.core.worker.types import WorkerResult
 from sie_server.ipc_types import (
@@ -1925,6 +1926,116 @@ class TestExtractSeamPages:
         result = msgpack.unpackb(outcome.outcomes[0].result_msgpack, raw=False)
         assert result["error"]["code"] == "INFERENCE_ERROR"
         assert outcome.outcomes[0].units is None
+
+
+# ---------------------------------------------------------------------------
+# QueueExecutor.process_extract_batch — generated tokens of generative extract
+# ---------------------------------------------------------------------------
+#
+# The SGLang vision OCR adapter reports, per item, the prompt tokens SGLang
+# counted and the completion tokens it decoded. They ride alongside the page or
+# image meter, which stays as it was; the commercial book decides which
+# dimension it prices.
+
+
+class TestExtractSeamOutputTokens:
+    @pytest.mark.asyncio
+    async def test_page_metered_ocr_reports_prompt_and_completion_tokens(self) -> None:
+        adapter = _FakeParseExtractAdapter()
+        extract_output = ExtractOutput(
+            entities=[[{"text": "# page", "label": "markdown", "score": 1.0}]],
+            pages=[1],
+            input_token_counts=[2590],
+            output_token_counts=[836],
+        )
+        reg = _extract_registry(adapter, _extract_worker(extract_output))
+        ex = QueueExecutor(reg)
+
+        outcome = await ex.process_extract_batch(_extract_request({"images": [{"data": b"png", "format": "png"}]}))
+
+        units = outcome.outcomes[0].units
+        assert units is not None
+        assert units.pages == 1
+        assert units.images is None
+        assert units.input_tokens == 2590
+        assert units.output_tokens == 836
+
+    @pytest.mark.asyncio
+    async def test_image_metered_ocr_keeps_images_and_adds_tokens(self) -> None:
+        adapter = _FakeVisionExtractAdapter()
+        extract_output = ExtractOutput(
+            entities=[[{"text": "TOTAL 9.99", "label": "text", "score": 1.0}]],
+            input_token_counts=[1835],
+            output_token_counts=[203],
+        )
+        reg = _extract_registry(adapter, _extract_worker(extract_output))
+        ex = QueueExecutor(reg)
+
+        outcome = await ex.process_extract_batch(_extract_request({"images": [_img()]}))
+
+        units = outcome.outcomes[0].units
+        assert units is not None
+        assert units.images == 1
+        assert units.input_tokens == 1835
+        assert units.output_tokens == 203
+
+    @pytest.mark.asyncio
+    async def test_extractors_without_generated_counts_report_none(self) -> None:
+        adapter = _FakeTextExtractAdapter()
+        extract_output = ExtractOutput(
+            entities=[[{"text": "Alice", "label": "person", "score": 0.99, "start": 0, "end": 5}]],
+            input_token_counts=[6],
+        )
+        reg = _extract_registry(adapter, _extract_worker(extract_output))
+        ex = QueueExecutor(reg)
+
+        outcome = await ex.process_extract_batch(_extract_request({"text": "Alice works at Acme."}))
+
+        units = outcome.outcomes[0].units
+        assert units is not None
+        assert units.input_tokens == 6
+        assert units.output_tokens is None
+
+    @pytest.mark.asyncio
+    async def test_malformed_generated_counts_are_dropped_not_estimated(self) -> None:
+        adapter = _FakeParseExtractAdapter()
+        extract_output = ExtractOutput(
+            entities=[[{"text": "# page", "label": "markdown", "score": 1.0}]],
+            pages=[1],
+            output_token_counts=[-1],
+        )
+        reg = _extract_registry(adapter, _extract_worker(extract_output))
+        ex = QueueExecutor(reg)
+
+        outcome = await ex.process_extract_batch(_extract_request({"images": [{"data": b"png", "format": "png"}]}))
+
+        units = outcome.outcomes[0].units
+        assert units is not None
+        assert units.pages == 1
+        assert units.output_tokens is None
+
+    def test_extract_handler_slices_and_reassembles_generated_counts(self) -> None:
+        handler = ExtractHandler()
+        batched = ExtractOutput(
+            entities=[[], []],
+            pages=[1, 1],
+            input_token_counts=[2590, 1790],
+            output_token_counts=[836, 412],
+        )
+        parts = {index: handler.slice_output(batched, index) for index in range(2)}
+        assert [part.output_token_counts for part in parts.values()] == [[836], [412]]
+
+        assembled = handler.assemble_output(parts, 2)
+        assert assembled.input_token_counts == [2590, 1790]
+        assert assembled.output_token_counts == [836, 412]
+
+        # All-or-nothing: one item without a count withholds the dimension.
+        parts[1] = ExtractOutput(entities=[[]], pages=[1], input_token_counts=[1790])
+        assert handler.assemble_output(parts, 2).output_token_counts is None
+
+    def test_extract_output_rejects_misaligned_generated_counts(self) -> None:
+        with pytest.raises(ValueError, match="output_token_counts length"):
+            ExtractOutput(entities=[[]], output_token_counts=[1, 2])
 
 
 # ---------------------------------------------------------------------------

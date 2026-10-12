@@ -133,6 +133,7 @@ from ._shared import (
     _coerce_token_count,
     admission_retry_delay,
     attach_request_metadata,
+    attempt_timeout_cap,
     base_url_accepts_origin_credentials,
     build_chat_body,
     build_estimate_envelope,
@@ -401,14 +402,18 @@ class SIEClient:
 
     Args:
         base_url: Base URL of the SIE server (e.g., "http://localhost:8080").
-            Defaults to the ``SIE_BASE_URL`` environment variable when omitted.
+            When omitted, the ``SIE_BASE_URL`` environment variable is used;
+            without it, SIE Serverless (``https://api.superlinked.com``) is
+            used when an API key is available (``api_key`` or ``SIE_API_KEY``).
+            With neither a base URL nor a key, construction raises ``ValueError``.
         timeout_s: One per-attempt limit in seconds for both connecting and
             waiting for response data. Sets ``connect_timeout_s`` and
             ``read_timeout_s`` together; either of those overrides it.
         api_key: Optional API key for authentication (sent as Bearer token).
             When omitted, the ``SIE_API_KEY`` environment variable is used only if
             ``base_url`` has the same origin as ``SIE_BASE_URL`` (including when
-            ``base_url`` itself comes from ``SIE_BASE_URL``); with a
+            ``base_url`` itself comes from ``SIE_BASE_URL``), or the SIE
+            Serverless origin while ``SIE_BASE_URL`` is unset; with a
             ``control_plane_url`` on another origin the key must be passed
             explicitly. Pass ``""`` to send no credential.
         gpu: Default GPU/machine profile for requests (e.g., "l4", "l4-spot").
@@ -487,7 +492,7 @@ class SIEClient:
         remote: Literal["forbid"] | None = None,
         http_client: httpx.Client | None = None,
     ) -> None:
-        base_url = resolve_base_url(base_url)
+        base_url = resolve_base_url(base_url, api_key)
         api_key = resolve_api_key(api_key, base_url, control_plane_url)
         # Normalize base_url (remove trailing slash)
         validate_base_url(base_url)
@@ -632,10 +637,12 @@ class SIEClient:
     def _attempt_timeout(self, remaining: float, read_timeout_s: float | None = None) -> httpx.Timeout:
         """Timeouts for one attempt, capped by the remaining provision budget.
 
-        An explicit per-call ``read_timeout_s`` is honoured as given.
+        An explicit per-call ``read_timeout_s`` is honoured as given. See
+        :func:`attempt_timeout_cap` for the final attempt.
         """
-        read = read_timeout_s if read_timeout_s is not None else min(self._timeout, remaining)
-        return httpx.Timeout(read, connect=min(self._connect_timeout, remaining))
+        cap = attempt_timeout_cap(remaining)
+        read = read_timeout_s if read_timeout_s is not None else min(self._timeout, cap)
+        return httpx.Timeout(read, connect=min(self._connect_timeout, cap))
 
     def _check_server_version(self, response: httpx.Response) -> None:
         revision = response.headers.get(MODEL_REVISION_HEADER)
@@ -1411,6 +1418,7 @@ class SIEClient:
         # backoff via ``compute_oom_backoff``.
         oom_retries = 0
         connect_retries = 0
+        after_capacity_wait = False
 
         # Retry loop for retryable provisioning/capacity responses.
         while True:
@@ -1418,9 +1426,10 @@ class SIEClient:
             # This ensures a single hanging request can't exceed the overall timeout
             elapsed = time.monotonic() - start_time
             remaining = timeout - elapsed
-            if remaining <= 0:
+            if remaining <= 0 and not after_capacity_wait:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
+            after_capacity_wait = False
             request_timeout = self._attempt_timeout(remaining)
 
             try:
@@ -1477,7 +1486,7 @@ class SIEClient:
             # Short-circuit terminal load failures BEFORE engaging the
             # MODEL_LOADING retry budget. The server emits 502
             # MODEL_LOAD_FAILED for permanent classes (gated repos,
-            # missing deps) — retrying would waste 5 minutes on a
+            # missing deps) — retrying would waste 15 minutes on a
             # known-bad configuration.
             raise_if_model_load_failed(response, model=model)
 
@@ -1499,6 +1508,7 @@ class SIEClient:
                     )
                     self._record_retry()
                     time.sleep(actual_delay)
+                    after_capacity_wait = True
                     continue
 
                 if error_code == LORA_LOADING_ERROR_CODE:
@@ -1508,7 +1518,12 @@ class SIEClient:
                         # Extract lora from options for error message
                         lora_name = resolved_options.get("lora") if resolved_options else None
                         msg = f"LoRA loading timeout after {lora_retries} retries"
-                        raise LoraLoadingError(msg, lora=str(lora_name) if lora_name else None, model=model)
+                        raise LoraLoadingError(
+                            msg,
+                            lora=str(lora_name) if lora_name else None,
+                            model=model,
+                            request=parse_request_metadata(response.headers),
+                        )
 
                     # Wait and retry
                     retry_after = get_retry_after(response)
@@ -1528,7 +1543,7 @@ class SIEClient:
                     elapsed = time.monotonic() - start_time
                     if elapsed >= timeout:
                         msg = f"Model loading timeout after {elapsed:.1f}s for '{model}'"
-                        raise ModelLoadingError(msg, model=model)
+                        raise ModelLoadingError(msg, model=model, request=parse_request_metadata(response.headers))
 
                     # Wait and retry, respecting remaining time
                     retry_after = get_retry_after(response)
@@ -1543,6 +1558,7 @@ class SIEClient:
                     )
                     self._record_retry()
                     time.sleep(actual_delay)
+                    after_capacity_wait = True
                     continue
 
                 if error_code == RESOURCE_EXHAUSTED_ERROR_CODE:
@@ -2084,7 +2100,7 @@ class SIEClient:
             gpu: GPU type to wait for (e.g., "l4", "a100-80gb").
             model: Optional model to use for warmup request. If provided, sends
                 a warmup encode request which may trigger model loading.
-            timeout_s: Maximum time to wait for capacity. Default: 300s (5 min).
+            timeout_s: Maximum time to wait for capacity. Default: 900s (15 min).
             poll_interval_s: How often to check capacity. Default: 5s.
 
         Returns:
@@ -2268,6 +2284,7 @@ class SIEClient:
         # OOM retry counter (RESOURCE_EXHAUSTED) — bounded with exponential backoff.
         oom_retries = 0
         connect_retries = 0
+        after_capacity_wait = False
 
         # Retry loop for retryable provisioning/capacity responses.
         while True:
@@ -2275,9 +2292,10 @@ class SIEClient:
             # This ensures a single hanging request can't exceed the overall timeout
             elapsed = time.monotonic() - start_time
             remaining = timeout - elapsed
-            if remaining <= 0:
+            if remaining <= 0 and not after_capacity_wait:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
+            after_capacity_wait = False
             request_timeout = self._attempt_timeout(remaining)
 
             try:
@@ -2352,6 +2370,7 @@ class SIEClient:
                     )
                     self._record_retry()
                     time.sleep(actual_delay)
+                    after_capacity_wait = True
                     continue
 
                 if error_code == MODEL_LOADING_ERROR_CODE:
@@ -2359,7 +2378,7 @@ class SIEClient:
                     elapsed = time.monotonic() - start_time
                     if elapsed >= timeout:
                         msg = f"Model loading timeout after {elapsed:.1f}s for '{model}'"
-                        raise ModelLoadingError(msg, model=model)
+                        raise ModelLoadingError(msg, model=model, request=parse_request_metadata(response.headers))
 
                     # Wait and retry, respecting remaining time
                     retry_after = get_retry_after(response)
@@ -2374,6 +2393,7 @@ class SIEClient:
                     )
                     self._record_retry()
                     time.sleep(actual_delay)
+                    after_capacity_wait = True
                     continue
 
                 if error_code == RESOURCE_EXHAUSTED_ERROR_CODE:
@@ -2595,13 +2615,15 @@ class SIEClient:
         start_time = time.monotonic()
         oom_retries = 0
         connect_retries = 0
+        after_capacity_wait = False
 
         while True:
             elapsed = time.monotonic() - start_time
             remaining = timeout - elapsed
-            if remaining <= 0:
+            if remaining <= 0 and not after_capacity_wait:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
+            after_capacity_wait = False
             request_timeout = self._attempt_timeout(remaining, read_timeout_s)
 
             try:
@@ -2662,6 +2684,7 @@ class SIEClient:
                     )
                     self._record_retry()
                     time.sleep(actual_delay)
+                    after_capacity_wait = True
                     continue
 
                 if error_code == MODEL_LOADING_ERROR_CODE:
@@ -2672,7 +2695,7 @@ class SIEClient:
                     elapsed = time.monotonic() - start_time
                     if elapsed >= timeout:
                         msg = f"Model loading timeout after {elapsed:.1f}s for '{model}'"
-                        raise ModelLoadingError(msg, model=model)
+                        raise ModelLoadingError(msg, model=model, request=parse_request_metadata(response.headers))
                     retry_after = get_retry_after(response)
                     delay = retry_after_or_default(retry_after, MODEL_LOADING_DEFAULT_DELAY_S)
                     remaining = timeout - elapsed
@@ -2684,7 +2707,7 @@ class SIEClient:
                             f"Model loading retry delay ({delay:.1f}s) would exceed the "
                             f"provision timeout ({timeout:.1f}s, {elapsed:.1f}s elapsed) for '{model}'"
                         )
-                        raise ModelLoadingError(msg, model=model)
+                        raise ModelLoadingError(msg, model=model, request=parse_request_metadata(response.headers))
                     self._record_retry()
                     time.sleep(delay)
                     continue
@@ -2840,11 +2863,13 @@ class SIEClient:
         start_time = time.monotonic()
         oom_retries = 0
         connect_retries = 0
+        after_capacity_wait = False
         while True:
             remaining = timeout - (time.monotonic() - start_time)
-            if remaining <= 0:
+            if remaining <= 0 and not after_capacity_wait:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
+            after_capacity_wait = False
             try:
                 response = self._client.post(
                     "/v1/responses",
@@ -2888,6 +2913,7 @@ class SIEClient:
             )
             self._record_retry()
             time.sleep(delay)
+            after_capacity_wait = True
 
         self._check_server_version(response)
         data = parse_terminal_json_object(response, owner="Responses")
@@ -2985,11 +3011,13 @@ class SIEClient:
         start_time = time.monotonic()
         oom_retries = 0
         connect_retries = 0
+        after_capacity_wait = False
         while True:
             remaining = timeout - (time.monotonic() - start_time)
-            if remaining <= 0:
+            if remaining <= 0 and not after_capacity_wait:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
+            after_capacity_wait = False
             try:
                 response = self._client.post(
                     "/v1/chat/completions",
@@ -3035,6 +3063,7 @@ class SIEClient:
             )
             self._record_retry()
             time.sleep(delay)
+            after_capacity_wait = True
 
         self._check_server_version(response)
         data = parse_terminal_json_object(response, owner="chat completion")
@@ -3249,11 +3278,13 @@ class SIEClient:
         start_time = time.monotonic()
         oom_retries = 0
         connect_retries = 0
+        after_capacity_wait = False
         while True:
             remaining = timeout - (time.monotonic() - start_time)
-            if remaining <= 0:
+            if remaining <= 0 and not after_capacity_wait:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
+            after_capacity_wait = False
             retry_delay: float | None = None
             try:
                 with self._client.stream(
@@ -3360,6 +3391,7 @@ class SIEClient:
             # Reached only on the non-200 pre-stream retry path.
             if retry_delay is not None:
                 time.sleep(retry_delay)
+                after_capacity_wait = True
 
     # Use overload for proper type hints when single item vs list
     @overload
@@ -3554,6 +3586,7 @@ class SIEClient:
         # OOM retry counter (RESOURCE_EXHAUSTED) — bounded with exponential backoff.
         oom_retries = 0
         connect_retries = 0
+        after_capacity_wait = False
 
         # Retry loop for retryable provisioning/capacity responses.
         while True:
@@ -3561,9 +3594,10 @@ class SIEClient:
             # This ensures a single hanging request can't exceed the overall timeout
             elapsed = time.monotonic() - start_time
             remaining = timeout - elapsed
-            if remaining <= 0:
+            if remaining <= 0 and not after_capacity_wait:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
+            after_capacity_wait = False
             request_timeout = self._attempt_timeout(remaining)
 
             try:
@@ -3641,6 +3675,7 @@ class SIEClient:
                     )
                     self._record_retry()
                     time.sleep(actual_delay)
+                    after_capacity_wait = True
                     continue
 
                 if error_code == MODEL_LOADING_ERROR_CODE:
@@ -3648,7 +3683,7 @@ class SIEClient:
                     elapsed = time.monotonic() - start_time
                     if elapsed >= timeout:
                         msg = f"Model loading timeout after {elapsed:.1f}s for '{model}'"
-                        raise ModelLoadingError(msg, model=model)
+                        raise ModelLoadingError(msg, model=model, request=parse_request_metadata(response.headers))
 
                     # Wait and retry, respecting remaining time
                     retry_after = get_retry_after(response)
@@ -3663,6 +3698,7 @@ class SIEClient:
                     )
                     self._record_retry()
                     time.sleep(actual_delay)
+                    after_capacity_wait = True
                     continue
 
                 if error_code == RESOURCE_EXHAUSTED_ERROR_CODE:

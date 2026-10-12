@@ -83,9 +83,9 @@ def request_body(case: dict, settings: dict) -> dict:
         "model": settings["model"],
         **case["request"],
         "max_completion_tokens": settings["max_completion_tokens"],
-        "temperature": 1.0,
+        "temperature": settings["temperature"],
         "top_p": 0.95,
-        "top_k": 64,
+        "top_k": settings["top_k"],
     }
     if settings["thinking"] != "server":
         body["chat_template_kwargs"] = {"enable_thinking": settings["thinking"] == "on"}
@@ -241,9 +241,9 @@ def case_worker(case: dict, folder: Path, settings: dict, inner: httpx.BaseTrans
                 case["request"]["messages"],
                 response_format=case["request"]["response_format"],
                 max_completion_tokens=settings["max_completion_tokens"],
-                temperature=1.0,
+                temperature=settings["temperature"],
                 top_p=0.95,
-                top_k=64,
+                top_k=settings["top_k"],
                 extra_body=extra,
                 wait_for_capacity=False,
                 max_oom_retries=0,
@@ -320,10 +320,21 @@ def run_frame(
     timeout_s: float = 1800,
     max_completion_tokens: int = 32768,
     thinking: str = "on",
+    temperature: float = 1.0,
+    top_k: int = 64,
     execute=run_case,
 ) -> list[dict]:
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 2**32 - 1:
+        raise ValueError("Top-k must be an integer from 1 to 4294967295")
     if not math.isfinite(timeout_s) or timeout_s <= 0 or max_completion_tokens <= 0:
         raise ValueError("Positive finite case timeout and completion token cap are required")
+    if (
+        isinstance(temperature, bool)
+        or not isinstance(temperature, (int, float))
+        or not math.isfinite(temperature)
+        or not 0 <= temperature <= 2
+    ):
+        raise ValueError("Temperature must be a finite number from 0 to 2")
     address = httpx.URL(url)
     if (
         address.scheme not in {"http", "https"}
@@ -343,6 +354,8 @@ def run_frame(
         "timeout_s": timeout_s,
         "max_completion_tokens": max_completion_tokens,
         "thinking": thinking,
+        "temperature": float(temperature),
+        "top_k": top_k,
     }
     out.mkdir(parents=True, exist_ok=False)
     sync_directory(out.parent)
@@ -400,7 +413,7 @@ def run_frame(
     return rows
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--inputs", type=Path, default=Path("data/inputs.json"))
     parser.add_argument("--out", type=Path, default=Path("run-output"))
@@ -409,7 +422,9 @@ if __name__ == "__main__":
     parser.add_argument("--timeout", type=float, default=1800)
     parser.add_argument("--max-completion-tokens", type=int, default=32768)
     parser.add_argument("--thinking", choices=("on", "off", "server"), default="on")
-    args = parser.parse_args()
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--top-k", type=int, default=64)
+    args = parser.parse_args(argv)
     if not args.url:
         parser.error("Set SIE_URL or pass --url")
     outcomes = run_frame(
@@ -420,5 +435,11 @@ if __name__ == "__main__":
         timeout_s=args.timeout,
         max_completion_tokens=args.max_completion_tokens,
         thinking=args.thinking,
+        temperature=args.temperature,
+        top_k=args.top_k,
     )
-    raise SystemExit(1 if any(row.get("halt") for row in outcomes) or outcomes[0]["status"] != "ok" else 0)
+    return 1 if any(row.get("halt") for row in outcomes) or outcomes[0]["status"] != "ok" else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

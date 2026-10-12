@@ -1,5 +1,9 @@
 # Mask personal data before it reaches a log, a prompt or a vendor
 
+For a complete document sent through `superlinked/pii-redact` in one SDK
+operation, see the [one-call example](one-call/README.md). This directory retains
+the recorded two-model study, its callers and scoring below.
+
 ## What this shows
 
 This example holds the recorded run behind

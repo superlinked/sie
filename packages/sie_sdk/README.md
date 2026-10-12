@@ -250,30 +250,44 @@ Private reasoning is hidden on both input surfaces. If it consumes the entire
 generation budget without usable output, the request fails with
 `empty_model_output`.
 
-## Connecting to a managed SIE platform
+## Connecting to SIE Serverless or a managed gateway
 
-The examples above target a local server. For a managed SIE gateway,
-pass the gateway URL as `base_url` and your API key (sent as a Bearer
-token):
+The examples above target a local server. Given an API key and no base URL,
+the client connects to SIE Serverless at `https://api.superlinked.com`:
 
 ```python
 from sie_sdk import SIEClient
 
+client = SIEClient()  # reads SIE_API_KEY
+```
+
+`SIEClient(api_key="sk-sie-...")` does the same with an explicit key. Keys
+issued for the EU region use `https://eu.api.superlinked.com`; set
+`SIE_BASE_URL` to it. Set `SIE_BASE_URL` alongside a key for your own gateway
+too, or `SIEClient()` sends that key to SIE Serverless. For another SIE
+gateway, pass its URL as `base_url` and your API key (sent as a Bearer token):
+
+```python
 client = SIEClient(
     "https://your-gateway.example.com",
     api_key="YOUR_API_KEY",
 )
 ```
 
-When `base_url` is omitted, the client reads `SIE_BASE_URL`. When `api_key` is
-omitted, it selects `SIE_API_KEY` only for a base URL with the same origin as
-`SIE_BASE_URL`; a client for any other URL does not pick it up. Set both
-variables to let code and integrations that construct a client without
-credentials use a gateway with token auth. An explicit argument always wins;
-`api_key=""` sends no credential. The `connections` namespace reuses the
-client's key on requests to an explicitly configured `control_plane_url`, so a
-client whose `control_plane_url` is on another origin must pass `api_key`
-explicitly rather than rely on `SIE_API_KEY`.
+The client takes its base URL from `base_url`, then `SIE_BASE_URL`, then SIE
+Serverless when an API key is available (`api_key`, or `SIE_API_KEY` when
+`api_key` is omitted). With none of these it raises `ValueError`; it does not
+assume a local server, so pass `"http://localhost:8080"` or set `SIE_BASE_URL`
+for one. When `api_key` is omitted, the client selects `SIE_API_KEY` only for a
+base URL with the same origin as `SIE_BASE_URL`, or as SIE Serverless while
+`SIE_BASE_URL` is unset; a client for any other URL, such as
+`http://localhost:8080`, does not pick it up. Set both variables to let code
+and integrations that construct a client without credentials use a gateway
+with token auth. An explicit argument always wins; `api_key=""` sends no
+credential and does not select SIE Serverless. The `connections` namespace
+reuses the client's key on requests to an explicitly configured
+`control_plane_url`, so a client whose `control_plane_url` is on another
+origin must pass `api_key` explicitly rather than rely on `SIE_API_KEY`.
 
 ## Generation execution evidence
 
@@ -323,9 +337,15 @@ use local/PVC, S3, GCS, or Azure storage for that store.
 
 Server-reported errors are raised as typed exceptions from
 `sie_sdk.client.errors`; all inherit from `SIEError`, and errors that
-carry a server response expose `.code` and `.status_code`. Invalid
-client-side arguments (for example, a bad `base_url_headers` value)
-raise ordinary Python exceptions such as `ValueError`.
+carry a server response expose `.code` and `.status_code`. `RequestError`,
+`ServerError`, `ProvisioningError`, `ModelLoadingError` and
+`LoraLoadingError` also expose `.request`, the request metadata of the
+error response when it carried any: for example `served_by`,
+`fallback_reason` and `fallback_error` on a local refusal that answers a
+failed remote attempt. When a retry budget runs out, it describes the
+last refusal. Invalid client-side arguments (for example, a bad
+`base_url_headers` value) raise ordinary Python exceptions such as
+`ValueError`.
 
 Several `503` codes are transient and retried automatically (see the
 next section for the `RESOURCE_EXHAUSTED` budget):
@@ -353,6 +373,18 @@ a `503 QUEUE_UNAVAILABLE` that carries `Retry-After`. A
 [`packages/wire-fixtures/retry_classification.json`](../wire-fixtures/retry_classification.json)
 lists how each response is classified; the Python and TypeScript SDKs
 both test against it.
+
+SIE Cloud answers `403` when it will not serve a request through SIE
+Relay, its partner capacity. The SDK raises `RelayUnavailableError`, a
+`RequestError` subclass that carries the server's message, and never
+retries it. Branch on `.code`:
+
+- `THIRD_PARTY_SERVING_DISABLED` — serving through SIE Relay is disabled.
+- `THIRD_PARTY_RUNTIME_UNLISTED` — the SIE Relay runtime that would serve
+  the model is not listed.
+- `THIRD_PARTY_REGION_UNAVAILABLE` — SIE Relay cannot serve the model in
+  the API key's region. `.key_region` and `.deployment_region` name the
+  regions when the response includes them.
 
 ### Timeouts
 

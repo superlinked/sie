@@ -14,23 +14,36 @@ npm install @superlinked/sie-sdk
 ```typescript
 import { SIEClient } from "@superlinked/sie-sdk";
 
-// Local server
-const client = new SIEClient("http://localhost:8080");
+// SIE Serverless (https://api.superlinked.com). Server-side only, see below.
+const client = new SIEClient(); // reads SIE_API_KEY
 
-// Managed SIE gateway: pass the gateway URL and your API key
+// Local server
+const local = new SIEClient("http://localhost:8080");
+
+// Another SIE gateway: pass its URL and your API key
 // (sent as a Bearer token). Server-side code only — see below.
 const managed = new SIEClient("https://your-gateway.example.com", {
   apiKey: "YOUR_API_KEY",
 });
 ```
 
-In Node.js, an omitted `baseUrl` falls back to `SIE_BASE_URL`. An omitted
-`apiKey` selects `SIE_API_KEY` only for a base URL with the same origin as
-`SIE_BASE_URL`; a client for any other URL does not pick it up. An explicit
-value always wins; `apiKey: ""` sends no credential. The `connections`
-namespace reuses the client's key on requests to an explicitly configured
-`controlPlaneUrl`, so a client whose `controlPlaneUrl` is on another origin
-must pass `apiKey` explicitly rather than rely on `SIE_API_KEY`.
+The client takes its base URL from `baseUrl`, then `SIE_BASE_URL` (in
+Node.js), then SIE Serverless when an API key is available (`apiKey`, or
+`SIE_API_KEY` when `apiKey` is omitted), so
+`new SIEClient(undefined, { apiKey })` also targets SIE Serverless. With none
+of these it throws a `TypeError`; it does not assume a local server. Keys
+issued for the EU region use `https://eu.api.superlinked.com`; set
+`SIE_BASE_URL` to it. Set `SIE_BASE_URL` alongside a key for your own gateway
+too, or `new SIEClient()` sends that key to SIE Serverless.
+
+An omitted `apiKey` selects `SIE_API_KEY` only for a base URL with the same
+origin as `SIE_BASE_URL`, or as SIE Serverless while `SIE_BASE_URL` is unset;
+a client for any other URL, such as `http://localhost:8080`, does not pick it
+up. An explicit value always wins; `apiKey: ""` sends no credential and does
+not select SIE Serverless. The `connections` namespace reuses the client's key
+on requests to an explicitly configured `controlPlaneUrl`, so a client whose
+`controlPlaneUrl` is on another origin must pass `apiKey` explicitly rather
+than rely on `SIE_API_KEY`.
 
 > **Warning:** only pass `apiKey` in server-side code. Shipping it in a
 > browser bundle exposes the bearer key to anyone who loads the page.
@@ -73,15 +86,75 @@ const scored = await client.score(
 console.log(scored.scores[0].itemId, scored.scores[0].score);
 ```
 
+`encode` and `score` take runtime options as `adapterOptions`, which the
+Python SDK names `options`: for example
+`{ adapterOptions: { profile: "long_context" } }` selects a named model
+profile. `score` also takes an `instruction`. Each `encode` result names the
+`model` that served it.
+
+## Extraction
+
+```typescript
+import { readFile } from "node:fs/promises";
+
+// Entities for the labels you pass
+const result = await client.extract(
+  "urchade/gliner_multi-v2.1",
+  { text: "Apple was founded by Steve Jobs." },
+  { labels: ["person", "organization"] },
+);
+for (const entity of result.entities) {
+  console.log(entity.label, entity.text, entity.score);
+}
+
+// No options for models that take none: OCR, document parsing, speech to text
+const pngBytes = await readFile("page.png");
+const page = await client.extract("lightonai/LightOnOCR-2-1B", { images: [pngBytes] });
+console.log(page.entities[0]?.text); // the page as Markdown
+
+// Typed decisions: questions go in outputSchema, answers come back in data
+const decision = await client.extract(
+  "fastino/GLiNER2.5-Decide",
+  { text: "This is the third time I have explained the same missing refund." },
+  {
+    outputSchema: {
+      handoff: { type: "noul", instructions: "Should a person take over?" },
+    },
+  },
+);
+console.log(decision.data?.handoff);
+```
+
+`labels`, `outputSchema` and `instruction` are all optional. `threshold` and
+anything in `adapterOptions` are sent as runtime options (`params.options`),
+where the Python SDK's `options` keyword argument puts them.
+
+Images are bytes (`Uint8Array`, `ArrayBuffer`, `Blob`) or a base64 or `data:`
+URL string. A string is never read as a file path, unlike in the Python SDK;
+read the file and pass its bytes.
+
 ## Generation
 
 Text-only `generate` and `streamGenerate` prompts are raw continuation input:
 the worker preserves them without rendering a chat template or applying
 `enable_thinking` / `guardian_config`. Native requests with images render one
-user turn. For chat, instruction-based structured output (`responseFormat`),
+user turn. For chat, instruction-based structured output (`response_format`),
 and guard checks, use `chatCompletions` or `streamChatCompletions` with messages
 so the worker applies the served template settings. Operator settings take
 precedence over request template kwargs.
+
+```typescript
+const reply = await client.chatCompletions({
+  model: "Qwen/Qwen3-4B-Instruct-2507",
+  messages: [{ role: "user", content: "Write a haiku about the sea." }],
+  max_completion_tokens: 64,
+});
+console.log(reply.choices[0]?.message.content);
+```
+
+The chat request and response keep the wire's snake_case field names. The
+Python SDK takes the same fields as keyword arguments after `model` and
+`messages`.
 
 Granite Guardian's shipped risk dimension is `harm`; requesting another
 dimension in prompt text does not change it. Valid thresholded verdicts are
@@ -118,7 +191,13 @@ for await (const chunk of client.streamGenerate(
 All errors extend `SIEError` and are exported from the package root.
 Server-reported errors carry `.code` and `.statusCode`, plus
 `.requestId` (the gateway `x-sie-request-id`) when the gateway included
-one in the response — check it before using it.
+one in the response — check it before using it. `RequestError`,
+`ServerError`, `ProvisioningError`, `ModelLoadingError` and
+`LoraLoadingError` also carry `.request`, the request metadata of the
+error response when it carried any: for example `servedBy`,
+`fallbackReason` and `fallbackError` on a local refusal that answers a
+failed remote attempt. When a retry budget runs out, it describes the
+last refusal.
 
 ```typescript
 import {
@@ -164,6 +243,18 @@ gateway's queue backpressure, a `503 QUEUE_UNAVAILABLE` that carries
 lists how each response is classified; the TypeScript and Python SDKs
 both test against it.
 
+SIE Cloud answers `403` when it will not serve a request through SIE
+Relay, its partner capacity. The SDK throws `RelayUnavailableError`, a
+`RequestError` subclass that carries the server's message, and never
+retries it. Branch on `.code`:
+
+- `THIRD_PARTY_SERVING_DISABLED` — serving through SIE Relay is disabled.
+- `THIRD_PARTY_RUNTIME_UNLISTED` — the SIE Relay runtime that would serve
+  the model is not listed.
+- `THIRD_PARTY_REGION_UNAVAILABLE` — SIE Relay cannot serve the model in
+  the API key's region. `.keyRegion` and `.deploymentRegion` name the
+  regions when the response includes them.
+
 Each attempt waits up to `timeoutMs` (default 150000 ms, longer than the
 gateway's default 120 s request deadline) for a response. A timed-out
 request is never retried, because the server may still be processing it.
@@ -190,4 +281,4 @@ does not make retrying generation safe after output has already arrived.
 
 ## License
 
-MIT
+Apache 2.0

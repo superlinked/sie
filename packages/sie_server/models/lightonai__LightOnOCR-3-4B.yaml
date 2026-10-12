@@ -38,6 +38,11 @@ tasks:
 # continuous batching, no system prompt, the chat template's enable_thinking=False, and only the
 # two trained prompts accepted. The `transformers` profile runs the same contract in-process in the
 # transformers5 bundle.
+#
+# Throughput: up to 128 pages run in the engine at once. The radix cache is off: every page is a
+# new image, so it saves nothing, and with it on SGLang turns overlap scheduling off for this
+# hybrid (Gated DeltaNet) model. FlashInfer serves the attention layers. Sampling is unchanged and
+# outputs stay within bf16 run-to-run variance.
 max_sequence_length: 24576
 profiles:
   default:
@@ -49,7 +54,7 @@ profiles:
         mem_fraction_static: 0.85
         served_model_name: lightonai/LightOnOCR-3-4B
         trust_remote_code: false
-        max_concurrent_requests: 32
+        max_concurrent_requests: 128
         meter_pages: true
         max_new_tokens: 12288
         temperature: 0.1
@@ -58,7 +63,9 @@ profiles:
           enable_thinking: false
         allowed_instructions:
           - grounding
-        attention_backend: triton
+        attention_backend: flashinfer
+        extra_launch_args:
+          - --disable-radix-cache
       runtime:
         max_new_tokens: 12288
         num_beams: 1

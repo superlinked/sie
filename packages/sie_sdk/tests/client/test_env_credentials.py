@@ -1,4 +1,4 @@
-"""``SIE_BASE_URL`` and ``SIE_API_KEY`` fallbacks for both client constructors."""
+"""``SIE_BASE_URL`` and ``SIE_API_KEY`` fallbacks, and the SIE Serverless default, for both client constructors."""
 
 from __future__ import annotations
 
@@ -84,6 +84,9 @@ def test_sync_client_sends_env_key_to_the_env_base_url_origin(
         ("https://gateway.example.com", "http://gateway.example.com"),
         ("https://gateway.example.com", "https://gateway.example.com:8443"),
         ("not a url", "https://gateway.example.com"),
+        (None, "http://api.superlinked.com"),
+        (None, "https://api.superlinked.com:8443"),
+        (None, "https://api.superlinked.com.example.com"),
     ],
 )
 def test_sync_client_withholds_env_key_from_other_origins(
@@ -174,6 +177,100 @@ def test_clients_require_a_base_url(monkeypatch: pytest.MonkeyPatch, env_value: 
         SIEAsyncClient()
 
 
+SERVERLESS = "https://api.superlinked.com"
+
+
+def test_sync_client_defaults_to_serverless_with_env_key(
+    monkeypatch: pytest.MonkeyPatch, sync_headers: dict[str, Any]
+) -> None:
+    monkeypatch.setenv("SIE_API_KEY", "env-key")
+
+    client = SIEClient()
+
+    assert client.base_url == SERVERLESS
+    assert sync_headers["base_url"] == SERVERLESS
+    assert sync_headers["headers"]["Authorization"] == "Bearer env-key"
+
+
+def test_sync_client_defaults_to_serverless_with_explicit_key(sync_headers: dict[str, Any]) -> None:
+    client = SIEClient(api_key="explicit-key")
+
+    assert client.base_url == SERVERLESS
+    assert sync_headers["headers"]["Authorization"] == "Bearer explicit-key"
+
+
+def test_sync_client_prefers_env_base_url_over_serverless(
+    monkeypatch: pytest.MonkeyPatch, sync_headers: dict[str, Any]
+) -> None:
+    monkeypatch.setenv("SIE_BASE_URL", "http://localhost:8080")
+    monkeypatch.setenv("SIE_API_KEY", "env-key")
+
+    client = SIEClient()
+
+    assert client.base_url == "http://localhost:8080"
+    assert sync_headers["headers"]["Authorization"] == "Bearer env-key"
+
+
+def test_sync_client_explicit_local_base_url_keeps_env_key_for_serverless(
+    monkeypatch: pytest.MonkeyPatch, sync_headers: dict[str, Any]
+) -> None:
+    monkeypatch.setenv("SIE_API_KEY", "env-key")
+
+    client = SIEClient("http://localhost:8080")
+
+    assert client.base_url == "http://localhost:8080"
+    assert "Authorization" not in sync_headers["headers"]
+
+
+@pytest.mark.parametrize("base_url", [SERVERLESS, f"{SERVERLESS}/", "https://API.superlinked.com:443"])
+def test_sync_client_sends_env_key_to_serverless_while_env_base_url_is_unset(
+    monkeypatch: pytest.MonkeyPatch, sync_headers: dict[str, Any], base_url: str
+) -> None:
+    monkeypatch.setenv("SIE_API_KEY", "env-key")
+
+    SIEClient(base_url)
+
+    assert sync_headers["headers"]["Authorization"] == "Bearer env-key"
+
+
+def test_sync_client_scopes_env_key_to_env_base_url_not_serverless(
+    monkeypatch: pytest.MonkeyPatch, sync_headers: dict[str, Any]
+) -> None:
+    monkeypatch.setenv("SIE_BASE_URL", "https://gateway.example.com")
+    monkeypatch.setenv("SIE_API_KEY", "env-key")
+
+    SIEClient(SERVERLESS)
+
+    assert "Authorization" not in sync_headers["headers"]
+
+
+def test_clients_without_a_key_name_serverless_in_the_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SIE_API_KEY", "   ")
+    with pytest.raises(ValueError, match=r"SIE_API_KEY to use SIE Serverless \(https://api\.superlinked\.com\)"):
+        SIEClient()
+    with pytest.raises(ValueError, match="SIE_API_KEY"):
+        SIEAsyncClient()
+
+
+def test_clients_with_an_empty_api_key_do_not_default_to_serverless(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SIE_API_KEY", "env-key")
+    with pytest.raises(ValueError, match="base_url is required"):
+        SIEClient(api_key="")
+    with pytest.raises(ValueError, match="base_url is required"):
+        SIEAsyncClient(api_key="")
+
+
+def test_clients_scope_the_serverless_env_key_away_from_a_cross_origin_control_plane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SIE_API_KEY", "env-key")
+
+    with pytest.raises(ValueError, match="control_plane_url"):
+        SIEClient(control_plane_url="https://control.example.com")
+    with pytest.raises(ValueError, match="control_plane_url"):
+        SIEAsyncClient(control_plane_url="https://control.example.com")
+
+
 def test_clients_validate_the_env_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SIE_BASE_URL", "localhost:8080")
     with pytest.raises(ValueError, match="http:// or https://"):
@@ -226,4 +323,38 @@ async def test_async_client_empty_api_key_opts_out_of_env_key(monkeypatch: pytes
 
     kwargs = await _async_session_kwargs(SIEAsyncClient("http://localhost:8080", api_key=""))
 
+    assert "Authorization" not in kwargs["headers"]
+
+
+@pytest.mark.asyncio
+async def test_async_client_defaults_to_serverless_with_env_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SIE_API_KEY", "env-key")
+
+    client = SIEAsyncClient()
+    kwargs = await _async_session_kwargs(client)
+
+    assert client.base_url == SERVERLESS
+    assert kwargs["base_url"] == SERVERLESS
+    assert kwargs["headers"]["Authorization"] == "Bearer env-key"
+
+
+@pytest.mark.asyncio
+async def test_async_client_defaults_to_serverless_with_explicit_key() -> None:
+    client = SIEAsyncClient(api_key="explicit-key")
+    kwargs = await _async_session_kwargs(client)
+
+    assert client.base_url == SERVERLESS
+    assert kwargs["headers"]["Authorization"] == "Bearer explicit-key"
+
+
+@pytest.mark.asyncio
+async def test_async_client_explicit_local_base_url_keeps_env_key_for_serverless(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SIE_API_KEY", "env-key")
+
+    client = SIEAsyncClient("http://localhost:8080")
+    kwargs = await _async_session_kwargs(client)
+
+    assert client.base_url == "http://localhost:8080"
     assert "Authorization" not in kwargs["headers"]

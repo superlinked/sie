@@ -317,6 +317,11 @@ class ModelWorker:
         return self._config
 
     @property
+    def dispatch_width(self) -> int:
+        """Return how many batches this worker runs through its adapter at once."""
+        return self._dispatch_width
+
+    @property
     def stats(self) -> WorkerStats:
         """Return current worker statistics."""
         return self._stats
