@@ -164,13 +164,24 @@ SIE's release workflow does not publish Terraform modules.
 | Azure | [terraform-azure-sie](https://github.com/superlinked/terraform-azure-sie) |
 | Alibaba Cloud | [terraform-alicloud-sie](https://github.com/superlinked/terraform-alicloud-sie) |
 
-Keep runtime installation instructions evergreen. For a fresh installation,
-select the latest stable chart once, then use that retained chart, its bundled
-cloud values, and its matching application image tags. Do not combine separate
-latest lookups for the chart, values, and images. Controlled upgrades should
-select an explicitly reviewed chart version, read the relevant SIE release
-notes, and preserve existing values and credentials. Terraform module and
+Keep runtime installation instructions simple and evergreen: use
+`helm upgrade --install` with the OCI chart reference and omit `--version`
+for the latest stable chart. Pass cloud values with a public values URL;
+do not require pulling, unpacking, or staging the chart first. A latest chart
+and values from `main` are rolling inputs. For controlled upgrades, optionally
+set a reviewed chart version and the matching values tag/ref, read the relevant
+SIE release notes, and preserve existing values and credentials. Multi-step
+image mirroring should keep the selected chart, values and image versions
+consistent, but does not require chart extraction. Terraform module and
 provider version constraints remain independent and reproducible.
+
+Terraform Registry documentation is served from a published module version,
+not from the repository's current `main`. Ordinary documentation-only changes
+appear there with the next module release. A maintainer can explicitly
+authorize a one-time documentation refresh release when needed; publish a new
+immutable patch version and verify its Registry documentation and download
+source. Never move or overwrite an existing tag to refresh its documentation.
+This exception does not restore automatic module releases for each SIE version.
 
 The release owner checks whether the new SIE release changes a requirement on
 the infrastructure module: for example, a required output, workload identity
