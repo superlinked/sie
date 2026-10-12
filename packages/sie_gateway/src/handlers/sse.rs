@@ -100,7 +100,9 @@ pub struct SseParams<'a> {
     pub state: &'a AppState,
     pub work_publisher: Arc<dyn WorkDispatcher>,
     pub physical_lane: PhysicalLane,
-    /// DISPLAY id (the requested model) — surfaced in the streamed chunk
+    /// The model as the caller sent it, which a provisioning answer names.
+    pub requested_model: String,
+    /// DISPLAY id (the resolved model) — surfaced in the streamed chunk
     /// ``model`` field and the routing/timeout metric labels.
     pub model: String,
     /// DISPATCH id — the grammar ``:no-spec`` variant when routing fired,
@@ -116,6 +118,8 @@ pub struct SseParams<'a> {
     pub bundle_config_hash: String,
     pub work_params: publisher::WorkParams,
     pub endpoint: SseEndpoint,
+    /// The kind of route the request arrived on.
+    pub(crate) route: crate::handlers::proxy::RouteKind,
 }
 
 /// Build the SSE response. Publishes the work item, subscribes to
@@ -135,6 +139,7 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
         state,
         work_publisher,
         physical_lane,
+        requested_model,
         model,
         dispatch_model,
         bundle,
@@ -145,6 +150,7 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
         bundle_config_hash,
         work_params,
         endpoint,
+        route,
     } = params;
 
     // Resolve the routing key & target the same way
@@ -258,15 +264,9 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
                     &physical_lane,
                     "no_consumers",
                 );
-                let route = match endpoint {
-                    SseEndpoint::Generate => crate::handlers::proxy::RouteKind::Native,
-                    SseEndpoint::Chat { .. } | SseEndpoint::Completion { .. } => {
-                        crate::handlers::proxy::RouteKind::Compatibility
-                    }
-                };
-                let retry_after = crate::handlers::proxy::provisioning_retry_after(
+                let estimate = crate::handlers::proxy::ProvisioningEstimate::new(
                     state,
-                    &[crate::handlers::proxy::lane_wake_target(
+                    vec![crate::handlers::proxy::lane_wake_target(
                         &pool,
                         &gpu,
                         &bundle,
@@ -275,8 +275,8 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
                     route,
                 );
                 return crate::handlers::proxy::provisioning_response(
-                    &model,
-                    retry_after,
+                    &requested_model,
+                    estimate,
                     crate::handlers::proxy::ProvisioningSurface::OpenAiCompat,
                 );
             }

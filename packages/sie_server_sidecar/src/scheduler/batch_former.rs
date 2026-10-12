@@ -10,10 +10,13 @@
 //! 2. **Oversize item**: a single item whose cost already exceeds
 //!    `max_batch_cost` still flushes (alone) so it can't starve
 //!    forever.
-//! 3. **Cost-sorted sub-batch**: `_pending` is sorted by `cost`
-//!    ascending before each extract; packing is greedy under the cost
-//!    and count caps. Remaining items stay in the queue for the next
-//!    extract, preserving FIFO-within-cost-bucket ordering.
+//! 3. **Bounded cost-sorted packing**: before each extract, the oldest
+//!    request that has reached `max_batch_wait_ms` gets the first packing
+//!    opportunity. All other requests are stably sorted by cost, then packed
+//!    greedily under the cost and count caps. This prevents replenishing
+//!    cheap requests from indefinitely overtaking an aged expensive one.
+//!    Progress requires a downstream dispatch slot; the wait window is not
+//!    an end-to-end latency guarantee.
 //! 4. **Timer refresh**: after a partial cost-sorted extract, first/last
 //!    timestamps are re-anchored to the requests that remain; once the queue
 //!    empties both are cleared so the next submit starts a fresh window.
@@ -68,7 +71,9 @@
 //! extract and clears them only when empty. Rust re-anchors them to the actual
 //! remainder because the sidecar's cross-key FCFS selector reads that state:
 //! retaining a removed request's timestamp can repeatedly prioritize a hot key
-//! and can make a newer tail skip its own coalescing window.
+//! and can make a newer tail skip its own coalescing window. Python's packing
+//! remains strictly cost-sorted; Rust promotes one aged request per extract
+//! (point 3).
 //!
 //! The runs-alone lane (point 5) is the Python batcher's rule too (#601),
 //! with three differences:
@@ -506,9 +511,10 @@ impl<I: HasCost, T> BatchFormer<I, T> {
     ///
     /// The scheduler drain loop uses this to bound one continuous-batching
     /// wave to the backlog count observed when its first continuation slot
-    /// opens. Because packing cost-sorts all currently pending items, a newer
-    /// cheap item can participate ahead of an older expensive item; the count
-    /// budget bounds wave size but does not identify an exact request cohort.
+    /// opens. A newer cheap item can participate ahead of an unaged expensive
+    /// item; the oldest request gets the first packing opportunity once its
+    /// wait window expires. The count budget bounds wave size but does not
+    /// identify an exact request cohort.
     pub async fn try_drain_up_to(&self, max_items: usize) -> Option<FormattedBatch<I, T>> {
         if max_items == 0 {
             return None;
@@ -674,7 +680,9 @@ fn wait_timeout<I: HasCost, T>(inner: &Inner<I, T>) -> Option<Duration> {
 /// is stable, so FIFO order holds within equal costs (Python's `list.sort` is
 /// stable too). Then [`make_room_for_owed`] moves the requests the turn owes
 /// forward where packing would otherwise leave no room for them. Outside
-/// batchable turns this is the plain cost sort of point 3. Mirrors Python's
+/// batchable turns, with no runs-alone request pending, this is point 3: the
+/// oldest request that has waited `max_batch_wait_ms` first, the rest by
+/// cost. Mirrors Python's
 /// `BatchFormer._order_runs_alone_lane`, except that a batchable turn can
 /// span several batches and serves the requests earlier turns left over.
 ///
@@ -729,6 +737,27 @@ fn order_for_next_batch<I: HasCost, T>(
         inner.last_turn_cutoff = inner.last_turn_cutoff.max(Some(cutoff));
     }
 
+    // Outside batchable turns, with no runs-alone request pending, packing is
+    // point 3's: a timeout must give the oldest request an extraction
+    // opportunity even while cheaper arrivals keep the queue full. Inside a
+    // turn, what the turn owes bounds the wait instead (point 5). Select
+    // before sorting so tied arrival timestamps retain their pending order.
+    let oldest_aged = if inner.batchable_turn.is_none() && !alone_pending {
+        inner
+            .pending
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, request)| request.arrival_time)
+            .filter(|(_, request)| {
+                request.arrival_time.elapsed().as_secs_f64() * 1000.0
+                    >= inner.config.max_batch_wait_ms
+            })
+            .map(|(index, _)| index)
+    } else {
+        None
+    };
+    let promoted = oldest_aged.map(|index| inner.pending.remove(index));
+
     // Cost order keeps each batch's items close in length, minimising
     // padding waste on the adapter side.
     let turn = inner.batchable_turn;
@@ -746,6 +775,9 @@ fn order_for_next_batch<I: HasCost, T>(
                 }
             })
     });
+    if let Some(request) = promoted {
+        inner.pending.insert(0, request);
+    }
     if alone_next {
         if let Some(head) = inner.pending.iter().position(|r| r.item.runs_alone()) {
             inner.pending[..=head].rotate_right(1);
@@ -1023,6 +1055,151 @@ mod tests {
         }
     }
 
+    // Arrival age is a std::Instant value, so these tests backdate the real
+    // pending requests rather than advancing Tokio's separate virtual clock.
+    async fn set_request_ages<I: HasCost>(
+        former: &BatchFormer<I, usize>,
+        ages_ms: &[(usize, u64)],
+    ) {
+        let now = Instant::now();
+        let mut guard = former.inner.lock().await;
+        for request in &mut guard.pending {
+            let age_ms = ages_ms
+                .iter()
+                .find(|(metadata, _)| *metadata == request.metadata)
+                .expect("every pending request has an explicit age")
+                .1;
+            request.arrival_time = now - Duration::from_millis(age_ms);
+        }
+        guard.first_request_time = guard.pending.iter().map(|r| r.arrival_time).min();
+        guard.last_submit_time = guard.pending.iter().map(|r| r.arrival_time).max();
+        former.refresh_fcfs_head(&guard);
+    }
+
+    #[tokio::test]
+    async fn aged_requests_progress_in_arrival_order_under_replenishment() {
+        let former = BatchFormer::<StubItem, usize>::new(BatchConfig {
+            max_batch_cost: 10,
+            max_batch_requests: 8,
+            max_batch_wait_ms: 20.0,
+            ..BatchConfig::default()
+        });
+        // Pending order and cost order both differ from actual arrival order.
+        for id in [2, 0, 1] {
+            former.submit(StubItem::with_idx(10, id), id).await;
+        }
+        former.submit(StubItem::with_idx(1, 3), 3).await;
+        set_request_ages(&former, &[(2, 100), (0, 300), (1, 200), (3, 0)]).await;
+
+        for id in 0..3 {
+            let batch = former.try_drain_up_to(1).await.unwrap();
+            assert_eq!(batch.metadata, vec![id], "oldest aged request goes first");
+            assert_eq!(batch.items, vec![StubItem::with_idx(10, id)]);
+            assert_eq!(batch.total_cost, 10);
+            former.submit(StubItem::with_idx(1, id + 4), id + 4).await;
+        }
+        assert_eq!(former.pending_count().await, 4);
+        assert_eq!(former.pending_cost().await, 4);
+        let remainder = former.try_drain().await.unwrap();
+        assert_eq!(remainder.metadata, vec![3, 4, 5, 6]);
+        assert_eq!(former.pending_count().await, 0);
+        assert_eq!(former.pending_cost().await, 0);
+        assert_eq!(former.fcfs_head_ns(), 0);
+    }
+
+    #[tokio::test]
+    async fn aged_oversize_request_flushes_alone_among_smaller_requests() {
+        let former = BatchFormer::<StubItem, usize>::new(BatchConfig {
+            max_batch_cost: 10,
+            max_batch_requests: 8,
+            max_batch_wait_ms: 20.0,
+            ..BatchConfig::default()
+        });
+        former.submit(StubItem::with_idx(20, 0), 0).await;
+        former.submit(StubItem::with_idx(0, 1), 1).await;
+        former.submit(StubItem::with_idx(1, 2), 2).await;
+        set_request_ages(&former, &[(0, 100), (1, 0), (2, 0)]).await;
+        let remaining_first = former.inner.lock().await.pending[1].arrival_time;
+
+        let batch = former.try_get_batch().await.unwrap();
+        assert_eq!(batch.metadata, vec![0]);
+        assert_eq!(batch.items, vec![StubItem::with_idx(20, 0)]);
+        assert_eq!(batch.total_cost, 20);
+        assert_eq!(former.pending_count().await, 2);
+        assert_eq!(former.pending_cost().await, 1);
+        let guard = former.inner.lock().await;
+        assert_eq!(guard.first_request_time, Some(remaining_first));
+        assert_eq!(guard.last_submit_time, Some(remaining_first));
+        assert_ne!(former.fcfs_head_ns(), 0);
+    }
+
+    #[tokio::test]
+    async fn aged_promotion_preserves_hard_cost_and_updated_count_caps() {
+        let config = BatchConfig {
+            max_batch_cost: 1_000,
+            max_batch_requests: 8,
+            max_batch_wait_ms: 20.0,
+            ..BatchConfig::default()
+        };
+        let former = BatchFormer::<HardCapItem, usize>::new(config);
+        for (id, cost) in [4, 2, 2, 2].into_iter().enumerate() {
+            former.submit(HardCapItem { cost, cap: 7 }, id).await;
+        }
+        set_request_ages(&former, &[(0, 100), (1, 0), (2, 0), (3, 0)]).await;
+
+        let batch = former.try_drain_up_to(3).await.unwrap();
+        assert_eq!(batch.metadata, vec![0, 1]);
+        assert_eq!(
+            batch.total_cost, 6,
+            "promotion must still honor the hard cap"
+        );
+        assert_eq!(former.pending_cost().await, 4);
+        former
+            .update_config(BatchConfig {
+                max_batch_cost: 5,
+                max_batch_requests: 1,
+                ..config
+            })
+            .await;
+        let batch = former.try_drain_up_to(3).await.unwrap();
+        assert_eq!(batch.metadata, vec![2]);
+        assert_eq!(batch.total_cost, 2);
+        assert_eq!(former.pending_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn promotion_tracks_updated_wait_threshold() {
+        let config = BatchConfig {
+            max_batch_cost: 10,
+            max_batch_requests: 8,
+            max_batch_wait_ms: 1_000_000.0,
+            ..BatchConfig::default()
+        };
+        let former = BatchFormer::<StubItem, usize>::new(config);
+        former.submit(StubItem::with_idx(10, 0), 0).await;
+        former.submit(StubItem::with_idx(1, 1), 1).await;
+        set_request_ages(&former, &[(0, 100), (1, 0)]).await;
+        let first = former.try_drain_up_to(1).await.unwrap();
+        assert_eq!(
+            first.metadata,
+            vec![1],
+            "unaged requests remain cost-sorted"
+        );
+        former.submit(StubItem::with_idx(1, 2), 2).await;
+        former
+            .update_config(BatchConfig {
+                max_batch_wait_ms: 20.0,
+                ..config
+            })
+            .await;
+
+        let next = former.get_batch(true).await;
+        assert_eq!(next.metadata, vec![0]);
+        assert_eq!(next.total_cost, 10);
+        assert_eq!(former.pending_count().await, 1);
+        assert_eq!(former.pending_cost().await, 1);
+    }
+
     #[tokio::test]
     async fn submit_and_drain_roundtrip() {
         let b = BatchFormer::<StubItem, u32>::new(BatchConfig::default());
@@ -1194,6 +1371,7 @@ mod tests {
         let cfg = BatchConfig {
             max_batch_cost: 1_000_000,
             max_batch_requests: 64,
+            max_batch_wait_ms: 1_000_000.0,
             ..BatchConfig::default()
         };
         let b = BatchFormer::<StubItem, usize>::new(cfg);
@@ -1201,10 +1379,16 @@ mod tests {
         b.submit(StubItem::with_idx(50, 0), 0).await;
         b.submit(StubItem::with_idx(10, 1), 1).await;
         b.submit(StubItem::with_idx(30, 2), 2).await;
+        b.submit(StubItem::with_idx(10, 3), 3).await;
 
         let batch = b.try_drain().await.unwrap();
         let costs: Vec<u64> = batch.items.iter().map(|i| i.cost()).collect();
-        assert_eq!(costs, vec![10, 30, 50], "must be sorted ascending");
+        assert_eq!(costs, vec![10, 10, 30, 50], "must be sorted ascending");
+        assert_eq!(
+            batch.metadata,
+            vec![1, 3, 2, 0],
+            "equal-cost FIFO is stable"
+        );
     }
 
     #[tokio::test]
@@ -1523,6 +1707,10 @@ mod tests {
                     last_turn_cutoff: None,
                     config: BatchConfig {
                         max_batch_cost,
+                        // Arrival times here are simulated, while point 3's
+                        // aging reads the real clock: keep it out of reach
+                        // unless a test lowers it.
+                        max_batch_wait_ms: f64::INFINITY,
                         ..BatchConfig::default()
                     },
                 },

@@ -40,18 +40,23 @@ from typing import Any, Literal, cast
 import httpx
 
 from sie_server.adapters._generation_base import (
+    REASONING_CONTROL_TOKENS,
     FinishReason,
     GenerationAdapter,
     GenerationChunk,
     GenerationError,
     GenerationInvalidRequestError,
     GenerationResult,
+    ReasoningFormat,
     reasoning_expected_after_prompt,
+    reasoning_starts_in_prompt,
     resolve_reasoning_format,
 )
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters.sglang import _server
+from sie_server.adapters.sglang._compat.sie_thinking_budget import PARAM as THINKING_BUDGET_PARAM
+from sie_server.adapters.sglang._compat.sie_thinking_budget import PROCESSOR_REFERENCE as THINKING_BUDGET_PROCESSOR
 from sie_server.observability.generation_diagnostics import GenerationStreamTimer
 from sie_server.types.grammar import (
     OUTLINES_JSON_SCHEMA_TYPE_DIAGNOSTIC,
@@ -182,6 +187,51 @@ def _validate_json_number_max_digits(value: Any, grammar_backend: str | None) ->
         msg = f"json_number_max_digits bounds XGrammar's JSON grammars and needs grammar_backend 'xgrammar', got {grammar_backend!r}"
         raise ValueError(msg)
     return value
+
+
+def _validate_thinking_budget(value: Any, reasoning_parser: str | None) -> int | None:
+    """Return a usable reasoning-token budget, or None when the profile sets none."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        msg = f"thinking_budget must be a positive integer, got {value!r}"
+        raise ValueError(msg)
+    if reasoning_parser not in REASONING_CONTROL_TOKENS:
+        msg = (
+            f"thinking_budget needs a reasoning_parser with known control tokens "
+            f"({', '.join(sorted(REASONING_CONTROL_TOKENS))}), got {reasoning_parser!r}"
+        )
+        raise ValueError(msg)
+    return value
+
+
+def _reasoning_control_token_ids(
+    model_name_or_path: str,
+    *,
+    revision: str | None,
+    trust_remote_code: bool,
+    reasoning_format: ReasoningFormat,
+) -> dict[str, int | None]:
+    """Resolve the reasoning block's open and close token ids, and a newline id, from the tokenizer.
+
+    Raises:
+        ValueError: When a control token does not encode to exactly one id.
+    """
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name_or_path, revision=revision, trust_remote_code=trust_remote_code
+    )
+    ids: dict[str, int | None] = {}
+    for key, text in zip(("open", "close"), REASONING_CONTROL_TOKENS[reasoning_format], strict=True):
+        encoded = tokenizer.encode(text, add_special_tokens=False)
+        if len(encoded) != 1:
+            msg = f"thinking_budget needs {text!r} to be one token for {model_name_or_path}, got {encoded!r}"
+            raise ValueError(msg)
+        ids[key] = int(encoded[0])
+    newline = tokenizer.encode("\n", add_special_tokens=False)
+    ids["newline"] = int(newline[0]) if len(newline) == 1 else None
+    return ids
 
 
 def _mamba_strategy_value(extra_launch_args: list[str], flag: str) -> str | None:
@@ -509,10 +559,17 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # bound needs the ``xgrammar`` backend, which the child's sitecustomize
         # patches.
         json_number_max_digits: int | None = None,
+        # Most tokens a request may spend inside the model's private reasoning
+        # block before the adapter closes it; the answer, and any grammar on
+        # it, then follows as usual. None leaves reasoning unbounded and the
+        # launch unchanged. Needs a reasoning parser with known control tokens.
+        thinking_budget: int | None = None,
         **kwargs: Any,  # accept extra args from loader for compatibility
     ) -> None:
         _ = kwargs
         self._json_number_max_digits = _validate_json_number_max_digits(json_number_max_digits, grammar_backend)
+        self._thinking_budget = _validate_thinking_budget(thinking_budget, reasoning_parser)
+        self._thinking_budget_tokens: dict[str, int | None] | None = None
         self._model_name_or_path = str(model_name_or_path)
         self._max_seq_length = max_seq_length
         self._mem_fraction_static = mem_fraction_static
@@ -685,6 +742,24 @@ class SGLangGenerationAdapter(GenerationAdapter):
         return self._reasoning_parser
 
     @property
+    def thinking_budget(self) -> int | None:
+        """Return the profile's reasoning-token budget, or None when reasoning is unbounded."""
+        return self._thinking_budget
+
+    def _thinking_budget_spec(self, prompt: str) -> dict[str, int | bool | None] | None:
+        """Return the budget fields the SGLang child's processor reads for one reasoning request."""
+        tokens = self._thinking_budget_tokens
+        if self._thinking_budget is None or tokens is None:
+            return None
+        return {
+            "budget": self._thinking_budget,
+            "open": tokens["open"],
+            "close": tokens["close"],
+            "newline": tokens["newline"],
+            "open_in_prompt": reasoning_starts_in_prompt(prompt, resolve_reasoning_format(None, self)),
+        }
+
+    @property
     def image_token_budget(self) -> int | None:
         """Return the most visual tokens ONE image of a single-image request can expand to.
 
@@ -747,6 +822,13 @@ class SGLangGenerationAdapter(GenerationAdapter):
             model_name_or_path=self._model_name_or_path,
             revision=self._revision,
         )
+        if self._thinking_budget is not None:
+            self._thinking_budget_tokens = _reasoning_control_token_ids(
+                self._model_name_or_path,
+                revision=self._revision,
+                trust_remote_code=self._trust_remote_code,
+                reasoning_format=resolve_reasoning_format(None, self),
+            )
         port = _server.find_free_port()
         self._port = port
         self._server_url = f"http://localhost:{port}"
@@ -839,6 +921,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
             cmd.extend(["--reasoning-parser", self._reasoning_parser])
         if self._tool_call_parser:
             cmd.extend(["--tool-call-parser", self._tool_call_parser])
+        if self._thinking_budget is not None:
+            cmd.append("--enable-custom-logit-processor")
         cmd.extend(self._speculative_launch_args(self._speculative))
         # Multi-LoRA serving: one base, N adapters, per-request selection via
         # ``sampling_params["lora_path"]``. Only emitted when the profile
@@ -1561,6 +1645,10 @@ class SGLangGenerationAdapter(GenerationAdapter):
                 # further compile-time validation happens inside the backend.
                 sampling_params["ebnf"] = grammar.value
 
+        thinking_budget = self._thinking_budget_spec(prompt) if require_reasoning else None
+        if thinking_budget is not None:
+            sampling_params["custom_params"] = {THINKING_BUDGET_PARAM: thinking_budget}
+
         # Multi-candidate (``n > 1`` and/or ``best_of``): ask SGLang for all
         # candidates in one non-streaming call (``sampling_params["n"]`` → native
         # parallel sampling) and emit them as one terminal chunk's ``candidates``
@@ -1596,6 +1684,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
                 sbody["image_data"] = image_data
             if require_reasoning:
                 sbody["require_reasoning"] = True
+            if thinking_budget is not None:
+                sbody["custom_logit_processor"] = THINKING_BUDGET_PROCESSOR
             if video_data:
                 sbody["video_data"] = video_data
             if logprobs:
@@ -1753,6 +1843,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
                 nbody["image_data"] = image_data
             if require_reasoning:
                 nbody["require_reasoning"] = True
+            if thinking_budget is not None:
+                nbody["custom_logit_processor"] = THINKING_BUDGET_PROCESSOR
             if video_data:
                 nbody["video_data"] = video_data
             if logprobs or rank:
@@ -1873,6 +1965,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
             body["image_data"] = image_data
         if require_reasoning:
             body["require_reasoning"] = True
+        if thinking_budget is not None:
+            body["custom_logit_processor"] = THINKING_BUDGET_PROCESSOR
         if video_data:
             body["video_data"] = video_data
         # OpenAI ``logprobs`` → SGLang ``return_logprob`` (top-level body

@@ -1952,7 +1952,9 @@ describe("SIEClient.extract() - NER", () => {
     expect(parsed.items?.[0]?.audio).toEqual({ data: audioBytes });
   });
 
-  it("should pass threshold option in params", async () => {
+  it("should send threshold as a runtime option in params.options", async () => {
+    // The server reads the threshold from params.options and ignores a
+    // params.threshold member, so that is where it has to go.
     mockFetch.mockResolvedValueOnce(
       createMsgpackResponse({
         items: [{ entities: [] }],
@@ -1967,9 +1969,28 @@ describe("SIEClient.extract() - NER", () => {
 
     const fetchCall = mockFetch.mock.calls[0];
     const body = fetchCall?.[1]?.body as Uint8Array;
-    const parsed = unpackMessage<{ params?: { threshold?: number } }>(body);
+    const parsed = unpackMessage<{
+      params?: { threshold?: number; options?: Record<string, unknown> };
+    }>(body);
 
-    expect(parsed.params?.threshold).toBe(0.8);
+    expect(parsed.params?.options).toEqual({ threshold: 0.8 });
+    expect(parsed.params?.threshold).toBeUndefined();
+  });
+
+  it("should send no params when extract is called without options", async () => {
+    mockFetch.mockResolvedValueOnce(
+      createMsgpackResponse({
+        items: [{ entities: [] }],
+      }),
+    );
+
+    await client.extract("lightonai/LightOnOCR-2-1B", { text: "test" });
+
+    const fetchCall = mockFetch.mock.calls[0];
+    const body = fetchCall?.[1]?.body as Uint8Array;
+    const parsed = unpackMessage<Record<string, unknown>>(body);
+
+    expect(Object.keys(parsed)).toEqual(["items"]);
   });
 
   it("should forward adapterOptions as params.options on the wire", async () => {

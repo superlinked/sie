@@ -8,7 +8,9 @@ directly in either the Apple-Silicon or CUDA image.
   Apple Silicon and SGLang on CUDA. Chat templating, streaming, tool parsing,
   and structured output remain owned by that already-loaded child. The proxy
   pins the request to the child's loopback URL and served model identity; a
-  client cannot select another upstream. Remote generation profiles use their
+  client cannot select another upstream. A ``json_schema`` response format is
+  also written into the messages the SGLang child renders, as queued
+  generation does (:mod:`sie_server.processors.schema_prompt`). Remote generation profiles use their
   adapter's normalized chat methods instead; the operator-configured upstream
   owns chat rendering, and the worker retains validation and output policy.
 - ``/v1/rerank`` wraps the in-process score adapter in the Cohere/OpenAI rerank
@@ -30,6 +32,7 @@ import logging
 import math
 import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Annotated, Any, cast
 from urllib.parse import urlsplit
 
@@ -55,6 +58,7 @@ from sie_server.adapters.remote._http import RemoteUpstreamError
 from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
 from sie_server.api.generate import (
     _generation_http_exception,
+    _load_native_tokenizer_coalesced,
     _validate_logit_bias,
     _validate_logprobs,
     _validate_schema_shape,
@@ -86,6 +90,15 @@ from sie_server.core.video_frames import (
 )
 from sie_server.observability.tracing import tracer
 from sie_server.processors.remote_chat_prompt import collect_rendered_chat, prepare_rendered_chat
+from sie_server.processors.schema_prompt import (
+    json_schema_response_format,
+    profile_schema_in_prompt,
+    renders_system_role,
+    response_format_section,
+    schema_in_messages,
+    starts_with_system_message,
+    with_response_format,
+)
 from sie_server.processors.streaming import _decode_data_uri_image
 from sie_server.processors.strict_grammar import (
     MODEL_OUTPUT_PARSE_ERROR,
@@ -149,6 +162,7 @@ _CUDA_CHAT_FIELDS = frozenset(
         "top_logprobs",
         "logit_bias",
         "response_format",
+        "schema_in_prompt",
         "stream",
         "tools",
         "tool_choice",
@@ -516,7 +530,7 @@ def _validate_common_chat_body(body: dict[str, Any]) -> None:
         isinstance(stop, str) or (isinstance(stop, list) and all(isinstance(value, str) for value in stop))
     ):
         raise _bad_request("'stop' must be a string or array of strings", param="stop")
-    for field in ("parallel_tool_calls",):
+    for field in ("parallel_tool_calls", "schema_in_prompt"):
         if body.get(field) is not None and not isinstance(body[field], bool):
             raise _bad_request(f"'{field}' must be a boolean", param=field)
     for field in ("user", "safety_identifier"):
@@ -740,6 +754,7 @@ def _prepare_chat_body(
     # SIE owns these edge-only identifiers; do not send unknown metadata into
     # the engine process.
     proxied.pop("safety_identifier", None)
+    proxied.pop("schema_in_prompt", None)
     if proxied.get("parallel_tool_calls") is None:
         proxied.pop("parallel_tool_calls", None)
 
@@ -797,6 +812,50 @@ def _prepare_chat_body(
         proxied["chat_template_kwargs"] = merged_template_kwargs
 
     return proxied
+
+
+_SYSTEM_ROLE_RENDERING: dict[tuple[str, str | None], bool] = {}
+
+
+async def _template_renders_system_role(config: Any) -> bool:
+    """Whether the model's chat template keeps a system message (cached per tokenizer)."""
+    hf_id = getattr(config, "hf_id", None)
+    source = hf_id or getattr(config, "weights_path", None)
+    if not isinstance(source, str | Path):
+        return True
+    revision = getattr(config, "hf_revision", None) if hf_id else None
+    key = (str(source), revision if isinstance(revision, str) else None)
+    cached = _SYSTEM_ROLE_RENDERING.get(key)
+    if cached is not None:
+        return cached
+    try:
+        tokenizer = await asyncio.to_thread(_load_native_tokenizer_coalesced, key[0], key[1])
+    except Exception:  # noqa: BLE001 - without a local template the child decides
+        logger.info("no local tokenizer to probe the system role of %s; using a system message", key[0])
+        return True
+    supported = await asyncio.to_thread(renders_system_role, tokenizer.apply_chat_template)
+    _SYSTEM_ROLE_RENDERING[key] = supported
+    return supported
+
+
+async def _messages_showing_response_format(body: dict[str, Any], config: Any, messages: list[Any]) -> list[Any]:
+    """Write a ``json_schema`` response format into the messages the child renders.
+
+    The child's grammar backend still constrains decoding; this lets the model
+    read the schema too. ``schema_in_prompt: false`` (request) or
+    ``adapter_options.runtime.schema_in_prompt: false`` (profile) turns it off.
+    """
+    grammar = json_schema_response_format(body.get("response_format"))
+    section = response_format_section(grammar)
+    if section is None or grammar is None or not isinstance(grammar.value, dict):
+        return messages
+    requested = body.get("schema_in_prompt")
+    if requested is False or (requested is None and not profile_schema_in_prompt(config)):
+        return messages
+    if await asyncio.to_thread(schema_in_messages, messages, grammar.value):
+        return messages
+    system_role = starts_with_system_message(messages) or await _template_renders_system_role(config)
+    return with_response_format(messages, section, system_role=system_role)
 
 
 def _prepare_sglang_body(
@@ -1426,6 +1485,7 @@ async def _chat_completions(
                 max_tokens=max_tokens,
                 seed=seed,
             )
+            proxied["messages"] = await _messages_showing_response_format(body, config, proxied["messages"])
         else:
             raise _unsupported_chat(model, device)
 

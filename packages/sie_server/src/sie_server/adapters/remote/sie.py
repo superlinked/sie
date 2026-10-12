@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 from collections.abc import AsyncIterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -82,6 +83,8 @@ from sie_server.types.responses import Classification, DetectedObject, Entity, E
 if TYPE_CHECKING:
     from sie_server.types.grammar import GrammarSpec
     from sie_server.types.inputs import ImageInput, Item, VideoInput
+
+logger = logging.getLogger(__name__)
 
 _MSGPACK = "application/msgpack"
 REQUEST_DEADLINE_S = 60.0
@@ -189,7 +192,8 @@ class SieUpstreamAdapter(BaseAdapter, GenerationAdapter):
     def load(self, device: str) -> None:
         upstream = upstream_for_serving(self._upstream_name)
         if upstream.kind is not UpstreamKind.SIE:
-            raise UpstreamConfigError(f"upstream {self._upstream_name!r} is not of kind 'sie'")
+            logger.warning("upstream %r is not of kind 'sie'", self._upstream_name)
+            raise UpstreamConfigError("this remote profile's upstream is not of kind 'sie'")
         self._upstream = upstream
         self._client = upstream_sync_client(upstream)
         self._executor = ThreadPoolExecutor(

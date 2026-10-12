@@ -24,11 +24,21 @@ import httpx
 import msgpack
 import numpy as np
 import pytest
-from sie_sdk import IncompleteBatchError, SIEAsyncClient, SIEClient, SIEConnectionError, SIEError
+from sie_sdk import (
+    IncompleteBatchError,
+    ModelLoadingError,
+    ProvisioningError,
+    SIEAsyncClient,
+    SIEClient,
+    SIEConnectionError,
+    SIEError,
+)
+from sie_sdk.client import _shared as shared_module
 from sie_sdk.client import async_ as async_module
 from sie_sdk.client import sync as sync_module
 from sie_sdk.client._shared import (
     DEFAULT_CONNECT_TIMEOUT_S,
+    DEFAULT_PROVISION_TIMEOUT_S,
     DEFAULT_READ_TIMEOUT_S,
     get_retry_after,
     resolve_timeouts,
@@ -154,7 +164,17 @@ def _json_ok(operation: str) -> _Reply:
 
 
 def _success(operation: str) -> _Reply:
-    return _encode_ok() if operation == "encode" else _json_ok(operation)
+    if operation == "encode":
+        return _encode_ok()
+    if operation == "score":
+        scores = {"model": "m", "scores": [{"item_id": "a", "score": 0.5, "rank": 0}]}
+        return _Reply(200, msgpack.packb(scores, use_bin_type=True), dict(_MSGPACK_HEADERS))
+    if operation == "extract":
+        extracted = {"model": "m", "items": [{"id": "a", "entities": []}]}
+        return _Reply(200, msgpack.packb(extracted, use_bin_type=True), dict(_MSGPACK_HEADERS))
+    if operation == "stream_generate":
+        return _sse_reply()
+    return _json_ok(operation)
 
 
 def _fixture_reply(case: dict[str, Any]) -> _Reply:
@@ -168,20 +188,32 @@ def _operation_class(operation: str) -> str:
 def _call_sync(client: SIEClient, operation: str, **kwargs: Any) -> Any:
     if operation == "encode":
         return client.encode("m", {"id": "a", "text": "hi"}, **kwargs)
+    if operation == "score":
+        return client.score("m", {"text": "q"}, [{"id": "a", "text": "hi"}], **kwargs)
+    if operation == "extract":
+        return client.extract("m", {"id": "a", "text": "hi"}, labels=["person"], **kwargs)
     if operation == "generate":
         return client.generate("m", "hi", max_new_tokens=4, **kwargs)
     if operation == "responses":
         return client.responses("m", "hi", **kwargs)
+    if operation == "stream_generate":
+        return list(client.stream_generate("m", "hi", max_new_tokens=4, **kwargs))
     return client.chat_completions("m", [{"role": "user", "content": "hi"}], **kwargs)
 
 
 async def _call_async(client: SIEAsyncClient, operation: str, **kwargs: Any) -> Any:
     if operation == "encode":
         return await client.encode("m", {"id": "a", "text": "hi"}, **kwargs)
+    if operation == "score":
+        return await client.score("m", {"text": "q"}, [{"id": "a", "text": "hi"}], **kwargs)
+    if operation == "extract":
+        return await client.extract("m", {"id": "a", "text": "hi"}, labels=["person"], **kwargs)
     if operation == "generate":
         return await client.generate("m", "hi", max_new_tokens=4, **kwargs)
     if operation == "responses":
         return await client.responses("m", "hi", **kwargs)
+    if operation == "stream_generate":
+        return [chunk async for chunk in client.stream_generate("m", "hi", max_new_tokens=4, **kwargs)]
     return await client.chat_completions("m", [{"role": "user", "content": "hi"}], **kwargs)
 
 
@@ -435,3 +467,126 @@ async def test_async_stream_retries_queue_backpressure_before_opening(stub: _Stu
         assert client.last_retry_count == 1
     assert [chunk["text_delta"] for chunk in chunks] == ["ok"]
     assert len(stub.paths) == 2
+
+
+class _BudgetClock:
+    """Monotonic clock that advances only when a client sleeps."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class _BudgetClockAsyncio:
+    def __init__(self, clock: _BudgetClock) -> None:
+        self._clock = clock
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(asyncio, name)
+
+    async def sleep(self, seconds: float, result: Any = None) -> Any:
+        self._clock.sleep(seconds)
+        return result
+
+
+@pytest.fixture
+def budget_clock(monkeypatch: pytest.MonkeyPatch) -> _BudgetClock:
+    clock = _BudgetClock()
+    monkeypatch.setattr(sync_module, "time", clock)
+    monkeypatch.setattr(async_module, "time", clock)
+    monkeypatch.setattr(shared_module, "time", clock)
+    monkeypatch.setattr(async_module, "asyncio", _BudgetClockAsyncio(clock))
+    return clock
+
+
+_REFUSAL_HEADERS = {
+    "Retry-After": "900",
+    "X-SIE-Request-ID": "req-final",
+    "X-SIE-Served-By": "local",
+    "X-SIE-Fallback-Reason": "provisioning",
+    "X-SIE-Fallback-Error": "QUEUE_FULL",
+}
+_REFUSAL_METADATA = {
+    "id": "req-final",
+    "served_by": "local",
+    "fallback_reason": "provisioning",
+    "fallback_error": "QUEUE_FULL",
+}
+_CAPACITY_WAIT_CASES = [
+    (operation, code)
+    for operation in ("encode", "score", "extract", "generate", "chat_completions", "responses", "stream_generate")
+    for code in ("PROVISIONING", "MODEL_LOADING")
+    # generate() raises ModelLoadingError instead of waiting when Retry-After reaches the budget end.
+    if (operation, code) != ("generate", "MODEL_LOADING")
+]
+
+
+def _capacity_refusal(code: str) -> _Reply:
+    body = {"detail": {"code": code, "message": "Capacity for model 'm' is starting."}}
+    return _Reply(503, json.dumps(body).encode(), {**_JSON_HEADERS, **_REFUSAL_HEADERS})
+
+
+def _assert_final_refusal(error: SIEError, code: str) -> None:
+    assert isinstance(error, ProvisioningError if code == "PROVISIONING" else ModelLoadingError)
+    assert error.request == _REFUSAL_METADATA
+
+
+@pytest.mark.parametrize(("operation", "code"), _CAPACITY_WAIT_CASES)
+def test_sync_final_attempt_follows_the_wait_that_ends_the_budget(
+    stub: _StubServer, budget_clock: _BudgetClock, operation: str, code: str
+) -> None:
+    stub.replies = [_capacity_refusal(code), _success(operation)]
+    client = SIEClient(stub.url)
+    try:
+        _call_sync(client, operation)
+        assert client.last_retry_count == 1
+    finally:
+        client.close()
+    assert len(stub.paths) == 2
+    assert budget_clock.now == DEFAULT_PROVISION_TIMEOUT_S
+
+
+@pytest.mark.parametrize(("operation", "code"), _CAPACITY_WAIT_CASES)
+async def test_async_final_attempt_follows_the_wait_that_ends_the_budget(
+    stub: _StubServer, budget_clock: _BudgetClock, operation: str, code: str
+) -> None:
+    stub.replies = [_capacity_refusal(code), _success(operation)]
+    async with SIEAsyncClient(stub.url) as client:
+        await _call_async(client, operation)
+        assert client.last_retry_count == 1
+    assert len(stub.paths) == 2
+    assert budget_clock.now == DEFAULT_PROVISION_TIMEOUT_S
+
+
+@pytest.mark.parametrize(("operation", "code"), _CAPACITY_WAIT_CASES)
+def test_sync_refusal_of_the_final_attempt_is_raised_with_its_metadata(
+    stub: _StubServer, budget_clock: _BudgetClock, operation: str, code: str
+) -> None:
+    stub.replies = [_capacity_refusal(code)]
+    client = SIEClient(stub.url)
+    try:
+        with pytest.raises(SIEError) as excinfo:
+            _call_sync(client, operation)
+    finally:
+        client.close()
+    _assert_final_refusal(excinfo.value, code)
+    assert len(stub.paths) == 2
+    assert budget_clock.now == DEFAULT_PROVISION_TIMEOUT_S
+
+
+@pytest.mark.parametrize(("operation", "code"), _CAPACITY_WAIT_CASES)
+async def test_async_refusal_of_the_final_attempt_is_raised_with_its_metadata(
+    stub: _StubServer, budget_clock: _BudgetClock, operation: str, code: str
+) -> None:
+    stub.replies = [_capacity_refusal(code)]
+    async with SIEAsyncClient(stub.url) as client:
+        with pytest.raises(SIEError) as excinfo:
+            await _call_async(client, operation)
+    _assert_final_refusal(excinfo.value, code)
+    assert len(stub.paths) == 2
+    assert budget_clock.now == DEFAULT_PROVISION_TIMEOUT_S

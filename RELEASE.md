@@ -152,10 +152,10 @@ that GPU inference was exercised.
 
 ## Terraform module follow-up
 
-Every stable SIE release needs a follow-up in all four public Terraform module
-repositories. The modules provision infrastructure; their installation examples
-select the SIE Helm chart, cloud values files, and runtime images. SIE's release
-workflow does not update or release these repositories automatically.
+Terraform modules provision infrastructure and have release lifecycles
+independent of SIE, its Helm chart, and its runtime images. A new SIE version
+alone does **not** require a Terraform repository update or module release.
+SIE's release workflow does not publish Terraform modules.
 
 | Cloud | Repository |
 | --- | --- |
@@ -164,46 +164,42 @@ workflow does not update or release these repositories automatically.
 | Azure | [terraform-azure-sie](https://github.com/superlinked/terraform-azure-sie) |
 | Alibaba Cloud | [terraform-alicloud-sie](https://github.com/superlinked/terraform-alicloud-sie) |
 
-The agent or maintainer carrying the SIE release owns this follow-up:
+Keep runtime installation instructions evergreen. For a fresh installation,
+select the latest stable chart once, then use that retained chart, its bundled
+cloud values, and its matching application image tags. Do not combine separate
+latest lookups for the chart, values, and images. Controlled upgrades should
+select an explicitly reviewed chart version, read the relevant SIE release
+notes, and preserve existing values and credentials. Terraform module and
+provider version constraints remain independent and reproducible.
 
-1. Verify that the stable tag, release source, final publication job, versioned
-   images, and public Helm chart agree. Use the successfully published version,
-   not an open release PR or a tag whose publication is incomplete.
-2. Inspect current `main`, open update/release PRs, and the module's contributor
-   and release instructions in each repository. Work in isolated worktrees and
-   update an existing matching PR when possible.
-3. Update every SIE chart pin, matching tagged cloud-overlay URL, chart reference,
-   and image-mirroring example. Preserve the image's platform, bundle, and Rust
-   architecture suffixes. Keep the Terraform module's own version, provider
-   constraints, and infrastructure sizing independent of the SIE version.
-   Retain applicable upgrade guidance and check for new breaking changes.
-4. Run the module's existing relevant checks and render the actual published
-   chart with its documented cloud values and Terraform output formats. Verify
-   that the rendered image tags exist, mirrored tags cover enabled workers,
-   and workload identity, payload-store wiring, and GPU selectors still match
-   the example. This validation does not require applying infrastructure.
-5. Open focused PRs, follow CI and review findings on their final heads, and
-   merge within the authorized scope through normal repository protections.
-   Do not bypass a missing review or attempt to approve a PR as its author.
-6. After the updates merge, inspect the module's release-please PR and confirm it
-   includes the new SIE references. For generated manifest/changelog-only release
-   PRs, review that metadata directly; do not request or wait for a separate
-   CodeRabbit review when bot auto-review skips. Reinspect every changed head,
-   and take unexpected non-generated changes through the normal code-review flow.
-   Inspect exact-head workflow runs: `action_required` CI needs workflow-execution
-   approval. Approve execution where authorized, or report that gate. Require
-   actual Terraform CI completion and normal repository approvals, unless the
-   user explicitly authorizes bypassing those approvals. A skipped bot review
-   does not supply a required approval. Module release versions are independent
-   of SIE's version. Verify the resulting immutable tag and Terraform Registry
-   version/download source; a merged update PR alone does not publish a module
-   version.
+The release owner checks whether the new SIE release changes a requirement on
+the infrastructure module: for example, a required output, workload identity
+binding, storage integration, or supported cluster capability. If no module
+change is needed, record that conclusion; do not open version-bump PRs merely
+to refresh chart numbers, image examples, or release-note summaries.
 
-Report SIE artifact publication and Terraform follow-up separately. For each
-module, include the update PR/merge SHA and published module version, or the
-exact outstanding release PR, review, CI, or publication gate. If module
-publication is outside the current authorization, report it as pending. Do not
-leave this follow-up implicit or describe pending module releases as published.
+When an actual compatibility issue requires a change:
+
+1. Inspect current `main`, open PRs, and contributor instructions in the
+   affected module repository. Keep the fix scoped to that module.
+2. Run its relevant Terraform checks and, where applicable, render the
+   published chart with the module's output formats. Preserve workload
+   identity, payload-store wiring, GPU selectors, and image-tag consistency.
+   Validation does not authorize applying infrastructure.
+3. Use `docs:` or `chore:` for documentation-only updates. They do not warrant
+   a module version. Use the appropriate releasing commit type only for an
+   actual module implementation, behavior, or interface change; retain
+   applicable historical upgrade and security guidance.
+4. Follow normal PR review and exact-head CI. For actual module changes, follow
+   the module's release process and verify its immutable tag and Terraform
+   Registry version/download source within the authorized publication scope.
+   Do not bypass missing reviews or checks, manufacture approvals, or treat a
+   merged source PR as proof that a module version was published.
+
+Report SIE publication separately from any necessary Terraform compatibility
+work. Distinguish documentation-only updates, actual module releases, and
+outstanding review, CI, or publication gates. Module release numbers need not
+match SIE's version.
 
 ## Publisher setup
 

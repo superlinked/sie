@@ -124,6 +124,7 @@ from ._shared import (
     _coerce_token_count,
     admission_retry_delay,
     attach_request_metadata,
+    attempt_timeout_cap,
     base_url_accepts_origin_credentials,
     build_chat_body,
     build_estimate_envelope,
@@ -625,13 +626,15 @@ class SIEAsyncClient:
     def _attempt_timeout(self, remaining: float, read_timeout_s: float | None = None) -> aiohttp.ClientTimeout:
         """Timeouts for one attempt, capped by the remaining provision budget.
 
-        An explicit per-call ``read_timeout_s`` is honoured as given.
+        An explicit per-call ``read_timeout_s`` is honoured as given. See
+        :func:`attempt_timeout_cap` for the final attempt.
         """
-        read = read_timeout_s if read_timeout_s is not None else min(self._timeout, remaining)
+        cap = attempt_timeout_cap(remaining)
+        read = read_timeout_s if read_timeout_s is not None else min(self._timeout, cap)
         return aiohttp.ClientTimeout(
             total=max(remaining, read),
             connect=read,
-            sock_connect=min(self._connect_timeout, remaining),
+            sock_connect=min(self._connect_timeout, cap),
             sock_read=read,
         )
 
@@ -1417,6 +1420,7 @@ class SIEAsyncClient:
         # Retry counter for server-side OOM (RESOURCE_EXHAUSTED).
         oom_retries = 0
         connect_retries = 0
+        after_capacity_wait = False
 
         # Retry loop for retryable provisioning/capacity responses.
         while True:
@@ -1424,9 +1428,10 @@ class SIEAsyncClient:
             # This ensures a single hanging request can't exceed the overall timeout
             elapsed = time.monotonic() - start_time
             remaining = timeout - elapsed
-            if remaining <= 0:
+            if remaining <= 0 and not after_capacity_wait:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
+            after_capacity_wait = False
             request_timeout = self._attempt_timeout(remaining)
 
             try:
@@ -1504,6 +1509,7 @@ class SIEAsyncClient:
                     )
                     self._record_retry()
                     await asyncio.sleep(actual_delay)
+                    after_capacity_wait = True
                     continue
 
                 if error_code == LORA_LOADING_ERROR_CODE:
@@ -1513,7 +1519,12 @@ class SIEAsyncClient:
                         # Extract lora from options for error message
                         lora_name = resolved_options.get("lora") if resolved_options else None
                         msg = f"LoRA loading timeout after {lora_retries} retries"
-                        raise LoraLoadingError(msg, lora=str(lora_name) if lora_name else None, model=model)
+                        raise LoraLoadingError(
+                            msg,
+                            lora=str(lora_name) if lora_name else None,
+                            model=model,
+                            request=parse_request_metadata(response.headers),
+                        )
 
                     # Wait and retry
                     retry_after = get_retry_after(response)
@@ -1533,7 +1544,7 @@ class SIEAsyncClient:
                     elapsed = time.monotonic() - start_time
                     if elapsed >= timeout:
                         msg = f"Model loading timeout after {elapsed:.1f}s for '{model}'"
-                        raise ModelLoadingError(msg, model=model)
+                        raise ModelLoadingError(msg, model=model, request=parse_request_metadata(response.headers))
 
                     # Wait and retry, respecting remaining time
                     retry_after = get_retry_after(response)
@@ -1548,6 +1559,7 @@ class SIEAsyncClient:
                     )
                     self._record_retry()
                     await asyncio.sleep(actual_delay)
+                    after_capacity_wait = True
                     continue
 
                 if error_code == RESOURCE_EXHAUSTED_ERROR_CODE:
@@ -1993,6 +2005,7 @@ class SIEAsyncClient:
         # OOM retry counter (RESOURCE_EXHAUSTED) — bounded with exponential backoff.
         oom_retries = 0
         connect_retries = 0
+        after_capacity_wait = False
 
         # Retry loop for retryable provisioning/capacity responses.
         while True:
@@ -2000,9 +2013,10 @@ class SIEAsyncClient:
             # This ensures a single hanging request can't exceed the overall timeout
             elapsed = time.monotonic() - start_time
             remaining = timeout - elapsed
-            if remaining <= 0:
+            if remaining <= 0 and not after_capacity_wait:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
+            after_capacity_wait = False
             request_timeout = self._attempt_timeout(remaining)
 
             try:
@@ -2080,13 +2094,14 @@ class SIEAsyncClient:
                     )
                     self._record_retry()
                     await asyncio.sleep(actual_delay)
+                    after_capacity_wait = True
                     continue
 
                 if error_code == MODEL_LOADING_ERROR_CODE:
                     elapsed = time.monotonic() - start_time
                     if elapsed >= timeout:
                         msg = f"Model loading timeout after {elapsed:.1f}s for '{model}'"
-                        raise ModelLoadingError(msg, model=model)
+                        raise ModelLoadingError(msg, model=model, request=parse_request_metadata(response.headers))
 
                     retry_after = get_retry_after(response)
                     delay = retry_after_or_default(retry_after, MODEL_LOADING_DEFAULT_DELAY_S)
@@ -2100,6 +2115,7 @@ class SIEAsyncClient:
                     )
                     self._record_retry()
                     await asyncio.sleep(actual_delay)
+                    after_capacity_wait = True
                     continue
 
                 if error_code == RESOURCE_EXHAUSTED_ERROR_CODE:
@@ -2239,13 +2255,15 @@ class SIEAsyncClient:
         start_time = time.monotonic()
         oom_retries = 0
         connect_retries = 0
+        after_capacity_wait = False
 
         while True:
             elapsed = time.monotonic() - start_time
             remaining = timeout - elapsed
-            if remaining <= 0:
+            if remaining <= 0 and not after_capacity_wait:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
+            after_capacity_wait = False
             request_timeout = self._attempt_timeout(remaining, read_timeout_s)
 
             try:
@@ -2304,6 +2322,7 @@ class SIEAsyncClient:
                     )
                     self._record_retry()
                     await asyncio.sleep(delay)
+                    after_capacity_wait = True
                     continue
 
                 if error_code == MODEL_LOADING_ERROR_CODE:
@@ -2314,7 +2333,7 @@ class SIEAsyncClient:
                     elapsed = time.monotonic() - start_time
                     if elapsed >= timeout:
                         msg = f"Model loading timeout after {elapsed:.1f}s for '{model}'"
-                        raise ModelLoadingError(msg, model=model)
+                        raise ModelLoadingError(msg, model=model, request=parse_request_metadata(response.headers))
                     retry_after = get_retry_after(response)
                     delay = retry_after_or_default(retry_after, MODEL_LOADING_DEFAULT_DELAY_S)
                     remaining = timeout - elapsed
@@ -2326,7 +2345,7 @@ class SIEAsyncClient:
                             f"Model loading retry delay ({delay:.1f}s) would exceed the "
                             f"provision timeout ({timeout:.1f}s, {elapsed:.1f}s elapsed) for '{model}'"
                         )
-                        raise ModelLoadingError(msg, model=model)
+                        raise ModelLoadingError(msg, model=model, request=parse_request_metadata(response.headers))
                     self._record_retry()
                     await asyncio.sleep(delay)
                     continue
@@ -2445,11 +2464,13 @@ class SIEAsyncClient:
         start_time = time.monotonic()
         oom_retries = 0
         connect_retries = 0
+        after_capacity_wait = False
         while True:
             remaining = timeout - (time.monotonic() - start_time)
-            if remaining <= 0:
+            if remaining <= 0 and not after_capacity_wait:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
+            after_capacity_wait = False
             try:
                 async with (
                     self._throttle(),
@@ -2499,6 +2520,7 @@ class SIEAsyncClient:
             )
             self._record_retry()
             await asyncio.sleep(delay)
+            after_capacity_wait = True
 
         self._check_server_version(response)
         data = parse_terminal_json_object(response, owner="Responses")
@@ -2595,11 +2617,13 @@ class SIEAsyncClient:
         start_time = time.monotonic()
         oom_retries = 0
         connect_retries = 0
+        after_capacity_wait = False
         while True:
             remaining = timeout - (time.monotonic() - start_time)
-            if remaining <= 0:
+            if remaining <= 0 and not after_capacity_wait:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
+            after_capacity_wait = False
             try:
                 async with (
                     self._throttle(),
@@ -2651,6 +2675,7 @@ class SIEAsyncClient:
             )
             self._record_retry()
             await asyncio.sleep(delay)
+            after_capacity_wait = True
 
         self._check_server_version(response)
         data = parse_terminal_json_object(response, owner="chat completion")
@@ -2853,11 +2878,13 @@ class SIEAsyncClient:
         start_time = time.monotonic()
         oom_retries = 0
         connect_retries = 0
+        after_capacity_wait = False
         while True:
             remaining = timeout - (time.monotonic() - start_time)
-            if remaining <= 0:
+            if remaining <= 0 and not after_capacity_wait:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
+            after_capacity_wait = False
             retry_delay: float | None = None
             try:
                 async with (
@@ -2879,8 +2906,8 @@ class SIEAsyncClient:
                         # (per socket read), not total.
                         timeout=aiohttp.ClientTimeout(
                             total=None,
-                            connect=min(self._timeout, remaining),
-                            sock_connect=min(self._connect_timeout, remaining),
+                            connect=min(self._timeout, attempt_timeout_cap(remaining)),
+                            sock_connect=min(self._connect_timeout, attempt_timeout_cap(remaining)),
                             sock_read=self._timeout,
                         ),
                         allow_redirects=False,
@@ -2987,6 +3014,7 @@ class SIEAsyncClient:
             if retry_delay is not None:
                 self._record_retry()
                 await asyncio.sleep(retry_delay)
+                after_capacity_wait = True
 
     # Use overload for proper type hints when single item vs list
     @overload
@@ -3091,6 +3119,7 @@ class SIEAsyncClient:
         # OOM retry counter (RESOURCE_EXHAUSTED) — bounded with exponential backoff.
         oom_retries = 0
         connect_retries = 0
+        after_capacity_wait = False
 
         # Retry loop for retryable provisioning/capacity responses.
         while True:
@@ -3098,9 +3127,10 @@ class SIEAsyncClient:
             # This ensures a single hanging request can't exceed the overall timeout
             elapsed = time.monotonic() - start_time
             remaining = timeout - elapsed
-            if remaining <= 0:
+            if remaining <= 0 and not after_capacity_wait:
                 msg = f"Provision timeout ({timeout:.1f}s) exceeded before request could be sent"
                 raise ProvisioningError(msg, gpu=resolved_gpu)
+            after_capacity_wait = False
             request_timeout = self._attempt_timeout(remaining)
 
             try:
@@ -3181,13 +3211,14 @@ class SIEAsyncClient:
                     )
                     self._record_retry()
                     await asyncio.sleep(actual_delay)
+                    after_capacity_wait = True
                     continue
 
                 if error_code == MODEL_LOADING_ERROR_CODE:
                     elapsed = time.monotonic() - start_time
                     if elapsed >= timeout:
                         msg = f"Model loading timeout after {elapsed:.1f}s for '{model}'"
-                        raise ModelLoadingError(msg, model=model)
+                        raise ModelLoadingError(msg, model=model, request=parse_request_metadata(response.headers))
 
                     retry_after = get_retry_after(response)
                     delay = retry_after_or_default(retry_after, MODEL_LOADING_DEFAULT_DELAY_S)
@@ -3201,6 +3232,7 @@ class SIEAsyncClient:
                     )
                     self._record_retry()
                     await asyncio.sleep(actual_delay)
+                    after_capacity_wait = True
                     continue
 
                 if error_code == RESOURCE_EXHAUSTED_ERROR_CODE:

@@ -86,15 +86,75 @@ const scored = await client.score(
 console.log(scored.scores[0].itemId, scored.scores[0].score);
 ```
 
+`encode` and `score` take runtime options as `adapterOptions`, which the
+Python SDK names `options`: for example
+`{ adapterOptions: { profile: "long_context" } }` selects a named model
+profile. `score` also takes an `instruction`. Each `encode` result names the
+`model` that served it.
+
+## Extraction
+
+```typescript
+import { readFile } from "node:fs/promises";
+
+// Entities for the labels you pass
+const result = await client.extract(
+  "urchade/gliner_multi-v2.1",
+  { text: "Apple was founded by Steve Jobs." },
+  { labels: ["person", "organization"] },
+);
+for (const entity of result.entities) {
+  console.log(entity.label, entity.text, entity.score);
+}
+
+// No options for models that take none: OCR, document parsing, speech to text
+const pngBytes = await readFile("page.png");
+const page = await client.extract("lightonai/LightOnOCR-2-1B", { images: [pngBytes] });
+console.log(page.entities[0]?.text); // the page as Markdown
+
+// Typed decisions: questions go in outputSchema, answers come back in data
+const decision = await client.extract(
+  "fastino/GLiNER2.5-Decide",
+  { text: "This is the third time I have explained the same missing refund." },
+  {
+    outputSchema: {
+      handoff: { type: "noul", instructions: "Should a person take over?" },
+    },
+  },
+);
+console.log(decision.data?.handoff);
+```
+
+`labels`, `outputSchema` and `instruction` are all optional. `threshold` and
+anything in `adapterOptions` are sent as runtime options (`params.options`),
+where the Python SDK's `options` keyword argument puts them.
+
+Images are bytes (`Uint8Array`, `ArrayBuffer`, `Blob`) or a base64 or `data:`
+URL string. A string is never read as a file path, unlike in the Python SDK;
+read the file and pass its bytes.
+
 ## Generation
 
 Text-only `generate` and `streamGenerate` prompts are raw continuation input:
 the worker preserves them without rendering a chat template or applying
 `enable_thinking` / `guardian_config`. Native requests with images render one
-user turn. For chat, instruction-based structured output (`responseFormat`),
+user turn. For chat, instruction-based structured output (`response_format`),
 and guard checks, use `chatCompletions` or `streamChatCompletions` with messages
 so the worker applies the served template settings. Operator settings take
 precedence over request template kwargs.
+
+```typescript
+const reply = await client.chatCompletions({
+  model: "Qwen/Qwen3-4B-Instruct-2507",
+  messages: [{ role: "user", content: "Write a haiku about the sea." }],
+  max_completion_tokens: 64,
+});
+console.log(reply.choices[0]?.message.content);
+```
+
+The chat request and response keep the wire's snake_case field names. The
+Python SDK takes the same fields as keyword arguments after `model` and
+`messages`.
 
 Granite Guardian's shipped risk dimension is `harm`; requesting another
 dimension in prompt text does not change it. Valid thresholded verdicts are
@@ -131,11 +191,13 @@ for await (const chunk of client.streamGenerate(
 All errors extend `SIEError` and are exported from the package root.
 Server-reported errors carry `.code` and `.statusCode`, plus
 `.requestId` (the gateway `x-sie-request-id`) when the gateway included
-one in the response — check it before using it. `RequestError` and
-`ServerError` also carry `.request`, the request metadata of the error
-response when it carried any: for example `servedBy`, `fallbackReason`
-and `fallbackError` on a local refusal that answers a failed remote
-attempt.
+one in the response — check it before using it. `RequestError`,
+`ServerError`, `ProvisioningError`, `ModelLoadingError` and
+`LoraLoadingError` also carry `.request`, the request metadata of the
+error response when it carried any: for example `servedBy`,
+`fallbackReason` and `fallbackError` on a local refusal that answers a
+failed remote attempt. When a retry budget runs out, it describes the
+last refusal.
 
 ```typescript
 import {
@@ -219,4 +281,4 @@ does not make retrying generation safe after output has already arrived.
 
 ## License
 
-MIT
+Apache 2.0

@@ -95,6 +95,33 @@ describe("encode batch guard", () => {
     }
   });
 
+  it("carries the response's request metadata", async () => {
+    mockFetch.mockResolvedValueOnce(
+      msgpackResponse(
+        { items: [dense(0.1)] },
+        {
+          "x-sie-request-id": "req-drop",
+          "x-sie-served-by": "remote",
+          "x-sie-upstream": "team-sie",
+          "x-sie-fallback-reason": "saturated",
+        },
+      ),
+    );
+
+    const error = await client
+      .encode("bge-m3", [{ text: "ok" }, { text: "over-length" }])
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(IncompleteBatchError);
+    expect((error as IncompleteBatchError).request).toEqual({
+      id: "req-drop",
+      servedBy: "remote",
+      upstream: "team-sie",
+      fallbackReason: "saturated",
+    });
+    expect((error as IncompleteBatchError).requestId).toBe("req-drop");
+  });
+
   it("names the dropped ids when every item carries one", async () => {
     mockFetch.mockResolvedValueOnce(
       msgpackResponse({
@@ -167,6 +194,26 @@ describe("extract batch guard", () => {
       expect(incomplete.code).toBe("EXTRACT_RESULT_COUNT_MISMATCH");
       expect(incomplete.message).toContain("extraction result(s)");
     }
+  });
+
+  it("carries the response's request metadata", async () => {
+    mockFetch.mockResolvedValueOnce(
+      msgpackResponse(
+        { items: [{ entities: [] }] },
+        { "x-sie-request-id": "req-extract", "x-sie-served-by": "local" },
+      ),
+    );
+
+    const error = await client
+      .extract("gliner", [{ text: "Apple info" }, { text: "Tesla info" }], { labels: ["org"] })
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(IncompleteBatchError);
+    expect((error as IncompleteBatchError).request).toEqual({
+      id: "req-extract",
+      servedBy: "local",
+    });
+    expect((error as IncompleteBatchError).requestId).toBe("req-extract");
   });
 
   it("passes through when the counts match", async () => {

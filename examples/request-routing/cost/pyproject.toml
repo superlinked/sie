@@ -1,0 +1,27 @@
+[project]
+name = "superlinked-sie-cost-routing-example"
+version = "0.1.0"
+description = "Route each request to a cheap or a strong LLM with a bge-m3 nearest-neighbour router, reproducing a pre-registered cost study"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "sie-sdk==0.10.0",
+  "numpy==2.4.6",
+  "httpx>=0.28,<1",
+]
+
+[tool.uv]
+package = false
+
+# SIEClient() with only SIE_API_KEY set targets SIE Serverless from superlinked/sie#691,
+# which is newer than the sie-sdk 0.10.0 release on PyPI.
+[tool.uv.sources]
+sie-sdk = { git = "https://github.com/superlinked/sie", rev = "d680237f02c2b67fd9afd91f30b73a29cb18fae0", subdirectory = "packages/sie_sdk" }
+
+[dependency-groups]
+dev = [
+  "ruff>=0.14",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"

@@ -176,13 +176,28 @@ export class ProvisioningError extends SIEError {
   readonly retryAfter: number | undefined;
   /** Offending request field from the server error envelope, when known. */
   readonly param: string | null | undefined;
+  /**
+   * Request metadata of the refusal, when it carried any: for example
+   * `servedBy`, `fallbackReason` and `fallbackError` on a local refusal that
+   * answers a failed remote attempt. When the provisioning budget runs out,
+   * the metadata of the last refusal. Mirrors the Python SDK's
+   * `ProvisioningError.request`.
+   */
+  readonly request: RequestMetadata | undefined;
 
-  constructor(message: string, gpu?: string, retryAfter?: number, param?: string | null) {
+  constructor(
+    message: string,
+    gpu?: string,
+    retryAfter?: number,
+    param?: string | null,
+    request?: RequestMetadata,
+  ) {
     super(message);
     this.name = "ProvisioningError";
     this.gpu = gpu;
     this.retryAfter = retryAfter;
     this.param = param;
+    this.request = request;
   }
 }
 
@@ -226,13 +241,22 @@ export class LoraLoadingError extends SIEError {
   readonly model: string | undefined;
   /** Offending request field from the server error envelope, when known. */
   readonly param: string | null | undefined;
+  /** Request metadata of the last refusal, when it carried any (see {@link ProvisioningError}). */
+  readonly request: RequestMetadata | undefined;
 
-  constructor(message: string, lora?: string, model?: string, param?: string | null) {
+  constructor(
+    message: string,
+    lora?: string,
+    model?: string,
+    param?: string | null,
+    request?: RequestMetadata,
+  ) {
     super(message);
     this.name = "LoraLoadingError";
     this.lora = lora;
     this.model = model;
     this.param = param;
+    this.request = request;
   }
 }
 
@@ -251,12 +275,15 @@ export class ModelLoadingError extends SIEError {
   readonly model: string | undefined;
   /** Offending request field from the server error envelope, when known. */
   readonly param: string | null | undefined;
+  /** Request metadata of the last refusal, when it carried any (see {@link ProvisioningError}). */
+  readonly request: RequestMetadata | undefined;
 
-  constructor(message: string, model?: string, param?: string | null) {
+  constructor(message: string, model?: string, param?: string | null, request?: RequestMetadata) {
     super(message);
     this.name = "ModelLoadingError";
     this.model = model;
     this.param = param;
+    this.request = request;
   }
 }
 

@@ -177,8 +177,11 @@ pub(crate) struct RecordingDispatcher {
     fallback_reasons: Mutex<Vec<Option<FallbackTrigger>>>,
     numerical_admissions: Mutex<Vec<Option<String>>>,
     on_model_load: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    on_remote_work: Mutex<Option<RemoteWorkAction>>,
     provisioning_estimates: Mutex<HashMap<LaneKey, Duration>>,
 }
+
+type RemoteWorkAction = Box<dyn FnOnce(&RecordingDispatcher) + Send>;
 
 impl RecordingDispatcher {
     /// Estimate that the `(pool, machine_profile, bundle)` lane needs
@@ -190,9 +193,22 @@ impl RecordingDispatcher {
             .insert(LaneKey::new(lane.0, lane.1, lane.2), estimate);
     }
 
+    /// Stop estimating the `(pool, machine_profile, bundle)` lane.
+    pub(crate) fn forget_provisioning_estimate(&self, lane: (&str, &str, &str)) {
+        self.provisioning_estimates
+            .lock()
+            .unwrap()
+            .remove(&LaneKey::new(lane.0, lane.1, lane.2));
+    }
+
     /// Run `action` once, when the next load-only item is published.
     pub(crate) fn on_model_load(&self, action: Box<dyn FnOnce() + Send>) {
         *self.on_model_load.lock().unwrap() = Some(action);
+    }
+
+    /// Run `action` once, when the next remote-lane work is published.
+    pub(crate) fn on_remote_work(&self, action: RemoteWorkAction) {
+        *self.on_remote_work.lock().unwrap() = Some(action);
     }
 
     /// Answer remote-lane work as a remote worker does when its upstream cannot
@@ -304,7 +320,14 @@ impl RecordingDispatcher {
     }
 
     fn record(&self, dispatched: Dispatched) {
+        let remote_work = dispatched.bundle == REMOTE_LANE.2 && dispatched.endpoint != "load";
         self.dispatched.lock().unwrap().push(dispatched);
+        if remote_work {
+            let action = self.on_remote_work.lock().unwrap().take();
+            if let Some(action) = action {
+                action(self);
+            }
+        }
     }
 
     fn record_authority(&self, target: &PublishTarget, params: &WorkParams) {
@@ -810,6 +833,15 @@ impl TestGateway {
         Arc::get_mut(&mut self.state)
             .expect("the gateway state is not shared yet")
             .model_access_policy = Some(policy);
+    }
+
+    /// Resolve `alias` to `target`, as an operator's model alias does.
+    pub(crate) fn add_model_alias(&mut self, alias: &str, target: &str) {
+        let state = Arc::get_mut(&mut self.state).expect("the gateway state is not shared yet");
+        Arc::get_mut(&mut state.config)
+            .expect("the gateway config is not shared yet")
+            .model_aliases
+            .insert(alias.to_string(), target.to_string());
     }
 
     /// Wait at most `seconds` for queued results.

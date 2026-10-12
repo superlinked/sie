@@ -434,6 +434,16 @@ def resolve_timeouts(
     return connect, read
 
 
+def attempt_timeout_cap(remaining: float) -> float:
+    """Seconds that cap the timeouts of one attempt.
+
+    Attempts are capped by the remaining provisioning budget. The final
+    attempt, made after a capacity wait that used up the budget, is not capped
+    and runs with the client's own timeouts.
+    """
+    return remaining if remaining > 0 else math.inf
+
+
 # Pool settings
 DEFAULT_LEASE_RENEWAL_INTERVAL_S = 60.0  # Renew lease every 60s (lease is 1200s)
 
@@ -443,7 +453,7 @@ LORA_LOADING_DEFAULT_DELAY_S = 1.0  # Default retry delay if no Retry-After head
 LORA_LOADING_ERROR_CODE = "LORA_LOADING"  # Error code from server
 
 # Model loading retry settings
-MODEL_LOADING_MAX_RETRIES = 60  # Max retries (60 * 5s = 5 min, matches provision timeout)
+MODEL_LOADING_MAX_RETRIES = 60  # Max retries (60 * 5s = 5 min)
 MODEL_LOADING_DEFAULT_DELAY_S = 5.0  # Default retry delay (model loads take longer than LoRA)
 MODEL_LOADING_ERROR_CODE = "MODEL_LOADING"  # Error code from server
 PROVISIONING_ERROR_CODE = "PROVISIONING"  # Gateway scale-from-zero / worker provisioning
@@ -1289,7 +1299,7 @@ def raise_if_model_load_failed(response: _HttpResponse, model: str | None = None
     Used by the SDK retry loops to short-circuit *before* checking the
     ``MODEL_LOADING`` retry budget. The server returns this on the very
     first request when it has a recorded terminal failure for the
-    model, so the caller should fail fast instead of retrying for 5
+    model, so the caller should fail fast instead of retrying for 15
     minutes.
 
     Args:
@@ -1435,7 +1445,7 @@ def handle_error(response: _HttpResponse) -> NoReturn:
     # Fallback dispatch — ``model`` is only attached by the helper-style
     # short-circuit (``raise_if_input_too_long``) on the extract path.
     if response.status_code == HTTP_SERVICE_UNAVAILABLE and code == PROVISIONING_ERROR_CODE:
-        raise ProvisioningError(message, retry_after=get_retry_after(response), param=param)
+        raise ProvisioningError(message, retry_after=get_retry_after(response), param=param, request=request)
     if response.status_code == HTTP_CLIENT_ERROR and code == INPUT_TOO_LONG_ERROR_CODE:
         raise InputTooLongError(message, param=param, request=request)
     # Rate limit (pass-2 audit B1). Retried on the admission ladder in the
@@ -1495,11 +1505,15 @@ def provisioning_retry_delay(
     param = get_error_param(response)
     if not wait_for_capacity:
         msg = f"No capacity available for GPU '{gpu}'. Server is provisioning."
-        raise ProvisioningError(msg, gpu=gpu, retry_after=retry_after, param=param)
+        raise ProvisioningError(
+            msg, gpu=gpu, retry_after=retry_after, param=param, request=parse_request_metadata(response.headers)
+        )
     elapsed = time.monotonic() - start_time
     if elapsed >= timeout:
         msg = f"Provisioning timeout after {elapsed:.1f}s waiting for GPU '{gpu}'"
-        raise ProvisioningError(msg, gpu=gpu, retry_after=retry_after, param=param)
+        raise ProvisioningError(
+            msg, gpu=gpu, retry_after=retry_after, param=param, request=parse_request_metadata(response.headers)
+        )
     remaining = timeout - elapsed
     if retry_after is not None:
         return min(retry_after, remaining)
@@ -1640,7 +1654,7 @@ def next_stream_retry_delay(
         if code == MODEL_LOADING_ERROR_CODE:
             if elapsed >= timeout:
                 msg = f"Model loading timeout after {elapsed:.1f}s for '{model}'"
-                raise ModelLoadingError(msg, model=model)
+                raise ModelLoadingError(msg, model=model, request=parse_request_metadata(response.headers))
             retry_after = get_retry_after(response)
             delay = retry_after_or_default(retry_after, MODEL_LOADING_DEFAULT_DELAY_S)
             return min(delay, timeout - elapsed), oom_retries

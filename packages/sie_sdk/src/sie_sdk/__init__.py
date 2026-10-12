@@ -35,6 +35,7 @@ from sie_sdk.client import (
     SIEError,
     SpendLimitError,
 )
+from sie_sdk.client._shared import get_sdk_version
 from sie_sdk.encoding import (
     SparseVector,
     dense_embedding,
@@ -100,7 +101,8 @@ from sie_sdk.types import (
     WorkerStatusMessage,
 )
 
-__version__ = "0.1.0"
+# The installed distribution's version, which is also sent as `X-SIE-SDK-Version`.
+__version__ = get_sdk_version()
 
 __all__ = [
     "AccountInactiveError",

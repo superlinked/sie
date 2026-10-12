@@ -112,7 +112,7 @@ function parseNonnegativeMeterHeader(headers: Headers, name: string): number | u
  * `body` is the decoded response envelope, when the caller has one. The settled
  * charge is read from its `usage` block FIRST and falls back to the
  * `x-sie-credits-debited` header, which is the only source on a gateway that
- * predates in-body surfacing (#2434). The two always agree when both are
+ * predates in-body surfacing. The two always agree when both are
  * present; the body additionally names the rate book, which no header does.
  */
 export function parseRequestMetadata(
@@ -192,7 +192,7 @@ export function parseRequestMetadata(
 }
 
 /**
- * The settled charge from a response envelope's `usage` block (#2434).
+ * The settled charge from a response envelope's `usage` block.
  *
  * Shares `settledChargeFields`' validation so the metadata path and the result
  * parsers can never disagree about what counts as a publishable charge.
@@ -491,7 +491,7 @@ export async function handleError(response: Response, gpu?: string): Promise<nev
 
   if (status === 503 && code === PROVISIONING_ERROR_CODE) {
     const retryAfter = getRetryAfter(response);
-    throw new ProvisioningError(message, gpu, retryAfter, param);
+    throw new ProvisioningError(message, gpu, retryAfter, param, request);
   }
 
   // Rate limit (pass-2 audit B1). Retried on the admission ladder in the
@@ -630,7 +630,7 @@ interface WireDetectedObject {
 
 interface WireExtractResult {
   id?: string;
-  entities: WireEntity[];
+  entities?: WireEntity[];
   relations?: WireRelation[];
   classifications?: WireClassification[];
   objects?: WireDetectedObject[];
@@ -754,7 +754,7 @@ export function validateBatchResultCount(
   submitted: readonly unknown[],
   model: string,
   operation: "encode" | "extract",
-  requestId?: string,
+  request?: RequestMetadata,
 ): void {
   if (results.length === submitted.length) {
     return;
@@ -774,7 +774,7 @@ export function validateBatchResultCount(
     code,
     model,
     missingIds,
-    requestId,
+    request,
     results,
   });
 }
@@ -856,7 +856,7 @@ function parseExtractItemError(data: unknown): ExtractItemError | undefined {
 export function parseExtractResult(data: WireExtractResult): ExtractResult {
   return {
     id: data.id,
-    entities: data.entities.map(parseEntity),
+    entities: (data.entities ?? []).map(parseEntity),
     relations: (data.relations ?? []).map(
       (r: WireRelation): Relation => ({
         head: r.head,

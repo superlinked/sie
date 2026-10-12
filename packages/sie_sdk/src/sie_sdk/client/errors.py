@@ -83,6 +83,10 @@ class ProvisioningError(SIEError):
     Attributes:
         gpu: The GPU type that was requested.
         retry_after: Suggested retry delay from server (if provided).
+        request: Request metadata of the refusal, when it carried any: for
+            example ``served_by``, ``fallback_reason`` and ``fallback_error``
+            on a local refusal that answers a failed remote attempt. When the
+            provisioning budget runs out, the metadata of the last refusal.
     """
 
     def __init__(
@@ -92,11 +96,13 @@ class ProvisioningError(SIEError):
         gpu: str | None = None,
         retry_after: float | None = None,
         param: str | None = None,
+        request: RequestMetadata | None = None,
     ) -> None:
         super().__init__(message)
         self.gpu = gpu
         self.retry_after = retry_after
         self.param = param
+        self.request = request
 
 
 class PoolError(SIEError):
@@ -135,6 +141,8 @@ class LoraLoadingError(SIEError):
     Attributes:
         lora: The LoRA adapter that was requested.
         model: The model the LoRA was requested for.
+        request: Request metadata of the last refusal, when it carried any
+            (see :class:`ProvisioningError`).
     """
 
     def __init__(
@@ -143,10 +151,12 @@ class LoraLoadingError(SIEError):
         *,
         lora: str | None = None,
         model: str | None = None,
+        request: RequestMetadata | None = None,
     ) -> None:
         super().__init__(message)
         self.lora = lora
         self.model = model
+        self.request = request
 
 
 class ModelLoadingError(SIEError):
@@ -158,6 +168,8 @@ class ModelLoadingError(SIEError):
 
     Attributes:
         model: The model that was requested.
+        request: Request metadata of the last refusal, when it carried any
+            (see :class:`ProvisioningError`).
     """
 
     def __init__(
@@ -165,9 +177,11 @@ class ModelLoadingError(SIEError):
         message: str,
         *,
         model: str | None = None,
+        request: RequestMetadata | None = None,
     ) -> None:
         super().__init__(message)
         self.model = model
+        self.request = request
 
 
 class ModelLoadFailedError(ServerError):

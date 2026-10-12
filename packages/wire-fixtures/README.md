@@ -35,6 +35,13 @@ executable.
   score, extract) and for generation, keyed by status, error code, and whether
   a usable `Retry-After` is present. It also pins how a `Retry-After` value is
   parsed (delay seconds or an HTTP date; a past date means retry now).
+- `sdk_requests.json` — the HTTP request each SDK sends for the same call to
+  encode, score, extract, generate and the chat route: method, path, the
+  headers that carry meaning, and the decoded body. Each case names one call;
+  each SDK spells that call with its own options and must put the same request
+  on the wire. The file states what counts as the same: paths are compared
+  percent-decoded, a `null` member equals an absent one, and a case may list
+  members an SDK is free to send at the server's default.
 - `serving_disclosure.json` — remote serving: the `X-SIE-Remote: forbid`
   request header a caller sends to keep a request off remote upstreams, and the
   response headers that say which side served (`X-SIE-Served-By`,
@@ -74,7 +81,13 @@ fixture set. Current consumers:
   server). `test_wire_contract.py` also asserts the header names, values and
   patterns of `serving_disclosure.json` against the client constants and
   `RequestMetadata`.
-- TypeScript SDK — `packages/sie_ts_sdk/tests/wireContract.test.ts` (asserts the
+  `packages/sie_sdk/tests/client/test_sdk_requests.py` issues every
+  `sdk_requests.json` case through the sync and the async client against a
+  local HTTP server and compares the request that arrived.
+- TypeScript SDK — `packages/sie_ts_sdk/tests/sdkRequests.test.ts` (issues every
+  `sdk_requests.json` case through the client with a stubbed `fetch` and
+  compares the request it sent; a case the SDK has no call for fails),
+  `packages/sie_ts_sdk/tests/wireContract.test.ts` (asserts the
   runtime `MODEL_STATES` and `MODEL_INFO_WIRE_FIELDS` arrays — the single
   sources the `ModelState` type and `WireModelInfo` interface are checked
   against — match the fixtures), and

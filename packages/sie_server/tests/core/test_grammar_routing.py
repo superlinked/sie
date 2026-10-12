@@ -128,6 +128,8 @@ def test_all_existing_gemma_grammar_routes_are_preserved(tmp_path: Path) -> None
         "h100-96k-hires-no-spec": "h100-96k-hires-no-spec",
         "h100-96k-hires-out8k": "h100-96k-hires-out8k-no-spec",
         "h100-96k-hires-out8k-no-spec": "h100-96k-hires-out8k-no-spec",
+        "h100-96k-hires-thinking-no-spec": "h100-96k-hires-thinking-no-spec",
+        "h100-96k-hires-thinking-budget512-no-spec": "h100-96k-hires-thinking-budget512-no-spec",
     }
     for profile, serving_profile in expected.items():
         requested = _GEMMA_ID if not profile else f"{_GEMMA_ID}:{profile}"
