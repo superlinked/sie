@@ -5,7 +5,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from sie_server.adapters.qwen2_flash_cross_encoder.adapter import (
+    Qwen2CrossEncoderAdapter,
+    Qwen2FlashCrossEncoderAdapter,
+)
 from sie_server.config.model import (
+    AdapterOptions,
     EmbeddingDim,
     EncodeTask,
     ModelConfig,
@@ -95,18 +100,57 @@ class TestAdapterFactoryIntegration:
 
         assert type(adapter).__name__ == "CrossEncoderAdapter"
 
-    def test_qwen2_flash_cross_encoder_on_cpu(self, tmp_path: Path) -> None:
-        """Qwen2 flash cross-encoder falls back on CPU."""
+    @pytest.mark.parametrize("device", ["cpu", "mps"])
+    def test_qwen2_flash_cross_encoder_preserves_native_options(self, tmp_path: Path, device: str) -> None:
+        """Non-CUDA Qwen fallback retains the causal prompt and score contract."""
         config = _make_config(
             "test-qwen2",
-            "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+            "Qwen/Qwen3-Reranker-0.6B",
+            "sie_server.adapters.qwen2_flash_cross_encoder.adapter:Qwen2FlashCrossEncoderAdapter",
+            score=True,
+        )
+        config.hf_revision = "e61197ed45024b0ed8a2d74b80b4d909f1255473"
+        config.max_sequence_length = 32768
+        config.profiles["default"].compute_precision = "bfloat16"
+        config.profiles["default"].adapter_options = AdapterOptions(
+            loadtime={
+                "input_format": "qwen3",
+                "score_mode": "log_softmax",
+                "yes_token": "yes",
+                "no_token": "no",
+                "default_instruction": "Find passages satisfying the rule",
+            }
+        )
+
+        adapter = load_adapter(config, tmp_path, device=device)
+
+        assert type(adapter) is Qwen2CrossEncoderAdapter
+        assert adapter.capabilities.outputs == ["score"]
+        assert adapter._revision == config.hf_revision
+        assert adapter._max_seq_length == 32768
+        assert adapter._input_format == "qwen3"
+        assert adapter._score_mode == "log_softmax"
+        assert (adapter._yes_token, adapter._no_token) == ("yes", "no")
+        assert adapter._default_instruction == "Find passages satisfying the rule"
+        assert adapter._compute_precision == ("float16" if device == "mps" else "bfloat16")
+
+    @pytest.mark.parametrize("flash_available", [False, True])
+    def test_qwen2_cuda_factory_keeps_flash_when_available(self, tmp_path: Path, flash_available: bool) -> None:
+        config = _make_config(
+            "test-qwen2",
+            "mixedbread-ai/mxbai-rerank-base-v2",
             "sie_server.adapters.qwen2_flash_cross_encoder.adapter:Qwen2FlashCrossEncoderAdapter",
             score=True,
         )
 
-        adapter = load_adapter(config, tmp_path, device="cpu")
+        with patch("sie_server.core.inference.is_flash_attention_available", return_value=flash_available):
+            adapter = load_adapter(config, tmp_path, device="cuda:0")
 
-        assert type(adapter).__name__ == "CrossEncoderAdapter"
+        expected = Qwen2FlashCrossEncoderAdapter if flash_available else Qwen2CrossEncoderAdapter
+        assert type(adapter) is expected
+        assert isinstance(adapter, Qwen2FlashCrossEncoderAdapter)
+        assert (adapter._input_format, adapter._score_mode) == ("mxbai", "logit_diff")
+        assert (adapter._yes_token, adapter._no_token) == ("1", "0")
 
     def test_nomic_flash_on_cpu(self, tmp_path: Path) -> None:
         """Nomic flash falls back to SentenceTransformer on CPU."""

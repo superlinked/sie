@@ -64,8 +64,7 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
       log-softmax probability scoring, ``<think>`` suffix.
     """
 
-    fallback_adapter_path: ClassVar[str | None] = "cross_encoder:CrossEncoderAdapter"
-    fallback_kwargs_overrides: ClassVar[dict[str, Any]] = {"attn_implementation": "sdpa"}
+    fallback_adapter_path: ClassVar[str | None] = "qwen2_flash_cross_encoder.adapter:Qwen2CrossEncoderAdapter"
 
     spec = AdapterSpec(
         inputs=("text",),
@@ -165,14 +164,18 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
         if not device.startswith("cuda"):
             raise RuntimeError(_ERR_CUDA_REQUIRED)
 
+        self._load_model(device, attn_implementation="eager")
+
+    def _load_model(self, device: str, *, attn_implementation: str) -> None:
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         self._device = device
         self._dtype = self._resolve_dtype()
 
         logger.info(
-            "Loading %s with Flash Attention varlen (dtype=%s, format=%s, score=%s)",
+            "Loading %s with %s (dtype=%s, format=%s, score=%s)",
             self._model_name_or_path,
+            "Flash Attention varlen" if attn_implementation == "eager" else attn_implementation,
             self._dtype,
             self._input_format,
             self._score_mode,
@@ -188,11 +191,11 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
             **shared_kwargs,
         )
 
-        # Load model with eager attention - we handle flash attention manually
+        # The Flash path handles attention itself; the native path uses SDPA.
         self._model = AutoModelForCausalLM.from_pretrained(
             self._model_name_or_path,
             torch_dtype=self._dtype,
-            attn_implementation="eager",
+            attn_implementation=attn_implementation,
             **shared_kwargs,
         )
         self._model.to(device)
@@ -404,11 +407,25 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
                 content_counts.append(min(len(input_ids), caller_tokens + document_tokens))
             all_input_ids.append(input_ids)
 
-        # Build packed representation
+        seq_lengths = [len(ids) for ids in all_input_ids]
+
+        with torch.inference_mode():
+            logits = self._forward_pairs(all_input_ids)
+            scores_tensor = self._compute_scores(logits)
+            scores_array = scores_tensor.cpu().numpy().astype(np.float32)
+
+        return ScoreOutput(
+            scores=scores_array,
+            input_token_counts=seq_lengths,
+            content_token_counts=content_counts,
+        )
+
+    def _forward_pairs(self, all_input_ids: list[list[int]]) -> torch.Tensor:
+        """Score the existing complete pair rows through packed Flash attention."""
         seq_lengths = [len(ids) for ids in all_input_ids]
         total_tokens = sum(seq_lengths)
         max_seqlen = max(seq_lengths)
-        batch_size = len(queries)
+        batch_size = len(all_input_ids)
 
         # Pack input_ids
         input_ids_packed = torch.tensor(
@@ -424,25 +441,14 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
             dim=0,
         )
 
-        with torch.inference_mode():
-            position_ids = self._build_position_ids(cu_seqlens, batch_size)
-
-            logits = self._forward_flash(
-                input_ids_packed,
-                cu_seqlens,
-                max_seqlen,
-                total_tokens,
-                batch_size,
-                position_ids,
-            )
-
-            scores_tensor = self._compute_scores(logits)
-            scores_array = scores_tensor.cpu().numpy().astype(np.float32)
-
-        return ScoreOutput(
-            scores=scores_array,
-            input_token_counts=seq_lengths,
-            content_token_counts=content_counts,
+        position_ids = self._build_position_ids(cu_seqlens, batch_size)
+        return self._forward_flash(
+            input_ids_packed,
+            cu_seqlens,
+            max_seqlen,
+            total_tokens,
+            batch_size,
+            position_ids,
         )
 
     def _caller_text_tokens(self, text: str, cache: dict[str, int]) -> int:
@@ -750,3 +756,65 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
             "float32": torch.float32,
         }
         return dtype_map.get(self._compute_precision, torch.bfloat16)
+
+
+class Qwen2CrossEncoderAdapter(Qwen2FlashCrossEncoderAdapter):
+    """Native SDPA fallback with the same Qwen pair and score-token contract."""
+
+    fallback_adapter_path: ClassVar[str | None] = None
+
+    def load(self, device: str) -> None:
+        self._load_model(device, attn_implementation="sdpa")
+
+    def _resolve_dtype(self) -> torch.dtype:
+        device_type = torch.device(self._device).type if self._device is not None else None
+        if device_type == "cpu":
+            return torch.float32
+        if device_type == "mps" and self._compute_precision == "bfloat16":
+            return torch.float16
+        return super()._resolve_dtype()
+
+    def _forward_pairs(self, all_input_ids: list[list[int]]) -> torch.Tensor:
+        assert self._tokenizer is not None
+        pad_id = self._tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = self._tokenizer.eos_token_id
+        if pad_id is None:
+            raise RuntimeError("Qwen causal reranker requires an existing pad or eos token")
+
+        # Padding must not amplify a scheduler-admitted packed batch into an
+        # unbounded native forward. Sorting keeps similarly sized rows together.
+        token_budget = sum(map(len, all_input_ids))
+        ordered = sorted(range(len(all_input_ids)), key=lambda index: len(all_input_ids[index]))
+        chunks: list[list[int]] = []
+        current: list[int] = []
+        for index in ordered:
+            if current and (len(current) + 1) * len(all_input_ids[index]) > token_budget:
+                chunks.append(current)
+                current = []
+            current.append(index)
+        if current:
+            chunks.append(current)
+
+        logits = torch.empty((len(all_input_ids), 2), dtype=torch.float32, device=self._device)
+        for indices in chunks:
+            lengths = torch.tensor([len(all_input_ids[index]) for index in indices], device=self._device)
+            width = max(len(all_input_ids[index]) for index in indices)
+            input_ids = torch.full((len(indices), width), pad_id, dtype=torch.long, device=self._device)
+            for row, index in enumerate(indices):
+                input_ids[row, : len(all_input_ids[index])] = torch.tensor(
+                    all_input_ids[index], dtype=torch.long, device=self._device
+                )
+            positions = torch.arange(width, device=self._device).expand(len(indices), -1)
+            attention_mask = positions < lengths.unsqueeze(1)
+            output = self._model.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=positions,
+                use_cache=False,
+                return_dict=True,
+            )
+            rows = torch.arange(len(indices), device=self._device)
+            last_hidden = output.last_hidden_state[rows, lengths - 1]
+            logits[indices] = self._project_score_logits(last_hidden)
+        return logits
