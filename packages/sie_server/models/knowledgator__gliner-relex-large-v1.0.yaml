@@ -1,6 +1,10 @@
 sie_id: knowledgator/gliner-relex-large-v1.0
 hf_id: knowledgator/gliner-relex-large-v1.0
 hf_revision: 4aedc9226a5ac9e2f6b5ea3e91c1ee577c88a290
+# The checkpoint ships its own tokenizer (the DeBERTa-v3 vocabulary plus the
+# <<ENT>>, <<SEP>> and <<REL>> markers), so the pin is this repository.
+hf_tokenizer_dependencies:
+  knowledgator/gliner-relex-large-v1.0: 4aedc9226a5ac9e2f6b5ea3e91c1ee577c88a290
 inputs:
   text: true
   image: false

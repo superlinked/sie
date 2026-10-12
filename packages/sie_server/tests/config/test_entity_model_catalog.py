@@ -62,3 +62,10 @@ def test_existing_gliner2_routes_keep_their_adapter_and_default_dependency():
         )
     default = yaml.safe_load((BUNDLES / "default.yaml").read_text())
     assert default["deps"]["gliner2"] == ">=1.3.1,<2"
+
+
+@pytest.mark.parametrize("model_id", ["knowledgator/gliner-relex-large-v1.0", "Ihor/gliner-biomed-large-v1.0"])
+def test_gliner_models_that_ship_their_tokenizer_pin_their_own_repository(model_id):
+    config = load_model_configs(MODELS)[model_id]
+
+    assert config.hf_tokenizer_dependencies == {config.hf_id: config.hf_revision}
