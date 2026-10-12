@@ -535,6 +535,20 @@ profiles:
   # With 32 image requests in flight at 0.90, SGLang hit CUDA OOM in the vision
   # path and failed requests; at 0.88 the same burst completed cleanly. The KV
   # pool shrinks from about 107.9K to 103.4K tokens.
+  # ``schema_in_prompt: false`` keeps a ``json_schema`` response format out of
+  # the prompt on the two screenshot profiles. The grammar still constrains the
+  # answer, and a request that sends ``schema_in_prompt: true`` gets the
+  # section back. On the 25 fixed public-app screenshot fixtures, whose prompts
+  # do not contain their schema, both profiles scored 23/25 screens fully right
+  # with the section: FF12 ``transaction_type`` came back as the form's helper
+  # sentence and FF15 ``attachments`` as null. With this switch, on the same
+  # code and GPU, the 512-token profile scored 25/25. The Screenshot DEV24
+  # prompts contain their schema, so the section is never added there.
+  # Evidence: Hugging Face dataset ``superlinked/sie-task-evidence``, under
+  # ``evaluations/2026-10-11/screenshot-dev24-gemma4-serving-v1/results/``,
+  # ``amendment-5-fixtures25`` and ``amendment-6-fixtures25-noschema``.
+  # The runtime block restates ``h100-96k-hires`` in full because, like the
+  # load-time block, a profile's runtime block replaces its parent's.
   h100-96k-hires-thinking-no-spec:
     extends: h100-96k-hires
     max_output_tokens: 32768
@@ -561,6 +575,18 @@ profiles:
           - "--mm-process-config"
           - '{"image":{"max_soft_tokens":1120}}'
           - "--constrained-json-disable-any-whitespace"
+      runtime:
+        first_chunk_timeout_s: 900
+        inter_chunk_timeout_s: 30
+        overall_timeout_s: 1800
+        default_sampling:
+          temperature: 1.0
+          top_p: 0.95
+          top_k: 64
+          min_new_tokens: 1
+        stop_tokens:
+          - "<end_of_turn>"
+        schema_in_prompt: false
   # ``h100-96k-hires-thinking-no-spec`` with private reasoning capped at 512
   # tokens: the adapter closes the thought channel there and the json_schema
   # grammar then constrains the answer. The launch is otherwise identical, so
@@ -568,6 +594,7 @@ profiles:
   # (two passes per run, default sampling) two 512-token runs scored 32/48
   # complete records at 96.9% of fields and 30/48 at 96.1%, against 32/48 at
   # 96.9% uncapped, with about 45% fewer output tokens per screen.
+  # It keeps the schema out of the prompt for the reason given on that profile.
   h100-96k-hires-thinking-budget512-no-spec:
     extends: h100-96k-hires
     max_output_tokens: 32768
@@ -595,3 +622,15 @@ profiles:
           - "--mm-process-config"
           - '{"image":{"max_soft_tokens":1120}}'
           - "--constrained-json-disable-any-whitespace"
+      runtime:
+        first_chunk_timeout_s: 900
+        inter_chunk_timeout_s: 30
+        overall_timeout_s: 1800
+        default_sampling:
+          temperature: 1.0
+          top_p: 0.95
+          top_k: 64
+          min_new_tokens: 1
+        stop_tokens:
+          - "<end_of_turn>"
+        schema_in_prompt: false

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from sie_server.core.loader import expand_profile_variants, load_model_config
 from sie_server.processors import streaming as streaming_mod
 from sie_server.processors.schema_prompt import (
     json_schema_response_format,
@@ -39,6 +41,7 @@ SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 GRAMMAR = GrammarSpec(kind="json_schema", value=SCHEMA, label="cvss", strict=True)
+GEMMA_31B_FILE = Path(__file__).resolve().parents[2] / "models" / "google__gemma-4-31B-it.yaml"
 _SECTION = response_format_section(GRAMMAR)
 assert _SECTION is not None
 SECTION: str = _SECTION
@@ -297,6 +300,27 @@ async def test_profile_opt_out_and_request_override(monkeypatch: pytest.MonkeyPa
     assert _system_texts(tok) == ["Score the report."]
 
     tok, _, _ = await _run(monkeypatch, _request(schema_in_prompt=True), profile_runtime={"schema_in_prompt": False})
+    assert _system_texts(tok) == ["Score the report.\n\n" + SECTION]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "profile",
+    ["h100-96k-hires-thinking-no-spec", "h100-96k-hires-thinking-budget512-no-spec"],
+)
+async def test_gemma_screenshot_profiles_opt_out_and_request_override(
+    monkeypatch: pytest.MonkeyPatch, profile: str
+) -> None:
+    """The served Gemma 4 31B screenshot profiles leave the prompt as sent unless the request asks for the schema."""
+    variant = expand_profile_variants([load_model_config(GEMMA_31B_FILE)])[f"google/gemma-4-31B-it:{profile}"]
+    runtime = dict(variant.resolve_profile("default").runtime)
+
+    tok, adapter, _ = await _run(monkeypatch, _request(), profile_runtime=runtime)
+    assert _system_texts(tok) == ["Score the report."]
+    assert adapter.dispatched_parameters is not None
+    assert adapter.dispatched_parameters["grammar"] == GRAMMAR
+
+    tok, _, _ = await _run(monkeypatch, _request(schema_in_prompt=True), profile_runtime=runtime)
     assert _system_texts(tok) == ["Score the report.\n\n" + SECTION]
 
 
