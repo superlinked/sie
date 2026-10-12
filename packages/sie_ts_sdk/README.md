@@ -281,4 +281,4 @@ does not make retrying generation safe after output has already arrived.
 
 ## License
 
-MIT
+Apache 2.0
