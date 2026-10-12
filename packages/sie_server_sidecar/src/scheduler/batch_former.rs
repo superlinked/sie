@@ -16,7 +16,9 @@
 //!    greedily under the cost and count caps. This prevents replenishing
 //!    cheap requests from indefinitely overtaking an aged expensive one.
 //!    Progress requires a downstream dispatch slot; the wait window is not
-//!    an end-to-end latency guarantee.
+//!    an end-to-end latency guarantee. Nothing is promoted during a
+//!    batchable turn or while a runs-alone item is pending: there, what a
+//!    turn owes bounds the wait instead (point 5).
 //! 4. **Timer refresh**: after a partial cost-sorted extract, first/last
 //!    timestamps are re-anchored to the requests that remain; once the queue
 //!    empties both are cleared so the next submit starts a fresh window.
@@ -65,15 +67,17 @@
 //!    owed items take most of each turn, in arrival order: no item waits
 //!    indefinitely and more items are served than in cost order alone, but
 //!    the median wait grows, most where the cost cap holds few items (such as
-//!    4096 ms, the adaptive floor for a backend that reports no budget).
+//!    4096 ms, the adaptive floor for a backend that reports no budget, or a
+//!    cap set low through `SIE_ADAPTIVE_BATCH_MAX_COST`). Point 3's
+//!    promotion makes the same trade between turns.
 //!
 //! Python currently retains its original first/last timers after a partial
 //! extract and clears them only when empty. Rust re-anchors them to the actual
 //! remainder because the sidecar's cross-key FCFS selector reads that state:
 //! retaining a removed request's timestamp can repeatedly prioritize a hot key
 //! and can make a newer tail skip its own coalescing window. Python's packing
-//! remains strictly cost-sorted; Rust promotes one aged request per extract
-//! (point 3).
+//! remains strictly cost-sorted; Rust promotes at most one aged request per
+//! extract, outside batchable turns (points 3 and 5).
 //!
 //! The runs-alone lane (point 5) is the Python batcher's rule too (#601),
 //! with three differences:
@@ -94,8 +98,7 @@
 //!   after turn. The sidecar's turn owes the items earlier turns left over,
 //!   which gives the wait bound of point 5.
 //!
-//! Packing, caps, and flush triggers otherwise follow the Python test
-//! contract. The async primitives differ as expected (`tokio::sync` rather
+//! Caps and flush triggers otherwise follow the Python test contract. The async primitives differ as expected (`tokio::sync` rather
 //! than asyncio).
 
 use std::cmp::Reverse;
@@ -512,9 +515,10 @@ impl<I: HasCost, T> BatchFormer<I, T> {
     /// The scheduler drain loop uses this to bound one continuous-batching
     /// wave to the backlog count observed when its first continuation slot
     /// opens. A newer cheap item can participate ahead of an unaged expensive
-    /// item; the oldest request gets the first packing opportunity once its
-    /// wait window expires. The count budget bounds wave size but does not
-    /// identify an exact request cohort.
+    /// item; outside a batchable turn (module docs, point 5), the oldest
+    /// request gets the first packing opportunity once its wait window
+    /// expires. The count budget bounds wave size but does not identify an
+    /// exact request cohort.
     pub async fn try_drain_up_to(&self, max_items: usize) -> Option<FormattedBatch<I, T>> {
         if max_items == 0 {
             return None;

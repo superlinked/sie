@@ -585,9 +585,11 @@ and an item is served within the first `n + 1` turns that begin after it
 arrives, where `n` counts it and the older items still pending when the first
 of them ended. Batches stay in cost order. Each batch keeps the request count
 cap and the hard audio duration cap, and the cost cap unless it is a single
-item above it, which runs alone. Batch formation is unchanged outside these
-turns, which run only while a long recording is pending or has just run. The
-Python batcher applies the same rule, but there only the Whisper adapter flags
+item above it, which runs alone. The turns run only while a long recording is
+pending or has just run. Outside them, batches form as for every other model:
+the oldest request that has waited out the batch window goes first, the rest by
+cost. Inside a turn, nothing is promoted that way, because what the turn owes
+already bounds each item's wait. The Python batcher applies the same rule, but there only the Whisper adapter flags
 audio as long-form, a turn is always one batch, and it is ordered by cost
 alone.
 
