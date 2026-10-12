@@ -1709,12 +1709,29 @@ mod tests {
                         max_batch_cost,
                         // Arrival times here are simulated, while point 3's
                         // aging reads the real clock: keep it out of reach
-                        // unless a test lowers it.
+                        // unless a test opts in (see `Lanes::aged`).
                         max_batch_wait_ms: f64::INFINITY,
                         ..BatchConfig::default()
                     },
                 },
                 epoch: Instant::now(),
+            }
+        }
+
+        /// Like [`Lanes::new`], but every request counts as having waited
+        /// `max_batch_wait_ms`, so point 3's aged promotion applies wherever
+        /// it may.
+        fn aged(max_batch_cost: u64) -> Self {
+            let mut lanes = Self::new(max_batch_cost);
+            lanes.inner.config.max_batch_wait_ms = 0.0;
+            lanes
+        }
+
+        fn with_aging(max_batch_cost: u64, aged: bool) -> Self {
+            if aged {
+                Self::aged(max_batch_cost)
+            } else {
+                Self::new(max_batch_cost)
             }
         }
 
@@ -1768,22 +1785,39 @@ mod tests {
         }
     }
 
-    /// Cost-sorted greedy packing exactly as `extract_batch_up_to` did before
-    /// the runs-alone lane. `pending` holds `(cost, hard_cap, name)` in queue
-    /// order and is updated in place, as the batcher updates its own queue.
+    /// Greedy packing exactly as `extract_batch_up_to` does without the
+    /// runs-alone lane (point 3): with `aged`, every request has waited out
+    /// the batch window, so the oldest goes first and the rest by cost;
+    /// otherwise all by cost. `pending` holds `(cost, hard_cap, name,
+    /// arrival_ms)` in queue order and is updated in place, as the batcher
+    /// updates its own queue.
     fn previous_packing(
-        pending: &mut Vec<(u64, Option<u64>, String)>,
+        pending: &mut Vec<(u64, Option<u64>, String, u64)>,
         config: &BatchConfig,
         max_items: usize,
+        aged: bool,
     ) -> (Vec<String>, u64) {
-        pending.sort_by_key(|(cost, _, _)| *cost);
+        let oldest = aged
+            .then(|| {
+                pending
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, (_, _, _, arrival))| *arrival)
+                    .map(|(index, _)| index)
+            })
+            .flatten();
+        let promoted = oldest.map(|index| pending.remove(index));
+        pending.sort_by_key(|(cost, _, _, _)| *cost);
+        if let Some(request) = promoted {
+            pending.insert(0, request);
+        }
         let max_cost = pending
             .iter()
-            .filter_map(|(_, cap, _)| *cap)
+            .filter_map(|(_, cap, _, _)| *cap)
             .fold(config.max_batch_cost, u64::min);
         let mut batch_cost = 0;
         let mut take_count = 0;
-        for (cost, _, _) in pending.iter() {
+        for (cost, _, _, _) in pending.iter() {
             if take_count >= max_items {
                 break;
             }
@@ -1796,18 +1830,18 @@ mod tests {
                 break;
             }
         }
-        let taken = pending.drain(..take_count).map(|(_, _, name)| name);
+        let taken = pending.drain(..take_count).map(|(_, _, name, _)| name);
         (taken.collect(), batch_cost)
     }
 
     #[test]
     fn unflagged_batches_match_previous_cost_sorted_packing() {
-        for seed in 0..20 {
+        for (seed, aged) in (0..20).flat_map(|seed| [(seed, false), (seed, true)]) {
             let mut rng = TestRng(seed);
-            let mut lanes = Lanes::new(rng.range(1, 4_000));
+            let mut lanes = Lanes::with_aging(rng.range(1, 4_000), aged);
             lanes.inner.config.max_batch_requests = rng.range(1, 8) as usize;
             let config = lanes.inner.config;
-            let mut reference: Vec<(u64, Option<u64>, String)> = Vec::new();
+            let mut reference: Vec<(u64, Option<u64>, String, u64)> = Vec::new();
             let mut now_ms = 0;
             let mut next_id = 0;
 
@@ -1824,7 +1858,7 @@ mod tests {
                         hard_cap,
                     };
                     lanes.arrive(item, &name, now_ms);
-                    reference.push((cost, hard_cap, name));
+                    reference.push((cost, hard_cap, name, now_ms));
                 }
                 if reference.is_empty() {
                     continue;
@@ -1834,17 +1868,21 @@ mod tests {
                 let batch = lanes.take_up_to(max_items);
 
                 let (expected, expected_cost) =
-                    previous_packing(&mut reference, &config, max_items);
-                assert_eq!(batch.metadata, expected, "seed {seed}");
-                assert_eq!(batch.total_cost, expected_cost, "seed {seed}");
-                let remaining: Vec<&String> = reference.iter().map(|(_, _, name)| name).collect();
+                    previous_packing(&mut reference, &config, max_items, aged);
+                assert_eq!(batch.metadata, expected, "seed {seed}, aged {aged}");
+                assert_eq!(batch.total_cost, expected_cost, "seed {seed}, aged {aged}");
+                let remaining: Vec<&String> =
+                    reference.iter().map(|(_, _, name, _)| name).collect();
                 assert_eq!(
                     lanes.pending_names().iter().collect::<Vec<_>>(),
                     remaining,
-                    "seed {seed}"
+                    "seed {seed}, aged {aged}"
                 );
-                let remaining_cost: u64 = reference.iter().map(|(cost, _, _)| cost).sum();
-                assert_eq!(lanes.inner.total_cost, remaining_cost, "seed {seed}");
+                let remaining_cost: u64 = reference.iter().map(|(cost, _, _, _)| cost).sum();
+                assert_eq!(
+                    lanes.inner.total_cost, remaining_cost,
+                    "seed {seed}, aged {aged}"
+                );
             }
         }
     }
@@ -1973,6 +2011,49 @@ mod tests {
             run.worst_wait_turns[client] = run.worst_wait_turns[client].max(waited);
         }
         run
+    }
+
+    #[test]
+    fn aged_recording_waits_while_a_clip_turn_is_under_way() {
+        // Every request has waited out the batch window, so outside clip
+        // turns the oldest would go first (point 3). A clip turn still serves
+        // the clips that waited behind the last recording before the next
+        // recording runs, however long that recording has waited.
+        let mut lanes = Lanes::aged(720_000);
+        lanes.arrive(long_form(60), "first-recording", 0);
+        lanes.arrive(long_form(60), "second-recording", 1);
+        lanes.arrive(clip(10), "clip", 2);
+
+        assert_eq!(lanes.take(), ["first-recording"]);
+        assert_eq!(lanes.take(), ["clip"]);
+        assert_eq!(lanes.take(), ["second-recording"]);
+    }
+
+    #[test]
+    fn aged_promotion_resumes_once_the_turn_after_the_last_recording_ends() {
+        // The clip turn after the last recording serves its clips cheapest
+        // first, like every clip turn, and leaves the 20 s clip over. Once
+        // that turn ends and nothing flagged is pending, packing is point 3's
+        // again: the 20 s clip, now the oldest request, goes before a cheaper
+        // clip that arrived since.
+        let mut lanes = Lanes::aged(10_000);
+        lanes.arrive(long_form(60), "recording", 0);
+        lanes.arrive(clip(20), "long-clip", 1);
+        lanes.arrive(clip(5), "short-clip-1", 2);
+        lanes.arrive(clip(5), "short-clip-2", 3);
+
+        assert_eq!(lanes.take(), ["recording"]);
+        assert_eq!(lanes.take(), ["short-clip-1", "short-clip-2"]);
+        lanes.arrive(clip(1), "late-clip", 4);
+        assert_eq!(lanes.take(), ["long-clip"]);
+        assert_eq!(lanes.take(), ["late-clip"]);
+
+        // Without aging, cost order alone would keep passing the 20 s clip
+        // over.
+        let mut lanes = Lanes::new(10_000);
+        lanes.arrive(clip(20), "long-clip", 1);
+        lanes.arrive(clip(1), "late-clip", 4);
+        assert_eq!(lanes.take(), ["late-clip"]);
     }
 
     #[test]
@@ -2696,9 +2777,12 @@ mod tests {
         // start, for backends that report no budget; a speech model's floor
         // (180000 ms) and its 720000 ms start, which is also the hard audio
         // cap.
-        for max_batch_cost in [4_096, 16_384, 65_536, 180_000, 720_000] {
+        // Each runs with and without point 3's aged promotion, which applies
+        // only between clip turns while nothing flagged is pending.
+        let caps = [4_096, 16_384, 65_536, 180_000, 720_000];
+        for (max_batch_cost, aged) in caps.into_iter().flat_map(|cap| [(cap, false), (cap, true)]) {
             let mut rng = TestRng(max_batch_cost);
-            let mut lanes = Lanes::new(max_batch_cost);
+            let mut lanes = Lanes::with_aging(max_batch_cost, aged);
             let mut audit = LaneAudit::default();
             let mut submitted = Vec::new();
             let mut now_ms = 0;
@@ -2729,7 +2813,7 @@ mod tests {
 
             audit.served.sort();
             submitted.sort();
-            assert_eq!(audit.served, submitted, "cap {max_batch_cost}");
+            assert_eq!(audit.served, submitted, "cap {max_batch_cost}, aged {aged}");
             assert!(audit.flagged_waits.is_empty());
             assert_eq!(lanes.inner.total_cost, 0);
         }
@@ -2764,11 +2848,15 @@ mod tests {
         // and every clip against its bound: a clip its first turn leaves over
         // is served by the turn numbered that turn plus the clips, itself
         // included, that arrived no later than it and were still pending then.
+        // Recordings stay pending, so every batch belongs to a clip turn or a
+        // recording, and point 3's aged promotion never applies: the aged
+        // runs must match the others batch for batch.
         let caps = [4_096, 16_384, 65_536, 180_000, 720_000];
         let mut turns_with_left_over = 0;
-        for seed in 0..24 {
+        let mut unaged_served = Vec::new();
+        for (seed, aged) in (0..24).flat_map(|seed| [(seed, false), (seed, true)]) {
             let mut rng = TestRng(1_000 + seed);
-            let mut lanes = Lanes::new(rng.pick(&caps));
+            let mut lanes = Lanes::with_aging(rng.pick(&caps), aged);
             let mut audit = LaneAudit::default();
             let mut now_ms = 0;
             for _ in 0..rng.range(1, 3) {
@@ -2803,12 +2891,17 @@ mod tests {
             }
             assert!(
                 audit.turns_begun >= 70,
-                "seed {seed}: clip turns keep coming"
+                "seed {seed}, aged {aged}: clip turns keep coming"
             );
             turns_with_left_over += audit.turns_with_left_over;
+            if aged {
+                assert_eq!(audit.served, unaged_served, "seed {seed}");
+            } else {
+                unaged_served = audit.served;
+            }
         }
         assert!(
-            turns_with_left_over >= 1_500,
+            turns_with_left_over >= 3_000,
             "the load leaves clips over: {turns_with_left_over} turns began with some"
         );
     }
