@@ -35,7 +35,7 @@ git -C "$WORK" init -q
 TASK="$(cat "$WORK/README.md")"
 
 echo "== before: the seeded tests"
-(cd "$WORK" && uv run --quiet pytest -q 2>&1 | tail -n 3) || true
+(cd "$WORK" && uv run --quiet pytest -q -c pyproject.toml tests 2>&1 | tail -n 3) || true
 
 echo "== opencode run, recipe $RECIPE"
 (cd "$WORK" && OPENCODE_CONFIG="$CONFIG" opencode run --auto --format json "$TASK" </dev/null | tee "$OUT/opencode-events.jsonl")
@@ -50,8 +50,8 @@ if find "$WORK" -name conftest.py -not -path '*/.venv/*' | grep -q .; then
     exit 1
 fi
 
-echo "== after: pytest on the worked copy"
-if (cd "$WORK" && uv run --quiet pytest -q 2>&1 | tee "$OUT/pytest.txt"); then
+echo "== after: pytest on the worked copy, pinned to the seeded config and tests"
+if (cd "$WORK" && uv run --quiet pytest -q -c pyproject.toml tests 2>&1 | tee "$OUT/pytest.txt"); then
     echo "GATE PASS ($OUT)"
 else
     echo "GATE FAIL ($OUT)"

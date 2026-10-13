@@ -23,7 +23,9 @@ Three pieces are in this directory:
    with two failing tests and a one-line task, "make the tests pass". The
    script runs OpenCode on a copy non-interactively, then runs pytest on the
    result and prints the verdict. A run that changed the tests or
-   `pyproject.toml`, or added a `conftest.py`, fails before pytest is asked.
+   `pyproject.toml`, or added a `conftest.py`, fails before pytest is asked,
+   and the verdict run is pinned to the seeded `pyproject.toml` and `tests/`
+   path, so a new `pytest.ini` or test directory does not count.
 
 The conformance check uses the `openai` Python package rather than the SIE
 SDK. The thing under test is the OpenAI-compatible wire surface that
