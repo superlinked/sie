@@ -28,7 +28,17 @@ serde = { version = "1", features = ["derive"] }
 # serde_json's default "fast" parser can be 1 ULP off for some decimals
 # (e.g. "14.394267984578837" parses 1 bit low), which breaks the
 # shadow-trace ULP diff. Do not drop this feature.
-serde_json = { version = "1", features = ["float_roundtrip"] }
+#
+# `preserve_order` keeps JSON object keys in the order the caller sent them.
+# A work item's `options` and `output_schema` are decoded into
+# `serde_json::Value` and re-encoded for the engine, and an adapter that reads
+# a mapping in order (the options of a choice question, the properties of a
+# schema) answers differently when the keys arrive sorted. The gateway sets
+# the same feature; a workspace build already unified it into this crate,
+# while the shipped binary, built with `--package sie-server-sidecar`, sorted.
+# Nothing in this crate relies on sorted `Value` keys. Do not drop this
+# feature either.
+serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
 serde_bytes = "0.11"
 half = "2"
 rmp-serde = "1"
