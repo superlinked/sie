@@ -956,6 +956,12 @@ class ModelConfig(BaseModel):
                 )
                 raise ValueError(msg)
             if "max_seq_length" in loadtime:
+                if name == "default":
+                    msg = (
+                        "Remote profile 'default' cannot declare 'max_seq_length': the default profile serves "
+                        "the model's own window"
+                    )
+                    raise ValueError(msg)
                 max_seq_length = loadtime["max_seq_length"]
                 if not isinstance(max_seq_length, int) or isinstance(max_seq_length, bool) or max_seq_length <= 0:
                     msg = f"Remote profile '{name}': 'max_seq_length' must be a positive integer"
@@ -1191,24 +1197,26 @@ class ModelConfig(BaseModel):
         if self.tasks.generate is not None:
             for name, profile in self.profiles.items():
                 parent = self.profiles[profile.extends] if profile.extends is not None else None
-                effective_output_cap = (
-                    profile.max_output_tokens
-                    if profile.max_output_tokens is not None
-                    else parent.max_output_tokens
-                    if parent is not None
-                    else None
+                effective_loadtime = profile.adapter_options.loadtime or (
+                    parent.adapter_options.loadtime if parent is not None else {}
                 )
+                declared_window = effective_loadtime.get("max_seq_length")
+                if not isinstance(declared_window, int) or declared_window <= 0:
+                    declared_window = None
+                effective_output_cap = profile.max_output_tokens
+                if effective_output_cap is None and parent is not None:
+                    effective_output_cap = parent.max_output_tokens
+                if effective_output_cap is None and declared_window is not None:
+                    effective_output_cap = self.tasks.generate.max_output_tokens
                 if effective_output_cap is not None:
-                    effective_loadtime = profile.adapter_options.loadtime or (
-                        parent.adapter_options.loadtime if parent is not None else {}
-                    )
-                    effective_context = effective_loadtime.get(
-                        "max_seq_length",
-                        self.tasks.generate.context_length,
-                    )
+                    effective_context = self.tasks.generate.context_length
+                    if declared_window is not None:
+                        effective_context = (
+                            min(declared_window, effective_context) if name == "default" else declared_window
+                        )
                     if effective_output_cap > effective_context:
                         msg = (
-                            f"Profile '{name}' on generation model '{self.sie_id}' sets "
+                            f"Profile '{name}' on generation model '{self.sie_id}' has "
                             f"max_output_tokens={effective_output_cap}, exceeding its "
                             f"context_length={effective_context}"
                         )
