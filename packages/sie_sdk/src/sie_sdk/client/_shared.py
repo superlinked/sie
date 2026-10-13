@@ -1743,6 +1743,7 @@ def build_chat_body(
     safety_identifier: str | None = None,
     lora_adapter: str | None = None,
     stream_options: dict[str, Any] | None = None,
+    include_reasoning: bool | None = None,
     extra_body: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the ``/v1/chat/completions`` request body (snake_case wire shape).
@@ -1786,6 +1787,7 @@ def build_chat_body(
         "safety_identifier": safety_identifier,
         "lora_adapter": lora_adapter,
         "stream_options": stream_options,
+        "include_reasoning": include_reasoning,
     }
     body.update({key: value for key, value in optional.items() if value is not None})
     if extra_body:

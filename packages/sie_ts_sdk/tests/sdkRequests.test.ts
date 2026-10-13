@@ -201,6 +201,7 @@ const CALLS: Record<string, (client: SIEClient) => Promise<unknown>> = {
         messages: [{ role: "user", content: "Count to ten." }],
         max_completion_tokens: 64,
         stream_options: { include_usage: true },
+        include_reasoning: true,
       }),
     ),
 };

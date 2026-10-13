@@ -5972,6 +5972,11 @@ fn decrement_gauge(gauge: &RuntimeGauge, value: i64) {
 /// normal saturated loads benefit from hiding IPC roundtrip/decode time
 /// behind the current forward pass.
 ///
+/// On a lane whose engine runs one batch at a time, the second slot takes
+/// only a batch that is already full (see
+/// [`scheduler_hold_while_busy_enabled`]): a batch that could still grow
+/// stays in the queue until the engine is free.
+///
 /// Values are clamped to `[1, 8]`. The upper bound is intentionally
 /// conservative: Python inference is still serialized by the adapter's
 /// single CUDA stream, so large depths mainly park decoded batches on
@@ -5991,7 +5996,10 @@ fn pipeline_depth() -> usize {
 /// Whether the scheduler may flush the first item after an idle gap
 /// immediately instead of waiting for the coalesce window.
 ///
-/// Default true preserves the current low-load latency behavior.
+/// Default true preserves the current low-load latency behavior. On a
+/// lane that holds while busy, "idle" is read from the lane (no batch
+/// out, none just returned), so a request of several items leaves at once
+/// too; with this off, an idle lane waits for the classic flush triggers.
 /// Operators can set `SIE_BATCHER_IDLE_BYPASS_ENABLED=false` for
 /// passthrough runtimes such as Candle when multi-worker fanout makes
 /// each worker see a thinner local stream and early singleton flushes
@@ -6009,6 +6017,87 @@ fn scheduler_idle_bypass_enabled() -> bool {
             })
             .unwrap_or(true)
     })
+}
+
+/// Whether a lane whose engine runs one batch at a time holds arrivals
+/// while a batch is with the engine and sends them together when it
+/// returns (see [`crate::scheduler::Scheduler::next_dispatch`]).
+///
+/// Default true. `SIE_BATCHER_HOLD_WHILE_BUSY=false` restores the earlier
+/// loop for every lane: whatever is pending is sent into a free pipeline
+/// slot as soon as the flush triggers allow, behind the batch the engine
+/// is working on. Lanes whose backend reports a dispatch width above 1
+/// always use that loop.
+fn scheduler_hold_while_busy_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SIE_BATCHER_HOLD_WHILE_BUSY")
+            .ok()
+            .map(|raw| {
+                !matches!(
+                    raw.trim().to_ascii_lowercase().as_str(),
+                    "0" | "false" | "no" | "off"
+                )
+            })
+            .unwrap_or(true)
+    })
+}
+
+/// Reports a lane batch's return when dropped, so the lane is released
+/// however the dispatch task ends.
+struct LaneReturn {
+    scheduler: Arc<ProductionScheduler>,
+    answered: usize,
+    sent: Instant,
+}
+
+impl Drop for LaneReturn {
+    fn drop(&mut self) {
+        self.scheduler
+            .note_return(self.answered, self.sent.elapsed());
+    }
+}
+
+/// Spawn a batch that [`crate::scheduler::Scheduler::next_dispatch`]
+/// released, holding `permit` until it is back. Every such batch is a
+/// whole one (everything the lane had pending under the caps), so each
+/// steps the adaptive controller. `completes` is the number of requests
+/// the batch answers.
+#[allow(clippy::too_many_arguments)]
+fn spawn_lane_batch(
+    model_id: &str,
+    dispatcher: &Arc<Dispatcher>,
+    scheduler: &Arc<ProductionScheduler>,
+    permit: OwnedSemaphorePermit,
+    op: SchedOp,
+    lora: crate::scheduler::LoraKey,
+    batch: crate::scheduler::FormattedBatch<SchedulerItem, SchedulerMeta>,
+    completes: usize,
+) {
+    let model_id_c = model_id.to_owned();
+    let disp_c = Arc::clone(dispatcher);
+    let sched_c = Arc::clone(scheduler);
+    let lane_return = LaneReturn {
+        scheduler: Arc::clone(scheduler),
+        answered: completes,
+        sent: Instant::now(),
+    };
+    tokio::spawn(async move {
+        process_scheduler_batch(
+            &model_id_c,
+            &disp_c,
+            &sched_c,
+            op,
+            lora,
+            batch,
+            WaveRole::Primary,
+        )
+        .await;
+        // Report the return before the slot frees, so the loop that wakes
+        // on the slot reads a lane that already knows.
+        drop(lane_return);
+        drop(permit);
+    });
 }
 
 /// Spawn a dispatch as an independent task while holding a previously
@@ -6190,10 +6279,13 @@ pub(crate) async fn scheduler_drain_loop(
     let pipeline = dispatcher.model_pipeline(&model_id);
     let depth = pipeline.depth();
     let idle_bypass_enabled = scheduler_idle_bypass_enabled();
+    let hold_while_busy = scheduler_hold_while_busy_enabled();
     info!(
         model = %model_id,
         pipeline_depth = depth,
         idle_bypass_enabled,
+        hold_while_busy,
+        dispatch_width = dispatcher.dispatch_width(&model_id),
         "rust-scheduler: drain loop started",
     );
 
@@ -6260,8 +6352,85 @@ pub(crate) async fn scheduler_drain_loop(
     //     Multi-item batches or non-empty drain tails mean traffic
     //     is steady and the next iteration should accumulate (no
     //     immediate flush).
+    //
+    // The steps above are the loop of a lane whose backend batches by
+    // itself (dispatch width above 1), and of every lane when
+    // `SIE_BATCHER_HOLD_WHILE_BUSY=false`. An engine that runs one batch at
+    // a time is served by the first branch of the loop instead: a batch
+    // sent while another is with the engine only waits at the engine's
+    // lock with its membership frozen, and the requests that return a
+    // moment later start a batch of their own behind it, so two groups
+    // take turns and each request waits for the other group's forward.
+    // There the scheduler's lane decides when the next batch leaves: at
+    // once on an idle lane, held while a batch is out unless the pending
+    // work is already full, and together after the batch returns.
     let mut was_idle = true;
     'run: loop {
+        if hold_while_busy && dispatcher.dispatch_width(&model_id) <= 1 {
+            // The slot is reserved before the lane is asked, as below: while
+            // the pipeline is full the pending work stays in the queue.
+            let Some(permit) = reserve_pipeline_slot(&pipeline_sem, &shutdown).await else {
+                info!(
+                    model = %model_id,
+                    "rust-scheduler: shutdown observed — entering final drain",
+                );
+                break;
+            };
+            let next = tokio::select! {
+                biased;
+                _ = shutdown.wait() => None,
+                batch = scheduler.next_dispatch(idle_bypass_enabled) => Some(batch),
+            };
+            let Some(crate::scheduler::Dispatch {
+                op,
+                lora,
+                batch,
+                completes,
+            }) = next
+            else {
+                drop(permit);
+                info!(
+                    model = %model_id,
+                    "rust-scheduler: shutdown observed — entering final drain",
+                );
+                break;
+            };
+            if dispatcher.dispatch_width(&model_id) > 1 {
+                // The backend reported a dispatch width while the lane was
+                // waiting (a reload): this batch is the other loop's first.
+                // It never went out under the lane's rule, so take it back
+                // out of the lane's count before sending it that way.
+                scheduler.note_return(0, Duration::ZERO);
+                spawn_scheduler_batch(
+                    &model_id,
+                    &dispatcher,
+                    &scheduler,
+                    &pipeline_sem,
+                    &shutdown,
+                    permit,
+                    op,
+                    lora,
+                    batch,
+                    WaveRole::Primary,
+                )
+                .await;
+            } else {
+                spawn_lane_batch(
+                    &model_id,
+                    &dispatcher,
+                    &scheduler,
+                    permit,
+                    op,
+                    lora,
+                    batch,
+                    completes,
+                );
+            }
+            // A lane that changes hands mid-run starts the other loop from idle.
+            was_idle = true;
+            continue;
+        }
+
         let Some(primary_permit) = reserve_pipeline_slot(&pipeline_sem, &shutdown).await else {
             info!(
                 model = %model_id,
@@ -7648,6 +7817,99 @@ mod tests {
         stop_scheduled(&dispatcher, &shutdown).await;
     }
 
+    /// One-page extract requests `slots` for model "ocr", each its own
+    /// request, submitted together.
+    async fn send_extract_requests(
+        dispatcher: &Arc<Dispatcher>,
+        prefix: &str,
+        slots: std::ops::Range<u32>,
+        tx: &tokio::sync::mpsc::UnboundedSender<crate::delivery::LocalDeliveryEvent>,
+    ) {
+        send_extract_pages(dispatcher, prefix, slots, tx).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn requests_arriving_during_a_forward_leave_as_one_batch_when_it_returns() {
+        // An engine that runs one batch at a time (no dispatch width).
+        let backend = EngineBatchedBackend::new(None);
+        let (dispatcher, shutdown) = scheduled_dispatcher(backend.clone());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // A request on an idle lane goes out alone, at once.
+        send_extract_requests(&dispatcher, "first", 0..1, &tx).await;
+        assert_eq!(backend.take_observations(), (vec![1], 1));
+
+        // Four more arrive, one after another, while it is with the engine.
+        // Nothing is sent behind it, though the pipeline has a second slot
+        // and every flush window has long passed.
+        for slot in 1..5 {
+            send_extract_requests(&dispatcher, "during", slot..slot + 1, &tx).await;
+        }
+        assert_eq!(backend.take_observations(), (vec![], 0));
+
+        // The first returns: the four leave together.
+        backend.release.add_permits(1);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(backend.take_observations(), (vec![4], 1));
+
+        backend.release.add_permits(1);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        stop_scheduled(&dispatcher, &shutdown).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_full_batch_is_sent_ahead_of_the_return() {
+        let backend = EngineBatchedBackend::new(None);
+        let (dispatcher, shutdown) = scheduled_dispatcher(backend.clone());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        send_extract_requests(&dispatcher, "first", 0..1, &tx).await;
+        // Twelve requests fill the default item cap: holding them cannot
+        // improve the batch, so it takes the second pipeline slot.
+        send_extract_requests(&dispatcher, "burst", 1..13, &tx).await;
+        // One more is held: both slots are taken.
+        send_extract_requests(&dispatcher, "late", 13..14, &tx).await;
+        assert_eq!(backend.take_observations(), (vec![1, 12], 2));
+
+        backend.release.add_permits(3);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(backend.take_observations().0, vec![1]);
+        stop_scheduled(&dispatcher, &shutdown).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_request_cut_by_the_item_cap_leaves_as_full_batches_then_its_remainder() {
+        let backend = EngineBatchedBackend::new(None);
+        let (dispatcher, shutdown) = scheduled_dispatcher(backend.clone());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Default caps: 12 items a batch. One request of 32 items: two full
+        // batches take the two pipeline slots and the last 8 follow as soon
+        // as one frees, as they always did. The caller is waiting on the
+        // earlier parts, so the rest is neither held nor gathered for.
+        let group = (0..32u32)
+            .map(|index| {
+                let mut item = wi("states", index, "ocr", "extract");
+                item.total_items = 32;
+                (
+                    item,
+                    Delivery::Local(LocalDelivery::new(index as usize, 0, tx.clone())),
+                )
+            })
+            .collect();
+        dispatcher.dispatch_decoded(group, 32, Instant::now()).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(backend.take_observations(), (vec![12, 12], 2));
+
+        backend.release.add_permits(1);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(backend.take_observations(), (vec![8], 2));
+
+        backend.release.add_permits(2);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        stop_scheduled(&dispatcher, &shutdown).await;
+    }
+
     #[test]
     fn only_extract_on_an_engine_batched_model_dispatches_alone() {
         let dispatcher = dispatcher_with_backend(EngineBatchedBackend::new(None));
@@ -8920,6 +9182,7 @@ mod tests {
             max_batch_wait_ms: 100.0,
             coalesce_ms: 100.0,
             coalesce_ratio: 1.0,
+            ..BatchConfig::default()
         });
         let pipeline_sem = Arc::new(Semaphore::new(1));
         let active_batch = pipeline_sem

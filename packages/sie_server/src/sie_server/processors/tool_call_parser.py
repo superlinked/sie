@@ -559,6 +559,8 @@ async def _parse_tool_call_stream_impl(
             yield chunk
             continue
         idx = chunk.choice_index
+        if chunk.reasoning_delta:
+            yield GenerationChunk(text_delta="", choice_index=idx, reasoning_delta=chunk.reasoning_delta)
         state = _state(idx)
         incoming = chunk.text_delta
 

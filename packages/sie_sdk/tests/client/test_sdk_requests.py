@@ -152,7 +152,7 @@ _CALLS: dict[str, tuple[str, tuple[Any, ...], dict[str, Any]]] = {
     "stream_chat_completions": (
         "stream_chat_completions",
         ("Qwen/Qwen3-4B-Instruct-2507", [{"role": "user", "content": "Count to ten."}]),
-        {"max_completion_tokens": 64, "stream_options": {"include_usage": True}},
+        {"max_completion_tokens": 64, "stream_options": {"include_usage": True}, "include_reasoning": True},
     ),
 }
 

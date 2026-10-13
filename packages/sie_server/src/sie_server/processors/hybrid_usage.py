@@ -51,7 +51,7 @@ def _candidate_texts(candidate: dict[str, Any]) -> list[str]:
 
 
 async def count_hybrid_usage(
-    chunks: AsyncIterator[GenerationChunk], count: HybridCount
+    chunks: AsyncIterator[GenerationChunk], count: HybridCount, *, keep_reasoning: bool = False
 ) -> AsyncIterator[GenerationChunk]:
     """Report the worker's count on the terminal chunk and drop private reasoning.
 
@@ -60,6 +60,7 @@ async def count_hybrid_usage(
     upstream's counts in ``upstream_usage``. A completion the upstream counted
     but that returned no text counts as one token, and no completion counts
     above ``count.completion_limit``. Any other terminal passes through.
+    ``keep_reasoning`` leaves the counted reasoning on the chunks.
     """
     texts: dict[int, list[str]] = {}
     outcome_selected = False
@@ -71,7 +72,7 @@ async def count_hybrid_usage(
                 choice.extend((chunk.tool_call_delta.function_name or "", chunk.tool_call_delta.arguments_delta))
             for index, candidate in enumerate(chunk.candidates or ()):
                 texts.setdefault(index, []).extend(_candidate_texts(candidate))
-            if chunk.reasoning_delta:
+            if chunk.reasoning_delta and not keep_reasoning:
                 if _only_reasoning(chunk):
                     continue
                 chunk = replace(chunk, reasoning_delta="")

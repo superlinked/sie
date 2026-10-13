@@ -6436,6 +6436,10 @@ struct ChatRequestParams {
     /// rendered prompt. ``None`` leaves it to the serving profile
     /// (default on).
     schema_in_prompt: Option<bool>,
+    /// SIE extension ``include_reasoning``: ``true`` asks the worker to
+    /// publish the model's reasoning as ``reasoning_content`` on the
+    /// message and on stream deltas. Absent or ``false`` keeps it private.
+    include_reasoning: Option<bool>,
     /// OpenAI ``stream`` flag. ``true`` switches the handler to the
     /// SSE response branch; ``false`` (default) uses the existing
     /// aggregating path. Parsed by :func:`chat_params_from_json`;
@@ -6519,6 +6523,7 @@ impl ChatRequestParams {
                 chat_template_kwargs: self.chat_template_kwargs,
                 grammar: self.grammar,
                 schema_in_prompt: self.schema_in_prompt,
+                include_reasoning: self.include_reasoning,
                 routing_key: self.routing_key.clone(),
                 prompt_cache_key: self.prompt_cache_key.clone(),
                 tools: self.tools,
@@ -7782,6 +7787,19 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
             );
         }
     };
+    // SIE extension: ``include_reasoning: true`` makes the model's reasoning
+    // public as ``reasoning_content``. Absent or ``null`` keeps it private.
+    let include_reasoning = match obj.get("include_reasoning") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Bool(b)) => Some(*b),
+        Some(_) => {
+            return bad(
+                "'include_reasoning' must be a boolean",
+                Some("include_reasoning"),
+                oai_code::INVALID_REQUEST,
+            );
+        }
+    };
     // ``tool_choice`` without ``tools`` is meaningless; OpenAI itself
     // returns a 400 in that case. We mirror the behaviour so SDKs that
     // accidentally send ``tool_choice: "auto"`` on a plain chat call
@@ -7856,6 +7874,7 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
         "routing_key",
         "response_format",
         "schema_in_prompt",
+        "include_reasoning",
         "stream",
         "tools",
         "tool_choice",
@@ -7907,6 +7926,7 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
         prompt_cache_key,
         grammar,
         schema_in_prompt,
+        include_reasoning,
         stream,
         stream_include_usage,
         tools,
@@ -8300,6 +8320,7 @@ fn build_chat_completion_body(
     model: &str,
     request_id: &str,
     outcome: &crate::queue::streaming::StreamOutcome,
+    include_reasoning: bool,
 ) -> Result<Vec<u8>, Response> {
     let Some(usage) = outcome.usage.as_ref() else {
         return Err((
@@ -8345,6 +8366,9 @@ fn build_chat_completion_body(
         } else {
             message.insert("content".to_string(), json!(outcome.text));
         }
+        if let Some(reasoning) = outcome.reasoning.get(&0).filter(|_| include_reasoning) {
+            message.insert("reasoning_content".to_string(), json!(reasoning));
+        }
         vec![json!({
             "index": 0,
             "message": Value::Object(message),
@@ -8375,6 +8399,14 @@ fn build_chat_completion_body(
                     }
                 } else {
                     message.insert("content".to_string(), json!(cand.text));
+                }
+                let reasoning = cand
+                    .reasoning_content
+                    .as_ref()
+                    .or_else(|| outcome.reasoning.get(&(i as u32)))
+                    .filter(|_| include_reasoning);
+                if let Some(reasoning) = reasoning {
+                    message.insert("reasoning_content".to_string(), json!(reasoning));
                 }
                 json!({
                     "index": i,
@@ -9686,6 +9718,7 @@ async fn proxy_chat_inner(
     let requested_model = params.model.clone();
     let stream = params.stream;
     let stream_include_usage = params.stream_include_usage;
+    let include_reasoning = params.include_reasoning == Some(true);
     let mut work_params = params.into_work_params();
     work_params.require_execution_authority_v1 = require_execution_authority_v1;
     work_params.fallback_reason = fallback_reason;
@@ -9720,6 +9753,7 @@ async fn proxy_chat_inner(
             work_params,
             endpoint: super::sse::SseEndpoint::Chat {
                 include_usage: stream_include_usage,
+                include_reasoning,
             },
             route: RouteKind::Compatibility,
         })
@@ -9755,10 +9789,11 @@ async fn proxy_chat_inner(
     };
     let elapsed = start.elapsed();
 
-    let body_bytes = match build_chat_completion_body(&model_name, &request_id, &outcome) {
-        Ok(b) => b,
-        Err(resp) => return resp,
-    };
+    let body_bytes =
+        match build_chat_completion_body(&model_name, &request_id, &outcome, include_reasoning) {
+            Ok(b) => b,
+            Err(resp) => return resp,
+        };
 
     state.registry.record_request("queue").await;
     emit_audit_log(AuditEntry {
@@ -14103,6 +14138,7 @@ fn generate_params_from_json(
         best_of: None,
         stream,
         lora_adapter,
+        include_reasoning: None,
     }))
 }
 
@@ -14532,6 +14568,7 @@ fn generate_params_from_rmpv(
         best_of: None,
         stream,
         lora_adapter,
+        include_reasoning: None,
     }))
 }
 
@@ -16849,6 +16886,7 @@ mod tests {
             executed_bundle_config_hash: Some(execution_hash.clone()),
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
         insert_buffered_generation_model_revision_header(
             &mut headers,
@@ -16958,6 +16996,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: Some(identity.clone()),
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
         insert_stream_execution_identity_header(&mut headers, &outcome);
         assert_eq!(
@@ -17093,6 +17132,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: Some(binding.clone()),
+            reasoning: Default::default(),
         };
         insert_stream_execution_binding_header(&mut headers, &outcome);
         assert_eq!(
@@ -17477,9 +17517,36 @@ mod tests {
     struct GenerationTargetProbe {
         targets: std::sync::Mutex<Vec<(String, PublishTarget)>>,
         params: std::sync::Mutex<Vec<WorkParams>>,
+        worker_chunks: std::sync::Mutex<Vec<serde_json::Value>>,
     }
 
     impl GenerationTargetProbe {
+        fn collect_worker_chunks(
+            &self,
+            display_model: &str,
+        ) -> Option<(
+            oneshot::Receiver<StreamOutcome>,
+            broadcast::Receiver<ChunkEnvelope>,
+        )> {
+            let chunks = self.worker_chunks.lock().expect("chunk probe lock").clone();
+            if chunks.is_empty() {
+                return None;
+            }
+            let (tx, rx) = oneshot::channel();
+            let mut collector = crate::queue::streaming::StreamCollector::new(
+                tx,
+                display_model.to_string(),
+                "default".to_string(),
+            );
+            let tap = collector.install_chunk_tap();
+            for chunk in chunks {
+                collector.apply(serde_json::from_value(chunk).expect("worker chunk"));
+            }
+            let outcome = collector.build_outcome().expect("worker terminal");
+            collector.sender.take().unwrap().send(outcome).unwrap();
+            Some((rx, tap))
+        }
+
         fn take_params(&self) -> WorkParams {
             self.params
                 .lock()
@@ -17561,6 +17628,14 @@ mod tests {
                 .lock()
                 .expect("target probe lock")
                 .push((display_model.to_string(), target));
+            if let Some((rx, _tap)) = self.collect_worker_chunks(display_model) {
+                return Ok((
+                    "request-1".to_string(),
+                    rx,
+                    Arc::new(Notify::new()),
+                    DispatchDurability::accepted(),
+                ));
+            }
             let (tx, rx) = oneshot::channel();
             tx.send(StreamOutcome {
                 text: "ok".to_string(),
@@ -17585,6 +17660,7 @@ mod tests {
                 executed_bundle_config_hash: None,
                 execution_identity_sha256: None,
                 execution_binding_sha256: None,
+                reasoning: Default::default(),
             })
             .expect("target probe outcome receiver");
             Ok((
@@ -17620,6 +17696,14 @@ mod tests {
                 .lock()
                 .expect("target probe lock")
                 .push((display_model.to_string(), target));
+            if let Some((rx, tap)) = self.collect_worker_chunks(display_model) {
+                return Ok((
+                    "request-1".to_string(),
+                    rx,
+                    tap,
+                    DispatchDurability::accepted(),
+                ));
+            }
             let (tx, rx) = oneshot::channel();
             let mut collector = crate::queue::streaming::StreamCollector::new(
                 tx,
@@ -18311,6 +18395,148 @@ mod tests {
                     .unwrap();
             }
         }
+    }
+
+    fn reasoning_worker_chunk(seq: u32, fields: serde_json::Value) -> serde_json::Value {
+        let mut chunk = json!({
+            "kind": "chunk", "request_id": "request-1", "attempt_id": "attempt-1",
+            "seq": seq, "text_delta": "", "done": false,
+        });
+        chunk
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        chunk
+    }
+
+    fn reasoning_worker_terminal(seq: u32, fields: serde_json::Value) -> serde_json::Value {
+        let mut terminal = json!({
+            "done": true, "finish_reason": "stop",
+            "usage": {"prompt_tokens": 1, "completion_tokens": 3, "total_tokens": 4},
+        });
+        terminal
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        reasoning_worker_chunk(seq, terminal)
+    }
+
+    #[tokio::test]
+    async fn chat_include_reasoning_reaches_the_worker_and_the_answer_only_when_set() {
+        for include_reasoning in [None, Some(false), Some(true)] {
+            for stream in [false, true] {
+                let (state, probe) = mixed_governed_generation_state(false).await;
+                *probe.worker_chunks.lock().unwrap() = vec![
+                    reasoning_worker_chunk(0, json!({"reasoning_delta": "why "})),
+                    reasoning_worker_chunk(1, json!({"text_delta": "Hi", "is_first": true})),
+                    reasoning_worker_terminal(2, json!({})),
+                ];
+                let mut body = json!({
+                    "model": "org/g",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 4,
+                    "stream": stream,
+                });
+                if let Some(value) = include_reasoning {
+                    body["include_reasoning"] = json!(value);
+                }
+                let response = proxy_chat(
+                    State(Arc::clone(&state)),
+                    json_request("/v1/chat/completions", body),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(
+                    probe
+                        .take_params()
+                        .generate
+                        .expect("generate")
+                        .include_reasoning,
+                    include_reasoning
+                );
+                let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+                    .await
+                    .unwrap();
+                let expected = (include_reasoning == Some(true)).then_some("why ");
+                if stream {
+                    let text = String::from_utf8(bytes.to_vec()).unwrap();
+                    let deltas: Vec<serde_json::Value> = text
+                        .lines()
+                        .filter_map(|line| line.strip_prefix("data: "))
+                        .filter(|data| *data != "[DONE]")
+                        .map(|data| serde_json::from_str::<serde_json::Value>(data).unwrap())
+                        .filter_map(|event| event["choices"].get(0).map(|c| c["delta"].clone()))
+                        .collect();
+                    let reasoning: String = deltas
+                        .iter()
+                        .filter_map(|delta| delta["reasoning_content"].as_str())
+                        .collect();
+                    let content: String = deltas
+                        .iter()
+                        .filter_map(|delta| delta["content"].as_str())
+                        .collect();
+                    assert_eq!(content, "Hi");
+                    assert_eq!(
+                        (!reasoning.is_empty()).then_some(reasoning.as_str()),
+                        expected
+                    );
+                } else {
+                    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    let message = &value["choices"][0]["message"];
+                    assert_eq!(message["content"], "Hi");
+                    assert_eq!(
+                        message.get("reasoning_content").and_then(|v| v.as_str()),
+                        expected
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_include_reasoning_keeps_each_candidate_reasoning_on_its_choice() {
+        let (state, probe) = mixed_governed_generation_state(false).await;
+        *probe.worker_chunks.lock().unwrap() = vec![
+            reasoning_worker_chunk(0, json!({"reasoning_delta": "R0"})),
+            reasoning_worker_chunk(1, json!({"reasoning_delta": "R1", "choice_index": 1})),
+            reasoning_worker_terminal(
+                2,
+                json!({"candidates": [
+                    {"text": "A", "finish_reason": "stop"},
+                    {"text": "B", "finish_reason": "length"},
+                ]}),
+            ),
+        ];
+        let response = proxy_chat(
+            State(state),
+            json_request(
+                "/v1/chat/completions",
+                json!({
+                    "model": "org/g",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 4,
+                    "n": 2,
+                    "include_reasoning": true,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let choices = value["choices"].as_array().expect("choices");
+        let answered: Vec<(&str, &str)> = choices
+            .iter()
+            .map(|choice| {
+                (
+                    choice["message"]["content"].as_str().unwrap(),
+                    choice["message"]["reasoning_content"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(answered, vec![("A", "R0"), ("B", "R1")]);
     }
 
     #[tokio::test]
@@ -21949,6 +22175,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
         let body = build_generate_success_body_v2("Qwen/Qwen3-4B-Instruct", &outcome, false);
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -25702,6 +25929,46 @@ mod tests {
         assert_eq!(err["error"]["code"], "invalid_request");
     }
 
+    // ── include_reasoning: public reasoning on chat completions ──
+
+    #[test]
+    fn test_chat_include_reasoning_is_forwarded_and_defaults_to_private() {
+        let mut body = _chat_body_min("m");
+        let generate = _expect_chat_ok(body.clone())
+            .into_work_params()
+            .generate
+            .expect("generate params");
+        assert_eq!(generate.include_reasoning, None);
+        let wire = serde_json::to_value(&generate).unwrap();
+        assert!(wire.get("include_reasoning").is_none());
+
+        for (value, expected) in [
+            (serde_json::json!(true), Some(true)),
+            (serde_json::json!(false), Some(false)),
+            (serde_json::Value::Null, None),
+        ] {
+            body["include_reasoning"] = value;
+            let generate = _expect_chat_ok(body.clone())
+                .into_work_params()
+                .generate
+                .expect("generate params");
+            assert_eq!(generate.include_reasoning, expected);
+        }
+        body["include_reasoning"] = serde_json::json!(true);
+        let generate = _expect_chat_ok(body).into_work_params().generate.unwrap();
+        let wire = serde_json::to_value(&generate).unwrap();
+        assert_eq!(wire["include_reasoning"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn test_chat_include_reasoning_must_be_a_boolean() {
+        let mut body = _chat_body_min("m");
+        body["include_reasoning"] = serde_json::json!("yes");
+        let err = _expect_chat_err(body).await;
+        assert_eq!(err["error"]["param"], "include_reasoning");
+        assert_eq!(err["error"]["code"], "invalid_request");
+    }
+
     #[test]
     fn test_native_generate_keeps_the_grammar_out_of_the_prompt() {
         let body = serde_json::json!({
@@ -26963,19 +27230,22 @@ mod tests {
                     finish_reason: Some("stop".to_string()),
                     logprobs: None,
                     tool_calls: None,
+                    reasoning_content: None,
                 },
                 CandidateData {
                     text: "Beta".to_string(),
                     finish_reason: Some("length".to_string()),
                     logprobs: None,
                     tool_calls: None,
+                    reasoning_content: None,
                 },
             ],
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "req", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "req", &outcome, false).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let choices = v["choices"].as_array().expect("choices array");
         assert_eq!(choices.len(), 2);
@@ -27029,19 +27299,22 @@ mod tests {
                             "arguments": "{\"city\":\"Tokyo\"}"
                         }
                     })]),
+                    reasoning_content: None,
                 },
                 CandidateData {
                     text: "plain answer".to_string(),
                     finish_reason: Some("stop".to_string()),
                     logprobs: None,
                     tool_calls: None,
+                    reasoning_content: None,
                 },
             ],
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "req-tc", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "req-tc", &outcome, false).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let c0 = &v["choices"][0];
         assert!(c0["message"]["content"].is_null());
@@ -27092,12 +27365,14 @@ mod tests {
                 finish_reason: Some("stop".to_string()),
                 logprobs: Some(cand_lp),
                 tool_calls: None,
+                reasoning_content: None,
             }],
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "req-lp", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "req-lp", &outcome, false).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let lps = &v["choices"][0]["logprobs"];
         assert!(!lps.is_null(), "candidate logprobs must surface (M4)");
@@ -27477,6 +27752,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
         let bytes = build_text_completion_body("m", "req-1", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -28104,6 +28380,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
         let bytes = build_responses_body("m", "req-1", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -28190,9 +28467,11 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("Qwen/Qwen3-4B-Instruct-2507", "req-1", &outcome)
-            .expect("ok");
+        let bytes =
+            build_chat_completion_body("Qwen/Qwen3-4B-Instruct-2507", "req-1", &outcome, false)
+                .expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["object"], "chat.completion");
         assert_eq!(v["model"], "Qwen/Qwen3-4B-Instruct-2507");
@@ -28289,8 +28568,9 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "r", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "r", &outcome, false).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let lp = &v["choices"][0]["logprobs"];
         assert!(lp["content"].is_array(), "logprobs.content must be present");
@@ -28325,10 +28605,87 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "r", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "r", &outcome, false).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(v["choices"][0]["logprobs"].is_null());
+    }
+
+    #[test]
+    fn test_build_chat_completion_body_surfaces_reasoning_only_when_collected() {
+        use crate::queue::streaming::CandidateData;
+        let mut outcome = crate::queue::streaming::StreamOutcome {
+            text: "Hi".to_string(),
+            finish_reason: "stop".to_string(),
+            usage: Some(crate::queue::streaming::UsageBlock {
+                upstream_usage: None,
+                gpu_second: None,
+                images: None,
+                prompt_tokens_details: None,
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+            }),
+            attempt_id: "a".to_string(),
+            ttft_ms: None,
+            tpot_ms: None,
+            error: None,
+            origin: crate::queue::streaming::StreamOutcomeOrigin::WorkerTerminal,
+            tool_calls: None,
+            logprobs: None,
+            candidates: Vec::new(),
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
+            execution_binding_sha256: None,
+            reasoning: Default::default(),
+        };
+        let bytes = build_chat_completion_body("m", "r", &outcome, true).expect("ok");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["choices"][0]["message"]
+            .get("reasoning_content")
+            .is_none());
+
+        outcome.reasoning.insert(0, "why".to_string());
+        let bytes = build_chat_completion_body("m", "r", &outcome, true).expect("ok");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["choices"][0]["message"]["reasoning_content"], "why");
+        assert_eq!(v["choices"][0]["message"]["content"], "Hi");
+
+        let bytes = build_chat_completion_body("m", "r", &outcome, false).expect("ok");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["choices"][0]["message"]
+            .get("reasoning_content")
+            .is_none());
+
+        outcome.candidates = vec![
+            CandidateData {
+                text: "Alpha".to_string(),
+                finish_reason: Some("stop".to_string()),
+                logprobs: None,
+                tool_calls: None,
+                reasoning_content: Some("because".to_string()),
+            },
+            CandidateData {
+                text: "Beta".to_string(),
+                finish_reason: Some("stop".to_string()),
+                logprobs: None,
+                tool_calls: None,
+                reasoning_content: None,
+            },
+        ];
+        let bytes = build_chat_completion_body("m", "r", &outcome, true).expect("ok");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["choices"][0]["message"]["reasoning_content"], "because");
+        assert!(v["choices"][1]["message"]
+            .get("reasoning_content")
+            .is_none());
+
+        let bytes = build_chat_completion_body("m", "r", &outcome, false).expect("ok");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["choices"][0]["message"]
+            .get("reasoning_content")
+            .is_none());
     }
 
     /// When the worker observed tool-call deltas across the stream
@@ -28367,8 +28724,9 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "req-tc", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "req-tc", &outcome, false).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
         let msg = &v["choices"][0]["message"];
@@ -28399,8 +28757,10 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
-        let resp = build_chat_completion_body("m", "req-1", &outcome).expect_err("missing usage");
+        let resp =
+            build_chat_completion_body("m", "req-1", &outcome, false).expect_err("missing usage");
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = axum::body::to_bytes(resp.into_body(), 16 * 1024)
             .await
@@ -29017,8 +29377,9 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "req-x", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "req-x", &outcome, false).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         // Non-streaming uses `chat.completion`, not `chat.completion.chunk`.
         assert_eq!(v["object"], "chat.completion");

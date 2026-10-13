@@ -111,6 +111,25 @@ pub struct ChunkEnvelope {
     /// it atomically with the full execution identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_binding_sha256: Option<String>,
+    /// The model's reasoning for this delta, published only when the request
+    /// set ``include_reasoning``. Surfaces as ``delta.reasoning_content`` on
+    /// the chat stream and is concatenated into ``message.reasoning_content``
+    /// for the non-streaming body.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reasoning_delta: String,
+}
+
+impl ChunkEnvelope {
+    /// Whether the chunk carries model output: answer text, reasoning, or a
+    /// tool-call delta.
+    pub fn carries_output(&self) -> bool {
+        !self.text_delta.is_empty()
+            || !self.reasoning_delta.is_empty()
+            || self
+                .tool_calls
+                .as_ref()
+                .is_some_and(|tool_calls| !tool_calls.is_empty())
+    }
 }
 
 fn is_zero_u32(v: &u32) -> bool {
@@ -144,6 +163,10 @@ pub struct CandidateData {
     /// parsed for this candidate (the common case for plain text).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<serde_json::Value>>,
+    /// This candidate's reasoning, present only when the request set
+    /// ``include_reasoning`` and the model produced any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 /// Wire shape of one OpenAI tool-call delta. Mirrors the worker's
@@ -469,6 +492,10 @@ pub struct StreamOutcome {
     pub executed_bundle_config_hash: Option<String>,
     pub execution_identity_sha256: Option<String>,
     pub execution_binding_sha256: Option<String>,
+    /// Reasoning concatenated per ``choice_index`` from the chunks that
+    /// carried ``reasoning_delta``. Empty unless the request set
+    /// ``include_reasoning`` and the model produced any.
+    pub reasoning: BTreeMap<u32, String>,
 }
 
 /// Fully-assembled tool call ready to surface on the non-streaming
@@ -586,6 +613,9 @@ pub struct StreamCollector {
     /// requested. Snapshotted/cleared by the attempt-generation machinery
     /// exactly like ``chunks``.
     logprobs: Vec<serde_json::Value>,
+    /// Reasoning concatenated per ``choice_index`` from every accepted chunk's
+    /// ``reasoning_delta``. Snapshotted/cleared exactly like ``chunks``.
+    reasoning: BTreeMap<u32, String>,
     /// Worker-origin digest latched across every accepted chunk in the current
     /// attempt. One absent, malformed, or mismatching chunk makes the attempt
     /// non-attestable while preserving ordinary streaming compatibility.
@@ -640,6 +670,7 @@ struct AttemptSnapshot {
     chunks: Vec<(u32, String)>,
     tool_calls_by_index: BTreeMap<u32, AggregatedToolCall>,
     logprobs: Vec<serde_json::Value>,
+    reasoning: BTreeMap<u32, String>,
     first_chunk_at: Option<Instant>,
     last_chunk_at: Option<Instant>,
     last_output_at: Option<Instant>,
@@ -686,6 +717,7 @@ impl StreamCollector {
             chunk_tap: None,
             tool_calls_by_index: BTreeMap::new(),
             logprobs: Vec::new(),
+            reasoning: BTreeMap::new(),
             execution_identity_sha256: None,
             execution_identity_consistent: true,
             execution_binding_sha256: None,
@@ -759,6 +791,7 @@ impl StreamCollector {
             chunks: std::mem::take(&mut self.chunks),
             tool_calls_by_index: std::mem::take(&mut self.tool_calls_by_index),
             logprobs: std::mem::take(&mut self.logprobs),
+            reasoning: std::mem::take(&mut self.reasoning),
             first_chunk_at: self.first_chunk_at,
             last_chunk_at: self.last_chunk_at,
             last_output_at: self.last_output_at,
@@ -838,6 +871,7 @@ impl StreamCollector {
             self.chunks = snap.chunks;
             self.tool_calls_by_index = snap.tool_calls_by_index;
             self.logprobs = snap.logprobs;
+            self.reasoning = snap.reasoning;
             self.first_chunk_at = snap.first_chunk_at;
             self.last_chunk_at = snap.last_chunk_at;
             self.last_output_at = snap.last_output_at;
@@ -1041,12 +1075,7 @@ impl StreamCollector {
         // (it gates its inter-chunk timer on ``first_at.is_some()``)
         // throughout an active tool-call stream. Matches the SSE
         // driver's ``first_seen`` semantics.
-        let has_output = !chunk.text_delta.is_empty()
-            || chunk
-                .tool_calls
-                .as_ref()
-                .is_some_and(|tool_calls| !tool_calls.is_empty());
-        if has_output {
+        if chunk.carries_output() {
             if self.first_chunk_at.is_none() {
                 self.first_chunk_at = Some(now);
             }
@@ -1085,6 +1114,12 @@ impl StreamCollector {
 
         if !chunk.text_delta.is_empty() {
             self.chunks.push((chunk.seq, chunk.text_delta));
+        }
+        if !chunk.reasoning_delta.is_empty() {
+            self.reasoning
+                .entry(chunk.choice_index)
+                .or_default()
+                .push_str(&chunk.reasoning_delta);
         }
 
         // Absorb any tool-call deltas before mutating the activity
@@ -1216,6 +1251,7 @@ impl StreamCollector {
             execution_binding_sha256: complete_execution_evidence
                 .then(|| self.execution_binding_sha256.clone())
                 .flatten(),
+            reasoning: self.reasoning.clone(),
         })
     }
 }
@@ -1312,7 +1348,54 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning_delta: String::new(),
         }
+    }
+
+    #[test]
+    fn test_collector_concatenates_reasoning_per_choice_into_the_outcome() {
+        let (tx, _rx) = oneshot::channel();
+        let mut c = StreamCollector::new(tx, "m".to_string(), "default".to_string());
+        let mut first = _make_chunk("att-A", 0, "", false);
+        first.reasoning_delta = "why ".to_string();
+        let mut second = _make_chunk("att-A", 1, "", false);
+        second.reasoning_delta = "not".to_string();
+        second.choice_index = 1;
+
+        assert_eq!(c.apply(first), ChunkApplied::Delta);
+        assert_eq!(c.apply(second), ChunkApplied::Delta);
+        assert_eq!(
+            c.apply(_make_chunk("att-A", 2, "Hi", false)),
+            ChunkApplied::Delta
+        );
+        assert_eq!(
+            c.apply(_make_chunk("att-A", 3, "", true)),
+            ChunkApplied::Terminal
+        );
+
+        let outcome = c.build_outcome().expect("terminal");
+        assert_eq!(outcome.text, "Hi");
+        assert_eq!(outcome.reasoning.get(&0).map(String::as_str), Some("why "));
+        assert_eq!(outcome.reasoning.get(&1).map(String::as_str), Some("not"));
+    }
+
+    #[test]
+    fn test_chunk_envelope_decodes_the_worker_reasoning_delta() {
+        let bytes = rmp_serde::to_vec_named(&serde_json::json!({
+            "kind": "chunk", "request_id": "req-1", "attempt_id": "att-A", "seq": 0,
+            "text_delta": "", "done": false, "reasoning_delta": "why",
+        }))
+        .expect("encode");
+        let chunk: ChunkEnvelope = rmp_serde::from_slice(&bytes).expect("decode");
+        assert_eq!(chunk.reasoning_delta, "why");
+
+        let legacy = rmp_serde::to_vec_named(&serde_json::json!({
+            "kind": "chunk", "request_id": "req-1", "attempt_id": "att-A", "seq": 0,
+            "text_delta": "ok", "done": false,
+        }))
+        .expect("encode");
+        let chunk: ChunkEnvelope = rmp_serde::from_slice(&legacy).expect("decode");
+        assert!(chunk.reasoning_delta.is_empty());
     }
 
     #[test]
@@ -1653,12 +1736,14 @@ mod tests {
                 finish_reason: Some("stop".to_string()),
                 logprobs: None,
                 tool_calls: None,
+                reasoning_content: None,
             },
             CandidateData {
                 text: "two".to_string(),
                 finish_reason: Some("length".to_string()),
                 logprobs: None,
                 tool_calls: None,
+                reasoning_content: None,
             },
         ];
         assert_eq!(c.apply(term), ChunkApplied::Terminal);
@@ -2303,6 +2388,31 @@ mod tests {
             c.first_chunk_at.is_some(),
             "tool-call-only chunk must arm first_chunk_at"
         );
+    }
+
+    #[test]
+    fn test_reasoning_only_chunk_arms_first_chunk_at() {
+        let (tx, _rx) = oneshot::channel();
+        let mut c = StreamCollector::new(tx, "m".to_string(), "p".to_string());
+        let mut chunk = _make_chunk("att-A", 0, "", false);
+        chunk.reasoning_delta = "why".to_string();
+        assert_eq!(c.apply(chunk), ChunkApplied::Delta);
+        assert!(c.first_chunk_at.is_some());
+        assert_eq!(c.output_event_count, 1);
+    }
+
+    #[test]
+    fn test_carries_output_counts_text_reasoning_and_tool_calls_only() {
+        let empty = _make_chunk("att-A", 0, "", false);
+        assert!(!empty.carries_output());
+        assert!(_make_chunk("att-A", 0, "Hi", false).carries_output());
+        assert!(_make_tool_call_chunk("att-A", 0, false).carries_output());
+        let mut reasoning = empty.clone();
+        reasoning.reasoning_delta = "why".to_string();
+        assert!(reasoning.carries_output());
+        let mut no_calls = empty;
+        no_calls.tool_calls = Some(Vec::new());
+        assert!(!no_calls.carries_output());
     }
 
     /// BUG E regression: a terminal chunk re-using a ``seq`` already seen
