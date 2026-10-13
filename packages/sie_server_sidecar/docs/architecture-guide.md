@@ -566,10 +566,12 @@ the other group's forward. The drain loop therefore asks the model's lane
    lone request, of one item or of several, never waits a window.
 2. **Busy lane: hold.** While a batch is with the engine, arrivals stay in the
    queue, where later arrivals can join them. Two things take the second
-   pipeline slot (`SIE_RUST_PIPELINE_DEPTH`, default 2) instead: a batch that is
-   already full (item cap, cost cap, or one request over the cost cap), because
-   holding it cannot improve it, and the rest of a request whose first part is
-   with the engine, because its caller is waiting on that part.
+   pipeline slot (`SIE_RUST_PIPELINE_DEPTH`, default 2) instead: the next batch
+   if it is already full (item cap, cost cap, or one request over the cost cap),
+   because holding it cannot improve it, and the rest of a request whose first
+   part is with the engine, because its caller is waiting on that part. The
+   next batch is the one of the `(operation, LoRA)` queue whose head is oldest:
+   a full batch on a younger queue does not overtake an older queue's held one.
 3. **On a return: gather once, then send everything pending.** The callers just
    answered are the ones most likely to come straight back. The lane waits for
    as many arrivals as the returned batch answered. It stops waiting when

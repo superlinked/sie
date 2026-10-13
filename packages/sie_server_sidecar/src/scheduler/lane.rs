@@ -15,10 +15,13 @@
 //!    else pending. A lone request never waits a window.
 //! 2. **Busy lane, hold.** While a batch is with the engine, arrivals
 //!    stay in the queue where later arrivals can join them. Two things go
-//!    ahead into a free pipeline slot instead: a batch that is already
-//!    full, since holding it cannot improve it, and the rest of a request
-//!    whose first part is with the engine, since its caller is waiting on
-//!    that part and has nobody to come back with.
+//!    ahead into a free pipeline slot instead: the next batch if it is
+//!    already full, since holding it cannot improve it, and the rest of a
+//!    request whose first part is with the engine, since its caller is
+//!    waiting on that part and has nobody to come back with. "Next" is the
+//!    scheduler's first-come-first-served pick across its queues: a full
+//!    batch on a younger queue does not overtake an older queue's held
+//!    one, which would then wait a forward longer for it.
 //! 3. **On a return, gather once.** The callers just answered are the
 //!    ones most likely to come straight back. The lane waits for as many
 //!    arrivals as the returned batch answered, then sends everything

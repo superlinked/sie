@@ -357,7 +357,11 @@ where
     ///
     /// The rule is [`super::lane`]'s: at once on an idle lane, held while a
     /// batch is with the engine unless the pending work is already full,
-    /// and together after the batch returns. The caller must hold a free
+    /// and together after the batch returns. It is applied to the queue
+    /// whose head is oldest, as [`Self::consume_next`] picks it: fairness
+    /// across `(op, lora)` queues stays first come, first served, so a
+    /// younger queue's full batch waits behind an older queue's held one
+    /// rather than taking the free slot ahead of it. The caller must hold a free
     /// pipeline slot, report every batch it got from here back through
     /// [`Self::note_return`], and not mix this with the other consume
     /// calls while such a batch is out.
@@ -1462,6 +1466,52 @@ mod tests {
             sent.elapsed()
         );
         assert_eq!(third.batch.size(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_full_batch_on_a_younger_queue_does_not_overtake_an_older_held_one() {
+        // First come, first served across queues: while a batch is out, the
+        // older queue's partial batch is held, and the younger queue's full
+        // batch does not take the free slot ahead of it. If it did, the
+        // older requests would wait one more forward, for the younger ones.
+        let s = lane_scheduler(2);
+        let older = LoraKey::from_name("older");
+        let younger = LoraKey::from_name("younger");
+        s.submit(Op::Encode, LoraKey::base(), StubItem { cost: 1, idx: 0 }, 0)
+            .await;
+        let _ = dispatch_within(&s, 200).await.unwrap();
+
+        s.submit(Op::Encode, older.clone(), StubItem { cost: 1, idx: 0 }, 1)
+            .await;
+        tsleep(TDuration::from_millis(2)).await;
+        for id in [2, 3] {
+            s.submit(
+                Op::Encode,
+                younger.clone(),
+                StubItem { cost: 1, idx: 0 },
+                id,
+            )
+            .await;
+        }
+        assert!(
+            dispatch_within(&s, 30).await.is_none(),
+            "the younger queue is full, but it is not its turn",
+        );
+
+        s.note_return(1, Duration::ZERO);
+        let first = timeout(TDuration::from_millis(200), s.next_dispatch(true))
+            .await
+            .expect("the older queue goes when the lane is free");
+        assert_eq!(first.lora, older);
+        assert_eq!(first.batch.metadata, vec![1]);
+        // Now the younger queue's head is the oldest, and its full batch
+        // takes the second slot at once.
+        let second = timeout(TDuration::from_millis(200), s.next_dispatch(true))
+            .await
+            .expect("a full batch whose turn has come is not held");
+        assert_eq!(second.lora, younger);
+        assert_eq!(second.batch.metadata, vec![2, 3]);
+        assert_eq!(second.batch.flush_reason, FlushReason::CountCap);
     }
 
     #[test]
