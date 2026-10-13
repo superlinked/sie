@@ -6,7 +6,7 @@
       "npm": "@ai-sdk/openai-compatible",
       "name": "SIE cluster",
       "options": {
-        "baseURL": "https://sie.example.com/v1",
+        "baseURL": "{env:SIE_BASE_URL}/v1",
         "apiKey": "{env:SIE_API_KEY}",
         "timeout": 1800000,
         "headerTimeout": 600000,

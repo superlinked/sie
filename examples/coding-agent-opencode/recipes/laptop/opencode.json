@@ -14,15 +14,7 @@
       },
       "models": {
         "Qwen/Qwen3.5-4B:long-context": {
-          "name": "Qwen3.5-4B, 32K window (Apple Silicon or NVIDIA)",
-          "limit": {
-            "context": 32768,
-            "output": 4096
-          },
-          "tool_call": true
-        },
-        "Qwen/Qwen3-4B-Instruct-2507": {
-          "name": "Qwen3-4B-Instruct-2507, 32K window (NVIDIA)",
+          "name": "Qwen3.5-4B, 32K window",
           "limit": {
             "context": 32768,
             "output": 4096
