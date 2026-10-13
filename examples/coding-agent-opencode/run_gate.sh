@@ -69,7 +69,10 @@ RUN=$!
     sleep "$GATE_DEADLINE_SECONDS"
     touch "$OUT/deadline-passed"
     kill -TERM -- "-$RUN"
-    sleep 10
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 1
+        kill -0 -- "-$RUN" || exit 0
+    done
     kill -KILL -- "-$RUN"
 } >/dev/null 2>&1 &
 WATCHDOG=$!
@@ -79,7 +82,8 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 OPENCODE_STATUS=0
 wait "$RUN" || OPENCODE_STATUS=$?
-kill -- "-$WATCHDOG" 2>/dev/null || true
+[[ -e "$OUT/deadline-passed" ]] || kill -- "-$WATCHDOG" 2>/dev/null || true
+wait "$WATCHDOG" 2>/dev/null || true
 trap - EXIT INT TERM
 if [[ -e "$OUT/deadline-passed" ]]; then
     echo "GATE FAIL: opencode run passed its ${GATE_DEADLINE_SECONDS}s deadline and was stopped ($OUT)"

@@ -144,10 +144,13 @@ def test_the_build_agent_gets_the_step_budget(tmp_path: Path) -> None:
     assert json.loads(config) == {"agent": {"build": {"steps": 7}}}
 
 
-def test_a_run_past_its_deadline_is_stopped_and_fails(tmp_path: Path) -> None:
+@pytest.mark.parametrize("ignores_term", [False, True])
+def test_a_run_past_its_deadline_is_stopped_and_fails(tmp_path: Path, ignores_term: bool) -> None:
     child = tmp_path / "agent-child.pid"
+    prelude = "trap '' TERM\n" if ignores_term else ""
+    agent = f"{prelude}sleep 120 &\necho $! > {child}\nwait"
     started = time.monotonic()
-    code, lines = _gate(tmp_path, f"sleep 120 &\necho $! > {child}\nwait", {"GATE_DEADLINE_SECONDS": "2"})
+    code, lines = _gate(tmp_path, agent, {"GATE_DEADLINE_SECONDS": "2"})
     assert code == 1, lines
     assert lines[-1].startswith("GATE FAIL: opencode run passed its 2s deadline")
     assert time.monotonic() - started < 60
