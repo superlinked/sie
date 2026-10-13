@@ -23,4 +23,15 @@ profiles:
         input_format: qwen3
         score_mode: log_softmax
         default_instruction: "Given a web search query, retrieve relevant passages that answer the query"
+        # The layers' elementwise work as fused Triton kernels: the same scores,
+        # bit for bit, in less GPU time.
+        fused_kernels: true
+        # Rows that start with the same tokens (template, instruction and query)
+        # attend to one encoding of them: the 20 candidates of a question, or the
+        # messages a yes-or-no question is asked of, one request at a time. A
+        # prefix seen twice is kept across requests, in at most prefix_cache_mb.
+        prefix_reuse: true
+        prefix_cache_mb: 512
+        # A one-row request over a cached prefix replays as a CUDA graph.
+        cuda_graphs: bucketed
       runtime: {}

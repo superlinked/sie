@@ -6,12 +6,22 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 import numpy as np
 import torch
 
+from sie_server.adapters._cuda_graphs import memory_budget
 from sie_server.adapters._flash_base import FlashBaseAdapter
 from sie_server.adapters._flash_pack import build_position_ids
+from sie_server.adapters._modernbert_flash_graphs import PackedForward, VarlenGraphRunner, unsupported_reason
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters._utils import apply_rotary_pos_emb
+from sie_server.adapters.qwen2_flash import _fused_layers
+from sie_server.adapters.qwen2_flash_cross_encoder._prefix import (
+    PrefixCache,
+    PrefixEntry,
+    SharedForward,
+    plan_shared_forward,
+)
 from sie_server.core.inference_output import ScoreOutput
+from sie_server.core.oom import is_oom_error
 from sie_server.types.inputs import InvalidInputError, InvalidMediaError, Item
 
 if TYPE_CHECKING:
@@ -23,6 +33,45 @@ logger = logging.getLogger(__name__)
 
 _ERR_CUDA_REQUIRED = "Qwen2FlashCrossEncoder requires CUDA for Flash Attention."
 _ERR_UNSUPPORTED_MEDIA = "Qwen2FlashCrossEncoder accepts text-only query and document items"
+
+# Positions the graphs' rotary tables cover: a cached prefix and its tail must fit.
+_GRAPH_WINDOW = 4096
+# Tail tokens a graph may hold, at least and at most (the smallest bucket; half the rotary window).
+_MIN_GRAPH_TOKENS = 64
+_MAX_GRAPH_TOKENS = _GRAPH_WINDOW // 2
+# Cached prefixes that may hold graphs at once; the least recently used gives way.
+_MAX_PREFIX_GRAPHS = 8
+# Instructions and queries whose token ids and counts are remembered across requests.
+_MEMO_TEXTS = 512
+
+
+def default_graph_tokens(hidden_size: int) -> int:
+    """Tail tokens a graph over a cached prefix holds, by the model's width.
+
+    A graph pays off while the GPU waits on the host: below the size where
+    the forward's GPU time passes the time the host needs to launch its
+    kernels. On an L4 that is about 190 tokens for a 2,560-wide, 36-layer
+    model (Qwen3-Reranker-4B) and several hundred for a 1,024-wide one. Past
+    it, padding a forward to its bucket costs more than the graph saves. A
+    faster GPU moves the point up: ``cuda_graph_tokens`` overrides this.
+    """
+    return 512 if hidden_size <= 1024 else 128
+
+
+def _remember(memo: dict[Any, Any], key: Any, value: Any) -> None:
+    """Keep ``value`` in a memo of at most ``_MEMO_TEXTS`` entries, the oldest first out."""
+    memo[key] = value
+    while len(memo) > _MEMO_TEXTS:
+        memo.pop(next(iter(memo)), None)
+
+
+class _PrefixGraphRunner(VarlenGraphRunner):
+    """The runner of one cached prefix: together the prefixes' graphs hold what one model's graphs may."""
+
+    @staticmethod
+    def _memory_budget(device: torch.device) -> int:
+        return memory_budget(device) // _MAX_PREFIX_GRAPHS
+
 
 # ---------------------------------------------------------------------------
 # Input-format presets
@@ -62,6 +111,19 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
       raw logit-difference scoring.
     * ``qwen3`` — Qwen3-Reranker models, ``"yes"``/``"no"`` tokens,
       log-softmax probability scoring, ``<think>`` suffix.
+
+    Three load-time options, each off unless a profile turns it on:
+
+    * ``fused_kernels`` runs the layers' elementwise work as the embedding
+      sibling's Triton kernels (``qwen2_flash._fused_layers``), bit for bit
+      equal to the eager layers.
+    * ``prefix_reuse`` (``qwen3`` format) encodes the tokens before the
+      document once for the rows that share them, and keeps a repeated
+      prefix's keys and values across requests in a cache of at most
+      ``prefix_cache_mb`` (see ``_prefix``).
+    * ``cuda_graphs: bucketed`` replays a one-row forward over a cached prefix
+      as a CUDA graph, where the GPU otherwise waits on the host that launches
+      its kernels.
     """
 
     fallback_adapter_path: ClassVar[str | None] = "cross_encoder:CrossEncoderAdapter"
@@ -86,6 +148,9 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
             "_chat_suffix_ids",
             "_task_prompt_ids",
             "_sep_ids",
+            "_prefix_cache",
+            "_prefix_graphs",
+            "_rope_tables",
         ),
     )
 
@@ -102,6 +167,11 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
         input_format: InputFormat = "mxbai",
         score_mode: ScoreMode = "logit_diff",
         default_instruction: str | None = None,
+        fused_kernels: bool = False,
+        prefix_reuse: bool = False,
+        prefix_cache_mb: int = 512,
+        cuda_graphs: str | bool = "off",
+        cuda_graph_tokens: int | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the adapter.
@@ -120,9 +190,50 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
                 (probability via log-softmax then exp).
             default_instruction: Instruction text used by the ``qwen3``
                 template when no per-request instruction is supplied.
+            fused_kernels: If True, run each layer's residual add + RMSNorm,
+                q/k RMSNorm, rotary embedding and SiLU-gated MLP product as
+                single Triton kernels. Scores equal the eager layers'.
+            prefix_reuse: If True (``qwen3`` format), rows that start with the
+                same tokens (template, instruction and query) attend to one
+                encoding of them, and a prefix seen twice is kept across
+                requests. Scores move by floating-point rounding.
+            prefix_cache_mb: Device memory the cross-request prefix cache may
+                hold, in MiB; 0 shares a prefix inside a forward only.
+            cuda_graphs: "off" (the default) or "bucketed": whether a one-row
+                forward over a cached prefix replays as a CUDA graph (see
+                ``sie_server.adapters._modernbert_flash_graphs`` for the
+                runner). Needs ``prefix_reuse``. An operator setting, fixed
+                at load.
+            cuda_graph_tokens: The longest tail (document and closing tokens)
+                a graph holds, 64 to 2048; longer ones run eagerly. Defaults
+                by the model's width (``default_graph_tokens``), sized for an
+                L4; a faster GPU gains from more.
             **kwargs: Additional arguments (ignored).
+
+        Raises:
+            ValueError: If ``cuda_graphs`` is not "off" or "bucketed",
+                ``prefix_cache_mb`` is negative, or ``cuda_graph_tokens`` is
+                outside 64 to 2048.
         """
         _ = kwargs
+        if cuda_graphs is False:  # YAML reads an unquoted ``off`` as False
+            cuda_graphs = "off"
+        if cuda_graphs not in ("off", "bucketed"):
+            msg = f"Qwen2FlashCrossEncoder cuda_graphs must be 'off' or 'bucketed', got {cuda_graphs!r}"
+            raise ValueError(msg)
+        if isinstance(prefix_cache_mb, bool) or not isinstance(prefix_cache_mb, int) or prefix_cache_mb < 0:
+            msg = f"Qwen2FlashCrossEncoder prefix_cache_mb must be a non-negative integer, got {prefix_cache_mb!r}"
+            raise ValueError(msg)
+        if cuda_graph_tokens is not None and (
+            isinstance(cuda_graph_tokens, bool)
+            or not isinstance(cuda_graph_tokens, int)
+            or not _MIN_GRAPH_TOKENS <= cuda_graph_tokens <= _MAX_GRAPH_TOKENS
+        ):
+            msg = (
+                f"Qwen2FlashCrossEncoder cuda_graph_tokens must be an integer from {_MIN_GRAPH_TOKENS} to "
+                f"{_MAX_GRAPH_TOKENS}, got {cuda_graph_tokens!r}"
+            )
+            raise ValueError(msg)
         self._model_name_or_path = str(model_name_or_path)
         self._trust_remote_code = trust_remote_code
         self._max_seq_length = max_seq_length
@@ -135,6 +246,11 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
         self._input_format: InputFormat = input_format
         self._score_mode: ScoreMode = score_mode
         self._default_instruction: str | None = default_instruction
+        self._fused_kernels = fused_kernels
+        self._prefix_reuse = prefix_reuse
+        self._prefix_cache_mb = prefix_cache_mb
+        self._cuda_graphs: str = cuda_graphs
+        self._cuda_graph_tokens = cuda_graph_tokens
 
         # Loaded state
         self._model: Any = None
@@ -159,6 +275,18 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
         self._chat_suffix_ids: list[int] = []
         self._task_prompt_ids: list[int] = []
         self._sep_ids: list[int] = []
+
+        # Shared prefixes (set during load when ``prefix_reuse`` applies)
+        self._prefix_cache: PrefixCache | None = None
+        # One graph runner per cached prefix, dropped with it.
+        self._prefix_graphs: dict[int, tuple[PrefixEntry, VarlenGraphRunner]] | None = None
+        self._graph_tokens = 0
+        # With ``prefix_reuse``: the tokens of recent (instruction, query) prefixes
+        # and the token counts of recent caller texts, so a repeated question is
+        # not tokenized again on every request.
+        self._prefix_ids_memo: dict[tuple[str, str], list[int]] = {}
+        self._text_tokens_memo: dict[str, int] = {}
+        self._rope_tables: tuple[torch.Tensor, torch.Tensor] | None = None
 
     def load(self, device: str) -> None:
         """Load model weights onto the specified device."""
@@ -233,6 +361,7 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
 
         # Pre-tokenize templates based on input format
         self._pre_tokenize_templates()
+        self._resolve_serving_options(device)
 
         logger.info(
             "Loaded: hidden=%d, heads=%d, kv_heads=%d, layers=%d, yes_tok=%d ('%s'), no_tok=%d ('%s')",
@@ -253,6 +382,50 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
             self._model,
             self._max_seq_length,
         )
+
+    def _resolve_serving_options(self, device: str) -> None:
+        """Turn off the load-time options this model or device cannot run, and build what the others need."""
+        if self._fused_kernels and not _fused_layers.supported(self._model.model):
+            logger.warning(
+                "fused_kernels needs Triton and Qwen2/Qwen3 layers with a SiLU-gated MLP; "
+                "%s runs the eager layers instead",
+                self._model_name_or_path,
+            )
+            self._fused_kernels = False
+        if self._prefix_reuse and self._input_format != "qwen3":
+            logger.warning(
+                "prefix_reuse applies to the qwen3 input format; %s (%s) scores every row whole",
+                self._model_name_or_path,
+                self._input_format,
+            )
+            self._prefix_reuse = False
+        self._prefix_cache = None
+        self._prefix_graphs = None
+        self._rope_tables = None
+        self._prefix_ids_memo = {}
+        self._text_tokens_memo = {}
+        if not self._prefix_reuse:
+            if self._cuda_graphs != "off":
+                logger.warning(
+                    "cuda_graphs replays forwards over a cached prefix and needs prefix_reuse; %s runs eagerly",
+                    self._model_name_or_path,
+                )
+            return
+        if self._prefix_cache_mb:
+            self._prefix_cache = PrefixCache(self._prefix_cache_mb * 2**20)
+        if self._cuda_graphs == "off" or self._prefix_cache is None:
+            return
+        reason = unsupported_reason(device)
+        if reason is not None:
+            logger.warning(
+                "cuda_graphs=%s does not apply to %s, which runs eagerly: %s",
+                self._cuda_graphs,
+                self._model_name_or_path,
+                reason,
+            )
+            return
+        self._prefix_graphs = {}
+        self._graph_tokens = self._cuda_graph_tokens or default_graph_tokens(self._hidden_size)
 
     # ------------------------------------------------------------------
     # Template pre-tokenization
@@ -377,13 +550,26 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
         if not queries:
             return ScoreOutput(scores=np.empty(0, dtype=np.float32))
 
-        # Build input sequences with chat template
-        all_input_ids = []
+        # Build each row with the chat template, as the tokens before the
+        # document (qwen3 format) and the rest; the row is their concatenation.
+        rows: list[tuple[list[int], list[int]]] = []
         content_counts: list[int] | None = [] if self._input_format == "qwen3" else None
         caller_text_tokens: dict[str, int] = {}
-        for query_item, doc_item in zip(queries, docs, strict=True):
-            query_text = self._extract_text_only(query_item)
-            doc_text = self._extract_text_only(doc_item)
+        user_prefixes: dict[str, list[int]] = {}
+        texts = [
+            (self._extract_text_only(query_item), self._extract_text_only(doc_item))
+            for query_item, doc_item in zip(queries, docs, strict=True)
+        ]
+        # Every document in one batched call: the fast tokenizer encodes them in
+        # parallel and returns, per text, exactly the ids a call on it alone returns.
+        doc_ids_list: list[list[int] | None] = [None] * len(texts)
+        if content_counts is not None:
+            doc_ids_list = self._tokenizer(
+                [doc_text for _, doc_text in texts],
+                add_special_tokens=False,
+                return_attention_mask=False,
+            )["input_ids"]
+        for (query_text, doc_text), doc_ids in zip(texts, doc_ids_list, strict=True):
             if content_counts is None:
                 input_ids = self._build_input_ids(
                     query_text,
@@ -391,28 +577,46 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
                     max_length=max_length,
                     instruction=instruction,
                 )
+                rows.append(([], input_ids))
             else:
-                input_ids, document_tokens = self._build_qwen3_pair(
+                prefix_ids, tail_ids, document_tokens = self._split_qwen3_pair(
                     query_text,
                     doc_text,
                     max_length=max_length,
                     instruction=instruction,
+                    user_prefixes=user_prefixes,
+                    doc_ids=doc_ids,
                 )
                 caller_tokens = self._caller_text_tokens(query_text, caller_text_tokens)
                 if instruction:
                     caller_tokens += self._caller_text_tokens(instruction, caller_text_tokens)
-                content_counts.append(min(len(input_ids), caller_tokens + document_tokens))
-            all_input_ids.append(input_ids)
+                content_counts.append(min(len(prefix_ids) + len(tail_ids), caller_tokens + document_tokens))
+                rows.append((prefix_ids, tail_ids))
 
-        # Build packed representation
-        seq_lengths = [len(ids) for ids in all_input_ids]
+        seq_lengths = [len(prefix) + len(tail) for prefix, tail in rows]
+
+        with torch.inference_mode():
+            logits = self._forward_shared(rows) if self._prefix_reuse else None
+            if logits is None:
+                logits = self._forward_rows(rows, seq_lengths)
+            scores_tensor = self._compute_scores(logits)
+            scores_array = scores_tensor.cpu().numpy().astype(np.float32)
+
+        return ScoreOutput(
+            scores=scores_array,
+            input_token_counts=seq_lengths,
+            content_token_counts=content_counts,
+        )
+
+    def _forward_rows(self, rows: list[tuple[list[int], list[int]]], seq_lengths: list[int]) -> torch.Tensor:
+        """Score-token logits of whole rows, each its own sequence of one packed forward."""
         total_tokens = sum(seq_lengths)
         max_seqlen = max(seq_lengths)
-        batch_size = len(queries)
+        batch_size = len(rows)
 
         # Pack input_ids
         input_ids_packed = torch.tensor(
-            [tok for ids in all_input_ids for tok in ids],
+            [tok for prefix, tail in rows for ids in (prefix, tail) for tok in ids],
             dtype=torch.long,
             device=self._device,
         )
@@ -423,34 +627,26 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
             torch.tensor(seq_lengths, dtype=torch.int32, device=self._device),
             dim=0,
         )
-
-        with torch.inference_mode():
-            position_ids = self._build_position_ids(cu_seqlens, batch_size)
-
-            logits = self._forward_flash(
-                input_ids_packed,
-                cu_seqlens,
-                max_seqlen,
-                total_tokens,
-                batch_size,
-                position_ids,
-            )
-
-            scores_tensor = self._compute_scores(logits)
-            scores_array = scores_tensor.cpu().numpy().astype(np.float32)
-
-        return ScoreOutput(
-            scores=scores_array,
-            input_token_counts=seq_lengths,
-            content_token_counts=content_counts,
+        position_ids = self._build_position_ids(cu_seqlens, batch_size)
+        return self._forward_flash(
+            input_ids_packed,
+            cu_seqlens,
+            max_seqlen,
+            total_tokens,
+            batch_size,
+            position_ids,
         )
 
     def _caller_text_tokens(self, text: str, cache: dict[str, int]) -> int:
         """Token count of one caller-supplied string tokenized on its own."""
         count = cache.get(text)
         if count is None:
-            assert self._tokenizer is not None
-            count = len(self._tokenizer.encode(text, add_special_tokens=False))
+            count = self._text_tokens_memo.get(text) if self._prefix_reuse else None
+            if count is None:
+                assert self._tokenizer is not None
+                count = len(self._tokenizer.encode(text, add_special_tokens=False))
+                if self._prefix_reuse:
+                    _remember(self._text_tokens_memo, text, count)
             cache[text] = count
         return count
 
@@ -568,19 +764,52 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
         instruction: str | None = None,
     ) -> tuple[list[int], int]:
         """Return the Qwen3 pair's input IDs and its post-truncation document token count."""
+        prefix_ids, tail_ids, document_tokens = self._split_qwen3_pair(
+            query,
+            document,
+            max_length=max_length,
+            instruction=instruction,
+        )
+        return prefix_ids + tail_ids, document_tokens
+
+    def _split_qwen3_pair(
+        self,
+        query: str,
+        document: str,
+        *,
+        max_length: int | None = None,
+        instruction: str | None = None,
+        user_prefixes: dict[str, list[int]] | None = None,
+        doc_ids: list[int] | None = None,
+    ) -> tuple[list[int], list[int], int]:
+        """The Qwen3 pair as the tokens before its document and the rest, with the document's token count.
+
+        The row is ``prefix + tail``. The prefix (chat template, instruction
+        and query) is the same list for every pair of one query when the
+        caller passes ``user_prefixes``, a memo for one ``score_pairs`` call.
+        ``doc_ids`` are the document's token ids when the caller has them.
+        """
         assert self._tokenizer is not None
         effective_max_length = max_length or self._max_seq_length
-        inst = instruction or self._default_instruction or QWEN3_DEFAULT_INSTRUCTION
-
-        user_prefix = f"<Instruct>: {inst}\n<Query>: {query}\n<Document>: "
-        user_prefix_ids = self._tokenizer.encode(
-            user_prefix,
-            add_special_tokens=False,
-        )
-        doc_ids = self._tokenizer.encode(document, add_special_tokens=False)
+        prefix_ids = user_prefixes.get(query) if user_prefixes is not None else None
+        if prefix_ids is None:
+            inst = instruction or self._default_instruction or QWEN3_DEFAULT_INSTRUCTION
+            prefix_ids = self._prefix_ids_memo.get((inst, query)) if self._prefix_reuse else None
+            if prefix_ids is None:
+                user_prefix = f"<Instruct>: {inst}\n<Query>: {query}\n<Document>: "
+                prefix_ids = self._chat_prefix_ids + self._tokenizer.encode(
+                    user_prefix,
+                    add_special_tokens=False,
+                )
+                if self._prefix_reuse:
+                    _remember(self._prefix_ids_memo, (inst, query), prefix_ids)
+            if user_prefixes is not None:
+                user_prefixes[query] = prefix_ids
+        if doc_ids is None:
+            doc_ids = self._tokenizer.encode(document, add_special_tokens=False)
 
         # Truncate document if needed (keep instruction + query intact)
-        predefined_len = len(self._chat_prefix_ids) + len(user_prefix_ids) + len(self._chat_suffix_ids)
+        predefined_len = len(prefix_ids) + len(self._chat_suffix_ids)
         max_doc_len = effective_max_length - predefined_len
         if max_doc_len < 0:
             raise InvalidInputError(
@@ -592,7 +821,7 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
         elif len(doc_ids) > max_doc_len:
             doc_ids = doc_ids[:max_doc_len]
 
-        return self._chat_prefix_ids + user_prefix_ids + doc_ids + self._chat_suffix_ids, len(doc_ids)
+        return prefix_ids, doc_ids + self._chat_suffix_ids, len(doc_ids)
 
     def _extract_text_only(self, item: Item) -> str:
         if item.images or item.audio is not None or item.video is not None or item.document is not None:
@@ -664,22 +893,54 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
         Returns:
             Score-token logits ``[batch_size, 2]`` ordered as ``[no, yes]``.
         """
-        from flash_attn import flash_attn_varlen_func
-
         # Get embeddings (Qwen2 uses only token embeddings, RoPE applied in attention)
         hidden = self._model.model.embed_tokens(input_ids)
+        cos, sin = self._compute_rope(self._rotary_emb(), position_ids)
+        hidden = self._run_layers(hidden, cu_seqlens, max_seqlen, total_tokens, cos, sin)
+
+        # Final layer norm
+        hidden = self._model.model.norm(hidden)
+
+        # Extract last token hidden state for each sequence
+        last_indices = (cu_seqlens[1:] - 1).long()  # Last token of each sequence
+        last_hidden = hidden[last_indices]  # [batch_size, hidden_size]
+
+        return self._project_score_logits(last_hidden)
+
+    def _rotary_emb(self) -> Any:
+        """The model's rotary embedding (Qwen3 stores it at model level, Qwen2 per layer)."""
+        base = self._model.model
+        if hasattr(base, "rotary_emb"):
+            return base.rotary_emb
+        return base.layers[0].self_attn.rotary_emb
+
+    def _run_layers(
+        self,
+        hidden: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+        total_tokens: int,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        *,
+        attend: _fused_layers.AttendFn | None = None,
+    ) -> torch.Tensor:
+        """Run the decoder layers over the packed ``hidden``; the residual stream before the final norm.
+
+        With ``fused_kernels`` the elementwise work runs as the embedding
+        sibling's Triton kernels, bit for bit equal to the loop below. With
+        ``attend``, each layer's attention is that call (a shared-prefix
+        forward) in place of causal varlen flash attention over ``cu_seqlens``.
+        """
+        if self._fused_kernels:
+            return _fused_layers.run_layers(
+                self._model.model, hidden, cu_seqlens, max_seqlen, total_tokens, cos, sin, causal=True, attend=attend
+            )
 
         softmax_scale = 1.0 / (self._head_dim**0.5)
 
-        # Precompute RoPE (Qwen3 stores rotary_emb at model level, Qwen2 per-layer)
-        if hasattr(self._model.model, "rotary_emb"):
-            rotary_emb = self._model.model.rotary_emb
-        else:
-            rotary_emb = self._model.model.layers[0].self_attn.rotary_emb
-        cos, sin = self._compute_rope(rotary_emb, position_ids)
-
         # Run transformer layers
-        for layer in self._model.model.layers:
+        for index, layer in enumerate(self._model.model.layers):
             attn = layer.self_attn
 
             # Pre-norm (Qwen2 uses RMSNorm before attention)
@@ -704,18 +965,23 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
             # Apply RoPE
             query, key = apply_rotary_pos_emb(query, key, cos, sin)
 
-            # Flash attention with causal masking (decoder)
-            attn_out = flash_attn_varlen_func(
-                query,
-                key,
-                value,
-                cu_seqlens_q=cu_seqlens,
-                cu_seqlens_k=cu_seqlens,
-                max_seqlen_q=max_seqlen,
-                max_seqlen_k=max_seqlen,
-                causal=True,  # Causal for decoder
-                softmax_scale=softmax_scale,
-            )
+            if attend is None:
+                from flash_attn import flash_attn_varlen_func
+
+                # Flash attention with causal masking (decoder)
+                attn_out = flash_attn_varlen_func(
+                    query,
+                    key,
+                    value,
+                    cu_seqlens_q=cu_seqlens,
+                    cu_seqlens_k=cu_seqlens,
+                    max_seqlen_q=max_seqlen,
+                    max_seqlen_k=max_seqlen,
+                    causal=True,  # Causal for decoder
+                    softmax_scale=softmax_scale,
+                )
+            else:
+                attn_out = attend(index, query, key, value)
             attn_out = attn_out.reshape(total_tokens, self._num_heads * self._head_dim)
 
             # Output projection
@@ -733,14 +999,212 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
             # Residual connection
             hidden = hidden + mlp_out
 
-        # Final layer norm
-        hidden = self._model.model.norm(hidden)
+        return hidden
 
-        # Extract last token hidden state for each sequence
-        last_indices = (cu_seqlens[1:] - 1).long()  # Last token of each sequence
-        last_hidden = hidden[last_indices]  # [batch_size, hidden_size]
+    # ------------------------------------------------------------------
+    # Shared prefixes (see ``_prefix``)
+    # ------------------------------------------------------------------
 
-        return self._project_score_logits(last_hidden)
+    def _forward_shared(self, rows: list[tuple[list[int], list[int]]]) -> torch.Tensor | None:
+        """Score-token logits through a forward that shares prefixes; None when no row can share one."""
+        cache = self._prefix_cache
+        try:
+            plan = plan_shared_forward(rows, cache, self._prefix_token_bytes())
+            if plan is None:
+                return None
+            if len(rows) == 1 and len(plan.cached) == 1 and not plan.store:
+                logits = self._replay_cached(plan.cached[0], rows[0][1])
+                if logits is not None:
+                    return logits
+            return self._run_shared(plan)
+        except Exception as exc:
+            # Cached prefixes and their graphs hold device memory: release it
+            # so the caller's out-of-memory recovery has it to work with.
+            if is_oom_error(exc):
+                self._drop_prefixes()
+            raise
+
+    def _prefix_token_bytes(self) -> int:
+        """Device bytes one cached prefix token holds: its keys and values in every layer."""
+        dtype = self._dtype or self._resolve_dtype()
+        layers = len(self._model.model.layers)
+        return 2 * layers * self._num_kv_heads * self._head_dim * dtype.itemsize
+
+    def _drop_prefixes(self) -> None:
+        if self._prefix_cache is not None:
+            self._prefix_cache.clear()
+        if self._prefix_graphs is not None:
+            for _, runner in self._prefix_graphs.values():
+                runner.clear()
+            self._prefix_graphs.clear()
+
+    def _prefix_attention(self, cu_seqlens_q: torch.Tensor, cu_seqlens_k: torch.Tensor, max_q: int, max_k: int) -> Any:
+        """Causal varlen flash attention of tails over ``prefix + tail`` keys: ``(q, k, v) -> output``.
+
+        With more keys than queries in a sequence, flash-attn aligns the
+        causal mask to the bottom right: a tail token attends to the whole
+        prefix and to the tail up to itself.
+        """
+        from flash_attn import flash_attn_varlen_func
+
+        softmax_scale = 1.0 / (self._head_dim**0.5)
+
+        def attention(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
+            return flash_attn_varlen_func(
+                query,
+                key,
+                value,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=max_q,
+                max_seqlen_k=max_k,
+                causal=True,
+                softmax_scale=softmax_scale,
+            )
+
+        return attention
+
+    def _run_shared(self, plan: SharedForward) -> torch.Tensor:
+        """Run a shared-prefix forward eagerly; score-token logits ``[rows, 2]`` ordered as ``[no, yes]``."""
+        device = self._device
+        base = self._model.model
+        input_ids = torch.from_numpy(plan.input_ids).to(device)
+        positions = torch.from_numpy(plan.positions).to(device)
+        cu_seqlens_q = torch.from_numpy(plan.cu_seqlens_q).to(device)
+        cu_seqlens_k = torch.from_numpy(plan.cu_seqlens_k).to(device)
+        k_index = torch.from_numpy(plan.k_index).to(device) if plan.k_index is not None else None
+        total_tokens = len(plan.input_ids)
+
+        hidden = base.embed_tokens(input_ids)
+        cos, sin = self._compute_rope(self._rotary_emb(), positions)
+
+        # The prefixes this forward keeps: filled layer by layer, cached once whole.
+        def empty(tokens: int) -> torch.Tensor:
+            shape = (len(base.layers), tokens, self._num_kv_heads, self._head_dim)
+            return torch.empty(shape, dtype=hidden.dtype, device=device)
+
+        new = [
+            (key, start, end, PrefixEntry(keys=empty(end - start), values=empty(end - start)))
+            for key, start, end in plan.store
+        ]
+        cached = plan.cached
+        attention = self._prefix_attention(cu_seqlens_q, cu_seqlens_k, plan.max_seqlen_q, plan.max_seqlen_k)
+
+        def attend(index: int, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
+            for _, start, end, entry in new:
+                entry.keys[index].copy_(key[start:end])
+                entry.values[index].copy_(value[start:end])
+            if cached:
+                key = torch.cat([*(entry.keys[index] for entry in cached), key])
+                value = torch.cat([*(entry.values[index] for entry in cached), value])
+            if k_index is not None:
+                key = key.index_select(0, k_index)
+                value = value.index_select(0, k_index)
+            return attention(query, key, value)
+
+        hidden = self._run_layers(hidden, cu_seqlens_q, plan.max_seqlen_q, total_tokens, cos, sin, attend=attend)
+        last_hidden = hidden[torch.from_numpy(plan.last_index).to(device)]
+        logits = self._project_score_logits(base.norm(last_hidden))
+        if self._prefix_cache is not None and new:
+            for key, _, _, entry in new:
+                self._prefix_cache.put(key, entry)
+            self._drop_evicted_prefix_graphs()
+            logger.info(
+                "Kept %d repeated prefix(es) of %s for reuse across requests: %d cached, %d MB",
+                len(new),
+                self._model_name_or_path,
+                len(self._prefix_cache),
+                self._prefix_cache.held_bytes // 2**20,
+            )
+        return logits
+
+    # ------------------------------------------------------------------
+    # CUDA graphs over a cached prefix
+    # ------------------------------------------------------------------
+
+    def _replay_cached(self, entry: PrefixEntry, tail: list[int]) -> torch.Tensor | None:
+        """Score-token logits of one row over a cached prefix from a replayed CUDA graph; None to run it eagerly."""
+        graphs = self._prefix_graphs
+        if graphs is None or len(tail) > self._graph_tokens or entry.tokens + self._graph_tokens > _GRAPH_WINDOW:
+            return None
+        held = graphs.pop(id(entry), None)
+        if held is None:
+            self._drop_evicted_prefix_graphs()
+            while len(graphs) >= _MAX_PREFIX_GRAPHS:  # the least recently used gives way
+                graphs.pop(next(iter(graphs)))[1].clear()
+            held = (entry, self._prefix_graph_runner(entry))
+        graphs[id(entry)] = held  # the most recently used last
+
+        def head(packed: PackedForward) -> torch.Tensor:
+            last = (packed.cu_seqlens[1:] - 1).long()
+            return self._project_score_logits(packed.hidden[last])
+
+        runner = held[1]
+        recorded = runner.stats.recorded
+        logits = runner.run(tail, [len(tail)], head)
+        if runner.stats.recorded != recorded:
+            logger.info(
+                "CUDA graph for %d tail tokens over a cached prefix of %d recorded for %s: "
+                "%d graphs on this prefix, %d MB; %d prefixes hold graphs",
+                len(tail),
+                entry.tokens,
+                self._model_name_or_path,
+                runner.graph_count,
+                runner.held_bytes // 2**20,
+                len(graphs),
+            )
+        return logits
+
+    def _drop_evicted_prefix_graphs(self) -> None:
+        """Drop the graphs of prefixes the cache no longer holds, with the keys and values they read."""
+        graphs, cache = self._prefix_graphs, self._prefix_cache
+        if not graphs or cache is None:
+            return
+        live = cache.entry_ids()
+        for key in [key for key in graphs if key not in live]:
+            graphs.pop(key)[1].clear()
+
+    def _prefix_graph_runner(self, entry: PrefixEntry) -> VarlenGraphRunner:
+        """A runner whose graphs score one tail over ``entry``: the tail's forward up to the final norm.
+
+        The graph reads the cached keys and values in place, so it lives no
+        longer than the cache holds ``entry``. A graph has slots for several
+        sequences; this one is offered one row, which fills the first slot,
+        and the other slots stay empty.
+        """
+        base = self._model.model
+        if self._rope_tables is None:
+            self._rope_tables = self._compute_rope(self._rotary_emb(), torch.arange(_GRAPH_WINDOW, device=self._device))
+        cos_table, sin_table = self._rope_tables
+        prefix_tokens = entry.tokens
+
+        def encode(
+            input_ids: torch.Tensor, positions: torch.Tensor, cu_seqlens: torch.Tensor, max_seqlen: int, total: int
+        ) -> torch.Tensor:
+            hidden = base.embed_tokens(input_ids)
+            at = (positions + prefix_tokens).long()
+            # The row's keys follow the prefix's; the empty slots hold neither.
+            cu_seqlens_k = cu_seqlens + (cu_seqlens > 0).to(cu_seqlens.dtype) * prefix_tokens
+            attention = self._prefix_attention(cu_seqlens, cu_seqlens_k, max_seqlen, prefix_tokens + max_seqlen)
+
+            def attend(index: int, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
+                return attention(query, torch.cat([entry.keys[index], key]), torch.cat([entry.values[index], value]))
+
+            hidden = self._run_layers(
+                hidden, cu_seqlens, max_seqlen, total, cos_table[at], sin_table[at], attend=attend
+            )
+            return base.norm(hidden)
+
+        return _PrefixGraphRunner(
+            encode,
+            hidden_size=self._hidden_size,
+            dtype=self._dtype or self._resolve_dtype(),
+            device=self._device or "cuda",
+            window=self._graph_tokens,
+            pad_token_id=getattr(self._tokenizer, "pad_token_id", None) or 0,
+            max_tokens=self._graph_tokens,
+            name=self._model_name_or_path,
+        )
 
     def _resolve_dtype(self) -> torch.dtype:
         """Resolve compute dtype."""
