@@ -16,6 +16,9 @@ class _CharTokenizer:
         _ = add_special_tokens
         return list(range(len(text)))
 
+    def __call__(self, texts: list[str], **_kwargs: object) -> dict[str, list[list[int]]]:
+        return {"input_ids": [self.encode(text) for text in texts]}
+
 
 def test_qwen3_chat_prefix_matches_checkpoint_template() -> None:
     assert QWEN3_CHAT_PREFIX == (

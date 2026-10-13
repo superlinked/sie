@@ -6,13 +6,23 @@ tensor, the rotary embedding as one in-place kernel per tensor and the MLP's
 ``silu(gate) * up`` as one kernel (see ``_fused_ops``). The kernels round where
 the eager ops round, so the result matches the eager layers bit for bit; the
 projections and attention are the same calls.
+
+A caller may supply the attention step (``attend``). The causal rerankers use it
+to let rows that share a prefix attend to one copy of that prefix's keys and
+values (``qwen2_flash_cross_encoder``); the embedding adapter does not.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import torch
+
+# The attention step of one layer: (layer index, queries, keys, values), each
+# ``[tokens, heads, head_dim]`` with q/k-norm and the rotary embedding applied,
+# to the attention output ``[tokens, num_heads, head_dim]``.
+AttendFn = Callable[[int, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
 
 
 def supported(model: Any) -> bool:
@@ -55,8 +65,14 @@ def run_layers(
     sin: torch.Tensor,
     *,
     causal: bool,
+    attend: AttendFn | None = None,
 ) -> torch.Tensor:
-    """Run ``model``'s decoder layers over the packed ``hidden``; returns the residual stream before the final norm."""
+    """Run ``model``'s decoder layers over the packed ``hidden``; returns the residual stream before the final norm.
+
+    With ``attend``, each layer's attention is that call in place of varlen
+    flash attention over ``cu_seqlens``; ``cu_seqlens``, ``max_seqlen`` and
+    ``causal`` are then the caller's to apply.
+    """
     from flash_attn import flash_attn_varlen_func
 
     from sie_server.adapters.qwen2_flash._fused_ops import rms_norm, rotary_, silu_mul
@@ -69,7 +85,7 @@ def run_layers(
     cos, sin = cos.contiguous(), sin.contiguous()
 
     residual: torch.Tensor | None = None
-    for layer in model.layers:
+    for index, layer in enumerate(model.layers):
         attn = layer.self_attn
         norm = layer.input_layernorm
         normed, residual = rms_norm(hidden, norm.weight, norm.variance_epsilon, residual)
@@ -82,17 +98,21 @@ def run_layers(
             key, _ = rms_norm(key, attn.k_norm.weight, attn.k_norm.variance_epsilon)
         query = rotary_(query.contiguous(), cos, sin)
         key = rotary_(key.contiguous(), cos, sin)
-        attn_out = flash_attn_varlen_func(
-            query,
-            key,
-            value,
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_k=cu_seqlens,
-            max_seqlen_q=max_seqlen,
-            max_seqlen_k=max_seqlen,
-            causal=causal,
-            softmax_scale=softmax_scale,
-        ).reshape(total_tokens, num_heads * head_dim)
+        if attend is None:
+            attn_out = flash_attn_varlen_func(
+                query,
+                key,
+                value,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seqlen,
+                max_seqlen_k=max_seqlen,
+                causal=causal,
+                softmax_scale=softmax_scale,
+            )
+        else:
+            attn_out = attend(index, query, key, value)
+        attn_out = attn_out.reshape(total_tokens, num_heads * head_dim)
         norm = layer.post_attention_layernorm
         normed, residual = rms_norm(attn.o_proj(attn_out), norm.weight, norm.variance_epsilon, residual)
         mlp = layer.mlp
