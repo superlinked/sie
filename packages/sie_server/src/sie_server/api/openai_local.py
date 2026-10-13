@@ -172,8 +172,9 @@ _CUDA_CHAT_FIELDS = frozenset(
 )
 
 # mlx_lm's public chat request fields, excluding child process controls such as
-# model adapters and speculative-decoding configuration. Validate this boundary
-# before a potentially expensive MLX model download.
+# model adapters and speculative-decoding configuration, plus the tool-choice
+# fields this route resolves itself because mlx_lm reads neither. Validate this
+# boundary before a potentially expensive MLX model download.
 _MLX_CHAT_FIELDS = frozenset(
     {
         "model",
@@ -195,6 +196,8 @@ _MLX_CHAT_FIELDS = frozenset(
         "stream",
         "stream_options",
         "tools",
+        "tool_choice",
+        "parallel_tool_calls",
         "role_mapping",
     }
 )
@@ -590,6 +593,19 @@ def _validate_mlx_chat_body(body: dict[str, Any]) -> None:
         raise _bad_request(f"field '{unknown}' is not supported", param=unknown, code="unsupported_field")
 
     _validate_common_chat_body(body)
+    choice = body.get("tool_choice")
+    if choice is not None and choice not in ("auto", "none"):
+        raise _bad_request(
+            "'tool_choice' must be 'auto' or 'none' on the MLX backend, which cannot force a tool call",
+            param="tool_choice",
+            code="unsupported_field",
+        )
+    if body.get("parallel_tool_calls") is False:
+        raise _bad_request(
+            "'parallel_tool_calls' cannot be false on the MLX backend, which cannot limit a turn to one tool call",
+            param="parallel_tool_calls",
+            code="unsupported_field",
+        )
 
     min_p = body.get("min_p")
     if min_p is not None and (isinstance(min_p, bool) or not isinstance(min_p, int | float) or not 0 <= min_p <= 1):
@@ -905,6 +921,9 @@ def _prepare_mlx_body(
     proxied["max_tokens"] = requested_cap if requested_cap is not None else cap
     # mlx_lm versions used by the Mac bundle consume the legacy field.
     proxied.pop("max_completion_tokens", None)
+    proxied.pop("parallel_tool_calls", None)
+    if proxied.pop("tool_choice", None) == "none":
+        proxied.pop("tools", None)
     if seed is not None:
         proxied["seed"] = seed
 

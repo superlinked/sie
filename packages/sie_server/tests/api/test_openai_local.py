@@ -422,6 +422,134 @@ def test_mlx_chat_rejects_child_process_controls_before_model_load(
     registry.get.assert_not_called()
 
 
+_WEATHER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+    },
+}
+
+
+@pytest.mark.parametrize(
+    "tool_fields",
+    [
+        {"tool_choice": "auto"},
+        {"tool_choice": "auto", "parallel_tool_calls": True},
+        {"parallel_tool_calls": True},
+    ],
+)
+def test_mlx_chat_accepts_auto_tool_choice_and_returns_every_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_fields: dict[str, Any],
+) -> None:
+    seen: dict[str, Any] = {}
+    calls = [
+        {"id": "call_paris", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'}},
+        {"id": "call_tokyo", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Tokyo"}'}},
+    ]
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json=_chat_completion(None, finish_reason="tool_calls", tool_calls=calls))
+
+    client, _ = _mlx_chat_client(monkeypatch, _handler, chat_template_kwargs={"enable_thinking": False})
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3.5-4B",
+            "messages": [{"role": "user", "content": "Weather in Paris and Tokyo?"}],
+            "tools": [_WEATHER_TOOL],
+            **tool_fields,
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen["body"]["tools"] == [_WEATHER_TOOL]
+    assert "tool_choice" not in seen["body"]
+    assert "parallel_tool_calls" not in seen["body"]
+    completion = ChatCompletion.model_validate(response.json())
+    assert completion.choices[0].finish_reason == "tool_calls"
+    assert [call.id for call in completion.choices[0].message.tool_calls or []] == ["call_paris", "call_tokyo"]
+
+
+def test_mlx_chat_tool_choice_none_withholds_tools_from_the_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json=_chat_completion("It is sunny."))
+
+    client, _ = _mlx_chat_client(monkeypatch, _handler, chat_template_kwargs={"enable_thinking": False})
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3.5-4B",
+            "messages": [{"role": "user", "content": "Weather in Paris?"}],
+            "tools": [_WEATHER_TOOL],
+            "tool_choice": "none",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "tools" not in seen["body"]
+    assert "tool_choice" not in seen["body"]
+    assert response.json()["choices"][0]["message"]["content"] == "It is sunny."
+
+
+@pytest.mark.parametrize(
+    ("tool_fields", "param", "message"),
+    [
+        (
+            {"tool_choice": "required"},
+            "tool_choice",
+            "'tool_choice' must be 'auto' or 'none' on the MLX backend, which cannot force a tool call",
+        ),
+        (
+            {"tool_choice": {"type": "function", "function": {"name": "get_weather"}}},
+            "tool_choice",
+            "'tool_choice' must be 'auto' or 'none' on the MLX backend, which cannot force a tool call",
+        ),
+        (
+            {"tool_choice": "auto", "parallel_tool_calls": False},
+            "parallel_tool_calls",
+            "'parallel_tool_calls' cannot be false on the MLX backend, which cannot limit a turn to one tool call",
+        ),
+    ],
+)
+def test_mlx_chat_refuses_tool_controls_it_cannot_enforce_before_model_load(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_fields: dict[str, Any],
+    param: str,
+    message: str,
+) -> None:
+    client, registry = _mlx_chat_client(
+        monkeypatch,
+        lambda _request: pytest.fail("refused request must not reach upstream"),
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3.5-4B",
+            "messages": [{"role": "user", "content": "Weather in Paris?"}],
+            "tools": [_WEATHER_TOOL],
+            **tool_fields,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == {
+        "code": "unsupported_field",
+        "message": message,
+        "param": param,
+        "type": "invalid_request_error",
+    }
+    registry.is_loaded.assert_not_called()
+    registry.get.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("chat_template_kwargs", "code"),
     [
