@@ -1,0 +1,23 @@
+sie_id: Qwen/Qwen3-ASR-1.7B-hf
+hf_id: Qwen/Qwen3-ASR-1.7B-hf
+hf_revision: bcd2b5b7f32b480ab5790554cfa8347f246a14f3
+inputs:
+  text: false
+  image: false
+  audio: true
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 65536
+profiles:
+  default:
+    max_batch_tokens: 720000
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.qwen3_asr.adapter:Qwen3ASRAdapter
+    adapter_options:
+      loadtime:
+        max_new_tokens: 512
+        inference_batch_size: 4
+      runtime: {}
