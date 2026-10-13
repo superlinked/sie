@@ -37,8 +37,8 @@ tasks:
     # <tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value></tool_call>,
     # which the worker's glm_xml parser reads on the queued route and the
     # engine's glm47 parser on the direct route. Grammar stays unclaimed: the
-    # engine applies a grammar from the first generated token, which is inside
-    # the open thinking block.
+    # engine holds a grammar back until the thinking block closes, and
+    # structured output has not been measured on this route.
     capabilities:
       grammar: []
       streaming: true
