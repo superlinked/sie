@@ -2,14 +2,17 @@
 """Agent-loop conformance check for an OpenAI-compatible chat endpoint.
 
     uv sync
-    uv run python conformance.py --model Qwen/Qwen3.5-4B                       # local sie-server
+    uv run python conformance.py --model Qwen/Qwen3.5-4B:long-context          # local sie-server
     SIE_API_KEY=... uv run python conformance.py \
-        --base-url https://api.superlinked.com/v1 --model zai-org/GLM-5.3-Flash:relay
+        --base-url "$SIE_BASE_URL/v1" --model zai-org/GLM-5.3-Flash:relay
 
 Drives ``/v1/chat/completions`` the way a coding agent such as OpenCode does:
 streaming on, tools declared on every turn, tool results sent back as
-``role: tool`` messages. Every case records what came back, so a failure
-says what the wire did rather than only that it was wrong.
+``role: tool`` messages. When the endpoint accepts ``include_reasoning``, every
+tools turn carries it and the earlier turn's reasoning goes back as
+``reasoning_content``, as OpenCode sends it with the SIE Cloud recipe. Every
+case records what came back, so a failure says what the wire did rather than
+only that it was wrong.
 
 The check goes through the ``openai`` package on purpose. The thing under test
 is the OpenAI-compatible wire surface that OpenCode's provider speaks, so the
@@ -36,9 +39,16 @@ DEFAULT_REPORT = Path("run-output/conformance.json")
 REQUEST_TIMEOUT_S = 900.0
 WARM_UP_TIMEOUT_S = 900.0
 WARM_UP_POLL_S = 5.0
+RETRY_BUDGET_S = 300.0
+RETRY_AFTER_DEFAULT_S = 5.0
+RETRY_AFTER_MAX_S = 60.0
+GENERATION_BUDGET = 4096
+HIDDEN_TOKEN_SLACK = 16
 LONG_PROMPT_MIN_TOKENS = 65_536
-LONG_PROMPT_WORDS = 60_000
+LONG_PROMPT_WORDS = 68_000
 NEEDLE = "The access code is 7741-ZEBRA."
+RECORDED_HEADERS = ("x-sie-served-by", "x-sie-model-revision")
+REASONING_QUESTION = "Which is larger, 9.11 or 9.9? Answer with just the larger number."
 
 WEATHER_TOOL = {
     "type": "function",
@@ -121,6 +131,7 @@ class StreamResult:
     chunks: int = 0
     headers: dict[str, str] = field(default_factory=dict)
     error: dict[str, Any] | None = None
+    retries: list[dict[str, Any]] = field(default_factory=list)
     seconds: float = 0.0
 
     def calls(self) -> list[ToolCall]:
@@ -148,8 +159,16 @@ class StreamResult:
             "usage_on_last_chunk": self.usage_on_last_chunk,
             "seconds": round(self.seconds, 2),
             "error": self.error,
+            "retries": self.retries,
             "headers": self.headers,
         }
+
+    def hidden_output_tokens(self) -> int | None:
+        completion = (self.usage or {}).get("completion_tokens")
+        if not isinstance(completion, int):
+            return None
+        visible = len(self.content) + len(self.reasoning) + sum(len(call.arguments) for call in self.calls())
+        return completion - visible
 
 
 @dataclass
@@ -168,32 +187,60 @@ def _extra(obj: Any, key: str) -> Any:
     return extra.get(key) if isinstance(extra, dict) else None
 
 
-def _error_payload(exc: openai.APIStatusError) -> dict[str, Any]:
-    body = exc.body if isinstance(exc.body, dict) else {}
+def _error_payload(exc: Exception) -> dict[str, Any]:
+    body = getattr(exc, "body", None)
+    body = body if isinstance(body, dict) else {}
     inner = body.get("error") if isinstance(body.get("error"), dict) else body
     return {
-        "status": exc.status_code,
-        "code": inner.get("code"),
+        "status": exc.status_code if isinstance(exc, openai.APIStatusError) else None,
+        "code": inner.get("code") or (None if isinstance(exc, openai.APIStatusError) else type(exc).__name__),
+        "param": inner.get("param"),
         "message": inner.get("message") or str(exc),
     }
+
+
+def _retry_wait(exc: openai.APIStatusError) -> float | None:
+    busy = exc.status_code == 429 or (exc.status_code == 503 and _error_payload(exc)["code"] != "MODEL_LOADING")
+    if not busy:
+        return None
+    try:
+        wait = float(exc.response.headers.get("retry-after", RETRY_AFTER_DEFAULT_S))
+    except ValueError:
+        wait = RETRY_AFTER_DEFAULT_S
+    return min(max(wait, 0.0), RETRY_AFTER_MAX_S)
+
+
+def _create(client: openai.OpenAI, result: StreamResult, **kwargs: Any) -> Any:
+    started = time.monotonic()
+    while True:
+        try:
+            return client.chat.completions.with_raw_response.create(**kwargs)
+        except openai.APIStatusError as exc:
+            wait = _retry_wait(exc)
+            if wait is None or time.monotonic() - started + wait > RETRY_BUDGET_S:
+                raise
+            result.retries.append({**_error_payload(exc), "waited_s": wait})
+            time.sleep(wait)
+
+
+def _keep_headers(result: StreamResult, raw: Any) -> None:
+    result.headers = {name: raw.headers[name] for name in RECORDED_HEADERS if name in raw.headers}
 
 
 def stream_chat(client: openai.OpenAI, model: str, messages: list[dict[str, Any]], **params: Any) -> StreamResult:
     result = StreamResult()
     started = time.monotonic()
     try:
-        raw = client.chat.completions.with_raw_response.create(
+        raw = _create(
+            client,
+            result,
             model=model,
             messages=messages,
             stream=True,
             stream_options={"include_usage": True},
             **params,
         )
-        result.headers = {
-            name: raw.headers[name]
-            for name in ("x-sie-served-by", "x-sie-upstream", "x-sie-model-revision")
-            if name in raw.headers
-        }
+        _keep_headers(result, raw)
         for chunk in raw.parse():
             result.chunks += 1
             result.usage_on_last_chunk = False
@@ -226,10 +273,31 @@ def stream_chat(client: openai.OpenAI, model: str, messages: list[dict[str, Any]
                         call.name = piece.function.name
                     if piece.function and piece.function.arguments:
                         call.arguments += piece.function.arguments
-    except openai.APIStatusError as exc:
+    except (openai.APIError, httpx.HTTPError) as exc:
         result.error = _error_payload(exc)
-    except (openai.APIConnectionError, openai.APITimeoutError) as exc:
-        result.error = {"status": None, "code": type(exc).__name__, "message": str(exc)}
+    result.seconds = time.monotonic() - started
+    return result
+
+
+def complete_chat(client: openai.OpenAI, model: str, messages: list[dict[str, Any]], **params: Any) -> StreamResult:
+    result = StreamResult()
+    started = time.monotonic()
+    try:
+        raw = _create(client, result, model=model, messages=messages, **params)
+        _keep_headers(result, raw)
+        completion = raw.parse()
+        if completion.usage is not None:
+            result.usage = completion.usage.model_dump(exclude_none=True)
+        for choice in completion.choices or []:
+            if choice.index != 0:
+                continue
+            result.finish_reason = choice.finish_reason
+            result.content = choice.message.content or ""
+            reasoning = _extra(choice.message, "reasoning_content")
+            if isinstance(reasoning, str):
+                result.reasoning = reasoning
+    except (openai.APIError, httpx.HTTPError) as exc:
+        result.error = _error_payload(exc)
     result.seconds = time.monotonic() - started
     return result
 
@@ -247,9 +315,12 @@ def _fail_on_error(name: str, result: StreamResult) -> Case | None:
     )
 
 
+def _is_refusal(error: dict[str, Any]) -> bool:
+    return error.get("status") in (400, 422)
+
+
 def _refuses_field(error: dict[str, Any], name: str) -> bool:
-    status = error.get("status")
-    return status is not None and 400 <= status < 500 and name in str(error.get("message") or "")
+    return _is_refusal(error) and (error.get("param") == name or name in str(error.get("message") or ""))
 
 
 def case_streaming_tool_call_deltas(
@@ -257,7 +328,9 @@ def case_streaming_tool_call_deltas(
 ) -> tuple[Case, StreamResult]:
     name = "streaming_tool_call_deltas"
     messages = [{"role": "user", "content": "What is the weather in Paris right now? Use the get_weather tool."}]
-    result = stream_chat(client, model, messages, tools=[WEATHER_TOOL], max_tokens=512, temperature=0, **tool_params)
+    result = stream_chat(
+        client, model, messages, tools=[WEATHER_TOOL], max_tokens=GENERATION_BUDGET, temperature=0, **tool_params
+    )
     failed = _fail_on_error(name, result)
     if failed:
         return failed, result
@@ -294,7 +367,9 @@ def case_parallel_tool_calls(client: openai.OpenAI, model: str, tool_params: dic
             "content": "Get the current weather in Paris and in Tokyo. Call get_weather once per city, both in this turn.",
         }
     ]
-    result = stream_chat(client, model, messages, tools=[WEATHER_TOOL], max_tokens=512, temperature=0, **tool_params)
+    result = stream_chat(
+        client, model, messages, tools=[WEATHER_TOOL], max_tokens=GENERATION_BUDGET, temperature=0, **tool_params
+    )
     failed = _fail_on_error(name, result)
     if failed:
         return failed
@@ -321,9 +396,9 @@ def case_tool_result_round_trip(
     calls = first.calls()
     if first.error or not calls:
         return Case(name, "fail", "no tool call from streaming_tool_call_deltas to send a result for", first.observed())
-    assistant = {
+    assistant: dict[str, Any] = {
         "role": "assistant",
-        "content": first.content or None,
+        "content": first.content,
         "tool_calls": [
             {
                 "id": call.id,
@@ -333,6 +408,8 @@ def case_tool_result_round_trip(
             for call in calls
         ],
     }
+    if first.reasoning or "extra_body" in tool_params:
+        assistant["reasoning_content"] = first.reasoning
     tool_messages = [
         {
             "role": "tool",
@@ -346,11 +423,14 @@ def case_tool_result_round_trip(
         assistant,
         *tool_messages,
     ]
-    result = stream_chat(client, model, messages, tools=[WEATHER_TOOL], max_tokens=256, temperature=0, **tool_params)
+    result = stream_chat(
+        client, model, messages, tools=[WEATHER_TOOL], max_tokens=GENERATION_BUDGET, temperature=0, **tool_params
+    )
     failed = _fail_on_error(name, result)
     if failed:
         return failed
     observed = result.observed()
+    observed["reasoning_content_sent_back"] = assistant.get("reasoning_content")
     problems = []
     if result.calls():
         problems.append(f"answered with another tool call: {_describe_calls(result)}")
@@ -372,7 +452,15 @@ def long_prompt() -> str:
     return "\n".join(lines)
 
 
-def case_prompt_above_64k_tokens(client: openai.OpenAI, model: str) -> Case:
+def declared_window(entry: dict[str, Any] | None) -> int | None:
+    for key in ("max_sequence_length", "context_length"):
+        value = (entry or {}).get(key)
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def case_prompt_above_64k_tokens(client: openai.OpenAI, model: str, entry: dict[str, Any] | None) -> Case:
     name = "prompt_above_64k_tokens"
     document = long_prompt()
     messages = [
@@ -381,10 +469,21 @@ def case_prompt_above_64k_tokens(client: openai.OpenAI, model: str) -> Case:
             "content": f"Read this warehouse log, then answer.\n\n{document}\n\nWhat is the access code? Reply with just the code.",
         }
     ]
-    result = stream_chat(client, model, messages, max_tokens=64, temperature=0)
+    result = stream_chat(client, model, messages, max_tokens=GENERATION_BUDGET, temperature=0)
     observed = result.observed()
     observed["prompt_chars"] = len(messages[0]["content"])
     observed["needle_found"] = "7741-ZEBRA" in result.content
+    window = declared_window(entry)
+    observed["declared_window"] = window
+    if window is not None and window < LONG_PROMPT_MIN_TOKENS:
+        error = result.error
+        if error is None:
+            prompt_tokens = (result.usage or {}).get("prompt_tokens")
+            detail = f"declared window {window} is under {LONG_PROMPT_MIN_TOKENS}, yet {prompt_tokens} prompt tokens were accepted"
+            return Case(name, "recorded", detail, observed)
+        if _is_refusal(error):
+            detail = f"declared window {window} is under {LONG_PROMPT_MIN_TOKENS}; refused: {error['status']} {error['code']}: {error['message']}"
+            return Case(name, "recorded", detail, observed)
     failed = _fail_on_error(name, result)
     if failed:
         failed.observed = observed
@@ -405,7 +504,7 @@ def case_prompt_above_64k_tokens(client: openai.OpenAI, model: str) -> Case:
 def case_finish_reason_stop(client: openai.OpenAI, model: str) -> tuple[Case, StreamResult]:
     name = "finish_reason_stop"
     messages = [{"role": "user", "content": "Reply with the single word: ready."}]
-    result = stream_chat(client, model, messages, max_tokens=64, temperature=0)
+    result = stream_chat(client, model, messages, max_tokens=GENERATION_BUDGET, temperature=0)
     failed = _fail_on_error(name, result)
     if failed:
         return failed, result
@@ -453,57 +552,88 @@ def case_usage_on_final_chunk(stop: StreamResult) -> Case:
     return Case(name, "pass", f"final chunk carries usage {usage}", observed)
 
 
-def case_include_reasoning(client: openai.OpenAI, model: str) -> Case:
+def _hid_reasoning(result: StreamResult) -> bool:
+    hidden = result.hidden_output_tokens()
+    return hidden is not None and hidden > HIDDEN_TOKEN_SLACK
+
+
+def case_include_reasoning(client: openai.OpenAI, model: str) -> tuple[Case, bool]:
     name = "include_reasoning"
-    messages = [{"role": "user", "content": "Which is larger, 9.11 or 9.9? Answer with just the larger number."}]
-    with_flag = stream_chat(
-        client, model, messages, max_tokens=2048, temperature=0, extra_body={"include_reasoning": True}
-    )
-    without_flag = stream_chat(client, model, messages, max_tokens=2048, temperature=0)
+    messages = [{"role": "user", "content": REASONING_QUESTION}]
+    flag = {"extra_body": {"include_reasoning": True}}
+    with_flag = stream_chat(client, model, messages, max_tokens=GENERATION_BUDGET, temperature=0, **flag)
+    without_flag = stream_chat(client, model, messages, max_tokens=GENERATION_BUDGET, temperature=0)
+    whole = complete_chat(client, model, messages, max_tokens=GENERATION_BUDGET, temperature=0, **flag)
+    contents = (with_flag.content, without_flag.content, whole.content)
     observed = {
         "with_include_reasoning": with_flag.observed(),
-        "without_include_reasoning": {
-            "reasoning_deltas": without_flag.reasoning_deltas,
-            "error": without_flag.error,
+        "without_include_reasoning": without_flag.observed(),
+        "non_streamed_with_include_reasoning": {
+            "finish_reason": whole.finish_reason,
+            "content": whole.content[:200],
+            "reasoning_chars": len(whole.reasoning),
+            "usage": whole.usage,
+            "error": whole.error,
+            "retries": whole.retries,
         },
-        "content_has_think_tags": "<think>" in with_flag.content or "</think>" in with_flag.content,
+        "content_has_think_tags": any("<think>" in text or "</think>" in text for text in contents),
     }
-    if with_flag.error:
-        error = with_flag.error
-        return Case(
-            name, "fail", f"include_reasoning refused: {error['status']} {error['code']}: {error['message']}", observed
-        )
-    if without_flag.error:
-        error = without_flag.error
-        return Case(
-            name, "fail", f"plain request failed: {error['status']} {error['code']}: {error['message']}", observed
-        )
+    accepted = with_flag.error is None
+    for label, result in (("include_reasoning", with_flag), ("plain request", without_flag)):
+        if result.error:
+            error = result.error
+            verdict = "refused" if label == "include_reasoning" else "failed"
+            detail = f"{label} {verdict}: {error['status']} {error['code']}: {error['message']}"
+            return Case(name, "fail", detail, observed), accepted
+    if whole.error:
+        error = whole.error
+        detail = f"non-streamed include_reasoning failed: {error['status']} {error['code']}: {error['message']}"
+        return Case(name, "fail", detail, observed), accepted
     if observed["content_has_think_tags"]:
-        return Case(name, "fail", "raw <think> tags leaked into content", observed)
+        return Case(name, "fail", "raw <think> tags leaked into content", observed), accepted
     if without_flag.reasoning_deltas:
-        return Case(
-            name,
-            "fail",
-            f"reasoning_content arrived without the flag ({without_flag.reasoning_deltas} deltas)",
-            observed,
-        )
-    if with_flag.reasoning_deltas:
-        detail = f"{with_flag.reasoning_deltas} reasoning_content deltas, {len(with_flag.reasoning)} chars; none without the flag"
-    else:
-        detail = "no reasoning_content deltas: the model declares no reasoning, or the field is not served here"
-    return Case(name, "pass", detail, observed)
+        detail = f"reasoning_content arrived without the flag ({without_flag.reasoning_deltas} deltas)"
+        return Case(name, "fail", detail, observed), accepted
+    reasoned = bool(with_flag.reasoning or whole.reasoning) or any(
+        _hid_reasoning(result) for result in (with_flag, without_flag, whole)
+    )
+    observed["model_reasoned"] = reasoned
+    if not reasoned:
+        completion = (without_flag.usage or {}).get("completion_tokens")
+        detail = f"the model did not reason here ({completion} completion tokens for {without_flag.content.strip()[:20]!r}); no reasoning to return"
+        return Case(name, "pass", detail, observed), accepted
+    problems = []
+    if not with_flag.reasoning:
+        problems.append("no delta.reasoning_content in the stream")
+    if not whole.reasoning:
+        problems.append("no message.reasoning_content in the non-streamed answer")
+    if problems:
+        hidden = max((r.hidden_output_tokens() or 0) for r in (with_flag, without_flag, whole))
+        detail = f"the model reasoned ({hidden} completion tokens beyond the visible text) but with include_reasoning: {'; '.join(problems)}"
+        return Case(name, "fail", detail, observed), accepted
+    detail = (
+        f"{with_flag.reasoning_deltas} reasoning_content deltas, {len(with_flag.reasoning)} chars; "
+        f"message.reasoning_content {len(whole.reasoning)} chars; none without the flag"
+    )
+    return Case(name, "pass", detail, observed), accepted
 
 
 def case_tool_choice_required(client: openai.OpenAI, model: str) -> Case:
     name = "tool_choice_required"
     messages = [{"role": "user", "content": "Say hello."}]
     result = stream_chat(
-        client, model, messages, tools=[WEATHER_TOOL], tool_choice="required", max_tokens=256, temperature=0
+        client,
+        model,
+        messages,
+        tools=[WEATHER_TOOL],
+        tool_choice="required",
+        max_tokens=GENERATION_BUDGET,
+        temperature=0,
     )
     observed = result.observed()
     if result.error:
         error = result.error
-        if error["status"] is not None and 400 <= error["status"] < 500:
+        if _is_refusal(error):
             observed["support"] = "refused"
             return Case(name, "recorded", f"refused: {error['status']} {error['code']}: {error['message']}", observed)
         return Case(name, "fail", f"request failed: {error['status']} {error['code']}: {error['message']}", observed)
@@ -523,7 +653,12 @@ def model_entry(base_url: str, api_key: str, model: str) -> dict[str, Any] | Non
         payload = response.json()
     except (httpx.HTTPError, ValueError):
         return None
-    entries = payload.get("models") or payload.get("data") or []
+    if isinstance(payload, dict):
+        entries = payload.get("models") or payload.get("data") or []
+    else:
+        entries = payload
+    if not isinstance(entries, list):
+        return None
     for entry in entries:
         if isinstance(entry, dict) and (entry.get("name") == model or entry.get("id") == model):
             return {
@@ -550,10 +685,14 @@ def wait_until_loaded(client: openai.OpenAI, model: str) -> dict[str, Any]:
 def run(base_url: str, api_key: str, model: str) -> dict[str, Any]:
     client = openai.OpenAI(base_url=base_url, api_key=api_key or "none", timeout=REQUEST_TIMEOUT_S, max_retries=0)
     started = datetime.now(UTC)
+    entry = model_entry(base_url, api_key, model)
     warm_up = wait_until_loaded(client, model)
     cases: list[Case] = []
 
+    reasoning_case, reasoning_accepted = case_include_reasoning(client, model)
     tool_params: dict[str, Any] = {"tool_choice": "auto"}
+    if reasoning_accepted:
+        tool_params["extra_body"] = {"include_reasoning": True}
     tool_case, tool_result = case_streaming_tool_call_deltas(client, model, tool_params)
     if tool_result.error and _refuses_field(tool_result.error, "tool_choice"):
         error = tool_result.error
@@ -562,32 +701,32 @@ def run(base_url: str, api_key: str, model: str) -> dict[str, Any]:
             f"refused: {error['status']} {error['code']}: {error['message']}"
         )
         cases.append(Case("tool_choice_auto", "fail", detail, tool_result.observed()))
-        tool_params = {}
+        tool_params.pop("tool_choice")
         tool_case, tool_result = case_streaming_tool_call_deltas(client, model, tool_params)
     elif tool_result.error:
         error = tool_result.error
-        detail = f"request failed: {error['status']} {error['code']}: {error['message']}"
-        cases.append(Case("tool_choice_auto", "fail", detail, tool_result.observed()))
+        detail = f"not judged, the tools turn failed: {error['status']} {error['code']}: {error['message']}"
+        cases.append(Case("tool_choice_auto", "recorded", detail, tool_result.observed()))
     else:
         observed = {"tool_choice": "auto", "finish_reason": tool_result.finish_reason}
         cases.append(Case("tool_choice_auto", "pass", "tool_choice=auto accepted on the tools turn", observed))
     cases.append(tool_case)
     cases.append(case_parallel_tool_calls(client, model, tool_params))
     cases.append(case_tool_result_round_trip(client, model, tool_result, tool_params))
-    cases.append(case_prompt_above_64k_tokens(client, model))
+    cases.append(case_prompt_above_64k_tokens(client, model, entry))
     stop_case, stop_result = case_finish_reason_stop(client, model)
     cases.append(stop_case)
     cases.append(case_finish_reason_tool_calls(tool_case))
     cases.append(case_finish_reason_length(client, model))
     cases.append(case_usage_on_final_chunk(stop_result))
-    cases.append(case_include_reasoning(client, model))
+    cases.append(reasoning_case)
     cases.append(case_tool_choice_required(client, model))
 
     counts = {status: sum(1 for case in cases if case.status == status) for status in ("pass", "fail", "recorded")}
     return {
         "base_url": base_url,
         "model": model,
-        "model_entry": model_entry(base_url, api_key, model),
+        "model_entry": entry,
         "started_at": started.isoformat(),
         "finished_at": datetime.now(UTC).isoformat(),
         "served_by": tool_result.headers.get("x-sie-served-by"),
