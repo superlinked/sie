@@ -106,29 +106,6 @@ A remote profile's `adapter_options.loadtime` takes `upstream` and
 `upstream_model`, both required, and an optional `max_seq_length`: the context
 window the upstream serves. Every other load-time option is refused.
 
-A generation model with local weights can declare a different window for its
-remote profile than for its local one, for example when the upstream serves a
-longer context than the local accelerators admit:
-
-```yaml
-profiles:
-  remote:
-    adapter_path: sie_server.adapters.remote.openai:OpenAIUpstreamAdapter
-    max_batch_tokens: 16384
-    max_output_tokens: 32768
-    adapter_options:
-      loadtime:
-        upstream: vendor
-        upstream_model: org/model
-        max_seq_length: 131072
-```
-
-A request that names the profile, `org/model:remote`, takes that window as its
-`context_length` and that cap as its `max_output_tokens`, and the usage the
-upstream reports is checked against them. The output cap must fit inside the
-window. A request for the bare name keeps the model's own `context_length` and
-`max_output_tokens`.
-
 From the repository root, start the server:
 
 ```bash
@@ -202,6 +179,31 @@ ranked order.
 The operator may add `set_params` and `strip_params` on the upstream. Reserved
 input and response-shaping fields, including `model`, cannot be overridden or
 stripped. Callers cannot pass additional upstream fields or credentials.
+
+## Context window of a remote profile
+
+A generation model with local weights can declare a different window for its
+remote profile than for its local one, for example when the upstream serves a
+longer context than the local accelerators admit:
+
+```yaml
+profiles:
+  remote:
+    adapter_path: sie_server.adapters.remote.openai:OpenAIUpstreamAdapter
+    max_batch_tokens: 16384
+    max_output_tokens: 32768
+    adapter_options:
+      loadtime:
+        upstream: vendor
+        upstream_model: org/model
+        max_seq_length: 131072
+```
+
+A request that names the profile, `org/model:remote`, takes that window as its
+`context_length` and that cap as its `max_output_tokens`, and the usage the
+upstream reports is checked against them. The output cap must fit inside the
+window. A request for the bare name keeps the model's own `context_length` and
+`max_output_tokens`.
 
 ## Controls and failure behavior
 
