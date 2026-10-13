@@ -12,7 +12,7 @@ from __future__ import annotations
 import functools
 import json
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -100,20 +100,12 @@ def _upstreams(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None
     install_upstreams({})
 
 
-def answer(adapter: OpenAIUpstreamAdapter, respond: Callable[[httpx.Request], httpx.Response]) -> list[httpx.Request]:
+def answer(adapter: OpenAIUpstreamAdapter, usages: list[dict[str, int]]) -> list[httpx.Request]:
     requests: list[httpx.Request] = []
 
-    def record(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return respond(request)
-
-    assert adapter._upstream is not None
-    adapter._async_client = upstream_client(adapter._upstream, transport=httpx.MockTransport(record))
-    return requests
-
-
-def upstream_answer(usage: dict[str, int]) -> Callable[[httpx.Request], httpx.Response]:
     def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        usage = usages[len(requests) - 1]
         if json.loads(request.content)["stream"]:
             frames = [
                 {"choices": [{"index": 0, "delta": {"role": "assistant", "content": "answer"}, "finish_reason": None}]},
@@ -134,7 +126,9 @@ def upstream_answer(usage: dict[str, int]) -> Callable[[httpx.Request], httpx.Re
             200, headers={"content-type": "application/json"}, stream=httpx.ByteStream(json.dumps(payload).encode())
         )
 
-    return respond
+    assert adapter._upstream is not None
+    adapter._async_client = upstream_client(adapter._upstream, transport=httpx.MockTransport(respond))
+    return requests
 
 
 def test_the_remote_variant_carries_the_window_its_profile_declares(tmp_path: Path) -> None:
@@ -195,68 +189,66 @@ def test_the_direct_route_bounds_upstream_usage_by_the_variant_window(direct: tu
     body = {"model": REMOTE, "messages": [{"role": "user", "content": "question"}], "max_tokens": 32768}
     if streaming:
         body.update(stream=True, stream_options={"include_usage": True})
+    usages = [IN_WINDOW, OVER_WINDOW, OVER_REMAINDER]
+    requests = answer(adapter, usages)
 
-    requests = answer(adapter, upstream_answer(IN_WINDOW))
-    response = client.post("/v1/chat/completions", json=body)
-    assert response.status_code == 200, response.text
-    assert response.headers["X-SIE-Served-By"] == "remote"
-    assert '"prompt_tokens":100000' in response.text.replace(" ", "")
-    assert '"error"' not in response.text
-    assert json.loads(requests[0].content)["max_tokens"] == 32768
+    served, *refused = [client.post("/v1/chat/completions", json=body) for _ in usages]
 
-    for usage in (OVER_WINDOW, OVER_REMAINDER):
-        answer(adapter, upstream_answer(usage))
-        response = client.post("/v1/chat/completions", json=body)
+    assert served.status_code == 200, served.text
+    assert served.headers["X-SIE-Served-By"] == "remote"
+    assert '"prompt_tokens":100000' in served.text.replace(" ", "")
+    assert '"error"' not in served.text
+    for response in refused:
         if streaming:
             assert response.status_code == 200
             assert '"code":"upstream_error"' in response.text
         else:
             assert response.status_code == 502, response.text
+    assert [json.loads(request.content)["max_tokens"] for request in requests] == [32768] * len(usages)
 
 
 async def test_the_queued_route_bounds_upstream_usage_by_the_variant_window(tmp_path: Path) -> None:
     registry = ModelRegistry(models_dir=write_models(tmp_path), device="cpu", enable_hot_reload=False)
-    try:
-        adapter = await registry.load_async(REMOTE, device="cpu")
-        assert isinstance(adapter, OpenAIUpstreamAdapter)
+    adapter = await registry.load_async(REMOTE, device="cpu")
+    assert isinstance(adapter, OpenAIUpstreamAdapter)
+    usages = [IN_WINDOW, OVER_WINDOW, OVER_REMAINDER]
+    requests = answer(adapter, usages * 2)
 
-        async def run(usage: dict[str, int], *, stream: bool) -> list[dict[str, Any]]:
-            requests = answer(adapter, upstream_answer(usage))
-            nc = AsyncMock()
-            proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
-            msg = AsyncMock()
-            msg.data = msgpack.packb(
-                {
-                    "request_id": "req-1",
-                    "work_item_id": "req-1.0",
-                    "item_index": 0,
-                    "total_items": 1,
-                    "operation": "generate",
-                    "model_id": REMOTE,
-                    "profile_id": "default",
-                    "pool_name": "default",
-                    "router_id": "router-1",
-                    "reply_subject": "_INBOX.router-1.req-1",
-                    "timestamp": time.time(),
-                    "generate": {
-                        "messages": [{"role": "user", "content": "question"}],
-                        "max_new_tokens": 32768,
-                        "stream": stream,
-                    },
+    async def run(*, stream: bool) -> dict[str, Any]:
+        nc = AsyncMock()
+        proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+        msg = AsyncMock()
+        msg.data = msgpack.packb(
+            {
+                "request_id": "req-1",
+                "work_item_id": "req-1.0",
+                "item_index": 0,
+                "total_items": 1,
+                "operation": "generate",
+                "model_id": REMOTE,
+                "profile_id": "default",
+                "pool_name": "default",
+                "router_id": "router-1",
+                "reply_subject": "_INBOX.router-1.req-1",
+                "timestamp": time.time(),
+                "generate": {
+                    "messages": [{"role": "user", "content": "question"}],
+                    "max_new_tokens": 32768,
+                    "stream": stream,
                 },
-                use_bin_type=True,
-            )
-            await proc.process(msg, REMOTE)
-            assert len(requests) == 1
-            assert json.loads(requests[0].content)["max_tokens"] == 32768
-            return [msgpack.unpackb(call.args[1], raw=False) for call in nc.publish.await_args_list]
+            },
+            use_bin_type=True,
+        )
+        await proc.process(msg, REMOTE)
+        return msgpack.unpackb(nc.publish.await_args_list[-1].args[1], raw=False)
 
-        for stream in (False, True):
-            chunks = await run(IN_WINDOW, stream=stream)
-            assert chunks[-1]["finish_reason"] == "stop", chunks[-1]
-            assert chunks[-1]["usage"]["prompt_tokens"] == 100_000
-            for usage in (OVER_WINDOW, OVER_REMAINDER):
-                chunks = await run(usage, stream=stream)
-                assert chunks[-1]["finish_reason"] == "error", chunks[-1]
+    try:
+        terminals = [await run(stream=stream) for stream in (False, True) for _ in usages]
     finally:
+        await adapter.aclose_client()
         await registry.unload_all_async()
+
+    assert [terminal["finish_reason"] for terminal in terminals] == ["stop", "error", "error"] * 2
+    assert [terminals[0]["usage"]["prompt_tokens"], terminals[3]["usage"]["prompt_tokens"]] == [100_000, 100_000]
+    assert [json.loads(request.content)["stream"] for request in requests] == [False] * 3 + [True] * 3
+    assert [json.loads(request.content)["max_tokens"] for request in requests] == [32768] * 6
