@@ -544,8 +544,56 @@ query/document pair. The cached score estimate never enters the IPC schema,
 never mutates or truncates inputs, and is not an authoritative token or billing
 count. Extract currently uses unit cost.
 
+The item cap (`SIE_BATCHER_MAX_BATCH_REQUESTS`, default 12) cuts a request of
+more items than the cap into batches that run one after another.
+`SIE_BATCHER_MAX_REQUEST_ITEMS` (default 0, off) keeps a request of up to that
+many items in one batch past the item cap; the cost cap and the per-item media
+caps still cut. It is off by default because whether one large batch beats
+several smaller ones is the adapter's property: one that pads a batch to its
+longest row can be slower on the whole request.
+
+### When a batch leaves
+
+An engine that runs one batch at a time is the scarce thing on its lane. A batch
+sent while another is still with it only waits at the engine's lock, with its
+membership frozen; the requests that come back a moment later start a batch of
+their own behind it, and two groups then take turns, each request waiting for
+the other group's forward. The drain loop therefore asks the model's lane
+([`scheduler/lane.rs`](../src/scheduler/lane.rs)) when the next batch leaves:
+
+1. **Idle lane: at once.** Nothing is with the engine and no batch has just
+   come back. The request leaves immediately with everything else pending. A
+   lone request, of one item or of several, never waits a window.
+2. **Busy lane: hold.** While a batch is with the engine, arrivals stay in the
+   queue, where later arrivals can join them. Two things take the second
+   pipeline slot (`SIE_RUST_PIPELINE_DEPTH`, default 2) instead: a batch that is
+   already full (item cap, cost cap, or one request over the cost cap), because
+   holding it cannot improve it, and the rest of a request whose first part is
+   with the engine, because its caller is waiting on that part.
+3. **On a return: gather once, then send everything pending.** The callers just
+   answered are the ones most likely to come straight back. The lane waits for
+   as many arrivals as the returned batch answered. It stops waiting when
+   nothing has arrived for the coalesce window (`SIE_BATCHER_COALESCE_MS`,
+   default 5), and in any case after half the returned batch's round trip or
+   the batch wait (`SIE_BATCHER_MAX_BATCH_WAIT_MS`), whichever is shorter.
+   `SIE_BATCHER_COALESCE_MS=0` turns the gather off. A batch that answered
+   nobody (the first part of a request the item cap cut) is followed by an
+   immediate send.
+4. **No gather where it does not pay.** The lane keeps a running score of
+   whether returns are followed by that many arrivals inside the window. A
+   closed loop of callers scores high. Arrivals at random times score low, and a
+   return is then followed by an immediate send of what is pending. The score
+   is updated either way, so the lane notices when callers start coming back.
+
+`SIE_BATCHER_IDLE_BYPASS_ENABLED=false` makes an idle lane wait for the classic
+triggers (caps, batch wait, coalesce window since the last arrival) instead of
+rule 1. `SIE_BATCHER_HOLD_WHILE_BUSY=false` restores the earlier loop for every
+lane: whatever is pending is sent into a free pipeline slot as soon as those
+triggers allow.
+
 A model whose descriptor reports `max_concurrent_dispatch` above 1 fronts an
-engine that batches continuously, such as SGLang serving an OCR model. A shared
+engine that batches continuously, such as SGLang serving an OCR model. Its lane
+keeps the earlier loop: there is no single forward to wait for. A shared
 `RunBatch` would only make each item wait for the slowest one, so the drain
 loop sends each of that model's extract items in a `RunBatch` of its own. The
 model's pipeline depth becomes the larger of `SIE_RUST_PIPELINE_DEPTH` and that
