@@ -167,8 +167,8 @@ class StreamResult:
         completion = (self.usage or {}).get("completion_tokens")
         if not isinstance(completion, int):
             return None
-        visible = len(self.content) + len(self.reasoning) + sum(len(call.arguments) for call in self.calls())
-        return completion - visible
+        texts = [self.content, self.reasoning, *(call.arguments for call in self.calls())]
+        return completion - sum(len(text.encode()) for text in texts)
 
 
 @dataclass
@@ -557,6 +557,11 @@ def _hid_reasoning(result: StreamResult) -> bool:
     return hidden is not None and hidden > HIDDEN_TOKEN_SLACK
 
 
+def _too_short_to_have_reasoned(result: StreamResult) -> bool:
+    completion = (result.usage or {}).get("completion_tokens")
+    return isinstance(completion, int) and completion <= HIDDEN_TOKEN_SLACK
+
+
 def case_include_reasoning(client: openai.OpenAI, model: str) -> tuple[Case, bool]:
     name = "include_reasoning"
     messages = [{"role": "user", "content": REASONING_QUESTION}]
@@ -594,9 +599,16 @@ def case_include_reasoning(client: openai.OpenAI, model: str) -> tuple[Case, boo
     if without_flag.reasoning_deltas:
         detail = f"reasoning_content arrived without the flag ({without_flag.reasoning_deltas} deltas)"
         return Case(name, "fail", detail, observed), accepted
-    reasoned = bool(with_flag.reasoning or whole.reasoning) or any(
-        _hid_reasoning(result) for result in (with_flag, without_flag, whole)
-    )
+    results = (with_flag, without_flag, whole)
+    reasoned = bool(with_flag.reasoning or whole.reasoning) or any(_hid_reasoning(result) for result in results)
+    if not reasoned and not all(_too_short_to_have_reasoned(result) for result in results):
+        observed["model_reasoned"] = None
+        spent = [(result.usage or {}).get("completion_tokens") for result in results]
+        detail = (
+            f"no reasoning came back, and the visible text could account for the completion tokens {spent}, "
+            "so whether the model reasoned is unknown"
+        )
+        return Case(name, "recorded", detail, observed), accepted
     observed["model_reasoned"] = reasoned
     if not reasoned:
         completion = (without_flag.usage or {}).get("completion_tokens")
@@ -608,8 +620,8 @@ def case_include_reasoning(client: openai.OpenAI, model: str) -> tuple[Case, boo
     if not whole.reasoning:
         problems.append("no message.reasoning_content in the non-streamed answer")
     if problems:
-        hidden = max((r.hidden_output_tokens() or 0) for r in (with_flag, without_flag, whole))
-        detail = f"the model reasoned ({hidden} completion tokens beyond the visible text) but with include_reasoning: {'; '.join(problems)}"
+        hidden = max((r.hidden_output_tokens() or 0) for r in results)
+        detail = f"the model reasoned (at least {hidden} completion tokens beyond the visible text) but with include_reasoning: {'; '.join(problems)}"
         return Case(name, "fail", detail, observed), accepted
     detail = (
         f"{with_flag.reasoning_deltas} reasoning_content deltas, {len(with_flag.reasoning)} chars; "

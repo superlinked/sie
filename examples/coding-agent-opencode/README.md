@@ -217,7 +217,7 @@ the laptop and cluster recipes. The report's `tools_turn_params` says which.
 | `finish_reason_tool_calls` | the tool-call turn above ended with `tool_calls` |
 | `finish_reason_length` | `max_tokens: 8` on a long request ends with `length` |
 | `usage_on_final_chunk` | with `stream_options.include_usage`, the last chunk carries `prompt_tokens` and `completion_tokens` |
-| `include_reasoning` | the flag is accepted streamed and not streamed, no raw `<think>` tag leaks into content, and without the flag no `reasoning_content` arrives. When the model reasoned, the stream carries `delta.reasoning_content` and the non-streamed answer `message.reasoning_content`. A model reasoned when it returned reasoning, or when it spent more completion tokens than its visible text can account for |
+| `include_reasoning` | the flag is accepted streamed and not streamed, no raw `<think>` tag leaks into content, and without the flag no `reasoning_content` arrives. When the model reasoned, the stream carries `delta.reasoning_content` and the non-streamed answer `message.reasoning_content`. A model reasoned when it returned reasoning, or when its completion tokens exceed the UTF-8 bytes of its visible text by more than 16, since a byte-level tokenizer spends at most one token per byte. It did not reason when no answer took more than 16 completion tokens. Between the two, whether it reasoned is unknown and the case is recorded, not judged |
 | `tool_choice_required` | recorded as `supported` when a call is forced or `refused` on a 400 or 422, neither a failure; accepted-but-ignored fails, and so does any other error |
 
 Every request asks for up to 4,096 tokens, except the `length` case, so a
@@ -282,17 +282,18 @@ OpenCode config, OpenCode's JSON event lines left out:
 == before: the seeded tests
 FAILED tests/test_amounts.py::test_credit_in_parentheses_is_negative - decima...
 FAILED tests/test_amounts.py::test_total_nets_credits - decimal.InvalidOperat...
-2 failed, 1 passed in 0.02s
+2 failed, 1 passed in 0.01s
 == opencode run, recipe laptop, up to 50 steps and 1800 s
 == after: the seeded tests must be untouched
 == after: pytest in a fresh environment, pinned to the seeded config and tests
 ...                                                                      [100%]
-3 passed in 0.01s
-GATE PASS (.../run-output/gate-20261013T185200Z-6HIi7Z)
+3 passed in 0.00s
+GATE PASS (.../run-output/gate-20261013T191942Z-KiK1JL)
 ```
 
-OpenCode took 7 steps and 6 tool calls (`bash`, `read`, `edit`, `bash`,
-`edit`, `bash`), 16 seconds from its first event to its last.
+OpenCode took 5 steps and 4 tool calls (`bash`, `read`, `edit`, `bash`), 8
+seconds from its first event to its last. An earlier run on the same server
+took 7 steps and 6 tool calls.
 
 ### SIE Cloud, GLM-5.3-Flash via SIE Relay
 
@@ -338,7 +339,8 @@ What runs anywhere, and in this repository's CI, is the test suite:
   refused, silently ignored or rate-limited, usage missing, the long prompt
   refused, a smaller declared window, `<think>` tags leaking into content,
   reasoning arriving without the flag, a reasoning model whose server drops
-  the flag, reasoning missing from the non-streamed answer, `include_reasoning`
+  the flag, a long answer that leaves the reasoning question open, reasoning
+  missing from the non-streamed answer, `include_reasoning`
   or `tool_choice: "auto"` refused, busy refusals, an error event mid-stream,
   a `/v1/models` answered as a bare list, a model that thinks for thousands
   of tokens, and a model that answers `MODEL_LOADING` for its first requests.
@@ -347,8 +349,8 @@ What runs anywhere, and in this repository's CI, is the test suite:
   `opencode`: a real fix, no change, a failed `opencode run`, edited tests, an
   environment planted in the worked copy, a caller's `PYTEST_ADDOPTS` or
   `PYTEST_PLUGINS` that would deselect the failing tests, the step budget
-  handed to the build agent, a run that outlives its deadline, and two runs
-  started in the same second.
+  handed to the build agent, a run that outlives its deadline, with and
+  without a child that ignores TERM, and two runs started in the same second.
 
 ```sh
 uv run pytest

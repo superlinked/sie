@@ -22,6 +22,9 @@ KNOBS: dict[str, Any] = {}
 SEEN: dict[str, list[dict[str, Any]]] = {}
 
 REASONING = " ".join(["Compare the tenths first: 9.9 has nine tenths and 9.11 has one tenth."] * 5)
+LONG_ANSWER = (
+    "9.9 is the larger number, because its tenths digit, 9, is larger than the tenths digit of 9.11, which is 1."
+)
 
 
 def _words(text: str) -> int:
@@ -72,13 +75,14 @@ def _reply(body: dict[str, Any]) -> dict[str, Any]:
     if "9.11" in user_text:
         mode = KNOBS.get("reasoning", "yes")
         reasoning = REASONING if mode in ("yes", "ignored", "stream_only") else ""
+        answer = LONG_ANSWER if KNOBS.get("long_answer") else "9.9"
         if mode == "stream_only" and not body.get("stream"):
-            return {"content": "9.9", "finish": "stop", "hidden": reasoning}
+            return {"content": answer, "finish": "stop", "hidden": reasoning}
         if KNOBS.get("reasoning_without_flag") and not body.get("include_reasoning"):
-            return {"content": "9.9", "finish": "stop", "reasoning": "leaked"}
+            return {"content": answer, "finish": "stop", "reasoning": "leaked"}
         if not body.get("include_reasoning") or mode == "ignored":
-            return {"content": "9.9", "finish": "stop", "hidden": reasoning}
-        content = "<think>hmm</think>9.9" if KNOBS.get("leak_think") else "9.9"
+            return {"content": answer, "finish": "stop", "hidden": reasoning}
+        content = f"<think>hmm</think>{answer}" if KNOBS.get("leak_think") else answer
         return {"content": content, "finish": "stop", "reasoning": reasoning}
     return {"content": "ready", "finish": "stop"}
 
@@ -405,3 +409,11 @@ def test_reasoning_missing_from_the_non_streamed_message_fails(base_url: str) ->
     assert case["status"] == "fail"
     assert "no message.reasoning_content" in case["detail"]
     assert "in the stream" not in case["detail"]
+
+
+@pytest.mark.parametrize("reasoning", ["no", "ignored"])
+def test_a_long_answer_without_reasoning_is_recorded_not_judged(base_url: str, reasoning: str) -> None:
+    case = _run(base_url, reasoning=reasoning, long_answer=True)["include_reasoning"]
+    assert case["status"] == "recorded", case["detail"]
+    assert "whether the model reasoned is unknown" in case["detail"]
+    assert case["observed"]["model_reasoned"] is None
