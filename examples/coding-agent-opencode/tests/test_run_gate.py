@@ -7,10 +7,14 @@ the verdict. Each stand-in plays one kind of agent run.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
+
+import pytest
 
 EXAMPLE = Path(__file__).resolve().parents[1]
 
@@ -45,7 +49,7 @@ def _executable(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
-def _gate(tmp_path: Path, agent: str) -> tuple[int, list[str]]:
+def _gate(tmp_path: Path, agent: str, extra_env: dict[str, str] | None = None) -> tuple[int, list[str]]:
     root = tmp_path / "example"
     if not root.exists():
         root.mkdir()
@@ -58,6 +62,7 @@ def _gate(tmp_path: Path, agent: str) -> tuple[int, list[str]]:
     _executable(bin_dir / "opencode", agent)
     env = {key: value for key, value in os.environ.items() if key != "VIRTUAL_ENV"}
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env.update(extra_env or {})
     run = subprocess.run(
         ["bash", str(root / "run_gate.sh"), "laptop"], check=False, capture_output=True, text=True, env=env, timeout=600
     )
@@ -109,3 +114,49 @@ def test_an_environment_planted_in_the_worked_copy_is_not_used(tmp_path: Path) -
     assert code == 1
     assert lines[-1].startswith("GATE FAIL (")
     assert any("2 failed" in line for line in lines)
+
+
+@pytest.mark.parametrize("variable", ["PYTEST_ADDOPTS", "PYTEST_PLUGINS"])
+def test_the_callers_pytest_environment_cannot_deselect_the_seeded_tests(tmp_path: Path, variable: str) -> None:
+    plugins = tmp_path / "plugins"
+    plugins.mkdir()
+    (plugins / "gate_deselect.py").write_text(
+        "def pytest_collection_modifyitems(config, items):\n"
+        "    items[:] = [item for item in items if 'credit' not in item.name]\n"
+    )
+    caller = {
+        "PYTEST_ADDOPTS": {"PYTEST_ADDOPTS": "-k 'not credit'"},
+        "PYTEST_PLUGINS": {"PYTEST_PLUGINS": "gate_deselect", "PYTHONPATH": str(plugins)},
+    }[variable]
+    code, lines = _gate(tmp_path, NO_CHANGE, caller)
+    assert code == 1, lines
+    assert lines[-1].startswith("GATE FAIL (")
+    assert any("2 failed" in line for line in lines)
+
+
+def test_the_build_agent_gets_the_step_budget(tmp_path: Path) -> None:
+    record = tmp_path / "opencode-call.txt"
+    agent = f'printf \'%s\\n\' "$@" "$OPENCODE_CONFIG_CONTENT" > {record}\n{FIX}'
+    code, lines = _gate(tmp_path, agent, {"GATE_STEPS": "7"})
+    assert code == 0, lines
+    *args, config = record.read_text().splitlines()
+    assert args[args.index("--agent") + 1] == "build"
+    assert json.loads(config) == {"agent": {"build": {"steps": 7}}}
+
+
+def test_a_run_past_its_deadline_is_stopped_and_fails(tmp_path: Path) -> None:
+    child = tmp_path / "agent-child.pid"
+    started = time.monotonic()
+    code, lines = _gate(tmp_path, f"sleep 120 &\necho $! > {child}\nwait", {"GATE_DEADLINE_SECONDS": "2"})
+    assert code == 1, lines
+    assert lines[-1].startswith("GATE FAIL: opencode run passed its 2s deadline")
+    assert time.monotonic() - started < 60
+    pid = int(child.read_text())
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail(f"the agent's child process {pid} outlived the deadline")
