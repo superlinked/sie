@@ -51,10 +51,12 @@ move by floating-point rounding, as they do when a state shares a request with
 others; the server README ("Laya CUDA graphs") has both measured.
 
 Forward size. Rows run longest first in forwards of at most
-``max_forward_tokens`` padded tokens. On an L4, 128 rows of up to 233 tokens
-take 353 ms in forwards of 4,096 padded tokens and 400 ms in forwards of
-16,384 on ``laya``, and 139 against 154 ms on ``laya-multilingual``, so the
-default is 4,096.
+``max_forward_tokens`` padded tokens, a load-time option (16,384 by default).
+Called directly with 128 rows of up to 233 tokens, the adapter is faster at
+4,096 on an L4 (353 against 400 ms on ``laya``, 139 against 154 ms on
+``laya-multilingual``). Behind the server it is not: the server already hands
+the adapter a 32-state request in smaller calls, and there 4,096 measured the
+same on ``laya`` and slower on ``laya-multilingual``. So the default stays.
 """
 
 from __future__ import annotations
@@ -130,8 +132,8 @@ MAX_OPTIONS = 1024
 # item at max_len 1024, and all 64 at 512.
 MAX_ITEM_TOKENS = 32_768
 
-# Padded tokens per forward: the size at which an L4 is fastest (see the module docstring).
-DEFAULT_MAX_FORWARD_TOKENS = 4096
+# Padded tokens per forward (see "Forward size" in the module docstring).
+DEFAULT_MAX_FORWARD_TOKENS = 16384
 
 DEFAULT_LABELS_INSTRUCTION = "Which category does this text belong to?"
 _MIN_BF16_MAJOR = 8  # Ampere

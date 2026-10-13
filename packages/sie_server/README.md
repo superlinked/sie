@@ -868,10 +868,14 @@ agrees on 1,427, 1,427 and 1,430 of the 1,440 rows from a graph, on 1,429,
 1,433 from the package's own bfloat16 autocast.
 
 **Forward size.** Rows run longest first in forwards of at most
-`max_forward_tokens` padded tokens, a load-time option. The default is 4,096.
-128 rows of up to 233 tokens (32 states with four questions) take 353, 353
-and 139 ms that way on the three models above, against 400, 399 and 154 ms at
-the earlier default of 16,384.
+`max_forward_tokens` padded tokens, a load-time option that stays at 16,384.
+Called directly with 128 rows of up to 233 tokens (32 states with four
+questions), the adapter takes 353, 353 and 139 ms at 4,096 on the three
+models above, against 400, 399 and 154 ms at 16,384. Behind the server that
+gain does not show: the server hands the adapter a 32-state request in
+smaller calls already. Behind the sidecar, with 4,096, the same request took
+371.5 against 372.5 ms and 370.6 against 374.5 ms on the 1,024-wide
+checkpoints, and 162.6 against 155.7 ms on `laya-multilingual`.
 
 **Fused rotary embedding.** The adapter also takes `fused_rope` (above). It
 took 7 to 10% off 128-row requests, and no shipped profile enables it: with
