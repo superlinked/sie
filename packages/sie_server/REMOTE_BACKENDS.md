@@ -103,8 +103,12 @@ The declared dimensions and input limit must describe the upstream model.
 The model configuration can name an upstream; it cannot create one.
 
 A remote profile's `adapter_options.loadtime` takes `upstream` and
-`upstream_model`, both required, and an optional `max_seq_length`: the context
-window the upstream serves. Every other load-time option is refused.
+`upstream_model`, both required. Every other load-time option is refused,
+except `max_seq_length` on a profile other than `default` (see
+[Context window of a remote profile](#context-window-of-a-remote-profile)).
+The `default` profile serves the model's own window, which a remote-backed
+model declares with `max_sequence_length` and, for generation,
+`tasks.generate.context_length`.
 
 From the repository root, start the server:
 
@@ -202,8 +206,18 @@ profiles:
 A request that names the profile, `org/model:remote`, takes that window as its
 `context_length` and that cap as its `max_output_tokens`, and the usage the
 upstream reports is checked against them. The output cap must fit inside the
-window. A request for the bare name keeps the model's own `context_length` and
-`max_output_tokens`.
+window. A profile without a `max_output_tokens` of its own takes the cap of the
+profile it extends, or else the model's, and that cap must fit too. Load-time
+options are not merged with a parent's, so a profile that extends a remote
+profile and declares a window restates `upstream` and `upstream_model`.
+
+A request for the bare name keeps the model's own `context_length` and
+`max_output_tokens` when its local profile serves it, and when single-node
+fallback sends it to the remote profile. In a cluster, routing sends a
+bare-name request to the remote profile as `org/model:remote`. The gateway
+still holds its output to the model's own `max_output_tokens`, and the remote
+worker checks it against the remote profile's window, as for a request that
+names the profile.
 
 ## Controls and failure behavior
 
