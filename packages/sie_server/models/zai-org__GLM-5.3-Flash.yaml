@@ -32,14 +32,17 @@ tasks:
     # has the engine's glm45 parser split it off.
     chat_template_kwargs:
       enable_thinking: true
-    # Grammar and tool calling are not claimed yet. On the queued route the
+    # Tool calling is claimed on the chat route. The template renders a call
+    # in the model's own form,
+    # <tool_call>NAME<arg_key>K</arg_key><arg_value>V</arg_value></tool_call>,
+    # which the worker's glm_xml parser reads on the queued route and the
+    # engine's glm47 parser on the direct route. Grammar stays unclaimed: the
     # engine applies a grammar from the first generated token, which is inside
-    # the open thinking block, and the worker does not parse this template's
-    # <arg_key>/<arg_value> tool calls.
+    # the open thinking block.
     capabilities:
       grammar: []
       streaming: true
-      tools: false
+      tools: true
 max_sequence_length: 16384
 profiles:
   default:
@@ -63,6 +66,7 @@ profiles:
         trust_remote_code: false
         grammar_backend: xgrammar
         reasoning_parser: glm45
+        tool_call_parser: glm47
         speculative:
           enabled: false
       runtime:
