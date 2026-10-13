@@ -16,7 +16,9 @@
 //! 2. **Busy lane, hold.** While a batch is with the engine, arrivals
 //!    stay in the queue where later arrivals can join them. Two things go
 //!    ahead into a free pipeline slot instead: the next batch if it is
-//!    already full, since holding it cannot improve it, and the rest of a
+//!    already full (a cap reached, or no room under the cost cap for
+//!    another item like its largest), since holding it cannot improve it,
+//!    and the rest of a
 //!    request whose first part is with the engine, since its caller is
 //!    waiting on that part and has nobody to come back with. "Next" is the
 //!    scheduler's first-come-first-served pick across its queues: a full

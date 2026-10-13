@@ -477,9 +477,10 @@ impl<I: HasCost, T> BatchFormer<I, T> {
 /// Snapshot of one queue for the lane's dispatch rule.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct GateView {
-    /// The cap the pending work has reached, if it already fills a batch
-    /// (or holds one request over the cost cap). Waiting cannot improve
-    /// such a batch.
+    /// The cap the pending work has reached, if it already fills a batch:
+    /// the item cap, the cost cap, one request over the cost cap, or no
+    /// room under the cost cap for another item like its largest. Waiting
+    /// cannot improve such a batch.
     pub full: Option<FlushReason>,
     /// The classic flush trigger that has fired, if any (caps, batch wait,
     /// coalesce window since the last arrival).
@@ -576,14 +577,23 @@ fn flush_reason<I: HasCost, T>(inner: &Inner<I, T>, immediate: bool) -> Option<F
 }
 
 /// The cap the pending work has reached, if any: one request over the cost
-/// cap, the cost cap, or the item cap.
+/// cap, the cost cap, the item cap, or a cost so close to the cap that
+/// another item like the largest one pending would not fit.
+///
+/// The last case is what makes a single large item full by itself: a
+/// 15,000-cost request under a 16,384 cap cannot share a batch with another
+/// like it, so holding it for company only delays the engine-side
+/// preparation that could overlap the forward before it.
 fn full_reason<I: HasCost, T>(inner: &Inner<I, T>) -> Option<FlushReason> {
-    match flush_reason(inner, false) {
-        reason @ Some(
-            FlushReason::SingleOversize | FlushReason::CostCap | FlushReason::CountCap,
-        ) => reason,
-        _ => None,
+    if let reason @ Some(
+        FlushReason::SingleOversize | FlushReason::CostCap | FlushReason::CountCap,
+    ) = flush_reason(inner, false)
+    {
+        return reason;
     }
+    let largest = inner.pending.iter().map(|r| r.item.cost()).max()?;
+    (inner.total_cost.saturating_add(largest) > effective_max_cost(inner))
+        .then_some(FlushReason::CostCap)
 }
 
 /// Time remaining until the next guaranteed flush, given current
@@ -977,6 +987,37 @@ mod tests {
         assert_eq!(batch_requests(&first), vec![("small", 1), ("large", 3)]);
         let second = former.try_drain().await.unwrap();
         assert_eq!(batch_requests(&second), vec![("large", 3)]);
+    }
+
+    #[tokio::test]
+    async fn pending_work_with_no_room_for_another_like_its_largest_is_full() {
+        let config = BatchConfig {
+            max_batch_cost: 100,
+            max_batch_wait_ms: 1_000_000.0,
+            coalesce_ms: 1_000_000.0,
+            coalesce_ratio: 1.0,
+            ..BatchConfig::default()
+        };
+        // One item that could share the batch with another like it: not
+        // full, the lane may hold it for company.
+        let former = BatchFormer::<StubItem, usize>::new(config);
+        former.submit(StubItem::with_idx(40, 0), 0).await;
+        assert_eq!(former.gate_view().await.full, None);
+        // A second one leaves no room for a third.
+        former.submit(StubItem::with_idx(40, 1), 1).await;
+        assert_eq!(former.gate_view().await.full, Some(FlushReason::CostCap));
+        let (batch, _) = former.take(FlushReason::IdleBypass).await.unwrap();
+        assert_eq!(batch.size(), 2);
+        assert_eq!(batch.flush_reason, FlushReason::CostCap);
+
+        // One item under the cap that another like it could not join (a
+        // 20-candidate rerank request under the default cap): full alone.
+        let former = BatchFormer::<StubItem, usize>::new(config);
+        former.submit(StubItem::with_idx(60, 0), 0).await;
+        assert_eq!(former.gate_view().await.full, Some(FlushReason::CostCap));
+        // The classic triggers are unchanged: nothing has fired for it.
+        assert_eq!(former.gate_view().await.classic, None);
+        assert!(former.try_get_batch().await.is_none());
     }
 
     #[tokio::test]
