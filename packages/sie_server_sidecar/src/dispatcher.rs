@@ -13,6 +13,7 @@
 //!                 on IPC failure -> NAK group with transient delay
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -281,8 +282,7 @@ struct GenerateDeliveryLogContext {
 /// * `retry_later` readiness (unknown error path)
 /// * generic transient IPC / executor failures
 ///
-/// Local model-loading waits use JetStream progress ACKs instead of NAKs, with
-/// `loading_in_progress` sleeping for `2 × base` between readiness probes.
+/// Local model-loading waits use JetStream progress ACKs instead of NAKs.
 pub(crate) fn base_nak_delay_ms() -> u64 {
     std::env::var("SIE_NAK_DELAY_S")
         .ok()
@@ -304,6 +304,23 @@ const NAK_DELAY_OVERFLOW_MS: u64 = 100;
 /// errors. Holding the message back longer just starves redelivery.
 const NAK_DELAY_DRAINING_MS: u64 = 100;
 const READINESS_PROGRESS_ACK_WAIT_FRACTION: u64 = 2;
+const MODEL_READINESS_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const MODEL_READINESS_PROGRESS_INTERVAL: Duration =
+    Duration::from_secs(crate::nats_consumer::ACK_WAIT_SECS / 3);
+
+struct ModelReadinessWait {
+    deadline: tokio::time::Instant,
+    next_progress: tokio::time::Instant,
+}
+
+impl ModelReadinessWait {
+    fn new(deadline: tokio::time::Instant) -> Self {
+        Self {
+            deadline,
+            next_progress: tokio::time::Instant::now(),
+        }
+    }
+}
 
 /// Pick the right NAK delay for a given backend error — `Draining` is
 /// fast because we want redelivery to another worker, everything else
@@ -2325,7 +2342,7 @@ impl Dispatcher {
         &self,
         model_id: &str,
         items: &[(WorkItem, Delivery)],
-        ready_deadline: Option<tokio::time::Instant>,
+        ready_wait: Option<&mut ModelReadinessWait>,
     ) -> Option<Result<crate::ipc_types::EnsureModelReadyResponse, BackendError>> {
         if self.model_is_unsupported(model_id) {
             info!(
@@ -2345,14 +2362,22 @@ impl Dispatcher {
             return None;
         }
         let readiness = self.backend.ensure_model_ready(model_id);
-        let Some(deadline) = ready_deadline else {
+        let Some(ready_wait) = ready_wait else {
             return Some(readiness.await);
         };
-        tokio::pin!(readiness);
-        let progress_every = Duration::from_secs(crate::nats_consumer::ACK_WAIT_SECS)
-            / READINESS_PROGRESS_ACK_WAIT_FRACTION as u32;
+        self.wait_during_model_loading(model_id, items, ready_wait, readiness)
+            .await
+    }
+
+    async fn wait_during_model_loading<T>(
+        &self,
+        model_id: &str,
+        items: &[(WorkItem, Delivery)],
+        ready_wait: &mut ModelReadinessWait,
+        operation: impl Future<Output = T>,
+    ) -> Option<T> {
+        tokio::pin!(operation);
         loop {
-            let next_progress = (tokio::time::Instant::now() + progress_every).min(deadline);
             let shutdown_wait = async {
                 match self.shutdown.as_ref() {
                     Some(shutdown) => shutdown.wait().await,
@@ -2360,23 +2385,24 @@ impl Dispatcher {
                 }
             };
             tokio::select! {
-                // A ready response must not start work when shutdown is also ready.
                 biased;
                 () = shutdown_wait => {
                     nak_all(items, NAK_DELAY_DRAINING_MS, &self.runtime_state.telemetry).await;
                     return None;
                 }
-                result = &mut readiness => return Some(result),
-                () = tokio::time::sleep_until(next_progress) => {
-                    if next_progress >= deadline {
-                        self.nak_group_past_ready_deadline(model_id, items).await;
-                        return None;
-                    }
+                () = tokio::time::sleep_until(ready_wait.deadline) => {
+                    self.nak_group_past_ready_deadline(model_id, items).await;
+                    return None;
+                }
+                () = tokio::time::sleep_until(ready_wait.next_progress) => {
                     if !progress_all(items, &self.runtime_state.telemetry).await {
                         nak_all(items, base_nak_delay_ms(), &self.runtime_state.telemetry).await;
                         return None;
                     }
+                    ready_wait.next_progress =
+                        tokio::time::Instant::now() + MODEL_READINESS_PROGRESS_INTERVAL;
                 }
+                result = &mut operation => return Some(result),
             }
         }
     }
@@ -2406,6 +2432,7 @@ impl Dispatcher {
         let group_started = Instant::now();
         let group_size = items.len();
         let base_delay_ms = base_nak_delay_ms();
+        let mut ready_wait = ready_deadline.map(ModelReadinessWait::new);
         if items.iter().any(|(wi, delivery)| {
             delivery.requires_execution_authority_v1()
                 && (!delivery.execution_authority_model_matches(&wi.model_id)
@@ -2443,7 +2470,7 @@ impl Dispatcher {
                 return Ok(());
             }
             let Some(readiness) = self
-                .ensure_model_ready_by(model_id, &items, ready_deadline)
+                .ensure_model_ready_by(model_id, &items, ready_wait.as_mut())
                 .await
             else {
                 return Ok(());
@@ -2480,35 +2507,30 @@ impl Dispatcher {
                 self.dead_letter_all(&items, model_id).await;
                 return Ok(());
             }
-            if let Some(delay_ms) =
-                readiness_progress_delay_ms(&readiness_resp.state, base_delay_ms)
-            {
-                let Some(ready_deadline) = ready_deadline else {
+            if matches!(
+                readiness_resp.state,
+                ReadinessState::LoadingStarted | ReadinessState::LoadingInProgress
+            ) {
+                let Some(ready_wait) = ready_wait.as_mut() else {
                     self.park_model_group(model_id, items);
                     return Ok(());
                 };
-                if tokio::time::Instant::now() >= ready_deadline {
-                    self.nak_group_past_ready_deadline(model_id, &items).await;
-                    return Ok(());
-                }
-                info!(
+                debug!(
                     model = %model_id,
                     group_size,
                     readiness = ?readiness_resp.state,
-                    delay_ms,
-                    "model loading — progress ACKing group before retry"
+                    "model loading — waiting before readiness probe"
                 );
-                if !progress_all(&items, &self.runtime_state.telemetry).await {
-                    nak_all(&items, base_delay_ms, &self.runtime_state.telemetry).await;
-                    return Ok(());
-                }
-                if self.sleep_or_shutdown(delay_ms).await {
-                    warn!(
-                        model = %model_id,
-                        group_size,
-                        "shutdown while waiting for model load — NAKing group"
-                    );
-                    nak_all(&items, NAK_DELAY_DRAINING_MS, &self.runtime_state.telemetry).await;
+                if self
+                    .wait_during_model_loading(
+                        model_id,
+                        &items,
+                        ready_wait,
+                        tokio::time::sleep(MODEL_READINESS_POLL_INTERVAL),
+                    )
+                    .await
+                    .is_none()
+                {
                     return Ok(());
                 }
                 continue;
@@ -3272,18 +3294,6 @@ impl Dispatcher {
         )
         .await;
         Ok(())
-    }
-
-    async fn sleep_or_shutdown(&self, delay_ms: u64) -> bool {
-        let delay = Duration::from_millis(delay_ms);
-        let Some(shutdown) = self.shutdown.as_ref() else {
-            tokio::time::sleep(delay).await;
-            return false;
-        };
-        tokio::select! {
-            _ = tokio::time::sleep(delay) => false,
-            _ = shutdown.wait() => true,
-        }
     }
 
     // -- outcome / publish helpers ---------------------------------------
@@ -6642,6 +6652,8 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
     use crate::delivery::LocalDelivery;
     use crate::scheduler::{BatchConfig, Scheduler};
 
@@ -6842,6 +6854,7 @@ mod tests {
     /// model after the first takes that long.
     struct LoadingModelBackend {
         loading_model: &'static str,
+        loading_state: ReadinessState,
         loaded: AtomicBool,
         later_probe_delay: Option<Duration>,
         probes: std::sync::atomic::AtomicUsize,
@@ -6859,6 +6872,7 @@ mod tests {
         ) -> Arc<Self> {
             Arc::new(Self {
                 loading_model,
+                loading_state: ReadinessState::LoadingInProgress,
                 loaded: AtomicBool::new(false),
                 later_probe_delay,
                 probes: std::sync::atomic::AtomicUsize::new(0),
@@ -6891,7 +6905,7 @@ mod tests {
                 }
             }
             let state = if model_id == self.loading_model && !self.loaded.load(Ordering::SeqCst) {
-                ReadinessState::LoadingInProgress
+                self.loading_state.clone()
             } else {
                 ReadinessState::Ready
             };
@@ -8251,6 +8265,313 @@ mod tests {
         assert!(partitions
             .iter()
             .all(|partition| partition.items.len() == partition.metadata.len()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_newly_loaded_model_is_rechecked_within_one_second() {
+        for state in [
+            ReadinessState::LoadingStarted,
+            ReadinessState::LoadingInProgress,
+        ] {
+            let mut backend = LoadingModelBackend::new("cold");
+            Arc::get_mut(&mut backend).unwrap().loading_state = state;
+            let dispatcher = dispatcher_with_backend(backend.clone());
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            dispatcher
+                .dispatch_decoded(
+                    local_group("cold-req", "cold", 0..1, &tx),
+                    1,
+                    Instant::now(),
+                )
+                .await;
+            while backend.probes.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+            let started = tokio::time::Instant::now();
+            tokio::time::advance(Duration::from_millis(1)).await;
+            backend.loaded.store(true, Ordering::SeqCst);
+            dispatcher.join_parked_groups(Duration::from_secs(2)).await;
+
+            assert_eq!(backend.encoded_models(), ["cold"]);
+            assert_eq!(backend.probes.load(Ordering::SeqCst), 3);
+            assert!(started.elapsed() <= MODEL_READINESS_POLL_INTERVAL);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn readiness_polling_preserves_one_progress_clock_across_calls_and_sleeps() {
+        async fn drive_io<T>(operation: impl Future<Output = T>) -> T {
+            tokio::pin!(operation);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                assert!(Instant::now() < deadline, "loopback NATS I/O timed out");
+                tokio::select! {
+                    biased;
+                    result = &mut operation => return result,
+                    () = tokio::task::yield_now() => {}
+                }
+            }
+        }
+
+        let backend = LoadingModelBackend::new("cold");
+        let dispatcher = dispatcher_with_backend(backend.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (count_tx, mut count_rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            let mut progress_count = 0;
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            write.write_all(b"INFO {\"server_id\":\"test\",\"version\":\"2.10.0\",\"proto\":1,\"max_payload\":1048576}\r\n").await.unwrap();
+            let mut lines = BufReader::new(read).lines();
+            while let Some(line) = lines.next_line().await.unwrap() {
+                if line == "PING" {
+                    write.write_all(b"PONG\r\n").await.unwrap();
+                } else if line.starts_with("PUB ") {
+                    let payload = lines.next_line().await.unwrap();
+                    if line == "PUB _INBOX.readiness-progress 4" {
+                        assert_eq!(payload.as_deref(), Some("+WPI"));
+                        progress_count += 1;
+                    } else {
+                        assert_eq!(line, "PUB _INBOX.progress-count 0");
+                        assert_eq!(payload.as_deref(), Some(""));
+                        count_tx.send(progress_count).unwrap();
+                    }
+                } else {
+                    assert!(line.starts_with("CONNECT "), "unexpected command: {line}");
+                }
+            }
+        });
+        let client = drive_io(async_nats::connect(format!("nats://{address}")))
+            .await
+            .unwrap();
+        let message = Message {
+            message: async_nats::Message {
+                subject: "sie.work.test".into(),
+                reply: Some("_INBOX.readiness-progress".into()),
+                payload: Default::default(),
+                headers: None,
+                status: None,
+                description: None,
+                length: 0,
+            },
+            context: async_nats::jetstream::new(client.clone()),
+        };
+        let items = vec![(
+            wi("cold-req", 0, "cold", "encode"),
+            Delivery::Nats(message, None, None),
+        )];
+        let started = tokio::time::Instant::now();
+        let mut wait = ModelReadinessWait::new(started + Duration::from_secs(60));
+
+        for second in 1..=25 {
+            let response = dispatcher
+                .ensure_model_ready_by("cold", &items, Some(&mut wait))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(response.state, ReadinessState::LoadingInProgress);
+            assert!(dispatcher
+                .wait_during_model_loading(
+                    "cold",
+                    &items,
+                    &mut wait,
+                    tokio::time::sleep(MODEL_READINESS_POLL_INTERVAL),
+                )
+                .await
+                .is_some());
+            assert_eq!(started.elapsed(), Duration::from_secs(second));
+            assert_eq!(
+                wait.next_progress,
+                started + Duration::from_secs((second / 10 + 1) * 10)
+            );
+            client
+                .publish("_INBOX.progress-count", Default::default())
+                .await
+                .unwrap();
+            assert_eq!(drive_io(count_rx.recv()).await, Some(second / 10 + 1));
+        }
+        assert_eq!(backend.probes.load(Ordering::SeqCst), 25);
+        assert!(backend.encoded_models().is_empty());
+        assert!(dispatcher
+            .wait_during_model_loading(
+                "cold",
+                &items,
+                &mut wait,
+                tokio::time::sleep(Duration::from_secs(16)),
+            )
+            .await
+            .is_some());
+        assert_eq!(wait.next_progress, started + Duration::from_secs(50));
+        client
+            .publish("_INBOX.progress-count", Default::default())
+            .await
+            .unwrap();
+        assert_eq!(drive_io(count_rx.recv()).await, Some(5));
+        server.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn parked_readiness_deadline_bounds_a_poll_sleep_for_every_local_operation() {
+        for operation in ["encode", "score", "extract", LOAD_OPERATION] {
+            let backend = LoadingModelBackend::new("cold");
+            let dispatcher = dispatcher_with_backend(backend.clone());
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut items = local_group("cold-req", "cold", 0..1, &tx);
+            items[0].0.operation = operation.into();
+            let started = tokio::time::Instant::now();
+            let budget = Duration::from_millis(125);
+
+            dispatcher
+                .handle_model_group("cold", items, Some(started + budget))
+                .await
+                .unwrap();
+
+            assert_eq!(started.elapsed(), budget, "{operation}");
+            assert_eq!(retried_slots(&mut rx), [0], "{operation}");
+            assert_eq!(backend.probes.load(Ordering::SeqCst), 1);
+            assert!(backend.encoded_models().is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_parked_deadline_wins_over_an_immediately_ready_model() {
+        for offset in [Duration::ZERO, Duration::from_millis(1)] {
+            let backend = LoadingModelBackend::new("cold");
+            backend.loaded.store(true, Ordering::SeqCst);
+            let dispatcher = dispatcher_with_backend(backend.clone());
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let now = tokio::time::Instant::now();
+
+            dispatcher
+                .handle_model_group(
+                    "cold",
+                    local_group("cold-req", "cold", 0..1, &tx),
+                    Some(now - offset),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(retried_slots(&mut rx), [0]);
+            assert_eq!(backend.probes.load(Ordering::SeqCst), 0);
+            assert!(backend.encoded_models().is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn parked_deadline_wins_when_a_pending_readiness_call_completes_at_expiry() {
+        let backend =
+            LoadingModelBackend::with_later_probe_delay("cold", Some(Duration::from_secs(1)));
+        backend.probes.store(1, Ordering::SeqCst);
+        backend.loaded.store(true, Ordering::SeqCst);
+        let dispatcher = dispatcher_with_backend(backend.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let started = tokio::time::Instant::now();
+
+        dispatcher
+            .handle_model_group(
+                "cold",
+                local_group("cold-req", "cold", 0..1, &tx),
+                Some(started + Duration::from_secs(1)),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(started.elapsed(), Duration::from_secs(1));
+        assert_eq!(retried_slots(&mut rx), [0]);
+        assert!(backend.encoded_models().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_interrupts_a_readiness_poll_sleep() {
+        let backend = LoadingModelBackend::new("cold");
+        let shutdown = Arc::new(Shutdown::new());
+        let mut dispatcher = dispatcher_with_backend(backend.clone());
+        Arc::get_mut(&mut dispatcher).unwrap().shutdown = Some(Arc::clone(&shutdown));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        dispatcher
+            .dispatch_decoded(
+                local_group("cold-req", "cold", 0..1, &tx),
+                1,
+                Instant::now(),
+            )
+            .await;
+        while backend.probes.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+        let started = tokio::time::Instant::now();
+        shutdown.fire();
+        dispatcher.join_parked_groups(Duration::from_secs(1)).await;
+
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        let Some(crate::delivery::LocalDeliveryEvent::Retry {
+            slot: 0, delay_ms, ..
+        }) = rx.try_recv().ok()
+        else {
+            panic!("shutdown must retry the parked item");
+        };
+        assert_eq!(delay_ms, NAK_DELAY_DRAINING_MS);
+        assert!(backend.encoded_models().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_during_a_readiness_poll_prevents_another_probe() {
+        for operation in ["encode", "score", "extract", LOAD_OPERATION] {
+            let backend = LoadingModelBackend::new("cold");
+            let dispatcher = dispatcher_with_backend(backend.clone());
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut items = local_group("cold-req", "cold", 0..1, &tx);
+            items[0].0.operation = operation.into();
+            dispatcher.dispatch_decoded(items, 1, Instant::now()).await;
+            while backend.probes.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+            dispatcher
+                .request_cancel_state
+                .cancel(String::new(), "cold-req".into());
+            backend.loaded.store(true, Ordering::SeqCst);
+            dispatcher.join_parked_groups(Duration::from_secs(2)).await;
+
+            assert_eq!(backend.probes.load(Ordering::SeqCst), 2, "{operation}");
+            assert!(backend.encoded_models().is_empty());
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_and_retry_later_readiness_do_not_enter_the_poll_loop() {
+        for state in [ReadinessState::Failed, ReadinessState::RetryLater] {
+            let mut backend = LoadingModelBackend::new("cold");
+            Arc::get_mut(&mut backend).unwrap().loading_state = state.clone();
+            let dispatcher = dispatcher_with_backend(backend.clone());
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let started = tokio::time::Instant::now();
+            dispatcher
+                .handle_model_group(
+                    "cold",
+                    local_group("cold-req", "cold", 0..1, &tx),
+                    Some(started + Duration::from_secs(60)),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(started.elapsed(), Duration::ZERO);
+            assert_eq!(backend.probes.load(Ordering::SeqCst), 1);
+            assert!(backend.encoded_models().is_empty());
+            match rx.try_recv().unwrap() {
+                crate::delivery::LocalDeliveryEvent::Result { result, .. } => {
+                    assert_eq!(state, ReadinessState::Failed);
+                    assert_eq!(
+                        result.error_code.as_deref(),
+                        Some(MODEL_LOAD_FAILED_ERROR_CODE)
+                    );
+                }
+                crate::delivery::LocalDeliveryEvent::Retry { delay_ms, .. } => {
+                    assert_eq!(state, ReadinessState::RetryLater);
+                    assert_eq!(delay_ms, base_nak_delay_ms());
+                }
+            }
+        }
     }
 
     #[tokio::test(start_paused = true)]

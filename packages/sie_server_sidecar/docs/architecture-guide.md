@@ -88,10 +88,16 @@ Message settlement:
   unchanged. For a `QUEUE_FULL`, `MODEL_LOADING` or `RESOURCE_EXHAUSTED`
   answer the gateway uses a hint of 1 to 60 seconds as `Retry-After`; without
   one, or with a hint outside that range, it uses five seconds.
-- Active local model loads are held with JetStream progress ACKs until
+- Parked encode, score, extract and load work with active local model loads
+  is held with JetStream progress ACKs until
   `EnsureModelReady` returns ready; this preserves the delivery budget during
-  cold starts. The progress delay is clamped below the pool consumer `ack_wait`
-  even if the retry NAK delay is configured higher.
+  cold starts. Loading models are rechecked every second, independently of
+  the transient retry NAK delay. A shared progress-ACK clock spans readiness
+  calls and polling sleeps, refreshing the lease every third of the pool
+  consumer `ack_wait`, not on every probe. The parked wait is bounded by the
+  redelivery envelope; shutdown and deadline expiry take precedence over a
+  simultaneously ready model. Polling sleeps cannot extend that deadline.
+  Generation retains its separate `MODEL_LOADING` response and ACK path.
 - Transient backend, decode, stream, and drain failures are NAKed.
 - Reply publication failure, including a partial chunk sequence, leaves the
   JetStream message unacked for redelivery.
