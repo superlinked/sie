@@ -18,6 +18,11 @@ Two backbones run the same math:
 * ``forward_padded``: everything else (CPU, MPS, CUDA without flash-attn). The
   Hugging Face ``ModernBertModel`` with SDPA attention plus the same head — the
   reference math, in float32 off-CUDA.
+
+The flash path is split in two so that the encoder can be replayed as a CUDA
+graph (``sie_server.adapters._modernbert_flash_graphs``): ``encode_packed`` is
+what a graph records, and ``head_logits`` runs eagerly on its output, as it
+does after an eager forward.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ from sie_server.adapters._modernbert_flash import (
     modernbert_rope_theta,
     run_modernbert_flash_layers,
 )
+from sie_server.adapters._modernbert_flash_graphs import EncodeFn
 
 ENCODER_PREFIX = "encoder."
 HEAD_PREFIXES = ("head.", "type_emb.", "scorer.")
@@ -129,6 +135,7 @@ class LayaModel(nn.Module):
         self.head = head
         self._use_flash = False
         self._compute_dtype: torch.dtype = torch.float32
+        self._fused_rope = False
         self._rope: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
     @property
@@ -143,6 +150,7 @@ class LayaModel(nn.Module):
         compute_dtype: torch.dtype,
         max_positions: int,
         embedding_dtype: torch.dtype | None = None,
+        fused_rope: bool = False,
     ) -> None:
         """Place the model for the chosen path. Call once after loading weights (float32).
 
@@ -155,9 +163,13 @@ class LayaModel(nn.Module):
                 On the flash path a float16 or bfloat16 table is kept at that
                 precision, which is lossless because the values came from it;
                 any other table stays float32.
+            fused_rope: On the flash path, rotate queries and keys with one
+                fused kernel per layer where it runs (see
+                ``run_modernbert_flash_layers``). Outputs differ by rounding.
         """
         self._use_flash = use_flash
         self._compute_dtype = compute_dtype
+        self._fused_rope = fused_rope and use_flash
         if use_flash:
             # Projections in the compute dtype; norms stay float32 for the float32
             # residual stream. The embedding lookup is upcast to float32.
@@ -188,27 +200,24 @@ class LayaModel(nn.Module):
             return torch.autocast(device_type="cuda", dtype=self._compute_dtype)
         return nullcontext()
 
-    def forward_flash(
+    def encode_packed(
         self,
-        rows: list[list[int]],
-        marker_pos: torch.Tensor,
-        qtype: torch.Tensor,
-        device: str,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+        total_tokens: int,
     ) -> torch.Tensor:
-        """Packed varlen encoder + re-padded decision head. Returns float32 logits ``[rows, max_options]``."""
+        """The packed varlen encoder: token embeddings and their norm, the layers, the final norm.
+
+        This is what a CUDA graph records (an ``EncodeFn``), and what the eager
+        flash forward runs. ``input_ids`` and ``positions`` are integer device
+        tensors of ``total_tokens`` entries; ``cu_seqlens`` is int32.
+
+        Returns:
+            Float32 hidden states ``[total_tokens, hidden]``.
+        """
         encoder = self.encoder
-        lengths = [len(r) for r in rows]
-        total_tokens = sum(lengths)
-        max_seqlen = max(lengths)
-        num_rows = len(rows)
-
-        flat = [token for row in rows for token in row]
-        input_ids = torch.tensor(flat, dtype=torch.long, device=device)
-        lengths_t = torch.tensor(lengths, dtype=torch.int32, device=device)
-        cu_seqlens = torch.zeros(num_rows + 1, dtype=torch.int32, device=device)
-        cu_seqlens[1:] = torch.cumsum(lengths_t, dim=0)
-        positions = build_position_ids(cu_seqlens, total_tokens=total_tokens)
-
         embeddings = encoder.embeddings
         hidden = embeddings.norm(embeddings.tok_embeddings(input_ids).float())
         global_cos, global_sin = self._rope["global"]
@@ -224,18 +233,70 @@ class LayaModel(nn.Module):
             local_cos[positions],
             local_sin[positions],
             compute_dtype=self._compute_dtype,
+            fused_rope=self._fused_rope,
         )
-        hidden = encoder.final_norm(hidden)
+        return encoder.final_norm(hidden)
 
-        # Re-pad for the decision head: its layers attend over every token of a row.
-        row_index = torch.repeat_interleave(
-            torch.arange(num_rows, device=device), lengths_t.long(), output_size=total_tokens
-        )
+    def graph_encoder(self) -> tuple[EncodeFn, list[torch.Tensor]]:
+        """The encoder a CUDA graph records, and the RoPE tables it reads (for the runner's memory budget)."""
+        return self.encode_packed, [table for pair in self._rope.values() for table in pair]
+
+    def head_logits(
+        self,
+        hidden: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        lengths: list[int],
+        marker_pos: torch.Tensor,
+        qtype: torch.Tensor,
+        device: str,
+    ) -> torch.Tensor:
+        """Re-pad packed encoder output and run the decision head on it.
+
+        The head's layers attend over every token of a row, so the packed
+        ``[total_tokens, hidden]`` states are laid out as ``[rows, max_seqlen,
+        hidden]`` with the padding masked.
+
+        Args:
+            hidden: Packed encoder output of the real rows, row after row.
+            cu_seqlens: Their cumulative lengths ``[rows + 1]`` (int32).
+            lengths: Tokens per row (host copy of the same lengths).
+            marker_pos: Marker positions ``[rows, max_options]``.
+            qtype: Question type index per row.
+            device: The model's device.
+
+        Returns:
+            Float32 logits ``[rows, max_options]``.
+        """
+        num_rows, max_seqlen, total_tokens = len(lengths), max(lengths), hidden.shape[0]
+        lengths_t = (cu_seqlens[1:] - cu_seqlens[:-1]).long()
+        positions = build_position_ids(cu_seqlens, total_tokens=total_tokens)
+        row_index = torch.repeat_interleave(torch.arange(num_rows, device=device), lengths_t, output_size=total_tokens)
         padded = hidden.new_zeros(num_rows, max_seqlen, hidden.shape[-1])
         padded[row_index, positions] = hidden
         padding_mask = torch.arange(max_seqlen, device=device)[None, :] >= lengths_t[:, None]
         with self.autocast(device):
             return self.head(padded, padding_mask, qtype, marker_pos)
+
+    def forward_flash(
+        self,
+        rows: list[list[int]],
+        marker_pos: torch.Tensor,
+        qtype: torch.Tensor,
+        device: str,
+    ) -> torch.Tensor:
+        """Packed varlen encoder + re-padded decision head. Returns float32 logits ``[rows, max_options]``."""
+        lengths = [len(r) for r in rows]
+        total_tokens = sum(lengths)
+        num_rows = len(rows)
+
+        flat = [token for row in rows for token in row]
+        input_ids = torch.tensor(flat, dtype=torch.long, device=device)
+        lengths_t = torch.tensor(lengths, dtype=torch.int32, device=device)
+        cu_seqlens = torch.zeros(num_rows + 1, dtype=torch.int32, device=device)
+        cu_seqlens[1:] = torch.cumsum(lengths_t, dim=0)
+        positions = build_position_ids(cu_seqlens, total_tokens=total_tokens)
+        hidden = self.encode_packed(input_ids, positions, cu_seqlens, max(lengths), total_tokens)
+        return self.head_logits(hidden, cu_seqlens, lengths, marker_pos, qtype, device)
 
     def forward_padded(
         self,

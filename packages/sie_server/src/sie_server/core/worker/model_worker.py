@@ -1471,6 +1471,8 @@ class ModelWorker:
                             duration_s=metadata.timing.queue_ms / 1_000.0,
                         )
 
+        await self._prime_extract_groups(config_groups)
+
         # Run ONE inference call per unique configuration using handlers.
         # The BatchExecutor wraps dispatch with reactive OOM recovery —
         # cache_clear → evict_lru → split_batch → terminal failure. On
@@ -1592,6 +1594,40 @@ class ModelWorker:
         # Update batch stats
         self._stats.batches_processed += 1
         self._stats.total_tokens_processed += batch.total_tokens
+
+    async def _prime_extract_groups(
+        self,
+        config_groups: dict[
+            tuple[Any, ...],
+            tuple[list[Item], list[RequestMetadata], list[int], list[HasCost]],
+        ],
+    ) -> None:
+        """Let the adapter see every extract configuration of a batch before the per-configuration calls.
+
+        Only for a batch that holds more than one extract configuration, and
+        only when the worker runs one batch at a time, so what the adapter
+        keeps belongs to this batch. It is an optimisation: whatever goes wrong
+        here, each configuration's own call still runs and reports.
+        """
+        if self._dispatch_width != 1 or len(config_groups) < 2:
+            return
+        prime = getattr(self._handlers.get("extract"), "prime", None)
+        if not callable(prime) or not callable(getattr(self._adapter, "prime_extract_groups", None)):
+            return
+        groups = [
+            (items_list, config_key[1:], metadata_list)
+            for config_key, (items_list, metadata_list, _indices, _prepared) in config_groups.items()
+            if config_key[0] == "extract"
+        ]
+        if len(groups) < 2:
+            return
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(self._inference_executor, functools.partial(prime, self._adapter, groups))
+        except Exception:  # noqa: BLE001 -- best effort; every configuration still gets its own call
+            logger.warning(
+                "Priming %d extract configurations failed; running them one by one", len(groups), exc_info=True
+            )
 
     def _config_key_or_fail(self, metadata: RequestMetadata) -> tuple[Any, ...] | None:
         """Batching key for one request, or None after failing that request alone.

@@ -479,7 +479,7 @@ def test_long_documents_are_cut_to_whole_words_in_the_window(monkeypatch: pytest
     assert processor.tokenizer.tokenized_chars < 20 * 96
 
 
-def test_caches_keep_neither_long_words_nor_task_prompts() -> None:
+def test_caches_keep_neither_long_words_nor_the_processors_strings() -> None:
     adapter, processor = make_adapter(window=256)
     long_words = [f"{i:04d}" + "x" * 60 for i in range(20)]
 
@@ -490,6 +490,277 @@ def test_caches_keep_neither_long_words_nor_task_prompts() -> None:
     assert adapter._word_cache is not None
     assert adapter._word_cache.cache_info().currsize == 2  # ...but only "short" and "words" were kept
     assert processor._tokenize_cached.cache_info().currsize == 0
+
+
+# ---------------------------------------------------------------------------
+# Task prompts of recent request shapes
+# ---------------------------------------------------------------------------
+
+
+def count_prompts(processor: FakeProcessor, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Record the schemas the processor builds a task prompt for."""
+    built: list[dict[str, Any]] = []
+    original = processor.transform_and_format
+
+    def transform_and_format(text: str, schema: dict[str, Any]) -> SimpleNamespace:
+        built.append(schema)
+        return original(text, schema)
+
+    monkeypatch.setattr(processor, "transform_and_format", transform_and_format)
+    return built
+
+
+def test_a_request_shapes_task_prompt_is_built_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter, processor = make_adapter()
+    built = count_prompts(processor, monkeypatch)
+
+    first = adapter.extract([Item(text="refund please")], output_schema=QUESTIONS)
+    second = adapter.extract([Item(text="refund please")], output_schema=QUESTIONS)
+    assert len(built) == 1
+    assert second.data == first.data
+    assert second.input_token_counts == first.input_token_counts  # the free text is billed from the kept prompt
+
+    adapter.extract([Item(text="refund please")], labels=["yes", "no"])
+    adapter.extract([Item(text="another text")], labels=["yes", "no"])
+    adapter.extract([Item(text="refund please")], labels=["no", "yes"])  # label order is part of the prompt
+    adapter.extract([Item(text="refund please")], labels=["yes", "no"], instruction="Is it urgent?")
+    adapter.extract([Item(text="refund please")], labels=["yes", "no"], options={"classification_type": "multi-label"})
+    assert len(built) == 5
+
+
+def test_a_kept_prompt_gives_the_rows_a_fresh_one_gives(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter, _ = make_adapter()
+    items = [Item(text="refund please"), Item(text="cancel it")]
+    adapter.extract(items, output_schema=QUESTIONS)
+    rows = spy_rows(adapter, monkeypatch)
+
+    kept = adapter.extract(items, output_schema=QUESTIONS)
+    kept_rows = list(rows)
+    assert adapter._prompts is not None
+    adapter._prompts.clear()
+    rows.clear()
+    fresh = adapter.extract(items, output_schema=QUESTIONS)
+
+    assert kept_rows == rows
+    assert kept.data == fresh.data
+    assert kept.input_token_counts == fresh.input_token_counts
+
+
+def test_a_large_schema_builds_its_prompt_every_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter, processor = make_adapter(window=4096, max_prompt_tokens=2048)
+    built = count_prompts(processor, monkeypatch)
+    criteria = {"billing": "money " * 300, "bug": "broken " * 250, "other": "else " * 300}
+    wordy = {"topic": {"type": "choice", "instructions": "What is it about?", "criteria": criteria}}
+    assert len(json.dumps(wordy)) > decide_module._CACHED_PROMPT_CHARS
+
+    for _ in range(2):
+        adapter.extract([Item(text="refund please")], output_schema=wordy)
+
+    assert len(built) == 2
+    assert not adapter._prompts
+
+
+def test_the_prompt_cache_keeps_the_most_recent_shapes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(decide_module, "_PROMPT_CACHE_SIZE", 2)
+    adapter, processor = make_adapter()
+    built = count_prompts(processor, monkeypatch)
+
+    for labels in (["a", "b"], ["c", "d"], ["a", "b"], ["e", "f"], ["a", "b"], ["c", "d"]):
+        adapter.extract([Item(text="refund please")], labels=labels)
+
+    # ["c", "d"] was the least recently used when ["e", "f"] came, so only it is built again.
+    assert [schema["classifications"][0]["labels"] for schema in built] == [
+        ["a", "b"],
+        ["c", "d"],
+        ["e", "f"],
+        ["c", "d"],
+    ]
+    assert adapter._prompts is not None
+    assert len(adapter._prompts) == 2
+
+
+def test_a_prompt_over_budget_is_refused_every_time_and_not_kept() -> None:
+    adapter, _ = make_adapter(window=64, max_prompt_tokens=32)
+    labels = [f"label number {i}" for i in range(10)]
+
+    for _ in range(2):
+        with pytest.raises(InputTooLongError, match="takes at most 32"):
+            adapter.extract([Item(text="x")], labels=labels)
+
+    assert not adapter._prompts
+
+
+# ---------------------------------------------------------------------------
+# One pass for a batch of several request shapes
+# ---------------------------------------------------------------------------
+
+GROUPS: list[dict[str, Any]] = [
+    {"items": [Item(text="refund please"), Item(text="cancel my plan today")], "labels": ["refund", "cancel", "other"]},
+    {"items": [Item(text="the payroll file is late")], "output_schema": QUESTIONS},
+    {
+        "items": [Item(text="it crashes on start"), Item(text="   "), Item(text="thanks")],
+        "instruction": "Triage the ticket.",
+        "options": {"label_groups": {"topic": ["billing", "bug"], "urgency": ["low", "high"]}},
+    },
+]
+
+
+def call(adapter: GLiNER2DecideAdapter, group: dict[str, Any]) -> Any:
+    return adapter.extract(
+        group["items"],
+        labels=group.get("labels"),
+        output_schema=group.get("output_schema"),
+        instruction=group.get("instruction"),
+        options=group.get("options"),
+    )
+
+
+def count_forwards(adapter: GLiNER2DecideAdapter) -> list[int]:
+    """Record the rows of every encoder forward."""
+    forwards: list[int] = []
+    encoder = adapter._model.encoder
+
+    def forward(input_ids: torch.Tensor, attention_mask: torch.Tensor) -> SimpleNamespace:
+        forwards.append(input_ids.shape[0])
+        return encoder(input_ids=input_ids, attention_mask=attention_mask)
+
+    adapter._model.encoder = forward
+    return forwards
+
+
+def assert_same_answers(actual: Any, expected: Any) -> None:
+    assert actual.input_token_counts == expected.input_token_counts
+    assert [None if e is None else e.code for e in actual.errors or []] == [
+        None if e is None else e.code for e in expected.errors or []
+    ]
+    assert (actual.data is None) == (expected.data is None)
+    assert (actual.classifications is None) == (expected.classifications is None)
+    assert json.dumps(actual.data, sort_keys=True) == json.dumps(expected.data, sort_keys=True)
+    assert actual.classifications == expected.classifications
+
+
+def test_a_primed_batch_runs_one_forward_and_answers_as_its_calls_do_alone() -> None:
+    alone, _ = make_adapter()
+    expected = [call(alone, group) for group in GROUPS]
+    adapter, _ = make_adapter()
+    forwards = count_forwards(adapter)
+
+    adapter.prime_extract_groups(GROUPS)
+    assert forwards == [5]  # every readable row of the three request shapes, once
+
+    for group, answers in zip(GROUPS, expected, strict=True):
+        assert_same_answers(call(adapter, group), answers)
+    assert forwards == [5]  # the calls ran no forward of their own
+    assert not adapter._primed  # and took what was scored for them
+
+
+def test_primed_rows_read_their_own_shapes_label_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter, _ = make_adapter()
+    scored: list[tuple[list[int], list[int]]] = []
+    original = adapter._score_rows
+
+    def score_rows(rows: list[list[int]], positions: list[list[int]]) -> list[np.ndarray]:
+        scored.extend(zip(rows, positions, strict=True))
+        return original(rows, positions)
+
+    monkeypatch.setattr(adapter, "_score_rows", score_rows)
+
+    adapter.prime_extract_groups(GROUPS)
+
+    assert len({tuple(positions) for _, positions in scored}) == 3  # one set of markers per request shape
+    for row, positions in scored:
+        assert all(row[position] == adapter._tokenizer.convert_tokens_to_ids(["[L]"])[0] for position in positions)
+        np.testing.assert_allclose(
+            adapter._primed[tuple(row), tuple(positions)], expected_logits(row, positions), rtol=1e-5, atol=1e-9
+        )
+
+
+def test_a_single_request_shape_is_not_primed() -> None:
+    adapter, _ = make_adapter()
+    forwards = count_forwards(adapter)
+
+    adapter.prime_extract_groups(GROUPS[:1])
+    assert forwards == []
+
+    call(adapter, GROUPS[0])
+    assert forwards == [2]
+
+
+def test_a_group_that_cannot_be_read_is_left_to_its_own_call() -> None:
+    adapter, _ = make_adapter(window=64, max_prompt_tokens=32)
+    forwards = count_forwards(adapter)
+    malformed = {"items": [Item(text="a")], "labels": ["x"], "output_schema": {"q": {"type": "noul"}}}
+    too_long = {"items": [Item(text="b")], "labels": [f"label number {i}" for i in range(10)]}
+    readable = [{"items": [Item(text="c")], "labels": ["x", "y"]}, {"items": [Item(text="d")], "labels": ["y", "x"]}]
+
+    adapter.prime_extract_groups([malformed, readable[0], too_long, readable[1]])
+
+    assert forwards == [2]
+    with pytest.raises(InvalidInputError):
+        call(adapter, malformed)
+    with pytest.raises(InputTooLongError):
+        call(adapter, too_long)
+    for group in readable:
+        assert call(adapter, group).classifications
+    assert forwards == [2]
+
+
+def test_primed_logits_are_taken_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter, _ = make_adapter()
+    forwards = count_forwards(adapter)
+    adapter.prime_extract_groups(GROUPS)
+
+    first = call(adapter, GROUPS[0])
+    again = call(adapter, GROUPS[0])  # the same request later scores itself
+
+    assert forwards == [5, 2]
+    assert_same_answers(again, first)
+
+
+def test_the_next_batch_drops_what_the_last_one_left() -> None:
+    adapter, _ = make_adapter()
+    forwards = count_forwards(adapter)
+    adapter.prime_extract_groups(GROUPS)
+    assert adapter._primed
+
+    adapter.prime_extract_groups(GROUPS[:1])  # a batch of one shape primes nothing and keeps nothing
+
+    assert not adapter._primed
+    call(adapter, GROUPS[1])
+    assert forwards == [5, 1]
+
+
+def test_a_call_with_a_row_that_was_not_primed_scores_all_its_rows() -> None:
+    adapter, _ = make_adapter()
+    alone, _ = make_adapter()
+    forwards = count_forwards(adapter)
+    adapter.prime_extract_groups(GROUPS)
+    grown = {**GROUPS[0], "items": [*GROUPS[0]["items"], Item(text="one more message")]}
+
+    answers = call(adapter, grown)
+
+    assert forwards == [5, 3]
+    assert_same_answers(answers, call(alone, grown))
+
+
+def test_rows_that_repeat_in_a_batch_are_each_answered() -> None:
+    adapter, _ = make_adapter()
+    alone, _ = make_adapter()
+    forwards = count_forwards(adapter)
+    repeated = {"items": [Item(text="same text"), Item(text="same text")], "labels": ["yes", "no"]}
+    adapter.prime_extract_groups([repeated, GROUPS[1]])
+
+    answers = call(adapter, repeated)
+
+    assert forwards == [3]
+    assert_same_answers(answers, call(alone, repeated))
+
+
+def test_priming_needs_a_loaded_model() -> None:
+    adapter = GLiNER2DecideAdapter("fake/decide")
+
+    with pytest.raises(RuntimeError, match="not loaded"):
+        adapter.prime_extract_groups(GROUPS)
 
 
 def test_overflow_policy_error_and_unreadable_items_fail_alone() -> None:

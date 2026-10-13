@@ -29,6 +29,20 @@ the model reads. An item none of whose words fits returns a per-item
 ``INPUT_TOO_LONG`` error, as does any item that does not fit whole when
 ``options.overflow_policy`` is ``"error"``.
 
+CUDA graphs: with ``adapter_options.loadtime.cuda_graphs: bucketed`` a DeBERTa
+encoder on CUDA replays its forwards as CUDA graphs (see ``decide_graphs.py``).
+It is an operator setting; ``"off"`` (the default) runs every forward eagerly.
+A call of up to 32 rows and 2,048 padded tokens then pads to the length bucket
+and batch size of its graph, which rounds float16 sums as batching rows
+together already does; a larger call runs eagerly as before.
+
+One pass per batch: a batch the worker formed may hold requests with different
+labels, questions or options. The worker hands them all to
+``prime_extract_groups`` first, which scores every row in one pass, each row at
+its own label markers; the ``extract`` call of each request shape then reads its
+rows' logits from that pass instead of running a forward of its own. Rows of
+different shapes are padded and batched together, as rows of one shape are.
+
 Usage: an item's input tokens are its document tokens the model reads plus the
 tokens of the caller's free text encoded with it (question instructions and
 label descriptions), as the Laya and GLiClass adapters count instructions and
@@ -42,12 +56,13 @@ import json
 import logging
 import re
 import tempfile
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections import OrderedDict
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 import numpy as np
 import torch
@@ -58,6 +73,14 @@ from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters.errors import InputTooLongError
+from sie_server.adapters.gliner2.decide_graphs import (
+    GRAPH_MODES,
+    MAX_GRAPH_TOKENS,
+    DecideGraphRunner,
+    GraphMode,
+    Key,
+    unsupported_reason,
+)
 from sie_server.adapters.gliner2.decisions import (
     DecisionRequest,
     answer,
@@ -71,6 +94,7 @@ from sie_server.adapters.gliner2.decisions import (
 from sie_server.adapters.gliner2.words import linear_equivalent
 from sie_server.adapters.laya.questions import STATE_BYTES_PER_TOKEN, serialize_state
 from sie_server.core.inference_output import ExtractItemError, ExtractOutput
+from sie_server.core.oom import is_oom_error
 from sie_server.types.inputs import InvalidInputError, Item
 from sie_server.types.overflow_policy import DEFAULT_OVERFLOW_POLICY, VALID_OVERFLOW_POLICIES
 from sie_server.types.responses import Classification, ErrorCode
@@ -103,6 +127,13 @@ _COST_CHARS_PER_TOKEN = 4
 # most; a longer word (a hash, an id, a base64 run) is tokenized each time.
 _WORD_CACHE_SIZE = 16384
 _CACHED_WORD_CHARS = 32
+# Task prompts of recent request shapes, kept across requests: the same labels
+# or questions usually come with every request of an application. Only shapes
+# whose schema takes at most _CACHED_PROMPT_CHARS characters are kept (eight
+# short labels take about 400), so the cache holds about 1 MB at most; a larger
+# schema (long descriptions) builds its prompt each time.
+_PROMPT_CACHE_SIZE = 256
+_CACHED_PROMPT_CHARS = 4096
 _SENTENCE_END = (".", "!", "?")
 
 _ERR_ITEM = (
@@ -337,7 +368,17 @@ class GLiNER2DecideAdapter(BaseAdapter):
     spec: ClassVar[AdapterSpec] = AdapterSpec(
         inputs=("text",),
         outputs=("json",),
-        unload_fields=("_model", "_processor", "_tokenizer", "_word_splitter", "_word_ids", "_word_cache"),
+        unload_fields=(
+            "_model",
+            "_processor",
+            "_tokenizer",
+            "_word_splitter",
+            "_word_ids",
+            "_word_cache",
+            "_graphs",
+            "_prompts",
+            "_primed",
+        ),
     )
 
     def __init__(
@@ -349,6 +390,7 @@ class GLiNER2DecideAdapter(BaseAdapter):
         inference_batch_tokens: int = _DEFAULT_INFERENCE_BATCH_TOKENS,
         compute_precision: ComputePrecision = "float16",
         revision: str | None = None,
+        cuda_graphs: str | bool = "off",
         **kwargs: Any,
     ) -> None:
         """Initialize the adapter.
@@ -363,9 +405,21 @@ class GLiNER2DecideAdapter(BaseAdapter):
             compute_precision: Accelerator precision (``float16`` is the package's
                 ``quantize=True``). CPU always runs float32.
             revision: Hugging Face revision (commit SHA) to pin.
+            cuda_graphs: "off" (the default) or "bucketed": whether a DeBERTa
+                encoder on CUDA replays its forwards as CUDA graphs (see
+                ``decide_graphs.py``). An operator setting. YAML reads an
+                unquoted ``off`` as False, which means "off" too.
             **kwargs: Additional loader arguments (ignored).
+
+        Raises:
+            ValueError: If the window, the prompt bound, the batch bound or
+                ``cuda_graphs`` is not a value this adapter takes.
         """
         _ = kwargs
+        if cuda_graphs is False:  # an unquoted YAML ``off``
+            cuda_graphs = "off"
+        if not isinstance(cuda_graphs, str) or cuda_graphs not in GRAPH_MODES:
+            raise ValueError(f"GLiNER2.5-Decide cuda_graphs must be 'off' or 'bucketed', got {cuda_graphs!r}")
         window = _DEFAULT_WINDOW if max_seq_length is None else int(max_seq_length)
         prompt = min(window // 2, _DEFAULT_MAX_PROMPT_TOKENS) if max_prompt_tokens is None else int(max_prompt_tokens)
         if window < 2 or not 0 < prompt < window:
@@ -378,6 +432,7 @@ class GLiNER2DecideAdapter(BaseAdapter):
         self._inference_batch_tokens = int(inference_batch_tokens)
         self._compute_precision = compute_precision
         self._revision = revision
+        self._cuda_graphs = cast("GraphMode", cuda_graphs)
 
         self._model: Any = None
         self._processor: Any = None
@@ -386,6 +441,14 @@ class GLiNER2DecideAdapter(BaseAdapter):
         self._word_ids: Any = None
         self._word_cache: Any = None
         self._device: str | None = None
+        # Records and replays the encoder's forwards as CUDA graphs, when the
+        # operator turned them on and the loaded encoder supports them.
+        self._graphs: DecideGraphRunner | None = None
+        # Task prompts of recent request shapes, by schema (see _PROMPT_CACHE_SIZE).
+        self._prompts: OrderedDict[str, _Prefix] | None = None
+        # Logits ``prime_extract_groups`` scored for the batch in progress, by
+        # (row token ids, label markers); ``extract`` takes its rows' from here.
+        self._primed: dict[tuple[tuple[int, ...], tuple[int, ...]], np.ndarray] | None = None
 
     # ------------------------------------------------------------------ loading
 
@@ -426,8 +489,9 @@ class GLiNER2DecideAdapter(BaseAdapter):
             model.to(dtype=torch.bfloat16)
 
         self._attach(model, processor, device)
+        self._graphs = self._graph_runner(model, device)
         logger.info(
-            "Loaded GLiNER2.5-Decide %s (%s) on %s: %s, window %d tokens, prompt at most %d, RoPE %s",
+            "Loaded GLiNER2.5-Decide %s (%s) on %s: %s, window %d tokens, prompt at most %d, RoPE %s, CUDA graphs %s",
             self._model_name_or_path,
             type(model).__name__,
             device,
@@ -435,6 +499,31 @@ class GLiNER2DecideAdapter(BaseAdapter):
             self._window,
             self._max_prompt_tokens,
             rope,
+            "off" if self._graphs is None else f"{self._cuda_graphs} ({self._graphs.shape_count} shapes)",
+        )
+
+    def _graph_runner(self, model: Any, device: str) -> DecideGraphRunner | None:
+        """The CUDA graph runner for a loaded model; None when graphs are off or unsupported."""
+        if self._cuda_graphs == "off":
+            return None
+        # A graph's padded shape is a forward pass, so it keeps to the operator's bound on one.
+        max_tokens = min(MAX_GRAPH_TOKENS, self._inference_batch_tokens)
+        reason = unsupported_reason(model.encoder, device, self._window, max_tokens)
+        if reason is not None:
+            logger.warning(
+                "GLiNER2.5-Decide cuda_graphs=%s does not apply to %s, which runs eagerly: %s",
+                self._cuda_graphs,
+                self._model_name_or_path,
+                reason,
+            )
+            return None
+        pad = getattr(self._tokenizer, "pad_token_id", None)
+        return DecideGraphRunner(
+            model.encoder,
+            window=self._window,
+            pad_token_id=0 if pad is None else int(pad),
+            name=self._model_name_or_path,
+            max_tokens=max_tokens,
         )
 
     def _attach(self, model: Any, processor: Any, device: str) -> None:
@@ -467,6 +556,8 @@ class GLiNER2DecideAdapter(BaseAdapter):
         self._word_splitter = splitter
         self._word_ids = word_ids
         self._word_cache = cached
+        self._prompts = OrderedDict()
+        self._primed = {}
         self._device = device
 
     def warmup(self) -> None:
@@ -489,27 +580,12 @@ class GLiNER2DecideAdapter(BaseAdapter):
         _ = prepared_items
         if self._model is None:
             raise RuntimeError(ERR_NOT_LOADED)
-        opts = options or {}
-        request = parse_request(labels=labels, output_schema=output_schema, instruction=instruction, options=opts)
-        overflow_policy = opts.get("overflow_policy", DEFAULT_OVERFLOW_POLICY)
-        if not isinstance(overflow_policy, str) or overflow_policy not in VALID_OVERFLOW_POLICIES:
-            raise InvalidInputError(
-                f"GLiNER2.5-Decide overflow_policy must be one of {sorted(VALID_OVERFLOW_POLICIES)}"
-            )
-
-        with self._tokenizer_guard():
-            prefix = self._prefix(request)
-            room = self._window - len(prefix.ids)
-            documents: list[_Document | None] = []
-            errors: list[ExtractItemError | None] = []
-            for item in items:
-                document, error = self._document(item, room, overflow_policy)
-                documents.append(document)
-                errors.append(error)
-
+        request, prefix, documents, errors = self._read_request(
+            items, labels=labels, output_schema=output_schema, instruction=instruction, options=options
+        )
         kept = [(index, document) for index, document in enumerate(documents) if document is not None]
         rows = [prefix.ids + document.ids for _, document in kept]
-        logits = self._score(rows, prefix.label_positions) if rows else np.empty((0, 0), dtype=np.float32)
+        logits = self._logits(rows, prefix.label_positions) if rows else np.empty((0, 0), dtype=np.float32)
 
         data: list[dict[str, Any]] = [{} for _ in items]
         item_classifications: list[list[Classification]] = [[] for _ in items]
@@ -539,8 +615,116 @@ class GLiNER2DecideAdapter(BaseAdapter):
             input_token_counts=token_counts,
         )
 
+    def _read_request(
+        self,
+        items: list[Item],
+        *,
+        labels: list[str] | None,
+        output_schema: dict[str, Any] | None,
+        instruction: str | None,
+        options: dict[str, Any] | None,
+    ) -> tuple[DecisionRequest, _Prefix, list[_Document | None], list[ExtractItemError | None]]:
+        """A request's tasks and task prompt, and each item's document or error.
+
+        Raises:
+            InvalidInputError: The request is malformed.
+            InputTooLongError: The task prompt takes more than ``max_prompt_tokens``.
+        """
+        opts = options or {}
+        request = parse_request(labels=labels, output_schema=output_schema, instruction=instruction, options=opts)
+        overflow_policy = opts.get("overflow_policy", DEFAULT_OVERFLOW_POLICY)
+        if not isinstance(overflow_policy, str) or overflow_policy not in VALID_OVERFLOW_POLICIES:
+            raise InvalidInputError(
+                f"GLiNER2.5-Decide overflow_policy must be one of {sorted(VALID_OVERFLOW_POLICIES)}"
+            )
+        documents: list[_Document | None] = []
+        errors: list[ExtractItemError | None] = []
+        with self._tokenizer_guard():
+            prefix = self._prefix(request)
+            room = self._window - len(prefix.ids)
+            for item in items:
+                document, error = self._document(item, room, overflow_policy)
+                documents.append(document)
+                errors.append(error)
+        return request, prefix, documents, errors
+
+    def prime_extract_groups(self, groups: Sequence[Mapping[str, Any]]) -> None:
+        """Score the rows of several ``extract`` calls in one pass, before those calls run.
+
+        The worker calls this with every request shape of a batch it is about
+        to run: each group holds the ``items`` and the ``labels``,
+        ``output_schema``, ``instruction`` and ``options`` of one ``extract``
+        call. Every group's rows are scored together, each row at its own label
+        markers, and kept by (row token ids, label markers) until the group's
+        ``extract`` call takes them. A group that cannot be read (a malformed
+        request, a task prompt too long) is left to its own ``extract`` call,
+        which reports it. Each call drops what the one before it left.
+        """
+        if self._model is None:
+            raise RuntimeError(ERR_NOT_LOADED)
+        self._primed = primed = {}
+        if len(groups) < 2:
+            return
+        rows: list[list[int]] = []
+        positions: list[list[int]] = []
+        for group in groups:
+            try:
+                _, prefix, documents, _ = self._read_request(
+                    group["items"],
+                    labels=group.get("labels"),
+                    output_schema=group.get("output_schema"),
+                    instruction=group.get("instruction"),
+                    options=group.get("options"),
+                )
+            except (InvalidInputError, InputTooLongError):
+                continue
+            for document in documents:
+                if document is not None:
+                    rows.append(prefix.ids + document.ids)
+                    positions.append(prefix.label_positions)
+        if len(rows) < 2:
+            return
+        for row, markers, logits in zip(rows, positions, self._score_rows(rows, positions), strict=True):
+            primed[tuple(row), tuple(markers)] = logits
+
+    def _logits(self, rows: list[list[int]], label_positions: list[int]) -> np.ndarray:
+        """Every row's label logits, ``[rows, labels]``: from the batch's one pass when it scored them all."""
+        primed = self._primed
+        if primed:
+            markers = tuple(label_positions)
+            keys = [(tuple(row), markers) for row in rows]
+            found = [primed.get(key) for key in keys]
+            if all(logits is not None for logits in found):
+                for key in keys:
+                    primed.pop(key, None)
+                return np.stack(cast("list[np.ndarray]", found))
+        return self._score(rows, label_positions)
+
     def _prefix(self, request: DecisionRequest) -> _Prefix:
-        """The task prompt as the processor builds it, once per request.
+        """The task prompt of a request, built once per request shape and kept (see ``_PROMPT_CACHE_SIZE``).
+
+        Raises:
+            InputTooLongError: The task prompt takes more than ``max_prompt_tokens``.
+        """
+        prompts = self._prompts
+        if prompts is None:
+            return self._build_prefix(request)
+        # The prompt and its billed tokens depend on nothing but these entries.
+        shape = json.dumps([task.model_entry() for task in request.tasks], ensure_ascii=False, separators=(",", ":"))
+        if len(shape) > _CACHED_PROMPT_CHARS:
+            return self._build_prefix(request)
+        prefix = prompts.get(shape)
+        if prefix is not None:
+            prompts.move_to_end(shape)
+            return prefix
+        prefix = self._build_prefix(request)
+        prompts[shape] = prefix
+        while len(prompts) > _PROMPT_CACHE_SIZE:
+            prompts.popitem(last=False)
+        return prefix
+
+    def _build_prefix(self, request: DecisionRequest) -> _Prefix:
+        """The task prompt as the processor builds it.
 
         Raises:
             InputTooLongError: The task prompt takes more than ``max_prompt_tokens``.
@@ -683,6 +867,8 @@ class GLiNER2DecideAdapter(BaseAdapter):
         model, device = self._model, self._device
         if model is None or device is None:
             raise RuntimeError(ERR_NOT_LOADED)
+        if self._graphs is not None and self._graphs.key(len(rows), max(map(len, rows))) is not None:
+            return np.stack(self._score_rows(rows, [label_positions] * len(rows)))
         order = sorted(range(len(rows)), key=lambda row: len(rows[row]), reverse=True)
         out = np.empty((len(rows), len(label_positions)), dtype=np.float32)
         markers = torch.tensor(label_positions, dtype=torch.long, device=device)
@@ -704,6 +890,80 @@ class GLiNER2DecideAdapter(BaseAdapter):
             out[chunk] = logits.float().cpu().numpy()
             start += count
         return out
+
+    def _score_rows(self, rows: list[list[int]], positions: Sequence[Sequence[int]]) -> list[np.ndarray]:
+        """Each row's label logits, read at that row's own label markers.
+
+        Rows that fit one CUDA graph together are one forward, replayed from
+        it (or run eagerly at their own length while the graph is not recorded
+        yet, or cannot be). Otherwise the rows run eagerly, sorted longest
+        first, in the padded chunks ``_score`` forms. Every forward is queued on
+        the GPU before the host waits for any of them.
+        """
+        model, device, runner = self._model, self._device, self._graphs
+        if model is None or device is None:
+            raise RuntimeError(ERR_NOT_LOADED)
+        order = sorted(range(len(rows)), key=lambda row: len(rows[row]), reverse=True)
+        lengths = [len(rows[row]) for row in order]
+        key = runner.key(len(rows), lengths[0]) if runner is not None else None
+        pieces: list[tuple[int, Key | None]] = [(len(rows), key)] if key is not None else self._eager_pieces(lengths)
+        input_ids = np.zeros((len(rows), lengths[0]), dtype=np.int64)
+        attention_mask = np.zeros((len(rows), lengths[0]), dtype=np.int64)
+        offsets = [0]
+        for j, row in enumerate(order):
+            input_ids[j, : lengths[j]] = rows[row]
+            attention_mask[j, : lengths[j]] = 1
+            offsets.append(offsets[-1] + len(positions[row]))
+        marker_positions = np.fromiter(
+            (position for row in order for position in positions[row]), dtype=np.int64, count=offsets[-1]
+        )
+        # Each marker's row, counted from the start of the row's own forward.
+        marker_rows = np.empty(offsets[-1], dtype=np.int64)
+        start = 0
+        for count, _ in pieces:
+            for j in range(start, start + count):
+                marker_rows[offsets[j] : offsets[j + 1]] = j - start
+            start += count
+
+        parts: list[torch.Tensor] = []
+        try:
+            with torch.inference_mode(), runner.lock if runner is not None else nullcontext():
+                ids = torch.from_numpy(input_ids).to(device)
+                mask = torch.from_numpy(attention_mask).to(device)
+                marker_row = torch.from_numpy(marker_rows).to(device)
+                marker_position = torch.from_numpy(marker_positions).to(device)
+                start = 0
+                for count, key in pieces:
+                    stop = start + count
+                    piece_ids, piece_mask = ids[start:stop, : lengths[start]], mask[start:stop, : lengths[start]]
+                    hidden = runner.run(piece_ids, piece_mask, key) if runner is not None and key is not None else None
+                    if hidden is None:
+                        hidden = model.encoder(input_ids=piece_ids, attention_mask=piece_mask).last_hidden_state
+                    first, last = offsets[start], offsets[stop]
+                    markers = hidden[marker_row[first:last], marker_position[first:last]]
+                    parts.append(model.classifier(markers).squeeze(-1))
+                    start = stop
+                flat = torch.cat(parts).float().cpu().numpy()
+        except Exception as exc:
+            # Graph memory is held until the graphs go; drop them so the
+            # worker's out-of-memory recovery gets it back.
+            if runner is not None and is_oom_error(exc):
+                runner.clear()
+            raise
+        out: list[np.ndarray] = [flat[:0]] * len(rows)
+        for j, row in enumerate(order):
+            out[row] = flat[offsets[j] : offsets[j + 1]]
+        return out
+
+    def _eager_pieces(self, lengths: list[int]) -> list[tuple[int, Key | None]]:
+        """Rows sorted longest first, cut into padded chunks of at most ``inference_batch_tokens``."""
+        pieces: list[tuple[int, Key | None]] = []
+        start = 0
+        while start < len(lengths):
+            count = max(1, min(len(lengths) - start, self._inference_batch_tokens // lengths[start]))
+            pieces.append((count, None))
+            start += count
+        return pieces
 
     # ------------------------------------------------------------------ cost
 
