@@ -331,6 +331,8 @@ class CudaGraphRunner:
         self._failed: set[Key] = set()
         self._lock = threading.RLock()
         self._stream: torch.cuda.Stream | None = None
+        # Threads that have run a forward on that stream (see ``_record``).
+        self._warmed = threading.local()
         self._disabled = False
         # Set when the memory budget holds no more of a bucketed runner's graphs.
         self._full = False
@@ -688,11 +690,15 @@ class CudaGraphRunner:
         """Record the graph for ``key``.
 
         Recording runs on a stream of the runner's own, whose first use
-        creates per-stream state (the cuBLAS handle and workspace) that cannot
-        be created while recording: the first recording warms that stream up
-        with one row of its inputs, the only memory left cached on it.
-        Recording launches no kernels; the caller replays the graph to answer
-        the forward.
+        creates state (the cuBLAS handle and workspace) that cannot be created
+        while recording. PyTorch keeps the cuBLAS handle per thread and its
+        workspace per handle and stream, and the server does not tie a model
+        to one thread: it loads and warms a model up on one and serves it on
+        another. So each thread's first recording warms that stream up with
+        one row of its inputs, the only memory left cached on it; without
+        that, the first recording of a second thread fails with
+        ``CUBLAS_STATUS_NOT_INITIALIZED``. Recording launches no kernels; the
+        caller replays the graph to answer the forward.
 
         Raises:
             _RecordingOutOfMemoryError: When the warm-up or the recording runs out
@@ -718,7 +724,7 @@ class CudaGraphRunner:
             if relative_pos is not None:
                 self._relative_pos[padded_length] = relative_pos
         hidden = self._hidden_states(key, self._dtype, device)
-        warm_up = self._stream is None
+        warm_up = self._stream is None or not getattr(self._warmed, "done", False)
         stream = self._stream or torch.cuda.Stream(device=device)
         pool = next(iter(self._graphs.values())).graph.pool() if self._graphs else None
         graph = torch.cuda.CUDAGraph()
@@ -729,6 +735,7 @@ class CudaGraphRunner:
                     self._model(**{name: value[:1] for name, value in static.items()})
                     # Kept only once warmed up, so a failed warm-up is tried again.
                     self._stream = stream
+                    self._warmed.done = True
                 free_before = self._free_memory(device)
                 graph.capture_begin(pool=pool, capture_error_mode="thread_local")
                 try:
