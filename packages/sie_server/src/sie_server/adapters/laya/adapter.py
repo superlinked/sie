@@ -34,6 +34,26 @@ Request contract:
 
 Metering counts every row the model encodes: an item's input tokens are the sum
 of its (state, question) row lengths, so cost scales with items x questions.
+
+CUDA graphs (``adapter_options.loadtime.cuda_graphs: bucketed``; the shipped
+configs offer it as the ``graphs`` profile, ``MODEL:graphs``). One state with a
+few questions is a forward of a few rows, and its kernel launches (about 700 to
+900 of them), not the GPU, bound it: on an L4 a four-row, 710-token forward
+keeps the GPU busy for 7 ms of its 22 on ``laya-multilingual`` and for 17 ms of
+its 28 on ``laya``. With graphs on, a request whose rows hold at most
+``graph_token_bound`` packed tokens replays its encoder as one recorded graph
+(``sie_server.adapters._modernbert_flash_graphs``, the runner the other
+ModernBERT flash adapters use) and runs the decision head eagerly on the
+result. Larger requests, which the GPU bounds, run eagerly as before: there a
+graph's padding costs more than its launches save. Padding the token count up
+to a graph's bucket changes how many rows a matrix multiply sees, so logits
+move by floating-point rounding, as they do when a state shares a request with
+others; the server README ("Laya CUDA graphs") has both measured.
+
+Forward size. Rows run longest first in forwards of at most
+``max_forward_tokens`` padded tokens. On an L4, 128 rows of up to 233 tokens
+take 320 ms in forwards of 4,096 padded tokens, 368 ms in forwards of 16,384
+and 409 ms in one forward, so the default is 4,096.
 """
 
 from __future__ import annotations
@@ -51,6 +71,13 @@ import torch
 from huggingface_hub import snapshot_download
 
 from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._modernbert_flash import parse_fused_rope
+from sie_server.adapters._modernbert_flash_graphs import (
+    PackedForward,
+    VarlenGraphRunner,
+    parse_graph_mode,
+    unsupported_reason,
+)
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters.laya.model import LayaDecisionHead, LayaModel, apply_rope_parameters, split_checkpoint
@@ -102,6 +129,9 @@ MAX_OPTIONS = 1024
 # item at max_len 1024, and all 64 at 512.
 MAX_ITEM_TOKENS = 32_768
 
+# Padded tokens per forward: the size at which an L4 is fastest (see the module docstring).
+DEFAULT_MAX_FORWARD_TOKENS = 4096
+
 DEFAULT_LABELS_INSTRUCTION = "Which category does this text belong to?"
 _MIN_BF16_MAJOR = 8  # Ampere
 _LABELS_QUESTION_ID = "label"
@@ -122,13 +152,27 @@ _ERR_STATE_JSON = "Laya metadata.state must be JSON-serializable"
 _ERR_TOO_MANY_OPTIONS = "Laya accepts at most {limit} {what} per request, got {count}"
 
 
+def graph_token_bound(hidden_size: int) -> int:
+    """Packed tokens a CUDA graph of a Laya encoder with this hidden size may hold.
+
+    Twice the runner's own bound for encoders up to 768 wide and wider ones
+    (``_modernbert_flash_graphs.token_bound``): 2,048 and 1,024. The adapter's
+    eager forward launches more kernels than the dense adapters' do (the
+    casts around a float32 residual stream, and the decision head), so a graph
+    pays off for longer. On an L4 a 710-token request is 2.6x as fast from a
+    graph on ``laya-multilingual`` (768 wide) and 1.45x on ``laya`` (1,024
+    wide), where forwards of about 1,600 tokens are already slower from one.
+    """
+    return 2048 if hidden_size <= 768 else 1024
+
+
 class LayaAdapter(BaseAdapter):
     """Adapter for Laya decision models (``convaiinnovations/laya`` family)."""
 
     spec: ClassVar[AdapterSpec] = AdapterSpec(
         inputs=("text",),
         outputs=("json",),
-        unload_fields=("_model", "_tokenizer"),
+        unload_fields=("_model", "_tokenizer", "_graphs"),
     )
 
     def __init__(
@@ -136,9 +180,11 @@ class LayaAdapter(BaseAdapter):
         model_name_or_path: str | Path,
         *,
         max_seq_length: int | None = None,
-        max_forward_tokens: int = 16384,
+        max_forward_tokens: int = DEFAULT_MAX_FORWARD_TOKENS,
         compute_precision: ComputePrecision = "bfloat16",
         revision: str | None = None,
+        cuda_graphs: str | bool = "off",
+        fused_rope: bool = False,
         **kwargs: Any,
     ) -> None:
         """Initialize the adapter.
@@ -149,13 +195,26 @@ class LayaAdapter(BaseAdapter):
             max_seq_length: Upper bound on tokens per (state, question) row. Defaults
                 to the checkpoint's trained ``max_len``.
             max_forward_tokens: Padded-token budget per forward pass; rows beyond it
-                run in further passes.
+                run in further passes (see "Forward size" in the module docstring).
             compute_precision: Projection precision on CUDA (``bfloat16`` matches
                 the reference autocast). CPU and MPS always run float32.
             revision: Hugging Face revision (commit SHA) to pin.
+            cuda_graphs: "off" (the default) or "bucketed": whether small requests
+                replay the encoder as CUDA graphs (see the module docstring). An
+                operator setting, fixed at load; it applies on CUDA with flash-attn.
+            fused_rope: Rotate queries and keys with one fused kernel per layer
+                on the flash path (``run_modernbert_flash_layers``). About a
+                tenth faster on large requests; outputs differ by rounding, and
+                no shipped profile enables it (see the server README).
             **kwargs: Additional loader arguments (ignored).
+
+        Raises:
+            ValueError: If ``cuda_graphs`` is not "off" or "bucketed", or
+                ``fused_rope`` is not a boolean.
         """
         _ = kwargs
+        self._cuda_graphs = parse_graph_mode(cuda_graphs, adapter="LayaAdapter")
+        self._fused_rope = parse_fused_rope(fused_rope, adapter="LayaAdapter")
         self._model_name_or_path = str(model_name_or_path)
         self._max_seq_length = max_seq_length
         self._max_forward_tokens = max(1, int(max_forward_tokens))
@@ -165,6 +224,10 @@ class LayaAdapter(BaseAdapter):
         self._model: LayaModel | None = None
         self._tokenizer: PreTrainedTokenizerFast | None = None
         self._device: str | None = None
+        # Replays the encoder as CUDA graphs, when the operator enabled them,
+        # for requests of at most this many packed tokens.
+        self._graphs: VarlenGraphRunner | None = None
+        self._graph_tokens = 0
         self._calibration = Calibration(temperature=(1.0, 1.0, 1.0), temperature_by_options={})
         self._max_len = 512
         self._head_max_len = 192
@@ -258,11 +321,13 @@ class LayaAdapter(BaseAdapter):
             compute_dtype=compute_dtype,
             max_positions=self._max_len,
             embedding_dtype=embedding_dtype,
+            fused_rope=self._fused_rope,
         )
 
         self._tokenizer = tokenizer
         self._model = model
         self._device = device
+        self._graphs = self._graph_runner()
         logger.info(
             "Loaded Laya %s on %s (backbone=%s, compute=%s, max_len=%d, head_max_len=%d)",
             self._model_name_or_path,
@@ -271,6 +336,37 @@ class LayaAdapter(BaseAdapter):
             compute_dtype,
             self._max_len,
             self._head_max_len,
+        )
+
+    def _graph_runner(self) -> VarlenGraphRunner | None:
+        """The CUDA graph runner for the loaded model; None when graphs are off or do not apply."""
+        model, tokenizer, device = self._model, self._tokenizer, self._device
+        if self._cuda_graphs == "off" or model is None or tokenizer is None or device is None:
+            return None
+        reason = unsupported_reason(device)
+        if reason is None and not model.use_flash:
+            reason = "graphs record the flash-attention encoder, and this model runs the padded one"
+        if reason is not None:
+            logger.warning(
+                "Laya cuda_graphs=%s does not apply to %s, which runs eagerly: %s",
+                self._cuda_graphs,
+                self._model_name_or_path,
+                reason,
+            )
+            return None
+        encode, tables = model.graph_encoder()
+        hidden_size = model.encoder.config.hidden_size
+        self._graph_tokens = graph_token_bound(hidden_size)
+        return VarlenGraphRunner(
+            encode,
+            hidden_size=hidden_size,
+            dtype=torch.float32,  # the encoder's residual stream and final norm
+            device=device,
+            window=self._max_len,
+            pad_token_id=int(tokenizer.pad_token_id or 0),
+            max_tokens=self._graph_tokens,
+            static_tensors=tables,
+            name=self._model_name_or_path,
         )
 
     def warmup(self) -> None:
@@ -490,6 +586,8 @@ class LayaAdapter(BaseAdapter):
             raise RuntimeError(ERR_NOT_LOADED)
         order = sorted(range(len(rows)), key=lambda r: len(rows[r]), reverse=True)
         results: list[np.ndarray] = [np.empty(0, dtype=np.float32)] * len(rows)
+        # A small request replays the encoder as a CUDA graph; a larger one is GPU-bound and runs eagerly.
+        replay = self._graphs is not None and sum(len(row) for row in rows) <= self._graph_tokens
         start = 0
         while start < len(order):
             # Longest row first: the chunk's padded size is len(first) * n_rows.
@@ -505,21 +603,42 @@ class LayaAdapter(BaseAdapter):
             qtype = torch.tensor([QTYPES[row_prefix[r].question.qtype] for r in chunk], dtype=torch.long)
             marker_pos, qtype = marker_pos.to(device), qtype.to(device)
             with torch.inference_mode():
-                if model.use_flash:
-                    out = model.forward_flash(chunk_rows, marker_pos, qtype, device)
-                else:
-                    out = model.forward_padded(
-                        chunk_rows,
-                        marker_pos,
-                        qtype,
-                        device,
-                        pad_token_id=int(tokenizer.pad_token_id),
-                    )
-            out_np = out.float().cpu().numpy()
+                out_np = self._replay_rows(chunk_rows, marker_pos, qtype) if replay else None
+                if out_np is None:
+                    if model.use_flash:
+                        out = model.forward_flash(chunk_rows, marker_pos, qtype, device)
+                    else:
+                        out = model.forward_padded(
+                            chunk_rows,
+                            marker_pos,
+                            qtype,
+                            device,
+                            pad_token_id=int(tokenizer.pad_token_id),
+                        )
+                    out_np = out.float().cpu().numpy()
             for j, r in enumerate(chunk):
                 results[r] = out_np[j, : len(markers[j])]
             start += n
         return results
+
+    def _replay_rows(self, rows: list[list[int]], marker_pos: torch.Tensor, qtype: torch.Tensor) -> np.ndarray | None:
+        """Float32 logits for ``rows`` from a replayed CUDA graph; None when the forward runs eagerly.
+
+        The graph holds the encoder. The decision head runs eagerly on the real
+        rows of its output, inside the runner's lock, before the next replay
+        overwrites them.
+        """
+        graphs, model, device = self._graphs, self._model, self._device
+        if graphs is None or model is None or device is None:
+            return None
+        lengths = [len(row) for row in rows]
+        token_ids = np.fromiter(chain.from_iterable(rows), dtype=np.int32, count=sum(lengths))
+
+        def head(packed: PackedForward) -> np.ndarray:
+            logits = model.head_logits(packed.hidden, packed.cu_seqlens, packed.lengths, marker_pos, qtype, device)
+            return logits.float().cpu().numpy()
+
+        return graphs.run(token_ids, lengths, head)
 
     # ------------------------------------------------------------------ cost
 
