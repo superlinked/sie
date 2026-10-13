@@ -258,7 +258,9 @@ class TestShapes:
         [(1024, 1024), (1024, 768), (512, 1024), (512, 768)],
         ids=["large-1024", "base-1024", "large-512", "base-512"],
     )
-    def test_no_forward_pads_more_than_it_did_with_power_of_two_batches(self, max_length: int, hidden_size: int) -> None:
+    def test_no_forward_pads_more_than_it_did_with_power_of_two_batches(
+        self, max_length: int, hidden_size: int
+    ) -> None:
         # The shapes before batches of up to eight rows kept their size: the length to the
         # window's bucket, the batch to a power of two or the largest that fits.
         tokens = token_bound(hidden_size)

@@ -34,9 +34,9 @@ Two modes choose the shape:
 - ``bucketed`` pads the length up to a bucket (a multiple of 32 tokens at a
   512-token window, 64 at 1,024). A batch of up to eight rows keeps its size;
   a larger one pads up to a power of two, or to the largest batch the token
-  bound allows at that length, and buckets its length half as coarsely (see
-  "Padding costs GPU time" below). Padded positions are masked, and padded
-  rows are dropped before scoring. That makes the set of shapes small and
+  bound allows at that length. A forward of eight rows or more buckets its
+  length at half the width (see "Padding costs GPU time" below). Padded
+  positions are masked, and padded rows are dropped before scoring. That makes the set of shapes small and
   fixed (48 at a 1,024-token window for an encoder wider than 768, 84 for a
   narrower one), and the runner keeps a graph for every one, so after warm-up
   forwards replay whatever mix of batch sizes, lengths and label counts the
@@ -53,9 +53,9 @@ tokens takes 19 ms and of four rows 24 ms; of eight rows of 96 tokens 21 ms
 and of eight rows of 128 tokens 31 ms. So a batch of up to eight rows (a
 request of three typed questions is three rows, and a labels request runs
 eight rows per forward) gets a graph of its own size instead of the next
-power of two, and a forward of eight or more rows, the widest a short text
-can be part of, buckets its length at half the width: 32 tokens at a
-1,024-token window, 16 at 512.
+power of two. And a forward of eight rows or more, which the GPU bounds even
+when its rows are short, buckets its length at half the width (32 tokens at a
+1,024-token window, 16 at 512), unless the window's bucket pads fewer tokens.
 
 While a graph is being recorded, PyTorch's caching allocator will not free
 cached blocks to satisfy another allocation, so another model on the same GPU

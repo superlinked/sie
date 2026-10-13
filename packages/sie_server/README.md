@@ -201,7 +201,7 @@ labels, so one graph serves every label count.
 |--|--|--|
 | `off` (default) | none | eager |
 | `exact` | each (batch size, sequence length) seen twice; the 64 most recently used are kept | bit-identical to eager |
-| `bucketed` | sequence lengths padded up to a multiple of 64 tokens at a 1,024-token window (32 at 512), batch sizes up to a power of two: a fixed set of shapes, all kept | padding moves fp16 probabilities (see below) |
+| `bucketed` | sequence lengths padded up to a multiple of 64 tokens at a 1,024-token window (32 at 512); batches of up to eight rows keep their size, larger ones pad up to a power of two: a fixed set of shapes, all kept | padding moves fp16 probabilities (see below) |
 
 A request can send `options={"cuda_graphs": "off"}` to run eagerly on a model
 loaded with graphs. It cannot turn graphs on: any other value is refused.
@@ -263,12 +263,20 @@ the instruction set:
 A top label that changed did so in every pass; the table counts each answer
 once.
 
-Requests of several items pad their batch as well (3 items to 4, 5 to 8). Asked
-in 3- and 5-item requests and compared with eager execution of the same
-requests, the eight models that ship with graphs moved no probability by more
-than 0.0190 (`opir-multitask-large-v1.0`) and 0.0115 for every other model,
-and every top label that changed had an eager margin below the model's
-δ_eager.
+Requests of up to eight rows run at their own batch size, so only their length
+is padded; a forward of nine rows or more pads up to a power of two (9 rows to
+16) or to the largest batch the token bound allows at its length. A request of
+three questions as separate groups is three rows. The table above was measured
+when a batch padded up to a power of two (3 rows to 4, 5 to 8). With batches of
+up to eight rows keeping their size, the 384 CVE descriptions were asked again
+in 1-, 3-, 5- and 8-item requests with the weakness question's eight labels,
+and as three questions in separate groups, and compared with eager execution of
+the same requests: the eight models that ship with graphs moved no probability
+by more than 0.0127 (`opir-multitask-large-v1.0`, three questions) and 0.0098
+for every other model, and every top label that changed had an eager margin
+below the model's δ_eager (the largest was 0.0056, on
+`gliclass-instruct-base-v1.0`). One-row forwards replay the same shapes as
+before.
 
 `exact` changed nothing. A forward whose batch size is already a bucket (one
 item, for example) scores exactly as it did before batches were padded.
@@ -294,11 +302,25 @@ Larger forwards are bound by the GPU rather than by kernel launches and run
 eagerly: on an L4, a `gliclass-large-v1.0` forward stops gaining from a graph
 at about 1,000 tokens, a `gliclass-base-v1.0` forward at about 2,000. In
 `bucketed` mode at the 1,024-token window that leaves a fixed set of shapes,
-33 for the DeBERTa-v3-large models and 52 for the base and small ones (52 and
-71 at a 512-token window), and the model keeps a graph for every one. Once
+48 for the DeBERTa-v3-large models and 84 for the base and small ones (84 and
+136 at a 512-token window), and the model keeps a graph for every one. Once
 they are recorded, every forward under the token bound replays a graph,
 whatever mix of label counts, batch sizes and lengths the traffic has, and no
 request's shapes push out another's.
+
+**Padding costs GPU time.** A replay is not bound by kernel launches, so it
+costs the GPU time of its padded shape, which grows with the tokens in it. On
+an L4, `gliclass-instruct-large-v1.0` replays three rows of 192 tokens in
+19 ms and four rows in 24 ms; eight rows of 96 tokens in 21 ms and eight rows
+of 128 tokens in 31 ms. So two paddings are kept small. A batch of up to eight
+rows keeps its size instead of padding up to a power of two. And a forward of
+eight rows or more, where short texts are bound by the GPU, buckets its length
+at half the width (32 tokens at a 1,024-token window, 16 at 512), unless the
+window's bucket pads fewer tokens. In process on an L4, eight short texts per
+request went from 33.2 to 24.0 ms on `gliclass-instruct-large-v1.0` and from
+12.8 to 11.8 ms on `gliclass-base-v3.0`, and three questions about one record
+from 26.8 to 22.0 ms and from 12.7 to 9.4 ms; one text per request did not
+change (8.1 and 3.6 ms).
 
 Nothing is recorded at load. A shape is recorded the first time a request
 needs it (the second time in `exact` mode), and the new graph's first replay
@@ -315,13 +337,16 @@ into one shared buffer, and the driver keeps a copy of each graph: about 7 MB
 for the `gliclass-large-v1.0` encoder. The runner adds up the device memory
 its graphs hold (what each recording took, plus the tables and buffers they
 read) against 4% of the device's memory (900 MB on an L4). On an L4, at the
-1,024-token window, all of a model's `bucketed` shapes took 551 to 571 MB for
-the large GLiClass models, 677 MB for `opir-multitask-large-v1.0`, 761 to
-767 MB for the base models and 653 MB for `gliclass-small-v1.0`, plus about
-150 MB cached on the recording stream (its cuBLAS workspace and one warm-up
-row). Recorded while serving mixed traffic, the same shapes can take more, and
-at the 1,024-token window the budget can fill with one to three shapes left
-unrecorded; those shapes run eagerly. On a smaller GPU, where the shapes do not
+1,024-token window, all of a model's `bucketed` shapes, recorded largest
+first, took 743 to 777 MB for the large GLiClass models, 777 MB for
+`opir-multitask-large-v1.0`, 760 to 834 MB for the base models and 578 MB for
+`gliclass-small-v1.0`, plus about 150 MB cached on the recording stream (its
+cuBLAS workspace and one warm-up row). Recorded in another order, the same
+shapes take more, because the shared pool grows in steps: recorded smallest
+first, the budget fills with the largest shapes of each batch size left
+unrecorded (9 of 48 on `gliclass-instruct-large-v1.0`, 19 of 84 on
+`gliclass-base-v3.0`). Those are the shapes a graph gains least on, and they
+run eagerly. On a smaller GPU, where the shapes do not
 all fit, recording stops at the budget and the graphs already recorded keep
 replaying; the other shapes run eagerly. In `exact` mode, whose shapes are
 unbounded, a model past its budget drops every graph, returns their memory to
