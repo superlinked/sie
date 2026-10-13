@@ -14,6 +14,7 @@ real graphs.
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -240,27 +241,55 @@ def _cuda_ready() -> bool:
     return is_flash_attention_available("cuda:0")
 
 
+def _gpu_pair(checkpoint: Path) -> tuple[LayaAdapter, LayaAdapter]:
+    """The tiny model on the GPU in bfloat16 behind two adapters: real graphs, and eager."""
+    adapters = []
+    for graphs in ("bucketed", "off"):
+        model, embedding_dtype = _load_like_adapter(checkpoint, _encoder_config())
+        model.prepare(
+            "cuda:0",
+            use_flash=True,
+            compute_dtype=torch.bfloat16,
+            max_positions=_WINDOW,
+            embedding_dtype=embedding_dtype,
+        )
+        adapter = LayaAdapter("tiny", max_seq_length=_WINDOW, cuda_graphs=graphs)
+        adapter._model, adapter._device, adapter._max_len = model, "cuda:0", _WINDOW
+        adapter._tokenizer = SimpleNamespace(pad_token_id=PAD_ID)  # ty: ignore[invalid-assignment]
+        adapter._graphs = adapter._graph_runner()
+        adapters.append(adapter)
+    return adapters[0], adapters[1]
+
+
 @pytest.mark.gpu_hw
 class TestOnGpu:
+    def test_a_thread_other_than_the_first_records_a_graph(
+        self,
+        reference_checkpoint: tuple[Any, Path],  # noqa: F811
+    ) -> None:
+        """The server warms a model up on one thread and serves it on another: both must be able to record."""
+        if not _cuda_ready():
+            pytest.skip("requires CUDA and flash-attn")
+        graphed, eager = _gpu_pair(reference_checkpoint[1])
+        runner = graphed._graphs
+        assert runner is not None
+        one_row = ([ROWS[1]], [_prefixes()[1]])  # 14 tokens: the 64-token graph
+        graphed._run_rows(*one_row)
+        assert runner.stats.recorded == 1
+
+        results: list[Any] = []
+        serving = threading.Thread(target=lambda: results.append(graphed._run_rows(ROWS, _prefixes())))
+        serving.start()
+        serving.join()
+        # 71 tokens: the 128-token graph, recorded on a thread that has no cuBLAS handle yet.
+        assert (runner.stats.recorded, runner.stats.recording_failures, runner.stats.eager) == (2, 0, {})
+        for mine, ref in zip(results[0], eager._run_rows(ROWS, _prefixes()), strict=True):
+            np.testing.assert_allclose(mine, ref, atol=5e-2)
+
     def test_recorded_graphs_match_eager(self, reference_checkpoint: tuple[Any, Path]) -> None:  # noqa: F811
         if not _cuda_ready():
             pytest.skip("requires CUDA and flash-attn")
-        adapters = []
-        for graphs in ("bucketed", "off"):
-            model, embedding_dtype = _load_like_adapter(reference_checkpoint[1], _encoder_config())
-            model.prepare(
-                "cuda:0",
-                use_flash=True,
-                compute_dtype=torch.bfloat16,
-                max_positions=_WINDOW,
-                embedding_dtype=embedding_dtype,
-            )
-            adapter = LayaAdapter("tiny", max_seq_length=_WINDOW, cuda_graphs=graphs)
-            adapter._model, adapter._device, adapter._max_len = model, "cuda:0", _WINDOW
-            adapter._tokenizer = SimpleNamespace(pad_token_id=PAD_ID)  # ty: ignore[invalid-assignment]
-            adapter._graphs = adapter._graph_runner()
-            adapters.append(adapter)
-        graphed, eager = adapters
+        graphed, eager = _gpu_pair(reference_checkpoint[1])
         assert graphed._graphs is not None
         assert eager._graphs is None
         for _ in range(3):
