@@ -17716,7 +17716,7 @@ mod tests {
                 extends: None,
             },
         );
-        let tasks: serde_yaml::Value = serde_yaml::from_str(
+        let tasks: serde_json::Value = serde_saphyr::from_str(
             "generate:\n  capabilities:\n    grammar: [json_schema]\n    streaming: false\n",
         )
         .expect("generation task");
@@ -25173,7 +25173,7 @@ mod tests {
         .into_iter()
         .collect();
         let tasks =
-            serde_yaml::from_str("generate:\n  capabilities:\n    streaming: false\n").unwrap();
+            serde_saphyr::from_str("generate:\n  capabilities:\n    streaming: false\n").unwrap();
         registry
             .add_model_config(ModelConfig {
                 name: "org/buffered".to_string(),
@@ -25233,7 +25233,7 @@ mod tests {
         profiles.insert("no-spec".to_string(), no_spec);
         // `tasks.generate.grammar_profile: no-spec` is what surfaces on
         // `info_extras.grammar_profile` — the field the handlers read.
-        let tasks: serde_yaml::Value = serde_yaml::from_str(
+        let tasks: serde_json::Value = serde_saphyr::from_str(
             "generate:\n  grammar_profile: no-spec\n  capabilities:\n    grammar: [json_schema]\n",
         )
         .unwrap();
@@ -25385,8 +25385,8 @@ mod tests {
         let mut profiles = StdHashMap::new();
         profiles.insert("default".to_string(), default_profile);
         profiles.insert("no-spec".to_string(), nospec_profile);
-        let tasks: serde_yaml::Value =
-            serde_yaml::from_str("generate:\n  grammar_profile: no-spec\n").unwrap();
+        let tasks: serde_json::Value =
+            serde_saphyr::from_str("generate:\n  grammar_profile: no-spec\n").unwrap();
         registry
             .add_model_config(ModelConfig {
                 name: "org/g2".to_string(),
@@ -25446,7 +25446,7 @@ mod tests {
                 extends: None,
             },
         );
-        let tasks: serde_yaml::Value = serde_yaml::from_str(
+        let tasks: serde_json::Value = serde_saphyr::from_str(
             "generate:\n  grammar_profile: ghost\n  capabilities:\n    grammar: [json_schema]\n",
         )
         .unwrap();

@@ -45,11 +45,15 @@ The standalone Candle worker uses
 
 ## Releases
 
-Read `RELEASE.md` before authoring, publishing, or recovering a release. After
-successful stable publication, follow its [Terraform module follow-up](RELEASE.md#terraform-module-follow-up)
-for all four public module repositories. Include their update PRs and module
-release status in the release handoff; successful SIE publication does not update
-the Terraform repositories or Terraform Registry automatically.
+Read `RELEASE.md` before authoring, publishing, or recovering a release.
+Terraform modules have independent release lifecycles: a new SIE version alone
+does not require module documentation updates or module releases. Follow
+[Terraform module follow-up](RELEASE.md#terraform-module-follow-up) only when a
+release changes an infrastructure requirement or exposes a real compatibility
+issue. Documentation-only changes use non-releasing commits; reserve module
+versions for actual module changes. An explicitly authorized one-time Registry
+documentation refresh follows the exception in that guide; never retag an
+existing module version to change its documentation.
 
 Release automation is intentionally fail-closed. Package, image, and chart
 builds may run without publication authority; external publication additionally

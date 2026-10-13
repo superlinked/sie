@@ -2709,13 +2709,13 @@ mod tests {
 
     #[test]
     fn every_admission_outcome_is_declared_in_the_telemetry_contract() {
-        let contract: serde_yaml::Value = serde_yaml::from_str(include_str!(concat!(
+        let contract: serde_json::Value = serde_saphyr::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../telemetry/contract.yaml"
         )))
         .expect("telemetry contract parses");
         let declared: HashSet<&str> = contract["enums"]["admission_outcome"]
-            .as_sequence()
+            .as_array()
             .expect("admission_outcome is a contract enum")
             .iter()
             .map(|value| value.as_str().expect("enum values are strings"))

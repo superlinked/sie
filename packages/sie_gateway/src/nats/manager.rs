@@ -377,7 +377,7 @@ impl NatsManager {
             return;
         }
 
-        let config: ModelConfig = match serde_yaml::from_str(&notification.model_config) {
+        let config: ModelConfig = match serde_saphyr::from_str(&notification.model_config) {
             Ok(config) => config,
             Err(e) => {
                 telemetry::record_config_operation(operation, ConfigOutcome::ParseError);

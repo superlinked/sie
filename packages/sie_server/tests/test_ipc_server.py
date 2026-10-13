@@ -2260,8 +2260,11 @@ def _default_bundle_export() -> tuple[list[ReplaceModelConfigEntry], list[str], 
 def _route_ids_using(entries: list[ReplaceModelConfigEntry], modules: frozenset[str]) -> list[str]:
     routes = []
     for entry in entries:
-        for profile_name, profile in yaml.safe_load(entry.model_config)["profiles"].items():
-            adapter_path = profile.get("adapter_path") or ""
+        profiles = yaml.safe_load(entry.model_config)["profiles"]
+        for profile_name, profile in profiles.items():
+            # A profile that extends another runs on its adapter unless it names its own.
+            parent = profiles.get(profile.get("extends") or "", {})
+            adapter_path = profile.get("adapter_path") or parent.get("adapter_path") or ""
             if adapter_path.split(":", maxsplit=1)[0] in modules:
                 routes.append(entry.model_id if profile_name == "default" else f"{entry.model_id}:{profile_name}")
     return sorted(routes)
