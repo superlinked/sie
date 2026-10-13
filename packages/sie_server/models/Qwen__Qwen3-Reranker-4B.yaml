@@ -26,12 +26,23 @@ profiles:
         # The layers' elementwise work as fused Triton kernels: the same scores,
         # bit for bit, in less GPU time.
         fused_kernels: true
-        # Rows that start with the same tokens (template, instruction and query)
-        # attend to one encoding of them: the 20 candidates of a question, or the
-        # messages a yes-or-no question is asked of, one request at a time. A
-        # prefix seen twice is kept across requests, in at most prefix_cache_mb.
+      runtime: {}
+  # The default profile plus two serving options that move scores by
+  # floating-point rounding (server README, "Qwen3 reranker serving options"):
+  # the template, instruction and query are encoded once for the rows and the
+  # requests that share them, and a one-row request over a cached prefix replays
+  # as a CUDA graph. An extending profile restates the load-time options.
+  fast:
+    extends: default
+    adapter_options:
+      loadtime:
+        yes_token: "yes"
+        no_token: "no"
+        input_format: qwen3
+        score_mode: log_softmax
+        default_instruction: "Given a web search query, retrieve relevant passages that answer the query"
+        fused_kernels: true
         prefix_reuse: true
         prefix_cache_mb: 512
-        # A one-row request over a cached prefix replays as a CUDA graph.
         cuda_graphs: bucketed
-      runtime: {}
+        cuda_graph_tokens: 512

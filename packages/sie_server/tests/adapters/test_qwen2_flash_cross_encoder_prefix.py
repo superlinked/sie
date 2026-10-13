@@ -181,10 +181,23 @@ def test_shared_prefixes_and_graphs_are_off_unless_a_profile_asks() -> None:
 
 
 @pytest.mark.parametrize("config", ["Qwen__Qwen3-Reranker-4B.yaml", "Qwen__Qwen3-Reranker-0.6B.yaml"])
-def test_the_qwen3_rerankers_turn_shared_prefixes_and_graphs_on(config: str) -> None:
-    loadtime = load_model_config(_MODELS_DIR / config).resolve_profile("default").loadtime
-    assert loadtime["prefix_reuse"] is True
-    assert loadtime["cuda_graphs"] == "bucketed"
+def test_the_options_that_move_scores_ship_in_the_fast_profile_only(config: str) -> None:
+    model = load_model_config(_MODELS_DIR / config)
+    default, fast = model.resolve_profile("default"), model.resolve_profile("fast")
+
+    assert "prefix_reuse" not in default.loadtime
+    assert "cuda_graphs" not in default.loadtime
+    # The fast profile is the default one plus the options: same adapter, precision and scoring.
+    added = {"prefix_reuse": True, "prefix_cache_mb": 512, "cuda_graphs": "bucketed", "cuda_graph_tokens": 512}
+    assert dict(fast.loadtime) == {**default.loadtime, **added}
+    assert fast.adapter_path == default.adapter_path
+    assert fast.compute_precision == default.compute_precision
+    assert fast.max_batch_tokens == default.max_batch_tokens
+    adapter = Qwen2FlashCrossEncoderAdapter("unused", **fast.loadtime)
+    assert adapter._fused_kernels is True
+    assert adapter._prefix_reuse is True
+    assert adapter._cuda_graphs == "bucketed"
+    assert adapter._cuda_graph_tokens == 512
 
 
 def test_cuda_graphs_takes_off_or_bucketed() -> None:
