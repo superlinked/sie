@@ -275,8 +275,12 @@ the same requests: the eight models that ship with graphs moved no probability
 by more than 0.0127 (`opir-multitask-large-v1.0`, three questions) and 0.0098
 for every other model, and every top label that changed had an eager margin
 below the model's δ_eager (the largest was 0.0056, on
-`gliclass-instruct-base-v1.0`). One-row forwards replay the same shapes as
-before.
+`gliclass-instruct-base-v1.0`). Eight CVE descriptions in one batch are over
+the token bound of the DeBERTa-v3-large models and run eagerly, so the
+eight-row shapes of those four models were checked on requests of eight short
+news texts with eight labels instead: against eager execution no probability
+moved by more than 0.0083, and no top label changed. One-row forwards replay
+the same shapes as before.
 
 `exact` changed nothing. A forward whose batch size is already a bucket (one
 item, for example) scores exactly as it did before batches were padded.
@@ -317,10 +321,10 @@ rows keeps its size instead of padding up to a power of two. And a forward of
 eight rows or more, where short texts are bound by the GPU, buckets its length
 at half the width (32 tokens at a 1,024-token window, 16 at 512), unless the
 window's bucket pads fewer tokens. In process on an L4, eight short texts per
-request went from 33.2 to 24.0 ms on `gliclass-instruct-large-v1.0` and from
-12.8 to 11.8 ms on `gliclass-base-v3.0`, and three questions about one record
-from 26.8 to 22.0 ms and from 12.7 to 9.4 ms; one text per request did not
-change (8.1 and 3.6 ms).
+request went from 31.8 to 23.3 ms on `gliclass-instruct-large-v1.0` and from
+12.4 to 11.2 ms on `gliclass-base-v3.0`, and three questions about one record
+from 25.8 to 21.3 ms and from 11.2 to 8.9 ms; one text per request did not
+change (7.8 and 3.6 ms).
 
 Nothing is recorded at load. A shape is recorded the first time a request
 needs it (the second time in `exact` mode), and the new graph's first replay
