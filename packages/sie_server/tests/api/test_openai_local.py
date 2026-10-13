@@ -1886,11 +1886,23 @@ def test_cuda_chat_blocking_publishes_parser_reasoning_only_when_asked(
     assert payload["usage"]["completion_tokens"] == 4
 
 
-def test_cuda_chat_stream_publishes_split_reasoning_when_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("parser", [False, True])
+def test_cuda_chat_stream_publishes_split_reasoning_when_asked(monkeypatch: pytest.MonkeyPatch, parser: bool) -> None:
+    reasoning_deltas = (
+        [
+            _stream_event({"reasoning_content": "private ", "content": ""}),
+            _stream_event({"reasoning_content": "chain"}),
+            _stream_event({"content": "Visible answer"}),
+        ]
+        if parser
+        else [
+            _stream_event({"content": "private chain</thi"}),
+            _stream_event({"content": "nk>Visible answer"}),
+        ]
+    )
     events = [
         _stream_event({"role": "assistant", "content": ""}),
-        _stream_event({"reasoning_content": "private", "content": "private chain</thi"}),
-        _stream_event({"content": "nk>Visible answer"}),
+        *reasoning_deltas,
         _stream_event({}, finish_reason="stop"),
     ]
     wire = b"".join(f"data: {json.dumps(event)}\n\n".encode() for event in events) + b"data: [DONE]\n\n"
@@ -1899,7 +1911,12 @@ def test_cuda_chat_stream_publishes_split_reasoning_when_asked(monkeypatch: pyte
     def _handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, stream=upstream_stream, headers={"content-type": "text/event-stream"})
 
-    client, _ = _cuda_chat_client(monkeypatch, _handler, chat_template_kwargs={"enable_thinking": True})
+    client, _ = _cuda_chat_client(
+        monkeypatch,
+        _handler,
+        reasoning_parser="qwen3" if parser else None,
+        chat_template_kwargs={"enable_thinking": True},
+    )
     response = client.post(
         "/v1/chat/completions",
         json={
@@ -1916,7 +1933,7 @@ def test_cuda_chat_stream_publishes_split_reasoning_when_asked(monkeypatch: pyte
     assert data_lines[-1] == "[DONE]"
     deltas = [json.loads(line)["choices"][0]["delta"] for line in data_lines[:-1]]
     assert "".join(delta.get("content", "") for delta in deltas) == "Visible answer"
-    assert "".join(delta.get("reasoning_content", "") for delta in deltas) == "privateprivate chain"
+    assert "".join(delta.get("reasoning_content", "") for delta in deltas) == "private chain"
     assert "</think>" not in response.text
     assert upstream_stream.closed is True
 

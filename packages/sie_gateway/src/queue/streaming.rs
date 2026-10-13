@@ -1063,6 +1063,7 @@ impl StreamCollector {
         // throughout an active tool-call stream. Matches the SSE
         // driver's ``first_seen`` semantics.
         let has_output = !chunk.text_delta.is_empty()
+            || !chunk.reasoning_delta.is_empty()
             || chunk
                 .tool_calls
                 .as_ref()

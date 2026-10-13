@@ -8320,6 +8320,7 @@ fn build_chat_completion_body(
     model: &str,
     request_id: &str,
     outcome: &crate::queue::streaming::StreamOutcome,
+    include_reasoning: bool,
 ) -> Result<Vec<u8>, Response> {
     let Some(usage) = outcome.usage.as_ref() else {
         return Err((
@@ -8365,7 +8366,7 @@ fn build_chat_completion_body(
         } else {
             message.insert("content".to_string(), json!(outcome.text));
         }
-        if let Some(reasoning) = outcome.reasoning.get(&0) {
+        if let Some(reasoning) = outcome.reasoning.get(&0).filter(|_| include_reasoning) {
             message.insert("reasoning_content".to_string(), json!(reasoning));
         }
         vec![json!({
@@ -8402,7 +8403,8 @@ fn build_chat_completion_body(
                 let reasoning = cand
                     .reasoning_content
                     .as_ref()
-                    .or_else(|| outcome.reasoning.get(&(i as u32)));
+                    .or_else(|| outcome.reasoning.get(&(i as u32)))
+                    .filter(|_| include_reasoning);
                 if let Some(reasoning) = reasoning {
                     message.insert("reasoning_content".to_string(), json!(reasoning));
                 }
@@ -9716,6 +9718,7 @@ async fn proxy_chat_inner(
     let requested_model = params.model.clone();
     let stream = params.stream;
     let stream_include_usage = params.stream_include_usage;
+    let include_reasoning = params.include_reasoning == Some(true);
     let mut work_params = params.into_work_params();
     work_params.require_execution_authority_v1 = require_execution_authority_v1;
     work_params.fallback_reason = fallback_reason;
@@ -9750,6 +9753,7 @@ async fn proxy_chat_inner(
             work_params,
             endpoint: super::sse::SseEndpoint::Chat {
                 include_usage: stream_include_usage,
+                include_reasoning,
             },
             route: RouteKind::Compatibility,
         })
@@ -9785,10 +9789,11 @@ async fn proxy_chat_inner(
     };
     let elapsed = start.elapsed();
 
-    let body_bytes = match build_chat_completion_body(&model_name, &request_id, &outcome) {
-        Ok(b) => b,
-        Err(resp) => return resp,
-    };
+    let body_bytes =
+        match build_chat_completion_body(&model_name, &request_id, &outcome, include_reasoning) {
+            Ok(b) => b,
+            Err(resp) => return resp,
+        };
 
     state.registry.record_request("queue").await;
     emit_audit_log(AuditEntry {
@@ -26992,7 +26997,7 @@ mod tests {
             execution_binding_sha256: None,
             reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "req", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "req", &outcome, false).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let choices = v["choices"].as_array().expect("choices array");
         assert_eq!(choices.len(), 2);
@@ -27061,7 +27066,7 @@ mod tests {
             execution_binding_sha256: None,
             reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "req-tc", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "req-tc", &outcome, false).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let c0 = &v["choices"][0];
         assert!(c0["message"]["content"].is_null());
@@ -27119,7 +27124,7 @@ mod tests {
             execution_binding_sha256: None,
             reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "req-lp", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "req-lp", &outcome, false).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let lps = &v["choices"][0]["logprobs"];
         assert!(!lps.is_null(), "candidate logprobs must surface (M4)");
@@ -28216,8 +28221,9 @@ mod tests {
             execution_binding_sha256: None,
             reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("Qwen/Qwen3-4B-Instruct-2507", "req-1", &outcome)
-            .expect("ok");
+        let bytes =
+            build_chat_completion_body("Qwen/Qwen3-4B-Instruct-2507", "req-1", &outcome, false)
+                .expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["object"], "chat.completion");
         assert_eq!(v["model"], "Qwen/Qwen3-4B-Instruct-2507");
@@ -28316,7 +28322,7 @@ mod tests {
             execution_binding_sha256: None,
             reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "r", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "r", &outcome, false).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let lp = &v["choices"][0]["logprobs"];
         assert!(lp["content"].is_array(), "logprobs.content must be present");
@@ -28353,7 +28359,7 @@ mod tests {
             execution_binding_sha256: None,
             reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "r", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "r", &outcome, false).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(v["choices"][0]["logprobs"].is_null());
     }
@@ -28386,17 +28392,23 @@ mod tests {
             execution_binding_sha256: None,
             reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "r", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "r", &outcome, true).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(v["choices"][0]["message"]
             .get("reasoning_content")
             .is_none());
 
         outcome.reasoning.insert(0, "why".to_string());
-        let bytes = build_chat_completion_body("m", "r", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "r", &outcome, true).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["choices"][0]["message"]["reasoning_content"], "why");
         assert_eq!(v["choices"][0]["message"]["content"], "Hi");
+
+        let bytes = build_chat_completion_body("m", "r", &outcome, false).expect("ok");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["choices"][0]["message"]
+            .get("reasoning_content")
+            .is_none());
 
         outcome.candidates = vec![
             CandidateData {
@@ -28414,10 +28426,16 @@ mod tests {
                 reasoning_content: None,
             },
         ];
-        let bytes = build_chat_completion_body("m", "r", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "r", &outcome, true).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["choices"][0]["message"]["reasoning_content"], "because");
         assert!(v["choices"][1]["message"]
+            .get("reasoning_content")
+            .is_none());
+
+        let bytes = build_chat_completion_body("m", "r", &outcome, false).expect("ok");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["choices"][0]["message"]
             .get("reasoning_content")
             .is_none());
     }
@@ -28460,7 +28478,7 @@ mod tests {
             execution_binding_sha256: None,
             reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "req-tc", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "req-tc", &outcome, false).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
         let msg = &v["choices"][0]["message"];
@@ -28493,7 +28511,8 @@ mod tests {
             execution_binding_sha256: None,
             reasoning: Default::default(),
         };
-        let resp = build_chat_completion_body("m", "req-1", &outcome).expect_err("missing usage");
+        let resp =
+            build_chat_completion_body("m", "req-1", &outcome, false).expect_err("missing usage");
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = axum::body::to_bytes(resp.into_body(), 16 * 1024)
             .await
@@ -29112,7 +29131,7 @@ mod tests {
             execution_binding_sha256: None,
             reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "req-x", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "req-x", &outcome, false).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         // Non-streaming uses `chat.completion`, not `chat.completion.chunk`.
         assert_eq!(v["object"], "chat.completion");

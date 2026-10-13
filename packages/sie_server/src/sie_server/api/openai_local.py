@@ -1002,8 +1002,9 @@ def _sanitize_chat_payload(
         if visible != content and "logprobs" in choice_obj:
             choice_obj["logprobs"] = None
         if public_reasoning:
+            captured = stripper.take_reasoning()
             parsed = next((value for value in (reasoning_content, reasoning) if isinstance(value, str) and value), "")
-            exposed = parsed + stripper.take_reasoning()
+            exposed = parsed or captured
             if exposed:
                 container["reasoning_content"] = exposed
     return payload

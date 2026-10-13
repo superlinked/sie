@@ -79,6 +79,10 @@ pub enum SseEndpoint {
     Chat {
         /// Whether to emit a trailing usage-only chunk before ``[DONE]``.
         include_usage: bool,
+        /// Whether the request opted into public reasoning; a worker
+        /// ``reasoning_delta`` is forwarded as ``delta.reasoning_content``
+        /// only when it did.
+        include_reasoning: bool,
     },
     /// SIE-native generate chunk shape.
     Generate,
@@ -1104,6 +1108,7 @@ async fn run_sse_driver_with_lifecycle(
 
         // Non-stale chunk arrived. Update timing trackers.
         if !chunk.text_delta.is_empty()
+            || !chunk.reasoning_delta.is_empty()
             || chunk
                 .tool_calls
                 .as_ref()
@@ -1264,12 +1269,15 @@ async fn run_sse_driver_with_lifecycle(
             && !role_emitted.contains(&chunk.choice_index)
             && !skip_forward;
         let event_body = match endpoint {
-            SseEndpoint::Chat { .. } => build_chat_chunk_event(
+            SseEndpoint::Chat {
+                include_reasoning, ..
+            } => build_chat_chunk_event(
                 &stream_chat_id,
                 created,
                 &model,
                 &chunk,
                 emit_role_for_this_chunk,
+                include_reasoning,
             ),
             SseEndpoint::Generate => build_generate_chunk_event(&chunk, &terminal_usage_extras),
             SseEndpoint::Completion { .. } => {
@@ -1373,12 +1381,13 @@ fn build_chat_chunk_event(
     model: &str,
     chunk: &ChunkEnvelope,
     emit_role: bool,
+    include_reasoning: bool,
 ) -> Value {
     let mut delta = serde_json::Map::new();
     if emit_role {
         delta.insert("role".to_string(), json!("assistant"));
     }
-    if !chunk.reasoning_delta.is_empty() {
+    if include_reasoning && !chunk.reasoning_delta.is_empty() {
         delta.insert(
             "reasoning_content".to_string(),
             json!(chunk.reasoning_delta),
@@ -1542,7 +1551,7 @@ fn build_usage_only_chunk_event(
     terminal_extras: &[(String, Value)],
 ) -> Option<Value> {
     let object = match endpoint {
-        SseEndpoint::Chat { include_usage } if include_usage => "chat.completion.chunk",
+        SseEndpoint::Chat { include_usage, .. } if include_usage => "chat.completion.chunk",
         SseEndpoint::Completion { include_usage } if include_usage => "text_completion",
         _ => return None,
     };
@@ -1578,7 +1587,7 @@ fn terminal_carries_usage(endpoint: SseEndpoint, chunk: &ChunkEnvelope) -> bool 
     }
     match endpoint {
         SseEndpoint::Generate => true,
-        SseEndpoint::Chat { include_usage } | SseEndpoint::Completion { include_usage } => {
+        SseEndpoint::Chat { include_usage, .. } | SseEndpoint::Completion { include_usage } => {
             include_usage
         }
     }
@@ -1811,7 +1820,9 @@ async fn send_synthetic_error_chunk(
         reasoning_delta: String::new(),
     };
     let body = match endpoint {
-        SseEndpoint::Chat { .. } => build_chat_chunk_event(chat_id, created, model, &chunk, false),
+        SseEndpoint::Chat { .. } => {
+            build_chat_chunk_event(chat_id, created, model, &chunk, false, false)
+        }
         SseEndpoint::Completion { .. } => {
             build_text_completion_chunk_event(chat_id, created, model, &chunk)
         }
@@ -2407,6 +2418,7 @@ mod tests {
             for endpoint in [
                 SseEndpoint::Chat {
                     include_usage: true,
+                    include_reasoning: false,
                 },
                 SseEndpoint::Completion {
                     include_usage: true,
@@ -2495,6 +2507,7 @@ mod tests {
         for endpoint in [
             SseEndpoint::Chat {
                 include_usage: false,
+                include_reasoning: false,
             },
             SseEndpoint::Completion {
                 include_usage: false,
@@ -2527,6 +2540,7 @@ mod tests {
         for endpoint in [
             SseEndpoint::Chat {
                 include_usage: false,
+                include_reasoning: false,
             },
             SseEndpoint::Completion {
                 include_usage: false,
@@ -2633,6 +2647,7 @@ mod tests {
         for endpoint in [
             SseEndpoint::Chat {
                 include_usage: false,
+                include_reasoning: false,
             },
             SseEndpoint::Completion {
                 include_usage: false,
@@ -2738,7 +2753,7 @@ mod tests {
             "bytes": [72, 105],
             "top_logprobs": [],
         })]);
-        let ev = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, true);
+        let ev = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, true, false);
         let lp = &ev["choices"][0]["logprobs"];
         assert_eq!(lp["content"][0]["token"], "Hi");
         assert!(lp["refusal"].is_null());
@@ -2748,25 +2763,29 @@ mod tests {
     #[test]
     fn test_build_chat_chunk_event_logprobs_null_when_absent() {
         let chunk = _delta_chunk(0, "Hi");
-        let ev = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, true);
+        let ev = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, true, false);
         assert!(ev["choices"][0]["logprobs"].is_null());
     }
 
     /// A worker chunk carrying ``reasoning_delta`` surfaces it as
-    /// ``delta.reasoning_content``, with no ``content`` member when the
-    /// chunk carried no answer text; a plain text chunk has no such member.
+    /// ``delta.reasoning_content`` only for a request that opted in, with no
+    /// ``content`` member when the chunk carried no answer text; a plain text
+    /// chunk has no such member.
     #[test]
-    fn test_build_chat_chunk_event_surfaces_reasoning_delta() {
+    fn test_build_chat_chunk_event_surfaces_reasoning_delta_only_when_opted_in() {
         let mut chunk = _delta_chunk(0, "");
         chunk.reasoning_delta = "why ".to_string();
-        let ev = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, true);
+        let ev = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, true, true);
         let delta = &ev["choices"][0]["delta"];
         assert_eq!(delta["reasoning_content"], "why ");
         assert_eq!(delta["role"], "assistant");
         assert!(delta.get("content").is_none());
 
+        let ev = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, true, false);
+        assert!(ev["choices"][0]["delta"].get("reasoning_content").is_none());
+
         let text = _delta_chunk(1, "Hi");
-        let ev = build_chat_chunk_event("chatcmpl-1", 0, "m", &text, false);
+        let ev = build_chat_chunk_event("chatcmpl-1", 0, "m", &text, false, true);
         assert!(ev["choices"][0]["delta"].get("reasoning_content").is_none());
         assert_eq!(ev["choices"][0]["delta"]["content"], "Hi");
     }
@@ -2826,7 +2845,7 @@ mod tests {
     #[test]
     fn test_sse_chat_first_chunk_emits_role() {
         let chunk = _delta_chunk(0, "Hello");
-        let v = build_chat_chunk_event("chatcmpl-1", 1_700_000_000, "m", &chunk, true);
+        let v = build_chat_chunk_event("chatcmpl-1", 1_700_000_000, "m", &chunk, true, false);
         assert_eq!(v["object"], "chat.completion.chunk");
         assert_eq!(v["id"], "chatcmpl-1");
         assert_eq!(v["model"], "m");
@@ -2841,7 +2860,7 @@ mod tests {
         // choices[0].index = 2 so clients can reassemble per-candidate streams.
         let mut chunk = _delta_chunk(0, "B");
         chunk.choice_index = 2;
-        let v = build_chat_chunk_event("chatcmpl-1", 1_700_000_000, "m", &chunk, false);
+        let v = build_chat_chunk_event("chatcmpl-1", 1_700_000_000, "m", &chunk, false, false);
         assert_eq!(v["choices"][0]["index"], 2);
         assert_eq!(v["choices"][0]["delta"]["content"], "B");
     }
@@ -2858,7 +2877,7 @@ mod tests {
         chunk.finish_reason = Some("length".to_string());
         // done=false — this is the per-choice closure, not the global terminal.
         chunk.done = false;
-        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
         assert_eq!(v["choices"][0]["index"], 1);
         assert_eq!(v["choices"][0]["finish_reason"], "length");
         assert_eq!(v["choices"][0]["delta"]["content"], "last");
@@ -2878,7 +2897,7 @@ mod tests {
             "bytes": [116, 111, 107],
             "top_logprobs": [],
         })]);
-        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
         let lps = &v["choices"][0]["logprobs"];
         assert!(!lps.is_null());
         assert_eq!(lps["content"][0]["token"], "tok");
@@ -2952,7 +2971,7 @@ mod tests {
     #[test]
     fn test_sse_chat_subsequent_chunk_omits_role() {
         let chunk = _delta_chunk(1, " world");
-        let v = build_chat_chunk_event("chatcmpl-1", 1_700_000_000, "m", &chunk, false);
+        let v = build_chat_chunk_event("chatcmpl-1", 1_700_000_000, "m", &chunk, false, false);
         let delta = &v["choices"][0]["delta"];
         assert!(delta.get("role").is_none(), "role must not be re-emitted");
         assert_eq!(delta["content"], " world");
@@ -2963,7 +2982,7 @@ mod tests {
     #[test]
     fn test_sse_chat_terminal_finish_reason_stop() {
         let chunk = _terminal_chunk("stop", None);
-        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
         assert_eq!(v["choices"][0]["finish_reason"], "stop");
         // The terminal chunk has an empty delta — content must not
         // surface, but the delta object itself is still present.
@@ -2973,7 +2992,7 @@ mod tests {
     #[test]
     fn test_sse_chat_terminal_finish_reason_length_preserved() {
         let chunk = _terminal_chunk("length", None);
-        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
         assert_eq!(v["choices"][0]["finish_reason"], "length");
     }
 
@@ -2986,7 +3005,7 @@ mod tests {
         chunk.execution_binding_sha256 = Some(binding.clone());
 
         for value in [
-            build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false),
+            build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false),
             build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk),
             build_generate_chunk_event(&chunk, &[]),
         ] {
@@ -3033,7 +3052,7 @@ mod tests {
             param: Some("top_k".to_string()),
             retry_after_s: None,
         });
-        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
         assert_eq!(v["error"]["code"], "unsupported_field");
         assert_eq!(v["error"]["type"], "invalid_request_error");
         assert_eq!(v["error"]["param"], "top_k");
@@ -3054,7 +3073,7 @@ mod tests {
             retry_after_s: None,
         });
 
-        let value = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let value = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
         assert_eq!(
             value["error"]["code"],
             crate::queue::streaming::MODEL_LOAD_FAILED_ERROR_CODE
@@ -3072,10 +3091,17 @@ mod tests {
     /// deltas and clean terminals keep the exact pre-existing chat shape.
     #[test]
     fn test_sse_chat_non_error_chunks_omit_request_id() {
-        let delta = build_chat_chunk_event("chatcmpl-1", 0, "m", &_delta_chunk(0, "Hi"), true);
+        let delta =
+            build_chat_chunk_event("chatcmpl-1", 0, "m", &_delta_chunk(0, "Hi"), true, false);
         assert!(delta.get("request_id").is_none());
-        let terminal =
-            build_chat_chunk_event("chatcmpl-1", 0, "m", &_terminal_chunk("stop", None), false);
+        let terminal = build_chat_chunk_event(
+            "chatcmpl-1",
+            0,
+            "m",
+            &_terminal_chunk("stop", None),
+            false,
+            false,
+        );
         assert!(terminal.get("request_id").is_none());
     }
 
@@ -3179,7 +3205,7 @@ mod tests {
         });
 
         let values = [
-            build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false),
+            build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false),
             build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk),
             build_generate_chunk_event(&chunk, &[]),
         ];
@@ -3206,7 +3232,7 @@ mod tests {
         });
 
         for value in [
-            build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false),
+            build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false),
             build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk),
             build_generate_chunk_event(&chunk, &[]),
         ] {
@@ -3225,7 +3251,7 @@ mod tests {
             retry_after_s: Some(12),
         });
 
-        let chat = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let chat = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
         let completion = build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk);
         let generate = build_generate_chunk_event(&chunk, &[]);
 
@@ -3255,7 +3281,7 @@ mod tests {
             chunk.error = Some(error);
 
             for value in [
-                build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false),
+                build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false),
                 build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk),
                 build_generate_chunk_event(&chunk, &[]),
             ] {
@@ -3275,7 +3301,7 @@ mod tests {
             retry_after_s: None,
         });
 
-        let chat = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let chat = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
         let completion = build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk);
         let generate = build_generate_chunk_event(&chunk, &[]);
 
@@ -3321,7 +3347,7 @@ mod tests {
             retry_after_s: None,
         });
 
-        let chat = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let chat = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
         let completion = build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk);
         let generate = build_generate_chunk_event(&chunk, &[]);
 
@@ -3345,6 +3371,7 @@ mod tests {
             &tx,
             &SseEndpoint::Chat {
                 include_usage: false,
+                include_reasoning: false,
             },
             "chatcmpl-x",
             1,
@@ -3414,6 +3441,7 @@ mod tests {
                 SseEndpoint::Generate,
                 SseEndpoint::Chat {
                     include_usage: false,
+                    include_reasoning: false,
                 },
                 SseEndpoint::Completion {
                     include_usage: false,
@@ -3544,21 +3572,21 @@ mod tests {
 
         // First chunk — must carry role.
         let c1 = tap.recv().await.unwrap();
-        let v1 = build_chat_chunk_event("chatcmpl-1", 0, "m", &c1, true);
+        let v1 = build_chat_chunk_event("chatcmpl-1", 0, "m", &c1, true, false);
         assert_eq!(v1["choices"][0]["delta"]["role"], "assistant");
         assert_eq!(v1["choices"][0]["delta"]["content"], "Hello");
         assert!(v1["choices"][0]["finish_reason"].is_null());
 
         // Second chunk — role omitted, content only.
         let c2 = tap.recv().await.unwrap();
-        let v2 = build_chat_chunk_event("chatcmpl-1", 0, "m", &c2, false);
+        let v2 = build_chat_chunk_event("chatcmpl-1", 0, "m", &c2, false, false);
         assert!(v2["choices"][0]["delta"].get("role").is_none());
         assert_eq!(v2["choices"][0]["delta"]["content"], " world");
 
         // Terminal — finish_reason populated, content empty.
         let c3 = tap.recv().await.unwrap();
         assert!(c3.done);
-        let v3 = build_chat_chunk_event("chatcmpl-1", 0, "m", &c3, false);
+        let v3 = build_chat_chunk_event("chatcmpl-1", 0, "m", &c3, false, false);
         assert_eq!(v3["choices"][0]["finish_reason"], "stop");
     }
 
@@ -3584,6 +3612,7 @@ mod tests {
             (
                 SseEndpoint::Chat {
                     include_usage: true,
+                    include_reasoning: false,
                 },
                 "chat.completion.chunk",
             ),
@@ -3623,6 +3652,7 @@ mod tests {
         let chat = build_usage_only_chunk_event(
             SseEndpoint::Chat {
                 include_usage: true,
+                include_reasoning: false,
             },
             "cmpl-1",
             1700,
@@ -3669,6 +3699,7 @@ mod tests {
         let chat = build_usage_only_chunk_event(
             SseEndpoint::Chat {
                 include_usage: true,
+                include_reasoning: false,
             },
             "cmpl-1",
             1700,
@@ -3707,6 +3738,7 @@ mod tests {
         for endpoint in [
             SseEndpoint::Chat {
                 include_usage: false,
+                include_reasoning: false,
             },
             SseEndpoint::Completion {
                 include_usage: false,
@@ -3756,6 +3788,7 @@ mod tests {
         for endpoint in [
             SseEndpoint::Chat {
                 include_usage: true,
+                include_reasoning: false,
             },
             SseEndpoint::Completion {
                 include_usage: true,
@@ -3788,7 +3821,8 @@ mod tests {
         let countless = _terminal_chunk("error", None);
         assert!(build_usage_only_chunk_event(
             SseEndpoint::Chat {
-                include_usage: true
+                include_usage: true,
+                include_reasoning: false,
             },
             "cmpl-1",
             1700,
@@ -3825,6 +3859,7 @@ mod tests {
         let body = build_usage_only_chunk_event(
             SseEndpoint::Chat {
                 include_usage: true,
+                include_reasoning: false,
             },
             "cmpl-1",
             1700,
@@ -3862,7 +3897,10 @@ mod tests {
         );
         for include_usage in [true, false] {
             for endpoint in [
-                SseEndpoint::Chat { include_usage },
+                SseEndpoint::Chat {
+                    include_usage,
+                    include_reasoning: false,
+                },
                 SseEndpoint::Completion { include_usage },
             ] {
                 assert_eq!(terminal_carries_usage(endpoint, &terminal), include_usage);
@@ -3887,6 +3925,7 @@ mod tests {
             SseEndpoint::Generate,
             SseEndpoint::Chat {
                 include_usage: true,
+                include_reasoning: false,
             },
             SseEndpoint::Completion {
                 include_usage: true,
@@ -3902,7 +3941,8 @@ mod tests {
             .is_none());
         assert!(build_usage_only_chunk_event(
             SseEndpoint::Chat {
-                include_usage: true
+                include_usage: true,
+                include_reasoning: false,
             },
             "cmpl-1",
             1700,
@@ -3932,7 +3972,7 @@ mod tests {
         collector.apply(err_chunk);
         let got = tap.recv().await.unwrap();
         assert!(got.done);
-        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &got, true);
+        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &got, true, false);
         assert_eq!(v["error"]["code"], "rate_limit_exceeded");
         assert_eq!(v["error"]["type"], "rate_limit_error");
         // The SIE-native generate shape would carry it too.
@@ -4048,7 +4088,7 @@ mod tests {
             execution_binding_sha256: None,
             reasoning_delta: String::new(),
         };
-        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, true);
+        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, true, false);
         let delta = &v["choices"][0]["delta"];
         // Tool-call announcement: id + function.name set, arguments empty.
         let tcs = delta["tool_calls"].as_array().expect("tool_calls array");
@@ -4070,7 +4110,7 @@ mod tests {
     #[test]
     fn test_sse_terminal_finish_reason_tool_calls_passthrough() {
         let chunk = _terminal_chunk("tool_calls", None);
-        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
         assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
     }
 
