@@ -85,13 +85,15 @@ class _Runner(DecideGraphRunner):
         self.host_launch_ms = 30.0
         self.replay_ms_per_token = 0.0
         self.launches_timed = 0
+        self.launch_forwards: list[int] = []
         self.free = 2**40
 
     def _free_memory(self, device: torch.device) -> int:
         return self.free
 
-    def _time_launch(self, key: Any, entry: Any) -> float:
+    def _time_launch(self, key: Any, entry: Any, forwards: int = 3) -> float:
         self.launches_timed += 1
+        self.launch_forwards.append(forwards)
         return self.host_launch_ms
 
     def _time_replay(self, entry: Any) -> float:
@@ -465,15 +467,19 @@ class TestGraphsThatDoNotPay:
 
         assert runner.offer(1, 60) is not None  # 64 tokens: 32 ms
 
-    def test_the_launch_is_timed_once(self) -> None:
+    def test_the_launch_is_timed_with_every_recording_and_its_least_kept(self) -> None:
         runner = _Runner()
         assert runner.launch_ms is None
 
-        for rows in (1, 2, 3):
-            runner.offer(rows, 60)
+        runner.offer(1, 60)
+        runner.host_launch_ms = 45.0  # the CPU was busy this time
+        runner.offer(2, 60)
+        runner.host_launch_ms = 28.0
+        runner.offer(3, 60)
+        runner.offer(3, 60)  # a replay times nothing
 
-        assert runner.launches_timed == 1
-        assert runner.launch_ms == 30.0
+        assert runner.launch_forwards == [3, 1, 1]  # three one-row forwards the first time, one after
+        assert runner.launch_ms == 28.0
 
     def test_shapes_no_smaller_than_a_slow_one_are_not_recorded(self) -> None:
         runner = _Runner()
@@ -498,8 +504,9 @@ class TestGraphsThatDoNotPay:
         runner.clear()
 
         assert runner.offer(16, 60) is None
+        assert runner.recorded.count((16, 64)) == 1  # not timed again yet
         assert runner.offer(8, 60) is not None
-        assert runner.launches_timed == 1
+        assert runner.launch_ms == 30.0
 
     def test_memory_a_dropped_recording_left_in_the_pool_counts_against_the_budget(self) -> None:
         runner = _Runner()
@@ -518,10 +525,67 @@ class TestGraphsThatDoNotPay:
         with caplog.at_level(logging.INFO):
             runner.offer(16, 60)
             runner.now += 600.0
-            runner.offer(1, 60)
+            runner.offer(16, 60)  # timed again, slower again
 
         assert "this host launches a forward in 30.0 ms" in caplog.text
         assert "1 shapes not faster than a launch" in caplog.text
+
+    def test_a_shape_found_slower_is_timed_again_after_a_minute_and_kept_once_it_pays(self) -> None:
+        # Engines that warm up together on one GPU time their first graph while sharing it.
+        runner = _Runner()
+        runner.host_launch_ms, runner.replay_ms_per_token = 9.0, 1.0
+
+        assert runner.offer(1, 10) is None  # the smallest shape: 16 ms on a shared GPU
+        assert runner.offer(8, 60) is None  # and with it every shape, for now
+        runner.now += 59.0
+        assert runner.offer(1, 10) is None
+        assert runner.recorded == [(1, 16)]
+
+        runner.now += 1.0
+        runner.replay_ms_per_token = 0.006  # the GPU is this engine's own again
+        assert runner.offer(1, 10) is not None
+        assert runner.offer(8, 60) is not None
+        assert runner.recorded == [(1, 16), (1, 16), (8, 64)]
+        assert runner.stats.eager == {"not_faster": 3}
+        assert runner.stats.recording_failures == 0
+
+    def test_the_wait_doubles_each_time_a_shape_is_found_slower_again(self) -> None:
+        runner = _Runner()
+        runner.host_launch_ms, runner.replay_ms_per_token = 30.0, 0.03
+        timed_at = []
+
+        for second in range(0, 1000, 10):
+            runner.now = float(second)
+            before = len(runner.recorded)
+            runner.offer(16, 60)
+            if len(runner.recorded) > before:
+                timed_at.append(second)
+
+        assert timed_at == [0, 60, 180, 420, 900]  # after 60 s, then 120, 240, 480
+
+    def test_the_wait_stops_growing_at_an_hour(self) -> None:
+        runner = _Runner()
+        runner.host_launch_ms, runner.replay_ms_per_token = 30.0, 0.03
+
+        for _ in range(12):
+            runner.offer(16, 60)
+            runner.now = runner._slow[16, 64][0]
+
+        assert runner._slow[16, 64][1] == 3600.0
+
+    def test_a_graph_kept_against_a_launch_time_that_proves_shorter_is_dropped(self) -> None:
+        runner = _Runner()
+        runner.host_launch_ms, runner.replay_ms_per_token = 60.0, 0.03  # the CPU was busy at the first timing
+        assert runner.offer(16, 60) is not None  # 31 ms, kept against 60 ms
+        runner.host_launch_ms = 30.0
+        assert runner.offer(1, 60) is not None  # this recording times the launch again: 30 ms
+
+        assert runner.offer(16, 60) is None
+
+        assert runner.graph_count == 1
+        assert runner.stats.eager == {"not_faster": 1}
+        assert runner.offer(16, 60) is None  # and waits to be timed again like any shape found slower
+        assert runner.recorded.count((16, 64)) == 1
 
 
 class TestRecordingHook:

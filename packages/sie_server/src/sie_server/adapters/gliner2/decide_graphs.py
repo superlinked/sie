@@ -26,12 +26,22 @@ nothing else. An eager forward costs at least what the host needs to launch its
 kernels, whatever its size. So a graph is kept only if its replay takes no
 longer than the host takes to launch one forward eagerly: such a graph cannot
 lose to the eager forward it replaces, however few of its rows and tokens a
-call fills. The runner times both when it records. It times the launch once
-(the least of three one-row forwards) and each new graph's replay (the least of
-two); a graph that takes longer is dropped and its shape runs eagerly from then
-on, as does every shape with at least its rows and its length, which the GPU
-cannot run faster. The rule follows the machine: on a faster GPU, or a slower
-CPU, more shapes keep their graph.
+call fills. The runner times both when it records: the launch (one-row
+forwards, three the first time and one with each later recording, keeping the
+least ever seen) and the new graph's replay (the least of two). A graph that
+takes longer is dropped and its shape runs eagerly, as does every shape with at
+least its rows and its length, which the GPU cannot run faster. The rule
+follows the machine: on a faster GPU, or a slower CPU, more shapes keep their
+graph.
+
+Both timings can only come out too long, when something else has the GPU or
+the CPU at that moment: other engines warming up on the same GPU, another
+model's forward. So neither verdict is final. A shape found slower is timed
+again after a minute, then after two, doubling up to an hour, and is kept the
+first time it pays. A graph kept against a launch time that later proves
+shorter is dropped at its next replay. Without this, engines that warm up
+together on one GPU each time their first graph while sharing it, find the
+smallest shape slower than a launch, and run without graphs for good.
 
 Measured on Modal in October 2026 (float16, rows of 64 tokens): one row takes
 6.4 ms from a graph and 27.7 ms eagerly on an L4, 4.8 ms and 15.7 ms on an RTX
@@ -121,6 +131,10 @@ _WIDE_BUCKET = 32
 # A runner's recording budget: this many recordings, refilled at one per this many seconds.
 _RECORDING_BURST = 16
 _SECONDS_PER_RECORDING = 2.0
+# A shape whose replay took longer than a launch is timed again after this long, then after twice
+# as long each time it is found slower again, up to the cap.
+_SLOW_RETRY_SECONDS = 60.0
+_SLOW_RETRY_MAX_SECONDS = 3600.0
 # After a recording runs out of memory, the runner records nothing for this long.
 _OOM_COOL_DOWN_SECONDS = 60.0
 # Shapes that may fail to record, for reasons other than memory, before the runner turns graphs off.
@@ -197,6 +211,8 @@ class _Graph:
     attention_mask: torch.Tensor
     # Device memory the recording took: pool growth and the recorded graph.
     device_bytes: int = 0
+    # Milliseconds the GPU took to replay it when it was recorded.
+    replay_ms: float = 0.0
 
 
 class DecideGraphRunner:
@@ -221,10 +237,11 @@ class DecideGraphRunner:
         self._shapes = shapes(window, max_tokens)
         self._graphs: dict[Key, _Graph] = {}
         self._failed: set[Key] = set()
-        # Milliseconds this host takes to launch one eager forward, timed at the first recording.
+        # Milliseconds this host takes to launch one eager forward: the least of every timing so far.
         self._launch_ms: float | None = None
-        # Shapes whose replay takes longer than that: they run eagerly.
-        self._slow: set[Key] = set()
+        # Shapes whose replay took longer than that, each with the time it may be timed again and
+        # how long it waits after the next such verdict. Until then they run eagerly.
+        self._slow: dict[Key, tuple[float, float]] = {}
         # Held by the caller from ``run`` until it has queued the head (see the module docstring).
         self.lock = threading.RLock()
         self._stream: torch.cuda.Stream | None = None
@@ -281,8 +298,8 @@ class DecideGraphRunner:
     def _why_not_record(self, key: Key, device: torch.device) -> EagerReason | None:
         if key in self._failed:
             return "failed_shape"
-        if any(batch <= key[0] and length <= key[1] for batch, length in self._slow):
-            return "not_faster"  # no faster than a shape already found slower than a launch
+        if self._presumed_slow(key):
+            return "not_faster"  # no faster than a shape found slower than a launch
         if self._full:
             return "budget_full"
         if self._recording_credit < 1:
@@ -290,6 +307,18 @@ class DecideGraphRunner:
         if not self._has_headroom(device):
             return "no_headroom"
         return None
+
+    def _presumed_slow(self, key: Key) -> bool:
+        """Whether a shape with at most ``key``'s rows and length is, for now, found slower than a launch."""
+        now = self._clock()
+        return any(
+            batch <= key[0] and length <= key[1] and now < again for (batch, length), (again, _) in self._slow.items()
+        )
+
+    def _found_slow(self, key: Key) -> None:
+        """Run ``key`` eagerly until it may be timed again; the wait doubles with every such verdict."""
+        wait = self._slow.get(key, (0.0, _SLOW_RETRY_SECONDS))[1]
+        self._slow[key] = (self._clock() + wait, min(2 * wait, _SLOW_RETRY_MAX_SECONDS))
 
     # -- entry point -------------------------------------------------------
 
@@ -315,6 +344,11 @@ class DecideGraphRunner:
         elapsed, self._credited_at = now - self._credited_at, now
         self._recording_credit = min(float(_RECORDING_BURST), self._recording_credit + elapsed / _SECONDS_PER_RECORDING)
         entry = self._graphs.get(key)
+        if entry is not None and self._launch_ms is not None and entry.replay_ms > self._launch_ms:
+            # Kept against a launch time that has since proved shorter.
+            del self._graphs[key]
+            self._found_slow(key)
+            return None, "not_faster"
         if entry is not None:
             self.stats.replayed += 1
             return self._replay(key, entry, input_ids, attention_mask), None
@@ -360,27 +394,30 @@ class DecideGraphRunner:
 
         An eager forward takes at least its launches, so such a graph cannot
         lose to the eager forward it replaces. A graph that takes longer is not
-        kept, and its shape runs eagerly from then on.
+        kept, and its shape runs eagerly until it is timed again.
         """
-        if self._launch_ms is None:
-            self._launch_ms = self._time_launch(key, entry)
+        first = self._launch_ms is None
+        launch_ms = self._time_launch(key, entry, forwards=3 if first else 1)
+        self._launch_ms = launch_ms if self._launch_ms is None else min(self._launch_ms, launch_ms)
+        if first:
             logger.info(
                 "GLiNER2.5-Decide CUDA graphs for %s: this host launches a forward in %.1f ms; a shape keeps its "
                 "graph while the replay takes no longer",
                 self._name,
                 self._launch_ms,
             )
-        replay_ms = self._time_replay(entry)
-        if replay_ms <= self._launch_ms:
+        entry.replay_ms = self._time_replay(entry)
+        if entry.replay_ms <= self._launch_ms:
+            self._slow.pop(key, None)
             return True
-        self._slow.add(key)
+        self._found_slow(key)
         logger.debug(
             "GLiNER2.5-Decide CUDA graph for %s, batch %d, length %d, replays in %.1f ms, longer than a launch "
-            "(%.1f ms); that shape runs eagerly",
+            "(%.1f ms); that shape runs eagerly until it is timed again",
             self._name,
             key[0],
             key[1],
-            replay_ms,
+            entry.replay_ms,
             self._launch_ms,
         )
         return False
@@ -460,7 +497,7 @@ class DecideGraphRunner:
 
     @property
     def launch_ms(self) -> float | None:
-        """Milliseconds this host takes to launch one eager forward; None before the first recording."""
+        """Milliseconds this host takes to launch one eager forward, the least timed; None before the first recording."""
         return self._launch_ms
 
     @property
@@ -497,7 +534,7 @@ class DecideGraphRunner:
             stats.drops,
             len(self._graphs),
             self.held_bytes // 2**20,
-            len(self._slow),
+            sum(now < again for again, _ in self._slow.values()),
             ", off for this process" if self._disabled else "",
         )
 
@@ -595,8 +632,8 @@ class DecideGraphRunner:
             current.wait_stream(stream)
         return _Graph(graph=graph, input_ids=input_ids, attention_mask=attention_mask, device_bytes=device_bytes)
 
-    def _time_launch(self, key: Key, entry: _Graph) -> float:
-        """Milliseconds the host takes to launch one eager forward: the least of three one-row forwards.
+    def _time_launch(self, key: Key, entry: _Graph, forwards: int = 3) -> float:
+        """Milliseconds the host takes to launch one eager forward: the least of ``forwards`` one-row forwards.
 
         An eager forward returns once its kernels are launched, without
         waiting for the GPU, and launches the same kernels whatever its size.
@@ -607,7 +644,7 @@ class DecideGraphRunner:
         input_ids, attention_mask = entry.input_ids[:1], entry.attention_mask[:1]
         best = float("inf")
         with self._recording_on_this_thread(self._relative_pos.get(key[1])), torch.inference_mode():
-            for _ in range(3):
+            for _ in range(forwards):
                 torch.cuda.synchronize(device)
                 start = time.perf_counter()
                 self._encoder(input_ids=input_ids, attention_mask=attention_mask)
