@@ -27,7 +27,13 @@ Three pieces are in this directory:
    `conftest.py`, fails before pytest is asked. The verdict run is pinned to
    the seeded `pyproject.toml` and `tests/` path and runs in a fresh
    environment outside the worked copy, so a new `pytest.ini`, test directory
-   or anything planted in the copy's `.venv` does not count.
+   or anything planted in the copy's `.venv` does not count, and neither does
+   a `PYTEST_ADDOPTS` or `PYTEST_PLUGINS` in the caller's environment. The
+   OpenCode run is bounded: its build agent gets 50 steps (`GATE_STEPS`), and
+   a run still going after 1,800 seconds (`GATE_DEADLINE_SECONDS`) is stopped
+   and fails. OpenCode 1.19.0 treats the step budget as an instruction: at the
+   last step it tells the model to answer in text but still declares the
+   tools, so a model that keeps calling tools is stopped by the deadline.
 
 The conformance check uses the `openai` Python package rather than the SIE
 SDK. The thing under test is the OpenAI-compatible wire surface that
@@ -80,9 +86,10 @@ OpenCode's own system prompt plus its ten tool schemas, so the recipe names the
 profile.
 
 The laptop recipe has been run on Apple Silicon only, with the MLX backend and
-this model, bare and as `:long-context`. On that path OpenCode stops at its
-first turn today (see [the recorded result](#laptop-apple-silicon-recorded)).
-It has not been run on an NVIDIA machine.
+this model: the conformance check bare and as `:long-context`, the seeded gate
+with the recipe's `:long-context`. Both pass there (see
+[the recorded result](#laptop-apple-silicon-recorded)). It has not been run on
+an NVIDIA machine.
 
 ### Against your cluster
 
@@ -234,11 +241,13 @@ that case's error.
 
 ### Laptop, Apple Silicon, recorded
 
-`Qwen/Qwen3.5-4B:long-context` on a 48 GB Apple Silicon machine, MLX backend,
-`sie-server` from this repository at commit `3d39f375`, 2026-10-13:
+`Qwen/Qwen3.5-4B:long-context` on an Apple M3 Max with 48 GB under macOS
+15.7, MLX backend (`mlx-community/Qwen3.5-4B-4bit`), `sie-server` from this
+repository at commit `530dcde8` started with `mise run serve -- -b sglang`,
+2026-10-13:
 
 ```
-  tool_choice_auto            fail      OpenCode sends tool_choice=auto on every tools turn; refused: 400 unsupported_field: field 'tool_choice' is not supported
+  tool_choice_auto            pass      tool_choice=auto accepted on the tools turn
   streaming_tool_call_deltas  pass      1 call: get_weather({"city": "Paris"}); 1 deltas; finish_reason=tool_calls
   parallel_tool_calls         pass      2 calls in one turn: get_weather({"city": "Paris"}), get_weather({"city": "Tokyo"})
   tool_result_round_trip      pass      final answer used the tool result: 'The weather in Paris is currently overcast with a temperature of 18°C.'
@@ -247,32 +256,43 @@ that case's error.
   finish_reason_tool_calls    pass      finish_reason=tool_calls on the tool-call turn
   finish_reason_length        pass      finish_reason=length at max_tokens=8 (completion_tokens=8)
   usage_on_final_chunk        pass      final chunk carries usage {'completion_tokens': 2, 'prompt_tokens': 20, 'total_tokens': 22, 'prompt_tokens_details': {'cached_tokens': 16}}
-  include_reasoning           fail      include_reasoning refused: 400 unsupported_field: field 'include_reasoning' is not supported
-  tool_choice_required        recorded  refused: 400 unsupported_field: field 'tool_choice' is not supported
+  include_reasoning           pass      the model did not reason here (4 completion tokens for '9.9'); no reasoning to return
+  tool_choice_required        recorded  refused: 400 unsupported_field: 'tool_choice' must be 'auto' or 'none' on this device, which cannot force a tool call
 
-7 pass, 2 fail, 2 recorded
+9 pass, 0 fail, 2 recorded
 ```
 
-The two failures are the server's, not the model's, and both are worth
-knowing before pointing OpenCode at a laptop:
+- The server accepted `include_reasoning`, so the tools turns carried it.
+  This model did not reason on the probe, so there was no reasoning to
+  return.
+- The MLX backend accepts `tool_choice` as `auto` or `none` and refuses
+  `required`, since it cannot force a call. OpenCode sends only `auto`.
+- The server accepted and answered a 74,847-token prompt although this
+  profile declares a 32,768-token window. The declared window is what a
+  cluster advertises in `/v1/models` and what OpenCode's `limit.context`
+  should match.
 
-- The MLX chat path refuses the `tool_choice` field outright, `auto`
-  included. OpenCode sends `tool_choice: "auto"` on every turn, so on Apple
-  Silicon its first turn ends in that 400. `./run_gate.sh laptop` on this
-  machine ended with `GATE FAIL: opencode run exited 1`, the seeded tests
-  untouched.
-- `include_reasoning` is a newer addition to the chat contract than the server
-  this ran against. A server that does not know the field refuses it with
-  `unsupported_field`, so this case reads as fail until the server carries it,
-  and the tools turns ran without it. The Cloud recipe keeps the option, since
-  that endpoint is the one it is for.
-
-The server also accepted and answered a 74,847-token prompt although this
-profile declares a 32,768-token window. The declared window is what a cluster
-advertises in `/v1/models` and what OpenCode's `limit.context` should match.
-
-The same run against the bare `Qwen/Qwen3.5-4B` gave the same table, with
+The same check against the bare `Qwen/Qwen3.5-4B` gave the same table, with
 `declared window 8192` in the long-prompt line.
+
+`./run_gate.sh laptop` on the same server, with OpenCode 1.19.0 and no global
+OpenCode config, OpenCode's JSON event lines left out:
+
+```
+== before: the seeded tests
+FAILED tests/test_amounts.py::test_credit_in_parentheses_is_negative - decima...
+FAILED tests/test_amounts.py::test_total_nets_credits - decimal.InvalidOperat...
+2 failed, 1 passed in 0.02s
+== opencode run, recipe laptop, up to 50 steps and 1800 s
+== after: the seeded tests must be untouched
+== after: pytest in a fresh environment, pinned to the seeded config and tests
+...                                                                      [100%]
+3 passed in 0.01s
+GATE PASS (.../run-output/gate-20261013T185200Z-6HIi7Z)
+```
+
+OpenCode took 7 steps and 6 tool calls (`bash`, `read`, `edit`, `bash`,
+`edit`, `bash`), 16 seconds from its first event to its last.
 
 ### SIE Cloud, GLM-5.3-Flash via SIE Relay
 
@@ -325,8 +345,10 @@ What runs anywhere, and in this repository's CI, is the test suite:
   Each verdict is checked for what it accepts and what it refuses.
 - `tests/test_run_gate.py` runs `run_gate.sh` with a scripted stand-in for
   `opencode`: a real fix, no change, a failed `opencode run`, edited tests, an
-  environment planted in the worked copy, and two runs started in the same
-  second.
+  environment planted in the worked copy, a caller's `PYTEST_ADDOPTS` or
+  `PYTEST_PLUGINS` that would deselect the failing tests, the step budget
+  handed to the build agent, a run that outlives its deadline, and two runs
+  started in the same second.
 
 ```sh
 uv run pytest
@@ -345,9 +367,9 @@ That is a check of the checker. The endpoint itself is only checked by running
 - **Not a claim about every OpenCode version.** The wire facts were recorded
   with OpenCode 1.19.0. A later version can change what it sends; the
   recording stub approach in this README is how to re-check.
-- **Not a claim about every laptop.** The laptop recipe was run on Apple
-  Silicon with one 4B model, where the server stops OpenCode at its first turn.
-  NVIDIA and other models have not been run.
+- **Not a claim about every laptop.** The laptop recipe was run on one Apple
+  Silicon machine with one 4B model. NVIDIA and other models have not been
+  run.
 - **Not a Cloud result yet.** The Cloud table, the served-by header, the gate
   run, the terminal recording, the usage rows and the BFCL figures are
   placeholders until the run on the deployed endpoint is recorded here.
