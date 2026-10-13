@@ -209,6 +209,13 @@
           "content": {
             "type": "string"
           },
+          "reasoning_content": {
+            "description": "The model's reasoning. Present only when the request set\n``include_reasoning: true`` and the model produced any; streaming\nresponses carry it as ``delta.reasoning_content``.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "role": {
             "type": "string"
           },
@@ -377,6 +384,13 @@
             "format": "float",
             "type": [
               "number",
+              "null"
+            ]
+          },
+          "include_reasoning": {
+            "description": "SIE extension. `true` makes the model's reasoning public as `reasoning_content` on the message and, when streaming, on each delta. A model whose configuration declares no reasoning answers the field with nothing. Absent or `false` keeps reasoning private; `usage` is unchanged either way.",
+            "type": [
+              "boolean",
               "null"
             ]
           },

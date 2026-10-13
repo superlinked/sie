@@ -449,7 +449,8 @@
           "messages": [{ "role": "user", "content": "Count to ten." }],
           "stream": true,
           "max_completion_tokens": 64,
-          "stream_options": { "include_usage": true }
+          "stream_options": { "include_usage": true },
+          "include_reasoning": true
         }
       }
     }

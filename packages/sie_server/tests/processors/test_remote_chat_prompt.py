@@ -313,3 +313,51 @@ async def test_nullable_controls_retain_default_parallel_and_legacy_output_cap(t
     assert len(payload["choices"][0]["message"]["tool_calls"]) == 2
     assert adapter.parameters["max_new_tokens"] == 64
     assert request["parallel_tool_calls"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("tools", [False, True])
+@pytest.mark.parametrize("include_reasoning", [False, True])
+async def test_rendered_chat_answers_reasoning_only_when_asked(
+    template, stream: bool, tools: bool, include_reasoning: bool
+) -> None:
+    answer = '<tool_call>{"name":"lookup","arguments":{"x":1}}</tool_call>' if tools else "answer"
+    adapter = RawAdapter(
+        [
+            GenerationChunk(text_delta="private </th"),
+            GenerationChunk(text_delta="ink>" + answer),
+            GenerationChunk(text_delta="", done=True, finish_reason="stop", prompt_tokens=12, completion_tokens=3),
+        ]
+    )
+    request = body(stream=stream)
+    if tools:
+        request["tools"] = [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}]
+
+    events = await remote_chat_prompt.prepare_rendered_chat(
+        adapter,
+        request,
+        config=model(),
+        requested_model="local/model",
+        max_response_bytes=1024,
+        include_reasoning=include_reasoning,
+    )
+
+    assert events is not None
+    expected = "private " if include_reasoning else None
+    if stream:
+        deltas = [event["choices"][0]["delta"] async for event in events]
+        reasoning = "".join(delta.get("reasoning_content", "") for delta in deltas)
+        assert (reasoning or None) == expected
+        first_reasoning = next((i for i, delta in enumerate(deltas) if delta.get("reasoning_content")), None)
+        first_answer = next(i for i, delta in enumerate(deltas) if delta.get("content") or delta.get("tool_calls"))
+        assert first_reasoning is None or first_reasoning <= first_answer
+        assert all("think" not in json.dumps(delta) for delta in deltas)
+    else:
+        message = (await remote_chat_prompt.collect_rendered_chat(events))["choices"][0]["message"]
+        assert message.get("reasoning_content") == expected
+        if tools:
+            assert message["tool_calls"][0]["function"]["name"] == "lookup"
+        else:
+            assert message["content"] == "answer"
+    assert adapter.closed

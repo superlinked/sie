@@ -421,6 +421,42 @@ describe("SIEClient.streamChatCompletions", () => {
     expect(calls?.[0]?.function?.arguments).toBe('{"city":');
   });
 
+  it("forwards include_reasoning and yields reasoning_content deltas unchanged", async () => {
+    const reasoningChunk = JSON.stringify({
+      id: "chatcmpl-x",
+      object: "chat.completion.chunk",
+      created: 1_700_000_000,
+      model: "m",
+      system_fingerprint: null,
+      choices: [
+        {
+          index: 0,
+          delta: { role: "assistant", reasoning_content: "why " },
+          finish_reason: null,
+          logprobs: null,
+        },
+      ],
+    } satisfies ChatCompletionChunk);
+
+    mockFetch.mockResolvedValueOnce(sseResponse([reasoningChunk, chatChunk("Hi")]));
+
+    const client = new SIEClient("http://localhost:8080");
+    const chunks: ChatCompletionChunk[] = [];
+    for await (const chunk of client.streamChatCompletions({
+      model: "m",
+      messages: [{ role: "user", content: "why?" }],
+      include_reasoning: true,
+    })) {
+      chunks.push(chunk);
+    }
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]?.choices[0]?.delta.reasoning_content).toBe("why ");
+    expect(chunks[0]?.choices[0]?.delta.content).toBeUndefined();
+    expect(chunks[1]?.choices[0]?.delta.reasoning_content).toBeUndefined();
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.include_reasoning).toBe(true);
+  });
+
   it("sets stream:true automatically and uses Accept: text/event-stream", async () => {
     mockFetch.mockResolvedValueOnce(sseResponse([chatChunk("ok")]));
 

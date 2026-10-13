@@ -25,6 +25,11 @@
 //! "does this active model run under the Rust scheduler" is answered by
 //! which worker pool handles the model, not by a per-worker env var.
 //!
+//! When a formed batch leaves is the lane's rule ([`lane`]): at once on an
+//! idle lane, held while a batch is with the engine, and together after
+//! it returns. Python has no counterpart; its batcher runs in the engine
+//! process and sees the forward end.
+//!
 //! Invariants to preserve (same as the Python code; any deviation is a
 //! production bug, not a design call):
 //!
@@ -42,13 +47,14 @@ pub mod batch_config;
 pub mod batch_former;
 pub mod engine;
 pub mod item;
+pub(crate) mod lane;
 pub mod registry;
 pub mod trackers;
 
 pub use adaptive::{AdaptiveBatchController, AdaptiveBatchControllerBuilder, AdaptiveBatchState};
 pub use batch_config::BatchConfig;
 pub use batch_former::{BatchFormer, FlushReason, FormattedBatch, HasCost, PendingRequest};
-pub use engine::{LoraKey, Op, RecordCompletionOutcome, Scheduler, SchedulerBuilder};
+pub use engine::{Dispatch, LoraKey, Op, RecordCompletionOutcome, Scheduler, SchedulerBuilder};
 pub use item::{lora_from_options, SchedulerItem, SchedulerMeta};
 pub use registry::SchedulerRegistry;
 pub use trackers::BatchEfficiencyTracker;

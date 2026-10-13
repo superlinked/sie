@@ -61,6 +61,7 @@ async def prepare_rendered_chat(
     config: ModelConfig,
     requested_model: str,
     max_response_bytes: int,
+    include_reasoning: bool = False,
 ) -> AsyncIterator[dict[str, Any]] | None:
     """Prefer a usable onboarded template; otherwise select declared chat."""
     body = dict(body)
@@ -159,6 +160,7 @@ async def prepare_rendered_chat(
             chunks,
             start_inside=isinstance(adapter, OpenAIUpstreamAdapter) and reasoning_starts_in_prompt(prompt, reasoning),
             reasoning_format=reasoning,
+            keep_reasoning=include_reasoning,
         )
     if tools:
         chunks = parse_tool_call_stream(
@@ -197,6 +199,8 @@ async def _events(
             if chunk.error_code or chunk.finish_reason == "cancelled":
                 raise RemoteUpstreamError("upstream rendered chat did not finish successfully")
             delta: dict[str, Any] = {}
+            if chunk.reasoning_delta:
+                delta["reasoning_content"] = chunk.reasoning_delta
             if chunk.text_delta:
                 delta["content"] = chunk.text_delta
             if chunk.tool_call_delta is not None:
@@ -244,6 +248,7 @@ async def _events(
 async def collect_rendered_chat(events: AsyncIterator[dict[str, Any]]) -> dict[str, Any]:
     """Assemble the same normalized events for a buffered chat request."""
     text: list[str] = []
+    reasoning: list[str] = []
     tools: dict[int, dict[str, Any]] = {}
     final = None
     try:
@@ -251,6 +256,7 @@ async def collect_rendered_chat(events: AsyncIterator[dict[str, Any]]) -> dict[s
             choice = event["choices"][0]
             delta = choice["delta"]
             text.append(delta.get("content", ""))
+            reasoning.append(delta.get("reasoning_content", ""))
             for fragment in delta.get("tool_calls") or []:
                 tool = tools.setdefault(
                     fragment["index"], {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
@@ -263,6 +269,8 @@ async def collect_rendered_chat(events: AsyncIterator[dict[str, Any]]) -> dict[s
         if final is None:
             raise RemoteUpstreamError("upstream rendered chat omitted its terminal chunk")
         message: dict[str, Any] = {"role": "assistant", "content": "".join(text) or None}
+        if any(reasoning):
+            message["reasoning_content"] = "".join(reasoning)
         if tools:
             message["tool_calls"] = [tools[index] for index in sorted(tools)]
         return {

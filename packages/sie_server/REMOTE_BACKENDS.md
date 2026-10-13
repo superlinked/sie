@@ -102,6 +102,14 @@ The declared dimensions and input limit must describe the upstream model.
 `remote_backed: true` excludes local weight-source fields such as `hf_id`.
 The model configuration can name an upstream; it cannot create one.
 
+A remote profile's `adapter_options.loadtime` takes `upstream` and
+`upstream_model`, both required. Every other load-time option is refused,
+except `max_seq_length` on a profile other than `default` (see
+[Context window of a remote profile](#context-window-of-a-remote-profile)).
+The `default` profile serves the model's own window, which a remote-backed
+model declares with `max_sequence_length` and, for generation,
+`tasks.generate.context_length`.
+
 From the repository root, start the server:
 
 ```bash
@@ -175,6 +183,41 @@ ranked order.
 The operator may add `set_params` and `strip_params` on the upstream. Reserved
 input and response-shaping fields, including `model`, cannot be overridden or
 stripped. Callers cannot pass additional upstream fields or credentials.
+
+## Context window of a remote profile
+
+A generation model with local weights can declare a different window for its
+remote profile than for its local one, for example when the upstream serves a
+longer context than the local accelerators admit:
+
+```yaml
+profiles:
+  remote:
+    adapter_path: sie_server.adapters.remote.openai:OpenAIUpstreamAdapter
+    max_batch_tokens: 16384
+    max_output_tokens: 32768
+    adapter_options:
+      loadtime:
+        upstream: vendor
+        upstream_model: org/model
+        max_seq_length: 131072
+```
+
+A request that names the profile, `org/model:remote`, takes that window as its
+`context_length` and that cap as its `max_output_tokens`, and the usage the
+upstream reports is checked against them. The output cap must fit inside the
+window. A profile without a `max_output_tokens` of its own takes the cap of the
+profile it extends, or else the model's, and that cap must fit too. Load-time
+options are not merged with a parent's, so a profile that extends a remote
+profile and declares a window restates `upstream` and `upstream_model`.
+
+A request for the bare name keeps the model's own `context_length` and
+`max_output_tokens` when its local profile serves it, and when single-node
+fallback sends it to the remote profile. In a cluster, routing sends a
+bare-name request to the remote profile as `org/model:remote`. The gateway
+still holds its output to the model's own `max_output_tokens`, and the remote
+worker checks it against the remote profile's window, as for a request that
+names the profile.
 
 ## Controls and failure behavior
 

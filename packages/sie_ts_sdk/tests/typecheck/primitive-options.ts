@@ -48,11 +48,12 @@ void client.extract("urchade/gliner_multi-v2.1", { text: "hello" }).then((result
   return model;
 });
 
-// The gateway's schema_in_prompt chat field is part of the request type.
+// The gateway's schema_in_prompt and include_reasoning chat fields are part of the request type.
 const chat: ChatCompletionRequest = {
   model: "Qwen/Qwen3-4B-Instruct-2507",
   messages: [{ role: "user", content: "Extract the invoice fields." }],
   response_format: { type: "json_schema", json_schema: { name: "invoice", schema: {} } },
   schema_in_prompt: false,
+  include_reasoning: true,
 };
 void client.chatCompletions(chat);
