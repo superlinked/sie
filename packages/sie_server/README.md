@@ -798,6 +798,68 @@ graphs comparison, it is at least as accurate as the unfused rotation for
 `modernbert-embed-base`, `Reason-ModernColBERT` and `mLateOn`, and their
 profiles enable it. The other models load without it.
 
+### Qwen3 reranker serving options
+
+`Qwen/Qwen3-Reranker-4B` and `Qwen/Qwen3-Reranker-0.6B` run on
+`qwen2_flash_cross_encoder`: flash attention over unpadded rows, and an output
+head cut down to the `yes` and `no` rows. Three load-time options take out
+what that leaves, and both configs turn them on:
+
+```yaml
+profiles:
+  default:
+    adapter_options:
+      loadtime:
+        fused_kernels: true
+        prefix_reuse: true
+        prefix_cache_mb: 512
+        cuda_graphs: bucketed
+```
+
+**`fused_kernels`.** Each layer's residual add and RMSNorm, q/k-norm, rotary
+embedding and `silu(gate) * up` run as the Triton kernels of the Qwen3
+embedding adapter (`qwen2_flash/_fused_layers.py`). They round where the
+eager operations round, so scores are the same bit for bit. A model the
+kernels cannot run (no Triton, or an MLP that is not SiLU-gated) logs a
+warning and keeps the eager layers.
+
+**`prefix_reuse`.** Every row a reranker scores starts with the same tokens
+for one query: the chat template, the instruction and the query. Attention is
+causal, so those tokens have the same states in every row. With the option,
+a forward encodes each distinct prefix once and each row's document once, and
+a row attends to its prefix's keys and values (`flash_attn_varlen_func` takes
+keys with their own lengths, and aligns the causal mask to the bottom right).
+For a question with 20 candidates that removes 19 copies of the prefix: 39%
+of the tokens on the rerank study's requests. The rows are metered whole:
+token counts do not change.
+
+A prefix that comes back is kept across requests. That is the shape of a
+yes-or-no decision: the question and its rules as the query, one message as
+the document, the same prefix on every request. The second request with a
+prefix stores its keys and values per layer, and later requests encode only
+the message. The cache holds at most `prefix_cache_mb` of device memory (512
+by default; `0` shares a prefix inside a forward only) and at most 64
+prefixes, and drops the least recently used. One cached token takes 147 KB
+for the 4B and 115 KB for the 0.6B, so a 145-token question takes 21 MB and
+17 MB. A forward that runs out of memory drops the cache. The option applies
+to the `qwen3` input format.
+
+**`cuda_graphs: bucketed`.** A one-message request is small enough that the
+GPU waits on the host launching 1,500 to 2,000 kernels. With the option, one row
+over a cached prefix replays as a CUDA graph through the runner of the
+ModernBERT graphs above: the tail (document and closing tokens) padded to
+64, 128 and so on up to a bound, with the graph reading the cached keys and
+values in place. The bound is 512 tokens for a model up to 1,024 wide and 128
+wider, sized for an L4; `cuda_graph_tokens` (64 to 2,048) raises it for a
+faster GPU. Longer tails, requests with several
+rows, and prefixes not yet cached run eagerly. Up to 8 prefixes hold graphs at
+once, within the memory one model's graphs may take (4% of the device), and a
+prefix's graphs go when the cache drops it. Graphs need `prefix_reuse`.
+
+Shared prefixes and graphs change how many rows a matrix multiply sees, so
+scores move by floating-point rounding, as they do when the same pair is
+scored alone or among 20 candidates.
+
 ## Configuration
 
 `sie-server` reads its config from `SIE_*` environment variables (Pydantic
