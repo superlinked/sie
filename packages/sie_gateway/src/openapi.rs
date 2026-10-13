@@ -787,6 +787,17 @@ fn patch_chat_request_schema(value: &mut Value) {
             "type": ["boolean", "null"],
         }),
     );
+    properties.insert(
+        "include_reasoning".to_string(),
+        json!({
+            "description": "SIE extension. `true` makes the model's reasoning public as \
+                            `reasoning_content` on the message and, when streaming, on each \
+                            delta. A model whose configuration declares no reasoning answers \
+                            the field with nothing. Absent or `false` keeps reasoning private; \
+                            `usage` is unchanged either way.",
+            "type": ["boolean", "null"],
+        }),
+    );
     // response_format: {type:"text"|"json_object"|"json_schema", json_schema?:{...}}.
     properties.insert(
         "response_format".to_string(),
@@ -2355,6 +2366,13 @@ pub struct ChatCompletionRequest {
     /// applies). Absent: the serving profile decides (default on).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_in_prompt: Option<bool>,
+    /// SIE extension. ``true`` makes the model's reasoning public as
+    /// ``reasoning_content`` on the message and, when streaming, on each
+    /// delta. A model whose configuration declares no reasoning answers the
+    /// field with nothing. Absent or ``false`` keeps reasoning private;
+    /// ``usage`` is unchanged either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_reasoning: Option<bool>,
     /// SSE streaming. When ``true``, the response is a stream of
     /// ``chat.completion.chunk`` events terminated by ``data: [DONE]``.
     /// For ``n > 1``, per-``choice_index`` delta chunks include a per-choice
@@ -2398,6 +2416,11 @@ pub struct ChatCompletionChoiceMessage {
     /// function:{name, arguments}}`` where ``arguments`` is a JSON-encoded string.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Value>,
+    /// The model's reasoning. Present only when the request set
+    /// ``include_reasoning: true`` and the model produced any; streaming
+    /// responses carry it as ``delta.reasoning_content``.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

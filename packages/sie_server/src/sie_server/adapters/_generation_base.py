@@ -536,12 +536,20 @@ class ThinkingBlockStripper:
     partial tag nor its body can escape before the closing tag arrives.
     """
 
-    __slots__ = ("_buffer", "_close", "_inside", "_open")
+    __slots__ = ("_buffer", "_close", "_inside", "_keep", "_open", "_reasoning")
 
-    def __init__(self, inside: bool = False, *, reasoning_format: ReasoningFormat = "qwen3") -> None:
+    def __init__(
+        self, inside: bool = False, *, reasoning_format: ReasoningFormat = "qwen3", keep_reasoning: bool = False
+    ) -> None:
         self._buffer = ""
         self._inside = inside
         self._open, self._close = _REASONING_BOUNDARIES[reasoning_format]
+        self._keep = keep_reasoning
+        self._reasoning: list[str] = []
+
+    def _hide(self, text: str) -> None:
+        if self._keep and text:
+            self._reasoning.append(text)
 
     @staticmethod
     def _delimiter_prefix_length(text: str, delimiters: tuple[str, ...]) -> int:
@@ -560,12 +568,15 @@ class ThinkingBlockStripper:
             if self._inside:
                 close_at = self._buffer.find(self._close)
                 if close_at >= 0:
+                    self._hide(self._buffer[:close_at])
                     self._buffer = self._buffer[close_at + len(self._close) :]
                     self._inside = False
                     continue
 
                 keep = self._delimiter_prefix_length(self._buffer, (self._close,))
-                self._buffer = self._buffer[-keep:] if keep else ""
+                hide_upto = len(self._buffer) - keep
+                self._hide(self._buffer[:hide_upto])
+                self._buffer = self._buffer[hide_upto:]
                 break
 
             open_at = self._buffer.find(self._open)
@@ -599,20 +610,31 @@ class ThinkingBlockStripper:
 
     def finish(self) -> str:
         """Flush ordinary buffered text, but never truncated private reasoning."""
-        visible = "" if self._inside else self._buffer
+        if self._inside:
+            self._hide(self._buffer)
+            visible = ""
+        else:
+            visible = self._buffer
         self._buffer = ""
         self._inside = False
         return visible
 
+    def take_reasoning(self) -> str:
+        """Return the reasoning hidden since the previous call; empty unless kept."""
+        reasoning = "".join(self._reasoning)
+        self._reasoning.clear()
+        return reasoning
 
-def _strip_complete_thinking_blocks(
+
+def _split_thinking_blocks(
     text: str,
     *,
     start_inside: bool = False,
     reasoning_format: ReasoningFormat = "qwen3",
-) -> str:
-    stripper = ThinkingBlockStripper(inside=start_inside, reasoning_format=reasoning_format)
-    return stripper.feed(text) + stripper.finish()
+) -> tuple[str, str]:
+    stripper = ThinkingBlockStripper(inside=start_inside, reasoning_format=reasoning_format, keep_reasoning=True)
+    visible = stripper.feed(text) + stripper.finish()
+    return visible, stripper.take_reasoning()
 
 
 def _candidates_have_visible_text(candidates: tuple[dict[str, Any], ...] | None) -> bool:
@@ -669,6 +691,7 @@ async def suppress_thinking_blocks(
     *,
     start_inside: bool = False,
     reasoning_format: ReasoningFormat = "qwen3",
+    keep_reasoning: bool = False,
 ) -> AsyncIterator[GenerationChunk]:
     """Hide model reasoning blocks while preserving generation metadata.
 
@@ -682,7 +705,10 @@ async def suppress_thinking_blocks(
     delta. ``start_inside`` covers chat templates that place the opening
     reasoning marker in the prompt, so generated text begins with private
     reasoning and only emits the closing marker. ``reasoning_format`` selects
-    the boundary pair declared by the model's generation backend.
+    the boundary pair declared by the model's generation backend. With
+    ``keep_reasoning`` the hidden text rides on ``reasoning_delta`` (and
+    ``reasoning_content`` on candidates) instead of being dropped, for a
+    caller that opted into public reasoning.
 
     Closing the wrapper eagerly closes the upstream adapter iterator so client
     cancellation still reaches SGLang's ``/abort_request`` cleanup.
@@ -710,7 +736,7 @@ async def suppress_thinking_blocks(
                     item = dict(candidate)
                     text = item.get("text")
                     if isinstance(text, str):
-                        visible = _strip_complete_thinking_blocks(
+                        visible, reasoning = _split_thinking_blocks(
                             text,
                             start_inside=start_inside,
                             reasoning_format=reasoning_format,
@@ -719,12 +745,16 @@ async def suppress_thinking_blocks(
                             item["text"] = visible
                             item["logprobs"] = None
                             hid_reasoning = True
+                        if keep_reasoning and reasoning:
+                            item["reasoning_content"] = reasoning
                     candidate_items.append(item)
                 rewritten_candidates = tuple(candidate_items)
 
             state = states.setdefault(
                 chunk.choice_index,
-                ThinkingBlockStripper(inside=start_inside, reasoning_format=reasoning_format),
+                ThinkingBlockStripper(
+                    inside=start_inside, reasoning_format=reasoning_format, keep_reasoning=keep_reasoning
+                ),
             )
             was_inside = state.inside
             visible_delta = state.feed(chunk.text_delta)
@@ -743,6 +773,7 @@ async def suppress_thinking_blocks(
                 is_first=is_first,
                 logprobs=None if text_changed or was_inside else chunk.logprobs,
                 candidates=rewritten_candidates,
+                reasoning_delta=chunk.reasoning_delta + state.take_reasoning(),
             )
 
             if (

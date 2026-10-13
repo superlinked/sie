@@ -627,3 +627,25 @@ async def test_onboarded_native_sie_preserves_already_suppressed_answer(remote: 
     assert "".join(chunk.get("text_delta", "") for chunk in chunks) == "answer"
     assert chunks[-1]["finish_reason"] == "stop"
     assert requests[0].url.path.endswith("/generate/operator__model")
+
+
+@pytest.mark.parametrize("declares_reasoning", [False, True])
+async def test_include_reasoning_publishes_upstream_reasoning_only_for_a_reasoning_model(
+    remote: tuple, declares_reasoning: bool
+) -> None:
+    _adapter, proc, _nc, _requests = remote
+    if declares_reasoning:
+        config_data = proc._registry.get_config(MODEL).model_dump()
+        config_data["tasks"]["generate"]["chat_template_kwargs"] = {"enable_thinking": True}
+        proc._registry.get_config.return_value = ModelConfig.model_validate(config_data)
+    frame = choice("")
+    frame["choices"][0]["delta"]["reasoning_content"] = "PRIVATE"
+    respond(remote, frames=[frame, *events()])
+
+    msg, chunks = await run(remote, include_reasoning=True)
+
+    assert "".join(chunk.get("text_delta", "") for chunk in chunks) == "answer"
+    reasoning = "".join(chunk.get("reasoning_delta", "") for chunk in chunks)
+    assert reasoning == ("PRIVATE" if declares_reasoning else "")
+    assert chunks[-1]["usage"] == USAGE
+    msg.ack.assert_awaited_once()

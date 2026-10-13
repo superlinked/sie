@@ -411,6 +411,40 @@ def test_remote_reasoning_is_not_exposed_in_logprobs(remote_chat: tuple, streami
     assert "PRIVATE_REASONING" not in response.text
 
 
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("declares_reasoning", [False, True])
+def test_include_reasoning_publishes_remote_reasoning_only_for_a_reasoning_model(
+    remote_chat: tuple, streaming: bool, declares_reasoning: bool
+) -> None:
+    client, _, config, _ = remote_chat
+    if declares_reasoning:
+        config.tasks.generate.chat_template_kwargs = {"enable_thinking": True}
+    raw = completion()
+    raw["choices"][0]["message"]["reasoning_content"] = "PRIVATE_REASONING"
+    if streaming:
+        chunks = events()
+        chunks[0]["choices"][0]["delta"]["reasoning_content"] = "PRIVATE_REASONING"
+        answer_with(
+            remote_chat, httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=ChatStream(chunks))
+        )
+    else:
+        answer_with(remote_chat, json_response(200, raw))
+
+    response = client.post("/v1/chat/completions", json={**BODY, "stream": streaming, "include_reasoning": True})
+
+    assert response.status_code == 200
+    if streaming:
+        payloads = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.splitlines()
+            if line.startswith("data: ") and not line.endswith("[DONE]")
+        ]
+        reasoning = "".join(p["choices"][0]["delta"].get("reasoning_content", "") for p in payloads if p["choices"])
+    else:
+        reasoning = response.json()["choices"][0]["message"].get("reasoning_content", "")
+    assert reasoning == ("PRIVATE_REASONING" if declares_reasoning else "")
+
+
 @pytest.mark.parametrize("status", [400, 503])
 def test_native_remote_stream_refusal_precedes_http_success(remote_chat: tuple, status: int) -> None:
     client, _, config, requests = remote_chat

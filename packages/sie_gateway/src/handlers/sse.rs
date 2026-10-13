@@ -1378,6 +1378,12 @@ fn build_chat_chunk_event(
     if emit_role {
         delta.insert("role".to_string(), json!("assistant"));
     }
+    if !chunk.reasoning_delta.is_empty() {
+        delta.insert(
+            "reasoning_content".to_string(),
+            json!(chunk.reasoning_delta),
+        );
+    }
     if !chunk.text_delta.is_empty() {
         delta.insert("content".to_string(), json!(chunk.text_delta));
     }
@@ -1802,6 +1808,7 @@ async fn send_synthetic_error_chunk(
         executed_bundle_config_hash: None,
         execution_identity_sha256: None,
         execution_binding_sha256: None,
+        reasoning_delta: String::new(),
     };
     let body = match endpoint {
         SseEndpoint::Chat { .. } => build_chat_chunk_event(chat_id, created, model, &chunk, false),
@@ -2033,6 +2040,7 @@ mod tests {
                 executed_bundle_config_hash: None,
                 execution_identity_sha256: None,
                 execution_binding_sha256: None,
+                reasoning: Default::default(),
             }
         }
 
@@ -2561,6 +2569,7 @@ mod tests {
                     executed_bundle_config_hash: None,
                     execution_identity_sha256: None,
                     execution_binding_sha256: None,
+                    reasoning: Default::default(),
                 })
                 .expect("outcome receiver is live");
             let (durability_tx, durability_completion) = tokio::sync::oneshot::channel();
@@ -2743,6 +2752,25 @@ mod tests {
         assert!(ev["choices"][0]["logprobs"].is_null());
     }
 
+    /// A worker chunk carrying ``reasoning_delta`` surfaces it as
+    /// ``delta.reasoning_content``, with no ``content`` member when the
+    /// chunk carried no answer text; a plain text chunk has no such member.
+    #[test]
+    fn test_build_chat_chunk_event_surfaces_reasoning_delta() {
+        let mut chunk = _delta_chunk(0, "");
+        chunk.reasoning_delta = "why ".to_string();
+        let ev = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, true);
+        let delta = &ev["choices"][0]["delta"];
+        assert_eq!(delta["reasoning_content"], "why ");
+        assert_eq!(delta["role"], "assistant");
+        assert!(delta.get("content").is_none());
+
+        let text = _delta_chunk(1, "Hi");
+        let ev = build_chat_chunk_event("chatcmpl-1", 0, "m", &text, false);
+        assert!(ev["choices"][0]["delta"].get("reasoning_content").is_none());
+        assert_eq!(ev["choices"][0]["delta"]["content"], "Hi");
+    }
+
     fn _delta_chunk(seq: u32, text: &str) -> ChunkEnvelope {
         ChunkEnvelope {
             kind: "chunk".to_string(),
@@ -2763,6 +2791,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning_delta: String::new(),
         }
     }
 
@@ -2786,6 +2815,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning_delta: String::new(),
         }
     }
 
@@ -4016,6 +4046,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning_delta: String::new(),
         };
         let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, true);
         let delta = &v["choices"][0]["delta"];

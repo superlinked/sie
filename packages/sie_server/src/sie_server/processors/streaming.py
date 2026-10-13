@@ -821,6 +821,10 @@ class _GenerateRequestParams:
     # Multi-LoRA — served-name of the adapter to apply (passed to SGLang as
     # ``sampling_params.lora_path``). ``None`` → base model.
     lora_adapter: str | None = None
+    # Chat ``include_reasoning``: publish the model's reasoning as
+    # ``reasoning_delta`` chunks instead of dropping it. Honoured only for a
+    # model whose config declares reasoning.
+    include_reasoning: bool = False
 
 
 def _remote_chat_parameters(params: _GenerateRequestParams) -> dict[str, Any]:
@@ -1881,6 +1885,7 @@ class StreamingProcessor:
             )
             return
         suppress_thinking = thinking_blocks_must_be_hidden(config)
+        keep_reasoning = params.include_reasoning and suppress_thinking
         reasoning_format = resolve_reasoning_format(config, adapter)
 
         # Resolve ``tool_choice`` mode up front. When the caller set
@@ -2197,7 +2202,7 @@ class StreamingProcessor:
                     remote_body,
                     requested_model=model_id,
                     context_length=config.tasks.generate.context_length,
-                    keep_reasoning=hybrid_count is not None,
+                    keep_reasoning=hybrid_count is not None or keep_reasoning,
                 )
                 preflight_result = None
             else:
@@ -2301,6 +2306,7 @@ class StreamingProcessor:
                 suppress_thinking=suppress_thinking,
                 thinking_starts_in_prompt=thinking_starts_in_prompt,
                 reasoning_format=reasoning_format,
+                keep_reasoning=keep_reasoning,
                 grammar=effective_grammar,
                 tools=effective_tools,
                 enable_tool_parser=enable_tool_parser,
@@ -2346,6 +2352,7 @@ class StreamingProcessor:
         suppress_thinking: bool = False,
         thinking_starts_in_prompt: bool = False,
         reasoning_format: ReasoningFormat = "qwen3",
+        keep_reasoning: bool = False,
         grammar: GrammarSpec | None = None,
         tools: tuple[dict[str, Any], ...] | None = None,
         enable_tool_parser: bool | None = None,
@@ -2389,12 +2396,13 @@ class StreamingProcessor:
             else adapter.generate_with_preflight(gen_kwargs, preflight_result)
         )
         if hybrid_count is not None:
-            chunks_iter = count_hybrid_usage(chunks_iter, hybrid_count)
+            chunks_iter = count_hybrid_usage(chunks_iter, hybrid_count, keep_reasoning=keep_reasoning)
         if suppress_thinking:
             chunks_iter = suppress_thinking_blocks(
                 chunks_iter,
                 start_inside=thinking_starts_in_prompt,
                 reasoning_format=reasoning_format,
+                keep_reasoning=keep_reasoning,
             )
         # OpenAI tools: when enabled, wrap the adapter iterator with the
         # tool-call parser so ``<tool_call>{...}</tool_call>`` blocks
@@ -2431,6 +2439,9 @@ class StreamingProcessor:
         # (no cross-candidate text coalescing).
         multi_candidate_stream = bool(stream) and n is not None and n > 1
         pending_text: list[str] = []
+        # Public reasoning coalesced like text; a chunk never mixes the two,
+        # so reasoning is flushed before the answer text that follows it.
+        pending_reasoning: list[str] = []
         # OpenAI per-token logprob entries accumulated alongside
         # ``pending_text`` and flushed in the same coalesced chunk. The
         # adapter aligns each entry with the tokens in ``text_delta``.
@@ -2473,6 +2484,26 @@ class StreamingProcessor:
             stream error).
             """
             nonlocal seq, pending_count, last_flush_ts, first_text_published
+            if pending_reasoning:
+                reasoning_payload = _encode_chunk(
+                    kind="chunk",
+                    request_id=request_id,
+                    attempt_id=attempt_id,
+                    seq=seq,
+                    text_delta="",
+                    done=False,
+                    reasoning_delta="".join(pending_reasoning),
+                )
+                try:
+                    await _wait_for(chunk_queue.put((reasoning_payload, False)), timeout=_CHUNK_PUT_TIMEOUT_S)
+                except (asyncio.QueueFull, TimeoutError):
+                    return False
+                seq += 1
+                pending_reasoning.clear()
+                last_flush_ts = time.monotonic()
+                if not pending_text:
+                    pending_count = 0
+                    return True
             if not pending_text and not progress:
                 return True
             text = "".join(pending_text)
@@ -2672,6 +2703,7 @@ class StreamingProcessor:
                         choice_index=chunk.choice_index,
                         logprobs=list(chunk.logprobs) if chunk.logprobs else None,
                         tool_call_delta=chunk.tool_call_delta,
+                        reasoning_delta=chunk.reasoning_delta,
                     )
                     # H6: seq advances ONLY after the put succeeds. Per-choice
                     # deltas are required content chunks: a dropped delta
@@ -2695,6 +2727,15 @@ class StreamingProcessor:
 
                 if chunk.done:
                     # Flush any coalesced text before the terminal chunk.
+                    if chunk.reasoning_delta:
+                        if pending_text and not await _flush_pending():
+                            _record_failure()
+                            transport_failure_published = True
+                            terminal_sent = await self._enqueue_transport_failure(
+                                chunk_queue, request_id, attempt_id, seq
+                            )
+                            break
+                        pending_reasoning.append(chunk.reasoning_delta)
                     if chunk.text_delta:
                         pending_text.append(chunk.text_delta)
                         pending_count += max(1, len(chunk.text_delta))
@@ -2798,6 +2839,14 @@ class StreamingProcessor:
                     continue
 
                 # Non-terminal delta: accumulate, flush on time/count.
+                if chunk.reasoning_delta:
+                    if pending_text and not await _flush_pending():
+                        _record_failure()
+                        transport_failure_published = True
+                        terminal_sent = await self._enqueue_transport_failure(chunk_queue, request_id, attempt_id, seq)
+                        break
+                    pending_reasoning.append(chunk.reasoning_delta)
+                    pending_count += max(1, len(chunk.reasoning_delta))
                 if chunk.text_delta:
                     pending_text.append(chunk.text_delta)
                     pending_count += max(1, len(chunk.text_delta))
@@ -3457,6 +3506,10 @@ class StreamingProcessor:
             if schema_in_prompt_raw is not None
             else (config is None or profile_schema_in_prompt(config))
         )
+        include_reasoning_raw = params.get("include_reasoning")
+        if include_reasoning_raw is not None and not isinstance(include_reasoning_raw, bool):
+            return _ValidationError(code="invalid_request", message="'include_reasoning' must be a boolean")
+        include_reasoning = bool(include_reasoning_raw)
 
         # OpenAI ``seed`` / ``logit_bias`` / ``logprobs`` / ``top_logprobs``
         # round-trips. Gateway is the authority for shape validation
@@ -3593,6 +3646,7 @@ class StreamingProcessor:
             best_of=best_of,
             stream=stream,
             lora_adapter=lora_adapter,
+            include_reasoning=include_reasoning,
         )
 
     async def _get_tokenizer(self, model_id: str) -> TokenizerLike:
@@ -4593,6 +4647,7 @@ def _encode_chunk(
     logprobs: list[dict[str, Any]] | None = None,
     candidates: list[dict[str, Any]] | None = None,
     choice_index: int = 0,
+    reasoning_delta: str = "",
 ) -> bytes:
     """Encode one chunk envelope as msgpack bytes.
 
@@ -4668,6 +4723,8 @@ def _encode_chunk(
     if choice_index:
         # Streaming multi-candidate: the candidate ordinal this delta belongs to.
         payload["choice_index"] = choice_index
+    if reasoning_delta:
+        payload["reasoning_delta"] = reasoning_delta
     if tool_call_delta is not None:
         function_block: dict[str, Any] = {}
         if tool_call_delta.function_name is not None:

@@ -163,6 +163,7 @@ _CUDA_CHAT_FIELDS = frozenset(
         "logit_bias",
         "response_format",
         "schema_in_prompt",
+        "include_reasoning",
         "stream",
         "tools",
         "tool_choice",
@@ -194,6 +195,7 @@ _MLX_CHAT_FIELDS = frozenset(
         "stop",
         "stream",
         "stream_options",
+        "include_reasoning",
         "tools",
         "role_mapping",
     }
@@ -530,7 +532,7 @@ def _validate_common_chat_body(body: dict[str, Any]) -> None:
         isinstance(stop, str) or (isinstance(stop, list) and all(isinstance(value, str) for value in stop))
     ):
         raise _bad_request("'stop' must be a string or array of strings", param="stop")
-    for field in ("parallel_tool_calls", "schema_in_prompt"):
+    for field in ("parallel_tool_calls", "schema_in_prompt", "include_reasoning"):
         if body.get(field) is not None and not isinstance(body[field], bool):
             raise _bad_request(f"'{field}' must be a boolean", param=field)
     for field in ("user", "safety_identifier"):
@@ -755,6 +757,7 @@ def _prepare_chat_body(
     # the engine process.
     proxied.pop("safety_identifier", None)
     proxied.pop("schema_in_prompt", None)
+    proxied.pop("include_reasoning", None)
     if proxied.get("parallel_tool_calls") is None:
         proxied.pop("parallel_tool_calls", None)
 
@@ -894,6 +897,7 @@ def _prepare_mlx_body(
     seed: int | None,
 ) -> dict[str, Any]:
     proxied = dict(body)
+    proxied.pop("include_reasoning", None)
     proxied["model"] = adapter.mlx_repo
     requested_cap = max_completion_tokens if max_completion_tokens is not None else max_tokens
     if requested_cap is not None and requested_cap > cap:
@@ -947,6 +951,7 @@ def _sanitize_chat_payload(
     reasoning_format: ReasoningFormat,
     states: dict[int, ThinkingBlockStripper] | None = None,
     terminal: bool,
+    include_reasoning: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("child chat response must be a JSON object")
@@ -955,6 +960,7 @@ def _sanitize_chat_payload(
     if not isinstance(choices, list):
         return payload
 
+    public_reasoning = include_reasoning and hide_thinking_blocks
     state_map = states if states is not None else {}
     for position, choice in enumerate(choices):
         if not isinstance(choice, dict):
@@ -982,6 +988,7 @@ def _sanitize_chat_payload(
             ThinkingBlockStripper(
                 inside=initial_inside_thinking,
                 reasoning_format=reasoning_format,
+                keep_reasoning=public_reasoning,
             ),
         )
         raw_content = container.get("content")
@@ -994,6 +1001,11 @@ def _sanitize_chat_payload(
             container["content"] = visible
         if visible != content and "logprobs" in choice_obj:
             choice_obj["logprobs"] = None
+        if public_reasoning:
+            parsed = next((value for value in (reasoning_content, reasoning) if isinstance(value, str) and value), "")
+            exposed = parsed + stripper.take_reasoning()
+            if exposed:
+                container["reasoning_content"] = exposed
     return payload
 
 
@@ -1022,6 +1034,7 @@ async def _sanitize_sse_stream(
     reasoning_format: ReasoningFormat,
     slot: asyncio.Semaphore | None,
     strict_grammar: GrammarSpec | None = None,
+    include_reasoning: bool = False,
 ) -> AsyncIterator[bytes]:
     states: dict[int, ThinkingBlockStripper] = {}
     strict_contents: dict[int, list[str]] = {}
@@ -1066,6 +1079,7 @@ async def _sanitize_sse_stream(
                     reasoning_format=reasoning_format,
                     states=states,
                     terminal=False,
+                    include_reasoning=include_reasoning,
                 )
                 if strict_grammar is not None:
                     violation = await _stream_strict_violation(
@@ -1172,6 +1186,7 @@ async def _remote_chat_events(
     config: Any,
     adapter: GenerationAdapter,
     strict_grammar: GrammarSpec | None,
+    include_reasoning: bool = False,
 ) -> AsyncIterator[bytes]:
     states: dict[int, ThinkingBlockStripper] = {}
     strict_contents: dict[int, list[str]] = {}
@@ -1190,6 +1205,7 @@ async def _remote_chat_events(
                 reasoning_format=resolve_reasoning_format(config, adapter),
                 states=states,
                 terminal=False,
+                include_reasoning=include_reasoning,
             )
             if strict_grammar is not None:
                 violation = await _stream_strict_violation(
@@ -1240,23 +1256,33 @@ async def _remote_chat_response(
     stream: bool,
     headers: dict[str, str],
     strict_grammar: GrammarSpec | None,
+    include_reasoning: bool = False,
 ) -> Response:
     try:
         rendered = await prepare_rendered_chat(
-            adapter, body, config=config, requested_model=requested_model, max_response_bytes=_MAX_CHAT_RESPONSE_BYTES
+            adapter,
+            body,
+            config=config,
+            requested_model=requested_model,
+            max_response_bytes=_MAX_CHAT_RESPONSE_BYTES,
+            include_reasoning=include_reasoning,
         )
         if stream:
             iterator = _remote_chat_events(
                 rendered
                 if rendered is not None
                 else adapter.chat_completion_stream(
-                    body, requested_model=requested_model, max_response_bytes=_MAX_CHAT_RESPONSE_BYTES
+                    body,
+                    requested_model=requested_model,
+                    max_response_bytes=_MAX_CHAT_RESPONSE_BYTES,
+                    keep_reasoning=include_reasoning,
                 ),
                 body=body,
                 requested_model=requested_model,
                 config=config,
                 adapter=adapter,
                 strict_grammar=strict_grammar,
+                include_reasoning=include_reasoning,
             )
             # Decide a pre-output refusal before committing the HTTP 200.
             return await prefetched_sse_response(
@@ -1266,7 +1292,10 @@ async def _remote_chat_response(
             await collect_rendered_chat(rendered)
             if rendered is not None
             else await adapter.chat_completion(
-                body, requested_model=requested_model, max_response_bytes=_MAX_CHAT_RESPONSE_BYTES
+                body,
+                requested_model=requested_model,
+                max_response_bytes=_MAX_CHAT_RESPONSE_BYTES,
+                keep_reasoning=include_reasoning,
             )
         )
         _check_remote_chat_usage(payload, body, config)
@@ -1277,6 +1306,7 @@ async def _remote_chat_response(
             initial_inside_thinking=False,
             reasoning_format=resolve_reasoning_format(config, adapter),
             terminal=True,
+            include_reasoning=include_reasoning,
         )
         if len(json.dumps(payload, ensure_ascii=False).encode()) > _MAX_CHAT_RESPONSE_BYTES:
             raise RemoteUpstreamError("upstream chat response exceeded the byte limit")
@@ -1442,6 +1472,7 @@ async def _chat_completions(
         prepared_chat = _prepare_chat_body(
             body, config=config, max_completion_tokens=max_completion_tokens, max_tokens=max_tokens, seed=seed
         )
+        include_reasoning = body.get("include_reasoning") is True
 
         route = await route_request(http_request, requested_key, span, serving_key=registry_key)
 
@@ -1457,6 +1488,7 @@ async def _chat_completions(
                 stream=bool(stream_opt),
                 headers=route.headers(),
                 strict_grammar=strict_grammar,
+                include_reasoning=include_reasoning,
             )
         slot: asyncio.Semaphore | None = None
         reasoning_parser: str | None = None
@@ -1567,6 +1599,7 @@ async def _chat_completions(
                     reasoning_format=reasoning_format,
                     slot=slot,
                     strict_grammar=strict_grammar,
+                    include_reasoning=include_reasoning,
                 ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **route.headers()},
@@ -1603,6 +1636,7 @@ async def _chat_completions(
                 initial_inside_thinking=initial_inside_thinking,
                 reasoning_format=reasoning_format,
                 terminal=True,
+                include_reasoning=include_reasoning,
             )
         except (ValueError, TypeError, json.JSONDecodeError):
             logger.warning("generation child returned an invalid chat response", exc_info=True)

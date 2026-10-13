@@ -441,6 +441,11 @@ pub struct GenerateParams {
     /// ``Some(false)`` because its caller owns the prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_in_prompt: Option<bool>,
+    /// Chat ``include_reasoning``: ``Some(true)`` asks the worker to publish
+    /// the model's reasoning as ``reasoning_delta`` chunks. Absent keeps it
+    /// private.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_reasoning: Option<bool>,
     /// Caller-supplied routing affinity hint. Highest-priority input
     /// to the HRW key resolution in `crate::routing::key`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4095,6 +4100,7 @@ impl WorkPublisher {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
         if let Some(sender) = collector.sender.take() {
             if sender.send(outcome).is_err() {
@@ -5397,6 +5403,7 @@ impl WorkPublisher {
                     executed_bundle_config_hash: None,
                     execution_identity_sha256: None,
                     execution_binding_sha256: None,
+                    reasoning: Default::default(),
                 });
                 if let Some(sender) = collector.sender.take() {
                     if sender.send(outcome).is_err() {
