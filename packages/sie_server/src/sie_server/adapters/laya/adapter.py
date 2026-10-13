@@ -37,8 +37,8 @@ of its (state, question) row lengths, so cost scales with items x questions.
 
 CUDA graphs (``adapter_options.loadtime.cuda_graphs: bucketed``; the shipped
 configs offer it as the ``graphs`` profile, ``MODEL:graphs``). One state with a
-few questions is a forward of a few rows, and its kernel launches (about 700 to
-900 of them), not the GPU, bound it: on an L4 a four-row, 710-token forward
+few questions is a forward of a few rows, and its kernel launches (680 to 860
+of them), not the GPU, bound it: on an L4 a four-row, 710-token forward
 keeps the GPU busy for 7 ms of its 22 on ``laya-multilingual`` and for 17 ms of
 its 28 on ``laya``. With graphs on, a request whose rows hold at most
 ``graph_token_bound`` packed tokens replays its encoder as one recorded graph
@@ -52,8 +52,9 @@ others; the server README ("Laya CUDA graphs") has both measured.
 
 Forward size. Rows run longest first in forwards of at most
 ``max_forward_tokens`` padded tokens. On an L4, 128 rows of up to 233 tokens
-take 320 ms in forwards of 4,096 padded tokens, 368 ms in forwards of 16,384
-and 409 ms in one forward, so the default is 4,096.
+take 353 ms in forwards of 4,096 padded tokens and 400 ms in forwards of
+16,384 on ``laya``, and 139 against 154 ms on ``laya-multilingual``, so the
+default is 4,096.
 """
 
 from __future__ import annotations
@@ -159,9 +160,10 @@ def graph_token_bound(hidden_size: int) -> int:
     (``_modernbert_flash_graphs.token_bound``): 2,048 and 1,024. The adapter's
     eager forward launches more kernels than the dense adapters' do (the
     casts around a float32 residual stream, and the decision head), so a graph
-    pays off for longer. On an L4 a 710-token request is 2.6x as fast from a
-    graph on ``laya-multilingual`` (768 wide) and 1.45x on ``laya`` (1,024
-    wide), where forwards of about 1,600 tokens are already slower from one.
+    pays off for longer. On an L4 a 710-token request takes 9.3 ms from a graph
+    against 21.8 ms eagerly on ``laya-multilingual`` (768 wide), which still
+    gains at 1,420 tokens (17.8 against 23.1 ms). On ``laya`` (1,024 wide) it
+    takes 23.2 against 29.0 ms, and at 1,416 tokens a graph is no faster.
     """
     return 2048 if hidden_size <= 768 else 1024
 

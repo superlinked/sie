@@ -798,6 +798,89 @@ graphs comparison, it is at least as accurate as the unfused rotation for
 `modernbert-embed-base`, `Reason-ModernColBERT` and `mLateOn`, and their
 profiles enable it. The other models load without it.
 
+### Laya CUDA graphs
+
+The Laya adapter answers typed questions with one encoder row per (state,
+question) pair. One state with a few questions is a forward of a few rows, and
+kernel launches, not the GPU, bound it: on an L4, a request of four rows and
+710 tokens launches 680 to 860 kernels and keeps the GPU busy for 7 ms of a
+22 ms forward on `laya-multilingual`, and for 17 ms of 28 on `laya`. The
+adapter takes the load-time option the ModernBERT flash adapters have, and
+records its encoder with the same runner:
+
+```yaml
+profiles:
+  graphs:
+    extends: default
+    adapter_options:
+      loadtime:
+        cuda_graphs: bucketed
+```
+
+With it, a request whose rows hold at most 2,048 packed tokens replays the
+encoder as one graph, and the decision head runs eagerly on the result. On
+encoders wider than 768 the bound is 1,024 tokens. A larger request runs
+eagerly as before: the GPU bounds it, and padding it to a graph's bucket costs
+more than the launches save.
+
+The three shipped checkpoints offer graphs as a second profile. Request
+`convaiinnovations/laya:graphs`, `convaiinnovations/laya-typed-decisions:graphs`
+or `convaiinnovations/laya-multilingual:graphs` in place of the model; the
+default profile runs eagerly.
+
+Speed on an NVIDIA L4 with 8 vCPUs: the forward of rows that are already
+tokenized, eager and from a graph in one process, median of 15. One state is
+a 118-word email with four questions:
+
+| Model | 1 state: 4 rows, 710 tokens | 2 states: 8 rows, 1,420 tokens | 3 states: 12 rows, 2,130 tokens |
+|--|--|--|--|
+| `laya` | 29.0 → 23.2 ms | eager (39.6 ms) | eager |
+| `laya-typed-decisions` | 28.3 → 23.3 ms | eager (39.7 ms) | eager |
+| `laya-multilingual` | 21.8 → 9.3 ms | 23.1 → 17.8 ms | eager (24.4 ms) |
+
+On the 1,024-wide checkpoints a graph at 1,416 tokens took 40.0 ms against
+39.6 ms eagerly, which is where their bound comes from.
+
+**Why graphs are not the default profile.** Padding to a bucket changes how
+many rows a matrix multiply sees, so probabilities move by rounding. We sent
+240 public texts with six questions each, one state per request, through a
+graph and eagerly (1,440 answers per model), and measured the eager path's own
+batching noise the same way: each state alone against the same state in a
+request of eight.
+
+| Model | Graphs: largest probability change | Graphs: top answers changed (largest eager margin) | Eager batching: largest probability change | Eager batching: top answers changed |
+|--|--|--|--|--|
+| `laya` | 0.091 | 4 (0.008) | 0.130 | 11 |
+| `laya-typed-decisions` | 0.050 | 7 (0.008) | 0.079 | 13 |
+| `laya-multilingual` | 0.034 | 3 (0.014) | 0.052 | 5 |
+
+Graphs meet the second condition of the rule a speed-up ships enabled under
+(see "When a speed-up ships enabled" above): every answer they change had an
+eager margin far below the eager path's batching noise, and they move
+probabilities less than sharing a request does. They do not meet the first, a
+change of at most 0.02. Laya computes in bfloat16 through 22 or 28 layers, and
+the adapter's eager answers already move by more than that with what else is
+in the forward. So the default profiles stay
+eager, and the `graphs` profile is there for callers who want the one-state
+latency. Against a float32 forward of the reference package, the top answer
+agrees on 1,427, 1,427 and 1,430 of the 1,440 rows from a graph, on 1,429,
+1,431 and 1,433 eagerly with all rows in one call, and on 1,426, 1,428 and
+1,433 from the package's own bfloat16 autocast.
+
+**Forward size.** Rows run longest first in forwards of at most
+`max_forward_tokens` padded tokens, a load-time option. The default is 4,096.
+128 rows of up to 233 tokens (32 states with four questions) take 353, 353
+and 139 ms that way on the three models above, against 400, 399 and 154 ms at
+the earlier default of 16,384.
+
+**Fused rotary embedding.** The adapter also takes `fused_rope` (above). It
+took 7 to 10% off 128-row requests, and no shipped profile enables it: with
+it, agreement with the float32 reference was lower on two checkpoints with
+all rows in one call (1,424 and 1,426 of 1,440, against 1,429 and 1,431).
+
+The measurements, with their scripts, are in
+[superlinked/sie-task-evidence](https://huggingface.co/datasets/superlinked/sie-task-evidence/tree/main/blog-laya-on-sie/2026-10-13b).
+
 ## Configuration
 
 `sie-server` reads its config from `SIE_*` environment variables (Pydantic
