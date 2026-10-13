@@ -802,8 +802,10 @@ profiles enable it. The other models load without it.
 
 `Qwen/Qwen3-Reranker-4B` and `Qwen/Qwen3-Reranker-0.6B` run on
 `qwen2_flash_cross_encoder`: flash attention over unpadded rows, and an output
-head cut down to the `yes` and `no` rows. Three load-time options take out
-what that leaves, and both configs turn them on:
+head cut down to the `yes` and `no` rows. A request's documents are tokenized
+in one call. Three load-time options take out what that leaves. The default
+profile turns on the one that leaves scores unchanged, and a profile named
+`fast` (`Qwen/Qwen3-Reranker-4B:fast`) turns on all three:
 
 ```yaml
 profiles:
@@ -811,9 +813,15 @@ profiles:
     adapter_options:
       loadtime:
         fused_kernels: true
+  fast:
+    extends: default
+    adapter_options:
+      loadtime:
+        fused_kernels: true
         prefix_reuse: true
         prefix_cache_mb: 512
         cuda_graphs: bucketed
+        cuda_graph_tokens: 512
 ```
 
 **`fused_kernels`.** Each layer's residual add and RMSNorm, q/k-norm, rotary
@@ -830,7 +838,7 @@ a forward encodes each distinct prefix once and each row's document once, and
 a row attends to its prefix's keys and values (`flash_attn_varlen_func` takes
 keys with their own lengths, and aligns the causal mask to the bottom right).
 For a question with 20 candidates that removes 19 copies of the prefix: 39%
-of the tokens on the rerank study's requests. The rows are metered whole:
+of the tokens on the requests measured below. The rows are metered whole:
 token counts do not change.
 
 A prefix that comes back is kept across requests. That is the shape of a
@@ -848,17 +856,63 @@ to the `qwen3` input format.
 GPU waits on the host launching 1,500 to 2,000 kernels. With the option, one row
 over a cached prefix replays as a CUDA graph through the runner of the
 ModernBERT graphs above: the tail (document and closing tokens) padded to
-64, 128 and so on up to a bound, with the graph reading the cached keys and
-values in place. The bound is 512 tokens for a model up to 1,024 wide and 128
-wider, sized for an L4; `cuda_graph_tokens` (64 to 2,048) raises it for a
-faster GPU. Longer tails, requests with several
-rows, and prefixes not yet cached run eagerly. Up to 8 prefixes hold graphs at
-once, within the memory one model's graphs may take (4% of the device), and a
+64, 128 and so on up to `cuda_graph_tokens`, with the graph reading the
+cached keys and values in place. Without `cuda_graph_tokens` the bound is 512
+tokens for a model up to 1,024 wide and 128 wider, sized for an L4; the
+`fast` profile sets 512 for both models, which an H100 or an RTX PRO 6000
+gains from on requests of 130 to 500 tokens (mean latency 11% to 24% lower on
+a set with a median of 98 tokens) and which cost an L4 under 2% on the same
+set. Longer tails, requests with several rows, and prefixes not yet cached
+run eagerly. Up to 8 prefixes hold graphs at once,
+within the memory one model's graphs may take (4% of the device), and a
 prefix's graphs go when the cache drops it. Graphs need `prefix_reuse`.
 
-Shared prefixes and graphs change how many rows a matrix multiply sees, so
-scores move by floating-point rounding, as they do when the same pair is
-scored alone or among 20 candidates.
+Median latency of one request, one in flight, through the Rust sidecar with
+the client in the server's container (three runs each, main next to the
+change in one container). Rerank is one question with 20 candidates, about
+4,600 tokens; a decision is one message after a 145-token yes-or-no question:
+
+| Model | GPU | Rerank: before → default → `fast` options | Decision: before → default → `fast` options |
+|--|--|--|--|
+| `Qwen3-Reranker-4B` | H100 | 103.8 → 77.7 → 54.2 ms | 23.6 → 24.8 → 8.0 ms |
+| `Qwen3-Reranker-4B` | RTX PRO 6000 | 140.0 → 120.1 → 88.2 ms | 23.5 → 23.2 → 11.1 ms |
+| `Qwen3-Reranker-4B` | L4 | 952 → 761 → 480 ms | 56.7 → 53.6 → 40.5 ms |
+| `Qwen3-Reranker-0.6B` | H100 | 36.1 → 24.1 → 21.2 ms | 15.9 → 14.2 → 4.3 ms |
+| `Qwen3-Reranker-0.6B` | L4 | 179 → 131 → 85 ms | 28.6 → 28.8 → 8.4 ms |
+
+Rerank throughput at 16 requests in flight goes from 44,600 to 60,500 to
+90,100 tokens per second for the 4B on an H100, and from 4,800 to 6,000 to
+9,800 on an L4. The fused kernels pay where the GPU is the bottleneck
+(rerank), graphs where the host is (one message), and the shared prefix on
+both. For the 4B on an L4 a one-message request cannot go below about 30 ms:
+one forward reads the model's 8 GB of weights.
+
+**Why `fast` is a profile and not the default.** A shared prefix and a graph
+change how many rows a matrix multiply sees, so scores move by floating-point
+rounding. On the same requests, against the default profile:
+
+| Model | GPU | Rerank: questions of 499 with the same top candidate (largest score change) | One message: largest score change |
+|--|--|--|--|
+| `Qwen3-Reranker-4B` | H100 | 499, every score bit-equal | 0.036 |
+| `Qwen3-Reranker-0.6B` | H100 | 499, every score bit-equal | 0.039 |
+| `Qwen3-Reranker-4B` | RTX PRO 6000 | 498 (0.064); the other had a margin of 0.00009 | 0.041 |
+| `Qwen3-Reranker-4B` | L4 | 60 of 60 (0.074) | 0.055 |
+| `Qwen3-Reranker-0.6B` | L4 | 196 of 200 (0.120); margins up to 0.0036 | 0.066 |
+
+The default profile moves too. Scoring a pair alone or among its question's
+20 candidates changes its score by up to 0.019 for the 4B on an H100
+(0.000002 for the 0.6B), and by up to 0.097 and 0.144 on an L4, where the
+0.6B's top candidate changes in 3 of 60 questions. Against a float32 forward
+of each checkpoint the default profile is off by up to 0.167 on rerank and
+0.083 on one-message requests, 0.0005 to 0.0044 on average, and the `fast`
+options by about as much: an average within a tenth of the default profile's
+on rerank and the decision questions on every GPU (up to half again as large
+on longer one-message requests on an L4), and a largest difference that is
+larger on some request sets and smaller on others. So `fast` is as close
+to the model as the default profile is, without meeting the rule above ("When
+a speed-up ships enabled") on every request set and GPU: some scores move by
+more than 0.02, and the comparison against float32 goes either way. It ships
+as a profile an operator chooses.
 
 ## Configuration
 
