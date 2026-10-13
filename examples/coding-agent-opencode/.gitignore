@@ -1,0 +1,7 @@
+.venv/
+run-output/
+__pycache__/
+.ruff_cache/
+.pytest_cache/
+fixture/.venv/
+fixture/uv.lock

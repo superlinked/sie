@@ -1,0 +1,35 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "sie-local/Qwen/Qwen3.5-4B:long-context",
+  "provider": {
+    "sie-local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "SIE on this machine",
+      "options": {
+        "baseURL": "http://localhost:8080/v1",
+        "apiKey": "local",
+        "timeout": 1800000,
+        "headerTimeout": 600000,
+        "chunkTimeout": 600000
+      },
+      "models": {
+        "Qwen/Qwen3.5-4B:long-context": {
+          "name": "Qwen3.5-4B, 32K window (Apple Silicon or NVIDIA)",
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          },
+          "tool_call": true
+        },
+        "Qwen/Qwen3-4B-Instruct-2507": {
+          "name": "Qwen3-4B-Instruct-2507, 32K window (NVIDIA)",
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          },
+          "tool_call": true
+        }
+      }
+    }
+  }
+}

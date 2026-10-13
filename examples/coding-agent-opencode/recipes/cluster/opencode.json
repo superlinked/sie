@@ -1,0 +1,35 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "sie-cluster/zai-org/GLM-5.3-Flash",
+  "provider": {
+    "sie-cluster": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "SIE cluster",
+      "options": {
+        "baseURL": "https://sie.example.com/v1",
+        "apiKey": "{env:SIE_API_KEY}",
+        "timeout": 1800000,
+        "headerTimeout": 600000,
+        "chunkTimeout": 600000
+      },
+      "models": {
+        "zai-org/GLM-5.3-Flash": {
+          "name": "GLM-5.3-Flash on the cluster",
+          "limit": {
+            "context": 16384,
+            "output": 4096
+          },
+          "tool_call": true
+        },
+        "Qwen/Qwen3-4B-Instruct-2507": {
+          "name": "Qwen3-4B-Instruct-2507 on the cluster",
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          },
+          "tool_call": true
+        }
+      }
+    }
+  }
+}
