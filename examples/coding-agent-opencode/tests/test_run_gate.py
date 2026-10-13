@@ -36,18 +36,26 @@ DESELECT_FAILING_TESTS = (
 )
 
 
+FIX = f"cat > invoice_totals/amounts.py <<'PY'\n{FIXED_AMOUNTS}\nPY"
+NO_CHANGE = 'echo \'{"type":"text","text":"nothing to do"}\''
+
+
+def _executable(path: Path, body: str) -> None:
+    path.write_text(f"#!/usr/bin/env bash\nset -eu\n{body}\n")
+    path.chmod(0o755)
+
+
 def _gate(tmp_path: Path, agent: str) -> tuple[int, list[str]]:
     root = tmp_path / "example"
-    root.mkdir()
-    shutil.copy(EXAMPLE / "run_gate.sh", root)
-    ignored = shutil.ignore_patterns(".venv", "uv.lock", "__pycache__", ".pytest_cache")
-    shutil.copytree(EXAMPLE / "fixture", root / "fixture", ignore=ignored)
-    shutil.copytree(EXAMPLE / "recipes", root / "recipes")
+    if not root.exists():
+        root.mkdir()
+        shutil.copy(EXAMPLE / "run_gate.sh", root)
+        ignored = shutil.ignore_patterns(".venv", "uv.lock", "__pycache__", ".pytest_cache")
+        shutil.copytree(EXAMPLE / "fixture", root / "fixture", ignore=ignored)
+        shutil.copytree(EXAMPLE / "recipes", root / "recipes")
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    opencode = bin_dir / "opencode"
-    opencode.write_text(f"#!/usr/bin/env bash\nset -eu\n{agent}\n")
-    opencode.chmod(0o755)
+    bin_dir.mkdir(exist_ok=True)
+    _executable(bin_dir / "opencode", agent)
     env = {key: value for key, value in os.environ.items() if key != "VIRTUAL_ENV"}
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
     run = subprocess.run(
@@ -57,13 +65,24 @@ def _gate(tmp_path: Path, agent: str) -> tuple[int, list[str]]:
 
 
 def test_a_real_fix_passes(tmp_path: Path) -> None:
-    code, lines = _gate(tmp_path, f"cat > invoice_totals/amounts.py <<'PY'\n{FIXED_AMOUNTS}\nPY")
+    code, lines = _gate(tmp_path, FIX)
     assert code == 0, lines
     assert lines[-1].startswith("GATE PASS")
 
 
+def test_runs_started_in_the_same_second_judge_their_own_copies(tmp_path: Path) -> None:
+    (tmp_path / "bin").mkdir()
+    _executable(tmp_path / "bin" / "date", "echo 20260101T000000Z")
+    first_code, first = _gate(tmp_path, FIX)
+    second_code, second = _gate(tmp_path, NO_CHANGE)
+    assert first_code == 0, first
+    assert second_code == 1
+    assert second[-1].startswith("GATE FAIL (")
+    assert first[-1].rsplit("(", 1)[1] != second[-1].rsplit("(", 1)[1]
+
+
 def test_an_untouched_fixture_fails(tmp_path: Path) -> None:
-    code, lines = _gate(tmp_path, 'echo \'{"type":"text","text":"nothing to do"}\'')
+    code, lines = _gate(tmp_path, NO_CHANGE)
     assert code == 1
     assert lines[-1].startswith("GATE FAIL (")
 

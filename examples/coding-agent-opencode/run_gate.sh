@@ -5,7 +5,7 @@
 #   ./run_gate.sh laptop                                             # sie-server on http://localhost:8080
 #   SIE_BASE_URL=https://... SIE_API_KEY=... ./run_gate.sh cluster   # your gateway (recipes/cluster)
 #
-# Needs opencode and uv on PATH. Writes run-output/gate-<timestamp>/ with the
+# Needs opencode and uv on PATH. Writes run-output/gate-<timestamp>-<suffix>/ with the
 # worked copy of the fixture, OpenCode's event log and the pytest verdict.
 set -euo pipefail
 
@@ -31,9 +31,9 @@ if [[ "$RECIPE" != "laptop" ]]; then
     done
 fi
 
-OUT="$HERE/run-output/gate-$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$HERE/run-output"
+OUT="$(mktemp -d "$HERE/run-output/gate-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")"
 WORK="$OUT/fixture"
-mkdir -p "$OUT"
 cp -R "$HERE/fixture" "$WORK"
 git -C "$WORK" init -q
 TASK="$(cat "$WORK/README.md")"

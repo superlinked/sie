@@ -288,7 +288,7 @@ SIE Cloud usage rows   pending (expected: served_by relay)
 
 ### BFCL through SIE Relay
 
-A recorded measurement of `zai-org/GLM-5.3-Flash:relay` on the Berkeley
+The planned measurement of `zai-org/GLM-5.3-Flash:relay` on the Berkeley
 Function Calling Leaderboard, BFCL v3, from
 `gorilla-llm/Berkeley-Function-Calling-Leaderboard`: the full `simple` split
 and a 200-row subsample of `multiple`, each answer scored by AST match against
@@ -324,8 +324,9 @@ What runs anywhere, and in this repository's CI, is the test suite:
   of tokens, and a model that answers `MODEL_LOADING` for its first requests.
   Each verdict is checked for what it accepts and what it refuses.
 - `tests/test_run_gate.py` runs `run_gate.sh` with a scripted stand-in for
-  `opencode`: a real fix, no change, a failed `opencode run`, edited tests and
-  an environment planted in the worked copy.
+  `opencode`: a real fix, no change, a failed `opencode run`, edited tests, an
+  environment planted in the worked copy, and two runs started in the same
+  second.
 
 ```sh
 uv run pytest
