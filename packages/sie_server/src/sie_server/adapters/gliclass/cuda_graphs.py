@@ -32,17 +32,30 @@ Two modes choose the shape:
   nothing. The shapes are unbounded; a runner keeps the 64 most recently used
   graphs.
 - ``bucketed`` pads the length up to a bucket (a multiple of 32 tokens at a
-  512-token window, 64 at 1,024) and the batch up to a power of two, or to the
-  largest batch the token bound allows at that length. Padded positions are
-  masked, and padded rows are dropped before scoring. That makes the set of
-  shapes small and fixed (52 for gliclass-large-v1.0, 71 for
-  gliclass-base-v1.0, 33 for opir-multitask-large-v1.0), and the runner keeps
-  a graph for every one, so after warm-up forwards replay whatever mix of
-  batch sizes, lengths and label counts the traffic has. A longer sequence, or
-  a larger batch, rounds fp16 sums differently, as when requests are batched
-  together: up to 0.006 in probability on gliclass-large-v1.0 and 0.023 on
-  gliclass-multilang-mini in our tests. A forward whose batch is already a
-  bucket scores exactly as it did when graphs also covered the head.
+  512-token window, 64 at 1,024). A batch of up to eight rows keeps its size;
+  a larger one pads up to a power of two, or to the largest batch the token
+  bound allows at that length, and buckets its length half as coarsely (see
+  "Padding costs GPU time" below). Padded positions are masked, and padded
+  rows are dropped before scoring. That makes the set of shapes small and
+  fixed (48 at a 1,024-token window for an encoder wider than 768, 84 for a
+  narrower one), and the runner keeps a graph for every one, so after warm-up
+  forwards replay whatever mix of batch sizes, lengths and label counts the
+  traffic has. A longer sequence, or a larger batch, rounds fp16 sums
+  differently, as when requests are batched together: up to 0.006 in
+  probability on gliclass-large-v1.0 and 0.023 on gliclass-multilang-mini in
+  our tests. A forward whose batch is already a bucket scores exactly as it
+  did when graphs also covered the head.
+
+Padding costs GPU time. A replay is not bound by kernel launches, so what it
+costs is the GPU time of its padded shape, and that grows with the tokens in
+it. On an L4, a gliclass-instruct-large-v1.0 replay of three rows of 192
+tokens takes 19 ms and of four rows 24 ms; of eight rows of 96 tokens 21 ms
+and of eight rows of 128 tokens 31 ms. So a batch of up to eight rows (a
+request of three typed questions is three rows, and a labels request runs
+eight rows per forward) gets a graph of its own size instead of the next
+power of two, and a forward of eight or more rows, the widest a short text
+can be part of, buckets its length at half the width: 32 tokens at a
+1,024-token window, 16 at 512.
 
 While a graph is being recorded, PyTorch's caching allocator will not free
 cached blocks to satisfy another allocation, so another model on the same GPU
@@ -151,6 +164,13 @@ _RECORDING_LOCK = RECORDING_LOCK
 _MAX_RECORDING_FAILURES = 3
 # A runner serving forwards logs its counters this often.
 _SUMMARY_SECONDS = 600.0
+# Rows a ``bucketed`` batch may have without padded rows: every batch size up to
+# this many gets a graph of its own. Larger batches pad to a power of two.
+_EXACT_BATCH_ROWS = 8
+# Forwards of at least this many rows bucket their length at half the width:
+# they are the forwards whose replay the GPU bounds even at short lengths, so
+# their padded tokens cost time in proportion.
+_FINE_LENGTH_ROWS = 8
 # Encoders whose forward records cleanly once the two host reads are replaced.
 _ENCODERS = frozenset({"deberta-v2"})
 # Poolings whose pooled vector ignores padded positions, so ``bucketed`` mode
@@ -193,9 +213,13 @@ def unsupported_reason(model: Any, device: str | torch.device) -> str | None:
     return None
 
 
-def bucket_width(max_length: int) -> int:
-    """Sequence-length bucket for ``bucketed`` mode: 32 tokens at a 512 window, 64 at 1,024."""
-    return max(16, max_length // 16)
+def bucket_width(max_length: int, batch: int = 1) -> int:
+    """Sequence-length bucket for ``bucketed`` mode: 32 tokens at a 512 window, 64 at 1,024.
+
+    A forward of ``_FINE_LENGTH_ROWS`` rows or more buckets at half that width.
+    """
+    width = max(16, max_length // 16)
+    return width if batch < _FINE_LENGTH_ROWS else max(16, width // 2)
 
 
 def token_bound(hidden_size: int) -> int:
@@ -204,24 +228,55 @@ def token_bound(hidden_size: int) -> int:
 
 
 def batch_buckets(length: int, max_tokens: int) -> tuple[int, ...]:
-    """Batch sizes ``bucketed`` graphs of this padded length hold: powers of two, and the largest that fits.
+    """Batch sizes that fit ``bucketed`` graphs of this padded length.
 
-    A batch pads up to the next of these, so a batch past a power of two
-    costs at most twice its rows, and one near the token bound pads only to
-    the bound.
+    Every size up to ``_EXACT_BATCH_ROWS``, then powers of two, and the
+    largest that fits. A batch pads up to the next of these, so a batch of up
+    to eight rows pads no rows, a larger one costs at most twice its rows, and
+    one near the token bound pads only to the bound.
     """
     largest = max_tokens // length
-    sizes = [1 << power for power in range(largest.bit_length())]
-    if largest and sizes[-1] != largest:
-        sizes.append(largest)
-    return tuple(sizes)
+    sizes = set(range(1, min(largest, _EXACT_BATCH_ROWS) + 1))
+    sizes.update(1 << power for power in range(largest.bit_length()))
+    if largest:
+        sizes.add(largest)
+    return tuple(sorted(sizes))
+
+
+def bucketed_key(batch: int, length: int, max_length: int, max_tokens: int) -> Key | None:
+    """The shape a ``bucketed`` forward of ``batch`` rows of ``length`` tokens pads to.
+
+    None when no shape under the token bound holds it. A batch of up to
+    ``_EXACT_BATCH_ROWS`` rows keeps its size and rounds its length up to the
+    window's bucket. A larger batch rounds its length up to the finer bucket
+    or to the window's, and its rows up to the next size graphs of that length
+    hold, whichever pads fewer tokens: the finer length is shorter, but its
+    next batch size can be further away.
+    """
+    best: Key | None = None
+    for rows in (batch, 1) if batch >= _FINE_LENGTH_ROWS else (batch,):
+        width = bucket_width(max_length, rows)
+        padded = min(max_length, math.ceil(length / width) * width)
+        size = next((size for size in batch_buckets(padded, max_tokens) if size >= batch), 0)
+        if size and (best is None or size * padded < best[0] * best[1]):
+            best = (size, padded)
+    return best
 
 
 def bucketed_shapes(max_length: int, max_tokens: int) -> frozenset[Key]:
     """Every shape a ``bucketed`` runner can record at this window."""
-    width = bucket_width(max_length)
-    lengths = {min(max_length, width * step) for step in range(1, math.ceil(max_length / width) + 1)}
-    return frozenset((batch, length) for length in lengths for batch in batch_buckets(length, max_tokens))
+    shapes: set[Key] = set()
+    for rows in (1, _FINE_LENGTH_ROWS):
+        width = bucket_width(max_length, rows)
+        for step in range(1, math.ceil(max_length / width) + 1):
+            length = min(max_length, width * step)
+            shapes.update(
+                (batch, length)
+                for batch in batch_buckets(length, max_tokens)
+                # Rows under the finer bucket's size pad only to the window's bucket.
+                if batch >= rows
+            )
+    return frozenset(shapes)
 
 
 class _RecordingOutOfMemoryError(Exception):
@@ -255,7 +310,6 @@ class CudaGraphRunner:
         self._name = name
         self._pad_values = {"input_ids": pad_token_id, "attention_mask": 0, "token_type_ids": pad_token_type_id}
         self._max_length = max_length
-        self._bucket = bucket_width(max_length)
         config = model.config
         self._hidden_size = int(config.encoder_config.hidden_size)
         embeddings = getattr(model.model.encoder_model, "get_input_embeddings", None)
@@ -364,10 +418,9 @@ class CudaGraphRunner:
     def key(self, batch: int, length: int, mode: GraphMode) -> Key | None:
         """The graph a forward of this shape would replay; None when it runs eagerly."""
         if mode == "bucketed" and self._padding_safe:
-            length = min(self._max_length, math.ceil(length / self._bucket) * self._bucket)
-            batch = next((size for size in batch_buckets(length, self._max_tokens) if size >= batch), 0)
-            if not batch:
+            if length > self._max_length:
                 return None
+            return bucketed_key(batch, length, self._max_length, self._max_tokens)
         if batch * length > self._max_tokens or length > self._max_length:
             return None
         return (batch, length)

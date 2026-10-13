@@ -24,6 +24,7 @@ from sie_server.adapters.gliclass.cuda_graphs import (
     CudaGraphRunner,
     batch_buckets,
     bucket_width,
+    bucketed_key,
     bucketed_shapes,
     segment_ids,
     token_bound,
@@ -182,6 +183,13 @@ class TestShapes:
     @pytest.mark.parametrize(("max_length", "width"), [(512, 32), (1024, 64), (128, 16)])
     def test_bucket_width_follows_the_window(self, max_length: int, width: int) -> None:
         assert bucket_width(max_length) == width
+        assert {bucket_width(max_length, batch) for batch in range(1, 8)} == {width}
+
+    @pytest.mark.parametrize(("max_length", "width"), [(512, 16), (1024, 32), (128, 16)])
+    def test_forwards_of_eight_rows_or_more_bucket_their_length_at_half_the_width(
+        self, max_length: int, width: int
+    ) -> None:
+        assert {bucket_width(max_length, batch) for batch in (8, 9, 16, 64)} == {width}
 
     @pytest.mark.parametrize(("hidden_size", "tokens"), [(384, 2048), (768, 2048), (1024, 1024), (1536, 1024)])
     def test_wider_encoders_hold_fewer_tokens(self, hidden_size: int, tokens: int) -> None:
@@ -197,34 +205,85 @@ class TestShapes:
     @pytest.mark.parametrize(
         ("length", "tokens", "sizes"),
         [
-            (32, 2048, (1, 2, 4, 8, 16, 32, 64)),
-            (96, 2048, (1, 2, 4, 8, 16, 21)),
-            (512, 2048, (1, 2, 4)),
-            (96, 1024, (1, 2, 4, 8, 10)),
-            (192, 1024, (1, 2, 4, 5)),
+            (32, 2048, (1, 2, 3, 4, 5, 6, 7, 8, 16, 32, 64)),
+            (96, 2048, (1, 2, 3, 4, 5, 6, 7, 8, 16, 21)),
+            (512, 2048, (1, 2, 3, 4)),
+            (96, 1024, (1, 2, 3, 4, 5, 6, 7, 8, 10)),
+            (192, 1024, (1, 2, 3, 4, 5)),
             (512, 1024, (1, 2)),
             (1024, 1024, (1,)),
         ],
     )
-    def test_batch_buckets_are_powers_of_two_and_the_largest_that_fits(
+    def test_batch_buckets_are_every_size_up_to_eight_then_powers_of_two_and_the_largest_that_fits(
         self, length: int, tokens: int, sizes: tuple[int, ...]
     ) -> None:
         assert batch_buckets(length, tokens) == sizes
 
-    def test_bucketed_batches_pad_up_to_their_bucket(self) -> None:
-        runner = _Runner()  # a DeBERTa-large-wide encoder: 1,024 tokens
+    def test_batches_of_up_to_eight_rows_keep_their_size(self) -> None:
+        runner = _Runner()  # a DeBERTa-large-wide encoder: 1,024 tokens, 32-token buckets at this 512 window
 
-        assert [runner.key(batch, 100, "bucketed") for batch in (1, 2, 3, 4, 5, 8)] == [
+        assert [runner.key(batch, 100, "bucketed") for batch in (1, 2, 3, 4, 5, 6, 7)] == [
             (1, 128),
             (2, 128),
+            (3, 128),
             (4, 128),
-            (4, 128),
-            (8, 128),
-            (8, 128),
+            (5, 128),
+            (6, 128),
+            (7, 128),
         ]
-        assert runner.key(9, 100, "bucketed") is None  # 9 x 128 tokens: over the bound
         assert runner.key(5, 190, "bucketed") == (5, 192)  # the largest batch at 192 tokens
         assert runner.key(3, 100, "exact") == (3, 100)  # exact mode never pads
+
+    def test_eight_rows_or_more_pad_their_length_to_a_finer_bucket(self) -> None:
+        runner = _Runner()  # 16-token buckets for eight rows or more at this 512 window
+
+        assert runner.key(8, 100, "bucketed") == (8, 112)
+        assert runner.key(8, 97, "bucketed") == (8, 112)
+        assert runner.key(8, 96, "bucketed") == (8, 96)
+        assert runner.key(9, 100, "bucketed") == (9, 112)  # the largest batch at 112 tokens
+        assert runner.key(10, 100, "bucketed") is None  # 10 x 112 tokens: over the bound
+        assert runner.key(9, 60, "bucketed") == (16, 64)  # past eight rows, up to a power of two
+        # Where the finer length's next batch size pads more tokens than the window's bucket does, the window's wins:
+        # 9 rows of 65 tokens fit 12 x 80 or 10 x 96 tokens, the same 960, and the shorter rows are kept;
+        narrow = _Runner(_model(hidden_size=768))
+        assert runner.key(9, 65, "bucketed") == (12, 80)
+        # 9 rows of 129 tokens fit 14 x 144 (2,016 tokens) or 12 x 160 (1,920).
+        assert narrow.key(9, 129, "bucketed") == (12, 160)
+        wide_window = CudaGraphRunner(_model(), pad_token_id=0, max_length=1024)
+        assert wide_window.key(8, 91, "bucketed") == (8, 96)  # 32-token buckets at a 1,024 window
+        assert wide_window.key(7, 91, "bucketed") == (7, 128)  # under eight rows: 64-token buckets
+
+    @pytest.mark.parametrize(
+        ("max_length", "hidden_size"),
+        [(1024, 1024), (1024, 768), (512, 1024), (512, 768)],
+        ids=["large-1024", "base-1024", "large-512", "base-512"],
+    )
+    def test_no_forward_pads_more_than_it_did_with_power_of_two_batches(self, max_length: int, hidden_size: int) -> None:
+        # The shapes before batches of up to eight rows kept their size: the length to the
+        # window's bucket, the batch to a power of two or the largest that fits.
+        tokens = token_bound(hidden_size)
+        width = bucket_width(max_length)
+
+        def before(batch: int, length: int) -> tuple[int, int] | None:
+            padded = min(max_length, -(-length // width) * width)
+            largest = tokens // padded
+            sizes = [1 << power for power in range(largest.bit_length())]
+            if largest and sizes[-1] != largest:
+                sizes.append(largest)
+            size = next((size for size in sizes if size >= batch), 0)
+            return (size, padded) if size else None
+
+        for batch in range(1, 70):
+            for length in range(1, max_length + 1):
+                old, new = before(batch, length), bucketed_key(batch, length, max_length, tokens)
+                if old is None:
+                    continue
+                # Every forward that had a graph still has one, of no more tokens and no longer rows.
+                assert new is not None, (batch, length)
+                assert new[0] * new[1] <= old[0] * old[1], (batch, length)
+                assert new[1] <= old[1], (batch, length)
+                assert new[0] >= batch, (batch, length)
+                assert new[1] >= length, (batch, length)
 
     def test_shapes_past_the_token_bound_run_eagerly(self) -> None:
         runner = _Runner()
@@ -237,7 +296,7 @@ class TestShapes:
 
         narrow = _Runner(_model(hidden_size=768))
         assert narrow.key(4, 512, "exact") == (4, 512)
-        assert narrow.key(9, 100, "bucketed") == (16, 128)
+        assert narrow.key(9, 100, "bucketed") == (16, 112)
         assert narrow.key(65, 32, "bucketed") is None
 
     def test_the_token_bound_does_not_grow_with_the_window(self) -> None:
@@ -249,7 +308,7 @@ class TestShapes:
 
     @pytest.mark.parametrize(
         ("max_length", "hidden_size", "count"),
-        [(1024, 1024, 33), (1024, 768, 52), (512, 1024, 52), (512, 768, 71)],
+        [(1024, 1024, 48), (1024, 768, 84), (512, 1024, 84), (512, 768, 136)],
         ids=["large-1024", "base-1024", "large-512", "base-512"],
     )
     def test_every_bucketed_forward_maps_into_a_small_fixed_set(
@@ -308,7 +367,7 @@ class TestRecordingPolicy:
 
         answers = [runner.run(_inputs(3, 100), classes, "bucketed") for classes in range(1, 101)]
 
-        assert runner.recorded == [(4, 128)]
+        assert runner.recorded == [(3, 128)]
         assert runner.head_classes == list(range(1, 101))  # the head scores each forward's own label slots
         assert all(answer is not None and answer.shape == (3, classes) for classes, answer in enumerate(answers, 1))
 
@@ -319,13 +378,13 @@ class TestRecordingPolicy:
 
         assert runner.head_classes == [None]
 
-    def test_batch_sizes_share_their_bucket(self) -> None:
+    def test_batch_sizes_past_eight_rows_share_their_bucket(self) -> None:
         runner = _Runner()
 
-        for batch in (3, 4, 5, 6, 7, 8):
-            runner.run(_inputs(batch, 100), 4, "bucketed")
+        for batch in (3, 4, 8, 9, 12, 16):
+            runner.run(_inputs(batch, 60), 4, "bucketed")
 
-        assert runner.recorded == [(4, 128), (8, 128)]
+        assert runner.recorded == [(3, 64), (4, 64), (8, 64), (16, 64)]
 
     def test_after_warm_up_every_bucketed_forward_replays_whatever_the_mix(self) -> None:
         # Shape cycling: random batch sizes, lengths and label counts for ten
@@ -335,13 +394,13 @@ class TestRecordingPolicy:
         rng = random.Random(0)  # noqa: S311 -- a reproducible traffic mix, not a secret
         for step in range(12_000):
             runner.now = step * 0.05
-            runner.run(_inputs(rng.randint(1, 32), rng.randint(1, 512)), rng.randint(1, 100), "bucketed")
+            runner.run(_inputs(rng.randint(1, 64), rng.randint(1, 512)), rng.randint(1, 100), "bucketed")
 
         assert len(runner.recorded) == len(set(runner.recorded)) == shapes  # each shape once: nothing evicted
         assert runner.graph_count == shapes
         replayed, eager = runner.stats.replayed, dict(runner.stats.eager)
         for _ in range(1000):
-            runner.run(_inputs(rng.randint(1, 32), rng.randint(1, 512)), rng.randint(1, 100), "bucketed")
+            runner.run(_inputs(rng.randint(1, 64), rng.randint(1, 512)), rng.randint(1, 100), "bucketed")
         new_eager = {reason: count - eager.get(reason, 0) for reason, count in runner.stats.eager.items()}
         # Only forwards past the token bound run eagerly; every other forward replays.
         assert {reason for reason, count in new_eager.items() if count} <= {"too_large"}
@@ -360,7 +419,7 @@ class TestRecordingPolicy:
         assert set(runner._relative_pos) == {64, 96}
 
     def test_recording_is_rationed_in_time(self) -> None:
-        runner = _Runner(_model(hidden_size=768))  # 71 shapes
+        runner = _Runner(_model(hidden_size=768))  # 136 shapes
         shapes = sorted(bucketed_shapes(512, 2048))
 
         # Every call is a new shape: sixteen record at once, then none while time stands still.
@@ -406,7 +465,7 @@ class TestRecordingPolicy:
         assert runner.recorded == [(1, 32), (1, 64), (1, 96)]  # the third went over; no more
         assert runner.graph_count == 3
         assert runner.stats.eager == {"budget_full": 1}
-        assert "3 of 52 shapes recorded" in caplog.text
+        assert "3 of 84 shapes recorded" in caplog.text
         runner.run(_inputs(1, 32), 4, "bucketed")
         assert runner.replayed[-1] == (1, 32)  # graphs it holds keep replaying
         runner.clear()  # an out-of-memory error or unload starts over
@@ -822,7 +881,7 @@ def test_the_adapter_passes_its_label_slots_to_the_head() -> None:
 
     assert logits.shape == (3, 3)
     assert runner.head_classes == [3]
-    assert runner.recorded == [(4, 128)]
+    assert runner.recorded == [(3, 128)]
 
 
 class TestOperatorSetting:
