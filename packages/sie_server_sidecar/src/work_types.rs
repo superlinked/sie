@@ -321,6 +321,110 @@ mod tests {
         );
     }
 
+    fn ordered_map(entries: &[(&str, WireValue)]) -> WireValue {
+        WireValue::Map(
+            entries
+                .iter()
+                .map(|(key, value)| (WireValue::from(*key), value.clone()))
+                .collect(),
+        )
+    }
+
+    fn map_keys(value: &WireValue) -> Vec<String> {
+        value
+            .as_map()
+            .expect("msgpack map")
+            .iter()
+            .map(|(key, _)| key.as_str().expect("string key").to_string())
+            .collect()
+    }
+
+    fn map_field<'a>(value: &'a WireValue, key: &str) -> &'a WireValue {
+        value
+            .as_map()
+            .expect("msgpack map")
+            .iter()
+            .find(|(candidate, _)| candidate.as_str() == Some(key))
+            .map(|(_, value)| value)
+            .unwrap_or_else(|| panic!("missing {key:?}"))
+    }
+
+    /// The engine must see `output_schema` and `options` with their keys in
+    /// the order the caller sent them: an adapter that reads a mapping of
+    /// options in order (a choice question's option to criterion mapping)
+    /// answers differently when the keys arrive sorted.
+    #[test]
+    fn work_item_keeps_caller_key_order_through_to_the_engine_frame() {
+        // Deliberately not alphabetical at any level.
+        let choices = ordered_map(&[
+            ("refund", WireValue::from("asks for money back")),
+            ("cancel", WireValue::from("wants to stop the plan")),
+            ("technical", WireValue::from("reports a fault")),
+            ("billing_question", WireValue::from("asks about a charge")),
+            ("other", WireValue::from("anything else")),
+        ]);
+        let output_schema = ordered_map(&[
+            ("priority", WireValue::from("string")),
+            ("intent", ordered_map(&[("choice", choices.clone())])),
+            ("frustration", WireValue::from("number")),
+        ]);
+        let options = ordered_map(&[
+            ("threshold", WireValue::from(0.5)),
+            ("label_criteria", choices),
+            ("multi_label", WireValue::from(false)),
+        ]);
+
+        // A gateway-shaped work item, with the two mappings in caller order.
+        let template = rmp_serde::to_vec_named(&sample_work_item()).unwrap();
+        let mut fields = match rmp_serde::from_slice::<WireValue>(&template).unwrap() {
+            WireValue::Map(fields) => fields,
+            other => panic!("work item must encode as a map, got {other}"),
+        };
+        fields.retain(|(key, _)| !matches!(key.as_str(), Some("output_schema" | "options")));
+        fields.push((WireValue::from("output_schema"), output_schema));
+        fields.push((WireValue::from("options"), options));
+        let mut wire = Vec::new();
+        rmpv::encode::write_value(&mut wire, &WireValue::Map(fields)).unwrap();
+
+        // Decode as the queue and local-ingest paths do, then encode the
+        // engine frame's extract item as the IPC client does.
+        let item: WorkItem = rmp_serde::from_slice(&wire).unwrap();
+        let frame = rmp_serde::to_vec_named(&crate::ipc_types::ExtractBatchItem {
+            work_item_id: item.work_item_id.clone(),
+            request_id: item.request_id.clone(),
+            item_index: item.item_index,
+            total_items: item.total_items,
+            timestamp: item.timestamp,
+            item: item.item.clone().unwrap(),
+            labels: item.labels.clone(),
+            output_schema: item.output_schema.clone(),
+            instruction: item.instruction.clone(),
+            options: item.options.clone(),
+            profile_id: None,
+            bundle_config_hash: None,
+            payload_fetch_ms: 0.0,
+            prepared_audio: None,
+        })
+        .unwrap();
+        let sent: WireValue = rmp_serde::from_slice(&frame).unwrap();
+
+        let schema = map_field(&sent, "output_schema");
+        assert_eq!(map_keys(schema), ["priority", "intent", "frustration"]);
+        assert_eq!(
+            map_keys(map_field(map_field(schema, "intent"), "choice")),
+            ["refund", "cancel", "technical", "billing_question", "other"]
+        );
+        let options = map_field(&sent, "options");
+        assert_eq!(
+            map_keys(options),
+            ["threshold", "label_criteria", "multi_label"]
+        );
+        assert_eq!(
+            map_keys(map_field(options, "label_criteria")),
+            ["refund", "cancel", "technical", "billing_question", "other"]
+        );
+    }
+
     #[test]
     fn work_item_forward_compatible_extra_field_ignored() {
         // Producer adds a new field we don't know about — we must still decode.
