@@ -22,7 +22,8 @@ Three pieces are in this directory:
 3. `fixture/` and `run_gate.sh`, a seeded gate. The fixture is a tiny package
    with two failing tests and a one-line task, "make the tests pass". The
    script runs OpenCode on a copy non-interactively, then runs pytest on the
-   result and prints the verdict.
+   result and prints the verdict. A run that changed the tests or
+   `pyproject.toml`, or added a `conftest.py`, fails before pytest is asked.
 
 The conformance check uses the `openai` Python package rather than the SIE
 SDK. The thing under test is the OpenAI-compatible wire surface that

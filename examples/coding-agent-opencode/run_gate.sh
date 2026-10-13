@@ -40,6 +40,16 @@ echo "== before: the seeded tests"
 echo "== opencode run, recipe $RECIPE"
 (cd "$WORK" && OPENCODE_CONFIG="$CONFIG" opencode run --auto --format json "$TASK" </dev/null | tee "$OUT/opencode-events.jsonl")
 
+echo "== after: the seeded tests must be untouched"
+if ! diff -r -x __pycache__ "$HERE/fixture/tests" "$WORK/tests" || ! diff "$HERE/fixture/pyproject.toml" "$WORK/pyproject.toml"; then
+    echo "GATE FAIL: the tests or pyproject.toml were changed ($OUT)"
+    exit 1
+fi
+if find "$WORK" -name conftest.py -not -path '*/.venv/*' | grep -q .; then
+    echo "GATE FAIL: a conftest.py was added ($OUT)"
+    exit 1
+fi
+
 echo "== after: pytest on the worked copy"
 if (cd "$WORK" && uv run --quiet pytest -q 2>&1 | tee "$OUT/pytest.txt"); then
     echo "GATE PASS ($OUT)"
