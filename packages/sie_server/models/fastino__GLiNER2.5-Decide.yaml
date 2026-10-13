@@ -24,5 +24,11 @@ profiles:
     compute_precision: float16
     adapter_path: sie_server.adapters.gliner2.decide:GLiNER2DecideAdapter
     adapter_options:
-      loadtime: {}
+      loadtime:
+        # Replays the encoder's forward as a CUDA graph for calls of up to 32
+        # rows and 2,048 padded tokens (adapters/gliner2/decide_graphs.py): one
+        # short message takes the GPU 6 ms instead of the 28 ms the host needs
+        # to launch its kernels on an L4. Scores move as they do when requests
+        # are batched together; "off" runs every forward eagerly.
+        cuda_graphs: bucketed
       runtime: {}
