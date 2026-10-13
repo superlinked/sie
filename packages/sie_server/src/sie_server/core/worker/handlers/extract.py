@@ -87,21 +87,49 @@ class ExtractHandler(OperationHandler[ExtractOutput]):
         Returns:
             ExtractOutput with entities.
         """
+        return adapter.extract(items, **self._arguments(config_key, metadata_list), prepared_items=prepared_items)
+
+    @staticmethod
+    def _arguments(config_key: tuple[Any, ...], metadata_list: list[RequestMetadata]) -> dict[str, Any]:
+        """The ``extract`` arguments of one configuration."""
         labels_tuple, _schema_key, instruction, _options_key = config_key
-        labels = list(labels_tuple) if labels_tuple else None
         # Read original options from metadata like encode and score do: the
         # config key turns nested lists and objects into tuples, which would
         # hand adapters a lossy copy of structured options.
-        options = metadata_list[0].options or None
-        output_schema = metadata_list[0].output_schema
+        return {
+            "labels": list(labels_tuple) if labels_tuple else None,
+            "output_schema": metadata_list[0].output_schema,
+            "instruction": instruction,
+            "options": metadata_list[0].options or None,
+        }
 
-        return adapter.extract(
-            items,
-            labels=labels,
-            output_schema=output_schema,
-            instruction=instruction,
-            options=options,
-            prepared_items=prepared_items,
+    def prime(
+        self,
+        adapter: ModelAdapter,
+        groups: list[tuple[list[Item], tuple[Any, ...], list[RequestMetadata]]],
+    ) -> None:
+        """Hand an adapter every extract configuration of a batch before the per-configuration calls.
+
+        A batch can hold requests with different labels, schemas or options;
+        each configuration gets its own ``extract`` call. An adapter that can
+        work on all of them at once (one forward pass for every row, say)
+        declares ``prime_extract_groups``; it receives the ``items`` and the
+        ``extract`` arguments of each configuration, in the order the calls
+        will follow. Adapters without the method are left alone.
+
+        Args:
+            adapter: The model adapter.
+            groups: For each configuration: its items, its config key and its
+                requests' metadata.
+        """
+        hook = getattr(adapter, "prime_extract_groups", None)
+        if not callable(hook) or len(groups) < 2:
+            return
+        hook(
+            [
+                {"items": items, **self._arguments(config_key, metadata_list)}
+                for items, config_key, metadata_list in groups
+            ]
         )
 
     def slice_output(self, output: ExtractOutput, index: int) -> ExtractOutput:

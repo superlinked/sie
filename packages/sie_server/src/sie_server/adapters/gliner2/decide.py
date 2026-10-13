@@ -36,6 +36,13 @@ A call of up to 32 rows and 2,048 padded tokens then pads to the length bucket
 and batch size of its graph, which rounds float16 sums as batching rows
 together already does; a larger call runs eagerly as before.
 
+One pass per batch: a batch the worker formed may hold requests with different
+labels, questions or options. The worker hands them all to
+``prime_extract_groups`` first, which scores every row in one pass, each row at
+its own label markers; the ``extract`` call of each request shape then reads its
+rows' logits from that pass instead of running a forward of its own. Rows of
+different shapes are padded and batched together, as rows of one shape are.
+
 Usage: an item's input tokens are its document tokens the model reads plus the
 tokens of the caller's free text encoded with it (question instructions and
 label descriptions), as the Laya and GLiClass adapters count instructions and
@@ -49,6 +56,7 @@ import json
 import logging
 import re
 import tempfile
+from collections import OrderedDict
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -119,6 +127,13 @@ _COST_CHARS_PER_TOKEN = 4
 # most; a longer word (a hash, an id, a base64 run) is tokenized each time.
 _WORD_CACHE_SIZE = 16384
 _CACHED_WORD_CHARS = 32
+# Task prompts of recent request shapes, kept across requests: the same labels
+# or questions usually come with every request of an application. Only shapes
+# whose schema takes at most _CACHED_PROMPT_CHARS characters are kept (eight
+# short labels take about 400), so the cache holds about 1 MB at most; a larger
+# schema (long descriptions) builds its prompt each time.
+_PROMPT_CACHE_SIZE = 256
+_CACHED_PROMPT_CHARS = 4096
 _SENTENCE_END = (".", "!", "?")
 
 _ERR_ITEM = (
@@ -361,6 +376,8 @@ class GLiNER2DecideAdapter(BaseAdapter):
             "_word_ids",
             "_word_cache",
             "_graphs",
+            "_prompts",
+            "_primed",
         ),
     )
 
@@ -427,6 +444,11 @@ class GLiNER2DecideAdapter(BaseAdapter):
         # Records and replays the encoder's forwards as CUDA graphs, when the
         # operator turned them on and the loaded encoder supports them.
         self._graphs: DecideGraphRunner | None = None
+        # Task prompts of recent request shapes, by schema (see _PROMPT_CACHE_SIZE).
+        self._prompts: OrderedDict[str, _Prefix] | None = None
+        # Logits ``prime_extract_groups`` scored for the batch in progress, by
+        # (row token ids, label markers); ``extract`` takes its rows' from here.
+        self._primed: dict[tuple[tuple[int, ...], tuple[int, ...]], np.ndarray] | None = None
 
     # ------------------------------------------------------------------ loading
 
@@ -534,6 +556,8 @@ class GLiNER2DecideAdapter(BaseAdapter):
         self._word_splitter = splitter
         self._word_ids = word_ids
         self._word_cache = cached
+        self._prompts = OrderedDict()
+        self._primed = {}
         self._device = device
 
     def warmup(self) -> None:
@@ -556,27 +580,12 @@ class GLiNER2DecideAdapter(BaseAdapter):
         _ = prepared_items
         if self._model is None:
             raise RuntimeError(ERR_NOT_LOADED)
-        opts = options or {}
-        request = parse_request(labels=labels, output_schema=output_schema, instruction=instruction, options=opts)
-        overflow_policy = opts.get("overflow_policy", DEFAULT_OVERFLOW_POLICY)
-        if not isinstance(overflow_policy, str) or overflow_policy not in VALID_OVERFLOW_POLICIES:
-            raise InvalidInputError(
-                f"GLiNER2.5-Decide overflow_policy must be one of {sorted(VALID_OVERFLOW_POLICIES)}"
-            )
-
-        with self._tokenizer_guard():
-            prefix = self._prefix(request)
-            room = self._window - len(prefix.ids)
-            documents: list[_Document | None] = []
-            errors: list[ExtractItemError | None] = []
-            for item in items:
-                document, error = self._document(item, room, overflow_policy)
-                documents.append(document)
-                errors.append(error)
-
+        request, prefix, documents, errors = self._read_request(
+            items, labels=labels, output_schema=output_schema, instruction=instruction, options=options
+        )
         kept = [(index, document) for index, document in enumerate(documents) if document is not None]
         rows = [prefix.ids + document.ids for _, document in kept]
-        logits = self._score(rows, prefix.label_positions) if rows else np.empty((0, 0), dtype=np.float32)
+        logits = self._logits(rows, prefix.label_positions) if rows else np.empty((0, 0), dtype=np.float32)
 
         data: list[dict[str, Any]] = [{} for _ in items]
         item_classifications: list[list[Classification]] = [[] for _ in items]
@@ -606,8 +615,116 @@ class GLiNER2DecideAdapter(BaseAdapter):
             input_token_counts=token_counts,
         )
 
+    def _read_request(
+        self,
+        items: list[Item],
+        *,
+        labels: list[str] | None,
+        output_schema: dict[str, Any] | None,
+        instruction: str | None,
+        options: dict[str, Any] | None,
+    ) -> tuple[DecisionRequest, _Prefix, list[_Document | None], list[ExtractItemError | None]]:
+        """A request's tasks and task prompt, and each item's document or error.
+
+        Raises:
+            InvalidInputError: The request is malformed.
+            InputTooLongError: The task prompt takes more than ``max_prompt_tokens``.
+        """
+        opts = options or {}
+        request = parse_request(labels=labels, output_schema=output_schema, instruction=instruction, options=opts)
+        overflow_policy = opts.get("overflow_policy", DEFAULT_OVERFLOW_POLICY)
+        if not isinstance(overflow_policy, str) or overflow_policy not in VALID_OVERFLOW_POLICIES:
+            raise InvalidInputError(
+                f"GLiNER2.5-Decide overflow_policy must be one of {sorted(VALID_OVERFLOW_POLICIES)}"
+            )
+        documents: list[_Document | None] = []
+        errors: list[ExtractItemError | None] = []
+        with self._tokenizer_guard():
+            prefix = self._prefix(request)
+            room = self._window - len(prefix.ids)
+            for item in items:
+                document, error = self._document(item, room, overflow_policy)
+                documents.append(document)
+                errors.append(error)
+        return request, prefix, documents, errors
+
+    def prime_extract_groups(self, groups: Sequence[Mapping[str, Any]]) -> None:
+        """Score the rows of several ``extract`` calls in one pass, before those calls run.
+
+        The worker calls this with every request shape of a batch it is about
+        to run: each group holds the ``items`` and the ``labels``,
+        ``output_schema``, ``instruction`` and ``options`` of one ``extract``
+        call. Every group's rows are scored together, each row at its own label
+        markers, and kept by (row token ids, label markers) until the group's
+        ``extract`` call takes them. A group that cannot be read (a malformed
+        request, a task prompt too long) is left to its own ``extract`` call,
+        which reports it. Each call drops what the one before it left.
+        """
+        if self._model is None:
+            raise RuntimeError(ERR_NOT_LOADED)
+        self._primed = primed = {}
+        if len(groups) < 2:
+            return
+        rows: list[list[int]] = []
+        positions: list[list[int]] = []
+        for group in groups:
+            try:
+                _, prefix, documents, _ = self._read_request(
+                    group["items"],
+                    labels=group.get("labels"),
+                    output_schema=group.get("output_schema"),
+                    instruction=group.get("instruction"),
+                    options=group.get("options"),
+                )
+            except (InvalidInputError, InputTooLongError):
+                continue
+            for document in documents:
+                if document is not None:
+                    rows.append(prefix.ids + document.ids)
+                    positions.append(prefix.label_positions)
+        if len(rows) < 2:
+            return
+        for row, markers, logits in zip(rows, positions, self._score_rows(rows, positions), strict=True):
+            primed[tuple(row), tuple(markers)] = logits
+
+    def _logits(self, rows: list[list[int]], label_positions: list[int]) -> np.ndarray:
+        """Every row's label logits, ``[rows, labels]``: from the batch's one pass when it scored them all."""
+        primed = self._primed
+        if primed:
+            markers = tuple(label_positions)
+            keys = [(tuple(row), markers) for row in rows]
+            found = [primed.get(key) for key in keys]
+            if all(logits is not None for logits in found):
+                for key in keys:
+                    primed.pop(key, None)
+                return np.stack(cast("list[np.ndarray]", found))
+        return self._score(rows, label_positions)
+
     def _prefix(self, request: DecisionRequest) -> _Prefix:
-        """The task prompt as the processor builds it, once per request.
+        """The task prompt of a request, built once per request shape and kept (see ``_PROMPT_CACHE_SIZE``).
+
+        Raises:
+            InputTooLongError: The task prompt takes more than ``max_prompt_tokens``.
+        """
+        prompts = self._prompts
+        if prompts is None:
+            return self._build_prefix(request)
+        # The prompt and its billed tokens depend on nothing but these entries.
+        shape = json.dumps([task.model_entry() for task in request.tasks], ensure_ascii=False, separators=(",", ":"))
+        if len(shape) > _CACHED_PROMPT_CHARS:
+            return self._build_prefix(request)
+        prefix = prompts.get(shape)
+        if prefix is not None:
+            prompts.move_to_end(shape)
+            return prefix
+        prefix = self._build_prefix(request)
+        prompts[shape] = prefix
+        while len(prompts) > _PROMPT_CACHE_SIZE:
+            prompts.popitem(last=False)
+        return prefix
+
+    def _build_prefix(self, request: DecisionRequest) -> _Prefix:
+        """The task prompt as the processor builds it.
 
         Raises:
             InputTooLongError: The task prompt takes more than ``max_prompt_tokens``.
