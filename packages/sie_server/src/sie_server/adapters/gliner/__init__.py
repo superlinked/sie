@@ -25,6 +25,13 @@ back to the document and merged, and its input tokens are counted once each.
 A document needing more than ``_word_window.MAX_DOCUMENT_WINDOWS`` windows
 returns a per-item ``INPUT_TOO_LONG`` error rather than being read in part.
 
+Two opt-in output filters are off by default. ``options["exclude_labels"]``
+adds competitor labels to the model's label prompt: with ``flat_ner`` a span
+goes to its best-scoring label, and spans that land on an excluded label are
+removed from the reply. ``options["require_uppercase"]`` removes spans whose text
+contains no uppercase character. Both run after window merging (and after
+``merge_adjacent_entities``) and keep the remaining spans' offsets unchanged.
+
 A request's labels and relation types, which GLiNER encodes with every
 document and does not bill, may have at most 128 characters each and take at
 most ``max_prompt_tokens`` tokens together (default 1024); a longer prompt is
@@ -92,6 +99,11 @@ _ERR_NO_RELATIONS = (
     "This GLiNER model does not extract relations; options.relation_labels needs a joint "
     "entity-relation model such as knowledgator/gliner-relex-large-v1.0"
 )
+
+
+def _has_uppercase(text: str) -> bool:
+    """True when the span contains an uppercase character (Unicode-aware)."""
+    return any(character.isupper() for character in text)
 
 
 class GLiNERAdapter(BaseAdapter):
@@ -240,7 +252,9 @@ class GLiNERAdapter(BaseAdapter):
             instruction: Unused for GLiNER (included for interface compatibility).
             options: Adapter options to override model config defaults.
                     Supported: threshold (float), flat_ner (bool), multi_label (bool),
-                    merge_adjacent_entities (bool). Joint entity-relation models
+                    merge_adjacent_entities (bool), exclude_labels (list of
+                    competitor labels whose spans are removed), require_uppercase
+                    (bool; drop spans without an uppercase character). Joint entity-relation models
                     also take relation_labels (list of relation types to extract
                     between the found entities) and relation_threshold (float).
 
@@ -273,7 +287,12 @@ class GLiNERAdapter(BaseAdapter):
         if relation_labels and not self._extracts_relations:
             raise InvalidInputError(_ERR_NO_RELATIONS)
 
-        self._check_prompt(labels, relation_labels)
+        exclude_labels = self._validate_exclude_labels(opts.get("exclude_labels"), labels, relation_labels)
+        require_uppercase = self._validate_flag(opts.get("require_uppercase", False), "require_uppercase")
+        # Excluded labels compete for spans inside the model, then their spans are dropped from the reply.
+        model_labels = [*labels, *exclude_labels]
+
+        self._check_prompt(model_labels, relation_labels)
 
         # Extract texts from all items
         texts = [self._extract_text(item) for item in items]
@@ -288,7 +307,7 @@ class GLiNERAdapter(BaseAdapter):
         # Meter the exact post-word-truncation windows before GPU work.
         # Besides producing the authoritative terminal counts, this rejects a
         # finite-tokenizer prompt that leaves no represented document subword.
-        row_counts, row_tokens = self._meter(rows, labels, relation_labels, overlaps) if rows else ([], [])
+        row_counts, row_tokens = self._meter(rows, model_labels, relation_labels, overlaps) if rows else ([], [])
         input_token_counts = window_item_counts(row_counts, owners, len(texts))
 
         # Get options with fallback to model defaults
@@ -320,7 +339,7 @@ class GLiNERAdapter(BaseAdapter):
             row_entities, row_relations = (
                 self._inference(
                     rows,
-                    labels,
+                    model_labels,
                     row_tokens,
                     returns_relations=bool(relation_labels),
                     threshold=effective_threshold,
@@ -372,6 +391,12 @@ class GLiNERAdapter(BaseAdapter):
             if merge_adjacent:
                 entity_results = self._merge_entities(entity_results, text)
 
+            if exclude_labels:
+                excluded = set(exclude_labels)
+                entity_results = [entity for entity in entity_results if entity.get("label") not in excluded]
+            if require_uppercase:
+                entity_results = [entity for entity in entity_results if _has_uppercase(entity.get("text", ""))]
+
             all_entities.append(entity_results)
 
         all_relations = None
@@ -412,6 +437,34 @@ class GLiNERAdapter(BaseAdapter):
         self._prompt_limit.check(
             [*entity_types, *relation_labels], tokens, (tuple(entity_types), tuple(relation_labels))
         )
+
+    @staticmethod
+    def _validate_exclude_labels(value: Any, labels: list[str], relation_labels: list[str]) -> list[str]:
+        """Return the requested competitor labels (empty when none were asked for)."""
+        if value is None:
+            return []
+        if not isinstance(value, (list, tuple)):
+            raise InvalidInputError("GLiNER exclude_labels must be a list of labels")
+        if any(not isinstance(label, str) or not label.strip() for label in value):
+            raise InvalidInputError("GLiNER exclude_labels must be non-empty strings")
+        exclude_labels = [label.strip() for label in value]
+        if len(set(exclude_labels)) != len(exclude_labels):
+            raise InvalidInputError("GLiNER exclude_labels must be unique")
+        if set(exclude_labels) & {label.strip() for label in labels if isinstance(label, str)}:
+            raise InvalidInputError("GLiNER exclude_labels must not repeat any of labels")
+        if exclude_labels and relation_labels:
+            raise InvalidInputError("GLiNER exclude_labels cannot be combined with relation_labels")
+        if len(exclude_labels) + len(labels) > MAX_EXTRACT_LABELS:
+            raise InvalidInputError(
+                f"GLiNER labels and exclude_labels must contain at most {MAX_EXTRACT_LABELS} entries together"
+            )
+        return exclude_labels
+
+    @staticmethod
+    def _validate_flag(value: Any, name: str) -> bool:
+        if not isinstance(value, bool):
+            raise InvalidInputError(f"GLiNER {name} must be a boolean")
+        return value
 
     @staticmethod
     def _validate_relation_labels(value: Any, labels: list[str]) -> list[str]:
