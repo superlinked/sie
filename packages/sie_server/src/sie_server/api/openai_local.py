@@ -388,6 +388,47 @@ def _strict_output_error_response(message: str) -> JSONResponse:
     )
 
 
+def _mlx_tool_call_limit(body: dict[str, Any], proxied: dict[str, Any]) -> int | None:
+    """Most tool calls one choice may carry, or ``None`` for no limit.
+
+    ``mlx_lm`` parses tool calls out of the model's output whether or not the
+    request offered tools, and never limits how many it returns.
+    """
+    if not proxied.get("tools"):
+        return 0
+    if body.get("parallel_tool_calls") is False:
+        return 1
+    return None
+
+
+def _excess_tool_call(payload: dict[str, Any], limit: int, calls: dict[int, set[object]]) -> str | None:
+    """Record each choice's distinct tool calls and describe the first over ``limit``."""
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return None
+    for position, choice in enumerate(choices):
+        if not isinstance(choice, dict):
+            continue
+        choice_obj = cast("dict[str, Any]", choice)
+        raw_index = choice_obj.get("index", position)
+        index = raw_index if isinstance(raw_index, int) and not isinstance(raw_index, bool) else position
+        delta = choice_obj.get("delta")
+        message = choice_obj.get("message")
+        container = message if isinstance(message, dict) else delta if isinstance(delta, dict) else None
+        tool_calls = container.get("tool_calls") if container is not None else None
+        if not isinstance(tool_calls, list) or not tool_calls:
+            continue
+        seen = calls.setdefault(index, set())
+        for call in tool_calls:
+            key = call.get("index") if container is delta and isinstance(call, dict) else None
+            seen.add(key if isinstance(key, int) and not isinstance(key, bool) else object())
+        if len(seen) > limit:
+            if limit == 0:
+                return "generation child returned a tool call the request did not offer"
+            return "generation child returned more than one tool call with parallel_tool_calls=false"
+    return None
+
+
 def _validate_optional_positive_int(body: dict[str, Any], field: str) -> int | None:
     value = body.get(field)
     if value is None:
@@ -596,14 +637,8 @@ def _validate_mlx_chat_body(body: dict[str, Any]) -> None:
     choice = body.get("tool_choice")
     if choice is not None and choice not in ("auto", "none"):
         raise _bad_request(
-            "'tool_choice' must be 'auto' or 'none' on the MLX backend, which cannot force a tool call",
+            "'tool_choice' must be 'auto' or 'none' on this device, which cannot force a tool call",
             param="tool_choice",
-            code="unsupported_field",
-        )
-    if body.get("parallel_tool_calls") is False:
-        raise _bad_request(
-            "'parallel_tool_calls' cannot be false on the MLX backend, which cannot limit a turn to one tool call",
-            param="parallel_tool_calls",
             code="unsupported_field",
         )
 
@@ -1040,11 +1075,13 @@ async def _sanitize_sse_stream(
     initial_inside_thinking: bool,
     reasoning_format: ReasoningFormat,
     slot: asyncio.Semaphore | None,
+    tool_call_limit: int | None = None,
     strict_grammar: GrammarSpec | None = None,
 ) -> AsyncIterator[bytes]:
     states: dict[int, ThinkingBlockStripper] = {}
     strict_contents: dict[int, list[str]] = {}
     strict_tool_choices: set[int] = set()
+    tool_calls: dict[int, set[object]] = {}
     buffered = bytearray()
     received = 0
     saw_done = False
@@ -1100,6 +1137,12 @@ async def _sanitize_sse_stream(
                             code=MODEL_OUTPUT_PARSE_ERROR,
                             error_type="server_error",
                         )
+                        return
+                if tool_call_limit is not None:
+                    excess = _excess_tool_call(sanitized, tool_call_limit, tool_calls)
+                    if excess is not None:
+                        terminal_outcome_selected = True
+                        yield _upstream_error_event(excess)
                         return
                 encoded = json.dumps(sanitized, separators=(",", ":"), ensure_ascii=False).encode()
                 yield b"data: " + encoded + b"\n"
@@ -1479,6 +1522,7 @@ async def _chat_completions(
             )
         slot: asyncio.Semaphore | None = None
         reasoning_parser: str | None = None
+        tool_call_limit: int | None = None
         if isinstance(adapter, MLXGenerationAdapter) and not str(device).startswith("cuda"):
             if adapter.mlx_repo is None:
                 raise _unsupported_chat(model, device)
@@ -1492,6 +1536,7 @@ async def _chat_completions(
                 max_tokens=max_tokens,
                 seed=seed,
             )
+            tool_call_limit = _mlx_tool_call_limit(body, proxied)
             slot = adapter.generation_slot()
         elif isinstance(adapter, SGLangGenerationAdapter) and str(device).startswith("cuda"):
             server_url = adapter.server_url
@@ -1585,6 +1630,7 @@ async def _chat_completions(
                     initial_inside_thinking=initial_inside_thinking,
                     reasoning_format=reasoning_format,
                     slot=slot,
+                    tool_call_limit=tool_call_limit,
                     strict_grammar=strict_grammar,
                 ),
                 media_type="text/event-stream",
@@ -1630,6 +1676,8 @@ async def _chat_completions(
             violation = await _strict_output_violation(strict_grammar, _completed_choice_contents(payload))
             if violation is not None:
                 return _strict_output_error_response(violation)
+        if tool_call_limit is not None and (excess := _excess_tool_call(payload, tool_call_limit, {})) is not None:
+            return _upstream_error_response(excess)
         return JSONResponse(content=payload, headers=route.headers())
 
 

@@ -429,6 +429,58 @@ _WEATHER_TOOL = {
         "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
     },
 }
+_PARIS_CALL = {
+    "id": "call_paris",
+    "type": "function",
+    "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'},
+}
+_TOKYO_CALL = {
+    "id": "call_tokyo",
+    "type": "function",
+    "function": {"name": "get_weather", "arguments": '{"city": "Tokyo"}'},
+}
+_AFTER_A_TOOL_TURN = [
+    {"role": "user", "content": "Weather in Paris?"},
+    {"role": "assistant", "content": None, "tool_calls": [_PARIS_CALL]},
+    {"role": "tool", "tool_call_id": "call_paris", "content": "18C, clear"},
+    {"role": "user", "content": "And in Tokyo?"},
+]
+
+
+def _mlx_tool_call_stream(*calls: dict[str, Any]) -> _ChunkedAsyncStream:
+    """An mlx_lm.server chat stream: one delta per completed call, then the finish event."""
+    events = [
+        {
+            "id": "chatcmpl-mlx",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "mlx-community/Qwen3.5-4B-4bit",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": None,
+                    "delta": {"role": "assistant", "tool_calls": [{**call, "index": i}]},
+                }
+            ],
+        }
+        for i, call in enumerate(calls)
+    ]
+    events.append(
+        {
+            "id": "chatcmpl-mlx",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "mlx-community/Qwen3.5-4B-4bit",
+            "choices": [{"index": 0, "finish_reason": "tool_calls", "delta": {"role": "assistant"}}],
+        }
+    )
+    return _ChunkedAsyncStream([f"data: {json.dumps(event)}\n\n".encode() for event in events] + [b"data: [DONE]\n\n"])
+
+
+def _sse_events(response_text: str) -> list[dict[str, Any]]:
+    lines = [line.removeprefix("data: ") for line in response_text.splitlines() if line.startswith("data: ")]
+    assert lines[-1] == "[DONE]"
+    return [json.loads(line) for line in lines[:-1]]
 
 
 @pytest.mark.parametrize(
@@ -444,14 +496,12 @@ def test_mlx_chat_accepts_auto_tool_choice_and_returns_every_call(
     tool_fields: dict[str, Any],
 ) -> None:
     seen: dict[str, Any] = {}
-    calls = [
-        {"id": "call_paris", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'}},
-        {"id": "call_tokyo", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Tokyo"}'}},
-    ]
 
     def _handler(request: httpx.Request) -> httpx.Response:
         seen["body"] = json.loads(request.content)
-        return httpx.Response(200, json=_chat_completion(None, finish_reason="tool_calls", tool_calls=calls))
+        return httpx.Response(
+            200, json=_chat_completion(None, finish_reason="tool_calls", tool_calls=[_PARIS_CALL, _TOKYO_CALL])
+        )
 
     client, _ = _mlx_chat_client(monkeypatch, _handler, chat_template_kwargs={"enable_thinking": False})
     response = client.post(
@@ -471,6 +521,76 @@ def test_mlx_chat_accepts_auto_tool_choice_and_returns_every_call(
     completion = ChatCompletion.model_validate(response.json())
     assert completion.choices[0].finish_reason == "tool_calls"
     assert [call.id for call in completion.choices[0].message.tool_calls or []] == ["call_paris", "call_tokyo"]
+
+
+def test_mlx_chat_streams_every_tool_call_under_auto(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+    upstream_stream = _mlx_tool_call_stream(_PARIS_CALL, _TOKYO_CALL)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, stream=upstream_stream, headers={"content-type": "text/event-stream"})
+
+    client, _ = _mlx_chat_client(monkeypatch, _handler, chat_template_kwargs={"enable_thinking": False})
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3.5-4B",
+            "messages": [{"role": "user", "content": "Weather in Paris and Tokyo?"}],
+            "tools": [_WEATHER_TOOL],
+            "tool_choice": "auto",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen["body"]["tools"] == [_WEATHER_TOOL]
+    assert "tool_choice" not in seen["body"]
+    chunks = [ChatCompletionChunk.model_validate(event) for event in _sse_events(response.text)]
+    streamed = [call for chunk in chunks for call in chunk.choices[0].delta.tool_calls or []]
+    assert [(call.index, call.id) for call in streamed] == [(0, "call_paris"), (1, "call_tokyo")]
+    assert chunks[-1].choices[0].finish_reason == "tool_calls"
+    assert upstream_stream.closed is True
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_mlx_chat_parallel_tool_calls_false_returns_a_single_call(
+    monkeypatch: pytest.MonkeyPatch, stream: bool
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        if stream:
+            return httpx.Response(
+                200, stream=_mlx_tool_call_stream(_PARIS_CALL), headers={"content-type": "text/event-stream"}
+            )
+        return httpx.Response(200, json=_chat_completion(None, finish_reason="tool_calls", tool_calls=[_PARIS_CALL]))
+
+    client, _ = _mlx_chat_client(monkeypatch, _handler, chat_template_kwargs={"enable_thinking": False})
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3.5-4B",
+            "messages": [{"role": "user", "content": "Weather in Paris?"}],
+            "tools": [_WEATHER_TOOL],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+            "stream": stream,
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen["body"]["tools"] == [_WEATHER_TOOL]
+    assert "parallel_tool_calls" not in seen["body"]
+    if stream:
+        events = _sse_events(response.text)
+        assert [call["id"] for event in events for call in event["choices"][0]["delta"].get("tool_calls", [])] == [
+            "call_paris"
+        ]
+        assert events[-1]["choices"][0]["finish_reason"] == "tool_calls"
+    else:
+        assert [call["id"] for call in response.json()["choices"][0]["message"]["tool_calls"]] == ["call_paris"]
 
 
 def test_mlx_chat_tool_choice_none_withholds_tools_from_the_child(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -497,37 +617,82 @@ def test_mlx_chat_tool_choice_none_withholds_tools_from_the_child(monkeypatch: p
     assert response.json()["choices"][0]["message"]["content"] == "It is sunny."
 
 
+@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize(
-    ("tool_fields", "param", "message"),
+    ("tool_fields", "calls", "delivered", "message"),
     [
         (
-            {"tool_choice": "required"},
-            "tool_choice",
-            "'tool_choice' must be 'auto' or 'none' on the MLX backend, which cannot force a tool call",
+            {"tools": [_WEATHER_TOOL], "parallel_tool_calls": False},
+            [_PARIS_CALL, _TOKYO_CALL],
+            ["call_paris"],
+            "generation child returned more than one tool call with parallel_tool_calls=false",
         ),
         (
-            {"tool_choice": {"type": "function", "function": {"name": "get_weather"}}},
-            "tool_choice",
-            "'tool_choice' must be 'auto' or 'none' on the MLX backend, which cannot force a tool call",
+            {"tools": [_WEATHER_TOOL], "tool_choice": "none"},
+            [_TOKYO_CALL],
+            [],
+            "generation child returned a tool call the request did not offer",
         ),
         (
-            {"tool_choice": "auto", "parallel_tool_calls": False},
-            "parallel_tool_calls",
-            "'parallel_tool_calls' cannot be false on the MLX backend, which cannot limit a turn to one tool call",
+            {},
+            [_TOKYO_CALL],
+            [],
+            "generation child returned a tool call the request did not offer",
         ),
     ],
+    ids=["parallel_tool_calls_false", "tool_choice_none", "no_tools"],
 )
-def test_mlx_chat_refuses_tool_controls_it_cannot_enforce_before_model_load(
+def test_mlx_chat_fails_closed_on_tool_calls_the_request_ruled_out(
     monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
     tool_fields: dict[str, Any],
-    param: str,
+    calls: list[dict[str, Any]],
+    delivered: list[str],
     message: str,
+) -> None:
+    upstream_stream = _mlx_tool_call_stream(*calls)
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        if stream:
+            return httpx.Response(200, stream=upstream_stream, headers={"content-type": "text/event-stream"})
+        return httpx.Response(200, json=_chat_completion(None, finish_reason="tool_calls", tool_calls=calls))
+
+    client, _ = _mlx_chat_client(monkeypatch, _handler, chat_template_kwargs={"enable_thinking": False})
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "Qwen/Qwen3.5-4B", "messages": _AFTER_A_TOOL_TURN, "stream": stream, **tool_fields},
+    )
+
+    error = {"error": {"message": message, "type": "upstream_error", "param": None, "code": "upstream_error"}}
+    if not stream:
+        assert response.status_code == 502
+        assert response.json() == error
+        return
+    assert response.status_code == 200
+    events = _sse_events(response.text)
+    assert events[-1] == error
+    streamed = [call["id"] for event in events[:-1] for call in event["choices"][0]["delta"].get("tool_calls", [])]
+    assert streamed == delivered
+    assert all(event["choices"][0]["finish_reason"] is None for event in events[:-1])
+    assert upstream_stream.closed is True
+
+
+@pytest.mark.parametrize("device", ["mps", "cpu"])
+@pytest.mark.parametrize(
+    "tool_choice",
+    ["required", {"type": "function", "function": {"name": "get_weather"}}],
+)
+def test_mlx_chat_refuses_a_forced_tool_choice_before_model_load(
+    monkeypatch: pytest.MonkeyPatch,
+    device: str,
+    tool_choice: Any,
 ) -> None:
     client, registry = _mlx_chat_client(
         monkeypatch,
         lambda _request: pytest.fail("refused request must not reach upstream"),
         chat_template_kwargs={"enable_thinking": False},
     )
+    registry.device = device
 
     response = client.post(
         "/v1/chat/completions",
@@ -535,15 +700,15 @@ def test_mlx_chat_refuses_tool_controls_it_cannot_enforce_before_model_load(
             "model": "Qwen/Qwen3.5-4B",
             "messages": [{"role": "user", "content": "Weather in Paris?"}],
             "tools": [_WEATHER_TOOL],
-            **tool_fields,
+            "tool_choice": tool_choice,
         },
     )
 
     assert response.status_code == 400
     assert response.json()["error"] == {
         "code": "unsupported_field",
-        "message": message,
-        "param": param,
+        "message": "'tool_choice' must be 'auto' or 'none' on this device, which cannot force a tool call",
+        "param": "tool_choice",
         "type": "invalid_request_error",
     }
     registry.is_loaded.assert_not_called()
