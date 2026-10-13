@@ -1004,7 +1004,7 @@ def _sanitize_chat_payload(
         if public_reasoning:
             captured = stripper.take_reasoning()
             parsed = next((value for value in (reasoning_content, reasoning) if isinstance(value, str) and value), "")
-            exposed = parsed or captured
+            exposed = parsed if captured == parsed else parsed + captured
             if exposed:
                 container["reasoning_content"] = exposed
     return payload

@@ -119,6 +119,19 @@ pub struct ChunkEnvelope {
     pub reasoning_delta: String,
 }
 
+impl ChunkEnvelope {
+    /// Whether the chunk carries model output: answer text, reasoning, or a
+    /// tool-call delta.
+    pub fn carries_output(&self) -> bool {
+        !self.text_delta.is_empty()
+            || !self.reasoning_delta.is_empty()
+            || self
+                .tool_calls
+                .as_ref()
+                .is_some_and(|tool_calls| !tool_calls.is_empty())
+    }
+}
+
 fn is_zero_u32(v: &u32) -> bool {
     *v == 0
 }
@@ -1062,13 +1075,7 @@ impl StreamCollector {
         // (it gates its inter-chunk timer on ``first_at.is_some()``)
         // throughout an active tool-call stream. Matches the SSE
         // driver's ``first_seen`` semantics.
-        let has_output = !chunk.text_delta.is_empty()
-            || !chunk.reasoning_delta.is_empty()
-            || chunk
-                .tool_calls
-                .as_ref()
-                .is_some_and(|tool_calls| !tool_calls.is_empty());
-        if has_output {
+        if chunk.carries_output() {
             if self.first_chunk_at.is_none() {
                 self.first_chunk_at = Some(now);
             }
@@ -2381,6 +2388,31 @@ mod tests {
             c.first_chunk_at.is_some(),
             "tool-call-only chunk must arm first_chunk_at"
         );
+    }
+
+    #[test]
+    fn test_reasoning_only_chunk_arms_first_chunk_at() {
+        let (tx, _rx) = oneshot::channel();
+        let mut c = StreamCollector::new(tx, "m".to_string(), "p".to_string());
+        let mut chunk = _make_chunk("att-A", 0, "", false);
+        chunk.reasoning_delta = "why".to_string();
+        assert_eq!(c.apply(chunk), ChunkApplied::Delta);
+        assert!(c.first_chunk_at.is_some());
+        assert_eq!(c.output_event_count, 1);
+    }
+
+    #[test]
+    fn test_carries_output_counts_text_reasoning_and_tool_calls_only() {
+        let empty = _make_chunk("att-A", 0, "", false);
+        assert!(!empty.carries_output());
+        assert!(_make_chunk("att-A", 0, "Hi", false).carries_output());
+        assert!(_make_tool_call_chunk("att-A", 0, false).carries_output());
+        let mut reasoning = empty.clone();
+        reasoning.reasoning_delta = "why".to_string();
+        assert!(reasoning.carries_output());
+        let mut no_calls = empty;
+        no_calls.tool_calls = Some(Vec::new());
+        assert!(!no_calls.carries_output());
     }
 
     /// BUG E regression: a terminal chunk re-using a ``seq`` already seen

@@ -649,3 +649,54 @@ async def test_include_reasoning_publishes_upstream_reasoning_only_for_a_reasoni
     assert reasoning == ("PRIVATE" if declares_reasoning else "")
     assert chunks[-1]["usage"] == USAGE
     msg.ack.assert_awaited_once()
+
+
+def _declare_reasoning(proc: StreamingProcessor) -> None:
+    config_data = proc._registry.get_config(MODEL).model_dump()
+    config_data["tasks"]["generate"]["chat_template_kwargs"] = {"enable_thinking": True}
+    proc._registry.get_config.return_value = ModelConfig.model_validate(config_data)
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_include_reasoning_keeps_each_choice_reasoning_on_its_own_choice(remote: tuple, streaming: bool) -> None:
+    _adapter, proc, _nc, _requests = remote
+    _declare_reasoning(proc)
+    if streaming:
+        frames: list[dict | str] = []
+        for index, (reasoning, text, finish) in enumerate((("R0", "first", "stop"), ("R1", "second", "length"))):
+            frame = choice(text, index=index)
+            frame["choices"][0]["delta"]["reasoning_content"] = reasoning
+            frames += [frame, choice("", index=index, finish=finish)]
+        respond(remote, frames=[*frames, {"choices": [], "usage": USAGE}, "[DONE]"])
+    else:
+        respond(
+            remote,
+            payload={
+                "choices": [
+                    {
+                        "index": 1,
+                        "message": {"role": "assistant", "content": "second", "reasoning_content": "R1"},
+                        "finish_reason": "length",
+                    },
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "first", "reasoning_content": "R0"},
+                        "finish_reason": "stop",
+                    },
+                ],
+                "usage": USAGE,
+            },
+        )
+
+    msg, chunks = await run(remote, n=2, stream=streaming, include_reasoning=True)
+
+    reasoning: dict[int, str] = {}
+    for chunk in chunks:
+        if chunk.get("reasoning_delta"):
+            index = chunk.get("choice_index", 0)
+            reasoning[index] = reasoning.get(index, "") + chunk["reasoning_delta"]
+    assert reasoning == {0: "R0", 1: "R1"}
+    if not streaming:
+        assert [item["text"] for item in chunks[-1]["candidates"]] == ["first", "second"]
+    assert chunks[-1]["usage"] == USAGE
+    msg.ack.assert_awaited_once()

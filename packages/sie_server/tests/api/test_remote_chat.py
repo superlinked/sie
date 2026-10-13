@@ -861,3 +861,51 @@ def test_invalid_response_format_fails_before_template_load_or_dispatch(remote_c
     assert response.json()["error"]["param"] == "response_format"
     assert not requests
     registry.start_load_async.assert_not_called()
+
+
+@pytest.mark.parametrize("remote_chat", ["openai"], indirect=True)
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("include_reasoning", [False, True])
+def test_onboarded_direct_chat_answers_rendered_reasoning_only_when_asked(
+    remote_chat, monkeypatch: pytest.MonkeyPatch, stream: bool, include_reasoning: bool
+) -> None:
+    client, _, config, _ = remote_chat
+    data = config.model_dump()
+    data.update(remote_backed=False, hf_id="onboarded/model", hf_revision="a" * 40)
+    data["profiles"]["default"]["adapter_options"]["runtime"] = {}
+    data["tasks"]["generate"]["chat_template_kwargs"] = {"enable_thinking": True}
+    client.app.state.registry.get_config.return_value = ModelConfig.model_validate(data)
+    monkeypatch.setattr(
+        remote_chat_prompt,
+        "_tokenizer",
+        lambda *args: SimpleNamespace(
+            chat_template="template", apply_chat_template=lambda *args, **kwargs: "owned prompt<think>"
+        ),
+    )
+    upstream_stream = ChatStream(
+        [
+            {"choices": [{"index": 0, "text": "PRIVATE_REASONING</think>answer", "finish_reason": None}]},
+            {"choices": [{"index": 0, "text": "", "finish_reason": "stop"}], "usage": USAGE},
+            "[DONE]",
+        ]
+    )
+    answer_with(remote_chat, httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=upstream_stream))
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={**BODY, "max_tokens": 32, "stream": stream, "include_reasoning": include_reasoning},
+    )
+
+    assert response.status_code == 200
+    if stream:
+        payloads = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: {")]
+        deltas = [payload["choices"][0]["delta"] for payload in payloads if payload["choices"]]
+        reasoning = "".join(delta.get("reasoning_content", "") for delta in deltas)
+        content = "".join(delta.get("content") or "" for delta in deltas)
+    else:
+        message = response.json()["choices"][0]["message"]
+        reasoning, content = message.get("reasoning_content", ""), message["content"]
+    assert content == "answer"
+    assert reasoning == ("PRIVATE_REASONING" if include_reasoning else "")
+    assert "think>" not in response.text
+    assert upstream_stream.closed

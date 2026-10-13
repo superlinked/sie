@@ -1992,3 +1992,136 @@ def test_chat_rejects_a_non_boolean_include_reasoning(monkeypatch: pytest.Monkey
     assert response.status_code == 400
     assert response.json()["error"]["param"] == "include_reasoning"
     registry.get.assert_not_called()
+
+
+def _sse_wire(events: list[dict[str, Any]]) -> bytes:
+    return b"".join(f"data: {json.dumps(event)}\n\n".encode() for event in events) + b"data: [DONE]\n\n"
+
+
+def _sse_deltas(response_text: str) -> list[dict[str, Any]]:
+    lines = [line.removeprefix("data: ") for line in response_text.splitlines() if line.startswith("data: ")]
+    assert lines[-1] == "[DONE]"
+    return [json.loads(line)["choices"][0]["delta"] for line in lines[:-1]]
+
+
+@pytest.mark.parametrize(
+    ("parsed", "content", "expected_reasoning", "expected_content"),
+    [
+        ("A", "x<think>B</think>y", "AB", "xy"),
+        ("same", "<think>same</think>answer", "same", "answer"),
+    ],
+)
+def test_cuda_chat_answers_parser_and_raw_tag_reasoning_without_losing_either(
+    monkeypatch: pytest.MonkeyPatch, parsed: str, content: str, expected_reasoning: str, expected_content: str
+) -> None:
+    client, _ = _cuda_chat_client(
+        monkeypatch,
+        lambda _request: httpx.Response(200, json=_reasoning_child_payload(content, reasoning_content=parsed)),
+        reasoning_parser="qwen3",
+        chat_template_kwargs={"enable_thinking": True},
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3-0.6B",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "include_reasoning": True,
+        },
+    )
+
+    assert response.status_code == 200
+    message = response.json()["choices"][0]["message"]
+    assert message["reasoning_content"] == expected_reasoning
+    assert message["content"] == expected_content
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_cuda_chat_with_tools_answers_reasoning_beside_the_calls(monkeypatch: pytest.MonkeyPatch, stream: bool) -> None:
+    call = {"id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": '{"q":"x"}'}}
+    seen: dict[str, Any] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        if not stream:
+            payload = _reasoning_child_payload("", reasoning_content="need a lookup")
+            payload["choices"][0]["message"].update(content=None, tool_calls=[call])
+            payload["choices"][0]["finish_reason"] = "tool_calls"
+            return httpx.Response(200, json=payload)
+        wire = _sse_wire(
+            [
+                _stream_event({"role": "assistant", "content": ""}),
+                _stream_event({"reasoning_content": "need a lookup"}),
+                _stream_event({"tool_calls": [{"index": 0, **call}]}),
+                _stream_event({}, finish_reason="tool_calls"),
+            ]
+        )
+        return httpx.Response(200, stream=_ChunkedAsyncStream([wire]), headers={"content-type": "text/event-stream"})
+
+    client, _ = _cuda_chat_client(
+        monkeypatch, _handler, reasoning_parser="qwen3", chat_template_kwargs={"enable_thinking": True}
+    )
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3-0.6B",
+            "messages": [{"role": "user", "content": "Look it up"}],
+            "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}],
+            "stream": stream,
+            "include_reasoning": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert "include_reasoning" not in seen["body"]
+    assert seen["body"]["tools"][0]["function"]["name"] == "lookup"
+    if stream:
+        deltas = _sse_deltas(response.text)
+        assert "".join(delta.get("reasoning_content", "") for delta in deltas) == "need a lookup"
+        assert [delta["tool_calls"][0]["function"]["name"] for delta in deltas if delta.get("tool_calls")] == ["lookup"]
+    else:
+        message = response.json()["choices"][0]["message"]
+        assert message["reasoning_content"] == "need a lookup"
+        assert message["tool_calls"][0]["function"] == call["function"]
+        assert response.json()["choices"][0]["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.parametrize("include_reasoning", [False, True])
+def test_mlx_chat_stream_publishes_raw_tag_reasoning_only_when_asked(
+    monkeypatch: pytest.MonkeyPatch, include_reasoning: bool
+) -> None:
+    wire = _sse_wire(
+        [
+            _stream_event({"role": "assistant", "content": ""}),
+            _stream_event({"content": "<think>private "}),
+            _stream_event({"content": "default reasoning</th"}),
+            _stream_event({"content": "ink>Visible answer"}),
+            _stream_event({}, finish_reason="stop"),
+        ]
+    )
+    seen: dict[str, Any] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200, stream=_ChunkedAsyncStream([wire[:61], wire[61:]]), headers={"content-type": "text/event-stream"}
+        )
+
+    client, _ = _mlx_chat_client(monkeypatch, _handler, chat_template_kwargs={"enable_thinking": False})
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3.5-4B",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+            "include_reasoning": include_reasoning,
+        },
+    )
+
+    assert response.status_code == 200
+    assert "include_reasoning" not in seen["body"]
+    deltas = _sse_deltas(response.text)
+    assert "".join(delta.get("content", "") for delta in deltas) == "Visible answer"
+    reasoning = "".join(delta.get("reasoning_content", "") for delta in deltas)
+    assert reasoning == ("private default reasoning" if include_reasoning else "")
+    assert "<think>" not in response.text

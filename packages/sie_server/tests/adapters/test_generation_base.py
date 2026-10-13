@@ -711,3 +711,21 @@ async def test_suppress_thinking_blocks_keeps_truncated_reasoning_when_asked() -
     assert "".join(chunk.reasoning_delta for chunk in kept) == "cut off mid"
     assert "".join(chunk.text_delta for chunk in kept) == ""
     assert kept[-1].error_code == "empty_model_output"
+
+
+@pytest.mark.asyncio
+async def test_suppress_thinking_blocks_keeps_text_before_the_reasoning_that_follows_it() -> None:
+    source = _chunks(
+        GenerationChunk(text_delta="Hello <think>x</think> world", is_first=True),
+        GenerationChunk(text_delta="", done=True, finish_reason="stop", prompt_tokens=3, completion_tokens=8),
+    )
+
+    kept = [chunk async for chunk in suppress_thinking_blocks(source, keep_reasoning=True)]
+
+    assert [(chunk.reasoning_delta, chunk.text_delta) for chunk in kept if not chunk.done] == [
+        ("", "Hello "),
+        ("x", " world"),
+    ]
+    assert [chunk.is_first for chunk in kept if not chunk.done] == [True, False]
+    assert kept[-1].done
+    assert kept[-1].error_code is None

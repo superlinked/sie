@@ -17517,9 +17517,36 @@ mod tests {
     struct GenerationTargetProbe {
         targets: std::sync::Mutex<Vec<(String, PublishTarget)>>,
         params: std::sync::Mutex<Vec<WorkParams>>,
+        worker_chunks: std::sync::Mutex<Vec<serde_json::Value>>,
     }
 
     impl GenerationTargetProbe {
+        fn collect_worker_chunks(
+            &self,
+            display_model: &str,
+        ) -> Option<(
+            oneshot::Receiver<StreamOutcome>,
+            broadcast::Receiver<ChunkEnvelope>,
+        )> {
+            let chunks = self.worker_chunks.lock().expect("chunk probe lock").clone();
+            if chunks.is_empty() {
+                return None;
+            }
+            let (tx, rx) = oneshot::channel();
+            let mut collector = crate::queue::streaming::StreamCollector::new(
+                tx,
+                display_model.to_string(),
+                "default".to_string(),
+            );
+            let tap = collector.install_chunk_tap();
+            for chunk in chunks {
+                collector.apply(serde_json::from_value(chunk).expect("worker chunk"));
+            }
+            let outcome = collector.build_outcome().expect("worker terminal");
+            collector.sender.take().unwrap().send(outcome).unwrap();
+            Some((rx, tap))
+        }
+
         fn take_params(&self) -> WorkParams {
             self.params
                 .lock()
@@ -17601,6 +17628,14 @@ mod tests {
                 .lock()
                 .expect("target probe lock")
                 .push((display_model.to_string(), target));
+            if let Some((rx, _tap)) = self.collect_worker_chunks(display_model) {
+                return Ok((
+                    "request-1".to_string(),
+                    rx,
+                    Arc::new(Notify::new()),
+                    DispatchDurability::accepted(),
+                ));
+            }
             let (tx, rx) = oneshot::channel();
             tx.send(StreamOutcome {
                 text: "ok".to_string(),
@@ -17661,6 +17696,14 @@ mod tests {
                 .lock()
                 .expect("target probe lock")
                 .push((display_model.to_string(), target));
+            if let Some((rx, tap)) = self.collect_worker_chunks(display_model) {
+                return Ok((
+                    "request-1".to_string(),
+                    rx,
+                    tap,
+                    DispatchDurability::accepted(),
+                ));
+            }
             let (tx, rx) = oneshot::channel();
             let mut collector = crate::queue::streaming::StreamCollector::new(
                 tx,
@@ -18352,6 +18395,148 @@ mod tests {
                     .unwrap();
             }
         }
+    }
+
+    fn reasoning_worker_chunk(seq: u32, fields: serde_json::Value) -> serde_json::Value {
+        let mut chunk = json!({
+            "kind": "chunk", "request_id": "request-1", "attempt_id": "attempt-1",
+            "seq": seq, "text_delta": "", "done": false,
+        });
+        chunk
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        chunk
+    }
+
+    fn reasoning_worker_terminal(seq: u32, fields: serde_json::Value) -> serde_json::Value {
+        let mut terminal = json!({
+            "done": true, "finish_reason": "stop",
+            "usage": {"prompt_tokens": 1, "completion_tokens": 3, "total_tokens": 4},
+        });
+        terminal
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        reasoning_worker_chunk(seq, terminal)
+    }
+
+    #[tokio::test]
+    async fn chat_include_reasoning_reaches_the_worker_and_the_answer_only_when_set() {
+        for include_reasoning in [None, Some(false), Some(true)] {
+            for stream in [false, true] {
+                let (state, probe) = mixed_governed_generation_state(false).await;
+                *probe.worker_chunks.lock().unwrap() = vec![
+                    reasoning_worker_chunk(0, json!({"reasoning_delta": "why "})),
+                    reasoning_worker_chunk(1, json!({"text_delta": "Hi", "is_first": true})),
+                    reasoning_worker_terminal(2, json!({})),
+                ];
+                let mut body = json!({
+                    "model": "org/g",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 4,
+                    "stream": stream,
+                });
+                if let Some(value) = include_reasoning {
+                    body["include_reasoning"] = json!(value);
+                }
+                let response = proxy_chat(
+                    State(Arc::clone(&state)),
+                    json_request("/v1/chat/completions", body),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(
+                    probe
+                        .take_params()
+                        .generate
+                        .expect("generate")
+                        .include_reasoning,
+                    include_reasoning
+                );
+                let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+                    .await
+                    .unwrap();
+                let expected = (include_reasoning == Some(true)).then_some("why ");
+                if stream {
+                    let text = String::from_utf8(bytes.to_vec()).unwrap();
+                    let deltas: Vec<serde_json::Value> = text
+                        .lines()
+                        .filter_map(|line| line.strip_prefix("data: "))
+                        .filter(|data| *data != "[DONE]")
+                        .map(|data| serde_json::from_str::<serde_json::Value>(data).unwrap())
+                        .filter_map(|event| event["choices"].get(0).map(|c| c["delta"].clone()))
+                        .collect();
+                    let reasoning: String = deltas
+                        .iter()
+                        .filter_map(|delta| delta["reasoning_content"].as_str())
+                        .collect();
+                    let content: String = deltas
+                        .iter()
+                        .filter_map(|delta| delta["content"].as_str())
+                        .collect();
+                    assert_eq!(content, "Hi");
+                    assert_eq!(
+                        (!reasoning.is_empty()).then_some(reasoning.as_str()),
+                        expected
+                    );
+                } else {
+                    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    let message = &value["choices"][0]["message"];
+                    assert_eq!(message["content"], "Hi");
+                    assert_eq!(
+                        message.get("reasoning_content").and_then(|v| v.as_str()),
+                        expected
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_include_reasoning_keeps_each_candidate_reasoning_on_its_choice() {
+        let (state, probe) = mixed_governed_generation_state(false).await;
+        *probe.worker_chunks.lock().unwrap() = vec![
+            reasoning_worker_chunk(0, json!({"reasoning_delta": "R0"})),
+            reasoning_worker_chunk(1, json!({"reasoning_delta": "R1", "choice_index": 1})),
+            reasoning_worker_terminal(
+                2,
+                json!({"candidates": [
+                    {"text": "A", "finish_reason": "stop"},
+                    {"text": "B", "finish_reason": "length"},
+                ]}),
+            ),
+        ];
+        let response = proxy_chat(
+            State(state),
+            json_request(
+                "/v1/chat/completions",
+                json!({
+                    "model": "org/g",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 4,
+                    "n": 2,
+                    "include_reasoning": true,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let choices = value["choices"].as_array().expect("choices");
+        let answered: Vec<(&str, &str)> = choices
+            .iter()
+            .map(|choice| {
+                (
+                    choice["message"]["content"].as_str().unwrap(),
+                    choice["message"]["reasoning_content"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(answered, vec![("A", "R0"), ("B", "R1")]);
     }
 
     #[tokio::test]

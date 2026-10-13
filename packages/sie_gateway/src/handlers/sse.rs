@@ -1107,13 +1107,7 @@ async fn run_sse_driver_with_lifecycle(
         };
 
         // Non-stale chunk arrived. Update timing trackers.
-        if !chunk.text_delta.is_empty()
-            || !chunk.reasoning_delta.is_empty()
-            || chunk
-                .tool_calls
-                .as_ref()
-                .is_some_and(|calls| !calls.is_empty())
-        {
+        if chunk.carries_output() {
             if let Some(lifecycle) = lifecycle.as_mut() {
                 lifecycle.first_token();
             }

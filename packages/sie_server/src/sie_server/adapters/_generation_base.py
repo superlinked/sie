@@ -536,7 +536,7 @@ class ThinkingBlockStripper:
     partial tag nor its body can escape before the closing tag arrives.
     """
 
-    __slots__ = ("_buffer", "_close", "_inside", "_keep", "_open", "_reasoning")
+    __slots__ = ("_buffer", "_close", "_inside", "_keep", "_open", "_parts")
 
     def __init__(
         self, inside: bool = False, *, reasoning_format: ReasoningFormat = "qwen3", keep_reasoning: bool = False
@@ -545,11 +545,20 @@ class ThinkingBlockStripper:
         self._inside = inside
         self._open, self._close = _REASONING_BOUNDARIES[reasoning_format]
         self._keep = keep_reasoning
-        self._reasoning: list[str] = []
+        self._parts: list[tuple[str, str]] = []
 
     def _hide(self, text: str) -> None:
         if self._keep and text:
-            self._reasoning.append(text)
+            if self._parts and not self._parts[-1][1]:
+                self._parts[-1] = (self._parts[-1][0] + text, "")
+            else:
+                self._parts.append((text, ""))
+
+    def _show(self, text: str) -> str:
+        if self._keep and text:
+            reasoning, visible = self._parts.pop() if self._parts else ("", "")
+            self._parts.append((reasoning, visible + text))
+        return text
 
     @staticmethod
     def _delimiter_prefix_length(text: str, delimiters: tuple[str, ...]) -> int:
@@ -588,7 +597,7 @@ class ThinkingBlockStripper:
             ]
             if matches:
                 marker_at, marker = min(matches, key=lambda match: match[0])
-                visible.append(self._buffer[:marker_at])
+                visible.append(self._show(self._buffer[:marker_at]))
                 self._buffer = self._buffer[marker_at + len(marker) :]
                 if marker == self._open:
                     self._inside = True
@@ -598,7 +607,7 @@ class ThinkingBlockStripper:
 
             keep = self._delimiter_prefix_length(self._buffer, (self._open, self._close))
             emit_upto = len(self._buffer) - keep
-            visible.append(self._buffer[:emit_upto])
+            visible.append(self._show(self._buffer[:emit_upto]))
             self._buffer = self._buffer[emit_upto:]
             break
 
@@ -614,16 +623,19 @@ class ThinkingBlockStripper:
             self._hide(self._buffer)
             visible = ""
         else:
-            visible = self._buffer
+            visible = self._show(self._buffer)
         self._buffer = ""
         self._inside = False
         return visible
 
+    def take_parts(self) -> list[tuple[str, str]]:
+        """Return ``(reasoning, text)`` runs since the previous call in output order; empty unless kept."""
+        parts, self._parts = self._parts, []
+        return parts
+
     def take_reasoning(self) -> str:
         """Return the reasoning hidden since the previous call; empty unless kept."""
-        reasoning = "".join(self._reasoning)
-        self._reasoning.clear()
-        return reasoning
+        return "".join(reasoning for reasoning, _ in self.take_parts())
 
 
 def _split_thinking_blocks(
@@ -761,6 +773,21 @@ async def suppress_thinking_blocks(
             text_changed = visible_delta != chunk.text_delta
             if chunk.done or chunk.finish_reason is not None:
                 visible_delta += state.finish()
+            reasoning_delta = chunk.reasoning_delta
+            parts = state.take_parts()
+            for reasoning, text in parts[:-1]:
+                yield GenerationChunk(
+                    text_delta=text,
+                    is_first=not emitted_visible_text,
+                    choice_index=chunk.choice_index,
+                    reasoning_delta=reasoning_delta + reasoning,
+                )
+                reasoning_delta = ""
+                visible_delta = visible_delta[len(text) :]
+                emitted_visible_text = True
+                emitted_meaningful_text = emitted_meaningful_text or bool(text.strip())
+            if parts:
+                reasoning_delta += parts[-1][0]
 
             is_first = bool(visible_delta) and not emitted_visible_text
             emitted_visible_text = emitted_visible_text or bool(visible_delta)
@@ -773,7 +800,7 @@ async def suppress_thinking_blocks(
                 is_first=is_first,
                 logprobs=None if text_changed or was_inside else chunk.logprobs,
                 candidates=rewritten_candidates,
-                reasoning_delta=chunk.reasoning_delta + state.take_reasoning(),
+                reasoning_delta=reasoning_delta,
             )
 
             if (

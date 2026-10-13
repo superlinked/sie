@@ -2439,9 +2439,11 @@ class StreamingProcessor:
         # (no cross-candidate text coalescing).
         multi_candidate_stream = bool(stream) and n is not None and n > 1
         pending_text: list[str] = []
-        # Public reasoning coalesced like text; a chunk never mixes the two,
-        # so reasoning is flushed before the answer text that follows it.
+        # Public reasoning, coalesced per choice like text. A chunk's reasoning
+        # precedes its text, so pending reasoning is published ahead of
+        # pending text and new reasoning first flushes the text before it.
         pending_reasoning: list[str] = []
+        pending_reasoning_choice = 0
         # OpenAI per-token logprob entries accumulated alongside
         # ``pending_text`` and flushed in the same coalesced chunk. The
         # adapter aligns each entry with the tokens in ``text_delta``.
@@ -2492,6 +2494,7 @@ class StreamingProcessor:
                     seq=seq,
                     text_delta="",
                     done=False,
+                    choice_index=pending_reasoning_choice,
                     reasoning_delta="".join(pending_reasoning),
                 )
                 try:
@@ -2527,6 +2530,16 @@ class StreamingProcessor:
             pending_logprobs.clear()
             pending_count = 0
             last_flush_ts = time.monotonic()
+            return True
+
+        async def _pend_reasoning(chunk: GenerationChunk) -> bool:
+            nonlocal pending_count, pending_reasoning_choice
+            other_choice = bool(pending_reasoning) and chunk.choice_index != pending_reasoning_choice
+            if (pending_text or other_choice) and not await _flush_pending():
+                return False
+            pending_reasoning_choice = chunk.choice_index
+            pending_reasoning.append(chunk.reasoning_delta)
+            pending_count += max(1, len(chunk.reasoning_delta))
             return True
 
         next_task: asyncio.Task[GenerationChunk] | None = None
@@ -2727,15 +2740,11 @@ class StreamingProcessor:
 
                 if chunk.done:
                     # Flush any coalesced text before the terminal chunk.
-                    if chunk.reasoning_delta:
-                        if pending_text and not await _flush_pending():
-                            _record_failure()
-                            transport_failure_published = True
-                            terminal_sent = await self._enqueue_transport_failure(
-                                chunk_queue, request_id, attempt_id, seq
-                            )
-                            break
-                        pending_reasoning.append(chunk.reasoning_delta)
+                    if chunk.reasoning_delta and not await _pend_reasoning(chunk):
+                        _record_failure()
+                        transport_failure_published = True
+                        terminal_sent = await self._enqueue_transport_failure(chunk_queue, request_id, attempt_id, seq)
+                        break
                     if chunk.text_delta:
                         pending_text.append(chunk.text_delta)
                         pending_count += max(1, len(chunk.text_delta))
@@ -2839,14 +2848,11 @@ class StreamingProcessor:
                     continue
 
                 # Non-terminal delta: accumulate, flush on time/count.
-                if chunk.reasoning_delta:
-                    if pending_text and not await _flush_pending():
-                        _record_failure()
-                        transport_failure_published = True
-                        terminal_sent = await self._enqueue_transport_failure(chunk_queue, request_id, attempt_id, seq)
-                        break
-                    pending_reasoning.append(chunk.reasoning_delta)
-                    pending_count += max(1, len(chunk.reasoning_delta))
+                if chunk.reasoning_delta and not await _pend_reasoning(chunk):
+                    _record_failure()
+                    transport_failure_published = True
+                    terminal_sent = await self._enqueue_transport_failure(chunk_queue, request_id, attempt_id, seq)
+                    break
                 if chunk.text_delta:
                     pending_text.append(chunk.text_delta)
                     pending_count += max(1, len(chunk.text_delta))
