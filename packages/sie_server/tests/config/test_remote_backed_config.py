@@ -95,6 +95,40 @@ def test_a_remote_profile_names_both_the_upstream_and_its_model() -> None:
         ModelConfig.model_validate(remote_backed(profiles={"default": remote_profile(upstream="team-sie")}))
 
 
+def test_a_remote_profile_may_declare_the_window_its_upstream_serves() -> None:
+    config = ModelConfig.model_validate(
+        remote_backed(
+            profiles={"default": remote_profile(upstream="team-sie", upstream_model="sie-fake", max_seq_length=8192)}
+        )
+    )
+
+    assert config.resolve_profile("default").loadtime["max_seq_length"] == 8192
+    validate_profile_upstreams(config)
+
+
+def test_a_declared_window_does_not_stand_in_for_the_upstream_or_its_model() -> None:
+    with pytest.raises(ValidationError, match="must set load-time options: upstream_model"):
+        ModelConfig.model_validate(
+            remote_backed(profiles={"default": remote_profile(upstream="team-sie", max_seq_length=8192)})
+        )
+    with pytest.raises(ValidationError, match="must set load-time options: upstream, upstream_model"):
+        ModelConfig.model_validate(remote_backed(profiles={"default": remote_profile(max_seq_length=8192)}))
+
+
+@pytest.mark.parametrize("max_seq_length", [0, -1, True, "8192", 8192.0, None])
+def test_a_declared_window_is_a_positive_integer(max_seq_length: Any) -> None:
+    with pytest.raises(ValidationError, match="'max_seq_length' must be a positive integer"):
+        ModelConfig.model_validate(
+            remote_backed(
+                profiles={
+                    "default": remote_profile(
+                        upstream="team-sie", upstream_model="sie-fake", max_seq_length=max_seq_length
+                    )
+                }
+            )
+        )
+
+
 @pytest.mark.parametrize(
     "upstream_model",
     [
