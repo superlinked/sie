@@ -18834,6 +18834,69 @@ mod tests {
         assert_reason_first_order(&queued_json_schema(&params));
     }
 
+    /// An extract request's `output_schema` and `options`, keys deliberately
+    /// not alphabetical: an adapter that reads a mapping of options in order
+    /// answers differently when they arrive sorted.
+    const CALLER_ORDER_EXTRACT_PARAMS: &str = r#"{
+        "output_schema": {
+            "priority": "string",
+            "intent": {"choice": {"refund": "asks for money back", "cancel": "wants to stop", "billing": "asks about a charge"}},
+            "frustration": "number"
+        },
+        "options": {"threshold": 0.5, "label_criteria": {"refund": "r", "cancel": "c", "billing": "b"}, "multi_label": false}
+    }"#;
+
+    fn assert_caller_order_extract_params(params: &WorkParams) {
+        let queued = |value: &serde_json::Value| -> rmpv::Value {
+            let bytes = rmp_serde::to_vec_named(value).expect("encode queue field");
+            rmpv::decode::read_value(&mut bytes.as_slice()).expect("decode queue field")
+        };
+        let schema = queued(params.output_schema.as_ref().expect("output_schema"));
+        assert_eq!(msgpack_keys(&schema), ["priority", "intent", "frustration"]);
+        assert_eq!(
+            msgpack_keys(&msgpack_field(&msgpack_field(&schema, "intent"), "choice")),
+            ["refund", "cancel", "billing"]
+        );
+        let options = queued(params.options.as_ref().expect("options"));
+        assert_eq!(
+            msgpack_keys(&options),
+            ["threshold", "label_criteria", "multi_label"]
+        );
+        assert_eq!(
+            msgpack_keys(&msgpack_field(&options, "label_criteria")),
+            ["refund", "cancel", "billing"]
+        );
+    }
+
+    #[test]
+    fn extract_output_schema_and_options_reach_queue_in_caller_key_order() {
+        let json_body =
+            format!(r#"{{"items": [{{"text": "hi"}}], "params": {CALLER_ORDER_EXTRACT_PARAMS}}}"#);
+        let (_, params) =
+            parse_queue_request(json_body.as_bytes(), false, "extract").expect("json body");
+        assert_caller_order_extract_params(&params);
+
+        // Decode the params straight into rmpv so the msgpack body keeps the
+        // text's key order without going through serde_json::Value.
+        let params_msgpack: rmpv::Value =
+            serde_json::from_str(CALLER_ORDER_EXTRACT_PARAMS).expect("params as msgpack value");
+        let body = rmpv::Value::Map(vec![
+            (
+                rmpv::Value::from("items"),
+                rmpv::Value::Array(vec![rmpv::Value::Map(vec![(
+                    rmpv::Value::from("text"),
+                    rmpv::Value::from("hi"),
+                )])]),
+            ),
+            (rmpv::Value::from("params"), params_msgpack),
+        ]);
+        let mut msgpack_body = Vec::new();
+        rmpv::encode::write_value(&mut msgpack_body, &body).expect("encode msgpack body");
+        let (_, params) =
+            parse_queue_request(&msgpack_body, true, "extract").expect("msgpack body");
+        assert_caller_order_extract_params(&params);
+    }
+
     #[tokio::test]
     async fn installed_empty_generation_policy_fails_native_and_openai_closed() {
         let pool_manager = Arc::new(PoolManager::new(vec!["l4".to_string()]));
