@@ -28,8 +28,10 @@ def _json(data: bytes, *, max_bytes: int) -> dict[str, Any]:
         payload = json.loads(data)
     except (ValueError, RecursionError):
         raise _invalid() from None
-    if not isinstance(payload, dict) or "error" in payload:
+    if not isinstance(payload, dict):
         raise _invalid()
+    if "error" in payload:
+        raise RemoteUpstreamError("upstream sent an error instead of a chat answer")
     return payload
 
 
