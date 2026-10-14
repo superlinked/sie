@@ -1293,9 +1293,10 @@ async def _remote_chat_events(
             delivered = True
             yield b"data: " + encoded + b"\n\n"
         yield b"data: [DONE]\n\n"
-    except (RemoteUpstreamError, UpstreamUnavailableError, GenerationError, GenerationTimeoutError):
+    except (RemoteUpstreamError, UpstreamUnavailableError, GenerationError, GenerationTimeoutError) as exc:
         if not delivered:
             raise
+        logger.warning("remote chat for %s failed after output: %s", requested_model, exc)
         yield _upstream_error_event()
     finally:
         await aclose_with_error_precedence(iterator, outcome_selected=True, context="remote chat adapter")
@@ -1400,7 +1401,8 @@ async def _remote_chat_response(
             detail={"code": ErrorCode.QUEUE_FULL.value, "message": "remote serving is unavailable"},
             headers={"Retry-After": "1"},
         ) from exc
-    except RemoteUpstreamError:
+    except RemoteUpstreamError as exc:
+        logger.warning("remote chat for %s failed: %s", requested_model, exc)
         return _upstream_error_response()
 
 

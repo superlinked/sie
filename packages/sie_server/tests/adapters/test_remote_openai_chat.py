@@ -363,6 +363,25 @@ def test_invalid_and_oversized_events_never_expose_upstream_errors(data: bytes) 
 
 
 @pytest.mark.parametrize("stream", [False, True])
+def test_an_error_in_place_of_the_answer_is_named_without_repeating_it(stream: bool) -> None:
+    error = {
+        "id": "gen-1",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": "upstream/model",
+        "error": {"code": "server_error", "message": "secret provider detail"},
+        "choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": "error"}],
+    }
+    parser = ChatStreamParser("model")
+    with pytest.raises(RemoteUpstreamError) as raised:
+        if stream:
+            parser.parse(json.dumps(error).encode())
+        else:
+            parser.completion(json.dumps(error).encode())
+    assert str(raised.value) == "upstream sent an error instead of a chat answer"
+
+
+@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("reasoning_field", ["reasoning_content", "reasoning"])
 def test_discarded_reasoning_cannot_leak_through_logprobs(stream: bool, reasoning_field: str) -> None:
     raw = choice(stream=stream, **{reasoning_field: "private reasoning"})
