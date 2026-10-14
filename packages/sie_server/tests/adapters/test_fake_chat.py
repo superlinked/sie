@@ -50,6 +50,18 @@ async def test_the_stream_and_the_answer_agree(adapter: FakeAdapter) -> None:
     assert events[-1]["usage"] == answer["usage"]
 
 
+async def test_reasoning_is_spent_but_kept_private_without_keep_reasoning(adapter: FakeAdapter) -> None:
+    body = _body(chat_template_kwargs={"enable_thinking": True})
+    kept = await adapter.chat_completion(body, requested_model="m", keep_reasoning=True)
+    private = await adapter.chat_completion(body, requested_model="m")
+    events = await _streamed(adapter, body)
+
+    assert kept["choices"][0]["message"]["reasoning_content"]
+    assert "reasoning_content" not in private["choices"][0]["message"]
+    assert not any("reasoning_content" in choice["delta"] for event in events for choice in event["choices"])
+    assert private["usage"] == kept["usage"]
+
+
 async def test_the_same_request_gets_the_same_answer_and_another_request_another(adapter: FakeAdapter) -> None:
     first = await adapter.chat_completion(_body("one"), requested_model="m")
     again = await adapter.chat_completion(_body("one"), requested_model="m")
