@@ -265,9 +265,11 @@ refused with `PROVISIONING`, because the remote capacity is still starting,
 received no answer, so it is `QUEUE_FULL`. Any other failure is
 `INFERENCE_ERROR` for a server error and `INVALID_INPUT` for a client error.
 
-On a single node, the server logs one `WARNING` for each remote chat call that
-fails, naming the model, the upstream and a fixed reason such as
-`upstream answered 401` or `the upstream credential is unavailable`. The line
+A single node that answers a remote chat call with `502` `upstream_error`, or
+with `503` because the upstream is unavailable, busy or not ready, logs one
+`WARNING` naming the model, the upstream and a fixed reason such as
+`upstream answered 401` or `the upstream credential is unavailable`. An
+upstream failure after a stream has started is logged the same way. The line
 never contains the credential, the prompt or anything the upstream sent.
 
 Each upstream has a required rate cap and a circuit breaker. The limits are
