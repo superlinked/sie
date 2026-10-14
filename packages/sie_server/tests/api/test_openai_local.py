@@ -2418,3 +2418,107 @@ def test_mlx_chat_stream_publishes_raw_tag_reasoning_only_when_asked(
     reasoning = "".join(delta.get("reasoning_content", "") for delta in deltas)
     assert reasoning == ("private default reasoning" if include_reasoning else "")
     assert "<think>" not in response.text
+
+
+_MLX_REASONING = "The user wants one word.\n"
+_MLX_ANSWER = "\n\nready"
+
+
+@pytest.mark.parametrize("include_reasoning", [False, True])
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "assistant", "content": _MLX_ANSWER, "reasoning": _MLX_REASONING},
+        {"role": "assistant", "content": _MLX_ANSWER, "reasoning_content": _MLX_REASONING},
+        {"role": "assistant", "content": _MLX_REASONING + "</think>" + _MLX_ANSWER},
+    ],
+    ids=["reasoning", "reasoning_content", "raw_tags"],
+)
+def test_mlx_thinking_chat_keeps_the_answer_beside_split_reasoning(
+    monkeypatch: pytest.MonkeyPatch, message: dict[str, Any], include_reasoning: bool
+) -> None:
+    payload = {
+        "id": "chatcmpl-mlx",
+        "system_fingerprint": "0.32.0",
+        "object": "chat.completion",
+        "model": "mlx-community/Qwen3.5-4B-4bit",
+        "created": 1,
+        "choices": [{"index": 0, "finish_reason": "stop", "message": message}],
+        "usage": {"prompt_tokens": 14, "completion_tokens": 12, "total_tokens": 26},
+    }
+    client, _ = _mlx_chat_client(
+        monkeypatch, lambda _request: httpx.Response(200, json=payload), chat_template_kwargs={"enable_thinking": True}
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3.5-4B:thinking",
+            "messages": [{"role": "user", "content": "Reply with one word: ready"}],
+            "include_reasoning": include_reasoning,
+        },
+    )
+
+    assert response.status_code == 200
+    returned = response.json()["choices"][0]["message"]
+    assert returned["content"] == _MLX_ANSWER
+    assert "reasoning" not in returned
+    assert returned.get("reasoning_content") == (_MLX_REASONING if include_reasoning else None)
+    assert include_reasoning or "one word" not in response.text
+
+
+@pytest.mark.parametrize("include_reasoning", [False, True])
+@pytest.mark.parametrize(
+    "deltas",
+    [
+        [
+            {"role": "assistant", "reasoning": "The user wants "},
+            {"role": "assistant", "reasoning": "one word.\n"},
+            {"role": "assistant", "content": "\n\n"},
+            {"role": "assistant", "content": "ready"},
+        ],
+        [
+            {"role": "assistant", "content": ""},
+            {"reasoning_content": "The user wants "},
+            {"reasoning_content": "one word.\n"},
+            {"content": "\n\nready"},
+        ],
+        [
+            {"role": "assistant", "content": "The user wants "},
+            {"role": "assistant", "content": "one word.\n</th"},
+            {"role": "assistant", "content": "ink>\n\nready"},
+        ],
+    ],
+    ids=["reasoning", "reasoning_content_after_role", "raw_tags"],
+)
+def test_mlx_thinking_chat_stream_keeps_the_answer_beside_split_reasoning(
+    monkeypatch: pytest.MonkeyPatch, deltas: list[dict[str, Any]], include_reasoning: bool
+) -> None:
+    wire = _sse_wire(
+        [*(_stream_event(delta) for delta in deltas), _stream_event({"role": "assistant"}, finish_reason="stop")]
+    )
+    client, _ = _mlx_chat_client(
+        monkeypatch,
+        lambda _request: httpx.Response(
+            200, stream=_ChunkedAsyncStream([wire[:83], wire[83:]]), headers={"content-type": "text/event-stream"}
+        ),
+        chat_template_kwargs={"enable_thinking": True},
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3.5-4B:thinking",
+            "messages": [{"role": "user", "content": "Reply with one word: ready"}],
+            "stream": True,
+            "include_reasoning": include_reasoning,
+        },
+    )
+
+    assert response.status_code == 200
+    returned = _sse_deltas(response.text)
+    assert "".join(delta.get("content", "") for delta in returned) == _MLX_ANSWER
+    assert not any("reasoning" in delta for delta in returned)
+    reasoning = "".join(delta.get("reasoning_content", "") for delta in returned)
+    assert reasoning == (_MLX_REASONING if include_reasoning else "")
+    assert include_reasoning or "one word" not in response.text

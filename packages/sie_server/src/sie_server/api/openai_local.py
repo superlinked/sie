@@ -43,6 +43,7 @@ from jsonschema import Draft202012Validator, SchemaError
 from sie_sdk.queue_types import denormalize_model_id
 
 from sie_server.adapters._generation_base import (
+    REASONING_CONTROL_TOKENS,
     GenerationAdapter,
     GenerationError,
     GenerationUnsupportedFieldError,
@@ -1037,16 +1038,23 @@ def _sanitize_chat_payload(
 
         if not hide_thinking_blocks:
             continue
-        stripper = state_map.setdefault(
-            index,
-            ThinkingBlockStripper(
-                inside=initial_inside_thinking,
-                reasoning_format=reasoning_format,
-                keep_reasoning=public_reasoning,
-            ),
-        )
         raw_content = container.get("content")
         content = raw_content if isinstance(raw_content, str) else ""
+        stripper = state_map.get(index)
+        if stripper is None:
+            if not content and not reasoning_was_present:
+                continue
+            # A child that returns reasoning in its own field has consumed the
+            # prompt-seeded thinking block, unless content still carries it: a
+            # stream delta can close it later, a whole message has to close it.
+            content_holds_no_reasoning = (
+                REASONING_CONTROL_TOKENS[reasoning_format][1] not in content if container is message else not content
+            )
+            stripper = state_map[index] = ThinkingBlockStripper(
+                inside=initial_inside_thinking and not (reasoning_was_present and content_holds_no_reasoning),
+                reasoning_format=reasoning_format,
+                keep_reasoning=public_reasoning,
+            )
         visible = stripper.feed(content) if content else ""
         is_terminal_choice = terminal or choice_obj.get("finish_reason") is not None
         if is_terminal_choice:
