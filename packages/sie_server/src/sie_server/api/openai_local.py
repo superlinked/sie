@@ -31,6 +31,7 @@ import json
 import logging
 import math
 import os
+import re
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Annotated, Any, cast
@@ -91,6 +92,7 @@ from sie_server.core.video_frames import (
     sniff_video_container,
 )
 from sie_server.observability.tracing import tracer
+from sie_server.processors.remote_chat import _check_tools
 from sie_server.processors.remote_chat_prompt import collect_rendered_chat, prepare_rendered_chat
 from sie_server.processors.schema_prompt import (
     json_schema_response_format,
@@ -128,6 +130,7 @@ _MAX_BODY_BYTES = int(os.environ.get("SIE_CHAT_MAX_BODY_BYTES", str(8 * 1024 * 1
 # fence for malformed/non-token responses.
 _MAX_CHAT_RESPONSE_BYTES = int(os.environ.get("SIE_CHAT_MAX_RESPONSE_BYTES", str(32 * 1024 * 1024)))
 _MAX_CHAT_TOOLS = 64
+_TOOL_NAME = re.compile(r"[a-zA-Z0-9_-]{1,64}")
 _MAX_CHAT_MESSAGES = 4096
 _MAX_CHAT_CHOICES = 128
 _MAX_CHAT_VIDEOS = 1
@@ -594,13 +597,18 @@ def _validate_chat_tools(body: dict[str, Any]) -> None:
     if tools is not None:
         if not isinstance(tools, list) or len(tools) > _MAX_CHAT_TOOLS:
             raise _bad_request("'tools' must be an array of at most 64 functions", param="tools")
-        for tool in tools:
+        for index, tool in enumerate(cast("list[Any]", tools)):
             function = tool.get("function") if isinstance(tool, dict) else None
             if not isinstance(function, dict) or tool.get("type") != "function":
                 raise _bad_request("'tools' entries must declare a function object", param="tools")
             name = function.get("name")
             if not isinstance(name, str) or not name:
                 raise _bad_request("tool function names must be non-empty strings", param="tools")
+            if not _TOOL_NAME.fullmatch(name):
+                raise _bad_request(
+                    f"'tools[{index}].function.name' must match ^[a-zA-Z0-9_-]{{1,64}}$",
+                    param=f"tools[{index}].function.name",
+                )
             names.add(name)
             if function.get("description") is not None and not isinstance(function["description"], str):
                 raise _bad_request("tool descriptions must be strings", param="tools")
@@ -1267,6 +1275,16 @@ def _check_remote_chat_usage(payload: dict[str, Any], body: dict[str, Any], conf
         raise RemoteUpstreamError("upstream chat usage exceeded the configured token bounds")
 
 
+def _check_remote_chat_tools(payload: dict[str, Any], body: dict[str, Any], calls: dict[int, dict[int, str]]) -> None:
+    for choice in payload["choices"]:
+        message = choice["delta"] if "delta" in choice else choice["message"]
+        names = calls.setdefault(choice["index"], {})
+        for position, tool in enumerate(message.get("tool_calls") or []):
+            index = tool.get("index", position)
+            names[index] = names.get(index, "") + tool.get("function", {}).get("name", "")
+        _check_tools(names, body, finished=choice["finish_reason"] is not None)
+
+
 async def _remote_chat_events(
     iterator: AsyncIterator[dict[str, Any]],
     *,
@@ -1281,12 +1299,14 @@ async def _remote_chat_events(
     states: dict[int, ThinkingBlockStripper] = {}
     strict_contents: dict[int, list[str]] = {}
     strict_tool_choices: set[int] = set()
+    calls: dict[int, dict[int, str]] = {}
     delivered = False
     received = 0
     include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
     try:
         async for payload in iterator:
             _check_remote_chat_usage(payload, body, config)
+            _check_remote_chat_tools(payload, body, calls)
             sanitized = _sanitize_chat_payload(
                 payload,
                 requested_model=requested_model,
@@ -1392,6 +1412,7 @@ async def _remote_chat_response(
             )
         )
         _check_remote_chat_usage(payload, body, config)
+        _check_remote_chat_tools(payload, body, {})
         payload = _sanitize_chat_payload(
             payload,
             requested_model=requested_model,

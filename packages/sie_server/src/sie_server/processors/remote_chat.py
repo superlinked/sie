@@ -42,7 +42,7 @@ def _logprobs(choice: dict[str, Any], body: dict[str, Any]) -> tuple[dict[str, A
 
 def _check_tools(calls: dict[int, str], body: dict[str, Any], *, finished: bool) -> None:
     mode, name = normalize_tool_choice(body.get("tool_choice"))
-    allowed = {tool["function"]["name"] for tool in body.get("tools", [])}
+    allowed = {tool["function"]["name"] for tool in body.get("tools") or []}
     if calls and (mode == "none" or not allowed or (not body.get("parallel_tool_calls", True) and len(calls) > 1)):
         raise RemoteUpstreamError("upstream chat did not honor the requested tools")
     permitted = {name} if name is not None and name in allowed else allowed if name is None else set()
