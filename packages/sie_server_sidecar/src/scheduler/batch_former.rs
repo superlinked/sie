@@ -70,6 +70,13 @@
 //!    4096 ms, the adaptive floor for a backend that reports no budget, or a
 //!    cap set low through `SIE_ADAPTIVE_BATCH_MAX_COST`). Point 3's
 //!    promotion makes the same trade between turns.
+//! 6. **A request can be kept whole** (`max_request_items`, off by
+//!    default): the request at the head of an extract is then taken with
+//!    all of its pending items even past the item cap, so one caller's
+//!    request is not cut into batches that run one after another. The cost
+//!    cap still cuts. Like point 3's promotion, this applies only outside
+//!    batchable turns with nothing flagged pending: a turn's batches keep
+//!    the item cap and their cost order (point 5). Python has no such rule.
 //!
 //! Python currently retains its original first/last timers after a partial
 //! extract and clears them only when empty. Rust re-anchors them to the actual
@@ -140,6 +147,15 @@ pub trait HasCost {
     /// Used by the adapter-side output router to zip results back to
     /// the correct request item.
     fn original_index(&self) -> usize;
+
+    /// Identity of the request this item came from, when it has one.
+    /// Items that share a key were sent by one caller in one request:
+    /// the packer keeps them in one batch where the caps allow (see
+    /// [`BatchConfig::max_request_items`]) and the lane counts them as one
+    /// arrival. `None` means the item stands for itself.
+    fn request_key(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// A single request waiting to be batched, together with
@@ -175,6 +191,12 @@ impl<I: HasCost, T> FormattedBatch<I, T> {
     #[must_use]
     pub fn total_tokens(&self) -> u64 {
         self.total_cost
+    }
+
+    /// Number of requests the batch's items came from.
+    #[must_use]
+    pub fn request_count(&self) -> usize {
+        super::engine::distinct_requests(self.items.iter())
     }
 
     /// Return a new batch sorted by cost (ascending). Preserves the
@@ -533,6 +555,37 @@ impl<I: HasCost, T> BatchFormer<I, T> {
         }
     }
 
+    /// What a lane's dispatch rule ([`super::lane::Lane`]) reads from this
+    /// queue: whether the pending work already fills a batch, and the
+    /// classic flush triggers for a lane that has the idle bypass off.
+    pub(crate) async fn gate_view(&self) -> GateView {
+        let guard = self.inner.lock().await;
+        GateView {
+            full: full_reason(&guard),
+            classic: flush_reason(&guard, false),
+            classic_wait: wait_timeout(&guard),
+        }
+    }
+
+    /// Take the next batch now, whatever the flush triggers say, under the
+    /// usual caps. `reason` records why the lane sent it; a batch that is
+    /// full keeps its cap as the reason. `None` when nothing is pending.
+    ///
+    /// The second value is the number of requests the batch completes:
+    /// those with no item left pending here. A request cut by a cap is
+    /// completed by the batch that takes its last items.
+    pub(crate) async fn take(&self, reason: FlushReason) -> Option<(FormattedBatch<I, T>, usize)> {
+        let mut guard = self.inner.lock().await;
+        if guard.pending.is_empty() {
+            return None;
+        }
+        let reason = full_reason(&guard).unwrap_or(reason);
+        let batch = extract_batch(&mut guard, reason);
+        self.refresh_fcfs_head(&guard);
+        let completes = completed_requests(&batch.items, &guard.pending);
+        Some((batch, completes))
+    }
+
     /// Refresh the atomic FCFS head from the queue while `inner` is locked.
     ///
     /// [`extract_batch_up_to`] recomputes the timers from the actual remainder,
@@ -553,6 +606,22 @@ impl<I: HasCost, T> BatchFormer<I, T> {
         // Zero is reserved for an empty batcher.
         nanos.max(1)
     }
+}
+
+/// Snapshot of one queue for the lane's dispatch rule.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct GateView {
+    /// The cap the pending work has reached, if it already fills a batch:
+    /// the item cap, the cost cap, one request over the cost cap, or no
+    /// room under the cost cap for another item like its largest. Waiting
+    /// cannot improve such a batch.
+    pub full: Option<FlushReason>,
+    /// The classic flush trigger that has fired, if any (caps, batch wait,
+    /// coalesce window since the last arrival).
+    pub classic: Option<FlushReason>,
+    /// Time until a classic trigger fires by itself; `None` when nothing is
+    /// pending.
+    pub classic_wait: Option<Duration>,
 }
 
 // ---------------------------------------------------------------------
@@ -639,6 +708,26 @@ fn flush_reason<I: HasCost, T>(inner: &Inner<I, T>, immediate: bool) -> Option<F
         return Some(FlushReason::IdleBypass);
     }
     None
+}
+
+/// The cap the pending work has reached, if any: one request over the cost
+/// cap, the cost cap, the item cap, or a cost so close to the cap that
+/// another item like the largest one pending would not fit.
+///
+/// The last case is what makes a single large item full by itself: a
+/// 15,000-cost request under a 16,384 cap cannot share a batch with another
+/// like it, so holding it for company only delays the engine-side
+/// preparation that could overlap the forward before it.
+fn full_reason<I: HasCost, T>(inner: &Inner<I, T>) -> Option<FlushReason> {
+    if let reason @ Some(
+        FlushReason::SingleOversize | FlushReason::CostCap | FlushReason::CountCap,
+    ) = flush_reason(inner, false)
+    {
+        return reason;
+    }
+    let largest = inner.pending.iter().map(|r| r.item.cost()).max()?;
+    (inner.total_cost.saturating_add(largest) > effective_max_cost(inner))
+        .then_some(FlushReason::CostCap)
 }
 
 /// Time remaining until the next guaranteed flush, given current
@@ -918,6 +1007,20 @@ fn extract_batch_up_to<I: HasCost, T>(
     };
     let max_cost = turn.map_or(max_cost, |t| max_cost.min(t.cost_left));
 
+    // The request whose turn has come leaves whole: bring its other pending
+    // items to the front, in their sorted order, and let the item cap stop
+    // the pack only after them. The cap is there to bound how many arrivals
+    // are merged, not to cut one caller's request into batches that run one
+    // after another. The cost cap below still cuts, and a request of more
+    // than `max_request_items` items is packed item by item as before. Only
+    // outside batchable turns with nothing flagged pending (point 6): a
+    // turn's batches keep the item cap and the order the turn set.
+    let head_request_len = if !alone_next && turn.is_none() && pending_alone == 0 {
+        bring_head_request_forward(inner)
+    } else {
+        0
+    };
+
     // Greedy pack. Always take at least one item so a single large
     // request (cost ≥ max_cost) doesn't starve.
     let mut batch_cost: u64 = 0;
@@ -947,7 +1050,7 @@ fn extract_batch_up_to<I: HasCost, T>(
         }
         batch_cost += c;
         take_count += 1;
-        if runs_alone || take_count >= max_requests {
+        if runs_alone || (take_count >= max_requests && take_count >= head_request_len) {
             break;
         }
     }
@@ -1009,6 +1112,58 @@ fn extract_batch_up_to<I: HasCost, T>(
     }
 }
 
+/// Number of requests among `taken` that have no item left in `pending`.
+/// An item without a request key is a request of its own.
+fn completed_requests<I: HasCost, T>(taken: &[I], pending: &[PendingRequest<I, T>]) -> usize {
+    let still_pending: std::collections::HashSet<&str> = pending
+        .iter()
+        .filter_map(|request| request.item.request_key())
+        .collect();
+    let mut completed: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut unkeyed = 0usize;
+    for item in taken {
+        match item.request_key() {
+            Some(key) if still_pending.contains(key) => {}
+            Some(key) => {
+                completed.insert(key);
+            }
+            None => unkeyed += 1,
+        }
+    }
+    completed.len() + unkeyed
+}
+
+/// Move the other pending items of the head item's request to the front,
+/// keeping their order, and return how many items that request has pending.
+/// Returns 0 (and moves nothing) when the head item has no request key, is
+/// its request's only pending item, or its request is larger than
+/// `max_request_items`.
+fn bring_head_request_forward<I: HasCost, T>(inner: &mut Inner<I, T>) -> usize {
+    let limit = inner.config.max_request_items;
+    if limit <= 1 || inner.pending.len() <= 1 {
+        return 0;
+    }
+    let Some(key) = inner.pending[0].item.request_key().map(str::to_owned) else {
+        return 0;
+    };
+    let same_request =
+        |request: &PendingRequest<I, T>| request.item.request_key() == Some(key.as_str());
+    let len = inner
+        .pending
+        .iter()
+        .filter(|request| same_request(request))
+        .count();
+    if len <= 1 || len > limit {
+        return 0;
+    }
+    let (mut head, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut inner.pending)
+        .into_iter()
+        .partition(same_request);
+    head.extend(rest);
+    inner.pending = head;
+    len
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1057,6 +1212,227 @@ mod tests {
         fn original_index(&self) -> usize {
             0
         }
+    }
+
+    /// An item that belongs to a request, as production items do.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct RequestItem {
+        request: &'static str,
+        cost: u64,
+        idx: usize,
+    }
+
+    impl HasCost for RequestItem {
+        fn cost(&self) -> u64 {
+            self.cost
+        }
+        fn original_index(&self) -> usize {
+            self.idx
+        }
+        fn request_key(&self) -> Option<&str> {
+            Some(self.request)
+        }
+    }
+
+    fn request_items(request: &'static str, count: usize, cost: u64) -> Vec<(RequestItem, usize)> {
+        (0..count)
+            .map(|idx| (RequestItem { request, cost, idx }, idx))
+            .collect()
+    }
+
+    fn batch_requests(batch: &FormattedBatch<RequestItem, usize>) -> Vec<(&'static str, usize)> {
+        let mut counts: Vec<(&'static str, usize)> = Vec::new();
+        for item in &batch.items {
+            match counts
+                .iter_mut()
+                .find(|(request, _)| *request == item.request)
+            {
+                Some((_, count)) => *count += 1,
+                None => counts.push((item.request, 1)),
+            }
+        }
+        counts
+    }
+
+    /// The default caps with whole requests of up to 64 items switched on.
+    fn whole_requests() -> BatchConfig {
+        BatchConfig {
+            max_request_items: 64,
+            ..BatchConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn by_default_the_item_cap_cuts_a_request_and_the_last_batch_completes_it() {
+        let former = BatchFormer::<RequestItem, usize>::new(BatchConfig::default());
+        former.submit_many(request_items("a", 32, 1)).await;
+
+        let (first, completes) = former.take(FlushReason::IdleBypass).await.unwrap();
+        assert_eq!((first.size(), completes), (12, 0));
+        assert_eq!(first.flush_reason, FlushReason::CountCap);
+        let (second, completes) = former.take(FlushReason::IdleBypass).await.unwrap();
+        assert_eq!((second.size(), completes), (12, 0));
+        // The remainder is no longer full, and it is the batch that answers
+        // the request.
+        assert_eq!(former.gate_view().await.full, None);
+        let (third, completes) = former.take(FlushReason::IdleBypass).await.unwrap();
+        assert_eq!((third.size(), completes), (8, 1));
+        assert_eq!(third.flush_reason, FlushReason::IdleBypass);
+        assert_eq!(former.fcfs_head_ns(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_whole_request_larger_than_the_item_cap_leaves_in_one_batch() {
+        // 12 items merged across requests, a request of up to 64 items
+        // whole: 32 states in one request leave together, not as 12, 12
+        // and 8.
+        let former = BatchFormer::<RequestItem, usize>::new(whole_requests());
+        former.submit_many(request_items("a", 32, 1)).await;
+
+        let view = former.gate_view().await;
+        assert_eq!(view.full, Some(FlushReason::CountCap));
+        let (batch, completes) = former.take(FlushReason::IdleBypass).await.unwrap();
+        assert_eq!(batch.size(), 32);
+        assert_eq!(batch.request_count(), 1);
+        assert_eq!(completes, 1);
+        assert_eq!(batch.flush_reason, FlushReason::CountCap);
+        let indices: Vec<usize> = batch.items.iter().map(HasCost::original_index).collect();
+        assert_eq!(
+            indices,
+            (0..32).collect::<Vec<_>>(),
+            "equal-cost items keep their order"
+        );
+        assert_eq!(former.pending_count().await, 0);
+        assert_eq!(former.fcfs_head_ns(), 0);
+    }
+
+    #[tokio::test]
+    async fn two_whole_requests_leave_as_two_batches() {
+        let former = BatchFormer::<RequestItem, usize>::new(whole_requests());
+        former.submit_many(request_items("a", 32, 1)).await;
+        former.submit_many(request_items("b", 32, 1)).await;
+
+        let first = former.try_drain().await.unwrap();
+        assert_eq!(batch_requests(&first), vec![("a", 32)]);
+        let second = former.try_drain().await.unwrap();
+        assert_eq!(batch_requests(&second), vec![("b", 32)]);
+        assert_eq!(former.pending_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn the_item_cap_still_bounds_how_many_whole_requests_are_merged() {
+        // Three requests of 8 items under an item cap of 12: the head
+        // request whole, then the pack fills to the cap as it always did.
+        let former = BatchFormer::<RequestItem, usize>::new(whole_requests());
+        for request in ["a", "b", "c"] {
+            former.submit_many(request_items(request, 8, 1)).await;
+        }
+        let (first, completes) = former.take(FlushReason::Drain).await.unwrap();
+        assert_eq!(batch_requests(&first), vec![("a", 8), ("b", 4)]);
+        assert_eq!(completes, 1, "b still has items pending");
+        let (second, completes) = former.take(FlushReason::Drain).await.unwrap();
+        assert_eq!(batch_requests(&second), vec![("b", 4), ("c", 8)]);
+        assert_eq!(completes, 2);
+    }
+
+    #[tokio::test]
+    async fn the_cost_cap_still_cuts_a_whole_request() {
+        let former = BatchFormer::<RequestItem, usize>::new(BatchConfig {
+            max_batch_cost: 100,
+            ..whole_requests()
+        });
+        former.submit_many(request_items("a", 32, 10)).await;
+        let sizes: Vec<usize> = [
+            former.try_drain().await.unwrap(),
+            former.try_drain().await.unwrap(),
+            former.try_drain().await.unwrap(),
+            former.try_drain().await.unwrap(),
+        ]
+        .iter()
+        .map(FormattedBatch::size)
+        .collect();
+        assert_eq!(sizes, vec![10, 10, 10, 2]);
+    }
+
+    #[tokio::test]
+    async fn a_request_over_the_whole_request_limit_is_cut_by_the_item_cap() {
+        let former = BatchFormer::<RequestItem, usize>::new(whole_requests());
+        former.submit_many(request_items("a", 65, 1)).await;
+        assert_eq!(former.try_drain().await.unwrap().size(), 12);
+    }
+
+    #[tokio::test]
+    async fn the_head_request_is_the_one_whose_turn_it_is() {
+        // A cheap single-item request sorts ahead of a costlier large one,
+        // and takes its turn first; the large request then leaves whole.
+        let former = BatchFormer::<RequestItem, usize>::new(BatchConfig {
+            max_batch_requests: 4,
+            ..whole_requests()
+        });
+        former.submit_many(request_items("large", 6, 5)).await;
+        former.submit_many(request_items("small", 1, 1)).await;
+        let first = former.try_drain().await.unwrap();
+        assert_eq!(batch_requests(&first), vec![("small", 1), ("large", 3)]);
+        let second = former.try_drain().await.unwrap();
+        assert_eq!(batch_requests(&second), vec![("large", 3)]);
+    }
+
+    #[tokio::test]
+    async fn pending_work_with_no_room_for_another_like_its_largest_is_full() {
+        let config = BatchConfig {
+            max_batch_cost: 100,
+            max_batch_wait_ms: 1_000_000.0,
+            coalesce_ms: 1_000_000.0,
+            coalesce_ratio: 1.0,
+            ..BatchConfig::default()
+        };
+        // One item that could share the batch with another like it: not
+        // full, the lane may hold it for company.
+        let former = BatchFormer::<StubItem, usize>::new(config);
+        former.submit(StubItem::with_idx(40, 0), 0).await;
+        assert_eq!(former.gate_view().await.full, None);
+        // A second one leaves no room for a third.
+        former.submit(StubItem::with_idx(40, 1), 1).await;
+        assert_eq!(former.gate_view().await.full, Some(FlushReason::CostCap));
+        let (batch, _) = former.take(FlushReason::IdleBypass).await.unwrap();
+        assert_eq!(batch.size(), 2);
+        assert_eq!(batch.flush_reason, FlushReason::CostCap);
+
+        // One item under the cap that another like it could not join (a
+        // 20-candidate rerank request under the default cap): full alone.
+        let former = BatchFormer::<StubItem, usize>::new(config);
+        former.submit(StubItem::with_idx(60, 0), 0).await;
+        assert_eq!(former.gate_view().await.full, Some(FlushReason::CostCap));
+        // The classic triggers are unchanged: nothing has fired for it.
+        assert_eq!(former.gate_view().await.classic, None);
+        assert!(former.try_get_batch().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn take_sends_what_is_pending_without_a_flush_trigger() {
+        let former = BatchFormer::<StubItem, usize>::new(BatchConfig {
+            max_batch_wait_ms: 1_000_000.0,
+            coalesce_ms: 1_000_000.0,
+            coalesce_ratio: 1.0,
+            ..BatchConfig::default()
+        });
+        assert!(former.take(FlushReason::IdleBypass).await.is_none());
+        former.submit(StubItem::with_idx(3, 0), 0).await;
+        former.submit(StubItem::with_idx(2, 1), 1).await;
+        let view = former.gate_view().await;
+        assert_eq!(view.full, None);
+        assert_eq!(view.classic, None);
+        assert!(view.classic_wait.is_some());
+
+        let (batch, completes) = former.take(FlushReason::Coalesce).await.unwrap();
+        assert_eq!(batch.metadata, vec![1, 0], "still cost-sorted");
+        assert_eq!(batch.flush_reason, FlushReason::Coalesce);
+        assert_eq!(batch.request_count(), 2);
+        assert_eq!(
+            completes, 2,
+            "an item without a key is a request of its own"
+        );
+        assert_eq!(former.fcfs_head_ns(), 0);
     }
 
     // Arrival age is a std::Instant value, so these tests backdate the real
@@ -1307,6 +1683,7 @@ mod tests {
             max_batch_wait_ms: 10_000.0, // big so only cost triggers
             coalesce_ms: 10_000.0,
             coalesce_ratio: 1.0,
+            ..BatchConfig::default()
         };
         let b = BatchFormer::<StubItem, u32>::new(cfg);
         b.submit(StubItem::new(15), 1).await;
@@ -1326,6 +1703,7 @@ mod tests {
             max_batch_wait_ms: 10_000.0,
             coalesce_ms: 10_000.0,
             coalesce_ratio: 1.0,
+            ..BatchConfig::default()
         };
         let b = BatchFormer::<HardCapItem, u32>::new(cfg);
         b.submit(
@@ -1360,6 +1738,7 @@ mod tests {
             max_batch_wait_ms: 10_000.0,
             coalesce_ms: 10_000.0,
             coalesce_ratio: 1.0,
+            ..BatchConfig::default()
         };
         let b = BatchFormer::<StubItem, u32>::new(cfg);
         b.submit(StubItem::new(1), 1).await;
@@ -1483,6 +1862,7 @@ mod tests {
             max_batch_wait_ms: 20.0,
             coalesce_ms: 1_000.0,
             coalesce_ratio: 1.0, // coalesce ties max-wait; timeout wins by priority
+            ..BatchConfig::default()
         };
         let b = BatchFormer::<StubItem, u32>::new(cfg);
         b.submit(StubItem::new(1), 1).await;
@@ -1525,6 +1905,7 @@ mod tests {
             max_batch_wait_ms: 1_000_000.0,
             coalesce_ms: 1_000_000.0,
             coalesce_ratio: 1.0,
+            ..BatchConfig::default()
         };
         let b = std::sync::Arc::new(BatchFormer::<StubItem, u32>::new(original));
         b.submit(StubItem::new(5), 1).await;
@@ -1652,6 +2033,7 @@ mod tests {
         cost: u64,
         alone: bool,
         hard_cap: Option<u64>,
+        request: Option<&'static str>,
     }
 
     impl HasCost for LaneItem {
@@ -1667,6 +2049,9 @@ mod tests {
         fn original_index(&self) -> usize {
             0
         }
+        fn request_key(&self) -> Option<&str> {
+            self.request
+        }
     }
 
     fn clip_ms(cost: u64) -> LaneItem {
@@ -1674,6 +2059,7 @@ mod tests {
             cost,
             alone: false,
             hard_cap: Some(crate::audio_prep::MAX_AUDIO_BATCH_DURATION_MS),
+            request: None,
         }
     }
 
@@ -1860,6 +2246,7 @@ mod tests {
                         cost,
                         alone: false,
                         hard_cap,
+                        request: None,
                     };
                     lanes.arrive(item, &name, now_ms);
                     reference.push((cost, hard_cap, name, now_ms));
@@ -2058,6 +2445,36 @@ mod tests {
         lanes.arrive(clip(20), "long-clip", 1);
         lanes.arrive(clip(1), "late-clip", 4);
         assert_eq!(lanes.take(), ["late-clip"]);
+    }
+
+    #[test]
+    fn whole_requests_keep_the_item_cap_inside_a_clip_turn() {
+        // A request of four clips arrives behind a recording, with whole
+        // requests on and an item cap of 2. The clip turn after the
+        // recording keeps the item cap (point 6). With nothing flagged
+        // pending and no turn under way, the same request leaves whole.
+        let request = |seconds| LaneItem {
+            request: Some("four-clips"),
+            ..clip(seconds)
+        };
+        let mut lanes = Lanes::new(720_000);
+        lanes.inner.config.max_batch_requests = 2;
+        lanes.inner.config.max_request_items = 64;
+        lanes.arrive(long_form(60), "recording", 0);
+        for (name, seconds) in [("a", 4), ("b", 3), ("c", 2), ("d", 1)] {
+            lanes.arrive(request(seconds), name, 1);
+        }
+        assert_eq!(lanes.take(), ["recording"]);
+        assert_eq!(lanes.take(), ["d", "c"]);
+        assert_eq!(lanes.take(), ["b", "a"]);
+
+        let mut lanes = Lanes::new(720_000);
+        lanes.inner.config.max_batch_requests = 2;
+        lanes.inner.config.max_request_items = 64;
+        for (name, seconds) in [("a", 4), ("b", 3), ("c", 2), ("d", 1)] {
+            lanes.arrive(request(seconds), name, 1);
+        }
+        assert_eq!(lanes.take(), ["d", "c", "b", "a"]);
     }
 
     #[test]

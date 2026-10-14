@@ -15,6 +15,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def released_bytes(value: object) -> int:
+    """Normalize a ``release_optional_memory`` count. A bool is not a byte count.
+
+    ``bool`` is a subclass of ``int``, so ``True`` would otherwise count as one
+    byte. Non-integers and non-positive values release nothing.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return 0
+    return value
+
+
 class ModelCapabilities(BaseModel):
     """Capabilities supported by a model adapter."""
 
@@ -60,6 +71,13 @@ class ModelAdapter(ABC):
 
         Non-PyTorch adapters (e.g., SGLang) should use their own cleanup
         mechanism (e.g., engine.shutdown()) that fully releases memory.
+
+        Replay caches such as CUDA graphs are not weights. They keep device
+        memory that ``gc.collect()`` and ``empty_cache()`` cannot reclaim
+        while the graphs are alive. ``release_optional_memory()`` drops those
+        caches without unloading the model. The default returns 0.
+        ``has_releasable_memory()`` is the cheap check callers use first, so
+        an adapter with nothing cached is never locked just to free 0 bytes.
 
     Main Thread Requirement:
         Some adapters may use parent-process signal handlers that only work in
@@ -228,6 +246,33 @@ class ModelAdapter(ABC):
         """
         _ = (device_type, device_total_bytes)
         return None
+
+    def has_releasable_memory(self) -> bool:
+        """Whether ``release_optional_memory`` would drop anything.
+
+        Lock-free and cheap: the memory monitor calls it on every tick and
+        must not take the inference lock when this is false. The default is
+        false, including SGLang and every other adapter whose release is a
+        no-op.
+
+        Returns:
+            True only when a later ``release_optional_memory`` can free memory.
+        """
+        return False
+
+    def release_optional_memory(self) -> int:
+        """Release device memory that can be dropped without unloading weights.
+
+        Called under memory pressure and during OOM recovery, before a model
+        is evicted. Callers ask ``has_releasable_memory`` first and skip this
+        when it is false. Adapters with nothing to release must return 0 so
+        callers still evict when pressure remains. Must not require a GPU when
+        the adapter has nothing cached.
+
+        Returns:
+            Best-effort count of bytes released. Zero means nothing was released.
+        """
+        return 0
 
     def engine_exit_code(self) -> int | None:
         """Return the exit code of this adapter's engine process once it has exited.

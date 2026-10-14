@@ -788,6 +788,8 @@ class ChatMessage(TypedDict, total=False):
     for vision-capable generation models, base64 ``data:`` image parts);
     ``tool_calls`` / ``tool_call_id`` are honoured on the multi-turn tool-replay
     path. See the gateway schema for the canonical accepted subset.
+    ``reasoning_content`` is the model's reasoning on a response message,
+    present only when the request set ``include_reasoning``.
     """
 
     role: ChatRole
@@ -795,6 +797,7 @@ class ChatMessage(TypedDict, total=False):
     name: str
     tool_call_id: str
     tool_calls: list[dict[str, Any]]
+    reasoning_content: str
 
 
 class ChatUsage(TypedDict):
@@ -830,11 +833,16 @@ class ChatCompletion(TypedDict, total=False):
 
 
 class ChatDelta(TypedDict, total=False):
-    """Incremental delta emitted on each streaming chunk."""
+    """Incremental delta emitted on each streaming chunk.
+
+    ``reasoning_content`` carries the model's reasoning, present only when
+    the request set ``include_reasoning``.
+    """
 
     role: str
     content: str
     tool_calls: list[dict[str, Any]]
+    reasoning_content: str
 
 
 class ChatChunkChoice(TypedDict, total=False):

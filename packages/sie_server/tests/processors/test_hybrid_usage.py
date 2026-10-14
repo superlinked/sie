@@ -410,3 +410,19 @@ async def test_cancellation_closes_the_counted_upstream_chat(hybrid: tuple) -> N
     assert chunks[-1]["finish_reason"] == "cancelled"
     assert "usage" not in chunks[-1]
     assert stream.closed
+
+
+async def test_keep_reasoning_counts_it_and_leaves_it_on_the_chunks() -> None:
+    source = _Chunks(
+        [
+            GenerationChunk(text_delta="", reasoning_delta="think one two "),
+            GenerationChunk(text_delta="answer here", is_first=True),
+            _terminal(),
+        ]
+    )
+
+    out = [chunk async for chunk in count_hybrid_usage(source, _count(), keep_reasoning=True)]
+
+    assert [chunk.reasoning_delta for chunk in out] == ["think one two ", "", ""]
+    assert [chunk.text_delta for chunk in out] == ["", "answer here", ""]
+    assert out[-1].completion_tokens == 5

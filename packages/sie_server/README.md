@@ -201,7 +201,7 @@ labels, so one graph serves every label count.
 |--|--|--|
 | `off` (default) | none | eager |
 | `exact` | each (batch size, sequence length) seen twice; the 64 most recently used are kept | bit-identical to eager |
-| `bucketed` | sequence lengths padded up to a multiple of 64 tokens at a 1,024-token window (32 at 512), batch sizes up to a power of two: a fixed set of shapes, all kept | padding moves fp16 probabilities (see below) |
+| `bucketed` | sequence lengths padded up to a multiple of 64 tokens at a 1,024-token window (32 at 512); batches of up to eight rows keep their size, larger ones pad up to a power of two: a fixed set of shapes, all kept | padding moves fp16 probabilities (see below) |
 
 A request can send `options={"cuda_graphs": "off"}` to run eagerly on a model
 loaded with graphs. It cannot turn graphs on: any other value is refused.
@@ -263,12 +263,24 @@ the instruction set:
 A top label that changed did so in every pass; the table counts each answer
 once.
 
-Requests of several items pad their batch as well (3 items to 4, 5 to 8). Asked
-in 3- and 5-item requests and compared with eager execution of the same
-requests, the eight models that ship with graphs moved no probability by more
-than 0.0190 (`opir-multitask-large-v1.0`) and 0.0115 for every other model,
-and every top label that changed had an eager margin below the model's
-δ_eager.
+Requests of up to eight rows run at their own batch size, so only their length
+is padded; a forward of nine rows or more pads up to a power of two (9 rows to
+16) or to the largest batch the token bound allows at its length. A request of
+three questions as separate groups is three rows. The table above was measured
+when a batch padded up to a power of two (3 rows to 4, 5 to 8). With batches of
+up to eight rows keeping their size, the 384 CVE descriptions were asked again
+in 1-, 3-, 5- and 8-item requests with the weakness question's eight labels,
+and as three questions in separate groups, and compared with eager execution of
+the same requests: the eight models that ship with graphs moved no probability
+by more than 0.0127 (`opir-multitask-large-v1.0`, three questions) and 0.0098
+for every other model, and every top label that changed had an eager margin
+below the model's δ_eager (the largest was 0.0056, on
+`gliclass-instruct-base-v1.0`). Eight CVE descriptions in one batch are over
+the token bound of the DeBERTa-v3-large models and run eagerly, so the
+eight-row shapes of those four models were checked on requests of eight short
+news texts with eight labels instead: against eager execution no probability
+moved by more than 0.0083, and no top label changed. One-row forwards replay
+the same shapes as before.
 
 `exact` changed nothing. A forward whose batch size is already a bucket (one
 item, for example) scores exactly as it did before batches were padded.
@@ -294,11 +306,25 @@ Larger forwards are bound by the GPU rather than by kernel launches and run
 eagerly: on an L4, a `gliclass-large-v1.0` forward stops gaining from a graph
 at about 1,000 tokens, a `gliclass-base-v1.0` forward at about 2,000. In
 `bucketed` mode at the 1,024-token window that leaves a fixed set of shapes,
-33 for the DeBERTa-v3-large models and 52 for the base and small ones (52 and
-71 at a 512-token window), and the model keeps a graph for every one. Once
+48 for the DeBERTa-v3-large models and 84 for the base and small ones (84 and
+136 at a 512-token window), and the model keeps a graph for every one. Once
 they are recorded, every forward under the token bound replays a graph,
 whatever mix of label counts, batch sizes and lengths the traffic has, and no
 request's shapes push out another's.
+
+**Padding costs GPU time.** A replay is not bound by kernel launches, so it
+costs the GPU time of its padded shape, which grows with the tokens in it. On
+an L4, `gliclass-instruct-large-v1.0` replays three rows of 192 tokens in
+19 ms and four rows in 24 ms; eight rows of 96 tokens in 21 ms and eight rows
+of 128 tokens in 31 ms. So two paddings are kept small. A batch of up to eight
+rows keeps its size instead of padding up to a power of two. And a forward of
+eight rows or more, where short texts are bound by the GPU, buckets its length
+at half the width (32 tokens at a 1,024-token window, 16 at 512), unless the
+window's bucket pads fewer tokens. In process on an L4, eight short texts per
+request went from 31.8 to 23.3 ms on `gliclass-instruct-large-v1.0` and from
+12.4 to 11.2 ms on `gliclass-base-v3.0`, and three questions about one record
+from 25.8 to 21.3 ms and from 11.2 to 8.9 ms; one text per request did not
+change (7.8 and 3.6 ms).
 
 Nothing is recorded at load. A shape is recorded the first time a request
 needs it (the second time in `exact` mode), and the new graph's first replay
@@ -315,13 +341,16 @@ into one shared buffer, and the driver keeps a copy of each graph: about 7 MB
 for the `gliclass-large-v1.0` encoder. The runner adds up the device memory
 its graphs hold (what each recording took, plus the tables and buffers they
 read) against 4% of the device's memory (900 MB on an L4). On an L4, at the
-1,024-token window, all of a model's `bucketed` shapes took 551 to 571 MB for
-the large GLiClass models, 677 MB for `opir-multitask-large-v1.0`, 761 to
-767 MB for the base models and 653 MB for `gliclass-small-v1.0`, plus about
-150 MB cached on the recording stream (its cuBLAS workspace and one warm-up
-row). Recorded while serving mixed traffic, the same shapes can take more, and
-at the 1,024-token window the budget can fill with one to three shapes left
-unrecorded; those shapes run eagerly. On a smaller GPU, where the shapes do not
+1,024-token window, all of a model's `bucketed` shapes, recorded largest
+first, took 743 to 777 MB for the large GLiClass models, 777 MB for
+`opir-multitask-large-v1.0`, 760 to 834 MB for the base models and 578 MB for
+`gliclass-small-v1.0`, plus about 150 MB cached on the recording stream (its
+cuBLAS workspace and one warm-up row). Recorded in another order, the same
+shapes take more, because the shared pool grows in steps: recorded smallest
+first, the budget fills with the largest shapes of each batch size left
+unrecorded (9 of 48 on `gliclass-instruct-large-v1.0`, 19 of 84 on
+`gliclass-base-v3.0`). Those are the shapes a graph gains least on, and they
+run eagerly. On a smaller GPU, where the shapes do not
 all fit, recording stops at the budget and the graphs already recorded keep
 replaying; the other shapes run eagerly. In `exact` mode, whose shapes are
 unbounded, a model past its budget drops every graph, returns their memory to
@@ -797,6 +826,209 @@ Against a float32 reference of each checkpoint, on the SciFact sets of the
 graphs comparison, it is at least as accurate as the unfused rotation for
 `modernbert-embed-base`, `Reason-ModernColBERT` and `mLateOn`, and their
 profiles enable it. The other models load without it.
+
+### Laya CUDA graphs
+
+The Laya adapter answers typed questions with one encoder row per (state,
+question) pair. One state with a few questions is a forward of a few rows, and
+kernel launches, not the GPU, bound it: on an L4, a request of four rows and
+710 tokens launches 680 to 860 kernels and keeps the GPU busy for 7 ms of a
+22 ms forward on `laya-multilingual`, and for 17 ms of 28 on `laya`. The
+adapter takes the load-time option the ModernBERT flash adapters have, and
+records its encoder with the same runner:
+
+```yaml
+profiles:
+  graphs:
+    extends: default
+    adapter_options:
+      loadtime:
+        cuda_graphs: bucketed
+```
+
+With it, a request whose rows hold at most 2,048 packed tokens replays the
+encoder as one graph, and the decision head runs eagerly on the result. On
+encoders wider than 768 the bound is 1,024 tokens. A larger request runs
+eagerly as before: the GPU bounds it, and padding it to a graph's bucket costs
+more than the launches save.
+
+The three shipped checkpoints offer graphs as a second profile. Request
+`convaiinnovations/laya:graphs`, `convaiinnovations/laya-typed-decisions:graphs`
+or `convaiinnovations/laya-multilingual:graphs` in place of the model; the
+default profile runs eagerly.
+
+Speed on an NVIDIA L4 with 8 vCPUs: the forward of rows that are already
+tokenized, eager and from a graph in one process, median of 15. One state is
+a 118-word email with four questions:
+
+| Model | 1 state: 4 rows, 710 tokens | 2 states: 8 rows, 1,420 tokens | 3 states: 12 rows, 2,130 tokens |
+|--|--|--|--|
+| `laya` | 29.0 → 23.2 ms | eager (39.6 ms) | eager |
+| `laya-typed-decisions` | 28.3 → 23.3 ms | eager (39.7 ms) | eager |
+| `laya-multilingual` | 21.8 → 9.3 ms | 23.1 → 17.8 ms | eager (24.4 ms) |
+
+On the 1,024-wide checkpoints a graph at 1,416 tokens took 40.0 ms against
+39.6 ms eagerly, which is where their bound comes from.
+
+**Why graphs are not the default profile.** Padding to a bucket changes how
+many rows a matrix multiply sees, so probabilities move by rounding. We sent
+240 public texts with six questions each, one state per request, through a
+graph and eagerly (1,440 answers per model), and measured the eager path's own
+batching noise the same way: each state alone against the same state in a
+request of eight.
+
+| Model | Graphs: largest probability change | Graphs: top answers changed (largest eager margin) | Eager batching: largest probability change | Eager batching: top answers changed |
+|--|--|--|--|--|
+| `laya` | 0.091 | 4 (0.008) | 0.130 | 11 |
+| `laya-typed-decisions` | 0.050 | 7 (0.008) | 0.079 | 13 |
+| `laya-multilingual` | 0.034 | 3 (0.014) | 0.052 | 5 |
+
+Graphs meet the second condition of the rule a speed-up ships enabled under
+(see "When a speed-up ships enabled" above): every answer they change had an
+eager margin far below the eager path's batching noise, and they move
+probabilities less than sharing a request does. They do not meet the first, a
+change of at most 0.02. Laya computes in bfloat16 through 22 or 28 layers, and
+the adapter's eager answers already move by more than that with what else is
+in the forward. So the default profiles stay
+eager, and the `graphs` profile is there for callers who want the one-state
+latency. Against a float32 forward of the reference package, the top answer
+agrees on 1,427, 1,427 and 1,430 of the 1,440 rows from a graph, on 1,429,
+1,431 and 1,433 eagerly with all rows in one call, and on 1,426, 1,428 and
+1,433 from the package's own bfloat16 autocast.
+
+**Forward size.** Rows run longest first in forwards of at most
+`max_forward_tokens` padded tokens, a load-time option that stays at 16,384.
+Called directly with 128 rows of up to 233 tokens (32 states with four
+questions), the adapter takes 353, 353 and 139 ms at 4,096 on the three
+models above, against 400, 399 and 154 ms at 16,384. Behind the server that
+gain does not show: the server hands the adapter a 32-state request in
+smaller calls already. Behind the sidecar, with 4,096, the same request took
+371.5 against 372.5 ms and 370.6 against 374.5 ms on the 1,024-wide
+checkpoints, and 162.6 against 155.7 ms on `laya-multilingual`.
+
+**Fused rotary embedding.** The adapter also takes `fused_rope` (above). It
+took 7 to 10% off 128-row requests, and no shipped profile enables it: with
+it, agreement with the float32 reference was lower on two checkpoints with
+all rows in one call (1,424 and 1,426 of 1,440, against 1,429 and 1,431).
+
+The measurements, with their scripts, are in
+[superlinked/sie-task-evidence](https://huggingface.co/datasets/superlinked/sie-task-evidence/tree/main/blog-laya-on-sie/2026-10-13b).
+
+### Qwen3 reranker serving options
+
+`Qwen/Qwen3-Reranker-4B` and `Qwen/Qwen3-Reranker-0.6B` run on
+`qwen2_flash_cross_encoder`: flash attention over unpadded rows, and an output
+head cut down to the `yes` and `no` rows. A request's documents are tokenized
+in one call. Three load-time options take out what that leaves. The default
+profile turns on the one that leaves scores unchanged, and a profile named
+`fast` (`Qwen/Qwen3-Reranker-4B:fast`) turns on all three:
+
+```yaml
+profiles:
+  default:
+    adapter_options:
+      loadtime:
+        fused_kernels: true
+  fast:
+    extends: default
+    adapter_options:
+      loadtime:
+        fused_kernels: true
+        prefix_reuse: true
+        prefix_cache_mb: 512
+        cuda_graphs: bucketed
+        cuda_graph_tokens: 512
+```
+
+**`fused_kernels`.** Each layer's residual add and RMSNorm, q/k-norm, rotary
+embedding and `silu(gate) * up` run as the Triton kernels of the Qwen3
+embedding adapter (`qwen2_flash/_fused_layers.py`). They round where the
+eager operations round, so scores are the same bit for bit. A model the
+kernels cannot run (no Triton, or an MLP that is not SiLU-gated) logs a
+warning and keeps the eager layers.
+
+**`prefix_reuse`.** Every row a reranker scores starts with the same tokens
+for one query: the chat template, the instruction and the query. Attention is
+causal, so those tokens have the same states in every row. With the option,
+a forward encodes each distinct prefix once and each row's document once, and
+a row attends to its prefix's keys and values (`flash_attn_varlen_func` takes
+keys with their own lengths, and aligns the causal mask to the bottom right).
+For a question with 20 candidates that removes 19 copies of the prefix: 39%
+of the tokens on the requests measured below. The rows are metered whole:
+token counts do not change.
+
+A prefix that comes back is kept across requests. That is the shape of a
+yes-or-no decision: the question and its rules as the query, one message as
+the document, the same prefix on every request. The second request with a
+prefix stores its keys and values per layer, and later requests encode only
+the message. The cache holds at most `prefix_cache_mb` of device memory (512
+by default; `0` shares a prefix inside a forward only) and at most 64
+prefixes, and drops the least recently used. One cached token takes 147 KB
+for the 4B and 115 KB for the 0.6B, so a 145-token question takes 21 MB and
+17 MB. A forward that runs out of memory drops the cache. The option applies
+to the `qwen3` input format.
+
+**`cuda_graphs: bucketed`.** A one-message request is small enough that the
+GPU waits on the host launching 1,500 to 2,000 kernels. With the option, one row
+over a cached prefix replays as a CUDA graph through the runner of the
+ModernBERT graphs above: the tail (document and closing tokens) padded to
+64, 128 and so on up to `cuda_graph_tokens`, with the graph reading the
+cached keys and values in place. Without `cuda_graph_tokens` the bound is 512
+tokens for a model up to 1,024 wide and 128 wider, sized for an L4; the
+`fast` profile sets 512 for both models, which an H100 or an RTX PRO 6000
+gains from on requests of 130 to 500 tokens (mean latency 11% to 24% lower on
+a set with a median of 98 tokens) and which cost an L4 under 2% on the same
+set. Longer tails, requests with several rows, and prefixes not yet cached
+run eagerly. Up to 8 prefixes hold graphs at once,
+within the memory one model's graphs may take (4% of the device), and a
+prefix's graphs go when the cache drops it. Graphs need `prefix_reuse`.
+
+Median latency of one request, one in flight, through the Rust sidecar with
+the client in the server's container (three runs each, main next to the
+change in one container). Rerank is one question with 20 candidates, about
+4,600 tokens; a decision is one message after a 145-token yes-or-no question:
+
+| Model | GPU | Rerank: before → default → `fast` options | Decision: before → default → `fast` options |
+|--|--|--|--|
+| `Qwen3-Reranker-4B` | H100 | 103.8 → 77.7 → 54.2 ms | 23.6 → 24.8 → 8.0 ms |
+| `Qwen3-Reranker-4B` | RTX PRO 6000 | 140.0 → 120.1 → 88.2 ms | 23.5 → 23.2 → 11.1 ms |
+| `Qwen3-Reranker-4B` | L4 | 952 → 761 → 480 ms | 56.7 → 53.6 → 40.5 ms |
+| `Qwen3-Reranker-0.6B` | H100 | 36.1 → 24.1 → 21.2 ms | 15.9 → 14.2 → 4.3 ms |
+| `Qwen3-Reranker-0.6B` | L4 | 179 → 131 → 85 ms | 28.6 → 28.8 → 8.4 ms |
+
+Rerank throughput at 16 requests in flight goes from 44,600 to 60,500 to
+90,100 tokens per second for the 4B on an H100, and from 4,800 to 6,000 to
+9,800 on an L4. The fused kernels pay where the GPU is the bottleneck
+(rerank), graphs where the host is (one message), and the shared prefix on
+both. For the 4B on an L4 a one-message request cannot go below about 30 ms:
+one forward reads the model's 8 GB of weights.
+
+**Why `fast` is a profile and not the default.** A shared prefix and a graph
+change how many rows a matrix multiply sees, so scores move by floating-point
+rounding. On the same requests, against the default profile:
+
+| Model | GPU | Rerank: questions of 499 with the same top candidate (largest score change) | One message: largest score change |
+|--|--|--|--|
+| `Qwen3-Reranker-4B` | H100 | 499, every score bit-equal | 0.036 |
+| `Qwen3-Reranker-0.6B` | H100 | 499, every score bit-equal | 0.039 |
+| `Qwen3-Reranker-4B` | RTX PRO 6000 | 498 (0.064); the other had a margin of 0.00009 | 0.041 |
+| `Qwen3-Reranker-4B` | L4 | 60 of 60 (0.074) | 0.055 |
+| `Qwen3-Reranker-0.6B` | L4 | 196 of 200 (0.120); margins up to 0.0036 | 0.066 |
+
+The default profile moves too. Scoring a pair alone or among its question's
+20 candidates changes its score by up to 0.019 for the 4B on an H100
+(0.000002 for the 0.6B), and by up to 0.097 and 0.144 on an L4, where the
+0.6B's top candidate changes in 3 of 60 questions. Against a float32 forward
+of each checkpoint the default profile is off by up to 0.167 on rerank and
+0.083 on one-message requests, 0.0005 to 0.0044 on average, and the `fast`
+options by about as much: an average within a tenth of the default profile's
+on rerank and the decision questions on every GPU (up to half again as large
+on longer one-message requests on an L4), and a largest difference that is
+larger on some request sets and smaller on others. So `fast` is as close
+to the model as the default profile is, without meeting the rule above ("When
+a speed-up ships enabled") on every request set and GPU: some scores move by
+more than 0.02, and the comparison against float32 goes either way. It ships
+as a profile an operator chooses.
 
 ## Configuration
 

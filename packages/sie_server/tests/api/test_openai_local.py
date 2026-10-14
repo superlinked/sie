@@ -422,6 +422,299 @@ def test_mlx_chat_rejects_child_process_controls_before_model_load(
     registry.get.assert_not_called()
 
 
+_WEATHER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+    },
+}
+_PARIS_CALL = {
+    "id": "call_paris",
+    "type": "function",
+    "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'},
+}
+_TOKYO_CALL = {
+    "id": "call_tokyo",
+    "type": "function",
+    "function": {"name": "get_weather", "arguments": '{"city": "Tokyo"}'},
+}
+_AFTER_A_TOOL_TURN = [
+    {"role": "user", "content": "Weather in Paris?"},
+    {"role": "assistant", "content": None, "tool_calls": [_PARIS_CALL]},
+    {"role": "tool", "tool_call_id": "call_paris", "content": "18C, clear"},
+    {"role": "user", "content": "And in Tokyo?"},
+]
+
+
+def _mlx_tool_call_stream(*calls: dict[str, Any]) -> _ChunkedAsyncStream:
+    """An mlx_lm.server chat stream: one delta per completed call, then the finish event."""
+    events = [
+        {
+            "id": "chatcmpl-mlx",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "mlx-community/Qwen3.5-4B-4bit",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": None,
+                    "delta": {"role": "assistant", "tool_calls": [{**call, "index": i}]},
+                }
+            ],
+        }
+        for i, call in enumerate(calls)
+    ]
+    events.append(
+        {
+            "id": "chatcmpl-mlx",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "mlx-community/Qwen3.5-4B-4bit",
+            "choices": [{"index": 0, "finish_reason": "tool_calls", "delta": {"role": "assistant"}}],
+        }
+    )
+    return _ChunkedAsyncStream([f"data: {json.dumps(event)}\n\n".encode() for event in events] + [b"data: [DONE]\n\n"])
+
+
+def _sse_events(response_text: str) -> list[dict[str, Any]]:
+    lines = [line.removeprefix("data: ") for line in response_text.splitlines() if line.startswith("data: ")]
+    assert lines[-1] == "[DONE]"
+    return [json.loads(line) for line in lines[:-1]]
+
+
+@pytest.mark.parametrize(
+    "tool_fields",
+    [
+        {"tool_choice": "auto"},
+        {"tool_choice": "auto", "parallel_tool_calls": True},
+        {"parallel_tool_calls": True},
+    ],
+)
+def test_mlx_chat_accepts_auto_tool_choice_and_returns_every_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_fields: dict[str, Any],
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200, json=_chat_completion(None, finish_reason="tool_calls", tool_calls=[_PARIS_CALL, _TOKYO_CALL])
+        )
+
+    client, _ = _mlx_chat_client(monkeypatch, _handler, chat_template_kwargs={"enable_thinking": False})
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3.5-4B",
+            "messages": [{"role": "user", "content": "Weather in Paris and Tokyo?"}],
+            "tools": [_WEATHER_TOOL],
+            **tool_fields,
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen["body"]["tools"] == [_WEATHER_TOOL]
+    assert "tool_choice" not in seen["body"]
+    assert "parallel_tool_calls" not in seen["body"]
+    completion = ChatCompletion.model_validate(response.json())
+    assert completion.choices[0].finish_reason == "tool_calls"
+    assert [call.id for call in completion.choices[0].message.tool_calls or []] == ["call_paris", "call_tokyo"]
+
+
+def test_mlx_chat_streams_every_tool_call_under_auto(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+    upstream_stream = _mlx_tool_call_stream(_PARIS_CALL, _TOKYO_CALL)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, stream=upstream_stream, headers={"content-type": "text/event-stream"})
+
+    client, _ = _mlx_chat_client(monkeypatch, _handler, chat_template_kwargs={"enable_thinking": False})
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3.5-4B",
+            "messages": [{"role": "user", "content": "Weather in Paris and Tokyo?"}],
+            "tools": [_WEATHER_TOOL],
+            "tool_choice": "auto",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen["body"]["tools"] == [_WEATHER_TOOL]
+    assert "tool_choice" not in seen["body"]
+    chunks = [ChatCompletionChunk.model_validate(event) for event in _sse_events(response.text)]
+    streamed = [call for chunk in chunks for call in chunk.choices[0].delta.tool_calls or []]
+    assert [(call.index, call.id) for call in streamed] == [(0, "call_paris"), (1, "call_tokyo")]
+    assert chunks[-1].choices[0].finish_reason == "tool_calls"
+    assert upstream_stream.closed is True
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_mlx_chat_parallel_tool_calls_false_returns_a_single_call(
+    monkeypatch: pytest.MonkeyPatch, stream: bool
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        if stream:
+            return httpx.Response(
+                200, stream=_mlx_tool_call_stream(_PARIS_CALL), headers={"content-type": "text/event-stream"}
+            )
+        return httpx.Response(200, json=_chat_completion(None, finish_reason="tool_calls", tool_calls=[_PARIS_CALL]))
+
+    client, _ = _mlx_chat_client(monkeypatch, _handler, chat_template_kwargs={"enable_thinking": False})
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3.5-4B",
+            "messages": [{"role": "user", "content": "Weather in Paris?"}],
+            "tools": [_WEATHER_TOOL],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+            "stream": stream,
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen["body"]["tools"] == [_WEATHER_TOOL]
+    assert "parallel_tool_calls" not in seen["body"]
+    if stream:
+        events = _sse_events(response.text)
+        assert [call["id"] for event in events for call in event["choices"][0]["delta"].get("tool_calls", [])] == [
+            "call_paris"
+        ]
+        assert events[-1]["choices"][0]["finish_reason"] == "tool_calls"
+    else:
+        assert [call["id"] for call in response.json()["choices"][0]["message"]["tool_calls"]] == ["call_paris"]
+
+
+def test_mlx_chat_tool_choice_none_withholds_tools_from_the_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json=_chat_completion("It is sunny."))
+
+    client, _ = _mlx_chat_client(monkeypatch, _handler, chat_template_kwargs={"enable_thinking": False})
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3.5-4B",
+            "messages": [{"role": "user", "content": "Weather in Paris?"}],
+            "tools": [_WEATHER_TOOL],
+            "tool_choice": "none",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "tools" not in seen["body"]
+    assert "tool_choice" not in seen["body"]
+    assert response.json()["choices"][0]["message"]["content"] == "It is sunny."
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("tool_fields", "calls", "delivered", "message"),
+    [
+        (
+            {"tools": [_WEATHER_TOOL], "parallel_tool_calls": False},
+            [_PARIS_CALL, _TOKYO_CALL],
+            ["call_paris"],
+            "generation child returned more than one tool call with parallel_tool_calls=false",
+        ),
+        (
+            {"tools": [_WEATHER_TOOL], "tool_choice": "none"},
+            [_TOKYO_CALL],
+            [],
+            "generation child returned a tool call the request did not offer",
+        ),
+        (
+            {},
+            [_TOKYO_CALL],
+            [],
+            "generation child returned a tool call the request did not offer",
+        ),
+    ],
+    ids=["parallel_tool_calls_false", "tool_choice_none", "no_tools"],
+)
+def test_mlx_chat_fails_closed_on_tool_calls_the_request_ruled_out(
+    monkeypatch: pytest.MonkeyPatch,
+    stream: bool,
+    tool_fields: dict[str, Any],
+    calls: list[dict[str, Any]],
+    delivered: list[str],
+    message: str,
+) -> None:
+    upstream_stream = _mlx_tool_call_stream(*calls)
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        if stream:
+            return httpx.Response(200, stream=upstream_stream, headers={"content-type": "text/event-stream"})
+        return httpx.Response(200, json=_chat_completion(None, finish_reason="tool_calls", tool_calls=calls))
+
+    client, _ = _mlx_chat_client(monkeypatch, _handler, chat_template_kwargs={"enable_thinking": False})
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "Qwen/Qwen3.5-4B", "messages": _AFTER_A_TOOL_TURN, "stream": stream, **tool_fields},
+    )
+
+    error = {"error": {"message": message, "type": "upstream_error", "param": None, "code": "upstream_error"}}
+    if not stream:
+        assert response.status_code == 502
+        assert response.json() == error
+        return
+    assert response.status_code == 200
+    events = _sse_events(response.text)
+    assert events[-1] == error
+    streamed = [call["id"] for event in events[:-1] for call in event["choices"][0]["delta"].get("tool_calls", [])]
+    assert streamed == delivered
+    assert all(event["choices"][0]["finish_reason"] is None for event in events[:-1])
+    assert upstream_stream.closed is True
+
+
+@pytest.mark.parametrize("device", ["mps", "cpu"])
+@pytest.mark.parametrize(
+    "tool_choice",
+    ["required", {"type": "function", "function": {"name": "get_weather"}}],
+)
+def test_mlx_chat_refuses_a_forced_tool_choice_before_model_load(
+    monkeypatch: pytest.MonkeyPatch,
+    device: str,
+    tool_choice: Any,
+) -> None:
+    client, registry = _mlx_chat_client(
+        monkeypatch,
+        lambda _request: pytest.fail("refused request must not reach upstream"),
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    registry.device = device
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3.5-4B",
+            "messages": [{"role": "user", "content": "Weather in Paris?"}],
+            "tools": [_WEATHER_TOOL],
+            "tool_choice": tool_choice,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == {
+        "code": "unsupported_field",
+        "message": "'tool_choice' must be 'auto' or 'none' on this device, which cannot force a tool call",
+        "param": "tool_choice",
+        "type": "invalid_request_error",
+    }
+    registry.is_loaded.assert_not_called()
+    registry.get.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("chat_template_kwargs", "code"),
     [
@@ -1816,3 +2109,312 @@ def test_cuda_chat_response_format_without_its_grammar_profile_is_rejected(monke
     assert error["param"] == "response_format"
     assert "'no-spec'" in error["message"]
     registry.get.assert_not_called()
+
+
+# -- /v1/chat/completions include_reasoning ---------------------------------
+
+
+def _reasoning_child_payload(content: str, *, reasoning_content: str | None = None) -> dict[str, Any]:
+    message: dict[str, Any] = {"role": "assistant", "content": content}
+    if reasoning_content is not None:
+        message["reasoning_content"] = reasoning_content
+    return {
+        "id": "chatcmpl-test",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "upstream-served-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": message,
+                "logprobs": {"content": [{"token": "Visible", "logprob": -0.1, "bytes": None, "top_logprobs": []}]},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+    }
+
+
+def _stream_event(delta: dict[str, Any], *, finish_reason: str | None = None) -> dict[str, Any]:
+    return {
+        "id": "chatcmpl-stream",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": "upstream-served-model",
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+    }
+
+
+@pytest.mark.parametrize(
+    ("declares_reasoning", "include_reasoning", "expected"),
+    [(True, True, "private chain"), (True, False, None), (False, True, None)],
+)
+def test_cuda_chat_blocking_publishes_parser_reasoning_only_when_asked(
+    monkeypatch: pytest.MonkeyPatch, declares_reasoning: bool, include_reasoning: bool, expected: str | None
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json=_reasoning_child_payload("Visible answer", reasoning_content="private chain"))
+
+    client, _ = _cuda_chat_client(
+        monkeypatch,
+        _handler,
+        reasoning_parser="qwen3",
+        chat_template_kwargs={"enable_thinking": True} if declares_reasoning else {},
+    )
+    body: dict[str, Any] = {"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "user", "content": "Hello"}]}
+    if include_reasoning:
+        body["include_reasoning"] = True
+
+    response = client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    assert "include_reasoning" not in seen["body"]
+    payload = response.json()
+    assert payload["choices"][0]["message"]["content"] == "Visible answer"
+    assert payload["choices"][0]["message"].get("reasoning_content") == expected
+    assert payload["choices"][0]["logprobs"] is None
+    assert payload["usage"]["completion_tokens"] == 4
+
+
+@pytest.mark.parametrize("parser", [False, True])
+def test_cuda_chat_stream_publishes_split_reasoning_when_asked(monkeypatch: pytest.MonkeyPatch, parser: bool) -> None:
+    reasoning_deltas = (
+        [
+            _stream_event({"reasoning_content": "private ", "content": ""}),
+            _stream_event({"reasoning_content": "chain"}),
+            _stream_event({"content": "Visible answer"}),
+        ]
+        if parser
+        else [
+            _stream_event({"content": "private chain</thi"}),
+            _stream_event({"content": "nk>Visible answer"}),
+        ]
+    )
+    events = [
+        _stream_event({"role": "assistant", "content": ""}),
+        *reasoning_deltas,
+        _stream_event({}, finish_reason="stop"),
+    ]
+    wire = b"".join(f"data: {json.dumps(event)}\n\n".encode() for event in events) + b"data: [DONE]\n\n"
+    upstream_stream = _ChunkedAsyncStream([wire[:37], wire[37:121], wire[121:]])
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=upstream_stream, headers={"content-type": "text/event-stream"})
+
+    client, _ = _cuda_chat_client(
+        monkeypatch,
+        _handler,
+        reasoning_parser="qwen3" if parser else None,
+        chat_template_kwargs={"enable_thinking": True},
+    )
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3-0.6B:thinking",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 8,
+            "stream": True,
+            "include_reasoning": True,
+        },
+    )
+
+    assert response.status_code == 200
+    data_lines = [line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: ")]
+    assert data_lines[-1] == "[DONE]"
+    deltas = [json.loads(line)["choices"][0]["delta"] for line in data_lines[:-1]]
+    assert "".join(delta.get("content", "") for delta in deltas) == "Visible answer"
+    assert "".join(delta.get("reasoning_content", "") for delta in deltas) == "private chain"
+    assert "</think>" not in response.text
+    assert upstream_stream.closed is True
+
+
+def test_mlx_chat_publishes_raw_tag_reasoning_when_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-mlx",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "mlx-community/Qwen3.5-4B-4bit",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "<think>private default reasoning</think>Visible answer",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 9, "total_tokens": 12},
+            },
+        )
+
+    client, _ = _mlx_chat_client(monkeypatch, _handler, chat_template_kwargs={"enable_thinking": False})
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3.5-4B",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "include_reasoning": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert "include_reasoning" not in seen["body"]
+    message = response.json()["choices"][0]["message"]
+    assert message["content"] == "Visible answer"
+    assert message["reasoning_content"] == "private default reasoning"
+
+
+def test_chat_rejects_a_non_boolean_include_reasoning(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, registry = _cuda_chat_client(monkeypatch, lambda _request: httpx.Response(500))
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "user", "content": "Hi"}], "include_reasoning": "yes"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["param"] == "include_reasoning"
+    registry.get.assert_not_called()
+
+
+def _sse_wire(events: list[dict[str, Any]]) -> bytes:
+    return b"".join(f"data: {json.dumps(event)}\n\n".encode() for event in events) + b"data: [DONE]\n\n"
+
+
+def _sse_deltas(response_text: str) -> list[dict[str, Any]]:
+    lines = [line.removeprefix("data: ") for line in response_text.splitlines() if line.startswith("data: ")]
+    assert lines[-1] == "[DONE]"
+    return [json.loads(line)["choices"][0]["delta"] for line in lines[:-1]]
+
+
+@pytest.mark.parametrize(
+    ("parsed", "content", "expected_reasoning", "expected_content"),
+    [
+        ("A", "x<think>B</think>y", "AB", "xy"),
+        ("same", "<think>same</think>answer", "same", "answer"),
+    ],
+)
+def test_cuda_chat_answers_parser_and_raw_tag_reasoning_without_losing_either(
+    monkeypatch: pytest.MonkeyPatch, parsed: str, content: str, expected_reasoning: str, expected_content: str
+) -> None:
+    client, _ = _cuda_chat_client(
+        monkeypatch,
+        lambda _request: httpx.Response(200, json=_reasoning_child_payload(content, reasoning_content=parsed)),
+        reasoning_parser="qwen3",
+        chat_template_kwargs={"enable_thinking": True},
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3-0.6B",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "include_reasoning": True,
+        },
+    )
+
+    assert response.status_code == 200
+    message = response.json()["choices"][0]["message"]
+    assert message["reasoning_content"] == expected_reasoning
+    assert message["content"] == expected_content
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_cuda_chat_with_tools_answers_reasoning_beside_the_calls(monkeypatch: pytest.MonkeyPatch, stream: bool) -> None:
+    call = {"id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": '{"q":"x"}'}}
+    seen: dict[str, Any] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        if not stream:
+            payload = _reasoning_child_payload("", reasoning_content="need a lookup")
+            payload["choices"][0]["message"].update(content=None, tool_calls=[call])
+            payload["choices"][0]["finish_reason"] = "tool_calls"
+            return httpx.Response(200, json=payload)
+        wire = _sse_wire(
+            [
+                _stream_event({"role": "assistant", "content": ""}),
+                _stream_event({"reasoning_content": "need a lookup"}),
+                _stream_event({"tool_calls": [{"index": 0, **call}]}),
+                _stream_event({}, finish_reason="tool_calls"),
+            ]
+        )
+        return httpx.Response(200, stream=_ChunkedAsyncStream([wire]), headers={"content-type": "text/event-stream"})
+
+    client, _ = _cuda_chat_client(
+        monkeypatch, _handler, reasoning_parser="qwen3", chat_template_kwargs={"enable_thinking": True}
+    )
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3-0.6B",
+            "messages": [{"role": "user", "content": "Look it up"}],
+            "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}],
+            "stream": stream,
+            "include_reasoning": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert "include_reasoning" not in seen["body"]
+    assert seen["body"]["tools"][0]["function"]["name"] == "lookup"
+    if stream:
+        deltas = _sse_deltas(response.text)
+        assert "".join(delta.get("reasoning_content", "") for delta in deltas) == "need a lookup"
+        assert [delta["tool_calls"][0]["function"]["name"] for delta in deltas if delta.get("tool_calls")] == ["lookup"]
+    else:
+        message = response.json()["choices"][0]["message"]
+        assert message["reasoning_content"] == "need a lookup"
+        assert message["tool_calls"][0]["function"] == call["function"]
+        assert response.json()["choices"][0]["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.parametrize("include_reasoning", [False, True])
+def test_mlx_chat_stream_publishes_raw_tag_reasoning_only_when_asked(
+    monkeypatch: pytest.MonkeyPatch, include_reasoning: bool
+) -> None:
+    wire = _sse_wire(
+        [
+            _stream_event({"role": "assistant", "content": ""}),
+            _stream_event({"content": "<think>private "}),
+            _stream_event({"content": "default reasoning</th"}),
+            _stream_event({"content": "ink>Visible answer"}),
+            _stream_event({}, finish_reason="stop"),
+        ]
+    )
+    seen: dict[str, Any] = {}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200, stream=_ChunkedAsyncStream([wire[:61], wire[61:]]), headers={"content-type": "text/event-stream"}
+        )
+
+    client, _ = _mlx_chat_client(monkeypatch, _handler, chat_template_kwargs={"enable_thinking": False})
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3.5-4B",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": True,
+            "include_reasoning": include_reasoning,
+        },
+    )
+
+    assert response.status_code == 200
+    assert "include_reasoning" not in seen["body"]
+    deltas = _sse_deltas(response.text)
+    assert "".join(delta.get("content", "") for delta in deltas) == "Visible answer"
+    reasoning = "".join(delta.get("reasoning_content", "") for delta in deltas)
+    assert reasoning == ("private default reasoning" if include_reasoning else "")
+    assert "<think>" not in response.text

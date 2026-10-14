@@ -37,11 +37,11 @@
 //! LoRA been waiting". A hot key therefore cannot retain the timestamp
 //! of already-dispatched work and repeatedly jump ahead of a sibling.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, Notify, RwLock};
 
@@ -50,6 +50,7 @@ use crate::latency::LatencyTracker;
 use super::adaptive::AdaptiveBatchController;
 use super::batch_config::{process_env, BatchConfig, EnvLookup};
 use super::batch_former::{BatchFormer, FormattedBatch, HasCost};
+use super::lane::{Lane, Verdict};
 use super::trackers::BatchEfficiencyTracker;
 
 /// Snapshot returned by [`Scheduler::record_completion`] for the
@@ -89,6 +90,19 @@ pub struct RecordCompletionOutcome {
     /// Size of the batch whose completion drove this step. Echoed
     /// back so callers don't have to re-thread it through.
     pub batch_size: usize,
+}
+
+/// A batch the lane released, from [`Scheduler::next_dispatch`].
+#[derive(Debug)]
+pub struct Dispatch<I: HasCost, T> {
+    pub op: Op,
+    pub lora: LoraKey,
+    pub batch: FormattedBatch<I, T>,
+    /// Requests this batch completes: those with no item left in the queue.
+    /// These are the callers that can come back when the batch returns; a
+    /// request cut by a cap is still waiting for its later batches. Pass it
+    /// to [`Scheduler::note_return`].
+    pub completes: usize,
 }
 
 /// Operation class of a submitted item.
@@ -201,10 +215,20 @@ pub struct Scheduler<I: HasCost, T> {
     /// Where the `SIE_ADAPTIVE_BATCH_*` overrides are read when the
     /// controller is derived from a budget, at build time and on re-base.
     env: EnvLookup,
-    /// Fired on every submit that inserts into a previously empty
-    /// batcher. [`Scheduler::consume_next`] uses this to wake its
-    /// FCFS scan without polling.
+    /// Fired on every submit, and on every batch return reported through
+    /// [`Scheduler::note_return`]. [`Scheduler::consume_next`] and
+    /// [`Scheduler::next_dispatch`] use this to wake without polling.
     new_item: Notify,
+    /// When the next batch leaves for the engine (see [`super::lane`]).
+    /// One lane for the whole scheduler: its queues share the engine. A
+    /// plain mutex, never held across an await.
+    lane: std::sync::Mutex<Lane>,
+    /// The coalesce window and the batch wait in microseconds, as the
+    /// lane's gather limits. They mirror `config` so
+    /// [`Scheduler::note_return`] can run from a drop guard without
+    /// awaiting the config lock.
+    gather_quiet_us: AtomicU64,
+    gather_longest_us: AtomicU64,
     /// Monotonic origin shared by per-batcher FCFS head timestamps so
     /// comparisons are unaffected by wall-clock jumps.
     epoch: Instant,
@@ -345,6 +369,7 @@ where
         let key = Self::route_key(op, lora);
         let entry = self.get_or_create(&key).await;
         entry.former.submit(item, metadata).await;
+        self.lane().on_arrival(Instant::now(), 1);
         self.new_item.notify_one();
     }
 
@@ -356,7 +381,9 @@ where
         }
         let key = Self::route_key(op, lora);
         let entry = self.get_or_create(&key).await;
+        let requests = distinct_requests(items.iter().map(|(item, _)| item));
         entry.former.submit_many(items).await;
+        self.lane().on_arrival(Instant::now(), requests);
         self.new_item.notify_one();
     }
 
@@ -384,6 +411,99 @@ where
             }
             notified.await;
         }
+    }
+
+    /// Block until the lane's rule says the next batch leaves, then return
+    /// it. This is the consume path of an engine that runs one batch at a
+    /// time; [`Self::consume_next`] and the drain calls below remain for
+    /// engines that batch by themselves and for the shutdown drain.
+    ///
+    /// The rule is [`super::lane`]'s: at once on an idle lane, held while a
+    /// batch is with the engine unless the pending work is already full,
+    /// and together after the batch returns. It is applied to the queue
+    /// whose head is oldest, as [`Self::consume_next`] picks it: fairness
+    /// across `(op, lora)` queues stays first come, first served, so a
+    /// younger queue's full batch waits behind an older queue's held one
+    /// rather than taking the free slot ahead of it. The caller must hold a free
+    /// pipeline slot, report every batch it got from here back through
+    /// [`Self::note_return`], and not mix this with the other consume
+    /// calls while such a batch is out.
+    ///
+    /// `idle_bypass = false` is the operator's choice to wait on an idle
+    /// lane: the classic triggers (caps, batch wait, coalesce window since
+    /// the last arrival) then decide there, as they always did.
+    pub async fn next_dispatch(&self, idle_bypass: bool) -> Dispatch<I, T> {
+        loop {
+            // Arm before reading any state: an arrival or a return between
+            // the read and the await leaves its permit here.
+            let notified = self.new_item.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            let Some(entry) = self.pick_oldest().await else {
+                notified.await;
+                continue;
+            };
+            let view = entry.former.gate_view().await;
+            let now = Instant::now();
+            let verdict = {
+                let mut lane = self.lane();
+                if !idle_bypass && view.full.is_none() && lane.is_idle(now) {
+                    match (view.classic, view.classic_wait) {
+                        (Some(reason), _) => Verdict::Send(reason),
+                        (None, Some(wait)) => now
+                            .checked_add(wait)
+                            .map_or(Verdict::Hold, Verdict::WaitUntil),
+                        (None, None) => Verdict::Hold,
+                    }
+                } else {
+                    lane.verdict(now, view.full)
+                }
+            };
+            match verdict {
+                Verdict::Send(reason) => {
+                    // Empty only if another consumer raced us to it.
+                    if let Some((batch, completes)) = entry.former.take(reason).await {
+                        self.lane().on_dispatch(batch.request_count() > completes);
+                        return Dispatch {
+                            op: entry.op,
+                            lora: entry.lora.clone(),
+                            batch,
+                            completes,
+                        };
+                    }
+                }
+                Verdict::WaitUntil(deadline) => {
+                    tokio::select! {
+                        biased;
+                        () = &mut notified => {}
+                        () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {}
+                    }
+                }
+                Verdict::Hold => notified.await,
+            }
+        }
+    }
+
+    /// Report that a batch returned by [`Self::next_dispatch`] is back from
+    /// the engine: it answered `answered` requests ([`Dispatch::completes`])
+    /// and was out for `round_trip`. Wakes the consumer, which may now send
+    /// what was held.
+    ///
+    /// Synchronous so the caller can report from a drop guard: a batch
+    /// that is never reported would hold the lane for good.
+    pub fn note_return(&self, answered: usize, round_trip: Duration) {
+        let quiet = Duration::from_micros(self.gather_quiet_us.load(Ordering::Acquire));
+        let longest = Duration::from_micros(self.gather_longest_us.load(Ordering::Acquire));
+        self.lane()
+            .on_return(Instant::now(), answered, round_trip, quiet, longest);
+        self.new_item.notify_one();
+    }
+
+    /// Whether a returned batch is currently followed by a gather. For
+    /// logs and tests.
+    pub fn lane_gathers(&self) -> bool {
+        self.lane().gathers()
     }
 
     /// Non-blocking variant of [`Self::consume_next`]. Returns `None`
@@ -540,7 +660,8 @@ where
         }
     }
 
-    /// Push `cfg` to every live batcher.
+    /// Push `cfg` to every live batcher and to the lane's gather windows
+    /// after a return.
     ///
     /// We snapshot the Vec of Arcs under the read lock and drop it
     /// before the async `update_config` calls so a concurrent submit
@@ -549,6 +670,10 @@ where
     /// `get_or_create`, so we don't lose the update. Callers write
     /// `self.config` before calling this.
     async fn propagate_config(&self, cfg: BatchConfig) {
+        self.gather_quiet_us
+            .store(whole_micros(cfg.effective_coalesce_ms()), Ordering::Release);
+        self.gather_longest_us
+            .store(whole_micros(cfg.max_batch_wait_ms), Ordering::Release);
         let entries: Vec<Arc<BatcherEntry<I, T>>> = {
             let map = self.batchers.read().await;
             map.values().cloned().collect()
@@ -559,6 +684,14 @@ where
     }
 
     // ---- Internal helpers ----
+
+    fn lane(&self) -> std::sync::MutexGuard<'_, Lane> {
+        // The lane holds counters only, so a panic elsewhere cannot leave
+        // it half-updated.
+        self.lane
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     fn route_key(op: Op, lora: LoraKey) -> BatcherKey {
         match op {
@@ -746,13 +879,46 @@ where
             cost_budget: AtomicU64::new(self.config.max_batch_cost),
             env,
             new_item: Notify::new(),
+            lane: std::sync::Mutex::new(Lane::default()),
+            gather_quiet_us: AtomicU64::new(whole_micros(self.config.effective_coalesce_ms())),
+            gather_longest_us: AtomicU64::new(whole_micros(self.config.max_batch_wait_ms)),
             epoch: Instant::now(),
         }
     }
 }
 
+/// A window in milliseconds as whole microseconds; zero for a window that
+/// is not a positive number.
+fn whole_micros(window_ms: f64) -> u64 {
+    let micros = window_ms * 1000.0;
+    if micros.is_finite() && micros > 0.0 {
+        // The cast saturates: a window past u64 micros is "no limit".
+        micros as u64
+    } else {
+        0
+    }
+}
+
+/// Number of requests a set of items came from: items that share a
+/// [`HasCost::request_key`] count once, an item without one counts for
+/// itself.
+pub(crate) fn distinct_requests<'a, I: HasCost + 'a>(items: impl Iterator<Item = &'a I>) -> usize {
+    let mut keyed: HashSet<&str> = HashSet::new();
+    let mut unkeyed = 0usize;
+    for item in items {
+        match item.request_key() {
+            Some(key) => {
+                keyed.insert(key);
+            }
+            None => unkeyed += 1,
+        }
+    }
+    keyed.len() + unkeyed
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::batch_former::FlushReason;
     use super::*;
     use tokio::time::{sleep as tsleep, timeout, Duration as TDuration};
 
@@ -780,6 +946,7 @@ mod tests {
                 max_batch_wait_ms: 10_000.0,
                 coalesce_ms: 10_000.0,
                 coalesce_ratio: 1.0,
+                ..BatchConfig::default()
             })
             .build()
     }
@@ -942,6 +1109,7 @@ mod tests {
                 max_batch_wait_ms: 10_000.0,
                 coalesce_ms: 10_000.0,
                 coalesce_ratio: 1.0,
+                ..BatchConfig::default()
             })
             .build();
         // Two items, cost 3 each. First extract takes one (3 ≤ 5),
@@ -1036,6 +1204,7 @@ mod tests {
                 max_batch_wait_ms: 10_000.0,
                 coalesce_ms: 10_000.0,
                 coalesce_ratio: 1.0,
+                ..BatchConfig::default()
             })
             .build();
         let base = LoraKey::base();
@@ -1094,6 +1263,375 @@ mod tests {
         assert_eq!(s.total_pending_count().await, 1);
     }
 
+    // ---- The lane: when the next batch leaves ----
+
+    /// Caps and windows that never fire by themselves, so only the lane's
+    /// rule can release a batch.
+    fn lane_scheduler(max_batch_requests: usize) -> Arc<Scheduler<StubItem, u32>> {
+        Arc::new(
+            Scheduler::builder()
+                .config(BatchConfig {
+                    max_batch_cost: 1_000_000,
+                    max_batch_requests,
+                    max_batch_wait_ms: 10_000.0,
+                    coalesce_ms: 40.0,
+                    coalesce_ratio: 1.0,
+                    ..BatchConfig::default()
+                })
+                .build(),
+        )
+    }
+
+    async fn submit_one(s: &Scheduler<StubItem, u32>, id: u32) {
+        s.submit(
+            Op::Extract,
+            LoraKey::base(),
+            StubItem {
+                cost: 1,
+                idx: id as usize,
+            },
+            id,
+        )
+        .await;
+    }
+
+    async fn dispatch_within(
+        s: &Arc<Scheduler<StubItem, u32>>,
+        ms: u64,
+    ) -> Option<FormattedBatch<StubItem, u32>> {
+        timeout(TDuration::from_millis(ms), s.next_dispatch(true))
+            .await
+            .ok()
+            .map(|dispatch| dispatch.batch)
+    }
+
+    #[tokio::test]
+    async fn a_lone_request_on_an_idle_lane_leaves_at_once() {
+        let s = lane_scheduler(64);
+        submit_one(&s, 1).await;
+        let batch = dispatch_within(&s, 200)
+            .await
+            .expect("no window on an idle lane");
+        assert_eq!(batch.metadata, vec![1]);
+        assert_eq!(batch.flush_reason, FlushReason::IdleBypass);
+    }
+
+    #[tokio::test]
+    async fn a_request_of_several_items_on_an_idle_lane_leaves_at_once_and_whole() {
+        let s = lane_scheduler(64);
+        // One multi-item batch, returned, and a quiet lane afterwards: the
+        // earlier loop remembered "not idle" from the batch size and made
+        // the next request wait the coalesce window.
+        for round in 0..3u32 {
+            let items: Vec<(StubItem, u32)> = (0..8)
+                .map(|i| (StubItem { cost: 1, idx: i }, round * 8 + i as u32))
+                .collect();
+            s.submit_many(Op::Extract, LoraKey::base(), items).await;
+            let batch = dispatch_within(&s, 200)
+                .await
+                .expect("a request of several items is not held on an idle lane");
+            assert_eq!(batch.size(), 8);
+            s.note_return(1, Duration::from_millis(1));
+            // Longer than any gather window of that round trip.
+            tsleep(TDuration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn arrivals_during_a_forward_are_held_and_leave_together_with_the_returning_caller() {
+        let s = lane_scheduler(64);
+        submit_one(&s, 0).await;
+        let first = dispatch_within(&s, 200).await.unwrap();
+        assert_eq!(first.metadata, vec![0]);
+
+        // Seven more arrive while the first is with the engine.
+        for id in 1..8 {
+            submit_one(&s, id).await;
+        }
+        assert!(
+            dispatch_within(&s, 60).await.is_none(),
+            "nothing is sent behind a batch that is still out, however long it takes",
+        );
+
+        // The first returns. Its caller is back within the gather window:
+        // all eight leave as one batch, without waiting the window out.
+        s.note_return(1, Duration::from_millis(60));
+        let consumer = {
+            let s = Arc::clone(&s);
+            tokio::spawn(async move { s.next_dispatch(true).await })
+        };
+        tsleep(TDuration::from_millis(3)).await;
+        assert!(
+            !consumer.is_finished(),
+            "gathering for the caller just answered"
+        );
+        let sent = Instant::now();
+        submit_one(&s, 8).await;
+        let batch = timeout(TDuration::from_millis(200), consumer)
+            .await
+            .expect("the returning caller ends the gather")
+            .unwrap()
+            .batch;
+        assert!(sent.elapsed() < Duration::from_millis(20));
+        let mut ids = batch.metadata.clone();
+        ids.sort_unstable();
+        assert_eq!(ids, (1..=8).collect::<Vec<u32>>());
+        assert_eq!(batch.flush_reason, FlushReason::Coalesce);
+    }
+
+    #[tokio::test]
+    async fn the_gather_ends_at_the_window_when_the_caller_does_not_return() {
+        let s = lane_scheduler(64);
+        submit_one(&s, 0).await;
+        let _ = dispatch_within(&s, 200).await.unwrap();
+        for id in 1..4 {
+            submit_one(&s, id).await;
+        }
+        // Round trip 20 ms: the gather is half of it, under the 40 ms
+        // coalesce window.
+        let returned = Instant::now();
+        s.note_return(1, Duration::from_millis(20));
+        let batch = dispatch_within(&s, 200)
+            .await
+            .expect("the window ends the gather");
+        let waited = returned.elapsed();
+        assert!(
+            waited >= Duration::from_millis(9) && waited < Duration::from_millis(40),
+            "waited {waited:?}, expected about 10 ms",
+        );
+        assert_eq!(batch.size(), 3);
+        assert_eq!(batch.flush_reason, FlushReason::Coalesce);
+    }
+
+    #[tokio::test]
+    async fn callers_that_do_not_come_back_stop_being_waited_for() {
+        let s = lane_scheduler(64);
+        let mut next_id = 0u32;
+        // Requests at random times: one is answered, another arrived during
+        // its forward, nobody returns inside the window.
+        for _ in 0..3 {
+            submit_one(&s, next_id).await;
+            next_id += 1;
+            let _ = dispatch_within(&s, 200).await.unwrap();
+            submit_one(&s, next_id).await;
+            next_id += 1;
+            s.note_return(1, Duration::from_millis(4));
+            let _ = dispatch_within(&s, 200).await.unwrap();
+            s.note_return(1, Duration::from_millis(4));
+            tsleep(TDuration::from_millis(6)).await;
+        }
+        assert!(!s.lane_gathers());
+
+        // Now a return is followed by an immediate send of what is pending.
+        submit_one(&s, next_id).await;
+        let _ = dispatch_within(&s, 200).await.unwrap();
+        submit_one(&s, next_id + 1).await;
+        s.note_return(1, Duration::from_millis(30));
+        let sent = Instant::now();
+        let batch = dispatch_within(&s, 200).await.unwrap();
+        assert!(
+            sent.elapsed() < Duration::from_millis(8),
+            "no gather: {:?}",
+            sent.elapsed()
+        );
+        assert_eq!(batch.flush_reason, FlushReason::Drain);
+    }
+
+    #[tokio::test]
+    async fn a_full_batch_goes_ahead_while_a_batch_is_out() {
+        let s = lane_scheduler(4);
+        submit_one(&s, 0).await;
+        let _ = dispatch_within(&s, 200).await.unwrap();
+        for id in 1..=3 {
+            submit_one(&s, id).await;
+        }
+        assert!(
+            dispatch_within(&s, 30).await.is_none(),
+            "three of four: held"
+        );
+        submit_one(&s, 4).await;
+        let batch = dispatch_within(&s, 200)
+            .await
+            .expect("a full batch is not held: waiting cannot improve it");
+        assert_eq!(batch.size(), 4);
+        assert_eq!(batch.flush_reason, FlushReason::CountCap);
+    }
+
+    #[tokio::test]
+    async fn with_the_idle_bypass_off_an_idle_lane_waits_the_classic_window() {
+        let s = lane_scheduler(64);
+        submit_one(&s, 0).await;
+        let started = Instant::now();
+        let batch = timeout(TDuration::from_millis(500), s.next_dispatch(false))
+            .await
+            .expect("the coalesce window releases the batch")
+            .batch;
+        assert!(
+            started.elapsed() >= Duration::from_millis(35),
+            "sent after {:?}, before the 40 ms coalesce window",
+            started.elapsed()
+        );
+        assert_eq!(batch.flush_reason, FlushReason::Coalesce);
+    }
+
+    #[tokio::test]
+    async fn a_batch_out_on_one_queue_holds_the_other_queues_too() {
+        // The queues of a model share its engine.
+        let s = lane_scheduler(64);
+        s.submit(Op::Encode, LoraKey::base(), StubItem { cost: 1, idx: 0 }, 1)
+            .await;
+        let _ = dispatch_within(&s, 200).await.unwrap();
+        s.submit(
+            Op::Encode,
+            LoraKey::from_name("other"),
+            StubItem { cost: 1, idx: 0 },
+            2,
+        )
+        .await;
+        assert!(dispatch_within(&s, 30).await.is_none());
+        s.note_return(1, Duration::ZERO);
+        let batch = dispatch_within(&s, 200).await.unwrap();
+        assert_eq!(batch.metadata, vec![2]);
+    }
+
+    #[tokio::test]
+    async fn the_rest_of_a_cut_request_follows_at_once_and_is_not_gathered_for() {
+        #[derive(Debug)]
+        struct OneRequest(usize);
+        impl HasCost for OneRequest {
+            fn cost(&self) -> u64 {
+                1
+            }
+            fn original_index(&self) -> usize {
+                self.0
+            }
+            fn request_key(&self) -> Option<&str> {
+                Some("a")
+            }
+        }
+        let s: Scheduler<OneRequest, usize> = Scheduler::builder()
+            .config(BatchConfig {
+                max_batch_cost: 1_000_000,
+                max_batch_requests: 4,
+                max_batch_wait_ms: 10_000.0,
+                coalesce_ms: 40.0,
+                coalesce_ratio: 1.0,
+                ..BatchConfig::default()
+            })
+            .build();
+        // One request of six items under an item cap of four.
+        s.submit_many(
+            Op::Extract,
+            LoraKey::base(),
+            (0..6).map(|i| (OneRequest(i), i)).collect(),
+        )
+        .await;
+        let first = timeout(TDuration::from_millis(200), s.next_dispatch(true))
+            .await
+            .expect("the full part leaves at once");
+        assert_eq!(first.batch.size(), 4);
+        assert_eq!(
+            first.completes, 0,
+            "the request still has two items pending"
+        );
+        // The rest is not full, but its caller is waiting on the first
+        // part: it follows into the next free slot without waiting for
+        // the return.
+        let second = timeout(TDuration::from_millis(200), s.next_dispatch(true))
+            .await
+            .expect("the rest follows the first part");
+        assert_eq!(second.batch.size(), 2);
+        assert_eq!(second.completes, 1);
+
+        // The first part answered nobody: its return opens no gather. A new
+        // request that arrives after both are back leaves at once (a gather
+        // would be 30 ms here, half the round trip).
+        s.note_return(first.completes, Duration::from_millis(60));
+        s.note_return(0, Duration::from_millis(60));
+        s.submit(Op::Extract, LoraKey::base(), OneRequest(9), 9)
+            .await;
+        let sent = Instant::now();
+        let third = timeout(TDuration::from_millis(200), s.next_dispatch(true))
+            .await
+            .expect("an idle lane sends at once");
+        assert!(
+            sent.elapsed() < Duration::from_millis(10),
+            "waited {:?}",
+            sent.elapsed()
+        );
+        assert_eq!(third.batch.size(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_full_batch_on_a_younger_queue_does_not_overtake_an_older_held_one() {
+        // First come, first served across queues: while a batch is out, the
+        // older queue's partial batch is held, and the younger queue's full
+        // batch does not take the free slot ahead of it. If it did, the
+        // older requests would wait one more forward, for the younger ones.
+        let s = lane_scheduler(2);
+        let older = LoraKey::from_name("older");
+        let younger = LoraKey::from_name("younger");
+        s.submit(Op::Encode, LoraKey::base(), StubItem { cost: 1, idx: 0 }, 0)
+            .await;
+        let _ = dispatch_within(&s, 200).await.unwrap();
+
+        s.submit(Op::Encode, older.clone(), StubItem { cost: 1, idx: 0 }, 1)
+            .await;
+        tsleep(TDuration::from_millis(2)).await;
+        for id in [2, 3] {
+            s.submit(
+                Op::Encode,
+                younger.clone(),
+                StubItem { cost: 1, idx: 0 },
+                id,
+            )
+            .await;
+        }
+        assert!(
+            dispatch_within(&s, 30).await.is_none(),
+            "the younger queue is full, but it is not its turn",
+        );
+
+        s.note_return(1, Duration::ZERO);
+        let first = timeout(TDuration::from_millis(200), s.next_dispatch(true))
+            .await
+            .expect("the older queue goes when the lane is free");
+        assert_eq!(first.lora, older);
+        assert_eq!(first.batch.metadata, vec![1]);
+        // Now the younger queue's head is the oldest, and its full batch
+        // takes the second slot at once.
+        let second = timeout(TDuration::from_millis(200), s.next_dispatch(true))
+            .await
+            .expect("a full batch whose turn has come is not held");
+        assert_eq!(second.lora, younger);
+        assert_eq!(second.batch.metadata, vec![2, 3]);
+        assert_eq!(second.batch.flush_reason, FlushReason::CountCap);
+    }
+
+    #[test]
+    fn requests_are_counted_by_key_and_unkeyed_items_one_each() {
+        struct Keyed(Option<&'static str>);
+        impl HasCost for Keyed {
+            fn cost(&self) -> u64 {
+                1
+            }
+            fn original_index(&self) -> usize {
+                0
+            }
+            fn request_key(&self) -> Option<&str> {
+                self.0
+            }
+        }
+        let items = [
+            Keyed(Some("a")),
+            Keyed(Some("a")),
+            Keyed(Some("b")),
+            Keyed(None),
+            Keyed(None),
+        ];
+        assert_eq!(distinct_requests(items.iter()), 4);
+    }
+
     // ---- Adaptive controller wiring ----
 
     #[tokio::test]
@@ -1115,6 +1653,7 @@ mod tests {
                 max_batch_wait_ms: 20.0,
                 coalesce_ms: 20.0,
                 coalesce_ratio: 0.5,
+                ..BatchConfig::default()
             })
             .controller(ctrl)
             // Short warm-up so a handful of completions is enough to
@@ -1195,6 +1734,7 @@ mod tests {
                 max_batch_wait_ms: 15.0,
                 coalesce_ms: 15.0,
                 coalesce_ratio: 0.5,
+                ..BatchConfig::default()
             })
             .controller(ctrl)
             .build();

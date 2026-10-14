@@ -536,12 +536,29 @@ class ThinkingBlockStripper:
     partial tag nor its body can escape before the closing tag arrives.
     """
 
-    __slots__ = ("_buffer", "_close", "_inside", "_open")
+    __slots__ = ("_buffer", "_close", "_inside", "_keep", "_open", "_parts")
 
-    def __init__(self, inside: bool = False, *, reasoning_format: ReasoningFormat = "qwen3") -> None:
+    def __init__(
+        self, inside: bool = False, *, reasoning_format: ReasoningFormat = "qwen3", keep_reasoning: bool = False
+    ) -> None:
         self._buffer = ""
         self._inside = inside
         self._open, self._close = _REASONING_BOUNDARIES[reasoning_format]
+        self._keep = keep_reasoning
+        self._parts: list[tuple[str, str]] = []
+
+    def _hide(self, text: str) -> None:
+        if self._keep and text:
+            if self._parts and not self._parts[-1][1]:
+                self._parts[-1] = (self._parts[-1][0] + text, "")
+            else:
+                self._parts.append((text, ""))
+
+    def _show(self, text: str) -> str:
+        if self._keep and text:
+            reasoning, visible = self._parts.pop() if self._parts else ("", "")
+            self._parts.append((reasoning, visible + text))
+        return text
 
     @staticmethod
     def _delimiter_prefix_length(text: str, delimiters: tuple[str, ...]) -> int:
@@ -560,12 +577,15 @@ class ThinkingBlockStripper:
             if self._inside:
                 close_at = self._buffer.find(self._close)
                 if close_at >= 0:
+                    self._hide(self._buffer[:close_at])
                     self._buffer = self._buffer[close_at + len(self._close) :]
                     self._inside = False
                     continue
 
                 keep = self._delimiter_prefix_length(self._buffer, (self._close,))
-                self._buffer = self._buffer[-keep:] if keep else ""
+                hide_upto = len(self._buffer) - keep
+                self._hide(self._buffer[:hide_upto])
+                self._buffer = self._buffer[hide_upto:]
                 break
 
             open_at = self._buffer.find(self._open)
@@ -577,7 +597,7 @@ class ThinkingBlockStripper:
             ]
             if matches:
                 marker_at, marker = min(matches, key=lambda match: match[0])
-                visible.append(self._buffer[:marker_at])
+                visible.append(self._show(self._buffer[:marker_at]))
                 self._buffer = self._buffer[marker_at + len(marker) :]
                 if marker == self._open:
                     self._inside = True
@@ -587,7 +607,7 @@ class ThinkingBlockStripper:
 
             keep = self._delimiter_prefix_length(self._buffer, (self._open, self._close))
             emit_upto = len(self._buffer) - keep
-            visible.append(self._buffer[:emit_upto])
+            visible.append(self._show(self._buffer[:emit_upto]))
             self._buffer = self._buffer[emit_upto:]
             break
 
@@ -599,20 +619,34 @@ class ThinkingBlockStripper:
 
     def finish(self) -> str:
         """Flush ordinary buffered text, but never truncated private reasoning."""
-        visible = "" if self._inside else self._buffer
+        if self._inside:
+            self._hide(self._buffer)
+            visible = ""
+        else:
+            visible = self._show(self._buffer)
         self._buffer = ""
         self._inside = False
         return visible
 
+    def take_parts(self) -> list[tuple[str, str]]:
+        """Return ``(reasoning, text)`` runs since the previous call in output order; empty unless kept."""
+        parts, self._parts = self._parts, []
+        return parts
 
-def _strip_complete_thinking_blocks(
+    def take_reasoning(self) -> str:
+        """Return the reasoning hidden since the previous call; empty unless kept."""
+        return "".join(reasoning for reasoning, _ in self.take_parts())
+
+
+def _split_thinking_blocks(
     text: str,
     *,
     start_inside: bool = False,
     reasoning_format: ReasoningFormat = "qwen3",
-) -> str:
-    stripper = ThinkingBlockStripper(inside=start_inside, reasoning_format=reasoning_format)
-    return stripper.feed(text) + stripper.finish()
+) -> tuple[str, str]:
+    stripper = ThinkingBlockStripper(inside=start_inside, reasoning_format=reasoning_format, keep_reasoning=True)
+    visible = stripper.feed(text) + stripper.finish()
+    return visible, stripper.take_reasoning()
 
 
 def _candidates_have_visible_text(candidates: tuple[dict[str, Any], ...] | None) -> bool:
@@ -669,6 +703,7 @@ async def suppress_thinking_blocks(
     *,
     start_inside: bool = False,
     reasoning_format: ReasoningFormat = "qwen3",
+    keep_reasoning: bool = False,
 ) -> AsyncIterator[GenerationChunk]:
     """Hide model reasoning blocks while preserving generation metadata.
 
@@ -682,7 +717,10 @@ async def suppress_thinking_blocks(
     delta. ``start_inside`` covers chat templates that place the opening
     reasoning marker in the prompt, so generated text begins with private
     reasoning and only emits the closing marker. ``reasoning_format`` selects
-    the boundary pair declared by the model's generation backend.
+    the boundary pair declared by the model's generation backend. With
+    ``keep_reasoning`` the hidden text rides on ``reasoning_delta`` (and
+    ``reasoning_content`` on candidates) instead of being dropped, for a
+    caller that opted into public reasoning.
 
     Closing the wrapper eagerly closes the upstream adapter iterator so client
     cancellation still reaches SGLang's ``/abort_request`` cleanup.
@@ -710,7 +748,7 @@ async def suppress_thinking_blocks(
                     item = dict(candidate)
                     text = item.get("text")
                     if isinstance(text, str):
-                        visible = _strip_complete_thinking_blocks(
+                        visible, reasoning = _split_thinking_blocks(
                             text,
                             start_inside=start_inside,
                             reasoning_format=reasoning_format,
@@ -719,18 +757,37 @@ async def suppress_thinking_blocks(
                             item["text"] = visible
                             item["logprobs"] = None
                             hid_reasoning = True
+                        if keep_reasoning and reasoning:
+                            item["reasoning_content"] = reasoning
                     candidate_items.append(item)
                 rewritten_candidates = tuple(candidate_items)
 
             state = states.setdefault(
                 chunk.choice_index,
-                ThinkingBlockStripper(inside=start_inside, reasoning_format=reasoning_format),
+                ThinkingBlockStripper(
+                    inside=start_inside, reasoning_format=reasoning_format, keep_reasoning=keep_reasoning
+                ),
             )
             was_inside = state.inside
             visible_delta = state.feed(chunk.text_delta)
             text_changed = visible_delta != chunk.text_delta
             if chunk.done or chunk.finish_reason is not None:
                 visible_delta += state.finish()
+            reasoning_delta = chunk.reasoning_delta
+            parts = state.take_parts()
+            for reasoning, text in parts[:-1]:
+                yield GenerationChunk(
+                    text_delta=text,
+                    is_first=not emitted_visible_text,
+                    choice_index=chunk.choice_index,
+                    reasoning_delta=reasoning_delta + reasoning,
+                )
+                reasoning_delta = ""
+                visible_delta = visible_delta[len(text) :]
+                emitted_visible_text = True
+                emitted_meaningful_text = emitted_meaningful_text or bool(text.strip())
+            if parts:
+                reasoning_delta += parts[-1][0]
 
             is_first = bool(visible_delta) and not emitted_visible_text
             emitted_visible_text = emitted_visible_text or bool(visible_delta)
@@ -743,6 +800,7 @@ async def suppress_thinking_blocks(
                 is_first=is_first,
                 logprobs=None if text_changed or was_inside else chunk.logprobs,
                 candidates=rewritten_candidates,
+                reasoning_delta=reasoning_delta,
             )
 
             if (

@@ -1263,6 +1263,11 @@ export interface ChatMessage {
   tool_call_id?: string;
   /** Populated by the model when calling tools (assistant turns only). */
   tool_calls?: ToolCall[];
+  /**
+   * The model's reasoning on a response message. Present only when the
+   * request set `include_reasoning` and the model produced any.
+   */
+  reasoning_content?: string;
 }
 
 /**
@@ -1367,6 +1372,13 @@ export interface ChatCompletionRequest {
    * still applies. Absent, the serving profile decides (default on).
    */
   schema_in_prompt?: boolean;
+  /**
+   * SIE extension. `true` makes the model's reasoning public as
+   * `reasoning_content` on the message and, when streaming, on each delta.
+   * A model whose configuration declares no reasoning answers the field with
+   * nothing. Absent or `false` keeps reasoning private; `usage` is unchanged.
+   */
+  include_reasoning?: boolean;
   /** Accepted in the OpenAI range [-2, 2]; out-of-range values are rejected. */
   frequency_penalty?: number;
   presence_penalty?: number;
@@ -1480,6 +1492,8 @@ export interface ChatDelta {
   role?: "assistant";
   content?: string;
   tool_calls?: ToolCallDelta[];
+  /** Reasoning delta, present only when the request set `include_reasoning`. */
+  reasoning_content?: string;
 }
 
 /** Partial tool-call materialised across multiple streaming chunks. */

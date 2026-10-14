@@ -71,6 +71,19 @@ pub struct BatchConfig {
     /// keeps the coalesce time proportional when the adaptive
     /// controller mutates `max_batch_wait_ms`.
     pub coalesce_ratio: f64,
+
+    /// Largest request that leaves in one batch even past
+    /// [`Self::max_batch_requests`]. `0`, the default, is off: the item
+    /// cap cuts a request as it cuts a burst.
+    ///
+    /// When set, a request of up to this many items whose turn has come is
+    /// taken whole (the cost cap and the per-item hard caps still cut). It
+    /// is off by default because whether one large batch beats several
+    /// smaller ones is the adapter's property: an adapter that pads a
+    /// batch to its longest row can be slower on the whole request. It does
+    /// not apply inside the runs-alone lane's batchable turns or while a
+    /// runs-alone item is pending (see `batch_former`'s module docs).
+    pub max_request_items: usize,
 }
 
 impl BatchConfig {
@@ -90,6 +103,7 @@ impl BatchConfig {
     /// | `SIE_BATCHER_MAX_BATCH_REQUESTS`    | `max_batch_requests` | **12**  | Hard count cap (controller does not move). **Diverges from Python's 64** — see [`BatchConfig::default`] for the runtime rationale. |
     /// | `SIE_BATCHER_COALESCE_MS`           | `coalesce_ms`        | **5.0** | Coalesce window ceiling. **Diverges from Python's 15.0** — see [`BatchConfig::default`] for the runtime rationale. |
     /// | `SIE_BATCHER_COALESCE_RATIO`        | `coalesce_ratio`     | 0.5     | Coalesce as fraction of `max_batch_wait_ms`. |
+    /// | `SIE_BATCHER_MAX_REQUEST_ITEMS`     | `max_request_items`  | 0 (off) | Largest request kept in one batch past the item cap. Not in Python. |
     ///
     /// Bad values (non-numeric, NaN) log a warning and fall back to
     /// the default — never crash the registry init.
@@ -132,6 +146,9 @@ impl BatchConfig {
         if let Some(v) = get_f64("SIE_BATCHER_COALESCE_RATIO") {
             c.coalesce_ratio = v;
         }
+        if let Some(v) = get_usize("SIE_BATCHER_MAX_REQUEST_ITEMS") {
+            c.max_request_items = v;
+        }
 
         tracing::info!(
             max_batch_cost = c.max_batch_cost,
@@ -139,6 +156,7 @@ impl BatchConfig {
             max_batch_wait_ms = c.max_batch_wait_ms,
             coalesce_ms = c.coalesce_ms,
             coalesce_ratio = c.coalesce_ratio,
+            max_request_items = c.max_request_items,
             "batcher: BatchConfig constructed from env+defaults"
         );
 
@@ -198,6 +216,9 @@ impl Default for BatchConfig {
     /// `tests::defaults_diverge_from_python_intentionally` so Python parity
     /// is not restored by accident; retunes should update this rationale and
     /// the test together.
+    ///
+    /// `max_request_items` has no Python counterpart and is off: the item
+    /// cap cuts a request of more items than the cap, as in Python.
     fn default() -> Self {
         Self {
             max_batch_cost: 16_384,
@@ -205,6 +226,7 @@ impl Default for BatchConfig {
             max_batch_wait_ms: 15.0,
             coalesce_ms: 5.0,
             coalesce_ratio: 0.5,
+            max_request_items: 0,
         }
     }
 }
@@ -239,6 +261,8 @@ mod tests {
             c.max_batch_requests, 12,
             "expected max_batch_requests=12 (Rust-side worker default)"
         );
+        // Keeping a request whole past the item cap is opt-in.
+        assert_eq!(c.max_request_items, 0);
     }
 
     #[test]

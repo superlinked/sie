@@ -257,6 +257,15 @@ impl HasCost for SchedulerItem {
         }
     }
 
+    fn request_key(&self) -> Option<&str> {
+        let request_id = match self {
+            Self::Encode(e) => e.request_id.as_str(),
+            Self::Score { item, .. } => item.request_id.as_str(),
+            Self::Extract(x) => x.request_id.as_str(),
+        };
+        (!request_id.is_empty()).then_some(request_id)
+    }
+
     fn original_index(&self) -> usize {
         // Original request-local index is what the cost-sorted
         // packer uses to restore order inside a flushed batch so

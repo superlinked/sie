@@ -9,6 +9,7 @@ score like one labels request per group.
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
@@ -640,6 +641,32 @@ def test_a_forward_that_cannot_be_recorded_falls_back_to_eager(monkeypatch: pyte
     assert runner.stats.recording_failures == 3
     assert runner.graph_count == 0
     assert _outputs(rig.adapter.extract(items, labels=_LABELS)) == eager
+
+
+@pytest.mark.gpu_hw
+def test_a_thread_other_than_the_first_records_a_graph() -> None:
+    # The server loads and warms a model up on one thread and serves it on
+    # another: every thread that records must be able to, though PyTorch keeps
+    # a cuBLAS handle per thread and none can be created while recording.
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    rig = _Rig(prompt_first=True, scorer="mlp", device="cuda:0", dtype=torch.float16, cuda_graphs="bucketed")
+    runner = rig.adapter._graphs
+    assert runner is not None
+    one, three = [Item(text=_TEXTS[0])], [Item(text=text) for text in _TEXTS[:3]]
+    eager = _scores(rig.adapter.extract(three, labels=_LABELS, options=_EAGER))
+    rig.adapter.extract(one, labels=_LABELS)  # one row: the first graph, recorded on this thread
+    assert (runner.stats.recorded, runner.stats.recording_failures) == (1, 0)
+
+    served: list[Any] = []
+    serving = threading.Thread(target=lambda: served.append(rig.adapter.extract(three, labels=_LABELS)))
+    serving.start()
+    serving.join()
+    # Three rows: a second graph, recorded on a thread that has no cuBLAS handle yet.
+    assert (runner.stats.recorded, runner.stats.recording_failures) == (2, 0)
+    assert not runner.disabled
+    for expected, got in zip(eager, _scores(served[0]), strict=True):
+        assert got == pytest.approx(expected, abs=2e-2)
 
 
 @pytest.mark.parametrize("mode", ["exact", "bucketed"])

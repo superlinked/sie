@@ -38,6 +38,18 @@ def test_skips_exclude_pinned_ghost_and_unloading() -> None:
     assert got == "e"
 
 
+def test_skips_a_model_whose_release_is_still_running() -> None:
+    got = select_eviction_candidate(
+        ["releasing", "free"],
+        exclude_name="caller",
+        is_pinned=_never_pinned,
+        loaded={"releasing", "free"},
+        unloading=set(),
+        releasing=frozenset({"releasing"}),
+    )
+    assert got == "free"
+
+
 def test_returns_none_when_nothing_eligible() -> None:
     got = select_eviction_candidate(
         ["only-self"],

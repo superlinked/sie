@@ -22,3 +22,15 @@ profiles:
     adapter_options:
       loadtime: {}
       runtime: {}
+  # One state with a few questions is a small forward that kernel launches,
+  # not the GPU, bound. This profile replays its encoder as a CUDA graph
+  # (request it as `MODEL:graphs`). It is not the default because a graph
+  # moves probabilities by more than the 0.02 the server README allows a
+  # default speed-up, though by less than batching already does: see
+  # "Laya CUDA graphs" there.
+  graphs:
+    extends: default
+    adapter_options:
+      loadtime:
+        cuda_graphs: bucketed
+      runtime: {}

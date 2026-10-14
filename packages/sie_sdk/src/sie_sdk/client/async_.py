@@ -2554,6 +2554,7 @@ class SIEAsyncClient:
         user: str | None = None,
         safety_identifier: str | None = None,
         lora_adapter: str | None = None,
+        include_reasoning: bool | None = None,
         gpu: str | None = None,
         extra_body: dict[str, Any] | None = None,
         wait_for_capacity: bool = True,
@@ -2604,6 +2605,7 @@ class SIEAsyncClient:
                 user=user,
                 safety_identifier=safety_identifier,
                 lora_adapter=lora_adapter,
+                include_reasoning=include_reasoning,
                 extra_body=extra_body,
             )
         ).encode("utf-8")
@@ -2709,6 +2711,7 @@ class SIEAsyncClient:
         safety_identifier: str | None = None,
         lora_adapter: str | None = None,
         stream_options: dict[str, Any] | None = None,
+        include_reasoning: bool | None = None,
         gpu: str | None = None,
         extra_body: dict[str, Any] | None = None,
         wait_for_capacity: bool = True,
@@ -2753,6 +2756,7 @@ class SIEAsyncClient:
                 safety_identifier=safety_identifier,
                 lora_adapter=lora_adapter,
                 stream_options=stream_options,
+                include_reasoning=include_reasoning,
                 extra_body=extra_body,
             )
         ).encode("utf-8")

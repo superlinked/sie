@@ -988,3 +988,27 @@ async def test_non_streaming_candidates_keep_a_malformed_block_as_text() -> None
     (parsed,) = out[-1].candidates
     assert json.loads(parsed["tool_calls"][0]["function"]["arguments"]) == {"old_str": "    a"}
     assert parsed["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.asyncio
+async def test_parse_tool_call_stream_keeps_reasoning_ahead_of_the_text_it_rode_on() -> None:
+    out = [
+        item
+        async for item in parse_tool_call_stream(
+            _chunks(
+                [
+                    GenerationChunk(text_delta="", reasoning_delta="think "),
+                    GenerationChunk(
+                        text_delta='<tool_call>{"name":"get_weather","arguments":{"city":"Paris"}}</tool_call>',
+                        reasoning_delta="more",
+                    ),
+                    GenerationChunk(text_delta="", done=True, finish_reason="stop"),
+                ]
+            )
+        )
+    ]
+
+    assert [item.reasoning_delta for item in out if item.reasoning_delta] == ["think ", "more"]
+    first_tool = next(index for index, item in enumerate(out) if item.tool_call_delta is not None)
+    assert all(not item.reasoning_delta for item in out[first_tool:])
+    assert out[-1].finish_reason == "tool_calls"
