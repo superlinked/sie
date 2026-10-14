@@ -6,6 +6,12 @@ streams the way OpenRouter documents: SSE comment lines while it works,
 reasoning in a ``reasoning`` field, tool-call deltas, and a usage event that
 restates the finished choice. ``conformance.py`` then runs against the server,
 as the README tells a reader to, and the stub records what the server sent.
+
+A request whose ``provider`` block sets ``require_parameters`` gets a 404 from
+the stub unless one of the model's OpenRouter endpoints lists every request
+field other than the model, the messages, the stream flag and the provider
+block. ``openrouter_endpoints.json`` holds each endpoint's
+``supported_parameters`` from OpenRouter's public endpoints list.
 """
 
 from __future__ import annotations
@@ -37,8 +43,23 @@ TEST_KEY = "sk-or-test-key"
 SERVER_START_TIMEOUT_S = 300.0
 REASONING = "Compare the tenths first: 9.9 has nine tenths and 9.11 has one tenth, so 9.9 is larger."
 COMMENT = b": OPENROUTER PROCESSING\n\n"
+ENDPOINTS = [
+    frozenset(parameters)
+    for parameters in json.loads(Path(__file__).with_name("openrouter_endpoints.json").read_text())[
+        "supported_parameters"
+    ]
+]
+REQUEST_FIELDS = frozenset({"model", "messages", "stream", "provider"})
+NO_ENDPOINTS = "No endpoints found that can handle the requested parameters."
 
 SEEN: list[dict[str, Any]] = []
+
+
+def _unroutable(body: dict[str, Any]) -> bool:
+    if not (body.get("provider") or {}).get("require_parameters"):
+        return False
+    parameters = set(body) - REQUEST_FIELDS
+    return not any(parameters <= supported for supported in ENDPOINTS)
 
 
 def _words(text: str) -> int:
@@ -114,9 +135,20 @@ class OpenRouterStub(BaseHTTPRequestHandler):
     def _delta(self, delta: dict[str, Any], finish: str | None = None) -> dict[str, Any]:
         return {"index": 0, "delta": {"role": "assistant", "content": "", **delta}, "finish_reason": finish}
 
+    def _json(self, status: int, payload: dict[str, Any]) -> None:
+        raw = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
     def do_POST(self) -> None:
         body = json.loads(self.rfile.read(int(self.headers["content-length"])))
         SEEN.append({"path": self.path, "authorization": self.headers.get("authorization"), "body": body})
+        if _unroutable(body):
+            self._json(404, {"error": {"message": NO_ENDPOINTS, "code": 404}})
+            return
         reply = _reply(body)
         usage = _usage(body, reply)
         if not body.get("stream"):
@@ -127,12 +159,7 @@ class OpenRouterStub(BaseHTTPRequestHandler):
             if reply.get("calls"):
                 message["tool_calls"] = _calls(reply)
             choice = {"index": 0, "message": message, "finish_reason": reply["finish"]}
-            raw = json.dumps({"id": "gen-stub", "model": UPSTREAM_MODEL, "choices": [choice], "usage": usage}).encode()
-            self.send_response(200)
-            self.send_header("content-type", "application/json")
-            self.send_header("content-length", str(len(raw)))
-            self.end_headers()
-            self.wfile.write(raw)
+            self._json(200, {"id": "gen-stub", "model": UPSTREAM_MODEL, "choices": [choice], "usage": usage})
             return
         self.send_response(200)
         self.send_header("content-type", "text/event-stream")
@@ -251,14 +278,40 @@ def test_reasoning_reaches_the_client_only_when_asked(report: dict[str, Any]) ->
 def test_the_upstream_receives_the_recipes_request(report: dict[str, Any]) -> None:
     assert report["cases"]
     assert SEEN
+    every_endpoint = frozenset.intersection(*ENDPOINTS)
     for request in SEEN:
         body = request["body"]
         assert request["path"] == "/api/v1/chat/completions"
         assert request["authorization"] == f"Bearer {TEST_KEY}"
         assert body["model"] == UPSTREAM_MODEL
-        assert body["provider"] == {"require_parameters": True}
-        assert "chat_template_kwargs" not in body
-        assert "include_reasoning" not in body
+        fields = {"model", "messages", "stream", "max_tokens", "temperature"}
+        if body["stream"]:
+            fields.add("stream_options")
+        if "tools" in body:
+            fields |= {"tools", "tool_choice"}
+        assert set(body) == fields, body
+        assert fields - REQUEST_FIELDS - {"stream_options"} <= every_endpoint
+    assert {request["body"]["stream"] for request in SEEN} == {True, False}
     round_trip = [r["body"] for r in SEEN if r["body"]["messages"][-1]["role"] == "tool"]
     assert round_trip
     assert round_trip[0]["messages"][-2]["reasoning_content"] == "One call for Paris. "
+
+
+def test_the_stand_in_routes_require_parameters_by_the_endpoint_lists() -> None:
+    body = {
+        "model": UPSTREAM_MODEL,
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": True,
+        "max_tokens": 4,
+        "temperature": 0,
+        "tools": [],
+        "tool_choice": "auto",
+    }
+    strict = {**body, "provider": {"require_parameters": True}}
+    assert len(ENDPOINTS) == 33
+    assert not _unroutable(strict)
+    assert not _unroutable({**strict, "parallel_tool_calls": True})
+    assert _unroutable({**strict, "parallel_tool_calls": True, "top_k": 20})
+    assert _unroutable({**strict, "n": 1})
+    assert _unroutable({**strict, "stream_options": {"include_usage": True}})
+    assert not _unroutable({**body, "stream_options": {"include_usage": True}, "n": 1})

@@ -119,6 +119,12 @@ uv run python conformance.py --base-url http://localhost:8080/v1 --model zai-org
 ./run_gate.sh openrouter
 ```
 
+The server reads the key only when it sends a request, so it starts without
+one. A request it cannot send, or one OpenRouter refuses, for example for a
+missing or wrong key, no credits or no provider to route to, answers
+`502 upstream_error`. A busy or unreachable OpenRouter answers `503` with
+`Retry-After`.
+
 Pointed at OpenRouter directly, OpenCode would get the same model. Through SIE
 it uses one API and one model name, `zai-org/GLM-5.3-Flash`, which the cluster
 recipe uses too and SIE Cloud serves as its `:relay` profile, so the same
@@ -137,11 +143,14 @@ The two server files:
   calls for 60 s after 5 calls in a row, within 30 s, found OpenRouter
   unavailable. A request either one refuses gets `503` with `Retry-After`. Both
   limits apply per server process.
-- `set_params` adds OpenRouter's provider preference
-  `{"require_parameters": true}` to every request, so OpenRouter routes it only
-  to providers that support every parameter it carries, such as `tools` and
-  `tool_choice`. `strip_params` removes `chat_template_kwargs`, which the server
-  adds from the model file and which only a local chat template reads.
+- `strip_params` removes `chat_template_kwargs`, which the server adds from
+  the model file and which only a local chat template reads. The upstream sets
+  no OpenRouter provider preference. Every OpenRouter provider of
+  `z-ai/glm-5.3-flash` lists `tools` and `tool_choice`, and OpenRouter sends a
+  request that carries tools only to providers that support them. Its
+  `require_parameters` preference would also hold each request to the
+  parameters a provider lists, and the server adds `stream_options` to every
+  streamed request, which no provider lists.
 - `models/zai-org__GLM-5.3-Flash.yaml` declares a remote-backed model
   (`remote_backed: true`, `routing: {policy: remote_only}`) with one profile on
   the `openrouter` upstream. It declares a 131,072-token window with up to
@@ -518,11 +527,17 @@ What runs anywhere, and in this repository's CI, is the test suite:
   `upstreams.yaml` pointed at a scripted stand-in for OpenRouter on
   `127.0.0.1`. The stand-in streams the way OpenRouter documents: SSE comment
   lines, reasoning in a `reasoning` field, tool-call deltas and a closing usage
-  event that repeats the finished choice. `conformance.py` against the server
-  gives 10 pass, 0 fail and 1 recorded (`tool_choice_required`, supported),
-  and every request the stand-in received names `z-ai/glm-5.3-flash`, carries
-  the key from `OPENROUTER_API_KEY` and the provider preference, and carries
-  neither `chat_template_kwargs` nor `include_reasoning`. It needs the
+  event that repeats the finished choice. It answers `404` to a request that
+  asks for OpenRouter's `require_parameters` and carries a field, other than
+  the model, messages, stream flag and provider preference, that no parameter
+  list of the model's OpenRouter endpoints holds.
+  `tests/openrouter_endpoints.json` holds those lists as OpenRouter published
+  them. `conformance.py` against the server gives 10
+  pass, 0 fail and 1 recorded (`tool_choice_required`, supported). Every
+  request the stand-in received names `z-ai/glm-5.3-flash`, carries the key
+  from `OPENROUTER_API_KEY`, and carries only `model`, `messages`, `stream`,
+  `max_tokens` and `temperature`, plus `stream_options` when streamed and
+  `tools` and `tool_choice` on a tools turn. It needs the
   repository's environment, from `mise run sync` at the root, and is skipped
   without it outside CI.
 

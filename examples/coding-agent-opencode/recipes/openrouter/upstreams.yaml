@@ -11,7 +11,4 @@ upstreams:
       failures: 5
       window_s: 30
       cooldown_s: 60
-    set_params:
-      provider:
-        require_parameters: true
     strip_params: [chat_template_kwargs]
