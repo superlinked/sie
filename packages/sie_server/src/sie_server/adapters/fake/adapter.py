@@ -19,9 +19,10 @@ The whole family is ONE catalog entry — ``models/sie-fake.yaml``
 (``package_backed``, no HF weights) — served by the combined
 :class:`FakeAdapter` (encode + score + generate). Different cases are
 profiles of that one model, addressable as ``sie-fake:<profile>`` via the
-loader's variant expansion. Chat completions return ``invalid_request`` —
-chat-template rendering needs a real tokenizer source; ``/v1/generate``
-(raw prompt) is the supported generation surface.
+loader's variant expansion. The fake has no chat template: the single-node
+``/v1/chat/completions`` route gets a scripted answer from
+:meth:`FakeAdapter.chat_completion`, and queued chat, which renders a chat
+template, is refused. ``/v1/generate`` (raw prompt) works on every path.
 
 A model config that declares sparse or multivector dimensions, or an extract
 task, also gets those outputs from the same adapter, and image items are
@@ -39,6 +40,7 @@ import math
 import os
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -46,7 +48,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import numpy as np
 
 from sie_server.adapters._base_adapter import BaseAdapter
-from sie_server.adapters._generation_base import GenerationAdapter, GenerationChunk
+from sie_server.adapters._generation_base import GenerationAdapter, GenerationChunk, GenerationInputTooLongError
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED
 from sie_server.core.inference_output import (
@@ -273,7 +275,17 @@ def _hash_unit_interval(seed: str) -> float:
     return int.from_bytes(digest[:8], "big") / 2**64
 
 
+def _hash_tokens(seed: str, count: int) -> list[str]:
+    """``count`` hash-derived tokens, each but the last followed by a space."""
+    tokens = []
+    for i in range(count):
+        fragment = hashlib.sha256(f"{seed}\x00{i}".encode()).hexdigest()[:8]
+        tokens.append(f"tok_{fragment}" + ("" if i == count - 1 else " "))
+    return tokens
+
+
 _WORD = re.compile(r"\S+")
+_PIECE = re.compile(r"\S+\s*")
 _SPARSE_NONZEROS = 8
 _TOKENS_PER_IMAGE = 4
 
@@ -356,6 +368,61 @@ def _hash_extraction(item: Item, labels: list[str]) -> _FakeExtraction:
     )
 
 
+def _message_text(message: dict[str, Any]) -> str:
+    content = message.get("content")
+    if isinstance(content, list):
+        return " ".join(part.get("text") or "" for part in content)
+    return content or ""
+
+
+def _chat_transcript(body: dict[str, Any]) -> str:
+    """Each declared tool, then each message's role, text and tool calls, one per line."""
+    lines = [json.dumps(tool, sort_keys=True) for tool in body.get("tools") or []]
+    for message in body["messages"]:
+        calls = json.dumps(message["tool_calls"]) if message.get("tool_calls") else ""
+        lines.append(f"{message['role']} {_message_text(message)} {calls}")
+    return "\n".join(lines)
+
+
+@dataclass(frozen=True, slots=True)
+class _ChatTurn:
+    """One scripted answer cut to its token budget: one ``(kind, text)`` step per output token."""
+
+    steps: list[tuple[str, str]]
+    call_id: str
+    call_name: str | None
+    finish_reason: str
+    prompt_tokens: int
+    choices: int
+
+    @property
+    def usage(self) -> dict[str, int]:
+        completion = len(self.steps) * self.choices
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": completion,
+            "total_tokens": self.prompt_tokens + completion,
+        }
+
+    def delta(self, kind: str, text: str) -> dict[str, Any]:
+        if kind == "call":
+            function = {"name": self.call_name, "arguments": ""}
+            return {"tool_calls": [{"index": 0, "id": self.call_id, "type": "function", "function": function}]}
+        if kind == "arguments":
+            return {"tool_calls": [{"index": 0, "function": {"arguments": text}}]}
+        return {"reasoning_content" if kind == "reasoning" else "content": text}
+
+    def message(self, *, keep_reasoning: bool) -> dict[str, Any]:
+        text = {kind: "".join(t for k, t in self.steps if k == kind) for kind in ("reasoning", "arguments", "content")}
+        message: dict[str, Any] = {"role": "assistant", "content": text["content"]}
+        if keep_reasoning and text["reasoning"]:
+            message["reasoning_content"] = text["reasoning"]
+        if self.call_name is not None:
+            function = {"name": self.call_name, "arguments": text["arguments"]}
+            message["tool_calls"] = [{"id": self.call_id, "type": "function", "function": function}]
+        return message
+
+
 class FakeAdapter(BaseAdapter, GenerationAdapter):
     """One weightless fake serving every supported surface: hash-derived
     embeddings (``encode``), pair scores in ``[0, 1)`` (``score``),
@@ -376,6 +443,19 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
     and ``logprobs`` are accepted and ignored — determinism comes from the
     input alone. ``finish_reason`` is ``"length"`` when truncated by
     ``max_new_tokens``, else ``"stop"``.
+
+    Chat follows a script, for wire tests only. With tools declared and
+    ``tool_choice`` not ``"none"``, a turn calls one tool, the named one or
+    else the first, unless its last message is a tool result and the call is
+    not forced. Every required parameter gets the last user message's text.
+    A turn ending in tool results answers ``Tool result: <content>`` for
+    each, and any other turn answers ``default_completion_tokens`` hash
+    tokens. When ``chat_template_kwargs`` enables thinking, one sentence of
+    reasoning naming the rule comes first, returned only with
+    ``keep_reasoning``. A prompt token is a whitespace-separated word of the
+    tools and messages, and an output token is one streamed piece. Output
+    stops at the token limit with ``"length"``, a prompt that leaves no room
+    in ``max_seq_length`` is refused, and ``n`` repeats the turn.
     """
 
     spec: ClassVar[AdapterSpec] = AdapterSpec(
@@ -402,7 +482,8 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
         fault_key: str | None = None,
         **kwargs: Any,
     ) -> None:
-        _ = (model_name_or_path, max_seq_length, compute_precision, kwargs)
+        _ = (model_name_or_path, compute_precision, kwargs)
+        self._max_seq_length = max_seq_length
         self._dense_dim = dense_dim
         self._sparse_dim = sparse_dim
         self._multivector_dim = multivector_dim
@@ -598,12 +679,10 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
         # Char-count proxy, mirroring the reserve-estimate basis used when no
         # real tokenizer exists.
         prompt_tokens = max(1, len(prompt) // 4)
-        for i in range(count):
+        for i, token in enumerate(_hash_tokens(prompt, count)):
             if self._inter_token_latency_s > 0:
                 await asyncio.sleep(self._inter_token_latency_s)
-            fragment = hashlib.sha256(f"{prompt}\x00{i}".encode()).hexdigest()[:8]
-            separator = "" if i == count - 1 else " "
-            yield GenerationChunk(text_delta=f"tok_{fragment}{separator}", is_first=(i == 0))
+            yield GenerationChunk(text_delta=token, is_first=(i == 0))
         yield GenerationChunk(
             text_delta="",
             done=True,
@@ -611,3 +690,112 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
             prompt_tokens=prompt_tokens,
             completion_tokens=count,
         )
+
+    async def _chat_turn(self, body: dict[str, Any]) -> _ChatTurn:
+        if not self._loaded:
+            raise RuntimeError(ERR_NOT_LOADED)
+        await self._fault_runtime.on_dispatch_async()
+        transcript = _chat_transcript(body)
+        prompt_tokens = len(transcript.split())
+        budget = body.get("max_completion_tokens") or body["max_tokens"]
+        if self._max_seq_length is not None:
+            room = self._max_seq_length - prompt_tokens
+            if room < 1:
+                msg = f"the prompt is {prompt_tokens} tokens and leaves no room in the {self._max_seq_length}-token window"
+                raise GenerationInputTooLongError(msg)
+            budget = min(budget, room)
+        messages = body["messages"]
+        tools = [tool["function"] for tool in body.get("tools") or []]
+        choice = body.get("tool_choice")
+        named = choice.get("function", {}).get("name") if isinstance(choice, dict) else None
+        forced = choice == "required" or named is not None
+        results: list[str] = []
+        for message in reversed(messages):
+            if message["role"] != "tool":
+                break
+            results.insert(0, _message_text(message))
+        call_name: str | None = None
+        arguments = ""
+        content: list[str] = []
+        if tools and choice != "none" and (forced or not results):
+            function = next((tool for tool in tools if tool["name"] == named), tools[0])
+            call_name = function["name"]
+            question = next((_message_text(m) for m in reversed(messages) if m["role"] == "user"), "")
+            required = (function.get("parameters") or {}).get("required") or []
+            arguments = json.dumps(dict.fromkeys(required, question), ensure_ascii=False)
+            reason = "tool_choice requires a call" if forced else "the last message is not a tool result"
+            thought = f"Tools are declared and {reason}, so call {call_name}."
+        elif results:
+            thought = "The last message is a tool result, so answer with it."
+            content = _PIECE.findall(" ".join(f"Tool result: {result}" for result in results))
+        else:
+            thought = "No tool call applies, so answer in text."
+            content = _hash_tokens(transcript, self._default_completion_tokens)
+        steps: list[tuple[str, str]] = []
+        if (body.get("chat_template_kwargs") or {}).get("enable_thinking") is True:
+            steps += [("reasoning", piece) for piece in _PIECE.findall(thought)]
+        if call_name is not None:
+            steps.append(("call", ""))
+            steps += [("arguments", piece) for piece in _PIECE.findall(arguments)]
+        steps += [("content", piece) for piece in content]
+        kept = steps[:budget]
+        return _ChatTurn(
+            steps=kept,
+            call_id="call_" + hashlib.sha256(f"{transcript}\x00call".encode()).hexdigest()[:24],
+            call_name=call_name if ("call", "") in kept else None,
+            finish_reason="length" if len(steps) > budget else "tool_calls" if call_name else "stop",
+            prompt_tokens=prompt_tokens,
+            choices=body.get("n") or 1,
+        )
+
+    async def chat_completion(
+        self,
+        body: dict[str, Any],
+        *,
+        requested_model: str,
+        max_response_bytes: int = 32 << 20,
+        keep_reasoning: bool = False,
+    ) -> dict[str, Any]:
+        _ = max_response_bytes
+        turn = await self._chat_turn(body)
+        return {
+            "id": f"chatcmpl-{uuid.uuid4().hex}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": requested_model,
+            "choices": [
+                {
+                    "index": index,
+                    "message": turn.message(keep_reasoning=keep_reasoning),
+                    "finish_reason": turn.finish_reason,
+                }
+                for index in range(turn.choices)
+            ],
+            "usage": turn.usage,
+        }
+
+    async def chat_completion_stream(
+        self,
+        body: dict[str, Any],
+        *,
+        requested_model: str,
+        max_response_bytes: int = 32 << 20,
+        keep_reasoning: bool = False,
+    ) -> AsyncIterator[dict[str, Any]]:
+        _ = max_response_bytes
+        turn = await self._chat_turn(body)
+        envelope = {
+            "id": f"chatcmpl-{uuid.uuid4().hex}",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": requested_model,
+        }
+        for index in range(turn.choices):
+            deltas = [{"role": "assistant"}]
+            deltas += [turn.delta(kind, text) for kind, text in turn.steps if keep_reasoning or kind != "reasoning"]
+            for delta in deltas:
+                if self._inter_token_latency_s > 0:
+                    await asyncio.sleep(self._inter_token_latency_s)
+                yield {**envelope, "choices": [{"index": index, "delta": delta, "finish_reason": None}]}
+            yield {**envelope, "choices": [{"index": index, "delta": {}, "finish_reason": turn.finish_reason}]}
+        yield {**envelope, "choices": [], "usage": turn.usage}

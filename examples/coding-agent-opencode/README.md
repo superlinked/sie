@@ -385,13 +385,56 @@ with an output cap of 8,192 tokens and `tool_choice: "auto"`.
 
 ## Checked without a GPU
 
-`sie-server` ships a weightless `sie-fake` model for CI, but it has no
-chat-template child: `/v1/chat/completions` answers `501
-unsupported_operation` for it. So the conformance check cannot run against
-`sie-fake`.
+`sie-server` ships a weightless `sie-fake` model for CI. Its
+`sie-fake:chat` profile answers `/v1/chat/completions` from a script, not a
+model. With tools declared, a turn that ends in a user message calls the
+first tool, passing that message as every required argument. A turn that ends
+in a `role: tool` message answers `Tool result: ` followed by the result. Any
+other turn answers with hash-derived tokens. Every turn starts with one
+sentence of reasoning, returned as `reasoning_content` only with
+`include_reasoning`. A token is one word of the prompt or one streamed piece
+of the answer, and the profile declares a 131,072-token window. So the
+conformance check runs against a real `sie-server` without a GPU or weights:
+
+```sh
+mise run serve -- -b fake --device cpu      # from the repository root
+uv run python conformance.py --model sie-fake:chat
+```
+
+```
+  tool_choice_auto            pass      tool_choice=auto accepted on the tools turn
+  streaming_tool_call_deltas  pass      1 call: get_weather({"city": "What is the weather in Paris right now? Use the get_weather tool."}); 14 deltas; finish_reason=tool_calls
+  parallel_tool_calls         fail      1 tool call in the turn: get_weather({"city": "Get the current weather in Paris and in Tokyo. Call get_weather once per city, both in this turn."})
+  tool_result_round_trip      pass      final answer used the tool result: 'Tool result: {"city": "Paris", "temperature_c": 18, "conditions": "overcast"}'
+  prompt_above_64k_tokens     pass      68022 prompt tokens accepted and answered; needle not found
+  finish_reason_stop          pass      finish_reason=stop after 'tok_b0437c31 tok_5aaf6099 tok_f3b6ad77 t'
+  finish_reason_tool_calls    pass      finish_reason=tool_calls on the tool-call turn
+  finish_reason_length        pass      finish_reason=length at max_tokens=8 (completion_tokens=8)
+  usage_on_final_chunk        pass      final chunk carries usage {'completion_tokens': 40, 'prompt_tokens': 7, 'total_tokens': 47}
+  include_reasoning           pass      8 reasoning_content deltas, 40 chars; message.reasoning_content 40 chars; none without the flag
+  tool_choice_required        recorded  supported: forced get_weather({"city": "Say hello."})
+
+9 pass, 1 fail, 1 recorded
+```
+
+- A pass here checks SIE's single-node chat wire, not a model: the streamed
+  call deltas, the tool result sent back, reasoning returned only on request,
+  the finish reasons, the usage on the last chunk and the declared window.
+- `parallel_tool_calls` fails because the fake makes one call per turn.
+- The fake does not read the prompt, so the needle is not found, and the
+  answer to "Reply with the single word: ready." is hash-derived tokens.
 
 What runs anywhere, and in this repository's CI, is the test suite:
 
+- `tests/test_fake_engine.py` starts this repository's `sie-server` with the
+  fake bundle on the CPU and runs `conformance.py` against `sie-fake:chat`. It
+  asserts the table above case by case, the failing `parallel_tool_calls`
+  included, and what each case observed: the call's id and name on its first
+  delta, the tool result in the answer, reasoning only with the flag and the
+  same usage without it, the long prompt's size against the window, and
+  `max_tokens: 8` spending exactly 8 tokens. It needs the repository's
+  environment, from `mise run sync` at the root, and is skipped without it
+  outside CI.
 - `tests/test_conformance.py` starts a scripted OpenAI-compatible stub that
   plays a conforming wire, then breaks one thing per test: tool-call deltas
   without ids, one call where two were asked for, `tool_choice: "required"`
@@ -415,8 +458,9 @@ What runs anywhere, and in this repository's CI, is the test suite:
 uv run pytest
 ```
 
-That is a check of the checker. The endpoint itself is only checked by running
-`conformance.py` against it.
+`tests/test_conformance.py` and `tests/test_run_gate.py` check the checker,
+and `tests/test_fake_engine.py` checks SIE's chat route with a scripted model.
+A model's endpoint is only checked by running `conformance.py` against it.
 
 ## What this does NOT establish
 
