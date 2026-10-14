@@ -7,12 +7,15 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from sie_server.app.app_factory import AppFactory
+from sie_server.app.app_state_config import AppStateConfig
 from sie_server.config.upstreams import (
     Upstream,
     UpstreamConfigError,
     UpstreamCredentialError,
     UpstreamKind,
     install_upstreams,
+    installed_upstreams,
     load_upstreams,
     upstream_for_serving,
     validate_upstream_url,
@@ -223,3 +226,49 @@ def test_an_upstream_missing_at_serving_time_is_named_only_in_the_log(caplog: py
 
     assert str(raised.value) == "this remote profile's upstream is not defined in the startup configuration"
     assert "upstream 'team-sie' is not defined in the startup configuration" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("value", "problem"),
+    [
+        (None, "is not set"),
+        (" \n", "is not set"),
+        (f"{CANARY}\r\ninjected: header", "holds characters a credential cannot contain"),
+        (CANARY, None),
+    ],
+    ids=["unset", "blank", "unusable", "set"],
+)
+def test_startup_warns_about_an_unusable_credential_and_still_starts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    value: str | None,
+    problem: str | None,
+) -> None:
+    path = write(
+        tmp_path,
+        "upstreams:\n"
+        "  team-sie:\n    kind: sie\n    base_url: https://sie.example.internal\n    api_key_secret: TEAM_SIE_KEY\n"
+        + RATE_CAP
+        + "  open-sie:\n    kind: sie\n    base_url: https://open.example.internal\n"
+        + RATE_CAP,
+    )
+    if value is None:
+        monkeypatch.delenv("TEAM_SIE_KEY", raising=False)
+    else:
+        monkeypatch.setenv("TEAM_SIE_KEY", value)
+    caplog.set_level(logging.DEBUG)
+
+    try:
+        AppFactory.create_app(AppStateConfig(upstreams_file=str(path)))
+        assert sorted(installed_upstreams()) == ["open-sie", "team-sie"]
+    finally:
+        install_upstreams({})
+
+    warnings = [(record.name, record.getMessage()) for record in caplog.records if record.levelno >= logging.WARNING]
+    expected = (
+        "requests to upstream 'team-sie' fail until its credential is usable: "
+        f"environment variable TEAM_SIE_KEY {problem}"
+    )
+    assert warnings == ([] if problem is None else [("sie_server.config.upstreams", expected)])
+    assert CANARY not in caplog.text

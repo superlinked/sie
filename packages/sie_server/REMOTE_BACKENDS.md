@@ -74,7 +74,10 @@ upstreams:
 
 `TEAM_SIE_KEY` is the name of an environment variable, not its value. Supply
 that variable through your deployment's secret mechanism. The adapter reads
-it when sending a request. Do not put a key in the YAML or a URL.
+it when sending a request. A server that starts while the variable is unset
+logs a warning naming the upstream and the variable, and starts anyway. Each
+request to that upstream fails while the variable is unset. Do not put a key
+in the YAML or a URL.
 
 Create `remote-models/sentence-transformers__all-MiniLM-L6-v2.yaml`:
 
@@ -262,6 +265,16 @@ refused with `PROVISIONING`, because the remote capacity is still starting,
 received no answer, so it is `QUEUE_FULL`. Any other failure is
 `INFERENCE_ERROR` for a server error and `INVALID_INPUT` for a client error.
 
+A single node that answers a remote chat call with `502` `upstream_error`, or
+with `503` because the upstream is unavailable, busy or not ready, logs one
+`WARNING` with a fixed reason, for example
+`remote chat for <model> failed: upstream answered 401` or
+`remote chat for <model> failed: the upstream credential is unavailable`. A
+failure after a stream has started logs `failed after output`. Native
+generation and completions log an upstream they cannot reach as
+`remote generation failed: upstream '<name>' is unavailable: <reason>`. No
+line contains the credential, the prompt or anything the upstream sent.
+
 Each upstream has a required rate cap and a circuit breaker. The limits are
 shared by that worker process's adapters, not across replicas: adding remote
 worker replicas increases the aggregate permitted traffic. Background identity
@@ -275,6 +288,50 @@ returns the worker's code and wait. Under single-node `fallback`, an upstream fa
 returns the original local refusal with its retry delay. A client error is
 never retried remotely, and fallback cannot replay work after local acceptance
 or after output reaches the caller.
+
+A generation request sends the upstream the caller's messages or prompt and
+sampling parameters, together with defaults the model configures, such as
+sampling defaults, stop sequences or chat template arguments. This holds for
+chat, completions and native generation, streamed or buffered, and for chat
+that the server renders through the model's template before it calls the
+upstream's completions or native generation endpoint. An upstream that answers
+a generation request with `400` or `422` and no known SIE error code refused
+that input. An OpenAI-compatible API answers this way, for example, to a
+prompt longer than its context. The caller receives `400` `invalid_request`,
+as for an `INVALID_INPUT` refusal, with fixed text that repeats nothing the
+upstream sent and does not name the upstream. An upstream that refuses a
+configured default answers the same way, so the server logs every refused
+generation request at `WARNING` with the upstream's name and status, where a
+refused default shows as a refusal of every request. Encode, score and
+extraction report the same upstream answer as a server error. A `400` or `422`
+with a known SIE error code other than `INVALID_INPUT` or `INPUT_TOO_LONG`, and
+other upstream `4xx` answers such as `401`, `403` or `404`, point at the
+operator's credential, model name or route rather than at the request, so the
+caller receives a server error. `429` and `5xx` answers are retryable as
+described above.
+
+Chat checks an upstream answer against the request's tools on a single node
+and in a cluster, streamed and buffered. The answer fails as an upstream error
+when it calls a function the request did not declare, calls any function under
+`tool_choice: "none"`, calls a function other than the one `tool_choice` names,
+makes several calls under `parallel_tool_calls: false`, or makes no call when
+`tool_choice` is `"required"` or names a function. Before output, a single node
+answers that failure with `502` `upstream_error` and a cluster with `500`
+`inference_error`, as each answers any other upstream failure. A stream that
+has already started ends with an error event. A streamed function name is
+checked as OpenAI clients assemble it, by concatenating the fragments of each
+call index. A fragment is delivered while the name so far begins a permitted
+name, so a stream can deliver the start of a name before the call fails. An
+upstream that repeats the whole name on every delta fails, because the
+concatenated name is not one the request declared.
+
+Tool function names must match `^[a-zA-Z0-9_-]{1,64}$`, the pattern
+OpenAI-compatible APIs accept, so a local and a remote profile accept the same
+requests. The gateway and the single-node chat route refuse any other name
+with `400` before dispatch and name the field, for example
+`tools[1].function.name`. The error code is each route's code for an invalid
+chat request: `invalid_request` from the gateway and `INVALID_INPUT` from a
+single node.
 
 TLS is required outside loopback. URLs containing credentials, a query or a
 fragment are rejected. Redirects are refused, ambient proxy variables are

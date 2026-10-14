@@ -7949,6 +7949,8 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
 /// * Must be a non-empty JSON array.
 /// * Each entry must be ``{type: "function", function: {name: string,
 ///   description?: string, parameters?: object}}``.
+/// * ``function.name`` must match the OpenAI pattern
+///   ``^[a-zA-Z0-9_-]{1,64}$``.
 /// * ``function.parameters`` (when present) is run through the shared
 ///   JSON-Schema safety walker so the same depth / size / unsupported-
 ///   keyword caps that apply to ``response_format.json_schema`` also
@@ -8029,6 +8031,17 @@ fn validate_chat_tools(v: &serde_json::Value) -> Result<Vec<serde_json::Value>, 
         if name.is_empty() {
             return Err(bad(
                 format!("tools[{i}].function.name must be non-empty"),
+                &format!("tools[{i}].function.name"),
+                oai_code::INVALID_REQUEST,
+            ));
+        }
+        if name.len() > 64
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err(bad(
+                format!("tools[{i}].function.name must match ^[a-zA-Z0-9_-]{{1,64}}$"),
                 &format!("tools[{i}].function.name"),
                 oai_code::INVALID_REQUEST,
             ));
@@ -18224,6 +18237,54 @@ mod tests {
                 vec![("org/g".to_string(), expected_intent)],
                 "governed route lookup for {uri}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_tool_names_outside_the_openai_pattern_are_refused_before_routing() {
+        let chat = |name: &str| {
+            serde_json::json!({
+                "model": "org/g",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 4,
+                "tools": [
+                    {"type": "function", "function": {"name": "get_weather"}},
+                    {"type": "function", "function": {"name": name}}
+                ]
+            })
+        };
+        let too_long = "a".repeat(65);
+        let longest = "A".repeat(64);
+        for (name, valid) in [
+            ("math.factorial", false),
+            ("two words", false),
+            ("caf\u{e9}", false),
+            ("a/b", false),
+            (too_long.as_str(), false),
+            ("get-weather_2", true),
+            (longest.as_str(), true),
+        ] {
+            let (state, policy) = recording_generation_state().await;
+            let response = proxy_chat(
+                State(state),
+                json_request("/v1/chat/completions", chat(name)),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{name}");
+            let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("read body");
+            let error: serde_json::Value = serde_json::from_slice(&body).expect("body is JSON");
+            assert!(policy.take_calls().is_empty(), "{name} reached routing");
+            if valid {
+                // The fixture model declares no tool support, so a request
+                // that passed validation is refused by the capability gate.
+                assert_eq!(error["error"]["code"], "unsupported_field", "{name}");
+                assert_eq!(error["error"]["param"], "tools", "{name}");
+            } else {
+                assert_eq!(error["error"]["code"], "invalid_request", "{name}");
+                assert_eq!(error["error"]["param"], "tools[1].function.name", "{name}");
+            }
         }
     }
 

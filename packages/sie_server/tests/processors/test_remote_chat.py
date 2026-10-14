@@ -203,7 +203,8 @@ async def test_unsupported_chat_fields_refuse_without_dispatch(remote: tuple, fi
 
 
 @pytest.mark.parametrize(
-    ("status", "code"), [(429, "RESOURCE_EXHAUSTED"), (503, "RESOURCE_EXHAUSTED"), (400, "inference_error")]
+    ("status", "code"),
+    [(429, "RESOURCE_EXHAUSTED"), (503, "RESOURCE_EXHAUSTED"), (400, "invalid_request"), (401, "inference_error")],
 )
 async def test_remote_refusal_is_single_attempt_and_sanitized(remote: tuple, status: int, code: str) -> None:
     respond(remote, status=status, payload={"error": {"message": "PRIVATE_UPSTREAM_DETAIL"}})
@@ -408,14 +409,28 @@ async def test_buffered_chat_preserves_tools_and_exact_usage(remote: tuple) -> N
 
 
 @pytest.mark.parametrize(
-    ("code", "expected"), [("INVALID_INPUT", "invalid_request"), ("INPUT_TOO_LONG", "INPUT_TOO_LONG")]
+    ("status", "code", "expected"),
+    [
+        (400, "INVALID_INPUT", "invalid_request"),
+        (400, "INPUT_TOO_LONG", "INPUT_TOO_LONG"),
+        (400, "invalid_request_error", "invalid_request"),
+        (422, None, "invalid_request"),
+        (400, "MODEL_NOT_FOUND", "inference_error"),
+        (413, None, "inference_error"),
+        (401, None, "inference_error"),
+        (403, None, "inference_error"),
+        (404, None, "inference_error"),
+    ],
 )
-async def test_known_input_refusal_preserves_type(remote: tuple, code: str, expected: str) -> None:
-    respond(remote, status=400, payload={"error": {"code": code, "message": "PRIVATE"}})
+async def test_input_refusal_is_the_callers_error_and_other_refusals_are_not(
+    remote: tuple, status: int, code: str | None, expected: str
+) -> None:
+    respond(remote, status=status, payload={"error": {"code": code, "message": "PRIVATE"}})
     _msg, chunks = await run(remote)
     assert chunks[-1]["error"]["code"] == expected
     assert len(remote[3]) == 1
     assert "PRIVATE" not in json.dumps(chunks)
+    assert "queued-chat" not in json.dumps(chunks)
 
 
 async def test_post_output_disconnect_is_final(remote: tuple) -> None:
