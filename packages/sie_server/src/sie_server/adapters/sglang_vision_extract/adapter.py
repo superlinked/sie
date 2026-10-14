@@ -21,6 +21,7 @@ from sie_server.adapters._generation_base import GenerationResult, collect_gener
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters.base import ModelCapabilities, ModelDims
+from sie_server.adapters.lighton_ocr._markdown import lightonocr3_markdown
 from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
 from sie_server.core.inference_output import ExtractOutput
 from sie_server.types.inputs import InvalidMediaError
@@ -75,6 +76,7 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
         top_p: float = 1.0,
         chat_template_kwargs: dict[str, Any] | None = None,
         allowed_instructions: list[str] | None = None,
+        output_postprocess: str | None = None,
         disable_cuda_graph: bool = False,
         attention_backend: str | None = None,
         extra_launch_args: list[str] | None = None,
@@ -82,6 +84,9 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
         startup_timeout_s: float | None = None,
         **kwargs: Any,
     ) -> None:
+        if output_postprocess not in (None, "lightonocr3_markdown"):
+            msg = "output_postprocess must be None or 'lightonocr3_markdown'"
+            raise ValueError(msg)
         super().__init__(
             model_name_or_path=str(model_name_or_path),
             max_seq_length=max_seq_length,
@@ -119,6 +124,7 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
         self._top_p = float(top_p)
         self._chat_template_kwargs = dict(chat_template_kwargs or {})
         self._allowed_instructions = None if allowed_instructions is None else frozenset(allowed_instructions)
+        self._output_postprocess = output_postprocess
         # One bound across every batch in flight, created on the request loop.
         self._request_slots: asyncio.Semaphore | None = None
         self._processor: Any = None
@@ -273,6 +279,9 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
             raise RuntimeError(_ERR_NOT_LOADED)
 
         runtime = options or {}
+        if "output_postprocess" in runtime:
+            msg = "output_postprocess is a loadtime option"
+            raise ValueError(msg)
         max_new_tokens = int(runtime.get("max_new_tokens", self._max_new_tokens))
         num_beams = int(runtime.get("num_beams", self._num_beams))
         if num_beams != 1:
@@ -301,7 +310,20 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
             self._request_loop,
         )
         results = future.result()
-        entities = [[Entity(text=result.text.strip(), label=entity_label, score=1.0)] for result in results]
+        entities = [
+            [
+                Entity(
+                    text=(
+                        lightonocr3_markdown(result.text)
+                        if self._output_postprocess == "lightonocr3_markdown"
+                        else result.text.strip()
+                    ),
+                    label=entity_label,
+                    score=1.0,
+                )
+            ]
+            for result in results
+        ]
         # SGLang reports each request's prompt tokens (chat template plus the
         # image's vision tokens) and the completion tokens it decoded. Both are
         # reported alongside the page or image count, which stays unchanged;
