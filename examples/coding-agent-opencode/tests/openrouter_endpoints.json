@@ -36,5 +36,7 @@
     ["include_reasoning", "max_tokens", "reasoning", "reasoning_effort", "response_format", "temperature", "tool_choice", "tools", "top_k", "top_p"],
     ["frequency_penalty", "include_reasoning", "logit_bias", "logprobs", "max_tokens", "presence_penalty", "reasoning", "reasoning_effort", "repetition_penalty", "response_format", "seed", "stop", "structured_outputs", "temperature", "tool_choice", "tools", "top_k", "top_logprobs", "top_p"],
     ["frequency_penalty", "include_reasoning", "logit_bias", "logprobs", "max_tokens", "presence_penalty", "reasoning", "reasoning_effort", "repetition_penalty", "response_format", "stop", "structured_outputs", "temperature", "tool_choice", "tools", "top_k", "top_logprobs", "top_p"]
-  ]
+  ],
+  "catalog_source": "https://openrouter.ai/api/v1/models",
+  "catalog_parameters": ["frequency_penalty", "include_reasoning", "logit_bias", "logprobs", "max_completion_tokens", "max_tokens", "min_p", "parallel_tool_calls", "prediction", "presence_penalty", "reasoning", "reasoning_effort", "repetition_penalty", "response_format", "seed", "stop", "structured_outputs", "temperature", "tool_choice", "tools", "top_a", "top_k", "top_logprobs", "top_p", "verbosity", "web_search_options"]
 }

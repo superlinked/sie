@@ -119,11 +119,25 @@ uv run python conformance.py --base-url http://localhost:8080/v1 --model zai-org
 ./run_gate.sh openrouter
 ```
 
-The server reads the key only when it sends a request, so it starts without
-one. A request it cannot send, or one OpenRouter refuses, for example for a
-missing or wrong key, no credits or no provider to route to, answers
-`502 upstream_error`. A busy or unreachable OpenRouter answers `503` with
-`Retry-After`.
+The server reads the key from its own environment each time it sends a
+request, so it starts without one: export the key in the shell that starts the
+server. A busy or unreachable OpenRouter answers `503` with `Retry-After`. A
+request the server could not send, or that OpenRouter refused or did not
+answer with a chat answer the server accepts, answers `502 upstream_error`,
+`upstream generation request failed`, before any output, and ends the stream
+with an error event after output. The server log names the reason on a
+`WARNING` line, `remote chat for zai-org/GLM-5.3-Flash failed: <reason>`, or
+`failed after output: <reason>`:
+
+| Reason | Cause |
+|---|---|
+| `the upstream credential is unavailable` | `OPENROUTER_API_KEY` is not set in the server's environment, so nothing was sent |
+| `upstream answered 401` | OpenRouter refused the key |
+| `upstream answered 402` | the account has no credits |
+| `upstream answered 404` | OpenRouter found no endpoint for the request, for example under the account's provider or data-policy settings |
+| `upstream answered` another status | OpenRouter refused the request with that status |
+| `upstream sent an error instead of a chat answer` | OpenRouter accepted the request, then sent an error, as it does when the provider it picked fails |
+| anything else | OpenRouter's answer broke a rule the server holds every upstream to, for example usage above the request's `max_tokens` |
 
 Pointed at OpenRouter directly, OpenCode would get the same model. Through SIE
 it uses one API and one model name, `zai-org/GLM-5.3-Flash`, which the cluster
@@ -144,13 +158,18 @@ The two server files:
   unavailable. A request either one refuses gets `503` with `Retry-After`. Both
   limits apply per server process.
 - `strip_params` removes `chat_template_kwargs`, which the server adds from
-  the model file and which only a local chat template reads. The upstream sets
-  no OpenRouter provider preference. Every OpenRouter provider of
-  `z-ai/glm-5.3-flash` lists `tools` and `tool_choice`, and OpenRouter sends a
-  request that carries tools only to providers that support them. Its
-  `require_parameters` preference would also hold each request to the
-  parameters a provider lists, and the server adds `stream_options` to every
-  streamed request, which no provider lists.
+  the model file and which only a local chat template reads.
+- The upstream sets no OpenRouter provider preference. On 2026-10-14 all 33
+  OpenRouter endpoints of `z-ai/glm-5.3-flash` listed every parameter the
+  server forwards for OpenCode and `conformance.py` (`max_tokens`,
+  `temperature`, `tools` and `tool_choice`), and OpenRouter sends a request
+  with tools only to providers that support tools, so `require_parameters`
+  would exclude no endpoint for them. An endpoint ignores a parameter it does
+  not list, such as `parallel_tool_calls` (listed by 1 of the 33), `logprobs`
+  (17) or `seed` (22); with `require_parameters` the request would go only to
+  endpoints that list it. Of the 33, 11 report no support for `tool_choice:
+  "required"`, and OpenRouter does not document whether it routes by that
+  value.
 - `models/zai-org__GLM-5.3-Flash.yaml` declares a remote-backed model
   (`remote_backed: true`, `routing: {policy: remote_only}`) with one profile on
   the `openrouter` upstream. It declares a 131,072-token window with up to
@@ -527,17 +546,21 @@ What runs anywhere, and in this repository's CI, is the test suite:
   `upstreams.yaml` pointed at a scripted stand-in for OpenRouter on
   `127.0.0.1`. The stand-in streams the way OpenRouter documents: SSE comment
   lines, reasoning in a `reasoning` field, tool-call deltas and a closing usage
-  event that repeats the finished choice. It answers `404` to a request that
-  asks for OpenRouter's `require_parameters` and carries a field, other than
-  the model, messages, stream flag and provider preference, that no parameter
-  list of the model's OpenRouter endpoints holds.
-  `tests/openrouter_endpoints.json` holds those lists as OpenRouter published
-  them. `conformance.py` against the server gives 10
-  pass, 0 fail and 1 recorded (`tool_choice_required`, supported). Every
-  request the stand-in received names `z-ai/glm-5.3-flash`, carries the key
-  from `OPENROUTER_API_KEY`, and carries only `model`, `messages`, `stream`,
-  `max_tokens` and `temperature`, plus `stream_options` when streamed and
-  `tools` and `tool_choice` on a tools turn. It needs the
+  event that repeats the finished choice. `conformance.py` against the server
+  gives 10 pass, 0 fail and 1 recorded (`tool_choice_required`, supported).
+  The test pins each request the stand-in received, case by case: the model
+  `z-ai/glm-5.3-flash`, the key from `OPENROUTER_API_KEY` as a bearer token,
+  and exactly `messages`, `stream`, `max_tokens` and `temperature`, plus
+  `stream_options` when streamed and `tools` and `tool_choice` on a tools
+  turn. Asked for `require_parameters`, the stand-in answers `404` when no
+  endpoint of the model lists every request field that is one of the
+  parameter names in OpenRouter's public model list. That list does not hold
+  `stream` or `stream_options`; OpenRouter documents the preference in terms of
+  its parameters and does not say how it treats other fields.
+  `tests/openrouter_endpoints.json` holds the endpoints' lists and those names
+  as OpenRouter published them. The stand-in also answers `401`, `402`, `404`
+  and a stream whose only event is an error, and the test checks that each
+  comes back as a `502` whose reason the server log names. It needs the
   repository's environment, from `mise run sync` at the root, and is skipped
   without it outside CI.
 
@@ -570,6 +593,9 @@ That is a check of the checker. The endpoint itself is only checked by running
 - **Not yet a run against OpenRouter.** Until the result above is recorded,
   the OpenRouter recipe has been checked against a scripted stand-in only.
   Which provider OpenRouter routes a request to, and how that provider streams
-  tool calls and reasoning, shows only in a real run.
+  tool calls and reasoning, shows only in a real run. A provider without
+  `tool_choice: "required"` support can answer the `tool_choice_required` case
+  with text, which fails it, and a provider that reports more completion
+  tokens than `max_tokens` allows fails `finish_reason_length`.
 - **One endpoint, one day.** The Cloud results were recorded once, on
   2026-10-14.
