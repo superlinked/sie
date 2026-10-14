@@ -132,6 +132,7 @@ from ._shared import (
     SERVER_VERSION_HEADER,
     _coerce_token_count,
     admission_retry_delay,
+    attach_gateway_timing,
     attach_request_metadata,
     attempt_timeout_cap,
     base_url_accepts_origin_credentials,
@@ -1639,6 +1640,7 @@ class SIEClient:
                 result["timing"] = timing
 
         attach_request_metadata(results, response.headers, response_data)
+        attach_gateway_timing(results, response.headers)
         # Guard the 1:1 input↔output contract before any positional access
         # (``results[0]`` below, or batch reassembly in callers). The gateway's
         # queue path returns mixed-success batches as 200 with only the

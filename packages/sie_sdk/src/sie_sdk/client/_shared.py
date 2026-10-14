@@ -299,6 +299,7 @@ from sie_sdk.types import (
     EntityResult,
     ExtractItemErrorDetail,
     ExtractResult,
+    GatewayTimingInfo,
     GenerateGrammar,
     Relation,
     RequestMetadata,
@@ -979,6 +980,42 @@ def _parse_nonnegative_meter_header(headers: Any, name: str) -> int | None:
         return None
     parsed = int(value)
     return parsed if parsed <= _MAX_METER_VALUE else None
+
+
+_GATEWAY_TIMING_HEADERS = {
+    "publish_ms": "x-queue-publish-time",
+    "result_wait_ms": "x-queue-wait-time",
+    "worker_queue_ms_max": "x-queue-time",
+    "worker_inference_ms_max": "x-inference-time",
+    "worker_tokenization_ms_max": "x-tokenization-time",
+    "worker_postprocessing_ms_max": "x-postprocessing-time",
+    "worker_payload_fetch_ms_max": "x-payload-fetch-time",
+}
+
+
+def parse_gateway_timing(headers: Any) -> GatewayTimingInfo | None:
+    """Read bounded nonnegative decimal timing headers without inventing totals."""
+    timing: dict[str, float] = {}
+    for field, header in _GATEWAY_TIMING_HEADERS.items():
+        value = _header_value(headers, header)
+        if (
+            not isinstance(value, str)
+            or not 0 < len(value) <= 64
+            or re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", value) is None
+        ):
+            continue
+        parsed = float(value)
+        if math.isfinite(parsed):
+            timing[field] = parsed
+    return cast("GatewayTimingInfo", timing) if timing else None
+
+
+def attach_gateway_timing(results: Sequence[EncodeResult], headers: Any) -> None:
+    """Attach detached terminal-response timing without altering body timing."""
+    timing = parse_gateway_timing(headers)
+    if timing is not None:
+        for result in results:
+            result["gateway_timing"] = timing.copy()
 
 
 def settled_charge_from_usage(usage: Any) -> tuple[int, str] | None:
