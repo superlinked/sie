@@ -142,6 +142,27 @@ class TimingInfo(TypedDict, total=False):
     inference_ms: float
 
 
+class GatewayTimingInfo(TypedDict, total=False):
+    """Terminal response-header durations, in milliseconds.
+
+    Queue gateways report independent worker maxima, not additive request
+    phases. Their worker queue timing can include execution because it is
+    measured from publication to result. Queue/inference zero can be a gateway
+    missing-value fallback; any zero can also reflect header rounding. Direct
+    servers can report their own stage timings under the same worker headers.
+    Missing fields stay absent. These durations do not measure the complete
+    gateway request or client round trip.
+    """
+
+    publish_ms: float
+    result_wait_ms: float
+    worker_queue_ms_max: float
+    worker_inference_ms_max: float
+    worker_tokenization_ms_max: float
+    worker_postprocessing_ms_max: float
+    worker_payload_fetch_ms_max: float
+
+
 class RequestUsage(TypedDict, total=False):
     """Authoritative metered units for one completed inference request.
 
@@ -256,6 +277,8 @@ class EncodeResult(TypedDict, total=False):
             the default dtype; an explicit output_dtype request overrides it.
         request: Request-scoped id, metered usage, and settled debit when
             supplied by the gateway.
+        gateway_timing: Optional terminal response-header durations,
+            distinct from the response body's timing breakdown.
     """
 
     model: str
@@ -264,6 +287,7 @@ class EncodeResult(TypedDict, total=False):
     sparse: SparseResult
     multivector: NDArray[np.float16] | NDArray[np.float32]
     timing: TimingInfo
+    gateway_timing: GatewayTimingInfo
     request: RequestMetadata
 
 

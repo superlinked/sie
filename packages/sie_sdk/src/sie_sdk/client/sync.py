@@ -132,6 +132,7 @@ from ._shared import (
     SERVER_VERSION_HEADER,
     _coerce_token_count,
     admission_retry_delay,
+    attach_gateway_timing,
     attach_request_metadata,
     attempt_timeout_cap,
     base_url_accepts_origin_credentials,
@@ -176,6 +177,7 @@ from ._shared import (
     valid_stream_request_id,
     validate_base_url,
     validate_batch_result_count,
+    validate_encode_traceparent,
     validate_generate_grammar,
     validate_generate_request_body,
     websocket_matches_base_url_origin,
@@ -313,6 +315,10 @@ def _attach_origin_scoped_headers(
         return
     if request_matches_base_url_origin(base_url, str(request.url)):
         request.headers.update(headers)
+        traceparent = request.extensions.get("sie_encode_traceparent")
+        if traceparent is not None:
+            request.headers["traceparent"] = traceparent
+            request.headers.pop("tracestate", None)
 
 
 def _handle_oom_retry(
@@ -552,16 +558,15 @@ class SIEClient:
             "headers": headers,
             "follow_redirects": False,
         }
-        if self._base_url_headers:
-            client_kwargs["event_hooks"] = {
-                "request": [
-                    partial(
-                        _attach_origin_scoped_headers,
-                        base_url=self._base_url,
-                        headers=self._base_url_headers,
-                    )
-                ]
-            }
+        client_kwargs["event_hooks"] = {
+            "request": [
+                partial(
+                    _attach_origin_scoped_headers,
+                    base_url=self._base_url,
+                    headers=self._base_url_headers,
+                )
+            ]
+        }
         if max_connections is not None:
             client_kwargs["limits"] = httpx.Limits(
                 max_connections=max_connections,
@@ -665,8 +670,12 @@ class SIEClient:
         start_time: float,
         budget_s: float,
         accept: str = JSON_CONTENT_TYPE,
+        traceparent: str | None = None,
     ) -> httpx.Response:
         """Consume bounded same-origin Modal 303 result URLs without replaying POST."""
+        request_options: dict[str, Any] = {}
+        if traceparent is not None:
+            request_options["extensions"] = {"sie_encode_traceparent": traceparent}
         for _ in range(MODAL_CONTINUATION_MAX_HOPS):
             path = modal_continuation_path(self._base_url, response)
             if path is None:
@@ -680,6 +689,7 @@ class SIEClient:
                     path,
                     headers={"Accept": accept},
                     timeout=self._attempt_timeout(remaining),
+                    **request_options,
                 )
             except httpx.HTTPError as exc:
                 msg = f"Failed to retrieve the in-flight generation result: {type(exc).__name__}"
@@ -1208,6 +1218,7 @@ class SIEClient:
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
         max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
+        traceparent: str | None = None,
     ) -> EncodeResult: ...
 
     @overload
@@ -1225,6 +1236,7 @@ class SIEClient:
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
         max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
+        traceparent: str | None = None,
     ) -> list[EncodeResult]: ...
 
     def encode(
@@ -1241,6 +1253,7 @@ class SIEClient:
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
         max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
+        traceparent: str | None = None,
     ) -> EncodeResult | list[EncodeResult]:
         """Encode items into vector representations.
 
@@ -1257,6 +1270,10 @@ class SIEClient:
                     or individual options like "muvera", "smve", "normalize", etc.
             gpu: Target GPU type (e.g., "l4", "a100-80gb"). Routes request to workers
                 with matching GPU. Required when using the gateway with multiple GPU pools.
+            traceparent: Optional W3C version-00 context for this logical call,
+                unchanged across retries and same-origin continuations. Overrides
+                constructor tracing headers without changing the pooled client.
+                Inherited tracestate is omitted only when this option is set.
             wait_for_capacity: When True (default), auto-retry transient "not
                 enough capacity yet" responses under ``provision_timeout_s`` —
                 ``503 PROVISIONING`` (scale-from-zero provisioning);
@@ -1357,6 +1374,10 @@ class SIEClient:
             ...     {"images": ["photo.jpg"]},
             ... )
         """
+        validate_encode_traceparent(traceparent)
+        request_options: dict[str, Any] = {}
+        if traceparent is not None:
+            request_options["extensions"] = {"sie_encode_traceparent": traceparent}
         self._reset_retry_count()
         # Track if single item was passed
         single_item = not isinstance(items, list)
@@ -1434,7 +1455,11 @@ class SIEClient:
 
             try:
                 response = self._client.post(
-                    f"/v1/encode/{model}", content=body, headers=headers, timeout=request_timeout
+                    f"/v1/encode/{model}",
+                    content=body,
+                    headers=headers,
+                    timeout=request_timeout,
+                    **request_options,
                 )
             except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):
@@ -1481,6 +1506,7 @@ class SIEClient:
                 start_time=start_time,
                 budget_s=timeout,
                 accept=MSGPACK_CONTENT_TYPE,
+                traceparent=traceparent,
             )
 
             # Short-circuit terminal load failures BEFORE engaging the
@@ -1639,6 +1665,7 @@ class SIEClient:
                 result["timing"] = timing
 
         attach_request_metadata(results, response.headers, response_data)
+        attach_gateway_timing(results, response.headers)
         # Guard the 1:1 input↔output contract before any positional access
         # (``results[0]`` below, or batch reassembly in callers). The gateway's
         # queue path returns mixed-success batches as 200 with only the

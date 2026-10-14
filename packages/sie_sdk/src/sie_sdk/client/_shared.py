@@ -28,6 +28,7 @@ _logger = logging.getLogger(__name__)
 
 _HTTP_HEADER_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _HTTP_MEDIA_TYPE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+/[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_TRACEPARENT_V00 = re.compile(r"00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}")
 _CONTENT_SAFE_MEDIA_TYPES = frozenset(
     {"application/json", "application/msgpack", "application/problem+json", "text/html"}
 )
@@ -55,6 +56,17 @@ _RESERVED_BASE_URL_HEADERS = frozenset(
 )
 MODAL_CONTINUATION_MAX_HOPS = 20
 _MODAL_CONTINUATION_QUERY_PARAMETER = "__modal_attempt_token"
+
+
+def validate_encode_traceparent(traceparent: str | None) -> None:
+    """Accept a bounded version-00 trace context without changing its flags."""
+    if traceparent is None:
+        return
+    if not isinstance(traceparent, str):
+        raise TypeError("traceparent must be a string or None")
+    match = _TRACEPARENT_V00.fullmatch(traceparent) if len(traceparent) == 55 else None
+    if match is None or match[1] == "0" * 32 or match[2] == "0" * 16:
+        raise ValueError("traceparent must be a valid W3C version-00 trace context")
 
 
 def copy_base_url_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
@@ -299,6 +311,7 @@ from sie_sdk.types import (
     EntityResult,
     ExtractItemErrorDetail,
     ExtractResult,
+    GatewayTimingInfo,
     GenerateGrammar,
     Relation,
     RequestMetadata,
@@ -979,6 +992,42 @@ def _parse_nonnegative_meter_header(headers: Any, name: str) -> int | None:
         return None
     parsed = int(value)
     return parsed if parsed <= _MAX_METER_VALUE else None
+
+
+_GATEWAY_TIMING_HEADERS = {
+    "publish_ms": "x-queue-publish-time",
+    "result_wait_ms": "x-queue-wait-time",
+    "worker_queue_ms_max": "x-queue-time",
+    "worker_inference_ms_max": "x-inference-time",
+    "worker_tokenization_ms_max": "x-tokenization-time",
+    "worker_postprocessing_ms_max": "x-postprocessing-time",
+    "worker_payload_fetch_ms_max": "x-payload-fetch-time",
+}
+
+
+def parse_gateway_timing(headers: Any) -> GatewayTimingInfo | None:
+    """Read bounded nonnegative decimal timing headers without inventing totals."""
+    timing: dict[str, float] = {}
+    for field, header in _GATEWAY_TIMING_HEADERS.items():
+        value = _header_value(headers, header)
+        if (
+            not isinstance(value, str)
+            or not 0 < len(value) <= 64
+            or re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", value) is None
+        ):
+            continue
+        parsed = float(value)
+        if math.isfinite(parsed):
+            timing[field] = parsed
+    return cast("GatewayTimingInfo", timing) if timing else None
+
+
+def attach_gateway_timing(results: Sequence[EncodeResult], headers: Any) -> None:
+    """Attach detached terminal-response timing without altering body timing."""
+    timing = parse_gateway_timing(headers)
+    if timing is not None:
+        for result in results:
+            result["gateway_timing"] = timing.copy()
 
 
 def settled_charge_from_usage(usage: Any) -> tuple[int, str] | None:

@@ -123,6 +123,7 @@ from ._shared import (
     SERVER_VERSION_HEADER,
     _coerce_token_count,
     admission_retry_delay,
+    attach_gateway_timing,
     attach_request_metadata,
     attempt_timeout_cap,
     base_url_accepts_origin_credentials,
@@ -167,6 +168,7 @@ from ._shared import (
     valid_stream_request_id,
     validate_base_url,
     validate_batch_result_count,
+    validate_encode_traceparent,
     validate_generate_grammar,
     validate_generate_request_body,
     websocket_matches_base_url_origin,
@@ -661,13 +663,16 @@ class SIEAsyncClient:
         timeout_s: float | None = None,
         include_base_url_headers: bool = True,
         client_timeout: aiohttp.ClientTimeout | None = None,
+        traceparent: str | None = None,
     ) -> _AioResponse:
         kw: dict[str, Any] = {}
         if data is not None:
             kw["data"] = data
         if json_data is not None:
             kw["json"] = json_data
-        request_headers = self._headers_for_request(url, headers, include_base_url_headers=include_base_url_headers)
+        request_headers = self._headers_for_request(
+            url, headers, include_base_url_headers=include_base_url_headers, traceparent=traceparent
+        )
         if request_headers:
             kw["headers"] = request_headers
         if client_timeout is not None:
@@ -717,11 +722,21 @@ class SIEAsyncClient:
         headers: Mapping[str, str] | None,
         *,
         include_base_url_headers: bool = True,
+        traceparent: str | None = None,
     ) -> dict[str, str]:
         """Build detached request headers with exact-origin edge credentials."""
         merged = dict(headers or {})
         if include_base_url_headers and self._base_url_headers and request_matches_base_url_origin(self._base_url, url):
             merged.update(self._base_url_headers)
+        if (
+            traceparent is not None
+            and include_base_url_headers
+            and request_matches_base_url_origin(self._base_url, url)
+        ):
+            merged = {
+                name: value for name, value in merged.items() if name.lower() not in {"traceparent", "tracestate"}
+            }
+            merged["traceparent"] = traceparent
         return merged
 
     def _check_server_version(self, response: _AioResponse) -> None:
@@ -743,6 +758,7 @@ class SIEAsyncClient:
         start_time: float,
         budget_s: float,
         accept: str = JSON_CONTENT_TYPE,
+        traceparent: str | None = None,
     ) -> _AioResponse:
         """Consume bounded same-origin Modal 303 result URLs without replaying POST."""
         for _ in range(MODAL_CONTINUATION_MAX_HOPS):
@@ -758,7 +774,7 @@ class SIEAsyncClient:
                     self._throttle(),
                     self._ensure_session().get(
                         path,
-                        headers=self._headers_for_request(path, {"Accept": accept}),
+                        headers=self._headers_for_request(path, {"Accept": accept}, traceparent=traceparent),
                         timeout=self._attempt_timeout(remaining),
                         allow_redirects=False,
                     ) as raw,
@@ -1327,6 +1343,7 @@ class SIEAsyncClient:
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
         max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
+        traceparent: str | None = None,
     ) -> EncodeResult: ...
 
     @overload
@@ -1344,6 +1361,7 @@ class SIEAsyncClient:
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
         max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
+        traceparent: str | None = None,
     ) -> list[EncodeResult]: ...
 
     async def encode(
@@ -1360,8 +1378,10 @@ class SIEAsyncClient:
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
         max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
+        traceparent: str | None = None,
     ) -> EncodeResult | list[EncodeResult]:
         """Async version of encode(). See SIEClient.encode() for details."""
+        validate_encode_traceparent(traceparent)
         self._reset_retry_count()
         # Track if single item was passed
         single_item = not isinstance(items, list)
@@ -1440,6 +1460,7 @@ class SIEAsyncClient:
                     data=body,
                     headers=headers,
                     client_timeout=request_timeout,
+                    traceparent=traceparent,
                 )
             except _RETRYABLE_TRANSPORT_ERRORS as e:
                 if wait_for_capacity:
@@ -1486,6 +1507,7 @@ class SIEAsyncClient:
                 start_time=start_time,
                 budget_s=timeout,
                 accept=MSGPACK_CONTENT_TYPE,
+                traceparent=traceparent,
             )
 
             # Short-circuit terminal load failures.
@@ -1636,6 +1658,7 @@ class SIEAsyncClient:
                 result["timing"] = timing
 
         attach_request_metadata(results, response.headers, response_data)
+        attach_gateway_timing(results, response.headers)
         # Guard the 1:1 input↔output contract before any positional access
         # (``results[0]`` below, or batch reassembly in callers). The gateway's
         # queue path returns mixed-success batches as 200 with only the
