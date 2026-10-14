@@ -120,12 +120,18 @@ uv run python conformance.py --base-url http://localhost:8080/v1 --model zai-org
 ```
 
 The server reads the key from its own environment each time it sends a
-request, so it starts without one: export the key in the shell that starts the
-server. When OpenRouter answers `429` or a `5xx` other than `501` and `505`,
-or cannot be reached, the server answers `503` with `Retry-After`. A missing
-key, any other refusal from OpenRouter and an answer the server does not accept
-answer `502 upstream_error`, `upstream generation request failed`, before
-output. After output, the stream ends with an error event instead. A request
+request, so it starts without one. When `OPENROUTER_API_KEY` is unset, it logs
+a `WARNING` at startup, `requests to upstream 'openrouter' fail until its
+credential is usable: environment variable OPENROUTER_API_KEY is not set`.
+Export the key in the shell that starts the server. When OpenRouter answers
+`429` or a `5xx` other than `501` and `505`, or cannot be reached, the server
+answers `503` with `Retry-After`. When OpenRouter refuses the request with
+`400` or `422`, the server answers `400 invalid_request`, `the upstream
+refused the chat input`, and logs `upstream 'openrouter' refused a generation
+request: the upstream refused the input (400)`, or `(422)`. A missing key, any
+other refusal from OpenRouter and an answer the server does not accept answer
+`502 upstream_error`, `upstream generation request failed`, before output.
+After output, the stream ends with an error event instead. A request
 the server refuses itself answers `400` before anything is sent. For a `502`
 or an error event, the server log names the reason on a `WARNING` line,
 `remote chat for zai-org/GLM-5.3-Flash failed: <reason>`, or `failed after
@@ -135,11 +141,11 @@ output: <reason>`:
 |---|---|
 | `the upstream credential is unavailable` | `OPENROUTER_API_KEY` is not set in the server's environment, so nothing was sent |
 | `upstream answered 401` | OpenRouter refused the key |
-| `upstream answered 402` | the account has no credits |
+| `upstream answered 402` | the OpenRouter account has no credits; GLM-5.3-Flash is a paid model on OpenRouter |
 | `upstream answered 404` | OpenRouter found no endpoint for the request, for example under the account's provider or data-policy settings |
 | `upstream answered` another status | OpenRouter refused the request with that status |
 | `upstream sent an error instead of a chat answer` | OpenRouter accepted the request, then sent an error, as it does when the provider it picked fails |
-| anything else | OpenRouter's answer broke a rule the server holds every upstream to, for example usage above the request's `max_tokens` |
+| anything else | OpenRouter's answer broke a rule the server holds every upstream to, for example a call to a function the request did not declare, or usage above the request's `max_tokens` |
 
 Pointed at OpenRouter directly, OpenCode would get the same model. Through SIE
 it uses one API and one model name, `zai-org/GLM-5.3-Flash`, which the cluster
@@ -183,8 +189,9 @@ The two server files:
 
 On this path OpenRouter parses the model's tool calls and reasoning. The server
 checks that each streamed tool call arrives with an id, a function name and
-arguments, that every answer finishes with exact usage inside the declared
-window and the request's output cap, and reports that usage. OpenRouter
+arguments, that the calls keep to the request's `tools`, `tool_choice` and
+`parallel_tool_calls`, that every answer finishes with exact usage inside the
+declared window and the request's output cap, and reports that usage. OpenRouter
 returns reasoning in a `reasoning` field; the server passes it on as
 `reasoning_content` when the request sets `include_reasoning`, as the recipe's
 `options` do, and drops it otherwise. OpenCode sends each earlier turn's
