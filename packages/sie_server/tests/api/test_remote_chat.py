@@ -379,6 +379,143 @@ def test_upstream_input_refusal_is_a_sanitized_400(remote_chat: tuple, code: str
     assert len(requests) == 1
 
 
+@pytest.mark.parametrize(
+    ("status", "caller_error"), [(400, True), (422, True), (401, False), (403, False), (404, False)]
+)
+@pytest.mark.parametrize("streaming", [False, True])
+def test_upstream_refusal_without_a_code_is_the_callers_400_only_for_400_and_422(
+    remote_chat: tuple, status: int, caller_error: bool, streaming: bool
+) -> None:
+    client, _, _, requests = remote_chat
+    answer_with(
+        remote_chat,
+        json_response(status, {"error": {"message": "private upstream detail", "type": "invalid_request_error"}}),
+    )
+    response = client.post("/v1/chat/completions", json={**BODY, "stream": streaming})
+    assert response.status_code == (400 if caller_error else 502)
+    assert response.json()["error"]["code"] == ("invalid_request" if caller_error else "upstream_error")
+    assert "private" not in response.text
+    assert "chat-api" not in response.text
+    assert len(requests) == 1
+
+
+TOOLS = [
+    {"type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}}},
+    {"type": "function", "function": {"name": "list_dir", "parameters": {"type": "object"}}},
+]
+READ_FILE = {"type": "function", "function": {"name": "read_file"}}
+
+
+def tool_answer(names: list[str], *, streaming: bool) -> httpx.Response:
+    calls = [
+        {"id": f"call-{index}", "type": "function", "function": {"name": name, "arguments": "{}"}}
+        for index, name in enumerate(names)
+    ]
+    finish = "tool_calls" if names else "stop"
+    if not streaming:
+        message = (
+            {"role": "assistant", "content": None, "tool_calls": calls}
+            if names
+            else completion()["choices"][0]["message"]
+        )
+        return json_response(200, completion(choices=[{"index": 0, "message": message, "finish_reason": finish}]))
+    delta = (
+        {"role": "assistant", "tool_calls": [{"index": index, **call} for index, call in enumerate(calls)]}
+        if names
+        else {"role": "assistant", "content": "answer"}
+    )
+    stream = ChatStream(
+        [
+            {"choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": finish}]},
+            {"choices": [], "usage": USAGE},
+            "[DONE]",
+        ]
+    )
+    return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
+
+
+@pytest.mark.parametrize(
+    ("names", "changes"),
+    [
+        pytest.param(["delete_everything"], {}, id="undeclared"),
+        pytest.param(["read_file"], {"tool_choice": "none"}, id="choice-none"),
+        pytest.param(["read_file", "list_dir"], {"parallel_tool_calls": False}, id="parallel-false"),
+        pytest.param(["list_dir"], {"tool_choice": READ_FILE}, id="named-other"),
+        pytest.param([], {"tool_choice": READ_FILE}, id="named-missing"),
+        pytest.param([], {"tool_choice": "required"}, id="required-missing"),
+    ],
+)
+@pytest.mark.parametrize("streaming", [False, True])
+def test_direct_remote_chat_refuses_an_answer_outside_the_requested_tools(
+    remote_chat: tuple, names: list[str], changes: dict, streaming: bool
+) -> None:
+    client, _, _, requests = remote_chat
+    answer_with(remote_chat, tool_answer(names, streaming=streaming))
+    response = client.post("/v1/chat/completions", json={**BODY, "stream": streaming, "tools": TOOLS, **changes})
+    if streaming and not names:
+        assert response.status_code == 200
+        assert '"content":"answer"' in response.text
+        assert '"code":"upstream_error"' in response.text
+        assert '"finish_reason":"stop"' not in response.text
+    else:
+        assert response.status_code == 502, response.text
+        assert response.json()["error"]["code"] == "upstream_error"
+    assert not any(name in response.text for name in names)
+    assert len(requests) == 1
+    assert upstream_limiter("chat-api")._in_flight == 0
+
+
+@pytest.mark.parametrize(
+    ("names", "changes"),
+    [
+        pytest.param(["read_file"], {}, id="declared"),
+        pytest.param(["read_file", "list_dir"], {}, id="parallel"),
+        pytest.param(["read_file"], {"parallel_tool_calls": False}, id="parallel-false"),
+        pytest.param(["read_file"], {"tool_choice": READ_FILE}, id="named"),
+        pytest.param(["list_dir"], {"tool_choice": "required"}, id="required"),
+        pytest.param([], {"tool_choice": "none"}, id="choice-none"),
+    ],
+)
+@pytest.mark.parametrize("streaming", [False, True])
+def test_direct_remote_chat_serves_an_answer_within_the_requested_tools(
+    remote_chat: tuple, names: list[str], changes: dict, streaming: bool
+) -> None:
+    client, _, _, _ = remote_chat
+    answer_with(remote_chat, tool_answer(names, streaming=streaming))
+    response = client.post("/v1/chat/completions", json={**BODY, "stream": streaming, "tools": TOOLS, **changes})
+    assert response.status_code == 200, response.text
+    assert '"error"' not in response.text
+    if streaming:
+        assert response.text.endswith("data: [DONE]\n\n")
+        assert all(f'"name":"{name}"' in response.text for name in names)
+    else:
+        calls = response.json()["choices"][0]["message"].get("tool_calls") or []
+        assert [call["function"]["name"] for call in calls] == names
+
+
+@pytest.mark.parametrize("name", ["math.factorial", "two words", "café", "a/b", "a" * 65])
+def test_tool_names_outside_the_openai_pattern_never_dispatch(remote_chat: tuple, name: str) -> None:
+    client, _, _, requests = remote_chat
+    answer_with(remote_chat, lambda: pytest.fail("an invalid tool name must not dispatch"))
+    tools = [TOOLS[0], {"type": "function", "function": {"name": name}}]
+    response = client.post("/v1/chat/completions", json={**BODY, "tools": tools})
+    assert response.status_code == 400, response.text
+    error = response.json()["error"]
+    assert error["param"] == "tools[1].function.name"
+    assert error["type"] == "invalid_request_error"
+    assert not requests
+
+
+@pytest.mark.parametrize("name", ["get-weather_2", "A" * 64])
+def test_tool_names_inside_the_openai_pattern_dispatch(remote_chat: tuple, name: str) -> None:
+    client, _, _, requests = remote_chat
+    answer_with(remote_chat, json_response(200, completion()))
+    tools = [TOOLS[0], {"type": "function", "function": {"name": name}}]
+    assert client.post("/v1/chat/completions", json={**BODY, "tools": tools}).status_code == 200
+    assert [tool["function"]["name"] for tool in json.loads(requests[0].content)["tools"]] == ["read_file", name]
+
+
 @pytest.mark.parametrize("streaming", [False, True])
 def test_cached_serving_switch_refusal_is_a_sanitized_503(remote_chat: tuple, streaming: bool) -> None:
     client, adapter, _, requests = remote_chat
@@ -445,19 +582,13 @@ def test_include_reasoning_publishes_remote_reasoning_only_for_a_reasoning_model
     assert reasoning == ("PRIVATE_REASONING" if declares_reasoning else "")
 
 
-@pytest.mark.parametrize("status", [400, 503])
-def test_native_remote_stream_refusal_precedes_http_success(remote_chat: tuple, status: int) -> None:
+@pytest.mark.parametrize(("status", "code"), [(400, "INVALID_INPUT"), (400, None), (503, None)])
+def test_native_remote_stream_refusal_precedes_http_success(remote_chat: tuple, status: int, code: str | None) -> None:
     client, _, config, requests = remote_chat
     config.profiles["default"].adapter_options.runtime.clear()
     answer_with(
         remote_chat,
-        json_response(
-            status,
-            {"error": {"code": "INVALID_INPUT", "message": "private"}}
-            if status == 400
-            else {"error": {"message": "private"}},
-            headers={"retry-after": "19"},
-        ),
+        json_response(status, {"error": {"code": code, "message": "private"}}, headers={"retry-after": "19"}),
     )
     response = client.post(
         f"/v1/generate/{SAFE_MODEL}", json={"prompt": "question", "max_new_tokens": 8, "stream": True}

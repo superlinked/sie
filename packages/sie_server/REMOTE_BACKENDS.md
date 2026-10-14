@@ -276,6 +276,30 @@ returns the original local refusal with its retry delay. A client error is
 never retried remotely, and fallback cannot replay work after local acceptance
 or after output reaches the caller.
 
+Chat, completions and native generation forward the caller's own request. An
+upstream that answers such a request with `400` or `422` and no known SIE error
+code refused it, so the caller receives `400` `invalid_request`, as for an
+`INVALID_INPUT` refusal, with fixed text that repeats nothing the upstream sent
+and does not name the upstream. Encode, score and extraction build every
+upstream body themselves, so the same answer there is a server error. A `400`
+or `422` with a known SIE error code other than `INVALID_INPUT` or
+`INPUT_TOO_LONG`, and other upstream `4xx` answers such as `401`, `403` or
+`404`, point at the operator's credential, model name or route rather than at
+the request, so the caller receives a server error. `429` and `5xx` answers are
+retryable as described above.
+
+Chat checks an upstream answer against the request's tools on a single node
+and in a cluster, streamed and buffered. The answer fails as an upstream error
+when it calls a function the request did not declare, calls any function under
+`tool_choice: "none"`, calls a function other than the one `tool_choice` names,
+makes several calls under `parallel_tool_calls: false`, or makes no call when
+`tool_choice` is `"required"` or names a function. A stream that has already
+started ends with an error event. Tool function names must
+match `^[a-zA-Z0-9_-]{1,64}$`, the pattern OpenAI-compatible APIs accept, so a
+local and a remote profile accept the same requests. The gateway and the
+single-node chat route refuse any other name with `400` before dispatch and
+name the field, for example `tools[1].function.name`.
+
 TLS is required outside loopback. URLs containing credentials, a query or a
 fragment are rejected. Redirects are refused, ambient proxy variables are
 ignored, and inbound authorization is not forwarded. An explicit `proxy_url`

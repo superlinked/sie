@@ -14,7 +14,9 @@ the model is not ready upstream (``MODEL_LOADING``, ``PROVISIONING``,
 connection, a timeout, a dropped response, another 5xx). A 501, a 505 and the
 codes ``MODEL_LOAD_FAILED``, ``ACCOUNT_STATE_UNAVAILABLE`` and
 ``COLD_START_RATE_LIMITED`` are final. A refused input raises
-:class:`InputTooLongError` or :class:`InvalidInputError`. Everything else is a
+:class:`InputTooLongError` or :class:`InvalidInputError`. A streamed
+generation call forwards the caller's request, so there a 400 or 422 without a
+known code is a refused input too. Everything else is a
 :class:`RemoteUpstreamError`.
 """
 
@@ -126,9 +128,16 @@ def _send(client: httpx.Client, request: httpx.Request, *, upstream: str, max_by
         response.close()
 
 
-def failure_for_status(status: int, code: str | None, retry_after_s: int | None, *, upstream: str) -> Exception:
-    """The failure an upstream error status amounts to, given its known error code and wait."""
-    answered = f"answered {status} {code}" if code else f"answered {status}"
+def failure_for_status(
+    status: int, code: str | None, retry_after_s: int | None, *, upstream: str, caller_request: bool = False
+) -> Exception:
+    """The failure an upstream error status amounts to, given its known error code and wait.
+
+    ``caller_request`` says the call forwarded the caller's own request, so a
+    400 or 422 without a known code refused that request.
+    """
+    reply = f"{status} {code}" if code else str(status)
+    answered = f"answered {reply}"
     wait = retry_after_s if retry_after_s is not None else DEFAULT_RETRY_AFTER_S
     if code in _TERMINAL_CODES or status in _TERMINAL_SERVER_STATUSES:
         return RemoteUpstreamError(f"upstream {answered}")
@@ -142,8 +151,8 @@ def failure_for_status(status: int, code: str | None, retry_after_s: int | None,
         return UpstreamUnavailableError(upstream, "unavailable", retry_after_s=wait, reason=answered)
     if code == "INPUT_TOO_LONG":
         return InputTooLongError(f"the upstream refused the input as too long ({status} INPUT_TOO_LONG)")
-    if code == "INVALID_INPUT" and status in {400, 422}:
-        return InvalidInputError(f"the upstream refused the input ({status} INVALID_INPUT)")
+    if status in {400, 422} and (code == "INVALID_INPUT" or (caller_request and code is None)):
+        return InvalidInputError(f"the upstream refused the input ({reply})")
     return RemoteUpstreamError(f"upstream {answered}")
 
 
@@ -173,8 +182,10 @@ async def open_stream(
     The call goes through the upstream's limiter, whose slot is held until the
     block ends. The answer is a success with an uncompressed body, which the
     block reads. Failures raise as :func:`send_bounded` describes, including a
-    connection lost while the block reads. Leaving the block closes the answer,
-    which cancels work still running upstream.
+    connection lost while the block reads. The request forwards the caller's
+    own, so a 400 or 422 without a known code also raises
+    :class:`InvalidInputError`. Leaving the block closes the answer, which
+    cancels work still running upstream.
     """
     upstream_for_serving(upstream)
     with upstream_limiter(upstream).call():
@@ -204,6 +215,7 @@ async def open_stream(
                     ),
                     parse_retry_after(response.headers.get("retry-after")),
                     upstream=upstream,
+                    caller_request=True,
                 )
             if _is_compressed(response):
                 raise RemoteUpstreamError("upstream sent a compressed body, which is refused")
