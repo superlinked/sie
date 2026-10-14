@@ -151,6 +151,21 @@ def test_required_tool_choice_forces_a_call_on_a_cpu_device() -> None:
     assert json.loads(choice["message"]["tool_calls"][0]["function"]["arguments"]) == {"city": "Say hello."}
 
 
+def test_a_tool_call_is_never_cut_by_max_tokens() -> None:
+    client = _client()
+    messages = [{"role": "user", "content": QUESTION}]
+    needed = _chat(client, messages, tools=[WEATHER], max_tokens=64).json()["usage"]["completion_tokens"]
+    exact = _chat(client, messages, tools=[WEATHER], max_tokens=needed)
+    short = _chat(client, messages, tools=[WEATHER], max_tokens=needed - 1, stream=True)
+
+    assert exact.status_code == 200, exact.text
+    [choice] = exact.json()["choices"]
+    assert choice["finish_reason"] == "tool_calls"
+    assert json.loads(choice["message"]["tool_calls"][0]["function"]["arguments"]) == {"city": QUESTION}
+    assert short.status_code == 400
+    assert short.json()["error"]["code"] == "invalid_request"
+
+
 def test_tool_choice_none_answers_in_text() -> None:
     response = _chat(_client(), [{"role": "user", "content": QUESTION}], tools=[WEATHER], tool_choice="none")
 

@@ -48,7 +48,12 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import numpy as np
 
 from sie_server.adapters._base_adapter import BaseAdapter
-from sie_server.adapters._generation_base import GenerationAdapter, GenerationChunk, GenerationInputTooLongError
+from sie_server.adapters._generation_base import (
+    GenerationAdapter,
+    GenerationChunk,
+    GenerationInputTooLongError,
+    GenerationInvalidRequestError,
+)
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED
 from sie_server.core.inference_output import (
@@ -453,9 +458,11 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
     tokens. When ``chat_template_kwargs`` enables thinking, one sentence of
     reasoning naming the rule comes first, returned only with
     ``keep_reasoning``. A prompt token is a whitespace-separated word of the
-    tools and messages, and an output token is one streamed piece. Output
-    stops at the token limit with ``"length"``, a prompt that leaves no room
-    in ``max_seq_length`` is refused, and ``n`` repeats the turn.
+    tools and messages, and an output token is one streamed piece. A text
+    answer stops at the token limit with ``"length"``. A tool call is never
+    cut: a turn without room for its reasoning and the whole call is refused,
+    as is a prompt that leaves no room in ``max_seq_length``. ``n`` repeats
+    the turn.
     """
 
     spec: ClassVar[AdapterSpec] = AdapterSpec(
@@ -738,11 +745,14 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
             steps.append(("call", ""))
             steps += [("arguments", piece) for piece in _PIECE.findall(arguments)]
         steps += [("content", piece) for piece in content]
-        kept = steps[:budget]
+        if call_name is not None and len(steps) > budget:
+            field = "max_completion_tokens" if body.get("max_completion_tokens") else "max_tokens"
+            msg = f"the scripted tool call needs {len(steps)} output tokens and {budget} are available"
+            raise GenerationInvalidRequestError(field, msg)
         return _ChatTurn(
-            steps=kept,
+            steps=steps[:budget],
             call_id="call_" + hashlib.sha256(f"{transcript}\x00call".encode()).hexdigest()[:24],
-            call_name=call_name if ("call", "") in kept else None,
+            call_name=call_name,
             finish_reason="length" if len(steps) > budget else "tool_calls" if call_name else "stop",
             prompt_tokens=prompt_tokens,
             choices=body.get("n") or 1,
