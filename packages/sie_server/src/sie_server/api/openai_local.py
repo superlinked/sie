@@ -13,6 +13,7 @@ directly in either the Apple-Silicon or CUDA image.
   generation does (:mod:`sie_server.processors.schema_prompt`). Remote generation profiles use their
   adapter's normalized chat methods instead; the operator-configured upstream
   owns chat rendering, and the worker retains validation and output policy.
+  The weightless fake answers through the same methods from a script.
 - ``/v1/rerank`` wraps the in-process score adapter in the Cohere/OpenAI rerank
   shape (``{query, documents, top_n}`` -> ``{results: [{index, relevance_score}]}``).
 
@@ -55,6 +56,7 @@ from sie_server.adapters._generation_base import (
     thinking_blocks_must_be_hidden,
 )
 from sie_server.adapters.errors import InputTooLongError, UpstreamUnavailableError
+from sie_server.adapters.fake.adapter import FakeAdapter
 from sie_server.adapters.mlx.generation import MLXGenerationAdapter, normalize_mlx_seed
 from sie_server.adapters.remote._http import RemoteUpstreamError
 from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
@@ -134,6 +136,7 @@ _MAX_CHAT_MESSAGES = 4096
 _MAX_CHAT_CHOICES = 128
 _MAX_CHAT_VIDEOS = 1
 _MAX_U32 = (1 << 32) - 1
+_FAKE_ADAPTER_PATH = f"{FakeAdapter.__module__}:{FakeAdapter.__name__}"
 _ALLOWED_CHAT_ROLES = frozenset({"system", "user", "assistant", "tool", "developer"})
 _ANSWER_FINISH_REASONS = frozenset({"stop", "tool_calls"})
 # Compatibility requests project onto the same native score bound.
@@ -278,6 +281,13 @@ async def _read_json_body(http_request: Request) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise _bad_request("request body must be a JSON object")
     return body
+
+
+def _adapter_answers_chat(config: Any) -> bool:
+    """Whether the adapter answers chat through its own chat methods rather than a managed child."""
+    return serves_remotely(config) or (
+        "default" in config.profiles and config.resolve_profile("default").adapter_path == _FAKE_ADAPTER_PATH
+    )
 
 
 def _unsupported_chat(model: str, device: object) -> HTTPException:
@@ -1564,8 +1574,8 @@ async def _chat_completions(
                 )
             # The child decodes video on its event loop; bound that work here.
             await asyncio.to_thread(_probe_chat_videos, videos)
-        remote_chat = serves_remotely(config)
-        if str(device).startswith("cuda") or remote_chat:
+        adapter_chat = _adapter_answers_chat(config)
+        if str(device).startswith("cuda") or adapter_chat:
             _validate_cuda_chat_body(body)
         else:
             _validate_mlx_chat_body(body)
@@ -1576,7 +1586,7 @@ async def _chat_completions(
             or ("include_usage" in options and not isinstance(options["include_usage"], bool))
         ):
             raise _bad_request("'stream_options' must contain only boolean 'include_usage'", param="stream_options")
-        if remote_chat:
+        if adapter_chat:
             _validate_remote_chat_media(messages)
 
         # Normalize and reject client errors before the bridge owns a local
@@ -1590,7 +1600,7 @@ async def _chat_completions(
 
         adapter = registry.get(route.key)
         registry.touch_lru(route.key)
-        if serves_remotely(registry.get_config(route.key)) and isinstance(adapter, GenerationAdapter):
+        if _adapter_answers_chat(registry.get_config(route.key)) and isinstance(adapter, GenerationAdapter):
             _validate_remote_chat_media(messages)
             return await _remote_chat_response(
                 adapter,
