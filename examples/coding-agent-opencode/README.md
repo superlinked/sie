@@ -202,8 +202,8 @@ its closing usage event, which repeats the finished choice, into an OpenAI-form
 usage chunk.
 
 This recipe has been checked against a scripted stand-in for OpenRouter (see
-[Checked without a GPU](#checked-without-a-gpu)). The run with a real key is
-[pending](#self-hosted-sie-with-an-openrouter-upstream-pending). To serve the
+[Checked without a GPU](#checked-without-a-gpu)). A successful run with a real
+key is still [pending](#self-hosted-sie-with-an-openrouter-upstream-pending). To serve the
 model from a cluster instead, define the upstream for the chart's remote worker
 pool as
 [Serving a model through a remote backend](../../packages/sie_server/REMOTE_BACKENDS.md#cluster-deployment)
