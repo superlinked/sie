@@ -1,0 +1,74 @@
+{
+  "files": {
+    "source/cases/KB01/image.png": {
+      "url": "https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/77a6f4402054447580e55cd60c82ddfcd9813497/screenshot/2026-10-11/fixed-public-multi-app-fixtures-v2/cases/KB01/image.png",
+      "bytes": 173994,
+      "sha256": "3555a094d9316ef63b097be239a42bba118c699006c8e8a59771c26e52fd027b"
+    },
+    "source/cases/KB01/prompt.txt": {
+      "url": "https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/77a6f4402054447580e55cd60c82ddfcd9813497/screenshot/2026-10-11/fixed-public-multi-app-fixtures-v2/cases/KB01/prompt.txt",
+      "bytes": 913,
+      "sha256": "025652a285fa1b490758261531b5a61f87f33da61b8728dfda9f24b74c29b7de"
+    },
+    "source/cases/KB01/schema.json": {
+      "url": "https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/77a6f4402054447580e55cd60c82ddfcd9813497/screenshot/2026-10-11/fixed-public-multi-app-fixtures-v2/cases/KB01/schema.json",
+      "bytes": 2430,
+      "sha256": "4608811a612d5d9f31adceb4bc39afa821a64c495c1bd6018e758916c1b43777"
+    },
+    "source/cases/KB01/gold.json": {
+      "url": "https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/77a6f4402054447580e55cd60c82ddfcd9813497/screenshot/2026-10-11/fixed-public-multi-app-fixtures-v2/cases/KB01/gold.json",
+      "bytes": 999,
+      "sha256": "28e7533ae081fbe8b06ddca98dc581b4c0ddbd66a00dc78d7c43682541b25cf5"
+    },
+    "source/screens.jsonl": {
+      "url": "https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/77a6f4402054447580e55cd60c82ddfcd9813497/screenshot/2026-10-11/fixed-public-multi-app-fixtures-v2/screens.jsonl",
+      "bytes": 142513,
+      "sha256": "6aeec18e50ac69708aa657ac3fa341fe1a8a1b2c4102393d98cd101304da2895"
+    },
+    "source/code/score.py": {
+      "url": "https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/77a6f4402054447580e55cd60c82ddfcd9813497/screenshot/2026-10-11/fixed-public-multi-app-fixtures-v2/code/score.py",
+      "bytes": 11803,
+      "sha256": "1d6dc40c3ad3b8e46b2eadbc394d9128d2079d71fbf670a01cb6715426f4470a"
+    },
+    "native/KB01-request.json": {
+      "url": "https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/c718fe42a8e914e122ffe8e5e20ac6f5a81bd6f9/screenshot-request-correction/2026-10-14/native/KB01-request.json",
+      "bytes": 234629,
+      "sha256": "433656897965e1c7166d7f4e78c3d2a74d9eecf0dccdb04edffa602ced24a72c"
+    },
+    "native/KB01-response.json": {
+      "url": "https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/c718fe42a8e914e122ffe8e5e20ac6f5a81bd6f9/screenshot-request-correction/2026-10-14/native/KB01-response.json",
+      "bytes": 1748,
+      "sha256": "c781ae8221eb304ed6f91965d203cf34c5ac65b8607416ca26bf3b73b3e66411"
+    },
+    "native/KB01-sdk-response.json": {
+      "url": "https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/c718fe42a8e914e122ffe8e5e20ac6f5a81bd6f9/screenshot-request-correction/2026-10-14/native/KB01-sdk-response.json",
+      "bytes": 1793,
+      "sha256": "9fa659c655f3ea006139a50764b6767dffaaee4363ec42cc5081864f1971574c"
+    },
+    "native/manifest.json": {
+      "url": "https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/c718fe42a8e914e122ffe8e5e20ac6f5a81bd6f9/screenshot-request-correction/2026-10-14/native/manifest.json",
+      "bytes": 3631,
+      "sha256": "0d68b4cb92f6014926ce4bbd13eccba47bb3eb0a0e8d5a0a5d8e34dda99a2e28"
+    },
+    "native/validation.json": {
+      "url": "https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/c718fe42a8e914e122ffe8e5e20ac6f5a81bd6f9/screenshot-request-correction/2026-10-14/native/validation.json",
+      "bytes": 393,
+      "sha256": "da0658537ae1bbdec0d409fa4f9ba0053770a39c14dd983b5a9d748f100654e4"
+    },
+    "native/run.json": {
+      "url": "https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/c718fe42a8e914e122ffe8e5e20ac6f5a81bd6f9/screenshot-request-correction/2026-10-14/native/run.json",
+      "bytes": 700,
+      "sha256": "82e7db4dd5aff3d513419c81043129b2a9493679cf632d807512a66bfe317e33"
+    },
+    "native/client-receipt.json": {
+      "url": "https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/c718fe42a8e914e122ffe8e5e20ac6f5a81bd6f9/screenshot-request-correction/2026-10-14/native/client-receipt.json",
+      "bytes": 1054,
+      "sha256": "7f4937b08b0c6e627c2746333196e874439ea3adb9096d22b25b2dc8dee138aa"
+    },
+    "native/README.md": {
+      "url": "https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/c718fe42a8e914e122ffe8e5e20ac6f5a81bd6f9/screenshot-request-correction/2026-10-14/native/README.md",
+      "bytes": 1405,
+      "sha256": "a7ca3c91d01c1ab4f198b3e055b6aaebfaf87af3eb78874a6b460a8bf120576a"
+    }
+  }
+}
