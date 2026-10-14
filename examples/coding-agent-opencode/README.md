@@ -99,8 +99,7 @@ an NVIDIA machine.
 This recipe runs the open-source `sie-server` on your machine and serves
 `zai-org/GLM-5.3-Flash` as a remote-backed model: the server holds no weights
 and sends each chat request on to OpenRouter's `z-ai/glm-5.3-flash`. OpenCode
-talks only to the local server, and the server is the only process that reads
-your OpenRouter key.
+talks only to the local server, and only the server needs your OpenRouter key.
 
 From the root of a checkout of this repository:
 
