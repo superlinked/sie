@@ -121,11 +121,12 @@ uv run python conformance.py --base-url http://localhost:8080/v1 --model zai-org
 
 The server reads the key from its own environment each time it sends a
 request, so it starts without one: export the key in the shell that starts the
-server. A busy or unreachable OpenRouter answers `503` with `Retry-After`. A
-request the server could not send, or that OpenRouter refused or did not
-answer with a chat answer the server accepts, answers `502 upstream_error`,
-`upstream generation request failed`, before any output, and ends the stream
-with an error event after output. The server log names the reason on a
+server. When OpenRouter answers `429` or a `5xx` other than `501` and `505`,
+or cannot be reached, the server answers `503` with `Retry-After`. Any other
+failure before output, such as a missing key, another refusal from OpenRouter
+or an answer the server does not accept, answers `502 upstream_error`,
+`upstream generation request failed`. After output, the stream ends with an
+error event instead. The server log names the reason on a
 `WARNING` line, `remote chat for zai-org/GLM-5.3-Flash failed: <reason>`, or
 `failed after output: <reason>`:
 
