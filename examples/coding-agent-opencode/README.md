@@ -295,34 +295,93 @@ OpenCode took 5 steps and 4 tool calls (`bash`, `read`, `edit`, `bash`), 8
 seconds from its first event to its last. An earlier run on the same server
 took 7 steps and 6 tool calls.
 
-### SIE Cloud, GLM-5.3-Flash via SIE Relay
+### SIE Cloud, GLM-5.3-Flash via SIE Relay, recorded
 
-To be recorded on the deployed endpoint:
+`zai-org/GLM-5.3-Flash:relay` on an SIE Cloud endpoint that serves it,
+2026-10-14, from this repository at commit `93325c4b`:
 
 ```
-conformance table      pending
-x-sie-served-by        pending (expected: remote)
-seeded gate            pending
-terminal recording     pending
-SIE Cloud usage rows   pending (expected: served_by relay)
+model zai-org/GLM-5.3-Flash:relay at https://.../v1
+served by remote
+
+  tool_choice_auto            pass      tool_choice=auto accepted on the tools turn
+  streaming_tool_call_deltas  pass      1 call: get_weather({"city": "Paris"}); 3 deltas; finish_reason=tool_calls
+  parallel_tool_calls         pass      2 calls in one turn: get_weather({"city": "Paris"}), get_weather({"city": "Tokyo"})
+  tool_result_round_trip      pass      final answer used the tool result: 'The current weather in Paris is **18°C** with **overcast** conditions.'
+  prompt_above_64k_tokens     pass      71444 prompt tokens accepted and answered; needle found
+  finish_reason_stop          pass      finish_reason=stop after 'ready'
+  finish_reason_tool_calls    pass      finish_reason=tool_calls on the tool-call turn
+  finish_reason_length        pass      finish_reason=length at max_tokens=8 (completion_tokens=7)
+  usage_on_final_chunk        pass      final chunk carries usage {'completion_tokens': 1, 'prompt_tokens': 20, 'total_tokens': 21, 'credits_charged': 1, ...}
+  include_reasoning           pass      2 reasoning_content deltas, 14 chars; message.reasoning_content 14 chars; none without the flag
+  tool_choice_required        fail      request failed: None RESOURCE_EXHAUSTED: the upstream is busy, please retry
+
+10 pass, 1 fail, 0 recorded
+```
+
+- The one failure is the rate limit, not the feature. The check sends its
+  cases back to back and does not retry, and the `:relay` profile admits a
+  bounded number of requests a minute. The same `tool_choice: "required"`
+  request sent alone a few minutes later came back with `finish_reason:
+  tool_calls` and the forced `get_weather` call.
+- A direct chat answer from the same endpoint carried `x-sie-served-by:
+  remote`, `x-sie-upstream: sie-relay` and `x-sie-credits-debited`, and the
+  streamed answers' final usage carried `credits_charged`, so the requests are
+  metered on SIE Cloud like any other.
+- The 71,444-token prompt fits the 131,072-token window the `:relay` profile
+  declares, which is the `limit.context` in the Cloud recipe.
+
+`./run_gate.sh` against the same endpoint, with OpenCode 1.19.0 and no global
+OpenCode config, OpenCode's JSON event lines left out:
+
+```
+== before: the seeded tests
+FAILED tests/test_amounts.py::test_credit_in_parentheses_is_negative - decima...
+FAILED tests/test_amounts.py::test_total_nets_credits - decimal.InvalidOperat...
+2 failed, 1 passed in 0.02s
+== opencode run, recipe cloud, up to 50 steps and 1800 s
+== after: the seeded tests must be untouched
+== after: pytest in a fresh environment, pinned to the seeded config and tests
+...                                                                      [100%]
+3 passed in 0.00s
+GATE PASS (.../run-output/gate-20261014T092431Z-4eL32J)
+```
+
+OpenCode took 9 steps and 6 tool calls (`bash`, `bash`, `read`, `read`,
+`edit`, `bash`), 21 seconds from its first event to its last, with at most
+11,355 input tokens on a step. Its one edit to `invoice_totals/amounts.py`:
+
+```diff
+     cleaned = text.strip().replace("$", "").replace(",", "")
++    if cleaned.startswith("(") and cleaned.endswith(")"):
++        cleaned = "-" + cleaned[1:-1].strip()
+     return Decimal(cleaned)
 ```
 
 ### BFCL through SIE Relay
 
-The planned measurement of `zai-org/GLM-5.3-Flash:relay` on the Berkeley
+The measurement of `zai-org/GLM-5.3-Flash:relay` on the Berkeley
 Function Calling Leaderboard, BFCL v3, from
 `gorilla-llm/Berkeley-Function-Calling-Leaderboard`: the full `simple` split
 and a 200-row subsample of `multiple`, each answer scored by AST match against
 BFCL's accepted calls, sent through SIE Cloud with the tools declared on the
 request.
 
-| Task | Rows | AST accuracy |
-|---|---|---|
-| `simple` | 400 | pending |
-| `multiple` | 200 | pending |
+| Task | Rows | Correct | AST accuracy |
+|---|---|---|---|
+| `simple` | 400 | 368 | 0.920 |
+| `multiple` | 200 | 184 | 0.920 |
 
-The numbers are filled in with the run date once the measurement is
-recorded.
+Recorded 2026-10-14 on the same SIE Cloud endpoint, one request at a time
+with an output cap of 8,192 tokens and `tool_choice: "auto"`.
+
+- BFCL names many functions with dots, such as `math.factorial`.
+  OpenAI-compatible APIs accept only letters, digits, `_` and `-` in a
+  function name, and SIE Relay refuses the dotted form. So each dotted name
+  was sent with `_` in place of the dot, and the model's calls were mapped
+  back to BFCL's names before scoring, as BFCL's own harness does for
+  OpenAI-style function calling.
+- One of the 600 requests failed with a `502` and is scored as a miss.
 
 ## Checked without a GPU
 
@@ -364,14 +423,19 @@ That is a check of the checker. The endpoint itself is only checked by running
 - **Not a coding benchmark.** The seeded fixture is two failing tests in a
   twenty-line module. Passing it shows that the loop closes, tools run and
   files land; it says nothing about harder tasks.
-- **Not a tool-calling score.** The conformance cases use one weather tool.
-  BFCL above is the measurement, and its numbers are pending.
+- **Not a full BFCL score.** The conformance cases use one weather tool. The
+  BFCL figures above cover the `simple` split and a 200-row `multiple`
+  subsample, scored by AST match. BFCL's executable, parallel, relevance and
+  multi-turn categories were not run.
 - **Not a claim about every OpenCode version.** The wire facts were recorded
   with OpenCode 1.19.0. A later version can change what it sends; the
   recording stub approach in this README is how to re-check.
 - **Not a claim about every laptop.** The laptop recipe was run on one Apple
   Silicon machine with one 4B model. NVIDIA and other models have not been
   run.
-- **Not a Cloud result yet.** The Cloud table, the served-by header, the gate
-  run, the terminal recording, the usage rows and the BFCL figures are
-  placeholders until the run on the deployed endpoint is recorded here.
+- **Not a measurement of SIE's own GPU serving.** Through SIE Relay the
+  model runs on a partner's servers. SIE routes the request, checks the wire
+  and meters it. A dedicated GPU deployment of the same model is a different
+  serving path and has its own window and limits.
+- **One endpoint, one day.** The Cloud results were recorded once, on
+  2026-10-14.
