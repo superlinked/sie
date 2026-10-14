@@ -660,8 +660,8 @@ where
         }
     }
 
-    /// Push `cfg` to every live batcher and to the lane's gather windows
-    /// after a return.
+    /// Push `cfg` to every live batcher, and to the gather windows the lane
+    /// waits on after a return.
     ///
     /// We snapshot the Vec of Arcs under the read lock and drop it
     /// before the async `update_config` calls so a concurrent submit
@@ -1990,6 +1990,174 @@ mod tests {
         let _ = s.record_completion(1, 1).await;
         assert!(!s.adopt_cost_budget(720_000).await);
         assert_eq!(s.controller_snapshot().await.starvation_streak, 1);
+    }
+
+    #[tokio::test]
+    async fn adopt_cost_budget_rebases_the_gather_windows_after_a_return() {
+        let s: Scheduler<StubItem, u32> = Scheduler::new(BatchConfig::default());
+        // Windows a controller step left behind.
+        s.gather_quiet_us.store(1, Ordering::Release);
+        s.gather_longest_us.store(2, Ordering::Release);
+
+        assert!(s.adopt_cost_budget(720_000).await);
+
+        let initial = BatchConfig::default();
+        assert_eq!(
+            s.gather_quiet_us.load(Ordering::Acquire),
+            whole_micros(initial.effective_coalesce_ms())
+        );
+        assert_eq!(
+            s.gather_longest_us.load(Ordering::Acquire),
+            whole_micros(initial.max_batch_wait_ms)
+        );
+    }
+
+    // ---- The lane beside the runs-alone lane ----
+
+    /// Prepared audio: clips batch together, recordings over 30 s run alone
+    /// (`batch_former` point 5).
+    #[derive(Debug, Clone)]
+    struct Audio {
+        ms: u64,
+        alone: bool,
+        key: &'static str,
+    }
+
+    impl HasCost for Audio {
+        fn cost(&self) -> u64 {
+            self.ms
+        }
+        fn hard_batch_cost_cap(&self) -> Option<u64> {
+            Some(crate::audio_prep::MAX_AUDIO_BATCH_DURATION_MS)
+        }
+        fn runs_alone(&self) -> bool {
+            self.alone
+        }
+        fn original_index(&self) -> usize {
+            0
+        }
+        fn request_key(&self) -> Option<&str> {
+            Some(self.key)
+        }
+    }
+
+    fn audio_clip(key: &'static str, seconds: u64) -> Audio {
+        Audio {
+            ms: seconds * 1_000,
+            alone: false,
+            key,
+        }
+    }
+
+    fn recording(key: &'static str, seconds: u64) -> Audio {
+        Audio {
+            ms: seconds * 1_000,
+            alone: true,
+            key,
+        }
+    }
+
+    /// Whisper's budget (720000 ms) and the default item cap, with batch
+    /// wait and coalesce windows that do not fire by themselves in a test.
+    fn audio_lane() -> Arc<Scheduler<Audio, &'static str>> {
+        Arc::new(
+            Scheduler::builder()
+                .config(BatchConfig {
+                    max_batch_cost: 720_000,
+                    max_batch_wait_ms: 10_000.0,
+                    coalesce_ms: 40.0,
+                    coalesce_ratio: 1.0,
+                    ..BatchConfig::default()
+                })
+                .env_lookup(Arc::new(|_| None))
+                .build(),
+        )
+    }
+
+    async fn put(s: &Scheduler<Audio, &'static str>, item: Audio) {
+        let key = item.key;
+        s.submit(Op::Extract, LoraKey::base(), item, key).await;
+    }
+
+    /// The names in the next batch the lane sends within `ms`, if any.
+    async fn sent_within(
+        s: &Arc<Scheduler<Audio, &'static str>>,
+        ms: u64,
+    ) -> Option<Vec<&'static str>> {
+        timeout(TDuration::from_millis(ms), s.next_dispatch(true))
+            .await
+            .ok()
+            .map(|dispatch| {
+                let mut names = dispatch.batch.metadata;
+                names.sort_unstable();
+                names
+            })
+    }
+
+    #[tokio::test]
+    async fn a_long_recording_pending_does_not_send_a_clip_batch_ahead() {
+        // r2 (7 min) is longer than half the cap, so the whole queue would
+        // count as full. The clips' batch can still grow, so the lane holds
+        // it while r1 is with the engine, and the clip that arrives during
+        // r1's forward joins it, ahead of r2.
+        let s = audio_lane();
+        put(&s, recording("r1", 40)).await;
+        assert_eq!(sent_within(&s, 200).await, Some(vec!["r1"]));
+        put(&s, recording("r2", 420)).await;
+        put(&s, audio_clip("c1", 5)).await;
+        assert_eq!(sent_within(&s, 30).await, None, "held while r1 is out");
+        put(&s, audio_clip("c2", 5)).await;
+
+        s.note_return(1, Duration::from_millis(200));
+        assert_eq!(sent_within(&s, 300).await, Some(vec!["c1", "c2"]));
+        s.note_return(2, Duration::from_millis(200));
+        assert_eq!(sent_within(&s, 300).await, Some(vec!["r2"]));
+    }
+
+    #[tokio::test]
+    async fn a_long_recording_waits_for_clips_that_arrive_during_a_recording() {
+        // r2 queued behind r1 cannot grow, but sending it into the second
+        // slot would make a clip that arrives during r1 wait for both. Held,
+        // r2 lets that clip take its turn first.
+        let s = audio_lane();
+        put(&s, recording("r1", 40)).await;
+        assert_eq!(sent_within(&s, 200).await, Some(vec!["r1"]));
+        put(&s, recording("r2", 420)).await;
+        assert_eq!(sent_within(&s, 30).await, None, "held while r1 is out");
+        put(&s, audio_clip("c", 5)).await;
+
+        s.note_return(1, Duration::from_millis(200));
+        assert_eq!(sent_within(&s, 300).await, Some(vec!["c"]));
+        s.note_return(1, Duration::from_millis(200));
+        assert_eq!(sent_within(&s, 300).await, Some(vec!["r2"]));
+    }
+
+    #[tokio::test]
+    async fn a_long_recording_after_a_clip_batch_still_leaves_at_once() {
+        // After a clip batch the recording goes next whatever arrives (point
+        // 5), so holding it gains nothing: a 7 min one is full, as on main.
+        let s = audio_lane();
+        put(&s, audio_clip("c", 5)).await;
+        assert_eq!(sent_within(&s, 200).await, Some(vec!["c"]));
+        put(&s, recording("r", 420)).await;
+        assert_eq!(sent_within(&s, 30).await, Some(vec!["r"]));
+    }
+
+    #[tokio::test]
+    async fn a_full_clip_batch_still_leaves_while_a_recording_is_out() {
+        // Twelve clips fill a batch whatever the recordings pending, so the
+        // lane sends them into the second slot, as for any other full batch.
+        let s = audio_lane();
+        put(&s, recording("r1", 40)).await;
+        assert_eq!(sent_within(&s, 200).await, Some(vec!["r1"]));
+        put(&s, recording("r2", 60)).await;
+        const CLIPS: [&str; 12] = [
+            "c01", "c02", "c03", "c04", "c05", "c06", "c07", "c08", "c09", "c10", "c11", "c12",
+        ];
+        for name in CLIPS {
+            put(&s, audio_clip(name, 2)).await;
+        }
+        assert_eq!(sent_within(&s, 30).await, Some(CLIPS.to_vec()));
     }
 
     // ---- Aggregates ----

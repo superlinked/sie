@@ -626,9 +626,12 @@ the other group's forward. The drain loop therefore asks the model's lane
    if it is already full (item cap, cost cap, one request over the cost cap, or
    no room under the cost cap for another item like its largest), because
    holding it cannot improve it, and the rest of a request whose first part is
-   with the engine, because its caller is waiting on that part. The
-   next batch is the one of the `(operation, LoRA)` queue whose head is oldest:
-   a full batch on a younger queue does not overtake an older queue's held one.
+   with the engine, because its caller is waiting on that part. Beside a long
+   recording, only the other items count toward full. A recording that is all
+   that is pending is not full right after another recording: holding it lets
+   the clips that arrive meanwhile take their turn first. The next batch is the
+   one of the `(operation, LoRA)` queue whose head is oldest: a full batch on a
+   younger queue does not overtake an older queue's held one.
 3. **On a return: gather once, then send everything pending.** The callers just
    answered are the ones most likely to come straight back. The lane waits for
    as many arrivals as the returned batch answered. It stops waiting when

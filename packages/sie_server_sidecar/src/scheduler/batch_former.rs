@@ -34,7 +34,7 @@
 //!    before the next one. Before any batch has been taken, the first turn
 //!    goes to the lane holding the oldest pending item. Batchable batches
 //!    outside turns (none under way, nothing pending flagged, and the last
-//!    batch not a flagged item) are packed exactly as point 3.
+//!    batch not a flagged item) are packed as points 3 and 6.
 //!
 //!    What a turn takes: it owes the items earlier turns left over, the
 //!    oldest whatever its cost, then, oldest first, as many more as fit the
@@ -105,8 +105,8 @@
 //!   after turn. The sidecar's turn owes the items earlier turns left over,
 //!   which gives the wait bound of point 5.
 //!
-//! Caps and flush triggers otherwise follow the Python test contract. The async primitives differ as expected (`tokio::sync` rather
-//! than asyncio).
+//! Caps and flush triggers otherwise follow the Python test contract. The
+//! async primitives differ as expected (`tokio::sync` rather than asyncio).
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -614,7 +614,8 @@ pub(crate) struct GateView {
     /// The cap the pending work has reached, if it already fills a batch:
     /// the item cap, the cost cap, one request over the cost cap, or no
     /// room under the cost cap for another item like its largest. Waiting
-    /// cannot improve such a batch.
+    /// cannot improve such a batch. Beside runs-alone items, only the
+    /// batchable items count (see `full_reason`).
     pub full: Option<FlushReason>,
     /// The classic flush trigger that has fired, if any (caps, batch wait,
     /// coalesce window since the last arrival).
@@ -718,16 +719,46 @@ fn flush_reason<I: HasCost, T>(inner: &Inner<I, T>, immediate: bool) -> Option<F
 /// 15,000-cost request under a 16,384 cap cannot share a batch with another
 /// like it, so holding it for company only delays the engine-side
 /// preparation that could overlap the forward before it.
+///
+/// Beside a pending runs-alone item, only the batchable items count: a
+/// runs-alone item never joins their batch (point 5), so a long recording
+/// must not make a clip batch that could still grow look full. With only
+/// runs-alone items pending, the next batch is the oldest of them. Right
+/// after a runs-alone item it is not full: held while the engine is busy,
+/// it lets the clips that arrive meanwhile take their turn first. After a
+/// batchable batch it goes next whatever arrives, so the whole queue counts.
 fn full_reason<I: HasCost, T>(inner: &Inner<I, T>) -> Option<FlushReason> {
-    if let reason @ Some(
-        FlushReason::SingleOversize | FlushReason::CostCap | FlushReason::CountCap,
-    ) = flush_reason(inner, false)
-    {
-        return reason;
+    let alone_pending = inner.pending.iter().any(|r| r.item.runs_alone());
+    let batchable_pending = inner.pending.iter().any(|r| !r.item.runs_alone());
+    if alone_pending && !batchable_pending && inner.last_batch_alone == Some(true) {
+        return None;
     }
-    let largest = inner.pending.iter().map(|r| r.item.cost()).max()?;
-    (inner.total_cost.saturating_add(largest) > effective_max_cost(inner))
-        .then_some(FlushReason::CostCap)
+    let batchable_only = alone_pending && batchable_pending;
+    let (mut count, mut total, mut largest) = (0usize, 0u64, 0u64);
+    for request in inner
+        .pending
+        .iter()
+        .filter(|r| !batchable_only || !r.item.runs_alone())
+    {
+        let cost = request.item.cost();
+        count += 1;
+        total = total.saturating_add(cost);
+        largest = largest.max(cost);
+    }
+    if count == 0 {
+        return None;
+    }
+    let max_cost = effective_max_cost(inner);
+    if count == 1 && total > max_cost {
+        return Some(FlushReason::SingleOversize);
+    }
+    if total >= max_cost {
+        return Some(FlushReason::CostCap);
+    }
+    if count >= inner.config.max_batch_requests {
+        return Some(FlushReason::CountCap);
+    }
+    (total.saturating_add(largest) > max_cost).then_some(FlushReason::CostCap)
 }
 
 /// Time remaining until the next guaranteed flush, given current
@@ -2176,11 +2207,11 @@ mod tests {
     }
 
     /// Greedy packing exactly as `extract_batch_up_to` does without the
-    /// runs-alone lane (point 3): with `aged`, every request has waited out
-    /// the batch window, so the oldest goes first and the rest by cost;
-    /// otherwise all by cost. `pending` holds `(cost, hard_cap, name,
-    /// arrival_ms)` in queue order and is updated in place, as the batcher
-    /// updates its own queue.
+    /// runs-alone lane and with whole requests off (points 3 and 6): with
+    /// `aged`, every request has waited out the batch window, so the oldest
+    /// goes first and the rest by cost; otherwise all by cost. `pending`
+    /// holds `(cost, hard_cap, name, arrival_ms)` in queue order and is
+    /// updated in place, as the batcher updates its own queue.
     fn previous_packing(
         pending: &mut Vec<(u64, Option<u64>, String, u64)>,
         config: &BatchConfig,
