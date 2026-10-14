@@ -322,6 +322,32 @@ Direct Python servers can emit the worker-named headers for their own stage
 timings without publish/wait headers. Those values are preserved too; header
 presence alone does not identify the serving path.
 
+## Encode trace correlation
+
+Both Python clients accept an optional `traceparent` keyword on `encode()`:
+
+```python
+result = client.encode(
+    "BAAI/bge-m3",
+    {"text": "Hello world"},
+    traceparent="00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+)
+```
+
+Supply a valid [W3C version-00 trace context](https://www.w3.org/TR/trace-context/#traceparent-header)
+from your tracer, using a distinct parent span for each logical call. The SDK
+validates the fixed-length lowercase format and nonzero trace/span IDs before
+I/O. It neither creates spans nor changes sampling flags. This value is sent
+unchanged on retry POSTs and bounded same-origin continuation GETs; it therefore
+identifies a logical call, not a unique HTTP attempt or a complete attempt count.
+
+The option retains the pooled client and overrides constructor `traceparent`
+only for this call. Inherited `tracestate` is omitted for the override; other
+headers and origin restrictions are unchanged. No shared client headers are
+mutated, so concurrent calls can supply independent contexts. With `None` (the
+default), constructor tracing headers and existing request behavior are unchanged.
+This option applies only to `encode()`, not its ancillary pool-management calls.
+
 ## Generation execution evidence
 
 `SIEClient.last_model_revision` retains the `X-SIE-Model-Revision` response

@@ -28,6 +28,7 @@ _logger = logging.getLogger(__name__)
 
 _HTTP_HEADER_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _HTTP_MEDIA_TYPE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+/[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_TRACEPARENT_V00 = re.compile(r"00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}")
 _CONTENT_SAFE_MEDIA_TYPES = frozenset(
     {"application/json", "application/msgpack", "application/problem+json", "text/html"}
 )
@@ -55,6 +56,17 @@ _RESERVED_BASE_URL_HEADERS = frozenset(
 )
 MODAL_CONTINUATION_MAX_HOPS = 20
 _MODAL_CONTINUATION_QUERY_PARAMETER = "__modal_attempt_token"
+
+
+def validate_encode_traceparent(traceparent: str | None) -> None:
+    """Accept a bounded version-00 trace context without changing its flags."""
+    if traceparent is None:
+        return
+    if not isinstance(traceparent, str):
+        raise TypeError("traceparent must be a string or None")
+    match = _TRACEPARENT_V00.fullmatch(traceparent) if len(traceparent) == 55 else None
+    if match is None or match[1] == "0" * 32 or match[2] == "0" * 16:
+        raise ValueError("traceparent must be a valid W3C version-00 trace context")
 
 
 def copy_base_url_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
