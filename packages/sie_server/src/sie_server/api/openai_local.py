@@ -44,6 +44,7 @@ from jsonschema import Draft202012Validator, SchemaError
 from sie_sdk.queue_types import denormalize_model_id
 
 from sie_server.adapters._generation_base import (
+    REASONING_CONTROL_TOKENS,
     GenerationAdapter,
     GenerationError,
     GenerationUnsupportedFieldError,
@@ -134,6 +135,7 @@ _MAX_CHAT_CHOICES = 128
 _MAX_CHAT_VIDEOS = 1
 _MAX_U32 = (1 << 32) - 1
 _ALLOWED_CHAT_ROLES = frozenset({"system", "user", "assistant", "tool", "developer"})
+_ANSWER_FINISH_REASONS = frozenset({"stop", "tool_calls"})
 # Compatibility requests project onto the same native score bound.
 _MAX_RERANK_DOCS = MAX_SCORE_ITEMS
 
@@ -1012,6 +1014,7 @@ def _sanitize_chat_payload(
     initial_inside_thinking: bool,
     reasoning_format: ReasoningFormat,
     states: dict[int, ThinkingBlockStripper] | None = None,
+    held_contents: dict[int, list[str]] | None = None,
     terminal: bool,
     include_reasoning: bool = False,
 ) -> dict[str, Any]:
@@ -1024,6 +1027,7 @@ def _sanitize_chat_payload(
 
     public_reasoning = include_reasoning and hide_thinking_blocks
     state_map = states if states is not None else {}
+    held_map = held_contents if held_contents is not None else {}
     for position, choice in enumerate(choices):
         if not isinstance(choice, dict):
             continue
@@ -1045,18 +1049,37 @@ def _sanitize_chat_payload(
 
         if not hide_thinking_blocks:
             continue
-        stripper = state_map.setdefault(
-            index,
-            ThinkingBlockStripper(
+        raw_content = container.get("content")
+        content = raw_content if isinstance(raw_content, str) else ""
+        stripper = state_map.get(index)
+        if stripper is None:
+            if not content and not reasoning_was_present:
+                continue
+            stripper = state_map[index] = ThinkingBlockStripper(
                 inside=initial_inside_thinking,
                 reasoning_format=reasoning_format,
                 keep_reasoning=public_reasoning,
-            ),
-        )
-        raw_content = container.get("content")
-        content = raw_content if isinstance(raw_content, str) else ""
-        visible = stripper.feed(content) if content else ""
+            )
+            if initial_inside_thinking and reasoning_was_present:
+                held_map[index] = []
         is_terminal_choice = terminal or choice_obj.get("finish_reason") is not None
+        text = content
+        held = held_map.get(index)
+        if held is not None:
+            close = REASONING_CONTROL_TOKENS[reasoning_format][1]
+            closes = close in "".join(held[1 - len(close) :]) + content
+            if content:
+                held.append(content)
+            if closes or is_terminal_choice:
+                del held_map[index]
+                text = "".join(held)
+                if not closes and choice_obj.get("finish_reason") in _ANSWER_FINISH_REASONS:
+                    stripper = state_map[index] = ThinkingBlockStripper(
+                        reasoning_format=reasoning_format, keep_reasoning=public_reasoning
+                    )
+            else:
+                text = ""
+        visible = stripper.feed(text) if text else ""
         if is_terminal_choice:
             visible += stripper.finish()
         if isinstance(raw_content, str) or visible:
@@ -1101,6 +1124,7 @@ async def _sanitize_sse_stream(
     include_reasoning: bool = False,
 ) -> AsyncIterator[bytes]:
     states: dict[int, ThinkingBlockStripper] = {}
+    held_contents: dict[int, list[str]] = {}
     strict_contents: dict[int, list[str]] = {}
     strict_tool_choices: set[int] = set()
     tool_calls: dict[int, set[object]] = {}
@@ -1143,6 +1167,7 @@ async def _sanitize_sse_stream(
                     initial_inside_thinking=initial_inside_thinking,
                     reasoning_format=reasoning_format,
                     states=states,
+                    held_contents=held_contents,
                     terminal=False,
                     include_reasoning=include_reasoning,
                 )
