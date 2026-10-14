@@ -45,6 +45,7 @@ from sie_sdk.queue_types import denormalize_model_id
 from sie_server.adapters._generation_base import (
     REASONING_CONTROL_TOKENS,
     GenerationAdapter,
+    GenerationCapacityError,
     GenerationError,
     GenerationUnsupportedFieldError,
     ReasoningFormat,
@@ -1271,6 +1272,7 @@ async def _remote_chat_events(
     *,
     body: dict[str, Any],
     requested_model: str,
+    upstream: str | None,
     config: Any,
     adapter: GenerationAdapter,
     strict_grammar: GrammarSpec | None,
@@ -1318,9 +1320,10 @@ async def _remote_chat_events(
             delivered = True
             yield b"data: " + encoded + b"\n\n"
         yield b"data: [DONE]\n\n"
-    except (RemoteUpstreamError, UpstreamUnavailableError, GenerationError, GenerationTimeoutError):
+    except (RemoteUpstreamError, UpstreamUnavailableError, GenerationError, GenerationTimeoutError) as exc:
         if not delivered:
             raise
+        logger.warning("chat failed for %s at upstream %r after output: %s", requested_model, upstream, exc)
         yield _upstream_error_event()
     finally:
         await aclose_with_error_precedence(iterator, outcome_selected=True, context="remote chat adapter")
@@ -1340,6 +1343,7 @@ async def _remote_chat_response(
     body: dict[str, Any],
     *,
     requested_model: str,
+    upstream: str | None,
     config: Any,
     stream: bool,
     headers: dict[str, str],
@@ -1367,6 +1371,7 @@ async def _remote_chat_response(
                 ),
                 body=body,
                 requested_model=requested_model,
+                upstream=upstream,
                 config=config,
                 adapter=adapter,
                 strict_grammar=strict_grammar,
@@ -1404,12 +1409,15 @@ async def _remote_chat_response(
                 return _strict_output_error_response(violation)
         return JSONResponse(content=payload, headers=headers)
     except GenerationError as exc:
+        if isinstance(exc, GenerationCapacityError):
+            logger.warning("chat failed for %s at upstream %r: %s", requested_model, upstream, exc)
         raise _generation_http_exception(exc) from exc
     except GenerationTimeoutError:
         raise HTTPException(
             status_code=504, detail={"code": "generation_timeout", "message": "remote generation timed out"}
         ) from None
     except UpstreamUnavailableError as exc:
+        logger.warning("chat failed for %s at upstream %r: %s", requested_model, upstream, exc)
         raise upstream_unavailable_exception(exc, requested_model) from exc
     except (InputTooLongError, InvalidInputError) as exc:
         raise HTTPException(
@@ -1425,7 +1433,8 @@ async def _remote_chat_response(
             detail={"code": ErrorCode.QUEUE_FULL.value, "message": "remote serving is unavailable"},
             headers={"Retry-After": "1"},
         ) from exc
-    except RemoteUpstreamError:
+    except RemoteUpstreamError as exc:
+        logger.warning("chat failed for %s at upstream %r: %s", requested_model, upstream, exc)
         return _upstream_error_response()
 
 
@@ -1572,6 +1581,7 @@ async def _chat_completions(
                 adapter,
                 prepared_chat,
                 requested_model=model,
+                upstream=route.upstream,
                 config=config,
                 stream=bool(stream_opt),
                 headers=route.headers(),

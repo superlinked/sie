@@ -74,7 +74,10 @@ upstreams:
 
 `TEAM_SIE_KEY` is the name of an environment variable, not its value. Supply
 that variable through your deployment's secret mechanism. The adapter reads
-it when sending a request. Do not put a key in the YAML or a URL.
+it when sending a request. A server that starts while the variable is unset
+logs a warning naming the upstream and the variable, and starts anyway. Each
+request to that upstream fails while the variable is unset. Do not put a key
+in the YAML or a URL.
 
 Create `remote-models/sentence-transformers__all-MiniLM-L6-v2.yaml`:
 
@@ -261,6 +264,11 @@ upstream that cannot serve now. The OpenAI codes `server_overloaded` and
 refused with `PROVISIONING`, because the remote capacity is still starting,
 received no answer, so it is `QUEUE_FULL`. Any other failure is
 `INFERENCE_ERROR` for a server error and `INVALID_INPUT` for a client error.
+
+On a single node, the server logs one `WARNING` for each remote chat call that
+fails, naming the model, the upstream and a fixed reason such as
+`upstream answered 401` or `the upstream credential is unavailable`. The line
+never contains the credential, the prompt or anything the upstream sent.
 
 Each upstream has a required rate cap and a circuit breaker. The limits are
 shared by that worker process's adapters, not across replicas: adding remote
