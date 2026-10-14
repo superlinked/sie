@@ -621,8 +621,10 @@ uv run pytest
 ```
 
 `tests/test_conformance.py` and `tests/test_run_gate.py` check the checker,
-and `tests/test_fake_engine.py` checks SIE's chat route with a scripted model.
-A model's endpoint is only checked by running `conformance.py` against it.
+`tests/test_fake_engine.py` checks SIE's chat route with a scripted model, and
+`tests/test_openrouter_recipe.py` checks the OpenRouter recipe against a
+scripted stand-in for OpenRouter. A model's endpoint is only checked by running
+`conformance.py` against it.
 
 ## What this does NOT establish
 
