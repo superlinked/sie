@@ -923,6 +923,7 @@ async def _stream_generate_events(
     except Exception:  # noqa: BLE001 — surface as a terminal error chunk, never 500 mid-stream
         terminal_outcome_selected = True
         if pre_output_errors and seq == 0:
+            logger.warning("stream_generate failed before output", exc_info=True)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail={"code": "inference_error", "message": "internal error during generation"},

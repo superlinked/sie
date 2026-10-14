@@ -1432,6 +1432,7 @@ async def _remote_chat_response(
             status_code=504, detail={"code": "generation_timeout", "message": "remote generation timed out"}
         ) from None
     except UpstreamUnavailableError as exc:
+        logger.warning("remote chat for %s failed: %s", requested_model, exc)
         raise upstream_unavailable_exception(exc, requested_model) from exc
     except (InputTooLongError, InvalidInputError) as exc:
         raise HTTPException(

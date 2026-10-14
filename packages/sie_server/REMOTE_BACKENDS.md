@@ -267,10 +267,13 @@ received no answer, so it is `QUEUE_FULL`. Any other failure is
 
 A single node that answers a remote chat call with `502` `upstream_error`, or
 with `503` because the upstream is unavailable, busy or not ready, logs one
-`WARNING` naming the model, the upstream and a fixed reason such as
-`upstream answered 401` or `the upstream credential is unavailable`. An
-upstream failure after a stream has started is logged the same way. The line
-never contains the credential, the prompt or anything the upstream sent.
+`WARNING` with a fixed reason, for example
+`remote chat for <model> failed: upstream answered 401` or
+`remote chat for <model> failed: the upstream credential is unavailable`. A
+failure after a stream has started logs `failed after output`. Native
+generation and completions log an upstream they cannot reach as
+`remote generation failed: upstream '<name>' is unavailable: <reason>`. No
+line contains the credential, the prompt or anything the upstream sent.
 
 Each upstream has a required rate cap and a circuit breaker. The limits are
 shared by that worker process's adapters, not across replicas: adding remote

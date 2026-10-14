@@ -329,6 +329,7 @@ class SieUpstreamAdapter(BaseAdapter, GenerationAdapter):
         except UpstreamUnavailableError as error:
             if yielded:
                 raise RemoteUpstreamError("the upstream failed during generation") from None
+            logger.warning("remote generation failed: %s", error)
             raise generation_error(error) from None
         except InputTooLongError:
             raise GenerationInputTooLongError("the upstream refused the prompt as too long") from None
