@@ -135,6 +135,7 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         GenerateResponse,
         GenerateChunk,
         GenerateChunkError,
+        UpstreamFailureReason,
         GenerateUsage,
         PromptTokensDetails,
         ChatCompletionRequest,
@@ -2139,6 +2140,31 @@ pub struct GenerateChunkError {
     #[schema(minimum = 1, maximum = 60)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after_s: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<UpstreamFailureReason>,
+}
+
+/// Class of a remote upstream's failure, when one ended the generation.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub enum UpstreamFailureReason {
+    #[serde(rename = "upstream_credential_unavailable")]
+    CredentialUnavailable,
+    #[serde(rename = "upstream_credential_rejected")]
+    CredentialRejected,
+    #[serde(rename = "upstream_payment_required")]
+    PaymentRequired,
+    #[serde(rename = "upstream_model_not_found")]
+    ModelNotFound,
+    #[serde(rename = "upstream_refused")]
+    Refused,
+    #[serde(rename = "upstream_unavailable")]
+    Unavailable,
+    #[serde(rename = "upstream_busy")]
+    Busy,
+    #[serde(rename = "upstream_not_ready")]
+    NotReady,
+    #[serde(rename = "upstream_invalid_response")]
+    InvalidResponse,
 }
 
 /// One JSON payload from a SIE-native generation SSE ``data:`` event.
@@ -2594,6 +2620,8 @@ pub struct OpenAIErrorBody {
     pub param: Option<String>,
     /// SIE-native discriminator, see ``http_error::openai_code``.
     pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<UpstreamFailureReason>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -3738,6 +3766,22 @@ mod tests {
         );
         assert_eq!(chunk_error["properties"]["retry_after_s"]["minimum"], 1);
         assert_eq!(chunk_error["properties"]["retry_after_s"]["maximum"], 60);
+        let reasons: Vec<&str> = crate::queue::streaming::UpstreamFailureReason::ALL
+            .iter()
+            .map(|reason| reason.as_str())
+            .collect();
+        assert_eq!(
+            spec["components"]["schemas"]["UpstreamFailureReason"]["enum"],
+            json!(reasons)
+        );
+        for schema in ["GenerateChunkError", "OpenAIErrorBody"] {
+            let properties = &spec["components"]["schemas"][schema]["properties"];
+            assert_eq!(
+                properties["reason"]["oneOf"][1]["$ref"],
+                "#/components/schemas/UpstreamFailureReason",
+                "{schema}"
+            );
+        }
         assert_eq!(
             chunk["properties"]["logprobs"]["type"],
             json!(["array", "null"])
