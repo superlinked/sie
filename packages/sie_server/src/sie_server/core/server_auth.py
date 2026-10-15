@@ -233,10 +233,10 @@ def read_stored_token(directory: Path) -> str:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise TokenFileError(f"{path} must be a regular file.")
-        if info.st_nlink != 1:
+        if info.st_nlink != 1 and not _drop_staging_links(path, info):
             raise TokenFileError(
-                f"{path} must not have other hard links. If a start of sie-server was interrupted, delete "
-                f"{path.parent / ('.' + TOKEN_FILE_NAME)}.* and start again."
+                f"{path} must not have other hard links. Remove the other link, or delete {path} to have "
+                f"sie-server generate a new token."
             )
         if info.st_uid != os.getuid():
             raise TokenFileError(f"{path} must be owned by the user that runs sie-server.")
@@ -254,6 +254,27 @@ def read_stored_token(directory: Path) -> str:
             f"Delete {path} to have sie-server generate a new token."
         )
     return token
+
+
+def _drop_staging_links(path: Path, info: os.stat_result) -> bool:
+    """Remove the staging links an interrupted first start left on the token.
+
+    True when every extra hard link of the token is such a staging file; any
+    other link is left in place and the token is refused.
+    """
+    staged = []
+    for entry in path.parent.glob(f".{TOKEN_FILE_NAME}.*"):
+        try:
+            entry_info = entry.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISREG(entry_info.st_mode) and (entry_info.st_dev, entry_info.st_ino) == (info.st_dev, info.st_ino):
+            staged.append(entry)
+    if len(staged) != info.st_nlink - 1:
+        return False
+    for entry in staged:
+        entry.unlink(missing_ok=True)
+    return True
 
 
 def server_tokens(env: Mapping[str, str]) -> tuple[str, ...]:

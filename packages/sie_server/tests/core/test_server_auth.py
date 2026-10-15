@@ -202,6 +202,15 @@ class TestPersistedToken:
         assert isinstance(outcome[0], TokenFileError)
         assert "must be a regular file" in str(outcome[0])
 
+    def test_a_staging_link_left_by_an_interrupted_start_is_dropped(self, tmp_path: Path) -> None:
+        stored = load_or_create_token(tmp_path)
+        staged = tmp_path / ".auth-token.0123456789abcdef"
+        os.link(stored.path, staged)
+
+        assert read_stored_token(tmp_path) == stored.token
+        assert not staged.exists()
+        assert stored.path.stat().st_nlink == 1
+
     def test_a_hard_linked_token_is_refused(self, tmp_path: Path) -> None:
         stored = load_or_create_token(tmp_path)
         os.link(stored.path, tmp_path / "copy")
