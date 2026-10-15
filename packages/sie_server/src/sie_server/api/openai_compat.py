@@ -46,7 +46,7 @@ from sie_server.core.model_suggestions import suggestion_suffix
 from sie_server.core.oom import is_oom_error
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import QueueFullError
-from sie_server.core.worker.types import WorkerDrainedError
+from sie_server.core.worker.types import LoraNotReadyError, WorkerDrainedError
 from sie_server.observability.tracing import tracer
 from sie_server.observability.worker_telemetry import worker_telemetry, worker_telemetry_enabled
 from sie_server.types.inputs import InvalidInputError, Item, item_size_error
@@ -499,7 +499,7 @@ async def _create_embeddings(
 
         lora = options.get("lora_id")
         if lora is not None:
-            await ModelStateChecker(registry, route.key, span).ensure_lora_loaded(lora)
+            await ModelStateChecker(registry, route.key, span).ensure_lora_loaded(lora, None)
             options["lora"] = lora
 
         # Run encoding
@@ -578,6 +578,24 @@ async def _create_embeddings(
                     item_count=len(items),
                 )
             raise _openai_state_error(upstream_unavailable_exception(e, model)) from e
+        except LoraNotReadyError as e:
+            span.set_attribute("error", "lora_loading")
+            if inference_started is not None:
+                worker_telemetry().item_completed(
+                    operation="embeddings",
+                    outcome="retry",
+                    model=model,
+                    profile="default",
+                    duration_s=time.perf_counter() - inference_started,
+                    item_count=len(items),
+                )
+            raise _openai_state_error(
+                HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail={"code": ErrorCode.LORA_LOADING.value, "message": str(e)},
+                    headers={"Retry-After": str(e.retry_after_s)},
+                )
+            ) from e
         except (InputTooLongError, InvalidInputError) as e:
             too_long = isinstance(e, InputTooLongError)
             span.set_attribute("error", "input_too_long" if too_long else "invalid_input")

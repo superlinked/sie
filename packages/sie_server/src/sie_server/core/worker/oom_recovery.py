@@ -67,6 +67,14 @@ class RegistryCallbacks(Protocol):
         """
         ...
 
+    def request_lora_load(self, model: str, lora: str) -> int | None:
+        """Start loading a declared LoRA that a batch of ``model`` found absent.
+
+        Returns the seconds the caller should wait before retrying, or
+        ``None`` when no load can make ``lora`` available on ``model``.
+        """
+        ...
+
 
 # Type for the dispatch callable injected by the worker for a single config
 # group. Returns the typed adapter output for the supplied batch slice. The

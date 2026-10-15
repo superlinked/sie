@@ -685,6 +685,30 @@ class ResolvedProfile(BaseModel):
     chat_template_kwargs: MappingProxyType[str, Any] | None = None
     grammar_profile: str | None = None
 
+    def lora_ids(self) -> frozenset[str]:
+        """The LoRAs this profile declares, by the id a load names: each ``loadtime.lora_paths`` source and ``runtime.lora_id``."""
+        ids: set[str] = set()
+        lora_paths = self.loadtime.get("lora_paths")
+        if isinstance(lora_paths, Mapping):
+            ids.update(lora_entry_ref(ref)[0] for ref in lora_paths.values() if ref)
+        elif isinstance(lora_paths, (list, tuple)):
+            ids.update(str(path) for path in lora_paths if path)
+        lora_id = self.runtime.get("lora_id")
+        if lora_id:
+            ids.add(str(lora_id))
+        return frozenset(ids)
+
+    def lora_names(self) -> frozenset[str]:
+        """Every name that selects one of this profile's LoRAs: its ids, its served names and ``runtime.lora``."""
+        names = set(self.lora_ids())
+        lora_paths = self.loadtime.get("lora_paths")
+        if isinstance(lora_paths, Mapping):
+            names.update(str(name) for name in lora_paths)
+        selected = self.runtime.get("lora")
+        if selected:
+            names.add(str(selected))
+        return frozenset(names)
+
 
 # Coarse per-family KV-bytes-per-token constants used by the derived-budget
 # warning. Real calibration lives in the calibration follow-up; these constants

@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import hashlib
 import json
 import logging
+import math
 import threading
 import time
-from collections.abc import AsyncIterator, Collection, Coroutine, Iterable, Mapping
+from collections.abc import AsyncIterator, Callable, Collection, Coroutine, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -50,7 +52,7 @@ from sie_server.core.loader import (
     validate_loadtime_options,
 )
 from sie_server.core.memory import MemoryConfig, MemoryManager
-from sie_server.core.model_loader import DEFAULT_MAX_LORAS, LoadedModel, ModelLoader
+from sie_server.core.model_loader import DEFAULT_MAX_LORAS, LoadedModel, LoraLoadFailure, ModelLoader
 from sie_server.core.oom import is_oom_error
 from sie_server.core.pool_isolation import (
     counts_toward_pool_isolation,
@@ -75,6 +77,11 @@ _ENGINE_STABLE_UPTIME_S = 600.0
 # Same bound as ``evict_lru_excluding``'s load-lock wait. A graph drop finishes
 # well inside it; a stuck adapter must not pin the memory monitor past it.
 _OPTIONAL_MEMORY_RELEASE_TIMEOUT_S = 5.0
+
+# A failed LoRA load is retried after 5 s, doubling per consecutive failure up
+# to 5 minutes.
+_LORA_RETRY_BASE_S = 5.0
+_LORA_RETRY_MAX_S = 300.0
 
 
 class _ConfigChangedDuringLoadError(RuntimeError):
@@ -3394,7 +3401,9 @@ class ModelRegistry:
         Returns:
             Tuple of (is_ready, is_loading):
             - (True, False): LoRA is loaded and ready
-            - (False, True): LoRA is loading, caller should retry
+            - (False, True): LoRA is loading, or its last load failed and a
+              new one waits for the backoff; caller should retry after
+              :meth:`lora_retry_after_s`
             - (False, False): LoRA load failed or not supported
 
         Raises:
@@ -3418,8 +3427,17 @@ class ModelRegistry:
         # scattered supports_lora() / supports_hot_lora_reload() flag-checks.
         lora_cap = adapter.lora_capability()
         if lora_cap is None:
-            msg = f"Model '{model}' does not support LoRA"
+            msg = f"Model '{model}' cannot load a LoRA adapter at runtime"
             raise ValueError(msg)
+
+        if lora not in loaded_model.config.lora_revisions():
+            msg = f"Model '{model}' does not declare this LoRA adapter"
+            raise ValueError(msg)
+
+        lora_state = loaded_model.loras.get(lora)
+        if lora_state is not None and not lora_state.loading:
+            loaded_model.loras.move_to_end(lora)
+            return (True, False)
 
         # Get or create LoRA lock for this model
         lora_lock = loaded_model.get_lora_lock()
@@ -3435,6 +3453,9 @@ class ModelRegistry:
                 # Touch to update LRU (move to end of OrderedDict)
                 loaded_model.loras.move_to_end(lora)
                 return (True, False)
+
+            if self._lora_backoff_s(loaded_model, lora) is not None:
+                return (False, True)
 
             # Not loaded - start loading
             logger.info("Starting LoRA load for model '%s': %s", model, lora)
@@ -3457,69 +3478,76 @@ class ModelRegistry:
                     oldest_lora,
                     loaded_model.max_loras,
                 )
-                try:
-                    lora_cap.unload_lora(oldest_lora)
-                except Exception:
-                    logger.exception("Error unloading LoRA '%s'", oldest_lora)
-                del loaded_model.loras[oldest_lora]
+                evicted = loaded_model.loras.pop(oldest_lora)
+                if not evicted.loading:
+                    await self._unload_lora(loaded_model, oldest_lora)
 
         # Load outside the lock if adapter supports hot reload
-        # (PEFT can load while other inference continues)
         if lora_cap.supports_hot_lora_reload():
             # Non-blocking load in background
             task = asyncio.create_task(
-                self._load_lora_background(model, lora),
+                self._load_lora(model, lora),
                 name=f"lora-load-{model}-{lora}",
             )
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
             return (False, True)
 
-        # Blocking load (SGLang) - load synchronously
-        await self._load_lora_blocking(model, lora)
-        return (self.is_lora_loaded(model, lora), False)
+        # Blocking load - load synchronously
+        await self._load_lora(model, lora)
+        return (self.is_lora_loaded(model, lora), self.lora_load_failed(model, lora))
 
-    async def _load_lora_background(self, model: str, lora: str) -> None:
-        """Load a LoRA adapter in the background (for hot-reload adapters).
+    async def _load_lora(self, model: str, lora: str) -> None:
+        """Load a LoRA adapter and record it, or drop its placeholder and back off when the load fails.
+
+        A hot-reload adapter fetches the LoRA's files outside inference and
+        attaches them while no batch of the model is in flight. A LoRA
+        evicted while it was loading is unloaded again as soon as its load
+        finishes, so the adapter never holds one the registry does not track.
 
         Args:
             model: Model name.
             lora: LoRA adapter name/path.
         """
-        loop = asyncio.get_running_loop()
-
         try:
             loaded_model = self._loaded.get(model)
             if loaded_model is None:
                 logger.warning("Model '%s' unloaded during LoRA load", model)
                 return
 
-            adapter = loaded_model.adapter
+            lora_cap = loaded_model.adapter.lora_capability()
+            if lora_cap is None:
+                msg = f"Model '{model}' does not support LoRA"
+                raise ValueError(msg)
             # Config-pinned revision (#2113): an on-demand load of a
             # profile-declared LoRA (e.g. a reload after LRU eviction) must
             # honor the same pin the preload used, or eviction would silently
             # reintroduce the drift the pin exists to prevent.
             revision = loaded_model.config.lora_revisions().get(lora)
+            if lora_cap.supports_hot_lora_reload():
+                source = await asyncio.get_running_loop().run_in_executor(
+                    None, functools.partial(lora_cap.fetch_lora, lora, revision)
+                )
+                attach = functools.partial(lora_cap.load_lora, lora, revision=revision, source=source)
+            else:
+                attach = functools.partial(lora_cap.load_lora, lora, revision=revision)
+            memory_bytes = await self._run_lora_mutation(loaded_model, attach)
 
-            # Run blocking load in thread pool
-            def _do_load() -> int:
-                return adapter.load_lora(lora, revision=revision)
-
-            memory_bytes = await loop.run_in_executor(None, _do_load)
-
-            # Update LoRA state
-            lora_lock = loaded_model.get_lora_lock()
-            async with lora_lock:
+            async with loaded_model.get_lora_lock():
+                loaded_model.lora_failures.pop(lora, None)
                 lora_state = loaded_model.loras.get(lora)
-                if lora_state is not None:
-                    lora_state.loading = False
-                    lora_state.memory_bytes = memory_bytes
-                    logger.info(
-                        "LoRA '%s' loaded for model '%s' (%.2f MB)",
-                        lora,
-                        model,
-                        memory_bytes / 1024 / 1024,
-                    )
+                if lora_state is None:
+                    logger.info("LoRA '%s' for model '%s' was evicted while it loaded", lora, model)
+                    await self._unload_lora(loaded_model, lora)
+                    return
+                lora_state.loading = False
+                lora_state.memory_bytes = memory_bytes
+                logger.info(
+                    "LoRA '%s' loaded for model '%s' (%.2f MB)",
+                    lora,
+                    model,
+                    memory_bytes / 1024 / 1024,
+                )
 
         except Exception:
             logger.exception("Error loading LoRA '%s' for model '%s'", lora, model)
@@ -3527,54 +3555,74 @@ class ModelRegistry:
             loaded_model = self._loaded.get(model)
             if loaded_model:
                 loaded_model.loras.pop(lora, None)
+                previous = loaded_model.lora_failures.get(lora)
+                attempts = previous.attempts + 1 if previous is not None else 1
+                delay_s = min(_LORA_RETRY_BASE_S * 2 ** (attempts - 1), _LORA_RETRY_MAX_S)
+                loaded_model.lora_failures[lora] = LoraLoadFailure(
+                    attempts=attempts, retry_at=time.monotonic() + delay_s
+                )
 
-    async def _load_lora_blocking(self, model: str, lora: str) -> None:
-        """Load a LoRA adapter with blocking semantics (for SGLang).
+    @staticmethod
+    def _lora_backoff_s(loaded_model: LoadedModel, lora: str) -> int | None:
+        failure = loaded_model.lora_failures.get(lora)
+        if failure is None:
+            return None
+        remaining = failure.retry_at - time.monotonic()
+        return math.ceil(remaining) if remaining > 0 else None
 
-        For adapters that don't support hot reload, we block until loading
-        completes. This ensures the LoRA is ready when we return.
+    def lora_retry_after_s(self, model: str, lora: str) -> int:
+        """Seconds a caller should wait before asking for ``lora`` again: the rest of a failed load's backoff, else 1."""
+        loaded_model = self._loaded.get(model)
+        backoff = self._lora_backoff_s(loaded_model, lora) if loaded_model is not None else None
+        return backoff if backoff is not None else 1
 
-        Args:
-            model: Model name.
-            lora: LoRA adapter name/path.
+    def lora_load_failed(self, model: str, lora: str) -> bool:
+        """True while ``lora``'s last load failed and the next one waits for the backoff."""
+        loaded_model = self._loaded.get(model)
+        return loaded_model is not None and self._lora_backoff_s(loaded_model, lora) is not None
+
+    def request_lora_load(self, model: str, lora: str) -> int | None:
+        """Start loading a declared LoRA that a batch found absent.
+
+        Called by the worker, which holds its dispatch lock, so the load runs
+        as a background task. Returns the seconds the caller should wait
+        before retrying, or ``None`` when no load can make ``lora`` available:
+        the model is not loaded, does not support LoRA, or does not declare
+        ``lora`` as a LoRA to load.
         """
-        loop = asyncio.get_running_loop()
+        loaded_model = self._loaded.get(model)
+        if (
+            loaded_model is None
+            or loaded_model.adapter.lora_capability() is None
+            or lora not in loaded_model.config.lora_revisions()
+        ):
+            return None
+        lora_state = loaded_model.loras.get(lora)
+        if lora_state is not None and not lora_state.loading:
+            loaded_model.loras.pop(lora)
+        task = asyncio.create_task(self._ensure_lora_quietly(model, lora), name=f"lora-request-{model}-{lora}")
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return self.lora_retry_after_s(model, lora)
 
+    async def _ensure_lora_quietly(self, model: str, lora: str) -> None:
         try:
-            loaded_model = self._loaded.get(model)
-            if loaded_model is None:
-                return
-
-            adapter = loaded_model.adapter
-            # Config-pinned revision (#2113): an on-demand load of a
-            # profile-declared LoRA (e.g. a reload after LRU eviction) must
-            # honor the same pin the preload used, or eviction would silently
-            # reintroduce the drift the pin exists to prevent.
-            revision = loaded_model.config.lora_revisions().get(lora)
-
-            # Run blocking load in thread pool
-            def _do_load() -> int:
-                return adapter.load_lora(lora, revision=revision)
-
-            memory_bytes = await loop.run_in_executor(None, _do_load)
-
-            # Update LoRA state
-            lora_lock = loaded_model.get_lora_lock()
-            async with lora_lock:
-                lora_state = loaded_model.loras.get(lora)
-                if lora_state is not None:
-                    lora_state.loading = False
-                    lora_state.memory_bytes = memory_bytes
-                    logger.info(
-                        "LoRA '%s' loaded for model '%s' (%.2f MB)",
-                        lora,
-                        model,
-                        memory_bytes / 1024 / 1024,
-                    )
-
+            await self.ensure_lora_loaded_async(model, lora)
         except Exception:
-            logger.exception("Error loading LoRA '%s' for model '%s'", lora, model)
-            # Remove failed LoRA from tracking
-            loaded_model = self._loaded.get(model)
-            if loaded_model:
-                loaded_model.loras.pop(lora, None)
+            logger.exception("Error starting LoRA load for model '%s': %s", model, lora)
+
+    async def _unload_lora(self, loaded_model: LoadedModel, lora: str) -> None:
+        lora_cap = loaded_model.adapter.lora_capability()
+        if lora_cap is None:
+            return
+        try:
+            await self._run_lora_mutation(loaded_model, functools.partial(lora_cap.unload_lora, lora))
+        except Exception:
+            logger.exception("Error unloading LoRA '%s'", lora)
+
+    @staticmethod
+    async def _run_lora_mutation[T](loaded_model: LoadedModel, mutation: Callable[[], T]) -> T:
+        """Run a LoRA load or unload where no batch of the model can observe it half done."""
+        if loaded_model.worker is None:
+            return await asyncio.get_running_loop().run_in_executor(None, mutation)
+        return await loaded_model.worker.run_adapter_mutation(mutation)

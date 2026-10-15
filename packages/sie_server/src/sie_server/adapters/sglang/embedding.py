@@ -39,6 +39,7 @@ from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.tokenizer import load_tokenizer
 
 if TYPE_CHECKING:
+    from sie_server.adapters.lora import LoraCapability
     from sie_server.types.inputs import Item
 
 logger = logging.getLogger(__name__)
@@ -538,8 +539,7 @@ class SGLangEmbeddingAdapter(BaseAdapter):
         # Validate active LoRA if specified
         lora = self._active_lora
         if lora is not None and lora not in self._lora_paths:
-            available = list(self._lora_paths.keys()) if self._lora_paths else []
-            msg = f"LoRA '{lora}' not loaded. Available: {available}"
+            msg = f"LoRA '{lora}' is not loaded"
             raise ValueError(msg)
 
         self._validate_output_types(output_types)
@@ -915,6 +915,13 @@ class SGLangEmbeddingAdapter(BaseAdapter):
         """Return True if LoRA adapters are configured."""
         return bool(self._lora_paths)
 
+    def lora_capability(self) -> LoraCapability | None:
+        """Return ``None``: the engine loads its LoRA adapters at launch and cannot load or unload one later.
+
+        A LoRA is selected by its served name through :meth:`set_active_lora`.
+        """
+        return None
+
     def supports_hot_lora_reload(self) -> bool:
         """Return False - SGLang blocks during LoRA loading.
 
@@ -931,5 +938,11 @@ class SGLangEmbeddingAdapter(BaseAdapter):
 
         Args:
             lora_name: LoRA adapter name, or None for base model.
+
+        Raises:
+            ValueError: ``lora_name`` is not one of the served names the engine launched with.
         """
+        if lora_name is not None and lora_name not in self._lora_paths:
+            msg = f"LoRA '{lora_name}' is not loaded"
+            raise ValueError(msg)
         self._active_lora = lora_name

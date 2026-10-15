@@ -760,28 +760,38 @@ class TestSGLangLoRA:
         call_args = mock_post.call_args
         assert call_args[1]["json"]["model"] == "default"
 
-    def test_encode_invalid_lora_raises(self) -> None:
-        """Encode raises ValueError for unknown LoRA adapter set via set_active_lora."""
+    def test_selecting_an_unknown_lora_raises_without_naming_the_served_ones(self) -> None:
         adapter = SGLangEmbeddingAdapter(
             "test-model",
             lora_paths={"legal": "org/legal-lora"},
         )
         adapter._server_url = "http://localhost:30000"
 
-        items = [Item(text="test")]
-        adapter.set_active_lora("unknown")
-        with pytest.raises(ValueError, match="LoRA 'unknown' not loaded"):
-            adapter.encode(items, output_types=["dense"])
+        with pytest.raises(ValueError, match="LoRA 'unknown' is not loaded") as raised:
+            adapter.set_active_lora("unknown")
 
-    def test_encode_lora_without_any_loaded_raises(self) -> None:
-        """Encode raises ValueError when LoRA set but none loaded."""
+        assert "legal" not in str(raised.value)
+        assert adapter._active_lora is None
+
+    def test_encode_with_an_unknown_active_lora_raises_without_naming_the_served_ones(self) -> None:
+        adapter = SGLangEmbeddingAdapter(
+            "test-model",
+            lora_paths={"legal": "org/legal-lora"},
+        )
+        adapter._server_url = "http://localhost:30000"
+        adapter._active_lora = "unknown"
+
+        with pytest.raises(ValueError, match="LoRA 'unknown' is not loaded") as raised:
+            adapter.encode([Item(text="test")], output_types=["dense"])
+
+        assert "legal" not in str(raised.value)
+
+    def test_selecting_a_lora_without_any_served_raises(self) -> None:
         adapter = SGLangEmbeddingAdapter("test-model")  # No lora_paths
         adapter._server_url = "http://localhost:30000"
 
-        items = [Item(text="test")]
-        adapter.set_active_lora("legal")
-        with pytest.raises(ValueError, match=r"LoRA 'legal' not loaded.*Available: \[\]"):
-            adapter.encode(items, output_types=["dense"])
+        with pytest.raises(ValueError, match="LoRA 'legal' is not loaded"):
+            adapter.set_active_lora("legal")
 
 
 class TestPortReservation:

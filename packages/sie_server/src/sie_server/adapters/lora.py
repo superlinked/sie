@@ -3,8 +3,9 @@
 Groups the LoRA lifecycle an adapter exposes when it supports LoRA into one
 typed capability, so callers ask ``adapter.lora_capability()`` once and use the
 returned handle instead of flag-checking ``supports_lora()`` and then calling
-the individual hooks. The two implementations behind this capability are the
-PEFT mixin (in-process, hot-reloadable) and the SGLang adapter (HTTP, blocking).
+the individual hooks. The PEFT mixin (in-process, hot-reloadable) implements
+this capability. An adapter whose engine loads its LoRAs at launch, such as the
+SGLang embedding adapter, selects them by served name and returns ``None``.
 """
 
 from __future__ import annotations
@@ -25,9 +26,16 @@ class LoraCapability(Protocol):
         if the load blocks all requests (SGLang HTTP).
         """
 
-    def load_lora(self, lora_path: str, revision: str | None = None) -> int:
-        """Load a LoRA adapter (optionally at a pinned 40-hex commit SHA);
-        return its memory usage in bytes.
+    def fetch_lora(self, lora_path: str, revision: str | None = None) -> str:
+        """Bring a LoRA adapter's files to one local directory and return it.
+
+        Hot-reload adapters do their network and disk I/O here, outside inference.
+        """
+
+    def load_lora(self, lora_path: str, revision: str | None = None, *, source: str | None = None) -> int:
+        """Load a LoRA adapter (optionally at a pinned 40-hex commit SHA), from
+        ``source`` when :meth:`fetch_lora` already brought it local; return its
+        memory usage in bytes.
         """
 
     def unload_lora(self, lora_name: str) -> None:

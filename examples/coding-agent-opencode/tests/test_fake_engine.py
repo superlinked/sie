@@ -8,7 +8,9 @@ message it answers with the tool result, and it reasons in one sentence first.
 So each case here checks SIE's single-node chat wire, not a model.
 
 The fake makes one call per turn, so ``parallel_tool_calls`` fails, and the
-test asserts that failure instead of skipping the case. The fake does not read
+test asserts that failure instead of skipping the case. Its 4,096-token output
+cap refuses the 32,000 tokens a 64 KiB call needs, so ``long_tool_call`` is
+recorded as not run. The fake does not read
 the long prompt, so the needle is never found; the case passes on the prompt
 size and the answer, as it does for any model.
 """
@@ -34,6 +36,7 @@ REPOSITORY = EXAMPLE.parents[1]
 SERVER = REPOSITORY / ".venv" / "bin" / "sie-server"
 MODEL = "sie-fake:chat"
 WINDOW = 131072
+OUTPUT_CAP = 4096
 SERVER_START_TIMEOUT_S = 300.0
 TOOL_RESULT = {"city": "Paris", "temperature_c": 18, "conditions": "overcast"}
 
@@ -107,6 +110,7 @@ def test_each_case_against_the_fake(report: dict[str, Any]) -> None:
         "usage_on_final_chunk": "pass",
         "include_reasoning": "pass",
         "tool_choice_required": "recorded",
+        "long_tool_call": "recorded",
     }, report["cases"]
     assert report["served_by"] == "local"
     assert report["warm_up"]["error"] is None
@@ -164,6 +168,13 @@ def test_max_tokens_and_usage_are_exact(report: dict[str, Any]) -> None:
     assert length["usage"]["completion_tokens"] == 8
     usage = cases["usage_on_final_chunk"]["observed"]["usage"]
     assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+
+
+def test_the_long_tool_call_is_not_sent_past_the_declared_output_cap(report: dict[str, Any]) -> None:
+    case = _cases(report)["long_tool_call"]
+    assert case["observed"]["error"]["param"] == "max_tokens"
+    assert case["detail"].startswith("not run: max_tokens=32000 refused: 400 INVALID_INPUT")
+    assert f"model cap ({OUTPUT_CAP})" in case["detail"]
 
 
 def test_tool_choice_required_forces_a_call(report: dict[str, Any]) -> None:

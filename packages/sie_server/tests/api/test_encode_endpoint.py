@@ -885,6 +885,8 @@ class TestEncodeLoraRouting:
         registry.model_names = ["test-model"]
         registry.device = "cpu"
         registry.ensure_lora_loaded_async = AsyncMock(return_value=lora_state)
+        registry.lora_load_failed.return_value = False
+        registry.lora_retry_after_s.return_value = 1
 
         preprocessor_registry = MagicMock()
         preprocessor_registry.has_tokenizer.return_value = False
@@ -934,22 +936,42 @@ class TestEncodeLoraRouting:
     def test_request_level_lora_id_is_mapped_to_lora(
         self, lora_client: tuple[TestClient, MagicMock, MagicMock]
     ) -> None:
-        """A request-level options.lora_id override is also mapped to lora."""
+        """A request-level options.lora_id naming a declared LoRA is also mapped to lora."""
         client, registry, adapter = lora_client
 
         response = client.post(
             "/v1/encode/test-model",
             json={
                 "items": [{"text": "Hello"}],
-                "params": {"options": {"lora_id": "org/override-lora"}},
+                "params": {"options": {"profile": "us-regulatory", "lora_id": "org/test-lora"}},
             },
             headers=JSON_HEADERS,
         )
         assert response.status_code == 200, response.text
 
-        registry.ensure_lora_loaded_async.assert_called_once_with("test-model", "org/override-lora")
+        registry.ensure_lora_loaded_async.assert_called_once_with("test-model", "org/test-lora")
         forwarded_options = adapter.encode.call_args.kwargs["options"]
-        assert forwarded_options.get("lora") == "org/override-lora"
+        assert forwarded_options.get("lora") == "org/test-lora"
+
+    @pytest.mark.parametrize("key", ["lora_id", "lora"])
+    def test_request_level_undeclared_lora_is_refused_before_any_load(
+        self, lora_client: tuple[TestClient, MagicMock, MagicMock], key: str
+    ) -> None:
+        client, registry, adapter = lora_client
+
+        response = client.post(
+            "/v1/encode/test-model",
+            json={
+                "items": [{"text": "Hello"}],
+                "params": {"options": {key: "org/override-lora"}},
+            },
+            headers=JSON_HEADERS,
+        )
+
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"]["code"] == "INVALID_INPUT"
+        registry.ensure_lora_loaded_async.assert_not_called()
+        adapter.encode.assert_not_called()
 
     def test_no_lora_id_does_not_set_lora_key(self, lora_client: tuple[TestClient, MagicMock, MagicMock]) -> None:
         """Without a LoRA, options['lora'] must remain unset (no spurious routing)."""
@@ -1048,7 +1070,7 @@ class TestEncodeLoraRouting:
             "/v1/encode/test-model",
             json={
                 "items": [{"text": "Hello"}],
-                "params": {"options": {"lora_id": "org/customer-lora"}},
+                "params": {"options": {"profile": "us-regulatory"}},
             },
             headers=JSON_HEADERS,
         )
