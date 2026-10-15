@@ -199,19 +199,14 @@ def lanes(root: Path, version: str, floors: dict[str, Any], metadata: dict[str, 
     return records
 
 
-def _passing_runs(tested: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
-    runs = {}
-    for run in tested.get("runs", []):
-        if run.get("result") == "passed":
-            runs[run["lane"], run["route"]] = run
-    return runs
+Runs = dict[tuple[str, str], list[dict[str, Any]]]
 
 
-def _failed_runs(tested: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
-    runs = {}
+def _runs_by_route(tested: dict[str, Any], *, failed: bool) -> Runs:
+    runs: Runs = {}
     for run in tested.get("runs", []):
-        if run.get("result") == "failed" and run.get("conclusive"):
-            runs[run["lane"], run["route"]] = run
+        if (run.get("result") == "failed" and bool(run.get("conclusive"))) if failed else run.get("result") == "passed":
+            runs.setdefault((run["lane"], run["route"]), []).append(run)
     return runs
 
 
@@ -220,10 +215,12 @@ def _evidence(run: dict[str, Any]) -> dict[str, Any]:
     return {key: run[key] for key in keys if key in run}
 
 
-def _on_lane_image(run: dict[str, Any] | None, lane: dict[str, Any]) -> bool:
-    """Whether a smoke run tested this lane's exact recorded image digest."""
+def _lane_run(runs: list[dict[str, Any]] | None, lane: dict[str, Any]) -> dict[str, Any] | None:
+    """The first smoke run of this lane's exact recorded image digest, if any."""
     digest = lane["digest"]
-    return run is not None and digest is not None and run.get("image", "").endswith(f"@{digest}")
+    if digest is None:
+        return None
+    return next((run for run in runs or [] if run.get("image", "").endswith(f"@{digest}")), None)
 
 
 def cell(
@@ -232,8 +229,8 @@ def cell(
     config: ModelConfig,
     *,
     bundle: str,
-    passed: dict[tuple[str, str], dict[str, Any]],
-    failed: dict[tuple[str, str], dict[str, Any]],
+    passed: Runs,
+    failed: Runs,
 ) -> dict[str, Any]:
     model, profile = _route_parts(route, config)
     resolved = config.resolve_profile("default")
@@ -252,21 +249,22 @@ def cell(
     if lane["platform"] == "cpu" and adapter.startswith(CUDA_ONLY_ADAPTER_PREFIXES):
         return {**record, "status": "unsupported", "reason": f"the {lane['engine']} engine serves on CUDA only"}
     key = (lane["lane"], route)
-    if _on_lane_image(passed.get(key), lane):
-        run = passed[key]
-        return {
-            **record,
-            "status": "tested",
-            "reason": f"GPU smoke passed on {run['gpu']} (driver {run['driver']}) on {run['date']}",
-            "evidence": _evidence(run),
-        }
-    if _on_lane_image(failed.get(key), lane):
-        run = failed[key]
+    failure = _lane_run(failed.get(key), lane)
+    if failure is not None:
         return {
             **record,
             "status": "unsupported",
-            "reason": f"GPU smoke failed on {run['gpu']} on {run['date']}: {run.get('cause') or run['detail']}",
-            "evidence": _evidence(run),
+            "reason": f"GPU smoke failed on {failure['gpu']} on {failure['date']}: "
+            f"{failure.get('cause') or failure['detail']}",
+            "evidence": _evidence(failure),
+        }
+    success = _lane_run(passed.get(key), lane)
+    if success is not None:
+        return {
+            **record,
+            "status": "tested",
+            "reason": f"GPU smoke passed on {success['gpu']} (driver {success['driver']}) on {success['date']}",
+            "evidence": _evidence(success),
         }
     reason = "routed to this lane's bundle; no smoke test of this image backs it"
     return {**record, "status": "declared", "reason": reason}
@@ -284,8 +282,8 @@ def build(
     lane_records = lanes(root, version, floors, metadata or {})
     bundles = load_bundles(root)
     configs = load_model_configs(root / "packages/sie_server/models")
-    passed = _passing_runs(tested or {})
-    failed = _failed_runs(tested or {})
+    passed = _runs_by_route(tested or {}, failed=False)
+    failed = _runs_by_route(tested or {}, failed=True)
     cells = []
     for route, config in sorted(configs.items()):
         module = config.resolve_profile("default").adapter_path.partition(":")[0]

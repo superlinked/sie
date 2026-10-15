@@ -168,6 +168,40 @@ def test_a_run_on_another_digest_is_not_evidence_for_this_release():
     assert result["summary"]["tested"] == 0
 
 
+def test_a_run_on_the_lane_digest_counts_whatever_other_images_were_run():
+    digest = "sha256:" + "a" * 64
+    other = "ghcr.io/superlinked/sie-server@sha256:" + "b" * 64
+    tested = {
+        "runs": [
+            run("cuda12-sglang", "Qwen/Qwen3-0.6B", f"ghcr.io/superlinked/sie-server@{digest}"),
+            run("cuda12-sglang", "Qwen/Qwen3-0.6B", other),
+        ]
+    }
+    result = matrix.build(
+        matrix.ROOT, "0.0.0", floors=floors(), metadata={"cuda12-sglang": {"digest": digest}}, tested=tested
+    )
+
+    assert result["summary"]["tested"] == 1
+
+
+def test_a_conclusive_failure_outranks_a_pass_on_the_same_image():
+    digest = "sha256:" + "a" * 64
+    image = f"ghcr.io/superlinked/sie-server@{digest}"
+    tested = {
+        "runs": [
+            run("cuda12-sglang", "Qwen/Qwen3-0.6B", image),
+            run("cuda12-sglang", "Qwen/Qwen3-0.6B", image, result="failed", conclusive=True, detail="crash"),
+        ]
+    }
+    result = matrix.build(
+        matrix.ROOT, "0.0.0", floors=floors(), metadata={"cuda12-sglang": {"digest": digest}}, tested=tested
+    )
+    cells = {(cell["lane"], cell["variant_id"]): cell for cell in result["cells"]}
+
+    assert cells["cuda12-sglang", "Qwen/Qwen3-0.6B"]["status"] == "unsupported"
+    assert result["summary"]["tested"] == 0
+
+
 def test_runs_without_a_recorded_lane_digest_classify_nothing():
     image = "ghcr.io/superlinked/sie-server@sha256:" + "a" * 64
     tested = {
