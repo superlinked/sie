@@ -684,6 +684,7 @@ async fn run_sse_driver_with_lifecycle(
     let overall_deadline = publish_instant + overall_timeout;
     let mut last_chunk_at: Option<tokio::time::Instant> = None;
     let mut first_seen = false;
+    let mut output_seen = false;
     // Per-``choice_index`` ``role_emitted`` set (H4). For n=1 (the default)
     // this only ever contains 0; for streaming n>1 each candidate's first
     // delta gets an ``assistant`` role emitted independently, matching
@@ -744,7 +745,7 @@ async fn run_sse_driver_with_lifecycle(
         if now >= overall_deadline {
             send_error_chunk_before_output(
                 &mut first_output,
-                !first_seen,
+                !output_seen,
                 &event_tx,
                 &endpoint,
                 &stream_chat_id,
@@ -1075,12 +1076,12 @@ async fn run_sse_driver_with_lifecycle(
             Err(broadcast::error::RecvError::Closed) => {
                 // The collector was removed (terminal chunk applied
                 // and outcome fired, or drop_pending_stream raced).
-                // If we never saw a chunk, surface a generic
+                // If no output was forwarded, surface a generic
                 // result-channel-closed; otherwise the terminator
                 // was already sent below on the terminal chunk
                 // arm — guard against a double `[DONE]` by checking
-                // `first_seen`.
-                if !first_seen {
+                // `output_seen`.
+                if !output_seen {
                     send_error_chunk_before_output(
                         &mut first_output,
                         false,
@@ -1114,6 +1115,17 @@ async fn run_sse_driver_with_lifecycle(
         }
         first_seen = true;
         last_chunk_at = Some(tokio::time::Instant::now());
+        let progress_only = !chunk.carries_output()
+            && !chunk.done
+            && chunk.finish_reason.is_none()
+            && chunk.error.is_none()
+            && chunk.logprobs.is_none();
+        // A bridge keeps its HTTP refusal until real output; progress only
+        // feeds the deadlines above.
+        if progress_only && first_output.is_some() {
+            continue;
+        }
+        output_seen |= !progress_only;
 
         // Forward as an SSE event, then handle terminal/error/usage.
         let is_terminal = chunk.done;
@@ -4127,13 +4139,21 @@ mod tests {
 
     // ── Long tool calls ────────────────────────────────────────────
 
+    struct DrivenStream {
+        payloads: Vec<String>,
+        local_successes: usize,
+        bridge: Option<Result<(), PreOutputFailure>>,
+    }
+
     /// Feed the real stream collector and SSE driver a worker's chunk
-    /// timeline: each chunk is applied after its delay, numbered in order,
-    /// and the terminal resolves the outcome. Returns the SSE payloads and how
-    /// many times the stream counted as local-serving success.
+    /// timeline: each chunk is applied after its delay and numbered in order.
+    /// A terminal resolves the outcome; a timeline without one drops the
+    /// collector. With `bridge`, the driver holds a first-output gate the way
+    /// a remote bridge does.
     async fn drive_worker_timeline(
         timeline: Vec<(Duration, ChunkEnvelope)>,
-    ) -> (Vec<String>, usize) {
+        bridge: bool,
+    ) -> DrivenStream {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         use crate::queue::streaming::StreamCollector;
@@ -4164,11 +4184,12 @@ mod tests {
             .send(Ok::<(), String>(()))
             .expect("durability receiver is live");
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
+        let (gate_tx, mut gate_rx) = tokio::sync::oneshot::channel();
         let local_successes = Arc::new(AtomicUsize::new(0));
         let recorded = Arc::clone(&local_successes);
         let driver = tokio::spawn(run_sse_driver_with_lifecycle(
             SseDriverArgs {
-                first_output: None,
+                first_output: bridge.then_some(gate_tx),
                 local_serving_model: Some("test/model".to_string()),
                 event_tx,
                 chunk_rx,
@@ -4205,11 +4226,11 @@ mod tests {
                 chunk.seq = seq;
                 if chunk.done {
                     assert!(matches!(collector.apply(chunk), ChunkApplied::Terminal));
-                    break;
+                    let _ = outcome_tx.send(collector.build_outcome().expect("terminal outcome"));
+                    return;
                 }
                 assert!(matches!(collector.apply(chunk), ChunkApplied::Delta));
             }
-            let _ = outcome_tx.send(collector.build_outcome().expect("terminal outcome"));
         });
 
         let mut payloads = Vec::new();
@@ -4218,7 +4239,27 @@ mod tests {
         }
         driver.await.expect("driver task");
         worker.abort();
-        (payloads, local_successes.load(Ordering::SeqCst))
+        DrivenStream {
+            payloads,
+            local_successes: local_successes.load(Ordering::SeqCst),
+            bridge: bridge.then(|| gate_rx.try_recv().expect("bridge gate resolved")),
+        }
+    }
+
+    fn progress_beat(every: Duration) -> (Duration, ChunkEnvelope) {
+        (every, _delta_chunk(0, ""))
+    }
+
+    fn failed_terminal() -> ChunkEnvelope {
+        let mut failed = _terminal_chunk("error", None);
+        failed.error = Some(
+            serde_json::from_value(json!({
+                "code": "MODEL_OUTPUT_PARSE_ERROR",
+                "message": "unterminated <tool_call> block",
+            }))
+            .expect("chunk error"),
+        );
+        failed
     }
 
     /// An agent's long `write` call: a preamble, two minutes decoding inside
@@ -4245,7 +4286,7 @@ mod tests {
         let call_after = match progress {
             Some(every) => {
                 let beats = (decode.as_secs() / every.as_secs()) as usize;
-                timeline.extend((0..beats).map(|_| (every, _delta_chunk(0, ""))));
+                timeline.extend((0..beats).map(|_| progress_beat(every)));
                 Duration::ZERO
             }
             None => decode,
@@ -4266,8 +4307,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_worker_silent_through_a_long_tool_call_ends_at_the_inter_chunk_deadline() {
-        let (payloads, _) = drive_worker_timeline(long_tool_call_timeline(None, "{}")).await;
-        let events = chat_events(&payloads);
+        let driven = drive_worker_timeline(long_tool_call_timeline(None, "{}"), false).await;
+        let events = chat_events(&driven.payloads);
 
         assert_eq!(events.len(), 2);
         assert_eq!(
@@ -4286,12 +4327,12 @@ mod tests {
         .to_string();
         assert!(arguments.len() > 64 * 1024);
 
-        let (payloads, _) = drive_worker_timeline(long_tool_call_timeline(
-            Some(Duration::from_secs(1)),
-            &arguments,
-        ))
+        let driven = drive_worker_timeline(
+            long_tool_call_timeline(Some(Duration::from_secs(1)), &arguments),
+            false,
+        )
         .await;
-        let events = chat_events(&payloads);
+        let events = chat_events(&driven.payloads);
 
         assert!(events.iter().all(|event| event.get("error").is_none()));
         let progress: Vec<&Value> = events
@@ -4320,28 +4361,88 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn progress_alone_is_not_local_serving_output() {
-        let progress = || (Duration::from_secs(1), _delta_chunk(0, ""));
-        let mut failed = _terminal_chunk("error", None);
-        failed.error = Some(
-            serde_json::from_value(json!({
-                "code": "MODEL_OUTPUT_PARSE_ERROR",
-                "message": "unterminated <tool_call> block",
-            }))
-            .expect("chunk error"),
-        );
-        let (payloads, successes) =
-            drive_worker_timeline(vec![progress(), progress(), (Duration::ZERO, failed)]).await;
-        assert!(chat_events(&payloads)
+        let second = Duration::from_secs(1);
+        let failed = drive_worker_timeline(
+            vec![
+                progress_beat(second),
+                progress_beat(second),
+                (Duration::ZERO, failed_terminal()),
+            ],
+            false,
+        )
+        .await;
+        assert!(chat_events(&failed.payloads)
             .iter()
             .any(|event| event["error"]["code"] == "MODEL_OUTPUT_PARSE_ERROR"));
-        assert_eq!(successes, 0);
+        assert_eq!(failed.local_successes, 0);
 
-        let (_, successes) = drive_worker_timeline(vec![
-            progress(),
-            (Duration::ZERO, _terminal_chunk("stop", None)),
-        ])
+        let empty = drive_worker_timeline(
+            vec![
+                progress_beat(second),
+                (Duration::ZERO, _terminal_chunk("stop", None)),
+            ],
+            false,
+        )
         .await;
-        assert_eq!(successes, 1);
+        assert_eq!(empty.local_successes, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_closed_tap_after_progress_alone_still_ends_the_stream() {
+        let second = Duration::from_secs(1);
+        let driven =
+            drive_worker_timeline(vec![progress_beat(second), progress_beat(second)], false).await;
+        let events = chat_events(&driven.payloads);
+
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[2]["error"]["code"], "transport_failure");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bridge_keeps_its_refusal_through_progress() {
+        let second = Duration::from_secs(1);
+        let failed = drive_worker_timeline(
+            vec![
+                progress_beat(second),
+                progress_beat(second),
+                (Duration::ZERO, failed_terminal()),
+            ],
+            true,
+        )
+        .await;
+        let refusal = failed.bridge.expect("bridge").expect_err("refusal kept");
+        assert_eq!(refusal.code.as_deref(), Some("MODEL_OUTPUT_PARSE_ERROR"));
+        assert!(!failed
+            .payloads
+            .iter()
+            .any(|payload| payload.contains("\"delta\":{}")));
+
+        let stalled = drive_worker_timeline(
+            (0..70)
+                .map(|_| progress_beat(Duration::from_secs(10)))
+                .collect(),
+            true,
+        )
+        .await;
+        let refusal = stalled.bridge.expect("bridge").expect_err("refusal kept");
+        assert_eq!(refusal.code.as_deref(), Some("overall_timeout"));
+        assert!(refusal.unanswered);
+
+        let answered = drive_worker_timeline(
+            vec![
+                progress_beat(second),
+                (Duration::ZERO, _delta_chunk(0, "answer")),
+                progress_beat(second),
+                (Duration::ZERO, _terminal_chunk("stop", None)),
+            ],
+            true,
+        )
+        .await;
+        assert!(answered.bridge.expect("bridge").is_ok());
+        let events = chat_events(&answered.payloads);
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0]["choices"][0]["delta"]["content"], "answer");
+        assert_eq!(events[1]["choices"][0]["delta"], json!({}));
     }
 
     // ── Helpers ────────────────────────────────────────────────────
