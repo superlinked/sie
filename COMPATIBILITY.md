@@ -183,7 +183,10 @@ that will change logs a warning naming 0.13.0.
 
 #### Release N: options and warnings
 
-Nothing breaks. Every new option keeps today's behaviour by default.
+Every new option keeps today's behaviour by default. The one exception is a
+security fix: `/ws/status` stops sending host identity at once, which changes
+the values of three response fields (see the `ServerInfo` item below). The
+fields keep their names and types, so clients that read them keep working.
 
 - `sie-server serve`:
   - `--host` also reads `SIE_SERVER_HOST`. The default stays `0.0.0.0`.
@@ -201,7 +204,10 @@ Nothing breaks. Every new option keeps today's behaviour by default.
     warning on every start.
   - `/ws/status` no longer sends the OS user, working directory or process id.
     `ServerInfo.user`, `working_dir` and `pid` are always `""`, `""` and `0`,
-    and are deprecated. `ServerInfo.version` reports the installed version.
+    and are deprecated. This is an exception to the rule that a changed
+    response value is breaking: the old values exposed the host to any client
+    that could open the WebSocket. `ServerInfo.version` reports the installed
+    version.
 - Rust/Candle worker: logs a notice when it binds `0.0.0.0` only because
   `SIE_SERVER_HOST` is unset.
 - Gateway:
