@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from email.utils import format_datetime
@@ -76,6 +77,8 @@ def _reply(body: dict[str, Any]) -> dict[str, Any]:
             return {"status": 503, "code": "QUEUE_FULL", "message": "upstream busy", "headers": {"retry-after": "0"}}
         if KNOBS.get("midstream_error"):
             return {"error_event": KNOBS["midstream_error"]}
+    if tools and tools[0]["function"]["name"] == "write_file":
+        return _long_call(body)
     if tools and "Tokyo" in user_text:
         calls = [("call_1", "get_weather", {"city": "Paris"}), ("call_2", "get_weather", {"city": "Tokyo"})]
         if KNOBS.get("parallel") == "single":
@@ -104,6 +107,28 @@ def _reply(body: dict[str, Any]) -> dict[str, Any]:
         content = f"<think>hmm</think>{answer}" if KNOBS.get("leak_think") else answer
         return {"content": content, "finish": "stop", "reasoning": reasoning}
     return {"content": "ready", "finish": "stop"}
+
+
+def _long_call(body: dict[str, Any]) -> dict[str, Any]:
+    SEEN.setdefault("long_calls", [])
+    cap = KNOBS.get("max_output")
+    if cap and body["max_tokens"] > cap:
+        message = f"max_tokens ({body['max_tokens']}) exceeds model cap ({cap})"
+        return {"status": 400, "code": "INVALID_INPUT", "message": message, "param": "max_tokens"}
+    SEEN["long_calls"].append(body)
+    mode = KNOBS.get("long_call", "write")
+    lines = 10 if mode == "short" else conformance.LONG_CALL_LINES
+    arguments = {"path": "notes/pangrams.txt", "content": "\n".join([conformance.LONG_CALL_SENTENCE] * lines)}
+    if mode == "decline":
+        return {"content": "That file is too long to write in one call.", "finish": "stop"}
+    if mode == "error":
+        error = {"message": "inter-chunk timeout", "type": "server_error", "param": None, "code": "TIMEOUT"}
+        return {"partial": "Writing the file.", "error_event": error}
+    raw = json.dumps(arguments)
+    if mode in ("truncated", "length"):
+        raw = raw[: len(raw) // 2]
+    finish = {"length": "length", "stop": "stop"}.get(mode, "tool_calls")
+    return {"raw_calls": [("call_long", "write_file", raw)], "finish": finish}
 
 
 def _thinking_budget_spent(body: dict[str, Any], reply: dict[str, Any]) -> dict[str, Any]:
@@ -153,6 +178,7 @@ class Handler(BaseHTTPRequestHandler):
         completion = " ".join(
             [reply.get("content") or "", reply.get("reasoning") or "", reply.get("hidden") or ""]
             + [json.dumps(arguments) for _, _, arguments in reply.get("calls") or []]
+            + [raw for _, _, raw in reply.get("raw_calls") or []]
         )
         completion_tokens = max(1, _words(completion))
         return {
@@ -175,6 +201,8 @@ class Handler(BaseHTTPRequestHandler):
         reply = _thinking_budget_spent(body, _reply(body))
         if "status" in reply:
             error = {"message": reply["message"], "type": "invalid_request_error", "code": reply["code"]}
+            if reply.get("param"):
+                error["param"] = reply["param"]
             self._json(reply["status"], {"error": error}, reply.get("headers"))
             return
         if not body.get("stream"):
@@ -217,6 +245,14 @@ class Handler(BaseHTTPRequestHandler):
             self._chunk([{"index": 0, "delta": {"tool_calls": [head]}, "finish_reason": None}])
             tail = {"index": index, "function": {"arguments": json.dumps(arguments)}}
             self._chunk([{"index": 0, "delta": {"tool_calls": [tail]}, "finish_reason": None}])
+        for index, (call_id, name, raw) in enumerate(reply.get("raw_calls") or []):
+            head = {"index": index, "id": call_id, "type": "function", "function": {"name": name, "arguments": ""}}
+            self._chunk([{"index": 0, "delta": {"tool_calls": [head]}, "finish_reason": None}])
+            for start in range(0, len(raw), 4096):
+                if KNOBS.get("gap_s"):
+                    time.sleep(KNOBS["gap_s"])
+                piece = {"index": index, "function": {"arguments": raw[start : start + 4096]}}
+                self._chunk([{"index": 0, "delta": {"tool_calls": [piece]}, "finish_reason": None}])
         for word in (reply.get("content") or "").split(" "):
             if word:
                 self._chunk([{"index": 0, "delta": {"content": word + " "}, "finish_reason": None}])
@@ -372,7 +408,7 @@ def test_a_request_still_busy_after_the_cap_is_a_capacity_failure(
     assert case["retries"] == len(expected_waits)
     assert waits == expected_waits
     assert case["detail"].startswith(f"still busy after {len(expected_waits)} retries and {sum(expected_waits):g} s")
-    assert report["summary"] == {"pass": 10, "fail": 0, "recorded": 0, "capacity": 1}
+    assert report["summary"] == {"pass": 11, "fail": 0, "recorded": 0, "capacity": 1}
 
 
 def test_a_retry_after_date_is_waited_until(base_url: str, waits: list[float]) -> None:
@@ -455,17 +491,18 @@ def test_an_endpoint_that_stays_busy_fails_on_capacity_not_behaviour(
         "usage_on_final_chunk": "capacity",
         "include_reasoning": "capacity",
         "tool_choice_required": "capacity",
+        "long_tool_call": "capacity",
     }
     assert cases["streaming_tool_call_deltas"]["retries"] == conformance.BUSY_RETRIES
     assert cases["include_reasoning"]["retries"] == 3 * conformance.BUSY_RETRIES
     assert cases["finish_reason_tool_calls"]["retries"] == 0
     assert cases["usage_on_final_chunk"]["retries"] == 0
-    assert report["summary"] == {"pass": 0, "fail": 0, "recorded": 1, "capacity": 10}
+    assert report["summary"] == {"pass": 0, "fail": 0, "recorded": 1, "capacity": 11}
     argv = ["conformance.py", "--base-url", base_url, "--model", "stub-model", "--report", str(tmp_path / "r.json")]
     monkeypatch.setattr(sys, "argv", argv)
     capsys.readouterr()
     assert conformance.main() == 1
-    assert "0 pass, 0 fail, 1 recorded, 10 capacity" in capsys.readouterr().out
+    assert "0 pass, 0 fail, 1 recorded, 11 capacity" in capsys.readouterr().out
 
 
 def test_a_failed_tools_turn_does_not_blame_tool_choice(base_url: str) -> None:
@@ -581,3 +618,46 @@ def test_a_long_answer_without_reasoning_is_recorded_not_judged(base_url: str, r
     assert case["status"] == "recorded", case["detail"]
     assert "whether the model reasoned is unknown" in case["detail"]
     assert case["observed"]["model_reasoned"] is None
+
+
+def test_a_long_tool_call_passes_when_the_whole_call_arrives(base_url: str) -> None:
+    case = _run(base_url, gap_s=0.05)["long_tool_call"]
+    assert case["status"] == "pass", case["detail"]
+    observed = case["observed"]
+    assert observed["argument_bytes"] > conformance.LONG_CALL_MIN_BYTES
+    assert observed["lines_as_asked"] == conformance.LONG_CALL_LINES
+    assert observed["max_tokens"] == conformance.LONG_CALL_BUDGET
+    assert observed["longest_gap_s"] >= 0.05
+    assert len(observed["tool_calls"][0]["arguments"]) == 200
+    (request,) = SEEN["long_calls"]
+    assert [tool["function"]["name"] for tool in request["tools"]] == ["write_file"]
+    assert request["tool_choice"] == "auto"
+    assert request["include_reasoning"] is True
+
+
+@pytest.mark.parametrize(
+    ("mode", "status", "detail"),
+    [
+        ("short", "recorded", "the model wrote 0.5 KiB of arguments, under the 64 KiB asked for"),
+        ("decline", "recorded", "the model answered without a tool call"),
+        ("length", "recorded", "max_tokens=32000 ended the turn"),
+        ("truncated", "fail", "but not a JSON object: truncated or corrupted"),
+        ("stop", "fail", "finish_reason is 'stop' after a complete call"),
+        ("error", "fail", "request failed: None TIMEOUT: inter-chunk timeout"),
+    ],
+)
+def test_a_long_tool_call_separates_the_model_declining_from_the_wire_breaking(
+    base_url: str, mode: str, status: str, detail: str
+) -> None:
+    case = _run(base_url, long_call=mode)["long_tool_call"]
+    assert case["status"] == status
+    assert detail in case["detail"]
+
+
+def test_a_long_tool_call_over_the_output_cap_is_recorded_not_failed(base_url: str) -> None:
+    case = _run(base_url, max_output=4096)["long_tool_call"]
+    assert case["status"] == "recorded"
+    assert case["detail"] == (
+        "not run: max_tokens=32000 refused: 400 INVALID_INPUT: max_tokens (32000) exceeds model cap (4096)"
+    )
+    assert SEEN["long_calls"] == []

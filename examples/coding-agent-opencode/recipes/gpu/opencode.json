@@ -1,0 +1,27 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "sie-gpu/Qwen/Qwen3.8-27B-FP8:h100-256k-batch",
+  "provider": {
+    "sie-gpu": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "SIE on one GPU",
+      "options": {
+        "baseURL": "http://localhost:8080/v1",
+        "apiKey": "local",
+        "timeout": 1800000,
+        "headerTimeout": 600000,
+        "chunkTimeout": 600000
+      },
+      "models": {
+        "Qwen/Qwen3.8-27B-FP8:h100-256k-batch": {
+          "name": "Qwen3.8-27B, 256K window, one 80 GB GPU",
+          "limit": {
+            "context": 262144,
+            "output": 32768
+          },
+          "tool_call": true
+        }
+      }
+    }
+  }
+}

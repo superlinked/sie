@@ -163,3 +163,32 @@ def test_a_run_past_its_deadline_is_stopped_and_fails(tmp_path: Path, ignores_te
         time.sleep(0.1)
     else:
         pytest.fail(f"the agent's child process {pid} outlived the deadline")
+
+
+@pytest.mark.parametrize(("recipe", "needs_sie_variables"), [("gpu", False), ("cluster", True), ("cloud", True)])
+def test_only_a_recipe_that_reads_the_sie_variables_requires_them(
+    tmp_path: Path, recipe: str, needs_sie_variables: bool
+) -> None:
+    root = tmp_path / "example"
+    root.mkdir()
+    shutil.copy(EXAMPLE / "run_gate.sh", root)
+    ignored = shutil.ignore_patterns(".venv", "uv.lock", "__pycache__", ".pytest_cache")
+    shutil.copytree(EXAMPLE / "fixture", root / "fixture", ignore=ignored)
+    shutil.copytree(EXAMPLE / "recipes", root / "recipes")
+    record = tmp_path / "opencode-config.txt"
+    (tmp_path / "bin").mkdir()
+    _executable(tmp_path / "bin" / "opencode", f'echo "$OPENCODE_CONFIG" > {record}\n{FIX}')
+    unset = ("VIRTUAL_ENV", "SIE_BASE_URL", "SIE_API_KEY")
+    env = {key: value for key, value in os.environ.items() if key not in unset}
+    env["PATH"] = f"{tmp_path / 'bin'}{os.pathsep}{env['PATH']}"
+    run = subprocess.run(
+        ["bash", str(root / "run_gate.sh"), recipe], check=False, capture_output=True, text=True, env=env, timeout=600
+    )
+    if needs_sie_variables:
+        assert run.returncode == 2
+        assert run.stderr.strip() == "SIE_BASE_URL is not set"
+        assert not record.exists()
+    else:
+        assert run.returncode == 0, run.stdout
+        assert run.stdout.strip().splitlines()[-1].startswith("GATE PASS")
+        assert Path(record.read_text().strip()).parts[-3:] == ("recipes", recipe, "opencode.json")

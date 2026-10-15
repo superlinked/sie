@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "sie-cluster/zai-org/GLM-5.3-Flash",
+  "model": "sie-cluster/Qwen/Qwen3.8-27B-FP8:h100-256k-batch",
   "provider": {
     "sie-cluster": {
       "npm": "@ai-sdk/openai-compatible",
@@ -26,6 +26,14 @@
           "limit": {
             "context": 32768,
             "output": 4096
+          },
+          "tool_call": true
+        },
+        "Qwen/Qwen3.8-27B-FP8:h100-256k-batch": {
+          "name": "Qwen3.8-27B on the cluster, 256K window",
+          "limit": {
+            "context": 262144,
+            "output": 32768
           },
           "tool_call": true
         }

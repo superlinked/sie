@@ -55,6 +55,16 @@ LONG_PROMPT_WORDS = 68_000
 NEEDLE = "The access code is 7741-ZEBRA."
 RECORDED_HEADERS = ("x-sie-served-by", "x-sie-model-revision")
 REASONING_QUESTION = "Which is larger, 9.11 or 9.9? Answer with just the larger number."
+LONG_CALL_MIN_BYTES = 65_536
+LONG_CALL_BUDGET = 32_000
+LONG_CALL_LINES = 1_500
+LONG_CALL_SENTENCE = "The quick brown fox jumps over the lazy dog."
+LONG_CALL_PROMPT = (
+    "Use the write_file tool once to create the file notes/pangrams.txt. Its content must be the sentence "
+    f'"{LONG_CALL_SENTENCE}" on {LONG_CALL_LINES:,} lines, one copy per line, about '
+    f"{LONG_CALL_LINES * (len(LONG_CALL_SENTENCE) + 1):,} characters in all. Write every line out in full in that "
+    "one call: no ellipsis, no placeholder, no summary and no code that generates the lines."
+)
 
 WEATHER_TOOL = {
     "type": "function",
@@ -65,6 +75,22 @@ WEATHER_TOOL = {
             "type": "object",
             "properties": {"city": {"type": "string", "description": "City name, for example Paris"}},
             "required": ["city"],
+        },
+    },
+}
+
+WRITE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "write_file",
+        "description": "Create or replace one text file.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path relative to the project root"},
+                "content": {"type": "string", "description": "The whole file content"},
+            },
+            "required": ["path", "content"],
         },
     },
 }
@@ -139,6 +165,9 @@ class StreamResult:
     error: dict[str, Any] | None = None
     retries: list[dict[str, Any]] = field(default_factory=list)
     seconds: float = 0.0
+    first_chunk_s: float | None = None
+    stream_s: float = 0.0
+    longest_gap_s: float = 0.0
 
     def calls(self) -> list[ToolCall]:
         return [self.tool_calls[index] for index in sorted(self.tool_calls)]
@@ -286,6 +315,7 @@ def complete_chat(client: openai.OpenAI, model: str, messages: list[dict[str, An
 
 def _stream_once(client: openai.OpenAI, model: str, messages: list[dict[str, Any]], **params: Any) -> StreamResult:
     result = StreamResult()
+    started = previous = time.monotonic()
     try:
         raw = client.chat.completions.with_raw_response.create(
             model=model,
@@ -296,6 +326,13 @@ def _stream_once(client: openai.OpenAI, model: str, messages: list[dict[str, Any
         )
         _keep_headers(result, raw)
         for chunk in raw.parse():
+            now = time.monotonic()
+            if result.first_chunk_s is None:
+                result.first_chunk_s = now - started
+            else:
+                result.longest_gap_s = max(result.longest_gap_s, now - previous)
+                result.stream_s = now - started - result.first_chunk_s
+            previous = now
             result.chunks += 1
             result.usage_on_last_chunk = False
             usage = getattr(chunk, "usage", None)
@@ -722,6 +759,58 @@ def case_tool_choice_required(client: openai.OpenAI, model: str) -> Case:
     )
 
 
+def case_long_tool_call(client: openai.OpenAI, model: str, tool_params: dict[str, Any]) -> Case:
+    name = "long_tool_call"
+    messages = [{"role": "user", "content": LONG_CALL_PROMPT}]
+    result = stream_chat(
+        client, model, messages, tools=[WRITE_TOOL], max_tokens=LONG_CALL_BUDGET, temperature=0, **tool_params
+    )
+    calls = result.calls()
+    size = sum(len(call.arguments.encode()) for call in calls)
+    observed = result.observed()
+    observed.update(
+        max_tokens=LONG_CALL_BUDGET,
+        argument_bytes=size,
+        first_chunk_s=None if result.first_chunk_s is None else round(result.first_chunk_s, 2),
+        stream_s=round(result.stream_s, 2),
+        longest_gap_s=round(result.longest_gap_s, 2),
+    )
+    timing = f"streamed over {result.stream_s:.0f} s, longest gap between chunks {result.longest_gap_s:.1f} s"
+    if result.error and _refuses_field(result.error, "max_tokens"):
+        error = result.error
+        detail = (
+            f"not run: max_tokens={LONG_CALL_BUDGET} refused: {error['status']} {error['code']}: {error['message']}"
+        )
+        return Case(name, "recorded", detail, observed)
+    failed = _fail_on_error(name, result)
+    if failed:
+        failed.observed = observed
+        failed.detail = f"{failed.detail} ({timing})"
+        return failed
+    if not calls:
+        detail = f"the model answered without a tool call: {result.content.strip()[:80]!r}"
+        return Case(name, "recorded", detail, observed)
+    arguments = [call.parsed_arguments() for call in calls]
+    if result.finish_reason == "length":
+        detail = f"max_tokens={LONG_CALL_BUDGET} ended the turn after {size:,} bytes of arguments ({timing})"
+        return Case(name, "recorded", detail, observed)
+    if None in arguments:
+        detail = f"{size:,} bytes of arguments, but not a JSON object: truncated or corrupted ({timing})"
+        return Case(name, "fail", detail, observed)
+    if result.finish_reason != "tool_calls":
+        detail = f"finish_reason is {result.finish_reason!r} after a complete call, expected 'tool_calls'"
+        return Case(name, "fail", detail, observed)
+    content = next((args.get("content") for args in arguments if args and isinstance(args.get("content"), str)), "")
+    observed["content_lines"] = len(content.splitlines())
+    observed["lines_as_asked"] = sum(line.strip() == LONG_CALL_SENTENCE for line in content.splitlines())
+    kib = size / 1024
+    if size < LONG_CALL_MIN_BYTES:
+        detail = f"the model wrote {kib:.1f} KiB of arguments, under the {LONG_CALL_MIN_BYTES // 1024} KiB asked for"
+        return Case(name, "recorded", detail, observed)
+    detail = f"{kib:.1f} KiB of arguments in {len(calls)} call ({observed['content_lines']} lines), {timing}"
+    return Case(name, "pass", detail, observed)
+
+
 def model_entry(base_url: str, api_key: str, model: str) -> dict[str, Any] | None:
     headers = {"authorization": f"Bearer {api_key}"} if api_key else {}
     try:
@@ -797,6 +886,7 @@ def run(base_url: str, api_key: str, model: str) -> dict[str, Any]:
     cases.append(case_usage_on_final_chunk(stop_result))
     cases.append(reasoning_case)
     cases.append(case_tool_choice_required(client, model))
+    cases.append(case_long_tool_call(client, model, tool_params))
 
     statuses = ("pass", "fail", "recorded", "capacity")
     counts = {status: sum(1 for case in cases if case.status == status) for status in statuses}
