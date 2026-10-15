@@ -502,6 +502,16 @@ token, and the workers require it unless workers.auth.allowUnauthenticated.
 {{- end }}
 
 {{/*
+Labels of the worker-auth release test pod, which the worker NetworkPolicies
+admit to the worker ports while the workers require the token.
+*/}}
+{{- define "sie-cluster.workers.authTestSelectorLabels" -}}
+app.kubernetes.io/name: sie-health-test
+app.kubernetes.io/component: worker-auth
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{/*
 "true" when the workers require the worker token: workers.auth.enabled and
 not workers.auth.allowUnauthenticated.
 */}}

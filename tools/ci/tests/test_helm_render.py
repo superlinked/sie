@@ -3015,8 +3015,8 @@ def test_worker_network_policy_admits_the_gateway_with_worker_auth(tmp_path: Pat
     workers = {"auth": {"enabled": True}, "networkPolicy": {"enabled": True}, **L4_POOL["workers"]}
     (policy,) = worker_network_policies(rendered_documents(tmp_path, {"workers": workers}))
     (rule,) = policy["spec"]["ingress"]
-    (peer,) = rule["from"]
-    assert peer["podSelector"]["matchLabels"]["app.kubernetes.io/component"] == "gateway"
+    gateway, _ = rule["from"]
+    assert gateway["podSelector"]["matchLabels"]["app.kubernetes.io/component"] == "gateway"
     assert [port["port"] for port in rule["ports"]] == [8080]
 
 
@@ -3439,3 +3439,110 @@ def test_the_worker_auth_variables_the_chart_renders_are_read_by_the_images(tmp_
         assert f'"{name}"' in server, f"sie-server does not read {name}"
     for name in sorted(gateway_names):
         assert f'"{name}"' in gateway, f"sie-gateway does not read {name}"
+
+
+AUTH_TEST_POD_LABELS = {
+    "app.kubernetes.io/name": "sie-health-test",
+    "app.kubernetes.io/component": "worker-auth",
+    "app.kubernetes.io/instance": "sie",
+}
+
+
+def ingress_peers(docs: list[dict], policy_name: str) -> list[dict]:
+    (policy,) = [doc for doc in docs if doc["kind"] == "NetworkPolicy" and doc["metadata"]["name"] == policy_name]
+    (rule,) = policy["spec"]["ingress"]
+    return [peer["podSelector"]["matchLabels"] for peer in rule["from"]]
+
+
+@pytest.mark.parametrize(
+    ("auth", "admitted"),
+    [({"enabled": True}, True), ({"enabled": True, "allowUnauthenticated": True}, False), ({}, False)],
+)
+def test_worker_policies_admit_the_auth_test_only_while_workers_require_the_token(
+    tmp_path: Path, auth: dict, admitted: bool
+) -> None:
+    values = remote_pool_values()
+    values["workers"].update({"auth": auth, "networkPolicy": {"enabled": True}})
+    values["workers"]["pools"]["l4"] = {"enabled": True}
+    docs = rendered_documents(tmp_path, values)
+    for policy in ("sie-sie-cluster-worker", "sie-sie-cluster-worker-remote"):
+        assert (AUTH_TEST_POD_LABELS in ingress_peers(docs, policy)) is admitted, policy
+    if admitted:
+        pod_labels = hook_jobs(docs)[WORKER_AUTH_TEST_JOB]["spec"]["template"]["metadata"]["labels"]
+        assert pod_labels == AUTH_TEST_POD_LABELS
+
+
+def test_the_worker_auth_test_fails_closed_and_reports_what_it_checked(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, {"workers": {"auth": {"enabled": True}, **L4_POOL["workers"]}})
+    script = hook_jobs(docs)[WORKER_AUTH_TEST_JOB]["spec"]["template"]["spec"]["containers"][0]["args"][0]
+    assert 'echo "FAILED: StatefulSet $lane not found."' in script
+    assert 'echo "FAILED: $lane has ready workers that did not answer from this pod."' in script
+    assert 'echo "WARNING: no worker was checked. Every lane was scaled to zero or still starting."' in script
+    assert '000|"")' in script
+
+
+WORKER_AUTH_STUBS = {
+    "kubectl": """#!/bin/sh
+case "$*" in
+  "get statefulset "*" -o jsonpath="*) echo rev-1 ;;
+  "get statefulset "*) [ "$STUB_STATEFULSET" = present ] ;;
+  "get pods "*) printf '%s' "$STUB_PODS" ;;
+  *) exit 2 ;;
+esac
+""",
+    "curl": """#!/bin/sh
+printf '%s' "$STUB_HTTP_CODE"
+""",
+    "date": """#!/bin/sh
+count=$(cat "$STUB_DIR/date-calls" 2>/dev/null || echo 0)
+echo $((count + 1)) > "$STUB_DIR/date-calls"
+if [ "$count" -eq 0 ]; then echo 0; else echo 100000; fi
+""",
+    "sleep": "#!/bin/sh\n",
+}
+READY_POD = {
+    "items": [
+        {
+            "metadata": {},
+            "status": {"podIP": "10.0.0.7", "conditions": [{"type": "Ready", "status": "True"}]},
+        }
+    ]
+}
+
+
+def run_worker_auth_test(tmp_path: Path, statefulset: str, pods: dict, http_code: str) -> subprocess.CompletedProcess:
+    docs = rendered_documents(tmp_path, {"workers": {"auth": {"enabled": True}, **L4_POOL["workers"]}})
+    script = hook_jobs(docs)[WORKER_AUTH_TEST_JOB]["spec"]["template"]["spec"]["containers"][0]["args"][0]
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    for name, body in WORKER_AUTH_STUBS.items():
+        (stubs / name).write_text(body, encoding="utf-8")
+        (stubs / name).chmod(0o755)
+    env = {
+        "PATH": f"{stubs}:{os.environ['PATH']}",
+        "STUB_DIR": str(stubs),
+        "STUB_STATEFULSET": statefulset,
+        "STUB_PODS": json.dumps(pods),
+        "STUB_HTTP_CODE": http_code,
+    }
+    script = script.replace("KUBECONFIG=/tmp/sie-in-cluster-kubeconfig", f"KUBECONFIG={tmp_path}/kubeconfig")
+    return subprocess.run(["/bin/sh", "-c", script], env=env, capture_output=True, text=True, check=False, timeout=60)
+
+
+@pytest.mark.parametrize(
+    ("statefulset", "pods", "http_code", "exit_code", "message"),
+    [
+        ("present", READY_POD, "401", 0, "SUCCESS: 1 worker(s) refused a request without a token."),
+        ("present", READY_POD, "200", 1, "answered GET /v1/models without a token (HTTP 200)"),
+        ("present", READY_POD, "404", 1, "answered GET /v1/models without a token (HTTP 404)"),
+        ("present", READY_POD, "000", 1, "has ready workers that did not answer from this pod"),
+        ("missing", READY_POD, "401", 1, "StatefulSet sie-sie-cluster-worker-l4-default not found"),
+        ("present", {"items": []}, "401", 0, "WARNING: no worker was checked."),
+    ],
+)
+def test_the_worker_auth_test_script_decides_on_what_it_observes(
+    tmp_path: Path, statefulset: str, pods: dict, http_code: str, exit_code: int, message: str
+) -> None:
+    result = run_worker_auth_test(tmp_path, statefulset, pods, http_code)
+    assert result.returncode == exit_code, result.stdout + result.stderr
+    assert message in result.stdout

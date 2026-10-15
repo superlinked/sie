@@ -61,6 +61,11 @@ spec:
         - podSelector:
             matchLabels:
               {{- include "sie-cluster.gateway.selectorLabels" . | nindent 14 }}
+        {{- if include "sie-cluster.workers.authEnforced" . }}
+        - podSelector:
+            matchLabels:
+              {{- include "sie-cluster.workers.authTestSelectorLabels" . | nindent 14 }}
+        {{- end }}
       ports:
         {{- range $i := until $maxWorkerChildCount }}
         - port: {{ add $.Values.workers.common.port $i }}

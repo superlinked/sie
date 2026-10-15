@@ -1665,11 +1665,14 @@ variables, so their workers serve without a token. A post-install and
 post-upgrade hook Job, `<fullname>-worker-auth-test-<revision>`, checks this
 while the workers require the token: once a worker of each lane's current
 StatefulSet revision is ready, it sends `GET /v1/models` without a token and
-fails the release when a worker answers with anything but `401`. A worker that
-the NetworkPolicy keeps from the hook counts as refusing, and a lane with no
-ready worker of the current revision within four minutes is skipped (scaled to
-zero or still starting). Keep the image tags at the chart default, or override
-`workers.common.image.tag` only with a tag of the same release or later.
+fails the release when a worker answers with anything but `401`, when a ready
+worker does not answer, or when a lane's StatefulSet is missing. Both worker
+NetworkPolicies admit the hook pod to the worker ports while the workers
+require the token. A lane with no ready worker of the current revision within
+four minutes (scaled to zero, or a cold start longer than that) is skipped with
+a warning, and the Job logs a warning when it checked no worker at all. Keep
+the image tags at the chart default, or override `workers.common.image.tag`
+only with a tag of the same release or later.
 
 With `workers.auth.tokenSecretName` empty, the chart creates
 `<fullname>-worker-token` holding a random 64-character token under

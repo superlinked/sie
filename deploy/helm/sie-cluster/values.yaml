@@ -914,7 +914,8 @@ workers:
   # images of 0.10.1 and earlier ignore these variables and serve without a
   # token. A post-install and post-upgrade hook Job fails the release when a
   # ready worker of the current revision answers GET /v1/models without a
-  # token. With worker auth off, the chart sets SIE_AUTH_MODE=none on those
+  # token or does not answer; the worker NetworkPolicies admit that Job's pod.
+  # With worker auth off, the chart sets SIE_AUTH_MODE=none on those
   # containers. 0.13.0 changes the default to true; see "Securing the cluster"
   # in the chart README.
   auth:

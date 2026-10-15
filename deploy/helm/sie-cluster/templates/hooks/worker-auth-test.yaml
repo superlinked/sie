@@ -88,8 +88,7 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: sie-health-test
-        app.kubernetes.io/component: worker-auth
+        {{- include "sie-cluster.workers.authTestSelectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ $name }}
       restartPolicy: Never
@@ -107,41 +106,58 @@ spec:
               DEADLINE=$(( $(date +%s) + 240 ))
               echo "=== Worker token test ==="
               echo "Every ready worker of the current revision must refuse GET /v1/models without a token."
+              verified=0
               for lane in $LANES; do
-                checked=false
-                while [ "$checked" = "false" ]; do
-                  revision=$(kubectl get statefulset "$lane" -o jsonpath='{.status.updateRevision}' 2>/dev/null || true)
-                  addresses=""
-                  if [ -n "$revision" ]; then
-                    addresses=$(kubectl get pods -l "controller-revision-hash=$revision" -o json \
-                      | jq -r '.items[] | select(.metadata.deletionTimestamp == null)
-                          | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))
-                          | .status.podIP // empty')
-                  fi
+                if ! kubectl get statefulset "$lane" >/dev/null; then
+                  echo "FAILED: StatefulSet $lane not found."
+                  exit 1
+                fi
+                state=waiting
+                while [ "$state" = "waiting" ]; do
+                  revision=$(kubectl get statefulset "$lane" -o jsonpath='{.status.updateRevision}')
+                  addresses=$(kubectl get pods -l "controller-revision-hash=$revision" -o json \
+                    | jq -r '.items[] | select(.metadata.deletionTimestamp == null)
+                        | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))
+                        | .status.podIP // empty')
+                  unreached=0
                   if [ -n "$addresses" ]; then
                     for address in $addresses; do
                       code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$address:$PORT/v1/models" || true)
                       case "$code" in
                         401)
-                          echo "$lane $address: refused without a token" ;;
+                          echo "$lane $address: refused without a token"
+                          verified=$((verified + 1)) ;;
                         000|"")
-                          echo "$lane $address: not reachable from this pod" ;;
+                          echo "$lane $address: not reached"
+                          unreached=$((unreached + 1)) ;;
                         *)
                           echo "FAILED: $lane $address answered GET /v1/models without a token (HTTP $code)."
                           echo "Its sie-server image does not enforce workers.auth. Use worker images from the same release as the chart."
                           exit 1 ;;
                       esac
                     done
-                    checked=true
-                  elif [ "$(date +%s)" -ge "$DEADLINE" ]; then
-                    echo "$lane: no ready worker of the current revision to check (scaled to zero or still starting)"
-                    checked=true
-                  else
-                    sleep 5
+                    if [ "$unreached" -eq 0 ]; then
+                      state=checked
+                    fi
+                  fi
+                  if [ "$state" = "waiting" ]; then
+                    if [ "$(date +%s)" -lt "$DEADLINE" ]; then
+                      sleep 5
+                    elif [ "$unreached" -gt 0 ]; then
+                      echo "FAILED: $lane has ready workers that did not answer from this pod."
+                      exit 1
+                    else
+                      echo "WARNING: $lane has no ready worker of the current revision to check (scaled to zero or still starting)."
+                      state=skipped
+                    fi
                   fi
                 done
               done
-              echo "SUCCESS: no checked worker serves without a token"
+              if [ "$verified" -eq 0 ]; then
+                echo "WARNING: no worker was checked. Every lane was scaled to zero or still starting."
+              else
+                echo "SUCCESS: $verified worker(s) refused a request without a token."
+              fi
           resources:
             {{- include "sie-cluster.hooks.resources" . | nindent 12 }}
       tolerations:
