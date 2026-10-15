@@ -1547,8 +1547,11 @@ hfToken:
   # -- Token value (passed via --set, never baked into values files)
   value: ""
 
-# -- Anonymous usage telemetry. See https://superlinked.com/policies/telemetry
+# -- Anonymous usage telemetry from the workers. See the chart README section
+# "Telemetry" for every field sent, and https://superlinked.com/policies/telemetry
 telemetry:
+  # -- true renders SIE_TELEMETRY_ENABLED=1 on the workers; false renders
+  # SIE_TELEMETRY_DISABLED=1. The chart default changes to false in 0.13.0.
   enabled: true
   # -- Override receiver endpoint (enterprise self-hosted collectors)
   url: ""
