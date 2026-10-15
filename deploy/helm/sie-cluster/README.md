@@ -1588,13 +1588,26 @@ While the gateway receives the generated token, `gateway.extraEnv` cannot set
 `SIE_AUTH_TOKEN` or `SIE_AUTH_TOKENS`, which would replace it.
 
 The worker sidecars receive the same Secret as `SIE_GATEWAY_API_KEY` and
-present it when they call the gateway. The MCP edge does not receive it: set
+present its first comma-separated token when they call the gateway, so
+`workers.common.workerSidecar.extraEnv` cannot set `SIE_GATEWAY_API_KEY`
+while the chart wires it. The MCP edge does not receive the Secret: set
 `mcpEdge.clusterApiKey.existingSecretName` and `mcpEdge.clusterApiKey.secretKey`
-to the token's Secret and key. With token auth, pool create, renew, and delete
-also need the [gateway admin token](#gateway-admin-token). The render fails
-when the client token is the same Secret key as another credential the chart
-wires: the Hugging Face token, a NATS password, the gateway admin token, or
-either sie-config token.
+to a Secret key holding one gateway token. The MCP edge presents the whole
+value, so that key must hold a single token. The render fails when the gateway
+requires a token, `mcpEdge.enabled` is set, `mcpEdge.clusterBaseUrl` is empty
+(the edge calls the in-cluster gateway), and no cluster API key is set. With
+token auth, pool create, renew, and delete also need the
+[gateway admin token](#gateway-admin-token). The render fails when the client
+token, a `gateway.extraEnv` token Secret, or the MCP edge cluster API key is
+the same Secret key as any other credential the chart wires: the Hugging Face
+token, a NATS password, the gateway admin token, either sie-config token, an
+image pull secret, an oauth2-proxy secret, the Better Stack token, the MCP
+connector secrets, or a TLS key. They may share a key with each other.
+
+When `gateway.extraEnv` sets `SIE_AUTH_MODE` from `valueFrom`, the mode is
+unknown at render time. The gateway then receives the generated token, as it
+receives an operator-managed Secret, so a mode that resolves to `none` at run
+time is refused as a misconfiguration.
 
 To turn the generated token on for an existing release without locking out
 clients, upgrade twice. Pass your values as on every upgrade. First create the
@@ -1616,9 +1629,21 @@ helm upgrade sie-cluster oci://ghcr.io/superlinked/charts/sie-cluster \
   --set gateway.auth.mode=token
 ```
 
-The second step rolls only the gateway. To rotate the generated token, delete
-the Secret, run `helm upgrade`, and restart the gateway and the worker
-StatefulSets, which read the token at start.
+The second step rolls only the gateway.
+
+**Rotating the gateway token.** Pods read the token at start, and deleting
+the generated Secret replaces every client's token at once. For a rotation
+without a cutover, use an operator-managed Secret:
+
+1. Put the new token first and keep the old one: `new-token,old-token`. Run
+   `helm upgrade` (with the Secret's name in `gateway.auth.tokenSecretName`)
+   and restart the gateway and the worker StatefulSets. The gateway accepts
+   both tokens, and the worker sidecars present the first one.
+2. Move every client, including the MCP edge's key, to the new token.
+3. Remove the old token from the Secret and restart the gateway.
+
+To leave a generated token, copy it into your own Secret as the old token in
+step 1, then set `gateway.auth.tokenSecretName`.
 
 ### Worker token
 
@@ -1632,21 +1657,34 @@ connection, which it does with `gateway.healthMode=ws` or when it falls back to
 WebSocket health because NATS is unavailable at start. With the default NATS
 health mode the gateway reaches the workers only through NATS. The Rust worker
 (`engine: candle`) serves only probes over HTTP and receives no token, and the
-worker sidecars do not serve the worker API. The gateway and worker images
-must come from the same chart release: older images ignore these variables,
-and the workers would then not require the token.
+worker sidecars do not serve the worker API.
+
+Worker auth needs `sie-server` and `sie-gateway` images from this chart's
+release (its `appVersion`) or later. Images of 0.10.1 and earlier ignore these
+variables, so their workers serve without a token. A post-install and
+post-upgrade hook Job, `<fullname>-worker-auth-test-<revision>`, checks this
+while the workers require the token: once a worker of each lane's current
+StatefulSet revision is ready, it sends `GET /v1/models` without a token and
+fails the release when a worker answers with anything but `401`. A worker that
+the NetworkPolicy keeps from the hook counts as refusing, and a lane with no
+ready worker of the current revision within four minutes is skipped (scaled to
+zero or still starting). Keep the image tags at the chart default, or override
+`workers.common.image.tag` only with a tag of the same release or later.
 
 With `workers.auth.tokenSecretName` empty, the chart creates
 `<fullname>-worker-token` holding a random 64-character token under
 `workers.auth.tokenSecretKey` (`SIE_AUTH_TOKEN`), with the same reuse check,
 keep policy, and `helm template` caveat as the gateway token. Otherwise it uses
 the named Secret unchanged. The render fails when the worker token is the same
-Secret key as the gateway client token or another credential the chart wires
-(the Hugging Face token, a NATS password, the gateway admin token, or either
-sie-config token). While the workers require the token, the worker `extraEnv`
-lists cannot set `SIE_AUTH_MODE`, `SIE_AUTH_TOKEN`, or `SIE_AUTH_TOKENS`, and
-while `workers.auth.enabled` is set, `gateway.extraEnv` cannot set
-`SIE_WORKER_AUTH_TOKEN`.
+Secret key as any other credential the chart wires, including the gateway
+client token (see [Gateway token](#gateway-token) for the list). While
+`workers.auth.enabled` is set, the worker `extraEnv` lists cannot set
+`SIE_AUTH_MODE`, `SIE_AUTH_TOKEN`, or `SIE_AUTH_TOKENS`, and `gateway.extraEnv`
+cannot set `SIE_WORKER_AUTH_TOKEN`. When the workers do not require the token
+(worker auth off, or the first upgrade step below), the chart sets
+`SIE_AUTH_MODE=none` on the containers that serve the worker API, unless a
+worker `extraEnv` list sets one of those three variables. A worker therefore
+never generates a token of its own.
 
 All workers share one token, so a worker container can call the other
 workers' APIs. Keep `workers.networkPolicy` on with it, so that only the
@@ -1682,10 +1720,25 @@ the value from the first step. The second step rolls the workers. `helm status`
 prints a warning while `workers.auth.allowUnauthenticated` is on, and the
 render fails when it is set without `workers.auth.enabled`.
 
+**Rotating the worker token.** The gateway presents a single worker token, so
+the gateway and the workers switch tokens together:
+
+- With the default NATS health mode, nothing calls the worker API except the
+  probes. Delete the generated Secret (or change your own), run `helm upgrade`,
+  and restart the gateway and the worker StatefulSets.
+- With WebSocket health, use the upgrade aid: upgrade with
+  `workers.auth.allowUnauthenticated=true` and wait for the workers to restart,
+  replace the token, run `helm upgrade` and restart the gateway, then upgrade
+  with `workers.auth.allowUnauthenticated=false`. Keep `workers.networkPolicy`
+  on, since the workers accept unauthenticated requests between the first and
+  last step.
+
 ### NetworkPolicy
 
 `workers.networkPolicy.enabled=true` admits only this release's gateway pods
 to the worker HTTP ports (see [Worker NetworkPolicy](#worker-networkpolicy)).
+A NetworkPolicy takes effect only with a CNI that enforces it. Without one the
+policy admits every pod, and the worker token remains the only control.
 It needs no change for the worker token: the gateway is the only caller of the
 worker API inside the chart, and the kubelet probes, which the policy does not
 restrict, use the probe paths that need no token. Remote lanes have their own

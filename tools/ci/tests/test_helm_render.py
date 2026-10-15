@@ -2923,7 +2923,7 @@ def generated_token(docs: list[dict], name: str, component: str) -> str:
 def test_gateway_and_worker_tokens_are_off_by_default(tmp_path: Path, values: dict) -> None:
     docs = rendered_documents(tmp_path, values)
     assert {GATEWAY_TOKEN_SECRET, WORKER_TOKEN_SECRET}.isdisjoint(secret_names(docs))
-    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: "none"}
+    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: "none", L4_WORKER: "none"}
     for name in ("SIE_AUTH_TOKEN", "SIE_AUTH_TOKENS", "SIE_GATEWAY_API_KEY", "SIE_WORKER_AUTH_TOKEN"):
         assert env_entries(docs, name) == {}
 
@@ -2931,7 +2931,7 @@ def test_gateway_and_worker_tokens_are_off_by_default(tmp_path: Path, values: di
 def test_generated_gateway_token_with_auth_mode_none_reaches_only_the_worker_sidecars(tmp_path: Path) -> None:
     docs = rendered_documents(tmp_path, {**L4_POOL, "gateway": {"auth": {"generateToken": True}}})
     generated_token(docs, GATEWAY_TOKEN_SECRET, "gateway")
-    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: "none"}
+    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: "none", L4_WORKER: "none"}
     assert env_entries(docs, "SIE_AUTH_TOKEN") == {}
     assert env_entries(docs, "SIE_GATEWAY_API_KEY") == {L4_SIDECAR: GENERATED_GATEWAY_TOKEN}
 
@@ -2941,7 +2941,7 @@ def test_generated_gateway_token_is_wired_to_every_consumer_with_token_auth(tmp_
     gateway = {"auth": {"mode": mode, "generateToken": True}}
     docs = rendered_documents(tmp_path, ingress_values(SCOPED_TLS, gateway=gateway, workers=L4_POOL["workers"]))
     generated_token(docs, GATEWAY_TOKEN_SECRET, "gateway")
-    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: mode}
+    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: mode, L4_WORKER: "none"}
     assert env_entries(docs, "SIE_AUTH_TOKEN") == {GATEWAY: GENERATED_GATEWAY_TOKEN}
     assert env_entries(docs, "SIE_GATEWAY_API_KEY") == {L4_SIDECAR: GENERATED_GATEWAY_TOKEN}
     assert len(gateway_ingresses(docs)) == 1
@@ -2998,7 +2998,7 @@ def test_worker_auth_upgrade_aid_gives_the_token_only_to_the_gateway(tmp_path: P
     docs = rendered_documents(tmp_path, {"workers": {"auth": auth, **L4_POOL["workers"]}})
     generated_token(docs, WORKER_TOKEN_SECRET, "worker")
     assert env_entries(docs, "SIE_WORKER_AUTH_TOKEN") == {GATEWAY: GENERATED_WORKER_TOKEN}
-    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: "none"}
+    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: "none", L4_WORKER: "none"}
     assert env_entries(docs, "SIE_AUTH_TOKEN") == {}
 
 
@@ -3167,3 +3167,275 @@ def test_an_upstream_key_cannot_be_the_gateway_client_or_worker_token(
     result = render_workers(tmp_path, {**values, "upstreams": {"team": upstream(api_key_secret=api_key_secret)}})
     assert result.returncode != 0
     assert f"upstreams.team.api_key_secret and {owner} name the same Secret key" in result.stderr
+
+
+WORKER_AUTH_TEST_JOB = "sie-sie-cluster-worker-auth-test-1"
+
+
+def worker_with(**auth: object) -> dict:
+    return {"auth": {"enabled": True, **auth}, **L4_POOL["workers"]}
+
+
+@pytest.mark.parametrize(
+    ("values", "error"),
+    [
+        (
+            {"workers": worker_with(tokenSecretName="oauth2-proxy", tokenSecretKey="OAUTH2_PROXY_COOKIE_SECRET")},
+            "The worker token and the oauth2-proxy cookieSecretKey are the same Secret key",
+        ),
+        (
+            {
+                "gateway": {
+                    "auth": {
+                        "mode": "token",
+                        "tokenSecretName": "oauth2-proxy",
+                        "tokenSecretKey": "OAUTH2_PROXY_CLIENT_SECRET",
+                    }
+                }
+            },
+            "The gateway client token and the oauth2-proxy clientSecretKey are the same Secret key",
+        ),
+        (
+            {
+                "global": {"imagePullSecrets": ["regcred"]},
+                "workers": worker_with(tokenSecretName="regcred", tokenSecretKey=".dockerconfigjson"),
+            },
+            "The worker token and the image pull secret are the same Secret key",
+        ),
+        (
+            {
+                "mcpEdge": {"existingSecretName": "mcp-conn"},
+                "gateway": {
+                    "auth": {"mode": "token", "tokenSecretName": "mcp-conn", "tokenSecretKey": "connector-secrets"}
+                },
+            },
+            "The gateway client token and the MCP connector secrets are the same Secret key",
+        ),
+        (
+            {
+                "observability": {"otel": {"collector": {"betterStack": {"existingSecret": "better-stack"}}}},
+                "workers": worker_with(tokenSecretName="better-stack", tokenSecretKey="token"),
+            },
+            "The worker token and the Better Stack token are the same Secret key",
+        ),
+        (
+            {
+                "mcpEdge": {"clusterApiKey": {"existingSecretName": "mcp-key"}},
+                "workers": worker_with(tokenSecretName="mcp-key", tokenSecretKey="api-key"),
+            },
+            "The worker token and the MCP edge cluster API key are the same Secret key",
+        ),
+        (
+            {
+                "mcpEdge": {"clusterApiKey": {"existingSecretName": "hf", "secretKey": "token"}},
+                "workers": {"common": {"hfCache": {"tokenSecret": "hf", "tokenSecretKey": "token"}}},
+            },
+            "The MCP edge cluster API key and the Hugging Face token are the same Secret key",
+        ),
+        (
+            {"workers": worker_with(tokenSecretName="sie-sie-cluster-mcp-tls", tokenSecretKey="tls.key")},
+            "The worker token and the MCP ingress TLS certificate are the same Secret key",
+        ),
+        (
+            {
+                "gateway": {
+                    "auth": {"mode": "token"},
+                    "extraEnv": [
+                        {
+                            "name": "SIE_AUTH_TOKENS",
+                            "valueFrom": {"secretKeyRef": {"name": "client-tokens", "key": "tokens"}},
+                        }
+                    ],
+                },
+                "workers": worker_with(tokenSecretName="client-tokens", tokenSecretKey="tokens"),
+            },
+            "The worker token and the gateway client token from gateway.extraEnv SIE_AUTH_TOKENS are the same",
+        ),
+        (
+            {
+                "gateway": {
+                    "auth": {"mode": "token"},
+                    "extraEnv": [
+                        {
+                            "name": "SIE_AUTH_TOKEN",
+                            "valueFrom": {"secretKeyRef": {"name": "sie-nats-auth-gateway", "key": "password"}},
+                        }
+                    ],
+                }
+            },
+            "gateway.extraEnv SIE_AUTH_TOKEN and the NATS gateway password are the same Secret key",
+        ),
+    ],
+)
+def test_client_and_worker_tokens_are_kept_apart_from_every_wired_secret_key(
+    tmp_path: Path, values: dict, error: str
+) -> None:
+    workers = {**L4_POOL["workers"], **values.get("workers", {})}
+    assert error in render_error(tmp_path, {**values, "workers": workers})
+
+
+def test_the_mcp_edge_may_present_the_gateway_client_token(tmp_path: Path) -> None:
+    values = {
+        **L4_POOL,
+        "gateway": {"auth": {"mode": "token", "generateToken": True}},
+        "mcpEdge": {
+            "enabled": True,
+            "clusterApiKey": {"existingSecretName": GATEWAY_TOKEN_SECRET, "secretKey": "SIE_AUTH_TOKEN"},
+        },
+    }
+    docs = rendered_documents(tmp_path, values)
+    assert env_entries(docs, "SIE_API_KEY") == {"sie-sie-cluster-mcp/mcp-edge": GENERATED_GATEWAY_TOKEN}
+
+
+def test_an_upstream_key_cannot_be_a_gateway_extra_env_token(tmp_path: Path) -> None:
+    secret_ref = {"secretKeyRef": {"name": "team-upstream", "key": "api-key"}}
+    values = {
+        "gateway": {"auth": {"mode": "token"}, "extraEnv": [{"name": "SIE_AUTH_TOKENS", "valueFrom": secret_ref}]},
+        "upstreams": {"team": upstream(api_key_secret={"name": "team-upstream", "key": "api-key"})},
+    }
+    result = render_workers(tmp_path, values)
+    assert result.returncode != 0
+    assert (
+        "upstreams.team.api_key_secret and gateway.extraEnv SIE_AUTH_TOKENS name the same Secret key" in result.stderr
+    )
+
+
+@pytest.mark.parametrize(
+    "workers",
+    [
+        L4_POOL["workers"],
+        {"auth": {"enabled": True, "allowUnauthenticated": True}, **L4_POOL["workers"]},
+    ],
+)
+def test_workers_that_do_not_require_the_token_are_explicitly_open(tmp_path: Path, workers: dict) -> None:
+    pools = {
+        **workers["pools"],
+        "cpu": {"enabled": True, "bundles": {"candle": {"engine": "candle", "minReplicas": 0, "maxReplicas": 1}}},
+    }
+    docs = rendered_documents(tmp_path, {"workers": {**workers, "pools": pools}})
+    assert "sie-sie-cluster-worker-cpu-candle/worker" in env_entries(docs, "SIE_BUNDLE")
+    cpu_worker = "sie-sie-cluster-worker-cpu-default/worker"
+    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: "none", L4_WORKER: "none", cpu_worker: "none"}
+    assert env_entries(docs, "SIE_AUTH_TOKEN") == {}
+
+
+def test_an_operator_worker_token_in_extra_env_is_not_overridden(tmp_path: Path) -> None:
+    extra_env = [{"name": "SIE_AUTH_TOKEN", "valueFrom": {"secretKeyRef": {"name": "own-worker", "key": "token"}}}]
+    docs = rendered_documents(tmp_path, {"workers": {"common": {"extraEnv": extra_env}, **L4_POOL["workers"]}})
+    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: "none"}
+    assert env_entries(docs, "SIE_AUTH_TOKEN") == {L4_WORKER: {"name": "own-worker", "key": "token"}}
+
+
+@pytest.mark.parametrize("name", ["SIE_AUTH_MODE", "SIE_AUTH_TOKEN", "SIE_AUTH_TOKENS"])
+def test_worker_auth_variables_are_reserved_in_the_upgrade_step(tmp_path: Path, name: str) -> None:
+    workers = {
+        "auth": {"enabled": True, "allowUnauthenticated": True},
+        "common": {"extraEnv": [{"name": name, "value": "override"}]},
+        **L4_POOL["workers"],
+    }
+    error = render_error(tmp_path, {"workers": workers})
+    assert f"workers.common.extraEnv must not override chart-owned variable {name}" in error
+
+
+def test_the_sidecar_gateway_key_is_reserved_while_the_chart_wires_it(tmp_path: Path) -> None:
+    sidecar = {"workerSidecar": {"extraEnv": [{"name": "SIE_GATEWAY_API_KEY", "value": "override"}]}}
+    workers = {"common": sidecar, **L4_POOL["workers"]}
+    error = render_error(tmp_path, {"gateway": {"auth": {"generateToken": True}}, "workers": workers})
+    assert "workers.common.workerSidecar.extraEnv must not override chart-owned variable SIE_GATEWAY_API_KEY" in error
+    docs = rendered_documents(tmp_path, {"workers": workers})
+    assert env_entries(docs, "SIE_GATEWAY_API_KEY") == {L4_SIDECAR: "override"}
+
+
+MCP_TOKEN_AUTH = {"gateway": {"auth": {"mode": "token", "generateToken": True}}, "mcpEdge": {"enabled": True}}
+
+
+def test_the_mcp_edge_needs_a_gateway_token_when_the_gateway_requires_one(tmp_path: Path) -> None:
+    error = render_error(tmp_path, {**L4_POOL, **MCP_TOKEN_AUTH})
+    assert "mcpEdge.enabled with gateway token auth needs mcpEdge.clusterApiKey.existingSecretName" in error
+    assert f"mcpEdge.clusterApiKey.existingSecretName={GATEWAY_TOKEN_SECRET}" in error
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"gateway": {"auth": {"generateToken": True}}, "mcpEdge": {"enabled": True}},
+        {**MCP_TOKEN_AUTH, "mcpEdge": {"enabled": True, "clusterBaseUrl": "https://gateway.example.com"}},
+        {
+            **MCP_TOKEN_AUTH,
+            "mcpEdge": {"enabled": True, "clusterApiKey": {"existingSecretName": "mcp-key", "secretKey": "token"}},
+        },
+    ],
+)
+def test_the_mcp_edge_renders_when_it_has_what_its_gateway_needs(tmp_path: Path, values: dict) -> None:
+    rendered_documents(tmp_path, {**L4_POOL, **values})
+
+
+def test_a_gateway_mode_from_value_from_gets_the_generated_token(tmp_path: Path) -> None:
+    mode = {"name": "SIE_AUTH_MODE", "valueFrom": {"configMapKeyRef": {"name": "gateway-auth", "key": "mode"}}}
+    docs = rendered_documents(tmp_path, {**L4_POOL, "gateway": {"auth": {"generateToken": True}, "extraEnv": [mode]}})
+    assert env_entries(docs, "SIE_AUTH_TOKEN") == {GATEWAY: GENERATED_GATEWAY_TOKEN}
+
+
+def hook_jobs(docs: list[dict]) -> dict[str, dict]:
+    return {doc["metadata"]["name"]: doc for doc in docs if doc["kind"] == "Job"}
+
+
+def test_enforced_worker_auth_adds_a_release_test_of_every_api_lane(tmp_path: Path) -> None:
+    pools = {
+        "l4": {"enabled": True},
+        "cpu": {"enabled": True, "bundles": {"candle": {"engine": "candle", "minReplicas": 0, "maxReplicas": 1}}},
+    }
+    docs = rendered_documents(tmp_path, {"workers": {"auth": {"enabled": True}, "pools": pools}})
+    job = hook_jobs(docs)[WORKER_AUTH_TEST_JOB]
+    assert job["metadata"]["annotations"]["helm.sh/hook"] == "post-install,post-upgrade"
+    (container,) = job["spec"]["template"]["spec"]["containers"]
+    script = container["args"][0]
+    assert 'LANES="sie-sie-cluster-worker-cpu-default sie-sie-cluster-worker-l4-default"' in script
+    assert "candle" not in script
+    assert "http://$address:$PORT/v1/models" in script
+    assert "401)" in script
+    assert "exit 1" in script
+    (role,) = [
+        doc for doc in docs if doc["kind"] == "Role" and doc["metadata"]["name"] == "sie-sie-cluster-worker-auth-test"
+    ]
+    assert role["rules"] == [
+        {"apiGroups": ["apps"], "resources": ["statefulsets"], "verbs": ["get"]},
+        {"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]},
+    ]
+
+
+@pytest.mark.parametrize(
+    "workers",
+    [L4_POOL["workers"], {"auth": {"enabled": True, "allowUnauthenticated": True}, **L4_POOL["workers"]}],
+)
+def test_there_is_no_worker_auth_test_while_workers_do_not_require_the_token(tmp_path: Path, workers: dict) -> None:
+    assert WORKER_AUTH_TEST_JOB not in hook_jobs(rendered_documents(tmp_path, {"workers": workers}))
+
+
+SERVER_SOURCES = ROOT / "packages" / "sie_server" / "src"
+GATEWAY_SOURCES = ROOT / "packages" / "sie_gateway" / "src"
+
+
+def source_text(root: Path, suffix: str) -> str:
+    return "\n".join(path.read_text(encoding="utf-8") for path in sorted(root.rglob(f"*{suffix}")))
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="sie-server and sie-gateway read the worker auth variables only once server token auth is on main",
+)
+def test_the_worker_auth_variables_the_chart_renders_are_read_by_the_images(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, {"workers": {"auth": {"enabled": True}, **L4_POOL["workers"]}})
+    worker_names = set(container_env(docs, "sie-sie-cluster-worker-l4-default", "worker")) & {
+        "SIE_AUTH_MODE",
+        "SIE_AUTH_TOKEN",
+    }
+    gateway_names = set(container_env(docs, "sie-sie-cluster-gateway", "gateway")) & {"SIE_WORKER_AUTH_TOKEN"}
+    assert worker_names == {"SIE_AUTH_MODE", "SIE_AUTH_TOKEN"}
+    assert gateway_names == {"SIE_WORKER_AUTH_TOKEN"}
+    server = source_text(SERVER_SOURCES, ".py")
+    gateway = source_text(GATEWAY_SOURCES, ".rs")
+    for name in sorted(worker_names):
+        assert f'"{name}"' in server, f"sie-server does not read {name}"
+    for name in sorted(gateway_names):
+        assert f'"{name}"' in gateway, f"sie-gateway does not read {name}"

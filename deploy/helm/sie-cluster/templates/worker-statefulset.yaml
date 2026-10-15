@@ -38,8 +38,9 @@ fast at render time.
 {{- $reservedWorkerEnv = append $reservedWorkerEnv (include "sie-cluster.upstream.keyEnvName" $upstreamName) -}}
 {{- end -}}
 {{- $workerAuthEnforced := include "sie-cluster.workers.authEnforced" $root -}}
-{{- if $workerAuthEnforced -}}
-{{- $reservedWorkerEnv = concat $reservedWorkerEnv (list "SIE_AUTH_MODE" "SIE_AUTH_TOKEN" "SIE_AUTH_TOKENS") -}}
+{{- $workerAuthEnvNames := list "SIE_AUTH_MODE" "SIE_AUTH_TOKEN" "SIE_AUTH_TOKENS" -}}
+{{- if include "sie-cluster.workers.authEnabled" $root -}}
+{{- $reservedWorkerEnv = concat $reservedWorkerEnv $workerAuthEnvNames -}}
 {{- end -}}
 {{- /* The SIE_STREAM_* trio is chart-owned on the sidecar for the same
      reason as on the gateway: both create the work streams, first creator
@@ -49,6 +50,9 @@ fast at render time.
      sie-config credential comes only from config.auth, so SIE_ADMIN_TOKEN and
      SIE_CONFIG_SERVICE_TOKEN are reserved too. */}}
 {{- $reservedSidecarEnv := concat $reservedOtelEnv (list "SIE_ADMIN_TOKEN" "SIE_BUNDLE" "SIE_CONFIG_SERVICE_TOKEN" "SIE_GPU_COUNT" "SIE_HEALTH_PUBLISH_ENABLED" "SIE_HEALTH_PUBLISH_INTERVAL_MS" "SIE_MACHINE_PROFILE" "SIE_NATS_PASSWORD" "SIE_NATS_USER" "SIE_OTEL_LANE" "SIE_POOL" "SIE_STREAM_MAX_AGE_S" "SIE_STREAM_REPLICAS" "SIE_STREAM_STORAGE" "SIE_WORKER_ID") -}}
+{{- if include "sie-cluster.gateway.tokenSecretName" $root -}}
+{{- $reservedSidecarEnv = append $reservedSidecarEnv "SIE_GATEWAY_API_KEY" -}}
+{{- end -}}
 {{- include "sie-cluster.env.assertNoReserved" (dict "path" "workers.common.extraEnv" "entries" $root.Values.workers.common.extraEnv "reserved" $reservedWorkerEnv) -}}
 {{- include "sie-cluster.env.assertNoReserved" (dict "path" "workers.common.workerSidecar.extraEnv" "entries" $root.Values.workers.common.workerSidecar.extraEnv "reserved" $reservedSidecarEnv) -}}
 {{- range $poolName, $pool := .Values.workers.pools }}
@@ -70,6 +74,12 @@ fast at render time.
 {{- $bundle := $lane.bundle }}
 {{- $workerTargetName := printf "%s-worker-%s-%s" (include "sie-cluster.fullname" $root) $poolName $bundleName -}}
 {{- include "sie-cluster.env.assertNoReserved" (dict "path" (printf "workers.pools.%s.bundles.%s.extraEnv" $poolName $bundleName) "entries" $bundleCfg.extraEnv "reserved" $reservedWorkerEnv) -}}
+{{- $extraEnvSetsWorkerAuth := false -}}
+{{- range $entry := concat (default (list) $root.Values.workers.common.extraEnv) (default (list) $bundleCfg.extraEnv) -}}
+{{- if and (kindIs "map" $entry) (has (toString (index $entry "name")) $workerAuthEnvNames) -}}
+{{- $extraEnvSetsWorkerAuth = true -}}
+{{- end -}}
+{{- end -}}
 {{- if not (hasKey $bundleCfg "minReplicas") }}
 {{- fail (printf "workers.pools.%s.bundles.%s: missing required `minReplicas`." $poolName $bundleName) }}
 {{- end }}
@@ -462,7 +472,8 @@ spec:
             {{- end }}
             - name: SIE_THRESHOLD_ROUTING_ENABLED
               value: {{ dig "thresholdRouting" "enabled" false $root.Values.gateway | quote }}
-            {{- if and $workerAuthEnforced (ne $engine "candle") }}
+            {{- if ne $engine "candle" }}
+            {{- if $workerAuthEnforced }}
             - name: SIE_AUTH_MODE
               value: "token"
             - name: SIE_AUTH_TOKEN
@@ -470,6 +481,10 @@ spec:
                 secretKeyRef:
                   name: {{ include "sie-cluster.workers.authTokenSecretName" $root }}
                   key: {{ include "sie-cluster.workers.authTokenSecretKey" $root }}
+            {{- else if not $extraEnvSetsWorkerAuth }}
+            - name: SIE_AUTH_MODE
+              value: "none"
+            {{- end }}
             {{- end }}
             {{- if $root.Values.workers.common.workerSidecar.enabled }}
             # worker-sidecar owns the NATS loop; the adapter process

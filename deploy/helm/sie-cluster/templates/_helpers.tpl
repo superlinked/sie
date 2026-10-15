@@ -477,15 +477,18 @@ Secret, otherwise empty.
 
 {{/*
 Secret the gateway receives as SIE_AUTH_TOKEN: gateway.auth.tokenSecretName, or
-the chart-generated Secret only while the gateway enforces token auth. With
+the chart-generated Secret unless the gateway mode is known to be none. With
 auth mode none the generated Secret is not wired, so clients can read the
-token before the gateway requires it.
+token before the gateway requires it. A mode set by a gateway.extraEnv
+valueFrom is unknown at render time and gets the token, as an operator Secret
+does.
 */}}
 {{- define "sie-cluster.gateway.enforcedTokenSecretName" -}}
 {{- $name := dig "tokenSecretName" "" (.Values.gateway.auth | default dict) -}}
+{{- $auth := include "sie-cluster.gateway.effectiveAuthMode" . | fromJson -}}
 {{- if $name -}}
 {{- $name -}}
-{{- else if and (include "sie-cluster.gateway.generatesToken" .) (include "sie-cluster.gateway.authenticates" .) -}}
+{{- else if and (include "sie-cluster.gateway.generatesToken" .) (or (not $auth.known) (include "sie-cluster.gateway.authenticates" .)) -}}
 {{- include "sie-cluster.gateway.generatedTokenSecretName" . -}}
 {{- end -}}
 {{- end }}
@@ -1012,6 +1015,22 @@ and token, and refuses every request when token auth has no token.
 {{- end }}
 
 {{/*
+Validation: the MCP edge calls the in-cluster gateway unless
+mcpEdge.clusterBaseUrl points elsewhere. When that gateway enforces token auth
+the edge needs a client token, or every tool call is refused.
+*/}}
+{{- define "sie-cluster.mcpEdge.validateGatewayToken" -}}
+{{- $mcp := .Values.mcpEdge | default dict -}}
+{{- if and $mcp.enabled (not $mcp.clusterBaseUrl) (not (dig "clusterApiKey" "existingSecretName" "" $mcp)) (include "sie-cluster.gateway.authenticates" .) -}}
+{{- $example := "" -}}
+{{- with include "sie-cluster.gateway.tokenSecretName" . -}}
+{{- $example = printf ", for example mcpEdge.clusterApiKey.existingSecretName=%s and mcpEdge.clusterApiKey.secretKey=%s" . (include "sie-cluster.gateway.tokenSecretKey" $) -}}
+{{- end -}}
+{{- fail (printf "mcpEdge.enabled with gateway token auth needs mcpEdge.clusterApiKey.existingSecretName: the MCP edge calls the in-cluster gateway, which refuses requests without a token. Point it at a Secret key that holds one gateway client token%s." $example) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Validation: workers.auth.allowUnauthenticated is the first step of the
 two-step upgrade and needs workers.auth.enabled.
 */}}
@@ -1023,57 +1042,123 @@ two-step upgrade and needs workers.auth.enabled.
 {{- end }}
 
 {{/*
-Validation: the gateway client token and the worker token are kept apart from
-every other credential the chart wires: the Hugging Face token, the NATS
-passwords, the gateway admin token, and the sie-config tokens. A client or
-worker token that is also another credential's Secret key hands that
-credential to every holder of the token: API clients, worker sidecars, or the
-worker containers that run model code.
+Validation: the worker token and every gateway client credential (the gateway
+client token, gateway.extraEnv token Secrets, and the MCP edge cluster API
+key) are kept apart from every other Secret key the chart wires
+(sie-cluster.wiredSecretKeys). A client or worker token that is also another
+credential's Secret key hands that credential to every holder of the token:
+API clients, worker sidecars, the MCP edge, or the worker containers that run
+model code. Gateway client credentials may share a key with each other.
 */}}
 {{- define "sie-cluster.validateTokenSeparation" -}}
-{{- $others := list -}}
-{{- $hfCache := dig "common" "hfCache" dict (.Values.workers | default dict) -}}
+{{- $keys := include "sie-cluster.wiredSecretKeys" . | fromJsonArray -}}
+{{- range $token := $keys -}}
+{{- if eq (default "" $token.role) "worker" -}}
+{{- range $other := $keys -}}
+{{- if and (ne (default "" $other.role) "worker") (eq $other.ref $token.ref) -}}
+{{- fail (printf "The worker token and the %s are the same Secret key (%s), so every holder of one would hold the other, including the worker containers that run model code. Store them in different Secrets or keys." $other.name $token.ref) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- range $token := $keys -}}
+{{- if eq (default "" $token.role) "gateway-client" -}}
+{{- range $other := $keys -}}
+{{- if and (eq (default "" $other.role) "") (eq $other.ref $token.ref) -}}
+{{- fail (printf "The %s and the %s are the same Secret key (%s), so every holder of the %s would also hold the %s. Store them in different Secrets or keys." $token.name $other.name $token.ref $token.name $other.name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Every Secret key the chart wires into a pod, as a JSON list of
+{owner, name, ref, role}: owner is the values path or a description used in
+upstream errors, name is a label for separation errors, ref is "secret/key",
+and role is "gateway-client" for credentials presented to the gateway as a
+client token, "worker" for the worker token, and empty otherwise. Both the
+token-separation check and the upstream-key collision check read this list.
+*/}}
+{{- define "sie-cluster.wiredSecretKeys" -}}
+{{- $root := . -}}
+{{- $keys := list -}}
+{{- $hfCache := $root.Values.workers.common.hfCache | default dict -}}
 {{- with $hfCache.tokenSecret -}}
-{{- $others = append $others (dict "name" "Hugging Face token" "ref" (printf "%s/%s" . $hfCache.tokenSecretKey)) -}}
+{{- $keys = append $keys (dict "owner" "workers.common.hfCache.tokenSecret" "name" "Hugging Face token" "ref" (printf "%s/%s" . $hfCache.tokenSecretKey)) -}}
 {{- end -}}
-{{- if include "sie-cluster.nats.authEnabled" . -}}
-{{- $natsComponents := include "sie-cluster.nats.authComponents" . | fromJsonArray -}}
-{{- if dig "config" "cluster" "enabled" false .Values.nats -}}
-{{- $natsComponents = append $natsComponents "route" -}}
+{{- $gatewayAuth := $root.Values.gateway.auth | default dict -}}
+{{- with include "sie-cluster.gateway.tokenSecretName" $root -}}
+{{- $keys = append $keys (dict "owner" (ternary "gateway.auth.tokenSecretName" "the generated gateway client token" (ne (dig "tokenSecretName" "" $gatewayAuth) "")) "name" "gateway client token" "ref" (printf "%s/%s" . (include "sie-cluster.gateway.tokenSecretKey" $root)) "role" "gateway-client") -}}
 {{- end -}}
-{{- range $component := $natsComponents -}}
-{{- $natsSecret := include "sie-cluster.nats.authSecretName" (dict "auth" $.Values.nats.auth "release" $.Release.Name "component" $component) -}}
-{{- $others = append $others (dict "name" (printf "NATS %s password" $component) "ref" (printf "%s/password" $natsSecret)) -}}
-{{- end -}}
-{{- end -}}
-{{- with dig "adminTokenSecretName" "" (.Values.gateway.auth | default dict) -}}
-{{- $others = append $others (dict "name" "gateway admin token" "ref" (printf "%s/%s" . (include "sie-cluster.gateway.adminTokenSecretKey" $))) -}}
-{{- end -}}
-{{- if .Values.config.enabled -}}
-{{- with include "sie-cluster.config.adminTokenSecretName" . -}}
-{{- $others = append $others (dict "name" "sie-config admin token" "ref" (printf "%s/%s" . (include "sie-cluster.config.adminTokenSecretKey" $))) -}}
-{{- end -}}
-{{- with include "sie-cluster.config.readTokenSecretName" . -}}
-{{- $others = append $others (dict "name" "sie-config read token" "ref" (printf "%s/%s" . (include "sie-cluster.config.readTokenSecretKey" $))) -}}
-{{- end -}}
-{{- end -}}
-{{- with include "sie-cluster.gateway.tokenSecretName" . -}}
-{{- $gatewayRef := printf "%s/%s" . (include "sie-cluster.gateway.tokenSecretKey" $) -}}
-{{- range $other := $others -}}
-{{- if eq $other.ref $gatewayRef -}}
-{{- fail (printf "The gateway client token and the %s are the same Secret key (%s), so every API client and worker sidecar would hold the %s. Store them in different Secrets or keys." $other.name $gatewayRef $other.name) -}}
-{{- end -}}
-{{- end -}}
-{{- $others = append $others (dict "name" "gateway client token" "ref" $gatewayRef) -}}
-{{- end -}}
-{{- with include "sie-cluster.workers.authTokenSecretName" . -}}
-{{- $workerRef := printf "%s/%s" . (include "sie-cluster.workers.authTokenSecretKey" $) -}}
-{{- range $other := $others -}}
-{{- if eq $other.ref $workerRef -}}
-{{- fail (printf "The worker token and the %s are the same Secret key (%s), so every holder of one would hold the other, including the worker containers that run model code. Store them in different Secrets or keys." $other.name $workerRef) -}}
+{{- range $entry := (default (list) $root.Values.gateway.extraEnv) -}}
+{{- if and (kindIs "map" $entry) (has (toString (index $entry "name")) (list "SIE_AUTH_TOKEN" "SIE_AUTH_TOKENS")) -}}
+{{- $secretRef := dig "valueFrom" "secretKeyRef" dict $entry -}}
+{{- if and $secretRef.name $secretRef.key -}}
+{{- $keys = append $keys (dict "owner" (printf "gateway.extraEnv %s" (index $entry "name")) "name" (printf "gateway client token from gateway.extraEnv %s" (index $entry "name")) "ref" (printf "%s/%s" $secretRef.name $secretRef.key) "role" "gateway-client") -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- with include "sie-cluster.workers.authTokenSecretName" $root -}}
+{{- $keys = append $keys (dict "owner" (ternary "workers.auth.tokenSecretName" "the generated worker token" (ne (dig "auth" "tokenSecretName" "" $root.Values.workers) "")) "name" "worker token" "ref" (printf "%s/%s" . (include "sie-cluster.workers.authTokenSecretKey" $root)) "role" "worker") -}}
+{{- end -}}
+{{- with $gatewayAuth.adminTokenSecretName -}}
+{{- $keys = append $keys (dict "owner" "gateway.auth.adminTokenSecretName" "name" "gateway admin token" "ref" (printf "%s/%s" . (include "sie-cluster.gateway.adminTokenSecretKey" $root))) -}}
+{{- end -}}
+{{- with include "sie-cluster.config.readTokenSecretName" $root -}}
+{{- $keys = append $keys (dict "owner" "the sie-config read token" "name" "sie-config read token" "ref" (printf "%s/%s" . (include "sie-cluster.config.readTokenSecretKey" $root))) -}}
+{{- end -}}
+{{- with include "sie-cluster.config.adminTokenSecretName" $root -}}
+{{- $keys = append $keys (dict "owner" "the sie-config admin token" "name" "sie-config admin token" "ref" (printf "%s/%s" . (include "sie-cluster.config.adminTokenSecretKey" $root))) -}}
+{{- end -}}
+{{- range $secretName := $root.Values.global.imagePullSecrets -}}
+{{- range $key := list ".dockerconfigjson" ".dockercfg" -}}
+{{- $keys = append $keys (dict "owner" "global.imagePullSecrets" "name" "image pull secret" "ref" (printf "%s/%s" $secretName $key)) -}}
+{{- end -}}
+{{- end -}}
+{{- $oauthSecret := $root.Values.auth.oauth2Proxy.secret -}}
+{{- with $oauthSecret.name -}}
+{{- $secretName := . -}}
+{{- range $keyField := list "clientIDKey" "clientSecretKey" "cookieSecretKey" -}}
+{{- $keys = append $keys (dict "owner" (printf "auth.oauth2Proxy.secret.%s" $keyField) "name" (printf "oauth2-proxy %s" $keyField) "ref" (printf "%s/%s" $secretName (index $oauthSecret $keyField))) -}}
+{{- end -}}
+{{- end -}}
+{{- $betterStack := $root.Values.observability.otel.collector.betterStack -}}
+{{- with $betterStack.existingSecret -}}
+{{- $keys = append $keys (dict "owner" "observability.otel.collector.betterStack.existingSecret" "name" "Better Stack token" "ref" (printf "%s/%s" . $betterStack.tokenKey)) -}}
+{{- end -}}
+{{- $mcp := $root.Values.mcpEdge -}}
+{{- if or $mcp.connectorSecrets $mcp.existingSecretName -}}
+{{- $keys = append $keys (dict "owner" "the MCP connector secrets" "name" "MCP connector secrets" "ref" (printf "%s/connector-secrets" (include "sie-cluster.mcpEdge.secretName" $root))) -}}
+{{- end -}}
+{{- with $mcp.clusterApiKey.existingSecretName -}}
+{{- $keys = append $keys (dict "owner" "mcpEdge.clusterApiKey.existingSecretName" "name" "MCP edge cluster API key" "ref" (printf "%s/%s" . $mcp.clusterApiKey.secretKey) "role" "gateway-client") -}}
+{{- end -}}
+{{- $tls := include "sie-cluster.ingressTlsConfig" $root | fromYaml -}}
+{{- $tlsSecrets := list (dict "owner" "the ingress TLS certificate" "name" $tls.secretName) (dict "owner" "the MCP ingress TLS certificate" "name" (printf "%s-tls" (include "sie-cluster.mcpEdge.serviceName" $root))) -}}
+{{- $rootCA := dig "selfSigned" "rootCA" dict $tls -}}
+{{- $namespace := include "sie-cluster.namespace" $root -}}
+{{- if eq (default $namespace $rootCA.namespace) $namespace -}}
+{{- $tlsSecrets = append $tlsSecrets (dict "owner" "the ingress root CA" "name" $rootCA.secretName) -}}
+{{- end -}}
+{{- range $tlsSecret := $tlsSecrets -}}
+{{- if $tlsSecret.name -}}
+{{- range $key := list "tls.crt" "tls.key" -}}
+{{- $keys = append $keys (dict "owner" $tlsSecret.owner "name" (trimPrefix "the " $tlsSecret.owner) "ref" (printf "%s/%s" $tlsSecret.name $key)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if include "sie-cluster.nats.authEnabled" $root -}}
+{{- $components := include "sie-cluster.nats.authComponents" $root | fromJsonArray -}}
+{{- if dig "config" "cluster" "enabled" false $root.Values.nats -}}
+{{- $components = append $components "route" -}}
+{{- end -}}
+{{- range $component := $components -}}
+{{- $natsSecret := include "sie-cluster.nats.authSecretName" (dict "auth" $root.Values.nats.auth "release" $root.Release.Name "component" $component) -}}
+{{- $keys = append $keys (dict "owner" (printf "the NATS %s password" $component) "name" (printf "NATS %s password" $component) "ref" (printf "%s/password" $natsSecret)) -}}
+{{- end -}}
+{{- end -}}
+{{- $keys | toJson -}}
 {{- end }}
 
 {{/*
@@ -2019,74 +2104,7 @@ credential pasted as a key would otherwise be printed.
 {{- if and $evidenceConfigMap (not (and (le (len $evidenceConfigMap) 253) (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $evidenceConfigMap))) -}}
 {{- fail "workers.remote.equivalence.configMap must be a valid ConfigMap name" -}}
 {{- end -}}
-{{- $chartSecretKeys := list -}}
-{{- $hfCache := $root.Values.workers.common.hfCache | default dict -}}
-{{- with $hfCache.tokenSecret -}}
-{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "workers.common.hfCache.tokenSecret" "ref" (printf "%s/%s" . $hfCache.tokenSecretKey)) -}}
-{{- end -}}
-{{- $gatewayAuth := $root.Values.gateway.auth | default dict -}}
-{{- with include "sie-cluster.gateway.tokenSecretName" $root -}}
-{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" (ternary "gateway.auth.tokenSecretName" "the generated gateway client token" (ne (dig "tokenSecretName" "" $gatewayAuth) "")) "ref" (printf "%s/%s" . (include "sie-cluster.gateway.tokenSecretKey" $root))) -}}
-{{- end -}}
-{{- with include "sie-cluster.workers.authTokenSecretName" $root -}}
-{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" (ternary "workers.auth.tokenSecretName" "the generated worker token" (ne (dig "auth" "tokenSecretName" "" $root.Values.workers) "")) "ref" (printf "%s/%s" . (include "sie-cluster.workers.authTokenSecretKey" $root))) -}}
-{{- end -}}
-{{- with $gatewayAuth.adminTokenSecretName -}}
-{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "gateway.auth.adminTokenSecretName" "ref" (printf "%s/%s" . (include "sie-cluster.gateway.adminTokenSecretKey" $root))) -}}
-{{- end -}}
-{{- with include "sie-cluster.config.readTokenSecretName" $root -}}
-{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "the sie-config read token" "ref" (printf "%s/%s" . (include "sie-cluster.config.readTokenSecretKey" $root))) -}}
-{{- end -}}
-{{- with include "sie-cluster.config.adminTokenSecretName" $root -}}
-{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "the sie-config admin token" "ref" (printf "%s/%s" . (include "sie-cluster.config.adminTokenSecretKey" $root))) -}}
-{{- end -}}
-{{- range $secretName := $root.Values.global.imagePullSecrets -}}
-{{- range $key := list ".dockerconfigjson" ".dockercfg" -}}
-{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "global.imagePullSecrets" "ref" (printf "%s/%s" $secretName $key)) -}}
-{{- end -}}
-{{- end -}}
-{{- $oauthSecret := $root.Values.auth.oauth2Proxy.secret -}}
-{{- with $oauthSecret.name -}}
-{{- $secretName := . -}}
-{{- range $keyField := list "clientIDKey" "clientSecretKey" "cookieSecretKey" -}}
-{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" (printf "auth.oauth2Proxy.secret.%s" $keyField) "ref" (printf "%s/%s" $secretName (index $oauthSecret $keyField))) -}}
-{{- end -}}
-{{- end -}}
-{{- $betterStack := $root.Values.observability.otel.collector.betterStack -}}
-{{- with $betterStack.existingSecret -}}
-{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "observability.otel.collector.betterStack.existingSecret" "ref" (printf "%s/%s" . $betterStack.tokenKey)) -}}
-{{- end -}}
-{{- $mcp := $root.Values.mcpEdge -}}
-{{- if or $mcp.connectorSecrets $mcp.existingSecretName -}}
-{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "the MCP connector secrets" "ref" (printf "%s/connector-secrets" (include "sie-cluster.mcpEdge.secretName" $root))) -}}
-{{- end -}}
-{{- with $mcp.clusterApiKey.existingSecretName -}}
-{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "mcpEdge.clusterApiKey.existingSecretName" "ref" (printf "%s/%s" . $mcp.clusterApiKey.secretKey)) -}}
-{{- end -}}
-{{- $tls := include "sie-cluster.ingressTlsConfig" $root | fromYaml -}}
-{{- $tlsSecrets := list (dict "owner" "the ingress TLS certificate" "name" $tls.secretName) (dict "owner" "the MCP ingress TLS certificate" "name" (printf "%s-tls" (include "sie-cluster.mcpEdge.serviceName" $root))) -}}
-{{- $rootCA := dig "selfSigned" "rootCA" dict $tls -}}
-{{- $namespace := include "sie-cluster.namespace" $root -}}
-{{- if eq (default $namespace $rootCA.namespace) $namespace -}}
-{{- $tlsSecrets = append $tlsSecrets (dict "owner" "the ingress root CA" "name" $rootCA.secretName) -}}
-{{- end -}}
-{{- range $tlsSecret := $tlsSecrets -}}
-{{- if $tlsSecret.name -}}
-{{- range $key := list "tls.crt" "tls.key" -}}
-{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" $tlsSecret.owner "ref" (printf "%s/%s" $tlsSecret.name $key)) -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
-{{- if include "sie-cluster.nats.authEnabled" $root -}}
-{{- $components := include "sie-cluster.nats.authComponents" $root | fromJsonArray -}}
-{{- if dig "config" "cluster" "enabled" false $root.Values.nats -}}
-{{- $components = append $components "route" -}}
-{{- end -}}
-{{- range $component := $components -}}
-{{- $natsSecret := include "sie-cluster.nats.authSecretName" (dict "auth" $root.Values.nats.auth "release" $root.Release.Name "component" $component) -}}
-{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" (printf "the NATS %s password" $component) "ref" (printf "%s/password" $natsSecret)) -}}
-{{- end -}}
-{{- end -}}
+{{- $chartSecretKeys := include "sie-cluster.wiredSecretKeys" $root | fromJsonArray -}}
 {{- $upstreamsSecretName := include "sie-cluster.upstreams.secretName" $root -}}
 {{- $upstreamsFileRef := printf "%s/upstreams.yaml" $upstreamsSecretName -}}
 {{- if $upstreams -}}
