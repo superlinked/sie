@@ -350,8 +350,10 @@ and the time to the first token on returning turns, at the median and at p90,
 where the p90 decode rate is the rate nine turns in ten reached or beat. The
 decode rate counts the tokens after the first streamed piece, estimated by
 their share of the streamed text, over the time from the first piece to the
-last. A turn that ends without the finish reason `stop` or `length` counts as
-failed, and answers that stopped before `--output-tokens` are counted. It
+last. A model that thinks without returning its reasoning adds tokens the
+text does not show, which raises that rate. A turn that ends without the
+finish reason `stop` or `length` counts as failed, and answers that stopped
+before `--output-tokens` are counted. It
 also gives the share of returning-turn prompt tokens the server reported as
 cached, when it reports them. A session count meets the bar when, at p90,
 every session decodes at 30 tok/s or more and a returning turn starts within

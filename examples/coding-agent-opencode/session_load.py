@@ -16,7 +16,8 @@ Each turn records the time to the first streamed token, the decode rate after
 it, the prompt tokens and, when the server reports them, the cached prompt
 tokens. The decode rate is the tokens after the first streamed piece, estimated
 by their share of the streamed text, answer and any returned reasoning, over
-the time from the first piece to the last. A turn whose stream ends without
+the time from the first piece to the last; reasoning the model does not return
+is counted but not seen, and raises the rate. A turn whose stream ends without
 the finish reason ``stop`` or ``length`` counts as failed, and the summary
 counts short answers, turns that stopped before ``--output-tokens``. A returning turn is any turn after a session's first: with a working
 prefix cache only its new input is prefilled. The summary for each session
