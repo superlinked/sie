@@ -581,6 +581,26 @@ def test_non_production_config_service_may_opt_out_of_the_token(tmp_path: Path, 
     assert env_entries(docs, "SIE_CONFIG_SERVICE_TOKEN") == dict.fromkeys(CONFIG_CONSUMERS, "")
 
 
+@pytest.mark.parametrize(
+    ("telemetry", "expected"),
+    [
+        ({}, {"SIE_TELEMETRY_ENABLED": "1"}),
+        ({"enabled": True}, {"SIE_TELEMETRY_ENABLED": "1"}),
+        ({"enabled": False}, {"SIE_TELEMETRY_DISABLED": "1"}),
+        ({"enabled": None}, {}),
+    ],
+)
+def test_worker_telemetry_setting_is_explicit(tmp_path: Path, telemetry: dict, expected: dict[str, str]) -> None:
+    (statefulset,) = worker_statefulsets(tmp_path, {**L4_POOL, "telemetry": telemetry})
+    (worker,) = [c for c in statefulset["spec"]["template"]["spec"]["containers"] if c["name"] == "worker"]
+    rendered = {
+        env["name"]: env["value"]
+        for env in worker["env"]
+        if env["name"] in {"SIE_TELEMETRY_ENABLED", "SIE_TELEMETRY_DISABLED"}
+    }
+    assert rendered == expected
+
+
 @pytest.mark.parametrize("setting", ["admin", "read"])
 @pytest.mark.parametrize(
     ("token", "error"),

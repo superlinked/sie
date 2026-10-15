@@ -248,7 +248,32 @@ helm upgrade --install sie-cluster oci://ghcr.io/superlinked/charts/sie-cluster 
 
 See the [deployment guide](https://superlinked.com/docs/deployment/).
 
-> **Telemetry**: SIE collects anonymous usage data (version, OS, architecture, GPU type) to understand adoption. No IP addresses, hostnames, or request data are collected. Disable with `SIE_TELEMETRY_DISABLED=1` or `DO_NOT_TRACK=1`.
+### Telemetry
+
+`sie-server` sends anonymous usage telemetry so the maintainers can see which versions, platforms, and GPUs are in use. It is on by default in releases before 0.13.0. **From 0.13.0 it is off unless `SIE_TELEMETRY_ENABLED=1` is set.** Until then, a server that sends it only because of the default logs a notice at startup.
+
+Each event is a JSON `POST` to `https://telemetry.superlinked.com/api/telemetry` (`SIE_TELEMETRY_URL` overrides the endpoint) with these fields:
+
+| Field | Value |
+| --- | --- |
+| `worker_id` | A random UUID generated on first start and stored in the server data directory (`SIE_DATA_DIR`) |
+| `sent_at` | The send time (UTC) |
+| `event` | `init`, `update`, or `terminate` |
+| `sie_version` | The installed `sie-server` version |
+| `variant` | `SIE_VARIANT`: the image platform and bundle, set by the Helm chart (`null` otherwise) |
+| `os`, `arch` | Operating system and CPU architecture |
+| `gpus` | GPU model names |
+| `deployment_env` | `SIE_DEPLOYMENT_ENV` (default `unknown`) |
+
+The receiver derives country, region, and city from the request's source IP address and does not store the address. No request data, hostnames, or file paths are sent.
+
+`init` is sent at start, the first `update` 45 to 75 minutes later, then one `update` every 55 to 65 minutes, and `terminate` at shutdown.
+
+- Opt in: `SIE_TELEMETRY_ENABLED=1`.
+- Opt out: `SIE_TELEMETRY_DISABLED=1` or `DO_NOT_TRACK=1`, which always win, or `SIE_TELEMETRY_ENABLED=0`.
+- `SIE_TELEMETRY_ENABLED` and `SIE_TELEMETRY_DISABLED` accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `off`, in any case. Any other value of either turns telemetry off with a warning.
+
+Every start logs the state and where it came from, for example `telemetry: on (default)` or `telemetry: off (DO_NOT_TRACK)`. The Helm chart's `telemetry.enabled` default also changes to `false` in 0.13.0; see the [chart README](https://github.com/superlinked/sie/blob/main/deploy/helm/sie-cluster/README.md#telemetry). Policy: [superlinked.com/policies/telemetry](https://superlinked.com/policies/telemetry).
 
 ---
 
