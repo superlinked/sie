@@ -49,7 +49,9 @@ def _executable(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
-def _gate(tmp_path: Path, agent: str, extra_env: dict[str, str] | None = None) -> tuple[int, list[str]]:
+def _gate(
+    tmp_path: Path, agent: str, extra_env: dict[str, str] | None = None, recipe: str = "laptop"
+) -> tuple[int, list[str]]:
     root = tmp_path / "example"
     if not root.exists():
         root.mkdir()
@@ -60,11 +62,11 @@ def _gate(tmp_path: Path, agent: str, extra_env: dict[str, str] | None = None) -
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     _executable(bin_dir / "opencode", agent)
-    env = {key: value for key, value in os.environ.items() if key != "VIRTUAL_ENV"}
+    env = {key: value for key, value in os.environ.items() if key not in ("VIRTUAL_ENV", "SIE_BASE_URL", "SIE_API_KEY")}
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
     env.update(extra_env or {})
     run = subprocess.run(
-        ["bash", str(root / "run_gate.sh"), "laptop"], check=False, capture_output=True, text=True, env=env, timeout=600
+        ["bash", str(root / "run_gate.sh"), recipe], check=False, capture_output=True, text=True, env=env, timeout=600
     )
     return run.returncode, run.stdout.strip().splitlines()
 
@@ -73,6 +75,23 @@ def test_a_real_fix_passes(tmp_path: Path) -> None:
     code, lines = _gate(tmp_path, FIX)
     assert code == 0, lines
     assert lines[-1].startswith("GATE PASS")
+
+
+@pytest.mark.parametrize("recipe", ["laptop", "openrouter"])
+def test_a_local_server_recipe_needs_no_sie_key(tmp_path: Path, recipe: str) -> None:
+    record = tmp_path / "opencode-config.txt"
+    code, lines = _gate(tmp_path, f'echo "$OPENCODE_CONFIG" > {record}\n{FIX}', recipe=recipe)
+    assert code == 0, lines
+    assert lines[-1].startswith("GATE PASS")
+    assert Path(record.read_text().strip()).parts[-3:] == ("recipes", recipe, "opencode.json")
+
+
+@pytest.mark.parametrize("recipe", ["cluster", "cloud"])
+def test_a_remote_recipe_without_the_sie_key_never_starts_opencode(tmp_path: Path, recipe: str) -> None:
+    record = tmp_path / "opencode-ran.txt"
+    code, _ = _gate(tmp_path, f"touch {record}\n{FIX}", recipe=recipe)
+    assert code == 2
+    assert not record.exists()
 
 
 def test_runs_started_in_the_same_second_judge_their_own_copies(tmp_path: Path) -> None:

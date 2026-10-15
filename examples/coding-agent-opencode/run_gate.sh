@@ -17,7 +17,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RECIPE="${1:-cloud}"
 CONFIG="$HERE/recipes/$RECIPE/opencode.json"
 if [[ ! -f "$CONFIG" ]]; then
-    echo "unknown recipe '$RECIPE'; pick laptop, cluster or cloud" >&2
+    echo "unknown recipe '$RECIPE'; pick laptop, openrouter, cluster or cloud" >&2
     exit 2
 fi
 for tool in opencode uv; do
@@ -34,7 +34,7 @@ for var in GATE_STEPS GATE_DEADLINE_SECONDS; do
         exit 2
     fi
 done
-if [[ "$RECIPE" != "laptop" ]]; then
+if [[ "$RECIPE" != "laptop" && "$RECIPE" != "openrouter" ]]; then
     for var in SIE_BASE_URL SIE_API_KEY; do
         if [[ -z "${!var:-}" ]]; then
             echo "$var is not set" >&2

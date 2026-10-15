@@ -5,16 +5,19 @@
 [OpenCode](https://opencode.ai) is an open-source coding agent. It talks to
 any OpenAI-compatible chat endpoint through a custom provider built on
 `@ai-sdk/openai-compatible`, which targets `/v1/chat/completions`. This
-example points it at SIE three ways and checks that the agent loop holds up:
+example points it at SIE four ways and checks that the agent loop holds up:
 
 - a laptop running `sie-server` with a small tools-capable model,
+- a self-hosted `sie-server` that serves `zai-org/GLM-5.3-Flash` through an
+  [OpenRouter](https://openrouter.ai) upstream, with your OpenRouter key,
 - a self-hosted SIE cluster, reached through its gateway with a key,
 - SIE Cloud, where `zai-org/GLM-5.3-Flash:relay` is served through SIE Relay.
 
 Three pieces are in this directory:
 
-1. `recipes/<laptop|cluster|cloud>/opencode.json`, one OpenCode config per
-   setup.
+1. `recipes/<laptop|openrouter|cluster|cloud>/opencode.json`, one OpenCode
+   config per setup. The OpenRouter recipe also holds the server's
+   `upstreams.yaml` and its `models/` directory.
 2. `conformance.py`, an agent-loop conformance check. It drives
    `/v1/chat/completions` the way OpenCode does, streaming, with tools declared
    on every turn and tool results sent back as `role: tool` messages, and
@@ -91,6 +94,121 @@ with the recipe's `:long-context`. Both pass there (see
 [the recorded result](#laptop-apple-silicon-recorded)). It has not been run on
 an NVIDIA machine.
 
+### Self-hosted SIE with an OpenRouter upstream
+
+This recipe runs the open-source `sie-server` on your machine and serves
+`zai-org/GLM-5.3-Flash` as a remote-backed model: the server holds no weights
+and sends each chat request on to OpenRouter's `z-ai/glm-5.3-flash`. OpenCode
+talks only to the local server, and only the server needs your OpenRouter key.
+
+From the root of a checkout of this repository:
+
+```sh
+export OPENROUTER_API_KEY=sk-or-...
+mise exec -- uv run --frozen --project . --package sie-server sie-server serve \
+  --models-dir examples/coding-agent-opencode/recipes/openrouter/models \
+  --upstreams-file examples/coding-agent-opencode/recipes/openrouter/upstreams.yaml \
+  --device cpu --host 127.0.0.1
+```
+
+Then, from this directory:
+
+```sh
+uv sync
+uv run python conformance.py --base-url http://localhost:8080/v1 --model zai-org/GLM-5.3-Flash
+./run_gate.sh openrouter
+```
+
+The server reads the key from its own environment each time it sends a
+request, so it starts without one. When `OPENROUTER_API_KEY` is unset, it logs
+a `WARNING` at startup, `requests to upstream 'openrouter' fail until its
+credential is usable: environment variable OPENROUTER_API_KEY is not set`.
+Export the key in the shell that starts the server. When OpenRouter answers
+`429` or a `5xx` other than `501` and `505`, or cannot be reached, the server
+answers `503` with `Retry-After`. When OpenRouter refuses the request with
+`400` or `422`, the server answers `400 invalid_request`, `the upstream
+refused the chat input`, and logs `upstream 'openrouter' refused a generation
+request: the upstream refused the input (400)`, or `(422)`. A missing key, any
+other refusal from OpenRouter and an answer the server does not accept answer
+`502 upstream_error`, `upstream generation request failed`, before output.
+After output, the stream ends with an error event instead. A request
+the server refuses itself answers `400` before anything is sent. For a `502`
+or an error event, the server log names the reason on a `WARNING` line,
+`remote chat for zai-org/GLM-5.3-Flash failed: <reason>`, or `failed after
+output: <reason>`:
+
+| Reason | Cause |
+|---|---|
+| `the upstream credential is unavailable` | `OPENROUTER_API_KEY` is not set in the server's environment, so nothing was sent |
+| `upstream answered 401` | OpenRouter refused the key |
+| `upstream answered 402` | the OpenRouter account has no credits; GLM-5.3-Flash is a paid model on OpenRouter |
+| `upstream answered 404` | OpenRouter found no endpoint for the request, for example under the account's provider or data-policy settings |
+| `upstream answered` another status | OpenRouter refused the request with that status |
+| `upstream sent an error instead of a chat answer` | OpenRouter accepted the request, then sent an error, as it does when the provider it picked fails |
+| anything else | OpenRouter's answer broke a rule the server holds every upstream to, for example a call to a function the request did not declare, or usage above the request's `max_tokens` |
+
+Pointed at OpenRouter directly, OpenCode would get the same model. Through SIE
+it uses one API and one model name, `zai-org/GLM-5.3-Flash`, which the cluster
+recipe uses too and SIE Cloud serves as its `:relay` profile, so the same
+`conformance.py` and `run_gate.sh` check every setup, and the server adds the
+upstream's rate cap and circuit breaker and its checks of tool calls and usage.
+
+The two server files:
+
+- `upstreams.yaml` defines the `openrouter` upstream at
+  `https://openrouter.ai/api/v1`, offering `chat`. `api_key_secret` names the
+  environment variable the server reads the key from when it sends a request.
+  The key is in no file, and the recipe's `opencode.json` carries only a
+  placeholder `apiKey` for the local server. The server listens on `127.0.0.1`
+  because every request it serves spends that key.
+- `rate_cap` allows 60 requests a minute and 4 at a time. `breaker` stops
+  calls for 60 s after 5 calls in a row, within 30 s, found OpenRouter
+  unavailable. A request either one refuses gets `503` with `Retry-After`. Both
+  limits apply per server process.
+- `strip_params` removes `chat_template_kwargs`, which the server adds from
+  the model file and which only a local chat template reads.
+- The upstream sets no OpenRouter provider preference. On 2026-10-14 all 33
+  OpenRouter endpoints of `z-ai/glm-5.3-flash` listed every parameter the
+  server forwards for OpenCode and `conformance.py` (`max_tokens`,
+  `temperature`, `tools` and `tool_choice`), and OpenRouter sends a request
+  with tools only to providers that support tools, so `require_parameters`
+  would exclude no endpoint for them. An endpoint ignores a parameter it does
+  not list, such as `parallel_tool_calls` (listed by 1 of the 33), `logprobs`
+  (17) or `seed` (22); with `require_parameters` the request would go only to
+  endpoints that list it. Of the 33, 11 report no support for `tool_choice:
+  "required"`, and OpenRouter does not document whether it routes by that
+  value.
+- `models/zai-org__GLM-5.3-Flash.yaml` declares a remote-backed model
+  (`remote_backed: true`, `routing: {policy: remote_only}`) with one profile on
+  the `openrouter` upstream. It declares a 131,072-token window with up to
+  32,768 tokens out, tool calling and text input. OpenRouter serves a larger
+  window; the declared one is what `/v1/models` reports and what the server
+  holds each answer's usage to. `chat_template_kwargs.enable_thinking: true`
+  declares the model as one that reasons, which is what lets
+  `include_reasoning` return its reasoning.
+
+On this path OpenRouter parses the model's tool calls and reasoning. The server
+checks that each streamed tool call arrives with an id, a function name and
+arguments, that the calls keep to the request's `tools`, `tool_choice` and
+`parallel_tool_calls`, that every answer finishes with exact usage inside the
+declared window and the request's output cap, and reports that usage. OpenRouter
+returns reasoning in a `reasoning` field; the server passes it on as
+`reasoning_content` when the request sets `include_reasoning`, as the recipe's
+`options` do, and drops it otherwise. OpenCode sends each earlier turn's
+reasoning back as `reasoning_content`, which the server forwards and OpenRouter
+accepts as an alias of `reasoning`. The server skips the SSE comment lines
+OpenRouter sends while a request waits (`: OPENROUTER PROCESSING`), and turns
+its closing usage event, which repeats the finished choice, into an OpenAI-form
+usage chunk.
+
+This recipe has been checked against a scripted stand-in for OpenRouter (see
+[Checked without a GPU](#checked-without-a-gpu)). A successful run with a real
+key is still [pending](#self-hosted-sie-with-an-openrouter-upstream-pending). To serve the
+model from a cluster instead, define the upstream for the chart's remote worker
+pool as
+[Serving a model through a remote backend](../../packages/sie_server/REMOTE_BACKENDS.md#cluster-deployment)
+describes.
+
 ### Against your cluster
 
 Set `limit.context` and `limit.output` in `recipes/cluster/opencode.json` to
@@ -114,7 +232,7 @@ and prints a table. The exit code is 1 when any case fails.
 
 ## The OpenCode recipes
 
-The three configs differ only in `baseURL`, the key and the model list. The
+The four configs differ only in `baseURL`, the key and the model list. The
 Cloud one in full:
 
 ```json
@@ -383,6 +501,28 @@ with an output cap of 8,192 tokens and `tool_choice: "auto"`.
   OpenAI-style function calling.
 - One of the 600 requests failed with a `502` and is scored as a miss.
 
+### Self-hosted SIE with an OpenRouter upstream, pending
+
+`zai-org/GLM-5.3-Flash` through OpenRouter's `z-ai/glm-5.3-flash`, with the
+recipe's server files and a real OpenRouter key. `sie-server` from this
+repository at commit pending, OpenCode version pending, recorded on date
+pending.
+
+| Check | Result |
+|---|---|
+| `tool_choice_auto` | pending |
+| `streaming_tool_call_deltas` | pending |
+| `parallel_tool_calls` | pending |
+| `tool_result_round_trip` | pending |
+| `prompt_above_64k_tokens` | pending |
+| `finish_reason_stop` | pending |
+| `finish_reason_tool_calls` | pending |
+| `finish_reason_length` | pending |
+| `usage_on_final_chunk` | pending |
+| `include_reasoning` | pending |
+| `tool_choice_required` | pending |
+| `./run_gate.sh openrouter` | pending |
+
 ## Checked without a GPU
 
 `sie-server` ships a weightless `sie-fake` model for CI. Its
@@ -453,14 +593,38 @@ What runs anywhere, and in this repository's CI, is the test suite:
   `PYTEST_PLUGINS` that would deselect the failing tests, the step budget
   handed to the build agent, a run that outlives its deadline, with and
   without a child that ignores TERM, and two runs started in the same second.
+- `tests/test_openrouter_recipe.py` starts this repository's `sie-server`
+  with the OpenRouter recipe's `models/` directory and a copy of its
+  `upstreams.yaml` pointed at a scripted stand-in for OpenRouter on
+  `127.0.0.1`. The stand-in streams the way OpenRouter documents: SSE comment
+  lines, reasoning in a `reasoning` field, tool-call deltas and a closing usage
+  event that repeats the finished choice. `conformance.py` against the server
+  gives 10 pass, 0 fail and 1 recorded (`tool_choice_required`, supported).
+  The test pins each request the stand-in received, case by case: the model
+  `z-ai/glm-5.3-flash`, the key from `OPENROUTER_API_KEY` as a bearer token,
+  and exactly `messages`, `stream`, `max_tokens` and `temperature`, plus
+  `stream_options` when streamed and `tools` and `tool_choice` on a tools
+  turn. Asked for `require_parameters`, the stand-in answers `404` when no
+  endpoint of the model lists every request field that is one of the
+  parameter names in OpenRouter's public model list. That list does not hold
+  `stream` or `stream_options`; OpenRouter documents the preference in terms of
+  its parameters and does not say how it treats other fields.
+  `tests/openrouter_endpoints.json` holds the endpoints' lists and those names
+  as OpenRouter published them. The stand-in also answers `401`, `402`, `404`
+  and a stream whose only event is an error, and the test checks that each
+  comes back as a `502` whose reason the server log names. It needs the
+  repository's environment, from `mise run sync` at the root, and is skipped
+  without it outside CI.
 
 ```sh
 uv run pytest
 ```
 
 `tests/test_conformance.py` and `tests/test_run_gate.py` check the checker,
-and `tests/test_fake_engine.py` checks SIE's chat route with a scripted model.
-A model's endpoint is only checked by running `conformance.py` against it.
+`tests/test_fake_engine.py` checks SIE's chat route with a scripted model, and
+`tests/test_openrouter_recipe.py` checks the OpenRouter recipe against a
+scripted stand-in for OpenRouter. A model's endpoint is only checked by running
+`conformance.py` against it.
 
 ## What this does NOT establish
 
@@ -481,5 +645,12 @@ A model's endpoint is only checked by running `conformance.py` against it.
   model runs on a partner's servers. SIE routes the request, checks the wire
   and meters it. A dedicated GPU deployment of the same model is a different
   serving path and has its own window and limits.
+- **Not yet a run against OpenRouter.** Until the result above is recorded,
+  the OpenRouter recipe has been checked against a scripted stand-in only.
+  Which provider OpenRouter routes a request to, and how that provider streams
+  tool calls and reasoning, shows only in a real run. A provider without
+  `tool_choice: "required"` support can answer the `tool_choice_required` case
+  with text, which fails it, and a provider that reports more completion
+  tokens than `max_tokens` allows fails `finish_reason_length`.
 - **One endpoint, one day.** The Cloud results were recorded once, on
   2026-10-14.
