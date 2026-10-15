@@ -418,9 +418,14 @@ spec:
               value: {{ .nakDelaySec | default 5 | quote }}
             {{- end }}
             # Telemetry
-            {{- if and $root.Values.telemetry (hasKey $root.Values.telemetry "enabled") (not $root.Values.telemetry.enabled) }}
+            {{- if and $root.Values.telemetry (hasKey $root.Values.telemetry "enabled") }}
+            {{- if $root.Values.telemetry.enabled }}
+            - name: SIE_TELEMETRY_ENABLED
+              value: "1"
+            {{- else }}
             - name: SIE_TELEMETRY_DISABLED
               value: "1"
+            {{- end }}
             {{- end }}
             {{- if and $root.Values.telemetry $root.Values.telemetry.url }}
             - name: SIE_TELEMETRY_URL

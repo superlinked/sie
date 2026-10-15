@@ -44,6 +44,12 @@ Grafana password: kubectl get secret -n {{ include "sie-cluster.kubePrometheusSt
 {{- if .Values.keda.install }}
 KEDA:       enabled
 {{- end }}
+{{- if and .Values.telemetry .Values.telemetry.enabled }}
+
+Telemetry: the workers send anonymous usage telemetry (telemetry.enabled=true). The chart default
+changes to false in 0.13.0. Set telemetry.enabled=true to keep sending it after that release, or
+telemetry.enabled=false to stop now. What is sent: see the chart README section "Telemetry".
+{{- end }}
 {{- if eq (include "sie-cluster.worker.remoteLaneEnabled" .) "true" }}
 
 Remote backends: the remote lane is the only worker that holds upstream credentials.
