@@ -423,9 +423,10 @@ took 7 steps and 6 tool calls.
 cores and 64 GiB of memory, 2026-10-15. `sie-server` ran from this repository
 with the `sglang-cu130` bundle (SGLang 0.5.20), started as `sie-server serve
 -b sglang-cu130 --preload Qwen/Qwen3.8-27B-FP8:h100-256k-batch`, in three
-sessions on machines of that kind. Each result below names the commit it was
-recorded at. The `docker run` line above starts the same server, profile and
-bundle from the published image; the runs below did not use the image.
+sessions on machines of that kind. Each result below names the commit of the
+server it was recorded at; the checks are the ones in this directory. The
+`docker run` line above starts the same server, profile and bundle from the
+published image; the runs below did not use the image.
 
 What the engine reported once loaded:
 
@@ -438,7 +439,7 @@ The server answered its first request 197 s and 229 s after it started in two
 new containers, with the weights already downloaded, and 76 s after a restart
 in the same container, with the kernels already compiled.
 
-The conformance check at commit `ac9902d3`:
+The conformance check at commit `09b62a32`:
 
 ```
 model Qwen/Qwen3.8-27B-FP8:h100-256k-batch at http://localhost:8080/v1
@@ -501,7 +502,7 @@ step. Five more runs with the recipe's `presence_penalty: 0` also passed, with
 three more at commit `00d7d732`. The seeded gate does not tell the two
 settings apart; BFCL below does.
 
-`session_load.py` at commit `ac9902d3`, with its defaults, sessions growing to
+`session_load.py` at commit `09b62a32`, with its defaults, sessions growing to
 about 61,000 tokens, and with `--turn-tokens 12000 --turns 9`, growing to about
 128,000:
 
@@ -583,7 +584,7 @@ worker, on one machine, with the gateway on `127.0.0.1:31000`. The worker was
 ready 100 s and 161 s after the stack started when the kernels were already
 compiled, and 270 s after in a new container.
 
-The conformance check at commit `ac9902d3`:
+The conformance check at commit `09b62a32`:
 
 ```
 model Qwen/Qwen3.8-27B-FP8:h100-256k-batch at http://127.0.0.1:31000/v1
@@ -624,7 +625,7 @@ seconds, with at most 9,240 input tokens on a step.
 
 BFCL is in [the table above](#one-gpu-qwen38-27b-fp8-recorded).
 
-`session_load.py` through the gateway at commit `ac9902d3`:
+`session_load.py` through the gateway at commit `09b62a32`:
 
 | Sessions | Largest prompt | Decode p50 / p90, tok/s | Returning-turn first token p50 / p90 | Returning-turn prompt cached | Bar |
 |---|---|---|---|---|---|
