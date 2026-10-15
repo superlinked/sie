@@ -4498,6 +4498,24 @@ async fn queue_mode_proxy(
         return response;
     }
 
+    if matches!(endpoint, "encode" | "extract" | "score") {
+        if let Some((key, value)) = undeclared_lora_option(params.options.as_ref(), || {
+            state.model_registry.get_model_info(model)
+        }) {
+            return endpoint_error_response(
+                endpoint,
+                StatusCode::BAD_REQUEST,
+                err_code::INVALID_REQUEST,
+                oai_type::INVALID_REQUEST,
+                oai_code::UNKNOWN_LORA_ADAPTER,
+                Some(key),
+                format!(
+                    "'{key}' must name a LoRA adapter that model '{display_model}' declares; {value} is not one of them."
+                ),
+            );
+        }
+    }
+
     // Generate has its own publish + result-collection path
     // (streaming chunk aggregation instead of one-shot WorkResult fan-in).
     if endpoint == "generate" {
@@ -11725,6 +11743,71 @@ pub(crate) fn validate_lora_for_profile(
     } else {
         LoraValidation::UnknownAdapter
     }
+}
+
+/// The caller's ``options.lora`` or ``options.lora_id`` as ``(param, value)``
+/// when it is set and names no LoRA that a profile of the model ``entry``
+/// returns declares: a ``loadtime.lora_paths`` served name or source, a
+/// ``runtime.lora_id``, or a ``runtime.lora``. ``entry`` is called only when
+/// the options select a LoRA; a model it does not return is not checked.
+pub(crate) fn undeclared_lora_option(
+    options: Option<&Value>,
+    entry: impl FnOnce() -> Option<crate::types::model::ModelEntry>,
+) -> Option<(&'static str, Value)> {
+    let options = options?.as_object()?;
+    let requested: Vec<(&'static str, &Value)> =
+        [("options.lora", "lora"), ("options.lora_id", "lora_id")]
+            .into_iter()
+            .filter_map(|(param, key)| {
+                let value = options.get(key).filter(|value| !value.is_null())?;
+                Some((param, value))
+            })
+            .collect();
+    if requested.is_empty() {
+        return None;
+    }
+    let entry = entry()?;
+    requested
+        .into_iter()
+        .find(|(_, value)| {
+            !value
+                .as_str()
+                .is_some_and(|name| entry_declares_lora(&entry, name))
+        })
+        .map(|(param, value)| (param, value.clone()))
+}
+
+fn entry_declares_lora(entry: &crate::types::model::ModelEntry, name: &str) -> bool {
+    entry
+        .profile_configs
+        .values()
+        .filter_map(|profile| profile.adapter_options.as_ref())
+        .any(|adapter_options| {
+            let runtime = adapter_options.get("runtime");
+            let runtime_names = |key: &str| {
+                runtime
+                    .and_then(|runtime| runtime.get(key))
+                    .and_then(Value::as_str)
+                    == Some(name)
+            };
+            if runtime_names("lora_id") || runtime_names("lora") {
+                return true;
+            }
+            match adapter_options
+                .get("loadtime")
+                .and_then(|loadtime| loadtime.get("lora_paths"))
+            {
+                Some(Value::Object(paths)) => paths.iter().any(|(served, source)| {
+                    served == name
+                        || source
+                            .as_str()
+                            .or_else(|| source.get("id").and_then(Value::as_str))
+                            == Some(name)
+                }),
+                Some(Value::Array(paths)) => paths.iter().any(|path| path.as_str() == Some(name)),
+                _ => false,
+            }
+        })
 }
 
 fn parse_model_spec(spec: &str) -> (String, String) {
@@ -29447,6 +29530,169 @@ mod tests {
         // And the message is fully assembled (no `delta` field).
         assert_eq!(v["choices"][0]["message"]["content"], "Hi");
         assert!(v["choices"][0].get("delta").is_none());
+    }
+
+    // ── Declared LoRA selection on encode, extract and score ───────
+
+    const LORA_MODEL: &str = "\
+sie_id: acme/lora
+hf_id: acme/lora
+tasks:
+  encode:
+    dense:
+      dim: 2
+  score: {}
+  extract: {}
+profiles:
+  default:
+    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter
+    max_batch_tokens: 4096
+  banking:
+    extends: default
+    adapter_options:
+      runtime:
+        lora_id: org/banking-lora
+  tuned:
+    extends: default
+    adapter_options:
+      runtime:
+        lora: org/tuned-lora
+  served:
+    extends: default
+    adapter_options:
+      loadtime:
+        lora_paths:
+          legal: org/legal-lora
+          pinned:
+            id: org/pinned-lora
+            revision: 0123456789abcdef0123456789abcdef01234567
+  listed:
+    extends: default
+    adapter_options:
+      loadtime:
+        lora_paths:
+          - org/listed-lora
+";
+
+    #[tokio::test]
+    async fn undeclared_lora_option_accepts_only_what_a_profile_declares() {
+        let gateway = TestGateway::new(&[LORA_MODEL]).await;
+        let entry = gateway
+            .state
+            .model_registry
+            .get_model_info("acme/lora")
+            .expect("model entry");
+
+        for name in [
+            "org/banking-lora",
+            "org/tuned-lora",
+            "legal",
+            "org/legal-lora",
+            "pinned",
+            "org/pinned-lora",
+            "org/listed-lora",
+        ] {
+            for key in ["lora", "lora_id"] {
+                let options = json!({ key: name });
+                assert_eq!(
+                    undeclared_lora_option(Some(&options), || Some(entry.clone())),
+                    None,
+                    "{key}={name}"
+                );
+            }
+        }
+        let not_looked_up = || -> Option<crate::types::model::ModelEntry> {
+            panic!("no LoRA is selected, so the model is not looked up")
+        };
+        assert_eq!(
+            undeclared_lora_option(Some(&json!({"lora": null, "lora_id": null})), not_looked_up),
+            None
+        );
+        assert_eq!(
+            undeclared_lora_option(Some(&json!({"profile": "banking"})), not_looked_up),
+            None
+        );
+        assert_eq!(undeclared_lora_option(None, not_looked_up), None);
+        assert_eq!(
+            undeclared_lora_option(Some(&json!({"lora": "attacker/lora"})), || None),
+            None
+        );
+
+        for (options, expected) in [
+            (
+                json!({"lora_id": "attacker/lora"}),
+                ("options.lora_id", json!("attacker/lora")),
+            ),
+            (
+                json!({"lora": "/srv/any/dir"}),
+                ("options.lora", json!("/srv/any/dir")),
+            ),
+            (json!({"lora": ""}), ("options.lora", json!(""))),
+            (json!({"lora": 42}), ("options.lora", json!(42))),
+            (
+                json!({"lora": "legal", "lora_id": "attacker/lora"}),
+                ("options.lora_id", json!("attacker/lora")),
+            ),
+        ] {
+            assert_eq!(
+                undeclared_lora_option(Some(&options), || Some(entry.clone())),
+                Some(expected),
+                "{options}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_undeclared_lora_is_refused_on_encode_extract_and_score_before_dispatch() {
+        let gateway = TestGateway::new(&[LORA_MODEL]).await;
+        gateway.add_worker("local-1", LOCAL_LANE, &[]).await;
+        let requests = |options: Value| {
+            [
+                (
+                    "encode",
+                    json!({"items": [{"text": "x"}], "params": {"options": options.clone()}}),
+                ),
+                (
+                    "extract",
+                    json!({"items": [{"text": "x"}], "params": {"labels": ["a"], "options": options.clone()}}),
+                ),
+                (
+                    "score",
+                    json!({"query": {"text": "q"}, "items": [{"text": "x"}], "options": options}),
+                ),
+            ]
+        };
+
+        for (endpoint, body) in requests(json!({"lora_id": "attacker/lora"})) {
+            let response = proxy_request(
+                State(Arc::clone(&gateway.state)),
+                json_request(&format!("/v1/{endpoint}/acme/lora"), body),
+                endpoint,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{endpoint}");
+            let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["detail"]["code"], "INVALID_REQUEST", "{endpoint}");
+            assert!(
+                value["detail"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("attacker/lora")),
+                "{endpoint}: {value}"
+            );
+        }
+        assert_eq!(gateway.dispatcher.dispatched(), Vec::new());
+
+        for (endpoint, body) in requests(json!({"lora": "legal"})) {
+            let response = proxy_request(
+                State(Arc::clone(&gateway.state)),
+                json_request(&format!("/v1/{endpoint}/acme/lora"), body),
+                endpoint,
+            )
+            .await;
+            assert_ne!(response.status(), StatusCode::BAD_REQUEST, "{endpoint}");
+        }
+        assert_eq!(gateway.dispatcher.dispatched().len(), 3);
     }
 
     // ── M10: per-profile LoRA adapter validation ───────────────────

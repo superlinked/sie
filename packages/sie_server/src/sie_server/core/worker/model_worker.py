@@ -581,6 +581,16 @@ class ModelWorker:
         finally:
             self._adapter_dispatch_lock.release()
 
+    async def run_adapter_mutation[T](self, mutation: Callable[[], T]) -> T:
+        """Run ``mutation`` on the inference thread while no batch is in flight.
+
+        For changes to adapter state that a forward reads, such as loading or
+        unloading a LoRA: the dispatch lock keeps them out of the span between
+        ``set_active_lora`` and the end of the batch that follows it.
+        """
+        async with self._adapter_dispatch_lock:
+            return await asyncio.get_running_loop().run_in_executor(self._inference_executor, mutation)
+
     async def _release_optional_memory_with_slots(self) -> int:
         if not _slots_can_acquire_all(self._dispatch_slots, self._dispatch_width):
             return 0
@@ -681,6 +691,24 @@ class ModelWorker:
             WorkerDrainedError(f"Model '{self._model_name or 'unknown'}' stopped before this request ran; retry")
         )
         return 1
+
+    def _fail_unselectable_batch(
+        self,
+        batch: FormattedBatch[HasCost, RequestMetadata],
+        lora: str | None,
+        error: Exception,
+    ) -> None:
+        """Fail every request of a batch whose LoRA the adapter cannot make active."""
+        model = self._model_name or "unknown"
+        logger.warning("LoRA '%s' cannot be made active on model '%s': %s", lora, model, error)
+        seen: set[int] = set()
+        for metadata in batch.metadata:
+            if id(metadata) in seen or metadata.future.done():
+                continue
+            seen.add(id(metadata))
+            failure = InvalidInputError(f"LoRA '{lora}' is not loaded on model '{model}'")
+            failure.__cause__ = error
+            metadata.future.set_exception(failure)
 
     def _register_in_flight(self, batch: FormattedBatch[HasCost, RequestMetadata]) -> _InFlightBatch:
         """Record a batch as in flight and return its registration."""
@@ -1352,7 +1380,12 @@ class ModelWorker:
                     # immediate drains. The lock also excludes sidecar
                     # pre-formed batches from interleaving a different LoRA
                     # selection between set_active_lora and adapter inference.
-                    self._adapter.set_active_lora(active_lora)
+                    try:
+                        self._adapter.set_active_lora(active_lora)
+                    except Exception as exc:  # noqa: BLE001
+                        self._fail_unselectable_batch(batch, active_lora, exc)
+                        was_idle = True
+                        continue
 
                     # Process the batch and track inference time.
                     await self._process_batch(batch, engine_queue_owned=True)

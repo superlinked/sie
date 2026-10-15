@@ -1044,6 +1044,18 @@ class ModelConfig(BaseModel):
                         raise ValueError(msg)
         return refs
 
+    def declared_lora_names(self) -> frozenset[str]:
+        """Every name a request may select a LoRA by: each declared LoRA id, served name and ``runtime.lora``."""
+        names = set(self.lora_revisions())
+        for profile in self.profiles.values():
+            lora_paths = profile.adapter_options.loadtime.get("lora_paths")
+            if isinstance(lora_paths, Mapping):
+                names.update(str(name) for name in lora_paths)
+            selected = profile.adapter_options.runtime.get("lora")
+            if selected:
+                names.add(str(selected))
+        return frozenset(names)
+
     def speculative_draft_revisions(self) -> dict[str, str | None]:
         """Enabled speculative draft repos mapped to their optional immutable pins."""
         refs: dict[str, str | None] = {}

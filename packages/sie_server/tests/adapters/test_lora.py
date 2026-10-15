@@ -15,7 +15,11 @@ Tests cover:
 from __future__ import annotations
 
 import asyncio
+import json
+import threading
+import time
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -29,8 +33,12 @@ from sie_server.adapters.bert_flash import BertFlashAdapter
 from sie_server.adapters.nomic_flash import NomicFlashAdapter
 from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin, validate_lora_target_modules
 from sie_server.config.model import AdapterOptions, EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
+from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.model_loader import DEFAULT_MAX_LORAS, LoadedLora, LoadedModel, ModelLoader
+from sie_server.core.prepared import make_text_item
 from sie_server.core.registry import ModelRegistry
+from sie_server.core.worker import ModelWorker, WorkerConfig
+from sie_server.types.inputs import Item
 from sie_server.types.responses import ErrorCode
 from torch import nn
 
@@ -200,7 +208,7 @@ class MockAdapterWithLoRA(PEFTLoRAMixin, ModelAdapter):
 
 def _bias_free_peft() -> MagicMock:
     peft = MagicMock()
-    peft.PeftConfig.from_pretrained.return_value = SimpleNamespace(bias="none", target_modules=None)
+    peft.PeftConfig.from_pretrained.return_value = SimpleNamespace(peft_type="LORA", bias="none", target_modules=None)
     return peft
 
 
@@ -739,7 +747,9 @@ class TestMixinTargetModulesValidation:
     @staticmethod
     def _peft_module(target_modules: object) -> MagicMock:
         peft = MagicMock()
-        peft.PeftConfig.from_pretrained.return_value = SimpleNamespace(bias="none", target_modules=target_modules)
+        peft.PeftConfig.from_pretrained.return_value = SimpleNamespace(
+            peft_type="LORA", bias="none", target_modules=target_modules
+        )
         mock_peft_model = MagicMock()
         mock_peft_model.named_parameters.return_value = []
         peft.PeftModel.from_pretrained.return_value = mock_peft_model
@@ -812,7 +822,7 @@ class TestMixinBiasRefusal:
     def _peft_module(biases: dict[str, str]) -> MagicMock:
         peft = MagicMock()
         peft.PeftConfig.from_pretrained.side_effect = lambda path, revision=None: SimpleNamespace(
-            bias=biases[path], target_modules=None
+            peft_type="LORA", bias=biases[path], target_modules=None
         )
         mock_peft_model = MagicMock()
         mock_peft_model.named_parameters.return_value = []
@@ -991,7 +1001,7 @@ class TestBiasLoraIsolation:
         adapter = TinyLoRAAdapter()
         adapter.load("cpu")
         snapshot = _snapshot(adapter._model)
-        config = _tiny_config()
+        config = _tiny_config([lora])
         loaded = LoadedModel(config=config, adapter=adapter, device="cpu")
         registry = ModelRegistry()
         registry._configs["t/tiny"] = config
@@ -1087,3 +1097,197 @@ class TestPinnedLoraServing:
 
         with pytest.raises(ValueError, match="cannot honor a pin"):
             self._loader()._finish_load("t/pinned", "cpu", adapter, self._pinned_config())
+
+
+# =============================================================================
+# Declared-only loading and base-preserving adapter configs
+# =============================================================================
+
+
+def _save_plain_lora(path: Path, **config_overrides: Any) -> str:
+    trained = get_peft_model(
+        _tiny_encoder(), LoraConfig(r=2, target_modules=["query"], bias="none", init_lora_weights=False)
+    )
+    trained.save_pretrained(str(path))
+    if config_overrides:
+        config_path = path / "adapter_config.json"
+        config = json.loads(config_path.read_text())
+        config.update(config_overrides)
+        config_path.write_text(json.dumps(config))
+    return str(path)
+
+
+def _registry_serving(adapter: ModelAdapter, config: ModelConfig, **loaded_fields: Any) -> tuple[ModelRegistry, Any]:
+    loaded = LoadedModel(config=config, adapter=adapter, device="cpu", **loaded_fields)
+    registry = ModelRegistry()
+    registry._configs[config.sie_id] = config
+    registry._loaded[config.sie_id] = loaded
+    return registry, loaded
+
+
+class TestRegistryLoadsOnlyDeclaredLoras:
+    async def test_an_undeclared_lora_is_refused_before_any_load(self, tmp_path: Path) -> None:
+        lora = _save_plain_lora(tmp_path / "undeclared")
+        adapter = TinyLoRAAdapter()
+        adapter.load("cpu")
+        registry, loaded = _registry_serving(adapter, _tiny_config())
+
+        with pytest.raises(ValueError, match="does not declare"):
+            await registry.ensure_lora_loaded_async("t/tiny", lora)
+
+        assert not registry._background_tasks
+        assert lora not in loaded.loras
+        assert adapter._peft_model is None
+
+    async def test_a_declared_lora_loads(self, tmp_path: Path) -> None:
+        lora = _save_plain_lora(tmp_path / "declared")
+        adapter = TinyLoRAAdapter()
+        adapter.load("cpu")
+        registry, _ = _registry_serving(adapter, _tiny_config([lora]))
+
+        assert await registry.ensure_lora_loaded_async("t/tiny", lora) == (False, True)
+        await asyncio.gather(*registry._background_tasks)
+
+        assert await registry.ensure_lora_loaded_async("t/tiny", lora) == (True, False)
+        assert adapter._loaded_loras == {lora}
+
+
+class TestBaseMutatingLoraConfigs:
+    """A LoRA config whose loading rewrites shared base weights is refused before PEFT sees it."""
+
+    @pytest.mark.parametrize("initializer", ["pissa", "pissa_niter_4", "olora"])
+    def test_real_peft_initializers_that_rewrite_the_base_are_refused(self, tmp_path: Path, initializer: str) -> None:
+        plain = _save_plain_lora(tmp_path / "plain")
+        mutating = _save_plain_lora(tmp_path / "mutating", init_lora_weights=initializer)
+        adapter = TinyLoRAAdapter()
+        adapter.load("cpu")
+        adapter.load_lora(plain)
+        expected = adapter._model(_probe())
+
+        with pytest.raises(ValueError, match="init_lora_weights"):
+            adapter.load_lora(mutating)
+
+        adapter.set_active_lora(None)
+        assert torch.equal(adapter._model(_probe()), expected)
+        assert adapter._loaded_loras == {plain}
+
+    @pytest.mark.parametrize("initializer", [True, False, "gaussian", "eva", "orthogonal"])
+    def test_initializers_that_touch_only_the_adapter_are_accepted(self, initializer: object) -> None:
+        config = SimpleNamespace(peft_type="LORA", bias="none", init_lora_weights=initializer)
+        TinyLoRAAdapter()._check_lora_config("org/lora", config)
+
+    @pytest.mark.parametrize("initializer", ["corda", "loftq", "lora_ga", "olora", "pissa", "PiSSA", "unknown"])
+    def test_other_initializers_are_refused(self, initializer: str) -> None:
+        config = SimpleNamespace(peft_type="LORA", bias="none", init_lora_weights=initializer)
+        with pytest.raises(ValueError, match="init_lora_weights"):
+            TinyLoRAAdapter()._check_lora_config("org/lora", config)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("layer_replication", [[0, 2], [1, 3]]), ("megatron_config", {"tensor_model_parallel_size": 1})],
+    )
+    def test_fields_that_change_the_base_model_are_refused(self, field: str, value: object) -> None:
+        config = SimpleNamespace(peft_type="LORA", bias="none", init_lora_weights=True, **{field: value})
+        with pytest.raises(ValueError, match=field):
+            TinyLoRAAdapter()._check_lora_config("org/lora", config)
+
+    @pytest.mark.parametrize("peft_type", ["IA3", "OFT", "PROMPT_TUNING", None])
+    def test_an_adapter_that_is_not_a_lora_is_refused(self, peft_type: str | None) -> None:
+        config = SimpleNamespace(peft_type=peft_type, bias="none", init_lora_weights=True)
+        with pytest.raises(ValueError, match="not a LoRA"):
+            TinyLoRAAdapter()._check_lora_config("org/lora", config)
+
+
+class _GatedTinyLoRAAdapter(TinyLoRAAdapter):
+    """Each LoRA load waits for its gate, so a test can order loads against eviction and batches."""
+
+    def __init__(self, gates: dict[str, threading.Event]) -> None:
+        super().__init__()
+        self.gates = gates
+
+    def load_lora(self, lora_path: str, revision: str | None = None) -> int:
+        gate = self.gates.get(lora_path)
+        if gate is not None:
+            assert gate.wait(10)
+        return super().load_lora(lora_path, revision=revision)
+
+
+class TestRegistryLoraLifecycle:
+    async def test_a_lora_evicted_while_loading_does_not_stay_resident(self, tmp_path: Path) -> None:
+        first = _save_plain_lora(tmp_path / "first")
+        second = _save_plain_lora(tmp_path / "second")
+        gates = {first: threading.Event(), second: threading.Event()}
+        adapter = _GatedTinyLoRAAdapter(gates)
+        adapter.load("cpu")
+        registry, loaded = _registry_serving(adapter, _tiny_config([first, second]), max_loras=1)
+
+        assert await registry.ensure_lora_loaded_async("t/tiny", first) == (False, True)
+        first_load = next(iter(registry._background_tasks))
+        assert await registry.ensure_lora_loaded_async("t/tiny", second) == (False, True)
+        assert list(loaded.loras) == [second]
+
+        gates[first].set()
+        await first_load
+        gates[second].set()
+        await asyncio.gather(*registry._background_tasks)
+
+        assert list(loaded.loras) == [second]
+        assert adapter._loaded_loras == {second}
+
+    async def test_a_lora_load_waits_for_the_batch_in_flight(self, tmp_path: Path) -> None:
+        first = _save_plain_lora(tmp_path / "first")
+        second = _save_plain_lora(tmp_path / "second")
+        in_forward = threading.Event()
+        release_forward = threading.Event()
+        adapter = _BlockingForwardAdapter(in_forward, release_forward)
+        adapter.load("cpu")
+        adapter.load_lora(first)
+        adapter.set_active_lora(first)
+        with_first = adapter._model(_probe()).detach().clone()
+        adapter.set_active_lora(None)
+        worker = ModelWorker(adapter, WorkerConfig(max_batch_wait_ms=1))
+        registry, loaded = _registry_serving(adapter, _tiny_config([first, second]), worker=worker)
+        loaded.loras[first] = LoadedLora(adapter_id=first)
+        await worker.start()
+        try:
+            future = await worker.submit([make_text_item([1], 0)], [Item(text="x")], ["dense"], options={"lora": first})
+            assert await asyncio.to_thread(in_forward.wait, 10)
+
+            assert await registry.ensure_lora_loaded_async("t/tiny", second) == (False, True)
+            load_finished_during_batch = await asyncio.to_thread(_wait_until, lambda: second in adapter._loaded_loras)
+            release_forward.set()
+            result = await asyncio.wait_for(future, 10)
+            await asyncio.gather(*registry._background_tasks)
+        finally:
+            release_forward.set()
+            await worker.stop()
+
+        assert torch.allclose(torch.as_tensor(result.output.dense[0]), with_first[0])
+        assert not load_finished_during_batch
+        assert adapter._loaded_loras == {first, second}
+
+
+def _wait_until(condition: Callable[[], bool], timeout_s: float = 1.0) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.01)
+    return condition()
+
+
+class _BlockingForwardAdapter(TinyLoRAAdapter):
+    """A forward that signals it started and waits for release before reading the adapter state."""
+
+    def __init__(self, in_forward: threading.Event, release_forward: threading.Event) -> None:
+        super().__init__()
+        self._in_forward = in_forward
+        self._release_forward = release_forward
+
+    def encode(self, items: list[Item], output_types: list[str], **kwargs: Any) -> EncodeOutput:
+        _ = (output_types, kwargs)
+        self._in_forward.set()
+        assert self._release_forward.wait(10)
+        with torch.no_grad():
+            dense = self._model(_probe()[: len(items)]).numpy()
+        return EncodeOutput(dense=dense, batch_size=len(items), dense_dim=2)

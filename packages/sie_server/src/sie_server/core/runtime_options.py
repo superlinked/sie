@@ -70,6 +70,34 @@ def check_overflow_policy(options: dict[str, Any]) -> None:
         )
 
 
+class UndeclaredLoraError(InvalidInputError):
+    """``options.lora`` or ``options.lora_id`` names a LoRA the model's configuration does not declare."""
+
+
+_LORA_OPTION_KEYS = ("lora", "lora_id")
+
+
+def _check_declared_lora(config: ModelConfig, request_options: dict[str, Any]) -> None:
+    """Reject a request LoRA selection the model's configuration does not declare.
+
+    Raises:
+        UndeclaredLoraError: ``options.lora`` or ``options.lora_id`` is not null
+            and not one of :meth:`ModelConfig.declared_lora_names`.
+    """
+    declared: frozenset[str] | None = None
+    for key in _LORA_OPTION_KEYS:
+        value = request_options.get(key)
+        if value is None:
+            continue
+        if declared is None:
+            declared = config.declared_lora_names()
+        if not isinstance(value, str) or value not in declared:
+            raise UndeclaredLoraError(
+                f"'options.{key}' must name a LoRA adapter that model '{config.sie_id}' declares; "
+                f"{value!r} is not one of them."
+            )
+
+
 def merge_runtime_options_with_profile(
     config: ModelConfig,
     request_options: dict[str, Any] | None,
@@ -77,12 +105,14 @@ def merge_runtime_options_with_profile(
     """Return merged adapter options and the profile used to derive them.
 
     Raises:
-        InvalidInputError: The request selects an unknown or malformed profile, or
-            the merged ``overflow_policy`` is not a valid policy name.
+        InvalidInputError: The request selects an unknown or malformed profile,
+            selects a LoRA the model does not declare, or the merged
+            ``overflow_policy`` is not a valid policy name.
     """
     resolved = _resolve_profile_or_raise(config, request_options)
     merged: dict[str, Any] = dict(resolved.runtime)
     if request_options:
+        _check_declared_lora(config, request_options)
         merged |= {key: value for key, value in request_options.items() if key != "profile"}
     check_overflow_policy(merged)
     return merged, resolved

@@ -6,7 +6,7 @@ import pytest
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.prepared import make_text_item
 from sie_server.core.worker import ModelWorker, WorkerConfig
-from sie_server.types.inputs import Item
+from sie_server.types.inputs import InvalidInputError, Item
 
 
 class TestModelWorkerLoRABatching:
@@ -63,6 +63,31 @@ class TestModelWorkerLoRABatching:
 
         finally:
             await worker.stop()
+
+    @pytest.mark.asyncio
+    async def test_a_lora_the_adapter_cannot_activate_fails_its_requests(self, mock_adapter: MagicMock) -> None:
+        def set_active_lora(name: str | None) -> None:
+            if name is not None:
+                msg = f"LoRA '{name}' is not loaded. Available: {{'org/private-lora'}}"
+                raise ValueError(msg)
+
+        mock_adapter.set_active_lora.side_effect = set_active_lora
+        worker = ModelWorker(mock_adapter, WorkerConfig(max_batch_wait_ms=1))
+        await worker.start()
+        try:
+            failing = await worker.submit(
+                [make_text_item([1, 2, 3], 0)], [Item(text="hello")], ["dense"], options={"lora": "gone"}
+            )
+            with pytest.raises(InvalidInputError) as raised:
+                await asyncio.wait_for(failing, 5)
+            served = await worker.submit([make_text_item([4, 5, 6], 0)], [Item(text="world")], ["dense"])
+            result = await asyncio.wait_for(served, 5)
+        finally:
+            await worker.stop()
+
+        assert "gone" in str(raised.value)
+        assert "org/private-lora" not in str(raised.value)
+        assert result.output.dense is not None
 
     @pytest.mark.asyncio
     async def test_same_lora_batched_together(self, mock_adapter: MagicMock) -> None:

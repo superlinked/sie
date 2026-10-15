@@ -27,6 +27,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# String ``init_lora_weights`` values with which PEFT initializes only the
+# adapter's own weights (peft 0.19 ``LoraLayer.update_layer``). PiSSA, CorDA,
+# OLoRA, LoftQ and LoRA-GA instead rewrite the base layer's weights.
+_BASE_PRESERVING_INITIALIZERS = ("gaussian", "eva", "orthogonal")
+
 
 def validate_lora_target_modules(
     lora_path: str,
@@ -257,12 +262,35 @@ class PEFTLoRAMixin:
     def _check_lora_config(self, lora_path: str, peft_config: PeftConfig) -> None:
         """Refuse a LoRA from its ``adapter_config.json`` before any weights load.
 
-        A LoRA whose ``bias`` is not ``"none"`` trains biases that live in the
-        base model's own layers, which every request shares; PEFT cannot turn
-        them off with the adapter. A LoRA whose ``target_modules`` miss every
-        module in :attr:`lora_called_module_names` would have no effect (see
-        :func:`validate_lora_target_modules`).
+        Only a LoRA is accepted, and only one whose loading leaves the base
+        model, which every request shares, as it was. PEFT rewrites the base
+        weights while it loads a LoRA whose ``init_lora_weights`` is not one of
+        :data:`_BASE_PRESERVING_INITIALIZERS` or a boolean, restructures the
+        base model for ``layer_replication``, and imports the module named by
+        ``megatron_core`` for ``megatron_config``. A LoRA whose ``bias`` is not
+        ``"none"`` trains biases that live in the base model's own layers; PEFT
+        cannot turn them off with the adapter. A LoRA whose ``target_modules``
+        miss every module in :attr:`lora_called_module_names` would have no
+        effect (see :func:`validate_lora_target_modules`).
         """
+        peft_type = getattr(peft_config, "peft_type", None)
+        if getattr(peft_type, "value", peft_type) != "LORA":
+            msg = f"LoRA '{lora_path}' is not a LoRA adapter (peft_type={peft_type!r})."
+            raise ValueError(msg)
+
+        initializer = getattr(peft_config, "init_lora_weights", True)
+        if not isinstance(initializer, bool) and initializer not in _BASE_PRESERVING_INITIALIZERS:
+            msg = (
+                f"LoRA '{lora_path}' sets init_lora_weights={initializer!r}: loading it would rewrite the "
+                "base model's shared weights. Export it as a plain LoRA with init_lora_weights=true."
+            )
+            raise ValueError(msg)
+
+        for field in ("layer_replication", "megatron_config"):
+            if getattr(peft_config, field, None):
+                msg = f"LoRA '{lora_path}' sets {field}, which changes the base model every request shares."
+                raise ValueError(msg)
+
         bias = getattr(peft_config, "bias", "none")
         if bias != "none":
             msg = (

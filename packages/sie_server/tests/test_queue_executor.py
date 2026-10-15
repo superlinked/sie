@@ -264,6 +264,11 @@ def _runtime_profile_config() -> ModelConfig:
                         }
                     },
                 },
+                "alternate": {
+                    "max_batch_tokens": 8192,
+                    "adapter_path": "sie_server.adapters.fake.adapter:FakeAdapter",
+                    "adapter_options": {"runtime": {"lora": "request-lora"}},
+                },
             },
         }
     )
@@ -1071,6 +1076,21 @@ class TestProcessEncodeBatch:
         assert outcome.outcomes[0].disposition == "publish_error_and_ack"
         assert outcome.outcomes[0].error_code == "INVALID_INPUT"
 
+    @pytest.mark.parametrize("key", ["lora", "lora_id"])
+    @pytest.mark.asyncio
+    async def test_an_undeclared_lora_is_invalid_input(self, key: str) -> None:
+        reg = _make_registry()
+        outcome = await QueueExecutor(reg).process_encode_batch(
+            ProcessEncodeBatchRequest(
+                model_id="test/model",
+                items=[_encode_item(options={key: "attacker/lora"})],
+            )
+        )
+
+        assert outcome.outcomes[0].disposition == "publish_error_and_ack"
+        assert outcome.outcomes[0].error_code == "INVALID_INPUT"
+        reg.ensure_lora_loaded_async.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_muvera_profile_translates_managed_adapter_output(self) -> None:
         """Managed queue requests must use the same MuVERA contract as HTTP."""
@@ -1793,6 +1813,10 @@ class TestProcessExtractBatch:
                         wiid="invalid.0",
                         options={"profile": "missing"},
                     ),
+                    _extract_item(
+                        wiid="undeclared.0",
+                        options={"profile": "tuned", "lora": "attacker/lora"},
+                    ),
                 ],
             )
         )
@@ -1802,6 +1826,8 @@ class TestProcessExtractBatch:
         assert by_id["override.0"].disposition == "publish_and_ack"
         assert by_id["invalid.0"].disposition == "publish_error_and_ack"
         assert by_id["invalid.0"].error_code == "INVALID_INPUT"
+        assert by_id["undeclared.0"].disposition == "publish_error_and_ack"
+        assert by_id["undeclared.0"].error_code == "INVALID_INPUT"
 
         assert len(calls) == 2
         by_lora = dict(calls)
