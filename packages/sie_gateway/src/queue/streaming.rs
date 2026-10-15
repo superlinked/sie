@@ -331,6 +331,10 @@ pub struct ChunkError {
     /// errors. The gateway validates code + bounds before trusting it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after_s: Option<u16>,
+    /// Class of a remote upstream's failure. Additive for mixed-version
+    /// rollouts; the gateway admits only [`UpstreamFailureReason`] names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl ChunkError {
@@ -352,7 +356,14 @@ impl ChunkError {
     /// errors remain exact; generic backend and grammar-internal failures use
     /// stable public text so mixed-version workers cannot disclose internals.
     pub(crate) fn client_safe_message(&self) -> &str {
-        client_safe_worker_error_message(&self.code, &self.message)
+        client_safe_worker_error_message(&self.code, &self.message, self.client_safe_reason())
+    }
+
+    /// The worker's upstream failure class, when it is one the gateway knows.
+    pub(crate) fn client_safe_reason(&self) -> Option<UpstreamFailureReason> {
+        self.reason
+            .as_deref()
+            .and_then(UpstreamFailureReason::parse)
     }
 
     /// Treat worker terminal parameters as untrusted. Only the typed
@@ -403,10 +414,81 @@ pub(crate) fn client_safe_worker_error_code(code: &str) -> &'static str {
     }
 }
 
-pub(crate) fn client_safe_worker_error_message<'a>(code: &str, message: &'a str) -> &'a str {
+/// Class of a remote upstream's failure that ended a generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UpstreamFailureReason {
+    CredentialUnavailable,
+    CredentialRejected,
+    PaymentRequired,
+    ModelNotFound,
+    Refused,
+    Unavailable,
+    Busy,
+    NotReady,
+    InvalidResponse,
+}
+
+impl UpstreamFailureReason {
+    pub(crate) const ALL: [Self; 9] = [
+        Self::CredentialUnavailable,
+        Self::CredentialRejected,
+        Self::PaymentRequired,
+        Self::ModelNotFound,
+        Self::Refused,
+        Self::Unavailable,
+        Self::Busy,
+        Self::NotReady,
+        Self::InvalidResponse,
+    ];
+
+    pub(crate) fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|reason| reason.as_str() == name)
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::CredentialUnavailable => "upstream_credential_unavailable",
+            Self::CredentialRejected => "upstream_credential_rejected",
+            Self::PaymentRequired => "upstream_payment_required",
+            Self::ModelNotFound => "upstream_model_not_found",
+            Self::Refused => "upstream_refused",
+            Self::Unavailable => "upstream_unavailable",
+            Self::Busy => "upstream_busy",
+            Self::NotReady => "upstream_not_ready",
+            Self::InvalidResponse => "upstream_invalid_response",
+        }
+    }
+
+    /// Caller-facing text for an ``inference_error`` of this class, in place
+    /// of the worker's own message.
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::CredentialUnavailable => "the server has no usable credential for its upstream",
+            Self::CredentialRejected => "the upstream rejected the server's credential",
+            Self::PaymentRequired => "the upstream account cannot pay for the request",
+            Self::ModelNotFound => "the upstream has no route for the configured model",
+            Self::Refused => "the upstream refused the request",
+            Self::Unavailable => "the upstream could not be reached, timed out or failed",
+            Self::Busy => "the upstream is busy",
+            Self::NotReady => "the model is not ready on the upstream",
+            Self::InvalidResponse => {
+                "the upstream answered with something the server cannot accept"
+            }
+        }
+    }
+}
+
+pub(crate) fn client_safe_worker_error_message<'a>(
+    code: &str,
+    message: &'a str,
+    reason: Option<UpstreamFailureReason>,
+) -> &'a str {
     match client_safe_worker_error_code(code) {
         MODEL_LOAD_FAILED_ERROR_CODE => MODEL_LOAD_FAILED_PUBLIC_MESSAGE,
-        "inference_error" if code == "inference_error" => "internal error during generation",
+        "inference_error" if code == "inference_error" => reason.map_or(
+            "internal error during generation",
+            UpstreamFailureReason::message,
+        ),
         "inference_error" => UNKNOWN_WORKER_ERROR_PUBLIC_MESSAGE,
         "grammar_compile_failed" => "internal error compiling grammar",
         _ => message,
@@ -1414,6 +1496,7 @@ mod tests {
             message: "Model 'Qwen/Qwen3-4B-Instruct-2507' is loading; retry later.".to_string(),
             param: None,
             retry_after_s: None,
+            reason: None,
         });
 
         assert_eq!(c.apply(term), ChunkApplied::Terminal);
@@ -1605,6 +1688,7 @@ mod tests {
                 message: public_message.to_string(),
                 param: Some(param.to_string()),
                 retry_after_s: None,
+                reason: None,
             };
             assert_eq!(error.client_safe_message(), expected_message, "{code}");
             assert_eq!(error.client_safe_param(), expected_param, "{code}");
@@ -1709,16 +1793,79 @@ mod tests {
         assert_eq!(
             client_safe_worker_error_message(
                 MODEL_LOAD_FAILED_ERROR_CODE,
-                "SENSITIVE_WORKER_FAILURE_SENTINEL"
+                "SENSITIVE_WORKER_FAILURE_SENTINEL",
+                None
             ),
             MODEL_LOAD_FAILED_PUBLIC_MESSAGE
         );
         assert_eq!(
             client_safe_worker_error_message(
                 "SENSITIVE_WORKER_ERROR_CODE_SENTINEL",
-                "SENSITIVE_WORKER_FAILURE_SENTINEL"
+                "SENSITIVE_WORKER_FAILURE_SENTINEL",
+                Some(UpstreamFailureReason::PaymentRequired)
             ),
             UNKNOWN_WORKER_ERROR_PUBLIC_MESSAGE
+        );
+    }
+
+    #[test]
+    fn test_worker_upstream_failure_reasons_are_the_wire_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../wire-fixtures/upstream_failure_reasons.json"
+        ))
+        .unwrap();
+        let reasons: serde_json::Map<String, serde_json::Value> = UpstreamFailureReason::ALL
+            .iter()
+            .map(|reason| (reason.as_str().to_string(), reason.message().into()))
+            .collect();
+        assert_eq!(fixture["reasons"], serde_json::Value::Object(reasons));
+    }
+
+    #[test]
+    fn test_worker_upstream_failure_reason_is_a_closed_set_with_fixed_text() {
+        let error = |code: &str, reason: &str| ChunkError {
+            code: code.to_string(),
+            message: "SENSITIVE_WORKER_FAILURE_SENTINEL".to_string(),
+            param: None,
+            retry_after_s: None,
+            reason: Some(reason.to_string()),
+        };
+        for reason in UpstreamFailureReason::ALL {
+            let failed = error("inference_error", reason.as_str());
+            assert_eq!(failed.client_safe_reason(), Some(reason));
+            assert_eq!(failed.client_safe_message(), reason.message());
+        }
+        let busy = ChunkError {
+            message: "the upstream is busy, please retry".to_string(),
+            ..error("RESOURCE_EXHAUSTED", "upstream_busy")
+        };
+        assert_eq!(busy.client_safe_reason(), Some(UpstreamFailureReason::Busy));
+        assert_eq!(
+            busy.client_safe_message(),
+            "the upstream is busy, please retry"
+        );
+        let unknown = error("inference_error", "SENSITIVE_REASON_SENTINEL");
+        assert_eq!(unknown.client_safe_reason(), None);
+        assert_eq!(
+            unknown.client_safe_message(),
+            "internal error during generation"
+        );
+        let decoded: ChunkError = rmp_serde::from_slice(
+            &rmp_serde::to_vec_named(&serde_json::json!({
+                "code": "inference_error",
+                "message": "SENSITIVE_WORKER_FAILURE_SENTINEL",
+                "reason": "upstream_payment_required",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.client_safe_reason(),
+            Some(UpstreamFailureReason::PaymentRequired)
+        );
+        assert_eq!(
+            decoded.client_safe_message(),
+            "the upstream account cannot pay for the request"
         );
     }
 

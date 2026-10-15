@@ -167,6 +167,7 @@ pub(crate) struct RecordingDispatcher {
     stream_mid_error: AtomicBool,
     stream_terminal_failure: Mutex<Option<&'static str>>,
     remote_refusal: Mutex<Option<(&'static str, Option<u32>)>>,
+    remote_failure_reason: Mutex<Option<&'static str>>,
     remote_silence: Mutex<Option<bool>>,
     unanswered: Mutex<Vec<Box<dyn Any + Send>>>,
     first_chunk_republish: AtomicBool,
@@ -215,6 +216,19 @@ impl RecordingDispatcher {
     /// serve now: a published `code` error with the upstream's wait, if any.
     pub(crate) fn refuse_remote_work(&self, code: &'static str, retry_after_s: Option<u32>) {
         *self.remote_refusal.lock().unwrap() = Some((code, retry_after_s));
+    }
+
+    /// Answer remote-lane generation as a remote worker does when its
+    /// upstream failed: an `inference_error` terminal that names `reason`.
+    pub(crate) fn fail_remote_generation(&self, reason: &'static str) {
+        *self.remote_refusal.lock().unwrap() = Some(("inference_error", None));
+        *self.remote_failure_reason.lock().unwrap() = Some(reason);
+    }
+
+    fn remote_generation_error(&self, refusal: (&str, Option<u32>)) -> serde_json::Value {
+        let mut error = refusal_error(refusal);
+        error["reason"] = json!(*self.remote_failure_reason.lock().unwrap());
+        error
     }
 
     /// Leave remote-lane work unanswered. With `after_output`, a generation
@@ -612,7 +626,7 @@ impl WorkDispatcher for RecordingDispatcher {
             RemoteAnswer::Refused(refusal) => stream_chunk_collector(
                 display_model,
                 bundle_config_hash,
-                Some(refusal_error(refusal)),
+                Some(self.remote_generation_error(refusal)),
                 false,
                 None,
             ),
@@ -660,7 +674,7 @@ impl WorkDispatcher for RecordingDispatcher {
             return Err("no consumers ready: the lane is starting".into());
         }
         let error = match self.remote_answer(&target) {
-            RemoteAnswer::Refused(refusal) => Some(refusal_error(refusal)),
+            RemoteAnswer::Refused(refusal) => Some(self.remote_generation_error(refusal)),
             RemoteAnswer::Withheld => {
                 let (tx, rx) = oneshot::channel();
                 let mut collector =

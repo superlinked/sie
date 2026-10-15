@@ -2690,6 +2690,97 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_remote_generation_failure_tells_the_caller_its_reason_on_every_surface() {
+        let messages = json!([{"role": "user", "content": "hello"}]);
+        for (surface, stream) in [
+            ("native", false),
+            ("chat", false),
+            ("completions", false),
+            ("responses", false),
+            ("native", true),
+            ("chat", true),
+            ("completions", true),
+        ] {
+            let gateway = gateway().await;
+            gateway
+                .dispatcher
+                .fail_remote_generation("upstream_payment_required");
+            let state = State(Arc::clone(&gateway.state));
+            let response = match surface {
+                "native" => {
+                    proxy_request(
+                        state,
+                        json_request(
+                            "/v1/generate/acme__chat:remote",
+                            json!({"prompt": "hello", "max_new_tokens": 4, "stream": stream}),
+                        ),
+                        "generate",
+                    )
+                    .await
+                }
+                "chat" => {
+                    proxy_chat(
+                        state,
+                        json_request(
+                            "/v1/chat/completions",
+                            json!({"model": "acme/chat:remote", "messages": messages, "stream": stream}),
+                        ),
+                    )
+                    .await
+                }
+                "completions" => {
+                    proxy_completions(
+                        state,
+                        json_request(
+                            "/v1/completions",
+                            json!({"model": "acme/chat:remote", "prompt": "hello", "stream": stream}),
+                        ),
+                    )
+                    .await
+                }
+                _ => {
+                    proxy_responses(
+                        state,
+                        json_request(
+                            "/v1/responses",
+                            json!({"model": "acme/chat:remote", "input": "hello"}),
+                        ),
+                    )
+                    .await
+                }
+            };
+            let case = format!("{surface} stream={stream}");
+            let status = response.status();
+            let body = String::from_utf8(
+                axum::body::to_bytes(response.into_body(), 64 * 1024)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap();
+            let error: serde_json::Value = if stream {
+                assert_eq!(status, StatusCode::OK, "{case}");
+                body.lines()
+                    .filter_map(|line| line.strip_prefix("data: "))
+                    .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+                    .find_map(|event| event.get("error").cloned())
+                    .unwrap_or_else(|| panic!("{case}: no error event in {body}"))
+            } else {
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{case}");
+                serde_json::from_str::<serde_json::Value>(&body).unwrap()["error"].clone()
+            };
+            assert_eq!(error["code"], "inference_error", "{case}");
+            assert_eq!(error["reason"], "upstream_payment_required", "{case}");
+            assert_eq!(
+                error["message"], "the upstream account cannot pay for the request",
+                "{case}"
+            );
+            assert!(!body.contains("team-sie"), "{case}");
+            assert!(!body.contains("busy, please retry"), "{case}");
+        }
+    }
+
     #[test]
     fn only_a_served_response_or_a_server_side_refusal_is_stamped() {
         let disclosure = ServingDisclosure::default();
