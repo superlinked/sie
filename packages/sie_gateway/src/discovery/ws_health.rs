@@ -217,6 +217,7 @@ mod tests {
         Request as ServerRequest, Response as ServerResponse,
     };
 
+    #[allow(clippy::result_large_err)]
     async fn authorization_seen_by_worker(authorization: Option<HeaderValue>) -> Option<String> {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
