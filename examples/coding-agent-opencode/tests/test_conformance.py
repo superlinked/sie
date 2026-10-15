@@ -12,6 +12,8 @@ import json
 import sys
 import threading
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -88,6 +90,8 @@ def _reply(body: dict[str, Any]) -> dict[str, Any]:
             return {"status": 400, "code": "INPUT_TOO_LONG", "message": "prompt exceeds the context window"}
         return {"content": "7741-ZEBRA", "finish": "stop"}
     if "9.11" in user_text:
+        if KNOBS.get("plain_busy") and not body.get("include_reasoning"):
+            return {"status": 503, "code": "QUEUE_FULL", "message": "upstream busy", "headers": {"retry-after": "0"}}
         mode = KNOBS.get("reasoning", "yes")
         reasoning = REASONING if mode in ("yes", "ignored", "stream_only") else ""
         answer = LONG_ANSWER if KNOBS.get("long_answer") else "9.9"
@@ -352,6 +356,7 @@ def test_a_busy_error_event_before_any_output_is_retried(base_url: str, waits: l
         (RATE_LIMITED, [5.0, 10.0, 20.0, 40.0]),
         ({**RATE_LIMITED, "headers": {"retry-after": "Wed, 21 Oct 2015 07:28:00 GMT"}}, [5.0, 10.0, 20.0, 40.0]),
         ({**RATE_LIMITED, "headers": {"retry-after": "nan"}}, [5.0, 10.0, 20.0, 40.0]),
+        ({**RATE_LIMITED, "headers": {"retry-after": "-3"}}, [5.0, 10.0, 20.0, 40.0]),
         ({**RATE_LIMITED, "headers": {"retry-after": "60"}}, [60.0, 60.0, 60.0]),
         ({**RATE_LIMITED, "headers": {"retry-after": "600"}}, [60.0, 60.0, 60.0]),
         (BUSY_EVENT, [12.0, 12.0, 12.0, 12.0]),
@@ -368,6 +373,29 @@ def test_a_request_still_busy_after_the_cap_is_a_capacity_failure(
     assert waits == expected_waits
     assert case["detail"].startswith(f"still busy after {len(expected_waits)} retries and {sum(expected_waits):g} s")
     assert report["summary"] == {"pass": 10, "fail": 0, "recorded": 0, "capacity": 1}
+
+
+def test_a_retry_after_date_is_waited_until(base_url: str, waits: list[float]) -> None:
+    when = format_datetime(datetime.now(UTC) + timedelta(seconds=30), usegmt=True)
+    case = _run(base_url, required_refusals=[{**RATE_LIMITED, "headers": {"retry-after": when}}])[
+        "tool_choice_required"
+    ]
+    assert case["status"] == "recorded"
+    assert case["retries"] == 1
+    assert len(waits) == 1
+    assert 25.0 < waits[0] <= 30.0
+
+
+def test_a_busy_request_does_not_hide_a_refusal(base_url: str, waits: list[float]) -> None:
+    refused = _run(base_url, reasoning="refuse", plain_busy=True)["include_reasoning"]
+    assert refused["status"] == "fail"
+    assert refused["detail"].startswith("include_reasoning refused: 400 unsupported_field")
+    assert refused["retries"] == conformance.BUSY_RETRIES
+    KNOBS.clear()
+    SEEN.clear()
+    busy = _run(base_url, plain_busy=True)["include_reasoning"]
+    assert busy["status"] == "capacity"
+    assert busy["detail"].startswith("still busy after 4 retries")
 
 
 @pytest.mark.parametrize(

@@ -30,6 +30,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
@@ -200,12 +201,26 @@ def _seconds(value: Any) -> float | None:
     return seconds if math.isfinite(seconds) and seconds >= 0 else None
 
 
+def _retry_after(value: str | None) -> float | None:
+    seconds = _seconds(value)
+    if seconds is not None or value is None:
+        return seconds
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    remaining = (when - datetime.now(UTC)).total_seconds()
+    return remaining if remaining > 0 else None
+
+
 def _error_payload(exc: Exception) -> dict[str, Any]:
     body = getattr(exc, "body", None)
     body = body if isinstance(body, dict) else {}
     inner = body.get("error") if isinstance(body.get("error"), dict) else body
     status_error = isinstance(exc, openai.APIStatusError)
-    retry_after = _seconds(exc.response.headers.get("retry-after")) if status_error else None
+    retry_after = _retry_after(exc.response.headers.get("retry-after")) if status_error else None
     return {
         "status": exc.status_code if status_error else None,
         "code": inner.get("code") or (None if status_error else type(exc).__name__),
@@ -628,19 +643,19 @@ def case_include_reasoning(client: openai.OpenAI, model: str) -> tuple[Case, boo
         "content_has_think_tags": any("<think>" in text or "</think>" in text for text in contents),
     }
     accepted = with_flag.error is None
-    busy = next((result for result in (with_flag, without_flag, whole) if _is_busy(result.error)), None)
-    if busy is not None:
-        return Case(name, "capacity", _still_busy(busy), observed), accepted
     for label, result in (("include_reasoning", with_flag), ("plain request", without_flag)):
-        if result.error:
+        if result.error and not _is_busy(result.error):
             error = result.error
             verdict = "refused" if label == "include_reasoning" else "failed"
             detail = f"{label} {verdict}: {error['status']} {error['code']}: {error['message']}"
             return Case(name, "fail", detail, observed), accepted
-    if whole.error:
+    if whole.error and not _is_busy(whole.error):
         error = whole.error
         detail = f"non-streamed include_reasoning failed: {error['status']} {error['code']}: {error['message']}"
         return Case(name, "fail", detail, observed), accepted
+    busy = next((result for result in (with_flag, without_flag, whole) if _is_busy(result.error)), None)
+    if busy is not None:
+        return Case(name, "capacity", _still_busy(busy), observed), accepted
     if observed["content_has_think_tags"]:
         return Case(name, "fail", "raw <think> tags leaked into content", observed), accepted
     if without_flag.reasoning_deltas:

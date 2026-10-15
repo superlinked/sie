@@ -236,9 +236,9 @@ waits for a tiny request to be served, up to 15 minutes, and records how long
 that took. A request refused as busy or rate-limited is retried: a `429` or
 `503` whose code is `QUEUE_FULL`, `RESOURCE_EXHAUSTED` or
 `rate_limit_exceeded`, or an error event with one of those codes that ends a
-stream before any output. Each wait is the `Retry-After` header, or else the
-error's `retry_after_s`, capped at 60 seconds. Without either, the wait is
-5 seconds, doubling with each retry. A request is retried at most 4 times and
+stream before any output. Each wait is the `Retry-After` header, in seconds or
+until its future date, or else the error's `retry_after_s`, capped at 60
+seconds. Without either, the wait is 5 seconds, doubling with each retry. A request is retried at most 4 times and
 waits at most 3 minutes in all. Each retry is recorded with its error and
 wait in the case's `observed`, and the case's `retries` counts them. A case
 whose request is still refused as busy after that, or whose stream ends in a
