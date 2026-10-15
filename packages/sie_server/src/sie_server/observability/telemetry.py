@@ -100,7 +100,9 @@ def _get_or_create_worker_id(data_dir: str | None = None) -> str:
     # Try to persist
     try:
         ensure_data_dir(Path(data_dir))
-        id_file.write_text(new_id)
+        fd = os.open(id_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(new_id)
     except OSError:
         logger.debug("Could not persist worker ID to %s, using ephemeral ID", id_path)
 

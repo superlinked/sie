@@ -275,7 +275,7 @@ fn apply_gateway_openapi_overrides(value: &mut Value) {
         "name": "Apache-2.0",
         "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
     });
-    value["security"] = json!([{ "bearerAuth": [] }]);
+    value["security"] = json!([{ "bearerAuth": [] }, { "apiKeyAuth": [] }]);
 
     let components = value
         .as_object_mut()
@@ -288,6 +288,12 @@ fn apply_gateway_openapi_overrides(value: &mut Value) {
             "scheme": "bearer",
             "bearerFormat": "opaque",
             "description": "SIE bearer token. Mutating pool/config/admin routes require the configured admin token; other protected routes accept a normal gateway token."
+        },
+        "apiKeyAuth": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "x-api-key",
+            "description": "The same SIE token as bearerAuth, sent in the x-api-key header. When a request sends both, the Authorization header is used and x-api-key is ignored."
         }
     });
 
@@ -3477,7 +3483,19 @@ mod tests {
     #[test]
     fn openapi_json_documents_auth_and_exempt_routes() {
         let spec: serde_json::Value = serde_json::from_str(&OPENAPI_JSON).unwrap();
-        assert_eq!(spec["security"], json!([{ "bearerAuth": [] }]));
+        assert_eq!(
+            spec["security"],
+            json!([{ "bearerAuth": [] }, { "apiKeyAuth": [] }])
+        );
+        assert_eq!(
+            spec["components"]["securitySchemes"]["apiKeyAuth"],
+            json!({
+                "type": "apiKey",
+                "in": "header",
+                "name": "x-api-key",
+                "description": "The same SIE token as bearerAuth, sent in the x-api-key header. When a request sends both, the Authorization header is used and x-api-key is ignored."
+            })
+        );
         assert_eq!(spec["paths"]["/healthz"]["get"]["security"], json!([]));
         assert_eq!(spec["paths"]["/readyz"]["get"]["security"], json!([]));
         assert!(spec["paths"]["/readyz"]["get"]["description"]

@@ -1040,19 +1040,30 @@ as a profile an operator chooses.
 | Env var | Default | Effect |
 |--|--|--|
 | `SIE_SERVER_HOST` | `0.0.0.0` | Address `sie-server serve` binds, same as `--host`. `127.0.0.1` accepts connections from this machine only. The default becomes `127.0.0.1` in 0.13.0. |
-| `SIE_AUTH_MODE` | unset | `token` (alias `static`) requires a token on every route except `/healthz`, `/livez` and `/readyz`, including `/ws/status`. `none` turns authentication off. `auto` requires a token when the bind address is not loopback. Unset behaves as `none`, or as `token` when a token is configured. Any other value stops startup. |
-| `SIE_AUTH_TOKENS` | unset | Comma-separated accepted tokens. `SIE_AUTH_TOKEN` is read when it is unset. Setting a token with `SIE_AUTH_MODE=none` stops startup. |
+| `SIE_AUTH_MODE` | unset | `token` (alias `static`) requires a token on every route of the HTTP port except `/healthz`, `/livez` and `/readyz`, including `/ws/status`. `none` turns authentication off. `auto` requires a token when the bind address is not loopback; it is a `sie-server` value, which the gateway refuses. Unset behaves as `none`, or as `token` when a token is configured. Values are lowercase and case-sensitive, as on the gateway; any other value stops startup. |
+| `SIE_AUTH_TOKENS` | unset | Comma-separated accepted tokens. `SIE_AUTH_TOKEN` is read when it is unset. Setting a token with `SIE_AUTH_MODE=none` stops startup, and so does a token variable that is set but holds no token, unless `SIE_AUTH_MODE=none`. |
 | `SIE_DATA_DIR` | `$XDG_DATA_HOME/sie`, else `~/.local/share/sie` | Holds the generated token (`auth-token`, mode `0600`) and the telemetry worker id. Images set `/app/.cache/sie`. |
 
 Clients send the token as `Authorization: Bearer <token>` or `x-api-key: <token>`;
-when both are sent they must carry the same token. The SDKs send `SIE_API_KEY`
+when both are sent, `Authorization` is used and `x-api-key` is ignored, as on the
+gateway. The SDKs send `SIE_API_KEY`
 as a Bearer token.
 
+Token auth covers the HTTP port. The other listeners are local: the IPC socket
+that a worker sidecar uses (`SIE_IPC_SOCKET_PATH`, mode `0600`) and the
+loopback ports of the engines the server launches.
+
 When token auth is on and no token is configured, the server generates one on
-first start, saves it in `SIE_DATA_DIR`, and prints it once. Later starts reuse
-it and print only its path. The server refuses a token file that is a symbolic
-link, belongs to another user, or is readable by others. In Docker, keep the
-token across containers with a volume:
+first start and saves it in `SIE_DATA_DIR`. When stderr is a terminal it prints
+the token once; otherwise, as in a container or under a service manager whose
+output is kept in logs, it prints only the file's path and the command that
+reads it. Later starts reuse the token and print only its path. In containers,
+prefer setting `SIE_AUTH_TOKEN` yourself. The server refuses a token directory
+that another user owns or can write to, and a token file that is a symbolic
+link, not a regular file, hard-linked, owned by another user, or readable by
+others. To rotate a generated token, delete `auth-token` from `SIE_DATA_DIR`
+and restart the server. In Docker, keep the token across containers with a
+volume:
 
 ```bash
 docker run -p 127.0.0.1:8080:8080 -e SIE_AUTH_MODE=token \
@@ -1064,6 +1075,12 @@ docker run -p 127.0.0.1:8080:8080 -e SIE_AUTH_MODE=token \
 A server that listens beyond loopback without authentication logs a warning on
 every start. From 0.13.0 such a server requires a token unless
 `SIE_AUTH_MODE=none` is set explicitly.
+
+A server bound to loopback (`127.0.0.0/8`, `::1` or `localhost`) with
+authentication off answers only requests whose `Host` header names this
+machine: `localhost`, `127.0.0.1`, `[::1]` or the bind address, with any port.
+Any other `Host` gets `400`. This keeps a web page that rebinds its own domain
+to `127.0.0.1` from using the server through the browser.
 
 ### Memory & OOM resilience
 

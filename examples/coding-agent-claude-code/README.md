@@ -88,9 +88,10 @@ export API_TIMEOUT_MS=1800000
 
 - `ANTHROPIC_BASE_URL` is the gateway without `/v1`. Claude Code appends
   `/v1/messages`.
-- `ANTHROPIC_AUTH_TOKEN` arrives as `Authorization: Bearer ...`, which is
-  where SIE reads the key. Claude Code sends `ANTHROPIC_API_KEY` as
-  `x-api-key` instead, which SIE does not read.
+- `ANTHROPIC_AUTH_TOKEN` arrives as `Authorization: Bearer ...`, and
+  Claude Code sends `ANTHROPIC_API_KEY` as `x-api-key`. The gateway reads
+  either one; when a request carries both, it uses `Authorization` and
+  ignores `x-api-key`.
 - The model id is sent byte for byte, slash and colon included. The four
   model variables keep every request, background tasks and subagents
   included, on the SIE model. A request that names a model the gateway does

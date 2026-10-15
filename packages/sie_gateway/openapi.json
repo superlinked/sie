@@ -4506,6 +4506,12 @@
       }
     },
     "securitySchemes": {
+      "apiKeyAuth": {
+        "description": "The same SIE token as bearerAuth, sent in the x-api-key header. When a request sends both, the Authorization header is used and x-api-key is ignored.",
+        "in": "header",
+        "name": "x-api-key",
+        "type": "apiKey"
+      },
       "bearerAuth": {
         "bearerFormat": "opaque",
         "description": "SIE bearer token. Mutating pool/config/admin routes require the configured admin token; other protected routes accept a normal gateway token.",
@@ -9080,6 +9086,9 @@
   "security": [
     {
       "bearerAuth": []
+    },
+    {
+      "apiKeyAuth": []
     }
   ],
   "tags": [

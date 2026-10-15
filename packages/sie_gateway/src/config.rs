@@ -807,9 +807,14 @@ pub fn auth_mode_is_set() -> bool {
 }
 
 /// The startup warning for a gateway that serves other machines without
-/// authentication only because `SIE_AUTH_MODE` is unset.
-pub fn unset_auth_mode_warning(host: &str, auth_mode_set: bool) -> Option<String> {
-    if auth_mode_set || host_is_loopback(host.trim_start_matches('[').trim_end_matches(']')) {
+/// authentication only because `SIE_AUTH_MODE` is unset. A configuration
+/// [`Config::auth_config_error`] refuses serves nobody, so it gets none.
+pub fn unset_auth_mode_warning(config: &Config, auth_mode_set: bool) -> Option<String> {
+    let host = config.host.as_str();
+    if auth_mode_set
+        || config.auth_config_error().is_some()
+        || host_is_loopback(host.trim_start_matches('[').trim_end_matches(']'))
+    {
         return None;
     }
     Some(format!(
@@ -1001,7 +1006,7 @@ impl Config {
         if !is_enabled && has_tokens {
             issues.push((
                 AuditLevel::Error,
-                "SIE_AUTH_TOKEN(S) is set but SIE_AUTH_MODE is not 'static'/'token'. Auth is DISABLED; the tokens are dead configuration. Set SIE_AUTH_MODE=token to enforce auth.".to_string(),
+                "SIE_AUTH_TOKEN(S) is set but SIE_AUTH_MODE is not 'static'/'token', so the gateway refuses every request except the probes and the API description. Set SIE_AUTH_MODE=token to enforce the tokens, or remove them.".to_string(),
             ));
         } else if !is_enabled && has_admin {
             let usage = if admin_is_config_credential {
@@ -2234,9 +2239,8 @@ mod tests {
         let cfg = cfg_with_auth("none", vec!["t1"], "admin", false);
         let issues = cfg.audit_auth();
         assert!(
-            issues
-                .iter()
-                .any(|(lvl, msg)| *lvl == AuditLevel::Error && msg.contains("DISABLED")),
+            issues.iter().any(|(lvl, msg)| *lvl == AuditLevel::Error
+                && msg.contains("refuses every request except the probes")),
             "expected error about tokens + disabled auth, got {:?}",
             issues
         );
@@ -2400,15 +2404,32 @@ mod tests {
         );
     }
 
+    fn cfg_on_host(host: &str, mode: &str, tokens: Vec<&str>) -> Config {
+        let mut cfg = cfg_with_auth(mode, tokens, "", false);
+        cfg.host = host.to_string();
+        cfg
+    }
+
     #[test]
     fn unset_auth_mode_warning_covers_only_an_exposed_unset_mode() {
-        let warning = unset_auth_mode_warning("0.0.0.0", false).unwrap();
+        let warning =
+            unset_auth_mode_warning(&cfg_on_host("0.0.0.0", "none", vec![]), false).unwrap();
         assert!(warning.contains("0.13.0"), "{warning}");
-        assert!(unset_auth_mode_warning("::", false).is_some());
-        assert!(unset_auth_mode_warning("10.0.0.5", false).is_some());
-        assert!(unset_auth_mode_warning("0.0.0.0", true).is_none());
+        assert!(unset_auth_mode_warning(&cfg_on_host("::", "none", vec![]), false).is_some());
+        assert!(unset_auth_mode_warning(&cfg_on_host("10.0.0.5", "none", vec![]), false).is_some());
+        assert!(unset_auth_mode_warning(&cfg_on_host("0.0.0.0", "none", vec![]), true).is_none());
         for host in ["127.0.0.1", "::1", "[::1]", "localhost"] {
-            assert!(unset_auth_mode_warning(host, false).is_none(), "{host}");
+            assert!(
+                unset_auth_mode_warning(&cfg_on_host(host, "none", vec![]), false).is_none(),
+                "{host}"
+            );
         }
+    }
+
+    #[test]
+    fn unset_auth_mode_warning_stays_quiet_when_the_gateway_refuses_every_request() {
+        let refusing = cfg_on_host("0.0.0.0", "none", vec!["t1"]);
+        assert!(refusing.auth_config_error().is_some());
+        assert!(unset_auth_mode_warning(&refusing, false).is_none());
     }
 }

@@ -192,7 +192,7 @@ async fn run_server(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
             crate::config::AuditLevel::Error => tracing::error!(audit = "auth", "{}", msg),
         }
     }
-    if let Some(msg) = config::unset_auth_mode_warning(&config.host, config::auth_mode_is_set()) {
+    if let Some(msg) = config::unset_auth_mode_warning(&config, config::auth_mode_is_set()) {
         tracing::warn!(audit = "auth", "{}", msg);
     }
     let worker_authorization = config::worker_authorization_from_env()?;

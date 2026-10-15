@@ -5,7 +5,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from sie_server.config.upstreams import REMOTE_SERVING_ENV, UPSTREAMS_FILE_ENV, remote_serving_from_env
-from sie_server.core.server_auth import AUTH_MODE_ENV, AuthMode, configured_tokens, requested_mode, resolve_auth_mode
+from sie_server.core.server_auth import (
+    AUTH_MODE_ENV,
+    AuthMode,
+    configured_tokens,
+    declares_tokens,
+    requested_mode,
+    resolve_auth_mode,
+)
 
 # Environment variable names for configuration
 ENV_DEVICE = "SIE_DEVICE"
@@ -18,6 +25,7 @@ ENV_POOL = "SIE_POOL"
 ENV_UPSTREAMS_FILE = UPSTREAMS_FILE_ENV
 ENV_REMOTE_SERVING = REMOTE_SERVING_ENV
 ENV_AUTH_MODE = AUTH_MODE_ENV
+ENV_SERVER_HOST = "SIE_SERVER_HOST"
 
 
 @dataclass
@@ -57,6 +65,9 @@ class AppStateConfig:
 
     auth_mode: AuthMode = "none"
     """Resolved auth mode. ``token`` requires a token on every route except the probes."""
+
+    bind_host: str | None = None
+    """Address the server binds. With auth off on a loopback bind, only loopback Host headers are answered."""
 
     def __post_init__(self) -> None:
         """Keep scalar and concrete device settings in the same device family."""
@@ -129,6 +140,10 @@ class AppStateConfig:
 
         os.environ[ENV_REMOTE_SERVING] = "1" if self.remote_serving else "0"
         os.environ[ENV_AUTH_MODE] = self.auth_mode
+        if self.bind_host:
+            os.environ[ENV_SERVER_HOST] = self.bind_host
+        elif ENV_SERVER_HOST in os.environ:
+            del os.environ[ENV_SERVER_HOST]
 
     @classmethod
     def from_env_vars(cls) -> AppStateConfig:
@@ -154,7 +169,9 @@ class AppStateConfig:
             requested_mode(os.environ),
             has_tokens=bool(configured_tokens(os.environ)),
             exposed=True,
+            declares_tokens=declares_tokens(os.environ),
         )
+        bind_host = os.environ.get(ENV_SERVER_HOST) or None
 
         return cls(
             models_dir=models_dir,
@@ -167,4 +184,5 @@ class AppStateConfig:
             upstreams_file=upstreams_file,
             remote_serving=remote_serving,
             auth_mode=auth_mode,
+            bind_host=bind_host,
         )

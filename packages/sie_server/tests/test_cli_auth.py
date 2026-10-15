@@ -125,6 +125,7 @@ def test_token_mode_generates_and_prints_the_token_once(
     started: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("SIE_AUTH_MODE", "token")
+    monkeypatch.setattr(cli, "_stderr_is_terminal", lambda: True)
 
     first = serve("--port", "9090")
 
@@ -139,6 +140,40 @@ def test_token_mode_generates_and_prints_the_token_once(
     assert second.exit_code == 0, second.output
     assert token not in second.output
     assert str(token_path(tmp_path / "data")) in second.output
+
+
+def test_a_generated_token_is_not_printed_into_logs(
+    started: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("SIE_AUTH_MODE", "token")
+    monkeypatch.setattr(cli, "_stderr_is_terminal", lambda: False)
+
+    result = serve()
+
+    assert result.exit_code == 0, result.output
+    path = token_path(tmp_path / "data")
+    assert path.read_text().strip() not in result.output
+    assert f"export SIE_API_KEY=$(cat {path})" in result.output
+    assert "set SIE_AUTH_TOKEN yourself" in result.output
+
+
+@pytest.mark.parametrize("value", [" ", ",", ""])
+def test_a_blank_token_stops_startup(started: dict[str, Any], monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("SIE_AUTH_TOKEN", value)
+
+    result = serve("--host", "0.0.0.0")  # noqa: S104
+
+    assert result.exit_code == 1
+    assert "holds no token" in result.output
+    assert not started
+
+
+def test_the_bind_address_reaches_the_app(started: dict[str, Any]) -> None:
+    result = serve("--host", "127.0.0.1")
+
+    assert result.exit_code == 0, result.output
+    config: AppStateConfig = started["config"]
+    assert config.bind_host == "127.0.0.1"
 
 
 def test_auto_leaves_a_loopback_server_open(started: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -199,4 +234,17 @@ def test_an_unsafe_token_file_stops_startup(
     assert result.exit_code == 1
     assert "chmod 600" in result.output
     assert TOKEN not in result.output
+    assert not started
+
+
+@pytest.mark.parametrize("value", ["TOKEN", "Token", "None"])
+def test_auth_modes_are_case_sensitive_as_on_the_gateway(
+    started: dict[str, Any], monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("SIE_AUTH_MODE", value)
+
+    result = serve()
+
+    assert result.exit_code == 1
+    assert "lowercase" in result.output
     assert not started

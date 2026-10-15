@@ -2,7 +2,8 @@
 
 One vocabulary with the gateway: ``SIE_AUTH_MODE`` selects the mode,
 ``SIE_AUTH_TOKENS`` (or ``SIE_AUTH_TOKEN``) holds comma-separated tokens, and a
-request presents one in ``Authorization: Bearer`` or ``x-api-key``.
+request presents one in ``Authorization: Bearer`` or ``x-api-key``, with
+``Authorization`` taking precedence when both are sent.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import ipaddress
 import os
 import secrets
 import stat
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +31,7 @@ AUTH_TOKEN_ENV = "SIE_AUTH_TOKEN"  # noqa: S105 - an environment variable name
 TOKEN_FILE_NAME = "auth-token"  # noqa: S105 - a file name
 
 EXEMPT_PATHS = frozenset({"/healthz", "/livez", "/readyz"})
+LOOPBACK_HOST_NAMES = frozenset({"localhost", "127.0.0.1", "[::1]"})
 
 AuthMode = Literal["none", "token"]
 
@@ -37,6 +40,8 @@ _KNOWN_MODES = frozenset({"none", "auto"} | _TOKEN_MODES)
 _MAX_TOKEN_FILE_BYTES = 4096
 _GENERATED_TOKEN_BYTES = 32
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_SETTLE_ATTEMPTS = 40
+_SETTLE_INTERVAL_S = 0.025
 
 
 class AuthConfigError(ValueError):
@@ -64,20 +69,37 @@ def configured_tokens(env: Mapping[str, str]) -> tuple[str, ...]:
 
 
 def requested_mode(env: Mapping[str, str]) -> str | None:
-    """The normalised ``SIE_AUTH_MODE``, or ``None`` when it is unset or empty."""
-    raw = env.get(AUTH_MODE_ENV, "").strip().lower()
+    """``SIE_AUTH_MODE`` without surrounding whitespace, or ``None`` when it is unset or empty.
+
+    Values are case-sensitive, as the gateway reads them.
+    """
+    raw = env.get(AUTH_MODE_ENV, "").strip()
     return raw or None
 
 
-def resolve_auth_mode(requested: str | None, *, has_tokens: bool, exposed: bool) -> AuthMode:
+def declares_tokens(env: Mapping[str, str]) -> bool:
+    """Whether ``SIE_AUTH_TOKENS`` or ``SIE_AUTH_TOKEN`` is present, even with a blank value."""
+    return AUTH_TOKENS_ENV in env or AUTH_TOKEN_ENV in env
+
+
+def resolve_auth_mode(
+    requested: str | None, *, has_tokens: bool, exposed: bool, declares_tokens: bool = False
+) -> AuthMode:
     """Decide whether requests need a token.
 
     A configured token is never dead configuration: it turns auth on unless
     ``SIE_AUTH_MODE=none`` says otherwise, and that combination is refused.
+    A token variable that is present but holds no token is refused too, unless
+    the mode is ``none``, because it reads as an attempt to set a token.
     ``auto`` also turns auth on for a bind that other machines can reach.
     """
     if requested is not None and requested not in _KNOWN_MODES:
-        raise AuthConfigError(f"{AUTH_MODE_ENV} must be one of none, token, static or auto.")
+        raise AuthConfigError(f"{AUTH_MODE_ENV} must be one of none, token, static or auto (lowercase).")
+    if declares_tokens and not has_tokens and requested != "none":
+        raise AuthConfigError(
+            f"{AUTH_TOKENS_ENV} or {AUTH_TOKEN_ENV} is set but holds no token, for example an empty or unset "
+            f"variable passed through. Set it to a token, or remove it."
+        )
     if requested in _TOKEN_MODES:
         return "token"
     if requested == "none":
@@ -105,41 +127,104 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
+def loopback_host_allowlist(bind_host: str) -> frozenset[str]:
+    """Host header values a loopback server answers: the loopback names plus its own bind address."""
+    candidate = bind_host.strip().lower().strip("[]")
+    if not candidate:
+        return LOOPBACK_HOST_NAMES
+    return LOOPBACK_HOST_NAMES | {f"[{candidate}]" if ":" in candidate else candidate}
+
+
+def request_host(headers: Iterable[tuple[bytes, bytes]]) -> str | None:
+    """The request's Host without its port, lowercased; ``None`` when absent or malformed."""
+    for name, value in headers:
+        if name != b"host":
+            continue
+        raw = value.decode("latin-1").strip().lower()
+        if raw.startswith("["):
+            host, bracket, rest = raw.partition("]")
+            host += bracket
+        else:
+            host, _, port = raw.partition(":")
+            rest = f":{port}" if port else ""
+        if not _bracket_ok(host) or (rest and not (rest.startswith(":") and rest[1:].isdigit())):
+            return None
+        return host
+    return None
+
+
+def _bracket_ok(host: str) -> bool:
+    return bool(host) and (not host.startswith("[") or host.endswith("]"))
+
+
 def token_path(directory: Path) -> Path:
     return directory / TOKEN_FILE_NAME
 
 
 def load_or_create_token(directory: Path) -> StoredToken:
-    """Read the persisted token, generating it on first use."""
+    """Read the persisted token, generating it on first use.
+
+    The token appears at its path complete or not at all: it is written to a
+    private temporary file and hard-linked into place, which fails if another
+    process created the token first.
+    """
     path = token_path(directory)
     try:
         ensure_data_dir(directory)
     except OSError as exc:
         raise TokenFileError(f"Cannot create {directory}: {exc.strerror or exc}") from exc
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o600)
-    except FileExistsError:
-        return StoredToken(token=read_stored_token(directory), path=path, created=False)
-    except OSError as exc:
-        raise TokenFileError(f"Cannot create {path}: {exc.strerror or exc}") from exc
+    check_private_directory(directory)
     token = secrets.token_urlsafe(_GENERATED_TOKEN_BYTES)
+    staged = directory / f".{TOKEN_FILE_NAME}.{secrets.token_hex(8)}"
     try:
+        fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o600)
         try:
             os.write(fd, f"{token}\n".encode())
             os.fsync(fd)
         finally:
             os.close(fd)
+        os.link(staged, path)
+    except FileExistsError:
+        _wait_for_settled_token(path)
+        return StoredToken(token=read_stored_token(directory), path=path, created=False)
     except OSError as exc:
-        path.unlink(missing_ok=True)
         raise TokenFileError(f"Cannot write {path}: {exc.strerror or exc}") from exc
+    finally:
+        staged.unlink(missing_ok=True)
     return StoredToken(token=token, path=path, created=True)
+
+
+def _wait_for_settled_token(path: Path) -> None:
+    """Give a concurrent first start time to drop its staging link."""
+    for _ in range(_SETTLE_ATTEMPTS):
+        try:
+            if os.lstat(path).st_nlink == 1:
+                return
+        except OSError:
+            return
+        time.sleep(_SETTLE_INTERVAL_S)
+
+
+def check_private_directory(directory: Path) -> None:
+    """Refuse a token directory that another user owns or can write to."""
+    try:
+        info = directory.stat()
+    except OSError as exc:
+        raise TokenFileError(f"Cannot read {directory}: {exc.strerror or exc}") from exc
+    if not stat.S_ISDIR(info.st_mode):
+        raise TokenFileError(f"{directory} must be a directory.")
+    if info.st_uid != os.getuid():
+        raise TokenFileError(f"{directory} must be owned by the user that runs sie-server.")
+    if stat.S_IMODE(info.st_mode) & 0o022:
+        raise TokenFileError(f"{directory} must not be writable by others (chmod 700 {directory}).")
 
 
 def read_stored_token(directory: Path) -> str:
     """Read the persisted token, refusing a file that others could read or replace."""
+    check_private_directory(directory)
     path = token_path(directory)
     try:
-        fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             raise TokenFileError(f"{path} is a symbolic link; it must be a regular file.") from exc
@@ -148,6 +233,11 @@ def read_stored_token(directory: Path) -> str:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise TokenFileError(f"{path} must be a regular file.")
+        if info.st_nlink != 1:
+            raise TokenFileError(
+                f"{path} must not have other hard links. If a start of sie-server was interrupted, delete "
+                f"{path.parent / ('.' + TOKEN_FILE_NAME)}.* and start again."
+            )
         if info.st_uid != os.getuid():
             raise TokenFileError(f"{path} must be owned by the user that runs sie-server.")
         if stat.S_IMODE(info.st_mode) & 0o077:
@@ -159,7 +249,10 @@ def read_stored_token(directory: Path) -> str:
         raise TokenFileError(f"{path} is too large to be a token.")
     token = raw.decode("ascii", errors="replace").strip()
     if not token or any(not ("!" <= ch <= "~") or ch == "," for ch in token):
-        raise TokenFileError(f"{path} must hold one token: printable ASCII without spaces or commas.")
+        raise TokenFileError(
+            f"{path} must hold one token: printable ASCII without spaces or commas. "
+            f"Delete {path} to have sie-server generate a new token."
+        )
     return token
 
 
@@ -175,24 +268,27 @@ def server_tokens(env: Mapping[str, str]) -> tuple[str, ...]:
 
 
 def request_credentials(headers: Iterable[tuple[bytes, bytes]]) -> set[bytes]:
-    """Every distinct token a request presents in ``Authorization`` or ``x-api-key``.
+    """The distinct tokens a request presents, as the gateway reads them.
 
-    ``Authorization`` accepts ``Bearer <token>`` (any case) or the bare token,
-    as the gateway does. Empty values are ignored.
+    ``Authorization`` (``Bearer <token>`` in any case, or the bare token) takes
+    precedence: when it carries a token, ``x-api-key`` is ignored. Otherwise the
+    ``x-api-key`` values count. Empty values are ignored. More than one distinct
+    token means repeated headers that disagree.
     """
-    presented: set[bytes] = set()
+    authorization: set[bytes] = set()
+    api_key: set[bytes] = set()
     for name, value in headers:
         if name == b"authorization":
             credential = value.strip()
             if credential[:7].lower() == b"bearer ":
                 credential = credential[7:].strip()
+            if credential:
+                authorization.add(credential)
         elif name == b"x-api-key":
             credential = value.strip()
-        else:
-            continue
-        if credential:
-            presented.add(credential)
-    return presented
+            if credential:
+                api_key.add(credential)
+    return authorization or api_key
 
 
 class ServerAuthMiddleware:
@@ -212,16 +308,13 @@ class ServerAuthMiddleware:
         if rejection is None:
             await self.app(scope, receive, send)
             return
-        if scope["type"] == "http":
-            await _send_unauthorized(send, rejection)
-        else:
-            await _reject_websocket(scope, receive, send, rejection)
+        await _reject(scope, receive, send, _unauthorized(rejection))
 
     def _rejection(self, presented: set[bytes]) -> str | None:
         if not presented:
             return "Missing credentials: send Authorization: Bearer <token> or x-api-key: <token>"
         if len(presented) > 1:
-            return "Authorization and x-api-key carry different tokens"
+            return "Repeated credential headers carry different tokens"
         (credential,) = presented
         matches = [hmac.compare_digest(credential, token) for token in self._tokens]
         if any(matches):
@@ -229,41 +322,50 @@ class ServerAuthMiddleware:
         return "Invalid token"
 
 
-def _unauthorized_body(message: str) -> bytes:
-    return orjson.dumps({"detail": {"code": "UNAUTHORIZED", "message": message}})
+class LoopbackHostMiddleware:
+    """Answer only Host headers that name this machine, so a DNS-rebinding page cannot reach the server."""
+
+    def __init__(self, app: ASGIApp, allowed_hosts: Iterable[str]) -> None:
+        self.app = app
+        self._allowed = frozenset(allowed_hosts)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] not in ("http", "websocket") or request_host(scope["headers"]) in self._allowed:
+            await self.app(scope, receive, send)
+            return
+        rejection = _Rejection(
+            400,
+            "INVALID_INPUT",
+            "This server listens on loopback and answers only requests addressed to localhost, 127.0.0.1 or [::1].",
+        )
+        await _reject(scope, receive, send, rejection)
 
 
-_UNAUTHORIZED_HEADERS = [
-    (b"content-type", b"application/json"),
-    (b"www-authenticate", b"Bearer"),
-]
+@dataclass(frozen=True)
+class _Rejection:
+    status: int
+    code: str
+    message: str
 
 
-async def _send_unauthorized(send: Send, message: str) -> None:
-    body = _unauthorized_body(message)
-    await send(
-        {
-            "type": "http.response.start",
-            "status": 401,
-            "headers": [*_UNAUTHORIZED_HEADERS, (b"content-length", str(len(body)).encode())],
-        }
-    )
-    await send({"type": "http.response.body", "body": body})
+def _unauthorized(message: str) -> _Rejection:
+    return _Rejection(401, "UNAUTHORIZED", message)
 
 
-async def _reject_websocket(scope: Scope, receive: Receive, send: Send, message: str) -> None:
+async def _reject(scope: Scope, receive: Receive, send: Send, rejection: _Rejection) -> None:
+    body = orjson.dumps({"detail": {"code": rejection.code, "message": rejection.message}})
+    headers = [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]
+    if rejection.status == 401:
+        headers.append((b"www-authenticate", b"Bearer"))
+    if scope["type"] == "http":
+        await send({"type": "http.response.start", "status": rejection.status, "headers": headers})
+        await send({"type": "http.response.body", "body": body})
+        return
     connect = await receive()
     if connect["type"] != "websocket.connect":
         return
     if "websocket.http.response" in (scope.get("extensions") or {}):
-        body = _unauthorized_body(message)
-        await send(
-            {
-                "type": "websocket.http.response.start",
-                "status": 401,
-                "headers": [*_UNAUTHORIZED_HEADERS, (b"content-length", str(len(body)).encode())],
-            }
-        )
+        await send({"type": "websocket.http.response.start", "status": rejection.status, "headers": headers})
         await send({"type": "websocket.http.response.body", "body": body})
         return
     await send({"type": "websocket.close", "code": 1008})

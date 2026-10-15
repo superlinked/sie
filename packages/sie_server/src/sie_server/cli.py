@@ -71,6 +71,7 @@ from sie_server.core.server_auth import (
     StoredToken,
     TokenFileError,
     configured_tokens,
+    declares_tokens,
     is_loopback_host,
     load_or_create_token,
     requested_mode,
@@ -148,23 +149,32 @@ _SECURE_DEFAULTS_RELEASE = "0.13.0"
 SERVER_HOST_ENV = "SIE_SERVER_HOST"
 
 
+def _stderr_is_terminal() -> bool:
+    return sys.stderr.isatty()
+
+
 def _echo_generated_token(stored: StoredToken, port: int) -> None:
     rule = "=" * 72
-    typer.echo(
-        "\n".join(
-            [
-                rule,
-                f"sie-server generated an API token and saved it to {stored.path}.",
-                "It is shown only this once. Clients send it as 'Authorization: Bearer <token>'",
-                "or 'x-api-key: <token>':",
-                "",
-                f"  export SIE_API_KEY={stored.token}",
-                f'  curl -H "Authorization: Bearer $SIE_API_KEY" http://localhost:{port}/v1/models',
-                rule,
-            ]
-        ),
-        err=True,
-    )
+    if _stderr_is_terminal():
+        lines = [
+            f"sie-server generated an API token and saved it to {stored.path}.",
+            "It is shown only this once. Clients send it as 'Authorization: Bearer <token>'",
+            "or 'x-api-key: <token>':",
+            "",
+            f"  export SIE_API_KEY={stored.token}",
+        ]
+    else:
+        lines = [
+            f"sie-server generated an API token and saved it to {stored.path}.",
+            "It is not printed because this output is not a terminal and may be kept in logs. Read it with:",
+            "",
+            f"  export SIE_API_KEY=$(cat {stored.path})",
+            "",
+            f"In a container, run that through 'docker exec', or set {AUTH_TOKEN_ENV} yourself instead.",
+            "Clients send it as 'Authorization: Bearer <token>' or 'x-api-key: <token>'.",
+        ]
+    lines.append(f'  curl -H "Authorization: Bearer $SIE_API_KEY" http://localhost:{port}/v1/models')
+    typer.echo("\n".join([rule, *lines, rule]), err=True)
 
 
 def _prepare_auth(*, host: str, port: int, host_is_default: bool) -> AuthMode:
@@ -173,7 +183,9 @@ def _prepare_auth(*, host: str, port: int, host_is_default: bool) -> AuthMode:
     requested = requested_mode(os.environ)
     tokens = configured_tokens(os.environ)
     try:
-        mode = resolve_auth_mode(requested, has_tokens=bool(tokens), exposed=exposed)
+        mode = resolve_auth_mode(
+            requested, has_tokens=bool(tokens), exposed=exposed, declares_tokens=declares_tokens(os.environ)
+        )
     except AuthConfigError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None
@@ -817,6 +829,7 @@ def serve(
         upstreams_file=upstreams_file,
         remote_serving=remote_serving,
         auth_mode=auth_mode,
+        bind_host=host,
     )
     if upstreams_file and not remote_serving:
         typer.echo("Remote serving: off. Every remote profile is refused.")

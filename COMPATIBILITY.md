@@ -183,20 +183,23 @@ that will change logs a warning naming 0.13.0.
 
 #### Release N: options and warnings
 
-Every new option keeps today's behaviour by default. The one exception is a
-security fix: `/ws/status` stops sending host identity at once, which changes
-the values of three response fields (see the `ServerInfo` item below). The
-fields keep their names and types, so clients that read them keep working.
+Nothing breaks. Every new option keeps today's behaviour by default. The one
+exception is a security fix: `/ws/status` stops sending host identity at once,
+which changes the values of three response fields (see the `ServerInfo` item
+below). The fields keep their names and types, so clients that read them keep
+working.
 
 - `sie-server serve`:
   - `--host` also reads `SIE_SERVER_HOST`. The default stays `0.0.0.0`.
   - Opt-in token authentication, with the gateway's variables:
     `SIE_AUTH_MODE` (`none`, `token`, `auto`) and `SIE_AUTH_TOKENS` or
     `SIE_AUTH_TOKEN`. A configured token turns it on. Clients send
-    `Authorization: Bearer <token>` or `x-api-key: <token>`. `/healthz`,
+    `Authorization: Bearer <token>` or `x-api-key: <token>`; when a request
+    sends both, `Authorization` is used and `x-api-key` is ignored. `/healthz`,
     `/livez` and `/readyz` stay open.
-  - In token mode without a configured token, the server generates one, saves
-    it with mode `0600` in `SIE_DATA_DIR`, and prints it once.
+  - In token mode without a configured token, the server generates one and
+    saves it with mode `0600` in `SIE_DATA_DIR`. It prints the token once when
+    stderr is a terminal, and otherwise only the file's path.
   - `SIE_DATA_DIR` moves from `/tmp/sie-server` to a per-user directory,
     `$XDG_DATA_HOME/sie` or `~/.local/share/sie`. Images set `/app/.cache/sie`;
     mount a volume there to keep the token across containers.
@@ -211,8 +214,10 @@ fields keep their names and types, so clients that read them keep working.
 - Rust/Candle worker: logs a notice when it binds `0.0.0.0` only because
   `SIE_SERVER_HOST` is unset.
 - Gateway:
-  - Accepts `x-api-key` alongside `Authorization`. A request that sends both
-    must send the same token in each.
+  - Accepts `x-api-key` alongside `Authorization`. When a request sends both,
+    `Authorization` is used and `x-api-key` is ignored, so a request that
+    passes today still passes, including one where a proxy in front of the
+    gateway adds an `x-api-key` of its own.
   - `SIE_WORKER_AUTH_TOKEN` is the token the gateway presents to workers.
   - Logs a warning when `SIE_AUTH_MODE` is unset on a non-loopback bind.
 - Telemetry: `SIE_TELEMETRY_ENABLED=1` opts in explicitly. The default stays on,
