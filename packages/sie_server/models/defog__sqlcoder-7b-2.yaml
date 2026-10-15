@@ -47,6 +47,7 @@ tasks:
       # native completions template (0.467) it loses to Qwen3-4B-Instruct (0.70 —
       # the actual model="sql" target). Flip on only once SQLCoder beats the
       # incumbent on a wired, measured path.
+max_sequence_length: 8192
 profiles:
   default:
     # Generation does not batch at the SIE layer (SGLang batches internally) but

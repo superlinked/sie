@@ -54,6 +54,11 @@ def test_candidate_uses_every_pure_builder_at_one_source_without_publication():
         "packages/sie_audio_prep/build_wheel.py",
         "packages/sie_server_rust/Cargo.lock",
         "deploy/helm/sie-cluster/Chart.yaml",
+        "packages/sie_server/models/Qwen__Qwen3.6-27B.yaml",
+        "packages/sie_server/src/sie_server/adapters/sglang/cuda13.py",
+        "packages/sie_server/src/sie_server/adapters/sglang_vision_extract/adapter.py",
+        "conformance/engine-flags/sglang-0.5.20.txt",
+        "tools/ci/engine_launch_probe.py",
     ):
         assert any(fnmatch.fnmatchcase(path, pattern) for pattern in triggers["pull_request"]["paths"]), path
     assert candidate["permissions"] == {"contents": "read"}

@@ -6,6 +6,9 @@ on:
       - .github/workflows/cuda13-tensorrt-llm.yml
       - .github/workflows/cuda13-bundle-image.yml
       - tools/ci/cuda13_image_smoke.py
+      - tools/ci/engine_launch_contract.py
+      - tools/ci/engine_launch_probe.py
+      - conformance/engine-flags/**
       - Cargo.toml
       - Cargo.lock
       - packages/sie_audio_prep/**

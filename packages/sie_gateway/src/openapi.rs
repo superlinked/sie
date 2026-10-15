@@ -60,6 +60,7 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         crate::handlers::proxy::proxy_chat,
         crate::handlers::proxy::proxy_completions,
         crate::handlers::proxy::proxy_responses,
+        crate::handlers::messages::proxy_messages,
         crate::handlers::proxy::proxy_moderations,
         docs_ui
     ),
@@ -149,6 +150,12 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         ResponsesRequest,
         OpenAIErrorBody,
         OpenAIErrorEnvelope,
+        crate::handlers::messages::schema::MessagesRequest,
+        crate::handlers::messages::schema::EmptyOutputConfig,
+        crate::handlers::messages::schema::MessagesResponse,
+        crate::handlers::messages::schema::MessagesUsage,
+        crate::handlers::messages::schema::AnthropicErrorBody,
+        crate::handlers::messages::schema::AnthropicErrorEnvelope,
         PoolListResponse,
         crate::types::pool::PoolSpec,
         crate::types::pool::PoolStatus,
@@ -1438,6 +1445,7 @@ fn inject_remote_control_header(paths: &mut serde_json::Map<String, Value>) {
         "/v1/chat/completions",
         "/v1/completions",
         "/v1/responses",
+        "/v1/messages",
         "/v1/audio/transcriptions",
     ] {
         let Some(operation) = paths
@@ -1537,7 +1545,12 @@ fn inject_inference_response_headers(paths: &mut serde_json::Map<String, Value>)
         }
     }
 
-    for path in ["/v1/chat/completions", "/v1/completions", "/v1/responses"] {
+    for path in [
+        "/v1/chat/completions",
+        "/v1/completions",
+        "/v1/responses",
+        "/v1/messages",
+    ] {
         let Some(responses) = paths
             .get_mut(path)
             .and_then(|path_item| path_item.get_mut("post"))
@@ -3906,6 +3919,7 @@ mod tests {
             ("/v1/chat/completions", &["post"][..]),
             ("/v1/completions", &["post"][..]),
             ("/v1/responses", &["post"][..]),
+            ("/v1/messages", &["post"][..]),
             ("/v1/moderations", &["post"][..]),
             ("/v1/rerank", &["post"][..]),
             ("/v2/rerank", &["post"][..]),
@@ -4151,6 +4165,7 @@ mod tests {
             "/v1/chat/completions",
             "/v1/completions",
             "/v1/responses",
+            "/v1/messages",
         ] {
             let retryable_503_headers = &spec["paths"][path]["post"]["responses"]["503"]["headers"];
             assert!(
@@ -4189,7 +4204,12 @@ mod tests {
                 "/v1/embeddings 200 missing documented {name} header"
             );
         }
-        for path in ["/v1/chat/completions", "/v1/completions", "/v1/responses"] {
+        for path in [
+            "/v1/chat/completions",
+            "/v1/completions",
+            "/v1/responses",
+            "/v1/messages",
+        ] {
             let headers = &spec["paths"][path]["post"]["responses"]["200"]["headers"];
             for name in [
                 "X-SIE-Request-Id",

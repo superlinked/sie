@@ -6,8 +6,10 @@ stream. This module converts those tagged regions into the worker/gateway
 ``tool_call_delta`` shape while preserving surrounding prose as normal text.
 
 This first implementation emits arguments atomically when the closing tag arrives.
-It is intentionally strict: malformed JSON or missing ``name``/``arguments``
-turns into a terminal ``MODEL_OUTPUT_PARSE_ERROR`` chunk.
+While a block is open, each text delta it absorbs is passed on as an empty
+progress chunk, so a consumer that bounds the gap between chunks sees a call that
+is still being generated. It is intentionally strict: malformed JSON or missing
+``name``/``arguments`` turns into a terminal ``MODEL_OUTPUT_PARSE_ERROR`` chunk.
 
 The XML forms carry every argument value as text. Each value is converted by
 the JSON-schema type its parameter declares in the request's ``tools``: a
@@ -72,11 +74,10 @@ ToolCallFormat = Literal["auto", "qwen_xml", "hermes_json", "glm_xml"]
 # stream as a parse error instead of an OOM.
 _MAX_TOOL_BUFFER_CHARS = 256 * 1024
 _MAX_TEXT_BUFFER_CHARS = 256 * 1024
-# Cap on the deserialised ``arguments`` blob's re-serialised length.
-# Defends against pathological deeply-nested JSON that survives
-# ``json.loads`` (Python's default recursion limit) but takes seconds
-# to ``json.dumps`` back out.
-_MAX_TOOL_ARGUMENTS_CHARS = 64 * 1024
+# A call's serialised ``arguments`` cross the queue as one chunk, and one queue
+# message carries at most 1 MiB by default. JSON escaping at most doubles
+# printable ASCII, so any such block that fits the tool buffer fits this bound.
+_MAX_TOOL_ARGUMENTS_BYTES = 2 * _MAX_TOOL_BUFFER_CHARS
 
 ToolSchemas = Mapping[str, Mapping[str, Any]]
 
@@ -586,6 +587,8 @@ async def _parse_tool_call_stream_impl(
                 yield ev
             if terminal:
                 return
+            if not (emitted or chunk.reasoning_delta or chunk.logprobs or chunk.finish_reason or chunk.done):
+                yield GenerationChunk(text_delta="", choice_index=idx)
         # Forward the chunk's logprobs slice (already tagged with
         # choice_index) as its own chunk so streaming logprobs survive
         # the parser wrap. Tool-call deltas from the model surface via
@@ -826,12 +829,11 @@ def _tool_call_deltas(
         arguments = {}
     try:
         arguments_json = json.dumps(arguments, separators=(",", ":"), ensure_ascii=False)
+        size = len(arguments_json.encode())
     except (TypeError, ValueError) as exc:
         raise ValueError(f"tool-call 'arguments' is not JSON-serialisable: {exc}") from exc
-    if len(arguments_json) > _MAX_TOOL_ARGUMENTS_CHARS:
-        raise ValueError(
-            f"tool-call 'arguments' serialised to {len(arguments_json)} chars, exceeds {_MAX_TOOL_ARGUMENTS_CHARS}"
-        )
+    if size > _MAX_TOOL_ARGUMENTS_BYTES:
+        raise ValueError(f"tool-call 'arguments' serialised to {size} bytes, exceeds {_MAX_TOOL_ARGUMENTS_BYTES}")
     call_id = f"call_{uuid.uuid4().hex[:24]}"
     return [
         ToolCallDelta(index=index, id=call_id, function_name=name, arguments_delta=""),

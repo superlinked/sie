@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::config::Config;
-use crate::handlers::{audio, config_api, health, models, pools, proxy};
+use crate::handlers::{audio, config_api, health, messages, models, pools, proxy};
 use crate::middleware::audit::AuditLayer;
 use crate::middleware::auth::AuthLayer;
 use crate::middleware::metrics::apply_request_telemetry;
@@ -640,6 +640,8 @@ pub fn create_router_core(
         .route("/v1/completions", post(proxy::proxy_completions))
         // OpenAI Responses API (MVP: string input, non-streaming).
         .route("/v1/responses", post(proxy::proxy_responses))
+        // Anthropic Messages API, translated onto chat completions.
+        .route("/v1/messages", post(messages::proxy_messages))
         // OpenAI moderations surface — registered but not implemented (501)
         // until a moderation model + governance store land (Tier 0).
         .route("/v1/moderations", post(proxy::proxy_moderations))
@@ -654,7 +656,12 @@ pub fn create_router_core(
         AuditPlacement::Composition => router,
     };
 
-    router.layer(AuthLayer::new(config)).with_state(state)
+    router
+        .layer(AuthLayer::new(config))
+        .layer(axum::middleware::from_fn(
+            messages::anthropic_error_envelope,
+        ))
+        .with_state(state)
 }
 
 #[cfg(test)]

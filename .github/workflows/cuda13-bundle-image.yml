@@ -35,3 +35,13 @@ jobs:
           load: true
           push: false
       - run: python3 tools/ci/cuda13_image_smoke.py "${{ inputs.bundle }}" "${{ inputs.image-tag }}"
+      - run: >-
+          python3 tools/ci/engine_launch_contract.py "${{ inputs.bundle }}" "${{ inputs.image-tag }}"
+          --report-dir engine-launch
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: engine-launch-${{ inputs.bundle }}
+          path: engine-launch/
+          if-no-files-found: ignore
+          retention-days: 30
