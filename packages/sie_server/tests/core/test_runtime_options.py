@@ -89,15 +89,15 @@ def _lora_config() -> ModelConfig:
 @pytest.mark.parametrize(
     "request_options",
     [
-        {"lora_id": "org/banking-lora"},
-        {"lora": "org/banking-lora"},
-        {"lora": "org/legal-lora"},
-        {"lora": "legal"},
+        {"profile": "banking", "lora_id": "org/banking-lora"},
+        {"profile": "banking", "lora": "org/banking-lora"},
+        {"profile": "served", "lora_id": "org/legal-lora"},
+        {"profile": "served", "lora": "org/legal-lora"},
+        {"profile": "served", "lora": "legal"},
         {"lora": None, "lora_id": None},
-        {"profile": "banking", "lora_id": "org/legal-lora"},
     ],
 )
-def test_a_request_may_select_a_lora_the_model_declares(request_options: dict[str, Any]) -> None:
+def test_a_request_may_select_a_lora_its_profile_declares(request_options: dict[str, Any]) -> None:
     merged, _ = merge_runtime_options_with_profile(_lora_config(), request_options)
 
     for key in ("lora", "lora_id"):
@@ -111,14 +111,17 @@ def test_a_request_may_select_a_lora_the_model_declares(request_options: dict[st
         {"lora_id": "attacker/lora"},
         {"lora": "attacker/lora"},
         {"lora_id": "/srv/any/dir"},
-        {"lora_id": "legal"},
+        {"profile": "served", "lora_id": "legal"},
         {"profile": "banking", "lora_id": "attacker/lora"},
+        {"lora_id": "org/banking-lora"},
+        {"profile": "banking", "lora_id": "org/legal-lora"},
+        {"profile": "served", "lora": "org/banking-lora"},
         {"lora": ""},
         {"lora": 42},
         {"lora_id": ["org/banking-lora"]},
     ],
 )
-def test_a_request_may_not_select_a_lora_the_model_does_not_declare(request_options: dict[str, Any]) -> None:
+def test_a_request_may_not_select_a_lora_its_profile_does_not_declare(request_options: dict[str, Any]) -> None:
     with pytest.raises(runtime_options.UndeclaredLoraError, match="declares"):
         merge_runtime_options_with_profile(_lora_config(), request_options)
 

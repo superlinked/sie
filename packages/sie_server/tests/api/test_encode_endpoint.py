@@ -885,6 +885,8 @@ class TestEncodeLoraRouting:
         registry.model_names = ["test-model"]
         registry.device = "cpu"
         registry.ensure_lora_loaded_async = AsyncMock(return_value=lora_state)
+        registry.lora_load_failed.return_value = False
+        registry.lora_retry_after_s.return_value = 1
 
         preprocessor_registry = MagicMock()
         preprocessor_registry.has_tokenizer.return_value = False
@@ -941,7 +943,7 @@ class TestEncodeLoraRouting:
             "/v1/encode/test-model",
             json={
                 "items": [{"text": "Hello"}],
-                "params": {"options": {"lora_id": "org/test-lora"}},
+                "params": {"options": {"profile": "us-regulatory", "lora_id": "org/test-lora"}},
             },
             headers=JSON_HEADERS,
         )

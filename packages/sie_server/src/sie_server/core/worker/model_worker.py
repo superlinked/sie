@@ -37,6 +37,7 @@ from sie_server.core.timing import RequestTiming
 from sie_server.core.worker.handlers import EncodeHandler, ExtractHandler, OperationHandler, ScoreHandler
 from sie_server.core.worker.oom_recovery import BatchExecutor, RegistryCallbacks
 from sie_server.core.worker.types import (
+    LoraNotReadyError,
     QueueFullError,
     RequestMetadata,
     WorkerConfig,
@@ -701,15 +702,30 @@ class ModelWorker:
         lora: str | None,
         error: Exception,
     ) -> None:
-        """Fail every request of a batch whose LoRA the adapter cannot make active."""
+        """Fail every request of a batch whose LoRA the adapter cannot make active.
+
+        When the registry can load that LoRA, it starts the load and the
+        requests fail with the retryable :class:`LoraNotReadyError`; otherwise
+        they fail with :class:`InvalidInputError`. Neither message names any
+        other adapter.
+        """
         model = self._model_name or "unknown"
         logger.warning("LoRA '%s' cannot be made active on model '%s': %s", lora, model, error)
+        retry_after_s = None
+        if lora is not None and self._registry_callbacks is not None and self._model_name is not None:
+            retry_after_s = self._registry_callbacks.request_lora_load(self._model_name, lora)
         seen: set[int] = set()
         for metadata in batch.metadata:
             if id(metadata) in seen or metadata.future.done():
                 continue
             seen.add(id(metadata))
-            failure = InvalidInputError(f"LoRA '{lora}' is not loaded on model '{model}'")
+            failure: Exception
+            if retry_after_s is not None:
+                failure = LoraNotReadyError(
+                    f"LoRA '{lora}' is loading on model '{model}', please retry", retry_after_s=retry_after_s
+                )
+            else:
+                failure = InvalidInputError(f"LoRA '{lora}' is not available on model '{model}'")
             failure.__cause__ = error
             metadata.future.set_exception(failure)
 
@@ -1219,7 +1235,11 @@ class ModelWorker:
             return futures
 
         async with self._adapter_dispatch_lock:
-            self._adapter.set_active_lora(lora)
+            try:
+                self._adapter.set_active_lora(lora)
+            except Exception as exc:  # noqa: BLE001
+                self._fail_unselectable_batch(synthetic_batch, lora, exc)
+                return futures
             await self._process_batch(synthetic_batch)
 
         return futures

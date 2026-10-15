@@ -11752,8 +11752,9 @@ pub(crate) fn validate_lora_for_profile(
 }
 
 /// The caller's ``options.lora`` or ``options.lora_id`` as ``(param, value)``
-/// when it is set and names no LoRA that a profile of the model ``entry``
-/// returns declares. ``options.lora_id`` names a LoRA to load: a
+/// when it is set and names no LoRA that the selected profile
+/// (``options.profile``, else ``default``) of the model ``entry`` returns
+/// declares. ``options.lora_id`` names a LoRA to load: a
 /// ``loadtime.lora_paths`` source or a ``runtime.lora_id``. ``options.lora``
 /// selects a loaded LoRA, so a ``lora_paths`` served name and a
 /// ``runtime.lora`` also qualify. ``entry`` is called only when the options
@@ -11777,51 +11778,50 @@ pub(crate) fn undeclared_lora_option(
         return None;
     }
     let entry = entry()?;
+    let profile_name = options
+        .get("profile")
+        .and_then(Value::as_str)
+        .unwrap_or("default");
+    let adapter_options = entry
+        .profile_configs
+        .get(profile_name)
+        .and_then(|profile| profile.adapter_options.as_ref());
     requested
         .into_iter()
         .find(|(_, served_names, value)| {
-            !value
-                .as_str()
-                .is_some_and(|name| entry_declares_lora(&entry, name, *served_names))
+            !value.as_str().is_some_and(|name| {
+                adapter_options
+                    .is_some_and(|options| profile_declares_lora(options, name, *served_names))
+            })
         })
         .map(|(param, _, value)| (param, value.clone()))
 }
 
-fn entry_declares_lora(
-    entry: &crate::types::model::ModelEntry,
-    name: &str,
-    served_names: bool,
-) -> bool {
-    entry
-        .profile_configs
-        .values()
-        .filter_map(|profile| profile.adapter_options.as_ref())
-        .any(|adapter_options| {
-            let runtime = adapter_options.get("runtime");
-            let runtime_names = |key: &str| {
-                runtime
-                    .and_then(|runtime| runtime.get(key))
-                    .and_then(Value::as_str)
+fn profile_declares_lora(adapter_options: &Value, name: &str, served_names: bool) -> bool {
+    let runtime = adapter_options.get("runtime");
+    let runtime_names = |key: &str| {
+        runtime
+            .and_then(|runtime| runtime.get(key))
+            .and_then(Value::as_str)
+            == Some(name)
+    };
+    if runtime_names("lora_id") || (served_names && runtime_names("lora")) {
+        return true;
+    }
+    match adapter_options
+        .get("loadtime")
+        .and_then(|loadtime| loadtime.get("lora_paths"))
+    {
+        Some(Value::Object(paths)) => paths.iter().any(|(served, source)| {
+            (served_names && served == name)
+                || source
+                    .as_str()
+                    .or_else(|| source.get("id").and_then(Value::as_str))
                     == Some(name)
-            };
-            if runtime_names("lora_id") || (served_names && runtime_names("lora")) {
-                return true;
-            }
-            match adapter_options
-                .get("loadtime")
-                .and_then(|loadtime| loadtime.get("lora_paths"))
-            {
-                Some(Value::Object(paths)) => paths.iter().any(|(served, source)| {
-                    (served_names && served == name)
-                        || source
-                            .as_str()
-                            .or_else(|| source.get("id").and_then(Value::as_str))
-                            == Some(name)
-                }),
-                Some(Value::Array(paths)) => paths.iter().any(|path| path.as_str() == Some(name)),
-                _ => false,
-            }
-        })
+        }),
+        Some(Value::Array(paths)) => paths.iter().any(|path| path.as_str() == Some(name)),
+        _ => false,
+    }
 }
 
 fn parse_model_spec(spec: &str) -> (String, String) {
@@ -29602,7 +29602,7 @@ profiles:
 ";
 
     #[tokio::test]
-    async fn undeclared_lora_option_accepts_only_what_a_profile_declares() {
+    async fn undeclared_lora_option_accepts_only_what_the_selected_profile_declares() {
         let gateway = TestGateway::new(&[LORA_MODEL]).await;
         let entry = gateway
             .state
@@ -29610,21 +29610,21 @@ profiles:
             .get_model_info("acme/lora")
             .expect("model entry");
 
-        for (name, keys) in [
-            ("org/banking-lora", &["lora", "lora_id"][..]),
-            ("org/legal-lora", &["lora", "lora_id"][..]),
-            ("org/pinned-lora", &["lora", "lora_id"][..]),
-            ("org/listed-lora", &["lora", "lora_id"][..]),
-            ("org/tuned-lora", &["lora"][..]),
-            ("legal", &["lora"][..]),
-            ("pinned", &["lora"][..]),
+        for (profile, name, keys) in [
+            ("banking", "org/banking-lora", &["lora", "lora_id"][..]),
+            ("served", "org/legal-lora", &["lora", "lora_id"][..]),
+            ("served", "org/pinned-lora", &["lora", "lora_id"][..]),
+            ("listed", "org/listed-lora", &["lora", "lora_id"][..]),
+            ("tuned", "org/tuned-lora", &["lora"][..]),
+            ("served", "legal", &["lora"][..]),
+            ("served", "pinned", &["lora"][..]),
         ] {
             for key in keys {
-                let options = json!({ *key: name });
+                let options = json!({ "profile": profile, *key: name });
                 assert_eq!(
                     undeclared_lora_option(Some(&options), || Some(entry.clone())),
                     None,
-                    "{key}={name}"
+                    "{options}"
                 );
             }
         }
@@ -29655,17 +29655,29 @@ profiles:
                 ("options.lora", json!("/srv/any/dir")),
             ),
             (
-                json!({"lora_id": "legal"}),
+                json!({"lora_id": "org/banking-lora"}),
+                ("options.lora_id", json!("org/banking-lora")),
+            ),
+            (
+                json!({"profile": "served", "lora_id": "org/banking-lora"}),
+                ("options.lora_id", json!("org/banking-lora")),
+            ),
+            (
+                json!({"profile": "missing", "lora": "legal"}),
+                ("options.lora", json!("legal")),
+            ),
+            (
+                json!({"profile": "served", "lora_id": "legal"}),
                 ("options.lora_id", json!("legal")),
             ),
             (
-                json!({"lora_id": "org/tuned-lora"}),
+                json!({"profile": "tuned", "lora_id": "org/tuned-lora"}),
                 ("options.lora_id", json!("org/tuned-lora")),
             ),
             (json!({"lora": ""}), ("options.lora", json!(""))),
             (json!({"lora": 42}), ("options.lora", json!(42))),
             (
-                json!({"lora": "legal", "lora_id": "attacker/lora"}),
+                json!({"profile": "served", "lora": "legal", "lora_id": "attacker/lora"}),
                 ("options.lora_id", json!("attacker/lora")),
             ),
         ] {
@@ -29718,7 +29730,22 @@ profiles:
         }
         assert_eq!(gateway.dispatcher.dispatched(), Vec::new());
 
-        for (endpoint, body) in requests(json!({"lora": "legal"})) {
+        let msgpack = Request::builder()
+            .uri("/v1/encode/acme/lora")
+            .header("content-type", "application/msgpack")
+            .body(Body::from(
+                rmp_serde::to_vec_named(&json!({
+                    "items": [{"text": "x"}],
+                    "params": {"options": {"lora_id": "attacker/lora"}}
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let response = proxy_request(State(Arc::clone(&gateway.state)), msgpack, "encode").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "msgpack encode");
+        assert_eq!(gateway.dispatcher.dispatched(), Vec::new());
+
+        for (endpoint, body) in requests(json!({"profile": "served", "lora": "legal"})) {
             let response = proxy_request(
                 State(Arc::clone(&gateway.state)),
                 json_request(&format!("/v1/{endpoint}/acme/lora"), body),

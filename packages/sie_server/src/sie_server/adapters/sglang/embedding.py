@@ -538,8 +538,7 @@ class SGLangEmbeddingAdapter(BaseAdapter):
         # Validate active LoRA if specified
         lora = self._active_lora
         if lora is not None and lora not in self._lora_paths:
-            available = list(self._lora_paths.keys()) if self._lora_paths else []
-            msg = f"LoRA '{lora}' not loaded. Available: {available}"
+            msg = f"LoRA '{lora}' is not loaded"
             raise ValueError(msg)
 
         self._validate_output_types(output_types)
@@ -931,5 +930,11 @@ class SGLangEmbeddingAdapter(BaseAdapter):
 
         Args:
             lora_name: LoRA adapter name, or None for base model.
+
+        Raises:
+            ValueError: ``lora_name`` is not one of the served names the engine launched with.
         """
+        if lora_name is not None and lora_name not in self._lora_paths:
+            msg = f"LoRA '{lora_name}' is not loaded"
+            raise ValueError(msg)
         self._active_lora = lora_name

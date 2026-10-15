@@ -258,16 +258,12 @@ def _runtime_profile_config() -> ModelConfig:
                     "max_batch_tokens": 8192,
                     "adapter_path": "sie_server.adapters.fake.adapter:FakeAdapter",
                     "adapter_options": {
+                        "loadtime": {"lora_paths": ["request-lora"]},
                         "runtime": {
                             "threshold": 0.5,
                             "lora": "profile-lora",
-                        }
+                        },
                     },
-                },
-                "alternate": {
-                    "max_batch_tokens": 8192,
-                    "adapter_path": "sie_server.adapters.fake.adapter:FakeAdapter",
-                    "adapter_options": {"runtime": {"lora": "request-lora"}},
                 },
             },
         }

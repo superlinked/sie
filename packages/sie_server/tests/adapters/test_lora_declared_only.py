@@ -1,12 +1,15 @@
-"""A request selects only the LoRA adapters its model's configuration declares.
+"""A request selects only the LoRA adapters its selected profile declares.
 
-A real SIE app on loopback serves a tiny PEFT-capable model whose forward runs
-a real torch module, so a LoRA's effect, or its absence, shows in the encode
-output. Every LoRA is a real PEFT adapter directory on disk.
+A tiny PEFT-capable model whose forward runs a real torch module serves the
+requests, so a LoRA's effect, or its absence, shows in the encode output.
+Every LoRA is a real PEFT adapter directory on disk. The direct HTTP tests run
+a real SIE app on loopback; the queued and sidecar tests drive a real
+registry, worker and queue executor.
 """
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import time
@@ -21,11 +24,23 @@ import httpx
 import numpy as np
 import pytest
 import torch
+import yaml
 from fastapi import FastAPI
 from peft import LoraConfig, get_peft_model
+from safetensors.torch import load_file, save_file
+from sie_server.adapter_call_loop import handle_run_batch
 from sie_server.app.app_factory import AppFactory
 from sie_server.app.app_state_config import AppStateConfig
 from sie_server.core.registry import ModelRegistry
+from sie_server.ipc_types import (
+    EncodeBatchItem,
+    ExtractBatchItem,
+    ProcessEncodeBatchRequest,
+    ProcessExtractBatchRequest,
+    RunBatchItem,
+    RunBatchRequest,
+)
+from sie_server.queue_executor import QueueExecutor
 
 MODEL = "acme/tiny-lora"
 ADAPTER_SOURCE = """\
@@ -67,11 +82,11 @@ class TinyLoraAdapter(PEFTLoRAMixin, FakeAdapter):
     def load(self, device: str) -> None:
         super().load(device)
         self._model = tiny_encoder()
-        self.lora_load_attempts = []
+        self.lora_fetches = []
 
-    def load_lora(self, lora_path, revision=None):
-        self.lora_load_attempts.append(lora_path)
-        return super().load_lora(lora_path, revision=revision)
+    def fetch_lora(self, lora_path, revision=None):
+        self.lora_fetches.append(lora_path)
+        return super().fetch_lora(lora_path, revision=revision)
 
     def encode(self, items, output_types, *, instruction=None, is_query=False, prepared_items=None, options=None):
         x = torch.stack([features(item.text or "") for item in items])
@@ -81,33 +96,28 @@ class TinyLoraAdapter(PEFTLoRAMixin, FakeAdapter):
 """
 
 
-def _model_yaml(profiles: dict[str, str]) -> str:
-    lines = [
-        f"sie_id: {MODEL}",
-        "package_backed: true",
-        "inputs:",
-        "  text: true",
-        "tasks:",
-        "  encode:",
-        "    dense:",
-        "      dim: 4",
-        "profiles:",
-        "  default:",
-        "    adapter_path: tiny_lora_adapter.py:TinyLoraAdapter",
-        "    max_batch_tokens: 8192",
-        "    adapter_options:",
-        "      loadtime:",
-        "        dense_dim: 4",
-    ]
-    for name, lora in profiles.items():
-        lines += [
-            f"  {name}:",
-            "    extends: default",
-            "    adapter_options:",
-            "      runtime:",
-            f"        lora_id: {lora}",
-        ]
-    return "\n".join(lines) + "\n"
+def _model_yaml(profiles: dict[str, dict[str, Any]]) -> str:
+    config: dict[str, Any] = {
+        "sie_id": MODEL,
+        "package_backed": True,
+        "inputs": {"text": True},
+        "tasks": {"encode": {"dense": {"dim": 4}}, "extract": {}},
+        "profiles": {
+            "default": {
+                "adapter_path": "tiny_lora_adapter.py:TinyLoraAdapter",
+                "max_batch_tokens": 8192,
+                "adapter_options": {"loadtime": {"dense_dim": 4}},
+            }
+        },
+    }
+    for name, spec in profiles.items():
+        adapter_options: dict[str, Any] = {}
+        if "lora_id" in spec:
+            adapter_options["runtime"] = {"lora_id": spec["lora_id"]}
+        if "lora_paths" in spec:
+            adapter_options["loadtime"] = {"dense_dim": 4, "lora_paths": spec["lora_paths"]}
+        config["profiles"][name] = {"extends": "default", "adapter_options": adapter_options}
+    return yaml.safe_dump(config, sort_keys=False)
 
 
 def _save_lora(helpers: ModuleType, path: Path, **config_overrides: Any) -> str:
@@ -162,8 +172,8 @@ class Served:
     def loaded_ids(self) -> set[str]:
         return set(self.app.state.registry._loaded[MODEL].loras)
 
-    def load_attempts(self) -> list[str]:
-        return list(self.app.state.registry.get(MODEL).lora_load_attempts)
+    def fetches(self) -> list[str]:
+        return list(self.app.state.registry.get(MODEL).lora_fetches)
 
 
 @pytest.fixture
@@ -180,24 +190,31 @@ def helpers(tmp_path: Path) -> ModuleType:
 
 
 @pytest.fixture
-def serve(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    serve_on_loopback: Callable[[FastAPI], AbstractContextManager[str]],
-    _offline_apps: None,
-) -> Callable[[dict[str, str]], AbstractContextManager[Served]]:
+def models_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[[dict[str, dict[str, Any]]], Path]:
     async def no_config_watcher(self: ModelRegistry) -> None:
         _ = self
 
     monkeypatch.setattr(ModelRegistry, "start_hot_reload", no_config_watcher)
 
-    @contextmanager
-    def start(profiles: dict[str, str]) -> Iterator[Served]:
+    def write(profiles: dict[str, dict[str, Any]]) -> Path:
         models = tmp_path / "models"
         models.mkdir()
         (models / "tiny_lora_adapter.py").write_text(ADAPTER_SOURCE, encoding="utf-8")
         (models / "tiny-lora.yaml").write_text(_model_yaml(profiles), encoding="utf-8")
-        app = AppFactory.create_app(AppStateConfig(models_dir=str(models), device="cpu"))
+        return models
+
+    return write
+
+
+@pytest.fixture
+def serve(
+    models_dir: Callable[[dict[str, dict[str, Any]]], Path],
+    serve_on_loopback: Callable[[FastAPI], AbstractContextManager[str]],
+    _offline_apps: None,
+) -> Callable[[dict[str, dict[str, Any]]], AbstractContextManager[Served]]:
+    @contextmanager
+    def start(profiles: dict[str, dict[str, Any]]) -> Iterator[Served]:
+        app = AppFactory.create_app(AppStateConfig(models_dir=str(models_dir(profiles)), device="cpu"))
         with serve_on_loopback(app) as url:
             yield Served(url=url, app=app)
 
@@ -218,53 +235,69 @@ class TestDirectEncodeRoute:
         declared = _save_lora(helpers, tmp_path / "declared-lora")
         base = _base_vector(helpers, "hello")
 
-        with serve({"declared": declared}) as server:
+        with serve({"declared": {"lora_id": declared}}) as server:
             assert np.allclose(_dense(_encode_when_ready(server.url, "hello")), base, atol=1e-5)
             by_profile = _dense(_encode_when_ready(server.url, "hello", {"profile": "declared"}))
-            by_option = _dense(_encode_when_ready(server.url, "hello", {"lora_id": declared}))
-            by_selection = _dense(_encode_when_ready(server.url, "hello", {"lora": declared}))
+            by_option = _dense(_encode_when_ready(server.url, "hello", {"profile": "declared", "lora_id": declared}))
+            by_selection = _dense(_encode_when_ready(server.url, "hello", {"profile": "declared", "lora": declared}))
 
         assert not np.allclose(by_profile, base, atol=1e-3)
         assert np.allclose(by_option, by_profile, atol=1e-5)
         assert np.allclose(by_selection, by_profile, atol=1e-5)
 
-    def test_an_undeclared_hub_repo_is_refused_without_a_load(
+    def test_an_undeclared_hub_repo_is_refused_without_a_fetch(
         self, tmp_path: Path, helpers: ModuleType, serve: Any, hub_offline: None
     ) -> None:
         declared = _save_lora(helpers, tmp_path / "declared-lora")
 
-        with serve({"declared": declared}) as server:
+        with serve({"declared": {"lora_id": declared}}) as server:
             _encode_when_ready(server.url, "warm")
-            response = _encode(server.url, "hello", {"lora_id": "attacker-org/some-lora"})
+            response = _encode(server.url, "hello", {"profile": "declared", "lora_id": "attacker-org/some-lora"})
             assert response.status_code == 400, response.text
             assert _error_code(response) == "INVALID_INPUT"
             assert server.loaded_ids() == {declared}
-            assert server.load_attempts() == [declared]
+            assert server.fetches() == [declared]
 
-    def test_an_undeclared_local_directory_is_refused_without_a_load(
+    def test_an_undeclared_local_directory_is_refused_without_a_fetch(
         self, tmp_path: Path, helpers: ModuleType, serve: Any
     ) -> None:
         declared = _save_lora(helpers, tmp_path / "declared-lora")
         undeclared = _save_lora(helpers, tmp_path / "elsewhere" / "undeclared-lora")
 
-        with serve({"declared": declared}) as server:
+        with serve({"declared": {"lora_id": declared}}) as server:
             base = _dense(_encode_when_ready(server.url, "hello"))
             for _ in range(3):
                 response = _encode(server.url, "hello", {"lora_id": undeclared})
                 assert response.status_code == 400, response.text
                 assert _error_code(response) == "INVALID_INPUT"
             assert server.loaded_ids() == {declared}
-            assert server.load_attempts() == [declared]
+            assert server.fetches() == [declared]
             assert np.allclose(_dense(_encode(server.url, "hello")), base, atol=1e-6)
+
+    def test_a_lora_another_profile_declares_is_refused(self, tmp_path: Path, helpers: ModuleType, serve: Any) -> None:
+        banking = _save_lora(helpers, tmp_path / "banking-lora")
+        legal = _save_lora(helpers, tmp_path / "legal-lora")
+
+        with serve({"banking": {"lora_id": banking}, "legal": {"lora_id": legal}}) as server:
+            _encode_when_ready(server.url, "warm")
+            for options in (
+                {"lora_id": banking},
+                {"lora": banking},
+                {"profile": "legal", "lora_id": banking},
+                {"profile": "legal", "lora": banking},
+            ):
+                response = _encode(server.url, "hello", options)
+                assert response.status_code == 400, (options, response.text)
+                assert _error_code(response) == "INVALID_INPUT"
 
     def test_an_undeclared_selection_is_refused_instead_of_hanging(
         self, tmp_path: Path, helpers: ModuleType, serve: Any
     ) -> None:
         declared = _save_lora(helpers, tmp_path / "declared-lora")
 
-        with serve({"declared": declared}) as server:
+        with serve({"declared": {"lora_id": declared}}) as server:
             _encode_when_ready(server.url, "warm")
-            response = _encode(server.url, "hello", {"lora": "attacker/unknown"})
+            response = _encode(server.url, "hello", {"profile": "declared", "lora": "attacker/unknown"})
             assert response.status_code == 400, response.text
             assert _error_code(response) == "INVALID_INPUT"
 
@@ -276,19 +309,183 @@ class TestDirectEncodeRoute:
         mutating = _save_lora(helpers, tmp_path / "mutating-lora", init_lora_weights=initializer)
         base = _base_vector(helpers, "hello")
 
-        with serve({"declared": declared, "mutating": mutating}) as server:
+        with serve({"declared": {"lora_id": declared}, "mutating": {"lora_id": mutating}}) as server:
             assert np.allclose(_dense(_encode_when_ready(server.url, "hello")), base, atol=1e-5)
             assert server.loaded_ids() == {declared}
 
-    def test_selecting_a_declared_lora_that_is_not_loaded_fails_instead_of_hanging(
+    def test_a_declared_lora_whose_weights_reach_the_base_model_is_refused(
+        self, tmp_path: Path, helpers: ModuleType, serve: Any
+    ) -> None:
+        declared = _save_lora(helpers, tmp_path / "declared-lora")
+        overwriting = _save_lora(helpers, tmp_path / "overwriting-lora")
+        weights = Path(overwriting) / "adapter_model.safetensors"
+        tensors = load_file(str(weights))
+        tensors["base_model.model.out.weight"] = torch.zeros(4, 4)
+        tensors["base_model.model.out.bias"] = torch.full((4,), 7.0)
+        save_file(tensors, str(weights))
+        base = _base_vector(helpers, "hello")
+
+        with serve({"declared": {"lora_id": declared}, "overwriting": {"lora_id": overwriting}}) as server:
+            assert np.allclose(_dense(_encode_when_ready(server.url, "hello")), base, atol=1e-5)
+            assert server.loaded_ids() == {declared}
+
+    def test_a_declared_lora_with_bin_weights_is_refused(
+        self, tmp_path: Path, helpers: ModuleType, serve: Any, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        declared = _save_lora(helpers, tmp_path / "declared-lora")
+        pickled = _save_lora(helpers, tmp_path / "pickled-lora")
+        weights = Path(pickled) / "adapter_model.safetensors"
+        torch.save(load_file(str(weights)), Path(pickled) / "adapter_model.bin")
+        weights.unlink()
+
+        with serve({"declared": {"lora_id": declared}, "pickled": {"lora_id": pickled}}) as server:
+            _encode_when_ready(server.url, "warm")
+            assert server.loaded_ids() == {declared}
+
+        assert "ships no adapter_model.safetensors" in caplog.text
+
+    def test_a_failing_declared_lora_backs_off_with_a_retryable_answer(
         self, tmp_path: Path, helpers: ModuleType, serve: Any
     ) -> None:
         declared = _save_lora(helpers, tmp_path / "declared-lora")
         missing = str(tmp_path / "missing-lora")
 
-        with serve({"declared": declared, "missing": missing}) as server:
+        with serve({"declared": {"lora_id": declared}, "missing": {"lora_id": missing}}) as server:
             _encode_when_ready(server.url, "warm")
-            response = _encode(server.url, "hello", {"lora": missing})
-            assert response.status_code == 400, response.text
-            assert _error_code(response) == "INVALID_INPUT"
-            assert _encode(server.url, "hello", {"lora": declared}).status_code == 200
+            first = _encode(server.url, "hello", {"profile": "missing"})
+            assert first.status_code == 503, first.text
+            assert _error_code(first) == "LORA_LOADING"
+            deadline = time.monotonic() + 10
+            while not server.app.state.registry.lora_load_failed(MODEL, missing):
+                assert time.monotonic() < deadline, "the failing load was not recorded"
+                time.sleep(0.05)
+            fetches = server.fetches().count(missing)
+            for _ in range(5):
+                response = _encode(server.url, "hello", {"profile": "missing"})
+                assert response.status_code == 503, response.text
+                assert _error_code(response) == "LORA_LOADING"
+                assert int(response.headers["Retry-After"]) > 1
+            assert server.fetches().count(missing) == fetches
+
+    def test_selecting_a_declared_lora_that_is_not_loaded_is_retryable_instead_of_hanging(
+        self, tmp_path: Path, helpers: ModuleType, serve: Any
+    ) -> None:
+        declared = _save_lora(helpers, tmp_path / "declared-lora")
+        missing = str(tmp_path / "missing-lora")
+
+        with serve({"declared": {"lora_id": declared}, "missing": {"lora_paths": [missing]}}) as server:
+            _encode_when_ready(server.url, "warm")
+            response = _encode(server.url, "hello", {"profile": "missing", "lora": missing})
+            assert response.status_code == 503, response.text
+            assert _error_code(response) == "LORA_LOADING"
+            assert "Retry-After" in response.headers
+            assert declared not in response.text
+            assert _encode(server.url, "hello", {"profile": "declared", "lora": declared}).status_code == 200
+
+    def test_selecting_a_declared_lora_when_none_is_loaded_does_not_serve_the_base_model(
+        self, tmp_path: Path, helpers: ModuleType, serve: Any
+    ) -> None:
+        missing = str(tmp_path / "missing-lora")
+
+        with serve({"missing": {"lora_paths": [missing]}}) as server:
+            _encode_when_ready(server.url, "warm")
+            response = _encode(server.url, "hello", {"profile": "missing", "lora": missing})
+            assert response.status_code == 503, response.text
+            assert _error_code(response) == "LORA_LOADING"
+
+
+class TestQueuedAndSidecarPaths:
+    """The worker's pre-formed batch path, reached through the queue executor and the sidecar's RunBatch."""
+
+    @staticmethod
+    async def _executor(models: Path) -> QueueExecutor:
+        executor = QueueExecutor(ModelRegistry(models_dir=str(models), device="cpu"))
+        deadline = time.monotonic() + 30
+        while (state := await executor.ensure_model_ready(MODEL)) != "ready":
+            assert state in {"loading_started", "loading_in_progress"}, state
+            assert time.monotonic() < deadline, "the model did not load"
+            await asyncio.sleep(0.05)
+        return executor
+
+    @staticmethod
+    def _encode_item(options: dict[str, Any]) -> EncodeBatchItem:
+        return EncodeBatchItem(
+            work_item_id="req-1.0",
+            request_id="req-1",
+            item_index=0,
+            total_items=1,
+            timestamp=time.time(),
+            item={"text": "hello"},
+            output_types=["dense"],
+            options=options,
+        )
+
+    @staticmethod
+    def _extract_item(options: dict[str, Any]) -> ExtractBatchItem:
+        return ExtractBatchItem(
+            work_item_id="req-2.0",
+            request_id="req-2",
+            item_index=0,
+            total_items=1,
+            timestamp=time.time(),
+            item={"text": "hello"},
+            labels=["thing"],
+            options=options,
+        )
+
+    async def test_a_served_name_the_adapter_cannot_select_fails_without_naming_loaded_adapters(
+        self, tmp_path: Path, helpers: ModuleType, models_dir: Callable[[dict[str, dict[str, Any]]], Path]
+    ) -> None:
+        declared = _save_lora(helpers, tmp_path / "private-lora")
+        executor = await self._executor(models_dir({"served": {"lora_paths": {"legal": declared}}}))
+        options = {"profile": "served", "lora": "legal"}
+
+        queued = await executor.process_encode_batch(
+            ProcessEncodeBatchRequest(model_id=MODEL, items=[self._encode_item(options)])
+        )
+        extracted = await executor.process_extract_batch(
+            ProcessExtractBatchRequest(model_id=MODEL, items=[self._extract_item(options)])
+        )
+        sidecar = await handle_run_batch(
+            executor,
+            RunBatchRequest(
+                model_id=MODEL,
+                batch_id=1,
+                lora_key="legal",
+                total_cost=1,
+                items=[RunBatchItem(op="encode", encode=self._encode_item(options))],
+            ),
+        )
+
+        for outcome in (*queued.outcomes, *extracted.outcomes, *sidecar.outcomes):
+            assert outcome.disposition == "publish_error_and_ack"
+            assert outcome.error_code == "INVALID_INPUT", outcome.error
+            assert outcome.error is not None
+            assert "private-lora" not in outcome.error
+
+    async def test_a_declared_lora_that_is_not_loaded_is_retryable(
+        self, tmp_path: Path, helpers: ModuleType, models_dir: Callable[[dict[str, dict[str, Any]]], Path]
+    ) -> None:
+        declared = _save_lora(helpers, tmp_path / "declared-lora")
+        missing = str(tmp_path / "missing-lora")
+        executor = await self._executor(
+            models_dir({"declared": {"lora_paths": [declared]}, "missing": {"lora_paths": [missing]}})
+        )
+
+        outcome = await handle_run_batch(
+            executor,
+            RunBatchRequest(
+                model_id=MODEL,
+                batch_id=1,
+                lora_key=missing,
+                total_cost=1,
+                items=[RunBatchItem(op="encode", encode=self._encode_item({"profile": "missing", "lora": missing}))],
+            ),
+        )
+
+        (item,) = outcome.outcomes
+        assert item.disposition == "publish_error_and_ack"
+        assert item.error_code == "LORA_LOADING", item.error
+        assert item.retry_after_s is not None
+        assert item.error is not None
+        assert declared not in item.error

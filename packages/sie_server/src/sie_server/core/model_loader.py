@@ -84,6 +84,14 @@ class LoadedLora:
 
 
 @dataclass
+class LoraLoadFailure:
+    """A declared LoRA whose last load failed, held back until ``retry_at`` (``time.monotonic``)."""
+
+    attempts: int
+    retry_at: float
+
+
+@dataclass
 class LoadedModel:
     """Container for a loaded model's state."""
 
@@ -96,6 +104,7 @@ class LoadedModel:
     # LoRA management - OrderedDict maintains LRU order (oldest first)
     loras: OrderedDict[str, LoadedLora] = field(default_factory=OrderedDict)
     max_loras: int = DEFAULT_MAX_LORAS
+    lora_failures: dict[str, LoraLoadFailure] = field(default_factory=dict)
 
     # Lock for concurrent LoRA loading (created on first use)
     _lora_lock: asyncio.Lock | None = field(default=None, init=False, repr=False)

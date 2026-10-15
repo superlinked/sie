@@ -591,7 +591,26 @@ class ModelAdapter(ABC):
         """
         return False
 
-    def load_lora(self, lora_path: str, revision: str | None = None) -> int:
+    def fetch_lora(self, lora_path: str, revision: str | None = None) -> str:
+        """Bring a LoRA adapter's files to one local directory, outside inference.
+
+        Hot-reload adapters (PEFT) download and validate here, so that
+        :meth:`load_lora` only attaches from local files.
+
+        Args:
+            lora_path: HuggingFace path (e.g., "org/lora-name") or local path.
+            revision: Pinned 40-hex commit SHA, or ``None`` for the default branch.
+
+        Returns:
+            The local directory to pass to :meth:`load_lora` as ``source``.
+
+        Raises:
+            NotImplementedError: If adapter doesn't support LoRA.
+        """
+        msg = f"{self.__class__.__name__} does not support LoRA (supports_lora=False)"
+        raise NotImplementedError(msg)
+
+    def load_lora(self, lora_path: str, revision: str | None = None, *, source: str | None = None) -> int:
         """Load a LoRA adapter.
 
         This is called by the LoRA manager to load a new adapter. The adapter
@@ -605,6 +624,7 @@ class ModelAdapter(ABC):
             revision: Pinned 40-hex commit SHA from the config's
                 ``loadtime.lora_paths`` dict form (#2113); ``None`` resolves
                 the Hub's default branch, as before.
+            source: Local directory from :meth:`fetch_lora`; ``None`` fetches first.
 
         Returns:
             Memory usage of the loaded LoRA in bytes.

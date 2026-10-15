@@ -25,9 +25,16 @@ class LoraCapability(Protocol):
         if the load blocks all requests (SGLang HTTP).
         """
 
-    def load_lora(self, lora_path: str, revision: str | None = None) -> int:
-        """Load a LoRA adapter (optionally at a pinned 40-hex commit SHA);
-        return its memory usage in bytes.
+    def fetch_lora(self, lora_path: str, revision: str | None = None) -> str:
+        """Bring a LoRA adapter's files to one local directory and return it.
+
+        Hot-reload adapters do their network and disk I/O here, outside inference.
+        """
+
+    def load_lora(self, lora_path: str, revision: str | None = None, *, source: str | None = None) -> int:
+        """Load a LoRA adapter (optionally at a pinned 40-hex commit SHA), from
+        ``source`` when :meth:`fetch_lora` already brought it local; return its
+        memory usage in bytes.
         """
 
     def unload_lora(self, lora_name: str) -> None:

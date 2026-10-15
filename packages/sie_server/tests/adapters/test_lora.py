@@ -28,6 +28,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from peft import LoraConfig, PeftModel, get_peft_model
+from sie_server.adapters import peft_lora_mixin
 from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
 from sie_server.adapters.bert_flash import BertFlashAdapter
 from sie_server.adapters.nomic_flash import NomicFlashAdapter
@@ -205,6 +206,10 @@ class MockAdapterWithLoRA(PEFTLoRAMixin, ModelAdapter):
     def unload(self) -> None:
         self._model = None
 
+    def fetch_lora(self, lora_path: str, revision: str | None = None) -> str:
+        _ = revision
+        return lora_path
+
 
 def _bias_free_peft() -> MagicMock:
     peft = MagicMock()
@@ -255,7 +260,6 @@ class TestPEFTLoRAMixin:
                     base_model,
                     "org/my-lora",
                     adapter_name=peft_adapter_name,
-                    revision=None,
                 )
                 assert peft_adapter_name.startswith("sie_lora_")
                 assert "/" not in peft_adapter_name
@@ -284,9 +288,7 @@ class TestPEFTLoRAMixin:
                 adapter.load_lora("org/lora2")
 
                 second_adapter_name = adapter._lora_adapter_names["org/lora2"]
-                mock_peft_model.load_adapter.assert_called_once_with(
-                    "org/lora2", adapter_name=second_adapter_name, revision=None
-                )
+                mock_peft_model.load_adapter.assert_called_once_with("org/lora2", adapter_name=second_adapter_name)
                 assert "org/lora1" in adapter._loaded_loras
                 assert "org/lora2" in adapter._loaded_loras
                 assert adapter._lora_adapter_names["org/lora1"] != second_adapter_name
@@ -335,13 +337,15 @@ class TestPEFTLoRAMixin:
         result = adapter.load_lora("org/my-lora")
         assert result == 0
 
-    def test_set_active_lora_when_no_peft_model(self) -> None:
-        """Test set_active_lora with no PeftModel is a no-op."""
+    def test_selecting_a_lora_when_none_is_loaded_raises(self) -> None:
         adapter = MockAdapterWithLoRA()
         adapter._peft_model = None
 
-        # Should not raise
-        adapter.set_active_lora("org/my-lora")
+        with pytest.raises(ValueError, match="LoRA 'org/my-lora' is not loaded"):
+            adapter.set_active_lora("org/my-lora")
+
+        adapter.set_active_lora(None)
+        assert adapter._active_lora is None
 
     def test_set_active_lora_to_none_disables_adapters(self) -> None:
         """Test set_active_lora(None) disables adapter layers."""
@@ -372,13 +376,15 @@ class TestPEFTLoRAMixin:
         assert adapter._active_lora == "org/my-lora"
 
     def test_set_active_lora_not_loaded_raises(self) -> None:
-        """Test set_active_lora raises for unloaded LoRA."""
+        """Test set_active_lora raises for unloaded LoRA, naming no loaded one."""
         adapter = MockAdapterWithLoRA()
         adapter._peft_model = MagicMock()
-        adapter._loaded_loras = set()
+        adapter._loaded_loras = {"/srv/loras/private-lora"}
 
-        with pytest.raises(ValueError, match="not loaded"):
+        with pytest.raises(ValueError, match="not loaded") as raised:
             adapter.set_active_lora("org/unknown")
+
+        assert "private-lora" not in str(raised.value)
 
     def test_unload_lora_not_loaded_raises(self) -> None:
         """Test unload_lora raises for unloaded LoRA."""
@@ -777,7 +783,7 @@ class TestMixinTargetModulesValidation:
 
             adapter.load_lora("org/matching-lora")
 
-            peft.PeftConfig.from_pretrained.assert_called_once_with("org/matching-lora", revision=None)
+            peft.PeftConfig.from_pretrained.assert_called_once_with("org/matching-lora")
             peft.PeftModel.from_pretrained.assert_called_once()
             assert "org/matching-lora" in adapter._loaded_loras
 
@@ -805,7 +811,7 @@ class TestMixinTargetModulesValidation:
 
             adapter.load_lora("org/any-lora")
 
-            peft.PeftConfig.from_pretrained.assert_called_once_with("org/any-lora", revision=None)
+            peft.PeftConfig.from_pretrained.assert_called_once_with("org/any-lora")
             peft.PeftModel.from_pretrained.assert_called_once()
             assert "org/any-lora" in adapter._loaded_loras
 
@@ -841,7 +847,7 @@ class TestMixinBiasRefusal:
             with pytest.raises(ValueError, match=f"bias={bias!r}"):
                 adapter.load_lora("org/bias-lora", revision=revision)
 
-            peft.PeftConfig.from_pretrained.assert_called_once_with("org/bias-lora", revision=revision)
+            peft.PeftConfig.from_pretrained.assert_called_once_with("org/bias-lora")
             peft.PeftModel.from_pretrained.assert_not_called()
             assert adapter._peft_model is None
             assert adapter._model is base_model
@@ -923,7 +929,9 @@ def _tiny_config(lora_paths: list[str] | None = None) -> ModelConfig:
 
 
 class TinyLoRAAdapter(MockAdapterWithLoRA):
-    """PEFT mixin adapter over a real two-layer torch model."""
+    """PEFT mixin adapter over a real two-layer torch model, fetching LoRAs for real."""
+
+    fetch_lora = PEFTLoRAMixin.fetch_lora
 
     def load(self, device: str) -> None:
         self._device = device
@@ -1205,11 +1213,11 @@ class _GatedTinyLoRAAdapter(TinyLoRAAdapter):
         super().__init__()
         self.gates = gates
 
-    def load_lora(self, lora_path: str, revision: str | None = None) -> int:
+    def load_lora(self, lora_path: str, revision: str | None = None, *, source: str | None = None) -> int:
         gate = self.gates.get(lora_path)
         if gate is not None:
             assert gate.wait(10)
-        return super().load_lora(lora_path, revision=revision)
+        return super().load_lora(lora_path, revision=revision, source=source)
 
 
 class TestRegistryLoraLifecycle:
@@ -1319,3 +1327,143 @@ class _BlockingForwardAdapter(TinyLoRAAdapter):
         with torch.no_grad():
             dense = self._model(_probe()[: len(items)]).numpy()
         return EncodeOutput(dense=dense, batch_size=len(items), dense_dim=2)
+
+
+class _GatedFetchAdapter(_BlockingForwardAdapter):
+    """Each fetch waits for its gate, or fails when the LoRA is listed as failing; fetches are counted."""
+
+    def __init__(self, fetch_gates: dict[str, threading.Event], failing: set[str] | None = None) -> None:
+        super().__init__(threading.Event(), threading.Event())
+        self._release_forward.set()
+        self.fetch_gates = fetch_gates
+        self.failing = failing or set()
+        self.fetches: list[str] = []
+
+    def fetch_lora(self, lora_path: str, revision: str | None = None) -> str:
+        self.fetches.append(lora_path)
+        gate = self.fetch_gates.get(lora_path)
+        if gate is not None:
+            assert gate.wait(10)
+        if lora_path in self.failing:
+            msg = f"LoRA '{lora_path}' could not be fetched"
+            raise OSError(msg)
+        return PEFTLoRAMixin.fetch_lora(self, lora_path, revision)
+
+
+class TestLoraFetchOutsideInference:
+    async def test_a_base_batch_completes_while_a_lora_fetch_is_blocked(self, tmp_path: Path) -> None:
+        lora = _save_plain_lora(tmp_path / "slow")
+        gate = threading.Event()
+        adapter = _GatedFetchAdapter({lora: gate})
+        adapter.load("cpu")
+        worker = ModelWorker(adapter, WorkerConfig(max_batch_wait_ms=1))
+        registry, _ = _registry_serving(adapter, _tiny_config([lora]), worker=worker)
+        await worker.start()
+        try:
+            assert await registry.ensure_lora_loaded_async("t/tiny", lora) == (False, True)
+            assert await asyncio.to_thread(_wait_until, lambda: adapter.fetches == [lora])
+
+            base = await worker.submit([make_text_item([1], 0)], [Item(text="x")], ["dense"])
+            result = await asyncio.wait_for(base, 5)
+
+            gate.set()
+            await asyncio.gather(*registry._background_tasks)
+        finally:
+            gate.set()
+            await worker.stop()
+
+        assert result.output.dense is not None
+        assert adapter._loaded_loras == {lora}
+
+    async def test_a_failing_lora_is_not_fetched_again_inside_its_backoff(self, tmp_path: Path) -> None:
+        lora = _save_plain_lora(tmp_path / "failing")
+        adapter = _GatedFetchAdapter({}, failing={lora})
+        adapter.load("cpu")
+        registry, loaded = _registry_serving(adapter, _tiny_config([lora]))
+
+        assert await registry.ensure_lora_loaded_async("t/tiny", lora) == (False, True)
+        await asyncio.gather(*registry._background_tasks)
+        assert registry.lora_load_failed("t/tiny", lora)
+        first_wait = registry.lora_retry_after_s("t/tiny", lora)
+
+        for _ in range(5):
+            assert await registry.ensure_lora_loaded_async("t/tiny", lora) == (False, True)
+        assert not registry._background_tasks
+        assert adapter.fetches == [lora]
+        assert 1 < first_wait <= 5
+
+        loaded.lora_failures[lora].retry_at = time.monotonic() - 1
+        assert await registry.ensure_lora_loaded_async("t/tiny", lora) == (False, True)
+        await asyncio.gather(*registry._background_tasks)
+
+        assert adapter.fetches == [lora, lora]
+        assert loaded.lora_failures[lora].attempts == 2
+        assert registry.lora_retry_after_s("t/tiny", lora) > 5
+
+        adapter.failing.clear()
+        loaded.lora_failures[lora].retry_at = time.monotonic() - 1
+        assert await registry.ensure_lora_loaded_async("t/tiny", lora) == (False, True)
+        await asyncio.gather(*registry._background_tasks)
+
+        assert await registry.ensure_lora_loaded_async("t/tiny", lora) == (True, False)
+        assert lora not in loaded.lora_failures
+
+    async def test_a_hub_lora_is_fetched_once_at_its_revision_and_loaded_from_that_snapshot(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        snapshot = _save_plain_lora(tmp_path / "snapshot")
+        calls: list[tuple[str, dict[str, Any]]] = []
+
+        def snapshot_download(repo_id: str, **kwargs: Any) -> str:
+            calls.append((repo_id, kwargs))
+            return snapshot
+
+        monkeypatch.setattr(peft_lora_mixin, "snapshot_download", snapshot_download)
+        adapter = TinyLoRAAdapter()
+        adapter.load("cpu")
+        expected = adapter._model(_probe()).detach().clone()
+        revision = "c" * 40
+
+        adapter.load_lora("org/hub-lora", revision=revision)
+        adapter.set_active_lora("org/hub-lora")
+
+        assert calls == [
+            (
+                "org/hub-lora",
+                {"revision": revision, "allow_patterns": ["adapter_config.json", "adapter_model.safetensors"]},
+            )
+        ]
+        assert not torch.allclose(adapter._model(_probe()), expected)
+
+
+class TestLoraWeightKeys:
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "base_model.model.query.lora_A.weight",
+            "base_model.model.query.lora_B.weight",
+            "base_model.model.query.lora_B.bias",
+            "base_model.model.query.lora_magnitude_vector",
+            "base_model.model.emb.lora_embedding_A",
+            "base_model.model.emb.lora_embedding_B",
+        ],
+    )
+    def test_a_lora_parameter_is_accepted(self, key: str) -> None:
+        assert peft_lora_mixin.is_lora_weight_key(key)
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "base_model.model.out.weight",
+            "base_model.model.out.bias",
+            "base_model.model.query.lora_A.bias",
+            "base_model.model.query.lora_A",
+            "base_model.model.lora_A.out.weight",
+            "base_model.model.out.weight.lora_A",
+            "base_model.model.query.lora_A.lora_B.weight",
+            "base_model.model.query.modules_to_save.weight",
+            "lora_A",
+        ],
+    )
+    def test_any_other_tensor_is_refused(self, key: str) -> None:
+        assert not peft_lora_mixin.is_lora_weight_key(key)

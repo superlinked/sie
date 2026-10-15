@@ -769,6 +769,8 @@ class TestOpenAIEmbeddingsProfileResolution:
             },
         )
         mock_registry.ensure_lora_loaded_async = AsyncMock(return_value=(False, True))
+        mock_registry.lora_load_failed.return_value = False
+        mock_registry.lora_retry_after_s.return_value = 1
 
         response = client.post("/v1/embeddings", json={"model": "text-embedding-3-small", "input": "hello"})
 

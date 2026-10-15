@@ -18,7 +18,11 @@ import gc
 import hashlib
 import logging
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
+
+from huggingface_hub import snapshot_download
+from safetensors import safe_open
 
 if TYPE_CHECKING:
     from collections.abc import Collection
@@ -31,6 +35,23 @@ logger = logging.getLogger(__name__)
 # adapter's own weights (peft 0.19 ``LoraLayer.update_layer``). PiSSA, CorDA,
 # OLoRA, LoftQ and LoRA-GA instead rewrite the base layer's weights.
 _BASE_PRESERVING_INITIALIZERS = ("gaussian", "eva", "orthogonal")
+
+_ADAPTER_CONFIG_FILE = "adapter_config.json"
+_ADAPTER_WEIGHTS_FILE = "adapter_model.safetensors"
+
+# The tensor names PEFT saves for a LoRA's own parameters. PEFT loads any
+# other name in an adapter's weights file into the model it wraps, so such a
+# name would overwrite the base model.
+_ADAPTER_WEIGHT_SUFFIXES = frozenset({("lora_A", "weight"), ("lora_B", "weight"), ("lora_B", "bias")})
+_ADAPTER_WEIGHT_PARAMETERS = frozenset({"lora_embedding_A", "lora_embedding_B", "lora_magnitude_vector"})
+
+
+def is_lora_weight_key(key: str) -> bool:
+    """True when ``key`` names a LoRA's own parameter in a PEFT adapter weights file."""
+    parts = key.split(".")
+    if len(parts) < 2 or key.count("lora_") != 1:
+        return False
+    return tuple(parts[-2:]) in _ADAPTER_WEIGHT_SUFFIXES or parts[-1] in _ADAPTER_WEIGHT_PARAMETERS
 
 
 def validate_lora_target_modules(
@@ -180,7 +201,59 @@ class PEFTLoRAMixin:
         """
         return True
 
-    def load_lora(self, lora_path: str, revision: str | None = None) -> int:
+    def fetch_lora(self, lora_path: str, revision: str | None = None) -> str:
+        """Resolve a LoRA to one local directory, and refuse it there unless it is safe to attach.
+
+        A Hub id is downloaded once, at one commit, with only its
+        ``adapter_config.json`` and ``adapter_model.safetensors``; a local
+        directory is used as it is. :meth:`load_lora` then reads both files
+        from the returned directory. Network and disk I/O happen here, so a
+        caller can run this outside inference.
+
+        Args:
+            lora_path: Hugging Face repo id or local directory.
+            revision: Pinned 40-hex commit SHA (#2113); ``None`` resolves the
+                default branch.
+
+        Returns:
+            The local directory that holds the adapter.
+
+        Raises:
+            ValueError: :meth:`_check_lora_config` refuses the adapter config,
+                the adapter ships no ``adapter_model.safetensors``, or its
+                weights file has a tensor that is not a LoRA parameter.
+        """
+        directory = Path(lora_path)
+        if not directory.is_dir():
+            directory = Path(
+                snapshot_download(
+                    lora_path,
+                    revision=revision,
+                    allow_patterns=[_ADAPTER_CONFIG_FILE, _ADAPTER_WEIGHTS_FILE],
+                )
+            )
+        try:
+            from peft import PeftConfig
+        except ImportError as e:
+            msg = "PEFT is required for LoRA support. Install with: pip install peft"
+            raise RuntimeError(msg) from e
+        self._check_lora_config(lora_path, PeftConfig.from_pretrained(str(directory)))
+        weights = directory / _ADAPTER_WEIGHTS_FILE
+        if not weights.is_file():
+            msg = f"LoRA '{lora_path}' ships no {_ADAPTER_WEIGHTS_FILE}; adapter weights in other formats are refused."
+            raise ValueError(msg)
+        with safe_open(str(weights), framework="pt") as handle:
+            names = handle.keys()
+        foreign = sorted(name for name in names if not is_lora_weight_key(name))
+        if foreign:
+            msg = (
+                f"LoRA '{lora_path}' has {len(foreign)} tensor(s) that are not LoRA parameters, such as "
+                f"{foreign[0]!r}; loading them would overwrite the base model every request shares."
+            )
+            raise ValueError(msg)
+        return str(directory)
+
+    def load_lora(self, lora_path: str, revision: str | None = None, *, source: str | None = None) -> int:
         """Load a LoRA adapter using PEFT.
 
         On first call, wraps the base model with PeftModel.
@@ -189,17 +262,19 @@ class PEFTLoRAMixin:
         Args:
             lora_path: HuggingFace path (e.g., "org/lora-name") or local path.
                 This path is the public LoRA id used for switching.
-            revision: Pinned 40-hex commit SHA (#2113) forwarded to PEFT's Hub
-                fetches; ``None`` resolves the default branch, as before. The
-                public LoRA id stays the bare ``lora_path``.
+            revision: Pinned 40-hex commit SHA (#2113) for the fetch when
+                ``source`` is ``None``; ``None`` resolves the default branch.
+                The public LoRA id stays the bare ``lora_path``.
+            source: The local directory :meth:`fetch_lora` returned for this
+                LoRA. ``None`` fetches it first.
 
         Returns:
             Memory usage of the loaded LoRA in bytes.
 
         Raises:
             RuntimeError: If model not loaded or PEFT import fails.
-            ValueError: If the LoRA trains biases, or targets none of the
-                modules the serving forward calls.
+            ValueError: If :meth:`fetch_lora` or :meth:`_check_lora_config`
+                refuses the LoRA.
         """
         self._ensure_lora_tracking()
 
@@ -222,7 +297,9 @@ class PEFTLoRAMixin:
 
         logger.info("Loading LoRA adapter: %s", lora_path)
 
-        self._check_lora_config(lora_path, PeftConfig.from_pretrained(lora_path, revision=revision))
+        if source is None:
+            source = self.fetch_lora(lora_path, revision)
+        self._check_lora_config(lora_path, PeftConfig.from_pretrained(source))
 
         peft_adapter_name = self._peft_adapter_name(lora_path)
 
@@ -231,9 +308,8 @@ class PEFTLoRAMixin:
             logger.debug("Creating PeftModel from base model")
             self._peft_model = PeftModel.from_pretrained(
                 base_model,
-                lora_path,
+                source,
                 adapter_name=peft_adapter_name,
-                revision=revision,
             )
             # Update self._model to point to the PEFT-wrapped model
             # This ensures encode() uses the LoRA-enhanced model
@@ -241,7 +317,7 @@ class PEFTLoRAMixin:
         else:
             # Additional LoRA - add to existing PeftModel
             logger.debug("Adding adapter to existing PeftModel")
-            self._peft_model.load_adapter(lora_path, adapter_name=peft_adapter_name, revision=revision)
+            self._peft_model.load_adapter(source, adapter_name=peft_adapter_name)
 
         self._loaded_loras.add(lora_path)
         self._lora_adapter_names[lora_path] = peft_adapter_name
@@ -363,7 +439,8 @@ class PEFTLoRAMixin:
 
         if self._peft_model is None:
             if lora_name is not None:
-                logger.warning("set_active_lora('%s') called but no LoRAs are loaded", lora_name)
+                msg = f"LoRA '{lora_name}' is not loaded"
+                raise ValueError(msg)
             return
 
         if lora_name is None:
@@ -373,7 +450,7 @@ class PEFTLoRAMixin:
             self._peft_model.disable_adapter_layers()
         else:
             if lora_name not in self._loaded_loras:
-                msg = f"LoRA '{lora_name}' is not loaded. Available: {self._loaded_loras}"
+                msg = f"LoRA '{lora_name}' is not loaded"
                 raise ValueError(msg)
 
             logger.debug("Setting active LoRA: %s", lora_name)

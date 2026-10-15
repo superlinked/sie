@@ -16,7 +16,7 @@ from sie_server.core.model_suggestions import suggestion_suffix
 from sie_server.core.oom import is_oom_error
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import QueueFullError
-from sie_server.core.worker.types import WorkerDrainedError
+from sie_server.core.worker.types import LoraNotReadyError, WorkerDrainedError
 from sie_server.observability.tracing import get_current_trace_id
 from sie_server.observability.worker_telemetry import worker_telemetry, worker_telemetry_enabled
 from sie_server.types.responses import ErrorCode
@@ -495,20 +495,23 @@ class ModelStateChecker:
 
         Raises:
             HTTPException: 503 ``LORA_LOADING`` with ``Retry-After`` while the
-                adapter loads, 500 if it failed to load, 400 if the model does
-                not support LoRA.
+                adapter loads or while a failed load waits for its backoff,
+                500 if it failed to load, 400 if the model does not support
+                LoRA or does not declare ``lora``.
         """
         try:
             is_ready, is_loading = await self.registry.ensure_lora_loaded_async(self.model, lora)
             if is_loading:
-                self.span.set_attribute("error", "lora_loading")
+                failed = self.registry.lora_load_failed(self.model, lora)
+                self.span.set_attribute("error", "lora_load_failed" if failed else "lora_loading")
+                state = "failed to load and will be retried" if failed else "is loading"
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail={
                         "code": ErrorCode.LORA_LOADING.value,
-                        "message": f"LoRA '{lora}' is loading for model '{self.model}', please retry",
+                        "message": f"LoRA '{lora}' {state} for model '{self.model}', please retry",
                     },
-                    headers={"Retry-After": "1"},
+                    headers={"Retry-After": str(self.registry.lora_retry_after_s(self.model, lora))},
                 )
             if not is_ready:
                 self.span.set_attribute("error", "lora_load_failed")
@@ -704,6 +707,16 @@ class InferenceErrorHandler:
                     "message": f"Model '{self.model}' was evicted before this request ran, please retry",
                 },
                 headers={"Retry-After": str(WORKER_DRAINED_RETRY_AFTER_S)},
+            )
+
+        if isinstance(error, LoraNotReadyError):
+            logger.info("%s for model %s found its LoRA not loaded: %s", operation, self.model, error)
+            self.span.set_attribute("error", "lora_loading")
+            self._record_completion("retry")
+            return HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"code": ErrorCode.LORA_LOADING.value, "message": str(error)},
+                headers={"Retry-After": str(error.retry_after_s)},
             )
 
         if isinstance(error, UpstreamUnavailableError):
