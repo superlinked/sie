@@ -171,6 +171,116 @@ Deprecated features are kept for at least **2 minor versions** before removal, a
 
 ---
 
+## Scheduled changes
+
+### Secure defaults in 0.13.0
+
+One release adds the options and warnings below and breaks nothing. It is
+called release N here. Release 0.13.0 then changes the defaults. It ships at
+least two minor releases and four weeks after release N, as the deprecation
+policy above requires. Until 0.13.0, each component that relies on a default
+that will change logs a warning naming 0.13.0.
+
+#### Release N: options and warnings
+
+Nothing breaks. Every new option keeps today's behaviour by default.
+
+- `sie-server serve`:
+  - `--host` also reads `SIE_SERVER_HOST`. The default stays `0.0.0.0`.
+  - Opt-in token authentication, with the gateway's variables:
+    `SIE_AUTH_MODE` (`none`, `token`, `auto`) and `SIE_AUTH_TOKENS` or
+    `SIE_AUTH_TOKEN`. A configured token turns it on. Clients send
+    `Authorization: Bearer <token>` or `x-api-key: <token>`. `/healthz`,
+    `/livez` and `/readyz` stay open.
+  - In token mode without a configured token, the server generates one, saves
+    it with mode `0600` in `SIE_DATA_DIR`, and prints it once.
+  - `SIE_DATA_DIR` moves from `/tmp/sie-server` to a per-user directory,
+    `$XDG_DATA_HOME/sie` or `~/.local/share/sie`. Images set `/app/.cache/sie`;
+    mount a volume there to keep the token across containers.
+  - A server that listens beyond loopback without authentication logs a
+    warning on every start.
+  - `/ws/status` no longer sends the OS user, working directory or process id.
+    `ServerInfo.user`, `working_dir` and `pid` are always `""`, `""` and `0`,
+    and are deprecated. `ServerInfo.version` reports the installed version.
+- Rust/Candle worker: logs a notice when it binds `0.0.0.0` only because
+  `SIE_SERVER_HOST` is unset.
+- Gateway:
+  - Accepts `x-api-key` alongside `Authorization`. A request that sends both
+    must send the same token in each.
+  - `SIE_WORKER_AUTH_TOKEN` is the token the gateway presents to workers.
+  - Logs a warning when `SIE_AUTH_MODE` is unset on a non-loopback bind.
+- Telemetry: `SIE_TELEMETRY_ENABLED=1` opts in explicitly. The default stays on,
+  with a notice at startup. Helm `telemetry.enabled: true` sets
+  `SIE_TELEMETRY_ENABLED=1`.
+- Helm: `gateway.auth.generateToken` and `workers.auth`, both off by default.
+
+#### 0.13.0: default changes (breaking)
+
+| Surface | Until 0.13.0 | From 0.13.0 | To keep the old behaviour |
+| --- | --- | --- | --- |
+| `sie-server serve` bind | `0.0.0.0` | `127.0.0.1` | `--host 0.0.0.0` or `SIE_SERVER_HOST=0.0.0.0` |
+| `sie-server` beyond loopback | No authentication | A token is required. Without `SIE_AUTH_TOKEN`, one is generated and printed once | `SIE_AUTH_MODE=none` |
+| Rust/Candle worker bind | `0.0.0.0` | `127.0.0.1` | `SIE_SERVER_HOST=0.0.0.0` (the image sets it) |
+| Gateway binary beyond loopback with `SIE_AUTH_MODE` unset | Starts without authentication | Refuses to start | `SIE_AUTH_MODE=none`, or `token` with `SIE_AUTH_TOKENS` |
+| Telemetry | On unless disabled | Off unless `SIE_TELEMETRY_ENABLED=1` | `SIE_TELEMETRY_ENABLED=1` |
+| Helm `gateway.auth.mode` | `none` | `token`, with a generated Secret | `gateway.auth.mode=none` |
+| Helm `workers.auth.enabled` | `false` | `true` | `workers.auth.enabled=false` |
+| Helm `workers.networkPolicy.enabled` | `false` | `true` | `workers.networkPolicy.enabled=false` |
+| Helm `telemetry.enabled` | `true` | `false` | `telemetry.enabled=true` |
+
+`ServerInfo.user`, `working_dir` and `pid` are removed no earlier than 0.13.0.
+
+**Why.** A server that anyone on the network can call runs inference and loads
+models at its owner's cost. Telemetry should be a choice, not a default.
+
+**How to migrate.**
+
+Docker, before:
+
+```bash
+docker run -p 8080:8080 ghcr.io/superlinked/sie-server:latest-cpu-default
+curl http://localhost:8080/v1/models
+```
+
+Docker, after: set a token, publish on loopback, and keep the data directory.
+
+```bash
+export SIE_API_KEY=$(openssl rand -hex 24)
+docker run -p 127.0.0.1:8080:8080 -e SIE_AUTH_TOKEN=$SIE_API_KEY \
+  -v sie-data:/app/.cache/sie ghcr.io/superlinked/sie-server:latest-cpu-default
+curl -H "Authorization: Bearer $SIE_API_KEY" http://localhost:8080/v1/models
+```
+
+Without `-e SIE_AUTH_TOKEN`, copy the generated token from `docker logs`. The
+SDKs read `SIE_API_KEY`.
+
+A server reached from another machine, before:
+
+```bash
+sie-server serve
+```
+
+After:
+
+```bash
+SIE_AUTH_TOKEN=<token> sie-server serve --host 0.0.0.0
+```
+
+Helm: upgrade worker authentication in two steps, so no worker rejects a
+gateway that has not rolled yet.
+
+```bash
+helm upgrade sie-cluster oci://ghcr.io/superlinked/charts/sie-cluster -f values.yaml \
+  --set workers.auth.enabled=true --set workers.auth.allowUnauthenticated=true
+# after every gateway and worker pod has restarted:
+helm upgrade sie-cluster oci://ghcr.io/superlinked/charts/sie-cluster -f values.yaml \
+  --set workers.auth.enabled=true --set workers.auth.allowUnauthenticated=false
+```
+
+For the gateway token, set `gateway.auth.generateToken=true` first, give the
+token to your clients, then set `gateway.auth.mode=token`. The chart README
+shows how to read the generated Secret.
+
 ## Migration Guides
 
 For every breaking change, we provide a migration guide. Migration guides are included in the CHANGELOG entry for the release and, for significant changes, as a standalone section in the release notes.
