@@ -219,9 +219,15 @@ impl RecordingDispatcher {
     }
 
     /// Answer remote-lane generation as a remote worker does when its
-    /// upstream failed: an `inference_error` terminal that names `reason`.
-    pub(crate) fn fail_remote_generation(&self, reason: &'static str) {
-        *self.remote_refusal.lock().unwrap() = Some(("inference_error", None));
+    /// upstream failed: a `code` terminal with the upstream's wait, if any,
+    /// that names `reason`.
+    pub(crate) fn fail_remote_generation(
+        &self,
+        code: &'static str,
+        retry_after_s: Option<u32>,
+        reason: &'static str,
+    ) {
+        *self.remote_refusal.lock().unwrap() = Some((code, retry_after_s));
         *self.remote_failure_reason.lock().unwrap() = Some(reason);
     }
 

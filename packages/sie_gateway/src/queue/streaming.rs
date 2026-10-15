@@ -1824,6 +1824,16 @@ mod tests {
             .map(|reason| (reason.as_str().to_string(), reason.message().into()))
             .collect();
         assert_eq!(fixture["reasons"], serde_json::Value::Object(reasons));
+        let worker = &fixture["worker_terminal_error"];
+        let decoded: ChunkError =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(worker).unwrap()).unwrap();
+        assert_eq!(
+            decoded
+                .client_safe_reason()
+                .map(UpstreamFailureReason::as_str),
+            worker["reason"].as_str()
+        );
+        assert_eq!(decoded.client_safe_message(), worker["message"]);
     }
 
     #[test]

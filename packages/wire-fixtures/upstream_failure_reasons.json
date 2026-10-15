@@ -1,5 +1,5 @@
 {
-  "description": "The class of a remote upstream's failure that ended a generation, as an error's `reason` field names it, with the fixed caller-facing message of an `inference_error` of that class. A worker sends only these names; the gateway forwards only these names and answers with this text, never the worker's own message.",
+  "description": "The class of a remote upstream's failure that ended a generation, as an error's `reason` field names it, with the fixed caller-facing message of an `inference_error` of that class. A worker sends only these names; the gateway forwards only these names and answers with this text, never the worker's own message. `worker_terminal_error` is the error object a worker publishes on its terminal chunk when its upstream answered 402.",
   "reasons": {
     "upstream_credential_unavailable": "the server has no usable credential for its upstream",
     "upstream_credential_rejected": "the upstream rejected the server's credential",
@@ -10,5 +10,10 @@
     "upstream_busy": "the upstream is busy",
     "upstream_not_ready": "the model is not ready on the upstream",
     "upstream_invalid_response": "the upstream answered with something the server cannot accept"
+  },
+  "worker_terminal_error": {
+    "code": "inference_error",
+    "message": "the upstream account cannot pay for the request",
+    "reason": "upstream_payment_required"
   }
 }
