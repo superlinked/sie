@@ -1,0 +1,189 @@
+{
+  "translated": [
+    {
+      "name": "text",
+      "model": "m",
+      "request_id": "r1",
+      "chat": {
+        "id": "chatcmpl-r1",
+        "object": "chat.completion",
+        "model": "m",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hello."}, "finish_reason": "stop", "logprobs": null}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}
+      },
+      "message": {
+        "id": "msg_r1",
+        "type": "message",
+        "role": "assistant",
+        "model": "m",
+        "content": [{"type": "text", "text": "Hello."}],
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {"input_tokens": 10, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 3}
+      }
+    },
+    {
+      "name": "cached prompt tokens are reported as cache reads",
+      "model": "org/model:profile",
+      "request_id": "r2",
+      "chat": {
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 2, "total_tokens": 102, "prompt_tokens_details": {"cached_tokens": 60}}
+      },
+      "message": {
+        "id": "msg_r2",
+        "type": "message",
+        "role": "assistant",
+        "model": "org/model:profile",
+        "content": [{"type": "text", "text": "ok"}],
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {"input_tokens": 40, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 60, "output_tokens": 2}
+      }
+    },
+    {
+      "name": "tool calls",
+      "model": "m",
+      "request_id": "r3",
+      "chat": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}},
+                {"id": "call_2", "type": "function", "function": {"name": "noop", "arguments": ""}}
+              ]
+            },
+            "finish_reason": "tool_calls"
+          }
+        ],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 12, "total_tokens": 32}
+      },
+      "message": {
+        "id": "msg_r3",
+        "type": "message",
+        "role": "assistant",
+        "model": "m",
+        "content": [
+          {"type": "tool_use", "id": "call_1", "name": "get_weather", "input": {"city": "Paris"}},
+          {"type": "tool_use", "id": "call_2", "name": "noop", "input": {}}
+        ],
+        "stop_reason": "tool_use",
+        "stop_sequence": null,
+        "usage": {"input_tokens": 20, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 12}
+      }
+    },
+    {
+      "name": "reasoning becomes a thinking block before the text",
+      "model": "m",
+      "request_id": "r4",
+      "chat": {
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "9.9", "reasoning_content": "Compare the tenths."}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 8, "completion_tokens": 30, "total_tokens": 38}
+      },
+      "message": {
+        "id": "msg_r4",
+        "type": "message",
+        "role": "assistant",
+        "model": "m",
+        "content": [
+          {"type": "thinking", "thinking": "Compare the tenths.", "signature": "sie-unsigned"},
+          {"type": "text", "text": "9.9"}
+        ],
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {"input_tokens": 8, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 30}
+      }
+    },
+    {
+      "name": "whitespace-only text is dropped, a stop with tool calls is a tool_use stop",
+      "model": "m",
+      "request_id": "r5",
+      "chat": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {"role": "assistant", "content": "\n\n", "tool_calls": [{"id": "c", "type": "function", "function": {"name": "run", "arguments": "{}"}}]},
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+      },
+      "message": {
+        "id": "msg_r5",
+        "type": "message",
+        "role": "assistant",
+        "model": "m",
+        "content": [{"type": "tool_use", "id": "c", "name": "run", "input": {}}],
+        "stop_reason": "tool_use",
+        "stop_sequence": null,
+        "usage": {"input_tokens": 1, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 1}
+      }
+    },
+    {
+      "name": "length",
+      "model": "m",
+      "request_id": "r6",
+      "chat": {
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "partial"}, "finish_reason": "length"}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 16, "total_tokens": 21}
+      },
+      "message": {
+        "id": "msg_r6",
+        "type": "message",
+        "role": "assistant",
+        "model": "m",
+        "content": [{"type": "text", "text": "partial"}],
+        "stop_reason": "max_tokens",
+        "stop_sequence": null,
+        "usage": {"input_tokens": 5, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 16}
+      }
+    },
+    {
+      "name": "content filter is a refusal, empty content is an empty list",
+      "model": "m",
+      "request_id": "r7",
+      "chat": {
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": "content_filter"}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 0, "total_tokens": 5}
+      },
+      "message": {
+        "id": "msg_r7",
+        "type": "message",
+        "role": "assistant",
+        "model": "m",
+        "content": [],
+        "stop_reason": "refusal",
+        "stop_sequence": null,
+        "usage": {"input_tokens": 5, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0}
+      }
+    }
+  ],
+  "faults": [
+    {
+      "name": "tool arguments are not an object",
+      "chat": {
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": null, "tool_calls": [{"id": "c", "type": "function", "function": {"name": "run", "arguments": "[1]"}}]}, "finish_reason": "tool_calls"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+      }
+    },
+    {
+      "name": "tool arguments are not JSON",
+      "chat": {
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": null, "tool_calls": [{"id": "c", "type": "function", "function": {"name": "run", "arguments": "{\"a\":"}}]}, "finish_reason": "tool_calls"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+      }
+    },
+    {
+      "name": "no usage",
+      "chat": {"choices": [{"index": 0, "message": {"role": "assistant", "content": "x"}, "finish_reason": "stop"}]}
+    },
+    {
+      "name": "no choices",
+      "chat": {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+    }
+  ]
+}

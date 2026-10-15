@@ -378,8 +378,8 @@ class DoclingAdapter(BaseAdapter):
         doc = result.document
         try:
             payload = {
-                "text": doc.export_to_text(),
-                "markdown": doc.export_to_markdown(),
+                "text": doc.export_to_text(traverse_pictures=True),
+                "markdown": doc.export_to_markdown(traverse_pictures=True),
                 "document": doc.export_to_dict(),
             }
         except Exception as exc:  # noqa: BLE001 - preserve processed pages on export failure

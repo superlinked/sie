@@ -2,65 +2,124 @@ import asyncio
 import logging
 import os
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from sie_server.observability import telemetry
 from sie_server.observability.telemetry import (
     _CONSECUTIVE_FAILURE_WARN_THRESHOLD,
+    _DEFAULT_ON_NOTICE,
     _FIRST_UPDATE_MAX_S,
     _FIRST_UPDATE_MIN_S,
     _UPDATE_MAX_S,
     _UPDATE_MIN_S,
     _build_payload,
     _get_or_create_worker_id,
-    _is_telemetry_disabled,
     _normalize_arch,
+    _resolve_telemetry,
     _send_heartbeat,
     _telemetry_loop,
     telemetry_sender,
 )
 
 
-class TestIsTelemetryDisabled:
-    def test_disabled_when_sie_telemetry_disabled_is_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("SIE_TELEMETRY_DISABLED", "1")
-        assert _is_telemetry_disabled() is True
+@pytest.fixture(autouse=True)
+def _telemetry_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("SIE_TELEMETRY_ENABLED", "SIE_TELEMETRY_DISABLED", "DO_NOT_TRACK"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(telemetry, "_default_on_notice_shown", False)
 
-    def test_disabled_when_sie_telemetry_disabled_is_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("SIE_TELEMETRY_DISABLED", "true")
-        assert _is_telemetry_disabled() is True
 
-    def test_disabled_when_sie_telemetry_disabled_is_yes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("SIE_TELEMETRY_DISABLED", "yes")
-        assert _is_telemetry_disabled() is True
+class TestResolveTelemetry:
+    def test_unset_uses_the_release_default(self) -> None:
+        assert _resolve_telemetry() == (True, "default")
 
-    def test_disabled_when_sie_telemetry_disabled_is_true_case_insensitive(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("value", ["", "  "])
+    def test_empty_uses_the_release_default(self, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+        monkeypatch.setenv("SIE_TELEMETRY_ENABLED", value)
+        assert _resolve_telemetry() == (True, "default")
+
+    @pytest.mark.parametrize("value", ["1", "true", "yes", "on", "TRUE", " Yes ", "On"])
+    def test_enabled_values_turn_it_on(self, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+        monkeypatch.setenv("SIE_TELEMETRY_ENABLED", value)
+        assert _resolve_telemetry() == (True, "SIE_TELEMETRY_ENABLED")
+
+    @pytest.mark.parametrize("value", ["0", "false", "no", "off", "FALSE", " Off "])
+    def test_disabled_values_turn_it_off(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, value: str
     ) -> None:
-        monkeypatch.setenv("SIE_TELEMETRY_DISABLED", "TRUE")
-        assert _is_telemetry_disabled() is True
+        monkeypatch.setenv("SIE_TELEMETRY_ENABLED", value)
+        with caplog.at_level(logging.WARNING, logger="sie_server.observability.telemetry"):
+            assert _resolve_telemetry() == (False, "SIE_TELEMETRY_ENABLED")
+        assert caplog.records == []
 
-    def test_disabled_when_do_not_track_is_1(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("SIE_TELEMETRY_DISABLED", raising=False)
+    @pytest.mark.parametrize("value", ["enable", "maybe", "s3cr3t-value"])
+    def test_unrecognised_value_turns_it_off_with_one_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, value: str
+    ) -> None:
+        monkeypatch.setenv("SIE_TELEMETRY_ENABLED", value)
+        with caplog.at_level(logging.WARNING, logger="sie_server.observability.telemetry"):
+            assert _resolve_telemetry() == (False, "SIE_TELEMETRY_ENABLED")
+        (record,) = caplog.records
+        assert record.levelno == logging.WARNING
+        assert "SIE_TELEMETRY_ENABLED has a value that is not recognised" in record.getMessage()
+        assert value not in record.getMessage()
+
+    @pytest.mark.parametrize("value", ["disable", "maybe", "s3cr3t-value"])
+    @pytest.mark.parametrize("enabled", [None, "1"])
+    def test_unrecognised_opt_out_value_turns_it_off_with_one_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, value: str, enabled: str | None
+    ) -> None:
+        monkeypatch.setenv("SIE_TELEMETRY_DISABLED", value)
+        if enabled is not None:
+            monkeypatch.setenv("SIE_TELEMETRY_ENABLED", enabled)
+        with caplog.at_level(logging.WARNING, logger="sie_server.observability.telemetry"):
+            assert _resolve_telemetry() == (False, "SIE_TELEMETRY_DISABLED")
+        (record,) = caplog.records
+        assert record.levelno == logging.WARNING
+        assert "SIE_TELEMETRY_DISABLED has a value that is not recognised" in record.getMessage()
+        assert value not in record.getMessage()
+
+    @pytest.mark.parametrize("value", ["1", "true", "yes", "on", "TRUE", " yes ", "On"])
+    @pytest.mark.parametrize("enabled", [None, "1", "on"])
+    def test_sie_telemetry_disabled_wins(
+        self, monkeypatch: pytest.MonkeyPatch, value: str, enabled: str | None
+    ) -> None:
+        monkeypatch.setenv("SIE_TELEMETRY_DISABLED", value)
         monkeypatch.setenv("DO_NOT_TRACK", "1")
-        assert _is_telemetry_disabled() is True
+        if enabled is not None:
+            monkeypatch.setenv("SIE_TELEMETRY_ENABLED", enabled)
+        assert _resolve_telemetry() == (False, "SIE_TELEMETRY_DISABLED")
 
-    def test_not_disabled_when_do_not_track_is_0(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("SIE_TELEMETRY_DISABLED", raising=False)
-        monkeypatch.setenv("DO_NOT_TRACK", "0")
-        assert _is_telemetry_disabled() is False
-
-    def test_not_disabled_when_no_env_vars(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("SIE_TELEMETRY_DISABLED", raising=False)
-        monkeypatch.delenv("DO_NOT_TRACK", raising=False)
-        assert _is_telemetry_disabled() is False
-
-    def test_both_vars_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("SIE_TELEMETRY_DISABLED", "1")
+    @pytest.mark.parametrize("enabled", [None, "1", "on"])
+    def test_do_not_track_wins(self, monkeypatch: pytest.MonkeyPatch, enabled: str | None) -> None:
         monkeypatch.setenv("DO_NOT_TRACK", "1")
-        assert _is_telemetry_disabled() is True
+        if enabled is not None:
+            monkeypatch.setenv("SIE_TELEMETRY_ENABLED", enabled)
+        assert _resolve_telemetry() == (False, "DO_NOT_TRACK")
+
+    @pytest.mark.parametrize(
+        ("name", "value"),
+        [
+            ("SIE_TELEMETRY_DISABLED", "0"),
+            ("SIE_TELEMETRY_DISABLED", "false"),
+            ("SIE_TELEMETRY_DISABLED", "no"),
+            ("SIE_TELEMETRY_DISABLED", " Off "),
+            ("SIE_TELEMETRY_DISABLED", " "),
+            ("DO_NOT_TRACK", "0"),
+        ],
+    )
+    def test_opt_out_variables_set_to_false_do_not_opt_out(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, name: str, value: str
+    ) -> None:
+        monkeypatch.setenv(name, value)
+        with caplog.at_level(logging.WARNING, logger="sie_server.observability.telemetry"):
+            assert _resolve_telemetry() == (True, "default")
+        assert caplog.records == []
 
 
 class TestGetOrCreateWorkerId:
@@ -278,16 +337,78 @@ class TestJitterRanges:
         assert _UPDATE_MAX_S == 65 * 60
 
 
+@contextmanager
+def _receiver() -> Iterator[MagicMock]:
+    with (
+        patch("sie_server.observability.telemetry.httpx.AsyncClient") as mock_client_cls,
+        patch("sie_server.observability.telemetry.get_gpu_metrics", return_value=[]),
+    ):
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=MagicMock(is_success=True))
+        mock_client.aclose = AsyncMock()
+        mock_client_cls.return_value = mock_client
+        yield mock_client_cls
+
+
+def _telemetry_messages(caplog: pytest.LogCaptureFixture, level: int) -> list[str]:
+    return [
+        r.getMessage() for r in caplog.records if r.name == "sie_server.observability.telemetry" and r.levelno == level
+    ]
+
+
 class TestTelemetrySender:
     @pytest.mark.asyncio
-    async def test_disabled_via_env_yields_immediately(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    @pytest.mark.parametrize(
+        ("name", "value", "source"),
+        [
+            ("SIE_TELEMETRY_DISABLED", "1", "SIE_TELEMETRY_DISABLED"),
+            ("SIE_TELEMETRY_DISABLED", "maybe", "SIE_TELEMETRY_DISABLED"),
+            ("DO_NOT_TRACK", "1", "DO_NOT_TRACK"),
+            ("SIE_TELEMETRY_ENABLED", "0", "SIE_TELEMETRY_ENABLED"),
+            ("SIE_TELEMETRY_ENABLED", "maybe", "SIE_TELEMETRY_ENABLED"),
+        ],
+    )
+    async def test_off_states_its_source_and_sends_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, name: str, value: str, source: str
     ) -> None:
-        monkeypatch.setenv("SIE_TELEMETRY_DISABLED", "1")
-        with caplog.at_level(logging.INFO, logger="sie_server.observability.telemetry"):
+        monkeypatch.setenv(name, value)
+        with _receiver() as mock_client_cls, caplog.at_level(logging.INFO):
             async with telemetry_sender():
                 pass
-        assert any("disabled via env var" in r.message for r in caplog.records)
+        assert _telemetry_messages(caplog, logging.INFO) == [f"telemetry: off ({source})"]
+        assert _DEFAULT_ON_NOTICE not in _telemetry_messages(caplog, logging.WARNING)
+        mock_client_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("value", ["1", "true", "yes", "on"])
+    async def test_explicit_opt_in_states_its_source_without_the_notice(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path, value: str
+    ) -> None:
+        monkeypatch.setenv("SIE_DATA_DIR", str(tmp_path))
+        monkeypatch.setenv("SIE_TELEMETRY_ENABLED", value)
+        with _receiver() as mock_client_cls, caplog.at_level(logging.INFO):
+            async with telemetry_sender():
+                pass
+        assert _telemetry_messages(caplog, logging.INFO) == ["telemetry: on (SIE_TELEMETRY_ENABLED)"]
+        assert _telemetry_messages(caplog, logging.WARNING) == []
+        mock_client_cls.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_default_on_states_its_source_every_start_and_warns_once(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("SIE_DATA_DIR", str(tmp_path))
+        with _receiver(), caplog.at_level(logging.INFO):
+            for _ in range(2):
+                async with telemetry_sender():
+                    pass
+        assert _telemetry_messages(caplog, logging.INFO) == ["telemetry: on (default)"] * 2
+        assert _telemetry_messages(caplog, logging.WARNING) == [_DEFAULT_ON_NOTICE]
+
+    def test_default_on_notice_names_the_flip_release_and_both_variables(self) -> None:
+        assert "From 0.13.0 it is off unless SIE_TELEMETRY_ENABLED=1." in _DEFAULT_ON_NOTICE
+        assert "SIE_TELEMETRY_DISABLED=1 to stop now" in _DEFAULT_ON_NOTICE
+        assert "https://github.com/superlinked/sie#telemetry" in _DEFAULT_ON_NOTICE
 
     @pytest.mark.asyncio
     async def test_lifecycle_init_terminate(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

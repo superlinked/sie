@@ -17,7 +17,7 @@ from typing import Any
 
 import yaml
 
-from tools.ci import cuda13_image_smoke, rust_cuda_image_smoke
+from tools.ci import cuda13_image_smoke, engine_launch_contract, rust_cuda_image_smoke
 from tools.ci.release_artifact import create_manifest, validate_manifest
 from tools.ci.release_guard import api, stable_version
 
@@ -609,6 +609,8 @@ def main() -> int:
                 rust_cuda_image_smoke.validate(image, source_revision=args.source_revision)
             else:
                 smoke_image(image, bundle=args.bundle if args.command == "build-server" else None)
+            if args.command == "build-server" and args.platform != "cpu":
+                engine_launch_contract.check(image, args.bundle)
             export_image(
                 image, args.archive_dir, version=args.version, source_revision=args.source_revision, run_id=args.run_id
             )

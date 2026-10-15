@@ -1963,9 +1963,33 @@ docker run -e HF_TOKEN=hf_your_token_here \
 
 ## Telemetry
 
-SIE collects anonymous usage telemetry (version, OS, architecture, GPU type) to help maintainers understand adoption and hardware distribution. Telemetry is on by default and sends a lightweight heartbeat once per hour.
+The `sie-server` worker containers send anonymous usage telemetry so the maintainers can see which versions, platforms, and GPUs are in use. Workers with `engine: candle` send none.
 
-**No IP addresses, hostnames, cluster names, API keys, or request data are collected.**
+`telemetry.enabled` is `true` by default. **The chart default changes to `false` in 0.13.0**, and so does the `sie-server` default.
+
+| `telemetry.enabled` | Worker environment |
+| --- | --- |
+| `true` (default) | `SIE_TELEMETRY_ENABLED=1` |
+| `false` | `SIE_TELEMETRY_DISABLED=1` |
+
+Because the chart sets the variable explicitly, workers do not log the `sie-server` default-on notice; the install notes print the 0.13.0 change instead. Each worker logs `telemetry: on (SIE_TELEMETRY_ENABLED)` or `telemetry: off (SIE_TELEMETRY_DISABLED)` at startup.
+
+Each event is a JSON `POST` to `https://telemetry.superlinked.com/api/telemetry` (`telemetry.url` overrides it) with these fields:
+
+| Field | Value |
+| --- | --- |
+| `worker_id` | A random UUID generated on the worker's first start and stored in its data directory (`SIE_DATA_DIR`) |
+| `sent_at` | The send time (UTC) |
+| `event` | `init`, `update`, or `terminate` |
+| `sie_version` | The installed `sie-server` version |
+| `variant` | `SIE_VARIANT`: the worker image platform and bundle, for example `cuda12-default` |
+| `os`, `arch` | Operating system and CPU architecture |
+| `gpus` | GPU model names |
+| `deployment_env` | `telemetry.deploymentEnv` (default `production`) |
+
+The receiver derives country, region, and city from the request's source IP address and does not store the address. No request data, hostnames, cluster names, API keys, or file paths are sent.
+
+`init` is sent when a worker starts, the first `update` 45 to 75 minutes later, then one `update` every 55 to 65 minutes, and `terminate` at shutdown. See the [telemetry policy](https://superlinked.com/policies/telemetry).
 
 Disable telemetry:
 

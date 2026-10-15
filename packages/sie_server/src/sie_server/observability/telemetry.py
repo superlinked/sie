@@ -29,12 +29,49 @@ _UPDATE_MAX_S = 65 * 60  # 65 minutes
 _SEND_TIMEOUT_S = 10
 _CONSECUTIVE_FAILURE_WARN_THRESHOLD = 3
 
+_DEFAULT_ENABLED = True
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+_DEFAULT_ON_NOTICE = (
+    "Anonymous usage telemetry is on by default. From 0.13.0 it is off unless SIE_TELEMETRY_ENABLED=1. "
+    "Set SIE_TELEMETRY_ENABLED=1 to keep sending it, or SIE_TELEMETRY_DISABLED=1 to stop now. "
+    "What is sent: https://github.com/superlinked/sie#telemetry"
+)
 
-def _is_telemetry_disabled() -> bool:
-    disabled_val = os.environ.get("SIE_TELEMETRY_DISABLED", "").lower()
-    if disabled_val in ("1", "true", "yes"):
-        return True
-    return os.environ.get("DO_NOT_TRACK") == "1"
+_default_on_notice_shown = False
+
+
+def _warn_unrecognised(name: str) -> None:
+    logger.warning(
+        "%s has a value that is not recognised, so telemetry is off. Use 1, true, yes or on, or 0, false, no or off.",
+        name,
+    )
+
+
+def _resolve_telemetry() -> tuple[bool, str]:
+    disabled = os.environ.get("SIE_TELEMETRY_DISABLED", "").strip().lower()
+    if disabled and disabled not in _FALSE_VALUES:
+        if disabled not in _TRUE_VALUES:
+            _warn_unrecognised("SIE_TELEMETRY_DISABLED")
+        return False, "SIE_TELEMETRY_DISABLED"
+    if os.environ.get("DO_NOT_TRACK", "").strip() == "1":
+        return False, "DO_NOT_TRACK"
+    enabled = os.environ.get("SIE_TELEMETRY_ENABLED", "").strip().lower()
+    if not enabled:
+        return _DEFAULT_ENABLED, "default"
+    if enabled in _TRUE_VALUES:
+        return True, "SIE_TELEMETRY_ENABLED"
+    if enabled not in _FALSE_VALUES:
+        _warn_unrecognised("SIE_TELEMETRY_ENABLED")
+    return False, "SIE_TELEMETRY_ENABLED"
+
+
+def _warn_default_on_once() -> None:
+    global _default_on_notice_shown
+    if _default_on_notice_shown:
+        return
+    _default_on_notice_shown = True
+    logger.warning(_DEFAULT_ON_NOTICE)
 
 
 def _get_or_create_worker_id(data_dir: str | None = None) -> str:
@@ -160,10 +197,13 @@ async def _telemetry_loop(
 
 @asynccontextmanager
 async def telemetry_sender() -> AsyncGenerator[None, None]:
-    if _is_telemetry_disabled():
-        logger.info("telemetry: disabled via env var")
+    enabled, source = _resolve_telemetry()
+    logger.info("telemetry: %s (%s)", "on" if enabled else "off", source)
+    if not enabled:
         yield
         return
+    if source == "default":
+        _warn_default_on_once()
 
     url = os.environ.get("SIE_TELEMETRY_URL", _DEFAULT_TELEMETRY_URL)
     worker_id = _get_or_create_worker_id()
