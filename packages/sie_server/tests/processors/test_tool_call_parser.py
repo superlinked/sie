@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 
 import pytest
 from sie_server.adapters._generation_base import GenerationChunk
+from sie_server.processors import tool_call_parser
 from sie_server.processors.tool_call_parser import parse_tool_call_stream
 
 
@@ -1012,3 +1014,41 @@ async def test_parse_tool_call_stream_keeps_reasoning_ahead_of_the_text_it_rode_
     first_tool = next(index for index, item in enumerate(out) if item.tool_call_delta is not None)
     assert all(not item.reasoning_delta for item in out[first_tool:])
     assert out[-1].finish_reason == "tool_calls"
+
+
+@pytest.mark.asyncio
+async def test_text_held_inside_a_block_passes_on_as_progress() -> None:
+    block = ["<tool_call>\n<function=write>\n", "<parameter=content>\n", "a\n", "b\n", "</parameter>\n</function>\n"]
+    out = [
+        item
+        async for item in parse_tool_call_stream(
+            _chunks(
+                [
+                    *(GenerationChunk(text_delta=text, choice_index=1) for text in block),
+                    GenerationChunk(text_delta="</tool_call>", choice_index=1),
+                    GenerationChunk(text_delta="", done=True, finish_reason="stop"),
+                ]
+            ),
+            tool_call_format="qwen_xml",
+        )
+    ]
+
+    first_call = next(index for index, item in enumerate(out) if item.tool_call_delta is not None)
+    assert out[:first_call] == [GenerationChunk(text_delta="", choice_index=1)] * len(block)
+    assert _args_for(out) == '{"content":"a\\nb"}'
+
+
+@pytest.mark.asyncio
+async def test_arguments_too_large_for_one_queue_message_end_with_a_parse_error() -> None:
+    content = "\x01" * 200_000
+    assert len(content) < tool_call_parser._MAX_TOOL_BUFFER_CHARS
+    assert len(json.dumps({"content": content}).encode()) > 1024 * 1024
+    out = await _collect(
+        f"<tool_call>\n<function=write>\n<parameter=content>\n{content}\n</parameter>\n</function>\n</tool_call>",
+        tool_call_format="qwen_xml",
+    )
+
+    assert out[-1].done is True
+    assert out[-1].error_code == "MODEL_OUTPUT_PARSE_ERROR"
+    assert "bytes, exceeds" in (out[-1].error_message or "")
+    assert not _deltas(out)

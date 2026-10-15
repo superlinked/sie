@@ -224,6 +224,71 @@ def test_failed_cuda13_release_smoke_never_exports_image(bundle, failed_check, m
     assert len(commands) == (2 if failed_check == "imports" else 3)
 
 
+def build_server_argv(tmp_path: Path, platform: str, bundle: str) -> list[str]:
+    return [
+        "docker_task.py",
+        "build-server",
+        "--registry",
+        "ghcr.io/superlinked",
+        "--version",
+        VERSION,
+        "--platform",
+        platform,
+        "--bundle",
+        bundle,
+        "--source-revision",
+        FULL_SHA,
+        "--run-id",
+        "1234",
+        "--archive-dir",
+        str(tmp_path / "artifact"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("platform", "bundle", "checked"),
+    [
+        ("cuda12", "sglang", True),
+        ("cuda12", "sglang-vision-extract", True),
+        ("cuda13", "sglang-cu130", True),
+        ("cuda12", "default", True),
+        ("cpu", "sglang", False),
+        ("cpu", "default", False),
+    ],
+)
+def test_gpu_release_images_check_the_engine_launch_contract_before_export(
+    platform, bundle, checked, monkeypatch, tmp_path
+):
+    events = []
+    monkeypatch.setattr(docker_task, "run", lambda command: events.append("run"))
+    monkeypatch.setattr(
+        docker_task.engine_launch_contract, "check", lambda image, bundle: events.append(("contract", image, bundle))
+    )
+    monkeypatch.setattr(docker_task, "export_image", lambda *args, **kwargs: events.append("export"))
+    monkeypatch.setattr(docker_task.sys, "argv", build_server_argv(tmp_path, platform, bundle))
+
+    assert docker_task.main() == 0
+
+    image = f"ghcr.io/superlinked/sie-server:v{VERSION}-{platform}-{bundle}"
+    contract = [("contract", image, bundle)] if checked else []
+    assert [event for event in events if event != "run"] == [*contract, "export"]
+
+
+def test_failed_engine_launch_contract_never_exports_image(monkeypatch, tmp_path):
+    monkeypatch.setattr(docker_task, "run", lambda command: None)
+
+    def failing(image, bundle):
+        raise ValueError("engine launch contract failed for sglang-cu130")
+
+    monkeypatch.setattr(docker_task.engine_launch_contract, "check", failing)
+    export = Mock()
+    monkeypatch.setattr(docker_task, "export_image", export)
+    monkeypatch.setattr(docker_task.sys, "argv", build_server_argv(tmp_path, "cuda13", "sglang-cu130"))
+
+    assert docker_task.main() == 1
+    export.assert_not_called()
+
+
 def test_complete_set_verified_before_alias_commands(complete_source, monkeypatch, tmp_path):
     commands = []
 

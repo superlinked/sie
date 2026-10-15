@@ -60,6 +60,7 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         crate::handlers::proxy::proxy_chat,
         crate::handlers::proxy::proxy_completions,
         crate::handlers::proxy::proxy_responses,
+        crate::handlers::messages::proxy_messages,
         crate::handlers::proxy::proxy_moderations,
         docs_ui
     ),
@@ -134,6 +135,7 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         GenerateResponse,
         GenerateChunk,
         GenerateChunkError,
+        UpstreamFailureReason,
         GenerateUsage,
         PromptTokensDetails,
         ChatCompletionRequest,
@@ -148,6 +150,12 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         ResponsesRequest,
         OpenAIErrorBody,
         OpenAIErrorEnvelope,
+        crate::handlers::messages::schema::MessagesRequest,
+        crate::handlers::messages::schema::EmptyOutputConfig,
+        crate::handlers::messages::schema::MessagesResponse,
+        crate::handlers::messages::schema::MessagesUsage,
+        crate::handlers::messages::schema::AnthropicErrorBody,
+        crate::handlers::messages::schema::AnthropicErrorEnvelope,
         PoolListResponse,
         crate::types::pool::PoolSpec,
         crate::types::pool::PoolStatus,
@@ -1437,6 +1445,7 @@ fn inject_remote_control_header(paths: &mut serde_json::Map<String, Value>) {
         "/v1/chat/completions",
         "/v1/completions",
         "/v1/responses",
+        "/v1/messages",
         "/v1/audio/transcriptions",
     ] {
         let Some(operation) = paths
@@ -1536,7 +1545,12 @@ fn inject_inference_response_headers(paths: &mut serde_json::Map<String, Value>)
         }
     }
 
-    for path in ["/v1/chat/completions", "/v1/completions", "/v1/responses"] {
+    for path in [
+        "/v1/chat/completions",
+        "/v1/completions",
+        "/v1/responses",
+        "/v1/messages",
+    ] {
         let Some(responses) = paths
             .get_mut(path)
             .and_then(|path_item| path_item.get_mut("post"))
@@ -2127,6 +2141,31 @@ pub struct GenerateChunkError {
     #[schema(minimum = 1, maximum = 60)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after_s: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<UpstreamFailureReason>,
+}
+
+/// Class of a remote upstream's failure, when one ended the generation.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub enum UpstreamFailureReason {
+    #[serde(rename = "upstream_credential_unavailable")]
+    CredentialUnavailable,
+    #[serde(rename = "upstream_credential_rejected")]
+    CredentialRejected,
+    #[serde(rename = "upstream_payment_required")]
+    PaymentRequired,
+    #[serde(rename = "upstream_model_not_found")]
+    ModelNotFound,
+    #[serde(rename = "upstream_refused")]
+    Refused,
+    #[serde(rename = "upstream_unavailable")]
+    Unavailable,
+    #[serde(rename = "upstream_busy")]
+    Busy,
+    #[serde(rename = "upstream_not_ready")]
+    NotReady,
+    #[serde(rename = "upstream_invalid_response")]
+    InvalidResponse,
 }
 
 /// One JSON payload from a SIE-native generation SSE ``data:`` event.
@@ -2582,6 +2621,8 @@ pub struct OpenAIErrorBody {
     pub param: Option<String>,
     /// SIE-native discriminator, see ``http_error::openai_code``.
     pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<UpstreamFailureReason>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -3726,6 +3767,22 @@ mod tests {
         );
         assert_eq!(chunk_error["properties"]["retry_after_s"]["minimum"], 1);
         assert_eq!(chunk_error["properties"]["retry_after_s"]["maximum"], 60);
+        let reasons: Vec<&str> = crate::queue::streaming::UpstreamFailureReason::ALL
+            .iter()
+            .map(|reason| reason.as_str())
+            .collect();
+        assert_eq!(
+            spec["components"]["schemas"]["UpstreamFailureReason"]["enum"],
+            json!(reasons)
+        );
+        for schema in ["GenerateChunkError", "OpenAIErrorBody"] {
+            let properties = &spec["components"]["schemas"][schema]["properties"];
+            assert_eq!(
+                properties["reason"]["oneOf"][1]["$ref"],
+                "#/components/schemas/UpstreamFailureReason",
+                "{schema}"
+            );
+        }
         assert_eq!(
             chunk["properties"]["logprobs"]["type"],
             json!(["array", "null"])
@@ -3862,6 +3919,7 @@ mod tests {
             ("/v1/chat/completions", &["post"][..]),
             ("/v1/completions", &["post"][..]),
             ("/v1/responses", &["post"][..]),
+            ("/v1/messages", &["post"][..]),
             ("/v1/moderations", &["post"][..]),
             ("/v1/rerank", &["post"][..]),
             ("/v2/rerank", &["post"][..]),
@@ -4107,6 +4165,7 @@ mod tests {
             "/v1/chat/completions",
             "/v1/completions",
             "/v1/responses",
+            "/v1/messages",
         ] {
             let retryable_503_headers = &spec["paths"][path]["post"]["responses"]["503"]["headers"];
             assert!(
@@ -4145,7 +4204,12 @@ mod tests {
                 "/v1/embeddings 200 missing documented {name} header"
             );
         }
-        for path in ["/v1/chat/completions", "/v1/completions", "/v1/responses"] {
+        for path in [
+            "/v1/chat/completions",
+            "/v1/completions",
+            "/v1/responses",
+            "/v1/messages",
+        ] {
             let headers = &spec["paths"][path]["post"]["responses"]["200"]["headers"];
             for name in [
                 "X-SIE-Request-Id",
