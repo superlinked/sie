@@ -119,7 +119,12 @@ def _long_call(body: dict[str, Any]) -> dict[str, Any]:
     mode = KNOBS.get("long_call", "write")
     lines = 10 if mode == "short" else conformance.LONG_CALL_LINES
     content = "\n".join(conformance.long_call_line(number) for number in range(1, lines + 1))
-    arguments = {"path": "notes/pangrams.txt", "content": content}
+    if mode == "wrong_content":
+        content = "\n".join(
+            f"{number:04d} Lorem ipsum dolor sit amet, consectetur adipiscing." for number in range(1, lines + 1)
+        )
+    path = "notes/other.txt" if mode == "wrong_path" else conformance.LONG_CALL_PATH
+    arguments = {"path": path, "content": content}
     if mode == "decline":
         return {"content": "That file is too long to write in one call.", "finish": "stop"}
     if mode == "error":
@@ -645,6 +650,8 @@ def test_a_long_tool_call_passes_when_the_whole_call_arrives(base_url: str) -> N
         ("truncated", "fail", "but not a JSON object: truncated or corrupted"),
         ("stop", "fail", "finish_reason is 'stop' after a complete call"),
         ("error", "fail", "request failed: None TIMEOUT: inter-chunk timeout"),
+        ("wrong_content", "recorded", "but not the file asked for: write_file to ['notes/pangrams.txt'], 0 of 1320"),
+        ("wrong_path", "recorded", "but not the file asked for: write_file to ['notes/other.txt'], 1320 of 1320"),
     ],
 )
 def test_a_long_tool_call_separates_the_model_declining_from_the_wire_breaking(

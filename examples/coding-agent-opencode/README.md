@@ -287,7 +287,7 @@ the laptop and cluster recipes. The report's `tools_turn_params` says which.
 | `usage_on_final_chunk` | with `stream_options.include_usage`, the last chunk carries `prompt_tokens` and `completion_tokens` |
 | `include_reasoning` | the flag is accepted streamed and not streamed, no raw `<think>` tag leaks into content, and without the flag no `reasoning_content` arrives. When the model reasoned, the stream carries `delta.reasoning_content` and the non-streamed answer `message.reasoning_content`. A model reasoned when it returned reasoning, or when its completion tokens exceed the UTF-8 bytes of its visible text by more than 16, since a byte-level tokenizer spends at most one token per byte. It did not reason when no answer took more than 16 completion tokens. Between the two, whether it reasoned is unknown and the case is recorded, not judged |
 | `tool_choice_required` | recorded as `supported` when a call is forced or `refused` on a 400 or 422, neither a failure; accepted-but-ignored fails, and so does any other error |
-| `long_tool_call` | one `write_file` call asked for 1,320 numbered lines, 67,363 bytes of arguments, arrives whole: the arguments parse as a JSON object over 64 KiB and the turn ends with `tool_calls`. The request sends `max_tokens: 32000`, as OpenCode does. A stream that breaks or arguments that do not parse fail. A model that answers in text, writes less than 64 KiB or runs out of `max_tokens` is recorded, and so is an endpoint that refuses `max_tokens: 32000`. The report keeps the argument size, how many lines came back as asked, the time to the first chunk, how long the stream ran and its longest gap between chunks |
+| `long_tool_call` | one `write_file` call asked for 1,320 numbered lines, 67,363 bytes of arguments, arrives whole: the arguments parse as a JSON object over 64 KiB, the turn ends with `tool_calls`, and the one call writes `notes/pangrams.txt` with every line as asked. The request sends `max_tokens: 32000`, as OpenCode does. A stream that breaks or arguments that do not parse fail. A model that answers in text, writes less than 64 KiB, writes another file or other lines, or runs out of `max_tokens` is recorded, and so is an endpoint that refuses `max_tokens: 32000`. The report keeps the argument size, how many lines came back as asked, the time to the first chunk, how long the stream ran and its longest gap between chunks |
 
 Every request asks for up to 4,096 tokens, except the `length` case and the
 long call, so a model that thinks before it answers has room to finish. The
@@ -347,7 +347,11 @@ agent-shaped sessions against one endpoint:
 The input is sized with the endpoint's own token count of the shared prompt.
 For each session count the report gives the decode rate after the first token
 and the time to the first token on returning turns, at the median and at p90,
-where the p90 decode rate is the rate nine turns in ten reached or beat. It
+where the p90 decode rate is the rate nine turns in ten reached or beat. The
+decode rate counts the tokens after the first streamed piece, estimated by
+their share of the streamed text, over the time from the first piece to the
+last. A turn that ends without the finish reason `stop` or `length` counts as
+failed, and answers that stopped before `--output-tokens` are counted. It
 also gives the share of returning-turn prompt tokens the server reported as
 cached, when it reports them. A session count meets the bar when, at p90,
 every session decodes at 30 tok/s or more and a returning turn starts within
@@ -786,13 +790,16 @@ What runs anywhere, and in this repository's CI, is the test suite:
   a `/v1/models` answered as a bare list, a model that thinks for thousands
   of tokens, a model that answers `MODEL_LOADING` for its first requests, and
   a long tool call that arrives whole, short, truncated, cut by an error
-  event, ended by the output cap or refused for its `max_tokens`. Each verdict
+  event, ended by the output cap, refused for its `max_tokens`, or valid but
+  for another file or with other lines. Each verdict
   is checked for what it accepts and what it refuses.
 - `tests/test_session_load.py` runs `session_load.py` against a scripted stub
   that counts one token per word and reports a cached prefix: each session
   sends its whole transcript back with the answers as streamed, the input is
-  sized with the endpoint's count, a failed turn ends its session and fails
-  the run, and the bar is judged at p90.
+  sized with the endpoint's count, a failed turn or one without `stop` or
+  `length` ends its session and fails the run, returned reasoning counts
+  toward the first token and the decode window, short answers are counted,
+  and the bar is judged at p90.
 - `tests/test_messages_conformance.py` runs `conformance.py --api messages`
   against a scripted Anthropic Messages stub that plays a conforming event
   stream, then breaks one thing per test: usage missing from

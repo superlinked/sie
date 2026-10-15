@@ -14,7 +14,11 @@ answer goes back into the transcript as it was streamed. For each count in
 
 Each turn records the time to the first streamed token, the decode rate after
 it, the prompt tokens and, when the server reports them, the cached prompt
-tokens. A returning turn is any turn after a session's first: with a working
+tokens. The decode rate is the tokens after the first streamed piece, estimated
+by their share of the streamed text, answer and any returned reasoning, over
+the time from the first piece to the last. A turn whose stream ends without
+the finish reason ``stop`` or ``length`` counts as failed, and the summary
+counts short answers, turns that stopped before ``--output-tokens``. A returning turn is any turn after a session's first: with a working
 prefix cache only its new input is prefilled. The summary for each session
 count gives the median and p90 of both, where the p90 decode rate is the rate
 nine turns in ten reached or beat, and whether that count meets the bar of at
@@ -65,6 +69,7 @@ class Turn:
     decode_tps: float | None = None
     seconds: float = 0.0
     finish_reason: str | None = None
+    full_answer: bool = False
     error: str | None = None
 
 
@@ -95,6 +100,7 @@ def stream_turn(
 ) -> str:
     started = time.monotonic()
     first = last = None
+    pieces: list[str] = []
     content = ""
     try:
         stream = client.chat.completions.create(
@@ -113,20 +119,37 @@ def stream_turn(
             for choice in chunk.choices or []:
                 if choice.finish_reason:
                     record.finish_reason = choice.finish_reason
-                text = choice.delta.content if choice.delta else None
-                if text:
+                text = (choice.delta.content if choice.delta else None) or ""
+                reasoning = _reasoning(choice.delta)
+                if text or reasoning:
                     now = time.monotonic()
                     first = now if first is None else first
                     last = now
+                    pieces.append(text + reasoning)
                     content += text
     except (openai.APIError, httpx.HTTPError) as exc:
         record.error = f"{type(exc).__name__}: {exc}"[:300]
+    if record.error is None and record.finish_reason not in ("stop", "length"):
+        reason = record.finish_reason
+        record.error = "the stream ended without a finish reason" if reason is None else f"finish_reason {reason!r}"
     record.seconds = time.monotonic() - started
-    if first is not None:
+    record.full_answer = (record.completion_tokens or 0) >= max_tokens
+    streamed = sum(len(piece) for piece in pieces)
+    if first is not None and last is not None:
         record.ttft_s = first - started
-        if last is not None and last > first and record.completion_tokens and record.completion_tokens > 1:
-            record.decode_tps = (record.completion_tokens - 1) / (last - first)
+        if last > first and record.completion_tokens and streamed:
+            after_first = record.completion_tokens * (streamed - len(pieces[0])) / streamed
+            record.decode_tps = after_first / (last - first)
     return content
+
+
+def _reasoning(delta: Any) -> str:
+    if delta is None:
+        return ""
+    value = getattr(delta, "reasoning_content", None)
+    if value is None and isinstance(getattr(delta, "model_extra", None), dict):
+        value = delta.model_extra.get("reasoning_content")
+    return value if isinstance(value, str) else ""
 
 
 def run_session(
@@ -168,6 +191,7 @@ def summarise(sessions: int, turns: list[Turn], wall_s: float) -> dict[str, Any]
         if reported
         else None
     )
+    short = sum(1 for turn in done if not turn.full_answer)
     decode_p90 = _percentile(rates, 0.1)
     ttft_p90 = _percentile(returning_ttft, 0.9)
     errors = len(turns) - len(done)
@@ -182,6 +206,7 @@ def summarise(sessions: int, turns: list[Turn], wall_s: float) -> dict[str, Any]
         "sessions": sessions,
         "turns": len(turns),
         "errors": errors,
+        "short_answers": short,
         "max_prompt_tokens": max((turn.prompt_tokens or 0 for turn in done), default=0),
         "decode_tps_p50": _round(_percentile(rates, 0.5), 1),
         "decode_tps_p90": _round(decode_p90, 1),

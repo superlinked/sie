@@ -17,6 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+import openai
 import pytest
 
 import session_load
@@ -61,14 +62,21 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(raw)
             return
-        answer = ANSWER.split()[: body["max_tokens"]]
+        answer = ANSWER.split()[: KNOBS.get("answer_words", body["max_tokens"])]
+        thinking = ["think"] * KNOBS.get("reasoning_words", 0) if len(body["messages"]) > 2 else []
         self.send_response(200)
         self.send_header("content-type", "text/event-stream")
         self.end_headers()
         base = {"id": "chatcmpl-stub", "object": "chat.completion.chunk", "created": 1, "model": "stub-model"}
+        for word in thinking:
+            delta = {"reasoning_content": word + " "}
+            self._send({**base, "choices": [{"index": 0, "delta": delta, "finish_reason": None}]})
         for word in answer:
             self._send({**base, "choices": [{"index": 0, "delta": {"content": word + " "}, "finish_reason": None}]})
-        self._send({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]})
+        finish = KNOBS.get("finish", "length" if len(answer) >= body["max_tokens"] else "stop")
+        if finish is not None:
+            self._send({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": finish}]})
+        answer = thinking + answer
         usage = {
             "prompt_tokens": len(words),
             "completion_tokens": len(answer),
@@ -184,3 +192,36 @@ def test_the_bar_is_judged_at_p90() -> None:
     assert session_load.summarise(1, slow_ttft, 1.0)["meets_bar"] is False
     slow_decode = fast[:-2] + [turn(11, 0.5, 20.0), turn(12, 0.5, 20.0)]
     assert session_load.summarise(1, slow_decode, 1.0)["meets_bar"] is False
+
+
+@pytest.mark.parametrize(("finish", "error"), [(None, "without a finish reason"), ("content_filter", "content_filter")])
+def test_a_turn_without_stop_or_length_fails(
+    base_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, finish: str | None, error: str
+) -> None:
+    KNOBS["finish"] = finish
+    with pytest.raises(SystemExit, match="could not size the prompt"):
+        _main(base_url, tmp_path, monkeypatch, "--sessions", "1")
+    record = session_load.Turn(sessions=1, session=1, turn=1)
+    client = openai.OpenAI(base_url=base_url, api_key="none", max_retries=0)
+    session_load.stream_turn(client, "stub-model", [{"role": "user", "content": "hi"}], record, 20)
+    assert error in (record.error or "")
+
+
+def test_reasoning_counts_toward_the_first_token_and_the_decode_window(
+    base_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    KNOBS["reasoning_words"] = 30
+    _, report = _main(base_url, tmp_path, monkeypatch, "--sessions", "1")
+    turn = next(turn for turn in report["turns"] if turn["turn"] == 2)
+    assert turn["completion_tokens"] == 50
+    assert turn["decode_tps"] > 0
+    assert turn["error"] is None
+
+
+def test_answers_that_stop_short_are_counted(base_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    KNOBS["answer_words"] = 5
+    code, report = _main(base_url, tmp_path, monkeypatch, "--sessions", "1")
+    assert code == 0
+    (level,) = report["levels"]
+    assert (level["errors"], level["short_answers"]) == (0, 3)
+    assert {turn["finish_reason"] for turn in report["turns"]} == {"stop"}

@@ -65,9 +65,10 @@ REASONING_QUESTION = "Which is larger, 9.11 or 9.9? Answer with just the larger 
 LONG_CALL_MIN_BYTES = 65_536
 LONG_CALL_BUDGET = 32_000
 LONG_CALL_LINES = 1_320
+LONG_CALL_PATH = "notes/pangrams.txt"
 LONG_CALL_SENTENCE = "The quick brown fox jumps over the lazy dog."
 LONG_CALL_PROMPT = (
-    f"Use the write_file tool once to create the file notes/pangrams.txt. Its content must be {LONG_CALL_LINES:,} "
+    f"Use the write_file tool once to create the file {LONG_CALL_PATH}. Its content must be {LONG_CALL_LINES:,} "
     f"lines numbered 0001 to {LONG_CALL_LINES:04d}: each line is its four-digit number, one space and the sentence "
     f'"{LONG_CALL_SENTENCE}", about {LONG_CALL_LINES * (len(LONG_CALL_SENTENCE) + 6):,} characters in all. Write '
     "every line out in full in that one call: no ellipsis, no placeholder, no summary and no code that generates "
@@ -408,6 +409,10 @@ def _complete_once(client: openai.OpenAI, model: str, messages: list[dict[str, A
     except (openai.APIError, httpx.HTTPError) as exc:
         result.error = _error_payload(exc)
     return result
+
+
+def _describe_names(calls: list[ToolCall]) -> str:
+    return ", ".join(str(call.name) for call in calls)
 
 
 def _describe_calls(result: StreamResult) -> str:
@@ -832,6 +837,18 @@ def case_long_tool_call(client: openai.OpenAI, model: str, tool_params: dict[str
     kib = size / 1024
     if size < LONG_CALL_MIN_BYTES:
         detail = f"the model wrote {kib:.1f} KiB of arguments, under the {LONG_CALL_MIN_BYTES // 1024} KiB asked for"
+        return Case(name, "recorded", detail, observed)
+    paths = [args.get("path") for args in arguments if args]
+    as_asked = (
+        [call.name for call in calls] == ["write_file"]
+        and paths == [LONG_CALL_PATH]
+        and observed["lines_as_asked"] == LONG_CALL_LINES == observed["content_lines"]
+    )
+    if not as_asked:
+        detail = (
+            f"{kib:.1f} KiB arrived as JSON, but not the file asked for: {_describe_names(calls)} to {paths}, "
+            f"{observed['lines_as_asked']} of {observed['content_lines']} lines as asked, {LONG_CALL_LINES} wanted"
+        )
         return Case(name, "recorded", detail, observed)
     detail = f"{kib:.1f} KiB of arguments in {len(calls)} call ({observed['content_lines']} lines), {timing}"
     return Case(name, "pass", detail, observed)
