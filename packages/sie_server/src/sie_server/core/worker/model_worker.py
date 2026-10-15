@@ -582,14 +582,17 @@ class ModelWorker:
             self._adapter_dispatch_lock.release()
 
     async def run_adapter_mutation[T](self, mutation: Callable[[], T]) -> T:
-        """Run ``mutation`` on the inference thread while no batch is in flight.
+        """Run ``mutation`` while no batch is in flight, on the inference thread while the worker runs.
 
         For changes to adapter state that a forward reads, such as loading or
         unloading a LoRA: the dispatch lock keeps them out of the span between
-        ``set_active_lora`` and the end of the batch that follows it.
+        ``set_active_lora`` and the end of the batch that follows it. A stopped
+        worker has shut its inference executor down, so the mutation runs on
+        the default executor instead.
         """
         async with self._adapter_dispatch_lock:
-            return await asyncio.get_running_loop().run_in_executor(self._inference_executor, mutation)
+            executor = self._inference_executor if self._running else None
+            return await asyncio.get_running_loop().run_in_executor(executor, mutation)
 
     async def _release_optional_memory_with_slots(self) -> int:
         if not _slots_can_acquire_all(self._dispatch_slots, self._dispatch_width):

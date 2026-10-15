@@ -1247,6 +1247,21 @@ class TestRegistryLoraLifecycle:
 
         assert ready == (True, False)
 
+    async def test_a_lora_loads_while_the_models_worker_is_stopped(self, tmp_path: Path) -> None:
+        lora = _save_plain_lora(tmp_path / "declared")
+        adapter = TinyLoRAAdapter()
+        adapter.load("cpu")
+        worker = ModelWorker(adapter, WorkerConfig(max_batch_wait_ms=1))
+        await worker.start()
+        await worker.stop()
+        registry, _ = _registry_serving(adapter, _tiny_config([lora]), worker=worker)
+
+        assert await registry.ensure_lora_loaded_async("t/tiny", lora) == (False, True)
+        await asyncio.gather(*registry._background_tasks)
+
+        assert await registry.ensure_lora_loaded_async("t/tiny", lora) == (True, False)
+        assert adapter._loaded_loras == {lora}
+
     async def test_a_lora_load_waits_for_the_batch_in_flight(self, tmp_path: Path) -> None:
         first = _save_plain_lora(tmp_path / "first")
         second = _save_plain_lora(tmp_path / "second")
