@@ -8,6 +8,7 @@ from typing import Any
 import torch
 from fastapi import FastAPI
 
+from sie_server import __version__
 from sie_server.api.encode import router as encode_router
 from sie_server.api.extract import router as extract_router
 from sie_server.api.generate import router as generate_router
@@ -80,7 +81,7 @@ class AppFactory:
         app = FastAPI(
             title="SIE Server",
             description="Search Inference Engine - GPU inference server for search workloads",
-            version="0.1.0",
+            version=__version__,
             lifespan=cls._create_lifespan(config, shutdown_state),
         )
         # Add graceful shutdown middleware (for spot instance preemption)
