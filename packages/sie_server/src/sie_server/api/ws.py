@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import getpass
 import hashlib
 import logging
 import os
@@ -26,6 +25,7 @@ from sie_sdk.types import (
     ModelConfig as SDKModelConfig,
 )
 
+from sie_server import __version__
 from sie_server.core.batcher import BatchConfig
 from sie_server.core.gpu_health import gpu_is_healthy_async
 from sie_server.core.readiness import is_ready
@@ -66,18 +66,19 @@ def get_server_info() -> ServerInfo:
     """Get server metadata.
 
     Returns:
-        ServerInfo with version, uptime, user, working_dir, pid.
+        ServerInfo with version and uptime. ``user``, ``working_dir`` and
+        ``pid`` are deprecated and always empty.
     """
     global _server_start_time
     if _server_start_time is None:
         _server_start_time = time.time()
 
     return ServerInfo(
-        version="0.1.0",
+        version=__version__,
         uptime_seconds=int(time.time() - _server_start_time),
-        user=getpass.getuser(),
-        working_dir=str(Path.cwd()),
-        pid=os.getpid(),
+        user="",
+        working_dir="",
+        pid=0,
     )
 
 

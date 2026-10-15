@@ -2,6 +2,7 @@
 
 import tempfile
 from collections.abc import Generator
+from importlib.metadata import version
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -48,6 +49,18 @@ class TestServerInfo:
         assert isinstance(info["user"], str)
         assert isinstance(info["working_dir"], str)
         assert isinstance(info["pid"], int)
+
+    def test_server_info_reports_no_host_identity(self) -> None:
+        """The OS user, working directory and process id never leave the host."""
+        info = get_server_info()
+
+        assert info["user"] == ""
+        assert info["working_dir"] == ""
+        assert info["pid"] == 0
+
+    def test_server_info_reports_package_version(self) -> None:
+        """The version is the installed sie-server version, not a placeholder."""
+        assert get_server_info()["version"] == version("sie-server")
 
     def test_uptime_is_non_negative(self) -> None:
         """Uptime should be non-negative."""
@@ -176,11 +189,11 @@ class TestWebSocketEndpoint:
 
             # Verify server info
             server = data["server"]
-            assert "version" in server
+            assert server["version"] == version("sie-server")
             assert "uptime_seconds" in server
-            assert "user" in server
-            assert "working_dir" in server
-            assert "pid" in server
+            assert server["user"] == ""
+            assert server["working_dir"] == ""
+            assert server["pid"] == 0
 
     @patch("sie_server.api.ws.asyncio.sleep", new_callable=AsyncMock)
     def test_websocket_sends_multiple_updates(self, mock_sleep: AsyncMock, client: TestClient) -> None:

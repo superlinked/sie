@@ -1279,7 +1279,12 @@ ClusterModelInfo = ModelSummary
 
 
 class ServerInfo(TypedDict):
-    """Server metadata included in worker status."""
+    """Server metadata included in worker status.
+
+    ``user``, ``working_dir`` and ``pid`` are deprecated: the server sends
+    ``""``, ``""`` and ``0``, and the fields will be removed no earlier than
+    0.13.0.
+    """
 
     version: str
     uptime_seconds: int

@@ -18,6 +18,7 @@ from sie_config.health import router as health_router
 from sie_config.managed_metrics import setup_managed_metrics
 from sie_config.model_registry import ModelRegistry
 from sie_config.nats_publisher import NatsPublisher
+from sie_config.version import CONFIG_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +102,7 @@ class AppFactory:
         app = FastAPI(
             title="SIE Config Service",
             description="Config control plane for SIE clusters",
-            version="0.1.0",
+            version=CONFIG_VERSION,
             lifespan=cls._create_lifespan(),
         )
 
