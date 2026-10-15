@@ -9,9 +9,11 @@ running ``conformance.py`` against a real endpoint.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -25,6 +27,16 @@ REASONING = " ".join(["Compare the tenths first: 9.9 has nine tenths and 9.11 ha
 LONG_ANSWER = (
     "9.9 is the larger number, because its tenths digit, 9, is larger than the tenths digit of 9.11, which is 1."
 )
+RATE_LIMITED = {"status": 429, "code": "rate_limit_exceeded", "message": "rate limit exceeded, retry later"}
+BUSY_EVENT = {
+    "error_event": {
+        "message": "the upstream is busy, please retry",
+        "type": "server_error",
+        "param": None,
+        "code": "RESOURCE_EXHAUSTED",
+        "retry_after_s": 12,
+    }
+}
 
 
 def _words(text: str) -> int:
@@ -40,10 +52,13 @@ def _reply(body: dict[str, Any]) -> dict[str, Any]:
     if body.get("tool_choice") == "auto" and KNOBS.get("auto") == "refuse":
         return {"status": 400, "code": "unsupported_field", "message": "field 'tool_choice' is not supported"}
     if body.get("tool_choice") == "required":
+        refusals = KNOBS.get("required_refusals", [])
+        refused = SEEN.setdefault("required_refusals", [])
+        if len(refused) < len(refusals):
+            refused.append(body)
+            return refusals[len(refused) - 1]
         if KNOBS.get("required") == "refuse":
             return {"status": 400, "code": "unsupported_field", "message": "tool_choice 'required' is not supported"}
-        if KNOBS.get("required") == "rate_limited":
-            return {"status": 429, "code": "rate_limit_exceeded", "message": "rate limit exceeded, retry later"}
         if KNOBS.get("required") == "ignore":
             return {"content": "Hello!", "finish": "stop"}
         return {"calls": [("call_req", "get_weather", {"city": "Paris"})], "finish": "tool_calls"}
@@ -56,9 +71,9 @@ def _reply(body: dict[str, Any]) -> dict[str, Any]:
             return {"status": 500, "code": "INTERNAL_ERROR", "message": "worker failed"}
         if KNOBS.get("busy", 0) > len(SEEN.get("busy", [])):
             SEEN.setdefault("busy", []).append(body)
-            return {"status": 503, "code": "QUEUE_FULL", "message": "upstream busy"}
+            return {"status": 503, "code": "QUEUE_FULL", "message": "upstream busy", "headers": {"retry-after": "0"}}
         if KNOBS.get("midstream_error"):
-            return {"midstream_error": True}
+            return {"error_event": KNOBS["midstream_error"]}
     if tools and "Tokyo" in user_text:
         calls = [("call_1", "get_weather", {"city": "Paris"}), ("call_2", "get_weather", {"city": "Tokyo"})]
         if KNOBS.get("parallel") == "single":
@@ -90,7 +105,7 @@ def _reply(body: dict[str, Any]) -> dict[str, Any]:
 def _thinking_budget_spent(body: dict[str, Any], reply: dict[str, Any]) -> dict[str, Any]:
     think = KNOBS.get("think_tokens", 0)
     max_tokens = body.get("max_tokens")
-    if not think or max_tokens in (4, 8) or "status" in reply or reply.get("midstream_error"):
+    if not think or max_tokens in (4, 8) or "status" in reply or "error_event" in reply:
         return reply
     if max_tokens is None or max_tokens < think + 64:
         return {"content": "", "finish": "length", "hidden": "think " * (max_tokens or 0)}
@@ -146,14 +161,17 @@ class Handler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["content-length"])))
         KNOBS["_posts"] = KNOBS.get("_posts", 0) + 1
         if KNOBS["_posts"] <= KNOBS.get("loading", 0):
-            error = {"message": "model is loading, please retry", "type": "server_error", "code": "MODEL_LOADING"}
+            code = KNOBS.get("loading_code", "MODEL_LOADING")
+            error = {"message": "model is loading, please retry", "type": "server_error", "code": code}
             self._json(503, {"error": error})
+            return
+        if KNOBS.get("busy_all"):
+            self._json(503, {"error": {"message": "upstream busy", "type": "server_error", "code": "QUEUE_FULL"}})
             return
         reply = _thinking_budget_spent(body, _reply(body))
         if "status" in reply:
             error = {"message": reply["message"], "type": "invalid_request_error", "code": reply["code"]}
-            retry = {"retry-after": str(KNOBS.get("retry_after", 0))} if reply["status"] in (429, 503) else {}
-            self._json(reply["status"], {"error": error}, retry)
+            self._json(reply["status"], {"error": error}, reply.get("headers"))
             return
         if not body.get("stream"):
             message: dict[str, Any] = {"role": "assistant", "content": reply.get("content")}
@@ -175,10 +193,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("x-sie-upstream", "vendor-name-from-the-profile")
         self.end_headers()
         self._chunk([{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}])
-        if reply.get("midstream_error"):
+        if "error_event" in reply:
+            if reply.get("partial"):
+                self._chunk([{"index": 0, "delta": {"content": reply["partial"]}, "finish_reason": None}])
             self._chunk(
                 [{"index": 0, "delta": {}, "finish_reason": None}],
-                error={"message": "upstream busy", "type": "server_error", "param": None, "code": "QUEUE_FULL"},
+                error=reply["error_event"],
                 request_id="req-stub",
             )
             self.wfile.write(b"data: [DONE]\n\n")
@@ -220,6 +240,13 @@ def reset_knobs() -> Iterator[None]:
     yield
     KNOBS.clear()
     SEEN.clear()
+
+
+@pytest.fixture
+def waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    slept: list[float] = []
+    monkeypatch.setattr(conformance.time, "sleep", slept.append)
+    return slept
 
 
 def _report(base_url: str, **knobs: Any) -> dict[str, Any]:
@@ -280,9 +307,10 @@ def test_tool_call_deltas_without_ids_fail(base_url: str) -> None:
     assert cases["parallel_tool_calls"]["status"] == "fail"
 
 
-def test_model_loading_is_waited_out(base_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("code", ["MODEL_LOADING", "provisioning"])
+def test_model_loading_is_waited_out(base_url: str, monkeypatch: pytest.MonkeyPatch, code: str) -> None:
     monkeypatch.setattr(conformance, "WARM_UP_POLL_S", 0.01)
-    report = _report(base_url, loading=3)
+    report = _report(base_url, loading=3, loading_code=code)
     assert report["warm_up"]["attempts"] == 4
     assert report["warm_up"]["error"] is None
     assert _failures({case["name"]: case for case in report["cases"]}) == set()
@@ -292,8 +320,124 @@ def test_busy_refusals_are_retried_and_recorded(base_url: str) -> None:
     cases = _run(base_url, busy=2)
     assert _failures(cases) == set()
     assert cases["tool_choice_auto"]["status"] == "pass"
-    retries = cases["streaming_tool_call_deltas"]["observed"]["retries"]
-    assert [(retry["status"], retry["code"]) for retry in retries] == [(503, "QUEUE_FULL"), (503, "QUEUE_FULL")]
+    case = cases["streaming_tool_call_deltas"]
+    assert case["status"] == "pass"
+    assert case["retries"] == 2
+    retries = case["observed"]["retries"]
+    assert [(retry["status"], retry["code"], retry["waited_s"]) for retry in retries] == [(503, "QUEUE_FULL", 0.0)] * 2
+    assert cases["parallel_tool_calls"]["retries"] == 0
+
+
+def test_a_rate_limited_request_waits_out_its_retry_after(base_url: str, waits: list[float]) -> None:
+    limited = {**RATE_LIMITED, "headers": {"retry-after": "7"}}
+    case = _run(base_url, required_refusals=[limited, limited])["tool_choice_required"]
+    assert case["status"] == "recorded"
+    assert case["observed"]["support"] == "supported"
+    assert case["retries"] == 2
+    assert waits == [7.0, 7.0]
+
+
+def test_a_busy_error_event_before_any_output_is_retried(base_url: str, waits: list[float]) -> None:
+    case = _run(base_url, required_refusals=[BUSY_EVENT])["tool_choice_required"]
+    assert case["status"] == "recorded"
+    assert case["observed"]["support"] == "supported"
+    (retry,) = case["observed"]["retries"]
+    assert (retry["status"], retry["code"], retry["retry_after_s"]) == (None, "RESOURCE_EXHAUSTED", 12.0)
+    assert waits == [12.0]
+
+
+@pytest.mark.parametrize(
+    ("refusal", "expected_waits"),
+    [
+        (RATE_LIMITED, [5.0, 10.0, 20.0, 40.0]),
+        ({**RATE_LIMITED, "headers": {"retry-after": "Wed, 21 Oct 2015 07:28:00 GMT"}}, [5.0, 10.0, 20.0, 40.0]),
+        ({**RATE_LIMITED, "headers": {"retry-after": "nan"}}, [5.0, 10.0, 20.0, 40.0]),
+        ({**RATE_LIMITED, "headers": {"retry-after": "60"}}, [60.0, 60.0, 60.0]),
+        ({**RATE_LIMITED, "headers": {"retry-after": "600"}}, [60.0, 60.0, 60.0]),
+        (BUSY_EVENT, [12.0, 12.0, 12.0, 12.0]),
+    ],
+)
+def test_a_request_still_busy_after_the_cap_is_a_capacity_failure(
+    base_url: str, waits: list[float], refusal: dict[str, Any], expected_waits: list[float]
+) -> None:
+    report = _report(base_url, required_refusals=[refusal] * 10)
+    case = {case["name"]: case for case in report["cases"]}["tool_choice_required"]
+    assert case["status"] == "capacity"
+    assert "support" not in case["observed"]
+    assert case["retries"] == len(expected_waits)
+    assert waits == expected_waits
+    assert case["detail"].startswith(f"still busy after {len(expected_waits)} retries and {sum(expected_waits):g} s")
+    assert report["summary"] == {"pass": 10, "fail": 0, "recorded": 0, "capacity": 1}
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        {"status": 429, "code": "insufficient_quota", "message": "you exceeded your current quota"},
+        {"status": 503, "code": "transport_failure", "message": "upstream down", "headers": {"retry-after": "0"}},
+        {"status": 500, "code": "RESOURCE_EXHAUSTED", "message": "out of memory", "headers": {"retry-after": "0"}},
+        {
+            "error_event": {
+                "message": "generation failed",
+                "type": "server_error",
+                "param": None,
+                "code": "inference_error",
+            }
+        },
+    ],
+)
+def test_other_errors_are_failures_and_not_retried(base_url: str, waits: list[float], refusal: dict[str, Any]) -> None:
+    case = _run(base_url, required_refusals=[refusal, refusal])["tool_choice_required"]
+    assert case["status"] == "fail"
+    assert case["retries"] == 0
+    assert waits == []
+
+
+def test_a_busy_error_event_after_output_is_not_retried(base_url: str, waits: list[float]) -> None:
+    refusal = {"partial": "Hel", **BUSY_EVENT}
+    case = _run(base_url, required_refusals=[refusal, refusal])["tool_choice_required"]
+    assert case["status"] == "capacity"
+    assert (
+        case["detail"]
+        == "busy after some output, not retried: None RESOURCE_EXHAUSTED: the upstream is busy, please retry"
+    )
+    assert case["retries"] == 0
+    assert case["observed"]["content"] == "Hel"
+    assert waits == []
+
+
+def test_an_endpoint_that_stays_busy_fails_on_capacity_not_behaviour(
+    base_url: str,
+    waits: list[float],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    report = _report(base_url, busy_all=True)
+    cases = {case["name"]: case for case in report["cases"]}
+    assert {name: case["status"] for name, case in cases.items()} == {
+        "tool_choice_auto": "recorded",
+        "streaming_tool_call_deltas": "capacity",
+        "parallel_tool_calls": "capacity",
+        "tool_result_round_trip": "capacity",
+        "prompt_above_64k_tokens": "capacity",
+        "finish_reason_stop": "capacity",
+        "finish_reason_tool_calls": "capacity",
+        "finish_reason_length": "capacity",
+        "usage_on_final_chunk": "capacity",
+        "include_reasoning": "capacity",
+        "tool_choice_required": "capacity",
+    }
+    assert cases["streaming_tool_call_deltas"]["retries"] == conformance.BUSY_RETRIES
+    assert cases["include_reasoning"]["retries"] == 3 * conformance.BUSY_RETRIES
+    assert cases["finish_reason_tool_calls"]["retries"] == 0
+    assert cases["usage_on_final_chunk"]["retries"] == 0
+    assert report["summary"] == {"pass": 0, "fail": 0, "recorded": 1, "capacity": 10}
+    argv = ["conformance.py", "--base-url", base_url, "--model", "stub-model", "--report", str(tmp_path / "r.json")]
+    monkeypatch.setattr(sys, "argv", argv)
+    capsys.readouterr()
+    assert conformance.main() == 1
+    assert "0 pass, 0 fail, 1 recorded, 10 capacity" in capsys.readouterr().out
 
 
 def test_a_failed_tools_turn_does_not_blame_tool_choice(base_url: str) -> None:
@@ -304,11 +448,13 @@ def test_a_failed_tools_turn_does_not_blame_tool_choice(base_url: str) -> None:
 
 
 def test_an_error_event_mid_stream_is_recorded_not_raised(base_url: str) -> None:
-    cases = _run(base_url, midstream_error=True)
+    error = {"message": "generation failed", "type": "server_error", "param": None, "code": "inference_error"}
+    cases = _run(base_url, midstream_error=error)
     case = cases["streaming_tool_call_deltas"]
     assert case["status"] == "fail"
-    assert case["observed"]["error"]["code"] == "QUEUE_FULL"
-    assert case["observed"]["error"]["message"] == "upstream busy"
+    assert case["observed"]["error"]["code"] == "inference_error"
+    assert case["observed"]["error"]["message"] == "generation failed"
+    assert case["retries"] == 0
     assert cases["finish_reason_stop"]["status"] == "pass"
 
 
@@ -340,16 +486,6 @@ def test_required_refused_is_recorded_not_failed(base_url: str) -> None:
     assert cases["tool_choice_required"]["status"] == "recorded"
     assert cases["tool_choice_required"]["observed"]["support"] == "refused"
     assert cases["tool_choice_required"]["observed"]["error"]["status"] == 400
-
-
-def test_required_rate_limited_is_a_failure_not_a_refusal(base_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(conformance, "RETRY_BUDGET_S", 0.2)
-    cases = _run(base_url, required="rate_limited", retry_after=0.05)
-    case = cases["tool_choice_required"]
-    assert case["status"] == "fail"
-    assert "support" not in case["observed"]
-    assert case["observed"]["error"]["status"] == 429
-    assert case["observed"]["retries"]
 
 
 def test_required_accepted_but_ignored_fails(base_url: str) -> None:

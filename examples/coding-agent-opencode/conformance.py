@@ -23,9 +23,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,7 +41,10 @@ DEFAULT_REPORT = Path("run-output/conformance.json")
 REQUEST_TIMEOUT_S = 900.0
 WARM_UP_TIMEOUT_S = 900.0
 WARM_UP_POLL_S = 5.0
-RETRY_BUDGET_S = 300.0
+WARM_UP_CODES = frozenset({"MODEL_LOADING", "provisioning"})
+BUSY_CODES = frozenset({"QUEUE_FULL", "RESOURCE_EXHAUSTED", "rate_limit_exceeded"})
+BUSY_RETRIES = 4
+BUSY_WAIT_CAP_S = 180.0
 RETRY_AFTER_DEFAULT_S = 5.0
 RETRY_AFTER_MAX_S = 60.0
 GENERATION_BUDGET = 4096
@@ -187,40 +192,69 @@ def _extra(obj: Any, key: str) -> Any:
     return extra.get(key) if isinstance(extra, dict) else None
 
 
+def _seconds(value: Any) -> float | None:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
+
+
 def _error_payload(exc: Exception) -> dict[str, Any]:
     body = getattr(exc, "body", None)
     body = body if isinstance(body, dict) else {}
     inner = body.get("error") if isinstance(body.get("error"), dict) else body
+    status_error = isinstance(exc, openai.APIStatusError)
+    retry_after = _seconds(exc.response.headers.get("retry-after")) if status_error else None
     return {
-        "status": exc.status_code if isinstance(exc, openai.APIStatusError) else None,
-        "code": inner.get("code") or (None if isinstance(exc, openai.APIStatusError) else type(exc).__name__),
+        "status": exc.status_code if status_error else None,
+        "code": inner.get("code") or (None if status_error else type(exc).__name__),
         "param": inner.get("param"),
         "message": inner.get("message") or str(exc),
+        "retry_after_s": retry_after if retry_after is not None else _seconds(inner.get("retry_after_s")),
     }
 
 
-def _retry_wait(exc: openai.APIStatusError) -> float | None:
-    busy = exc.status_code == 429 or (exc.status_code == 503 and _error_payload(exc)["code"] != "MODEL_LOADING")
-    if not busy:
+def _is_busy(error: dict[str, Any] | None) -> bool:
+    return error is not None and error["status"] in (None, 429, 503) and error["code"] in BUSY_CODES
+
+
+def _delivered(result: StreamResult) -> bool:
+    return bool(result.content or result.reasoning or result.tool_calls)
+
+
+def _busy_retry(result: StreamResult, retries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    error = result.error
+    if error is None or not _is_busy(error) or _delivered(result) or len(retries) >= BUSY_RETRIES:
         return None
-    try:
-        wait = float(exc.response.headers.get("retry-after", RETRY_AFTER_DEFAULT_S))
-    except ValueError:
-        wait = RETRY_AFTER_DEFAULT_S
-    return min(max(wait, 0.0), RETRY_AFTER_MAX_S)
+    hint = error["retry_after_s"]
+    wait = min(RETRY_AFTER_DEFAULT_S * 2 ** len(retries) if hint is None else hint, RETRY_AFTER_MAX_S)
+    if sum(retry["waited_s"] for retry in retries) + wait > BUSY_WAIT_CAP_S:
+        return None
+    return {**error, "waited_s": wait}
 
 
-def _create(client: openai.OpenAI, result: StreamResult, **kwargs: Any) -> Any:
+def _retrying(send: Callable[[], StreamResult]) -> StreamResult:
     started = time.monotonic()
+    retries: list[dict[str, Any]] = []
     while True:
-        try:
-            return client.chat.completions.with_raw_response.create(**kwargs)
-        except openai.APIStatusError as exc:
-            wait = _retry_wait(exc)
-            if wait is None or time.monotonic() - started + wait > RETRY_BUDGET_S:
-                raise
-            result.retries.append({**_error_payload(exc), "waited_s": wait})
-            time.sleep(wait)
+        result = send()
+        retry = _busy_retry(result, retries)
+        if retry is None:
+            result.retries = retries
+            result.seconds = time.monotonic() - started
+            return result
+        retries.append(retry)
+        time.sleep(retry["waited_s"])
+
+
+def _still_busy(result: StreamResult) -> str:
+    error = result.error or {}
+    refusal = f"{error.get('status')} {error.get('code')}: {error.get('message')}"
+    if _delivered(result):
+        return f"busy after some output, not retried: {refusal}"
+    waited = sum(retry["waited_s"] for retry in result.retries)
+    return f"still busy after {len(result.retries)} retries and {waited:g} s of waiting: {refusal}"
 
 
 def _keep_headers(result: StreamResult, raw: Any) -> None:
@@ -228,12 +262,17 @@ def _keep_headers(result: StreamResult, raw: Any) -> None:
 
 
 def stream_chat(client: openai.OpenAI, model: str, messages: list[dict[str, Any]], **params: Any) -> StreamResult:
+    return _retrying(lambda: _stream_once(client, model, messages, **params))
+
+
+def complete_chat(client: openai.OpenAI, model: str, messages: list[dict[str, Any]], **params: Any) -> StreamResult:
+    return _retrying(lambda: _complete_once(client, model, messages, **params))
+
+
+def _stream_once(client: openai.OpenAI, model: str, messages: list[dict[str, Any]], **params: Any) -> StreamResult:
     result = StreamResult()
-    started = time.monotonic()
     try:
-        raw = _create(
-            client,
-            result,
+        raw = client.chat.completions.with_raw_response.create(
             model=model,
             messages=messages,
             stream=True,
@@ -275,15 +314,13 @@ def stream_chat(client: openai.OpenAI, model: str, messages: list[dict[str, Any]
                         call.arguments += piece.function.arguments
     except (openai.APIError, httpx.HTTPError) as exc:
         result.error = _error_payload(exc)
-    result.seconds = time.monotonic() - started
     return result
 
 
-def complete_chat(client: openai.OpenAI, model: str, messages: list[dict[str, Any]], **params: Any) -> StreamResult:
+def _complete_once(client: openai.OpenAI, model: str, messages: list[dict[str, Any]], **params: Any) -> StreamResult:
     result = StreamResult()
-    started = time.monotonic()
     try:
-        raw = _create(client, result, model=model, messages=messages, **params)
+        raw = client.chat.completions.with_raw_response.create(model=model, messages=messages, **params)
         _keep_headers(result, raw)
         completion = raw.parse()
         if completion.usage is not None:
@@ -298,7 +335,6 @@ def complete_chat(client: openai.OpenAI, model: str, messages: list[dict[str, An
                 result.reasoning = reasoning
     except (openai.APIError, httpx.HTTPError) as exc:
         result.error = _error_payload(exc)
-    result.seconds = time.monotonic() - started
     return result
 
 
@@ -309,6 +345,8 @@ def _describe_calls(result: StreamResult) -> str:
 def _fail_on_error(name: str, result: StreamResult) -> Case | None:
     if result.error is None:
         return None
+    if _is_busy(result.error):
+        return Case(name, "capacity", _still_busy(result), result.observed())
     error = result.error
     return Case(
         name, "fail", f"request failed: {error['status']} {error['code']}: {error['message']}", result.observed()
@@ -394,6 +432,8 @@ def case_tool_result_round_trip(
 ) -> Case:
     name = "tool_result_round_trip"
     calls = first.calls()
+    if _is_busy(first.error):
+        return Case(name, "capacity", "not run, streaming_tool_call_deltas stayed busy", first.observed())
     if first.error or not calls:
         return Case(name, "fail", "no tool call from streaming_tool_call_deltas to send a result for", first.observed())
     assistant: dict[str, Any] = {
@@ -516,6 +556,8 @@ def case_finish_reason_stop(client: openai.OpenAI, model: str) -> tuple[Case, St
 def case_finish_reason_tool_calls(first: Case) -> Case:
     name = "finish_reason_tool_calls"
     finish = first.observed.get("finish_reason")
+    if first.status == "capacity":
+        return Case(name, "capacity", "not judged, the tool-call turn stayed busy", {"finish_reason": finish})
     if finish == "tool_calls":
         return Case(name, "pass", "finish_reason=tool_calls on the tool-call turn", {"finish_reason": finish})
     return Case(name, "fail", f"tool-call turn ended with finish_reason={finish!r}", {"finish_reason": finish})
@@ -539,6 +581,8 @@ def case_finish_reason_length(client: openai.OpenAI, model: str) -> Case:
 def case_usage_on_final_chunk(stop: StreamResult) -> Case:
     name = "usage_on_final_chunk"
     observed = {"usage": stop.usage, "usage_on_last_chunk": stop.usage_on_last_chunk, "chunks": stop.chunks}
+    if _is_busy(stop.error):
+        return Case(name, "capacity", "not judged, the stop stream stayed busy", observed)
     if stop.error:
         return Case(name, "fail", "the stop stream failed, see finish_reason_stop", observed)
     usage = stop.usage or {}
@@ -584,6 +628,9 @@ def case_include_reasoning(client: openai.OpenAI, model: str) -> tuple[Case, boo
         "content_has_think_tags": any("<think>" in text or "</think>" in text for text in contents),
     }
     accepted = with_flag.error is None
+    busy = next((result for result in (with_flag, without_flag, whole) if _is_busy(result.error)), None)
+    if busy is not None:
+        return Case(name, "capacity", _still_busy(busy), observed), accepted
     for label, result in (("include_reasoning", with_flag), ("plain request", without_flag)):
         if result.error:
             error = result.error
@@ -645,6 +692,8 @@ def case_tool_choice_required(client: openai.OpenAI, model: str) -> Case:
     observed = result.observed()
     if result.error:
         error = result.error
+        if _is_busy(error):
+            return Case(name, "capacity", _still_busy(result), observed)
         if _is_refusal(error):
             observed["support"] = "refused"
             return Case(name, "recorded", f"refused: {error['status']} {error['code']}: {error['message']}", observed)
@@ -689,7 +738,7 @@ def wait_until_loaded(client: openai.OpenAI, model: str) -> dict[str, Any]:
         attempts += 1
         result = stream_chat(client, model, messages, max_tokens=4, temperature=0)
         elapsed = time.monotonic() - started
-        if (result.error or {}).get("code") != "MODEL_LOADING" or elapsed > WARM_UP_TIMEOUT_S:
+        if (result.error or {}).get("code") not in WARM_UP_CODES or elapsed > WARM_UP_TIMEOUT_S:
             return {"attempts": attempts, "seconds": round(elapsed, 1), "error": result.error}
         time.sleep(WARM_UP_POLL_S)
 
@@ -734,7 +783,8 @@ def run(base_url: str, api_key: str, model: str) -> dict[str, Any]:
     cases.append(reasoning_case)
     cases.append(case_tool_choice_required(client, model))
 
-    counts = {status: sum(1 for case in cases if case.status == status) for status in ("pass", "fail", "recorded")}
+    statuses = ("pass", "fail", "recorded", "capacity")
+    counts = {status: sum(1 for case in cases if case.status == status) for status in statuses}
     return {
         "base_url": base_url,
         "model": model,
@@ -744,9 +794,14 @@ def run(base_url: str, api_key: str, model: str) -> dict[str, Any]:
         "served_by": tool_result.headers.get("x-sie-served-by"),
         "warm_up": warm_up,
         "tools_turn_params": tool_params,
-        "cases": [case.__dict__ for case in cases],
+        "cases": [{**case.__dict__, "retries": _retries_in(case.observed)} for case in cases],
         "summary": counts,
     }
+
+
+def _retries_in(observed: dict[str, Any]) -> int:
+    nested = sum(_retries_in(value) for value in observed.values() if isinstance(value, dict))
+    return len(observed.get("retries") or []) + nested
 
 
 def print_table(report: dict[str, Any]) -> None:
@@ -758,10 +813,12 @@ def print_table(report: dict[str, Any]) -> None:
     print(f"warm-up: {warm_up['attempts']} attempt(s), {warm_up['seconds']}s")
     print()
     for case in report["cases"]:
-        print(f"  {case['name']:<{width}}  {case['status']:<8}  {case['detail']}")
+        retried = f" ({case['retries']} busy retries)" if case["retries"] else ""
+        print(f"  {case['name']:<{width}}  {case['status']:<8}  {case['detail']}{retried}")
     summary = report["summary"]
+    capacity = f", {summary['capacity']} capacity" if summary["capacity"] else ""
     print()
-    print(f"{summary['pass']} pass, {summary['fail']} fail, {summary['recorded']} recorded")
+    print(f"{summary['pass']} pass, {summary['fail']} fail, {summary['recorded']} recorded{capacity}")
 
 
 def main() -> int:
@@ -781,7 +838,7 @@ def main() -> int:
     args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print_table(report)
     print(f"report written to {args.report}")
-    return 1 if report["summary"]["fail"] else 0
+    return 1 if report["summary"]["fail"] or report["summary"]["capacity"] else 0
 
 
 if __name__ == "__main__":

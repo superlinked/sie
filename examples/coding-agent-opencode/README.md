@@ -230,12 +230,23 @@ Every case keeps what it observed in the JSON report: the assembled calls, the
 delta counts, the finish reason, the usage object, the error body, any
 retries, and the `x-sie-served-by` header when the endpoint sends one.
 
-A server that is still loading the model answers `503 MODEL_LOADING`, so the
-check first waits for a tiny request to be served, up to 15 minutes, and
-records how long that took. A `429`, or a `503` other than `MODEL_LOADING`,
-is retried after its `Retry-After`, up to 5 minutes per request, and each
-retry is recorded. An error event in the middle of a stream is recorded as
-that case's error.
+A server that is still loading the model answers `503 MODEL_LOADING`, and a
+gateway still starting a worker answers `503 provisioning`, so the check first
+waits for a tiny request to be served, up to 15 minutes, and records how long
+that took. A request refused as busy or rate-limited is retried: a `429` or
+`503` whose code is `QUEUE_FULL`, `RESOURCE_EXHAUSTED` or
+`rate_limit_exceeded`, or an error event with one of those codes that ends a
+stream before any output. Each wait is the `Retry-After` header, or else the
+error's `retry_after_s`, capped at 60 seconds. Without either, the wait is
+5 seconds, doubling with each retry. A request is retried at most 4 times and
+waits at most 3 minutes in all. Each retry is recorded with its error and
+wait in the case's `observed`, and the case's `retries` counts them. A case
+whose request is still refused as busy after that, or whose stream ends in a
+busy error event after some output, has the status `capacity` rather than
+`fail`. The summary counts it apart, and it also makes the exit code 1. Other
+errors, including `MODEL_LOADING` or `provisioning` after the warm-up, are not
+retried, and an error event in the middle of a stream is recorded as that
+case's error.
 
 ## What result to expect
 
@@ -320,8 +331,9 @@ served by remote
 ```
 
 - The one failure is the rate limit, not the feature. The check sends its
-  cases back to back and does not retry, and the `:relay` profile admits a
-  bounded number of requests a minute. The same `tool_choice: "required"`
+  cases back to back, and the `:relay` profile admits a bounded number of
+  requests a minute. The refusal came as an error event in the stream, which
+  the check at that commit did not retry. The same `tool_choice: "required"`
   request sent alone a few minutes later came back with `finish_reason:
   tool_calls` and the forced `get_weather` call.
 - A direct chat answer from the same endpoint carried `x-sie-served-by:
