@@ -127,7 +127,7 @@ def test_snapshot_versions_order_numerically(older, newer):
     assert engine_launch_contract._version_key(older) < engine_launch_contract._version_key(newer)
 
 
-def test_check_writes_the_engine_snapshot_for_a_bump_and_fails(tmp_path):
+def test_check_writes_the_engine_snapshot_for_a_bump_and_fails(tmp_path, capsys):
     bumped = report(version="0.5.21", flags=["--a", "--b"])
 
     with pytest.raises(ValueError, match="commit sglang-0.5.21.txt"):
@@ -140,6 +140,7 @@ def test_check_writes_the_engine_snapshot_for_a_bump_and_fails(tmp_path):
 
     assert (tmp_path / "out/sglang-0.5.21.txt").read_text() == "--a\n--b\n"
     assert json.loads((tmp_path / "out/sglang-cu130.json").read_text()) == bumped
+    assert capsys.readouterr().out == ("::group::conformance/engine-flags/sglang-0.5.21.txt\n--a\n--b\n::endgroup::\n")
 
 
 def test_check_passes_a_clean_image(capsys):

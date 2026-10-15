@@ -133,6 +133,12 @@ def check(
             name = snapshot_path(report["engine"], report["engine_version"], report_dir).name
             (report_dir / name).write_text(render_snapshot(report["flags"]), encoding="utf-8")
     problems = evaluate(report, snapshot_dir)
+    if report.get("engine") is not None:
+        expected = snapshot_path(report["engine"], report["engine_version"], snapshot_dir)
+        if not expected.is_file():
+            print(f"::group::{expected.relative_to(ROOT) if expected.is_relative_to(ROOT) else expected}")
+            print(render_snapshot(report["flags"]), end="")
+            print("::endgroup::")
     if problems:
         raise ValueError(f"engine launch contract failed for {bundle}:\n" + "\n".join(problems))
     if report.get("engine") is None:
