@@ -12144,6 +12144,7 @@ pub(crate) fn is_openai_compat_forwarded_header(name: &str) -> bool {
 pub(crate) fn is_openai_compat_inner_request_header(name: &str) -> bool {
     [
         "authorization",
+        "x-api-key",
         "x-sie-machine-profile",
         "x-sie-pool",
         "x-sie-engine",
@@ -23275,6 +23276,7 @@ mod tests {
         // path — every other endpoint injects queue trace context).
         for name in [
             "authorization",
+            "x-api-key",
             "x-sie-machine-profile",
             "x-sie-pool",
             "x-sie-engine",
