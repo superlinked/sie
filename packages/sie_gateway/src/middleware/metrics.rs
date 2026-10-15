@@ -332,7 +332,7 @@ fn classify_endpoint(path: &str) -> Option<&'static str> {
     } else if path.starts_with("/v1/generate/")
         || matches!(
             path,
-            "/v1/chat/completions" | "/v1/completions" | "/v1/responses"
+            "/v1/chat/completions" | "/v1/completions" | "/v1/responses" | "/v1/messages"
         )
     {
         Some("generate")
@@ -890,6 +890,8 @@ mod tests {
         assert_eq!(classify_endpoint("/v1/chat/completions"), Some("generate"));
         assert_eq!(classify_endpoint("/v1/completions"), Some("generate"));
         assert_eq!(classify_endpoint("/v1/responses"), Some("generate"));
+        assert_eq!(classify_endpoint("/v1/messages"), Some("generate"));
+        assert_eq!(classify_endpoint("/v1/messages/count_tokens"), None);
         assert_eq!(classify_endpoint("/v1/chat/completions/extra"), None);
         assert_eq!(classify_endpoint("/v1/embeddings"), Some("embeddings"));
         assert_eq!(classify_endpoint("/v1/moderations"), Some("moderations"));

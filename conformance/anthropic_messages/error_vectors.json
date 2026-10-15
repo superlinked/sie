@@ -1,0 +1,137 @@
+{
+  "description": "An inner error answer (status, headers, JSON body or null for an empty body) and the Anthropic error answer it becomes. Headers not listed under expect.headers are not asserted, except that expect.absent_headers must be missing.",
+  "errors": [
+    {
+      "name": "model without tool calling",
+      "status": 400,
+      "body": {"error": {"message": "Model 'm' does not support tool calling", "type": "invalid_request_error", "param": "tools", "code": "unsupported_field"}},
+      "expect": {"status": 400, "type": "invalid_request_error", "message": "tools: Model 'm' does not support tool calling", "headers": {"x-sie-error-code": "unsupported_field"}}
+    },
+    {
+      "name": "output cap named by the chat route",
+      "status": 400,
+      "body": {"error": {"message": "max_completion_tokens (40000) exceeds model max_output_tokens (32768)", "type": "invalid_request_error", "param": "max_completion_tokens", "code": "invalid_request"}},
+      "expect": {"status": 400, "type": "invalid_request_error", "message": "max_tokens: 40000 > 32768, which is the maximum allowed number of output tokens for this model"}
+    },
+    {
+      "name": "output cap named by the worker",
+      "status": 400,
+      "body": {"error": {"message": "max_new_tokens (40000) exceeds model cap (4096)", "type": "context_length_exceeded", "param": null, "code": "context_exceeded"}},
+      "expect": {"status": 400, "type": "invalid_request_error", "message": "max_tokens: 40000 > 4096, which is the maximum allowed number of output tokens for this model"}
+    },
+    {
+      "name": "prompt over the context window",
+      "status": 400,
+      "headers": {"x-sie-request-id": "req-7"},
+      "body": {"error": {"message": "prompt_tokens (130000) + max_new_tokens (32768) = 162768 exceeds context_length (131072) for model 'm'", "type": "context_length_exceeded", "param": null, "code": "context_exceeded"}},
+      "expect": {"status": 400, "type": "invalid_request_error", "message": "prompt is too long: 162768 tokens > 131072 maximum", "request_id": "req-7", "headers": {"request-id": "req-7", "x-sie-request-id": "req-7"}}
+    },
+    {
+      "name": "prompt over the context window, independent accounting",
+      "status": 400,
+      "body": {"error": {"message": "prompt_tokens (140000) exceeds context_length (131072) for model 'm'", "type": "context_length_exceeded", "param": null, "code": "context_exceeded"}},
+      "expect": {"status": 400, "type": "invalid_request_error", "message": "prompt is too long: 140000 tokens > 131072 maximum"}
+    },
+    {
+      "name": "prompt over the byte limit",
+      "status": 400,
+      "body": {"error": {"message": "prompt exceeds the configured UTF-8 size limit", "type": "context_length_exceeded", "param": null, "code": "INPUT_TOO_LONG"}},
+      "expect": {"status": 400, "type": "invalid_request_error", "message": "prompt is too long"}
+    },
+    {
+      "name": "image on a text-only model names the block",
+      "status": 400,
+      "first_image": "messages.2.content.0.tool_result.content.0.image",
+      "body": {"error": {"message": "Model 'm' does not support image input", "type": "invalid_request_error", "param": "messages", "code": "unsupported_field"}},
+      "expect": {"status": 400, "type": "invalid_request_error", "message": "messages.2.content.0.tool_result.content.0.image: Model 'm' does not support image input"}
+    },
+    {
+      "name": "unknown model",
+      "status": 404,
+      "body": {"error": {"message": "Model 'nope' not found", "type": "invalid_request_error", "param": "model", "code": "model_not_found"}},
+      "expect": {"status": 404, "type": "not_found_error", "message": "Model 'nope' not found"}
+    },
+    {
+      "name": "missing credential, SIE envelope",
+      "status": 401,
+      "body": {"detail": {"code": "UNAUTHORIZED", "message": "Missing or invalid bearer token"}},
+      "expect": {"status": 401, "type": "authentication_error", "message": "Missing or invalid bearer token", "headers": {"x-sie-error-code": "UNAUTHORIZED"}}
+    },
+    {
+      "name": "payment required",
+      "status": 402,
+      "body": {"error": {"message": "insufficient credits", "type": "invalid_request_error", "param": null, "code": "INSUFFICIENT_CREDITS"}},
+      "expect": {"status": 402, "type": "billing_error", "message": "insufficient credits"}
+    },
+    {
+      "name": "forbidden",
+      "status": 403,
+      "body": {"detail": {"code": "INSUFFICIENT_SCOPE", "message": "the key does not grant inference"}},
+      "expect": {"status": 403, "type": "permission_error", "message": "the key does not grant inference"}
+    },
+    {
+      "name": "too large",
+      "status": 413,
+      "body": {"error": {"message": "Request body too large (max 16777216 bytes)", "type": "invalid_request_error", "param": null, "code": "payload_too_large"}},
+      "expect": {"status": 413, "type": "request_too_large", "message": "Request body too large (max 16777216 bytes)"}
+    },
+    {
+      "name": "rate limited",
+      "status": 429,
+      "headers": {"retry-after": "1"},
+      "body": {"error": {"message": "rate limit exceeded", "type": "rate_limit_error", "param": null, "code": "rate_limit_exceeded"}},
+      "expect": {"status": 429, "type": "rate_limit_error", "message": "rate limit exceeded", "headers": {"retry-after": "1", "x-should-retry": "true"}}
+    },
+    {
+      "name": "provisioning keeps 503 and caps Retry-After at 60",
+      "status": 503,
+      "headers": {"retry-after": "120", "x-sie-error-code": "PROVISIONING"},
+      "body": {"error": {"message": "Model 'm' is provisioning; retry later", "type": "server_error", "param": null, "code": "provisioning"}},
+      "expect": {"status": 503, "type": "overloaded_error", "message": "Model 'm' is provisioning; retry later", "headers": {"retry-after": "60", "x-should-retry": "true", "x-sie-error-code": "PROVISIONING"}}
+    },
+    {
+      "name": "unparseable Retry-After is dropped",
+      "status": 503,
+      "headers": {"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"},
+      "body": {"error": {"message": "busy", "type": "server_error", "param": null, "code": "RESOURCE_EXHAUSTED"}},
+      "expect": {"status": 503, "type": "overloaded_error", "message": "busy", "absent_headers": ["retry-after", "x-should-retry"]}
+    },
+    {
+      "name": "gateway timeout",
+      "status": 504,
+      "body": {"error": {"message": "Generation aborted: first_chunk timeout", "type": "server_error", "param": null, "code": "first_chunk_timeout"}},
+      "expect": {"status": 504, "type": "timeout_error", "message": "Generation aborted: first_chunk timeout"}
+    },
+    {
+      "name": "worker output fault",
+      "status": 500,
+      "body": {"error": {"message": "internal error during generation", "type": "server_error", "param": null, "code": "inference_error", "attempt_id": "a1"}},
+      "expect": {"status": 500, "type": "api_error", "message": "internal error during generation"}
+    },
+    {
+      "name": "model load failure",
+      "status": 502,
+      "body": {"error": {"code": "MODEL_LOAD_FAILED", "message": "The requested model failed to load."}},
+      "expect": {"status": 502, "type": "api_error", "message": "The requested model failed to load."}
+    },
+    {
+      "name": "empty not found",
+      "status": 404,
+      "body": null,
+      "expect": {"status": 404, "type": "not_found_error", "message": "not found"}
+    },
+    {
+      "name": "method not allowed",
+      "status": 405,
+      "body": null,
+      "expect": {"status": 405, "type": "invalid_request_error", "message": "method not allowed"}
+    },
+    {
+      "name": "an Anthropic envelope passes through",
+      "status": 529,
+      "headers": {"retry-after": "5"},
+      "body": {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}, "request_id": null},
+      "expect": {"status": 529, "type": "overloaded_error", "message": "Overloaded", "headers": {"retry-after": "5", "x-should-retry": "true"}}
+    }
+  ]
+}
