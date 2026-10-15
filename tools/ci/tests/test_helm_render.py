@@ -2891,3 +2891,240 @@ def test_threshold_long_name_keeps_control_resources_and_gateway_url_aligned(tmp
     gateway = next(doc for doc in yaml.safe_load_all(gateway_result.stdout) if doc and doc["kind"] == "Deployment")
     env = {item["name"]: item for item in gateway["spec"]["template"]["spec"]["containers"][0]["env"]}
     assert env["SIE_THRESHOLD_NATS_URL"]["value"] == f"nats://{name}:4222"
+
+
+GATEWAY_TOKEN_SECRET = "sie-sie-cluster-gateway-token"
+WORKER_TOKEN_SECRET = "sie-sie-cluster-worker-token"
+GENERATED_GATEWAY_TOKEN = {"name": GATEWAY_TOKEN_SECRET, "key": "SIE_AUTH_TOKEN"}
+GENERATED_WORKER_TOKEN = {"name": WORKER_TOKEN_SECRET, "key": "SIE_AUTH_TOKEN"}
+GENERATED_ADMIN_TOKEN_REF = {"tokenSecretName": GENERATED_ADMIN_TOKEN_SECRET, "tokenSecretKey": "SIE_ADMIN_TOKEN"}
+GENERATED_READ_TOKEN_REF = {"tokenSecretName": GENERATED_READ_TOKEN_SECRET, "tokenSecretKey": "SIE_CONFIG_READ_TOKEN"}
+L4_WORKER = "sie-sie-cluster-worker-l4-default/worker"
+L4_SIDECAR = "sie-sie-cluster-worker-l4-default/worker-sidecar"
+# Values as `helm upgrade --reuse-values` sees them from a release that predates
+# these keys: null removes the chart default.
+PREDATING_GATEWAY_AND_WORKER_TOKEN_KEYS = {
+    "gateway": {"auth": {"generateToken": None}},
+    "workers": {"auth": None, **L4_POOL["workers"]},
+}
+
+
+def secret_names(docs: list[dict]) -> set[str]:
+    return {doc["metadata"]["name"] for doc in docs if doc["kind"] == "Secret"}
+
+
+def generated_token(docs: list[dict], name: str, component: str) -> str:
+    (secret,) = [doc for doc in docs if doc["kind"] == "Secret" and doc["metadata"]["name"] == name]
+    assert secret["metadata"]["labels"]["app.kubernetes.io/component"] == component
+    return secret_token(secret, "SIE_AUTH_TOKEN")
+
+
+@pytest.mark.parametrize("values", [L4_POOL, PREDATING_GATEWAY_AND_WORKER_TOKEN_KEYS])
+def test_gateway_and_worker_tokens_are_off_by_default(tmp_path: Path, values: dict) -> None:
+    docs = rendered_documents(tmp_path, values)
+    assert {GATEWAY_TOKEN_SECRET, WORKER_TOKEN_SECRET}.isdisjoint(secret_names(docs))
+    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: "none"}
+    for name in ("SIE_AUTH_TOKEN", "SIE_AUTH_TOKENS", "SIE_GATEWAY_API_KEY", "SIE_WORKER_AUTH_TOKEN"):
+        assert env_entries(docs, name) == {}
+
+
+def test_generated_gateway_token_with_auth_mode_none_reaches_only_the_worker_sidecars(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, {**L4_POOL, "gateway": {"auth": {"generateToken": True}}})
+    generated_token(docs, GATEWAY_TOKEN_SECRET, "gateway")
+    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: "none"}
+    assert env_entries(docs, "SIE_AUTH_TOKEN") == {}
+    assert env_entries(docs, "SIE_GATEWAY_API_KEY") == {L4_SIDECAR: GENERATED_GATEWAY_TOKEN}
+
+
+@pytest.mark.parametrize("mode", ["token", "static"])
+def test_generated_gateway_token_is_wired_to_every_consumer_with_token_auth(tmp_path: Path, mode: str) -> None:
+    gateway = {"auth": {"mode": mode, "generateToken": True}}
+    docs = rendered_documents(tmp_path, ingress_values(SCOPED_TLS, gateway=gateway, workers=L4_POOL["workers"]))
+    generated_token(docs, GATEWAY_TOKEN_SECRET, "gateway")
+    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: mode}
+    assert env_entries(docs, "SIE_AUTH_TOKEN") == {GATEWAY: GENERATED_GATEWAY_TOKEN}
+    assert env_entries(docs, "SIE_GATEWAY_API_KEY") == {L4_SIDECAR: GENERATED_GATEWAY_TOKEN}
+    assert len(gateway_ingresses(docs)) == 1
+
+
+@pytest.mark.parametrize("generate", [False, True])
+def test_operator_gateway_token_secret_is_used_unchanged(tmp_path: Path, generate: bool) -> None:
+    auth = {"mode": "static", "tokenSecretName": "sie-gateway-auth", "tokenSecretKey": "tokens"}
+    docs = rendered_documents(tmp_path, {**L4_POOL, "gateway": {"auth": {**auth, "generateToken": generate}}})
+    assert GATEWAY_TOKEN_SECRET not in secret_names(docs)
+    operator = {"name": "sie-gateway-auth", "key": "tokens"}
+    assert env_entries(docs, "SIE_AUTH_TOKEN") == {GATEWAY: operator}
+    assert env_entries(docs, "SIE_GATEWAY_API_KEY") == {L4_SIDECAR: operator}
+
+
+def test_worker_auth_requires_the_token_on_every_container_that_serves_the_worker_api(tmp_path: Path) -> None:
+    pools = {
+        "l4": {"enabled": True, "gpu": {"count": 2}},
+        "cpu": {
+            "enabled": True,
+            "bundles": {"candle": {"engine": "candle", "minReplicas": 0, "maxReplicas": 1}},
+        },
+    }
+    docs = rendered_documents(tmp_path, {"workers": {"auth": {"enabled": True}, "pools": pools}})
+    generated_token(docs, WORKER_TOKEN_SECRET, "worker")
+    servers = [
+        "sie-sie-cluster-worker-l4-default/worker-0",
+        "sie-sie-cluster-worker-l4-default/worker-1",
+        "sie-sie-cluster-worker-cpu-default/worker",
+    ]
+    assert "sie-sie-cluster-worker-cpu-candle/worker" in env_entries(docs, "SIE_BUNDLE")
+    assert env_entries(docs, "SIE_AUTH_TOKEN") == dict.fromkeys(servers, GENERATED_WORKER_TOKEN)
+    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: "none", **dict.fromkeys(servers, "token")}
+    assert env_entries(docs, "SIE_WORKER_AUTH_TOKEN") == {GATEWAY: GENERATED_WORKER_TOKEN}
+
+
+def test_worker_auth_covers_the_remote_lane(tmp_path: Path) -> None:
+    values = remote_pool_values()
+    values["workers"]["auth"] = {"enabled": True}
+    tokens = env_entries(rendered_documents(tmp_path, values), "SIE_AUTH_TOKEN")
+    assert tokens["sie-sie-cluster-worker-remote-remote/worker"] == GENERATED_WORKER_TOKEN
+
+
+def test_worker_auth_upgrade_aid_gives_the_token_only_to_the_gateway(tmp_path: Path) -> None:
+    auth = {"enabled": True, "allowUnauthenticated": True}
+    docs = rendered_documents(tmp_path, {"workers": {"auth": auth, **L4_POOL["workers"]}})
+    generated_token(docs, WORKER_TOKEN_SECRET, "worker")
+    assert env_entries(docs, "SIE_WORKER_AUTH_TOKEN") == {GATEWAY: GENERATED_WORKER_TOKEN}
+    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: "none"}
+    assert env_entries(docs, "SIE_AUTH_TOKEN") == {}
+
+
+def test_operator_worker_token_secret_is_used_unchanged(tmp_path: Path) -> None:
+    auth = {"enabled": True, "tokenSecretName": "sie-worker-auth", "tokenSecretKey": "token"}
+    docs = rendered_documents(tmp_path, {"workers": {"auth": auth, **L4_POOL["workers"]}})
+    assert WORKER_TOKEN_SECRET not in secret_names(docs)
+    operator = {"name": "sie-worker-auth", "key": "token"}
+    assert env_entries(docs, "SIE_WORKER_AUTH_TOKEN") == {GATEWAY: operator}
+    assert env_entries(docs, "SIE_AUTH_TOKEN") == {L4_WORKER: operator}
+
+
+def test_worker_network_policy_admits_the_gateway_with_worker_auth(tmp_path: Path) -> None:
+    workers = {"auth": {"enabled": True}, "networkPolicy": {"enabled": True}, **L4_POOL["workers"]}
+    (policy,) = worker_network_policies(rendered_documents(tmp_path, {"workers": workers}))
+    (rule,) = policy["spec"]["ingress"]
+    (peer,) = rule["from"]
+    assert peer["podSelector"]["matchLabels"]["app.kubernetes.io/component"] == "gateway"
+    assert [port["port"] for port in rule["ports"]] == [8080]
+
+
+@pytest.mark.parametrize(
+    ("values", "error"),
+    [
+        (
+            {"workers": {"auth": {"allowUnauthenticated": True}}},
+            "workers.auth.allowUnauthenticated=true needs workers.auth.enabled=true",
+        ),
+        (
+            {
+                "gateway": {"auth": {"generateToken": True}},
+                "workers": {"auth": {"enabled": True, "tokenSecretName": GATEWAY_TOKEN_SECRET}},
+            },
+            "The worker token and the gateway client token are the same Secret key",
+        ),
+        (
+            {"gateway": GATEWAY_AUTH, "workers": {"auth": {"enabled": True, "tokenSecretName": "sie-gateway-auth"}}},
+            "The worker token and the gateway client token are the same Secret key",
+        ),
+        (
+            {
+                "gateway": {"auth": {"adminTokenSecretName": "gateway-admin"}},
+                "workers": {
+                    "auth": {"enabled": True, "tokenSecretName": "gateway-admin", "tokenSecretKey": "SIE_ADMIN_TOKEN"}
+                },
+            },
+            "The worker token and the gateway admin token are the same Secret key",
+        ),
+        (
+            {"workers": {"auth": {"enabled": True, **GENERATED_ADMIN_TOKEN_REF}}},
+            "The worker token and the sie-config admin token are the same Secret key",
+        ),
+        (
+            {"workers": {"auth": {"enabled": True, **GENERATED_READ_TOKEN_REF}}},
+            "The worker token and the sie-config read token are the same Secret key",
+        ),
+        (
+            {"gateway": {"auth": {"mode": "token", **GENERATED_ADMIN_TOKEN_REF}}},
+            "The gateway client token and the sie-config admin token are the same Secret key",
+        ),
+        (
+            {"gateway": {"auth": {"mode": "token", **GENERATED_READ_TOKEN_REF}}},
+            "The gateway client token and the sie-config read token are the same Secret key",
+        ),
+        (
+            {
+                "gateway": {
+                    "auth": {
+                        "generateToken": True,
+                        "adminTokenSecretName": GATEWAY_TOKEN_SECRET,
+                        "adminTokenSecretKey": "SIE_AUTH_TOKEN",
+                    }
+                }
+            },
+            "The gateway client token and the gateway admin token are the same Secret key",
+        ),
+        ({"gateway": {"auth": {"generateToken": "true"}}}, "gateway.auth.generateToken must be a boolean"),
+        ({"workers": {"auth": {"enabled": "false"}}}, "workers.auth.enabled must be a boolean"),
+        (
+            {"workers": {"auth": {"enabled": True, "allowUnauthenticated": "true"}}},
+            "workers.auth.allowUnauthenticated must be a boolean",
+        ),
+        ({"gateway": {"auth": {"generateToken": True, "tokenSecretKey": " "}}}, "gateway.auth.tokenSecretKey is empty"),
+        ({"workers": {"auth": {"enabled": True, "tokenSecretKey": ""}}}, "workers.auth.tokenSecretKey is empty"),
+        (
+            {
+                "gateway": {"extraEnv": [{"name": "SIE_WORKER_AUTH_TOKEN", "value": "override"}]},
+                "workers": {"auth": {"enabled": True}},
+            },
+            "gateway.extraEnv must not override chart-owned variable SIE_WORKER_AUTH_TOKEN",
+        ),
+        (
+            {"workers": {"auth": {"enabled": True}, "common": {"extraEnv": [{"name": "SIE_AUTH_MODE", "value": "none"}]}}},
+            "workers.common.extraEnv must not override chart-owned variable SIE_AUTH_MODE",
+        ),
+        (
+            {
+                "workers": {
+                    "auth": {"enabled": True},
+                    "common": {"extraEnv": [{"name": "SIE_AUTH_TOKENS", "value": "override"}]},
+                }
+            },
+            "workers.common.extraEnv must not override chart-owned variable SIE_AUTH_TOKENS",
+        ),
+    ],
+)
+def test_unsafe_gateway_and_worker_token_values_fail_the_render(tmp_path: Path, values: dict, error: str) -> None:
+    workers = {**L4_POOL["workers"], **values.get("workers", {})}
+    assert error in render_error(tmp_path, {**values, "workers": workers})
+
+
+@pytest.mark.parametrize(
+    ("values", "api_key_secret", "owner"),
+    [
+        (
+            {"gateway": {"auth": {"generateToken": True}}},
+            {"name": GATEWAY_TOKEN_SECRET, "key": "SIE_AUTH_TOKEN"},
+            "the generated gateway client token",
+        ),
+        (
+            {"workers": {"auth": {"enabled": True}}},
+            {"name": WORKER_TOKEN_SECRET, "key": "SIE_AUTH_TOKEN"},
+            "the generated worker token",
+        ),
+        (
+            {"workers": {"auth": {"enabled": True, "tokenSecretName": "team-upstream", "tokenSecretKey": "api-key"}}},
+            {"name": "team-upstream", "key": "api-key"},
+            "workers.auth.tokenSecretName",
+        ),
+    ],
+)
+def test_an_upstream_key_cannot_be_the_gateway_client_or_worker_token(
+    tmp_path: Path, values: dict, api_key_secret: dict, owner: str
+) -> None:
+    result = render_workers(tmp_path, {**values, "upstreams": {"team": upstream(api_key_secret=api_key_secret)}})
+    assert result.returncode != 0
+    assert f"upstreams.team.api_key_secret and {owner} name the same Secret key" in result.stderr

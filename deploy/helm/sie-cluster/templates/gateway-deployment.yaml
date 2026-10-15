@@ -1,4 +1,6 @@
 {{- include "sie-cluster.validateGatewayAuth" . }}
+{{- include "sie-cluster.workers.validateAuth" . }}
+{{- include "sie-cluster.validateTokenSeparation" . }}
 {{- /* Validate: at most one static overlay may be active. Zero overlays is the
      default; the gateway fetches bundles+models from sie-config at startup
      and has NO baked-in filesystem seed (see
@@ -42,6 +44,9 @@
         "SIE_STREAM_MAX_AGE_S"
         "SIE_STREAM_REPLICAS"
         "SIE_STREAM_STORAGE") -}}
+{{- if include "sie-cluster.workers.authEnabled" . -}}
+{{- $reservedGatewayEnv = append $reservedGatewayEnv "SIE_WORKER_AUTH_TOKEN" -}}
+{{- end -}}
 {{- include "sie-cluster.env.assertNoReserved" (dict "path" "gateway.extraEnv" "entries" .Values.gateway.extraEnv "reserved" $reservedGatewayEnv) -}}
 {{- range $annotation := list "checksum/gpu-config" "checksum/otel-resource" -}}
 {{- if hasKey $.Values.gateway.podAnnotations $annotation -}}
@@ -265,12 +270,12 @@ spec:
             # Gateway auth (static token)
             - name: SIE_AUTH_MODE
               value: {{ .Values.gateway.auth.mode | quote }}
-            {{- if .Values.gateway.auth.tokenSecretName }}
+            {{- with include "sie-cluster.gateway.enforcedTokenSecretName" . }}
             - name: SIE_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.gateway.auth.tokenSecretName }}
-                  key: {{ .Values.gateway.auth.tokenSecretKey }}
+                  name: {{ . }}
+                  key: {{ include "sie-cluster.gateway.tokenSecretKey" $ }}
             {{- end }}
             {{- with dig "adminTokenSecretName" "" (.Values.gateway.auth | default dict) }}
             # Inbound admin token for POST, PUT, and DELETE under /v1/pools,
@@ -280,6 +285,13 @@ spec:
                 secretKeyRef:
                   name: {{ . }}
                   key: {{ include "sie-cluster.gateway.adminTokenSecretKey" $ }}
+            {{- end }}
+            {{- with include "sie-cluster.workers.authTokenSecretName" . }}
+            - name: SIE_WORKER_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: {{ include "sie-cluster.workers.authTokenSecretKey" $ }}
             {{- end }}
             - name: SIE_THRESHOLD_ROUTING_ENABLED
               value: {{ dig "thresholdRouting" "enabled" false .Values.gateway | quote }}

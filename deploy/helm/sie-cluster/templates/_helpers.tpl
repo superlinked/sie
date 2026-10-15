@@ -434,10 +434,129 @@ empty-value failure as the sie-config keys.
 {{- end }}
 
 {{/*
+Data key of the gateway client-token Secret (gateway.auth.tokenSecretKey), with
+the same absent-key default and empty-value failure as the other token keys.
+*/}}
+{{- define "sie-cluster.gateway.tokenSecretKey" -}}
+{{- $key := dig "tokenSecretKey" "SIE_AUTH_TOKEN" (.Values.gateway.auth | default dict) | default "" | toString | trim -}}
+{{- if not $key -}}
+{{- fail "gateway.auth.tokenSecretKey is empty. Set it to the Secret key that holds the gateway client tokens (the chart default is SIE_AUTH_TOKEN)." -}}
+{{- end -}}
+{{- $key -}}
+{{- end }}
+
+{{- define "sie-cluster.gateway.generatedTokenSecretName" -}}
+{{- printf "%s-token" (include "sie-cluster.gateway.serviceName" .) -}}
+{{- end }}
+
+{{/*
+"true" when the chart generates the gateway client-token Secret:
+gateway.auth.generateToken is true and gateway.auth.tokenSecretName is empty.
+*/}}
+{{- define "sie-cluster.gateway.generatesToken" -}}
+{{- $auth := .Values.gateway.auth | default dict -}}
+{{- $generate := include "sie-cluster.optIn" (dict "value" (dig "generateToken" nil $auth) "path" "gateway.auth.generateToken") -}}
+{{- if and $generate (not (dig "tokenSecretName" "" $auth)) -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Secret holding the gateway client tokens, which worker sidecars present to the
+gateway: gateway.auth.tokenSecretName when set, otherwise the chart-generated
+Secret, otherwise empty.
+*/}}
+{{- define "sie-cluster.gateway.tokenSecretName" -}}
+{{- $name := dig "tokenSecretName" "" (.Values.gateway.auth | default dict) -}}
+{{- if $name -}}
+{{- $name -}}
+{{- else if include "sie-cluster.gateway.generatesToken" . -}}
+{{- include "sie-cluster.gateway.generatedTokenSecretName" . -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Secret the gateway receives as SIE_AUTH_TOKEN: gateway.auth.tokenSecretName, or
+the chart-generated Secret only while the gateway enforces token auth. With
+auth mode none the generated Secret is not wired, so clients can read the
+token before the gateway requires it.
+*/}}
+{{- define "sie-cluster.gateway.enforcedTokenSecretName" -}}
+{{- $name := dig "tokenSecretName" "" (.Values.gateway.auth | default dict) -}}
+{{- if $name -}}
+{{- $name -}}
+{{- else if and (include "sie-cluster.gateway.generatesToken" .) (include "sie-cluster.gateway.authenticates" .) -}}
+{{- include "sie-cluster.gateway.generatedTokenSecretName" . -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+"true" when workers.auth.enabled is true: the gateway presents the worker
+token, and the workers require it unless workers.auth.allowUnauthenticated.
+*/}}
+{{- define "sie-cluster.workers.authEnabled" -}}
+{{- include "sie-cluster.optIn" (dict "value" (dig "auth" "enabled" nil (.Values.workers | default dict)) "path" "workers.auth.enabled") -}}
+{{- end }}
+
+{{/*
+"true" when the workers require the worker token: workers.auth.enabled and
+not workers.auth.allowUnauthenticated.
+*/}}
+{{- define "sie-cluster.workers.authEnforced" -}}
+{{- $allowUnauthenticated := include "sie-cluster.optIn" (dict "value" (dig "auth" "allowUnauthenticated" nil (.Values.workers | default dict)) "path" "workers.auth.allowUnauthenticated") -}}
+{{- if and (include "sie-cluster.workers.authEnabled" .) (not $allowUnauthenticated) -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Data key of the worker-token Secret (workers.auth.tokenSecretKey), with the
+same absent-key default and empty-value failure as the other token keys.
+*/}}
+{{- define "sie-cluster.workers.authTokenSecretKey" -}}
+{{- $key := dig "auth" "tokenSecretKey" "SIE_AUTH_TOKEN" (.Values.workers | default dict) | default "" | toString | trim -}}
+{{- if not $key -}}
+{{- fail "workers.auth.tokenSecretKey is empty. Set it to the Secret key that holds the worker token (the chart default is SIE_AUTH_TOKEN)." -}}
+{{- end -}}
+{{- $key -}}
+{{- end }}
+
+{{- define "sie-cluster.workers.generatedAuthTokenSecretName" -}}
+{{- printf "%s-token" (include "sie-cluster.worker.serviceName" .) -}}
+{{- end }}
+
+{{/*
+"true" when the chart generates the worker-token Secret: workers.auth.enabled
+and workers.auth.tokenSecretName is empty.
+*/}}
+{{- define "sie-cluster.workers.generatesAuthToken" -}}
+{{- if and (include "sie-cluster.workers.authEnabled" .) (not (dig "auth" "tokenSecretName" "" (.Values.workers | default dict))) -}}
+true
+{{- end -}}
+{{- end }}
+
+{{/*
+Secret holding the worker token while workers.auth.enabled:
+workers.auth.tokenSecretName when set, otherwise the chart-generated Secret.
+Empty when worker auth is off.
+*/}}
+{{- define "sie-cluster.workers.authTokenSecretName" -}}
+{{- if include "sie-cluster.workers.authEnabled" . -}}
+{{- $name := dig "auth" "tokenSecretName" "" (.Values.workers | default dict) -}}
+{{- if $name -}}
+{{- $name -}}
+{{- else -}}
+{{- include "sie-cluster.workers.generatedAuthTokenSecretName" . -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Chart-generated token Secret: a random 64-character token on first install,
 and the existing token on upgrade (read with lookup and validated rather than
 replaced). Kept on uninstall. Args (dict): root, name (Secret), key (data key),
-keySetting and nameSetting (the values paths named in validation errors).
+keySetting and nameSetting (the values paths named in validation errors), and
+optionally labels (the labels template, default sie-cluster.config.labels).
 */}}
 {{- define "sie-cluster.config.generatedTokenSecret" -}}
 {{- $token := randAlphaNum 64 | b64enc -}}
@@ -452,7 +571,7 @@ metadata:
   name: {{ .name }}
   namespace: {{ include "sie-cluster.namespace" .root }}
   labels:
-    {{- include "sie-cluster.config.labels" .root | nindent 4 }}
+    {{- include (default "sie-cluster.config.labels" .labels) .root | nindent 4 }}
   annotations:
     helm.sh/resource-policy: keep
 type: Opaque
@@ -877,17 +996,67 @@ and token, and refuses every request when token auth has no token.
 {{- fail (printf "gateway auth mode %q is not supported; set gateway.auth.mode (or a gateway.extraEnv SIE_AUTH_MODE override) to none, static, or token." $auth.mode) -}}
 {{- end -}}
 {{- if has $auth.mode (list "static" "token") -}}
-{{- $tokenSource := dig "auth" "tokenSecretName" "" $gateway -}}
+{{- $tokenSource := include "sie-cluster.gateway.tokenSecretName" . -}}
 {{- range $entry := (default (list) $gateway.extraEnv) -}}
 {{- if and (kindIs "map" $entry) (has (toString (index $entry "name")) (list "SIE_AUTH_TOKEN" "SIE_AUTH_TOKENS")) -}}
 {{- $tokenSource = "extraEnv" -}}
 {{- end -}}
 {{- end -}}
 {{- if not $tokenSource -}}
-{{- fail (printf "gateway auth mode %q needs tokens: set gateway.auth.tokenSecretName to a Secret holding comma-separated tokens, or the gateway refuses every request." $auth.mode) -}}
+{{- fail (printf "gateway auth mode %q needs tokens: set gateway.auth.tokenSecretName to a Secret holding comma-separated tokens, or set gateway.auth.generateToken=true so the chart generates one, or the gateway refuses every request." $auth.mode) -}}
 {{- end -}}
 {{- else if dig "auth" "tokenSecretName" "" $gateway -}}
 {{- fail "gateway.auth.tokenSecretName is set but gateway auth mode is none: the gateway treats tokens without token auth as a misconfiguration and refuses every request with 500. Set gateway.auth.mode=static to enforce the tokens, or clear gateway.auth.tokenSecretName." -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Validation: workers.auth.allowUnauthenticated is the first step of the
+two-step upgrade and needs workers.auth.enabled.
+*/}}
+{{- define "sie-cluster.workers.validateAuth" -}}
+{{- $allowUnauthenticated := include "sie-cluster.optIn" (dict "value" (dig "auth" "allowUnauthenticated" nil (.Values.workers | default dict)) "path" "workers.auth.allowUnauthenticated") -}}
+{{- if and $allowUnauthenticated (not (include "sie-cluster.workers.authEnabled" .)) -}}
+{{- fail "workers.auth.allowUnauthenticated=true needs workers.auth.enabled=true: it is the first step of the two-step upgrade, in which the gateway presents the worker token and the workers do not require it yet. Set workers.auth.enabled=true with it, or remove it." -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Validation: the gateway client token and the worker token are kept apart from
+every other token the chart wires. A client or worker token that is also
+another credential's Secret key hands that credential to every holder of the
+token: API clients, worker sidecars, or the worker containers that run model
+code.
+*/}}
+{{- define "sie-cluster.validateTokenSeparation" -}}
+{{- $others := list -}}
+{{- with dig "adminTokenSecretName" "" (.Values.gateway.auth | default dict) -}}
+{{- $others = append $others (dict "name" "gateway admin token" "ref" (printf "%s/%s" . (include "sie-cluster.gateway.adminTokenSecretKey" $))) -}}
+{{- end -}}
+{{- if .Values.config.enabled -}}
+{{- with include "sie-cluster.config.adminTokenSecretName" . -}}
+{{- $others = append $others (dict "name" "sie-config admin token" "ref" (printf "%s/%s" . (include "sie-cluster.config.adminTokenSecretKey" $))) -}}
+{{- end -}}
+{{- with include "sie-cluster.config.readTokenSecretName" . -}}
+{{- $others = append $others (dict "name" "sie-config read token" "ref" (printf "%s/%s" . (include "sie-cluster.config.readTokenSecretKey" $))) -}}
+{{- end -}}
+{{- end -}}
+{{- with include "sie-cluster.gateway.tokenSecretName" . -}}
+{{- $gatewayRef := printf "%s/%s" . (include "sie-cluster.gateway.tokenSecretKey" $) -}}
+{{- range $other := $others -}}
+{{- if eq $other.ref $gatewayRef -}}
+{{- fail (printf "The gateway client token and the %s are the same Secret key (%s), so every API client and worker sidecar would hold the %s. Store them in different Secrets or keys." $other.name $gatewayRef $other.name) -}}
+{{- end -}}
+{{- end -}}
+{{- $others = append $others (dict "name" "gateway client token" "ref" $gatewayRef) -}}
+{{- end -}}
+{{- with include "sie-cluster.workers.authTokenSecretName" . -}}
+{{- $workerRef := printf "%s/%s" . (include "sie-cluster.workers.authTokenSecretKey" $) -}}
+{{- range $other := $others -}}
+{{- if eq $other.ref $workerRef -}}
+{{- fail (printf "The worker token and the %s are the same Secret key (%s), so every holder of one would hold the other, including the worker containers that run model code. Store them in different Secrets or keys." $other.name $workerRef) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end }}
@@ -967,7 +1136,7 @@ ingress.allowPlaintext opt-in.
 {{- $gatewayAuth := include "sie-cluster.gateway.authenticates" . -}}
 {{- if not (or $gatewayAuth $edgeAuth $allowUnauthenticated) -}}
 {{- $auth := include "sie-cluster.gateway.effectiveAuthMode" . | fromJson -}}
-{{- fail (printf "Refusing to render the gateway Ingress: nothing authenticates its requests (effective SIE_AUTH_MODE=%q, auth.enabled=false), so it would publish the inference and pool APIs to anyone who can reach the ingress controller. A hostname or TLS is not access control. Enable gateway auth (gateway.auth.mode=static with gateway.auth.tokenSecretName) or the oauth2-proxy edge (auth.enabled=true with ingress-nginx), or set ingress.allowUnauthenticated=true to publish it without authentication." $auth.mode) -}}
+{{- fail (printf "Refusing to render the gateway Ingress: nothing authenticates its requests (effective SIE_AUTH_MODE=%q, auth.enabled=false), so it would publish the inference and pool APIs to anyone who can reach the ingress controller. A hostname or TLS is not access control. Enable gateway auth (gateway.auth.mode=static with gateway.auth.tokenSecretName or gateway.auth.generateToken=true) or the oauth2-proxy edge (auth.enabled=true with ingress-nginx), or set ingress.allowUnauthenticated=true to publish it without authentication." $auth.mode) -}}
 {{- end -}}
 {{- $hosts := include "sie-cluster.ingress.hosts" . | fromJsonArray -}}
 {{- $tls := include "sie-cluster.ingressTlsConfig" . | fromYaml -}}
@@ -1010,7 +1179,7 @@ stays ClusterIP.
 {{- if has $serviceType (list "LoadBalancer" "NodePort") -}}
 {{- $allowUnauthenticated := include "sie-cluster.optIn" (dict "value" (dig "service" "allowUnauthenticated" nil (default (dict) .Values.gateway)) "path" "gateway.service.allowUnauthenticated") -}}
 {{- if not (or (include "sie-cluster.gateway.authenticates" .) $allowUnauthenticated) -}}
-{{- fail (printf "Refusing to render gateway.service.type=%s without gateway auth: the Service is reachable from outside the cluster on most managed platforms and would publish the inference and pool APIs. Enable gateway auth (gateway.auth.mode=static with gateway.auth.tokenSecretName), or set gateway.service.allowUnauthenticated=true." $serviceType) -}}
+{{- fail (printf "Refusing to render gateway.service.type=%s without gateway auth: the Service is reachable from outside the cluster on most managed platforms and would publish the inference and pool APIs. Enable gateway auth (gateway.auth.mode=static with gateway.auth.tokenSecretName or gateway.auth.generateToken=true), or set gateway.service.allowUnauthenticated=true." $serviceType) -}}
 {{- end -}}
 {{- $allowPlaintext := include "sie-cluster.optIn" (dict "value" (dig "service" "allowPlaintext" nil (default (dict) .Values.gateway)) "path" "gateway.service.allowPlaintext") -}}
 {{- if not $allowPlaintext -}}
@@ -1841,8 +2010,11 @@ credential pasted as a key would otherwise be printed.
 {{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "workers.common.hfCache.tokenSecret" "ref" (printf "%s/%s" . $hfCache.tokenSecretKey)) -}}
 {{- end -}}
 {{- $gatewayAuth := $root.Values.gateway.auth | default dict -}}
-{{- with $gatewayAuth.tokenSecretName -}}
-{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "gateway.auth.tokenSecretName" "ref" (printf "%s/%s" . $gatewayAuth.tokenSecretKey)) -}}
+{{- with include "sie-cluster.gateway.tokenSecretName" $root -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" (ternary "gateway.auth.tokenSecretName" "the generated gateway client token" (ne (dig "tokenSecretName" "" $gatewayAuth) "")) "ref" (printf "%s/%s" . (include "sie-cluster.gateway.tokenSecretKey" $root))) -}}
+{{- end -}}
+{{- with include "sie-cluster.workers.authTokenSecretName" $root -}}
+{{- $chartSecretKeys = append $chartSecretKeys (dict "owner" (ternary "workers.auth.tokenSecretName" "the generated worker token" (ne (dig "auth" "tokenSecretName" "" $root.Values.workers) "")) "ref" (printf "%s/%s" . (include "sie-cluster.workers.authTokenSecretKey" $root))) -}}
 {{- end -}}
 {{- with $gatewayAuth.adminTokenSecretName -}}
 {{- $chartSecretKeys = append $chartSecretKeys (dict "owner" "gateway.auth.adminTokenSecretName" "ref" (printf "%s/%s" . (include "sie-cluster.gateway.adminTokenSecretKey" $root))) -}}

@@ -37,6 +37,10 @@ fast at render time.
 {{- range $upstreamName, $_ := (default dict $root.Values.upstreams) -}}
 {{- $reservedWorkerEnv = append $reservedWorkerEnv (include "sie-cluster.upstream.keyEnvName" $upstreamName) -}}
 {{- end -}}
+{{- $workerAuthEnforced := include "sie-cluster.workers.authEnforced" $root -}}
+{{- if $workerAuthEnforced -}}
+{{- $reservedWorkerEnv = concat $reservedWorkerEnv (list "SIE_AUTH_MODE" "SIE_AUTH_TOKEN" "SIE_AUTH_TOKENS") -}}
+{{- end -}}
 {{- /* The SIE_STREAM_* trio is chart-owned on the sidecar for the same
      reason as on the gateway: both create the work streams, first creator
      wins, so the chart renders one value onto both. An extraEnv override
@@ -458,6 +462,15 @@ spec:
             {{- end }}
             - name: SIE_THRESHOLD_ROUTING_ENABLED
               value: {{ dig "thresholdRouting" "enabled" false $root.Values.gateway | quote }}
+            {{- if and $workerAuthEnforced (ne $engine "candle") }}
+            - name: SIE_AUTH_MODE
+              value: "token"
+            - name: SIE_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "sie-cluster.workers.authTokenSecretName" $root }}
+                  key: {{ include "sie-cluster.workers.authTokenSecretKey" $root }}
+            {{- end }}
             {{- if $root.Values.workers.common.workerSidecar.enabled }}
             # worker-sidecar owns the NATS loop; the adapter process
             # exposes the IPC server over a shared Unix socket. The chart fails render
@@ -593,12 +606,12 @@ spec:
               value: {{ $workerLivenessBudgetS | quote }}
             - name: SIE_GATEWAY_URL
               value: {{ include "sie-cluster.gateway.internalUrl" $root | quote }}
-            {{- if $root.Values.gateway.auth.tokenSecretName }}
+            {{- with include "sie-cluster.gateway.tokenSecretName" $root }}
             - name: SIE_GATEWAY_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ $root.Values.gateway.auth.tokenSecretName }}
-                  key: {{ $root.Values.gateway.auth.tokenSecretKey }}
+                  name: {{ . }}
+                  key: {{ include "sie-cluster.gateway.tokenSecretKey" $root }}
             {{- end }}
             - name: SIE_WORKER_ID
               valueFrom:
