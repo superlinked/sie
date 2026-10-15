@@ -783,8 +783,11 @@ export interface ModelSummary {
 export interface ServerInfo {
   version: string;
   uptime_seconds: number;
+  /** @deprecated Always `""`. Removed no earlier than 0.13.0. */
   user: string;
+  /** @deprecated Always `""`. Removed no earlier than 0.13.0. */
   working_dir: string;
+  /** @deprecated Always `0`. Removed no earlier than 0.13.0. */
   pid: number;
 }
 

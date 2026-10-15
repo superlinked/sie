@@ -7,6 +7,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -47,7 +48,7 @@ class TestAppFactory:
         """App has correct title and version."""
         app = AppFactory.create_app(AppStateConfig())
         assert app.title == "SIE Server"
-        assert app.version == "0.1.0"
+        assert app.version == version("sie-server")
 
     def test_health_routes_registered(self, client: TestClient) -> None:
         """Health routes are registered in the app."""
