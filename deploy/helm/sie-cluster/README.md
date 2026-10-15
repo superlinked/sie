@@ -1532,8 +1532,9 @@ that, and each can be turned on now. 0.13.0 changes their defaults:
 | `workers.networkPolicy.enabled` | `false` | `true` |
 | `telemetry.enabled` | `true` | `false` |
 
-To keep the current behavior after 0.13.0, set these values explicitly. The
-complete secure combination, which is the 0.13.0 default:
+To keep the current behavior after 0.13.0, set the "Default now" values
+explicitly. To adopt the 0.13.0 defaults now, which together are the secure
+combination, set:
 
 ```yaml
 gateway:
@@ -1583,12 +1584,16 @@ or managed by the operator:
   comma-separated tokens. The chart uses it unchanged and ignores
   `gateway.auth.generateToken`. Several tokens let you rotate one at a time.
 
+While the gateway receives the generated token, `gateway.extraEnv` cannot set
+`SIE_AUTH_TOKEN` or `SIE_AUTH_TOKENS`, which would replace it.
+
 The worker sidecars receive the same Secret as `SIE_GATEWAY_API_KEY` and
 present it when they call the gateway. The MCP edge does not receive it: set
 `mcpEdge.clusterApiKey.existingSecretName` and `mcpEdge.clusterApiKey.secretKey`
 to the token's Secret and key. With token auth, pool create, renew, and delete
 also need the [gateway admin token](#gateway-admin-token). The render fails
-when the client token is the same Secret key as the gateway admin token or
+when the client token is the same Secret key as another credential the chart
+wires: the Hugging Face token, a NATS password, the gateway admin token, or
 either sie-config token.
 
 To turn the generated token on for an existing release without locking out
@@ -1636,8 +1641,9 @@ With `workers.auth.tokenSecretName` empty, the chart creates
 `workers.auth.tokenSecretKey` (`SIE_AUTH_TOKEN`), with the same reuse check,
 keep policy, and `helm template` caveat as the gateway token. Otherwise it uses
 the named Secret unchanged. The render fails when the worker token is the same
-Secret key as the gateway client token, the gateway admin token, or either
-sie-config token. While the workers require the token, the worker `extraEnv`
+Secret key as the gateway client token or another credential the chart wires
+(the Hugging Face token, a NATS password, the gateway admin token, or either
+sie-config token). While the workers require the token, the worker `extraEnv`
 lists cannot set `SIE_AUTH_MODE`, `SIE_AUTH_TOKEN`, or `SIE_AUTH_TOKENS`, and
 while `workers.auth.enabled` is set, `gateway.extraEnv` cannot set
 `SIE_WORKER_AUTH_TOKEN`.

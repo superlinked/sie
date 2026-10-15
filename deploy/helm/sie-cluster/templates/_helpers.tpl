@@ -1024,13 +1024,28 @@ two-step upgrade and needs workers.auth.enabled.
 
 {{/*
 Validation: the gateway client token and the worker token are kept apart from
-every other token the chart wires. A client or worker token that is also
-another credential's Secret key hands that credential to every holder of the
-token: API clients, worker sidecars, or the worker containers that run model
-code.
+every other credential the chart wires: the Hugging Face token, the NATS
+passwords, the gateway admin token, and the sie-config tokens. A client or
+worker token that is also another credential's Secret key hands that
+credential to every holder of the token: API clients, worker sidecars, or the
+worker containers that run model code.
 */}}
 {{- define "sie-cluster.validateTokenSeparation" -}}
 {{- $others := list -}}
+{{- $hfCache := dig "common" "hfCache" dict (.Values.workers | default dict) -}}
+{{- with $hfCache.tokenSecret -}}
+{{- $others = append $others (dict "name" "Hugging Face token" "ref" (printf "%s/%s" . $hfCache.tokenSecretKey)) -}}
+{{- end -}}
+{{- if include "sie-cluster.nats.authEnabled" . -}}
+{{- $natsComponents := include "sie-cluster.nats.authComponents" . | fromJsonArray -}}
+{{- if dig "config" "cluster" "enabled" false .Values.nats -}}
+{{- $natsComponents = append $natsComponents "route" -}}
+{{- end -}}
+{{- range $component := $natsComponents -}}
+{{- $natsSecret := include "sie-cluster.nats.authSecretName" (dict "auth" $.Values.nats.auth "release" $.Release.Name "component" $component) -}}
+{{- $others = append $others (dict "name" (printf "NATS %s password" $component) "ref" (printf "%s/password" $natsSecret)) -}}
+{{- end -}}
+{{- end -}}
 {{- with dig "adminTokenSecretName" "" (.Values.gateway.auth | default dict) -}}
 {{- $others = append $others (dict "name" "gateway admin token" "ref" (printf "%s/%s" . (include "sie-cluster.gateway.adminTokenSecretKey" $))) -}}
 {{- end -}}

@@ -2947,6 +2947,14 @@ def test_generated_gateway_token_is_wired_to_every_consumer_with_token_auth(tmp_
     assert len(gateway_ingresses(docs)) == 1
 
 
+def test_operator_gateway_token_secret_keeps_its_extra_env_token_override(tmp_path: Path) -> None:
+    extra_env = [{"name": "SIE_AUTH_TOKENS", "value": "override"}]
+    values = {**L4_POOL, "gateway": {**GATEWAY_AUTH, "extraEnv": extra_env}}
+    docs = rendered_documents(tmp_path, values)
+    assert env_entries(docs, "SIE_AUTH_TOKEN") == {GATEWAY: {"name": "sie-gateway-auth", "key": "SIE_AUTH_TOKEN"}}
+    assert env_entries(docs, "SIE_AUTH_TOKENS") == {GATEWAY: "override"}
+
+
 @pytest.mark.parametrize("generate", [False, True])
 def test_operator_gateway_token_secret_is_used_unchanged(tmp_path: Path, generate: bool) -> None:
     auth = {"mode": "static", "tokenSecretName": "sie-gateway-auth", "tokenSecretKey": "tokens"}
@@ -3083,7 +3091,12 @@ def test_worker_network_policy_admits_the_gateway_with_worker_auth(tmp_path: Pat
             "gateway.extraEnv must not override chart-owned variable SIE_WORKER_AUTH_TOKEN",
         ),
         (
-            {"workers": {"auth": {"enabled": True}, "common": {"extraEnv": [{"name": "SIE_AUTH_MODE", "value": "none"}]}}},
+            {
+                "workers": {
+                    "auth": {"enabled": True},
+                    "common": {"extraEnv": [{"name": "SIE_AUTH_MODE", "value": "none"}]},
+                }
+            },
             "workers.common.extraEnv must not override chart-owned variable SIE_AUTH_MODE",
         ),
         (
@@ -3094,6 +3107,32 @@ def test_worker_network_policy_admits_the_gateway_with_worker_auth(tmp_path: Pat
                 }
             },
             "workers.common.extraEnv must not override chart-owned variable SIE_AUTH_TOKENS",
+        ),
+        (
+            {
+                "gateway": {
+                    "auth": {"mode": "token", "generateToken": True},
+                    "extraEnv": [{"name": "SIE_AUTH_TOKENS", "value": "override"}],
+                }
+            },
+            "gateway.extraEnv must not override chart-owned variable SIE_AUTH_TOKENS",
+        ),
+        (
+            {
+                "gateway": {"auth": {"generateToken": True}},
+                "workers": {
+                    "common": {"hfCache": {"tokenSecret": GATEWAY_TOKEN_SECRET, "tokenSecretKey": "SIE_AUTH_TOKEN"}}
+                },
+            },
+            "The gateway client token and the Hugging Face token are the same Secret key",
+        ),
+        (
+            {
+                "workers": {
+                    "auth": {"enabled": True, "tokenSecretName": "sie-nats-auth-worker", "tokenSecretKey": "password"}
+                }
+            },
+            "The worker token and the NATS worker password are the same Secret key",
         ),
     ],
 )

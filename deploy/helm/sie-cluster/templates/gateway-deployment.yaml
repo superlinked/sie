@@ -47,6 +47,9 @@
 {{- if include "sie-cluster.workers.authEnabled" . -}}
 {{- $reservedGatewayEnv = append $reservedGatewayEnv "SIE_WORKER_AUTH_TOKEN" -}}
 {{- end -}}
+{{- if and (include "sie-cluster.gateway.generatesToken" .) (include "sie-cluster.gateway.enforcedTokenSecretName" .) -}}
+{{- $reservedGatewayEnv = concat $reservedGatewayEnv (list "SIE_AUTH_TOKEN" "SIE_AUTH_TOKENS") -}}
+{{- end -}}
 {{- include "sie-cluster.env.assertNoReserved" (dict "path" "gateway.extraEnv" "entries" .Values.gateway.extraEnv "reserved" $reservedGatewayEnv) -}}
 {{- range $annotation := list "checksum/gpu-config" "checksum/otel-resource" -}}
 {{- if hasKey $.Values.gateway.podAnnotations $annotation -}}

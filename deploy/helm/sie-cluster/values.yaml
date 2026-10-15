@@ -332,8 +332,9 @@ gateway:
     mode: none
     # -- Secret with comma-separated tokens. When set, it is used unchanged and
     # no Secret is generated. Worker sidecars present it to the gateway as
-    # SIE_GATEWAY_API_KEY. It must not name the Secret and key of the gateway
-    # admin token or either sie-config token (the render fails).
+    # SIE_GATEWAY_API_KEY. It must not name the Secret and key of another
+    # credential the chart wires: the Hugging Face token, a NATS password, the
+    # gateway admin token, or either sie-config token (the render fails).
     tokenSecretName: ""
     tokenSecretKey: "SIE_AUTH_TOKEN"
     # -- Generate the gateway token (a boolean). When tokenSecretName is empty,
@@ -922,8 +923,9 @@ workers:
     # `<fullname>-worker-token` with a random 64-character token, with the
     # same reuse check, keep policy, and `helm template` caveat as
     # gateway.auth.generateToken. It must not name the Secret and key of the
-    # gateway client token, the gateway admin token, or either sie-config
-    # token (the render fails).
+    # gateway client token or another credential the chart wires: the Hugging
+    # Face token, a NATS password, the gateway admin token, or either
+    # sie-config token (the render fails).
     tokenSecretName: ""
     tokenSecretKey: "SIE_AUTH_TOKEN"
 
