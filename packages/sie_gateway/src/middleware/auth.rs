@@ -351,7 +351,14 @@ fn error_response(status: StatusCode, code: &'static str, message: &str) -> Resp
             "message": message,
         }
     });
-    (status, axum::Json(body)).into_response()
+    let mut response = (status, axum::Json(body)).into_response();
+    if status == StatusCode::UNAUTHORIZED {
+        response.headers_mut().insert(
+            axum::http::header::WWW_AUTHENTICATE,
+            axum::http::HeaderValue::from_static("Bearer"),
+        );
+    }
+    response
 }
 
 #[cfg(test)]
@@ -962,6 +969,23 @@ mod tests {
             .await
             .unwrap()
             .status()
+    }
+
+    #[tokio::test]
+    async fn middleware_401_names_the_bearer_scheme() {
+        let cfg = cfg_for_middleware("token", vec!["user"], "admin", false);
+        let response = test_router(cfg)
+            .oneshot(
+                HttpRequest::builder()
+                    .method(Method::POST)
+                    .uri("/v1/encode/any")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()["www-authenticate"], "Bearer");
     }
 
     #[tokio::test]
