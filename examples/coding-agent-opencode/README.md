@@ -40,6 +40,11 @@ SDK. The thing under test is the OpenAI-compatible wire surface that
 OpenCode's provider speaks, so the reference client for that surface is the
 right instrument.
 
+`conformance.py --api messages` checks the Anthropic Messages endpoint,
+`/v1/messages`, the way Claude Code speaks it, reading the raw event stream.
+[The Claude Code example](../coding-agent-claude-code/README.md) lists its
+cases and runs Claude Code on this directory's fixture.
+
 ## Run it
 
 ### Against SIE Cloud
@@ -459,6 +464,12 @@ What runs anywhere, and in this repository's CI, is the test suite:
   a `/v1/models` answered as a bare list, a model that thinks for thousands
   of tokens, and a model that answers `MODEL_LOADING` for its first requests.
   Each verdict is checked for what it accepts and what it refuses.
+- `tests/test_messages_conformance.py` runs `conformance.py --api messages`
+  against a scripted Anthropic Messages stub that plays a conforming event
+  stream, then breaks one thing per test: usage missing from
+  `message_delta`, a delta before its block, an accepted `output_config.effort`,
+  a system-turn refusal without the wording Claude Code resends on, busy
+  refusals and a loading model.
 - `tests/test_run_gate.py` runs `run_gate.sh` with a scripted stand-in for
   `opencode`: a real fix, no change, a failed `opencode run`, edited tests, an
   environment planted in the worked copy, a caller's `PYTEST_ADDOPTS` or
