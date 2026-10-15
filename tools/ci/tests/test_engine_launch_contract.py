@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,16 @@ def test_probe_runs_offline_inside_the_image_without_a_gpu():
     assert "TRANSFORMERS_OFFLINE=1" in command
     assert command[-6:] == ["--entrypoint", "python", "sie-server:pr", "-", "--bundle", "sglang"]
     assert not {"push", "login", "--gpus"} & set(command)
+
+
+def test_a_stalled_probe_is_a_contract_failure(monkeypatch):
+    def stalled(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(engine_launch_contract.subprocess, "run", stalled)
+
+    with pytest.raises(RuntimeError, match="did not finish within 5s"):
+        engine_launch_contract.run_probe("sie-server:pr", "sglang", timeout_s=5)
 
 
 @pytest.mark.parametrize(

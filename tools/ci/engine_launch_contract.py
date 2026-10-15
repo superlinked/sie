@@ -21,6 +21,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 PROBE = ROOT / "tools/ci/engine_launch_probe.py"
 SNAPSHOT_DIR = ROOT / "conformance/engine-flags"
+PROBE_TIMEOUT_S = 900
 
 
 def probe_command(image: str, bundle: str) -> list[str]:
@@ -46,14 +47,18 @@ def probe_command(image: str, bundle: str) -> list[str]:
     ]
 
 
-def run_probe(image: str, bundle: str) -> dict[str, Any]:
-    result = subprocess.run(  # noqa: S603
-        probe_command(image, bundle),
-        input=PROBE.read_text(encoding="utf-8"),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+def run_probe(image: str, bundle: str, *, timeout_s: float = PROBE_TIMEOUT_S) -> dict[str, Any]:
+    try:
+        result = subprocess.run(  # noqa: S603
+            probe_command(image, bundle),
+            input=PROBE.read_text(encoding="utf-8"),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"engine launch probe in {image} did not finish within {timeout_s:g}s") from error
     if result.returncode:
         raise RuntimeError(f"engine launch probe failed in {image}:\n{result.stderr[-4000:]}")
     return json.loads(result.stdout.strip().splitlines()[-1])
