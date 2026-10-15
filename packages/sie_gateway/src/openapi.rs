@@ -151,6 +151,7 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         OpenAIErrorBody,
         OpenAIErrorEnvelope,
         crate::handlers::messages::schema::MessagesRequest,
+        crate::handlers::messages::schema::EmptyOutputConfig,
         crate::handlers::messages::schema::MessagesResponse,
         crate::handlers::messages::schema::MessagesUsage,
         crate::handlers::messages::schema::AnthropicErrorBody,

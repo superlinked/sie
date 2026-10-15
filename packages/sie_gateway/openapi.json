@@ -1191,6 +1191,11 @@
         ],
         "type": "object"
       },
+      "EmptyOutputConfig": {
+        "additionalProperties": false,
+        "description": "An ``output_config`` with no fields, the only one accepted.",
+        "type": "object"
+      },
       "EncodeParams": {
         "properties": {
           "instruction": {
@@ -2256,7 +2261,15 @@
             "type": "string"
           },
           "output_config": {
-            "description": "Accepted only empty: every field in it is refused, ``effort`` with\n``output_config.effort: Extra inputs are not permitted``."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EmptyOutputConfig",
+                "description": "Accepted only empty: every field in it is refused, ``effort`` with\n``output_config.effort: Extra inputs are not permitted``."
+              }
+            ]
           },
           "stop_sequences": {
             "items": {

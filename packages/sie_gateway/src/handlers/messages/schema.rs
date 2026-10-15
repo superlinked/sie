@@ -76,8 +76,13 @@ pub struct MessagesRequest {
     /// Accepted only empty: every field in it is refused, ``effort`` with
     /// ``output_config.effort: Extra inputs are not permitted``.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_config: Option<Value>,
+    pub output_config: Option<EmptyOutputConfig>,
 }
+
+/// An ``output_config`` with no fields, the only one accepted.
+#[derive(Debug, Default, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EmptyOutputConfig {}
 
 /// Token usage of a Message. ``input_tokens`` plus
 /// ``cache_read_input_tokens`` equals the prompt tokens the chat route
