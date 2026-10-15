@@ -89,7 +89,11 @@ from sie_server.config.upstreams import RemoteServingDisabledError
 from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.inference_output import ScoreOutput
 from sie_server.core.loader import serves_remotely
-from sie_server.core.runtime_options import GenerationTimeoutError, grammar_default_sampling
+from sie_server.core.runtime_options import (
+    GenerationTimeoutError,
+    grammar_default_sampling,
+    resolve_generation_timeouts,
+)
 from sie_server.core.score_cost import MAX_SCORE_ITEMS, build_score_prepared_items
 from sie_server.core.timing import RequestTiming
 from sie_server.core.video_frames import (
@@ -130,6 +134,9 @@ router = APIRouter(prefix="/v1", tags=["openai-compat"], dependencies=[Depends(r
 # it applies to either managed generation child on this route.
 _PROXY_READ_TIMEOUT_S = float(os.environ.get("SIE_MLX_READ_TIMEOUT_S", "300"))
 _PROXY_TIMEOUT = httpx.Timeout(connect=10.0, read=_PROXY_READ_TIMEOUT_S, write=10.0, pool=10.0)
+# Same cadence as the gateway's SSE keep-alive, so client idle limits see bytes
+# while the child is silent.
+_SSE_KEEPALIVE_S = 15.0
 # Cap the request body so a huge messages/documents array can't be buffered/forwarded
 # unbounded (the gateway caps prod ingress; these local routes must cap themselves).
 _MAX_BODY_BYTES = int(os.environ.get("SIE_CHAT_MAX_BODY_BYTES", str(8 * 1024 * 1024)))
@@ -1109,6 +1116,22 @@ async def _read_upstream_body(response: httpx.Response) -> bytes:
     return bytes(body)
 
 
+def _child_timeout(config: Any, proxied: dict[str, Any], *, stream: bool) -> httpx.Timeout:
+    """Bound one request to the generation child.
+
+    The child writes nothing while it generates a non-streaming answer, or
+    while its own tool parser holds a streamed call's argument until that
+    argument closes. Those requests wait on the generation's overall budget, as
+    the other generation routes do; any other stream keeps the byte-gap bound
+    that catches a wedged child.
+    """
+    holds_output = not stream or (bool(proxied.get("tools")) and proxied.get("tool_choice") != "none")
+    overall = resolve_generation_timeouts(config, None).overall_s if holds_output else None
+    if overall is None or overall <= _PROXY_READ_TIMEOUT_S:
+        return _PROXY_TIMEOUT
+    return httpx.Timeout(connect=10.0, read=overall, write=10.0, pool=10.0)
+
+
 def _new_proxy_client() -> httpx.AsyncClient:
     # Ignore HTTP(S)_PROXY: even a loopback URL must connect directly to the
     # adapter-managed child rather than an operator-shell proxy.
@@ -1137,8 +1160,19 @@ async def _sanitize_sse_stream(
     received = 0
     saw_done = False
     terminal_outcome_selected = False
+    chunks = response.aiter_bytes()
+    next_chunk: asyncio.Future[bytes | None] | None = None
     try:
-        async for chunk in response.aiter_bytes():
+        while True:
+            next_chunk = next_chunk or asyncio.ensure_future(anext(chunks, None))
+            done, _ = await asyncio.wait({next_chunk}, timeout=_SSE_KEEPALIVE_S)
+            if not done:
+                yield b": keepalive\n\n"
+                continue
+            chunk = next_chunk.result()
+            next_chunk = None
+            if chunk is None:
+                break
             received += len(chunk)
             if received > _MAX_CHAT_RESPONSE_BYTES:
                 logger.error("generation child SSE exceeded %d bytes", _MAX_CHAT_RESPONSE_BYTES)
@@ -1218,6 +1252,11 @@ async def _sanitize_sse_stream(
             terminal_outcome_selected = True
             yield _upstream_error_event()
     finally:
+        if next_chunk is not None:
+            next_chunk.cancel()
+            await asyncio.wait({next_chunk})
+            if not next_chunk.cancelled():
+                next_chunk.exception()
         try:
             await aclose_with_error_precedence(
                 response,
@@ -1687,7 +1726,9 @@ async def _chat_completions(
                 await slot.acquire()
             client = _new_proxy_client()
             try:
-                upstream_request = client.build_request("POST", url, json=proxied)
+                upstream_request = client.build_request(
+                    "POST", url, json=proxied, timeout=_child_timeout(config, proxied, stream=True)
+                )
                 upstream = await client.send(upstream_request, stream=True)
             except asyncio.CancelledError:
                 await client.aclose()
@@ -1753,7 +1794,9 @@ async def _chat_completions(
         try:
             async with _new_proxy_client() as client:
                 try:
-                    async with client.stream("POST", url, json=proxied) as upstream:
+                    async with client.stream(
+                        "POST", url, json=proxied, timeout=_child_timeout(config, proxied, stream=False)
+                    ) as upstream:
                         raw = await _read_upstream_body(upstream)
                         upstream_status = upstream.status_code
                 except httpx.HTTPError:

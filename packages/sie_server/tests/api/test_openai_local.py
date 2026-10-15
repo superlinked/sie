@@ -9,7 +9,11 @@ from __future__ import annotations
 
 import base64
 import json
-from collections.abc import AsyncIterator, Callable
+import threading
+import time
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -2658,3 +2662,156 @@ def test_mlx_thinking_chat_stream_keeps_the_answer_beside_split_reasoning(
     assert not any("reasoning" in delta for delta in returned)
     assert "".join(delta.get("reasoning_content", "") for delta in returned) == (reasoning if include_reasoning else "")
     assert include_reasoning or hidden not in response.text
+
+
+# -- engine child silence --------------------------------------------------------
+
+_BYTE_GAP_S = 0.3
+_SILENCE_S = 3 * _BYTE_GAP_S
+
+
+@contextmanager
+def _loopback_child(*, before_headers_s: float, content_type: str, parts: list[tuple[float, bytes]]) -> Iterator[str]:
+    """Serve one scripted chat answer over real loopback HTTP, with real pauses."""
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers["Content-Length"]))
+            try:
+                time.sleep(before_headers_s)
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                if content_type == "application/json":
+                    self.send_header("Content-Length", str(sum(len(part) for _, part in parts)))
+                self.end_headers()
+                for pause, part in parts:
+                    time.sleep(pause)
+                    self.wfile.write(part)
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                return
+
+        def log_message(self, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def _child_chat_client(monkeypatch: pytest.MonkeyPatch, server_url: str) -> TestClient:
+    proxy_client = openai_local._new_proxy_client
+    client, registry = _cuda_chat_client(
+        monkeypatch, lambda _request: pytest.fail("the child is real"), server_url=server_url
+    )
+    monkeypatch.setattr(openai_local, "_new_proxy_client", proxy_client)
+    monkeypatch.setattr(openai_local, "_PROXY_READ_TIMEOUT_S", _BYTE_GAP_S)
+    monkeypatch.setattr(
+        openai_local, "_PROXY_TIMEOUT", httpx.Timeout(connect=10.0, read=_BYTE_GAP_S, write=10.0, pool=10.0)
+    )
+    monkeypatch.setattr(openai_local, "_SSE_KEEPALIVE_S", _BYTE_GAP_S / 6, raising=False)
+    registry.get_config.return_value.resolve_profile.return_value.runtime["overall_timeout_s"] = 10 * _SILENCE_S
+    return client
+
+
+_WRITE_FILE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "write_file",
+        "parameters": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+        },
+    },
+}
+
+
+def test_cuda_chat_stream_outlasts_the_engine_holding_a_long_tool_argument(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The engine's own tool parser streams a call's head and short arguments,
+    then sends nothing until a long argument closes. The proxy must wait the
+    generation out and keep the client's connection busy meanwhile.
+    """
+    content = "print('hello')\n" * (64 * 1024 // 15 + 1)
+    call = {"id": "call_write", "type": "function", "function": {"name": "write_file", "arguments": ""}}
+
+    def _arguments(text: str) -> dict[str, Any]:
+        return {"tool_calls": [{"index": 0, "function": {"arguments": text}}]}
+
+    head = b"".join(
+        f"data: {json.dumps(event)}\n\n".encode()
+        for event in [
+            _stream_event({"role": "assistant", "content": ""}),
+            _stream_event({"tool_calls": [{"index": 0, **call}]}),
+            _stream_event(_arguments("{")),
+            _stream_event(_arguments('"path": "src/app.py"')),
+        ]
+    )
+    tail = _sse_wire(
+        [
+            _stream_event(_arguments(', "content": ' + json.dumps(content))),
+            _stream_event(_arguments("}")),
+            _stream_event({}, finish_reason="tool_calls"),
+        ]
+    )
+    with _loopback_child(
+        before_headers_s=0, content_type="text/event-stream", parts=[(0, head), (_SILENCE_S, tail)]
+    ) as url:
+        client = _child_chat_client(monkeypatch, url)
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "Qwen/Qwen3-0.6B",
+                "messages": [{"role": "user", "content": "Write the file"}],
+                "tools": [_WRITE_FILE_TOOL],
+                "stream": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert "error" not in response.text
+    deltas = _sse_deltas(response.text)
+    arguments = "".join(
+        call["function"].get("arguments") or "" for delta in deltas for call in delta.get("tool_calls") or ()
+    )
+    assert json.loads(arguments) == {"path": "src/app.py", "content": content}
+    assert response.text.splitlines().count(": keepalive") >= 2
+
+
+def test_cuda_chat_stream_without_tools_still_ends_at_the_byte_gap(monkeypatch: pytest.MonkeyPatch) -> None:
+    head = f"data: {json.dumps(_stream_event({'role': 'assistant', 'content': 'Hel'}))}\n\n".encode()
+    tail = _sse_wire([_stream_event({"content": "lo"}, finish_reason="stop")])
+    with _loopback_child(
+        before_headers_s=0, content_type="text/event-stream", parts=[(0, head), (_SILENCE_S, tail)]
+    ) as url:
+        client = _child_chat_client(monkeypatch, url)
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        )
+
+    assert response.status_code == 200
+    data = [line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: ")]
+    assert data[-1] == "[DONE]"
+    assert json.loads(data[-2])["error"]["code"] == "upstream_error"
+    assert '"lo"' not in response.text
+
+
+def test_cuda_chat_blocking_waits_out_a_silent_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = _reasoning_child_payload("a long answer")
+    with _loopback_child(
+        before_headers_s=_SILENCE_S, content_type="application/json", parts=[(0, json.dumps(payload).encode())]
+    ) as url:
+        client = _child_chat_client(monkeypatch, url)
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "a long answer"
