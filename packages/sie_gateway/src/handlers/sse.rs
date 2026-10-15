@@ -4124,6 +4124,186 @@ mod tests {
         assert_eq!(got.finish_reason.as_deref(), Some("stop"));
     }
 
+    // ── Long tool calls ────────────────────────────────────────────
+
+    /// Feed the real stream collector and SSE driver the chunk timeline a
+    /// worker publishes for an agent's long `write` call: a preamble, two
+    /// minutes of decoding inside the call, then the call itself. The worker
+    /// publishes a chunk every `progress` while the call decodes, or nothing
+    /// when it is `None`.
+    async fn stream_long_tool_call(progress: Option<Duration>, arguments: &str) -> Vec<String> {
+        use crate::queue::streaming::StreamCollector;
+        use crate::state::demand_tracker::PhysicalLaneCatalog;
+
+        let recorder = Arc::new(client_disconnect_grace::TeardownRecorder::default());
+        let publisher: Arc<dyn WorkDispatcher> = recorder as Arc<dyn WorkDispatcher>;
+        let catalog = PhysicalLaneCatalog::try_from_raw([(
+            "default".to_string(),
+            "default".to_string(),
+            "default".to_string(),
+        )])
+        .expect("catalog");
+        let demand_tracker = Arc::new(DemandTracker::new(catalog));
+        let physical_lane = demand_tracker
+            .resolve_lane("default", "default", "default")
+            .expect("lane");
+        let (collector_tx, _collector_rx) = tokio::sync::oneshot::channel();
+        let mut collector = StreamCollector::new(
+            collector_tx,
+            "test/model".to_string(),
+            "default".to_string(),
+        );
+        let chunk_rx = collector.install_chunk_tap();
+        let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
+        let (durability_tx, durability_completion) = tokio::sync::oneshot::channel();
+        durability_tx
+            .send(Ok::<(), String>(()))
+            .expect("durability receiver is live");
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
+        let driver = tokio::spawn(run_sse_driver_with_lifecycle(
+            SseDriverArgs {
+                first_output: None,
+                local_serving_model: None,
+                event_tx,
+                chunk_rx,
+                outcome_rx,
+                durability_completion,
+                publisher,
+                demand_tracker,
+                physical_lane,
+                request_id: "req-test".to_string(),
+                model: "test/model".to_string(),
+                pool: "default".to_string(),
+                bundle: "default".to_string(),
+                gpu: "test".to_string(),
+                endpoint: SseEndpoint::Chat {
+                    include_usage: false,
+                    include_reasoning: false,
+                },
+                stream_chat_id: "chatcmpl-test".to_string(),
+                created: 1,
+                first_chunk_timeout: Duration::from_secs(90),
+                inter_chunk_timeout: Duration::from_secs(30),
+                overall_timeout: Duration::from_secs(600),
+                was_direct_dispatched: false,
+                pool_fallback_lane_worker_count: 1,
+            },
+            None,
+            |_: &str| {},
+        ));
+
+        let arguments = arguments.to_string();
+        let worker = tokio::spawn(async move {
+            let call_chunk = |seq: u32, name: Option<&str>, arguments: String| {
+                let mut chunk = _delta_chunk(seq, "");
+                chunk.tool_calls = Some(vec![ToolCallDeltaWire {
+                    index: 0,
+                    id: name.map(|_| "call_write".to_string()),
+                    kind: "function".to_string(),
+                    function: Some(ToolCallFunctionWire {
+                        name: name.map(str::to_string),
+                        arguments,
+                    }),
+                }]);
+                chunk
+            };
+            let mut seq = 0;
+            assert!(matches!(
+                collector.apply(_delta_chunk(seq, "Writing the file now.\n")),
+                ChunkApplied::Delta
+            ));
+            let decode = Duration::from_secs(120);
+            match progress {
+                Some(every) => {
+                    let mut elapsed = Duration::ZERO;
+                    while elapsed < decode {
+                        tokio::time::sleep(every).await;
+                        elapsed += every;
+                        seq += 1;
+                        assert!(matches!(
+                            collector.apply(_delta_chunk(seq, "")),
+                            ChunkApplied::Delta
+                        ));
+                    }
+                }
+                None => tokio::time::sleep(decode).await,
+            }
+            seq += 1;
+            collector.apply(call_chunk(seq, Some("write"), String::new()));
+            seq += 1;
+            collector.apply(call_chunk(seq, None, arguments));
+            let mut terminal = _terminal_chunk("tool_calls", None);
+            terminal.seq = seq + 1;
+            assert!(matches!(collector.apply(terminal), ChunkApplied::Terminal));
+            let _ = outcome_tx.send(collector.build_outcome().expect("terminal outcome"));
+        });
+
+        let mut payloads = Vec::new();
+        while let Some(event) = event_rx.recv().await {
+            payloads.push(_event_data(event.expect("infallible event")).await);
+        }
+        driver.await.expect("driver task");
+        worker.abort();
+        payloads
+    }
+
+    fn chat_events(payloads: &[String]) -> Vec<Value> {
+        assert_eq!(payloads.last().map(String::as_str), Some("[DONE]"));
+        payloads[..payloads.len() - 1]
+            .iter()
+            .map(|payload| serde_json::from_str(payload).expect("chat chunk JSON"))
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_worker_silent_through_a_long_tool_call_ends_at_the_inter_chunk_deadline() {
+        let events = chat_events(&stream_long_tool_call(None, "{}").await);
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0]["choices"][0]["delta"]["content"],
+            "Writing the file now.\n"
+        );
+        assert_eq!(events[1]["error"]["code"], "inter_chunk_timeout");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progress_chunks_carry_a_long_tool_call_past_the_inter_chunk_deadline() {
+        let arguments = json!({
+            "filePath": "src/handlers.py",
+            "content": "    return {\"ok\": True}\n".repeat(4096),
+        })
+        .to_string();
+        assert!(arguments.len() > 64 * 1024);
+
+        let events =
+            chat_events(&stream_long_tool_call(Some(Duration::from_secs(1)), &arguments).await);
+
+        assert!(events.iter().all(|event| event.get("error").is_none()));
+        let progress: Vec<&Value> = events
+            .iter()
+            .filter(|event| {
+                event["choices"][0]["delta"] == json!({})
+                    && event["choices"][0]["finish_reason"].is_null()
+            })
+            .collect();
+        assert_eq!(progress.len(), 120);
+        assert!(progress
+            .iter()
+            .all(|event| event["object"] == "chat.completion.chunk"));
+        let streamed: String = events
+            .iter()
+            .filter_map(|event| event["choices"][0]["delta"]["tool_calls"].as_array())
+            .flatten()
+            .map(|call| call["function"]["arguments"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(streamed, arguments);
+        assert_eq!(
+            events.last().expect("terminal")["choices"][0]["finish_reason"],
+            "tool_calls"
+        );
+    }
+
     // ── Helpers ────────────────────────────────────────────────────
 
     /// Extract the `data:` payload from an `axum::response::sse::Event`
@@ -4141,7 +4321,7 @@ mod tests {
         use axum::body::to_bytes;
         let stream = futures_util::stream::once(async move { Ok::<_, Infallible>(ev) });
         let resp = Sse::new(stream).into_response();
-        let bytes = to_bytes(resp.into_body(), 64 * 1024)
+        let bytes = to_bytes(resp.into_body(), 1024 * 1024)
             .await
             .expect("collect");
         let s = std::str::from_utf8(&bytes).expect("utf8");
