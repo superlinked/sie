@@ -100,6 +100,7 @@ def test_first_chunk_timeout_aborts_the_engine_and_returns_504(
 
     assert response.status_code == 504, response.text
     assert error_code(response.json()) == "first_chunk_timeout"
+    assert "reason" not in response.text
     assert adapter.closed
 
 

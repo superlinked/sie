@@ -26,8 +26,8 @@ use crate::queue::lane_admission::LaneKey;
 use crate::queue::publisher;
 use crate::queue::streaming::{
     client_safe_worker_error_code, client_safe_worker_error_message,
-    client_safe_worker_error_param, is_lower_sha256, MODEL_LOAD_FAILED_ERROR_CODE,
-    MODEL_LOAD_FAILED_PUBLIC_MESSAGE,
+    client_safe_worker_error_param, is_lower_sha256, UpstreamFailureReason,
+    MODEL_LOAD_FAILED_ERROR_CODE, MODEL_LOAD_FAILED_PUBLIC_MESSAGE,
 };
 
 use crate::server::{
@@ -5448,6 +5448,7 @@ pub(crate) enum StreamingDriverErr {
         message: String,
         param: Option<String>,
         retry_after_s: Option<u16>,
+        reason: Option<UpstreamFailureReason>,
         request_id: String,
         attempt_id: String,
     },
@@ -5983,6 +5984,7 @@ pub(crate) async fn run_streaming_generate(
             message: err.client_safe_message().to_string(),
             param: err.client_safe_param().map(str::to_string),
             retry_after_s: err.validated_retry_after_s(),
+            reason: err.client_safe_reason(),
             request_id: request_id.clone(),
             attempt_id: outcome.attempt_id.clone(),
         });
@@ -6148,6 +6150,7 @@ fn build_streaming_error_response(err: &StreamingDriverErr) -> Response {
             message,
             param,
             retry_after_s,
+            reason,
             request_id,
             attempt_id,
         } => {
@@ -6172,7 +6175,7 @@ fn build_streaming_error_response(err: &StreamingDriverErr) -> Response {
             let status = worker_error_http_status(stable_code);
             let err_type = worker_error_openai_type(stable_code);
             let mut body = json_openai_error(
-                client_safe_worker_error_message(code, message),
+                client_safe_worker_error_message(code, message, *reason),
                 err_type,
                 client_safe_worker_error_param(code, param.as_deref()),
                 openai_code,
@@ -6185,6 +6188,9 @@ fn build_streaming_error_response(err: &StreamingDriverErr) -> Response {
                         "attempt_id".to_string(),
                         serde_json::Value::String(attempt_id.clone()),
                     );
+                    if let Some(reason) = reason {
+                        err_obj.insert("reason".to_string(), json!(reason.as_str()));
+                    }
                 }
             }
             let mut resp = (status, Json(body)).into_response();
@@ -28904,6 +28910,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-rl-1".to_string(),
             attempt_id: "att-rl-1".to_string(),
+            reason: None,
         };
         let resp = build_streaming_error_response(&err);
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -28937,6 +28944,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-large-1".to_string(),
             attempt_id: "att-large-1".to_string(),
+            reason: None,
         };
         let response = build_streaming_error_response(&err);
 
@@ -28963,6 +28971,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-too-long-1".to_string(),
             attempt_id: "att-too-long-1".to_string(),
+            reason: None,
         };
         let response = build_streaming_error_response(&err);
 
@@ -28990,6 +28999,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-unsupported-1".to_string(),
             attempt_id: "att-unsupported-1".to_string(),
+            reason: None,
         };
         let response = build_streaming_error_response(&err);
 
@@ -29018,6 +29028,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-cold-1".to_string(),
             attempt_id: "att-cold-1".to_string(),
+            reason: None,
         };
         let resp = build_streaming_error_response(&err);
 
@@ -29045,6 +29056,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-empty-1".to_string(),
             attempt_id: "att-empty-1".to_string(),
+            reason: None,
         };
         let resp = build_streaming_error_response(&err);
 
@@ -29078,6 +29090,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-load-failed-1".to_string(),
             attempt_id: "att-load-failed-1".to_string(),
+            reason: None,
         };
         let resp = build_streaming_error_response(&err);
 
@@ -29113,6 +29126,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-unknown-1".to_string(),
             attempt_id: "att-unknown-1".to_string(),
+            reason: None,
         };
         let resp = build_streaming_error_response(&err);
 
@@ -29142,6 +29156,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-sensitive-1".to_string(),
             attempt_id: "att-sensitive-1".to_string(),
+            reason: None,
         };
 
         let response = build_streaming_error_response(&err);
@@ -29169,6 +29184,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-future-1".to_string(),
             attempt_id: "att-future-1".to_string(),
+            reason: None,
         };
 
         let response = build_streaming_error_response(&err);
@@ -29198,6 +29214,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-retry-1".to_string(),
             attempt_id: "att-retry-1".to_string(),
+            reason: None,
         };
         let resp = build_streaming_error_response(&err);
 
@@ -29242,6 +29259,7 @@ mod tests {
             retry_after_s: Some(12),
             request_id: "req-retry-configured".to_string(),
             attempt_id: "att-retry-configured".to_string(),
+            reason: None,
         };
 
         let response = build_streaming_error_response(&err);
@@ -29269,6 +29287,7 @@ mod tests {
                 retry_after_s,
                 request_id: "req-loading".to_string(),
                 attempt_id: "att-loading".to_string(),
+                reason: None,
             };
 
             let response = build_streaming_error_response(&err);

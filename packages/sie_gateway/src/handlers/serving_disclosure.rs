@@ -2690,6 +2690,127 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_remote_generation_failure_tells_the_caller_its_reason_on_every_surface() {
+        let messages = json!([{"role": "user", "content": "hello"}]);
+        for (code, retry_after_s, reason, message) in [
+            (
+                "inference_error",
+                None,
+                "upstream_payment_required",
+                "the upstream account cannot pay for the request",
+            ),
+            (
+                "RESOURCE_EXHAUSTED",
+                Some(7),
+                "upstream_busy",
+                "The upstream serving the model is busy, please retry",
+            ),
+            (
+                "MODEL_LOADING",
+                Some(7),
+                "upstream_not_ready",
+                "The upstream serving the model is busy, please retry",
+            ),
+        ] {
+            for (surface, stream) in [
+                ("native", false),
+                ("chat", false),
+                ("completions", false),
+                ("responses", false),
+                ("native", true),
+                ("chat", true),
+                ("completions", true),
+            ] {
+                let gateway = gateway().await;
+                gateway
+                    .dispatcher
+                    .fail_remote_generation(code, retry_after_s, reason);
+                let state = State(Arc::clone(&gateway.state));
+                let response = match surface {
+                    "native" => {
+                        proxy_request(
+                            state,
+                            json_request(
+                                "/v1/generate/acme__chat:remote",
+                                json!({"prompt": "hello", "max_new_tokens": 4, "stream": stream}),
+                            ),
+                            "generate",
+                        )
+                        .await
+                    }
+                    "chat" => {
+                        proxy_chat(
+                            state,
+                            json_request(
+                                "/v1/chat/completions",
+                                json!({"model": "acme/chat:remote", "messages": messages, "stream": stream}),
+                            ),
+                        )
+                        .await
+                    }
+                    "completions" => {
+                        proxy_completions(
+                            state,
+                            json_request(
+                                "/v1/completions",
+                                json!({"model": "acme/chat:remote", "prompt": "hello", "stream": stream}),
+                            ),
+                        )
+                        .await
+                    }
+                    _ => {
+                        proxy_responses(
+                            state,
+                            json_request(
+                                "/v1/responses",
+                                json!({"model": "acme/chat:remote", "input": "hello"}),
+                            ),
+                        )
+                        .await
+                    }
+                };
+                let case = format!("{code} {surface} stream={stream}");
+                let status = response.status();
+                let retry_after = response
+                    .headers()
+                    .get("retry-after")
+                    .map(|value| value.to_str().unwrap().to_string());
+                let body = String::from_utf8(
+                    axum::body::to_bytes(response.into_body(), 64 * 1024)
+                        .await
+                        .unwrap()
+                        .to_vec(),
+                )
+                .unwrap();
+                let error: serde_json::Value = if stream {
+                    assert_eq!(status, StatusCode::OK, "{case}");
+                    body.lines()
+                        .filter_map(|line| line.strip_prefix("data: "))
+                        .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+                        .find_map(|event| event.get("error").cloned())
+                        .unwrap_or_else(|| panic!("{case}: no error event in {body}"))
+                } else {
+                    let expected = if code == "inference_error" {
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    } else {
+                        assert!(retry_after.is_some(), "{case}");
+                        StatusCode::SERVICE_UNAVAILABLE
+                    };
+                    assert_eq!(status, expected, "{case}: {body}");
+                    serde_json::from_str::<serde_json::Value>(&body).unwrap()["error"].clone()
+                };
+                assert_eq!(error["code"], code, "{case}");
+                assert_eq!(error["reason"], reason, "{case}");
+                assert_eq!(error["message"], message, "{case}");
+                assert!(!body.contains("team-sie"), "{case}");
+                if code == "inference_error" {
+                    assert!(!body.contains("busy, please retry"), "{case}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn only_a_served_response_or_a_server_side_refusal_is_stamped() {
         let disclosure = ServingDisclosure::default();
