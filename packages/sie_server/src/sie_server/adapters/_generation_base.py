@@ -26,6 +26,7 @@ from typing import Any, ClassVar, Literal, cast
 
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters.errors import UPSTREAM_FAILURE_MESSAGES, UpstreamFailureReason
 from sie_server.types.grammar import GrammarSpec
 from sie_server.types.inputs import ImageInput, VideoInput
 
@@ -63,10 +64,15 @@ FinishReason = Literal["stop", "length", "cancelled", "error", "tool_calls"]
 
 
 class GenerationError(RuntimeError):
-    """Base for adapter-declared generation failures with stable semantics."""
+    """Base for adapter-declared generation failures with stable semantics.
+
+    ``upstream_reason`` names the class of a remote upstream's failure, when
+    one caused this error.
+    """
 
     code: ClassVar[str] = "inference_error"
     param: str | None = None
+    upstream_reason: UpstreamFailureReason | None = None
 
 
 class GenerationUnsupportedFieldError(GenerationError):
@@ -107,15 +113,36 @@ class GenerationCapacityError(GenerationError):
 
     code = "RESOURCE_EXHAUSTED"
 
-    def __init__(self, message: str = "", *, retry_after_s: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        retry_after_s: int | None = None,
+        upstream_reason: UpstreamFailureReason | None = None,
+    ) -> None:
         super().__init__(message)
         self.retry_after_s = retry_after_s
+        self.upstream_reason = upstream_reason
 
 
 class GenerationDrainingError(GenerationCapacityError):
     """The generation backend is draining and cannot accept new work."""
 
     code = "MODEL_LOADING"
+
+
+class GenerationUpstreamError(GenerationError):
+    """A remote upstream failed the generation, and the same request would fail again.
+
+    The message is operator-side detail. A caller sees the fixed text of
+    ``upstream_reason`` instead.
+    """
+
+    upstream_reason: UpstreamFailureReason
+
+    def __init__(self, message: str, *, upstream_reason: UpstreamFailureReason) -> None:
+        super().__init__(message)
+        self.upstream_reason = upstream_reason
 
 
 _CLIENT_SAFE_GENERATION_ERROR_MESSAGES = {
@@ -201,7 +228,9 @@ def client_safe_generation_error_code(error_code: str | None) -> str:
     return code if code in _CLIENT_SAFE_GENERATION_ERROR_CODES else "inference_error"
 
 
-def client_safe_generation_error_message(error_code: str | None, error_message: str | None) -> str:
+def client_safe_generation_error_message(
+    error_code: str | None, error_message: str | None, upstream_reason: UpstreamFailureReason | None = None
+) -> str:
     """Return the public message for an adapter-yielded terminal error.
 
     Adapter terminal chunks are an untrusted backend boundary just like raised
@@ -210,9 +239,12 @@ def client_safe_generation_error_message(error_code: str | None, error_message: 
     their actionable message. Unknown future adapter codes fail closed rather
     than making their backend-controlled message public. A terminal error
     without a code is the generic ``inference_error`` fallback used by every
-    public generation surface.
+    public generation surface, unless a remote upstream's ``upstream_reason``
+    selects that reason's fixed text.
     """
     code = error_code or "inference_error"
+    if upstream_reason is not None and code == "inference_error":
+        return UPSTREAM_FAILURE_MESSAGES[upstream_reason]
     if safe_message := _CLIENT_SAFE_GENERATION_ERROR_MESSAGES.get(code):
         return safe_message
     if code in _CLIENT_PASSTHROUGH_GENERATION_ERROR_CODES and error_message:

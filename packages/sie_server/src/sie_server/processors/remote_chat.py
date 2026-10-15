@@ -155,7 +155,7 @@ async def _buffered_chunks(
                 ),
             )
         yield _terminal(usage, [candidate["finish_reason"]])
-    except UpstreamUnavailableError as exc:
+    except (UpstreamUnavailableError, RemoteUpstreamError) as exc:
         raise generation_error(exc) from None
     except InputTooLongError:
         raise GenerationInputTooLongError("the upstream refused the chat input as too long") from None
@@ -227,7 +227,11 @@ async def _stream_chunks(
         yield _terminal(usage, list(reasons.values()))
     except UpstreamUnavailableError as exc:
         if visible:
-            raise RemoteUpstreamError("the upstream failed during chat generation") from None
+            raise generation_error(
+                RemoteUpstreamError("the upstream failed during chat generation", upstream_reason=exc.upstream_reason)
+            ) from None
+        raise generation_error(exc) from None
+    except RemoteUpstreamError as exc:
         raise generation_error(exc) from None
     except InputTooLongError:
         raise GenerationInputTooLongError("the upstream refused the chat input as too long") from None

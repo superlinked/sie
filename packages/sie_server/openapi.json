@@ -3338,6 +3338,30 @@
             "default": null,
             "description": "Authoritative retry hint in seconds for RESOURCE_EXHAUSTED only; null for other terminal errors",
             "title": "Retry After S"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "upstream_credential_unavailable",
+                  "upstream_credential_rejected",
+                  "upstream_payment_required",
+                  "upstream_model_not_found",
+                  "upstream_refused",
+                  "upstream_unavailable",
+                  "upstream_busy",
+                  "upstream_not_ready",
+                  "upstream_invalid_response"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Class of a remote upstream's failure, when one ended the generation",
+            "title": "Reason"
           }
         },
         "required": [

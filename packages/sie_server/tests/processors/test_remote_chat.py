@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import msgpack
 import pytest
+from sie_server.adapters.errors import UPSTREAM_FAILURE_MESSAGES
 from sie_server.adapters.remote._limits import upstream_limiter
 from sie_server.adapters.remote.openai import OpenAIUpstreamAdapter
 from sie_server.adapters.remote.sie import SieUpstreamAdapter
@@ -137,8 +138,9 @@ def respond(
     return stream
 
 
-async def run(remote: tuple, **fields: Any) -> tuple[AsyncMock, list[dict]]:
+async def run(remote: tuple, *, prompt: str | None = None, **fields: Any) -> tuple[AsyncMock, list[dict]]:
     _adapter, proc, nc, _requests = remote
+    request = {"messages": [{"role": "user", "content": "question"}]} if prompt is None else {"prompt": prompt}
     msg = AsyncMock()
     msg.data = msgpack.packb(
         {
@@ -154,7 +156,7 @@ async def run(remote: tuple, **fields: Any) -> tuple[AsyncMock, list[dict]]:
             "reply_subject": "_INBOX.router-1.req-1",
             "timestamp": time.time(),
             "generate": {
-                "messages": [{"role": "user", "content": "question"}],
+                **request,
                 "max_new_tokens": 9,
                 "stream": True,
                 **fields,
@@ -437,11 +439,85 @@ async def test_post_output_disconnect_is_final(remote: tuple) -> None:
     stream = respond(remote, stream=ChatStream([choice()], disconnect=True))
     _msg, chunks = await run(remote)
     assert "".join(chunk.get("text_delta", "") for chunk in chunks) == "answer"
-    assert chunks[-1]["error"]["code"] == "inference_error"
+    assert chunks[-1]["error"] == {
+        "code": "inference_error",
+        "message": UPSTREAM_FAILURE_MESSAGES["upstream_unavailable"],
+        "reason": "upstream_unavailable",
+    }
     assert "PRIVATE" not in json.dumps(chunks)
     assert len(remote[3]) == 1
     assert stream is not None
     assert stream.closed
+
+
+_UPSTREAM_DETAIL = "PRIVATE_UPSTREAM_DETAIL for account acct-7Q2Lw0d9"
+_FAILURES = [
+    ("401", "inference_error", "upstream_credential_rejected"),
+    ("402", "inference_error", "upstream_payment_required"),
+    ("403", "inference_error", "upstream_credential_rejected"),
+    ("404", "inference_error", "upstream_model_not_found"),
+    ("connect", "RESOURCE_EXHAUSTED", "upstream_unavailable"),
+    ("malformed", "inference_error", "upstream_invalid_response"),
+]
+
+
+def fail_upstream(remote: tuple, failure: str, *, streaming: bool) -> None:
+    adapter, _proc, _nc, requests = remote
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if failure == "connect":
+            raise httpx.ConnectError(_UPSTREAM_DETAIL)
+        if failure == "malformed" and streaming:
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=ChatStream([{"x": _UPSTREAM_DETAIL}])
+            )
+        status, payload = (
+            (200, {"x": _UPSTREAM_DETAIL})
+            if failure == "malformed"
+            else (int(failure), {"error": {"message": _UPSTREAM_DETAIL, "code": int(failure)}})
+        )
+        return httpx.Response(
+            status, headers={"content-type": "application/json"}, stream=httpx.ByteStream(json.dumps(payload).encode())
+        )
+
+    adapter._async_client = upstream_client(adapter._upstream, transport=httpx.MockTransport(handler))
+
+
+def assert_reason_reaches_the_gateway(
+    remote: tuple, msg: AsyncMock, chunks: list[dict], code: str, reason: str
+) -> None:
+    error = chunks[-1]["error"]
+    assert (error["code"], error["reason"]) == (code, reason)
+    if code == "inference_error":
+        assert error["message"] == UPSTREAM_FAILURE_MESSAGES[reason]
+    published = json.dumps(chunks)
+    for private in ("PRIVATE", "acct-7Q2Lw0d9", "queued-chat", "127.0.0.1", "operator"):
+        assert private not in published
+    assert len(remote[3]) == 1
+    msg.ack.assert_awaited_once()
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize(("failure", "code", "reason"), _FAILURES)
+async def test_an_upstream_failure_reaches_the_gateway_with_its_reason(
+    remote: tuple, streaming: bool, failure: str, code: str, reason: str
+) -> None:
+    fail_upstream(remote, failure, streaming=streaming)
+    msg, chunks = await run(remote, stream=streaming)
+    assert_reason_reaches_the_gateway(remote, msg, chunks, code, reason)
+
+
+@pytest.mark.parametrize("remote", ["sie"], indirect=True)
+@pytest.mark.parametrize(("failure", "code", "reason"), _FAILURES)
+async def test_an_upstream_failure_of_a_queued_prompt_reaches_the_gateway_with_its_reason(
+    remote: tuple, monkeypatch: pytest.MonkeyPatch, failure: str, code: str, reason: str
+) -> None:
+    monkeypatch.setattr(remote[1], "_check_context_length", AsyncMock(return_value=None))
+    fail_upstream(remote, failure, streaming=True)
+    msg, chunks = await run(remote, prompt="question")
+    assert_reason_reaches_the_gateway(remote, msg, chunks, code, reason)
+    assert remote[3][0].url.path.endswith("/v1/generate/operator__model")
 
 
 @pytest.mark.parametrize(

@@ -8,9 +8,13 @@ import httpx
 import pytest
 import yaml
 from sie_sdk import SIEClient
-from sie_server.adapters._generation_base import GenerationCapacityError, GenerationChunk, GenerationDrainingError
+from sie_server.adapters._generation_base import (
+    GenerationCapacityError,
+    GenerationChunk,
+    GenerationDrainingError,
+    GenerationUpstreamError,
+)
 from sie_server.adapters.remote import sie as remote_sie
-from sie_server.adapters.remote._http import RemoteUpstreamError
 from sie_server.adapters.remote._limits import upstream_limiter
 from sie_server.adapters.remote.sie import SieUpstreamAdapter
 from sie_server.api.generate import _generation_http_exception
@@ -163,8 +167,9 @@ async def test_a_disconnect_after_output_is_final_and_closes_the_stream(adapter:
     )
     iterator = adapter.generate("prompt", max_new_tokens=9)
     assert (await anext(iterator)).text_delta == "started"
-    with pytest.raises(RemoteUpstreamError, match="failed during generation"):
+    with pytest.raises(GenerationUpstreamError, match="failed during generation") as raised:
         await anext(iterator)
+    assert raised.value.upstream_reason == "upstream_unavailable"
     assert stream.closed
 
 
@@ -187,8 +192,9 @@ async def test_generation_refuses_missing_or_malformed_terminal_usage(adapter: S
     answer_with(
         adapter, lambda _request: httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
     )
-    with pytest.raises(RemoteUpstreamError, match="usage"):
+    with pytest.raises(GenerationUpstreamError, match="usage") as raised:
         _ = [chunk async for chunk in adapter.generate("prompt", max_new_tokens=9)]
+    assert raised.value.upstream_reason == "upstream_invalid_response"
     assert stream.closed
 
 

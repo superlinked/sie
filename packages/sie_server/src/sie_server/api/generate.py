@@ -692,6 +692,7 @@ def _generation_http_exception(error: GenerationError, registry: ModelRegistry |
             param=client_safe_generation_error_param(error),
             code=client_safe_generation_error_code(error.code),
         )
+    reason = {} if error.upstream_reason is None else {"reason": error.upstream_reason}
     if isinstance(error, GenerationCapacityError):
         if error.retry_after_s is not None:
             retry_after = str(error.retry_after_s)
@@ -704,6 +705,7 @@ def _generation_http_exception(error: GenerationError, registry: ModelRegistry |
             detail={
                 "code": client_safe_generation_error_code(error.code),
                 "message": client_safe_generation_error_message(error.code, str(error)),
+                **reason,
             },
             headers={"Retry-After": retry_after},
         )
@@ -711,7 +713,8 @@ def _generation_http_exception(error: GenerationError, registry: ModelRegistry |
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail={
             "code": "inference_error",
-            "message": client_safe_generation_error_message("inference_error", str(error)),
+            "message": client_safe_generation_error_message("inference_error", str(error), error.upstream_reason),
+            **reason,
         },
     )
 
@@ -894,10 +897,12 @@ async def _stream_generate_events(
         logger.info("stream_generate refused after preflight: %s", exc)
         error: dict[str, Any] = {
             "code": client_safe_generation_error_code(exc.code),
-            "message": client_safe_generation_error_message(exc.code, str(exc)),
+            "message": client_safe_generation_error_message(exc.code, str(exc), exc.upstream_reason),
         }
         if (param := client_safe_generation_error_param(exc)) is not None:
             error["param"] = param
+        if exc.upstream_reason is not None:
+            error["reason"] = exc.upstream_reason
         retry_after_s = exc.retry_after_s if isinstance(exc, GenerationCapacityError) else None
         if retry_after_s is None:
             retry_after_s = oom_retry_after_s

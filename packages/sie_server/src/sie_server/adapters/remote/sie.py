@@ -327,8 +327,13 @@ class SieUpstreamAdapter(BaseAdapter, GenerationAdapter):
                     seen_text = seen_text or bool(event.text)
             raise RemoteUpstreamError("upstream stream ended before its terminal event")
         except UpstreamUnavailableError as error:
+            logger.warning("remote generation failed: %s", error)
             if yielded:
-                raise RemoteUpstreamError("the upstream failed during generation") from None
+                raise generation_error(
+                    RemoteUpstreamError("the upstream failed during generation", upstream_reason=error.upstream_reason)
+                ) from None
+            raise generation_error(error) from None
+        except RemoteUpstreamError as error:
             logger.warning("remote generation failed: %s", error)
             raise generation_error(error) from None
         except InputTooLongError:

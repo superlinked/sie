@@ -92,12 +92,14 @@ class _CompletionError(Exception):
         code: str = "invalid_request",
         error_type: str | None = None,
         headers: dict[str, str] | None = None,
+        reason: str | None = None,
     ) -> None:
         super().__init__(message)
         self.message = message
         self.status_code = status_code
         self.param = param
         self.code = code
+        self.reason = reason
         self.error_type = error_type or (
             "invalid_request_error" if status_code < status.HTTP_500_INTERNAL_SERVER_ERROR else "server_error"
         )
@@ -119,19 +121,20 @@ class _CompletionParams:
     include_usage: bool
 
 
+def _error_body(error: _CompletionError) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "message": error.message,
+        "type": error.error_type,
+        "param": error.param,
+        "code": error.code,
+    }
+    if error.reason is not None:
+        body["reason"] = error.reason
+    return body
+
+
 def _error_response(error: _CompletionError) -> JSONResponse:
-    return JSONResponse(
-        status_code=error.status_code,
-        content={
-            "error": {
-                "message": error.message,
-                "type": error.error_type,
-                "param": error.param,
-                "code": error.code,
-            }
-        },
-        headers=error.headers,
-    )
+    return JSONResponse(status_code=error.status_code, content={"error": _error_body(error)}, headers=error.headers)
 
 
 def _from_http_exception(exc: HTTPException) -> _CompletionError:
@@ -144,16 +147,20 @@ def _from_http_exception(exc: HTTPException) -> _CompletionError:
         code = str(detail.get("code", "invalid_request"))
         param = detail.get("param")
         param = param if isinstance(param, str) else None
+        reason = detail.get("reason")
+        reason = reason if isinstance(reason, str) else None
     else:
         message = str(detail)
         code = "invalid_request"
         param = None
+        reason = None
     return _CompletionError(
         message,
         status_code=exc.status_code,
         param=param,
         code=code,
         headers=dict(exc.headers) if exc.headers is not None else None,
+        reason=reason,
     )
 
 
@@ -486,12 +493,7 @@ async def _stream_completion(
             text="",
             finish_reason=None,
         )
-        error_body: dict[str, Any] = {
-            "message": error.message,
-            "type": error.error_type,
-            "param": error.param,
-            "code": error.code,
-        }
+        error_body = _error_body(error)
         if (retry_after_s := _validated_retry_after_s(error)) is not None:
             error_body["retry_after_s"] = retry_after_s
         body["error"] = error_body

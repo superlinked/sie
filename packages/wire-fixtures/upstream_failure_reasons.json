@@ -1,0 +1,14 @@
+{
+  "description": "The class of a remote upstream's failure that ended a generation, as an error's `reason` field names it, with the fixed caller-facing message of an `inference_error` of that class. A worker sends only these names; the gateway forwards only these names and answers with this text, never the worker's own message.",
+  "reasons": {
+    "upstream_credential_unavailable": "the server has no usable credential for its upstream",
+    "upstream_credential_rejected": "the upstream rejected the server's credential",
+    "upstream_payment_required": "the upstream account cannot pay for the request",
+    "upstream_model_not_found": "the upstream has no route for the configured model",
+    "upstream_refused": "the upstream refused the request",
+    "upstream_unavailable": "the upstream could not be reached, timed out or failed",
+    "upstream_busy": "the upstream is busy",
+    "upstream_not_ready": "the model is not ready on the upstream",
+    "upstream_invalid_response": "the upstream answered with something the server cannot accept"
+  }
+}

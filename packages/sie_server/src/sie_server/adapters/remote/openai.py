@@ -341,8 +341,13 @@ class OpenAIUpstreamAdapter(BaseAdapter, GenerationAdapter):
                             return
                 parser.finish()
         except UpstreamUnavailableError as error:
+            logger.warning("remote generation failed: %s", error)
             if yielded:
-                raise RemoteUpstreamError("the upstream failed during generation") from None
+                raise generation_error(
+                    RemoteUpstreamError("the upstream failed during generation", upstream_reason=error.upstream_reason)
+                ) from None
+            raise generation_error(error) from None
+        except RemoteUpstreamError as error:
             logger.warning("remote generation failed: %s", error)
             raise generation_error(error) from None
         except InputTooLongError:

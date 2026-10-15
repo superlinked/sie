@@ -11,6 +11,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
+from sie_server.adapters.errors import UpstreamFailureReason
 from sie_server.core.extract_cost import MAX_EXTRACT_LABELS
 from sie_server.core.score_cost import MAX_SCORE_ITEMS
 from sie_server.types.inputs import DEFAULT_MAX_ITEM_TEXT_BYTES
@@ -760,6 +761,10 @@ class GenerateChunkErrorModel(BaseModel):
         ge=1,
         le=60,
         description=("Authoritative retry hint in seconds for RESOURCE_EXHAUSTED only; null for other terminal errors"),
+    )
+    reason: UpstreamFailureReason | None = Field(
+        default=None,
+        description="Class of a remote upstream's failure, when one ended the generation",
     )
 
 

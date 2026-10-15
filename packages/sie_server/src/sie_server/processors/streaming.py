@@ -71,6 +71,7 @@ from sie_server.adapters._generation_base import (
     suppress_thinking_blocks,
     thinking_blocks_must_be_hidden,
 )
+from sie_server.adapters.errors import UpstreamFailureReason
 from sie_server.adapters.remote.openai import OpenAIUpstreamAdapter
 from sie_server.adapters.remote.sie import SieUpstreamAdapter
 from sie_server.api.helpers import oom_retry_after_from_registry
@@ -2657,14 +2658,16 @@ class StreamingProcessor:
                     logger.warning("Generate iterator raised for %s/%s", request_id, attempt_id, exc_info=True)
                     if isinstance(exc, GenerationError):
                         error_code = exc.code
-                        error_message = client_safe_generation_error_message(exc.code, str(exc))
+                        error_message = client_safe_generation_error_message(exc.code, str(exc), exc.upstream_reason)
                         error_param = client_safe_generation_error_param(exc)
                         error_retry_after_s = _generation_error_retry_after_s(exc, self._registry)
+                        error_reason = exc.upstream_reason
                     else:
                         error_code = "inference_error"
                         error_message = _INTERNAL_GENERATION_MESSAGE
                         error_param = None
                         error_retry_after_s = None
+                        error_reason = None
                     err_payload = _encode_chunk(
                         kind="chunk",
                         request_id=request_id,
@@ -2677,6 +2680,7 @@ class StreamingProcessor:
                         error_message=error_message,
                         error_param=error_param,
                         error_retry_after_s=error_retry_after_s,
+                        error_reason=error_reason,
                     )
                     try:
                         await _wait_for(
@@ -4649,6 +4653,7 @@ def _encode_chunk(
     error_message: str | None = None,
     error_param: str | None = None,
     error_retry_after_s: int | None = None,
+    error_reason: UpstreamFailureReason | None = None,
     tool_call_delta: ToolCallDelta | None = None,
     logprobs: list[dict[str, Any]] | None = None,
     candidates: list[dict[str, Any]] | None = None,
@@ -4715,6 +4720,8 @@ def _encode_chunk(
             and 1 <= error_retry_after_s <= _RESOURCE_EXHAUSTED_RETRY_AFTER_MAX_S
         ):
             error["retry_after_s"] = error_retry_after_s
+        if error_reason is not None:
+            error["reason"] = error_reason
         payload["error"] = error
     if logprobs:
         # OpenAI ``ChatCompletionTokenLogprob`` entries, produced by the

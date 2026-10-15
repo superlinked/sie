@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Callable, Iterator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -10,6 +11,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sie_server.adapters.errors import UPSTREAM_FAILURE_MESSAGES
 from sie_server.adapters.remote._limits import upstream_limiter
 from sie_server.adapters.remote.openai import OpenAIUpstreamAdapter
 from sie_server.adapters.remote.sie import SieUpstreamAdapter
@@ -223,7 +225,8 @@ def test_a_502_before_output_logs_its_reason(
     with caplog.at_level(logging.WARNING, logger=openai_local.__name__):
         response = client.post("/v1/chat/completions", json={**BODY, "stream": streaming})
     assert response.status_code == 502
-    assert response.json()["error"]["message"] == "upstream generation request failed"
+    assert response.json()["error"]["message"] == "the upstream rejected the server's credential"
+    assert response.json()["error"]["reason"] == "upstream_credential_rejected"
     assert _remote_chat_warnings(caplog) == [f"remote chat for {MODEL} failed: upstream answered 401"]
     assert "private" not in caplog.text
 
@@ -239,7 +242,8 @@ def test_a_missing_upstream_key_is_a_502_whose_log_names_it(
     with caplog.at_level(logging.WARNING, logger=openai_local.__name__):
         response = client.post("/v1/chat/completions", json={**BODY, "stream": streaming})
     assert response.status_code == 502
-    assert response.json()["error"]["message"] == "upstream generation request failed"
+    assert response.json()["error"]["message"] == "the server has no usable credential for its upstream"
+    assert response.json()["error"]["reason"] == "upstream_credential_unavailable"
     assert _remote_chat_warnings(caplog) == [f"remote chat for {MODEL} failed: the upstream credential is unavailable"]
     assert not requests
 
@@ -752,7 +756,7 @@ def _render_chat_locally(remote_chat: tuple, monkeypatch: pytest.MonkeyPatch) ->
     [
         ("chat", "404", 502, "route", f"remote chat for {MODEL} failed: upstream answered 404"),
         ("chat", "connect", 503, "route", f"remote chat for {MODEL} failed: {UNAVAILABLE}"),
-        ("rendered chat", "401", 502, "route", f"remote chat for {MODEL} failed: upstream answered 401"),
+        ("rendered chat", "401", 502, "adapter", "remote generation failed: upstream answered 401"),
         ("rendered chat", "connect", 503, "adapter", f"remote generation failed: {UNAVAILABLE}"),
         ("native", "connect", 503, "adapter", f"remote generation failed: {UNAVAILABLE}"),
         ("completions", "connect", 503, "adapter", f"remote generation failed: {UNAVAILABLE}"),
@@ -793,6 +797,11 @@ def test_a_remote_generation_failure_logs_one_warning_with_its_reason(
     response = client.post(path, json=body)
 
     assert response.status_code == status, response.text
+    payload = response.json()
+    reason = {"401": "upstream_credential_rejected", "404": "upstream_model_not_found"}.get(
+        failure, "upstream_unavailable"
+    )
+    assert payload.get("error", payload.get("detail"))["reason"] == reason
     logger_name = openai_local.__name__ if source == "route" else type(adapter).__module__
     warnings = [(record.name, record.getMessage()) for record in caplog.records if record.levelno >= logging.WARNING]
     assert warnings == [(logger_name, message)]
@@ -802,14 +811,11 @@ def test_a_remote_generation_failure_logs_one_warning_with_its_reason(
         assert private not in caplog.text
 
 
-@pytest.mark.parametrize(
-    ("streaming", "message"),
-    [(False, f"generate failed for {SAFE_MODEL}"), (True, "stream_generate failed before output")],
-)
+@pytest.mark.parametrize("streaming", [False, True])
 def test_a_native_remote_failure_before_output_logs_one_warning_with_its_reason(
-    remote_chat: tuple, caplog: pytest.LogCaptureFixture, streaming: bool, message: str
+    remote_chat: tuple, caplog: pytest.LogCaptureFixture, streaming: bool
 ) -> None:
-    client, _, config, _ = remote_chat
+    client, adapter, config, _ = remote_chat
     config.profiles["default"].adapter_options.runtime.clear()
     answer_with(remote_chat, json_response(401, {"error": {"message": "private upstream detail"}}))
     caplog.set_level(logging.DEBUG)
@@ -819,9 +825,10 @@ def test_a_native_remote_failure_before_output_logs_one_warning_with_its_reason(
 
     assert response.status_code == 500
     [record] = [record for record in caplog.records if record.levelno >= logging.WARNING]
-    assert (record.name, record.getMessage()) == ("sie_server.api.generate", message)
-    assert record.exc_info is not None
-    assert str(record.exc_info[1]) == "upstream answered 401"
+    assert (record.name, record.getMessage()) == (
+        type(adapter).__module__,
+        "remote generation failed: upstream answered 401",
+    )
     for private in (PROMPT, "private upstream detail"):
         assert private not in caplog.text
 
@@ -1271,3 +1278,106 @@ def test_onboarded_direct_chat_answers_rendered_reasoning_only_when_asked(
     assert reasoning == ("PRIVATE_REASONING" if include_reasoning else "")
     assert "think>" not in response.text
     assert upstream_stream.closed
+
+
+def test_the_upstream_failure_reasons_are_the_wire_fixture() -> None:
+    fixture = json.loads(
+        (Path(__file__).resolve().parents[3] / "wire-fixtures" / "upstream_failure_reasons.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert UPSTREAM_FAILURE_MESSAGES == fixture["reasons"]
+
+
+ACCOUNT = "acct-7Q2Lw0d9"
+_FINAL_FAILURES = {
+    "401": "upstream_credential_rejected",
+    "402": "upstream_payment_required",
+    "403": "upstream_credential_rejected",
+    "404": "upstream_model_not_found",
+    "409": "upstream_refused",
+    "501": "upstream_unavailable",
+    "malformed": "upstream_invalid_response",
+}
+_UPSTREAM_IDENTIFIERS = ("chat-api", "127.0.0.1", "/prefix", "operator/model", ACCOUNT, "private upstream detail")
+
+
+def _answer_with_failure(remote_chat: tuple, failure: str) -> None:
+    _, adapter, _, requests = remote_chat
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        detail = f"private upstream detail: account {ACCOUNT} at {request.url}"
+        if failure == "connect":
+            raise httpx.ConnectError(detail)
+        if failure != "malformed":
+            return json_response(int(failure), {"error": {"message": detail, "code": int(failure)}})
+        if request.headers["accept"] == "text/event-stream":
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=ChatStream([{"detail": detail}])
+            )
+        return json_response(200, {"detail": detail})
+
+    adapter._async_client = upstream_client(adapter._upstream, transport=httpx.MockTransport(respond))
+
+
+@pytest.mark.parametrize(("surface", "streaming"), _GENERATION_SURFACES)
+@pytest.mark.parametrize("failure", ["401", "402", "403", "404", "409", "501", "connect", "malformed"])
+def test_an_upstream_failure_tells_the_caller_its_reason_and_nothing_that_identifies_the_upstream(
+    remote_chat: tuple, monkeypatch: pytest.MonkeyPatch, surface: str, streaming: bool, failure: str
+) -> None:
+    client, adapter, config, requests = remote_chat
+    config.profiles["default"].adapter_options.runtime.clear()
+    adapter._upstream = adapter._upstream.model_copy(update={"api_key_secret": "CHAT_API_KEY"})
+    monkeypatch.setenv("CHAT_API_KEY", CREDENTIAL)
+    _answer_with_failure(remote_chat, failure)
+    path, body = _generation_request(surface, stream=streaming)
+
+    response = client.post(path, json=body)
+
+    payload = response.json()
+    error = payload.get("error", payload.get("detail"))
+    if failure == "connect":
+        assert response.status_code == 503, response.text
+        assert error["code"] == ("QUEUE_FULL" if surface == "chat" else "RESOURCE_EXHAUSTED")
+        assert error["reason"] == "upstream_unavailable"
+    else:
+        reason = _FINAL_FAILURES[failure]
+        assert response.status_code == (502 if surface == "chat" else 500), response.text
+        assert error["code"] == ("upstream_error" if surface == "chat" else "inference_error")
+        assert error["reason"] == reason
+        assert error["message"] == UPSTREAM_FAILURE_MESSAGES[reason]
+    assert [request.headers["authorization"] for request in requests] == [f"Bearer {CREDENTIAL}"]
+    for private in (*_UPSTREAM_IDENTIFIERS, CREDENTIAL):
+        assert private not in response.text
+
+
+@pytest.mark.parametrize("surface", ["native", "chat", "completions"])
+def test_an_upstream_lost_after_output_ends_the_stream_with_its_reason(remote_chat: tuple, surface: str) -> None:
+    client, adapter, config, requests = remote_chat
+    config.profiles["default"].adapter_options.runtime.clear()
+    if surface == "chat":
+        first = events()[0]
+    elif isinstance(adapter, OpenAIUpstreamAdapter):
+        first = {"choices": [{"index": 0, "text": "answer", "finish_reason": None}]}
+    else:
+        first = {"request_id": "upstream-id", "seq": 0, "text_delta": "answer", "done": False}
+    stream = ChatStream([first], disconnect=True)
+    answer_with(remote_chat, httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream))
+    path, body = _generation_request(surface, stream=True)
+
+    response = client.post(path, json=body)
+
+    assert response.status_code == 200, response.text
+    assert "answer" in response.text
+    events_with_errors = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: {") and '"error"' in line
+    ]
+    assert [event["error"]["reason"] for event in events_with_errors] == ["upstream_unavailable"]
+    assert events_with_errors[0]["error"]["message"] == UPSTREAM_FAILURE_MESSAGES["upstream_unavailable"]
+    for private in _UPSTREAM_IDENTIFIERS:
+        assert private not in response.text
+    assert len(requests) == 1
+    assert stream.closed
