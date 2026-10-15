@@ -72,7 +72,8 @@ set -m
         cd "$WORK"
         # shellcheck source=/dev/null
         source "$ENV_FILE"
-        unset ANTHROPIC_API_KEY
+        unset ANTHROPIC_API_KEY ANTHROPIC_CUSTOM_HEADERS ANTHROPIC_BEDROCK_BASE_URL ANTHROPIC_VERTEX_BASE_URL \
+            ANTHROPIC_FOUNDRY_BASE_URL CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY
         export CLAUDE_CONFIG_DIR="$OUT/claude-config"
         claude --bare -p "$TASK" \
             --settings '{"apiKeyHelper": "printenv SIE_API_KEY"}' \

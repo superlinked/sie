@@ -985,7 +985,9 @@ def _messages_once(client: httpx.Client, body: dict[str, Any], headers: dict[str
                 return result
             name = ""
             for line in response.iter_lines():
-                if line.startswith("event:"):
+                if not line:
+                    name = ""
+                elif line.startswith("event:"):
                     name = line[len("event:") :].strip()
                 elif line.startswith("data:"):
                     result.chunks += 1

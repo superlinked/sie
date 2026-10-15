@@ -13,12 +13,14 @@ use utoipa::ToSchema;
 /// ``cache_control`` are accepted and have no effect: prefix caching is
 /// automatic and ``metadata`` is neither logged nor forwarded.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MessagesRequest {
     /// The model id, used as on ``/v1/chat/completions`` (``model`` or
     /// ``model:profile``, or an operator alias).
     pub model: String,
     /// Output token limit, at least 1 and at most the serving profile's
     /// ``max_output_tokens``.
+    #[schema(minimum = 1)]
     pub max_tokens: u32,
     /// ``user`` and ``assistant`` turns. User content blocks: ``text``,
     /// base64 ``image`` and ``tool_result``. Assistant content blocks:
@@ -56,6 +58,7 @@ pub struct MessagesRequest {
     pub top_p: Option<f64>,
     /// At least 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(minimum = 1)]
     pub top_k: Option<u32>,
     /// Server-sent events: ``message_start``, content block events,
     /// ``message_delta`` with the final usage, ``message_stop``, and ``ping``
@@ -67,6 +70,13 @@ pub struct MessagesRequest {
     /// Accepted and ignored (``user_id`` only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
+    /// Accepted and ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<Value>,
+    /// Accepted only empty: every field in it is refused, ``effort`` with
+    /// ``output_config.effort: Extra inputs are not permitted``.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<Value>,
 }
 
 /// Token usage of a Message. ``input_tokens`` plus

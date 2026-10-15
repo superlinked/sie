@@ -311,6 +311,7 @@ pub(crate) async fn anthropic_error_response(
         let name_str = name.as_str();
         if is_openai_compat_forwarded_header(name_str)
             || name_str.eq_ignore_ascii_case("x-sie-error-code")
+            || name_str.eq_ignore_ascii_case("x-sie-error-version")
             || name_str.eq_ignore_ascii_case("retry-after")
             || name_str.eq_ignore_ascii_case("www-authenticate")
         {

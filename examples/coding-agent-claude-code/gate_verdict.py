@@ -52,7 +52,9 @@ def judge(lines: list[str]) -> tuple[bool, dict[str, Any]]:
     results = [event for event in events if event.get("type") == "result"]
     retries = [event for event in events if event.get("type") == "system" and event.get("subtype") == "api_retry"]
     invalid_retries = [
-        event for event in retries if event.get("error_status") == 400 or "invalid_request" in json.dumps(event)
+        event
+        for event in retries
+        if event.get("error_status") == 400 or event.get("error") in ("invalid_request", "invalid_request_error")
     ]
     result = results[-1] if results else {}
     usage = result.get("usage") or {}

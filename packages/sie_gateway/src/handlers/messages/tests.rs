@@ -570,6 +570,35 @@ impl Drop for DropFlag {
 }
 
 #[tokio::test]
+async fn an_error_event_ends_the_body_and_drops_the_chat_body() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let flag = DropFlag(Arc::clone(&dropped));
+    let malformed = futures_util::stream::iter([Ok::<Bytes, std::io::Error>(Bytes::from_static(
+        b"data: {not json\n\n",
+    ))]);
+    let inner_stream = malformed
+        .chain(futures_util::stream::pending())
+        .map(move |item| {
+            let _keep = &flag;
+            item
+        });
+    let body = stream_body(
+        Body::from_stream(inner_stream.boxed()),
+        StreamMachine::new("msg_e".to_string(), "m".to_string()),
+        Duration::from_secs(60),
+    );
+    let collected = tokio::time::timeout(Duration::from_secs(5), to_bytes(body, usize::MAX))
+        .await
+        .expect("the body ends after the error event")
+        .unwrap();
+    assert_eq!(
+        event_names(&parse_events(&collected)),
+        ["message_start", "error"]
+    );
+    assert!(dropped.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
 async fn dropping_the_messages_body_drops_the_chat_body() {
     let dropped = Arc::new(AtomicBool::new(false));
     let flag = DropFlag(Arc::clone(&dropped));

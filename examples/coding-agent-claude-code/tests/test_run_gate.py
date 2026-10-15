@@ -96,6 +96,8 @@ def _gate(
             "SIE_BASE_URL": "https://sie.example",
             "SIE_API_KEY": "sk-test",
             "ANTHROPIC_API_KEY": "must-not-reach-claude",
+            "ANTHROPIC_CUSTOM_HEADERS": "x-forward: elsewhere",
+            "CLAUDE_CODE_USE_BEDROCK": "1",
             "GATE_TEST_RECORD": str(record),
             **(extra_env or {}),
         }
@@ -133,6 +135,8 @@ def test_a_fixing_run_passes_with_the_recipe_and_bare_flags(tmp_path: Path) -> N
     assert env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] == "1"
     assert env["CLAUDE_CODE_ATTRIBUTION_HEADER"] == "0"
     assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_CUSTOM_HEADERS" not in env
+    assert "CLAUDE_CODE_USE_BEDROCK" not in env
     assert "/run-output/gate-" in env["CLAUDE_CONFIG_DIR"]
 
 

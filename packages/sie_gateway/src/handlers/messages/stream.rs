@@ -5,7 +5,9 @@
 //! events it implies. [`stream_body`] drives it over the chat route's SSE body
 //! and adds a `ping` whenever no event was sent for the ping interval.
 //! Dropping the returned body drops the chat body with it, so a client that
-//! goes away cancels the generation the same way a chat client does.
+//! goes away cancels the generation the same way a chat client does. An
+//! `error` event ends the body the same way, so a stream the translation
+//! cannot follow stops generating.
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
@@ -461,7 +463,12 @@ pub(crate) fn stream_body(inner: Body, mut machine: StreamMachine, ping_every: D
                     Some(Ok(bytes)) => {
                         for payload in driver.parser.push(&bytes) {
                             let events = driver.machine.on_data(&payload);
+                            let failed = events.iter().any(|event| event.name == "error");
                             driver.queue(events);
+                            if failed {
+                                driver.finished = true;
+                                break;
+                            }
                         }
                     }
                     Some(Err(_)) => {

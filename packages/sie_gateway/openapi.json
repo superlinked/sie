@@ -2233,12 +2233,16 @@
         "type": "object"
       },
       "MessagesRequest": {
+        "additionalProperties": false,
         "description": "Anthropic Messages request, as accepted by ``POST /v1/messages``.\n\nThe request is translated into a ``/v1/chat/completions`` request and\nserved by the chat route, so every chat limit applies. Fields outside this\nset fail with ``400 invalid_request_error`` and the message\n``<field>: Extra inputs are not permitted``. ``metadata`` and every\n``cache_control`` are accepted and have no effect: prefix caching is\nautomatic and ``metadata`` is neither logged nor forwarded.",
         "properties": {
+          "cache_control": {
+            "description": "Accepted and ignored."
+          },
           "max_tokens": {
             "description": "Output token limit, at least 1 and at most the serving profile's\n``max_output_tokens``.",
             "format": "int32",
-            "minimum": 0,
+            "minimum": 1,
             "type": "integer"
           },
           "messages": {
@@ -2250,6 +2254,9 @@
           "model": {
             "description": "The model id, used as on ``/v1/chat/completions`` (``model`` or\n``model:profile``, or an operator alias).",
             "type": "string"
+          },
+          "output_config": {
+            "description": "Accepted only empty: every field in it is refused, ``effort`` with\n``output_config.effort: Extra inputs are not permitted``."
           },
           "stop_sequences": {
             "items": {
@@ -2290,7 +2297,7 @@
           "top_k": {
             "description": "At least 1.",
             "format": "int32",
-            "minimum": 0,
+            "minimum": 1,
             "type": [
               "integer",
               "null"

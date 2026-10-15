@@ -111,8 +111,9 @@
     {
       "name": "model load failure",
       "status": 502,
+      "headers": {"x-sie-error-code": "MODEL_LOAD_FAILED", "x-sie-error-version": "0.10.1"},
       "body": {"error": {"code": "MODEL_LOAD_FAILED", "message": "The requested model failed to load."}},
-      "expect": {"status": 502, "type": "api_error", "message": "The requested model failed to load."}
+      "expect": {"status": 502, "type": "api_error", "message": "The requested model failed to load.", "headers": {"x-sie-error-code": "MODEL_LOAD_FAILED", "x-sie-error-version": "0.10.1"}}
     },
     {
       "name": "empty not found",
