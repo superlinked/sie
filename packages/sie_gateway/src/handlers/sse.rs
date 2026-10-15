@@ -1328,6 +1328,7 @@ async fn run_sse_driver_with_lifecycle(
                 return;
             }
             if chunk.error.is_none()
+                && (chunk.carries_output() || chunk.done)
                 && !(chunk.done
                     && matches!(chunk.finish_reason.as_deref(), Some("cancelled" | "error")))
             {
@@ -4126,12 +4127,15 @@ mod tests {
 
     // ── Long tool calls ────────────────────────────────────────────
 
-    /// Feed the real stream collector and SSE driver the chunk timeline a
-    /// worker publishes for an agent's long `write` call: a preamble, two
-    /// minutes of decoding inside the call, then the call itself. The worker
-    /// publishes a chunk every `progress` while the call decodes, or nothing
-    /// when it is `None`.
-    async fn stream_long_tool_call(progress: Option<Duration>, arguments: &str) -> Vec<String> {
+    /// Feed the real stream collector and SSE driver a worker's chunk
+    /// timeline: each chunk is applied after its delay, numbered in order,
+    /// and the terminal resolves the outcome. Returns the SSE payloads and how
+    /// many times the stream counted as local-serving success.
+    async fn drive_worker_timeline(
+        timeline: Vec<(Duration, ChunkEnvelope)>,
+    ) -> (Vec<String>, usize) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
         use crate::queue::streaming::StreamCollector;
         use crate::state::demand_tracker::PhysicalLaneCatalog;
 
@@ -4160,10 +4164,12 @@ mod tests {
             .send(Ok::<(), String>(()))
             .expect("durability receiver is live");
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
+        let local_successes = Arc::new(AtomicUsize::new(0));
+        let recorded = Arc::clone(&local_successes);
         let driver = tokio::spawn(run_sse_driver_with_lifecycle(
             SseDriverArgs {
                 first_output: None,
-                local_serving_model: None,
+                local_serving_model: Some("test/model".to_string()),
                 event_tx,
                 chunk_rx,
                 outcome_rx,
@@ -4189,52 +4195,20 @@ mod tests {
                 pool_fallback_lane_worker_count: 1,
             },
             None,
-            |_: &str| {},
+            move |_: &str| {
+                recorded.fetch_add(1, Ordering::SeqCst);
+            },
         ));
-
-        let arguments = arguments.to_string();
         let worker = tokio::spawn(async move {
-            let call_chunk = |seq: u32, name: Option<&str>, arguments: String| {
-                let mut chunk = _delta_chunk(seq, "");
-                chunk.tool_calls = Some(vec![ToolCallDeltaWire {
-                    index: 0,
-                    id: name.map(|_| "call_write".to_string()),
-                    kind: "function".to_string(),
-                    function: Some(ToolCallFunctionWire {
-                        name: name.map(str::to_string),
-                        arguments,
-                    }),
-                }]);
-                chunk
-            };
-            let mut seq = 0;
-            assert!(matches!(
-                collector.apply(_delta_chunk(seq, "Writing the file now.\n")),
-                ChunkApplied::Delta
-            ));
-            let decode = Duration::from_secs(120);
-            match progress {
-                Some(every) => {
-                    let mut elapsed = Duration::ZERO;
-                    while elapsed < decode {
-                        tokio::time::sleep(every).await;
-                        elapsed += every;
-                        seq += 1;
-                        assert!(matches!(
-                            collector.apply(_delta_chunk(seq, "")),
-                            ChunkApplied::Delta
-                        ));
-                    }
+            for (seq, (delay, mut chunk)) in (0u32..).zip(timeline) {
+                tokio::time::sleep(delay).await;
+                chunk.seq = seq;
+                if chunk.done {
+                    assert!(matches!(collector.apply(chunk), ChunkApplied::Terminal));
+                    break;
                 }
-                None => tokio::time::sleep(decode).await,
+                assert!(matches!(collector.apply(chunk), ChunkApplied::Delta));
             }
-            seq += 1;
-            collector.apply(call_chunk(seq, Some("write"), String::new()));
-            seq += 1;
-            collector.apply(call_chunk(seq, None, arguments));
-            let mut terminal = _terminal_chunk("tool_calls", None);
-            terminal.seq = seq + 1;
-            assert!(matches!(collector.apply(terminal), ChunkApplied::Terminal));
             let _ = outcome_tx.send(collector.build_outcome().expect("terminal outcome"));
         });
 
@@ -4244,7 +4218,42 @@ mod tests {
         }
         driver.await.expect("driver task");
         worker.abort();
-        payloads
+        (payloads, local_successes.load(Ordering::SeqCst))
+    }
+
+    /// An agent's long `write` call: a preamble, two minutes decoding inside
+    /// the call with a chunk every `progress` (or none), then the call.
+    fn long_tool_call_timeline(
+        progress: Option<Duration>,
+        arguments: &str,
+    ) -> Vec<(Duration, ChunkEnvelope)> {
+        let call_chunk = |name: Option<&str>, arguments: &str| {
+            let mut chunk = _delta_chunk(0, "");
+            chunk.tool_calls = Some(vec![ToolCallDeltaWire {
+                index: 0,
+                id: name.map(|_| "call_write".to_string()),
+                kind: "function".to_string(),
+                function: Some(ToolCallFunctionWire {
+                    name: name.map(str::to_string),
+                    arguments: arguments.to_string(),
+                }),
+            }]);
+            chunk
+        };
+        let decode = Duration::from_secs(120);
+        let mut timeline = vec![(Duration::ZERO, _delta_chunk(0, "Writing the file now.\n"))];
+        let call_after = match progress {
+            Some(every) => {
+                let beats = (decode.as_secs() / every.as_secs()) as usize;
+                timeline.extend((0..beats).map(|_| (every, _delta_chunk(0, ""))));
+                Duration::ZERO
+            }
+            None => decode,
+        };
+        timeline.push((call_after, call_chunk(Some("write"), "")));
+        timeline.push((Duration::ZERO, call_chunk(None, arguments)));
+        timeline.push((Duration::ZERO, _terminal_chunk("tool_calls", None)));
+        timeline
     }
 
     fn chat_events(payloads: &[String]) -> Vec<Value> {
@@ -4257,7 +4266,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_worker_silent_through_a_long_tool_call_ends_at_the_inter_chunk_deadline() {
-        let events = chat_events(&stream_long_tool_call(None, "{}").await);
+        let (payloads, _) = drive_worker_timeline(long_tool_call_timeline(None, "{}")).await;
+        let events = chat_events(&payloads);
 
         assert_eq!(events.len(), 2);
         assert_eq!(
@@ -4276,8 +4286,12 @@ mod tests {
         .to_string();
         assert!(arguments.len() > 64 * 1024);
 
-        let events =
-            chat_events(&stream_long_tool_call(Some(Duration::from_secs(1)), &arguments).await);
+        let (payloads, _) = drive_worker_timeline(long_tool_call_timeline(
+            Some(Duration::from_secs(1)),
+            &arguments,
+        ))
+        .await;
+        let events = chat_events(&payloads);
 
         assert!(events.iter().all(|event| event.get("error").is_none()));
         let progress: Vec<&Value> = events
@@ -4302,6 +4316,32 @@ mod tests {
             events.last().expect("terminal")["choices"][0]["finish_reason"],
             "tool_calls"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progress_alone_is_not_local_serving_output() {
+        let progress = || (Duration::from_secs(1), _delta_chunk(0, ""));
+        let mut failed = _terminal_chunk("error", None);
+        failed.error = Some(
+            serde_json::from_value(json!({
+                "code": "MODEL_OUTPUT_PARSE_ERROR",
+                "message": "unterminated <tool_call> block",
+            }))
+            .expect("chunk error"),
+        );
+        let (payloads, successes) =
+            drive_worker_timeline(vec![progress(), progress(), (Duration::ZERO, failed)]).await;
+        assert!(chat_events(&payloads)
+            .iter()
+            .any(|event| event["error"]["code"] == "MODEL_OUTPUT_PARSE_ERROR"));
+        assert_eq!(successes, 0);
+
+        let (_, successes) = drive_worker_timeline(vec![
+            progress(),
+            (Duration::ZERO, _terminal_chunk("stop", None)),
+        ])
+        .await;
+        assert_eq!(successes, 1);
     }
 
     // ── Helpers ────────────────────────────────────────────────────
