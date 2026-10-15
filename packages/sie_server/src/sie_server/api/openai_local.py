@@ -118,6 +118,7 @@ from sie_server.processors.strict_grammar import (
 )
 from sie_server.types.grammar import GrammarSpec
 from sie_server.types.inputs import InvalidInputError, Item, item_size_error
+from sie_server.types.openapi import OpenAIGenerationErrorResponse
 from sie_server.types.responses import ErrorCode
 
 logger = logging.getLogger(__name__)
@@ -1346,7 +1347,7 @@ async def _remote_chat_events(
         if not delivered:
             raise
         logger.warning("remote chat for %s failed after output: %s", requested_model, exc)
-        reason = None if isinstance(exc, GenerationTimeoutError) else exc.upstream_reason
+        reason = "upstream_unavailable" if isinstance(exc, GenerationTimeoutError) else exc.upstream_reason
         yield (
             _upstream_error_event()
             if reason is None
@@ -1440,7 +1441,12 @@ async def _remote_chat_response(
         raise _generation_http_exception(exc) from exc
     except GenerationTimeoutError:
         raise HTTPException(
-            status_code=504, detail={"code": "generation_timeout", "message": "remote generation timed out"}
+            status_code=504,
+            detail={
+                "code": "generation_timeout",
+                "message": "remote generation timed out",
+                "reason": "upstream_unavailable",
+            },
         ) from None
     except UpstreamUnavailableError as exc:
         logger.warning("remote chat for %s failed: %s", requested_model, exc)
@@ -1469,7 +1475,16 @@ async def _remote_chat_response(
 # -- /v1/chat/completions (managed child or remote generation adapter) -------
 
 
-@router.post("/chat/completions", response_model=None)
+@router.post(
+    "/chat/completions",
+    response_model=None,
+    responses={
+        500: {"description": "Generation failed", "model": OpenAIGenerationErrorResponse},
+        502: {"description": "A remote upstream failed the request", "model": OpenAIGenerationErrorResponse},
+        503: {"description": "Model loading or temporarily unavailable", "model": OpenAIGenerationErrorResponse},
+        504: {"description": "Remote generation timed out", "model": OpenAIGenerationErrorResponse},
+    },
+)
 async def chat_completions(
     http_request: Request,
     x_machine_profile: Annotated[str | None, Header(alias="X-SIE-MACHINE-PROFILE")] = None,

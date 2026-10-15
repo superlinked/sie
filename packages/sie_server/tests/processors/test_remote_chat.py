@@ -2,6 +2,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -20,6 +21,11 @@ from sie_server.processors.streaming import StreamingProcessor
 MODEL = "queued/chat"
 USAGE = {"prompt_tokens": 37, "completion_tokens": 2, "total_tokens": 39}
 TOOL = {"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}
+WORKER_TERMINAL_ERROR = json.loads(
+    (Path(__file__).resolve().parents[3] / "wire-fixtures" / "upstream_failure_reasons.json").read_text(
+        encoding="utf-8"
+    )
+)["worker_terminal_error"]
 
 
 def choice(content: str = "answer", *, index: int = 0, finish: str | None = None, **extra: Any) -> dict:
@@ -506,18 +512,47 @@ async def test_an_upstream_failure_reaches_the_gateway_with_its_reason(
     fail_upstream(remote, failure, streaming=streaming)
     msg, chunks = await run(remote, stream=streaming)
     assert_reason_reaches_the_gateway(remote, msg, chunks, code, reason)
+    if failure == "402":
+        assert chunks[-1]["error"] == WORKER_TERMINAL_ERROR
 
 
-@pytest.mark.parametrize("remote", ["sie"], indirect=True)
+def serve_raw_completions(remote: tuple, monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter, proc, _nc, _requests = remote
+    monkeypatch.setattr(proc, "_check_context_length", AsyncMock(return_value=None))
+    if isinstance(adapter, OpenAIUpstreamAdapter):
+        adapter._upstream = adapter._upstream.model_copy(update={"endpoints": ["chat", "completions"]})
+
+
 @pytest.mark.parametrize(("failure", "code", "reason"), _FAILURES)
 async def test_an_upstream_failure_of_a_queued_prompt_reaches_the_gateway_with_its_reason(
     remote: tuple, monkeypatch: pytest.MonkeyPatch, failure: str, code: str, reason: str
 ) -> None:
-    monkeypatch.setattr(remote[1], "_check_context_length", AsyncMock(return_value=None))
+    serve_raw_completions(remote, monkeypatch)
     fail_upstream(remote, failure, streaming=True)
     msg, chunks = await run(remote, prompt="question")
     assert_reason_reaches_the_gateway(remote, msg, chunks, code, reason)
-    assert remote[3][0].url.path.endswith("/v1/generate/operator__model")
+    sie = isinstance(remote[0], SieUpstreamAdapter)
+    assert remote[3][0].url.path.endswith("/v1/generate/operator__model" if sie else "/completions")
+
+
+@pytest.mark.parametrize("output", [False, True])
+@pytest.mark.parametrize("reason", [None, "upstream_payment_required"])
+async def test_a_failure_the_upstream_reports_in_a_queued_prompt_reaches_the_gateway_with_its_reason(
+    remote: tuple, monkeypatch: pytest.MonkeyPatch, output: bool, reason: str | None
+) -> None:
+    serve_raw_completions(remote, monkeypatch)
+    sie = isinstance(remote[0], SieUpstreamAdapter)
+    if sie:
+        first = {"text_delta": "answer", "done": False}
+        error = {"code": "inference_error", "message": _UPSTREAM_DETAIL, **({"reason": reason} if reason else {})}
+        failure = {"text_delta": "", "done": True, "finish_reason": "error", "error": error}
+    else:
+        first = {"choices": [{"index": 0, "text": "answer", "finish_reason": None}]}
+        failure = {"error": {"message": _UPSTREAM_DETAIL, **({"code": 402} if reason else {})}}
+    respond(remote, frames=[first, failure] if output else [failure])
+    msg, chunks = await run(remote, prompt="question")
+    assert "".join(chunk.get("text_delta", "") for chunk in chunks) == ("answer" if output else "")
+    assert_reason_reaches_the_gateway(remote, msg, chunks, "inference_error", reason or "upstream_unavailable")
 
 
 @pytest.mark.parametrize(

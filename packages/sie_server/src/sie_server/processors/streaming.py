@@ -2794,10 +2794,13 @@ class StreamingProcessor:
                         ttft_ms=_compute_ttft_ms(publish_at, first_text_at),
                         error_code=(chunk.error_code or "inference_error") if terminal_has_error else None,
                         error_message=(
-                            client_safe_generation_error_message(chunk.error_code, chunk.error_message)
+                            client_safe_generation_error_message(
+                                chunk.error_code, chunk.error_message, chunk.upstream_reason
+                            )
                             if terminal_has_error
                             else None
                         ),
+                        error_reason=chunk.upstream_reason if terminal_has_error else None,
                         candidates=list(chunk.candidates) if chunk.candidates else None,
                     )
                     try:

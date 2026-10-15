@@ -529,6 +529,9 @@ class GenerationChunk:
     # Private reasoning text an upstream returned beside the answer. It is
     # counted and then dropped, never published.
     reasoning_delta: str = ""
+    # Terminal error chunk only: the class of the remote upstream's failure
+    # that ended the generation.
+    upstream_reason: UpstreamFailureReason | None = None
 
 
 # Backwards-compatibility alias: walking-skeleton callers (the local-dev
@@ -556,6 +559,7 @@ class GenerationResult:
     error_code: str | None = None
     error_message: str | None = None
     cached_tokens: int | None = None
+    upstream_reason: UpstreamFailureReason | None = None
 
 
 class ThinkingBlockStripper:
@@ -966,6 +970,7 @@ async def collect_generation(
     cached_tokens: int | None = None
     error_code: str | None = None
     error_message: str | None = None
+    upstream_reason: UpstreamFailureReason | None = None
     result_selected = False
     try:
         async for chunk in chunks:
@@ -980,6 +985,7 @@ async def collect_generation(
                 cached_tokens = chunk.cached_tokens
                 error_code = chunk.error_code
                 error_message = chunk.error_message
+                upstream_reason = chunk.upstream_reason
                 break
         result = GenerationResult(
             text="".join(parts),
@@ -989,6 +995,7 @@ async def collect_generation(
             error_code=error_code,
             error_message=error_message,
             cached_tokens=cached_tokens,
+            upstream_reason=upstream_reason,
         )
         result_selected = True
         return result

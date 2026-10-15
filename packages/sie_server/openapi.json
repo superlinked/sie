@@ -413,11 +413,35 @@
               }
             }
           },
+          "500": {
+            "description": "Generation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateErrorResponse"
+                }
+              }
+            }
+          },
           "503": {
-            "description": "Model loading or unavailable"
+            "description": "Model loading or unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateErrorResponse"
+                }
+              }
+            }
           },
           "504": {
-            "description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s"
+            "description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateErrorResponse"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -948,13 +972,34 @@
             "description": "Request body or prompt is too large"
           },
           "500": {
-            "description": "Generation failed"
+            "description": "Generation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIGenerationErrorResponse"
+                }
+              }
+            }
           },
           "503": {
-            "description": "Model loading or temporarily unavailable"
+            "description": "Model loading or temporarily unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIGenerationErrorResponse"
+                }
+              }
+            }
           },
           "504": {
-            "description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s"
+            "description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIGenerationErrorResponse"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -1044,13 +1089,34 @@
             "description": "Request body or rendered input is too large"
           },
           "500": {
-            "description": "Generation failed"
+            "description": "Generation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIGenerationErrorResponse"
+                }
+              }
+            }
           },
           "503": {
-            "description": "Model loading or temporarily unavailable"
+            "description": "Model loading or temporarily unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIGenerationErrorResponse"
+                }
+              }
+            }
           },
           "504": {
-            "description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s"
+            "description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenAIGenerationErrorResponse"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -1411,6 +1477,75 @@
         ],
         "title": "ExtractResultModel",
         "description": "Single item extraction result."
+      },
+      "GenerateErrorDetailModel": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code",
+            "description": "Stable error code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "Client-safe error message"
+          },
+          "param": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Param",
+            "description": "Offending request field, when known"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "upstream_credential_unavailable",
+                  "upstream_credential_rejected",
+                  "upstream_payment_required",
+                  "upstream_model_not_found",
+                  "upstream_refused",
+                  "upstream_unavailable",
+                  "upstream_busy",
+                  "upstream_not_ready",
+                  "upstream_invalid_response"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason",
+            "description": "Class of a remote upstream's failure, when one caused the error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "GenerateErrorDetailModel",
+        "description": "Detail returned for a native generation error."
+      },
+      "GenerateErrorResponse": {
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/GenerateErrorDetailModel"
+          }
+        },
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "title": "GenerateErrorResponse",
+        "description": "FastAPI error envelope for a native generation error."
       },
       "GenerateInputTooLongDetailModel": {
         "properties": {
@@ -2237,6 +2372,81 @@
         ],
         "title": "OpenAIEmbeddingsModelLoadFailedErrorResponse",
         "description": "Top-level OpenAI error envelope for a terminal ``/v1/embeddings`` model-load failure."
+      },
+      "OpenAIGenerationErrorModel": {
+        "properties": {
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "Client-safe error message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type",
+            "description": "OpenAI error type, e.g. 'server_error'"
+          },
+          "param": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Param",
+            "description": "Offending request field, when known"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code",
+            "description": "Stable error code"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "upstream_credential_unavailable",
+                  "upstream_credential_rejected",
+                  "upstream_payment_required",
+                  "upstream_model_not_found",
+                  "upstream_refused",
+                  "upstream_unavailable",
+                  "upstream_busy",
+                  "upstream_not_ready",
+                  "upstream_invalid_response"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason",
+            "description": "Class of a remote upstream's failure, when one caused the error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "message",
+          "type",
+          "code"
+        ],
+        "title": "OpenAIGenerationErrorModel",
+        "description": "Inner object of the top-level OpenAI ``{\"error\": {...}}`` envelope of a generation error."
+      },
+      "OpenAIGenerationErrorResponse": {
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/OpenAIGenerationErrorModel"
+          }
+        },
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "title": "OpenAIGenerationErrorResponse",
+        "description": "Top-level OpenAI error envelope of a generation error."
       },
       "OpenAIResponseOutputMessageModel": {
         "properties": {

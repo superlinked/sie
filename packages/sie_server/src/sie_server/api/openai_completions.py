@@ -52,7 +52,7 @@ from sie_server.core.runtime_options import (
     resolve_generation_timeouts,
 )
 from sie_server.observability.tracing import tracer
-from sie_server.types.openapi import OpenAICompletionResponseModel
+from sie_server.types.openapi import OpenAICompletionResponseModel, OpenAIGenerationErrorResponse
 
 logger = logging.getLogger(__name__)
 
@@ -175,8 +175,13 @@ def _from_generation_error(error: GenerationError, registry: Any) -> _Completion
     return _from_http_exception(_generation_http_exception(error, registry))
 
 
-def _generation_timeout_error(error: GenerationTimeoutError) -> _CompletionError:
-    return _CompletionError(str(error), status_code=status.HTTP_504_GATEWAY_TIMEOUT, code=error.code)
+def _generation_timeout_error(error: GenerationTimeoutError, *, remote: bool) -> _CompletionError:
+    return _CompletionError(
+        str(error),
+        status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+        code=error.code,
+        reason="upstream_unavailable" if remote else None,
+    )
 
 
 def _validated_retry_after_s(error: _CompletionError) -> int | None:
@@ -437,11 +442,14 @@ async def _stream_completion(
                 raise _CompletionError(
                     "generation was cancelled before completion"
                     if cancelled
-                    else client_safe_generation_error_message(chunk.error_code, chunk.error_message),
+                    else client_safe_generation_error_message(
+                        chunk.error_code, chunk.error_message, chunk.upstream_reason
+                    ),
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE
                     if cancelled
                     else status.HTTP_500_INTERNAL_SERVER_ERROR,
                     code="generation_cancelled" if cancelled else client_safe_generation_error_code(chunk.error_code),
+                    reason=None if cancelled else chunk.upstream_reason,
                 )
             body = _chunk_body(
                 completion_id=completion_id,
@@ -461,11 +469,15 @@ async def _stream_completion(
                 }
             elif errored:
                 body["error"] = {
-                    "message": client_safe_generation_error_message(chunk.error_code, chunk.error_message),
+                    "message": client_safe_generation_error_message(
+                        chunk.error_code, chunk.error_message, chunk.upstream_reason
+                    ),
                     "type": "server_error",
                     "param": None,
                     "code": client_safe_generation_error_code(chunk.error_code),
                 }
+                if chunk.upstream_reason is not None:
+                    body["error"]["reason"] = chunk.upstream_reason
             delivered = True
             yield f"data: {json.dumps(body)}\n\n"
             if chunk.done:
@@ -602,9 +614,10 @@ async def _collect_completion(chunks: AsyncIterator[GenerationChunk]) -> tuple[s
         )
     if terminal.finish_reason == "error" or terminal.error_code or terminal.error_message:
         raise _CompletionError(
-            client_safe_generation_error_message(terminal.error_code, terminal.error_message),
+            client_safe_generation_error_message(terminal.error_code, terminal.error_message, terminal.upstream_reason),
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             code=client_safe_generation_error_code(terminal.error_code),
+            reason=terminal.upstream_reason,
         )
     if terminal.finish_reason == "cancelled":
         raise _CompletionError(
@@ -631,9 +644,12 @@ async def _collect_completion(chunks: AsyncIterator[GenerationChunk]) -> tuple[s
         400: {"description": "Invalid or unsupported request"},
         404: {"description": "Model not found"},
         413: {"description": "Request body or prompt is too large"},
-        500: {"description": "Generation failed"},
-        503: {"description": "Model loading or temporarily unavailable"},
-        504: {"description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s"},
+        500: {"description": "Generation failed", "model": OpenAIGenerationErrorResponse},
+        503: {"description": "Model loading or temporarily unavailable", "model": OpenAIGenerationErrorResponse},
+        504: {
+            "description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s",
+            "model": OpenAIGenerationErrorResponse,
+        },
     },
     openapi_extra={
         "requestBody": {
@@ -772,7 +788,7 @@ async def completions(
             except _CompletionError:
                 raise
             except GenerationTimeoutError as exc:
-                raise _generation_timeout_error(exc) from exc
+                raise _generation_timeout_error(exc, remote=route.upstream is not None) from exc
             except GenerationError as exc:
                 raise _from_generation_error(exc, registry) from exc
             except Exception as exc:

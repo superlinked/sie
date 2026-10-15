@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, cast
 
 UpstreamFailureKind = Literal["not_ready", "busy", "unavailable"]
 UpstreamRefusal = Literal["rate_cap", "concurrency_cap", "breaker_open"]
@@ -43,6 +43,13 @@ _REFUSAL_TEXT: dict[UpstreamRefusal, tuple[UpstreamFailureKind, str]] = {
     "concurrency_cap": ("busy", "its concurrency cap is reached"),
     "breaker_open": ("unavailable", "its circuit breaker is open after repeated failures"),
 }
+
+
+def known_upstream_failure_reason(value: object) -> UpstreamFailureReason | None:
+    """``value`` when it names a :data:`UpstreamFailureReason`, else ``None``."""
+    return (
+        cast("UpstreamFailureReason", value) if isinstance(value, str) and value in UPSTREAM_FAILURE_MESSAGES else None
+    )
 
 
 class InputTooLongError(ValueError):

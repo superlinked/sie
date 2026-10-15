@@ -750,6 +750,43 @@ class OpenAIEmbeddingsModelLoadFailedErrorResponse(BaseModel):
     error: OpenAIEmbeddingsModelLoadFailedErrorModel
 
 
+class GenerateErrorDetailModel(BaseModel):
+    """Detail returned for a native generation error."""
+
+    code: str = Field(..., description="Stable error code")
+    message: str = Field(..., description="Client-safe error message")
+    param: str | None = Field(default=None, description="Offending request field, when known")
+    reason: UpstreamFailureReason | None = Field(
+        default=None,
+        description="Class of a remote upstream's failure, when one caused the error",
+    )
+
+
+class GenerateErrorResponse(BaseModel):
+    """FastAPI error envelope for a native generation error."""
+
+    detail: GenerateErrorDetailModel
+
+
+class OpenAIGenerationErrorModel(BaseModel):
+    """Inner object of the top-level OpenAI ``{"error": {...}}`` envelope of a generation error."""
+
+    message: str = Field(..., description="Client-safe error message")
+    type: str = Field(..., description="OpenAI error type, e.g. 'server_error'")
+    param: str | None = Field(default=None, description="Offending request field, when known")
+    code: str = Field(..., description="Stable error code")
+    reason: UpstreamFailureReason | None = Field(
+        default=None,
+        description="Class of a remote upstream's failure, when one caused the error",
+    )
+
+
+class OpenAIGenerationErrorResponse(BaseModel):
+    """Top-level OpenAI error envelope of a generation error."""
+
+    error: OpenAIGenerationErrorModel
+
+
 class GenerateChunkErrorModel(BaseModel):
     """Terminal error carried by a generation SSE event."""
 
