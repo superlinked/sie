@@ -96,6 +96,7 @@ from sie_server.processors.strict_grammar import enforce_strict_grammar
 from sie_server.types.grammar import GrammarSpec
 from sie_server.types.inputs import ImageInput
 from sie_server.types.openapi import (
+    GenerateErrorResponse,
     GenerateInputTooLongErrorResponse,
     GenerateModelLoadFailedErrorResponse,
     GenerateResponseModel,
@@ -692,6 +693,7 @@ def _generation_http_exception(error: GenerationError, registry: ModelRegistry |
             param=client_safe_generation_error_param(error),
             code=client_safe_generation_error_code(error.code),
         )
+    reason = {} if error.upstream_reason is None else {"reason": error.upstream_reason}
     if isinstance(error, GenerationCapacityError):
         if error.retry_after_s is not None:
             retry_after = str(error.retry_after_s)
@@ -704,6 +706,7 @@ def _generation_http_exception(error: GenerationError, registry: ModelRegistry |
             detail={
                 "code": client_safe_generation_error_code(error.code),
                 "message": client_safe_generation_error_message(error.code, str(error)),
+                **reason,
             },
             headers={"Retry-After": retry_after},
         )
@@ -711,7 +714,8 @@ def _generation_http_exception(error: GenerationError, registry: ModelRegistry |
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail={
             "code": "inference_error",
-            "message": client_safe_generation_error_message("inference_error", str(error)),
+            "message": client_safe_generation_error_message("inference_error", str(error), error.upstream_reason),
+            **reason,
         },
     )
 
@@ -849,8 +853,12 @@ async def _stream_generate_events(
                     finish_reason = "error"
                     terminal_error = {
                         "code": client_safe_generation_error_code(chunk.error_code),
-                        "message": client_safe_generation_error_message(chunk.error_code, chunk.error_message),
+                        "message": client_safe_generation_error_message(
+                            chunk.error_code, chunk.error_message, chunk.upstream_reason
+                        ),
                     }
+                    if chunk.upstream_reason is not None:
+                        terminal_error["reason"] = chunk.upstream_reason
                 if pre_output_errors and seq == 0 and (terminal_error is not None or finish_reason == "cancelled"):
                     break
                 if chunk.prompt_tokens is not None:
@@ -894,10 +902,12 @@ async def _stream_generate_events(
         logger.info("stream_generate refused after preflight: %s", exc)
         error: dict[str, Any] = {
             "code": client_safe_generation_error_code(exc.code),
-            "message": client_safe_generation_error_message(exc.code, str(exc)),
+            "message": client_safe_generation_error_message(exc.code, str(exc), exc.upstream_reason),
         }
         if (param := client_safe_generation_error_param(exc)) is not None:
             error["param"] = param
+        if exc.upstream_reason is not None:
+            error["reason"] = exc.upstream_reason
         retry_after_s = exc.retry_after_s if isinstance(exc, GenerationCapacityError) else None
         if retry_after_s is None:
             retry_after_s = oom_retry_after_s
@@ -1038,8 +1048,12 @@ async def _stream_generate_events(
             ),
             "model": GenerateModelLoadFailedErrorResponse,
         },
-        503: {"description": "Model loading or unavailable"},
-        504: {"description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s"},
+        500: {"description": "Generation failed", "model": GenerateErrorResponse},
+        503: {"description": "Model loading or unavailable", "model": GenerateErrorResponse},
+        504: {
+            "description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s",
+            "model": GenerateErrorResponse,
+        },
     },
     openapi_extra={
         "requestBody": {
@@ -1368,10 +1382,10 @@ async def generate(
             chunks = enforce_strict_grammar(chunks, grammar)
             result = await collect_generation(chunks)
         except GenerationTimeoutError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail={"code": exc.code, "message": str(exc)},
-            ) from exc
+            timeout: dict[str, Any] = {"code": exc.code, "message": str(exc)}
+            if route.upstream is not None:
+                timeout["reason"] = "upstream_unavailable"
+            raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=timeout) from exc
         except GenerationError as exc:
             raise _generation_http_exception(exc, registry) from exc
         except Exception as e:
@@ -1401,13 +1415,15 @@ async def generate(
                 client_safe_generation_error_code(result.error_code),
                 model,
             )
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail={
-                    "code": client_safe_generation_error_code(result.error_code),
-                    "message": client_safe_generation_error_message(result.error_code, result.error_message),
-                },
-            )
+            detail = {
+                "code": client_safe_generation_error_code(result.error_code),
+                "message": client_safe_generation_error_message(
+                    result.error_code, result.error_message, result.upstream_reason
+                ),
+            }
+            if result.upstream_reason is not None:
+                detail["reason"] = result.upstream_reason
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=detail)
         if result.finish_reason == "cancelled":
             # 503 Service Unavailable: the generation was cancelled before it
             # could complete (worker observed a cancel signal mid-stream).

@@ -197,7 +197,10 @@ async def _events(
             if terminal:
                 raise RemoteUpstreamError("upstream rendered chat emitted data after completion")
             if chunk.error_code or chunk.finish_reason == "cancelled":
-                raise RemoteUpstreamError("upstream rendered chat did not finish successfully")
+                raise RemoteUpstreamError(
+                    "upstream rendered chat did not finish successfully",
+                    upstream_reason=chunk.upstream_reason or "upstream_invalid_response",
+                )
             delta: dict[str, Any] = {}
             if chunk.reasoning_delta:
                 delta["reasoning_content"] = chunk.reasoning_delta

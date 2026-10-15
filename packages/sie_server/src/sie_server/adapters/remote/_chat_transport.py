@@ -70,7 +70,9 @@ async def chat_completion_stream(
                 yielded = True
                 yield event
             parser.finish()
-    except UpstreamUnavailableError:
+    except UpstreamUnavailableError as error:
         if yielded:
-            raise RemoteUpstreamError("the upstream failed during chat generation") from None
+            raise RemoteUpstreamError(
+                "the upstream failed during chat generation", upstream_reason=error.upstream_reason
+            ) from None
         raise
