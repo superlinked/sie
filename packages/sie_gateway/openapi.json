@@ -1685,6 +1685,16 @@
               "null"
             ]
           },
+          "reason": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UpstreamFailureReason"
+              }
+            ]
+          },
           "retry_after_s": {
             "description": "Authoritative retry hint in seconds for RESOURCE_EXHAUSTED only; null\nfor other terminal errors.",
             "format": "int32",
@@ -2952,6 +2962,16 @@
               "null"
             ]
           },
+          "reason": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/UpstreamFailureReason"
+              }
+            ]
+          },
           "type": {
             "description": "One of the stable types in ``http_error::openai_type``.",
             "type": "string"
@@ -4113,6 +4133,21 @@
           "inference_ms"
         ],
         "type": "object"
+      },
+      "UpstreamFailureReason": {
+        "description": "Class of a remote upstream's failure, when one ended the generation.",
+        "enum": [
+          "upstream_credential_unavailable",
+          "upstream_credential_rejected",
+          "upstream_payment_required",
+          "upstream_model_not_found",
+          "upstream_refused",
+          "upstream_unavailable",
+          "upstream_busy",
+          "upstream_not_ready",
+          "upstream_invalid_response"
+        ],
+        "type": "string"
       },
       "Usage": {
         "description": "Authoritative worker-emitted usage. Post-tokenization counts, never a\ncharacter estimate. A reported `0` is a measurement (a request that read no\ntext); an absent block means the serving path could not count. Structurally\nidentical to `ScoreUsage`, which shipped this shape first.",

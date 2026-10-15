@@ -659,6 +659,7 @@ async def _parse_tool_call_stream_impl(
                     logprobs=chunk.logprobs,
                     error_code=chunk.error_code,
                     error_message=chunk.error_message,
+                    upstream_reason=chunk.upstream_reason,
                 )
             # Global terminal. Close any choices that did not see a
             # per-choice finish event (single-candidate path: this is
@@ -707,6 +708,7 @@ async def _parse_tool_call_stream_impl(
                 upstream_usage=chunk.upstream_usage,
                 error_code=chunk.error_code,
                 error_message=chunk.error_message,
+                upstream_reason=chunk.upstream_reason,
                 # Preserve ``candidates`` (with any per-candidate
                 # ``tool_calls`` injected above for the non-streaming
                 # ``n>1`` + tools path) through the wrap.

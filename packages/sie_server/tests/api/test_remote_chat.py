@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Callable, Iterator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -10,6 +11,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sie_server.adapters.errors import UPSTREAM_FAILURE_MESSAGES
 from sie_server.adapters.remote._limits import upstream_limiter
 from sie_server.adapters.remote.openai import OpenAIUpstreamAdapter
 from sie_server.adapters.remote.sie import SieUpstreamAdapter
@@ -223,7 +225,8 @@ def test_a_502_before_output_logs_its_reason(
     with caplog.at_level(logging.WARNING, logger=openai_local.__name__):
         response = client.post("/v1/chat/completions", json={**BODY, "stream": streaming})
     assert response.status_code == 502
-    assert response.json()["error"]["message"] == "upstream generation request failed"
+    assert response.json()["error"]["message"] == "the upstream rejected the server's credential"
+    assert response.json()["error"]["reason"] == "upstream_credential_rejected"
     assert _remote_chat_warnings(caplog) == [f"remote chat for {MODEL} failed: upstream answered 401"]
     assert "private" not in caplog.text
 
@@ -239,7 +242,8 @@ def test_a_missing_upstream_key_is_a_502_whose_log_names_it(
     with caplog.at_level(logging.WARNING, logger=openai_local.__name__):
         response = client.post("/v1/chat/completions", json={**BODY, "stream": streaming})
     assert response.status_code == 502
-    assert response.json()["error"]["message"] == "upstream generation request failed"
+    assert response.json()["error"]["message"] == "the server has no usable credential for its upstream"
+    assert response.json()["error"]["reason"] == "upstream_credential_unavailable"
     assert _remote_chat_warnings(caplog) == [f"remote chat for {MODEL} failed: the upstream credential is unavailable"]
     assert not requests
 
@@ -752,7 +756,7 @@ def _render_chat_locally(remote_chat: tuple, monkeypatch: pytest.MonkeyPatch) ->
     [
         ("chat", "404", 502, "route", f"remote chat for {MODEL} failed: upstream answered 404"),
         ("chat", "connect", 503, "route", f"remote chat for {MODEL} failed: {UNAVAILABLE}"),
-        ("rendered chat", "401", 502, "route", f"remote chat for {MODEL} failed: upstream answered 401"),
+        ("rendered chat", "401", 502, "adapter", "remote generation failed: upstream answered 401"),
         ("rendered chat", "connect", 503, "adapter", f"remote generation failed: {UNAVAILABLE}"),
         ("native", "connect", 503, "adapter", f"remote generation failed: {UNAVAILABLE}"),
         ("completions", "connect", 503, "adapter", f"remote generation failed: {UNAVAILABLE}"),
@@ -793,6 +797,11 @@ def test_a_remote_generation_failure_logs_one_warning_with_its_reason(
     response = client.post(path, json=body)
 
     assert response.status_code == status, response.text
+    payload = response.json()
+    reason = {"401": "upstream_credential_rejected", "404": "upstream_model_not_found"}.get(
+        failure, "upstream_unavailable"
+    )
+    assert payload.get("error", payload.get("detail"))["reason"] == reason
     logger_name = openai_local.__name__ if source == "route" else type(adapter).__module__
     warnings = [(record.name, record.getMessage()) for record in caplog.records if record.levelno >= logging.WARNING]
     assert warnings == [(logger_name, message)]
@@ -802,14 +811,11 @@ def test_a_remote_generation_failure_logs_one_warning_with_its_reason(
         assert private not in caplog.text
 
 
-@pytest.mark.parametrize(
-    ("streaming", "message"),
-    [(False, f"generate failed for {SAFE_MODEL}"), (True, "stream_generate failed before output")],
-)
+@pytest.mark.parametrize("streaming", [False, True])
 def test_a_native_remote_failure_before_output_logs_one_warning_with_its_reason(
-    remote_chat: tuple, caplog: pytest.LogCaptureFixture, streaming: bool, message: str
+    remote_chat: tuple, caplog: pytest.LogCaptureFixture, streaming: bool
 ) -> None:
-    client, _, config, _ = remote_chat
+    client, adapter, config, _ = remote_chat
     config.profiles["default"].adapter_options.runtime.clear()
     answer_with(remote_chat, json_response(401, {"error": {"message": "private upstream detail"}}))
     caplog.set_level(logging.DEBUG)
@@ -819,9 +825,10 @@ def test_a_native_remote_failure_before_output_logs_one_warning_with_its_reason(
 
     assert response.status_code == 500
     [record] = [record for record in caplog.records if record.levelno >= logging.WARNING]
-    assert (record.name, record.getMessage()) == ("sie_server.api.generate", message)
-    assert record.exc_info is not None
-    assert str(record.exc_info[1]) == "upstream answered 401"
+    assert (record.name, record.getMessage()) == (
+        type(adapter).__module__,
+        "remote generation failed: upstream answered 401",
+    )
     for private in (PROMPT, "private upstream detail"):
         assert private not in caplog.text
 
@@ -1271,3 +1278,349 @@ def test_onboarded_direct_chat_answers_rendered_reasoning_only_when_asked(
     assert reasoning == ("PRIVATE_REASONING" if include_reasoning else "")
     assert "think>" not in response.text
     assert upstream_stream.closed
+
+
+def test_the_upstream_failure_reasons_are_the_wire_fixture() -> None:
+    fixture = json.loads(
+        (Path(__file__).resolve().parents[3] / "wire-fixtures" / "upstream_failure_reasons.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert fixture["reasons"] == UPSTREAM_FAILURE_MESSAGES
+
+
+ACCOUNT = "acct-7Q2Lw0d9"
+_FINAL_FAILURES = {
+    "401": "upstream_credential_rejected",
+    "402": "upstream_payment_required",
+    "403": "upstream_credential_rejected",
+    "403 ACCOUNT_SUSPENDED": "upstream_refused",
+    "404": "upstream_model_not_found",
+    "408": "upstream_unavailable",
+    "409": "upstream_refused",
+    "429 COLD_START_RATE_LIMITED": "upstream_busy",
+    "500 upstream_payment_required": "upstream_payment_required",
+    "501": "upstream_unavailable",
+    "malformed": "upstream_invalid_response",
+}
+_UPSTREAM_IDENTIFIERS = ("chat-api", "127.0.0.1", "/prefix", "operator/model", ACCOUNT, "private upstream detail")
+_REASON_SURFACES = [*_GENERATION_SURFACES, ("rendered chat", False), ("rendered chat", True)]
+
+
+def _reason_request(
+    remote_chat: tuple, monkeypatch: pytest.MonkeyPatch, surface: str, *, stream: bool
+) -> tuple[str, dict[str, Any]]:
+    if not surface.startswith("rendered chat"):
+        return _generation_request(surface, stream=stream)
+    _render_chat_locally(remote_chat, monkeypatch)
+    path, body = _generation_request("chat", stream=stream)
+    if surface == "rendered chat with tools":
+        body["tools"] = [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}]
+    return path, body
+
+
+def _final_error(surface: str) -> tuple[int, str]:
+    return (502, "upstream_error") if "chat" in surface else (500, "inference_error")
+
+
+def _error(response: httpx.Response) -> dict[str, Any]:
+    payload = response.json()
+    return payload.get("error", payload.get("detail"))
+
+
+def _answer_with_failure(remote_chat: tuple, failure: str) -> None:
+    _, adapter, _, requests = remote_chat
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        detail = f"private upstream detail: account {ACCOUNT} at {request.url}"
+        if failure == "connect":
+            raise httpx.ConnectError(detail)
+        if failure != "malformed":
+            status, _, named = failure.partition(" ")
+            error: dict[str, Any] = {"message": detail, "code": int(status)}
+            if named in UPSTREAM_FAILURE_MESSAGES:
+                error.update(code="inference_error", reason=named)
+            elif named:
+                error["code"] = named
+            return json_response(int(status), {"error": error})
+        if request.headers["accept"] == "text/event-stream":
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=ChatStream([{"detail": detail}])
+            )
+        return json_response(200, {"detail": detail})
+
+    adapter._async_client = upstream_client(adapter._upstream, transport=httpx.MockTransport(respond))
+
+
+@pytest.mark.parametrize(("surface", "streaming"), _REASON_SURFACES)
+@pytest.mark.parametrize("failure", [*_FINAL_FAILURES, "connect"])
+def test_an_upstream_failure_tells_the_caller_its_reason_and_nothing_that_identifies_the_upstream(
+    remote_chat: tuple, monkeypatch: pytest.MonkeyPatch, surface: str, streaming: bool, failure: str
+) -> None:
+    client, adapter, config, requests = remote_chat
+    config.profiles["default"].adapter_options.runtime.clear()
+    adapter._upstream = adapter._upstream.model_copy(update={"api_key_secret": "CHAT_API_KEY"})
+    monkeypatch.setenv("CHAT_API_KEY", CREDENTIAL)
+    _answer_with_failure(remote_chat, failure)
+    path, body = _reason_request(remote_chat, monkeypatch, surface, stream=streaming)
+
+    response = client.post(path, json=body)
+
+    error = _error(response)
+    if failure == "connect":
+        assert response.status_code == 503, response.text
+        assert error["reason"] == "upstream_unavailable"
+        if surface == "chat":
+            assert error["code"] == "QUEUE_FULL"
+            assert error["message"] == f"The upstream serving model '{MODEL}' is unavailable, please retry"
+        else:
+            assert error["code"] == "RESOURCE_EXHAUSTED"
+            assert error["message"] == "the upstream is unavailable, please retry"
+    else:
+        reason = _FINAL_FAILURES[failure]
+        assert (response.status_code, error["code"]) == _final_error(surface), response.text
+        assert error["reason"] == reason
+        assert error["message"] == UPSTREAM_FAILURE_MESSAGES[reason]
+    assert [request.headers["authorization"] for request in requests] == [f"Bearer {CREDENTIAL}"]
+    for private in (*_UPSTREAM_IDENTIFIERS, CREDENTIAL):
+        assert private not in response.text
+
+
+def _first_output(adapter: Any, path: str) -> dict[str, Any]:
+    if path.endswith("/chat/completions"):
+        return events()[0]
+    if isinstance(adapter, OpenAIUpstreamAdapter):
+        return {"choices": [{"index": 0, "text": "answer", "finish_reason": None}]}
+    return {"request_id": "upstream-id", "seq": 0, "text_delta": "answer", "done": False}
+
+
+def _reported_failure(adapter: Any, path: str, reason: str | None) -> dict[str, Any]:
+    detail = f"private upstream detail: account {ACCOUNT}"
+    if isinstance(adapter, SieUpstreamAdapter):
+        error: dict[str, Any] = {"message": detail, "code": "inference_error"}
+        if reason is not None:
+            error["reason"] = reason
+        if path.endswith("/chat/completions"):
+            return {"error": {**error, "code": "upstream_error", "type": "upstream_error"}}
+        return {
+            "request_id": "upstream-id",
+            "seq": 1,
+            "text_delta": "",
+            "done": True,
+            "finish_reason": "error",
+            "error": error,
+        }
+    return {"error": {"message": detail, **({} if reason is None else {"code": 402})}}
+
+
+def _answer_with_reported_failure(
+    remote_chat: tuple, reason: str | None, *, after_output: bool, streams: list[ChatStream]
+) -> None:
+    _, adapter, _, requests = remote_chat
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        path = request.url.path
+        failure = _reported_failure(adapter, path, reason)
+        if request.headers["accept"] != "text/event-stream":
+            return json_response(200, failure)
+        stream = ChatStream([*([_first_output(adapter, path)] if after_output else []), failure])
+        streams.append(stream)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
+
+    adapter._async_client = upstream_client(adapter._upstream, transport=httpx.MockTransport(respond))
+
+
+@pytest.mark.parametrize(
+    ("surface", "streaming"),
+    [*_REASON_SURFACES, ("rendered chat with tools", False), ("rendered chat with tools", True)],
+)
+@pytest.mark.parametrize("reason", [None, "upstream_payment_required"])
+def test_a_failure_the_upstream_reports_in_its_answer_tells_the_caller_its_reason(
+    remote_chat: tuple,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    surface: str,
+    streaming: bool,
+    reason: str | None,
+) -> None:
+    client, adapter, config, requests = remote_chat
+    config.profiles["default"].adapter_options.runtime.clear()
+    _answer_with_reported_failure(remote_chat, reason, after_output=False, streams=[])
+    path, body = _reason_request(remote_chat, monkeypatch, surface, stream=streaming)
+
+    with caplog.at_level(logging.WARNING):
+        response = client.post(path, json=body)
+
+    expected = reason or "upstream_unavailable"
+    error = _error(response)
+    assert (response.status_code, error["code"]) == _final_error(surface), response.text
+    assert error["reason"] == expected
+    assert error["message"] == UPSTREAM_FAILURE_MESSAGES[expected]
+    for private in _UPSTREAM_IDENTIFIERS:
+        assert private not in response.text
+    assert len(requests) == 1
+    if surface != "chat":
+        adapter_lines = [record.getMessage() for record in caplog.records if record.name == type(adapter).__module__]
+        if isinstance(adapter, SieUpstreamAdapter):
+            ended = " ".join(part for part in ("inference_error", reason) if part)
+            assert adapter_lines == [f"remote generation failed: upstream ended generation with {ended}"]
+        else:
+            sent = "an error" if reason is None else "error 402"
+            assert adapter_lines == [f"remote generation failed: upstream sent {sent} instead of a completion"]
+    assert ACCOUNT not in caplog.text
+
+
+@pytest.mark.parametrize("remote_chat", ["sie"], indirect=True)
+@pytest.mark.parametrize(("surface", "streaming"), [entry for entry in _REASON_SURFACES if entry[0] != "chat"])
+@pytest.mark.parametrize(
+    ("code", "reason"), [("RESOURCE_EXHAUSTED", "upstream_busy"), ("MODEL_LOADING", "upstream_not_ready")]
+)
+def test_a_retryable_terminal_event_before_output_tells_the_caller_its_reason(
+    remote_chat: tuple, monkeypatch: pytest.MonkeyPatch, surface: str, streaming: bool, code: str, reason: str
+) -> None:
+    client, _, config, requests = remote_chat
+    config.profiles["default"].adapter_options.runtime.clear()
+    terminal = {"text_delta": "", "done": True, "finish_reason": "error", "error": {"code": code, "retry_after_s": 7}}
+    answer_with(
+        remote_chat,
+        lambda: httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=ChatStream([terminal])),
+    )
+    path, body = _reason_request(remote_chat, monkeypatch, surface, stream=streaming)
+
+    response = client.post(path, json=body)
+
+    assert response.status_code == 503, response.text
+    assert response.headers["retry-after"] == "7"
+    error = _error(response)
+    assert (error["code"], error["reason"]) == (code, reason)
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("remote_chat", ["sie"], indirect=True)
+@pytest.mark.parametrize("surface", ["native", "completions", "rendered chat"])
+@pytest.mark.parametrize(
+    ("code", "reason"), [("RESOURCE_EXHAUSTED", "upstream_busy"), ("MODEL_LOADING", "upstream_not_ready")]
+)
+def test_a_retryable_terminal_event_after_output_ends_the_stream_with_its_reason(
+    remote_chat: tuple, monkeypatch: pytest.MonkeyPatch, surface: str, code: str, reason: str
+) -> None:
+    client, adapter, config, requests = remote_chat
+    config.profiles["default"].adapter_options.runtime.clear()
+    terminal = {"text_delta": "", "done": True, "finish_reason": "error", "error": {"code": code, "retry_after_s": 7}}
+    stream = ChatStream([_first_output(adapter, "/generate"), terminal])
+    answer_with(remote_chat, httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream))
+    path, body = _reason_request(remote_chat, monkeypatch, surface, stream=True)
+
+    response = client.post(path, json=body)
+
+    assert response.status_code == 200, response.text
+    assert "answer" in response.text
+    errors = [
+        json.loads(line.removeprefix("data: "))["error"]
+        for line in response.text.splitlines()
+        if line.startswith("data: {") and '"error"' in line
+    ]
+    assert [error["reason"] for error in errors] == [reason]
+    assert errors[0]["code"] == ("upstream_error" if surface == "rendered chat" else code)
+    assert len(requests) == 1
+
+
+class HangingStream(ChatStream):
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        async for chunk in super().__aiter__():
+            yield chunk
+        await asyncio.sleep(30)
+        yield b""
+
+
+@pytest.mark.parametrize(
+    ("surface", "streaming", "code"),
+    [
+        ("native", False, "first_chunk_timeout"),
+        ("completions", False, "first_chunk_timeout"),
+        ("responses", False, "first_chunk_timeout"),
+        ("rendered chat", False, "generation_timeout"),
+        ("rendered chat", True, "generation_timeout"),
+    ],
+)
+def test_a_remote_profile_timeout_tells_the_caller_the_upstream_timed_out(
+    remote_chat: tuple, monkeypatch: pytest.MonkeyPatch, surface: str, streaming: bool, code: str
+) -> None:
+    client, _, config, requests = remote_chat
+    config.profiles["default"].adapter_options.runtime.clear()
+    answer_with(
+        remote_chat,
+        lambda: httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=HangingStream([])),
+    )
+    path, body = _reason_request(remote_chat, monkeypatch, surface, stream=streaming)
+    served = client.app.state.registry.get_config.return_value
+    served.profiles["default"].adapter_options.runtime.update(first_chunk_timeout_s=0.2, overall_timeout_s=10)
+
+    response = client.post(path, json=body)
+
+    assert response.status_code == 504, response.text
+    error = _error(response)
+    assert (error["code"], error["reason"]) == (code, "upstream_unavailable")
+    assert len(requests) == 1
+
+
+_ENDINGS_AFTER_OUTPUT = [
+    ("disconnect", "upstream_unavailable"),
+    ("malformed", "upstream_invalid_response"),
+    ("reported", "upstream_unavailable"),
+    ("reported 402", "upstream_payment_required"),
+    ("timeout", "upstream_unavailable"),
+]
+
+
+@pytest.mark.parametrize(
+    ("surface", "ending", "reason"),
+    [
+        (surface, ending, reason)
+        for surface in ("native", "chat", "completions", "rendered chat")
+        for ending, reason in _ENDINGS_AFTER_OUTPUT
+        if ending != "timeout" or surface == "rendered chat"
+    ],
+)
+def test_an_upstream_failure_after_output_ends_the_stream_with_its_reason(
+    remote_chat: tuple, monkeypatch: pytest.MonkeyPatch, surface: str, ending: str, reason: str
+) -> None:
+    client, adapter, config, requests = remote_chat
+    config.profiles["default"].adapter_options.runtime.clear()
+    path, body = _reason_request(remote_chat, monkeypatch, surface, stream=True)
+    streams: list[ChatStream] = []
+    if ending.startswith("reported"):
+        _answer_with_reported_failure(
+            remote_chat,
+            "upstream_payment_required" if ending == "reported 402" else None,
+            after_output=True,
+            streams=streams,
+        )
+    else:
+        first = _first_output(adapter, "/chat/completions" if surface == "chat" else "/generate")
+        if ending == "timeout":
+            stream: ChatStream = HangingStream([first])
+            served = client.app.state.registry.get_config.return_value
+            served.profiles["default"].adapter_options.runtime.update(first_chunk_timeout_s=5, overall_timeout_s=0.5)
+        else:
+            stream = ChatStream([first, "{malformed"] if ending == "malformed" else [first], disconnect=True)
+        streams.append(stream)
+        answer_with(remote_chat, httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream))
+
+    response = client.post(path, json=body)
+
+    assert response.status_code == 200, response.text
+    assert "answer" in response.text
+    events_with_errors = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: {") and '"error"' in line
+    ]
+    assert [event["error"]["reason"] for event in events_with_errors] == [reason]
+    assert events_with_errors[0]["error"]["message"] == UPSTREAM_FAILURE_MESSAGES[reason]
+    for private in _UPSTREAM_IDENTIFIERS:
+        assert private not in response.text
+    assert len(requests) == 1
+    assert all(stream.closed for stream in streams)

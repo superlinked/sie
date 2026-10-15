@@ -1680,6 +1680,9 @@ fn worker_error_value(error: &ChunkError, include_openai_type: bool) -> Value {
     if let Some(retry_after_s) = error.validated_retry_after_s() {
         object.insert("retry_after_s".to_string(), json!(retry_after_s));
     }
+    if let Some(reason) = error.client_safe_reason() {
+        object.insert("reason".to_string(), json!(reason.as_str()));
+    }
     Value::Object(object)
 }
 
@@ -2240,6 +2243,7 @@ mod tests {
                     message: "sensitive diagnostic".into(),
                     param: None,
                     retry_after_s: None,
+                    reason: None,
                 },
             )
             .await;
@@ -2440,6 +2444,7 @@ mod tests {
                         message: "scheduler full".to_string(),
                         param: Some("model".to_string()),
                         retry_after_s: Some(12),
+                        reason: None,
                     },
                 )
                 .await;
@@ -2529,6 +2534,7 @@ mod tests {
                     message: "scheduler full".to_string(),
                     param: None,
                     retry_after_s: None,
+                    reason: None,
                 },
             )
             .await;
@@ -2582,6 +2588,7 @@ mod tests {
                         message: "pool republish failed".to_string(),
                         param: None,
                         retry_after_s: None,
+                        reason: None,
                     }),
                     origin: StreamOutcomeOrigin::GatewaySynthetic,
                     tool_calls: None,
@@ -2669,6 +2676,7 @@ mod tests {
                     message: "top_k is unavailable".to_string(),
                     param: Some("top_k".to_string()),
                     retry_after_s: None,
+                    reason: None,
                 },
             )
             .await;
@@ -2936,6 +2944,7 @@ mod tests {
             message: "SENSITIVE_WORKER_FAILURE_SENTINEL".to_string(),
             param: None,
             retry_after_s: None,
+            reason: None,
         });
 
         let value = build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk);
@@ -2963,6 +2972,7 @@ mod tests {
             message: "top_k is unavailable".to_string(),
             param: Some("top_k".to_string()),
             retry_after_s: None,
+            reason: None,
         });
 
         let value = build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk);
@@ -3036,6 +3046,7 @@ mod tests {
             message: "upstream gone".to_string(),
             param: None,
             retry_after_s: None,
+            reason: None,
         });
 
         for value in [
@@ -3058,6 +3069,7 @@ mod tests {
             message: "top_k is unavailable".to_string(),
             param: Some("top_k".to_string()),
             retry_after_s: None,
+            reason: None,
         });
         let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
         assert_eq!(v["error"]["code"], "unsupported_field");
@@ -3078,6 +3090,7 @@ mod tests {
             message: "SENSITIVE_WORKER_FAILURE_SENTINEL".to_string(),
             param: None,
             retry_after_s: None,
+            reason: None,
         });
 
         let value = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
@@ -3171,6 +3184,7 @@ mod tests {
             message: "upstream gone".to_string(),
             param: None,
             retry_after_s: None,
+            reason: None,
         });
         let v = build_generate_chunk_event(&chunk, &[]);
         assert_eq!(v["error"]["code"], "transport_failure");
@@ -3185,6 +3199,7 @@ mod tests {
             message: "SENSITIVE_WORKER_FAILURE_SENTINEL".to_string(),
             param: None,
             retry_after_s: None,
+            reason: None,
         });
 
         let value = build_generate_chunk_event(&chunk, &[]);
@@ -3209,6 +3224,7 @@ mod tests {
             message: "SENSITIVE_WORKER_FAILURE_SENTINEL".to_string(),
             param: None,
             retry_after_s: None,
+            reason: None,
         });
 
         let values = [
@@ -3229,6 +3245,48 @@ mod tests {
     }
 
     #[test]
+    fn test_sse_upstream_failure_reason_reaches_all_generation_shapes() {
+        for (reason, expected) in [
+            (
+                "upstream_payment_required",
+                Some("the upstream account cannot pay for the request"),
+            ),
+            ("SENSITIVE_REASON_SENTINEL", None),
+        ] {
+            let mut chunk = _terminal_chunk("error", None);
+            chunk.error = Some(ChunkError {
+                code: "inference_error".to_string(),
+                message: "SENSITIVE_WORKER_FAILURE_SENTINEL".to_string(),
+                param: None,
+                retry_after_s: None,
+                reason: Some(reason.to_string()),
+            });
+
+            for value in [
+                build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false),
+                build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk),
+                build_generate_chunk_event(&chunk, &[]),
+            ] {
+                let error = &value["error"];
+                assert_eq!(error["code"], "inference_error");
+                match expected {
+                    Some(message) => {
+                        assert_eq!(error["reason"], reason);
+                        assert_eq!(error["message"], message);
+                    }
+                    None => {
+                        assert!(error.get("reason").is_none());
+                        assert_eq!(error["message"], "internal error during generation");
+                    }
+                }
+                let serialized = value.to_string();
+                assert!(!serialized.contains("SENSITIVE_WORKER_FAILURE_SENTINEL"));
+                assert!(!serialized.contains("SENSITIVE_REASON_SENTINEL"));
+            }
+        }
+    }
+
+    #[test]
     fn test_sse_payload_too_large_preserves_worker_code_on_all_generation_shapes() {
         let mut chunk = _terminal_chunk("error", None);
         chunk.error = Some(ChunkError {
@@ -3236,6 +3294,7 @@ mod tests {
             message: "payload exceeds limit".to_string(),
             param: None,
             retry_after_s: None,
+            reason: None,
         });
 
         for value in [
@@ -3256,6 +3315,7 @@ mod tests {
             message: "resource pressure".to_string(),
             param: Some("model".to_string()),
             retry_after_s: Some(12),
+            reason: None,
         });
 
         let chat = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
@@ -3276,12 +3336,14 @@ mod tests {
                 message: "resource pressure".to_string(),
                 param: None,
                 retry_after_s: Some(61),
+                reason: None,
             },
             ChunkError {
                 code: "MODEL_LOADING".to_string(),
                 message: "draining".to_string(),
                 param: None,
                 retry_after_s: Some(12),
+                reason: None,
             },
         ] {
             let mut chunk = _terminal_chunk("error", None);
@@ -3306,6 +3368,7 @@ mod tests {
             message: sentinel.to_string(),
             param: Some(sentinel.to_string()),
             retry_after_s: None,
+            reason: None,
         });
 
         let chat = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
@@ -3331,6 +3394,7 @@ mod tests {
             message: sentinel.to_string(),
             param: Some(sentinel.to_string()),
             retry_after_s: None,
+            reason: None,
         });
 
         let value = build_generate_chunk_event(&chunk, &[]);
@@ -3352,6 +3416,7 @@ mod tests {
             message: sentinel.to_string(),
             param: Some(sentinel.to_string()),
             retry_after_s: None,
+            reason: None,
         });
 
         let chat = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
@@ -3459,6 +3524,7 @@ mod tests {
                     message: "SENSITIVE_WORKER_FAILURE_SENTINEL".to_string(),
                     param: None,
                     retry_after_s: None,
+                    reason: None,
                 };
                 let (tx, mut rx) = tokio::sync::mpsc::channel(4);
                 send_synthetic_error_chunk(&tx, &endpoint, "cmpl-1", 1, "m", "req-1", &error).await;
@@ -3975,6 +4041,7 @@ mod tests {
             message: "saturated".to_string(),
             param: None,
             retry_after_s: None,
+            reason: None,
         });
         collector.apply(err_chunk);
         let got = tap.recv().await.unwrap();
@@ -4010,6 +4077,7 @@ mod tests {
                 message: "top_k is unavailable".to_string(),
                 param: Some("top_k".to_string()),
                 retry_after_s: None,
+                reason: None,
             });
             collector.apply(error);
 

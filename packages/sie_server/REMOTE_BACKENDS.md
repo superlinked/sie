@@ -271,9 +271,69 @@ with `503` because the upstream is unavailable, busy or not ready, logs one
 `remote chat for <model> failed: upstream answered 401` or
 `remote chat for <model> failed: the upstream credential is unavailable`. A
 failure after a stream has started logs `failed after output`. Native
-generation and completions log an upstream they cannot reach as
-`remote generation failed: upstream '<name>' is unavailable: <reason>`. No
-line contains the credential, the prompt or anything the upstream sent.
+generation, completions and chat that the server renders through the model's
+template log a failed upstream call, an error the upstream sent in place of an
+answer, and an SIE upstream's terminal error event as
+`remote generation failed: <reason>`, for example
+`remote generation failed: upstream answered 402`,
+`remote generation failed: upstream ended generation with inference_error` or
+`remote generation failed: upstream '<name>' is unavailable: <reason>`.
+Rendered chat logs an answer it refuses as
+`remote chat for <model> failed: <reason>`. No line contains the credential,
+the prompt or anything the upstream sent.
+
+The caller's error names the class of a remote generation failure in a
+`reason` field, next to `code` and `message`: in the response's `error`
+object, or in `detail` for native generation on a single node, and in the
+error event of a stream that has already started. A cluster gateway forwards a
+worker's `reason` only on an `inference_error`, `RESOURCE_EXHAUSTED` or
+`MODEL_LOADING` error, and only when it is one of these values:
+
+| `reason` | Cause |
+| --- | --- |
+| `upstream_credential_unavailable` | The server has no credential to send, for example because the environment variable that holds it is not set. |
+| `upstream_credential_rejected` | The upstream answered `401`, or `403` without a known error code. |
+| `upstream_payment_required` | The upstream answered `402`, for example because its account has no credits. |
+| `upstream_model_not_found` | The upstream answered `404`, for example because it does not serve the configured model. |
+| `upstream_refused` | The upstream answered another `4xx`, including a `403` whose error code names the state of its account or service, such as `ACCOUNT_SUSPENDED`. |
+| `upstream_unavailable` | The upstream could not be reached, timed out, closed a started stream, answered `408` or `5xx`, or reported a failure of its own, or its circuit breaker is open. |
+| `upstream_busy` | The upstream answered `429` or a busy code, or the server's rate or concurrency cap for it is reached. |
+| `upstream_not_ready` | The upstream reports that the model is not ready. |
+| `upstream_invalid_response` | The answer is not one the server accepts: malformed, cut short, too large, compressed, a redirect, or a chat answer that breaks the request's tools or token limits. |
+
+The `reason` names the cause, and the status says whether a retry may help:
+for example a `429` with the final code `COLD_START_RATE_LIMITED` is a final
+failure whose reason is `upstream_busy`. An error object that the upstream
+sends in place of an answer, as the body of a `200` or as an event of a stream,
+is a final failure classed by the HTTP status its numeric `code` names, and
+otherwise as `upstream_unavailable`. An SIE upstream names the class of its own
+upstream's failure in a `reason` of its error, and the server keeps that class.
+When it is not `upstream_unavailable`, `upstream_busy` or `upstream_not_ready`,
+the failure is final here too. A terminal error event of an SIE upstream with
+the code `inference_error` carries the class that event names, or
+`upstream_unavailable` when it names none. One with `RESOURCE_EXHAUSTED` or
+`MODEL_LOADING` carries `upstream_busy` or `upstream_not_ready`, and one with
+any other code, which describes the request or the model's output, carries no
+`reason`.
+
+On a single node, the expiry of a remote profile's `first_chunk_timeout_s` or
+`overall_timeout_s` keeps its `504` and code and carries
+`upstream_unavailable`, and so does chat that times out after output. A cluster
+gateway's own deadline carries no `reason`, because it also covers the queue
+and the worker. A request that falls back to a remote profile answers a failed
+remote attempt with the original local refusal, unchanged, and names that
+attempt's failure only in `X-SIE-Fallback-Error`, so it carries no `reason`.
+
+The status and `code` do not change. A failure that a retry would not fix is
+`502` `upstream_error` from single-node chat and `500` `inference_error` from
+native generation, completions, responses and a cluster, and its message is
+fixed text for the reason, for example
+`the upstream account cannot pay for the request`. A retryable failure stays
+a `503` with `Retry-After` and its message. An upstream's refusal of the
+caller's input stays `400` and carries no `reason`. The `reason` and message
+never contain the upstream's name, URL, model id, answer or account; the
+`WARNING` line above keeps that detail for the operator, and `X-SIE-Upstream`
+still names the upstream as described above.
 
 Each upstream has a required rate cap and a circuit breaker. The limits are
 shared by that worker process's adapters, not across replicas: adding remote
@@ -317,7 +377,8 @@ when it calls a function the request did not declare, calls any function under
 makes several calls under `parallel_tool_calls: false`, or makes no call when
 `tool_choice` is `"required"` or names a function. Before output, a single node
 answers that failure with `502` `upstream_error` and a cluster with `500`
-`inference_error`, as each answers any other upstream failure. A stream that
+`inference_error`, as each answers any other upstream failure, and the reason
+is `upstream_invalid_response`. A stream that
 has already started ends with an error event. A streamed function name is
 checked as OpenAI clients assemble it, by concatenating the fragments of each
 call index. A fragment is delivered while the name so far begins a permitted

@@ -49,13 +49,19 @@ from sie_server.adapters._generation_base import (
     GenerationAdapter,
     GenerationError,
     GenerationUnsupportedFieldError,
+    GenerationUpstreamError,
     ReasoningFormat,
     ThinkingBlockStripper,
     aclose_with_error_precedence,
     resolve_reasoning_format,
     thinking_blocks_must_be_hidden,
 )
-from sie_server.adapters.errors import InputTooLongError, UpstreamUnavailableError
+from sie_server.adapters.errors import (
+    UPSTREAM_FAILURE_MESSAGES,
+    InputTooLongError,
+    UpstreamFailureReason,
+    UpstreamUnavailableError,
+)
 from sie_server.adapters.fake.adapter import FakeAdapter
 from sie_server.adapters.mlx.generation import MLXGenerationAdapter, normalize_mlx_seed
 from sie_server.adapters.remote._http import RemoteUpstreamError
@@ -112,6 +118,7 @@ from sie_server.processors.strict_grammar import (
 )
 from sie_server.types.grammar import GrammarSpec
 from sie_server.types.inputs import InvalidInputError, Item, item_size_error
+from sie_server.types.openapi import OpenAIGenerationErrorResponse
 from sie_server.types.responses import ErrorCode
 
 logger = logging.getLogger(__name__)
@@ -307,18 +314,12 @@ def _upstream_error_response(
     message: str = "upstream generation request failed",
     *,
     response_status: int = status.HTTP_502_BAD_GATEWAY,
+    reason: UpstreamFailureReason | None = None,
 ) -> JSONResponse:
-    return JSONResponse(
-        status_code=response_status,
-        content={
-            "error": {
-                "message": message,
-                "type": "upstream_error",
-                "param": None,
-                "code": "upstream_error",
-            }
-        },
-    )
+    error: dict[str, Any] = {"message": message, "type": "upstream_error", "param": None, "code": "upstream_error"}
+    if reason is not None:
+        error["reason"] = reason
+    return JSONResponse(status_code=response_status, content={"error": error})
 
 
 def _translated_upstream_status(upstream_status: int) -> int:
@@ -333,18 +334,12 @@ def _upstream_error_event(
     *,
     code: str = "upstream_error",
     error_type: str = "upstream_error",
+    reason: UpstreamFailureReason | None = None,
 ) -> bytes:
-    payload = json.dumps(
-        {
-            "error": {
-                "message": message,
-                "type": error_type,
-                "param": None,
-                "code": code,
-            }
-        },
-        separators=(",", ":"),
-    )
+    error: dict[str, Any] = {"message": message, "type": error_type, "param": None, "code": code}
+    if reason is not None:
+        error["reason"] = reason
+    payload = json.dumps({"error": error}, separators=(",", ":"))
     return f"data: {payload}\n\ndata: [DONE]\n\n".encode()
 
 
@@ -1352,7 +1347,12 @@ async def _remote_chat_events(
         if not delivered:
             raise
         logger.warning("remote chat for %s failed after output: %s", requested_model, exc)
-        yield _upstream_error_event()
+        reason = "upstream_unavailable" if isinstance(exc, GenerationTimeoutError) else exc.upstream_reason
+        yield (
+            _upstream_error_event()
+            if reason is None
+            else _upstream_error_event(UPSTREAM_FAILURE_MESSAGES[reason], reason=reason)
+        )
     finally:
         await aclose_with_error_precedence(iterator, outcome_selected=True, context="remote chat adapter")
 
@@ -1435,15 +1435,24 @@ async def _remote_chat_response(
             if violation is not None:
                 return _strict_output_error_response(violation)
         return JSONResponse(content=payload, headers=headers)
+    except GenerationUpstreamError as exc:
+        return _upstream_error_response(UPSTREAM_FAILURE_MESSAGES[exc.upstream_reason], reason=exc.upstream_reason)
     except GenerationError as exc:
         raise _generation_http_exception(exc) from exc
     except GenerationTimeoutError:
         raise HTTPException(
-            status_code=504, detail={"code": "generation_timeout", "message": "remote generation timed out"}
+            status_code=504,
+            detail={
+                "code": "generation_timeout",
+                "message": "remote generation timed out",
+                "reason": "upstream_unavailable",
+            },
         ) from None
     except UpstreamUnavailableError as exc:
         logger.warning("remote chat for %s failed: %s", requested_model, exc)
-        raise upstream_unavailable_exception(exc, requested_model) from exc
+        unavailable = upstream_unavailable_exception(exc, requested_model)
+        cast("dict[str, Any]", unavailable.detail)["reason"] = exc.upstream_reason
+        raise unavailable from exc
     except (InputTooLongError, InvalidInputError) as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1460,13 +1469,22 @@ async def _remote_chat_response(
         ) from exc
     except RemoteUpstreamError as exc:
         logger.warning("remote chat for %s failed: %s", requested_model, exc)
-        return _upstream_error_response()
+        return _upstream_error_response(UPSTREAM_FAILURE_MESSAGES[exc.upstream_reason], reason=exc.upstream_reason)
 
 
 # -- /v1/chat/completions (managed child or remote generation adapter) -------
 
 
-@router.post("/chat/completions", response_model=None)
+@router.post(
+    "/chat/completions",
+    response_model=None,
+    responses={
+        500: {"description": "Generation failed", "model": OpenAIGenerationErrorResponse},
+        502: {"description": "A remote upstream failed the request", "model": OpenAIGenerationErrorResponse},
+        503: {"description": "Model loading or temporarily unavailable", "model": OpenAIGenerationErrorResponse},
+        504: {"description": "Remote generation timed out", "model": OpenAIGenerationErrorResponse},
+    },
+)
 async def chat_completions(
     http_request: Request,
     x_machine_profile: Annotated[str | None, Header(alias="X-SIE-MACHINE-PROFILE")] = None,
