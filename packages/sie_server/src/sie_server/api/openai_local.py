@@ -1116,20 +1116,31 @@ async def _read_upstream_body(response: httpx.Response) -> bytes:
     return bytes(body)
 
 
-def _child_timeout(config: Any, proxied: dict[str, Any], *, stream: bool) -> httpx.Timeout:
-    """Bound one request to the generation child.
+def _child_budget(config: Any, proxied: dict[str, Any], *, stream: bool) -> float | None:
+    """Return the overall budget for one request to the generation child, if it has one.
 
     The child writes nothing while it generates a non-streaming answer, or
     while its own tool parser holds a streamed call's argument until that
-    argument closes. Those requests wait on the generation's overall budget, as
-    the other generation routes do; any other stream keeps the byte-gap bound
-    that catches a wedged child.
+    argument closes. Those requests are bounded by the generation's overall
+    budget, as the other generation routes are; ``None`` keeps any other
+    stream on the byte-gap bound that catches a wedged child.
     """
     holds_output = not stream or (bool(proxied.get("tools")) and proxied.get("tool_choice") != "none")
     overall = resolve_generation_timeouts(config, None).overall_s if holds_output else None
-    if overall is None or overall <= _PROXY_READ_TIMEOUT_S:
+    return overall if overall is not None and overall > _PROXY_READ_TIMEOUT_S else None
+
+
+def _child_timeout(budget: float | None) -> httpx.Timeout:
+    if budget is None:
         return _PROXY_TIMEOUT
-    return httpx.Timeout(connect=10.0, read=overall, write=10.0, pool=10.0)
+    return httpx.Timeout(connect=10.0, read=budget, write=10.0, pool=10.0)
+
+
+def _generation_timeout_exception() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+        detail={"code": "generation_timeout", "message": "generation timed out"},
+    )
 
 
 def _new_proxy_client() -> httpx.AsyncClient:
@@ -1150,6 +1161,7 @@ async def _sanitize_sse_stream(
     tool_call_limit: int | None = None,
     strict_grammar: GrammarSpec | None = None,
     include_reasoning: bool = False,
+    deadline: float | None = None,
 ) -> AsyncIterator[bytes]:
     states: dict[int, ThinkingBlockStripper] = {}
     held_contents: dict[int, list[str]] = {}
@@ -1162,10 +1174,17 @@ async def _sanitize_sse_stream(
     terminal_outcome_selected = False
     chunks = response.aiter_bytes()
     next_chunk: asyncio.Future[bytes | None] | None = None
+    loop = asyncio.get_running_loop()
     try:
         while True:
+            if deadline is not None and loop.time() >= deadline:
+                logger.warning("generation child chat stream exceeded its generation budget")
+                terminal_outcome_selected = True
+                yield _upstream_error_event("generation timed out", code="generation_timeout")
+                return
             next_chunk = next_chunk or asyncio.ensure_future(anext(chunks, None))
-            done, _ = await asyncio.wait({next_chunk}, timeout=_SSE_KEEPALIVE_S)
+            wait_s = _SSE_KEEPALIVE_S if deadline is None else min(_SSE_KEEPALIVE_S, deadline - loop.time())
+            done, _ = await asyncio.wait({next_chunk}, timeout=wait_s)
             if not done:
                 yield b": keepalive\n\n"
                 continue
@@ -1725,10 +1744,10 @@ async def _chat_completions(
             if slot is not None:
                 await slot.acquire()
             client = _new_proxy_client()
+            budget = _child_budget(config, proxied, stream=True)
+            deadline = None if budget is None else asyncio.get_running_loop().time() + budget
             try:
-                upstream_request = client.build_request(
-                    "POST", url, json=proxied, timeout=_child_timeout(config, proxied, stream=True)
-                )
+                upstream_request = client.build_request("POST", url, json=proxied, timeout=_child_timeout(budget))
                 upstream = await client.send(upstream_request, stream=True)
             except asyncio.CancelledError:
                 await client.aclose()
@@ -1784,6 +1803,7 @@ async def _chat_completions(
                     tool_call_limit=tool_call_limit,
                     strict_grammar=strict_grammar,
                     include_reasoning=include_reasoning,
+                    deadline=deadline,
                 ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **route.headers()},
@@ -1791,17 +1811,22 @@ async def _chat_completions(
 
         if slot is not None:
             await slot.acquire()
+        budget = _child_budget(config, proxied, stream=False)
         try:
             async with _new_proxy_client() as client:
                 try:
-                    async with client.stream(
-                        "POST", url, json=proxied, timeout=_child_timeout(config, proxied, stream=False)
-                    ) as upstream:
+                    async with (
+                        asyncio.timeout(budget),
+                        client.stream("POST", url, json=proxied, timeout=_child_timeout(budget)) as upstream,
+                    ):
                         raw = await _read_upstream_body(upstream)
                         upstream_status = upstream.status_code
                 except httpx.HTTPError:
                     logger.warning("generation child chat request failed", exc_info=True)
                     return _upstream_error_response("generation child is unavailable")
+        except TimeoutError:
+            logger.warning("generation child chat request exceeded its generation budget")
+            raise _generation_timeout_exception() from None
         except ValueError:
             logger.error("generation child chat response exceeded its byte limit")
             return _upstream_error_response("upstream response exceeded the byte limit")

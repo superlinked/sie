@@ -2705,7 +2705,9 @@ def _loopback_child(*, before_headers_s: float, content_type: str, parts: list[t
         thread.join()
 
 
-def _child_chat_client(monkeypatch: pytest.MonkeyPatch, server_url: str) -> TestClient:
+def _child_chat_client(
+    monkeypatch: pytest.MonkeyPatch, server_url: str, *, overall_s: float = 10 * _SILENCE_S
+) -> TestClient:
     proxy_client = openai_local._new_proxy_client
     client, registry = _cuda_chat_client(
         monkeypatch, lambda _request: pytest.fail("the child is real"), server_url=server_url
@@ -2716,7 +2718,7 @@ def _child_chat_client(monkeypatch: pytest.MonkeyPatch, server_url: str) -> Test
         openai_local, "_PROXY_TIMEOUT", httpx.Timeout(connect=10.0, read=_BYTE_GAP_S, write=10.0, pool=10.0)
     )
     monkeypatch.setattr(openai_local, "_SSE_KEEPALIVE_S", _BYTE_GAP_S / 6, raising=False)
-    registry.get_config.return_value.resolve_profile.return_value.runtime["overall_timeout_s"] = 10 * _SILENCE_S
+    registry.get_config.return_value.resolve_profile.return_value.runtime["overall_timeout_s"] = overall_s
     return client
 
 
@@ -2815,3 +2817,53 @@ def test_cuda_chat_blocking_waits_out_a_silent_generation(monkeypatch: pytest.Mo
 
     assert response.status_code == 200
     assert response.json()["choices"][0]["message"]["content"] == "a long answer"
+
+
+def test_cuda_chat_stream_with_tools_ends_at_the_generation_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    budget_s = 4 * _BYTE_GAP_S
+    trickle = f"data: {json.dumps(_stream_event({'content': '.'}))}\n\n".encode()
+    head = f"data: {json.dumps(_stream_event({'role': 'assistant', 'content': ''}))}\n\n".encode()
+    beats = int(3 * budget_s / (_BYTE_GAP_S / 3))
+    with _loopback_child(
+        before_headers_s=0,
+        content_type="text/event-stream",
+        parts=[(0, head), *[(_BYTE_GAP_S / 3, trickle)] * beats, (0, b"data: [DONE]\n\n")],
+    ) as url:
+        client = _child_chat_client(monkeypatch, url, overall_s=budget_s)
+        started = time.monotonic()
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "Qwen/Qwen3-0.6B",
+                "messages": [{"role": "user", "content": "Write the file"}],
+                "tools": [_WRITE_FILE_TOOL],
+                "stream": True,
+            },
+        )
+        elapsed = time.monotonic() - started
+
+    data = [line.removeprefix("data: ") for line in response.text.splitlines() if line.startswith("data: ")]
+    assert data[-1] == "[DONE]"
+    assert json.loads(data[-2])["error"]["code"] == "generation_timeout"
+    assert elapsed < 2 * budget_s
+
+
+def test_cuda_chat_blocking_ends_at_the_generation_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    budget_s = 4 * _BYTE_GAP_S
+    body = json.dumps(_reasoning_child_payload("a long answer")).encode()
+    beats = int(3 * budget_s / (_BYTE_GAP_S / 3))
+    step = len(body) // beats + 1
+    pieces = [body[start : start + step] for start in range(0, len(body), step)]
+    with _loopback_child(
+        before_headers_s=0,
+        content_type="application/json",
+        parts=[(_BYTE_GAP_S / 3, piece) for piece in pieces],
+    ) as url:
+        client = _child_chat_client(monkeypatch, url, overall_s=budget_s)
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+    assert response.status_code == 504
+    assert "generation_timeout" in response.text
