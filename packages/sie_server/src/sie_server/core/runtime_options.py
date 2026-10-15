@@ -74,24 +74,21 @@ class UndeclaredLoraError(InvalidInputError):
     """``options.lora`` or ``options.lora_id`` names a LoRA the model's configuration does not declare."""
 
 
-_LORA_OPTION_KEYS = ("lora", "lora_id")
-
-
 def _check_declared_lora(config: ModelConfig, request_options: dict[str, Any]) -> None:
     """Reject a request LoRA selection the model's configuration does not declare.
 
+    ``options.lora_id`` names a LoRA to load, so it must be a declared LoRA id
+    (:meth:`ModelConfig.lora_revisions`). ``options.lora`` selects a loaded
+    LoRA, so it may also be a served name (:meth:`ModelConfig.declared_lora_names`).
+
     Raises:
-        UndeclaredLoraError: ``options.lora`` or ``options.lora_id`` is not null
-            and not one of :meth:`ModelConfig.declared_lora_names`.
+        UndeclaredLoraError: Either option is not null and not one of those names.
     """
-    declared: frozenset[str] | None = None
-    for key in _LORA_OPTION_KEYS:
+    for key, declared in (("lora_id", config.lora_revisions), ("lora", config.declared_lora_names)):
         value = request_options.get(key)
         if value is None:
             continue
-        if declared is None:
-            declared = config.declared_lora_names()
-        if not isinstance(value, str) or value not in declared:
+        if not isinstance(value, str) or value not in declared():
             raise UndeclaredLoraError(
                 f"'options.{key}' must name a LoRA adapter that model '{config.sie_id}' declares; "
                 f"{value!r} is not one of them."

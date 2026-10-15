@@ -3426,6 +3426,11 @@ class ModelRegistry:
             msg = f"Model '{model}' does not declare LoRA '{lora}'"
             raise ValueError(msg)
 
+        lora_state = loaded_model.loras.get(lora)
+        if lora_state is not None and not lora_state.loading:
+            loaded_model.loras.move_to_end(lora)
+            return (True, False)
+
         # Get or create LoRA lock for this model
         lora_lock = loaded_model.get_lora_lock()
 

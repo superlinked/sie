@@ -11747,37 +11747,45 @@ pub(crate) fn validate_lora_for_profile(
 
 /// The caller's ``options.lora`` or ``options.lora_id`` as ``(param, value)``
 /// when it is set and names no LoRA that a profile of the model ``entry``
-/// returns declares: a ``loadtime.lora_paths`` served name or source, a
-/// ``runtime.lora_id``, or a ``runtime.lora``. ``entry`` is called only when
-/// the options select a LoRA; a model it does not return is not checked.
+/// returns declares. ``options.lora_id`` names a LoRA to load: a
+/// ``loadtime.lora_paths`` source or a ``runtime.lora_id``. ``options.lora``
+/// selects a loaded LoRA, so a ``lora_paths`` served name and a
+/// ``runtime.lora`` also qualify. ``entry`` is called only when the options
+/// select a LoRA; a model it does not return is not checked.
 pub(crate) fn undeclared_lora_option(
     options: Option<&Value>,
     entry: impl FnOnce() -> Option<crate::types::model::ModelEntry>,
 ) -> Option<(&'static str, Value)> {
     let options = options?.as_object()?;
-    let requested: Vec<(&'static str, &Value)> =
-        [("options.lora", "lora"), ("options.lora_id", "lora_id")]
-            .into_iter()
-            .filter_map(|(param, key)| {
-                let value = options.get(key).filter(|value| !value.is_null())?;
-                Some((param, value))
-            })
-            .collect();
+    let requested: Vec<(&'static str, bool, &Value)> = [
+        ("options.lora", "lora", true),
+        ("options.lora_id", "lora_id", false),
+    ]
+    .into_iter()
+    .filter_map(|(param, key, served_names)| {
+        let value = options.get(key).filter(|value| !value.is_null())?;
+        Some((param, served_names, value))
+    })
+    .collect();
     if requested.is_empty() {
         return None;
     }
     let entry = entry()?;
     requested
         .into_iter()
-        .find(|(_, value)| {
+        .find(|(_, served_names, value)| {
             !value
                 .as_str()
-                .is_some_and(|name| entry_declares_lora(&entry, name))
+                .is_some_and(|name| entry_declares_lora(&entry, name, *served_names))
         })
-        .map(|(param, value)| (param, value.clone()))
+        .map(|(param, _, value)| (param, value.clone()))
 }
 
-fn entry_declares_lora(entry: &crate::types::model::ModelEntry, name: &str) -> bool {
+fn entry_declares_lora(
+    entry: &crate::types::model::ModelEntry,
+    name: &str,
+    served_names: bool,
+) -> bool {
     entry
         .profile_configs
         .values()
@@ -11790,7 +11798,7 @@ fn entry_declares_lora(entry: &crate::types::model::ModelEntry, name: &str) -> b
                     .and_then(Value::as_str)
                     == Some(name)
             };
-            if runtime_names("lora_id") || runtime_names("lora") {
+            if runtime_names("lora_id") || (served_names && runtime_names("lora")) {
                 return true;
             }
             match adapter_options
@@ -11798,7 +11806,7 @@ fn entry_declares_lora(entry: &crate::types::model::ModelEntry, name: &str) -> b
                 .and_then(|loadtime| loadtime.get("lora_paths"))
             {
                 Some(Value::Object(paths)) => paths.iter().any(|(served, source)| {
-                    served == name
+                    (served_names && served == name)
                         || source
                             .as_str()
                             .or_else(|| source.get("id").and_then(Value::as_str))
@@ -29583,17 +29591,17 @@ profiles:
             .get_model_info("acme/lora")
             .expect("model entry");
 
-        for name in [
-            "org/banking-lora",
-            "org/tuned-lora",
-            "legal",
-            "org/legal-lora",
-            "pinned",
-            "org/pinned-lora",
-            "org/listed-lora",
+        for (name, keys) in [
+            ("org/banking-lora", &["lora", "lora_id"][..]),
+            ("org/legal-lora", &["lora", "lora_id"][..]),
+            ("org/pinned-lora", &["lora", "lora_id"][..]),
+            ("org/listed-lora", &["lora", "lora_id"][..]),
+            ("org/tuned-lora", &["lora"][..]),
+            ("legal", &["lora"][..]),
+            ("pinned", &["lora"][..]),
         ] {
-            for key in ["lora", "lora_id"] {
-                let options = json!({ key: name });
+            for key in keys {
+                let options = json!({ *key: name });
                 assert_eq!(
                     undeclared_lora_option(Some(&options), || Some(entry.clone())),
                     None,
@@ -29626,6 +29634,14 @@ profiles:
             (
                 json!({"lora": "/srv/any/dir"}),
                 ("options.lora", json!("/srv/any/dir")),
+            ),
+            (
+                json!({"lora_id": "legal"}),
+                ("options.lora_id", json!("legal")),
+            ),
+            (
+                json!({"lora_id": "org/tuned-lora"}),
+                ("options.lora_id", json!("org/tuned-lora")),
             ),
             (json!({"lora": ""}), ("options.lora", json!(""))),
             (json!({"lora": 42}), ("options.lora", json!(42))),

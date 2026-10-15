@@ -1234,6 +1234,19 @@ class TestRegistryLoraLifecycle:
         assert list(loaded.loras) == [second]
         assert adapter._loaded_loras == {second}
 
+    async def test_a_loaded_lora_is_ready_without_waiting_for_the_lora_lock(self, tmp_path: Path) -> None:
+        lora = _save_plain_lora(tmp_path / "loaded")
+        adapter = TinyLoRAAdapter()
+        adapter.load("cpu")
+        adapter.load_lora(lora)
+        registry, loaded = _registry_serving(adapter, _tiny_config([lora]))
+        loaded.loras[lora] = LoadedLora(adapter_id=lora)
+
+        async with loaded.get_lora_lock():
+            ready = await asyncio.wait_for(registry.ensure_lora_loaded_async("t/tiny", lora), 1)
+
+        assert ready == (True, False)
+
     async def test_a_lora_load_waits_for_the_batch_in_flight(self, tmp_path: Path) -> None:
         first = _save_plain_lora(tmp_path / "first")
         second = _save_plain_lora(tmp_path / "second")

@@ -111,6 +111,7 @@ def test_a_request_may_select_a_lora_the_model_declares(request_options: dict[st
         {"lora_id": "attacker/lora"},
         {"lora": "attacker/lora"},
         {"lora_id": "/srv/any/dir"},
+        {"lora_id": "legal"},
         {"profile": "banking", "lora_id": "attacker/lora"},
         {"lora": ""},
         {"lora": 42},
