@@ -10,7 +10,7 @@ use sie_server_rust::ipc::{IpcServer, IpcServerConfig};
 use sie_server_rust::ipc_types::SetPinnedModelsRequest;
 use sie_server_rust::native_backend::NativeBackend;
 use sie_server_rust::observability::{init_observability, shutdown_observability};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[derive(Debug, Parser)]
 #[command(author, version, name = "sie-server-rust")]
@@ -43,8 +43,8 @@ struct Cli {
     #[arg(long, env = "SIE_PINNED_MODELS")]
     pinned_models: Option<String>,
 
-    #[arg(long, env = "SIE_SERVER_HOST", default_value = "0.0.0.0")]
-    host: String,
+    #[arg(long, env = "SIE_SERVER_HOST")]
+    host: Option<String>,
 
     #[arg(long, env = "SIE_SERVER_PORT", default_value = "8080")]
     port: u16,
@@ -94,13 +94,15 @@ async fn run() -> anyhow::Result<()> {
     }
     backend.start_idle_evictor();
 
+    let http_host = http_host(cli.host);
+
     let shutdown_backend = backend.clone();
     let server = IpcServer::new(
         IpcServerConfig {
             socket_path: cli.ipc_socket_path,
             worker_id: cli.worker_id,
             bundle: cli.bundle,
-            http_host: cli.host,
+            http_host,
             http_port: cli.port,
         },
         backend,
@@ -110,6 +112,15 @@ async fn run() -> anyhow::Result<()> {
     let result = server.run().await.context("run IPC server");
     shutdown_backend.stop_idle_evictor();
     result
+}
+
+fn http_host(configured: Option<String>) -> String {
+    configured.unwrap_or_else(|| {
+        warn!(
+            "neither --host nor SIE_SERVER_HOST is set, so the health server listens on 0.0.0.0. From 0.13.0 the default is 127.0.0.1; set SIE_SERVER_HOST=0.0.0.0 to keep listening on every interface"
+        );
+        "0.0.0.0".to_string()
+    })
 }
 
 fn csv_values(raw: &str) -> Vec<String> {
@@ -147,6 +158,12 @@ fn idle_evict_duration(raw: Option<u64>) -> anyhow::Result<Option<Duration>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_host_keeps_every_interface_by_default() {
+        assert_eq!(http_host(None), "0.0.0.0");
+        assert_eq!(http_host(Some("127.0.0.1".to_string())), "127.0.0.1");
+    }
 
     #[test]
     fn idle_evict_duration_matches_python_bounds() {

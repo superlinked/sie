@@ -58,10 +58,24 @@ from sie_server.config.upstreams import (
     load_upstreams,
     remote_serving_from_env,
 )
+from sie_server.core.data_dir import DATA_DIR_ENV, resolve_data_dir
 from sie_server.core.deps import collect_bundle_deps
 from sie_server.core.loader import load_model_configs
 from sie_server.core.logging import configure_logging, is_valid_log_level, valid_log_levels
 from sie_server.core.model_suggestions import suggest_models
+from sie_server.core.server_auth import (
+    AUTH_MODE_ENV,
+    AUTH_TOKEN_ENV,
+    AuthConfigError,
+    AuthMode,
+    StoredToken,
+    TokenFileError,
+    configured_tokens,
+    is_loopback_host,
+    load_or_create_token,
+    requested_mode,
+    resolve_auth_mode,
+)
 from sie_server.main import run_server
 
 logger = logging.getLogger(__name__)
@@ -130,6 +144,94 @@ def _echo_suggestions(unknown: Iterable[str], known: Iterable[str]) -> None:
             typer.echo(f"  '{name}': did you mean {', '.join(suggestions)}?", err=True)
 
 
+_SECURE_DEFAULTS_RELEASE = "0.13.0"
+SERVER_HOST_ENV = "SIE_SERVER_HOST"
+
+
+def _echo_generated_token(stored: StoredToken, port: int) -> None:
+    rule = "=" * 72
+    typer.echo(
+        "\n".join(
+            [
+                rule,
+                f"sie-server generated an API token and saved it to {stored.path}.",
+                "It is shown only this once. Clients send it as 'Authorization: Bearer <token>'",
+                "or 'x-api-key: <token>':",
+                "",
+                f"  export SIE_API_KEY={stored.token}",
+                f'  curl -H "Authorization: Bearer $SIE_API_KEY" http://localhost:{port}/v1/models',
+                rule,
+            ]
+        ),
+        err=True,
+    )
+
+
+def _prepare_auth(*, host: str, port: int, host_is_default: bool) -> AuthMode:
+    """Resolve the server's auth mode, provision its token, and warn about exposure."""
+    exposed = not is_loopback_host(host)
+    requested = requested_mode(os.environ)
+    tokens = configured_tokens(os.environ)
+    try:
+        mode = resolve_auth_mode(requested, has_tokens=bool(tokens), exposed=exposed)
+    except AuthConfigError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+
+    if mode == "token" and tokens:
+        typer.echo(f"Auth: every route except /healthz, /livez and /readyz requires one of {len(tokens)} token(s)")
+    elif mode == "token":
+        directory = resolve_data_dir()
+        if directory is None:
+            typer.echo(
+                f"Error: {AUTH_MODE_ENV} requires a token, but there is no home directory to keep a generated "
+                f"one in. Set {AUTH_TOKEN_ENV}, or set {DATA_DIR_ENV} to a private directory.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        try:
+            stored = load_or_create_token(directory)
+        except TokenFileError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(1) from None
+        if stored.created:
+            _echo_generated_token(stored, port)
+        else:
+            typer.echo(f"Auth: every route except /healthz, /livez and /readyz requires the token in {stored.path}")
+
+    if exposed and mode == "none":
+        if requested == "none":
+            typer.echo(
+                f"Warning: authentication is off ({AUTH_MODE_ENV}=none) and sie-server listens on "
+                f"{host}:{port}. Anyone who can reach that address can use this server.",
+                err=True,
+            )
+        else:
+            rule = "!" * 72
+            typer.echo(
+                "\n".join(
+                    [
+                        rule,
+                        f"WARNING: sie-server listens on {host}:{port} without authentication.",
+                        "Any machine that can reach that address can use this server.",
+                        f"From {_SECURE_DEFAULTS_RELEASE}, an exposed sie-server requires a token. Set "
+                        f"{AUTH_TOKEN_ENV} now, or set {AUTH_MODE_ENV}=token to have the server generate one.",
+                        f"To keep it open, set {AUTH_MODE_ENV}=none.",
+                        rule,
+                    ]
+                ),
+                err=True,
+            )
+    if host_is_default and exposed:
+        typer.echo(
+            f"Notice: sie-server listens on {host} because neither --host nor {SERVER_HOST_ENV} is set. "
+            f"From {_SECURE_DEFAULTS_RELEASE} the default is 127.0.0.1. Pass --host {host} or set "
+            f"{SERVER_HOST_ENV}={host} to keep listening on every interface.",
+            err=True,
+        )
+    return mode
+
+
 def _came_from_command_line(param: str) -> bool:
     """Whether ``param`` was typed on the command line rather than defaulted.
 
@@ -140,10 +242,14 @@ def _came_from_command_line(param: str) -> bool:
     Returns ``False`` when there is no active Click context (direct calls in
     tests), which keeps the lenient path — the strict one is opt-in.
     """
+    return _parameter_source(param) == ParameterSource.COMMANDLINE
+
+
+def _parameter_source(param: str) -> ParameterSource | None:
     ctx = click.get_current_context(silent=True)
     if ctx is None:
-        return False
-    return ctx.get_parameter_source(param) == ParameterSource.COMMANDLINE
+        return None
+    return ctx.get_parameter_source(param)
 
 
 def _canonical_model_id(value: str) -> str:
@@ -326,7 +432,12 @@ def openapi_export(
 @app.command()
 def serve(
     port: int = typer.Option(8080, "--port", "-p", help="Port to listen on"),
-    host: str = typer.Option("0.0.0.0", "--host", help="Host to bind to"),  # noqa: S104 — intentional bind to all interfaces for server
+    host: str = typer.Option(
+        "0.0.0.0",  # noqa: S104 — intentional bind to all interfaces for server
+        "--host",
+        envvar=SERVER_HOST_ENV,
+        help="Address to bind to. Use 127.0.0.1 to accept connections from this machine only.",
+    ),
     device: str = typer.Option("auto", "--device", "-d", help="Device to use (auto, cuda, mps, cpu)"),
     models_dir: str = typer.Option(
         DEFAULT_MODELS_DIR,
@@ -612,6 +723,12 @@ def serve(
         typer.echo("Tracing enabled - exporting to localhost:4317")
         typer.echo("Start Jaeger with: mise run jaeger")
 
+    auth_mode = _prepare_auth(
+        host=host,
+        port=port,
+        host_is_default=_parameter_source("host") in (None, ParameterSource.DEFAULT),
+    )
+
     typer.echo(f"Starting SIE server on {host}:{port}")
 
     typer.echo(f"Models directory: {models_dir_resolved}")
@@ -699,6 +816,7 @@ def serve(
         pool_name=pool_name,
         upstreams_file=upstreams_file,
         remote_serving=remote_serving,
+        auth_mode=auth_mode,
     )
     if upstreams_file and not remote_serving:
         typer.echo("Remote serving: off. Every remote profile is refused.")

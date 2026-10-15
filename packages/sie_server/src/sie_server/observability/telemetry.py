@@ -12,6 +12,7 @@ from pathlib import Path
 
 import httpx
 
+from sie_server.core.data_dir import ensure_data_dir, resolve_data_dir
 from sie_server.observability.gpu import get_gpu_metrics
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,10 @@ def _is_telemetry_disabled() -> bool:
 
 def _get_or_create_worker_id(data_dir: str | None = None) -> str:
     if data_dir is None:
-        data_dir = os.environ.get("SIE_DATA_DIR", "/tmp/sie-server")  # noqa: S108
+        resolved = resolve_data_dir()
+        if resolved is None:
+            return str(uuid.uuid4())
+        data_dir = str(resolved)
 
     id_path = os.path.join(data_dir, "worker-id")
 
@@ -58,7 +62,7 @@ def _get_or_create_worker_id(data_dir: str | None = None) -> str:
 
     # Try to persist
     try:
-        Path(data_dir).mkdir(parents=True, exist_ok=True)
+        ensure_data_dir(Path(data_dir))
         id_file.write_text(new_id)
     except OSError:
         logger.debug("Could not persist worker ID to %s, using ephemeral ID", id_path)

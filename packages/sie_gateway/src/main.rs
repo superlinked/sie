@@ -192,6 +192,10 @@ async fn run_server(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
             crate::config::AuditLevel::Error => tracing::error!(audit = "auth", "{}", msg),
         }
     }
+    if let Some(msg) = config::unset_auth_mode_warning(&config.host, config::auth_mode_is_set()) {
+        tracing::warn!(audit = "auth", "{}", msg);
+    }
+    let worker_authorization = config::worker_authorization_from_env()?;
     for (level, msg) in config.audit_nats_producer_trust() {
         match level {
             crate::config::AuditLevel::Warn => {
@@ -369,7 +373,10 @@ async fn run_server(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if use_ws {
-        let ws_mgr = Arc::new(WsHealthManager::new(Arc::clone(&registry)));
+        let ws_mgr = Arc::new(WsHealthManager::new(
+            Arc::clone(&registry),
+            worker_authorization,
+        ));
         ws_mgr.start(discovery.get_worker_urls()).await;
         ws_mgr.start_heartbeat_loop().await;
         ws_manager = Some(ws_mgr);

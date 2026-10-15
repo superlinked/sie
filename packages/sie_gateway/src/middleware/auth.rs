@@ -141,14 +141,30 @@ where
                 return inner.call(req).await;
             }
 
-            let token = match extract_bearer_token(req.headers()) {
-                Some(t) => t,
-                None => {
+            let token = match extract_request_credential(req.headers()) {
+                RequestCredential::Token(t) => t,
+                RequestCredential::Missing => {
                     record_admission_rejection(&req, AdmissionOutcome::Unauthenticated);
                     return Ok(error_response(
                         StatusCode::UNAUTHORIZED,
                         err_code::UNAUTHORIZED,
-                        "Missing Authorization header",
+                        "Missing Authorization or x-api-key header",
+                    ));
+                }
+                RequestCredential::Conflicting => {
+                    record_admission_rejection(&req, AdmissionOutcome::Unauthenticated);
+                    return Ok(error_response(
+                        StatusCode::UNAUTHORIZED,
+                        err_code::UNAUTHORIZED,
+                        "Authorization and x-api-key carry different tokens",
+                    ));
+                }
+                RequestCredential::Unreadable => {
+                    record_admission_rejection(&req, AdmissionOutcome::Unauthenticated);
+                    return Ok(error_response(
+                        StatusCode::UNAUTHORIZED,
+                        err_code::UNAUTHORIZED,
+                        "Invalid token",
                     ));
                 }
             };
@@ -227,27 +243,78 @@ fn is_admin_endpoint(method: &Method, path: &str) -> bool {
 /// Extract the token from an `Authorization` header, accepting
 /// `Bearer <token>` (case-insensitive prefix) or a raw token value.
 ///
-/// Canonical shared implementation: also consumed by `handlers::proxy`
-/// and downstream authentication layers.
+/// Bearer-only library API for downstream authentication layers. This
+/// gateway reads request credentials with [`extract_request_credential`].
+#[allow(dead_code)]
 pub fn extract_bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
-    let header = headers
-        .get("authorization")?
-        .to_str()
-        .ok()?
-        .trim()
-        .to_string();
+    authorization_token(headers.get("authorization")?.to_str().ok()?)
+}
+
+fn authorization_token(header: &str) -> Option<String> {
+    let header = header.trim();
     if header.is_empty() {
         return None;
     }
     let token = if header.to_lowercase().starts_with("bearer ") {
-        header[7..].trim().to_string()
+        header[7..].trim()
     } else {
         header
     };
     if token.is_empty() {
         None
     } else {
-        Some(token)
+        Some(token.to_string())
+    }
+}
+
+/// The credential a request presents.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RequestCredential {
+    Missing,
+    Token(String),
+    /// `Authorization` and `x-api-key` (or repeated headers) carry different tokens.
+    Conflicting,
+    /// A credential header whose value is not visible ASCII.
+    Unreadable,
+}
+
+/// Read the request's token from `Authorization` (`Bearer <token>` or a raw
+/// value, as [`extract_bearer_token`]) or `x-api-key`. Every non-empty value
+/// must carry the same token.
+pub fn extract_request_credential(headers: &axum::http::HeaderMap) -> RequestCredential {
+    let authorization = headers
+        .get_all("authorization")
+        .iter()
+        .map(|value| value.to_str().map(authorization_token));
+    let api_key = headers.get_all("x-api-key").iter().map(|value| {
+        value.to_str().map(|raw| {
+            let raw = raw.trim();
+            (!raw.is_empty()).then(|| raw.to_string())
+        })
+    });
+    let mut found: Option<String> = None;
+    for value in authorization.chain(api_key) {
+        let Ok(token) = value else {
+            return RequestCredential::Unreadable;
+        };
+        let Some(token) = token else {
+            continue;
+        };
+        match &found {
+            None => found = Some(token),
+            Some(existing) if *existing == token => {}
+            Some(_) => return RequestCredential::Conflicting,
+        }
+    }
+    found.map_or(RequestCredential::Missing, RequestCredential::Token)
+}
+
+/// The masked request token for audit records, empty when the request
+/// presents no single readable token.
+pub fn request_token_id(headers: &axum::http::HeaderMap) -> String {
+    match extract_request_credential(headers) {
+        RequestCredential::Token(token) => mask_token(&token),
+        _ => String::new(),
     }
 }
 
@@ -788,6 +855,172 @@ mod tests {
         assert_eq!(
             send(r, Method::GET, "/health", None).await,
             StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> axum::http::HeaderMap {
+        let mut map = axum::http::HeaderMap::new();
+        for (name, value) in pairs {
+            map.append(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                axum::http::HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        map
+    }
+
+    #[test]
+    fn request_credential_reads_either_header() {
+        for pairs in [
+            vec![("authorization", "Bearer tok")],
+            vec![("authorization", "bearer tok")],
+            vec![("authorization", "tok")],
+            vec![("x-api-key", "tok")],
+            vec![("x-api-key", "  tok  ")],
+            vec![("authorization", "Bearer tok"), ("x-api-key", "tok")],
+            vec![("authorization", "Bearer tok"), ("authorization", "tok")],
+            vec![("authorization", ""), ("x-api-key", "tok")],
+        ] {
+            assert_eq!(
+                extract_request_credential(&headers(&pairs)),
+                RequestCredential::Token("tok".into()),
+                "{pairs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn request_credential_refuses_different_tokens() {
+        for pairs in [
+            vec![("authorization", "Bearer tok"), ("x-api-key", "other")],
+            vec![("x-api-key", "tok"), ("x-api-key", "other")],
+            vec![
+                ("authorization", "Bearer tok"),
+                ("authorization", "Bearer other"),
+            ],
+        ] {
+            assert_eq!(
+                extract_request_credential(&headers(&pairs)),
+                RequestCredential::Conflicting,
+                "{pairs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn request_credential_missing_and_unreadable() {
+        assert_eq!(
+            extract_request_credential(&headers(&[])),
+            RequestCredential::Missing
+        );
+        assert_eq!(
+            extract_request_credential(&headers(&[("authorization", ""), ("x-api-key", " ")])),
+            RequestCredential::Missing
+        );
+        let mut map = axum::http::HeaderMap::new();
+        map.insert(
+            "x-api-key",
+            axum::http::HeaderValue::from_bytes(b"t\xffk").unwrap(),
+        );
+        assert_eq!(
+            extract_request_credential(&map),
+            RequestCredential::Unreadable
+        );
+    }
+
+    #[test]
+    fn request_token_id_masks_either_header() {
+        assert_eq!(
+            request_token_id(&headers(&[("x-api-key", "secret-token-123")])),
+            "************-123"
+        );
+        assert_eq!(
+            request_token_id(&headers(&[("authorization", "Bearer secret-token-123")])),
+            "************-123"
+        );
+        assert_eq!(
+            request_token_id(&headers(&[
+                ("authorization", "Bearer a"),
+                ("x-api-key", "b")
+            ])),
+            ""
+        );
+    }
+
+    async fn send_headers(
+        router: Router,
+        method: Method,
+        path: &str,
+        pairs: &[(&str, &str)],
+    ) -> StatusCode {
+        let mut req = HttpRequest::builder().method(method).uri(path);
+        for (name, value) in pairs {
+            req = req.header(*name, *value);
+        }
+        router
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn middleware_accepts_x_api_key() {
+        let cfg = cfg_for_middleware("token", vec!["user"], "admin", false);
+        let r = test_router(Arc::clone(&cfg));
+        assert_eq!(
+            send_headers(r, Method::POST, "/v1/encode/any", &[("x-api-key", "user")]).await,
+            StatusCode::OK
+        );
+        let r = test_router(Arc::clone(&cfg));
+        assert_eq!(
+            send_headers(r, Method::POST, "/v1/encode/any", &[("x-api-key", "bogus")]).await,
+            StatusCode::UNAUTHORIZED
+        );
+        let r = test_router(cfg);
+        assert_eq!(
+            send_headers(
+                r,
+                Method::POST,
+                "/v1/encode/any",
+                &[("authorization", "Bearer user"), ("x-api-key", "user")]
+            )
+            .await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn middleware_refuses_different_tokens_in_the_two_headers() {
+        // A valid token in one header must not carry a request whose other
+        // header names a different token.
+        let cfg = cfg_for_middleware("token", vec!["user", "admin"], "admin", false);
+        for pairs in [
+            [("authorization", "Bearer user"), ("x-api-key", "bogus")],
+            [("authorization", "Bearer bogus"), ("x-api-key", "user")],
+            [("authorization", "Bearer user"), ("x-api-key", "admin")],
+        ] {
+            let r = test_router(Arc::clone(&cfg));
+            assert_eq!(
+                send_headers(r, Method::POST, "/v1/encode/any", &pairs).await,
+                StatusCode::UNAUTHORIZED,
+                "{pairs:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn middleware_admin_routes_accept_the_admin_token_in_x_api_key() {
+        let cfg = cfg_for_middleware("token", vec!["user"], "admin", false);
+        let r = test_router(Arc::clone(&cfg));
+        assert_eq!(
+            send_headers(r, Method::POST, "/v1/pools", &[("x-api-key", "admin")]).await,
+            StatusCode::OK
+        );
+        let r = test_router(cfg);
+        assert_eq!(
+            send_headers(r, Method::POST, "/v1/pools", &[("x-api-key", "user")]).await,
+            StatusCode::FORBIDDEN
         );
     }
 }

@@ -1035,6 +1035,36 @@ as a profile an operator chooses.
 `sie-server` reads its config from `SIE_*` environment variables (Pydantic
 `BaseSettings`). Common knobs:
 
+### Authentication and exposure
+
+| Env var | Default | Effect |
+|--|--|--|
+| `SIE_SERVER_HOST` | `0.0.0.0` | Address `sie-server serve` binds, same as `--host`. `127.0.0.1` accepts connections from this machine only. The default becomes `127.0.0.1` in 0.13.0. |
+| `SIE_AUTH_MODE` | unset | `token` (alias `static`) requires a token on every route except `/healthz`, `/livez` and `/readyz`, including `/ws/status`. `none` turns authentication off. `auto` requires a token when the bind address is not loopback. Unset behaves as `none`, or as `token` when a token is configured. Any other value stops startup. |
+| `SIE_AUTH_TOKENS` | unset | Comma-separated accepted tokens. `SIE_AUTH_TOKEN` is read when it is unset. Setting a token with `SIE_AUTH_MODE=none` stops startup. |
+| `SIE_DATA_DIR` | `$XDG_DATA_HOME/sie`, else `~/.local/share/sie` | Holds the generated token (`auth-token`, mode `0600`) and the telemetry worker id. Images set `/app/.cache/sie`. |
+
+Clients send the token as `Authorization: Bearer <token>` or `x-api-key: <token>`;
+when both are sent they must carry the same token. The SDKs send `SIE_API_KEY`
+as a Bearer token.
+
+When token auth is on and no token is configured, the server generates one on
+first start, saves it in `SIE_DATA_DIR`, and prints it once. Later starts reuse
+it and print only its path. The server refuses a token file that is a symbolic
+link, belongs to another user, or is readable by others. In Docker, keep the
+token across containers with a volume:
+
+```bash
+docker run -p 127.0.0.1:8080:8080 -e SIE_AUTH_MODE=token \
+  -v sie-data:/app/.cache/sie \
+  -v sie-hf-cache:/app/.cache/huggingface \
+  ghcr.io/superlinked/sie-server:latest-cpu-default
+```
+
+A server that listens beyond loopback without authentication logs a warning on
+every start. From 0.13.0 such a server requires a token unless
+`SIE_AUTH_MODE=none` is set explicitly.
+
 ### Memory & OOM resilience
 
 | Env var | Default | Effect |

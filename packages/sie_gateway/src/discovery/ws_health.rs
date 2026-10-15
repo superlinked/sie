@@ -3,6 +3,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::handshake::client::Request;
+use tokio_tungstenite::tungstenite::http::header::{HeaderValue, AUTHORIZATION};
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
 
@@ -11,13 +14,17 @@ use crate::types::WorkerStatusMessage;
 
 pub struct WsHealthManager {
     registry: Arc<WorkerRegistry>,
+    worker_authorization: Option<HeaderValue>,
     cancels: Mutex<HashMap<String, tokio::sync::watch::Sender<()>>>,
 }
 
 impl WsHealthManager {
-    pub fn new(registry: Arc<WorkerRegistry>) -> Self {
+    /// `worker_authorization` is the `Authorization` value presented on every
+    /// worker `/ws/status` dial.
+    pub fn new(registry: Arc<WorkerRegistry>, worker_authorization: Option<HeaderValue>) -> Self {
         Self {
             registry,
+            worker_authorization,
             cancels: Mutex::new(HashMap::new()),
         }
     }
@@ -56,8 +63,9 @@ impl WsHealthManager {
         cancels.insert(url.clone(), tx);
 
         let registry = Arc::clone(&self.registry);
+        let authorization = self.worker_authorization.clone();
         tokio::spawn(async move {
-            connect_to_worker(registry, url, rx).await;
+            connect_to_worker(registry, url, authorization, rx).await;
         });
     }
 
@@ -83,6 +91,7 @@ impl WsHealthManager {
 async fn connect_to_worker(
     registry: Arc<WorkerRegistry>,
     url: String,
+    authorization: Option<HeaderValue>,
     mut cancel: tokio::sync::watch::Receiver<()>,
 ) {
     let ws_url = url
@@ -99,7 +108,15 @@ async fn connect_to_worker(
             }
         }
 
-        match run_ws_connection(&registry, &url, &ws_url, &mut cancel).await {
+        match run_ws_connection(
+            &registry,
+            &url,
+            &ws_url,
+            authorization.as_ref(),
+            &mut cancel,
+        )
+        .await
+        {
             Ok(()) => return, // Cancelled
             Err(e) => {
                 warn!(url = %ws_url, error = %e, "websocket error");
@@ -118,15 +135,28 @@ async fn connect_to_worker(
     }
 }
 
+fn status_request(
+    ws_url: &str,
+    authorization: Option<&HeaderValue>,
+) -> Result<Request, Box<dyn std::error::Error + Send + Sync>> {
+    let mut request = ws_url.into_client_request()?;
+    if let Some(value) = authorization {
+        request.headers_mut().insert(AUTHORIZATION, value.clone());
+    }
+    Ok(request)
+}
+
 async fn run_ws_connection(
     registry: &Arc<WorkerRegistry>,
     http_url: &str,
     ws_url: &str,
+    authorization: Option<&HeaderValue>,
     cancel: &mut tokio::sync::watch::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!(url = %ws_url, "connecting to worker");
 
-    let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url).await?;
+    let request = status_request(ws_url, authorization)?;
+    let (ws_stream, _) = tokio_tungstenite::connect_async(request).await?;
     info!(url = %ws_url, "connected to worker");
 
     let (_, mut read) = ws_stream.split();
@@ -176,5 +206,60 @@ async fn run_ws_connection(
                 return Ok(());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::handshake::server::{
+        Request as ServerRequest, Response as ServerResponse,
+    };
+
+    async fn authorization_seen_by_worker(authorization: Option<HeaderValue>) -> Option<String> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let registry = Arc::new(WorkerRegistry::new(Duration::from_secs(30), None));
+        let manager = WsHealthManager::new(registry, authorization);
+        manager.add_worker(format!("http://{addr}")).await;
+
+        let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let _socket = tokio_tungstenite::accept_hdr_async(
+            stream,
+            move |request: &ServerRequest, response: ServerResponse| {
+                let header = request
+                    .headers()
+                    .get(AUTHORIZATION)
+                    .map(|value| value.to_str().unwrap().to_string());
+                tx.send((request.uri().path().to_string(), header)).unwrap();
+                Ok(response)
+            },
+        )
+        .await
+        .unwrap();
+        manager.stop().await;
+
+        let (path, header) = rx.recv().unwrap();
+        assert_eq!(path, "/ws/status");
+        header
+    }
+
+    #[tokio::test]
+    async fn worker_dial_presents_the_worker_token() {
+        let value = HeaderValue::from_static("Bearer worker-secret");
+        assert_eq!(
+            authorization_seen_by_worker(Some(value)).await.as_deref(),
+            Some("Bearer worker-secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_dial_without_a_token_sends_no_authorization() {
+        assert_eq!(authorization_seen_by_worker(None).await, None);
     }
 }

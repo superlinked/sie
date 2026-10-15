@@ -29,6 +29,7 @@ from sie_server.config.upstreams import install_upstreams, load_upstreams
 from sie_server.core.memory import MemoryConfig
 from sie_server.core.readiness import mark_not_ready, mark_ready, register_liveness_probe
 from sie_server.core.registry import ModelRegistry
+from sie_server.core.server_auth import ServerAuthMiddleware, server_tokens
 from sie_server.core.shutdown import ShutdownMiddleware, ShutdownState, setup_signal_handlers
 from sie_server.ipc_server import IpcServer
 from sie_server.observability.gpu import _init_nvml, shutdown_nvml
@@ -85,6 +86,8 @@ class AppFactory:
         )
         # Add graceful shutdown middleware (for spot instance preemption)
         app.add_middleware(ShutdownMiddleware, shutdown_state=shutdown_state)
+        if config.auth_mode == "token":
+            app.add_middleware(ServerAuthMiddleware, tokens=server_tokens(os.environ))
 
         install_upstreams(
             load_upstreams(config.upstreams_file) if config.upstreams_file else {},
