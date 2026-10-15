@@ -220,6 +220,12 @@ def _evidence(run: dict[str, Any]) -> dict[str, Any]:
     return {key: run[key] for key in keys if key in run}
 
 
+def _on_lane_image(run: dict[str, Any] | None, lane: dict[str, Any]) -> bool:
+    """Whether a smoke run tested this lane's exact recorded image digest."""
+    digest = lane["digest"]
+    return run is not None and digest is not None and run.get("image", "").endswith(f"@{digest}")
+
+
 def cell(
     lane: dict[str, Any] | None,
     route: str,
@@ -246,7 +252,7 @@ def cell(
     if lane["platform"] == "cpu" and adapter.startswith(CUDA_ONLY_ADAPTER_PREFIXES):
         return {**record, "status": "unsupported", "reason": f"the {lane['engine']} engine serves on CUDA only"}
     key = (lane["lane"], route)
-    if key in passed and (lane["digest"] is None or passed[key].get("image", "").endswith(lane["digest"])):
+    if _on_lane_image(passed.get(key), lane):
         run = passed[key]
         return {
             **record,
@@ -254,7 +260,7 @@ def cell(
             "reason": f"GPU smoke passed on {run['gpu']} (driver {run['driver']}) on {run['date']}",
             "evidence": _evidence(run),
         }
-    if key in failed:
+    if _on_lane_image(failed.get(key), lane):
         run = failed[key]
         return {
             **record,
@@ -263,11 +269,6 @@ def cell(
             "evidence": _evidence(run),
         }
     reason = "routed to this lane's bundle; no smoke test of this image backs it"
-    if lane["engine"] == "sglang":
-        reason = (
-            "routed to this lane's bundle and its launch flags parse with the lane's engine; "
-            "no smoke test of this image backs it"
-        )
     return {**record, "status": "declared", "reason": reason}
 
 

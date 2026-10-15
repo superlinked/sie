@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from functools import cache
 
 import pytest
@@ -167,17 +168,34 @@ def test_a_run_on_another_digest_is_not_evidence_for_this_release():
     assert result["summary"]["tested"] == 0
 
 
-def test_a_conclusive_failure_is_unsupported_with_its_cause():
+def test_runs_without_a_recorded_lane_digest_classify_nothing():
     image = "ghcr.io/superlinked/sie-server@sha256:" + "a" * 64
+    tested = {
+        "runs": [
+            run("cuda12-sglang", "Qwen/Qwen3-0.6B", image),
+            run("cuda12-sglang", "Qwen/Qwen3-4B-Instruct-2507", image, result="failed", conclusive=True, detail="x"),
+        ]
+    }
+    result = matrix.build(matrix.ROOT, "0.0.0", floors=floors(), tested=tested)
+    cells = {(cell["lane"], cell["variant_id"]): cell for cell in result["cells"]}
+
+    assert result["summary"]["tested"] == 0
+    assert cells["cuda12-sglang", "Qwen/Qwen3-4B-Instruct-2507"]["status"] == "declared"
+
+
+def test_a_conclusive_failure_is_unsupported_with_its_cause():
+    digest = "sha256:" + "a" * 64
+    image = f"ghcr.io/superlinked/sie-server@{digest}"
     tested = {
         "runs": [
             run("cuda12-sglang", "Qwen/Qwen3-0.6B", image, result="failed", conclusive=True, detail="out of memory"),
             run("cuda12-sglang", "Qwen/Qwen3-4B-Instruct-2507", image, result="failed", conclusive=False, detail="x"),
         ]
     }
+    metadata = {"cuda12-sglang": {"digest": digest}}
     cells = {
         (cell["lane"], cell["variant_id"]): cell
-        for cell in matrix.build(matrix.ROOT, "0.0.0", floors=floors(), tested=tested)["cells"]
+        for cell in matrix.build(matrix.ROOT, "0.0.0", floors=floors(), metadata=metadata, tested=tested)["cells"]
     }
 
     assert cells["cuda12-sglang", "Qwen/Qwen3-0.6B"]["status"] == "unsupported"
@@ -210,8 +228,16 @@ def test_diff_lists_status_and_driver_changes():
 
 
 @pytest.mark.parametrize("path", sorted(DOCS.glob("sie-compatibility-v*.json")), ids=lambda path: path.name)
-def test_committed_docs_page_renders_from_the_committed_matrix(path):
+def test_committed_matrices_carry_the_current_schema_and_their_release(path):
     committed = json.loads(path.read_text())
 
     assert committed["schema"] == matrix.SCHEMA
-    assert matrix.render_markdown(committed) == (matrix.ROOT / "docs/compatibility.md").read_text()
+    assert path.name == f"sie-compatibility-v{committed['release']}.json"
+
+
+def test_committed_docs_page_renders_from_the_matrix_it_names():
+    page = (matrix.ROOT / "docs/compatibility.md").read_text()
+    source = re.search(r"from (docs/compatibility/sie-compatibility-v[0-9.]+\.json)", page)
+
+    assert source is not None
+    assert matrix.render_markdown(json.loads((matrix.ROOT / source[1]).read_text())) == page

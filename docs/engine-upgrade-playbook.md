@@ -78,10 +78,15 @@ current release:
 
 ```console
 $ mise exec -- uv run --frozen --project . python -m tools.ci.compatibility_matrix generate \
-    --version <next-version> --output /tmp/next.json
+    --version <next-version> --evidence <tier-1-evidence>.json --output /tmp/next.json
 $ mise exec -- uv run --frozen --project . python -m tools.ci.compatibility_matrix diff \
     docs/compatibility/sie-compatibility-v<current>.json /tmp/next.json
 ```
+
+The evidence file has the shape of `docs/compatibility/gpu-smoke-v0.10.1.json`:
+the image digest of each lane under `images`, and one entry per smoke run under
+`runs`. Without it every cell of the new release is at most `declared`, and the
+diff shows lost evidence instead of the upgrade's outcome.
 
 The diff lists every cell whose status changed and every lane whose engine
 version, CUDA runtime or minimum driver changed. A raised minimum driver, or a
