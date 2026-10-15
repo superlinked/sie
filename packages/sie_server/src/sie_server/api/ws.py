@@ -66,8 +66,8 @@ def get_server_info() -> ServerInfo:
     """Get server metadata.
 
     Returns:
-        ServerInfo with version and uptime. ``user``, ``working_dir`` and
-        ``pid`` are deprecated and always empty.
+        ServerInfo with version and uptime. ``user`` and ``working_dir`` are
+        deprecated and always empty; ``pid`` is deprecated and always ``0``.
     """
     global _server_start_time
     if _server_start_time is None:
