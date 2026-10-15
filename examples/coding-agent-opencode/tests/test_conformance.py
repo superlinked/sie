@@ -118,7 +118,8 @@ def _long_call(body: dict[str, Any]) -> dict[str, Any]:
     SEEN["long_calls"].append(body)
     mode = KNOBS.get("long_call", "write")
     lines = 10 if mode == "short" else conformance.LONG_CALL_LINES
-    arguments = {"path": "notes/pangrams.txt", "content": "\n".join([conformance.LONG_CALL_SENTENCE] * lines)}
+    content = "\n".join(conformance.long_call_line(number) for number in range(1, lines + 1))
+    arguments = {"path": "notes/pangrams.txt", "content": content}
     if mode == "decline":
         return {"content": "That file is too long to write in one call.", "finish": "stop"}
     if mode == "error":

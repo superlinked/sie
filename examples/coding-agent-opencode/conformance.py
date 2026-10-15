@@ -57,13 +57,14 @@ RECORDED_HEADERS = ("x-sie-served-by", "x-sie-model-revision")
 REASONING_QUESTION = "Which is larger, 9.11 or 9.9? Answer with just the larger number."
 LONG_CALL_MIN_BYTES = 65_536
 LONG_CALL_BUDGET = 32_000
-LONG_CALL_LINES = 1_500
+LONG_CALL_LINES = 1_320
 LONG_CALL_SENTENCE = "The quick brown fox jumps over the lazy dog."
 LONG_CALL_PROMPT = (
-    "Use the write_file tool once to create the file notes/pangrams.txt. Its content must be the sentence "
-    f'"{LONG_CALL_SENTENCE}" on {LONG_CALL_LINES:,} lines, one copy per line, about '
-    f"{LONG_CALL_LINES * (len(LONG_CALL_SENTENCE) + 1):,} characters in all. Write every line out in full in that "
-    "one call: no ellipsis, no placeholder, no summary and no code that generates the lines."
+    f"Use the write_file tool once to create the file notes/pangrams.txt. Its content must be {LONG_CALL_LINES:,} "
+    f"lines numbered 0001 to {LONG_CALL_LINES:04d}: each line is its four-digit number, one space and the sentence "
+    f'"{LONG_CALL_SENTENCE}", about {LONG_CALL_LINES * (len(LONG_CALL_SENTENCE) + 6):,} characters in all. Write '
+    "every line out in full in that one call: no ellipsis, no placeholder, no summary and no code that generates "
+    "the lines."
 )
 
 WEATHER_TOOL = {
@@ -759,6 +760,10 @@ def case_tool_choice_required(client: openai.OpenAI, model: str) -> Case:
     )
 
 
+def long_call_line(number: int) -> str:
+    return f"{number:04d} {LONG_CALL_SENTENCE}"
+
+
 def case_long_tool_call(client: openai.OpenAI, model: str, tool_params: dict[str, Any]) -> Case:
     name = "long_tool_call"
     messages = [{"role": "user", "content": LONG_CALL_PROMPT}]
@@ -802,7 +807,9 @@ def case_long_tool_call(client: openai.OpenAI, model: str, tool_params: dict[str
         return Case(name, "fail", detail, observed)
     content = next((args.get("content") for args in arguments if args and isinstance(args.get("content"), str)), "")
     observed["content_lines"] = len(content.splitlines())
-    observed["lines_as_asked"] = sum(line.strip() == LONG_CALL_SENTENCE for line in content.splitlines())
+    observed["lines_as_asked"] = sum(
+        line.strip() == long_call_line(number) for number, line in enumerate(content.splitlines(), 1)
+    )
     kib = size / 1024
     if size < LONG_CALL_MIN_BYTES:
         detail = f"the model wrote {kib:.1f} KiB of arguments, under the {LONG_CALL_MIN_BYTES // 1024} KiB asked for"
