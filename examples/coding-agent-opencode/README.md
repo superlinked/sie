@@ -421,11 +421,11 @@ took 7 steps and 6 tool calls.
 
 `Qwen/Qwen3.8-27B-FP8:h100-256k-batch` on one NVIDIA H100 80GB HBM3 with 8 CPU
 cores and 64 GiB of memory, 2026-10-15. `sie-server` ran from this repository
-at commit `461c5a58` with the `sglang-cu130` bundle (SGLang 0.5.20), started
-as `sie-server serve -b sglang-cu130 --preload
-Qwen/Qwen3.8-27B-FP8:h100-256k-batch`. The `docker run` line above starts the
-same server, profile and bundle from the published image; the runs below did
-not use the image.
+with the `sglang-cu130` bundle (SGLang 0.5.20), started as `sie-server serve
+-b sglang-cu130 --preload Qwen/Qwen3.8-27B-FP8:h100-256k-batch`, in three
+sessions on machines of that kind. Each result below names the commit it was
+recorded at. The `docker run` line above starts the same server, profile and
+bundle from the published image; the runs below did not use the image.
 
 What the engine reported once loaded:
 
@@ -434,9 +434,11 @@ What the engine reported once loaded:
 - up to 32 requests decoding at once;
 - 28.5 GB of weights and 19.8 GB of KV cache.
 
-The server answered its first request 197 s after it started in a new
-container, with the weights already downloaded, and 76 s after a restart in the
-same container, with the kernels already compiled.
+The server answered its first request 197 s and 229 s after it started in two
+new containers, with the weights already downloaded, and 76 s after a restart
+in the same container, with the kernels already compiled.
+
+The conformance check at commit `ac9902d3`:
 
 ```
 model Qwen/Qwen3.8-27B-FP8:h100-256k-batch at http://localhost:8080/v1
@@ -453,29 +455,28 @@ served by local
   usage_on_final_chunk        pass      final chunk carries usage {'completion_tokens': 2, 'prompt_tokens': 20, 'total_tokens': 22, 'reasoning_tokens': 0}
   include_reasoning           pass      the model did not reason here (5 completion tokens for '9.11'); no reasoning to return
   tool_choice_required        recorded  supported: forced get_weather({"city": "Paris"})
-  long_tool_call              pass      65.8 KiB of arguments in 1 call (1320 lines), streamed over 244 s, longest gap between chunks 243.4 s
+  long_tool_call              pass      65.8 KiB of arguments in 1 call (1320 lines), streamed over 235 s, longest gap between chunks 235.0 s
 
 11 pass, 0 fail, 1 recorded
 ```
 
 - The long call came back with all 1,320 lines as asked: 19,840 completion
-  tokens in 244 s, 81 tok/s. The engine's `qwen3_coder` parser streams a call's
+  tokens in 235 s, 84 tok/s. The engine's `qwen3_coder` parser streams a call's
   name and short arguments as they are generated but holds a long argument
-  until it closes, so this stream sent nothing for 243 s. At this commit
-  `sie-server` ended a stream that sent nothing for 300 s, so an argument that
-  took longer than that to generate was cut off: about 24,000 tokens for a
-  session alone on the GPU, fewer when other sessions share it. From commit
-  `00d7d732` it writes an SSE comment every 15 s while the engine holds a
-  tool call, and allows the call the profile's overall budget of 1,800 s. The
-  case passed there too, with the same 239 s between chunks, since a comment
-  is not a chunk.
+  until it closes, so this stream sent no chunk for 235 s. `sie-server` writes
+  an SSE comment every 15 s while the engine holds a tool call, which keeps a
+  client's idle timer running without adding a chunk, and allows the call the
+  profile's overall budget of 1,800 s. Before commit `00d7d732` it ended a
+  stream that sent nothing for 300 s instead: at commit `461c5a58` the case
+  passed with 243 s of silence, but an argument that took longer than 300 s to
+  generate was cut off.
 - This profile does not think, so `include_reasoning` returns nothing. Its
   answer, 9.11, is wrong; the case does not judge answers.
 - The usage on this route carries no `cached_tokens`: the engine's cache report
   is off for this profile. The session load below shows the cache at work
   through the time to the first token.
 
-`./run_gate.sh gpu` on the same server, with OpenCode 1.19.0 and no global
+`./run_gate.sh gpu` at commit `461c5a58`, with OpenCode 1.19.0 and no global
 OpenCode config, before the recipe set `presence_penalty`, OpenCode's JSON
 event lines left out:
 
@@ -496,34 +497,44 @@ Five runs in a row passed at the profile's `presence_penalty` of 1.5. Each
 took 5 steps and 4 tool calls (`bash`, `read`, `edit`, `bash`), 8 to 9 seconds
 from OpenCode's first event to its last, with at most 8,957 input tokens on a
 step. Five more runs with the recipe's `presence_penalty: 0` also passed, with
-5 or 6 steps, 4 to 8 tool calls and at most 9,723 input tokens. The seeded
-gate does not tell the two settings apart; BFCL below does.
+5 or 6 steps, 4 to 8 tool calls and at most 9,723 input tokens, and so did
+three more at commit `00d7d732`. The seeded gate does not tell the two
+settings apart; BFCL below does.
 
-`session_load.py` with its defaults, sessions growing to about 61,000 tokens,
-and with `--turn-tokens 12000 --turns 9`, growing to about 128,000:
+`session_load.py` at commit `ac9902d3`, with its defaults, sessions growing to
+about 61,000 tokens, and with `--turn-tokens 12000 --turns 9`, growing to about
+128,000:
 
 | Sessions | Largest prompt | Decode p50 / p90, tok/s | Returning-turn first token p50 / p90 | Bar |
 |---|---|---|---|---|
-| 1 | 61,274 | 76.4 / 74.2 | 0.66 / 0.76 s | meets |
-| 2 | 61,252 | 69.7 / 63.5 | 0.85 / 1.07 s | meets |
-| 4 | 61,263 | 62.9 / 54.1 | 1.30 / 1.89 s | meets |
-| 6 | 61,278 | 53.6 / 41.8 | 0.98 / 2.82 s | meets |
-| 8 | 61,254 | 49.2 / 31.8 | 2.39 / 3.65 s | misses: first token |
-| 1 | 128,203 | 71.7 / 67.5 | 1.53 / 2.00 s | meets |
-| 2 | 128,288 | 64.2 / 50.5 | 2.06 / 2.60 s | meets |
-| 3 | 128,214 | 47.5 / 40.4 | 2.65 / 4.21 s | misses: first token |
+| 1 | 61,002 | 79.1 / 77.1 | 0.73 / 1.43 s | meets |
+| 2 | 60,879 | 72.0 / 60.8 | 0.97 / 1.12 s | meets |
+| 4 | 61,262 | 56.9 / 51.5 | 1.18 / 1.91 s | meets |
+| 6 | 61,200 | 47.5 / 40.7 | 0.88 / 2.81 s | meets |
+| 8 | 61,293 | 42.4 / 33.0 | 1.10 / 3.63 s | misses: first token |
+| 1 | 127,910 | 74.6 / 70.6 | 1.61 / 2.10 s | meets |
+| 2 | 128,251 | 65.4 / 47.0 | 2.08 / 2.39 s | meets |
+| 3 | 128,183 | 57.9 / 36.4 | 2.03 / 2.87 s | meets |
 
 - One H100 holds **6 sessions at about 61,000 tokens each, or 2 at about
-  128,000**, within the bar. No turn failed at any count.
+  128,000**, within the bar, on this route and through the gateway below. No
+  turn failed at any count.
+- Three sessions at about 128,000 are at the edge. They met the bar here
+  with 2.87 s at p90, missed it through the gateway below with 5.14 s, and
+  missed it on this route in an earlier sweep at commit `461c5a58` with
+  4.21 s. That sweep gave the same verdict as this one at every other count.
 - The prefix cache carries a session from turn to turn. A returning turn with
-  a 61,000-token prompt reached its first token in 0.66 s with one session,
+  a 61,000-token prompt reached its first token in 0.73 s with one session,
   which is the time to prefill only the new input.
+- The model often stopped before 500 tokens on later turns: answers averaged
+  410 to 455 tokens a session count at 61,000 and 350 to 440 at 128,000. The
+  recipes' `presence_penalty: 0` was not applied here.
 - Six 61,000-token sessions fit a 325,056-token cache because the shared
   16,000-token system prompt is stored once.
 - The profile's 32 requests decoding at once is a scheduler limit, not a
   session count.
 
-BFCL v3 with the harness and settings of
+BFCL v3 at commit `461c5a58`, with the harness and settings of
 [the SIE Relay record](#bfcl-through-sie-relay): the full `simple` split and
 the same 200-row `multiple` subsample, one request at a time, greedy decoding,
 an output cap of 8,192 tokens, `tool_choice: "auto"`, and dotted function
@@ -547,7 +558,8 @@ names sent with `_`. Both routes ran on the same GPU, the cluster route as
   closer to the model's training format was not established.
 
 One real issue on this repository, run twice through the single-server
-recipe: [issue #717](https://github.com/superlinked/sie/issues/717), a
+recipe at commit `461c5a58`:
+[issue #717](https://github.com/superlinked/sie/issues/717), a
 metering bug in the GLiNER adapters, on a checkout of commit `03dd3fd3`.
 OpenCode was asked to fix it, add a regression test and run it, with a
 100-step budget and no other help:
@@ -568,11 +580,10 @@ OpenCode was asked to fix it, add a regression test and run it, with a
 The same model, profile and H100, served the way a cluster serves it: this
 repository's `sie-gateway`, NATS, `sie-server-sidecar` and one `sie-server`
 worker, on one machine, with the gateway on `127.0.0.1:31000`. The worker was
-ready 100 s after the stack started when the kernels were already compiled,
-and 270 s after in a new container.
+ready 100 s and 161 s after the stack started when the kernels were already
+compiled, and 270 s after in a new container.
 
-The conformance check at commit `00d7d732`, which keeps a chat stream alive
-while a long tool call is generated:
+The conformance check at commit `ac9902d3`:
 
 ```
 model Qwen/Qwen3.8-27B-FP8:h100-256k-batch at http://127.0.0.1:31000/v1
@@ -589,20 +600,21 @@ served by local
   usage_on_final_chunk        pass      final chunk carries usage {'completion_tokens': 2, 'prompt_tokens': 20, 'total_tokens': 22, 'prompt_tokens_details': {'cached_tokens': 0}}
   include_reasoning           pass      the model did not reason here (5 completion tokens for '9.11'); no reasoning to return
   tool_choice_required        recorded  supported: forced get_weather({"city":"Paris"})
-  long_tool_call              pass      65.8 KiB of arguments in 1 call (1320 lines), streamed over 240 s, longest gap between chunks 0.1 s
+  long_tool_call              pass      65.8 KiB of arguments in 1 call (1320 lines), streamed over 235 s, longest gap between chunks 0.1 s
 
 11 pass, 0 fail, 1 recorded
 ```
 
 - The long call came back whole: 19,840 completion tokens, all 1,320 lines as
   asked. The gateway passes on an empty chunk while the worker holds a call,
-  so the stream never went quiet for more than 0.1 s. At commit `461c5a58`,
-  before that change, the same case failed after 30 s with
-  `inter_chunk_timeout`, with no argument bytes delivered.
+  so the stream never went quiet for more than 0.1 s. Before commit
+  `00d7d732` the gateway ended a stream after 30 s without a chunk: at commit
+  `461c5a58` the case failed after 30 s with `inter_chunk_timeout`, with no
+  argument bytes delivered.
 - This route reports `cached_tokens` in the usage, which the session load
   below reads.
-- One request with a 1.1 MB body, a 196,449-token prompt, was answered in
-  23 s.
+- At commit `461c5a58`, one request with a 1.1 MB body, a 196,449-token
+  prompt, was answered in 23 s.
 
 The seeded gate, `./run_gate.sh cluster` with `SIE_BASE_URL` set to the
 gateway, passed 5 of 5 runs at the profile's `presence_penalty` of 1.5, at
@@ -610,26 +622,30 @@ commit `461c5a58`, and 3 of 3 with the recipe's `presence_penalty: 0`, at
 commit `00d7d732`. Each run took 5 steps and 4 or 5 tool calls, 7 to 9
 seconds, with at most 9,240 input tokens on a step.
 
-BFCL is in [the table above](#one-gpu-qwen38-27b-fp8-recorded). The session
-load below was recorded at commit `461c5a58`.
+BFCL is in [the table above](#one-gpu-qwen38-27b-fp8-recorded).
 
-`session_load.py` through the gateway:
+`session_load.py` through the gateway at commit `ac9902d3`:
 
 | Sessions | Largest prompt | Decode p50 / p90, tok/s | Returning-turn first token p50 / p90 | Returning-turn prompt cached | Bar |
 |---|---|---|---|---|---|
-| 1 | 60,992 | 76.9 / 74.2 | 0.66 / 0.75 s | 86.3% | meets |
-| 2 | 61,105 | 71.9 / 63.6 | 0.80 / 1.08 s | 86.2% | meets |
-| 4 | 61,265 | 62.8 / 54.7 | 1.67 / 2.03 s | 86.2% | meets |
-| 6 | 61,274 | 53.4 / 38.7 | 1.23 / 2.51 s | 86.2% | meets |
-| 8 | 61,266 | 46.8 / 34.7 | 2.10 / 3.59 s | 86.3% | misses: first token |
-| 1 | 127,973 | 72.3 / 67.9 | 1.57 / 1.96 s | 85.6% | meets |
-| 2 | 127,742 | 61.2 / 43.6 | 1.84 / 2.15 s | 85.5% | meets |
+| 1 | 61,106 | 79.2 / 77.0 | 0.67 / 0.77 s | 86.3% | meets |
+| 2 | 61,207 | 72.9 / 65.9 | 0.78 / 1.07 s | 86.3% | meets |
+| 4 | 61,263 | 66.0 / 51.7 | 1.60 / 2.06 s | 86.3% | meets |
+| 6 | 61,273 | 54.3 / 37.1 | 1.30 / 2.46 s | 86.2% | meets |
+| 8 | 61,294 | 48.8 / 32.9 | 2.44 / 3.85 s | 86.3% | misses: first token |
+| 1 | 127,560 | 74.5 / 70.4 | 1.58 / 2.00 s | 85.5% | meets |
+| 2 | 127,991 | 67.7 / 50.7 | 1.82 / 2.26 s | 85.5% | meets |
+| 3 | 128,187 | 59.0 / 36.8 | 3.18 / 5.14 s | 83.7% | misses: first token |
 
-- The gateway adds nothing measurable to the single server's capacity: 6
-  sessions at about 61,000 tokens and 2 at about 128,000 meet the bar on both.
-- About 86% of each returning turn's prompt came from the cache. The rest,
-  about 6,200 tokens a turn on average, is the size of the turn's new input,
-  so what the session sends again is reused.
+- The gateway gives the same capacity as the single server: 6 sessions at
+  about 61,000 tokens and 2 at about 128,000 meet the bar on both. A sweep at
+  commit `461c5a58` gave the same verdicts at the counts it ran, 1 to 8 at
+  61,000 and 1 and 2 at 128,000.
+- What a session sends again is served from the cache. On a returning turn the
+  uncached part averaged 6,150 tokens at 61,000 and 12,150 at 128,000, the
+  size of the turn's new input. With 3 sessions at 128,000 the three
+  transcripts no longer fit the cache together, some turns had up to 37,307
+  tokens to prefill again, and the first token came later.
 
 The same real issue as above, once through the cluster recipe with
 `presence_penalty: 0` at commit `00d7d732`: 100 steps and 104 tool calls in
