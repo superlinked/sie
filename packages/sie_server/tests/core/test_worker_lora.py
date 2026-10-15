@@ -86,7 +86,7 @@ class TestModelWorkerLoRABatching:
         finally:
             await worker.stop()
 
-        assert "gone" in str(raised.value)
+        assert "gone" not in str(raised.value)
         assert "org/private-lora" not in str(raised.value)
         assert result.output.dense is not None
 

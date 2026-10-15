@@ -37,8 +37,10 @@ from sie_server.ipc_types import (
     ExtractBatchItem,
     ProcessEncodeBatchRequest,
     ProcessExtractBatchRequest,
+    ProcessScoreBatchRequest,
     RunBatchItem,
     RunBatchRequest,
+    ScoreBatchItem,
 )
 from sie_server.queue_executor import QueueExecutor
 
@@ -101,7 +103,7 @@ def _model_yaml(profiles: dict[str, dict[str, Any]]) -> str:
         "sie_id": MODEL,
         "package_backed": True,
         "inputs": {"text": True},
-        "tasks": {"encode": {"dense": {"dim": 4}}, "extract": {}},
+        "tasks": {"encode": {"dense": {"dim": 4}}, "extract": {}, "score": {}},
         "profiles": {
             "default": {
                 "adapter_path": "tiny_lora_adapter.py:TinyLoraAdapter",
@@ -112,8 +114,9 @@ def _model_yaml(profiles: dict[str, dict[str, Any]]) -> str:
     }
     for name, spec in profiles.items():
         adapter_options: dict[str, Any] = {}
-        if "lora_id" in spec:
-            adapter_options["runtime"] = {"lora_id": spec["lora_id"]}
+        runtime = {key: spec[key] for key in ("lora_id", "lora") if key in spec}
+        if runtime:
+            adapter_options["runtime"] = runtime
         if "lora_paths" in spec:
             adapter_options["loadtime"] = {"dense_dim": 4, "lora_paths": spec["lora_paths"]}
         config["profiles"][name] = {"extends": "default", "adapter_options": adapter_options}
@@ -134,6 +137,20 @@ def _save_lora(helpers: ModuleType, path: Path, **config_overrides: Any) -> str:
     return str(path)
 
 
+def _save_rank_mismatched_lora(helpers: ModuleType, path: Path) -> str:
+    torch.manual_seed(1)
+    trained = get_peft_model(
+        helpers.tiny_encoder(),
+        LoraConfig(r=2, target_modules=["query", "out"], bias="none", init_lora_weights=False),
+    )
+    trained.save_pretrained(str(path))
+    weights = path / "adapter_model.safetensors"
+    tensors = load_file(str(weights))
+    tensors["base_model.model.out.lora_A.weight"] = torch.ones(3, 4)
+    save_file(tensors, str(weights))
+    return str(path)
+
+
 def _base_vector(helpers: ModuleType, text: str) -> np.ndarray:
     with torch.no_grad():
         return helpers.tiny_encoder()(helpers.features(text).unsqueeze(0))[0].numpy()
@@ -144,6 +161,21 @@ def _encode(url: str, text: str, options: dict[str, Any] | None = None) -> httpx
     if options is not None:
         body["params"] = {"options": options}
     return httpx.post(f"{url}/v1/encode/{MODEL}", json=body, headers={"Accept": "application/json"}, timeout=10)
+
+
+def _extract(url: str, options: dict[str, Any] | None = None) -> httpx.Response:
+    params: dict[str, Any] = {"labels": ["thing"]}
+    if options is not None:
+        params["options"] = options
+    body = {"items": [{"text": "hello"}], "params": params}
+    return httpx.post(f"{url}/v1/extract/{MODEL}", json=body, headers={"Accept": "application/json"}, timeout=10)
+
+
+def _score(url: str, options: dict[str, Any] | None = None) -> httpx.Response:
+    body: dict[str, Any] = {"query": {"text": "hello"}, "items": [{"text": "world"}]}
+    if options is not None:
+        body["options"] = options
+    return httpx.post(f"{url}/v1/score/{MODEL}", json=body, headers={"Accept": "application/json"}, timeout=10)
 
 
 def _encode_when_ready(url: str, text: str, options: dict[str, Any] | None = None) -> httpx.Response:
@@ -355,6 +387,8 @@ class TestDirectEncodeRoute:
             first = _encode(server.url, "hello", {"profile": "missing"})
             assert first.status_code == 503, first.text
             assert _error_code(first) == "LORA_LOADING"
+            assert "profile 'missing'" in first.text
+            assert missing not in first.text
             deadline = time.monotonic() + 10
             while not server.app.state.registry.lora_load_failed(MODEL, missing):
                 assert time.monotonic() < deadline, "the failing load was not recorded"
@@ -365,7 +399,66 @@ class TestDirectEncodeRoute:
                 assert response.status_code == 503, response.text
                 assert _error_code(response) == "LORA_LOADING"
                 assert int(response.headers["Retry-After"]) > 1
+                assert missing not in response.text
             assert server.fetches().count(missing) == fetches
+            own = _encode(server.url, "hello", {"profile": "missing", "lora_id": missing})
+            assert own.status_code == 503, own.text
+            assert missing in own.text
+
+    def test_a_caller_who_names_only_the_profile_is_not_told_its_adapter_source(
+        self, tmp_path: Path, helpers: ModuleType, serve: Any
+    ) -> None:
+        selected = str(tmp_path / "selected-lora")
+        loaded = str(tmp_path / "loaded-lora")
+
+        with serve({"selects": {"lora_paths": [selected], "lora": selected}, "loads": {"lora_id": loaded}}) as server:
+            _encode_when_ready(server.url, "warm")
+            for profile in ("selects", "loads"):
+                for _ in range(3):
+                    response = _encode(server.url, "hello", {"profile": profile})
+                    assert response.status_code == 503, response.text
+                    assert _error_code(response) == "LORA_LOADING"
+                    assert str(tmp_path) not in response.text
+            deadline = time.monotonic() + 30
+            while True:
+                response = httpx.post(
+                    f"{server.url}/v1/embeddings", json={"model": f"{MODEL}:loads", "input": "hello"}, timeout=10
+                )
+                assert response.status_code == 503, response.text
+                assert str(tmp_path) not in response.text
+                if "LORA_LOADING" in response.text:
+                    break
+                assert time.monotonic() < deadline, response.text
+                time.sleep(0.05)
+
+    @pytest.mark.parametrize("after_a_loaded_lora", [False, True])
+    def test_a_declared_lora_whose_attach_fails_leaves_the_base_model_unchanged(
+        self, tmp_path: Path, helpers: ModuleType, serve: Any, after_a_loaded_lora: bool
+    ) -> None:
+        broken = _save_rank_mismatched_lora(helpers, tmp_path / "broken-lora")
+        profiles: dict[str, dict[str, Any]] = {"broken": {"lora_id": broken}}
+        if after_a_loaded_lora:
+            profiles = {"declared": {"lora_id": _save_lora(helpers, tmp_path / "declared-lora")}, **profiles}
+        base = _base_vector(helpers, "hello")
+
+        with serve(profiles) as server:
+            assert np.allclose(_dense(_encode_when_ready(server.url, "hello")), base, atol=1e-5)
+            failures = server.app.state.registry._loaded[MODEL].lora_failures
+            for attempt in (1, 2):
+                response = _encode(server.url, "hello", {"profile": "broken"})
+                assert response.status_code == 503, response.text
+                deadline = time.monotonic() + 10
+                while broken not in failures or failures[broken].attempts < attempt:
+                    assert time.monotonic() < deadline, "the failing load was not recorded"
+                    time.sleep(0.05)
+                failures[broken].retry_at = time.monotonic() - 1
+                assert np.allclose(_dense(_encode(server.url, "hello")), base, atol=1e-5)
+            assert broken not in server.loaded_ids()
+            adapter = server.app.state.registry.get(MODEL)
+            if after_a_loaded_lora:
+                assert adapter._peft_adapter_name(broken) not in adapter._peft_model.peft_config
+            else:
+                assert adapter._peft_model is None
 
     def test_selecting_a_declared_lora_that_is_not_loaded_is_retryable_instead_of_hanging(
         self, tmp_path: Path, helpers: ModuleType, serve: Any
@@ -392,6 +485,31 @@ class TestDirectEncodeRoute:
             response = _encode(server.url, "hello", {"profile": "missing", "lora": missing})
             assert response.status_code == 503, response.text
             assert _error_code(response) == "LORA_LOADING"
+
+
+class TestDirectExtractAndScoreRoutes:
+    def test_an_undeclared_or_cross_profile_lora_is_refused_without_a_fetch(
+        self, tmp_path: Path, helpers: ModuleType, serve: Any, hub_offline: None
+    ) -> None:
+        banking = _save_lora(helpers, tmp_path / "banking-lora")
+        legal = _save_lora(helpers, tmp_path / "legal-lora")
+
+        with serve({"banking": {"lora_id": banking}, "legal": {"lora_id": legal}}) as server:
+            _encode_when_ready(server.url, "warm")
+            assert _extract(server.url).status_code == 200
+            assert _score(server.url).status_code == 200
+            for options in (
+                {"lora_id": "attacker-org/some-lora"},
+                {"lora": "attacker-org/some-lora"},
+                {"lora_id": banking},
+                {"profile": "legal", "lora_id": banking},
+                {"profile": "legal", "lora": banking},
+            ):
+                for response in (_extract(server.url, options), _score(server.url, options)):
+                    assert response.status_code == 400, (options, response.text)
+                    assert _error_code(response) == "INVALID_INPUT"
+            assert server.loaded_ids() == {banking, legal}
+            assert sorted(server.fetches()) == sorted([banking, legal])
 
 
 class TestQueuedAndSidecarPaths:
@@ -432,6 +550,74 @@ class TestQueuedAndSidecarPaths:
             labels=["thing"],
             options=options,
         )
+
+    @staticmethod
+    def _score_item(options: dict[str, Any]) -> ScoreBatchItem:
+        return ScoreBatchItem(
+            work_item_id="req-3.0",
+            request_id="req-3",
+            item_index=0,
+            total_items=1,
+            timestamp=time.time(),
+            query_item={"text": "hello"},
+            score_items=[{"text": "world"}],
+            options=options,
+        )
+
+    async def test_a_queued_score_refuses_an_undeclared_or_cross_profile_lora(
+        self, tmp_path: Path, helpers: ModuleType, models_dir: Callable[[dict[str, dict[str, Any]]], Path]
+    ) -> None:
+        banking = _save_lora(helpers, tmp_path / "banking-lora")
+        legal = _save_lora(helpers, tmp_path / "legal-lora")
+        executor = await self._executor(models_dir({"banking": {"lora_id": banking}, "legal": {"lora_id": legal}}))
+
+        (served,) = (
+            await executor.process_score_batch(ProcessScoreBatchRequest(model_id=MODEL, items=[self._score_item({})]))
+        ).outcomes
+        assert served.error is None, served.error
+        for options in (
+            {"lora_id": "attacker-org/some-lora"},
+            {"lora": "attacker-org/some-lora"},
+            {"profile": "legal", "lora_id": banking},
+            {"profile": "legal", "lora": banking},
+        ):
+            outcome = await executor.process_score_batch(
+                ProcessScoreBatchRequest(model_id=MODEL, items=[self._score_item(options)])
+            )
+            (item,) = outcome.outcomes
+            assert item.disposition == "publish_error_and_ack", options
+            assert item.error_code == "INVALID_INPUT", (options, item.error)
+        assert set(executor._registry._loaded[MODEL].loras) == {banking, legal}
+
+    async def test_a_caller_who_names_only_the_profile_is_not_told_its_adapter_source(
+        self, tmp_path: Path, helpers: ModuleType, models_dir: Callable[[dict[str, dict[str, Any]]], Path]
+    ) -> None:
+        selected = str(tmp_path / "selected-lora")
+        executor = await self._executor(models_dir({"tenant": {"lora_paths": [selected], "lora": selected}}))
+        options = {"profile": "tenant"}
+
+        queued = await executor.process_encode_batch(
+            ProcessEncodeBatchRequest(model_id=MODEL, items=[self._encode_item(options)])
+        )
+        extracted = await executor.process_extract_batch(
+            ProcessExtractBatchRequest(model_id=MODEL, items=[self._extract_item(options)])
+        )
+        sidecar = await handle_run_batch(
+            executor,
+            RunBatchRequest(
+                model_id=MODEL,
+                batch_id=1,
+                lora_key="",
+                total_cost=1,
+                items=[RunBatchItem(op="encode", encode=self._encode_item(options))],
+            ),
+        )
+
+        for outcome in (*queued.outcomes, *extracted.outcomes, *sidecar.outcomes):
+            assert outcome.disposition == "publish_error_and_ack"
+            assert outcome.error_code == "LORA_LOADING", outcome.error
+            assert outcome.error is not None
+            assert str(tmp_path) not in outcome.error
 
     async def test_a_served_name_the_adapter_cannot_select_fails_without_naming_loaded_adapters(
         self, tmp_path: Path, helpers: ModuleType, models_dir: Callable[[dict[str, dict[str, Any]]], Path]

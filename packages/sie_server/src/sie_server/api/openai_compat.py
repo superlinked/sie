@@ -499,7 +499,7 @@ async def _create_embeddings(
 
         lora = options.get("lora_id")
         if lora is not None:
-            await ModelStateChecker(registry, route.key, span).ensure_lora_loaded(lora)
+            await ModelStateChecker(registry, route.key, span).ensure_lora_loaded(lora, None)
             options["lora"] = lora
 
         # Run encoding

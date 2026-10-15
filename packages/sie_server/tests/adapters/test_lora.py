@@ -27,19 +27,24 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from fastapi import HTTPException
 from peft import LoraConfig, PeftModel, get_peft_model
+from peft.tuners.tuners_utils import BaseTunerLayer
+from safetensors.torch import load_file, save_file
 from sie_server.adapters import peft_lora_mixin
 from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
 from sie_server.adapters.bert_flash import BertFlashAdapter
 from sie_server.adapters.nomic_flash import NomicFlashAdapter
 from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin, validate_lora_target_modules
+from sie_server.adapters.sglang.embedding import SGLangEmbeddingAdapter
+from sie_server.api.helpers import ModelStateChecker
 from sie_server.config.model import AdapterOptions, EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.model_loader import DEFAULT_MAX_LORAS, LoadedLora, LoadedModel, ModelLoader
 from sie_server.core.prepared import make_text_item
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.worker import ModelWorker, WorkerConfig
-from sie_server.types.inputs import Item
+from sie_server.types.inputs import InvalidInputError, Item
 from sie_server.types.responses import ErrorCode
 from torch import nn
 
@@ -688,7 +693,7 @@ class TestLoraRejectionOnNonSupportingAdapters:
         registry._configs["stub-model"] = MagicMock()
         registry._loaded["stub-model"] = loaded
 
-        with pytest.raises(ValueError, match="does not support LoRA"):
+        with pytest.raises(ValueError, match="cannot load a LoRA adapter at runtime"):
             await registry.ensure_lora_loaded_async("stub-model", "org/customer-lora")
 
 
@@ -1374,6 +1379,7 @@ class TestLoraFetchOutsideInference:
 
         assert result.output.dense is not None
         assert adapter._loaded_loras == {lora}
+        assert adapter.fetches == [lora]
 
     async def test_a_failing_lora_is_not_fetched_again_inside_its_backoff(self, tmp_path: Path) -> None:
         lora = _save_plain_lora(tmp_path / "failing")
@@ -1467,3 +1473,165 @@ class TestLoraWeightKeys:
     )
     def test_any_other_tensor_is_refused(self, key: str) -> None:
         assert not peft_lora_mixin.is_lora_weight_key(key)
+
+
+def _save_rank_mismatched_lora(path: Path) -> str:
+    """A LoRA on ``query`` and ``out`` whose ``out.lora_A`` has rank 3 where its config says 2.
+
+    Every tensor name is a LoRA parameter, so the adapter passes the fetch
+    checks; PEFT injects its layers and copies the ``query`` tensors before the
+    ``out`` shape mismatch fails the load.
+    """
+    trained = get_peft_model(
+        _tiny_encoder(), LoraConfig(r=2, target_modules=["query", "out"], bias="none", init_lora_weights=False)
+    )
+    trained.save_pretrained(str(path))
+    weights = path / "adapter_model.safetensors"
+    tensors = load_file(str(weights))
+    tensors["base_model.model.out.lora_A.weight"] = torch.ones(3, 4)
+    save_file(tensors, str(weights))
+    return str(path)
+
+
+async def _load_in_background(registry: ModelRegistry, lora: str) -> None:
+    assert await registry.ensure_lora_loaded_async("t/tiny", lora) == (False, True)
+    await asyncio.gather(*registry._background_tasks)
+
+
+async def _encode_one(worker: ModelWorker, lora: str | None) -> torch.Tensor:
+    future = await worker.submit(
+        [make_text_item([1], 0)], [Item(text="x")], ["dense"], options={"lora": lora} if lora else None
+    )
+    result = await asyncio.wait_for(future, 5)
+    return torch.as_tensor(result.output.dense[0])
+
+
+class TestFailedLoraAttach:
+    """A LoRA whose attach fails after PEFT injected its layers leaves the shared model as it was."""
+
+    @pytest.mark.parametrize("after_a_loaded_lora", [False, True])
+    async def test_base_batches_are_unchanged_after_a_failed_attach_and_its_retry(
+        self, tmp_path: Path, after_a_loaded_lora: bool
+    ) -> None:
+        loaded_lora = _save_plain_lora(tmp_path / "loaded")
+        broken = _save_rank_mismatched_lora(tmp_path / "broken")
+        adapter = _GatedFetchAdapter({})
+        adapter.load("cpu")
+        base = adapter._model(_probe()[:1]).detach()[0]
+        worker = ModelWorker(adapter, WorkerConfig(max_batch_wait_ms=1))
+        registry, loaded = _registry_serving(adapter, _tiny_config([loaded_lora, broken]), worker=worker)
+        await worker.start()
+        try:
+            if after_a_loaded_lora:
+                await _load_in_background(registry, loaded_lora)
+                with_lora = await _encode_one(worker, loaded_lora)
+            base_after: list[torch.Tensor] = []
+            for attempt in (1, 2):
+                await _load_in_background(registry, broken)
+                assert loaded.lora_failures[broken].attempts == attempt
+                loaded.lora_failures[broken].retry_at = time.monotonic() - 1
+                base_after.append(await _encode_one(worker, None))
+            if after_a_loaded_lora:
+                with_lora_after = await _encode_one(worker, loaded_lora)
+        finally:
+            await worker.stop()
+
+        assert all(torch.equal(output, base) for output in base_after)
+        assert broken not in adapter._loaded_loras
+        if after_a_loaded_lora:
+            assert not torch.equal(with_lora, base)
+            assert torch.equal(with_lora_after, with_lora)
+            assert adapter._peft_adapter_name(broken) not in adapter._peft_model.peft_config
+        else:
+            assert adapter._peft_model is None
+            assert not any(isinstance(module, BaseTunerLayer) for module in adapter._model.modules())
+            assert not hasattr(adapter._model, "peft_config")
+
+    @pytest.mark.parametrize("after_a_loaded_lora", [False, True])
+    def test_a_declared_lora_whose_preload_fails_leaves_the_base_model_unchanged(
+        self, tmp_path: Path, after_a_loaded_lora: bool
+    ) -> None:
+        broken = _save_rank_mismatched_lora(tmp_path / "broken")
+        declared = [_save_plain_lora(tmp_path / "loaded"), broken] if after_a_loaded_lora else [broken]
+        adapter = TinyLoRAAdapter()
+        adapter.load("cpu")
+        expected = adapter._model(_probe()).detach()
+        loader = ModelLoader(
+            preprocessor_registry=MagicMock(),
+            postprocessor_registry=MagicMock(),
+            all_configs={},
+        )
+
+        loaded = loader._finish_load("t/tiny", "cpu", adapter, _tiny_config(declared))
+
+        assert list(loaded.loras) == declared[:-1]
+        adapter.set_active_lora(None)
+        assert torch.equal(adapter._model(_probe()), expected)
+        if after_a_loaded_lora:
+            assert adapter._peft_adapter_name(broken) not in adapter._peft_model.peft_config
+        else:
+            assert adapter._peft_model is None
+            assert not any(isinstance(module, BaseTunerLayer) for module in adapter._model.modules())
+
+    @pytest.mark.parametrize("field", ["modules_to_save", "trainable_token_indices"])
+    def test_a_lora_that_replaces_whole_base_modules_is_refused(self, field: str) -> None:
+        config = SimpleNamespace(peft_type="LORA", bias="none", init_lora_weights=True, **{field: ["out"]})
+        with pytest.raises(ValueError, match=field):
+            TinyLoRAAdapter()._check_lora_config("org/lora", config)
+
+
+def _engine_owned_lora_config() -> ModelConfig:
+    return ModelConfig(
+        sie_id="t/engine",
+        hf_id="org/engine",
+        tasks=Tasks(encode=EncodeTask(dense=EmbeddingDim(dim=2))),
+        profiles={
+            "default": ProfileConfig(
+                adapter_path="mod:Cls",
+                max_batch_tokens=8,
+                adapter_options=AdapterOptions(loadtime={"lora_paths": {"legal": "org/legal-lora"}}),
+            )
+        },
+    )
+
+
+class TestEngineOwnedLoras:
+    """An adapter whose engine loads its LoRAs at launch answers a load request with a terminal error."""
+
+    async def test_a_declared_source_is_refused_without_a_load_or_a_backoff(self) -> None:
+        adapter = SGLangEmbeddingAdapter("org/engine", lora_paths={"legal": "org/legal-lora"})
+        registry, loaded = _registry_serving(adapter, _engine_owned_lora_config())
+        checker = ModelStateChecker(registry, "t/engine", MagicMock())
+
+        for _ in range(3):
+            with pytest.raises(ValueError, match="cannot load a LoRA adapter at runtime"):
+                await registry.ensure_lora_loaded_async("t/engine", "org/legal-lora")
+            with pytest.raises(HTTPException) as raised:
+                await checker.ensure_lora_loaded("org/legal-lora", {"lora_id": "org/legal-lora"})
+            assert raised.value.status_code == 400
+            assert raised.value.headers is None
+            assert registry.request_lora_load("t/engine", "org/legal-lora") is None
+
+        assert not registry._background_tasks
+        assert not loaded.loras
+        assert not loaded.lora_failures
+
+    @pytest.mark.parametrize("preformed", [False, True])
+    async def test_a_batch_selecting_a_declared_source_fails_with_a_terminal_error(self, preformed: bool) -> None:
+        adapter = SGLangEmbeddingAdapter("org/engine", lora_paths={"legal": "org/legal-lora"})
+        registry, _ = _registry_serving(adapter, _engine_owned_lora_config())
+        worker = ModelWorker(
+            adapter, WorkerConfig(max_batch_wait_ms=1), model_name="t/engine", registry_callbacks=registry
+        )
+        submit = worker.submit_preformed if preformed else worker.submit
+        await worker.start()
+        try:
+            future = await submit(
+                [make_text_item([1], 0)], [Item(text="x")], ["dense"], options={"lora": "org/legal-lora"}
+            )
+            with pytest.raises(InvalidInputError):
+                await asyncio.wait_for(future, 5)
+        finally:
+            await worker.stop()
+
+        assert not registry._background_tasks

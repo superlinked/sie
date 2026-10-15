@@ -54,6 +54,21 @@ def is_lora_weight_key(key: str) -> bool:
     return tuple(parts[-2:]) in _ADAPTER_WEIGHT_SUFFIXES or parts[-1] in _ADAPTER_WEIGHT_PARAMETERS
 
 
+def _unwrap_lora_layers(model: Any) -> None:
+    """Put back each base module that a PEFT tuner layer wraps inside ``model``, and drop PEFT's config on it."""
+    from peft.tuners.tuners_utils import BaseTunerLayer
+
+    for name, module in list(model.named_modules()):
+        if not isinstance(module, BaseTunerLayer):
+            continue
+        parent_name, _, child_name = name.rpartition(".")
+        parent = model.get_submodule(parent_name)
+        if getattr(parent, child_name, None) is module:
+            setattr(parent, child_name, module.get_base_layer())
+    if hasattr(model, "peft_config"):
+        del model.peft_config
+
+
 def validate_lora_target_modules(
     lora_path: str,
     target_modules: Any,
@@ -303,21 +318,25 @@ class PEFTLoRAMixin:
 
         peft_adapter_name = self._peft_adapter_name(lora_path)
 
-        if self._peft_model is None:
-            # First LoRA - wrap the base model
-            logger.debug("Creating PeftModel from base model")
-            self._peft_model = PeftModel.from_pretrained(
-                base_model,
-                source,
-                adapter_name=peft_adapter_name,
-            )
-            # Update self._model to point to the PEFT-wrapped model
-            # This ensures encode() uses the LoRA-enhanced model
-            self._model = self._peft_model
-        else:
-            # Additional LoRA - add to existing PeftModel
-            logger.debug("Adding adapter to existing PeftModel")
-            self._peft_model.load_adapter(source, adapter_name=peft_adapter_name)
+        try:
+            if self._peft_model is None:
+                # First LoRA - wrap the base model
+                logger.debug("Creating PeftModel from base model")
+                self._peft_model = PeftModel.from_pretrained(
+                    base_model,
+                    source,
+                    adapter_name=peft_adapter_name,
+                )
+                # Update self._model to point to the PEFT-wrapped model
+                # This ensures encode() uses the LoRA-enhanced model
+                self._model = self._peft_model
+            else:
+                # Additional LoRA - add to existing PeftModel
+                logger.debug("Adding adapter to existing PeftModel")
+                self._peft_model.load_adapter(source, adapter_name=peft_adapter_name)
+        except Exception:
+            self._detach_failed_lora(base_model, peft_adapter_name)
+            raise
 
         self._loaded_loras.add(lora_path)
         self._lora_adapter_names[lora_path] = peft_adapter_name
@@ -335,6 +354,22 @@ class PEFTLoRAMixin:
 
         return memory_bytes
 
+    def _detach_failed_lora(self, base_model: Any, peft_adapter_name: str) -> None:
+        """Remove what PEFT attached for a LoRA whose load raised, so no request runs through it.
+
+        PEFT injects a LoRA's layers into the model before it loads the
+        adapter's weights, so a load that fails on the weights leaves them in
+        place. A first LoRA's layers wrap the shared base model's own modules,
+        which are restored here; a later LoRA's adapter is deleted from the
+        existing PeftModel.
+        """
+        if self._peft_model is None:
+            _unwrap_lora_layers(base_model)
+            self._model = base_model
+            return
+        if peft_adapter_name in self._peft_model.peft_config:
+            self._peft_model.delete_adapter(peft_adapter_name)
+
     def _check_lora_config(self, lora_path: str, peft_config: PeftConfig) -> None:
         """Refuse a LoRA from its ``adapter_config.json`` before any weights load.
 
@@ -342,7 +377,8 @@ class PEFTLoRAMixin:
         model, which every request shares, as it was. PEFT rewrites the base
         weights while it loads a LoRA whose ``init_lora_weights`` is not one of
         :data:`_BASE_PRESERVING_INITIALIZERS` or a boolean, restructures the
-        base model for ``layer_replication``, and imports the module named by
+        base model for ``layer_replication``, replaces whole base modules for
+        ``modules_to_save`` and ``trainable_token_indices``, and imports the module named by
         ``megatron_core`` for ``megatron_config``. A LoRA whose ``bias`` is not
         ``"none"`` trains biases that live in the base model's own layers; PEFT
         cannot turn them off with the adapter. A LoRA whose ``target_modules``
@@ -362,7 +398,7 @@ class PEFTLoRAMixin:
             )
             raise ValueError(msg)
 
-        for field in ("layer_replication", "megatron_config"):
+        for field in ("layer_replication", "megatron_config", "modules_to_save", "trainable_token_indices"):
             if getattr(peft_config, field, None):
                 msg = f"LoRA '{lora_path}' sets {field}, which changes the base model every request shares."
                 raise ValueError(msg)

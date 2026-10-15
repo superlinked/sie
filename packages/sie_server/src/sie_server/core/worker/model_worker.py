@@ -706,8 +706,9 @@ class ModelWorker:
 
         When the registry can load that LoRA, it starts the load and the
         requests fail with the retryable :class:`LoraNotReadyError`; otherwise
-        they fail with :class:`InvalidInputError`. Neither message names any
-        other adapter.
+        they fail with :class:`InvalidInputError`. Neither message names an
+        adapter: a batch's LoRA can be a profile's declared source that its
+        callers never sent.
         """
         model = self._model_name or "unknown"
         logger.warning("LoRA '%s' cannot be made active on model '%s': %s", lora, model, error)
@@ -722,10 +723,13 @@ class ModelWorker:
             failure: Exception
             if retry_after_s is not None:
                 failure = LoraNotReadyError(
-                    f"LoRA '{lora}' is loading on model '{model}', please retry", retry_after_s=retry_after_s
+                    f"The LoRA adapter this request selects is loading on model '{model}', please retry",
+                    retry_after_s=retry_after_s,
                 )
             else:
-                failure = InvalidInputError(f"LoRA '{lora}' is not available on model '{model}'")
+                failure = InvalidInputError(
+                    f"The LoRA adapter this request selects is not available on model '{model}'"
+                )
             failure.__cause__ = error
             metadata.future.set_exception(failure)
 

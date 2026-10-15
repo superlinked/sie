@@ -39,6 +39,7 @@ from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.tokenizer import load_tokenizer
 
 if TYPE_CHECKING:
+    from sie_server.adapters.lora import LoraCapability
     from sie_server.types.inputs import Item
 
 logger = logging.getLogger(__name__)
@@ -913,6 +914,13 @@ class SGLangEmbeddingAdapter(BaseAdapter):
     def supports_lora(self) -> bool:
         """Return True if LoRA adapters are configured."""
         return bool(self._lora_paths)
+
+    def lora_capability(self) -> LoraCapability | None:
+        """Return ``None``: the engine loads its LoRA adapters at launch and cannot load or unload one later.
+
+        A LoRA is selected by its served name through :meth:`set_active_lora`.
+        """
+        return None
 
     def supports_hot_lora_reload(self) -> bool:
         """Return False - SGLang blocks during LoRA loading.

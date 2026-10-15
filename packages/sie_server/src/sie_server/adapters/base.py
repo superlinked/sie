@@ -572,8 +572,9 @@ class ModelAdapter(ABC):
         LoRA, else ``None``.
 
         One accessor callers use in place of checking :meth:`supports_lora` and
-        then calling the individual hooks. PEFT (in-process) and SGLang (HTTP)
-        are the two adapters behind this capability.
+        then calling the individual hooks. PEFT (in-process) is the adapter
+        behind this capability; an adapter that cannot load a LoRA at runtime
+        returns ``None``.
         """
         return self if self.supports_lora() else None
 

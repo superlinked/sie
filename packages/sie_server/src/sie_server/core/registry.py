@@ -3427,11 +3427,11 @@ class ModelRegistry:
         # scattered supports_lora() / supports_hot_lora_reload() flag-checks.
         lora_cap = adapter.lora_capability()
         if lora_cap is None:
-            msg = f"Model '{model}' does not support LoRA"
+            msg = f"Model '{model}' cannot load a LoRA adapter at runtime"
             raise ValueError(msg)
 
         if lora not in loaded_model.config.lora_revisions():
-            msg = f"Model '{model}' does not declare LoRA '{lora}'"
+            msg = f"Model '{model}' does not declare this LoRA adapter"
             raise ValueError(msg)
 
         lora_state = loaded_model.loras.get(lora)
@@ -3493,7 +3493,7 @@ class ModelRegistry:
             task.add_done_callback(self._background_tasks.discard)
             return (False, True)
 
-        # Blocking load (SGLang) - load synchronously
+        # Blocking load - load synchronously
         await self._load_lora(model, lora)
         return (self.is_lora_loaded(model, lora), self.lora_load_failed(model, lora))
 

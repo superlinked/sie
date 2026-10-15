@@ -3,8 +3,9 @@
 Groups the LoRA lifecycle an adapter exposes when it supports LoRA into one
 typed capability, so callers ask ``adapter.lora_capability()`` once and use the
 returned handle instead of flag-checking ``supports_lora()`` and then calling
-the individual hooks. The two implementations behind this capability are the
-PEFT mixin (in-process, hot-reloadable) and the SGLang adapter (HTTP, blocking).
+the individual hooks. The PEFT mixin (in-process, hot-reloadable) implements
+this capability. An adapter whose engine loads its LoRAs at launch, such as the
+SGLang embedding adapter, selects them by served name and returns ``None``.
 """
 
 from __future__ import annotations

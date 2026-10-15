@@ -487,18 +487,28 @@ class ModelStateChecker:
             headers={"Retry-After": "5"},
         )
 
-    async def ensure_lora_loaded(self, lora: str) -> None:
+    async def ensure_lora_loaded(self, lora: str, request_options: dict[str, Any] | None) -> None:
         """Start loading a LoRA adapter if needed, raise 503 to retry.
+
+        The error text names ``lora`` only when the caller's own options carry
+        that value. Otherwise ``lora`` is the selected profile's declared
+        source, and the text names the profile instead.
 
         Args:
             lora: LoRA id selected by the resolved profile or request options.
+            request_options: The caller's own request options, before the profile's are merged in.
 
         Raises:
             HTTPException: 503 ``LORA_LOADING`` with ``Retry-After`` while the
                 adapter loads or while a failed load waits for its backoff,
-                500 if it failed to load, 400 if the model does not support
-                LoRA or does not declare ``lora``.
+                500 if it failed to load, 400 if the model cannot load a LoRA
+                at runtime or does not declare ``lora``.
         """
+        options = request_options or {}
+        if lora in (options.get("lora_id"), options.get("lora")):
+            subject = f"LoRA '{lora}'"
+        else:
+            subject = f"The LoRA adapter of profile '{options.get('profile') or 'default'}'"
         try:
             is_ready, is_loading = await self.registry.ensure_lora_loaded_async(self.model, lora)
             if is_loading:
@@ -509,7 +519,7 @@ class ModelStateChecker:
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail={
                         "code": ErrorCode.LORA_LOADING.value,
-                        "message": f"LoRA '{lora}' {state} for model '{self.model}', please retry",
+                        "message": f"{subject} {state} for model '{self.model}', please retry",
                     },
                     headers={"Retry-After": str(self.registry.lora_retry_after_s(self.model, lora))},
                 )
@@ -519,7 +529,7 @@ class ModelStateChecker:
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail={
                         "code": ErrorCode.INFERENCE_ERROR.value,
-                        "message": f"Failed to load LoRA '{lora}' for model '{self.model}'",
+                        "message": f"{subject} failed to load for model '{self.model}'",
                     },
                 )
         except ValueError as e:

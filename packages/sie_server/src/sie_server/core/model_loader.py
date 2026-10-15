@@ -735,8 +735,8 @@ class ModelLoader:
         )
 
         # Preload profile LoRAs if the adapter exposes a LoRA capability.
-        # Engine-owned adapters (sglang: ``supports_hot_lora_reload() == False``)
-        # consume ``loadtime.lora_paths`` themselves at engine launch, so only
+        # Engine-owned adapters (sglang) expose none: they consume
+        # ``loadtime.lora_paths`` themselves at engine launch, so only
         # hot-reload (PEFT) adapters take the loadtime declarations from here.
         lora_cap = adapter.lora_capability()
 
