@@ -19,7 +19,10 @@
             "context": 262144,
             "output": 32768
           },
-          "tool_call": true
+          "tool_call": true,
+          "options": {
+            "presence_penalty": 0
+          }
         }
       }
     }

@@ -111,10 +111,14 @@ and point OpenCode at it with `recipes/gpu/opencode.json`.
   a 32,768-token output cap, up to 32 requests decoding at once, the
   `qwen3_coder` tool-call parser, no speculative decoding and no thinking. The
   recipe sets `limit.context` and `limit.output` to exactly those two numbers.
-  OpenCode then sends `max_tokens: 32000`, so a prompt may grow to 230,144
-  tokens before OpenCode compacts the session.
+  OpenCode then sends `max_tokens: 32000`, and the server accepts a prompt of
+  up to 230,144 tokens beside it.
 - The recipe names one model. Each profile is its own engine launch, so asking
   the same server for a second profile unloads the first.
+- The recipe sends `presence_penalty: 0` with every request. The profile's own
+  default is 1.5, which penalises every token the answer has already used,
+  and code repeats its identifiers. On BFCL, 0 scored higher on both routes
+  below and lost no row that 1.5 got right.
 - For a model that thinks before it answers, `Qwen/Qwen3.8-27B-FP8:thinking`
   is the same weights with reasoning on. Declare it with `"reasoning": true`,
   `"interleaved": {"field": "reasoning_content"}` and `"options":
@@ -150,20 +154,27 @@ an NVIDIA machine.
 
 ### Against your cluster
 
-Set `limit.context` and `limit.output` in `recipes/cluster/opencode.json` to
-the window your cluster advertises for the model in `/v1/models`. The recipe
-reads `SIE_BASE_URL` and `SIE_API_KEY` like the Cloud one. Then:
+`recipes/cluster/opencode.json` names `Qwen/Qwen3.8-27B-FP8:h100-256k-batch`,
+the model and profile recorded on one GPU below, served by a cluster worker on
+an 80 GB GPU. It also lists `zai-org/GLM-5.3-Flash` and
+`Qwen/Qwen3-4B-Instruct-2507`. Set `limit.context` and `limit.output` for each
+model to the window your cluster advertises for it in `/v1/models`. The recipe
+reads `SIE_BASE_URL` and `SIE_API_KEY` like the Cloud one, and the gateway
+checks the key. Then:
 
 ```sh
 export SIE_BASE_URL=https://your-gateway
 export SIE_API_KEY=...
-uv run python conformance.py --base-url "$SIE_BASE_URL/v1" --model zai-org/GLM-5.3-Flash
+uv run python conformance.py --base-url "$SIE_BASE_URL/v1" --model Qwen/Qwen3.8-27B-FP8:h100-256k-batch
 ./run_gate.sh cluster
 ```
 
-The cluster recipe is a template and has not been run. On a model whose
-declared window is under 64K tokens, such as the bare `zai-org/GLM-5.3-Flash`
-at 16,384, the 64K-plus prompt case is recorded rather than judged. A window
+The recipe's Qwen3.8 entry was run through this repository's gateway, queue
+and worker on one GPU (see
+[the recorded result](#the-same-gpu-through-the-cluster-gateway-recorded)).
+The GLM and Qwen3-4B entries have not been run. On a model whose declared
+window is under 64K tokens, such as the bare `zai-org/GLM-5.3-Flash` at
+16,384, the 64K-plus prompt case is recorded rather than judged. A window
 that size also runs out within a long agent session.
 
 Every path writes a JSON report, `run-output/conformance.json` by default,
@@ -171,8 +182,8 @@ and prints a table. The exit code is 1 when any case fails.
 
 ## The OpenCode recipes
 
-The three configs differ only in `baseURL`, the key and the model list. The
-Cloud one in full:
+The configs differ only in `baseURL`, the key and the model list. The Cloud
+one in full:
 
 ```json
 {
@@ -282,7 +293,9 @@ Every request asks for up to 4,096 tokens, except the `length` case and the
 long call, so a model that thinks before it answers has room to finish. The
 long call takes several minutes on one GPU: about 20,000 tokens of output.
 OpenCode's own `write` and `edit` calls carry whole files the same way, and a
-server that sends nothing while a call is generated must not end the stream. The 68,000-word
+server that sends nothing while a call is generated must not end the stream.
+The laptop and SIE Cloud tables below were recorded before this case was
+added. The 68,000-word
 prompt counts at least one token per word on any tokenizer that does not merge
 words: 71,431 with `cl100k_base`, 71,917 with `o200k_base`, 74,835 with
 Qwen3.5's tokenizer and 71,432 with GLM-5.3-Flash's.
@@ -443,9 +456,13 @@ served by local
   tokens in 244 s, 81 tok/s. The engine's `qwen3_coder` parser streams a call's
   name and short arguments as they are generated but holds a long argument
   until it closes, so this stream sent nothing for 243 s. At this commit
-  `sie-server` ends a stream that sends nothing for 300 s, so one argument
-  that takes longer than that to generate is cut off: about 24,000 tokens for a
-  session alone on the GPU, fewer when other sessions share it.
+  `sie-server` ended a stream that sent nothing for 300 s, so an argument that
+  took longer than that to generate was cut off: about 24,000 tokens for a
+  session alone on the GPU, fewer when other sessions share it. From commit
+  `00d7d732` it writes an SSE comment every 15 s while the engine holds a
+  tool call, and allows the call the profile's overall budget of 1,800 s. The
+  case passed there too, with the same 239 s between chunks, since a comment
+  is not a chunk.
 - This profile does not think, so `include_reasoning` returns nothing. Its
   answer, 9.11, is wrong; the case does not judge answers.
 - The usage on this route carries no `cached_tokens`: the engine's cache report
@@ -453,7 +470,8 @@ served by local
   through the time to the first token.
 
 `./run_gate.sh gpu` on the same server, with OpenCode 1.19.0 and no global
-OpenCode config, OpenCode's JSON event lines left out:
+OpenCode config, before the recipe set `presence_penalty`, OpenCode's JSON
+event lines left out:
 
 ```
 == before: the seeded tests
@@ -468,11 +486,12 @@ FAILED tests/test_amounts.py::test_total_nets_credits - decimal.InvalidOperat...
 GATE PASS (.../run-output/gate-20261015T162830Z-4g42xF)
 ```
 
-Five runs in a row passed. Each took 5 steps and 4 tool calls (`bash`, `read`,
-`edit`, `bash`), 8 to 9 seconds from OpenCode's first event to its last, with
-at most 8,957 input tokens on a step. Five more runs with `"options":
-{"presence_penalty": 0}` on the model also passed, with 5 or 6 steps, 4 to 8
-tool calls and at most 9,723 input tokens.
+Five runs in a row passed at the profile's `presence_penalty` of 1.5. Each
+took 5 steps and 4 tool calls (`bash`, `read`, `edit`, `bash`), 8 to 9 seconds
+from OpenCode's first event to its last, with at most 8,957 input tokens on a
+step. Five more runs with the recipe's `presence_penalty: 0` also passed, with
+5 or 6 steps, 4 to 8 tool calls and at most 9,723 input tokens. The seeded
+gate does not tell the two settings apart; BFCL below does.
 
 `session_load.py` with its defaults, sessions growing to about 61,000 tokens,
 and with `--turn-tokens 12000 --turns 9`, growing to about 128,000:
@@ -497,6 +516,119 @@ and with `--turn-tokens 12000 --turns 9`, growing to about 128,000:
   16,000-token system prompt is stored once.
 - The profile's 32 requests decoding at once is a scheduler limit, not a
   session count.
+
+BFCL v3 with the harness and settings of
+[the SIE Relay record](#bfcl-through-sie-relay): the full `simple` split and
+the same 200-row `multiple` subsample, one request at a time, greedy decoding,
+an output cap of 8,192 tokens, `tool_choice: "auto"`, and dotted function
+names sent with `_`. Both routes ran on the same GPU, the cluster route as
+[recorded below](#the-same-gpu-through-the-cluster-gateway-recorded):
+
+| Route | `presence_penalty` | `simple`, 400 rows | `multiple`, 200 rows |
+|---|---|---|---|
+| Single server | 1.5, the profile's default | 359, 0.8975 | 182, 0.910 |
+| Single server | 0, as the recipes set it | 370, 0.925 | 184, 0.920 |
+| Cluster gateway | 1.5 | 370, 0.925 | 187, 0.935 |
+| Cluster gateway | 0 | 378, 0.945 | 189, 0.945 |
+
+- On each route every row that passed at 1.5 also passed at 0. Setting 0
+  turned 13 failed rows into passes on the single server and 10 through the
+  gateway, so the recipes set it.
+- The two routes do not agree. They render the same tools turn to prompts of
+  different length, 306 tokens on the single server and 295 through the
+  gateway for the conformance check's weather turn, so their greedy answers
+  differ, and the gateway's scored higher at both settings. Which rendering is
+  closer to the model's training format was not established.
+
+One real issue on this repository, run twice through the single-server
+recipe: [issue #717](https://github.com/superlinked/sie/issues/717), a
+metering bug in the GLiNER adapters, on a checkout of commit `03dd3fd3`.
+OpenCode was asked to fix it, add a regression test and run it, with a
+100-step budget and no other help:
+
+- At the profile's `presence_penalty` of 1.5: 100 steps and 100 tool calls in
+  370 s, prompts up to 76,868 tokens, no failed request. After reading the
+  code it re-ran one shell command over and over: from the 30th call on,
+  every tenth call and each of the last four was that command. It made no
+  edit.
+- With `presence_penalty: 0`: 100 steps and 104 tool calls in 895 s, prompts
+  up to 100,258 tokens, no failed request. It changed the adapter code and
+  added a regression test, which still failed when the step budget ran out.
+- Neither run fixed the issue. Both held a session past 75,000 tokens on one
+  GPU without a serving error.
+
+### The same GPU through the cluster gateway, recorded
+
+The same model, profile and H100, served the way a cluster serves it: this
+repository's `sie-gateway`, NATS, `sie-server-sidecar` and one `sie-server`
+worker, on one machine, with the gateway on `127.0.0.1:31000`. The worker was
+ready 100 s after the stack started when the kernels were already compiled,
+and 270 s after in a new container.
+
+The conformance check at commit `00d7d732`, which keeps a chat stream alive
+while a long tool call is generated:
+
+```
+model Qwen/Qwen3.8-27B-FP8:h100-256k-batch at http://127.0.0.1:31000/v1
+served by local
+
+  tool_choice_auto            pass      tool_choice=auto accepted on the tools turn
+  streaming_tool_call_deltas  pass      1 call: get_weather({"city":"Paris"}); 2 deltas; finish_reason=tool_calls
+  parallel_tool_calls         pass      2 calls in one turn: get_weather({"city":"Paris"}), get_weather({"city":"Tokyo"})
+  tool_result_round_trip      pass      final answer used the tool result: "It's currently 18°C and overcast in Paris."
+  prompt_above_64k_tokens     pass      74847 prompt tokens accepted and answered; needle found
+  finish_reason_stop          pass      finish_reason=stop after 'ready'
+  finish_reason_tool_calls    pass      finish_reason=tool_calls on the tool-call turn
+  finish_reason_length        pass      finish_reason=length at max_tokens=8 (completion_tokens=8)
+  usage_on_final_chunk        pass      final chunk carries usage {'completion_tokens': 2, 'prompt_tokens': 20, 'total_tokens': 22, 'prompt_tokens_details': {'cached_tokens': 0}}
+  include_reasoning           pass      the model did not reason here (5 completion tokens for '9.11'); no reasoning to return
+  tool_choice_required        recorded  supported: forced get_weather({"city":"Paris"})
+  long_tool_call              pass      65.8 KiB of arguments in 1 call (1320 lines), streamed over 240 s, longest gap between chunks 0.1 s
+
+11 pass, 0 fail, 1 recorded
+```
+
+- The long call came back whole: 19,840 completion tokens, all 1,320 lines as
+  asked. The gateway passes on an empty chunk while the worker holds a call,
+  so the stream never went quiet for more than 0.1 s. At commit `461c5a58`,
+  before that change, the same case failed after 30 s with
+  `inter_chunk_timeout`, with no argument bytes delivered.
+- This route reports `cached_tokens` in the usage, which the session load
+  below reads.
+- One request with a 1.1 MB body, a 196,449-token prompt, was answered in
+  23 s.
+
+The seeded gate, `./run_gate.sh cluster` with `SIE_BASE_URL` set to the
+gateway, passed 5 of 5 runs at the profile's `presence_penalty` of 1.5, at
+commit `461c5a58`, and 3 of 3 with the recipe's `presence_penalty: 0`, at
+commit `00d7d732`. Each run took 5 steps and 4 or 5 tool calls, 7 to 9
+seconds, with at most 9,240 input tokens on a step.
+
+BFCL is in [the table above](#one-gpu-qwen38-27b-fp8-recorded). The session
+load below was recorded at commit `461c5a58`.
+
+`session_load.py` through the gateway:
+
+| Sessions | Largest prompt | Decode p50 / p90, tok/s | Returning-turn first token p50 / p90 | Returning-turn prompt cached | Bar |
+|---|---|---|---|---|---|
+| 1 | 60,992 | 76.9 / 74.2 | 0.66 / 0.75 s | 86.3% | meets |
+| 2 | 61,105 | 71.9 / 63.6 | 0.80 / 1.08 s | 86.2% | meets |
+| 4 | 61,265 | 62.8 / 54.7 | 1.67 / 2.03 s | 86.2% | meets |
+| 6 | 61,274 | 53.4 / 38.7 | 1.23 / 2.51 s | 86.2% | meets |
+| 8 | 61,266 | 46.8 / 34.7 | 2.10 / 3.59 s | 86.3% | misses: first token |
+| 1 | 127,973 | 72.3 / 67.9 | 1.57 / 1.96 s | 85.6% | meets |
+| 2 | 127,742 | 61.2 / 43.6 | 1.84 / 2.15 s | 85.5% | meets |
+
+- The gateway adds nothing measurable to the single server's capacity: 6
+  sessions at about 61,000 tokens and 2 at about 128,000 meet the bar on both.
+- About 86% of each returning turn's prompt came from the cache. The rest,
+  about 6,200 tokens a turn on average, is the size of the turn's new input,
+  so what the session sends again is reused.
+
+The same real issue as above, once through the cluster recipe with
+`presence_penalty: 0` at commit `00d7d732`: 100 steps and 104 tool calls in
+751 s, prompts up to 139,712 tokens, no failed request. It spent most steps on
+Python probes of the word splitter and made no edit.
 
 ### SIE Cloud, GLM-5.3-Flash via SIE Relay, recorded
 
@@ -617,14 +749,17 @@ uv run python conformance.py --model sie-fake:chat
   usage_on_final_chunk        pass      final chunk carries usage {'completion_tokens': 40, 'prompt_tokens': 7, 'total_tokens': 47}
   include_reasoning           pass      8 reasoning_content deltas, 40 chars; message.reasoning_content 40 chars; none without the flag
   tool_choice_required        recorded  supported: forced get_weather({"city": "Say hello."})
+  long_tool_call              recorded  not run: max_tokens=32000 refused: 400 INVALID_INPUT: max_tokens (32000) exceeds model cap (4096)
 
-9 pass, 1 fail, 1 recorded
+9 pass, 1 fail, 2 recorded
 ```
 
 - A pass here checks SIE's single-node chat wire, not a model: the streamed
   call deltas, the tool result sent back, reasoning returned only on request,
   the finish reasons, the usage on the last chunk and the declared window.
 - `parallel_tool_calls` fails because the fake makes one call per turn.
+- `long_tool_call` is not run because the profile caps output at 4,096
+  tokens and refuses the 32,000 the call asks for.
 - The fake does not read the prompt, so the needle is not found, and the
   answer to "Reply with the single word: ready." is hash-derived tokens.
 
@@ -649,8 +784,15 @@ What runs anywhere, and in this repository's CI, is the test suite:
   missing from the non-streamed answer, `include_reasoning`
   or `tool_choice: "auto"` refused, busy refusals, an error event mid-stream,
   a `/v1/models` answered as a bare list, a model that thinks for thousands
-  of tokens, and a model that answers `MODEL_LOADING` for its first requests.
-  Each verdict is checked for what it accepts and what it refuses.
+  of tokens, a model that answers `MODEL_LOADING` for its first requests, and
+  a long tool call that arrives whole, short, truncated, cut by an error
+  event, ended by the output cap or refused for its `max_tokens`. Each verdict
+  is checked for what it accepts and what it refuses.
+- `tests/test_session_load.py` runs `session_load.py` against a scripted stub
+  that counts one token per word and reports a cached prefix: each session
+  sends its whole transcript back with the answers as streamed, the input is
+  sized with the endpoint's count, a failed turn ends its session and fails
+  the run, and the bar is judged at p90.
 - `tests/test_messages_conformance.py` runs `conformance.py --api messages`
   against a scripted Anthropic Messages stub that plays a conforming event
   stream, then breaks one thing per test: usage missing from
@@ -662,13 +804,16 @@ What runs anywhere, and in this repository's CI, is the test suite:
   environment planted in the worked copy, a caller's `PYTEST_ADDOPTS` or
   `PYTEST_PLUGINS` that would deselect the failing tests, the step budget
   handed to the build agent, a run that outlives its deadline, with and
-  without a child that ignores TERM, and two runs started in the same second.
+  without a child that ignores TERM, two runs started in the same second, and
+  the key check, which applies only to a recipe that reads `SIE_BASE_URL` and
+  `SIE_API_KEY`.
 
 ```sh
 uv run pytest
 ```
 
-`tests/test_conformance.py` and `tests/test_run_gate.py` check the checker,
+`tests/test_conformance.py`, `tests/test_session_load.py` and
+`tests/test_run_gate.py` check the checkers,
 and `tests/test_fake_engine.py` checks SIE's chat route with a scripted model.
 A model's endpoint is only checked by running `conformance.py` against it.
 
@@ -687,9 +832,16 @@ A model's endpoint is only checked by running `conformance.py` against it.
 - **Not a claim about every laptop.** The laptop recipe was run on one Apple
   Silicon machine with one 4B model. NVIDIA and other models have not been
   run.
-- **Not a measurement of SIE's own GPU serving.** Through SIE Relay the
-  model runs on a partner's servers. SIE routes the request, checks the wire
-  and meters it. A dedicated GPU deployment of the same model is a different
-  serving path and has its own window and limits.
+- **The SIE Relay results are not a measurement of SIE's own GPU serving.**
+  Through SIE Relay the model runs on a partner's servers. SIE routes the
+  request, checks the wire and meters it. The one-GPU results are SIE's own
+  serving, of a different model.
+- **One GPU, one machine, one day.** The one-GPU results were recorded on one
+  H100 on 2026-10-15. Another card, driver or engine version can move every
+  number, and sessions with pauses between turns, as real agents have, load
+  the GPU less than `session_load.py` does.
+- **Not a measure of how well Qwen3.8-27B codes.** BFCL scores single calls,
+  the seeded gate is a twenty-line fix, and the one real issue was not fixed
+  in either run.
 - **One endpoint, one day.** The Cloud results were recorded once, on
   2026-10-14.
