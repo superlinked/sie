@@ -69,7 +69,22 @@ class TestResolveTelemetry:
         assert "SIE_TELEMETRY_ENABLED has a value that is not recognised" in record.getMessage()
         assert value not in record.getMessage()
 
-    @pytest.mark.parametrize("value", ["1", "true", "yes", "TRUE", " yes "])
+    @pytest.mark.parametrize("value", ["disable", "maybe", "s3cr3t-value"])
+    @pytest.mark.parametrize("enabled", [None, "1"])
+    def test_unrecognised_opt_out_value_turns_it_off_with_one_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, value: str, enabled: str | None
+    ) -> None:
+        monkeypatch.setenv("SIE_TELEMETRY_DISABLED", value)
+        if enabled is not None:
+            monkeypatch.setenv("SIE_TELEMETRY_ENABLED", enabled)
+        with caplog.at_level(logging.WARNING, logger="sie_server.observability.telemetry"):
+            assert _resolve_telemetry() == (False, "SIE_TELEMETRY_DISABLED")
+        (record,) = caplog.records
+        assert record.levelno == logging.WARNING
+        assert "SIE_TELEMETRY_DISABLED has a value that is not recognised" in record.getMessage()
+        assert value not in record.getMessage()
+
+    @pytest.mark.parametrize("value", ["1", "true", "yes", "on", "TRUE", " yes ", "On"])
     @pytest.mark.parametrize("enabled", [None, "1", "on"])
     def test_sie_telemetry_disabled_wins(
         self, monkeypatch: pytest.MonkeyPatch, value: str, enabled: str | None
@@ -87,12 +102,24 @@ class TestResolveTelemetry:
             monkeypatch.setenv("SIE_TELEMETRY_ENABLED", enabled)
         assert _resolve_telemetry() == (False, "DO_NOT_TRACK")
 
-    @pytest.mark.parametrize(("name", "value"), [("SIE_TELEMETRY_DISABLED", "0"), ("DO_NOT_TRACK", "0")])
-    def test_opt_out_variables_set_to_zero_do_not_opt_out(
-        self, monkeypatch: pytest.MonkeyPatch, name: str, value: str
+    @pytest.mark.parametrize(
+        ("name", "value"),
+        [
+            ("SIE_TELEMETRY_DISABLED", "0"),
+            ("SIE_TELEMETRY_DISABLED", "false"),
+            ("SIE_TELEMETRY_DISABLED", "no"),
+            ("SIE_TELEMETRY_DISABLED", " Off "),
+            ("SIE_TELEMETRY_DISABLED", " "),
+            ("DO_NOT_TRACK", "0"),
+        ],
+    )
+    def test_opt_out_variables_set_to_false_do_not_opt_out(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, name: str, value: str
     ) -> None:
         monkeypatch.setenv(name, value)
-        assert _resolve_telemetry() == (True, "default")
+        with caplog.at_level(logging.WARNING, logger="sie_server.observability.telemetry"):
+            assert _resolve_telemetry() == (True, "default")
+        assert caplog.records == []
 
 
 class TestGetOrCreateWorkerId:
@@ -335,6 +362,7 @@ class TestTelemetrySender:
         ("name", "value", "source"),
         [
             ("SIE_TELEMETRY_DISABLED", "1", "SIE_TELEMETRY_DISABLED"),
+            ("SIE_TELEMETRY_DISABLED", "maybe", "SIE_TELEMETRY_DISABLED"),
             ("DO_NOT_TRACK", "1", "DO_NOT_TRACK"),
             ("SIE_TELEMETRY_ENABLED", "0", "SIE_TELEMETRY_ENABLED"),
             ("SIE_TELEMETRY_ENABLED", "maybe", "SIE_TELEMETRY_ENABLED"),

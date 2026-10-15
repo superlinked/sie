@@ -269,8 +269,9 @@ The receiver derives country, region, and city from the request's source IP addr
 
 `init` is sent at start, the first `update` 45 to 75 minutes later, then one `update` every 55 to 65 minutes, and `terminate` at shutdown.
 
-- Opt in: `SIE_TELEMETRY_ENABLED=1` (also `true`, `yes`, `on`).
-- Opt out: `SIE_TELEMETRY_DISABLED=1` or `DO_NOT_TRACK=1`, which always win, or `SIE_TELEMETRY_ENABLED=0` (also `false`, `no`, `off`). Any other `SIE_TELEMETRY_ENABLED` value turns telemetry off with a warning.
+- Opt in: `SIE_TELEMETRY_ENABLED=1`.
+- Opt out: `SIE_TELEMETRY_DISABLED=1` or `DO_NOT_TRACK=1`, which always win, or `SIE_TELEMETRY_ENABLED=0`.
+- `SIE_TELEMETRY_ENABLED` and `SIE_TELEMETRY_DISABLED` accept `1`, `true`, `yes`, `on` and `0`, `false`, `no`, `off`, in any case. Any other value of either turns telemetry off with a warning.
 
 Every start logs the state and where it came from, for example `telemetry: on (default)` or `telemetry: off (DO_NOT_TRACK)`. The Helm chart's `telemetry.enabled` default also changes to `false` in 0.13.0; see the [chart README](https://github.com/superlinked/sie/blob/main/deploy/helm/sie-cluster/README.md#telemetry). Policy: [superlinked.com/policies/telemetry](https://superlinked.com/policies/telemetry).
 

@@ -29,9 +29,8 @@ _SEND_TIMEOUT_S = 10
 _CONSECUTIVE_FAILURE_WARN_THRESHOLD = 3
 
 _DEFAULT_ENABLED = True
-_OPT_OUT_VALUES = frozenset({"1", "true", "yes"})
-_ENABLED_VALUES = frozenset({"1", "true", "yes", "on"})
-_DISABLED_VALUES = frozenset({"0", "false", "no", "off"})
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 _DEFAULT_ON_NOTICE = (
     "Anonymous usage telemetry is on by default. From 0.13.0 it is off unless SIE_TELEMETRY_ENABLED=1. "
     "Set SIE_TELEMETRY_ENABLED=1 to keep sending it, or SIE_TELEMETRY_DISABLED=1 to stop now. "
@@ -41,21 +40,28 @@ _DEFAULT_ON_NOTICE = (
 _default_on_notice_shown = False
 
 
+def _warn_unrecognised(name: str) -> None:
+    logger.warning(
+        "%s has a value that is not recognised, so telemetry is off. Use 1, true, yes or on, or 0, false, no or off.",
+        name,
+    )
+
+
 def _resolve_telemetry() -> tuple[bool, str]:
-    if os.environ.get("SIE_TELEMETRY_DISABLED", "").strip().lower() in _OPT_OUT_VALUES:
+    disabled = os.environ.get("SIE_TELEMETRY_DISABLED", "").strip().lower()
+    if disabled and disabled not in _FALSE_VALUES:
+        if disabled not in _TRUE_VALUES:
+            _warn_unrecognised("SIE_TELEMETRY_DISABLED")
         return False, "SIE_TELEMETRY_DISABLED"
     if os.environ.get("DO_NOT_TRACK", "").strip() == "1":
         return False, "DO_NOT_TRACK"
-    value = os.environ.get("SIE_TELEMETRY_ENABLED", "").strip().lower()
-    if not value:
+    enabled = os.environ.get("SIE_TELEMETRY_ENABLED", "").strip().lower()
+    if not enabled:
         return _DEFAULT_ENABLED, "default"
-    if value in _ENABLED_VALUES:
+    if enabled in _TRUE_VALUES:
         return True, "SIE_TELEMETRY_ENABLED"
-    if value not in _DISABLED_VALUES:
-        logger.warning(
-            "SIE_TELEMETRY_ENABLED has a value that is not recognised, so telemetry is off. "
-            "Set it to 1, true, yes or on to send telemetry, or 0, false, no or off to stop it."
-        )
+    if enabled not in _FALSE_VALUES:
+        _warn_unrecognised("SIE_TELEMETRY_ENABLED")
     return False, "SIE_TELEMETRY_ENABLED"
 
 
