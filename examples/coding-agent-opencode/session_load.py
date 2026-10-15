@@ -14,21 +14,25 @@ answer goes back into the transcript as it was streamed. For each count in
 
 Each turn records the time to the first streamed token, the decode rate after
 it, the prompt tokens and, when the server reports them, the cached prompt
-tokens. The decode rate is the tokens after the first streamed piece, estimated
-by their share of the streamed text, answer and any returned reasoning, over
-the time from the first piece to the last; reasoning the model does not return
-is counted but not seen, and raises the rate. A turn whose stream ends without
-the finish reason ``stop`` or ``length`` counts as failed, and the summary
-counts short answers, turns that stopped before ``--output-tokens``. A returning turn is any turn after a session's first: with a working
-prefix cache only its new input is prefilled. The summary for each session
-count gives the median and p90 of both, where the p90 decode rate is the rate
-nine turns in ten reached or beat, and whether that count meets the bar of at
+tokens. The decode rate is the tokens after the first streamed piece,
+estimated by their share of the streamed text, answer and any returned
+reasoning, over the time from the first piece to the last; reasoning the model
+does not return is counted but not seen, and raises the rate. A turn whose
+stream ends without the finish reason ``stop`` or ``length`` counts as failed.
+
+A returning turn is any turn after a session's first: with a working prefix
+cache only its new input is prefilled. The summary for each session count
+gives the median and p90 of the decode rate and of the returning turns' time
+to the first token, where the p90 decode rate is the rate nine
+turns in ten reached or beat; the count of short answers, turns that stopped
+before ``--output-tokens``; and whether that session count meets the bar of at
 least 30 tok/s and at most 3 s to the first token on returning turns, both at
 p90, with no failed turn.
 
-The input is built from common English words in random order, sized with the endpoint's own
-token count of the shared prompt, so the sizes hold on any tokenizer to within
-a few percent; the report keeps the prompt tokens the server counted.
+The input is built from common English words in random order, sized with the
+endpoint's own token count of the shared prompt, so the sizes hold on any
+tokenizer to within a few percent; the report keeps the prompt tokens the
+server counted.
 """
 
 from __future__ import annotations
