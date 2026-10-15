@@ -271,9 +271,40 @@ with `503` because the upstream is unavailable, busy or not ready, logs one
 `remote chat for <model> failed: upstream answered 401` or
 `remote chat for <model> failed: the upstream credential is unavailable`. A
 failure after a stream has started logs `failed after output`. Native
-generation and completions log an upstream they cannot reach as
+generation, completions and chat that the server renders through the model's
+template log every upstream failure as `remote generation failed: <reason>`,
+for example `remote generation failed: upstream answered 402` or
 `remote generation failed: upstream '<name>' is unavailable: <reason>`. No
 line contains the credential, the prompt or anything the upstream sent.
+
+The caller's error names the class of a remote generation failure in a
+`reason` field, next to `code` and `message`: in the response's `error`
+object, or in `detail` for native generation on a single node, and in the
+error event of a stream that has already started. A cluster gateway forwards a
+worker's `reason` only when it is one of these values:
+
+| `reason` | Cause |
+| --- | --- |
+| `upstream_credential_unavailable` | The server has no credential to send, for example because the environment variable that holds it is not set. |
+| `upstream_credential_rejected` | The upstream answered `401` or `403`. |
+| `upstream_payment_required` | The upstream answered `402`, for example because its account has no credits. |
+| `upstream_model_not_found` | The upstream answered `404`, for example because it does not serve the configured model. |
+| `upstream_refused` | The upstream answered another final `4xx`. |
+| `upstream_unavailable` | The upstream could not be reached, timed out, closed a started stream or answered `5xx`, or its circuit breaker is open. |
+| `upstream_busy` | The upstream answered `429` or a busy code, or the server's rate or concurrency cap for it is reached. |
+| `upstream_not_ready` | The upstream reports that the model is not ready. |
+| `upstream_invalid_response` | The answer is not one the server accepts: malformed, cut short, too large, compressed, a redirect, or a chat answer that breaks the request's tools or token limits. |
+
+The status and `code` do not change. A failure that a retry would not fix is
+`502` `upstream_error` from single-node chat and `500` `inference_error` from
+native generation, completions, responses and a cluster, and its message is
+fixed text for the reason, for example
+`the upstream account cannot pay for the request`. A retryable failure stays
+a `503` with `Retry-After` and its message. An upstream's refusal of the
+caller's input stays `400` and carries no `reason`. The `reason` and message
+never contain the upstream's name, URL, model id, answer or account; the
+`WARNING` line above keeps that detail for the operator, and `X-SIE-Upstream`
+still names the upstream as described above.
 
 Each upstream has a required rate cap and a circuit breaker. The limits are
 shared by that worker process's adapters, not across replicas: adding remote
@@ -317,7 +348,8 @@ when it calls a function the request did not declare, calls any function under
 makes several calls under `parallel_tool_calls: false`, or makes no call when
 `tool_choice` is `"required"` or names a function. Before output, a single node
 answers that failure with `502` `upstream_error` and a cluster with `500`
-`inference_error`, as each answers any other upstream failure. A stream that
+`inference_error`, as each answers any other upstream failure, and the reason
+is `upstream_invalid_response`. A stream that
 has already started ends with an error event. A streamed function name is
 checked as OpenAI clients assemble it, by concatenating the fragments of each
 call index. A fragment is delivered while the name so far begins a permitted
