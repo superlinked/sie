@@ -281,7 +281,8 @@ The caller's error names the class of a remote generation failure in a
 `reason` field, next to `code` and `message`: in the response's `error`
 object, or in `detail` for native generation on a single node, and in the
 error event of a stream that has already started. A cluster gateway forwards a
-worker's `reason` only when it is one of these values:
+worker's `reason` only on an `inference_error`, `RESOURCE_EXHAUSTED` or
+`MODEL_LOADING` error, and only when it is one of these values:
 
 | `reason` | Cause |
 | --- | --- |

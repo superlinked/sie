@@ -1286,7 +1286,7 @@ def test_the_upstream_failure_reasons_are_the_wire_fixture() -> None:
             encoding="utf-8"
         )
     )
-    assert UPSTREAM_FAILURE_MESSAGES == fixture["reasons"]
+    assert fixture["reasons"] == UPSTREAM_FAILURE_MESSAGES
 
 
 ACCOUNT = "acct-7Q2Lw0d9"

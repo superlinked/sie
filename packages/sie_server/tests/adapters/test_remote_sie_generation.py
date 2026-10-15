@@ -160,6 +160,32 @@ async def test_upstream_failure_before_output_carries_its_retry_after(
     assert len(requests) == 1
 
 
+@pytest.mark.parametrize(
+    ("code", "error_class", "reason"),
+    [
+        ("MODEL_LOADING", GenerationDrainingError, "upstream_not_ready"),
+        ("RESOURCE_EXHAUSTED", GenerationCapacityError, "upstream_busy"),
+    ],
+)
+async def test_a_retryable_terminal_event_before_output_carries_its_reason(
+    adapter: SieUpstreamAdapter, code: str, error_class: type[GenerationCapacityError], reason: str
+) -> None:
+    stream = GenerationStream(
+        [{"done": True, "finish_reason": "error", "error": {"code": code, "message": "private", "retry_after_s": 7}}]
+    )
+    answer_with(
+        adapter, lambda _request: httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
+    )
+    with pytest.raises(error_class) as raised:
+        _ = [chunk async for chunk in adapter.generate("prompt", max_new_tokens=9)]
+    exception = _generation_http_exception(raised.value)
+    assert exception.status_code == 503
+    assert exception.detail["reason"] == reason
+    assert exception.headers is not None
+    assert exception.headers["Retry-After"] == "7"
+    assert "private" not in str(exception.detail)
+
+
 async def test_a_disconnect_after_output_is_final_and_closes_the_stream(adapter: SieUpstreamAdapter) -> None:
     stream = GenerationStream([{"done": False, "text_delta": "started"}], disconnect=True)
     answer_with(

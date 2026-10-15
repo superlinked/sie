@@ -765,9 +765,15 @@ def _terminal_chunk(event: _GenerationEvent, *, yielded: bool, seen_text: bool) 
         )
     if not yielded and not event.text:
         if event.error_code == "MODEL_LOADING":
-            raise GenerationDrainingError("the upstream is not ready, please retry", retry_after_s=event.retry_after_s)
+            raise GenerationDrainingError(
+                "the upstream is not ready, please retry",
+                retry_after_s=event.retry_after_s,
+                upstream_reason="upstream_not_ready",
+            )
         if event.error_code == "RESOURCE_EXHAUSTED":
-            raise GenerationCapacityError("the upstream is busy, please retry", retry_after_s=event.retry_after_s)
+            raise GenerationCapacityError(
+                "the upstream is busy, please retry", retry_after_s=event.retry_after_s, upstream_reason="upstream_busy"
+            )
         if event.error_code == "INPUT_TOO_LONG":
             raise GenerationInputTooLongError("the upstream refused the prompt as too long")
     return GenerationChunk(

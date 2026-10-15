@@ -359,11 +359,16 @@ impl ChunkError {
         client_safe_worker_error_message(&self.code, &self.message, self.client_safe_reason())
     }
 
-    /// The worker's upstream failure class, when it is one the gateway knows.
+    /// The worker's upstream failure class, when it is one the gateway knows
+    /// on an error code a remote upstream's failure can produce.
     pub(crate) fn client_safe_reason(&self) -> Option<UpstreamFailureReason> {
-        self.reason
-            .as_deref()
-            .and_then(UpstreamFailureReason::parse)
+        match self.code.as_str() {
+            "inference_error" | "RESOURCE_EXHAUSTED" | "MODEL_LOADING" => self
+                .reason
+                .as_deref()
+                .and_then(UpstreamFailureReason::parse),
+            _ => None,
+        }
     }
 
     /// Treat worker terminal parameters as untrusted. Only the typed
@@ -1844,6 +1849,13 @@ mod tests {
             busy.client_safe_message(),
             "the upstream is busy, please retry"
         );
+        for code in ["invalid_request", "unsupported_field", "INPUT_TOO_LONG"] {
+            assert_eq!(
+                error(code, "upstream_payment_required").client_safe_reason(),
+                None,
+                "{code}"
+            );
+        }
         let unknown = error("inference_error", "SENSITIVE_REASON_SENTINEL");
         assert_eq!(unknown.client_safe_reason(), None);
         assert_eq!(
