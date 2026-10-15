@@ -19,6 +19,15 @@ streamed or buffered, carries the caller's input and sampling, so there a 400
 or 422 without a known code is a refused input too, and is logged because a
 configured default the upstream refuses looks the same. Everything else is a
 :class:`RemoteUpstreamError`.
+
+Every failure names its class for the caller as an ``upstream_reason`` from
+:data:`~sie_server.adapters.errors.UpstreamFailureReason`, whether or not a
+retry may succeed: a missing credential, a 401 or a bare 403, a 402, a 404, a
+408 or 5xx, a 429, another 4xx (a 403 with a known code names the account's
+or the upstream's state, not the credential), an answer this server cannot
+accept, or the retryable kinds above. An upstream that is itself an SIE server
+names the class of its own upstream's failure in a ``reason``, which is kept,
+and a final class there makes the failure final here too.
 """
 
 from __future__ import annotations
@@ -33,16 +42,24 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from typing import Any
 
 import httpx
 from sie_sdk._msgpack import unpackb
 
-from sie_server.adapters._generation_base import GenerationCapacityError, GenerationDrainingError, GenerationError
+from sie_server.adapters._generation_base import (
+    GenerationCapacityError,
+    GenerationDrainingError,
+    GenerationError,
+    GenerationUpstreamError,
+)
 from sie_server.adapters.errors import (
     RETRY_AFTER_MAX_S,
     RETRY_AFTER_MIN_S,
     InputTooLongError,
+    UpstreamFailureReason,
     UpstreamUnavailableError,
+    known_upstream_failure_reason,
 )
 from sie_server.adapters.remote._limits import upstream_limiter
 from sie_server.config.upstreams import UpstreamCredentialError, upstream_for_serving
@@ -78,13 +95,33 @@ _KNOWN_ERROR_CODES = (
             "MODEL_NOT_FOUND",
             "MODEL_NOT_LOADED",
             "RATE_LIMIT",
+            "THIRD_PARTY_REGION_UNAVAILABLE",
+            "THIRD_PARTY_RUNTIME_UNLISTED",
+            "THIRD_PARTY_SERVING_DISABLED",
         }
     )
 )
+_STATUS_REASONS: dict[int, UpstreamFailureReason] = {
+    401: "upstream_credential_rejected",
+    402: "upstream_payment_required",
+    403: "upstream_credential_rejected",
+    404: "upstream_model_not_found",
+    408: "upstream_unavailable",
+    429: "upstream_busy",
+}
+_RETRYABLE_REASONS = frozenset({"upstream_busy", "upstream_not_ready", "upstream_unavailable"})
 
 
 class RemoteUpstreamError(RuntimeError):
-    """The upstream call failed in a way a retry would not fix, or its answer broke the profile's contract."""
+    """The upstream call failed in a way a retry would not fix, or its answer broke the profile's contract.
+
+    The message is operator-side detail. ``upstream_reason`` is the class of
+    failure a caller may see.
+    """
+
+    def __init__(self, message: str, *, upstream_reason: UpstreamFailureReason = "upstream_invalid_response") -> None:
+        super().__init__(message)
+        self.upstream_reason: UpstreamFailureReason = upstream_reason
 
 
 def send_bounded(
@@ -112,16 +149,20 @@ def _send(client: httpx.Client, request: httpx.Request, *, upstream: str, max_by
     try:
         response = client.send(request, stream=True)
     except UpstreamCredentialError:
-        raise RemoteUpstreamError("the upstream credential is unavailable") from None
+        raise RemoteUpstreamError(
+            "the upstream credential is unavailable", upstream_reason="upstream_credential_unavailable"
+        ) from None
     except httpx.HTTPError as exc:
         raise failure_for_transport_error(exc, upstream=upstream) from None
     try:
         if response.status_code >= 400:
+            error_body = _read_error_body(response, deadline)
             raise failure_for_status(
                 response.status_code,
-                upstream_error_code(response.headers, _read_error_body(response, deadline)),
+                upstream_error_code(response.headers, error_body),
                 parse_retry_after(response.headers.get("retry-after")),
                 upstream=upstream,
+                reason=upstream_error_reason(response.headers, error_body),
             )
         if _is_compressed(response):
             raise RemoteUpstreamError("upstream sent a compressed body, which is refused")
@@ -133,21 +174,31 @@ def _send(client: httpx.Client, request: httpx.Request, *, upstream: str, max_by
 
 
 def failure_for_status(
-    status: int, code: str | None, retry_after_s: int | None, *, upstream: str, caller_request: bool = False
+    status: int,
+    code: str | None,
+    retry_after_s: int | None,
+    *,
+    upstream: str,
+    caller_request: bool = False,
+    reason: UpstreamFailureReason | None = None,
 ) -> Exception:
-    """The failure an upstream error status amounts to, given its known error code and wait.
+    """The failure an upstream error status amounts to, given its known error code, wait and reason.
 
     ``caller_request`` says the call forwarded the caller's own request, so a
-    400 or 422 without a known code refused that request.
+    400 or 422 without a known code refused that request. ``reason`` is the
+    class an SIE upstream named for its own upstream's failure.
     """
-    reply = f"{status} {code}" if code else str(status)
+    reply = " ".join(str(part) for part in (status, code, reason) if part)
     answered = f"answered {reply}"
     wait = retry_after_s if retry_after_s is not None else DEFAULT_RETRY_AFTER_S
+    final_reason = reason or _status_reason(status, code)
     if code in _TERMINAL_CODES or status in _TERMINAL_SERVER_STATUSES:
-        return RemoteUpstreamError(f"upstream {answered}")
+        return RemoteUpstreamError(f"upstream {answered}", upstream_reason=final_reason)
     if status == 429:
         return UpstreamUnavailableError(upstream, "busy", retry_after_s=wait, reason=answered)
     if status >= 500:
+        if reason is not None and reason not in _RETRYABLE_REASONS:
+            return RemoteUpstreamError(f"upstream {answered}", upstream_reason=reason)
         if code in _NOT_READY_CODES:
             return UpstreamUnavailableError(upstream, "not_ready", retry_after_s=wait, reason=answered)
         if code in _BUSY_CODES or (code in _BUSY_WITH_RETRY_AFTER_CODES and retry_after_s is not None):
@@ -157,7 +208,33 @@ def failure_for_status(
         return InputTooLongError(f"the upstream refused the input as too long ({status} INPUT_TOO_LONG)")
     if status in {400, 422} and (code == "INVALID_INPUT" or (caller_request and code is None)):
         return InvalidInputError(f"the upstream refused the input ({reply})")
-    return RemoteUpstreamError(f"upstream {answered}")
+    return RemoteUpstreamError(f"upstream {answered}", upstream_reason=final_reason)
+
+
+def _status_reason(status: int, code: str | None) -> UpstreamFailureReason:
+    if status == 403 and code is not None:
+        return "upstream_refused"
+    return _STATUS_REASONS.get(status, "upstream_unavailable" if status >= 500 else "upstream_refused")
+
+
+def in_band_failure(error: Any, *, instead_of: str) -> RemoteUpstreamError:
+    """The failure an error object an upstream sent in place of ``instead_of`` amounts to.
+
+    It is final. Its class is the ``reason`` an SIE upstream names, else the
+    one of the HTTP status a numeric ``code`` names, else ``upstream_unavailable``.
+    """
+    reason = known_upstream_failure_reason(error.get("reason")) if isinstance(error, dict) else None
+    status = _status_code(error.get("code")) if isinstance(error, dict) else None
+    if reason is None:
+        reason = "upstream_unavailable" if status is None else _status_reason(status, None)
+    sent = "an error" if status is None else f"error {status}"
+    return RemoteUpstreamError(f"upstream sent {sent} instead of {instead_of}", upstream_reason=reason)
+
+
+def _status_code(value: object) -> int | None:
+    if isinstance(value, str) and value.isascii() and value.isdecimal():
+        value = int(value)
+    return value if isinstance(value, int) and not isinstance(value, bool) and 400 <= value <= 599 else None
 
 
 def failure_for_transport_error(exc: httpx.HTTPError, *, upstream: str) -> Exception:
@@ -174,7 +251,7 @@ def failure_for_transport_error(exc: httpx.HTTPError, *, upstream: str) -> Excep
             retry_after_s=DEFAULT_RETRY_AFTER_S,
             reason=failed,
         )
-    return RemoteUpstreamError(f"upstream {failed}")
+    return RemoteUpstreamError(f"upstream {failed}", upstream_reason="upstream_unavailable")
 
 
 @asynccontextmanager
@@ -208,19 +285,21 @@ async def open_stream(
                 httpx.ReadTimeout("upstream response headers exceeded the deadline"), upstream=upstream
             ) from None
         except UpstreamCredentialError:
-            raise RemoteUpstreamError("the upstream credential is unavailable") from None
+            raise RemoteUpstreamError(
+                "the upstream credential is unavailable", upstream_reason="upstream_credential_unavailable"
+            ) from None
         except httpx.HTTPError as exc:
             raise failure_for_transport_error(exc, upstream=upstream) from None
         try:
             if response.status_code >= 400:
+                error_body = await _read_error_body_async(response, timeout_s=error_body_timeout_s)
                 failure = failure_for_status(
                     response.status_code,
-                    upstream_error_code(
-                        response.headers, await _read_error_body_async(response, timeout_s=error_body_timeout_s)
-                    ),
+                    upstream_error_code(response.headers, error_body),
                     parse_retry_after(response.headers.get("retry-after")),
                     upstream=upstream,
                     caller_request=True,
+                    reason=upstream_error_reason(response.headers, error_body),
                 )
                 if isinstance(failure, InputTooLongError | InvalidInputError):
                     logger.warning("upstream %r refused a generation request: %s", upstream, failure)
@@ -274,11 +353,23 @@ async def sse_data(response: httpx.Response, *, max_event_bytes: int, max_total_
             raise RemoteUpstreamError("upstream sent an event over the size limit")
 
 
-def generation_error(error: UpstreamUnavailableError) -> GenerationError:
-    """Map an upstream failure before output to a retryable 503 with its wait."""
+def generation_error(error: UpstreamUnavailableError | RemoteUpstreamError) -> GenerationError:
+    """Map an upstream failure to the generation error that carries its reason.
+
+    A failure the same request may survive becomes a retryable 503 with its
+    wait. Any other becomes a :class:`GenerationUpstreamError`, whose message
+    stays operator-side.
+    """
+    reason = error.upstream_reason
+    if isinstance(error, RemoteUpstreamError):
+        return GenerationUpstreamError(str(error), upstream_reason=reason)
     if error.kind == "not_ready":
-        return GenerationDrainingError("the upstream is not ready, please retry", retry_after_s=error.retry_after_s)
-    return GenerationCapacityError(f"the upstream is {error.kind}, please retry", retry_after_s=error.retry_after_s)
+        return GenerationDrainingError(
+            "the upstream is not ready, please retry", retry_after_s=error.retry_after_s, upstream_reason=reason
+        )
+    return GenerationCapacityError(
+        f"the upstream is {error.kind}, please retry", retry_after_s=error.retry_after_s, upstream_reason=reason
+    )
 
 
 def upstream_error_code(headers: httpx.Headers, body: bytes) -> str | None:
@@ -290,22 +381,31 @@ def upstream_error_code(headers: httpx.Headers, body: bytes) -> str | None:
     from_header = _known_code(headers.get("x-sie-error-code"))
     if from_header is not None:
         return from_header
+    return _known_code(_error_envelope(headers, body).get("code"))
+
+
+def upstream_error_reason(headers: httpx.Headers, body: bytes) -> UpstreamFailureReason | None:
+    """The ``reason`` an SIE upstream names in its error, when it is a known class, else ``None``."""
+    return known_upstream_failure_reason(_error_envelope(headers, body).get("reason"))
+
+
+def _error_envelope(headers: httpx.Headers, body: bytes) -> dict[str, object]:
     if not body:
-        return None
+        return {}
     try:
         if "msgpack" in headers.get("content-type", "").lower():
             decoded = unpackb(body, numeric_arrays=False)
         else:
             decoded = json.loads(body)
     except Exception:  # noqa: BLE001 - untrusted bytes; an unreadable body carries no code
-        return None
+        return {}
     if not isinstance(decoded, dict):
-        return None
+        return {}
     for key in ("error", "detail"):
         envelope = decoded.get(key)
         if isinstance(envelope, dict):
-            return _known_code(envelope.get("code"))
-    return None
+            return envelope
+    return {}
 
 
 def parse_retry_after(value: str | None) -> int | None:

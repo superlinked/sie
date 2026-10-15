@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from jsonschema import Draft202012Validator
+from sie_server.adapters.errors import UPSTREAM_FAILURE_MESSAGES
 from sie_server.cli import app
 from typer.testing import CliRunner
 
@@ -102,6 +103,9 @@ def test_openapi_documents_generate_contract() -> None:
     assert retry_after["anyOf"][0]["minimum"] == 1
     assert retry_after["anyOf"][0]["maximum"] == 60
     assert "retry_after_s" not in chunk_error_schema["required"]
+    reason = chunk_error_schema["properties"]["reason"]
+    assert set(reason["anyOf"][0]["enum"]) == set(UPSTREAM_FAILURE_MESSAGES)
+    assert "reason" not in chunk_error_schema["required"]
 
     responses = operation["responses"]
     assert "INPUT_TOO_LONG" in responses["413"]["description"]
