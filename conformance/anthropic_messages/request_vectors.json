@@ -1,0 +1,405 @@
+{
+  "accepted": [
+    {
+      "name": "string content",
+      "body": {"model": "m", "max_tokens": 64, "messages": [{"role": "user", "content": "Hi"}]},
+      "chat": {
+        "model": "m",
+        "messages": [{"role": "user", "content": "Hi"}],
+        "max_tokens": 64,
+        "stream": false,
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "system blocks and text blocks are concatenated as sent, inert fields dropped",
+      "anthropic_version": "2023-06-01",
+      "body": {
+        "model": "org/model:profile",
+        "max_tokens": 32,
+        "cache_control": {"type": "ephemeral"},
+        "metadata": {"user_id": "opaque-user"},
+        "system": [
+          {"type": "text", "text": "You are terse.", "cache_control": {"type": "ephemeral"}},
+          {"type": "text", "text": "\nAnswer in English."}
+        ],
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {"type": "text", "text": "<context>notes</context>\n"},
+              {"type": "text", "text": "", "cache_control": {"type": "ephemeral"}},
+              {"type": "text", "text": "Summarize.", "cache_control": {"type": "ephemeral", "ttl": "5m"}}
+            ]
+          }
+        ]
+      },
+      "chat": {
+        "model": "org/model:profile",
+        "messages": [
+          {"role": "system", "content": "You are terse.\nAnswer in English."},
+          {"role": "user", "content": "<context>notes</context>\nSummarize."}
+        ],
+        "max_tokens": 32,
+        "stream": false,
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "sampling and stop sequences",
+      "body": {
+        "model": "m",
+        "max_tokens": 16,
+        "temperature": 0.5,
+        "top_p": 0.9,
+        "top_k": 40,
+        "stop_sequences": ["</block>", "END"],
+        "messages": [{"role": "user", "content": "x"}]
+      },
+      "chat": {
+        "model": "m",
+        "messages": [{"role": "user", "content": "x"}],
+        "max_tokens": 16,
+        "stop": ["</block>", "END"],
+        "temperature": 0.5,
+        "top_p": 0.9,
+        "top_k": 40,
+        "stream": false,
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "streaming asks for usage",
+      "body": {"model": "m", "max_tokens": 16, "stream": true, "stop_sequences": [], "messages": [{"role": "user", "content": "x"}]},
+      "chat": {
+        "model": "m",
+        "messages": [{"role": "user", "content": "x"}],
+        "max_tokens": 16,
+        "stream": true,
+        "stream_options": {"include_usage": true},
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "custom tools and tool_choice any without parallel calls",
+      "body": {
+        "model": "m",
+        "max_tokens": 16,
+        "tools": [
+          {
+            "name": "get_weather",
+            "description": "Weather for a city",
+            "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+            "cache_control": {"type": "ephemeral"},
+            "eager_input_streaming": true
+          },
+          {"type": "custom", "name": "noop", "input_schema": {"type": "object"}}
+        ],
+        "tool_choice": {"type": "any", "disable_parallel_tool_use": true},
+        "messages": [{"role": "user", "content": "Weather in Paris?"}]
+      },
+      "chat": {
+        "model": "m",
+        "messages": [{"role": "user", "content": "Weather in Paris?"}],
+        "max_tokens": 16,
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "description": "Weather for a city",
+              "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}
+            }
+          },
+          {"type": "function", "function": {"name": "noop", "parameters": {"type": "object"}}}
+        ],
+        "tool_choice": "required",
+        "parallel_tool_calls": false,
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "named tool choice",
+      "body": {
+        "model": "m",
+        "max_tokens": 16,
+        "tools": [{"name": "lookup", "input_schema": {"type": "object"}}],
+        "tool_choice": {"type": "tool", "name": "lookup"},
+        "messages": [{"role": "user", "content": "go"}]
+      },
+      "chat": {
+        "model": "m",
+        "messages": [{"role": "user", "content": "go"}],
+        "max_tokens": 16,
+        "stream": false,
+        "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}],
+        "tool_choice": {"type": "function", "function": {"name": "lookup"}},
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "tool_choice none and auto",
+      "body": {
+        "model": "m",
+        "max_tokens": 16,
+        "tools": [{"name": "lookup", "input_schema": {"type": "object"}}],
+        "tool_choice": {"type": "none"},
+        "messages": [{"role": "user", "content": "go"}]
+      },
+      "chat": {
+        "model": "m",
+        "messages": [{"role": "user", "content": "go"}],
+        "max_tokens": 16,
+        "stream": false,
+        "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}],
+        "tool_choice": "none",
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "tool_choice auto without tools is dropped",
+      "body": {"model": "m", "max_tokens": 16, "tools": [], "tool_choice": {"type": "auto"}, "messages": [{"role": "user", "content": "go"}]},
+      "chat": {
+        "model": "m",
+        "messages": [{"role": "user", "content": "go"}],
+        "max_tokens": 16,
+        "stream": false,
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "tool loop: tool results first, following text becomes a user turn",
+      "body": {
+        "model": "m",
+        "max_tokens": 16,
+        "tools": [{"name": "add", "input_schema": {"type": "object"}}],
+        "messages": [
+          {"role": "user", "content": "Add 40 and 2."},
+          {
+            "role": "assistant",
+            "content": [
+              {"type": "thinking", "thinking": "I should call add.", "signature": "sie-unsigned"},
+              {"type": "text", "text": "Calling add."},
+              {"type": "tool_use", "id": "call_1", "name": "add", "input": {"a": 40, "b": 2}}
+            ]
+          },
+          {
+            "role": "user",
+            "content": [
+              {"type": "tool_result", "tool_use_id": "call_1", "content": "42", "is_error": false, "cache_control": {"type": "ephemeral"}},
+              {"type": "text", "text": "Now explain."}
+            ]
+          }
+        ]
+      },
+      "chat": {
+        "model": "m",
+        "messages": [
+          {"role": "user", "content": "Add 40 and 2."},
+          {
+            "role": "assistant",
+            "content": "Calling add.",
+            "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "add", "arguments": "{\"a\":40,\"b\":2}"}}]
+          },
+          {"role": "tool", "tool_call_id": "call_1", "content": "42"},
+          {"role": "user", "content": "Now explain."}
+        ],
+        "max_tokens": 16,
+        "stream": false,
+        "tools": [{"type": "function", "function": {"name": "add", "parameters": {"type": "object"}}}],
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "parallel tool results and a tool_use-only assistant turn",
+      "body": {
+        "model": "m",
+        "max_tokens": 16,
+        "messages": [
+          {"role": "user", "content": "Run both."},
+          {
+            "role": "assistant",
+            "content": [
+              {"type": "redacted_thinking", "data": "opaque"},
+              {"type": "tool_use", "id": "t1", "name": "run", "input": {"cmd": "one"}},
+              {"type": "tool_use", "id": "t2", "name": "run", "input": {"cmd": "two"}}
+            ]
+          },
+          {
+            "role": "user",
+            "content": [
+              {"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "out "}, {"type": "text", "text": "one"}]},
+              {"type": "tool_result", "tool_use_id": "t2", "is_error": true, "content": "failed"}
+            ]
+          }
+        ]
+      },
+      "chat": {
+        "model": "m",
+        "messages": [
+          {"role": "user", "content": "Run both."},
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {"id": "t1", "type": "function", "function": {"name": "run", "arguments": "{\"cmd\":\"one\"}"}},
+              {"id": "t2", "type": "function", "function": {"name": "run", "arguments": "{\"cmd\":\"two\"}"}}
+            ]
+          },
+          {"role": "tool", "tool_call_id": "t1", "content": "out one"},
+          {"role": "tool", "tool_call_id": "t2", "content": "failed"}
+        ],
+        "max_tokens": 16,
+        "stream": false,
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "images in a tool result follow the tool message in a user turn",
+      "body": {
+        "model": "m",
+        "max_tokens": 16,
+        "messages": [
+          {"role": "user", "content": "Read the image."},
+          {"role": "assistant", "content": [{"type": "tool_use", "id": "r1", "name": "read", "input": {}}]},
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "r1",
+                "content": [
+                  {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}},
+                  {"type": "text", "text": "pixel.png"}
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "first_image": "messages.2.content.0.tool_result.content.0.image",
+      "chat": {
+        "model": "m",
+        "messages": [
+          {"role": "user", "content": "Read the image."},
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{"id": "r1", "type": "function", "function": {"name": "read", "arguments": "{}"}}]
+          },
+          {"role": "tool", "tool_call_id": "r1", "content": "pixel.png"},
+          {
+            "role": "user",
+            "content": [
+              {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}}
+            ]
+          }
+        ],
+        "max_tokens": 16,
+        "stream": false,
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "user image between text keeps its position",
+      "body": {
+        "model": "m",
+        "max_tokens": 16,
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {"type": "text", "text": "Before "},
+              {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "/9j/AA=="}, "cache_control": {"type": "ephemeral"}},
+              {"type": "text", "text": "after"}
+            ]
+          }
+        ]
+      },
+      "first_image": "messages.0.content.1.image",
+      "chat": {
+        "model": "m",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {"type": "text", "text": "Before "},
+              {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,/9j/AA=="}},
+              {"type": "text", "text": "after"}
+            ]
+          }
+        ],
+        "max_tokens": 16,
+        "stream": false,
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "adaptive thinking opts into reasoning",
+      "body": {"model": "m", "max_tokens": 16, "thinking": {"type": "adaptive"}, "messages": [{"role": "user", "content": "x"}]},
+      "chat": {"model": "m", "messages": [{"role": "user", "content": "x"}], "max_tokens": 16, "stream": false, "include_reasoning": true}
+    },
+    {
+      "name": "enabled thinking with a budget opts into reasoning",
+      "body": {"model": "m", "max_tokens": 4096, "thinking": {"type": "enabled", "budget_tokens": 1024, "display": "summarized"}, "messages": [{"role": "user", "content": "x"}]},
+      "chat": {"model": "m", "messages": [{"role": "user", "content": "x"}], "max_tokens": 4096, "stream": false, "include_reasoning": true}
+    },
+    {
+      "name": "omitted display keeps reasoning private",
+      "body": {"model": "m", "max_tokens": 16, "thinking": {"type": "adaptive", "display": "omitted"}, "messages": [{"role": "user", "content": "x"}]},
+      "chat": {"model": "m", "messages": [{"role": "user", "content": "x"}], "max_tokens": 16, "stream": false, "include_reasoning": false}
+    },
+    {
+      "name": "disabled thinking",
+      "body": {"model": "m", "max_tokens": 16, "thinking": {"type": "disabled"}, "messages": [{"role": "user", "content": "x"}]},
+      "chat": {"model": "m", "messages": [{"role": "user", "content": "x"}], "max_tokens": 16, "stream": false, "include_reasoning": false}
+    },
+    {
+      "name": "empty output_config is accepted",
+      "body": {"model": "m", "max_tokens": 16, "output_config": {}, "messages": [{"role": "user", "content": "x"}]},
+      "chat": {"model": "m", "messages": [{"role": "user", "content": "x"}], "max_tokens": 16, "stream": false, "include_reasoning": false}
+    }
+  ],
+  "rejected": [
+    {"name": "missing model", "body": {"max_tokens": 1, "messages": [{"role": "user", "content": "x"}]}, "message": "model: Field required"},
+    {"name": "missing max_tokens", "body": {"model": "m", "messages": [{"role": "user", "content": "x"}]}, "message": "max_tokens: Field required"},
+    {"name": "zero max_tokens", "body": {"model": "m", "max_tokens": 0, "messages": [{"role": "user", "content": "x"}]}, "message": "max_tokens: Input should be greater than or equal to 1"},
+    {"name": "fractional max_tokens", "body": {"model": "m", "max_tokens": 1.5, "messages": [{"role": "user", "content": "x"}]}, "message": "max_tokens: Input should be a valid integer"},
+    {"name": "missing messages", "body": {"model": "m", "max_tokens": 1}, "message": "messages: Field required"},
+    {"name": "empty messages", "body": {"model": "m", "max_tokens": 1, "messages": []}, "message": "messages: List should have at least 1 item"},
+    {"name": "unknown top-level field", "body": {"model": "m", "max_tokens": 1, "service_tier": "auto", "messages": [{"role": "user", "content": "x"}]}, "message": "service_tier: Extra inputs are not permitted"},
+    {"name": "effort", "body": {"model": "m", "max_tokens": 1, "output_config": {"effort": "high"}, "messages": [{"role": "user", "content": "x"}]}, "message": "output_config.effort: Extra inputs are not permitted"},
+    {"name": "structured output format", "body": {"model": "m", "max_tokens": 1, "output_config": {"format": {"type": "json_schema"}}, "messages": [{"role": "user", "content": "x"}]}, "message": "output_config.format: Extra inputs are not permitted"},
+    {"name": "context management", "body": {"model": "m", "max_tokens": 1, "context_management": {"edits": []}, "messages": [{"role": "user", "content": "x"}]}, "message": "context_management: Extra inputs are not permitted (Claude Code: set CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1)"},
+    {"name": "unsupported anthropic-version", "anthropic_version": "2024-01-01", "body": {"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": "x"}]}, "message": "anthropic-version: only 2023-06-01 is supported"},
+    {"name": "mid-conversation system turn", "body": {"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": "x"}, {"role": "system", "content": "context"}]}, "message": "messages.1.role: role \"system\" is not supported in messages; use the top-level system parameter"},
+    {"name": "unknown role", "body": {"model": "m", "max_tokens": 1, "messages": [{"role": "tool", "content": "x"}]}, "message": "messages.0.role: Input should be 'user' or 'assistant'"},
+    {"name": "assistant prefill", "body": {"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": "x"}, {"role": "assistant", "content": "{"}]}, "message": "messages: assistant message prefill is not supported; the conversation must end with a user message"},
+    {"name": "extra message field", "body": {"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": "x", "name": "n"}]}, "message": "messages.0.name: Extra inputs are not permitted"},
+    {"name": "url image source", "body": {"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": [{"type": "image", "source": {"type": "url", "url": "https://example.com/a.png"}}]}]}, "message": "messages.0.content.0.image.source: only base64 image sources are supported"},
+    {"name": "image media type", "body": {"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/bmp", "data": "Qk0="}}]}]}, "message": "messages.0.content.0.image.source.base64.media_type: Input should be 'image/jpeg', 'image/png', 'image/gif' or 'image/webp'"},
+    {"name": "document block", "body": {"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": [{"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "x"}}]}]}, "message": "messages.0.content.0.document: content blocks of type 'document' are not supported here"},
+    {"name": "unknown block type", "body": {"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": [{"type": "audio"}]}]}, "message": "messages.0.content.0.type: Input tag 'audio' found using 'type' does not match any of the expected tags"},
+    {"name": "tool_use input must be an object", "body": {"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": "x"}, {"role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": "n", "input": "[]"}]}, {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t"}]}]}, "message": "messages.1.content.0.tool_use.input: Input should be a valid dictionary"},
+    {"name": "server tool use in history", "body": {"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": "x"}, {"role": "assistant", "content": [{"type": "server_tool_use", "id": "s", "name": "web_search", "input": {}}]}, {"role": "user", "content": "y"}]}, "message": "messages.1.content.0.server_tool_use: content blocks of type 'server_tool_use' are not supported here"},
+    {"name": "system citations", "body": {"model": "m", "max_tokens": 1, "system": [{"type": "text", "text": "s", "citations": [{"type": "char_location"}]}], "messages": [{"role": "user", "content": "x"}]}, "message": "system.0.citations: citations are not supported"},
+    {"name": "anthropic-defined tool", "body": {"model": "m", "max_tokens": 1, "tools": [{"type": "bash_20250124", "name": "bash"}], "messages": [{"role": "user", "content": "x"}]}, "message": "tools.0.type: tool type 'bash_20250124' is not supported; only custom tools with an input_schema are"},
+    {"name": "strict tool", "body": {"model": "m", "max_tokens": 1, "tools": [{"name": "t", "input_schema": {"type": "object"}, "strict": true}], "messages": [{"role": "user", "content": "x"}]}, "message": "tools.0.strict: Extra inputs are not permitted"},
+    {"name": "deferred tool", "body": {"model": "m", "max_tokens": 1, "tools": [{"name": "t", "input_schema": {"type": "object"}, "defer_loading": true}], "messages": [{"role": "user", "content": "x"}]}, "message": "tools.0.defer_loading: Extra inputs are not permitted"},
+    {"name": "tool name over 64 characters", "body": {"model": "m", "max_tokens": 1, "tools": [{"name": "mcp__a_very_long_server_name__and_an_equally_long_tool_name_beyond", "input_schema": {"type": "object"}}], "messages": [{"role": "user", "content": "x"}]}, "message": "tools.0.name: tool names longer than 64 characters are not supported"},
+    {"name": "tool name pattern", "body": {"model": "m", "max_tokens": 1, "tools": [{"name": "math.add", "input_schema": {"type": "object"}}], "messages": [{"role": "user", "content": "x"}]}, "message": "tools.0.name: String should match pattern '^[a-zA-Z0-9_-]{1,64}$'"},
+    {"name": "tool without input_schema", "body": {"model": "m", "max_tokens": 1, "tools": [{"name": "t"}], "messages": [{"role": "user", "content": "x"}]}, "message": "tools.0.input_schema: Field required"},
+    {"name": "unsupported schema keyword", "body": {"model": "m", "max_tokens": 1, "tools": [{"name": "t", "input_schema": {"type": "object", "if": {"properties": {"a": {"const": 1}}}, "then": {"required": ["b"]}}}], "messages": [{"role": "user", "content": "x"}]}, "message": "tools.0.input_schema: the schema uses an unsupported JSON Schema keyword (if, then, else, $dynamicRef, unevaluatedProperties, dependentSchemas) or exceeds the size or depth limits"},
+    {"name": "undeclared named tool", "body": {"model": "m", "max_tokens": 1, "tools": [{"name": "a", "input_schema": {"type": "object"}}], "tool_choice": {"type": "tool", "name": "b"}, "messages": [{"role": "user", "content": "x"}]}, "message": "tool_choice.tool.name: tool 'b' is not declared in tools"},
+    {"name": "tool_choice any without tools", "body": {"model": "m", "max_tokens": 1, "tool_choice": {"type": "any"}, "messages": [{"role": "user", "content": "x"}]}, "message": "tool_choice.any: tool_choice requires tools"},
+    {"name": "thinking budget below minimum", "body": {"model": "m", "max_tokens": 4096, "thinking": {"type": "enabled", "budget_tokens": 512}, "messages": [{"role": "user", "content": "x"}]}, "message": "thinking.enabled.budget_tokens: Input should be greater than or equal to 1024"},
+    {"name": "thinking budget not below max_tokens", "body": {"model": "m", "max_tokens": 2048, "thinking": {"type": "enabled", "budget_tokens": 2048}, "messages": [{"role": "user", "content": "x"}]}, "message": "thinking.enabled.budget_tokens: must be less than max_tokens"},
+    {"name": "unknown thinking display", "body": {"model": "m", "max_tokens": 16, "thinking": {"type": "adaptive", "display": "updates"}, "messages": [{"role": "user", "content": "x"}]}, "message": "thinking.adaptive.display: Input should be 'summarized' or 'omitted'"},
+    {"name": "unknown thinking field", "body": {"model": "m", "max_tokens": 16, "thinking": {"type": "adaptive", "block_binding": {}}, "messages": [{"role": "user", "content": "x"}]}, "message": "thinking.adaptive.block_binding: Extra inputs are not permitted"},
+    {"name": "thinking between tools", "body": {"model": "m", "max_tokens": 16, "thinking": {"type": "between_tools"}, "messages": [{"role": "user", "content": "x"}]}, "message": "\"thinking.type.between_tools\" is not supported for this model."},
+    {"name": "temperature above 1", "body": {"model": "m", "max_tokens": 1, "temperature": 1.5, "messages": [{"role": "user", "content": "x"}]}, "message": "temperature: Input should be less than or equal to 1"},
+    {"name": "zero top_p", "body": {"model": "m", "max_tokens": 1, "top_p": 0, "messages": [{"role": "user", "content": "x"}]}, "message": "top_p: Input should be greater than 0"},
+    {"name": "metadata field", "body": {"model": "m", "max_tokens": 1, "metadata": {"user_id": "u", "tenant": "t"}, "messages": [{"role": "user", "content": "x"}]}, "message": "metadata.tenant: Extra inputs are not permitted"}
+  ]
+}

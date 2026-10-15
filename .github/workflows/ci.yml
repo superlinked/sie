@@ -87,6 +87,13 @@ jobs:
           mise exec -- uv run --frozen ruff format --check .
           mise exec -- uv run --frozen ruff check .
           mise exec -- uv run --frozen pytest -q
+      - name: Claude Code example gate
+        working-directory: examples/coding-agent-claude-code
+        run: |
+          mise exec -- uv lock --check
+          mise exec -- uv run --frozen ruff format --check .
+          mise exec -- uv run --frozen ruff check .
+          mise exec -- uv run --frozen pytest -q
       - name: Pinned collector privacy
         run: |
           mise run helm -- dependencies

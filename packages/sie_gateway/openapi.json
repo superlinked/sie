@@ -19,6 +19,45 @@
         ],
         "type": "object"
       },
+      "AnthropicErrorBody": {
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "type": {
+            "description": "Follows the status: ``invalid_request_error`` (400),\n``authentication_error`` (401), ``billing_error`` (402),\n``permission_error`` (403), ``not_found_error`` (404),\n``request_too_large`` (413), ``rate_limit_error`` (429),\n``api_error`` (500, 502), ``overloaded_error`` (503),\n``timeout_error`` (504).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "message"
+        ],
+        "type": "object"
+      },
+      "AnthropicErrorEnvelope": {
+        "description": "Anthropic error envelope used on ``/v1/messages``. The SIE error code is\nin the ``X-SIE-Error-Code`` header. ``Retry-After`` is at most 60.",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/AnthropicErrorBody"
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "description": "Always ``error``.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "error"
+        ],
+        "type": "object"
+      },
       "AssignedWorker": {
         "properties": {
           "bundle": {
@@ -1152,6 +1191,11 @@
         ],
         "type": "object"
       },
+      "EmptyOutputConfig": {
+        "additionalProperties": false,
+        "description": "An ``output_config`` with no fields, the only one accepted.",
+        "type": "object"
+      },
       "EncodeParams": {
         "properties": {
           "instruction": {
@@ -2190,6 +2234,181 @@
         },
         "required": [
           "message"
+        ],
+        "type": "object"
+      },
+      "MessagesRequest": {
+        "additionalProperties": false,
+        "description": "Anthropic Messages request, as accepted by ``POST /v1/messages``.\n\nThe request is translated into a ``/v1/chat/completions`` request and\nserved by the chat route, so every chat limit applies. Fields outside this\nset fail with ``400 invalid_request_error`` and the message\n``<field>: Extra inputs are not permitted``. ``metadata`` and every\n``cache_control`` are accepted and have no effect: prefix caching is\nautomatic and ``metadata`` is neither logged nor forwarded.",
+        "properties": {
+          "cache_control": {
+            "description": "Accepted and ignored."
+          },
+          "max_tokens": {
+            "description": "Output token limit, at least 1 and at most the serving profile's\n``max_output_tokens``.",
+            "format": "int32",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "messages": {
+            "description": "``user`` and ``assistant`` turns. User content blocks: ``text``,\nbase64 ``image`` and ``tool_result``. Assistant content blocks:\n``text``, ``tool_use``, and ``thinking`` / ``redacted_thinking``,\nwhich are accepted and do not reach the model. ``role: \"system\"``\nturns are refused; system text belongs in ``system``. The last turn\nmust be a user turn."
+          },
+          "metadata": {
+            "description": "Accepted and ignored (``user_id`` only)."
+          },
+          "model": {
+            "description": "The model id, used as on ``/v1/chat/completions`` (``model`` or\n``model:profile``, or an operator alias).",
+            "type": "string"
+          },
+          "output_config": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EmptyOutputConfig",
+                "description": "Accepted only empty: every field in it is refused, ``effort`` with\n``output_config.effort: Extra inputs are not permitted``."
+              }
+            ]
+          },
+          "stop_sequences": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "stream": {
+            "description": "Server-sent events: ``message_start``, content block events,\n``message_delta`` with the final usage, ``message_stop``, and ``ping``\nwhenever no other event was sent for 10 seconds. A failure after the\nstream opened is an ``error`` event, and the stream then ends without\n``message_stop``.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "system": {
+            "description": "A string or a list of ``text`` blocks, concatenated in order."
+          },
+          "temperature": {
+            "description": "In ``[0, 1]``.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "thinking": {
+            "description": "``enabled`` and ``adaptive`` return the model's reasoning as\n``thinking`` blocks; ``disabled``, ``display: \"omitted\"`` or an absent\nfield do not. Whether the model reasons is a property of its serving\nprofile, and ``budget_tokens`` is validated but does not bound\nreasoning."
+          },
+          "tool_choice": {
+            "description": "``auto``, ``any``, ``tool`` (with ``name``) or ``none``, with\n``disable_parallel_tool_use``."
+          },
+          "tools": {
+            "description": "Custom tools (``name``, ``description``, ``input_schema``), at most\n64, names matching ``^[a-zA-Z0-9_-]{1,64}$``. Anthropic-defined tool\ntypes are refused."
+          },
+          "top_k": {
+            "description": "At least 1.",
+            "format": "int32",
+            "minimum": 1,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "top_p": {
+            "description": "In ``(0, 1]``.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "model",
+          "max_tokens",
+          "messages"
+        ],
+        "type": "object"
+      },
+      "MessagesResponse": {
+        "description": "Anthropic Message answered by ``POST /v1/messages`` without ``stream``.",
+        "properties": {
+          "content": {
+            "description": "``thinking`` (when requested and produced), then ``text``, then one\n``tool_use`` per tool call. ``thinking.signature`` is an opaque\nconstant that SIE does not verify."
+          },
+          "id": {
+            "description": "``msg_`` followed by the gateway request id.",
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "role": {
+            "description": "Always ``assistant``.",
+            "type": "string"
+          },
+          "stop_reason": {
+            "description": "``end_turn``, ``tool_use``, ``max_tokens`` or ``refusal``.",
+            "type": "string"
+          },
+          "stop_sequence": {
+            "description": "Always ``null``.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "description": "Always ``message``.",
+            "type": "string"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/MessagesUsage"
+          }
+        },
+        "required": [
+          "id",
+          "type",
+          "role",
+          "model",
+          "content",
+          "stop_reason",
+          "usage"
+        ],
+        "type": "object"
+      },
+      "MessagesUsage": {
+        "description": "Token usage of a Message. ``input_tokens`` plus\n``cache_read_input_tokens`` equals the prompt tokens the chat route\nreports; ``cache_creation_input_tokens`` is always 0.",
+        "properties": {
+          "cache_creation_input_tokens": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "cache_read_input_tokens": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "input_tokens": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_tokens": {
+            "description": "Includes reasoning tokens.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input_tokens",
+          "cache_creation_input_tokens",
+          "cache_read_input_tokens",
+          "output_tokens"
         ],
         "type": "object"
       },
@@ -6972,6 +7191,337 @@
           "inference"
         ],
         "x-sie-axum-catch-all": "/v1/generate/{*model}"
+      }
+    },
+    "/v1/messages": {
+      "post": {
+        "description": "Anthropic Messages API. The request is translated into a /v1/chat/completions request, served by the chat route with all of its limits, and the answer is translated back. Buffered and streaming answers are supported. POST /v1/messages/count_tokens is not served.",
+        "operationId": "proxy_messages",
+        "parameters": [
+          {
+            "description": "Absent or 2023-06-01",
+            "in": "header",
+            "name": "anthropic-version",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Accepted and ignored",
+            "in": "header",
+            "name": "anthropic-beta",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Preferred GPU or machine profile",
+            "in": "header",
+            "name": "X-SIE-MACHINE-PROFILE",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Explicit pool routing override",
+            "in": "header",
+            "name": "X-SIE-Pool",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Require local serving through a current worker execution fence. A selected remote profile returns 400; no verified local worker returns retryable 503. Duplicate or other values return 400.",
+            "in": "header",
+            "name": "X-SIE-Remote",
+            "required": false,
+            "schema": {
+              "enum": [
+                "forbid"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MessagesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessagesResponse"
+                }
+              }
+            },
+            "description": "Message, or a text/event-stream of Messages events when stream is true",
+            "headers": {
+              "X-Inference-Time": {
+                "description": "Worker-reported inference time in milliseconds",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Payload-Fetch-Time": {
+                "description": "Worker-reported offloaded payload fetch time in milliseconds, when available",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Postprocessing-Time": {
+                "description": "Worker-reported postprocessing time in milliseconds, when available",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Queue-Publish-Time": {
+                "description": "Milliseconds spent publishing work to the queue",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Queue-Time": {
+                "description": "Worker-reported queue time in milliseconds",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Queue-Wait-Time": {
+                "description": "Milliseconds spent waiting for worker results",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Execution-Binding-SHA256": {
+                "description": "Worker-origin runtime-independent SHA-256 binding of the release and deployment route, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "X-SIE-Execution-Identity-SHA256": {
+                "description": "Worker-origin SHA-256 identity of the immutable release and realized serving resources, when available on buffered responses. SSE carries optional execution evidence in the successful terminal event instead of headers.",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "X-SIE-Model-Revision": {
+                "description": "Executed bundle/config SHA-256, distinct from the catalog weights revision (for example, a 40-hex Hugging Face commit). Buffered responses only: present when the routing snapshot has a model revision and all successful worker results report its expected config hash. Omitted when evidence is unavailable or mismatched, and always omitted on SSE because headers precede terminal execution evidence.",
+                "schema": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                }
+              },
+              "X-SIE-Request-Id": {
+                "description": "Gateway request id for queue-backed inference",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Server-Version": {
+                "description": "Gateway-compatible server version advertised by this gateway",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Version": {
+                "description": "Gateway package version that handled the request",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Worker": {
+                "description": "Logical queue worker tag that produced the response",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-Tokenization-Time": {
+                "description": "Worker-reported tokenization time in milliseconds, when available",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnthropicErrorEnvelope"
+                }
+              }
+            },
+            "description": "Invalid or unsupported request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnthropicErrorEnvelope"
+                }
+              }
+            },
+            "description": "Missing or invalid bearer token"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnthropicErrorEnvelope"
+                }
+              }
+            },
+            "description": "Model not found"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnthropicErrorEnvelope"
+                }
+              }
+            },
+            "description": "Request body is too large"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnthropicErrorEnvelope"
+                }
+              }
+            },
+            "description": "Rate limited; retry after Retry-After"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/AnthropicErrorEnvelope"
+                    },
+                    {
+                      "$ref": "#/components/schemas/StandardApiError"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Worker emitted a malformed response; gateway auth enabled but no tokens configured"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnthropicErrorEnvelope"
+                }
+              }
+            },
+            "description": "The model failed to load",
+            "headers": {
+              "X-SIE-Error-Code": {
+                "description": "SDK-stable gateway or worker error code",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Error-Version": {
+                "description": "Gateway package version associated with the error envelope",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Server-Version": {
+                "description": "Gateway-compatible server version advertised by this gateway",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Version": {
+                "description": "Gateway package version that handled the request",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnthropicErrorEnvelope"
+                }
+              }
+            },
+            "description": "Capacity is not ready; retry after Retry-After",
+            "headers": {
+              "Retry-After": {
+                "description": "Suggested retry delay in seconds, when retryable",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Error-Code": {
+                "description": "SDK-stable gateway or worker error code",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Server-Version": {
+                "description": "Gateway-compatible server version advertised by this gateway",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-SIE-Version": {
+                "description": "Gateway package version that handled the request",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnthropicErrorEnvelope"
+                }
+              }
+            },
+            "description": "Generation timed out"
+          }
+        },
+        "tags": [
+          "inference"
+        ]
       }
     },
     "/v1/models": {
