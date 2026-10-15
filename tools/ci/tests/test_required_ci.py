@@ -233,6 +233,9 @@ def test_rust_audits_both_committed_dependency_graphs():
 CUDA13_SHARED_PATHS = {
     ".github/workflows/cuda13-bundle-image.yml",
     "tools/ci/cuda13_image_smoke.py",
+    "tools/ci/engine_launch_contract.py",
+    "tools/ci/engine_launch_probe.py",
+    "conformance/engine-flags/**",
     "Cargo.toml",
     "Cargo.lock",
     "packages/sie_audio_prep/**",
@@ -338,6 +341,7 @@ def test_cuda13_reusable_workflow_is_read_only_pinned_and_build_only():
         "actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd",
         "useblacksmith/setup-docker-builder@9309da73a81f66976a6d750572e221508b1e2682",
         "useblacksmith/build-push-action@9b0579bbec7a6cad2f171596c57e7ac1e7658850",
+        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
     ]
     build = next(step for step in job["steps"] if step.get("uses", "").startswith("useblacksmith/build-push-action@"))
     assert build["with"] == {
@@ -349,9 +353,14 @@ def test_cuda13_reusable_workflow_is_read_only_pinned_and_build_only():
         "load": True,
         "push": False,
     }
-    assert job["steps"][-1]["run"] == (
-        'python3 tools/ci/cuda13_image_smoke.py "${{ inputs.bundle }}" "${{ inputs.image-tag }}"'
-    )
+    assert [step["run"] for step in job["steps"] if "run" in step] == [
+        'python3 tools/ci/cuda13_image_smoke.py "${{ inputs.bundle }}" "${{ inputs.image-tag }}"',
+        'python3 tools/ci/engine_launch_contract.py "${{ inputs.bundle }}" "${{ inputs.image-tag }}"'
+        " --report-dir engine-launch",
+    ]
+    upload = job["steps"][-1]
+    assert upload["if"] == "always()"
+    assert upload["with"]["path"] == "engine-launch/"
 
 
 def test_cuda13_workflows_have_no_privileged_or_unrelated_behavior():
