@@ -1,0 +1,19 @@
+{
+ "note": "The minimum NVIDIA Linux driver for each CUDA major version under CUDA minor version compatibility, as NVIDIA documents it. A newer driver also runs older CUDA versions through backward compatibility. Minor version compatibility has documented limits: PTX that the driver must JIT-compile needs the driver of the toolkit that produced it, and some features span the toolkit and the driver.",
+ "floors": [
+  {
+   "cuda_major": "12",
+   "driver_min": "525",
+   "source": "https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html"
+  },
+  {
+   "cuda_major": "13",
+   "driver_min": "580",
+   "source": "https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html"
+  }
+ ],
+ "references": [
+  "https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html#cuda-driver"
+ ],
+ "verified": "2026-10-15"
+}
