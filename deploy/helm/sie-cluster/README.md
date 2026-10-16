@@ -1686,11 +1686,13 @@ Secret key as any other credential the chart wires, including the gateway
 client token (see [Gateway token](#gateway-token) for the list). While
 `workers.auth.enabled` is set, the worker `extraEnv` lists cannot set
 `SIE_AUTH_MODE`, `SIE_AUTH_TOKEN`, or `SIE_AUTH_TOKENS`, and `gateway.extraEnv`
-cannot set `SIE_WORKER_AUTH_TOKEN`. When the workers do not require the token
-(worker auth off, or the first upgrade step below), the chart sets
-`SIE_AUTH_MODE=none` on the containers that serve the worker API, unless a
-worker `extraEnv` list sets one of those three variables. A worker therefore
-never generates a token of its own.
+cannot set `SIE_WORKER_AUTH_TOKEN`. When the workers do not require the token,
+the chart sets `SIE_AUTH_MODE=none` on the containers that serve the worker
+API. That covers the first upgrade step below (`workers.auth.enabled=true`
+with `workers.auth.allowUnauthenticated=true`), where the three variables stay
+reserved, and worker auth off, where a worker `extraEnv` list that sets one of
+them is left in charge instead. A worker therefore never generates a token of
+its own.
 
 All workers share one token, so a worker container can call the other
 workers' APIs. Keep `workers.networkPolicy` on with it, so that only the
