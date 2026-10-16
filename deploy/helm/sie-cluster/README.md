@@ -1557,10 +1557,13 @@ An Ingress or a `LoadBalancer`/`NodePort` gateway Service also needs TLS; see
 
 With `gateway.auth.mode` set to `token` (or `static`, which the gateway treats
 the same), the gateway requires a token on every request except its probes and
-API description. Clients send it as `Authorization: Bearer <token>`; SDK
-clients pass it as `api_key`/`apiKey`, or read it from `SIE_API_KEY` when their
-base URL comes from `SIE_BASE_URL`. The tokens come from one Secret, generated
-or managed by the operator:
+API description. Clients send it as `Authorization: Bearer <token>` or
+`x-api-key: <token>`. When a request sends both, the gateway uses
+`Authorization` and ignores `x-api-key`; until 0.13.0, a repeated
+`Authorization` header uses its first value. SDK clients pass the token as
+`api_key`/`apiKey`, or read it from `SIE_API_KEY` when their base URL comes
+from `SIE_BASE_URL`. The tokens come from one Secret, generated or managed by
+the operator:
 
 - **Generated.** With `gateway.auth.tokenSecretName` empty and
   `gateway.auth.generateToken=true`, the chart creates the Secret

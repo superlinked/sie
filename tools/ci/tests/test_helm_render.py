@@ -3420,10 +3420,6 @@ def source_text(root: Path, suffix: str) -> str:
     return "\n".join(path.read_text(encoding="utf-8") for path in sorted(root.rglob(f"*{suffix}")))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="sie-server and sie-gateway read the worker auth variables only once server token auth is on main",
-)
 def test_the_worker_auth_variables_the_chart_renders_are_read_by_the_images(tmp_path: Path) -> None:
     docs = rendered_documents(tmp_path, {"workers": {"auth": {"enabled": True}, **L4_POOL["workers"]}})
     worker_names = set(container_env(docs, "sie-sie-cluster-worker-l4-default", "worker")) & {
