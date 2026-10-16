@@ -333,10 +333,12 @@ gateway:
     # -- Secret with comma-separated tokens. When set, it is used unchanged and
     # no Secret is generated. Worker sidecars receive it as SIE_GATEWAY_API_KEY
     # and present its first token to the gateway. It must not name the Secret
-    # and key of another credential the chart wires, such as the Hugging Face
+    # and key of a checked credential, such as the Hugging Face
     # token, a NATS password, the gateway admin token, either sie-config token,
     # an image pull secret, an oauth2-proxy secret, the Better Stack token, the
-    # MCP connector secrets, or a TLS key (the render fails).
+    # bundled same-namespace Grafana admin key, MCP connector secrets, or an
+    # ingress TLS key (the render fails). Other optional dependency credentials
+    # and arbitrary subchart env/volume refs need operator separation; see #767.
     tokenSecretName: ""
     tokenSecretKey: "SIE_AUTH_TOKEN"
     # -- Generate the gateway token (a boolean). When tokenSecretName is empty,
@@ -933,8 +935,8 @@ workers:
     # `<fullname>-worker-token` with a random 64-character token, with the
     # same reuse check, keep policy, and `helm template` caveat as
     # gateway.auth.generateToken. It must not name the Secret and key of any
-    # other credential the chart wires, including the gateway client token
-    # (the render fails). The key may hold comma-separated tokens: the workers
+    # checked credential listed under gateway.auth, including the gateway client
+    # token (the render fails). The key may hold comma-separated tokens: the workers
     # accept each, and the gateway presents the first.
     tokenSecretName: ""
     tokenSecretKey: "SIE_AUTH_TOKEN"

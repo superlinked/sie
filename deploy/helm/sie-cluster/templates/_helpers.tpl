@@ -1061,8 +1061,8 @@ two-step upgrade and needs workers.auth.enabled.
 {{/*
 Validation: the worker token and every gateway client credential (the gateway
 client token, gateway.extraEnv token Secrets, and the MCP edge cluster API
-key) are kept apart from every other Secret key the chart wires
-(sie-cluster.wiredSecretKeys). A client or worker token that is also another
+key) are kept apart from the other known credential keys listed in
+sie-cluster.wiredSecretKeys. A client or worker token that is also another
 credential's Secret key hands that credential to every holder of the token:
 API clients, worker sidecars, the MCP edge, or the worker containers that run
 model code. Gateway client credentials may share a key with each other.
@@ -1090,7 +1090,7 @@ model code. Gateway client credentials may share a key with each other.
 {{- end }}
 
 {{/*
-Every Secret key the chart wires into a pod, as a JSON list of
+Known chart credential keys, as a JSON list of
 {owner, name, ref, role}: owner is the values path or a description used in
 upstream errors, name is a label for separation errors, ref is "secret/key",
 and role is "gateway-client" for credentials presented to the gateway as a
@@ -1143,6 +1143,20 @@ token-separation check and the upstream-key collision check read this list.
 {{- $betterStack := $root.Values.observability.otel.collector.betterStack -}}
 {{- with $betterStack.existingSecret -}}
 {{- $keys = append $keys (dict "owner" "observability.otel.collector.betterStack.existingSecret" "name" "Better Stack token" "ref" (printf "%s/%s" . $betterStack.tokenKey)) -}}
+{{- end -}}
+{{- with index $root.Subcharts "kube-prometheus-stack" -}}
+{{- with index .Subcharts "grafana" -}}
+{{- if eq (include "grafana.namespace" .) (include "sie-cluster.namespace" $root) -}}
+{{- $context := merge (dict "Template" $root.Template) . -}}
+{{- $secretName := tpl .Values.admin.existingSecret $context | default (include "grafana.fullname" .) -}}
+{{- if and (not .Values.env.GF_SECURITY_ADMIN_USER) (not .Values.env.GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION) -}}
+{{- $keys = append $keys (dict "owner" "the Grafana admin username" "name" "Grafana admin username" "ref" (printf "%s/%s" $secretName (default "admin-user" .Values.admin.userKey))) -}}
+{{- end -}}
+{{- if and (not .Values.env.GF_SECURITY_ADMIN_PASSWORD) (not .Values.env.GF_SECURITY_ADMIN_PASSWORD__FILE) (not .Values.env.GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION) -}}
+{{- $keys = append $keys (dict "owner" "the Grafana admin password" "name" "Grafana admin password" "ref" (printf "%s/%s" $secretName (default "admin-password" .Values.admin.passwordKey))) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- $mcp := $root.Values.mcpEdge -}}
 {{- if or $mcp.connectorSecrets $mcp.existingSecretName -}}

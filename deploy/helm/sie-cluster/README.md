@@ -816,9 +816,11 @@ Below, `<fullname>` is the chart's full name: `<release>-sie-cluster`, or
   reaches it. The chart owns `SIE_UPSTREAMS_FILE`, `SIE_REMOTE_SERVING` and
   the credential variables, so `extraEnv` cannot set them, and an `extraEnv`
   entry that reads an upstream's Secret anywhere else fails the render. An
-  upstream's Secret key must also differ from every Secret key the chart
-  hands to another component (the Hugging Face token, the gateway tokens, the
-  sie-config tokens and the NATS passwords).
+  upstream's Secret key must also differ from the checked credential keys
+  listed in [Gateway token](#gateway-token), including the Hugging Face token,
+  gateway tokens, sie-config tokens, NATS passwords, and bundled Grafana admin
+  credentials. Optional dependency and arbitrary subchart configuration outside
+  that list needs operator separation; see [#767](https://github.com/superlinked/sie/issues/767).
 - sie-config receives the upstream names (`SIE_UPSTREAM_NAMES`), built from the
   same `upstreams` values as the remote lanes' file, and refuses with a `422` a
   model whose remote profile names any other upstream. Without a remote lane it
@@ -1605,10 +1607,15 @@ requires a token, `mcpEdge.enabled` is set, `mcpEdge.clusterBaseUrl` is empty
 token auth, pool create, renew, and delete also need the
 [gateway admin token](#gateway-admin-token). The render fails when the client
 token, a `gateway.extraEnv` token Secret, or the MCP edge cluster API key is
-the same Secret key as any other credential the chart wires: the Hugging Face
+the same Secret key as a checked credential: the Hugging Face
 token, a NATS password, the gateway admin token, either sie-config token, an
-image pull secret, an oauth2-proxy secret, the Better Stack token, the MCP
-connector secrets, or a TLS key. They may share a key with each other.
+image pull secret, an oauth2-proxy secret, the Better Stack token, a bundled
+Grafana admin username or password in the same namespace, the MCP connector
+secrets, or a chart-managed ingress TLS key. Gateway client credentials may
+share a key with each other. The guard checks this finite list; other optional
+dependency credentials and arbitrary subchart env/volume configuration need
+operator separation. Remaining dependency cases are tracked in
+[#767](https://github.com/superlinked/sie/issues/767).
 
 When `gateway.extraEnv` sets `SIE_AUTH_MODE` from `valueFrom`, the mode is
 unknown at render time. The gateway then receives the generated token, as it
@@ -1691,7 +1698,7 @@ With `workers.auth.tokenSecretName` empty, the chart creates
 `workers.auth.tokenSecretKey` (`SIE_AUTH_TOKEN`), with the same reuse check,
 keep policy, and `helm template` caveat as the gateway token. Otherwise it uses
 the named Secret unchanged. The render fails when the worker token is the same
-Secret key as any other credential the chart wires, including the gateway
+Secret key as another checked credential listed above, including the gateway
 client token (see [Gateway token](#gateway-token) for the list). While
 `workers.auth.enabled` is set, the worker `extraEnv` lists cannot set
 `SIE_AUTH_MODE`, `SIE_AUTH_TOKEN`, or `SIE_AUTH_TOKENS`, and `gateway.extraEnv`

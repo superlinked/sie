@@ -3275,6 +3275,84 @@ def test_client_and_worker_tokens_are_kept_apart_from_every_wired_secret_key(
     assert error in render_error(tmp_path, {**values, "workers": workers})
 
 
+@pytest.mark.parametrize("credential", ["worker", "gateway", "upstream"])
+@pytest.mark.parametrize(
+    ("grafana", "secret_name", "secret_key"),
+    [
+        ({}, "sie-grafana", "admin-password"),
+        ({"admin": {"existingSecret": "grafana-admin"}}, "grafana-admin", "admin-user"),
+        (
+            {"admin": {"existingSecret": "{{ .Release.Name }}-admin", "passwordKey": "password"}},
+            "sie-admin",
+            "password",
+        ),
+        (
+            {"fullnameOverride": "dashboard", "admin": {"existingSecret": "{{ .Values.fullnameOverride }}"}},
+            "dashboard",
+            "admin-password",
+        ),
+        (
+            {"admin": {"existingSecret": "{{ .Values.admin.userKey }}-admin", "userKey": "dashboard"}},
+            "dashboard-admin",
+            "dashboard",
+        ),
+    ],
+)
+def test_inference_credentials_cannot_reuse_bundled_grafana_admin_keys(
+    tmp_path: Path, credential: str, grafana: dict, secret_name: str, secret_key: str
+) -> None:
+    values = {"kube-prometheus-stack": {"install": True, "grafana": grafana}}
+    if credential == "worker":
+        values["workers"] = worker_with(tokenSecretName=secret_name, tokenSecretKey=secret_key)
+    elif credential == "gateway":
+        values["gateway"] = {"auth": {"mode": "token", "tokenSecretName": secret_name, "tokenSecretKey": secret_key}}
+    else:
+        values["upstreams"] = {"team": upstream(api_key_secret={"name": secret_name, "key": secret_key})}
+    error = render_error(tmp_path, values)
+    assert "Grafana admin" in error
+    if credential == "upstream":
+        assert "upstreams.team.api_key_secret" in error
+    else:
+        assert f"{secret_name}/{secret_key}" in error
+
+
+@pytest.mark.parametrize(
+    "stack",
+    [
+        {"install": False},
+        {"install": True, "grafana": {"enabled": False}},
+        {"install": True, "grafana": {"namespaceOverride": "monitoring"}},
+        {"install": True, "grafana": {"env": {"GF_SECURITY_ADMIN_PASSWORD": "fixture-password"}}},
+        {"install": True, "grafana": {"env": {"GF_SECURITY_ADMIN_PASSWORD__FILE": "/etc/grafana/password"}}},
+        {"install": True, "grafana": {"env": {"GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION": "true"}}},
+    ],
+)
+def test_grafana_admin_keys_only_reserve_credentials_actually_wired_in_the_worker_namespace(
+    tmp_path: Path, stack: dict
+) -> None:
+    values = {
+        "kube-prometheus-stack": stack,
+        "workers": worker_with(tokenSecretName="sie-grafana", tokenSecretKey="admin-password"),
+    }
+    result = render_workers(tmp_path, values)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("grafana_namespace", ["sie", "workers"])
+def test_grafana_admin_collision_uses_the_effective_worker_namespace(tmp_path: Path, grafana_namespace: str) -> None:
+    values = {
+        "global": {"namespace": "workers"},
+        "kube-prometheus-stack": {"install": True, "grafana": {"namespaceOverride": grafana_namespace}},
+        "workers": worker_with(tokenSecretName="sie-grafana", tokenSecretKey="admin-password"),
+    }
+    result = render_workers(tmp_path, values)
+    if grafana_namespace == "workers":
+        assert result.returncode != 0
+        assert "The worker token and the Grafana admin password are the same Secret key" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+
+
 def test_the_mcp_edge_may_present_the_gateway_client_token(tmp_path: Path) -> None:
     values = {
         **L4_POOL,
