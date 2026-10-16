@@ -21,7 +21,8 @@ from fastapi import FastAPI, WebSocket
 from fastapi.testclient import TestClient
 from sie_server.app.app_factory import AppFactory
 from sie_server.app.app_state_config import AppStateConfig
-from sie_server.core.data_dir import resolve_data_dir
+from sie_server.core import server_auth
+from sie_server.core.data_dir import owned_files, resolve_data_dir
 from sie_server.core.server_auth import (
     AuthConfigError,
     LoopbackHostMiddleware,
@@ -237,6 +238,62 @@ class TestPersistedToken:
 
         assert read_stored_token(tmp_path) == stored.token
         assert seen == [2]
+
+    @pytest.mark.parametrize("foreign", [False, True], ids=["temporary-only", "with-foreign-link"])
+    def test_a_temporary_link_removed_after_the_scan(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, foreign: bool
+    ) -> None:
+        stored = load_or_create_token(tmp_path)
+        if foreign:
+            os.link(stored.path, tmp_path / "copy")
+        staged = tmp_path / ".auth-token.sie-server-0123456789abcdef"
+        os.link(stored.path, staged)
+        scans: list[int] = []
+
+        def scan_then_the_other_start_unlinks(directory: Path, name: re.Pattern[str]) -> Iterator[Any]:
+            yield from owned_files(directory, name)
+            scans.append(1)
+            staged.unlink(missing_ok=True)
+
+        monkeypatch.setattr(server_auth, "owned_files", scan_then_the_other_start_unlinks)
+
+        if foreign:
+            with pytest.raises(TokenFileError, match="hard links"):
+                read_stored_token(tmp_path)
+            assert (tmp_path / "copy").exists()
+        else:
+            assert read_stored_token(tmp_path) == stored.token
+            assert len(scans) == 1
+        assert not staged.exists()
+
+    def test_a_link_count_that_keeps_changing_is_refused_after_a_few_scans(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stored = load_or_create_token(tmp_path)
+        os.link(stored.path, tmp_path / ".auth-token.sie-server-0000000000000000")
+        scans: list[int] = []
+
+        def scan_then_another_link_appears(directory: Path, name: re.Pattern[str]) -> Iterator[Any]:
+            yield from owned_files(directory, name)
+            scans.append(1)
+            os.link(stored.path, tmp_path / f".auth-token.sie-server-{len(scans):016x}")
+
+        monkeypatch.setattr(server_auth, "owned_files", scan_then_another_link_appears)
+
+        with pytest.raises(TokenFileError, match="hard links"):
+            read_stored_token(tmp_path)
+        assert 1 < len(scans) <= 5
+
+    def test_a_symbolic_link_named_like_a_temporary_file_does_not_hide_a_foreign_link(self, tmp_path: Path) -> None:
+        stored = load_or_create_token(tmp_path)
+        os.link(stored.path, tmp_path / "copy")
+        decoy = tmp_path / ".auth-token.sie-server-0123456789abcdef"
+        decoy.symlink_to(stored.path)
+
+        with pytest.raises(TokenFileError, match="hard links"):
+            read_stored_token(tmp_path)
+        assert decoy.is_symlink()
+        assert (tmp_path / "copy").exists()
 
     def test_a_temporary_link_in_a_directory_without_write_permission_is_tolerated(self, tmp_path: Path) -> None:
         directory = tmp_path / "sie"

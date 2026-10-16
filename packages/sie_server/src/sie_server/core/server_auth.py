@@ -3,7 +3,10 @@
 One vocabulary with the gateway: ``SIE_AUTH_MODE`` selects the mode,
 ``SIE_AUTH_TOKENS`` (or ``SIE_AUTH_TOKEN``) holds comma-separated tokens, and a
 request presents one in ``Authorization: Bearer`` or ``x-api-key``, with
-``Authorization`` taking precedence when both are sent.
+``Authorization`` taking precedence when both are sent. Repeated headers are
+read differently until 0.13.0: the gateway uses only the first
+``Authorization`` value, while this server reads every value, skips empty ones
+and refuses values that carry different tokens.
 """
 
 from __future__ import annotations
@@ -49,6 +52,7 @@ _READ_ONLY_ERRNOS = frozenset({errno.EACCES, errno.EROFS})
 _HOST_CHECK_RELEASE = "0.13.0"
 _MAX_WARNED_HOSTS = 64
 _MAX_LOGGED_HOST_CHARS = 100
+_LINK_SCAN_ATTEMPTS = 3
 
 
 class AuthConfigError(ValueError):
@@ -266,26 +270,37 @@ def _drop_temporary_links(path: Path, fd: int, token: os.stat_result) -> bool:
 
     True when every extra hard link of the token is such a file, even if a
     read-only directory keeps them in place; any other link is left alone and
-    the token is refused. The link count is read again after the scan, so a
-    concurrent start that removes its own link meanwhile is not mistaken for a
-    foreign link.
+    the token is refused. The token's link count is read before and after each
+    scan: one link after the scan means the temporary links are gone, and an
+    unchanged count equal to the temporary links found plus one means they are
+    the only extra links. A count that changes during the scan means a
+    concurrent start is still adding or removing its link, so the scan is
+    repeated a few times before the token is refused.
     """
-    try:
-        linked = [
-            entry
-            for entry, info in owned_files(path.parent, _TEMP_NAME)
-            if (info.st_dev, info.st_ino) == (token.st_dev, token.st_ino)
-        ]
-    except OSError:
-        return False
-    if os.fstat(fd).st_nlink not in (1, len(linked) + 1):
-        return False
-    for entry in linked:
+    before = token.st_nlink
+    for _ in range(_LINK_SCAN_ATTEMPTS):
         try:
-            entry.unlink(missing_ok=True)
+            linked = [
+                entry
+                for entry, info in owned_files(path.parent, _TEMP_NAME)
+                if (info.st_dev, info.st_ino) == (token.st_dev, token.st_ino)
+            ]
         except OSError:
-            continue
-    return True
+            return False
+        after = os.fstat(fd).st_nlink
+        if after == 1:
+            return True
+        if after == before == len(linked) + 1:
+            for entry in linked:
+                try:
+                    entry.unlink(missing_ok=True)
+                except OSError:
+                    continue
+            return True
+        if after == before:
+            return False
+        before = after
+    return False
 
 
 def server_tokens(env: Mapping[str, str]) -> tuple[str, ...]:
@@ -300,12 +315,15 @@ def server_tokens(env: Mapping[str, str]) -> tuple[str, ...]:
 
 
 def request_credentials(headers: Iterable[tuple[bytes, bytes]]) -> set[bytes]:
-    """The distinct tokens a request presents, as the gateway reads them.
+    """The distinct tokens a request presents.
 
     ``Authorization`` (``Bearer <token>`` in any case, or the bare token) takes
-    precedence: when it carries a token, ``x-api-key`` is ignored. Otherwise the
-    ``x-api-key`` values count. Empty values are ignored. More than one distinct
-    token means repeated headers that disagree.
+    precedence, as on the gateway: when it carries a token, ``x-api-key`` is
+    ignored. Otherwise the ``x-api-key`` values count. Every value of a
+    repeated header is read and empty values are ignored, so an empty
+    ``Authorization`` followed by a valid one is accepted here, while the
+    gateway reads only the first ``Authorization`` value until 0.13.0. More
+    than one distinct token means repeated headers that disagree.
     """
     authorization: set[bytes] = set()
     api_key: set[bytes] = set()

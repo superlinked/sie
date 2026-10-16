@@ -1047,7 +1047,10 @@ as a profile an operator chooses.
 Clients send the token as `Authorization: Bearer <token>` or `x-api-key: <token>`;
 when both are sent, `Authorization` is used and `x-api-key` is ignored, as on the
 gateway. The SDKs send `SIE_API_KEY`
-as a Bearer token.
+as a Bearer token. Repeated headers differ from the gateway until 0.13.0: the
+server reads every value of a repeated header, skips empty ones, and refuses
+values that carry different tokens, while the gateway uses only the first
+`Authorization` value.
 
 Token auth covers the HTTP port. The other listeners are local: the IPC socket
 that a worker sidecar uses (`SIE_IPC_SOCKET_PATH`, mode `0600`) and the

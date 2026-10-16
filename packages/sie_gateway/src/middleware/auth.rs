@@ -149,17 +149,7 @@ where
             }
 
             let token = match extract_request_credential(req.headers()) {
-                RequestCredential::Token(t) => {
-                    if authorization_values_disagree(req.headers())
-                        && !repeated_authorization_warned.swap(true, Ordering::Relaxed)
-                    {
-                        tracing::warn!(
-                            audit = "auth",
-                            "A request repeated the Authorization header with different values. The gateway used the first value; from 0.13.0 it refuses such requests with 401. Send one Authorization header."
-                        );
-                    }
-                    t
-                }
+                RequestCredential::Token(t) => t,
                 RequestCredential::Missing => {
                     record_admission_rejection(&req, AdmissionOutcome::Unauthenticated);
                     return Ok(error_response(
@@ -207,6 +197,7 @@ where
                     ));
                 }
 
+                warn_on_repeated_authorization(&req, &repeated_authorization_warned);
                 return inner.call(req).await;
             }
 
@@ -224,8 +215,22 @@ where
                 ));
             }
 
+            warn_on_repeated_authorization(&req, &repeated_authorization_warned);
             inner.call(req).await
         })
+    }
+}
+
+/// Log, once per gateway, that an authenticated request repeated
+/// `Authorization` with values that 0.13.0 refuses. Only requests that pass
+/// authentication count, so an unauthenticated client cannot spend the
+/// warning.
+fn warn_on_repeated_authorization(req: &Request<Body>, warned: &AtomicBool) {
+    if authorization_values_disagree(req.headers()) && !warned.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            audit = "auth",
+            "A request repeated the Authorization header with different values. The gateway used the first value; from 0.13.0 it refuses such requests with 401. Send one Authorization header."
+        );
     }
 }
 
@@ -1288,6 +1293,60 @@ mod tests {
         }
         assert_eq!(log.count("repeated the Authorization header"), 1);
         assert_eq!(log.count("from 0.13.0 it refuses such requests"), 1);
+    }
+
+    fn repeated_authorization(path: &str, first: &str, second: &str) -> Request<Body> {
+        HttpRequest::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header("authorization", format!("Bearer {first}"))
+            .header("authorization", format!("Bearer {second}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn middleware_warns_only_for_a_repeat_that_passes_authentication() {
+        use tracing::instrument::WithSubscriber;
+
+        for (refused, passing) in [
+            (
+                repeated_authorization("/v1/encode/any", "bogus", "user"),
+                repeated_authorization("/v1/encode/any", "user", "bogus"),
+            ),
+            (
+                repeated_authorization("/v1/pools", "user", "admin"),
+                repeated_authorization("/v1/pools", "admin", "user"),
+            ),
+        ] {
+            let log = CapturedLog::default();
+            let dispatch = tracing::Dispatch::new(
+                tracing_subscriber::fmt()
+                    .with_writer(log.clone())
+                    .with_ansi(false)
+                    .finish(),
+            );
+            let router = test_router(cfg_for_middleware("token", vec!["user"], "admin", false));
+
+            let status = router
+                .clone()
+                .oneshot(refused)
+                .with_subscriber(dispatch.clone())
+                .await
+                .unwrap()
+                .status();
+            assert!(status.is_client_error(), "{status}");
+            assert_eq!(log.count("repeated the Authorization header"), 0);
+
+            let status = router
+                .oneshot(passing)
+                .with_subscriber(dispatch)
+                .await
+                .unwrap()
+                .status();
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(log.count("repeated the Authorization header"), 1);
+        }
     }
 
     #[tokio::test]

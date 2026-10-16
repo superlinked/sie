@@ -230,8 +230,10 @@ The changes:
     passes today still passes, including one where a proxy in front of the
     gateway adds an `x-api-key` of its own. Repeated `x-api-key` values that
     carry different tokens get `401`.
-  - A repeated `Authorization` header still uses its first value. When the
-    values carry different tokens, the gateway logs a warning once.
+  - A repeated `Authorization` header still uses its first value. The gateway
+    logs a warning, once per process, the first time a request that passes
+    authentication repeats `Authorization` with values that carry different
+    tokens or with a value it cannot read. A refused request never logs it.
   - `SIE_WORKER_AUTH_TOKEN` is the token the gateway presents to workers.
   - Logs a warning when `SIE_AUTH_MODE` is unset on a non-loopback bind.
 - Telemetry: `SIE_TELEMETRY_ENABLED=1` opts in explicitly. The default stays on,

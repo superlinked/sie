@@ -206,6 +206,29 @@ class TestGetOrCreateWorkerId:
         assert in_flight.exists()
         assert users.exists()
 
+    def test_a_write_interrupted_before_the_rename_is_swept_later(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class Interrupted(BaseException):
+            pass
+
+        def interrupted(self: Path, target: object) -> Path:
+            raise Interrupted
+
+        with monkeypatch.context() as patched:
+            patched.setattr(Path, "replace", interrupted)
+            with pytest.raises(Interrupted):
+                _get_or_create_worker_id(str(tmp_path))
+        (leftover,) = tmp_path.iterdir()
+        old = time.time() - 600
+        os.utime(leftover, (old, old))
+
+        worker_id = _get_or_create_worker_id(str(tmp_path))
+
+        assert not leftover.exists()
+        assert [entry.name for entry in tmp_path.iterdir()] == ["worker-id"]
+        assert (tmp_path / "worker-id").read_text() == worker_id
+
     def test_temporary_files_of_another_user_are_kept(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         old = time.time() - 600
         orphan = tmp_path / ".worker-id.sie-server-00000000000000aa"
