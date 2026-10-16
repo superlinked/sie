@@ -43,6 +43,8 @@ metadata:
 rules:
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
+    resourceNames:
+      {{- toYaml $lanes | nindent 6 }}
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["pods"]
@@ -79,12 +81,12 @@ metadata:
     app.kubernetes.io/component: worker-auth
   annotations:
     helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-delete-policy: before-hook-creation
     helm.sh/hook-weight: "5"
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: 300
-  ttlSecondsAfterFinished: 300
+  ttlSecondsAfterFinished: 86400
   template:
     metadata:
       labels:
@@ -99,30 +101,42 @@ spec:
           args:
             - |
               set -eu
+              set -o pipefail
               NAMESPACE="{{ include "sie-cluster.namespace" . }}"
               {{- include "sie-cluster.kubernetes.inClusterKubeconfig" . | nindent 14 }}
               LANES="{{ join " " $lanes }}"
               PORT={{ .Values.workers.common.port }}
-              DEADLINE=$(( $(date +%s) + 240 ))
+              DEADLINE=$(( $(date +%s) + 180 ))
               echo "=== Worker token test ==="
               echo "Every ready worker of the current revision must refuse GET /v1/models without a token."
               verified=0
               for lane in $LANES; do
-                if ! kubectl get statefulset "$lane" >/dev/null; then
+                if ! replicas=$(kubectl get statefulset "$lane" -o jsonpath='{.spec.replicas}'); then
                   echo "FAILED: StatefulSet $lane not found."
                   exit 1
                 fi
                 state=waiting
+                if [ "$replicas" = "0" ]; then
+                  echo "SKIPPED: $lane is scaled to zero."
+                  state=skipped
+                fi
                 while [ "$state" = "waiting" ]; do
                   revision=$(kubectl get statefulset "$lane" -o jsonpath='{.status.updateRevision}')
-                  addresses=$(kubectl get pods -l "controller-revision-hash=$revision" -o json \
+                  if ! addresses=$(kubectl get pods -l "controller-revision-hash=$revision" -o json \
                     | jq -r '.items[] | select(.metadata.deletionTimestamp == null)
                         | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))
-                        | .status.podIP // empty')
+                        | .status.podIP // empty'); then
+                    echo "FAILED: cannot list the pods of $lane."
+                    exit 1
+                  fi
                   unreached=0
                   if [ -n "$addresses" ]; then
                     for address in $addresses; do
-                      code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$address:$PORT/v1/models" || true)
+                      case "$address" in
+                        *:*) host="[$address]" ;;
+                        *) host="$address" ;;
+                      esac
+                      code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$host:$PORT/v1/models" || true)
                       case "$code" in
                         401)
                           echo "$lane $address: refused without a token"
@@ -147,7 +161,7 @@ spec:
                       echo "FAILED: $lane has ready workers that did not answer from this pod."
                       exit 1
                     else
-                      echo "WARNING: $lane has no ready worker of the current revision to check (scaled to zero or still starting)."
+                      echo "WARNING: $lane has no ready worker of the current revision to check (still starting)."
                       state=skipped
                     fi
                   fi

@@ -1026,17 +1026,20 @@ and token, and refuses every request when token auth has no token.
 
 {{/*
 Validation: the MCP edge calls the in-cluster gateway unless
-mcpEdge.clusterBaseUrl points elsewhere. When that gateway enforces token auth
-the edge needs a client token, or every tool call is refused.
+mcpEdge.clusterBaseUrl points elsewhere. When that gateway enforces token auth,
+or its auth mode is known only at run time, the edge needs a client token, or
+every tool call may be refused.
 */}}
 {{- define "sie-cluster.mcpEdge.validateGatewayToken" -}}
 {{- $mcp := .Values.mcpEdge | default dict -}}
-{{- if and $mcp.enabled (not $mcp.clusterBaseUrl) (not (dig "clusterApiKey" "existingSecretName" "" $mcp)) (include "sie-cluster.gateway.authenticates" .) -}}
+{{- $auth := include "sie-cluster.gateway.effectiveAuthMode" . | fromJson -}}
+{{- $mayAuthenticate := or (include "sie-cluster.gateway.authenticates" .) (not $auth.known) -}}
+{{- if and $mcp.enabled (not $mcp.clusterBaseUrl) (not (dig "clusterApiKey" "existingSecretName" "" $mcp)) $mayAuthenticate -}}
 {{- $example := "" -}}
 {{- with include "sie-cluster.gateway.tokenSecretName" . -}}
 {{- $example = printf ", for example mcpEdge.clusterApiKey.existingSecretName=%s and mcpEdge.clusterApiKey.secretKey=%s" . (include "sie-cluster.gateway.tokenSecretKey" $) -}}
 {{- end -}}
-{{- fail (printf "mcpEdge.enabled with gateway token auth needs mcpEdge.clusterApiKey.existingSecretName: the MCP edge calls the in-cluster gateway, which refuses requests without a token. Point it at a Secret key that holds one gateway client token%s." $example) -}}
+{{- fail (printf "mcpEdge.enabled with gateway token auth (or a gateway auth mode known only at run time) needs mcpEdge.clusterApiKey.existingSecretName: the MCP edge calls the in-cluster gateway, which refuses requests without a token. Point it at a Secret key that holds one gateway client token%s." $example) -}}
 {{- end -}}
 {{- end }}
 
@@ -1048,6 +1051,10 @@ two-step upgrade and needs workers.auth.enabled.
 {{- $allowUnauthenticated := include "sie-cluster.optIn" (dict "value" (dig "auth" "allowUnauthenticated" nil (.Values.workers | default dict)) "path" "workers.auth.allowUnauthenticated") -}}
 {{- if and $allowUnauthenticated (not (include "sie-cluster.workers.authEnabled" .)) -}}
 {{- fail "workers.auth.allowUnauthenticated=true needs workers.auth.enabled=true: it is the first step of the two-step upgrade, in which the gateway presents the worker token and the workers do not require it yet. Set workers.auth.enabled=true with it, or remove it." -}}
+{{- end -}}
+{{- $tag := toString (dig "common" "image" "tag" "" (.Values.workers | default dict)) -}}
+{{- if and (include "sie-cluster.workers.authEnabled" .) .Chart.AppVersion (regexMatch "^v?[0-9]+\\.[0-9]+\\.[0-9]+$" $tag) (semverCompare (printf "<%s" .Chart.AppVersion) $tag) -}}
+{{- fail (printf "workers.auth.enabled needs sie-server images from this chart's release (%s) or later, which enforce the worker token; workers.common.image.tag=%s is older, so its workers would serve without a token. Remove the tag override or set a tag of this release or later." .Chart.AppVersion $tag) -}}
 {{- end -}}
 {{- end }}
 

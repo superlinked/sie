@@ -786,15 +786,21 @@ fn env_default(key: &str, fallback: &str) -> String {
 }
 
 /// The `Authorization` value the gateway presents when it dials a worker's
-/// `/ws/status`, from `SIE_WORKER_AUTH_TOKEN`. `None` when it is unset or blank.
+/// `/ws/status`, from `SIE_WORKER_AUTH_TOKEN`. Like the workers' own
+/// `SIE_AUTH_TOKEN`, the value may list comma-separated tokens; the gateway
+/// presents the first. `None` when it holds no token.
 pub fn worker_authorization_from_env() -> Result<Option<HeaderValue>, String> {
-    worker_authorization(env::var("SIE_WORKER_AUTH_TOKEN").unwrap_or_default().trim())
+    worker_authorization(&env::var("SIE_WORKER_AUTH_TOKEN").unwrap_or_default())
 }
 
-fn worker_authorization(token: &str) -> Result<Option<HeaderValue>, String> {
-    if token.is_empty() {
+fn worker_authorization(tokens: &str) -> Result<Option<HeaderValue>, String> {
+    let Some(token) = tokens
+        .split(',')
+        .map(str::trim)
+        .find(|token| !token.is_empty())
+    else {
         return Ok(None);
-    }
+    };
     let mut value = HeaderValue::from_str(&format!("Bearer {token}"))
         .map_err(|_| "SIE_WORKER_AUTH_TOKEN is not a valid HTTP header value".to_string())?;
     value.set_sensitive(true);
@@ -2402,6 +2408,23 @@ mod tests {
             !error.contains("bad"),
             "the error must not echo the token: {error}"
         );
+    }
+
+    #[test]
+    fn worker_authorization_presents_the_first_listed_token() {
+        for (tokens, expected) in [
+            ("new,old", Some("Bearer new")),
+            (" new , old ", Some("Bearer new")),
+            (",new", Some("Bearer new")),
+            (" , ", None),
+        ] {
+            let value = worker_authorization(tokens).unwrap();
+            assert_eq!(
+                value.as_ref().map(|value| value.to_str().unwrap()),
+                expected,
+                "{tokens:?}"
+            );
+        }
     }
 
     fn cfg_on_host(host: &str, mode: &str, tokens: Vec<&str>) -> Config {

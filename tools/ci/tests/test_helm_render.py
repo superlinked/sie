@@ -7,6 +7,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -3351,8 +3352,70 @@ MCP_TOKEN_AUTH = {"gateway": {"auth": {"mode": "token", "generateToken": True}},
 
 def test_the_mcp_edge_needs_a_gateway_token_when_the_gateway_requires_one(tmp_path: Path) -> None:
     error = render_error(tmp_path, {**L4_POOL, **MCP_TOKEN_AUTH})
-    assert "mcpEdge.enabled with gateway token auth needs mcpEdge.clusterApiKey.existingSecretName" in error
+    assert "mcpEdge.enabled with gateway token auth" in error
+    assert "needs mcpEdge.clusterApiKey.existingSecretName" in error
     assert f"mcpEdge.clusterApiKey.existingSecretName={GATEWAY_TOKEN_SECRET}" in error
+
+
+RUNTIME_GATEWAY_MODE = {
+    "auth": {"generateToken": True},
+    "extraEnv": [{"name": "SIE_AUTH_MODE", "valueFrom": {"configMapKeyRef": {"name": "gateway-mode", "key": "mode"}}}],
+}
+
+
+def test_the_mcp_edge_needs_a_gateway_token_when_the_gateway_mode_is_known_only_at_run_time(tmp_path: Path) -> None:
+    error = render_error(tmp_path, {**L4_POOL, "gateway": RUNTIME_GATEWAY_MODE, "mcpEdge": {"enabled": True}})
+    assert "or a gateway auth mode known only at run time" in error
+    assert f"mcpEdge.clusterApiKey.existingSecretName={GATEWAY_TOKEN_SECRET}" in error
+
+
+def rendered_notes(tmp_path: Path, values: dict) -> str:
+    chart = tmp_path / "notes-chart"
+    shutil.copytree(helm.CHART_DIR, chart)
+    notes = (chart / "templates" / "NOTES.txt").read_text(encoding="utf-8")
+    (chart / "templates" / "NOTES.txt").unlink()
+    (chart / "templates" / "_notes_under_test.tpl").write_text(
+        '{{- define "notes.under.test" -}}\n' + notes + "\n{{- end -}}\n", encoding="utf-8"
+    )
+    (chart / "templates" / "notes-under-test.yaml").write_text(
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: notes-under-test\n"
+        'data:\n  notes: {{ include "notes.under.test" . | quote }}\n',
+        encoding="utf-8",
+    )
+    values_file = tmp_path / "notes-values.yaml"
+    values_file.write_text(yaml.safe_dump(values), encoding="utf-8")
+    result = subprocess.run(
+        [
+            "mise",
+            "exec",
+            "--",
+            "helm",
+            "template",
+            "sie",
+            str(chart),
+            "--namespace",
+            "sie",
+            "-f",
+            str(values_file),
+            "--show-only",
+            "templates/notes-under-test.yaml",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return yaml.safe_load(result.stdout)["data"]["notes"]
+
+
+def test_the_notes_say_when_the_gateway_mode_is_known_only_at_run_time(tmp_path: Path) -> None:
+    notes = rendered_notes(tmp_path, {**L4_POOL, "gateway": RUNTIME_GATEWAY_MODE})
+    assert "known only at run time" in notes
+    assert "does not require this token yet" not in notes
+    assert "does not require this token yet (gateway auth mode none)" in rendered_notes(
+        tmp_path / "none", {**L4_POOL, "gateway": {"auth": {"generateToken": True}}}
+    )
 
 
 @pytest.mark.parametrize(
@@ -3392,16 +3455,32 @@ def test_enforced_worker_auth_adds_a_release_test_of_every_api_lane(tmp_path: Pa
     script = container["args"][0]
     assert 'LANES="sie-sie-cluster-worker-cpu-default sie-sie-cluster-worker-l4-default"' in script
     assert "candle" not in script
-    assert "http://$address:$PORT/v1/models" in script
+    assert "http://$host:$PORT/v1/models" in script
     assert "401)" in script
     assert "exit 1" in script
     (role,) = [
         doc for doc in docs if doc["kind"] == "Role" and doc["metadata"]["name"] == "sie-sie-cluster-worker-auth-test"
     ]
     assert role["rules"] == [
-        {"apiGroups": ["apps"], "resources": ["statefulsets"], "verbs": ["get"]},
+        {
+            "apiGroups": ["apps"],
+            "resources": ["statefulsets"],
+            "resourceNames": ["sie-sie-cluster-worker-cpu-default", "sie-sie-cluster-worker-l4-default"],
+            "verbs": ["get"],
+        },
         {"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]},
     ]
+
+
+def test_the_worker_auth_test_job_is_kept_and_ends_well_before_its_deadline(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, {"workers": {"auth": {"enabled": True}, **L4_POOL["workers"]}})
+    job = hook_jobs(docs)[WORKER_AUTH_TEST_JOB]
+    assert job["metadata"]["annotations"]["helm.sh/hook-delete-policy"] == "before-hook-creation"
+    assert job["spec"]["ttlSecondsAfterFinished"] >= 3600
+    (wait,) = re.findall(
+        r"DEADLINE=\$\(\( \$\(date \+%s\) \+ (\d+) \)\)", job["spec"]["template"]["spec"]["containers"][0]["args"][0]
+    )
+    assert job["spec"]["activeDeadlineSeconds"] - int(wait) >= 120
 
 
 @pytest.mark.parametrize(
@@ -3477,52 +3556,125 @@ def test_the_worker_auth_test_fails_closed_and_reports_what_it_checked(tmp_path:
     assert '000|"")' in script
 
 
-WORKER_AUTH_STUBS = {
-    "kubectl": """#!/bin/sh
-case "$*" in
-  "get statefulset "*" -o jsonpath="*) echo rev-1 ;;
-  "get statefulset "*) [ "$STUB_STATEFULSET" = present ] ;;
-  "get pods "*) printf '%s' "$STUB_PODS" ;;
-  *) exit 2 ;;
-esac
-""",
-    "curl": """#!/bin/sh
-printf '%s' "$STUB_HTTP_CODE"
-""",
+WORKER_AUTH_KUBECTL = """
+import json, os, sys
+
+args = sys.argv[1:]
+with open(os.path.join(os.environ["STUB_DIR"], "kubectl.log"), "a") as log:
+    log.write(" ".join(args) + "\\n")
+output = args[args.index("-o") + 1] if "-o" in args else ""
+if args[:2] == ["get", "statefulset"]:
+    if os.environ["STUB_STATEFULSET"] != "present":
+        sys.exit(1)
+    answers = {
+        "jsonpath={.spec.replicas}": os.environ["STUB_REPLICAS"],
+        "jsonpath={.status.updateRevision}": "rev-2",
+    }
+    if output not in answers:
+        sys.exit(2)
+    print(answers[output], end="")
+elif args[:2] == ["get", "pods"] and output == "json" and "-l" in args:
+    if os.environ.get("STUB_PODS_FAIL"):
+        sys.exit(1)
+    key, _, value = args[args.index("-l") + 1].partition("=")
+    items = json.loads(os.environ["STUB_PODS"])["items"]
+    print(json.dumps({"items": [pod for pod in items if pod["metadata"].get("labels", {}).get(key) == value]}))
+else:
+    sys.exit(2)
+"""
+WORKER_AUTH_CURL = """
+import json, os, sys
+
+host = sys.argv[-1].removeprefix("http://").removesuffix("/v1/models").rpartition(":")[0]
+with open(os.path.join(os.environ["STUB_DIR"], "curl.log"), "a") as log:
+    log.write(host + "\\n")
+print(json.loads(os.environ["STUB_HTTP_CODES"]).get(host, os.environ["STUB_HTTP_CODE"]), end="")
+"""
+WORKER_AUTH_SHELL_STUBS = {
     "date": """#!/bin/sh
 count=$(cat "$STUB_DIR/date-calls" 2>/dev/null || echo 0)
 echo $((count + 1)) > "$STUB_DIR/date-calls"
 if [ "$count" -eq 0 ]; then echo 0; else echo 100000; fi
 """,
-    "sleep": "#!/bin/sh\n",
+    "sleep": '#!/bin/sh\necho "$@" >> "$STUB_DIR/sleep.log"\n',
 }
-READY_POD = {
+
+
+def worker_pod(ip: str, revision: str = "rev-2", ready: bool = True, terminating: bool = False) -> dict:
+    metadata: dict = {"labels": {"controller-revision-hash": revision}}
+    if terminating:
+        metadata["deletionTimestamp"] = "2026-01-01T00:00:00Z"
+    return {
+        "metadata": metadata,
+        "status": {"podIP": ip, "conditions": [{"type": "Ready", "status": "True" if ready else "False"}]},
+    }
+
+
+READY_POD = {"items": [worker_pod("10.0.0.7")]}
+MIXED_PODS = {
     "items": [
-        {
-            "metadata": {},
-            "status": {"podIP": "10.0.0.7", "conditions": [{"type": "Ready", "status": "True"}]},
-        }
+        worker_pod("10.0.0.1"),
+        worker_pod("10.0.0.2", ready=False),
+        worker_pod("10.0.0.3", terminating=True),
+        worker_pod("10.0.0.4", revision="rev-1"),
+        worker_pod("fd00::5"),
     ]
 }
+MIXED_POD_CODES = {"10.0.0.1": "401", "10.0.0.2": "200", "10.0.0.3": "200", "10.0.0.4": "200", "[fd00::5]": "401"}
 
 
-def run_worker_auth_test(tmp_path: Path, statefulset: str, pods: dict, http_code: str) -> subprocess.CompletedProcess:
+def pipefail_shell() -> str:
+    """A POSIX shell that supports pipefail, as the hook image's BusyBox ash does."""
+    for shell in ("/bin/sh", shutil.which("bash") or "/bin/bash"):
+        if subprocess.run([shell, "-c", "set -o pipefail"], capture_output=True, check=False).returncode == 0:
+            return shell
+    pytest.fail("no POSIX shell with pipefail support")
+
+
+def worker_auth_test_script(tmp_path: Path) -> str:
     docs = rendered_documents(tmp_path, {"workers": {"auth": {"enabled": True}, **L4_POOL["workers"]}})
-    script = hook_jobs(docs)[WORKER_AUTH_TEST_JOB]["spec"]["template"]["spec"]["containers"][0]["args"][0]
+    return hook_jobs(docs)[WORKER_AUTH_TEST_JOB]["spec"]["template"]["spec"]["containers"][0]["args"][0]
+
+
+def run_worker_auth_test(
+    tmp_path: Path,
+    statefulset: str,
+    pods: dict,
+    http_code: str,
+    *,
+    replicas: str = "1",
+    http_codes: dict | None = None,
+    pods_fail: bool = False,
+) -> subprocess.CompletedProcess:
+    script = worker_auth_test_script(tmp_path)
     stubs = tmp_path / "stubs"
     stubs.mkdir()
-    for name, body in WORKER_AUTH_STUBS.items():
+    for name, body in {
+        "kubectl": f"#!{sys.executable}\n{WORKER_AUTH_KUBECTL}",
+        "curl": f"#!{sys.executable}\n{WORKER_AUTH_CURL}",
+        **WORKER_AUTH_SHELL_STUBS,
+    }.items():
         (stubs / name).write_text(body, encoding="utf-8")
         (stubs / name).chmod(0o755)
     env = {
         "PATH": f"{stubs}:{os.environ['PATH']}",
         "STUB_DIR": str(stubs),
         "STUB_STATEFULSET": statefulset,
+        "STUB_REPLICAS": replicas,
         "STUB_PODS": json.dumps(pods),
         "STUB_HTTP_CODE": http_code,
+        "STUB_HTTP_CODES": json.dumps(http_codes or {}),
+        **({"STUB_PODS_FAIL": "1"} if pods_fail else {}),
     }
     script = script.replace("KUBECONFIG=/tmp/sie-in-cluster-kubeconfig", f"KUBECONFIG={tmp_path}/kubeconfig")
-    return subprocess.run(["/bin/sh", "-c", script], env=env, capture_output=True, text=True, check=False, timeout=60)
+    return subprocess.run(
+        [pipefail_shell(), "-c", script], env=env, capture_output=True, text=True, check=False, timeout=60
+    )
+
+
+def stub_log(tmp_path: Path, name: str) -> list[str]:
+    path = tmp_path / "stubs" / f"{name}.log"
+    return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
 
 
 @pytest.mark.parametrize(
@@ -3542,3 +3694,76 @@ def test_the_worker_auth_test_script_decides_on_what_it_observes(
     result = run_worker_auth_test(tmp_path, statefulset, pods, http_code)
     assert result.returncode == exit_code, result.stdout + result.stderr
     assert message in result.stdout
+
+
+def test_the_worker_auth_test_checks_only_ready_workers_of_the_current_revision(tmp_path: Path) -> None:
+    result = run_worker_auth_test(tmp_path, "present", MIXED_PODS, "000", http_codes=MIXED_POD_CODES)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SUCCESS: 2 worker(s) refused a request without a token." in result.stdout
+    assert sorted(stub_log(tmp_path, "curl")) == ["10.0.0.1", "[fd00::5]"]
+    assert "get pods -l controller-revision-hash=rev-2 -o json" in stub_log(tmp_path, "kubectl")
+
+
+def test_the_worker_auth_test_skips_a_lane_scaled_to_zero_at_once(tmp_path: Path) -> None:
+    result = run_worker_auth_test(tmp_path, "present", READY_POD, "200", replicas="0")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SKIPPED: sie-sie-cluster-worker-l4-default is scaled to zero." in result.stdout
+    assert "WARNING: no worker was checked." in result.stdout
+    assert not [call for call in stub_log(tmp_path, "kubectl") if call.startswith("get pods")]
+    assert stub_log(tmp_path, "sleep") == []
+    assert stub_log(tmp_path, "curl") == []
+
+
+def test_the_worker_auth_test_fails_when_it_cannot_list_the_pods(tmp_path: Path) -> None:
+    result = run_worker_auth_test(tmp_path, "present", READY_POD, "401", pods_fail=True)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "FAILED: cannot list the pods of sie-sie-cluster-worker-l4-default." in result.stdout
+    assert "WARNING" not in result.stdout
+
+
+@pytest.mark.parametrize("name", ["SIE_AUTH_MODE", "SIE_AUTH_TOKEN", "SIE_AUTH_TOKENS"])
+def test_worker_auth_variables_are_reserved_for_bundles_in_the_upgrade_step(tmp_path: Path, name: str) -> None:
+    bundle = {"default": {"extraEnv": [{"name": name, "value": "override"}]}}
+    workers = {
+        "auth": {"enabled": True, "allowUnauthenticated": True},
+        "pools": {"l4": {"enabled": True, "bundles": bundle}},
+    }
+    error = render_error(tmp_path, {"workers": workers})
+    assert f"workers.pools.l4.bundles.default.extraEnv must not override chart-owned variable {name}" in error
+
+
+def chart_app_version() -> str:
+    return yaml.safe_load((helm.CHART_DIR / "Chart.yaml").read_text(encoding="utf-8"))["appVersion"]
+
+
+def older_version(version: str) -> str:
+    major, minor, patch = (int(part) for part in version.lstrip("v").split("."))
+    return f"v{major}.{minor}.{patch - 1}" if patch else f"v{major}.{minor - 1}.0" if minor else f"v{major - 1}.0.0"
+
+
+def test_worker_auth_refuses_a_worker_image_tag_older_than_the_chart(tmp_path: Path) -> None:
+    tag = older_version(chart_app_version())
+    workers = {"auth": {"enabled": True}, "common": {"image": {"tag": tag}}, **L4_POOL["workers"]}
+    error = render_error(tmp_path, {"workers": workers})
+    assert f"workers.common.image.tag={tag} is older" in error
+    workers["auth"]["allowUnauthenticated"] = True
+    assert f"workers.common.image.tag={tag} is older" in render_error(tmp_path, {"workers": workers})
+
+
+@pytest.mark.parametrize(
+    ("auth", "tag"),
+    [
+        ({"enabled": True}, None),
+        ({"enabled": True}, "same"),
+        ({"enabled": True}, "v99.0.0"),
+        ({"enabled": True}, "main"),
+        ({}, "older"),
+    ],
+)
+def test_worker_image_tags_that_enforce_or_cannot_be_compared_render(
+    tmp_path: Path, auth: dict, tag: str | None
+) -> None:
+    version = chart_app_version()
+    tags = {"same": version, "older": older_version(version)}
+    common = {"image": {"tag": tags.get(tag, tag)}} if tag else {}
+    rendered_documents(tmp_path, {"workers": {"auth": auth, "common": common, **L4_POOL["workers"]}})

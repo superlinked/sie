@@ -36,7 +36,11 @@ sie-config read token (reads only): kubectl get secret -n {{ include "sie-cluste
 {{- end }}
 {{- if include "sie-cluster.gateway.generatesToken" . }}
 Gateway token: kubectl get secret -n {{ include "sie-cluster.namespace" . }} {{ include "sie-cluster.gateway.generatedTokenSecretName" . }} -o jsonpath='{.data.{{ include "sie-cluster.gateway.tokenSecretKey" . | replace "." "\\." }}}' | base64 -d
-{{- if not (include "sie-cluster.gateway.authenticates" .) }}
+{{- $gatewayAuth := include "sie-cluster.gateway.effectiveAuthMode" . | fromJson }}
+{{- if not $gatewayAuth.known }}
+The gateway auth mode comes from gateway.extraEnv and is known only at run time. The gateway receives
+this token and requires it when that mode is token or static.
+{{- else if not (include "sie-cluster.gateway.authenticates" .) }}
 The gateway does not require this token yet (gateway auth mode none). Give it to your clients, then
 run helm upgrade again with --set gateway.auth.mode=token.
 {{- end }}

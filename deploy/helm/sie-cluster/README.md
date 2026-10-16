@@ -869,9 +869,12 @@ A remote lane needs this policy or `workers.networkPolicy`, and the render
 fails when both are off. The policy takes effect only with a CNI that enforces
 NetworkPolicy.
 
-- **Ingress:** only this release's gateway pods, on the worker ports. The worker
-  API has no authentication of its own, so without this rule any pod in the
-  cluster could call a remote lane directly and spend its upstream credentials.
+- **Ingress:** this release's gateway pods, on the worker ports, and, while the
+  workers require the worker token, the release-time worker token test's pods
+  (`app.kubernetes.io/component: worker-auth`). Without `workers.auth` the
+  worker API has no authentication of its own, so without this rule any pod in
+  the cluster could call a remote lane directly and spend its upstream
+  credentials.
   While this policy is on, `workers.networkPolicy` excludes the remote lanes, so
   its `extraIngress` sources cannot reach them. NetworkPolicies are additive:
   any other policy that selects these pods and admits more sources widens
@@ -1655,7 +1658,8 @@ The workers serve an HTTP API that the gateway calls. With
 `SIE_AUTH_MODE=token` and `SIE_AUTH_TOKEN` and requires the token on every
 route except `/healthz`, `/livez`, and `/readyz`, which the kubelet probes
 call without credentials. The gateway receives the same token as
-`SIE_WORKER_AUTH_TOKEN` and presents it when it opens a worker's `/ws/status`
+`SIE_WORKER_AUTH_TOKEN` and presents it (the first one, when the Secret key
+lists several comma-separated tokens) when it opens a worker's `/ws/status`
 connection, which it does with `gateway.healthMode=ws` or when it falls back to
 WebSocket health because NATS is unavailable at start. With the default NATS
 health mode the gateway reaches the workers only through NATS. The Rust worker
@@ -1669,13 +1673,18 @@ post-upgrade hook Job, `<fullname>-worker-auth-test-<revision>`, checks this
 while the workers require the token: once a worker of each lane's current
 StatefulSet revision is ready, it sends `GET /v1/models` without a token and
 fails the release when a worker answers with anything but `401`, when a ready
-worker does not answer, or when a lane's StatefulSet is missing. Both worker
-NetworkPolicies admit the hook pod to the worker ports while the workers
-require the token. A lane with no ready worker of the current revision within
-four minutes (scaled to zero, or a cold start longer than that) is skipped with
-a warning, and the Job logs a warning when it checked no worker at all. Keep
-the image tags at the chart default, or override `workers.common.image.tag`
-only with a tag of the same release or later.
+worker does not answer, when a lane's StatefulSet is missing, or when its pods
+cannot be listed. Both worker NetworkPolicies admit the hook pod to the worker
+ports while the workers require the token. A lane scaled to zero is skipped at
+once, and a lane with no ready worker of the current revision within three
+minutes (a cold start longer than that) is skipped with a warning. The check is
+best effort: a skipped lane is not checked until a later release finds it
+running. The Job stays for a day after it finishes, so its log
+(`kubectl logs -n <namespace> job/<fullname>-worker-auth-test-<revision>`)
+shows which workers it checked and which lanes it skipped. Keep the image tags
+at the chart default, or override `workers.common.image.tag` only with a tag of
+the same release or later: with `workers.auth.enabled`, the render fails when
+that tag is a version older than the chart's `appVersion`.
 
 With `workers.auth.tokenSecretName` empty, the chart creates
 `<fullname>-worker-token` holding a random 64-character token under
@@ -1728,8 +1737,8 @@ the value from the first step. The second step rolls the workers. `helm status`
 prints a warning while `workers.auth.allowUnauthenticated` is on, and the
 render fails when it is set without `workers.auth.enabled`.
 
-**Rotating the worker token.** The gateway presents a single worker token, so
-the gateway and the workers switch tokens together:
+**Rotating the worker token.** The gateway presents one worker token at a
+time:
 
 - With the default NATS health mode, nothing calls the worker API except the
   probes. Delete the generated Secret (or change your own), run `helm upgrade`,
@@ -1740,18 +1749,26 @@ the gateway and the workers switch tokens together:
   with `workers.auth.allowUnauthenticated=false`. Keep `workers.networkPolicy`
   on, since the workers accept unauthenticated requests between the first and
   last step.
+- With your own Secret in `workers.auth.tokenSecretName`, rotate without a
+  gap: set the key to `old-token,new-token` and restart the worker
+  StatefulSets, so the workers accept both; set it to `new-token,old-token` and
+  restart the gateway, which presents the first; then set it to `new-token` and
+  restart the worker StatefulSets.
 
 ### NetworkPolicy
 
-`workers.networkPolicy.enabled=true` admits only this release's gateway pods
-to the worker HTTP ports (see [Worker NetworkPolicy](#worker-networkpolicy)).
-A NetworkPolicy takes effect only with a CNI that enforces it. Without one the
-policy admits every pod, and the worker token remains the only control.
-It needs no change for the worker token: the gateway is the only caller of the
-worker API inside the chart, and the kubelet probes, which the policy does not
-restrict, use the probe paths that need no token. Remote lanes have their own
-policy, `workers.remote.networkPolicy`, which also admits only the gateway
-(see [Network policy for remote lanes](#network-policy-for-remote-lanes)).
+`workers.networkPolicy.enabled=true` admits this release's gateway pods to the
+worker HTTP ports (see [Worker NetworkPolicy](#worker-networkpolicy)). While
+the workers require the token, it also admits pods labelled
+`{app.kubernetes.io/name: sie-health-test, app.kubernetes.io/component: worker-auth, app.kubernetes.io/instance: <release>}`,
+the label of the release-time worker token test; any pod created with that
+label in the namespace is admitted, as for the gateway's labels. A
+NetworkPolicy takes effect only with a CNI that enforces it. Without one the
+policy admits every pod, and the worker token remains the only control. The
+kubelet probes, which the policy does not restrict, use the probe paths that
+need no token. Remote lanes have their own policy,
+`workers.remote.networkPolicy`, which admits the same pods (see
+[Network policy for remote lanes](#network-policy-for-remote-lanes)).
 
 ## Ingress
 
@@ -1895,9 +1912,11 @@ Tune them with `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`,
 
 Worker pods serve an HTTP API that requires no token unless
 `workers.auth.enabled` is set (see [Worker token](#worker-token)); the gateway
-is the only in-chart caller. `workers.networkPolicy.enabled=true` renders an
-ingress `NetworkPolicy` whose only default rule admits this release's gateway
-pods to every worker HTTP port. Kubelet probes and traffic between containers
+is the only in-chart caller of the worker API, apart from the release-time
+worker token test. `workers.networkPolicy.enabled=true` renders an ingress
+`NetworkPolicy` whose default rule admits this release's gateway pods to every
+worker HTTP port and, while the workers require the token, the worker token
+test's pods (`app.kubernetes.io/component: worker-auth`). Kubelet probes and traffic between containers
 of the same pod are unaffected. It requires a CNI that enforces NetworkPolicy.
 NetworkPolicies are additive: if another policy selects the worker pods and
 admits more sources, those sources keep access, so it restricts worker ingress

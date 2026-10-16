@@ -934,13 +934,16 @@ workers:
     # same reuse check, keep policy, and `helm template` caveat as
     # gateway.auth.generateToken. It must not name the Secret and key of any
     # other credential the chart wires, including the gateway client token
-    # (the render fails).
+    # (the render fails). The key may hold comma-separated tokens: the workers
+    # accept each, and the gateway presents the first.
     tokenSecretName: ""
     tokenSecretKey: "SIE_AUTH_TOKEN"
 
   # -- Ingress NetworkPolicy for worker pods. When enabled, this policy admits
-  # only this release's gateway pods to the worker HTTP ports (the worker API
-  # requires no token unless workers.auth is enabled); kubelet probes and
+  # this release's gateway pods to the worker HTTP ports (the worker API
+  # requires no token unless workers.auth is enabled) and, while the workers
+  # require the token, the pods of the release-time worker token test (label
+  # app.kubernetes.io/component: worker-auth); kubelet probes and
   # in-pod sidecar traffic are unaffected. Requires a CNI that enforces
   # NetworkPolicy. NetworkPolicies are additive: any other policy that selects
   # worker pods and admits more sources widens access, so check for
@@ -985,7 +988,8 @@ workers:
     equivalence:
       configMap: ""
     # -- NetworkPolicy for the remote lanes' pods, rendered whenever a remote
-    # lane is enabled. Ingress: only this release's gateway pods, on the worker
+    # lane is enabled. Ingress: this release's gateway pods and, while the
+    # workers require the token, the worker token test's pods, on the worker
     # ports; the generic workers.networkPolicy then excludes the remote lanes.
     # Egress: DNS to dnsTo; this release's NATS, sie-config, gateway,
     # telemetry collector and bundled Tempo; and TCP 443 plus each upstream's
