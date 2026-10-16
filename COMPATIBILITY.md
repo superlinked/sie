@@ -2,6 +2,29 @@
 
 > Last Updated: 2026-03-17
 
+## Candle checkpoint filenames: ZIP 9 migration
+
+The Rust/Candle worker's maintained Candle 0.10.2 backport replaces yanked ZIP 7
+with ZIP 9. This adoption is a **breaking minor change**, because ZIP 9 changes
+how two classes of non-ASCII NPZ/PTH archive filenames are decoded:
+
+| Filename bytes and ZIP flag | ZIP 7 name | ZIP 9 name |
+| --- | --- | --- |
+| Valid UTF-8 bytes `C3 A9`, UTF-8 flag (bit 11) clear | `├⌐` (CP437) | `é` (UTF-8) |
+| Invalid UTF-8 byte `82`, UTF-8 flag set | `�` (replacement character) | `é` (CP437 fallback) |
+
+ZIP 9 tries UTF-8 first regardless of the flag, then falls back to CP437.
+Ordinary ASCII, correctly flagged UTF-8, and CP437 filenames whose bytes are
+not valid UTF-8 retain their names. Checkpoint loading does not extract archive
+entries to filesystem paths.
+
+To retain a previous tensor/member name in an affected archive, regenerate it
+with that intended name encoded as valid UTF-8 and the ZIP UTF-8 flag set. For
+example, encode `├⌐` itself as UTF-8 to retain that ZIP 7 name, rather than
+reusing unflagged `C3 A9` bytes. Regenerate invalid flagged filenames using the
+intended Unicode name. This migration applies to ZIP-backed NPZ/PTH checkpoints;
+the Safetensors format is unaffected.
+
 This document defines SIE's compatibility commitments: what constitutes a breaking change, how deprecations are communicated, and what must be true before declaring 1.0.
 
 ---

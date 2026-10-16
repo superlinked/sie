@@ -14,6 +14,11 @@ exclude = [
     "vendor/candle-splade-pool",
 ]
 
+[patch.crates-io]
+# Keep core and Metal kernel types in one immutable maintained source cohort.
+candle-core = { git = "https://github.com/superlinked/candle", rev = "9d2d6c6c1831c3d6444faca8e687dce06bd6bbe0" }
+candle-metal-kernels = { git = "https://github.com/superlinked/candle", rev = "9d2d6c6c1831c3d6444faca8e687dce06bd6bbe0" }
+
 [lib]
 name = "sie_server_rust"
 path = "src/lib.rs"
@@ -72,6 +77,7 @@ rmp-serde = "1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+zip = { version = "9.0.4", default-features = false }
 opentelemetry_sdk = { version = "0.32", features = ["testing"] }
 tempfile = "3"
 
