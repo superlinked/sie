@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import threading
+import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -188,6 +189,33 @@ class TestGetOrCreateWorkerId:
         assert worker_id != planted
         assert id_path.is_file()
         assert id_path.read_text() == worker_id
+
+    def test_only_old_temporary_files_of_the_server_are_cleaned_up(self, tmp_path: Path) -> None:
+        old = time.time() - 600
+        orphan = tmp_path / ".worker-id.sie-server-00000000000000aa"
+        in_flight = tmp_path / ".worker-id.sie-server-00000000000000bb"
+        users = tmp_path / ".worker-id.backup"
+        for path in (orphan, in_flight, users):
+            path.write_text(str(uuid.uuid4()))
+        for path in (orphan, users):
+            os.utime(path, (old, old))
+
+        _get_or_create_worker_id(str(tmp_path))
+
+        assert not orphan.exists()
+        assert in_flight.exists()
+        assert users.exists()
+
+    def test_temporary_files_of_another_user_are_kept(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        old = time.time() - 600
+        orphan = tmp_path / ".worker-id.sie-server-00000000000000aa"
+        orphan.write_text(str(uuid.uuid4()))
+        os.utime(orphan, (old, old))
+        monkeypatch.setattr(os, "getuid", lambda: orphan.stat().st_uid + 1)
+
+        _get_or_create_worker_id(str(tmp_path))
+
+        assert orphan.exists()
 
     def test_readonly_dir_falls_back_to_ephemeral(self, tmp_path: Path) -> None:
         nonexistent = os.path.join(str(tmp_path), "readonly", "nested", "deep")

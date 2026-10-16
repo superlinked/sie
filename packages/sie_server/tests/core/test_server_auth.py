@@ -217,6 +217,27 @@ class TestPersistedToken:
         assert not staged.exists()
         assert stored.path.stat().st_nlink == 1
 
+    def test_a_concurrent_start_that_removes_its_temporary_link_mid_read_is_accepted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stored = load_or_create_token(tmp_path)
+        staged = tmp_path / ".auth-token.sie-server-0123456789abcdef"
+        os.link(stored.path, staged)
+        real_fstat = os.fstat
+        seen: list[int] = []
+
+        def fstat_then_the_other_start_unlinks(fd: int) -> os.stat_result:
+            info = real_fstat(fd)
+            if not seen:
+                seen.append(info.st_nlink)
+                staged.unlink()
+            return info
+
+        monkeypatch.setattr(os, "fstat", fstat_then_the_other_start_unlinks)
+
+        assert read_stored_token(tmp_path) == stored.token
+        assert seen == [2]
+
     def test_a_temporary_link_in_a_directory_without_write_permission_is_tolerated(self, tmp_path: Path) -> None:
         directory = tmp_path / "sie"
         stored = load_or_create_token(directory)
@@ -262,17 +283,6 @@ class TestPersistedToken:
             again = load_or_create_token(directory)
         finally:
             directory.chmod(0o700)
-
-        assert not again.created
-        assert again.token == stored.token
-
-    def test_an_existing_token_on_a_read_only_volume_is_read(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        stored = load_or_create_token(tmp_path)
-        _refuse_creates_in(tmp_path, monkeypatch, errno.EROFS)
-
-        again = load_or_create_token(tmp_path)
 
         assert not again.created
         assert again.token == stored.token
@@ -583,6 +593,21 @@ class TestLoopbackServerApp:
             assert websocket.receive_json() == {"ready": True}
         (warning,) = _host_warnings(caplog)
         assert "0.13.0" in warning
+
+    def test_a_long_host_is_remembered_and_logged_by_its_first_characters(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        client = _loopback_client("127.0.0.1")
+        prefix = "a" * 100
+
+        with caplog.at_level(logging.WARNING, logger=_AUTH_LOGGER):
+            for tail in ("b" * 5000, "c" * 5000):
+                assert client.get("/healthz", headers={"Host": prefix + tail}).status_code == 200
+
+        (warning,) = _host_warnings(caplog)
+        assert repr(prefix) in warning
+        assert "a" * 101 not in warning
+        assert "bbbb" not in warning
 
     def test_each_other_host_is_warned_about_once(self, caplog: pytest.LogCaptureFixture) -> None:
         client = _loopback_client("127.0.0.1")

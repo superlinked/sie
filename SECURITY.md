@@ -41,17 +41,33 @@ What a default install exposes, and how to close it.
   requests without authentication. Anyone who can reach the port can run
   inference, read `/ws/status`, and make the server load catalog models, which
   costs compute, disk and network.
+- Turn on token authentication with `SIE_AUTH_MODE=token`, and set the token
+  with `SIE_AUTH_TOKEN` (or comma-separated `SIE_AUTH_TOKENS`). Without a
+  configured token, the server generates one and keeps it in `SIE_DATA_DIR`.
+  Clients send it as `Authorization: Bearer <token>` or `x-api-key: <token>`;
+  when both are sent, `Authorization` is used. `/healthz`, `/livez` and
+  `/readyz` stay open. Token authentication covers the HTTP port; the IPC
+  socket and the engines' ports listen on this machine only.
 - Keep it on this machine with `--host 127.0.0.1`. In Docker, publish the port
   on loopback only: `-p 127.0.0.1:8080:8080`.
+- A loopback server without a token is still exposed to a web page that uses
+  DNS rebinding. Until 0.13.0 the server only logs a warning for a `Host` that
+  does not name this machine. Set a token if a browser on this machine may
+  visit untrusted pages.
 - Do not expose an unauthenticated server to a network you do not control.
-  Expose it through an authenticating proxy, or through the gateway with token
-  authentication enabled.
+  Turn on token authentication, or expose it through an authenticating proxy
+  or through the gateway with token authentication enabled.
 
 ### Gateway
 
 - The gateway authenticates requests with static tokens: set
   `SIE_AUTH_MODE=token` and `SIE_AUTH_TOKENS`. Mutations of pools, admin and
   config routes also need `SIE_ADMIN_TOKEN`.
+- Clients send a token as `Authorization: Bearer <token>` or
+  `x-api-key: <token>`. When both are sent, `Authorization` is used and
+  `x-api-key` is ignored. Until 0.13.0, a repeated `Authorization` header uses
+  its first value and logs a warning; from 0.13.0, repeated values that carry
+  different tokens are refused.
 - `/healthz`, `/readyz`, `/openapi.json` and `/docs` are always reachable.
   `/`, `/health` and `/ws/*` require a token unless
   `SIE_AUTH_EXEMPT_OPERATIONAL=true`.

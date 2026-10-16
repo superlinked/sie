@@ -228,7 +228,10 @@ The changes:
   - Accepts `x-api-key` alongside `Authorization`. When a request sends both,
     `Authorization` is used and `x-api-key` is ignored, so a request that
     passes today still passes, including one where a proxy in front of the
-    gateway adds an `x-api-key` of its own.
+    gateway adds an `x-api-key` of its own. Repeated `x-api-key` values that
+    carry different tokens get `401`.
+  - A repeated `Authorization` header still uses its first value. When the
+    values carry different tokens, the gateway logs a warning once.
   - `SIE_WORKER_AUTH_TOKEN` is the token the gateway presents to workers.
   - Logs a warning when `SIE_AUTH_MODE` is unset on a non-loopback bind.
 - Telemetry: `SIE_TELEMETRY_ENABLED=1` opts in explicitly. The default stays on,
@@ -245,6 +248,7 @@ The changes:
 | `sie-server` beyond loopback | No authentication | A token is required. Without `SIE_AUTH_TOKEN`, one is generated, and printed once on a terminal | `SIE_AUTH_MODE=none` |
 | `sie-server` on loopback without authentication | A request whose `Host` does not name this machine is answered, with a warning | It gets `400`. So does a request whose `Origin` names another site, at least for WebSocket upgrades and methods other than `GET` | Token authentication, or a setting for more allowed `Host` names, designed together with this change |
 | Rust/Candle worker bind | `0.0.0.0` | `127.0.0.1` | `SIE_SERVER_HOST=0.0.0.0` (the image sets it) |
+| Gateway in token mode, repeated `Authorization` values that carry different tokens | The first value is used, with a warning | `401` | Send one `Authorization` header |
 | Gateway binary beyond loopback with `SIE_AUTH_MODE` unset | Starts without authentication | Refuses to start | `SIE_AUTH_MODE=none`, or `token` with `SIE_AUTH_TOKENS` |
 | Telemetry | On unless disabled | Off unless `SIE_TELEMETRY_ENABLED=1` | `SIE_TELEMETRY_ENABLED=1` |
 | Helm `gateway.auth.mode` | `none` | `token`, with a generated Secret (needs the chart change above) | `gateway.auth.mode=none` |

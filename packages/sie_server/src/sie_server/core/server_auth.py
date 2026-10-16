@@ -16,8 +16,7 @@ import os
 import re
 import secrets
 import stat
-import time
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -25,7 +24,7 @@ from typing import Literal
 import orjson
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from sie_server.core.data_dir import ensure_data_dir, resolve_data_dir
+from sie_server.core.data_dir import ensure_data_dir, owned_files, remove_stale_files, resolve_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +43,8 @@ _KNOWN_MODES = frozenset({"none", "auto"} | _TOKEN_MODES)
 _MAX_TOKEN_FILE_BYTES = 4096
 _GENERATED_TOKEN_BYTES = 32
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-_SETTLE_ATTEMPTS = 40
-_SETTLE_INTERVAL_S = 0.025
 _TEMP_PREFIX = f".{TOKEN_FILE_NAME}.sie-server-"
 _TEMP_NAME = re.compile(rf"{re.escape(_TEMP_PREFIX)}[0-9a-f]{{16}}")
-_ORPHAN_AGE_S = 60.0
 _READ_ONLY_ERRNOS = frozenset({errno.EACCES, errno.EROFS})
 _HOST_CHECK_RELEASE = "0.13.0"
 _MAX_WARNED_HOSTS = 64
@@ -187,7 +183,7 @@ def load_or_create_token(directory: Path) -> StoredToken:
     except OSError as exc:
         raise TokenFileError(f"Cannot create {directory}: {exc.strerror or exc}") from exc
     check_private_directory(directory)
-    _drop_orphaned_temporary_files(directory)
+    remove_stale_files(directory, _TEMP_NAME)
     if os.path.lexists(path):
         return StoredToken(token=read_stored_token(directory), path=path, created=False)
     token = secrets.token_urlsafe(_GENERATED_TOKEN_BYTES)
@@ -206,24 +202,12 @@ def load_or_create_token(directory: Path) -> StoredToken:
             os.close(fd)
         os.link(staged, path)
     except FileExistsError:
-        _wait_for_settled_token(path)
         return StoredToken(token=read_stored_token(directory), path=path, created=False)
     except OSError as exc:
         raise TokenFileError(f"Cannot create {path} from {staged}: {exc.strerror or exc}") from exc
     finally:
         staged.unlink(missing_ok=True)
     return StoredToken(token=token, path=path, created=True)
-
-
-def _wait_for_settled_token(path: Path) -> None:
-    """Give a concurrent first start time to drop its temporary link."""
-    for _ in range(_SETTLE_ATTEMPTS):
-        try:
-            if os.lstat(path).st_nlink == 1:
-                return
-        except OSError:
-            return
-        time.sleep(_SETTLE_INTERVAL_S)
 
 
 def check_private_directory(directory: Path) -> None:
@@ -254,7 +238,7 @@ def read_stored_token(directory: Path) -> str:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise TokenFileError(f"{path} must be a regular file.")
-        if info.st_nlink != 1 and not _drop_temporary_links(path, info):
+        if info.st_nlink != 1 and not _drop_temporary_links(path, fd, info):
             raise TokenFileError(
                 f"{path} must not have other hard links. Remove the other link, or delete {path} to have "
                 f"sie-server generate a new token."
@@ -277,35 +261,24 @@ def read_stored_token(directory: Path) -> str:
     return token
 
 
-def _temporary_files(directory: Path) -> Iterator[tuple[Path, os.stat_result]]:
-    """The temporary token files this server creates, owned by its user, with their status."""
-    for entry in directory.iterdir():
-        if not _TEMP_NAME.fullmatch(entry.name):
-            continue
-        try:
-            info = entry.lstat()
-        except FileNotFoundError:
-            continue
-        if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid():
-            yield entry, info
-
-
-def _drop_temporary_links(path: Path, info: os.stat_result) -> bool:
-    """Remove the temporary links an interrupted first start left on the token.
+def _drop_temporary_links(path: Path, fd: int, token: os.stat_result) -> bool:
+    """Remove the temporary links a concurrent or interrupted first start left on the token.
 
     True when every extra hard link of the token is such a file, even if a
     read-only directory keeps them in place; any other link is left alone and
-    the token is refused.
+    the token is refused. The link count is read again after the scan, so a
+    concurrent start that removes its own link meanwhile is not mistaken for a
+    foreign link.
     """
     try:
         linked = [
             entry
-            for entry, entry_info in _temporary_files(path.parent)
-            if (entry_info.st_dev, entry_info.st_ino) == (info.st_dev, info.st_ino)
+            for entry, info in owned_files(path.parent, _TEMP_NAME)
+            if (info.st_dev, info.st_ino) == (token.st_dev, token.st_ino)
         ]
     except OSError:
         return False
-    if len(linked) != info.st_nlink - 1:
+    if os.fstat(fd).st_nlink not in (1, len(linked) + 1):
         return False
     for entry in linked:
         try:
@@ -313,20 +286,6 @@ def _drop_temporary_links(path: Path, info: os.stat_result) -> bool:
         except OSError:
             continue
     return True
-
-
-def _drop_orphaned_temporary_files(directory: Path) -> None:
-    """Remove temporary token files a start that crashed before linking left behind.
-
-    Only files old enough that no start can still be writing them are removed.
-    """
-    cutoff = time.time() - _ORPHAN_AGE_S
-    try:
-        for entry, info in _temporary_files(directory):
-            if info.st_nlink == 1 and info.st_mtime < cutoff:
-                entry.unlink(missing_ok=True)
-    except OSError:
-        return
 
 
 def server_tokens(env: Mapping[str, str]) -> tuple[str, ...]:
@@ -430,10 +389,11 @@ class LoopbackHostMiddleware:
         await self.app(scope, receive, send)
 
     def _warn(self, host: str | None) -> None:
-        if host in self._warned or len(self._warned) >= _MAX_WARNED_HOSTS:
+        key = None if host is None else host[:_MAX_LOGGED_HOST_CHARS]
+        if key in self._warned or len(self._warned) >= _MAX_WARNED_HOSTS:
             return
-        self._warned.add(host)
-        shown = "(none)" if host is None else repr(host[:_MAX_LOGGED_HOST_CHARS])
+        self._warned.add(key)
+        shown = "(none)" if key is None else repr(key)
         logger.warning(
             "A request with Host %s reached this loopback server, which has authentication off. From %s "
             "sie-server refuses such requests with 400, because a web page can send them through DNS "

@@ -4,6 +4,7 @@ import logging
 import os
 import platform
 import random
+import re
 import secrets
 import stat
 import uuid
@@ -14,7 +15,7 @@ from pathlib import Path
 
 import httpx
 
-from sie_server.core.data_dir import ensure_data_dir, resolve_data_dir
+from sie_server.core.data_dir import ensure_data_dir, remove_stale_files, resolve_data_dir
 from sie_server.observability.gpu import get_gpu_metrics
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,8 @@ _UPDATE_MAX_S = 65 * 60  # 65 minutes
 
 _SEND_TIMEOUT_S = 10
 _WORKER_ID_FILE = "worker-id"
+_WORKER_ID_TEMP_PREFIX = f".{_WORKER_ID_FILE}.sie-server-"
+_WORKER_ID_TEMP_NAME = re.compile(rf"{re.escape(_WORKER_ID_TEMP_PREFIX)}[0-9a-f]{{16}}")
 _MAX_WORKER_ID_BYTES = 64
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _CONSECUTIVE_FAILURE_WARN_THRESHOLD = 3
@@ -103,7 +106,7 @@ def _read_worker_id(path: Path) -> str | None:
 
 def _store_worker_id(directory: Path, path: Path, worker_id: str) -> None:
     """Replace whatever is at ``path`` with ``worker_id``, never writing through a link."""
-    staged = directory / f".{_WORKER_ID_FILE}.{secrets.token_hex(8)}"
+    staged = directory / f"{_WORKER_ID_TEMP_PREFIX}{secrets.token_hex(8)}"
     fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o600)
     try:
         try:
@@ -125,6 +128,7 @@ def _get_or_create_worker_id(data_dir: str | None = None) -> str:
 
     directory = Path(data_dir)
     id_path = directory / _WORKER_ID_FILE
+    remove_stale_files(directory, _WORKER_ID_TEMP_NAME)
     existing = _read_worker_id(id_path)
     if existing is not None:
         return existing
