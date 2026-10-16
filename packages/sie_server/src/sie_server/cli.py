@@ -25,6 +25,7 @@ if sys.platform == "darwin":
 
 import hashlib
 import logging
+import shlex
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Annotated
@@ -168,7 +169,7 @@ def _echo_generated_token(stored: StoredToken, port: int) -> None:
             f"sie-server generated an API token and saved it to {stored.path}.",
             "It is not printed because this output is not a terminal and may be kept in logs. Read it with:",
             "",
-            f"  export SIE_API_KEY=$(cat {stored.path})",
+            f"  export SIE_API_KEY=$(cat {shlex.quote(str(stored.path))})",
             "",
             f"In a container, run that through 'docker exec', or set {AUTH_TOKEN_ENV} yourself instead.",
             "Clients send it as 'Authorization: Bearer <token>' or 'x-api-key: <token>'.",

@@ -183,11 +183,18 @@ that will change logs a warning naming 0.13.0.
 
 #### Release N: options and warnings
 
-Nothing breaks. Every new option keeps today's behaviour by default. The one
-exception is a security fix: `/ws/status` stops sending host identity at once,
-which changes the values of three response fields (see the `ServerInfo` item
-below). The fields keep their names and types, so clients that read them keep
-working.
+Nothing breaks. Every new option keeps today's behaviour by default. There are
+two exceptions, both security fixes:
+
+- `/ws/status` stops sending host identity at once, which changes the values of
+  three response fields (see the `ServerInfo` item below). The fields keep
+  their names and types, so clients that read them keep working.
+- `sie-server` stops at startup when `SIE_AUTH_TOKENS` or `SIE_AUTH_TOKEN` is
+  set but holds no token, as an unset variable passed through does, unless
+  `SIE_AUTH_MODE=none`. Without this, a server meant to require a token would
+  run without authentication.
+
+The changes:
 
 - `sie-server serve`:
   - `--host` also reads `SIE_SERVER_HOST`. The default stays `0.0.0.0`.
@@ -199,12 +206,16 @@ working.
     `/livez` and `/readyz` stay open.
   - In token mode without a configured token, the server generates one and
     saves it with mode `0600` in `SIE_DATA_DIR`. It prints the token once when
-    stderr is a terminal, and otherwise only the file's path.
+    stderr is a terminal, and otherwise only the file's path. A container with
+    a terminal counts as one, and its logs keep that print.
   - `SIE_DATA_DIR` moves from `/tmp/sie-server` to a per-user directory,
     `$XDG_DATA_HOME/sie` or `~/.local/share/sie`. Images set `/app/.cache/sie`;
     mount a volume there to keep the token across containers.
   - A server that listens beyond loopback without authentication logs a
     warning on every start.
+  - A server bound to loopback without authentication logs a warning, once per
+    `Host`, for a request whose `Host` does not name this machine (`localhost`,
+    `127.0.0.1`, `[::1]` or the bind address). The request is still answered.
   - `/ws/status` no longer sends the OS user, working directory or process id.
     `ServerInfo.user`, `working_dir` and `pid` are always `""`, `""` and `0`,
     and are deprecated. This is an exception to the rule that a changed
@@ -223,19 +234,21 @@ working.
 - Telemetry: `SIE_TELEMETRY_ENABLED=1` opts in explicitly. The default stays on,
   with a notice at startup. Helm `telemetry.enabled: true` sets
   `SIE_TELEMETRY_ENABLED=1`.
-- Helm: `gateway.auth.generateToken` and `workers.auth`, both off by default.
+- Helm, with the chart change that adds them: `gateway.auth.generateToken` and
+  `workers.auth`, both off by default.
 
 #### 0.13.0: default changes (breaking)
 
 | Surface | Until 0.13.0 | From 0.13.0 | To keep the old behaviour |
 | --- | --- | --- | --- |
 | `sie-server serve` bind | `0.0.0.0` | `127.0.0.1` | `--host 0.0.0.0` or `SIE_SERVER_HOST=0.0.0.0` |
-| `sie-server` beyond loopback | No authentication | A token is required. Without `SIE_AUTH_TOKEN`, one is generated and printed once | `SIE_AUTH_MODE=none` |
+| `sie-server` beyond loopback | No authentication | A token is required. Without `SIE_AUTH_TOKEN`, one is generated, and printed once on a terminal | `SIE_AUTH_MODE=none` |
+| `sie-server` on loopback without authentication | A request whose `Host` does not name this machine is answered, with a warning | It gets `400`. So does a request whose `Origin` names another site, at least for WebSocket upgrades and methods other than `GET` | Token authentication, or a setting for more allowed `Host` names, designed together with this change |
 | Rust/Candle worker bind | `0.0.0.0` | `127.0.0.1` | `SIE_SERVER_HOST=0.0.0.0` (the image sets it) |
 | Gateway binary beyond loopback with `SIE_AUTH_MODE` unset | Starts without authentication | Refuses to start | `SIE_AUTH_MODE=none`, or `token` with `SIE_AUTH_TOKENS` |
 | Telemetry | On unless disabled | Off unless `SIE_TELEMETRY_ENABLED=1` | `SIE_TELEMETRY_ENABLED=1` |
-| Helm `gateway.auth.mode` | `none` | `token`, with a generated Secret | `gateway.auth.mode=none` |
-| Helm `workers.auth.enabled` | `false` | `true` | `workers.auth.enabled=false` |
+| Helm `gateway.auth.mode` | `none` | `token`, with a generated Secret (needs the chart change above) | `gateway.auth.mode=none` |
+| Helm `workers.auth.enabled` (with the chart change above) | `false` | `true` | `workers.auth.enabled=false` |
 | Helm `workers.networkPolicy.enabled` | `false` | `true` | `workers.networkPolicy.enabled=false` |
 | Helm `telemetry.enabled` | `true` | `false` | `telemetry.enabled=true` |
 
@@ -262,8 +275,9 @@ docker run -p 127.0.0.1:8080:8080 -e SIE_AUTH_TOKEN=$SIE_API_KEY \
 curl -H "Authorization: Bearer $SIE_API_KEY" http://localhost:8080/v1/models
 ```
 
-Without `-e SIE_AUTH_TOKEN`, copy the generated token from `docker logs`. The
-SDKs read `SIE_API_KEY`.
+Without `-e SIE_AUTH_TOKEN`, read the generated token with
+`docker exec <container> cat /app/.cache/sie/auth-token`. The SDKs read
+`SIE_API_KEY`.
 
 A server reached from another machine, before:
 
@@ -277,8 +291,9 @@ After:
 SIE_AUTH_TOKEN=<token> sie-server serve --host 0.0.0.0
 ```
 
-Helm: upgrade worker authentication in two steps, so no worker rejects a
-gateway that has not rolled yet.
+Helm, with the chart change that adds `workers.auth`: upgrade worker
+authentication in two steps, so no worker rejects a gateway that has not rolled
+yet.
 
 ```bash
 helm upgrade sie-cluster oci://ghcr.io/superlinked/charts/sie-cluster -f values.yaml \

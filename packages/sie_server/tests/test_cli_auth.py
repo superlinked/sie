@@ -145,15 +145,17 @@ def test_token_mode_generates_and_prints_the_token_once(
 def test_a_generated_token_is_not_printed_into_logs(
     started: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    data = tmp_path / "data $HOME"
+    monkeypatch.setenv("SIE_DATA_DIR", str(data))
     monkeypatch.setenv("SIE_AUTH_MODE", "token")
     monkeypatch.setattr(cli, "_stderr_is_terminal", lambda: False)
 
     result = serve()
 
     assert result.exit_code == 0, result.output
-    path = token_path(tmp_path / "data")
+    path = token_path(data)
     assert path.read_text().strip() not in result.output
-    assert f"export SIE_API_KEY=$(cat {path})" in result.output
+    assert f"export SIE_API_KEY=$(cat '{path}')" in result.output
     assert "set SIE_AUTH_TOKEN yourself" in result.output
 
 

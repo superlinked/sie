@@ -243,8 +243,9 @@ fn is_admin_endpoint(method: &Method, path: &str) -> bool {
 /// Extract the token from an `Authorization` header, accepting
 /// `Bearer <token>` (case-insensitive prefix) or a raw token value.
 ///
-/// Bearer-only library API for downstream authentication layers. This
-/// gateway reads request credentials with [`extract_request_credential`].
+/// Exported through the crate's library target (`src/lib.rs`) for
+/// composition crates that read `Authorization` only. This gateway reads
+/// request credentials with [`extract_request_credential`].
 #[allow(dead_code)]
 pub fn extract_bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
     authorization_token(headers.get("authorization")?.to_str().ok()?)

@@ -4,6 +4,8 @@ import logging
 import os
 import platform
 import random
+import secrets
+import stat
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -27,6 +29,9 @@ _UPDATE_MIN_S = 55 * 60  # 55 minutes
 _UPDATE_MAX_S = 65 * 60  # 65 minutes
 
 _SEND_TIMEOUT_S = 10
+_WORKER_ID_FILE = "worker-id"
+_MAX_WORKER_ID_BYTES = 64
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _CONSECUTIVE_FAILURE_WARN_THRESHOLD = 3
 
 _DEFAULT_ENABLED = True
@@ -74,6 +79,43 @@ def _warn_default_on_once() -> None:
     logger.warning(_DEFAULT_ON_NOTICE)
 
 
+def _read_worker_id(path: Path) -> str | None:
+    """The stored worker id; ``None`` when the file is missing, not a regular file, or not a UUID."""
+    try:
+        fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        raw = os.read(fd, _MAX_WORKER_ID_BYTES + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    existing = raw.decode("ascii", errors="replace").strip()
+    try:
+        uuid.UUID(existing)
+    except ValueError:
+        return None
+    return existing
+
+
+def _store_worker_id(directory: Path, path: Path, worker_id: str) -> None:
+    """Replace whatever is at ``path`` with ``worker_id``, never writing through a link."""
+    staged = directory / f".{_WORKER_ID_FILE}.{secrets.token_hex(8)}"
+    fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o600)
+    try:
+        try:
+            os.write(fd, worker_id.encode())
+        finally:
+            os.close(fd)
+        staged.replace(path)
+    except OSError:
+        staged.unlink(missing_ok=True)
+        raise
+
+
 def _get_or_create_worker_id(data_dir: str | None = None) -> str:
     if data_dir is None:
         resolved = resolve_data_dir()
@@ -81,28 +123,16 @@ def _get_or_create_worker_id(data_dir: str | None = None) -> str:
             return str(uuid.uuid4())
         data_dir = str(resolved)
 
-    id_path = os.path.join(data_dir, "worker-id")
-
-    # Try to read existing ID
-    id_file = Path(id_path)
-
-    # Try to read existing ID
-    try:
-        existing = id_file.read_text().strip()
-        uuid.UUID(existing)  # validate
+    directory = Path(data_dir)
+    id_path = directory / _WORKER_ID_FILE
+    existing = _read_worker_id(id_path)
+    if existing is not None:
         return existing
-    except (OSError, ValueError):
-        pass
 
-    # Generate new ID
     new_id = str(uuid.uuid4())
-
-    # Try to persist
     try:
-        ensure_data_dir(Path(data_dir))
-        fd = os.open(id_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        with os.fdopen(fd, "w") as handle:
-            handle.write(new_id)
+        ensure_data_dir(directory)
+        _store_worker_id(directory, id_path, new_id)
     except OSError:
         logger.debug("Could not persist worker ID to %s, using ephemeral ID", id_path)
 

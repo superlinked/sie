@@ -11,11 +11,13 @@ from __future__ import annotations
 import errno
 import hmac
 import ipaddress
+import logging
 import os
+import re
 import secrets
 import stat
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -24,6 +26,8 @@ import orjson
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from sie_server.core.data_dir import ensure_data_dir, resolve_data_dir
+
+logger = logging.getLogger(__name__)
 
 AUTH_MODE_ENV = "SIE_AUTH_MODE"
 AUTH_TOKENS_ENV = "SIE_AUTH_TOKENS"
@@ -42,6 +46,13 @@ _GENERATED_TOKEN_BYTES = 32
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _SETTLE_ATTEMPTS = 40
 _SETTLE_INTERVAL_S = 0.025
+_TEMP_PREFIX = f".{TOKEN_FILE_NAME}.sie-server-"
+_TEMP_NAME = re.compile(rf"{re.escape(_TEMP_PREFIX)}[0-9a-f]{{16}}")
+_ORPHAN_AGE_S = 60.0
+_READ_ONLY_ERRNOS = frozenset({errno.EACCES, errno.EROFS})
+_HOST_CHECK_RELEASE = "0.13.0"
+_MAX_WARNED_HOSTS = 64
+_MAX_LOGGED_HOST_CHARS = 100
 
 
 class AuthConfigError(ValueError):
@@ -164,9 +175,11 @@ def token_path(directory: Path) -> Path:
 def load_or_create_token(directory: Path) -> StoredToken:
     """Read the persisted token, generating it on first use.
 
-    The token appears at its path complete or not at all: it is written to a
-    private temporary file and hard-linked into place, which fails if another
-    process created the token first.
+    An existing token is read without writing to the directory, so a read-only
+    directory or volume works once it holds the token. A new token appears at
+    its path complete or not at all: it is written to a private temporary file
+    and hard-linked into place, which fails if another process created the
+    token first.
     """
     path = token_path(directory)
     try:
@@ -174,10 +187,18 @@ def load_or_create_token(directory: Path) -> StoredToken:
     except OSError as exc:
         raise TokenFileError(f"Cannot create {directory}: {exc.strerror or exc}") from exc
     check_private_directory(directory)
+    _drop_orphaned_temporary_files(directory)
+    if os.path.lexists(path):
+        return StoredToken(token=read_stored_token(directory), path=path, created=False)
     token = secrets.token_urlsafe(_GENERATED_TOKEN_BYTES)
-    staged = directory / f".{TOKEN_FILE_NAME}.{secrets.token_hex(8)}"
+    staged = directory / f"{_TEMP_PREFIX}{secrets.token_hex(8)}"
     try:
         fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        if exc.errno in _READ_ONLY_ERRNOS and os.path.lexists(path):
+            return StoredToken(token=read_stored_token(directory), path=path, created=False)
+        raise TokenFileError(f"Cannot create {staged}: {exc.strerror or exc}") from exc
+    try:
         try:
             os.write(fd, f"{token}\n".encode())
             os.fsync(fd)
@@ -188,14 +209,14 @@ def load_or_create_token(directory: Path) -> StoredToken:
         _wait_for_settled_token(path)
         return StoredToken(token=read_stored_token(directory), path=path, created=False)
     except OSError as exc:
-        raise TokenFileError(f"Cannot write {path}: {exc.strerror or exc}") from exc
+        raise TokenFileError(f"Cannot create {path} from {staged}: {exc.strerror or exc}") from exc
     finally:
         staged.unlink(missing_ok=True)
     return StoredToken(token=token, path=path, created=True)
 
 
 def _wait_for_settled_token(path: Path) -> None:
-    """Give a concurrent first start time to drop its staging link."""
+    """Give a concurrent first start time to drop its temporary link."""
     for _ in range(_SETTLE_ATTEMPTS):
         try:
             if os.lstat(path).st_nlink == 1:
@@ -233,7 +254,7 @@ def read_stored_token(directory: Path) -> str:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise TokenFileError(f"{path} must be a regular file.")
-        if info.st_nlink != 1 and not _drop_staging_links(path, info):
+        if info.st_nlink != 1 and not _drop_temporary_links(path, info):
             raise TokenFileError(
                 f"{path} must not have other hard links. Remove the other link, or delete {path} to have "
                 f"sie-server generate a new token."
@@ -256,25 +277,56 @@ def read_stored_token(directory: Path) -> str:
     return token
 
 
-def _drop_staging_links(path: Path, info: os.stat_result) -> bool:
-    """Remove the staging links an interrupted first start left on the token.
-
-    True when every extra hard link of the token is such a staging file; any
-    other link is left in place and the token is refused.
-    """
-    staged = []
-    for entry in path.parent.glob(f".{TOKEN_FILE_NAME}.*"):
+def _temporary_files(directory: Path) -> Iterator[tuple[Path, os.stat_result]]:
+    """The temporary token files this server creates, owned by its user, with their status."""
+    for entry in directory.iterdir():
+        if not _TEMP_NAME.fullmatch(entry.name):
+            continue
         try:
-            entry_info = entry.lstat()
+            info = entry.lstat()
         except FileNotFoundError:
             continue
-        if stat.S_ISREG(entry_info.st_mode) and (entry_info.st_dev, entry_info.st_ino) == (info.st_dev, info.st_ino):
-            staged.append(entry)
-    if len(staged) != info.st_nlink - 1:
+        if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid():
+            yield entry, info
+
+
+def _drop_temporary_links(path: Path, info: os.stat_result) -> bool:
+    """Remove the temporary links an interrupted first start left on the token.
+
+    True when every extra hard link of the token is such a file, even if a
+    read-only directory keeps them in place; any other link is left alone and
+    the token is refused.
+    """
+    try:
+        linked = [
+            entry
+            for entry, entry_info in _temporary_files(path.parent)
+            if (entry_info.st_dev, entry_info.st_ino) == (info.st_dev, info.st_ino)
+        ]
+    except OSError:
         return False
-    for entry in staged:
-        entry.unlink(missing_ok=True)
+    if len(linked) != info.st_nlink - 1:
+        return False
+    for entry in linked:
+        try:
+            entry.unlink(missing_ok=True)
+        except OSError:
+            continue
     return True
+
+
+def _drop_orphaned_temporary_files(directory: Path) -> None:
+    """Remove temporary token files a start that crashed before linking left behind.
+
+    Only files old enough that no start can still be writing them are removed.
+    """
+    cutoff = time.time() - _ORPHAN_AGE_S
+    try:
+        for entry, info in _temporary_files(directory):
+            if info.st_nlink == 1 and info.st_mtime < cutoff:
+                entry.unlink(missing_ok=True)
+    except OSError:
+        return
 
 
 def server_tokens(env: Mapping[str, str]) -> tuple[str, ...]:
@@ -343,23 +395,53 @@ class ServerAuthMiddleware:
         return "Invalid token"
 
 
-class LoopbackHostMiddleware:
-    """Answer only Host headers that name this machine, so a DNS-rebinding page cannot reach the server."""
+def _describe_hosts(allowed: frozenset[str]) -> str:
+    names = ["localhost", "127.0.0.1", "[::1]", *sorted(allowed - LOOPBACK_HOST_NAMES)]
+    return f"{', '.join(names[:-1])} or {names[-1]}"
 
-    def __init__(self, app: ASGIApp, allowed_hosts: Iterable[str]) -> None:
+
+class LoopbackHostMiddleware:
+    """Watch for Host headers that do not name this machine, which is what a DNS-rebinding page sends.
+
+    Until 0.13.0 such a request is answered, and a warning is logged once per
+    Host. With ``enforce`` it is refused with 400.
+    """
+
+    def __init__(self, app: ASGIApp, allowed_hosts: Iterable[str], *, enforce: bool = False) -> None:
         self.app = app
         self._allowed = frozenset(allowed_hosts)
+        self._enforce = enforce
+        self._hosts = _describe_hosts(self._allowed)
+        self._warned: set[str | None] = set()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] not in ("http", "websocket") or request_host(scope["headers"]) in self._allowed:
+        if scope["type"] not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
-        rejection = _Rejection(
-            400,
-            "INVALID_INPUT",
-            "This server listens on loopback and answers only requests addressed to localhost, 127.0.0.1 or [::1].",
+        host = request_host(scope["headers"])
+        if host in self._allowed:
+            await self.app(scope, receive, send)
+            return
+        if self._enforce:
+            message = f"This server listens on loopback and answers only requests addressed to {self._hosts}."
+            await _reject(scope, receive, send, _Rejection(400, "INVALID_INPUT", message))
+            return
+        self._warn(host)
+        await self.app(scope, receive, send)
+
+    def _warn(self, host: str | None) -> None:
+        if host in self._warned or len(self._warned) >= _MAX_WARNED_HOSTS:
+            return
+        self._warned.add(host)
+        shown = "(none)" if host is None else repr(host[:_MAX_LOGGED_HOST_CHARS])
+        logger.warning(
+            "A request with Host %s reached this loopback server, which has authentication off. From %s "
+            "sie-server refuses such requests with 400, because a web page can send them through DNS "
+            "rebinding. Address the server as %s, or turn on token authentication.",
+            shown,
+            _HOST_CHECK_RELEASE,
+            self._hosts,
         )
-        await _reject(scope, receive, send, rejection)
 
 
 @dataclass(frozen=True)

@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
+import errno
+import logging
 import os
 import re
 import stat
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi import FastAPI, WebSocket
@@ -19,6 +24,7 @@ from sie_server.app.app_state_config import AppStateConfig
 from sie_server.core.data_dir import resolve_data_dir
 from sie_server.core.server_auth import (
     AuthConfigError,
+    LoopbackHostMiddleware,
     ServerAuthMiddleware,
     TokenFileError,
     configured_tokens,
@@ -202,14 +208,106 @@ class TestPersistedToken:
         assert isinstance(outcome[0], TokenFileError)
         assert "must be a regular file" in str(outcome[0])
 
-    def test_a_staging_link_left_by_an_interrupted_start_is_dropped(self, tmp_path: Path) -> None:
+    def test_a_temporary_link_left_by_an_interrupted_start_is_dropped(self, tmp_path: Path) -> None:
         stored = load_or_create_token(tmp_path)
-        staged = tmp_path / ".auth-token.0123456789abcdef"
+        staged = tmp_path / ".auth-token.sie-server-0123456789abcdef"
         os.link(stored.path, staged)
 
         assert read_stored_token(tmp_path) == stored.token
         assert not staged.exists()
         assert stored.path.stat().st_nlink == 1
+
+    def test_a_temporary_link_in_a_directory_without_write_permission_is_tolerated(self, tmp_path: Path) -> None:
+        directory = tmp_path / "sie"
+        stored = load_or_create_token(directory)
+        os.link(stored.path, directory / ".auth-token.sie-server-0123456789abcdef")
+        directory.chmod(0o500)
+        try:
+            assert read_stored_token(directory) == stored.token
+        finally:
+            directory.chmod(0o700)
+
+    @pytest.mark.parametrize("name", [".auth-token.bak", ".auth-token.0123456789abcdef"])
+    def test_a_users_link_named_like_a_temporary_file_is_kept_and_refused(self, tmp_path: Path, name: str) -> None:
+        stored = load_or_create_token(tmp_path)
+        backup = tmp_path / name
+        os.link(stored.path, backup)
+
+        with pytest.raises(TokenFileError, match="hard links"):
+            read_stored_token(tmp_path)
+        assert backup.exists()
+
+    def test_only_old_temporary_files_of_the_server_are_cleaned_up(self, tmp_path: Path) -> None:
+        old = time.time() - 600
+        orphan = tmp_path / ".auth-token.sie-server-00000000000000aa"
+        in_flight = tmp_path / ".auth-token.sie-server-00000000000000bb"
+        users = tmp_path / ".auth-token.backup"
+        for path in (orphan, in_flight, users):
+            path.write_text("unused\n")
+            path.chmod(0o600)
+        for path in (orphan, users):
+            os.utime(path, (old, old))
+
+        load_or_create_token(tmp_path)
+
+        assert not orphan.exists()
+        assert in_flight.exists()
+        assert users.exists()
+
+    def test_an_existing_token_in_a_directory_without_write_permission_is_read(self, tmp_path: Path) -> None:
+        directory = tmp_path / "sie"
+        stored = load_or_create_token(directory)
+        directory.chmod(0o500)
+        try:
+            again = load_or_create_token(directory)
+        finally:
+            directory.chmod(0o700)
+
+        assert not again.created
+        assert again.token == stored.token
+
+    def test_an_existing_token_on_a_read_only_volume_is_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stored = load_or_create_token(tmp_path)
+        _refuse_creates_in(tmp_path, monkeypatch, errno.EROFS)
+
+        again = load_or_create_token(tmp_path)
+
+        assert not again.created
+        assert again.token == stored.token
+
+    def test_an_existing_token_is_read_without_creating_a_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stored = load_or_create_token(tmp_path)
+        creates = _record_creates_in(tmp_path, monkeypatch)
+
+        assert load_or_create_token(tmp_path).token == stored.token
+        assert creates == []
+
+    @pytest.mark.parametrize("code", [errno.EACCES, errno.EROFS])
+    def test_a_token_that_appears_while_the_directory_refuses_writes_is_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int
+    ) -> None:
+        def another_start_finished_first() -> None:
+            token_path(tmp_path).write_text(f"{TOKEN}\n")
+            token_path(tmp_path).chmod(0o600)
+
+        _refuse_creates_in(tmp_path, monkeypatch, code, before=another_start_finished_first)
+
+        stored = load_or_create_token(tmp_path)
+
+        assert not stored.created
+        assert stored.token == TOKEN
+
+    def test_a_read_only_volume_without_a_token_names_the_temporary_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _refuse_creates_in(tmp_path, monkeypatch, errno.EROFS)
+
+        with pytest.raises(TokenFileError, match=r"Cannot create .*/\.auth-token\.sie-server-[0-9a-f]{16}: "):
+            load_or_create_token(tmp_path)
 
     def test_a_hard_linked_token_is_refused(self, tmp_path: Path) -> None:
         stored = load_or_create_token(tmp_path)
@@ -283,7 +381,7 @@ class TestPersistedToken:
         assert not token_path(tmp_path).exists()
 
 
-def _protected_app(tokens: tuple[str, ...] = (TOKEN, OTHER)) -> FastAPI:
+def _plain_app() -> FastAPI:
     app = FastAPI()
 
     @app.get("/healthz")
@@ -300,6 +398,11 @@ def _protected_app(tokens: tuple[str, ...] = (TOKEN, OTHER)) -> FastAPI:
         await websocket.send_json({"ready": True})
         await websocket.close()
 
+    return app
+
+
+def _protected_app(tokens: tuple[str, ...] = (TOKEN, OTHER)) -> FastAPI:
+    app = _plain_app()
     app.add_middleware(ServerAuthMiddleware, tokens=tokens)
     return app
 
@@ -437,26 +540,119 @@ def _loopback_client(bind_host: str, base_url: str = "http://localhost:8080", **
 
 class TestLoopbackServerApp:
     @pytest.mark.parametrize("base_url", ["http://localhost:8080", "http://127.0.0.1:8080", "http://localhost"])
-    def test_loopback_clients_are_answered(self, base_url: str) -> None:
+    def test_loopback_clients_are_answered_without_a_warning(
+        self, base_url: str, caplog: pytest.LogCaptureFixture
+    ) -> None:
         client = _loopback_client("127.0.0.1", base_url)
 
-        assert client.get("/openapi.json").status_code == 200
-        assert client.get("/healthz").status_code == 200
+        with caplog.at_level(logging.WARNING, logger=_AUTH_LOGGER):
+            assert client.get("/openapi.json").status_code == 200
+            assert client.get("/healthz").status_code == 200
+        assert _host_warnings(caplog) == []
 
-    def test_an_ipv6_loopback_host_is_answered(self) -> None:
+    def test_an_ipv6_loopback_host_is_answered(self, caplog: pytest.LogCaptureFixture) -> None:
         client = _loopback_client("::1")
 
-        assert client.get("/openapi.json", headers={"Host": "[::1]:8080"}).status_code == 200
+        with caplog.at_level(logging.WARNING, logger=_AUTH_LOGGER):
+            assert client.get("/openapi.json", headers={"Host": "[::1]:8080"}).status_code == 200
+        assert _host_warnings(caplog) == []
 
-    @pytest.mark.parametrize("host", ["evil.example", "localhost.evil.example", "evil.example:8080", "0.0.0.0:8080"])
-    def test_a_rebound_host_is_refused(self, host: str) -> None:
-        response = _loopback_client("127.0.0.1").get("/openapi.json", headers={"Host": host})
+    @pytest.mark.parametrize(
+        "host", ["evil.example", "localhost.evil.example", "evil.example:8080", "0.0.0.0:8080", "host.docker.internal"]
+    )
+    def test_another_host_is_answered_with_one_warning(self, host: str, caplog: pytest.LogCaptureFixture) -> None:
+        client = _loopback_client("127.0.0.1")
+
+        with caplog.at_level(logging.WARNING, logger=_AUTH_LOGGER):
+            assert client.get("/openapi.json", headers={"Host": host}).status_code == 200
+            assert client.get("/healthz", headers={"Host": host}).status_code == 200
+
+        (warning,) = _host_warnings(caplog)
+        assert "0.13.0" in warning
+        assert repr(host.partition(":")[0]) in warning
+
+    def test_another_host_on_a_websocket_connects_with_a_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        app = _plain_app()
+        app.add_middleware(LoopbackHostMiddleware, allowed_hosts=loopback_host_allowlist("127.0.0.1"))
+        client = TestClient(app)
+
+        with (
+            caplog.at_level(logging.WARNING, logger=_AUTH_LOGGER),
+            client.websocket_connect("/ws/status", headers={"Host": "evil.example"}) as websocket,
+        ):
+            assert websocket.receive_json() == {"ready": True}
+        (warning,) = _host_warnings(caplog)
+        assert "0.13.0" in warning
+
+    def test_each_other_host_is_warned_about_once(self, caplog: pytest.LogCaptureFixture) -> None:
+        client = _loopback_client("127.0.0.1")
+
+        with caplog.at_level(logging.WARNING, logger=_AUTH_LOGGER):
+            for host in ("a.example", "b.example", "a.example", "b.example"):
+                assert client.get("/healthz", headers={"Host": host}).status_code == 200
+
+        assert len(_host_warnings(caplog)) == 2
+
+    def test_warnings_stop_after_many_hosts(self, caplog: pytest.LogCaptureFixture) -> None:
+        client = _loopback_client("127.0.0.1")
+
+        with caplog.at_level(logging.WARNING, logger=_AUTH_LOGGER):
+            for index in range(80):
+                client.get("/healthz", headers={"Host": f"host-{index}.example"})
+
+        assert len(_host_warnings(caplog)) == 64
+
+    def test_the_bind_address_is_answered(self, caplog: pytest.LogCaptureFixture) -> None:
+        client = _loopback_client("127.0.0.2", "http://127.0.0.2:8080")
+
+        with caplog.at_level(logging.WARNING, logger=_AUTH_LOGGER):
+            assert client.get("/openapi.json").status_code == 200
+        assert _host_warnings(caplog) == []
+
+    @pytest.mark.parametrize("bind_host", ["0.0.0.0", "192.168.1.20", None])  # noqa: S104
+    def test_an_exposed_or_unknown_bind_is_not_host_checked(
+        self, bind_host: str | None, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        client = TestClient(AppFactory.create_app(AppStateConfig(bind_host=bind_host)))
+
+        with caplog.at_level(logging.WARNING, logger=_AUTH_LOGGER):
+            assert client.get("/openapi.json", headers={"Host": "evil.example"}).status_code == 200
+        assert _host_warnings(caplog) == []
+
+    def test_token_auth_replaces_the_host_check(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        monkeypatch.setenv("SIE_AUTH_TOKEN", TOKEN)
+        client = _loopback_client("127.0.0.1", auth_mode="token")
+
+        with caplog.at_level(logging.WARNING, logger=_AUTH_LOGGER):
+            response = client.get("/openapi.json", headers={"Host": "evil.example", "x-api-key": TOKEN})
+        assert response.status_code == 200
+        assert _host_warnings(caplog) == []
+
+
+class TestLoopbackHostEnforcement:
+    @pytest.fixture
+    def client(self) -> TestClient:
+        app = _plain_app()
+        app.add_middleware(LoopbackHostMiddleware, allowed_hosts=loopback_host_allowlist("127.0.0.2"), enforce=True)
+        return TestClient(app, base_url="http://127.0.0.2:8080")
+
+    def test_the_allowed_hosts_are_answered(self, client: TestClient) -> None:
+        for host in ("localhost", "127.0.0.1:8080", "[::1]", "127.0.0.2:8080"):
+            assert client.get("/v1/thing", headers={"Host": host}).status_code == 200
+
+    def test_another_host_is_refused_with_the_allowed_names(self, client: TestClient) -> None:
+        response = client.get("/v1/thing", headers={"Host": "evil.example"})
 
         assert response.status_code == 400
-        assert response.json()["detail"]["code"] == "INVALID_INPUT"
+        assert response.json()["detail"] == {
+            "code": "INVALID_INPUT",
+            "message": "This server listens on loopback and answers only requests addressed to "
+            "localhost, 127.0.0.1, [::1] or 127.0.0.2.",
+        }
 
-    def test_a_rebound_websocket_is_refused(self) -> None:
-        client = _loopback_client("127.0.0.1")
+    def test_another_host_on_a_websocket_is_refused(self, client: TestClient) -> None:
         with (
             pytest.raises(WebSocketDenialResponse) as denied,
             client.websocket_connect("/ws/status", headers={"Host": "evil.example"}),
@@ -464,23 +660,42 @@ class TestLoopbackServerApp:
             pass
         assert denied.value.status_code == 400
 
-    def test_the_bind_address_is_answered(self) -> None:
-        client = _loopback_client("127.0.0.2", "http://127.0.0.2:8080")
 
-        assert client.get("/openapi.json").status_code == 200
+class TestWebSocketCloseFallback:
+    """Without the ``websocket.http.response`` extension a refusal can only close the socket."""
 
-    @pytest.mark.parametrize("bind_host", ["0.0.0.0", "192.168.1.20", None])  # noqa: S104
-    def test_an_exposed_or_unknown_bind_is_not_host_checked(self, bind_host: str | None) -> None:
-        client = TestClient(AppFactory.create_app(AppStateConfig(bind_host=bind_host)))
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda inner: ServerAuthMiddleware(inner, tokens=(TOKEN,)),
+            lambda inner: LoopbackHostMiddleware(inner, loopback_host_allowlist("127.0.0.1"), enforce=True),
+        ],
+        ids=["token", "host"],
+    )
+    @pytest.mark.parametrize("extensions", [None, {}], ids=["absent", "empty"])
+    def test_a_refused_websocket_is_closed_with_policy_violation(
+        self, build: Callable[[Any], Any], extensions: dict[str, Any] | None
+    ) -> None:
+        inner_calls: list[dict[str, Any]] = []
 
-        assert client.get("/openapi.json", headers={"Host": "evil.example"}).status_code == 200
+        async def inner(scope: dict[str, Any], receive: Any, send: Any) -> None:
+            inner_calls.append(scope)
 
-    def test_token_auth_replaces_the_host_check(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("SIE_AUTH_TOKEN", TOKEN)
-        client = _loopback_client("127.0.0.1", auth_mode="token")
+        scope: dict[str, Any] = {"type": "websocket", "path": "/ws/status", "headers": [(b"host", b"evil.example")]}
+        if extensions is not None:
+            scope["extensions"] = extensions
+        sent: list[dict[str, Any]] = []
 
-        response = client.get("/openapi.json", headers={"Host": "evil.example", "x-api-key": TOKEN})
-        assert response.status_code == 200
+        async def receive() -> dict[str, Any]:
+            return {"type": "websocket.connect"}
+
+        async def send(message: dict[str, Any]) -> None:
+            sent.append(message)
+
+        asyncio.run(build(inner)(scope, receive, send))
+
+        assert inner_calls == []
+        assert sent == [{"type": "websocket.close", "code": 1008}]
 
 
 class TestServerApp:
@@ -538,6 +753,50 @@ _FIRST_START_SCRIPT = (
     "from sie_server.core.server_auth import load_or_create_token; "
     "print(load_or_create_token(Path(sys.argv[1])).token)"
 )
+
+
+_AUTH_LOGGER = "sie_server.core.server_auth"
+
+
+def _host_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _AUTH_LOGGER and record.levelno == logging.WARNING and "Host" in record.getMessage()
+    ]
+
+
+def _creates_in(directory: Path, path: Any, flags: int) -> bool:
+    return bool(flags & os.O_CREAT) and Path(os.fsdecode(path)).parent == directory
+
+
+def _record_creates_in(directory: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    creates: list[str] = []
+    real_open = os.open
+
+    def recording_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if _creates_in(directory, path, flags):
+            creates.append(os.fsdecode(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", recording_open)
+    return creates
+
+
+def _refuse_creates_in(
+    directory: Path, monkeypatch: pytest.MonkeyPatch, code: int, before: Callable[[], None] | None = None
+) -> None:
+    """Make creating a file in ``directory`` fail as a read-only directory or volume does."""
+    real_open = os.open
+
+    def refusing_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if _creates_in(directory, path, flags):
+            if before is not None:
+                before()
+            raise OSError(code, os.strerror(code), os.fsdecode(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", refusing_open)
 
 
 def _capture(call: Callable[[], object], outcome: list[BaseException]) -> None:

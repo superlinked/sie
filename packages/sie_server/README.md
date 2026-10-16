@@ -1055,15 +1055,19 @@ loopback ports of the engines the server launches.
 
 When token auth is on and no token is configured, the server generates one on
 first start and saves it in `SIE_DATA_DIR`. When stderr is a terminal it prints
-the token once; otherwise, as in a container or under a service manager whose
-output is kept in logs, it prints only the file's path and the command that
-reads it. Later starts reuse the token and print only its path. In containers,
-prefer setting `SIE_AUTH_TOKEN` yourself. The server refuses a token directory
-that another user owns or can write to, and a token file that is a symbolic
-link, not a regular file, hard-linked, owned by another user, or readable by
-others. To rotate a generated token, delete `auth-token` from `SIE_DATA_DIR`
-and restart the server. In Docker, keep the token across containers with a
-volume:
+the token once; otherwise, as in a container without a terminal or under a
+service manager whose output is kept in logs, it prints only the file's path
+and the command that reads it. Later starts reuse the token and print only its
+path. They only read it, so a read-only directory or volume works once it holds
+the token. A container started with a terminal (`docker run -t`, Compose
+`tty: true`, or a Kubernetes container with `tty: true`) counts as a terminal,
+and the container runtime keeps that one print in the container's logs. In
+containers, set `SIE_AUTH_TOKEN` yourself instead. The server refuses a token
+directory that another user owns or can write to, and a token file that is a
+symbolic link, not a regular file, hard-linked, owned by another user, or
+readable by others. To rotate a generated token, delete `auth-token` from
+`SIE_DATA_DIR` and restart the server. In Docker, keep the token across
+containers with a volume:
 
 ```bash
 docker run -p 127.0.0.1:8080:8080 -e SIE_AUTH_MODE=token \
@@ -1077,10 +1081,14 @@ every start. From 0.13.0 such a server requires a token unless
 `SIE_AUTH_MODE=none` is set explicitly.
 
 A server bound to loopback (`127.0.0.0/8`, `::1` or `localhost`) with
-authentication off answers only requests whose `Host` header names this
-machine: `localhost`, `127.0.0.1`, `[::1]` or the bind address, with any port.
-Any other `Host` gets `400`. This keeps a web page that rebinds its own domain
-to `127.0.0.1` from using the server through the browser.
+authentication off checks that the `Host` header names this machine:
+`localhost`, `127.0.0.1`, `[::1]` or the bind address, with any port. A web
+page that rebinds its own domain to `127.0.0.1` sends another `Host`. Until
+0.13.0 such a request is still answered, and the server logs a warning once for
+each such `Host`. From 0.13.0 it gets `400`. That also affects a reverse proxy
+on the same machine that passes the client's `Host` on, and a container that
+reaches the server as `host.docker.internal`: have them send one of the names
+above, or turn on token authentication.
 
 ### Memory & OOM resilience
 
