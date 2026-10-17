@@ -9,6 +9,8 @@ from sie_server.adapters.errors import InputTooLongError
 from sie_server.adapters.pplx_decider.adapter import PerplexityDecisionAdapter
 from sie_server.adapters.pplx_decider.model import DecisionModel, checkpoint_config
 from sie_server.adapters.pplx_decider.questions import answer, describe, messages, parse_questions
+from sie_server.core.batcher import BatchConfig, BatchFormer
+from sie_server.core.extract_cost import adapter_extract_item_costs, build_extract_prepared_items
 from sie_server.types.inputs import InvalidInputError, Item
 
 
@@ -97,7 +99,7 @@ def test_all_answer_types_and_reference_confidence():
     picked = answer(questions[0], [0.1, 0.8, 0.1])
     assert picked["choice"] == "second"
     assert picked["confidence"] == pytest.approx(0.7)
-    assert answer(questions[1], [0.2, 0.8]) == {"type": "noul", "noul": 0.8}
+    assert answer(questions[1], [0.2, 0.8]) == {"type": "noul", "noul": 0.8, "answer": True, "confidence": 0.8}
     scored = answer(questions[2], [0.1, 0.1, 0.8])
     assert scored["score"] == pytest.approx(1.7)
     assert scored["confidence"] == pytest.approx(0.55)
@@ -181,6 +183,51 @@ def adapter(window=512, budget=512):
     result._codes = ("A", "B")
     result._device = "cpu"
     return result
+
+
+@pytest.mark.asyncio
+async def test_normal_text_and_structured_states_share_worker_batch_with_exact_forward_bounds():
+    instance = adapter()
+    schema = {"choice": choice(), "noul": {"type": "noul"}}
+    items = [Item(text="refund please"), Item(metadata={"state": {"message": "refund please"}})]
+    costs = adapter_extract_item_costs(instance, items, output_schema=schema)
+    batcher = BatchFormer(BatchConfig(max_batch_tokens=8192, max_batch_wait_ms=0))
+    for prepared in build_extract_prepared_items(items, item_costs=costs):
+        await batcher.submit(prepared, prepared.original_index)
+    batch = batcher.try_get_batch()
+    assert batch is not None
+    assert batch.size == 2
+    assert batcher.pending_count == 0
+    forwarded = []
+    original = instance._forward
+
+    def observe(rows):
+        forwarded.append(rows)
+        return original(rows)
+
+    instance._forward = observe
+    result = instance.extract([items[i] for i in batch.metadata], output_schema=schema)
+    assert result.errors == [None, None]
+    assert any(len(rows) > 1 for rows in forwarded)
+    assert all(len(rows) * max(row.length for row in rows) <= 512 for rows in forwarded)
+    assert result.input_token_counts == [
+        sum(row.length for rows in forwarded for row in rows if row.item == i) for i in range(2)
+    ]
+    assert result.input_token_counts != [costs[i] for i in batch.metadata]
+
+
+def test_cost_estimates_account_for_repeated_questions_and_preserve_invalid_item_isolation():
+    instance = adapter()
+    schema = {"q": choice()}
+    items = [Item(text="ok"), Item(metadata={"state": {"bad": float("nan")}}), Item(text="x" * 40_000)]
+    costs = instance.extract_item_costs(items, output_schema=schema)
+    assert costs[1:] == [32_768 * 4] * 2
+    assert instance.extract_item_costs(items[:1], output_schema={"q": choice(), "r": choice()}) == [2 * costs[0]]
+    assert instance.extract_item_costs(items[:1], output_schema={"q": choice(instructions="x" * 1000)})[0] > costs[0]
+    result = instance.extract(items, output_schema=schema)
+    assert result.errors[0] is None
+    assert [error.code for error in result.errors[1:]] == ["INVALID_INPUT", "INPUT_TOO_LONG"]
+    assert result.input_token_counts[1:] == [0, 0]
 
 
 def test_extract_sorts_and_splits_complete_rows_preserving_item_question_order_and_usage():

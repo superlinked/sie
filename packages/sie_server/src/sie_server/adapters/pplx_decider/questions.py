@@ -143,7 +143,13 @@ def answer(question: Question, probabilities: Sequence[float]) -> dict[str, Any]
         raise ValueError("Decision model returned no finite probability mass")
     values = [value / total for value in values]
     if question.kind == "noul":
-        return {"type": "noul", "noul": values[1]}
+        probability = values[1]
+        return {
+            "type": "noul",
+            "noul": probability,
+            "answer": probability > 0.5,
+            "confidence": max(probability, 1 - probability),
+        }
     best = max(range(len(values)), key=lambda index: values[index])
     distribution = dict(zip(question.keys, values, strict=True))
     if question.kind == "choice":

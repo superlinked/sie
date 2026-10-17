@@ -73,12 +73,22 @@ def test_noncausal_hook_changes_future_attention_preserves_padding_and_recurrenc
         native(**rows, use_cache=True)
 
 
-def test_saved_native_checkpoint_loads_complete_backbone_and_separate_readout(native, tmp_path):
+def test_saved_native_checkpoint_loads_complete_backbone_and_separate_readout(native, tmp_path, monkeypatch):
     native.save_pretrained(tmp_path, safe_serialization=True)
     head = torch.nn.Linear(32, 255, bias=False)
     save_file({"weight": head.weight.detach()}, tmp_path / "readout.safetensors")
     saved = {"temperature": 1.7, "pooling": "last", "attention_mode": "noncausal_full_attention"}
+    loader = qwen.Qwen3_5Model.from_pretrained
+    devices = []
+
+    def observe_load(*args, **kwargs):
+        devices.append(kwargs.get("device_map"))
+        return loader(*args, **kwargs)
+
+    monkeypatch.setattr(qwen.Qwen3_5Model, "from_pretrained", observe_load)
     loaded = load_model(tmp_path, saved, "cpu", torch.float32)
+    assert devices == ["cpu"]
+    assert all(parameter.device.type == "cpu" for parameter in loaded.parameters())
     enable_noncausal_full_attention(native.language_model)
     inputs = {"input_ids": torch.tensor([[2, 3, 4]]), "attention_mask": torch.ones(1, 3, dtype=torch.long)}
     with torch.inference_mode():

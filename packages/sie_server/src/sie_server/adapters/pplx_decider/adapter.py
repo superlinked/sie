@@ -8,7 +8,6 @@ Actual input usage sums the complete, unpadded rows the backbone processed.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
@@ -22,7 +21,7 @@ from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters.errors import InputTooLongError
 from sie_server.adapters.pplx_decider.model import DecisionModel, checkpoint_config, load_model, validate_tokenizer
 from sie_server.adapters.pplx_decider.questions import (
-    MAX_QUESTIONS,
+    SYSTEM_PROMPT,
     Question,
     answer,
     describe,
@@ -250,15 +249,29 @@ class PerplexityDecisionAdapter(BaseAdapter):
         output_schema: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[int] | None:
-        """Conservatively charge batching for every question, without tokenizing on the event loop."""
+        """Estimate complete prompt characters without tokenizing on the event loop."""
         _ = kwargs
-        if not isinstance(output_schema, Mapping) or not 1 <= len(output_schema) <= MAX_QUESTIONS:
+        try:
+            questions = parse_questions(output_schema)
+        except (InvalidInputError, InputTooLongError):
             return None
-        # The worker's cost unit is characters. Structured states conservatively
-        # consume an item budget; the adapter still uses exact bounded forwards.
-        return [
-            min(MAX_ITEM_TOKENS * 4, len(output_schema) * (len(item.text) + self._max_seq_length * 4))
-            if item.text is not None
-            else MAX_ITEM_TOKENS * 4
-            for item in items
-        ]
+        # Include the repeated state, question, system prompt, option codes and
+        # estimated chat-template overhead. This only groups work: _item_rows
+        # and extract still enforce the exact unpadded and padded token limits.
+        prompt_chars = sum(
+            len(SYSTEM_PROMPT)
+            + len(question.instructions)
+            + sum(map(len, question.descriptions))
+            + 6 * len(question.keys)
+            + 256
+            for question in questions
+        )
+        limit = MAX_ITEM_TOKENS * 4
+        costs: list[int] = []
+        for item in items:
+            try:
+                costs.append(min(limit, len(questions) * len(self._state(item)) + prompt_chars))
+            except (InvalidInputError, InputTooLongError):
+                # Let extraction report the original per-item validation error.
+                costs.append(limit)
+        return costs

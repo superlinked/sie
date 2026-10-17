@@ -158,6 +158,7 @@ def load_model(directory: Path, config: Mapping[str, Any], device: str, dtype: t
     backbone, info = Qwen3_5Model.from_pretrained(
         str(directory),
         dtype=dtype,
+        device_map=device,
         attn_implementation="sdpa",
         local_files_only=True,
         trust_remote_code=False,
@@ -175,12 +176,12 @@ def load_model(directory: Path, config: Mapping[str, Any], device: str, dtype: t
         or not torch.isfinite(weights["weight"]).all()
     ):
         raise ValueError("Invalid Perplexity decision readout")
-    readout = torch.nn.Linear(size, MAX_OPTIONS, bias=False, dtype=dtype)
+    readout = torch.nn.Linear(size, MAX_OPTIONS, bias=False, dtype=dtype, device=device)
     readout.load_state_dict(weights, strict=True)
     if not torch.isfinite(readout.weight).all():
         raise ValueError("Perplexity decision readout overflows the requested compute precision")
     if config.get("attention_mode", "causal") == "noncausal_full_attention":
         enable_noncausal_full_attention(backbone.language_model)
     model = DecisionModel(backbone, readout, config)
-    model.requires_grad_(False).eval().to(device)
+    model.requires_grad_(False).eval()
     return model

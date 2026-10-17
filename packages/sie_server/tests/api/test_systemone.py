@@ -11,6 +11,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sie_server.adapters.base import ModelCapabilities, ModelDims
 from sie_server.adapters.errors import InputTooLongError
+from sie_server.adapters.pplx_decider.questions import answer as pplx_answer
+from sie_server.adapters.pplx_decider.questions import parse_questions as pplx_questions
 from sie_server.api.systemone import (
     MAX_RETRY_AFTER_S,
     choice_confidence,
@@ -151,6 +153,26 @@ def _post(client: TestClient, **body: Any) -> Any:
 
 
 class TestAnswers:
+    @pytest.mark.parametrize("probability", [0.0, 0.2, 0.5, 0.8, 1.0])
+    def test_native_perplexity_noul_includes_system_one_fields(self, client, adapter, probability):
+        def extract(items, *, output_schema, **kwargs):
+            question = pplx_questions(output_schema)[0]
+            return ExtractOutput(
+                entities=[[] for _ in items],
+                data=[{question.id: pplx_answer(question, [1 - probability, probability])} for _ in items],
+                input_token_counts=[42 for _ in items],
+            )
+
+        adapter.extract.side_effect = extract
+        response = _post(client, questions={"spam": QUESTIONS["spam"]})
+        assert response.status_code == 200
+        assert response.json()["answers"]["spam"] == {
+            "type": "noul",
+            "noul": probability,
+            "answer": probability > 0.5,
+            "confidence": max(probability, 1 - probability),
+        }
+
     def test_envelope(self, client: TestClient) -> None:
         response = _post(client)
         assert response.status_code == 200
