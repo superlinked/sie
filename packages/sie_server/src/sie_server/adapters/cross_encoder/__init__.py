@@ -17,7 +17,7 @@ Performance optimizations:
 """
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from sentence_transformers import CrossEncoder
@@ -27,6 +27,10 @@ from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, AttnImplementation, ComputePrecision
 from sie_server.core.inference_output import ScoreOutput
 from sie_server.types.inputs import Item
+
+if TYPE_CHECKING:
+    from sie_server.adapters.cross_encoder._lora import CrossEncoderLora
+    from sie_server.adapters.lora import LoraRuntimeConfig
 
 
 class CrossEncoderAdapter(BaseAdapter):
@@ -39,6 +43,15 @@ class CrossEncoderAdapter(BaseAdapter):
 
     These models take (query, document) pairs and output relevance scores.
     Higher scores indicate more relevant documents.
+
+    Runtime LoRA is opt-in through ``lora_paths={served_name: source}``.
+    Only ordinary A/B LoRA matrices targeting encoder Linear modules in a
+    standard, unquantized ``BertForSequenceClassification`` are supported.
+    The scoring head and activation stay those of the base checkpoint;
+    trained replacement heads, causal rerankers and custom model classes
+    are rejected when LoRA is enabled. Adapters load on demand under the
+    registry's resident limit. ``options.lora=None`` selects the base model.
+    Configurations without declarations use the original model and scoring path.
 
     Performance optimizations:
     - SDPA attention (default): Uses PyTorch's scaled_dot_product_attention
@@ -61,6 +74,9 @@ class CrossEncoderAdapter(BaseAdapter):
         compute_precision: ComputePrecision | None = None,
         attn_implementation: AttnImplementation = "sdpa",
         revision: str | None = None,
+        lora_paths: dict[str, str] | None = None,
+        lora_revisions: dict[str, str | None] | None = None,
+        max_loaded_loras: int = 10,
         **kwargs: Any,  # Accept extra args from loader (e.g., pooling)
     ) -> None:
         """Initialize the adapter.
@@ -76,6 +92,12 @@ class CrossEncoderAdapter(BaseAdapter):
             revision: Optional HuggingFace revision/branch/commit SHA to pin when
                 loading the model. If None, the default branch is used. Forwarded
                 to ``CrossEncoder(..., revision=...)``.
+            lora_paths: Declared adapter aliases/sources. Enables deferred runtime
+                loading for standard BERT encoder projections only. Served names
+                use letters, digits, underscores, dots and hyphens; sources may
+                be local directories or Hugging Face repositories.
+            lora_revisions: Source revisions supplied by the model loader.
+            max_loaded_loras: Resident adapter limit, enforced with registry LRU eviction.
             **kwargs: Additional arguments (ignored, for compatibility).
         """
         _ = kwargs  # Unused, but accepted for loader compatibility
@@ -88,6 +110,12 @@ class CrossEncoderAdapter(BaseAdapter):
 
         self._model: CrossEncoder | None = None
         self._device: str | None = None
+        self._lora: CrossEncoderLora | None = None
+        if lora_paths:
+            # Keep optional dependency imports and all LoRA state off the ordinary path.
+            from sie_server.adapters.cross_encoder._lora import CrossEncoderLora as LoraManager
+
+            self._lora = LoraManager(lora_paths, lora_revisions, max_loaded_loras)
 
     def load(self, device: str) -> None:
         """Load the model onto the specified device.
@@ -134,6 +162,50 @@ class CrossEncoderAdapter(BaseAdapter):
 
         if self._max_length is not None:
             self._model.max_length = self._max_length
+        if self._lora is not None:
+            self._lora.bind(self._model)
+
+    def unload(self) -> None:
+        try:
+            if self._lora is not None:
+                self._lora.close()
+        finally:
+            super().unload()
+
+    def supports_lora(self) -> bool:
+        return self._lora is not None
+
+    def supports_hot_lora_reload(self) -> bool:
+        return self._lora is not None
+
+    def lora_runtime_config(self) -> "LoraRuntimeConfig | None":
+        return self._lora.runtime_config() if self._lora is not None else None
+
+    def fetch_lora(self, lora_path: str, revision: str | None = None) -> str:
+        if self._lora is None:
+            return super().fetch_lora(lora_path, revision)
+        return self._lora.fetch(lora_path, revision)
+
+    def discard_lora_source(self, lora_path: str) -> None:
+        if self._lora is not None:
+            self._lora.discard(lora_path)
+
+    def load_lora(self, lora_path: str, revision: str | None = None, *, source: str | None = None) -> int:
+        if self._lora is None:
+            return super().load_lora(lora_path, revision, source=source)
+        return self._lora.load(lora_path, revision, source=source)
+
+    def unload_lora(self, lora_name: str) -> None:
+        if self._lora is None:
+            super().unload_lora(lora_name)
+        else:
+            self._lora.unload(lora_name)
+
+    def set_active_lora(self, lora_name: str | None) -> None:
+        if self._lora is not None:
+            self._lora.select(lora_name)
+        elif lora_name is not None:
+            raise ValueError("No LoRA sources are declared for this cross-encoder")
 
     def score(
         self,
