@@ -6,7 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from tools.ci.tests.test_helm_render import ROOT, render_chart, rendered_documents, upstream, worker_with
+from tools.ci.tests.test_helm_render import (
+    GATEWAY_TOKEN_SECRET,
+    ROOT,
+    WORKER_TOKEN_SECRET,
+    render_chart,
+    rendered_documents,
+    upstream,
+    worker_with,
+)
 
 
 def values_at(paths: dict) -> dict:
@@ -262,7 +270,7 @@ def consumed_refs(docs: list[dict]) -> set[tuple[str, str, str | None]]:
         namespace = doc["metadata"].get("namespace", "sie")
         if doc["kind"] in {"Deployment", "StatefulSet"}:
             spec = doc["spec"]["template"]["spec"]
-            for container in spec.get("containers", []) + spec.get("initContainers", []):
+            for container in (spec.get("containers") or []) + (spec.get("initContainers") or []):
                 for env in container.get("env", []) or []:
                     ref = env.get("valueFrom", {}).get("secretKeyRef")
                     if ref:
@@ -466,6 +474,61 @@ INACTIVE.extend(
         ),
     ]
 )
+
+
+INACTIVE.append(
+    (
+        "loki-enterprise-gel",
+        {
+            **LOKI,
+            "loki.gateway.enabled": True,
+            "loki.gateway.basicAuth.enabled": True,
+            "loki.enterprise.enabled": True,
+            "loki.enterprise.gelGateway": True,
+        },
+        "loki-gateway",
+        ".htpasswd",
+    )
+)
+
+
+# These key-mode controls still mount the same whole Secret for other known
+# filenames. A whole-volume render alone cannot prove which file the binary reads.
+NO_SECRET_CONSUMERS = [
+    case
+    for case in INACTIVE
+    if case[0] not in {"prom-cm-unused-filename", "prom-patch-unused-filename", "prom-monitor-ca-disabled"}
+]
+
+
+@pytest.mark.parametrize(
+    ("case", "paths", "name", "key"), NO_SECRET_CONSUMERS, ids=[case[0] for case in NO_SECRET_CONSUMERS]
+)
+def test_inactive_fixture_has_no_matching_consumer(tmp_path: Path, case: str, paths: dict, name: str, key: str) -> None:
+    values = values_at(paths)
+    namespace = values.get("global", {}).get("namespace", "sie")
+    refs = consumed_refs(rendered_documents(tmp_path, values))
+    assert (namespace, name, key) not in refs and (namespace, name, None) not in refs, (case, refs)
+
+
+@pytest.mark.parametrize("role", ["worker", "gateway", "gateway-prepare"])
+def test_generated_sie_tokens_cannot_alias_dependency_credentials(tmp_path: Path, role: str) -> None:
+    name = WORKER_TOKEN_SECRET if role == "worker" else GATEWAY_TOKEN_SECRET
+    values = values_at(
+        {
+            f"{PROM}.install": True,
+            f"{GRAFANA}.smtp.existingSecret": name,
+            f"{GRAFANA}.smtp.passwordKey": "SIE_AUTH_TOKEN",
+        }
+    )
+    if role == "worker":
+        values["workers"] = worker_with()
+    else:
+        values["gateway"] = {"auth": {"generateToken": True, "mode": "token" if role == "gateway" else "none"}}
+    result = render_chart(tmp_path, values)
+    assert result.returncode != 0
+    assert "same Secret key" in result.stderr, result.stderr
+    assert f"{name}/SIE_AUTH_TOKEN" in result.stderr, result.stderr
 
 
 @pytest.mark.parametrize("role", ["worker", "gateway", "upstream"])
