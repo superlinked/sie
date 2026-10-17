@@ -14,6 +14,10 @@ max_sequence_length: 1024  # the gliclass pipeline's default window, also used i
 profiles:
   default:
     max_batch_tokens: 16384
+    # The adaptive controller compares request latency, queue time included, with
+    # its target and shrinks GLiClass batches under load.
+    adaptive_batching:
+      enabled: false
     compute_precision: null
     adapter_path: sie_server.adapters.gliclass:GLiClassAdapter
     adapter_options:
