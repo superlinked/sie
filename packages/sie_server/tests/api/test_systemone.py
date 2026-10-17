@@ -29,6 +29,7 @@ from sie_server.types.responses import ErrorCode
 DECIDE = "fastino/GLiNER2.5-Decide"
 EMBEDDER = "org/embedder"
 DECIDE_ADAPTER = "sie_server.adapters.gliner2.decide:GLiNER2DecideAdapter"
+PPLX_ADAPTER = "sie_server.adapters.pplx_decider.adapter:PerplexityDecisionAdapter"
 
 QUESTIONS: dict[str, Any] = {
     "spam": {"type": "noul", "instructions": "Is this message spam?"},
@@ -105,14 +106,14 @@ def _worker(adapter: MagicMock) -> MagicMock:
     return worker
 
 
-@pytest.fixture
-def registry(adapter: MagicMock) -> MagicMock:
+@pytest.fixture(params=[DECIDE_ADAPTER, PPLX_ADAPTER])
+def registry(adapter: MagicMock, request: pytest.FixtureRequest) -> MagicMock:
     configs = {
         DECIDE: ModelConfig(
             sie_id=DECIDE,
             hf_id=DECIDE,
             tasks=Tasks(extract=ExtractTask()),
-            profiles={"default": ProfileConfig(adapter_path=DECIDE_ADAPTER, max_batch_tokens=8192)},
+            profiles={"default": ProfileConfig(adapter_path=request.param, max_batch_tokens=8192)},
         ),
         EMBEDDER: ModelConfig(
             sie_id=EMBEDDER,

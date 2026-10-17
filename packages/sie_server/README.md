@@ -35,13 +35,13 @@ pip install sie-server
   ```
 
 - **Transformers 5 bundle** (LightOnOCR, GLM-OCR, GLiGuard, GLiNER2.5 entity and Decide models, Privacy Filter, and the TopK-Embed-V1
-  multi-vector models) — requires `transformers` 5.x, and is served with `-b transformers5`. The GLiNER2.5-Decide
+  multi-vector models, and Perplexity decisions) — requires `transformers` 5.x, and is served with `-b transformers5`. The GLiNER2.5-Decide
   and entity models also need `gliner2` 2.x. `sie-server` itself asks for `gliner2<2`, which the default bundle's GLiNER2
   models need, so pip reports that conflict when the second command below installs 2.x; the transformers5
   bundle's GLiNER2 models are pinned to 2.0.0:
 
   ```bash
-  pip install sie-server "transformers>=5,<6"
+  pip install sie-server "transformers>=5.17,<6"
   pip install "gliner2==2.0.0"  # for the GLiNER2.5 and GLiNER2 PII models
   sie-server serve -b transformers5
   ```
@@ -58,6 +58,42 @@ pip install sie-server
 ```bash
 sie-server serve --port 8080 --device cuda:0
 ```
+
+### Perplexity typed decisions
+
+`perplexity-ai/pplx-decider-v1.1-27b` uses its native 255-option decision head
+in the `transformers5` bundle. It accepts text through `extract` with typed
+`output_schema` questions, `/v1/systemone`, and the OpenAI-compatible
+`/v1/decisions` route. The upstream image input is not supported by this adapter.
+
+The pinned checkpoint's attention mode, pooling and calibration temperature
+are preserved. Every state/question pair runs as a separate row, with at most
+8,192 tokens including the chat template and answer options. Oversized items
+return `INPUT_TOO_LONG`; inputs are never truncated. The request limits are
+32 questions, 255 options per question, 1,024 options total and 65,536 question
+characters. An item may occupy at most 32,768 tokens across all its rows.
+Input usage counts every complete row processed; no output tokens are generated.
+
+```python
+from sie_sdk import SIEClient
+
+client = SIEClient("http://localhost:8080")
+result = client.extract(
+    "perplexity-ai/pplx-decider-v1.1-27b",
+    ["The customer was charged twice and wants a refund."],
+    output_schema={
+        "intent": {
+            "type": "choice",
+            "instructions": "Which team should handle this message?",
+            "criteria": {"billing": "Payments and refunds", "support": "Technical problems"},
+        },
+    },
+)
+```
+
+Use a GPU with enough memory for the approximately 52 GB BF16 checkpoint plus
+inference activations. This model uses native forward passes, not generation,
+and has no runtime LoRA or image support in this adapter.
 
 ### LightOnOCR-3 extraction
 
