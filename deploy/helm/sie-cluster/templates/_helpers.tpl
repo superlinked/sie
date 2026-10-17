@@ -867,6 +867,14 @@ Runs from NOTES.txt so every install/upgrade is checked, regardless of which (or
 {{- end }}
 
 {{- define "sie-cluster.validateTls" -}}
+{{/* Pinned trust-manager Helm TLS generation uses Release.Namespace for its
+     Secret and DNS, while its Deployment honors the child namespace helper. */}}
+{{- with index .Subcharts "trust-manager" -}}
+{{- $namespace := include "trust-manager.namespace" . -}}
+{{- if and .Values.app.webhook.tls.helmCert.enabled (ne $namespace .Release.Namespace) -}}
+{{- fail (printf "trust-manager.namespace=%q must equal the Helm release namespace %q when trust-manager.app.webhook.tls.helmCert.enabled=true: the pinned dependency generates its TLS Secret and certificate DNS in the release namespace, while its Deployment uses the child namespace. Clear the namespace override or use helmCert.enabled=false with cert-manager." $namespace .Release.Namespace) -}}
+{{- end -}}
+{{- end -}}
 {{- $tls := include "sie-cluster.ingressTlsConfig" . | fromYaml }}
 {{- $hosts := include "sie-cluster.ingress.hosts" . | fromJsonArray }}
 {{- /* CRD existence is no longer a reliable "is cert-manager installed" signal — we vendor the

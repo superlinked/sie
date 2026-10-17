@@ -463,10 +463,10 @@ INACTIVE.extend(
             "ca",
         ),
         (
-            "trust-helm-other-namespace",
+            "trust-helm-other-sie-namespace",
             {
                 TRUST: True,
-                "trust-manager.namespace": "monitoring",
+                "global.namespace": "workers",
                 "trust-manager.app.webhook.tls.helmCert.enabled": True,
             },
             "trust-manager-tls",

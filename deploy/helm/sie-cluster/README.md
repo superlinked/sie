@@ -1647,10 +1647,10 @@ separation, not that arbitrary TLS PEM data would be accepted as a runtime beare
 token.
 
 In pinned trust-manager, Helm-generated TLS is created in the release namespace
-while its Deployment uses the child `namespace` override. Avoid combining a
-separate child namespace with `app.webhook.tls.helmCert.enabled=true`; the guard
-follows the actual Deployment namespace, and does not repair that inherited
-certificate-generation mismatch ([#781](https://github.com/superlinked/sie/issues/781)).
+while its Deployment uses the child `namespace` override. The render rejects a
+separate child namespace with `app.webhook.tls.helmCert.enabled=true` to prevent
+that inherited certificate-generation mismatch. Use the release namespace or
+cert-manager generation instead; see [Bundling cert-manager](#bundling-cert-manager).
 
 When `gateway.extraEnv` sets `SIE_AUTH_MODE` from `valueFrom`, the mode is
 unknown at render time. The gateway then receives the generated token, as it
@@ -2187,6 +2187,7 @@ Guards:
 2. A template-time `lookup` aborts the install when `certManagerBundle.certManager.install: true` is combined with an existing `certificates.cert-manager.io` CRD.
 3. A `pre-install` Job hook re-checks at apply time and aborts before any subchart resources are created (`lookup` returns empty during `helm template` / `--dry-run`, so the Job is the real safety net).
 4. Jetstack's `crds.keep: true` default is left in place, so `helm uninstall` does not silently delete `Certificate` / `Issuer` resources belonging to other operators.
+5. Bundled trust-manager with `trust-manager.app.webhook.tls.helmCert.enabled=true` must use the Helm release namespace. The render rejects a different `trust-manager.namespace`: the pinned dependency generates its TLS Secret and certificate DNS in the release namespace, while its Deployment honors the child namespace override. For a separate child namespace, use `helmCert.enabled=false` with cert-manager. `global.namespace` and `app.trust.namespace` do not relocate that TLS producer.
 
 Override the conflict guard (DANGER):
 

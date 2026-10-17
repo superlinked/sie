@@ -79,7 +79,7 @@ jobs:
           mise exec -- uv run --frozen --project . --no-sync ruff format --check tools/ci
           mise exec -- uv run --frozen --project . --no-sync ruff check --select E,F,I,UP,B tools/ci
           mise exec -- uv run --frozen --project . --no-sync ruff check --select E9,F63,F7,F82 tools/mise_tasks
-          mise exec -- uv run --frozen --project . --no-sync pytest -q tools/ci/tests --ignore tools/ci/tests/test_required_ci.py --ignore tools/ci/tests/test_public_tree.py --ignore tools/ci/tests/test_helm_render.py --ignore tools/ci/tests/test_helm_dependency_credentials.py
+          mise exec -- uv run --frozen --project . --no-sync pytest -q tools/ci/tests --ignore tools/ci/tests/test_required_ci.py --ignore tools/ci/tests/test_public_tree.py --ignore tools/ci/tests/test_helm_render.py --ignore tools/ci/tests/test_helm_dependency_credentials.py --ignore tools/ci/tests/test_helm_trust_namespace.py
       - name: OpenCode example checker and gate
         working-directory: examples/coding-agent-opencode
         run: |
@@ -215,6 +215,8 @@ jobs:
         run: mise exec -- uv run --frozen --project . pytest -q tools/ci/tests/test_helm_render.py
       - name: Dependency credential render tests
         run: mise exec -- uv run --frozen --project . pytest -q tools/ci/tests/test_helm_dependency_credentials.py
+      - name: Trust-manager namespace render tests
+        run: mise exec -- uv run --frozen --project . pytest -q tools/ci/tests/test_helm_trust_namespace.py
       - run: |
           destination="$(mktemp -d)"
           mise run helm -- package --destination "$destination"
