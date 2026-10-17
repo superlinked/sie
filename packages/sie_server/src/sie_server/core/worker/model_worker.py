@@ -232,6 +232,13 @@ class ModelWorker:
         self._model_name = model_name
         self._postprocessor_registry = postprocessor_registry
         self._registry_callbacks = registry_callbacks
+        # Task-restricted adapters opt in explicitly. Cache the bound method
+        # once; ordinary adapters (including dynamic test doubles) have no
+        # admission callback, and score/encode never consult this hook.
+        declared_admission = getattr(type(adapter), "validate_extract_request", None)
+        self._extract_admission: Callable[..., None] | None = (
+            getattr(adapter, "validate_extract_request", None) if callable(declared_admission) else None
+        )
 
         # Protect adapter-global state, especially active LoRA selection,
         # across the direct HTTP batcher and the sidecar IPC pre-formed batch
@@ -849,6 +856,10 @@ class ModelWorker:
             QueueFullError: If queue is full and cannot accept more items.
         """
         self._check_queue_capacity(len(prepared_items))
+        if self._extract_admission is not None:
+            self._extract_admission(
+                items, labels=labels, output_schema=output_schema, instruction=instruction, options=options
+            )
 
         future, request_timing = self._create_future_and_timing(timing)
 
@@ -968,6 +979,10 @@ class ModelWorker:
     ) -> asyncio.Future[WorkerResult]:
         """Run a caller-formed extract batch directly for sidecar IPC."""
         self._check_running()
+        if self._extract_admission is not None:
+            self._extract_admission(
+                items, labels=labels, output_schema=output_schema, instruction=instruction, options=options
+            )
 
         future, request_timing = self._create_future_and_timing(timing)
         metadata = RequestMetadata(
@@ -1000,8 +1015,23 @@ class ModelWorker:
         self._check_running()
 
         entries: list[tuple[Sequence[HasCost], RequestMetadata]] = []
+        guarded_futures: list[asyncio.Future[WorkerResult]] | None = [] if self._extract_admission is not None else None
         for req in requests:
             future, request_timing = self._create_future_and_timing(req.timing)
+            if guarded_futures is not None:
+                guarded_futures.append(future)
+            if self._extract_admission is not None:
+                try:
+                    self._extract_admission(
+                        req.items,
+                        labels=req.labels,
+                        output_schema=req.output_schema,
+                        instruction=req.instruction,
+                        options=req.options,
+                    )
+                except Exception as error:  # noqa: BLE001 - preserve each request's independent outcome
+                    future.set_exception(error)
+                    continue
             entries.append(
                 (
                     req.prepared_items,
@@ -1019,7 +1049,8 @@ class ModelWorker:
                 )
             )
 
-        return await self._submit_preformed_metadata_batch(entries, lora)
+        admitted = await self._submit_preformed_metadata_batch(entries, lora)
+        return admitted if guarded_futures is None else guarded_futures
 
     async def submit_score_preformed(
         self,
