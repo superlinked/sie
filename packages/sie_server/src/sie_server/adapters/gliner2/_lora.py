@@ -1,8 +1,9 @@
 """Strict generic-PEFT lifecycle for the opt-in GLiNER2 entity adapter.
 
 The raw extractor owns serving. A separate PEFT controller owns only reversible
-LoRA injection; it is never used as the extraction entrypoint. Disabled resident
-wrappers remain in the tree, so this module makes no base-performance promise.
+LoRA injection; it is never used as the extraction entrypoint. Resident wrappers
+stay outside the module tree while base is selected, sharing the exact original
+projection weights. Admission and selection still have their own runtime cost.
 """
 
 from __future__ import annotations
@@ -106,6 +107,9 @@ class GLiNER2Lora:
         self._model: Any = None
         self._controller: PeftModel | None = None
         self._originals: dict[str, torch.nn.Linear] = {}
+        # A plain dict retains GPU residency without making raw Extractor.eval()
+        # or base inference traverse adapter wrappers and their child modules.
+        self._resident_layers: dict[str, LoraLinear] = {}
         self._shapes: dict[str, tuple[int, int, torch.dtype]] = {}
         self._grad: list[tuple[torch.nn.Parameter, bool]] = []
         self._training: list[tuple[torch.nn.Module, bool]] = []
@@ -288,6 +292,41 @@ class GLiNER2Lora:
             raise RuntimeError("Entity LoRA controller does not own ordinary LoRA layers")
         return self._controller.base_model
 
+    def _attach_layers(self) -> None:
+        """Expose all residents before PEFT selection, injection or removal."""
+        for name, layer in self._resident_layers.items():
+            original = self._originals[name]
+            current = self._model.get_submodule(name)
+            if current is not original and current is not layer:
+                raise RuntimeError("A GLiNER2 module changed outside its owned LoRA lifecycle")
+            if layer.get_base_layer() is not original:
+                raise RuntimeError("A GLiNER2 LoRA base projection changed")
+            # Detached adapters must not silently migrate if an external caller
+            # moves/casts the raw model after it was admitted for serving.
+            if any(
+                parameter.device != original.weight.device or parameter.dtype != original.weight.dtype
+                for parameter in layer.parameters()
+            ):
+                raise RuntimeError("GLiNER2 device or precision changed with resident LoRAs")
+            parent, _, leaf = name.rpartition(".")
+            setattr(self._model.get_submodule(parent), leaf, layer)
+
+    def _detach_layers(self) -> None:
+        """Restore native base projections while retaining nonempty LoRA layers."""
+        for name, original in self._originals.items():
+            current = self._model.get_submodule(name)
+            if current is original:
+                continue
+            if not isinstance(current, LoraLinear) or current.get_base_layer() is not original:
+                raise RuntimeError("A GLiNER2 module changed outside its owned LoRA lifecycle")
+            if current.lora_A:
+                self._resident_layers[name] = current
+            else:
+                self._resident_layers.pop(name, None)
+            parent, _, leaf = name.rpartition(".")
+            setattr(self._model.get_submodule(parent), leaf, original)
+        self._active = None
+
     def _restore_tree(self, *, final: bool) -> None:
         for name, original in self._originals.items():
             current = self._model.get_submodule(name)
@@ -296,9 +335,11 @@ class GLiNER2Lora:
             if not isinstance(current, LoraLinear) or current.get_base_layer() is not original:
                 raise RuntimeError("A GLiNER2 module changed outside its owned LoRA lifecycle")
             if final or not current.lora_A:
+                self._resident_layers.pop(name, None)
                 parent, _, leaf = name.rpartition(".")
                 setattr(self._model.get_submodule(parent), leaf, original)
         if final:
+            self._resident_layers.clear()
             for module, name, present, value, contents in self._attributes:
                 if present:
                     if contents is not None:
@@ -364,6 +405,7 @@ class GLiNER2Lora:
     def _attach(self, canonical: str, source: str, prepared: _Prepared) -> int:
         internal = PEFTLoRAMixin._peft_adapter_name(canonical)
         try:
+            self._attach_layers()
             if self._controller is None:
                 self._controller = PeftModel.from_pretrained(
                     self._model,
@@ -401,16 +443,21 @@ class GLiNER2Lora:
                 parameters.append(parameter)
             self._tuner().disable_adapter_layers()
             self._freeze_adapters()
-            self._active = None
+            self._detach_layers()
             self._loaded[canonical] = parameters
         except BaseException:
             try:
                 if self._loaded:
+                    # A failed detach can have saved some new layers off-tree.
+                    # Restore the whole owned set before deleting the injection.
+                    self._attach_layers()
                     self._remove(internal)
                     assert self._controller is not None
                     self._tuner().disable_adapter_layers()
                     self._freeze_adapters()
                 self._restore_tree(final=not self._loaded)
+                if self._loaded:
+                    self._detach_layers()
             except BaseException as rollback:
                 self._uncertain = True
                 raise LoraStateUncertainError("Entity LoRA attachment rollback failed") from rollback
@@ -433,9 +480,12 @@ class GLiNER2Lora:
                     if canonical is None:
                         self._tuner().disable_adapter_layers()
                     else:
-                        self._controller.set_adapter(PEFTLoRAMixin._peft_adapter_name(canonical))
+                        self._attach_layers()
+                        self._controller.set_adapter(PEFTLoRAMixin._peft_adapter_name(canonical), inference_mode=True)
                         self._tuner().enable_adapter_layers()
                     self._freeze_adapters()
+                    if canonical is None:
+                        self._detach_layers()
                 self._active = canonical
             except BaseException as error:
                 self._uncertain = True
@@ -448,6 +498,7 @@ class GLiNER2Lora:
             if canonical not in self._loaded:
                 raise LoraUnavailableError("Entity LoRA is not resident")
             try:
+                self._attach_layers()
                 self._remove(PEFTLoRAMixin._peft_adapter_name(canonical))
                 final = len(self._loaded) == 1
                 if not final:
@@ -455,6 +506,8 @@ class GLiNER2Lora:
                     self._tuner().disable_adapter_layers()
                     self._freeze_adapters()
                 self._restore_tree(final=final)
+                if not final:
+                    self._detach_layers()
             except BaseException as error:
                 self._uncertain = True
                 raise LoraStateUncertainError("Entity LoRA removal failed; reload model") from error
@@ -480,6 +533,7 @@ class GLiNER2Lora:
                     errors.append(error)
             self._controller = self._model = None
             self._originals.clear()
+            self._resident_layers.clear()
             self._shapes.clear()
             self._grad.clear()
             self._training.clear()

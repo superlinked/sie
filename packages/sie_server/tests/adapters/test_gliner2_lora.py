@@ -196,6 +196,49 @@ def serve(adapter: GLiNER2EntityLoraAdapter, name: str | None) -> Any:
     return msgspec.to_builtins(adapter.extract([Item(text=t) for t in TEXTS], labels=LABELS, options={"lora": name}))
 
 
+def assert_native_base_with_residents(adapter: GLiNER2EntityLoraAdapter) -> None:
+    assert adapter._lora._resident_layers
+    assert all(layer.disable_adapters for layer in adapter._lora._resident_layers.values())
+    assert not any(isinstance(layer, LoraLinear) for layer in adapter._model.modules())
+    assert all(adapter._model.get_submodule(name) is original for name, original in adapter._lora._originals.items())
+
+
+@pytest.mark.parametrize("disjoint", [False, True])
+def test_resident_base_uses_exact_original_tree_without_visiting_wrappers(
+    raw_model: GLiNER2, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, disjoint: bool
+) -> None:
+    targets = _resolve_targets(raw_model, ["encoder.query", "encoder.value", "span_rep"])
+    paths = {
+        name: make_checkpoint(tmp_path, raw_model, name, targets=targets[index::2] if disjoint else targets)
+        for index, name in enumerate(("a", "b"))
+    }
+    adapter = adapter_for(raw_model, paths)
+    before = snapshot(raw_model)
+    baseline = serve(adapter, None)
+    for name in paths:
+        adapter.load_lora(name)
+    assert dict(raw_model.named_modules()) == {name: value[0] for name, value in before["modules"].items()}
+    assert dict(raw_model.named_parameters()) == {name: value[0] for name, value in before["parameters"].items()}
+    layers = adapter._lora._resident_layers
+    assert layers
+    assert all(isinstance(layer, LoraLinear) for layer in layers.values())
+    assert all(layer.get_base_layer() is before["modules"][name][0] for name, layer in layers.items())
+    identities = {name: id(layer) for name, layer in layers.items()}
+    with monkeypatch.context() as patch:
+        for layer in layers.values():
+            patch.setattr(layer, "forward", Mock(side_effect=AssertionError("base visited LoRA forward")))
+            patch.setattr(layer, "train", Mock(side_effect=AssertionError("base eval visited LoRA wrapper")))
+        assert serve(adapter, None) == baseline
+    assert serve(adapter, "a") != baseline
+    assert serve(adapter, "b") != baseline
+    assert serve(adapter, None) == baseline
+    assert identities == {name: id(layer) for name, layer in layers.items()}
+    assert dict(raw_model.named_modules()) == {name: value[0] for name, value in before["modules"].items()}
+    adapter.unload()
+    assert not layers
+    assert_restored(raw_model, before)
+
+
 def test_real_named_effects_eviction_and_full_restoration(raw_model: GLiNER2, tmp_path: Path) -> None:
     paths = {name: make_checkpoint(tmp_path, raw_model, name) for name in ("a", "b")}
     adapter = adapter_for(raw_model, paths)
@@ -207,7 +250,7 @@ def test_real_named_effects_eviction_and_full_restoration(raw_model: GLiNER2, tm
     adapter.load_lora("b")
     observed = []
     handles = []
-    for name, layer in raw_model.named_modules():
+    for name, layer in adapter._lora._resident_layers.items():
         if isinstance(layer, LoraLinear):
 
             def observe(module, args, output, name=name):
@@ -244,6 +287,129 @@ def test_real_named_effects_eviction_and_full_restoration(raw_model: GLiNER2, tm
     gc.collect()
     assert all(ref() is None for ref in parameter_refs)
     adapter.unload()
+
+
+def test_disjoint_eviction_releases_empty_wrappers_and_can_reattach(raw_model, tmp_path):
+    targets = {
+        name: _resolve_targets(raw_model, selected)
+        for name, selected in (("a", ["encoder.query"]), ("b", ["span_rep"]))
+    }
+    paths = {name: make_checkpoint(tmp_path, raw_model, name, targets=targets[name]) for name in targets}
+    adapter = adapter_for(raw_model, paths)
+    before = snapshot(raw_model)
+    base = serve(adapter, None)
+    for name in paths:
+        adapter.load_lora(name)
+    expected = {name: serve(adapter, name) for name in paths}
+    removed_layers = [weakref.ref(adapter._lora._resident_layers[name]) for name in targets["b"]]
+    adapter.unload_lora("b")
+    assert set(adapter._lora._resident_layers) == set(targets["a"])
+    assert all(reference() is None for reference in removed_layers)
+    assert_native_base_with_residents(adapter)
+    assert serve(adapter, None) == base
+    assert serve(adapter, "a") == expected["a"]
+    adapter.load_lora("b")
+    assert serve(adapter, "b") == expected["b"]
+    adapter.unload()
+    assert_restored(raw_model, before)
+
+
+@pytest.mark.parametrize("second", [False, True])
+def test_partial_detach_attachment_failure_restores_native_tree_and_prior_resident(
+    raw_model, tmp_path, monkeypatch, second
+):
+    a_targets = _resolve_targets(raw_model, ["encoder.query"])
+    b_targets = _resolve_targets(raw_model, ["span_rep"])
+    paths = {
+        "a": make_checkpoint(tmp_path, raw_model, "a", targets=a_targets),
+        "b": make_checkpoint(tmp_path, raw_model, "b", targets=b_targets),
+    }
+    adapter = adapter_for(raw_model, paths)
+    before = snapshot(raw_model)
+    baseline = serve(adapter, None)
+    expected = None
+    if second:
+        adapter.load_lora("a")
+        expected = serve(adapter, "a")
+    ordered = [name for name in adapter._lora._originals if name in b_targets]
+    assert len(ordered) > 1
+    parent_name, _, leaf = ordered[1].rpartition(".")
+    parent = raw_model.get_submodule(parent_name)
+    original = adapter._lora._originals[ordered[1]]
+    assign = torch.nn.Module.__setattr__
+    calls = 0
+
+    def fail_once(owner, name, value):
+        nonlocal calls
+        if owner is parent and name == leaf and value is original:
+            calls += 1
+            if calls == 1:
+                assert raw_model.get_submodule(ordered[0]) is adapter._lora._originals[ordered[0]]
+                raise RuntimeError("partial detach sentinel")
+        return assign(owner, name, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.nn.Module, "__setattr__", fail_once)
+        with pytest.raises(RuntimeError, match="partial detach sentinel"):
+            adapter.load_lora("b")
+    assert calls >= 2
+    assert not adapter._lora._uncertain
+    assert paths["b"] not in adapter._lora._loaded
+    assert serve(adapter, None) == baseline
+    if second:
+        assert set(adapter._lora._resident_layers) == set(a_targets)
+        assert_native_base_with_residents(adapter)
+        assert serve(adapter, "a") == expected
+    else:
+        assert not adapter._lora._resident_layers
+        assert_restored(raw_model, before)
+    adapter.load_lora("b")
+    assert serve(adapter, "b") != baseline
+    adapter.unload()
+    assert_restored(raw_model, before)
+
+
+def test_detached_adapter_precision_change_is_refused_before_selection(raw_model, tmp_path):
+    adapter = adapter_for(raw_model, {"a": make_checkpoint(tmp_path, raw_model, "a")})
+    adapter.load_lora("a")
+    assert_native_base_with_residents(adapter)
+    raw_model.half()
+    with pytest.raises(LoraStateUncertainError, match="selection failed"):
+        adapter.set_active_lora("a")
+    with pytest.raises(LoraStateUncertainError, match="uncertain"):
+        adapter.set_active_lora(None)
+    adapter.unload()
+    assert not adapter._lora._resident_layers
+
+
+def test_partial_reattach_selection_failure_refuses_inference_until_teardown(raw_model, tmp_path, monkeypatch):
+    paths = {name: make_checkpoint(tmp_path, raw_model, name) for name in ("a", "b")}
+    adapter = adapter_for(raw_model, paths)
+    before = snapshot(raw_model)
+    for name in paths:
+        adapter.load_lora(name)
+    layers = list(adapter._lora._resident_layers.items())
+    assert len(layers) > 1
+    parent_name, _, leaf = layers[1][0].rpartition(".")
+    parent = raw_model.get_submodule(parent_name)
+    assign = torch.nn.Module.__setattr__
+
+    def fail_reattach(owner, name, value):
+        if owner is parent and name == leaf and value is layers[1][1]:
+            assert raw_model.get_submodule(layers[0][0]) is layers[0][1]
+            raise RuntimeError("partial reattach sentinel")
+        return assign(owner, name, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.nn.Module, "__setattr__", fail_reattach)
+        with pytest.raises(LoraStateUncertainError, match="selection failed"):
+            adapter.set_active_lora("a")
+        for name in (None, "a", "b"):
+            with pytest.raises(LoraStateUncertainError, match="uncertain"):
+                serve(adapter, name)
+    adapter.unload()
+    assert not adapter._lora._resident_layers
+    assert_restored(raw_model, before)
 
 
 @pytest.mark.parametrize("order", [("a", "b"), ("b", "a")])
@@ -285,7 +451,7 @@ def test_remove_last_selected_resident_synchronizes_controller_and_survivor(
     assert adapter._lora._tuner().active_adapters == [internal]
     assert adapter._lora._active is None
     assert not adapter._lora._uncertain
-    assert all(layer.disable_adapters for layer in raw_model.modules() if isinstance(layer, LoraLinear))
+    assert_native_base_with_residents(adapter)
     assert all(not parameter.requires_grad for values in adapter._lora._loaded.values() for parameter in values)
     assert all(parameter.requires_grad is flag for parameter, flag in adapter._lora._grad)
     assert all(reference() is None for reference in removed_parameters)
@@ -333,7 +499,7 @@ def test_second_attach_rollback_restores_survivor_after_failed_adapter_became_ac
     internal = PEFTLoRAMixin._peft_adapter_name(paths["a"])
     assert adapter._lora._controller.active_adapter == internal
     assert adapter._lora._tuner().active_adapters == [internal]
-    assert all(layer.disable_adapters for layer in raw_model.modules() if isinstance(layer, LoraLinear))
+    assert_native_base_with_residents(adapter)
     assert all(not parameter.requires_grad for values in adapter._lora._loaded.values() for parameter in values)
     assert serve(adapter, None) == base
     assert serve(adapter, "a") == expected
@@ -601,7 +767,7 @@ def test_inference_failure_resets_adapter_and_preserves_original_error(raw_model
     with pytest.raises(RuntimeError, match="inference sentinel"):
         serve(adapter, "a")
     assert adapter._lora._active is None
-    assert all(module.disable_adapters for module in raw_model.modules() if isinstance(module, LoraLinear))
+    assert_native_base_with_residents(adapter)
     monkeypatch.setattr(raw_model, "batch_extract_entities", original)
     assert serve(adapter, None) == baseline
     adapter.unload()
@@ -931,6 +1097,9 @@ def test_real_sdk_cold_load_and_concurrent_named_base_isolation(raw_model, tmp_p
             {
                 "inputs": {key: value.tolist() for key, value in kwargs.items() if isinstance(value, torch.Tensor)},
                 "source": adapter._lora._active,
+                "native_projections": all(
+                    raw_model.get_submodule(name) is original for name, original in adapter._lora._originals.items()
+                ),
                 "tuners": {
                     name: [] if layer.disable_adapters else list(layer.active_adapters)
                     for name, layer in raw_model.named_modules()
@@ -1020,10 +1189,14 @@ def test_real_sdk_cold_load_and_concurrent_named_base_isolation(raw_model, tmp_p
                     assert all(batch["source"] == source for batch in record["batches"])
                     assert all(forward["source"] == source for forward in record["forwards"])
                     active = [] if source is None else [PEFTLoRAMixin._peft_adapter_name(source)]
-                    assert all(
-                        forward["tuners"] and all(names == active for names in forward["tuners"].values())
-                        for forward in record["forwards"]
-                    )
+                    for forward in record["forwards"]:
+                        if source is None:
+                            assert forward["tuners"] == {}
+                            assert forward["native_projections"]
+                        else:
+                            assert forward["tuners"]
+                            assert not forward["native_projections"]
+                            assert all(names == active for names in forward["tuners"].values())
                     oracles[name, rows] = {
                         "record": record,
                         "result": [result_by_id[item_id] for item_id in record["ids"]],

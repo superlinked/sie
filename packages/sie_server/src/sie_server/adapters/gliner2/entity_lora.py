@@ -15,8 +15,9 @@ encoders. Saved heads, merged weights and other PEFT transforms are refused.
 
 The first valid cold request returns ``LORA_LOADING`` while the registry loads
 the declaration. Clients may retry after readiness; the extract SDK currently
-surfaces that response as a ``ServerError``. Disabled resident wrappers remain
-in the model tree; this variant does not promise unchanged base latency.
+surfaces that response as a ``ServerError``. Base selection restores the original
+projection modules while adapter weights remain resident outside the model
+tree. Admission and locking still add work; this is not a latency guarantee.
 """
 
 from __future__ import annotations
