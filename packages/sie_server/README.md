@@ -72,6 +72,8 @@ are preserved. Every state/question pair runs as a separate row, with at most
 return `INPUT_TOO_LONG`; inputs are never truncated. The request limits are
 32 questions, 255 options per question, 1,024 options total and 65,536 question
 characters. An item may occupy at most 32,768 tokens across all its rows.
+The decision compatibility routes also apply their existing limits, including
+at most 10 levels for a score question.
 Input usage counts every complete row processed; no output tokens are generated.
 
 ```python
