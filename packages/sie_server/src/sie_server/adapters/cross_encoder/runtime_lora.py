@@ -10,13 +10,16 @@ from sie_server.adapters.lora import LoraRuntimeConfig
 
 
 class CrossEncoderLoraAdapter(CrossEncoderAdapter):
-    """Opt-in runtime LoRA for a standard, unquantized BERT cross-encoder.
+    """Opt-in runtime LoRA for a standard, unquantized BERT or XLM-R cross-encoder.
 
     Select ``sie_server.adapters.cross_encoder.runtime_lora:CrossEncoderLoraAdapter``
     explicitly and declare ``lora_paths={served_name: source}``. Only ordinary
-    A/B matrices targeting BERT encoder Linear modules are accepted. The outer
-    CrossEncoder, classifier, activation and scoring methods are inherited;
+    A/B matrices targeting encoder Linear modules of the exact
+    ``BertForSequenceClassification`` or ``XLMRobertaForSequenceClassification``
+    class are accepted. The outer CrossEncoder, classifier, activation and scoring methods are inherited;
     trained replacement heads and custom/causal reranker classes are rejected.
+    Native BertFlash/default catalog profiles are separate implementations and
+    do not gain LoRA support from this adapter.
 
     ``options.lora=None`` restores the original base modules while adapters stay
     resident off-tree. Loading, selection and eviction use the worker's existing

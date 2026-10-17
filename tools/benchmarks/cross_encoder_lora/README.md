@@ -42,9 +42,14 @@ The repository and revision above are placeholders. Use declared, compatible
 adapter weights. The explicit class requires nonempty declarations; revisions
 alone do not enable it. Older experimental PR775 configurations that added
 `lora_paths` to the ordinary class must change their `adapter_path`; the existing
-loader rejects those options on the ordinary class. Dependent architecture
-extensions must likewise opt into the separate class and retain their own
-qualification requirements; this change does not add XLM-R support.
+loader rejects those options on the ordinary class. This explicit adapter admits
+the exact standard, unquantized `BertForSequenceClassification` and
+`XLMRobertaForSequenceClassification` classes, with targets restricted to their
+encoder Linear modules. Native BertFlash/default catalog profiles, custom model
+classes and adapters containing saved classifier heads remain unsupported.
+XLM-R profiles must also select the explicit class. The fixed benchmark below
+still measures only the named BERT checkpoint; its results do not qualify XLM-R
+performance or trained-adapter quality.
 
 The opt-in class inherits the ordinary scoring methods. With base selected, its
 manager restores the original module objects and retains LoRA layers in a plain
