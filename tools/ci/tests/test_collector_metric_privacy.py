@@ -166,6 +166,42 @@ def require_cached_collector_image(image):
         )
 
 
+def model_loading_container_user(directory):
+    owner = directory.stat()
+    return f"--user={owner.st_uid}:{owner.st_gid}"
+
+
+def model_loading_startup_diagnostics(container):
+    results = []
+    commands = (
+        [
+            "docker",
+            "inspect",
+            "--format",
+            "{{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}",
+            container,
+        ],
+        ["docker", "logs", "--tail", "20", container],
+    )
+    for command in commands:
+        try:
+            result = subprocess.run(  # noqa: S603 - fixed diagnostics for the exact test-owned container
+                command, check=False, capture_output=True, text=True, errors="replace", timeout=5
+            )
+            results.append(f"{command[1]} exit={result.returncode}: {(result.stdout + result.stderr)[-4096:]}")
+        except (OSError, subprocess.SubprocessError) as error:
+            results.append(f"{command[1]} unavailable: {type(error).__name__}")
+    return "Collector startup diagnostics:\n" + "\n".join(results)
+
+
+def wait_for_model_loading_collector(container, health_check):
+    try:
+        wait_for(health_check)
+    except AssertionError as error:
+        error.add_note(model_loading_startup_diagnostics(container))
+        raise
+
+
 def cleanup_model_loading_collector(container, original_error):
     try:
         removed = subprocess.run(  # noqa: S603 - exact test-owned container
@@ -204,6 +240,46 @@ def test_model_loading_image_prerequisite_never_pulls(monkeypatch):
     with pytest.raises(pytest.fail.Exception, match="already cached; this test never pulls"):
         require_cached_collector_image(image)
     assert calls == [("docker", "image", "inspect", image)]
+
+
+def test_model_loading_container_uses_private_fixture_owner(tmp_path):
+    tmp_path.chmod(0o700)
+    owner = tmp_path.stat()
+    assert model_loading_container_user(tmp_path) == f"--user={owner.st_uid}:{owner.st_gid}"
+    assert owner.st_mode & 0o777 == 0o700
+
+
+@pytest.mark.parametrize("diagnostics_fail", [False, True])
+def test_model_loading_startup_failure_retains_bounded_diagnostics(monkeypatch, diagnostics_fail):
+    original_error = AssertionError("collector not ready")
+    calls = []
+
+    def failed_wait(_predicate):
+        raise original_error
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        if diagnostics_fail:
+            raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+        raw_output = b"exited exit=1 oom=false" if args[1] == "inspect" else b"x" * 8192 + b"permission denied\xff"
+        output = raw_output.decode("utf-8", errors=kwargs.get("errors", "strict"))
+        return subprocess.CompletedProcess(args, 0, output, "")
+
+    monkeypatch.setitem(wait_for_model_loading_collector.__globals__, "wait_for", failed_wait)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(AssertionError) as caught:
+        wait_for_model_loading_collector("sie-model-loading-test", lambda: True)
+    assert caught.value is original_error
+    (note,) = caught.value.__notes__
+    assert len(note) < 8300
+    assert "TimeoutExpired" in note if diagnostics_fail else "exited exit=1 oom=false" in note
+    if not diagnostics_fail:
+        assert "permission denied" in note
+        assert "\ufffd" in note
+    assert [args[1] for args, _ in calls] == ["inspect", "logs"]
+    assert calls[1][0] == ["docker", "logs", "--tail", "20", "sie-model-loading-test"]
+    assert all(args[-1] == "sie-model-loading-test" and kwargs["timeout"] == 5 for args, kwargs in calls)
+    assert all(kwargs["errors"] == "replace" for _, kwargs in calls)
 
 
 @pytest.mark.parametrize("removed", [False, True])
@@ -284,7 +360,7 @@ def test_model_loading_gauge_preserves_prometheus_name_and_remote_unit(tmp_path)
             "--cap-drop=ALL",
             "--security-opt=no-new-privileges",
             "--read-only",
-            "--user=0",
+            model_loading_container_user(tmp_path),
             "-p",
             "127.0.0.1::4338",
             "-p",
@@ -302,7 +378,7 @@ def test_model_loading_gauge_preserves_prometheus_name_and_remote_unit(tmp_path)
             with urllib.request.urlopen(f"http://127.0.0.1:{ports[port]}{path}", timeout=2) as response:
                 return response.read(1_048_577).decode()
 
-        wait_for(lambda: get(13133))
+        wait_for_model_loading_collector(container, lambda: get(13133))
         request = urllib.request.Request(
             f"http://127.0.0.1:{ports[4338]}/v1/metrics",
             data=model_loading_payload(),
