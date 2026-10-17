@@ -62,6 +62,45 @@ def render_template(tmp_path: Path, values: dict, template: str) -> subprocess.C
     )
 
 
+def render_collector_config(tmp_path: Path, *, remote_enabled: bool = True) -> tuple[dict, str]:
+    chart = tmp_path / "collector-chart"
+    (chart / "templates").mkdir(parents=True)
+    (chart / "Chart.yaml").write_text("apiVersion: v2\nname: collector-test\nversion: 0.0.0\n")
+    shutil.copyfile(ROOT / helm.CHART_DIR / "templates/_otel-collector-config.tpl", chart / "templates/_collector.tpl")
+    (chart / "templates/config.yaml").write_text(
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  collector.yaml: |\n"
+        '    {{- include "sie-cluster.otel.collectorConfig" .Values | nindent 4 }}\n'
+    )
+    defaults = yaml.safe_load((ROOT / helm.CHART_DIR / "values.yaml").read_text())
+    collector = defaults["observability"]["otel"]["collector"]
+    collector["betterStack"].update({"enabled": remote_enabled, "endpoint": "https://example.invalid"})
+    values = {
+        "metricsEnabled": True,
+        "logsEnabled": False,
+        "tracesEnabled": False,
+        "prometheusEnabled": True,
+        "collector": collector,
+        "traceEndpoint": "",
+        "logEndpoint": "",
+        "betterStack": collector["betterStack"],
+        "deploymentEnvironment": "dev",
+        "cloudRegion": "test-region",
+        "localTraceExporters": [],
+        "logExporters": [],
+    }
+    (chart / "values.yaml").write_text(yaml.safe_dump(values))
+    rendered = subprocess.run(  # noqa: S603 - fixed local Helm test chart
+        ["mise", "exec", "--", "helm", "template", "test", str(chart)],  # noqa: S607 - mise-managed Helm
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    ).stdout
+    image = collector["image"]
+    return yaml.safe_load(yaml.safe_load(rendered)["data"]["collector.yaml"]), f"{image['repository']}:{image['tag']}"
+
+
 def worker_statefulsets(tmp_path: Path, values: dict) -> list[dict]:
     result = render_workers(tmp_path, values)
     assert result.returncode == 0, result.stderr
@@ -174,6 +213,10 @@ def test_worker_scaledobject_appends_the_sixth_trigger(tmp_path: Path) -> None:
         "sie_gateway_rejected_rate_l4_default",
         "sie_gateway_model_loads_in_progress_l4_default",
     ]
+    loading = triggers[-1]["metadata"]
+    assert "max(sie_gateway_model_loads_in_progress{" in loading["query"]
+    assert "model_loads_in_progress_ratio" not in loading["query"]
+    assert loading["ignoreNullValues"] == "false"
 
     hook = render_template(tmp_path, values, "templates/hooks/keda-ready-test.yaml")
     assert hook.returncode == 0, hook.stderr
@@ -188,6 +231,37 @@ def test_worker_scaledobject_appends_the_sixth_trigger(tmp_path: Path) -> None:
     timeout = (30 * 3) + (probe_batches * 6 * 5 * 3) + 180
     assert f"TIMEOUT={timeout}" in script
     assert job["spec"]["activeDeadlineSeconds"] == timeout + 60
+
+
+@pytest.mark.parametrize("remote_enabled", [False, True])
+def test_model_loading_unit_override_is_prometheus_only(tmp_path: Path, remote_enabled: bool) -> None:
+    name = "sie.gateway.model_loads_in_progress"
+    contract = yaml.safe_load((ROOT / "telemetry/contract.yaml").read_text())
+    (metric,) = [metric for metric in contract["metrics"] if metric["name"] == name]
+    assert metric["unit"] == "1"
+    assert metric["prometheus_name"] == "sie_gateway_model_loads_in_progress"
+    assert contract["metric_processing"]["prometheus_compatibility"][name] == {
+        "unit_override": "",
+        "prometheus_name": metric["prometheus_name"],
+    }
+    config, _ = render_collector_config(tmp_path, remote_enabled=remote_enabled)
+    processors = config["processors"]
+    compatibility = processors["transform/prometheus_compatibility"]["metric_statements"]
+    assert f'set(unit, "") where name == "{name}"' in compatibility[0]["statements"]
+    canonical = processors["transform/contract_metrics"]["metric_statements"]
+    (descriptor,) = [group for group in canonical if group["context"] == "metric"]
+    assert any(
+        statement.startswith('set(unit, "1")') and "sie[.]gateway[.]model_loads_in_progress" in statement
+        for statement in descriptor["statements"]
+    )
+    pipelines = config["service"]["pipelines"]
+    for receiver in ("gateway", "application"):
+        local = pipelines[f"metrics/prometheus/{receiver}"]["processors"]
+        assert local.index("transform/contract_metrics") < local.index("transform/prometheus_compatibility")
+        if remote_enabled:
+            assert (
+                "transform/prometheus_compatibility" not in pipelines[f"metrics/betterstack/{receiver}"]["processors"]
+            )
 
 
 def test_scaledobject_apply_hook_also_runs_on_rollback(tmp_path: Path) -> None:

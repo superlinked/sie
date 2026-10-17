@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
+import subprocess
+import sys
+import time
 import urllib.request
+import uuid
 from pathlib import Path
 
 import pytest
@@ -12,6 +17,7 @@ from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import ExportM
 from opentelemetry.proto.metrics.v1.metrics_pb2 import AGGREGATION_TEMPORALITY_DELTA
 
 from tools.ci.tests.test_collector_trace_privacy import SENTINEL, run, wait_for
+from tools.ci.tests.test_helm_render import render_collector_config
 
 pytestmark = pytest.mark.docker
 
@@ -132,6 +138,210 @@ def payload(receiver):
 
 def batches(path: Path):
     return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def model_loading_payload():
+    wire = ExportMetricsServiceRequest()
+    resource = wire.resource_metrics.add()
+    for key, value in {
+        "service.name": "sie-gateway",
+        "service.instance.id": "model-loading-test",
+        "service.version": "test-version",
+    }.items():
+        add(resource.resource.attributes, key, value)
+    metric = resource.scope_metrics.add().metrics.add(name="sie.gateway.model_loads_in_progress", unit="1")
+    for profile, bundle, value in [("cpu", "default", 0), ("l4", "default", 1), ("cpu", "candle", 0)]:
+        point = metric.gauge.data_points.add(time_unix_nano=time.time_ns(), as_double=value)
+        for key, label in {"pool": "default", "machine_profile": profile, "bundle": bundle}.items():
+            add(point.attributes, key, label)
+    return wire.SerializeToString()
+
+
+def require_cached_collector_image(image):
+    try:
+        run("docker", "image", "inspect", image)
+    except subprocess.CalledProcessError:
+        pytest.fail(
+            f"Docker must be available with {image} already cached; this test never pulls images.", pytrace=False
+        )
+
+
+def cleanup_model_loading_collector(container, original_error):
+    try:
+        removed = subprocess.run(  # noqa: S603 - exact test-owned container
+            ["docker", "rm", "--force", container],  # noqa: S607 - local Docker CLI
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        remaining = subprocess.run(  # noqa: S603 - exact test-owned container
+            ["docker", "ps", "--all", "--filter", f"name=^/{container}$", "--format", "{{.Names}}"],  # noqa: S607 - local Docker CLI
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if remaining.stdout.strip():
+            raise RuntimeError(f"test-owned collector was not removed: {container}")
+        if original_error is None:
+            removed.check_returncode()
+    except Exception as cleanup_error:
+        if original_error is not None:
+            raise BaseExceptionGroup("collector test and cleanup failed", [original_error, cleanup_error]) from None
+        raise
+
+
+def test_model_loading_image_prerequisite_never_pulls(monkeypatch):
+    calls = []
+
+    def missing(*args):
+        calls.append(args)
+        raise subprocess.CalledProcessError(1, args)
+
+    monkeypatch.setitem(require_cached_collector_image.__globals__, "run", missing)
+    image = "otel/opentelemetry-collector-contrib:0.119.0"
+    with pytest.raises(pytest.fail.Exception, match="already cached; this test never pulls"):
+        require_cached_collector_image(image)
+    assert calls == [("docker", "image", "inspect", image)]
+
+
+@pytest.mark.parametrize("removed", [False, True])
+@pytest.mark.parametrize("original_error", [None, RuntimeError("startup or test failure")])
+def test_model_loading_cleanup_preserves_failures(monkeypatch, removed, original_error):
+    container = "sie-model-loading-test"
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0 if removed or args[1] == "ps" else 1, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    expected = type(original_error) if original_error else None if removed else subprocess.CalledProcessError
+    if expected:
+        with pytest.raises(expected) as caught:
+            try:
+                if original_error:
+                    raise original_error
+            finally:
+                cleanup_model_loading_collector(container, sys.exception())
+        if original_error:
+            assert caught.value is original_error
+    else:
+        cleanup_model_loading_collector(container, None)
+    assert calls[0][0] == ["docker", "rm", "--force", container]
+    assert calls[1][0] == ["docker", "ps", "--all", "--filter", f"name=^/{container}$", "--format", "{{.Names}}"]
+    assert [kwargs["timeout"] for _, kwargs in calls] == [20, 10]
+
+
+@pytest.mark.parametrize("verification_fails", [False, True])
+def test_model_loading_cleanup_failure_reports_both_errors(monkeypatch, verification_fails):
+    original_error = RuntimeError("original failure")
+
+    def fake_run(args, **_kwargs):
+        if args[1] == "ps" and verification_fails:
+            raise subprocess.CalledProcessError(1, args)
+        return subprocess.CompletedProcess(args, 0, "sie-model-loading-test" if args[1] == "ps" else "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(ExceptionGroup) as caught:
+        cleanup_model_loading_collector("sie-model-loading-test", original_error)
+    assert caught.value.exceptions[0] is original_error
+    assert isinstance(caught.value.exceptions[1], subprocess.CalledProcessError if verification_fails else RuntimeError)
+
+
+def test_model_loading_gauge_preserves_prometheus_name_and_remote_unit(tmp_path):
+    config, image = render_collector_config(tmp_path)
+    assert image == "otel/opentelemetry-collector-contrib:0.119.0"
+    require_cached_collector_image(image)
+    exporter = config["exporters"]["prometheus"]
+    assert exporter["add_metric_suffixes"] is True
+    exporter["endpoint"] = "0.0.0.0:9464"
+    config["exporters"] = {
+        "prometheus": exporter,
+        "file/remote": {"path": "/out/remote.json", "flush_interval": "100ms"},
+    }
+    pipelines = config["service"]["pipelines"]
+    config["service"]["pipelines"] = {
+        key: pipelines[key] for key in ["metrics/prometheus/gateway", "metrics/betterstack/gateway"]
+    }
+    pipelines["metrics/betterstack/gateway"]["exporters"] = ["file/remote"]
+    config["receivers"]["otlp/gateway"]["protocols"]["http"] = {"endpoint": "0.0.0.0:4338"}
+    config["processors"]["batch"]["timeout"] = "100ms"
+    (tmp_path / "collector.yaml").write_text(yaml.safe_dump(config))
+    container = f"sie-model-loading-{uuid.uuid4().hex}"
+    try:
+        run(
+            "docker",
+            "run",
+            "--detach",
+            "--pull=never",
+            "--name",
+            container,
+            "--cpus=1",
+            "--memory=256m",
+            "--pids-limit=64",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--read-only",
+            "--user=0",
+            "-p",
+            "127.0.0.1::4338",
+            "-p",
+            "127.0.0.1::9464",
+            "-p",
+            "127.0.0.1::13133",
+            "-v",
+            f"{tmp_path}:/out",
+            image,
+            "--config=/out/collector.yaml",
+        )
+        ports = {port: run("docker", "port", container, f"{port}/tcp").split(":")[-1] for port in [4338, 9464, 13133]}
+
+        def get(port, path=""):
+            with urllib.request.urlopen(f"http://127.0.0.1:{ports[port]}{path}", timeout=2) as response:
+                return response.read(1_048_577).decode()
+
+        wait_for(lambda: get(13133))
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{ports[4338]}/v1/metrics",
+            data=model_loading_payload(),
+            headers={"Content-Type": "application/x-protobuf"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:  # noqa: S310 - fixed loopback HTTP
+            assert response.status == 200
+        remote = wait_for(lambda: batches(tmp_path / "remote.json"))
+        text = wait_for(
+            lambda: value if "sie_gateway_model_loads_in_progress" in (value := get(9464, "/metrics")) else None
+        )
+        assert len(text) <= 1_048_576
+        assert "sie_gateway_model_loads_in_progress_ratio" not in text
+        samples = re.findall(
+            r"^sie_gateway_model_loads_in_progress\{([^}]+)\} ([01])(?:\.0)?(?: \d+)?$", text, re.MULTILINE
+        )
+        assert len(samples) == 3
+        observed = {}
+        for labels, value in samples:
+            attributes = dict(re.findall(r'(\w+)="([^"\\]*)"', labels))
+            assert attributes["pool"] == "default"
+            assert attributes["producer_service"] == "sie-gateway"
+            assert attributes["producer_instance"] == "model-loading-test"
+            assert re.fullmatch(r"[0-9a-f-]{36}", attributes["collector_generation"])
+            observed[attributes["machine_profile"], attributes["bundle"]] = int(value)
+        assert observed == {("cpu", "default"): 0, ("l4", "default"): 1, ("cpu", "candle"): 0}
+        metrics = [
+            metric
+            for batch in remote
+            for resource in batch["resourceMetrics"]
+            for scope in resource["scopeMetrics"]
+            for metric in scope["metrics"]
+        ]
+        assert len(metrics) == 1
+        assert metrics[0]["name"] == "sie.gateway.model_loads_in_progress"
+        assert metrics[0]["unit"] == "1"
+        assert sorted(point["asDouble"] for point in metrics[0]["gauge"]["dataPoints"]) == [0, 0, 1]
+    finally:
+        cleanup_model_loading_collector(container, sys.exception())
 
 
 @pytest.mark.parametrize("receiver", ["gateway", "application"])
