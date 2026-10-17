@@ -336,9 +336,9 @@ gateway:
     # and key of a checked credential, such as the Hugging Face
     # token, a NATS password, the gateway admin token, either sie-config token,
     # an image pull secret, an oauth2-proxy secret, the Better Stack token, the
-    # bundled same-namespace Grafana admin key, MCP connector secrets, or an
-    # ingress TLS key (the render fails). Other optional dependency credentials
-    # and arbitrary subchart env/volume refs need operator separation; see #767.
+    # bundled same-namespace dependency keys listed in README "Gateway token",
+    # MCP connector secrets, or an ingress TLS key (the render fails). Arbitrary
+    # dependency env/volume/provider refs still need operator separation.
     tokenSecretName: ""
     tokenSecretKey: "SIE_AUTH_TOKEN"
     # -- Generate the gateway token (a boolean). When tokenSecretName is empty,

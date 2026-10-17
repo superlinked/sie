@@ -1155,6 +1155,80 @@ token-separation check and the upstream-key collision check read this list.
 {{- if and (not .Values.env.GF_SECURITY_ADMIN_PASSWORD) (not .Values.env.GF_SECURITY_ADMIN_PASSWORD__FILE) (not .Values.env.GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION) -}}
 {{- $keys = append $keys (dict "owner" "the Grafana admin password" "name" "Grafana admin password" "ref" (printf "%s/%s" $secretName (default "admin-password" .Values.admin.passwordKey))) -}}
 {{- end -}}
+{{- if .Values.smtp.existingSecret -}}
+{{- $smtpSecret := .Values.smtp.existingSecret -}}
+{{- range $key := list (default "user" .Values.smtp.userKey) (default "password" .Values.smtp.passwordKey) -}}
+{{- $keys = append $keys (dict "owner" "the Grafana SMTP credentials" "name" "Grafana SMTP credentials" "ref" (printf "%s/%s" $smtpSecret $key)) -}}
+{{- end -}}
+{{- end -}}
+{{- if .Values.ldap.enabled -}}
+{{- $ldapSecret := default (include "grafana.fullname" .) .Values.ldap.existingSecret -}}
+{{- $keys = append $keys (dict "owner" "the Grafana LDAP configuration" "name" "Grafana LDAP configuration" "ref" (printf "%s/ldap-toml" $ldapSecret)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{/* Dependency contexts exist only when Helm enabled that dependency. Match
+     actual consumer namespaces; SIE global.namespace does not relocate them. */}}
+{{- with index $root.Subcharts "keda" -}}
+{{- if eq .Release.Namespace (include "sie-cluster.namespace" $root) -}}
+{{/* Generation and webhooks flags do not disable operator/metrics TLS mounts. */}}
+{{- $secretName := .Values.certificates.secretName -}}
+{{- range $key := list "ca.crt" "tls.crt" "tls.key" -}}
+{{- $keys = append $keys (dict "owner" "the KEDA serving TLS credentials" "name" "KEDA serving TLS credentials" "ref" (printf "%s/%s" $secretName $key)) -}}
+{{- end -}}
+{{- $cm := .Values.certificates.certManager -}}
+{{- if and $cm.enabled $cm.issuer.generate -}}
+{{- range $key := list "tls.crt" "tls.key" -}}
+{{- $keys = append $keys (dict "owner" "the KEDA CA signer" "name" "KEDA CA signer" "ref" (printf "%s/%s" $cm.caSecretName $key)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- with index $root.Subcharts "kube-prometheus-stack" -}}
+{{- if eq (include "kube-prometheus-stack.namespace" .) (include "sie-cluster.namespace" $root) -}}
+{{- $operator := .Values.prometheusOperator -}}
+{{- $admission := $operator.admissionWebhooks -}}
+{{- $fullname := include "kube-prometheus-stack.fullname" . -}}
+{{- if and $operator.enabled (or $operator.tls.enabled (and $admission.deployment.enabled $admission.deployment.tls.enabled)) -}}
+{{- $tlsKeys := ternary (list "tls.crt" "tls.key") (list "cert" "key") $admission.certManager.enabled -}}
+{{- range $key := $tlsKeys -}}
+{{- $keys = append $keys (dict "owner" "the Prometheus admission TLS credentials" "name" "Prometheus admission TLS credentials" "ref" (printf "%s-admission/%s" $fullname $key)) -}}
+{{- end -}}
+{{- end -}}
+{{/* certgen create/patch Jobs also read ca, even without serving TLS or a monitor. */}}
+{{- $patchReadsCA := and $admission.enabled $admission.patch.enabled (not $admission.certManager.enabled) -}}
+{{- if and $operator.enabled (or (and $operator.serviceMonitor.selfMonitor $operator.tls.enabled) $patchReadsCA) -}}
+{{- $key := ternary "ca.crt" "ca" $admission.certManager.enabled -}}
+{{- $keys = append $keys (dict "owner" "the Prometheus admission CA" "name" "Prometheus admission CA" "ref" (printf "%s-admission/%s" $fullname $key)) -}}
+{{- end -}}
+{{/* This CA Issuer exists even when the operator Deployment is disabled. */}}
+{{- if and $admission.certManager.enabled (not $admission.certManager.issuerRef) -}}
+{{- range $key := list "tls.crt" "tls.key" -}}
+{{- $keys = append $keys (dict "owner" "the Prometheus root CA signer" "name" "Prometheus root CA signer" "ref" (printf "%s-root-cert/%s" $fullname $key)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- with index $root.Subcharts "trust-manager" -}}
+{{- if eq (include "trust-manager.namespace" .) (include "sie-cluster.namespace" $root) -}}
+{{- $secretName := printf "%s-tls" (include "trust-manager.name" .) -}}
+{{- range $key := list "tls.crt" "tls.key" -}}
+{{- $keys = append $keys (dict "owner" "the trust-manager serving TLS credentials" "name" "trust-manager serving TLS credentials" "ref" (printf "%s/%s" $secretName $key)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- with index $root.Subcharts "loki" -}}
+{{- if eq .Release.Namespace (include "sie-cluster.namespace" $root) -}}
+{{- if and .Values.gateway.enabled .Values.gateway.basicAuth.enabled (not (and .Values.enterprise.enabled .Values.enterprise.gelGateway)) -}}
+{{- $secretName := include "loki.gatewayAuthSecret" . -}}
+{{- $keys = append $keys (dict "owner" "the Loki gateway basic auth credentials" "name" "Loki gateway basic auth credentials" "ref" (printf "%s/.htpasswd" $secretName)) -}}
+{{- end -}}
+{{- with index .Subcharts "minio" -}}
+{{- $secretName := include "minio.secretName" . -}}
+{{- range $key := list "rootUser" "rootPassword" -}}
+{{- $keys = append $keys (dict "owner" "the Loki MinIO root credentials" "name" "Loki MinIO root credentials" "ref" (printf "%s/%s" $secretName $key)) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
