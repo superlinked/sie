@@ -1041,29 +1041,45 @@ pub(crate) struct ThresholdBroker {
     _process: tokio::process::Child,
     _config: tempfile::NamedTempFile,
     _store_dir: tempfile::TempDir,
+    _ports_dir: tempfile::TempDir,
+    _logs: tempfile::NamedTempFile,
+    url: String,
+    server_name: String,
+    password: String,
 }
 
 impl ThresholdBroker {
     pub(crate) async fn start() -> Option<Self> {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        Self::start_on_port(-1)
+            .await
+            .unwrap_or_else(|error| panic!("control fixture start failed: {error}"))
+    }
+
+    // NATS 2.11.8 binds port -1 itself, then writes <executable>_<pid>.ports.
+    // Keeping port allocation in the child avoids the reserve/drop/spawn race.
+    async fn start_on_port(port: i32) -> Result<Option<Self>, String> {
+        let server_name = format!("sie-threshold-test-{}", uuid::Uuid::new_v4());
+        // An alphabetic prefix keeps NATS environment substitution from parsing
+        // a digit-leading UUID as a number rather than an authentication string.
+        let password = format!("ThresholdTest{}", uuid::Uuid::new_v4().simple());
         let fixture = include_str!("../../../../tools/ci/fixtures/sie-threshold-nats.conf")
-            .replace("port: 4222", &format!("listen: 127.0.0.1:{port}"))
+            .replace("port: 4222", &format!("host: 127.0.0.1\nport: {port}"))
             .replace("http_port: 8222", "http_port: -1");
+        let fixture = format!("{fixture}\nserver_name: {server_name}\n");
         let store_dir = tempfile::tempdir().unwrap();
+        let ports_dir = tempfile::tempdir().unwrap();
         let config = tempfile::NamedTempFile::new().unwrap();
+        let logs = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(config.path(), fixture).unwrap();
         let process = tokio::process::Command::new("nats-server")
             .args(["-c", config.path().to_str().unwrap()])
             .arg("-sd")
             .arg(store_dir.path())
-            .env(
-                "SIE_NATS_AUTH_GATEWAY_PASSWORD",
-                "GatewayThresholdTestPassword0123456789",
-            )
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .arg("--ports_file_dir")
+            .arg(ports_dir.path())
+            .env("SIE_NATS_AUTH_GATEWAY_PASSWORD", &password)
+            .stdout(logs.as_file().try_clone().unwrap())
+            .stderr(logs.as_file().try_clone().unwrap())
             .kill_on_drop(true)
             .spawn();
         let mut process = match process {
@@ -1073,36 +1089,143 @@ impl ThresholdBroker {
                     std::env::var("NATS_URL").is_err(),
                     "NATS integration requires nats-server"
                 );
-                return None;
+                return Ok(None);
             }
-            Err(error) => panic!("control fixture start failed: {error}"),
+            Err(error) => return Err(error.to_string()),
         };
+        let pid = process.id().expect("spawned control fixture pid");
+        let ports_file = ports_dir.path().join(format!("nats-server_{pid}.ports"));
+        let ready = Self::wait_ready(&mut process, &ports_file, &server_name, &password).await;
+        let (client, url) = match ready {
+            Ok(ready) => ready,
+            Err(error) => {
+                // Do not leave a failed owned child running while reporting its logs.
+                let cleanup = tokio::time::timeout(Duration::from_secs(1), process.kill()).await;
+                let output = std::fs::read_to_string(logs.path())
+                    .unwrap_or_else(|error| format!("could not read broker output: {error}"));
+                return Err(format!(
+                    "{error}; pid={pid}, server_name={server_name}, cleanup={cleanup:?}\n{output}"
+                ));
+            }
+        };
+        eprintln!(
+            "threshold broker ready: pid={pid}, server_name={server_name}, server_id={}, url={url}",
+            client.server_info().server_id
+        );
+        Ok(Some(Self {
+            context: async_nats::jetstream::new(client),
+            _process: process,
+            _config: config,
+            _store_dir: store_dir,
+            _ports_dir: ports_dir,
+            _logs: logs,
+            url,
+            server_name,
+            password,
+        }))
+    }
+
+    fn owned_url(ports_file: &std::path::Path) -> Result<Option<String>, String> {
+        let bytes = match std::fs::read(ports_file) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("control fixture ports file: {error}")),
+        };
+        #[derive(serde::Deserialize)]
+        struct Ports {
+            nats: Vec<String>,
+        }
+        let ports: Ports = match serde_json::from_slice(&bytes) {
+            Ok(ports) => ports,
+            // NATS writes this small file directly; a concurrent read may be partial.
+            Err(error) if error.is_eof() => return Ok(None),
+            Err(error) => return Err(format!("invalid control fixture ports file: {error}")),
+        };
+        let [url] = ports.nats.as_slice() else {
+            return Err("control fixture must advertise exactly one NATS listener".into());
+        };
+        if !url
+            .strip_prefix("nats://127.0.0.1:")
+            .and_then(|port| port.parse::<u16>().ok())
+            .is_some_and(|port| port > 0)
+        {
+            return Err("control fixture advertised a non-loopback or invalid listener".into());
+        }
+        Ok(Some(url.clone()))
+    }
+
+    async fn connect_owned(
+        url: &str,
+        server_name: &str,
+        password: &str,
+    ) -> Result<Option<async_nats::Client>, String> {
+        let Ok(client) = async_nats::ConnectOptions::new()
+            .user_and_password("sie-gateway".into(), password.into())
+            .connect(url)
+            .await
+        else {
+            return Ok(None);
+        };
+        if client.flush().await.is_err() {
+            return Ok(None);
+        }
+        let info = client.server_info();
+        if info.server_name != server_name || info.server_id.is_empty() {
+            return Err(format!(
+                "control fixture server identity mismatch: expected {server_name}, got {} ({})",
+                info.server_name, info.server_id
+            ));
+        }
+        Ok(Some(client))
+    }
+
+    async fn wait_ready(
+        process: &mut tokio::process::Child,
+        ports_file: &std::path::Path,
+        server_name: &str,
+        password: &str,
+    ) -> Result<(async_nats::Client, String), String> {
         let ready_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while tokio::time::Instant::now() < ready_deadline {
-            if let Some(status) = process.try_wait().expect("control fixture status") {
-                panic!("control fixture exited before readiness: {status}");
+            if let Some(status) = process.try_wait().map_err(|error| error.to_string())? {
+                return Err(format!("control fixture exited before readiness: {status}"));
             }
-            if let Ok(Ok(client)) = tokio::time::timeout(
-                Duration::from_millis(250),
-                async_nats::ConnectOptions::new()
-                    .user_and_password(
-                        "sie-gateway".into(),
-                        "GatewayThresholdTestPassword0123456789".into(),
-                    )
-                    .connect(format!("nats://127.0.0.1:{port}")),
+            if let Some(url) = Self::owned_url(ports_file)? {
+                let remaining =
+                    ready_deadline.saturating_duration_since(tokio::time::Instant::now());
+                let result = tokio::time::timeout(
+                    remaining.min(Duration::from_millis(250)),
+                    Self::connect_owned(&url, server_name, password),
+                )
+                .await;
+                if let Ok(result) = result {
+                    if let Some(client) = result? {
+                        // A foreign listener cannot hide the owned child's bind failure.
+                        if let Some(status) =
+                            process.try_wait().map_err(|error| error.to_string())?
+                        {
+                            return Err(format!(
+                                "control fixture exited during readiness: {status}"
+                            ));
+                        }
+                        return Ok((client, url));
+                    }
+                }
+            }
+            tokio::time::sleep(
+                Duration::from_millis(20)
+                    .min(ready_deadline.saturating_duration_since(tokio::time::Instant::now())),
             )
-            .await
-            {
-                return Some(Self {
-                    context: async_nats::jetstream::new(client),
-                    _process: process,
-                    _config: config,
-                    _store_dir: store_dir,
-                });
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            .await;
         }
-        panic!("control broker did not become ready");
+        Err("control broker did not become ready within 10 seconds".into())
+    }
+
+    pub(crate) fn credentials(&self) -> crate::config::NatsCredentials {
+        crate::config::NatsCredentials {
+            user: "sie-gateway".into(),
+            password: self.password.clone(),
+        }
     }
 
     pub(crate) async fn bind(
@@ -1125,5 +1248,91 @@ impl ThresholdBroker {
             .model_registry
             .install_threshold_binding(Arc::clone(&binding));
         binding
+    }
+}
+
+#[cfg(test)]
+mod threshold_broker_tests {
+    use super::ThresholdBroker;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn threshold_broker_rejects_foreign_identity_and_credentials() {
+        let Some(mut first) = ThresholdBroker::start().await else {
+            return;
+        };
+        let Some(mut second) = ThresholdBroker::start().await else {
+            return;
+        };
+        assert_ne!(first.url, second.url);
+        assert_ne!(first.server_name, second.server_name);
+        assert_ne!(first.password, second.password);
+        let foreign = tokio::time::timeout(
+            Duration::from_secs(10),
+            ThresholdBroker::connect_owned(&first.url, &second.server_name, &first.password),
+        )
+        .await
+        .expect("foreign identity check must finish");
+        assert!(foreign.unwrap_err().contains("server identity mismatch"));
+        let wrong_password = tokio::time::timeout(
+            Duration::from_secs(10),
+            ThresholdBroker::connect_owned(&first.url, &first.server_name, &second.password),
+        )
+        .await
+        .expect("foreign credential check must finish")
+        .unwrap();
+        assert!(wrong_password.is_none());
+        first._process.kill().await.unwrap();
+        second._process.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn threshold_broker_collision_fails_with_owned_child_diagnostics() {
+        let Some(mut broker) = ThresholdBroker::start().await else {
+            return;
+        };
+        let port: i32 = broker.url.rsplit(':').next().unwrap().parse().unwrap();
+        let failure = tokio::time::timeout(
+            Duration::from_secs(12),
+            ThresholdBroker::start_on_port(port),
+        )
+        .await
+        .expect("owned startup and cleanup must finish within their existing bounds");
+        let error = match failure {
+            Err(error) => error,
+            Ok(_) => panic!("colliding fixture must not accept the existing broker"),
+        };
+        assert!(error.contains("exited before readiness"), "{error}");
+        assert!(error.contains("pid="), "{error}");
+        assert!(error.contains("server_name="), "{error}");
+        assert!(error.contains("address already in use"), "{error}");
+        assert!(
+            ThresholdBroker::connect_owned(&broker.url, &broker.server_name, &broker.password)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        broker._process.kill().await.unwrap();
+    }
+
+    #[test]
+    fn threshold_broker_accepts_only_complete_single_loopback_port_metadata() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        assert!(ThresholdBroker::owned_url(file.path()).unwrap().is_none());
+        for body in [
+            r#"{"nats": []}"#,
+            r#"{"nats": ["nats://127.0.0.1:1234", "nats://127.0.0.1:1235"]}"#,
+            r#"{"nats": ["nats://other-host:1234"]}"#,
+            r#"{"nats": ["nats://127.0.0.1:0"]}"#,
+            r#"{"nats": ["nats://127.0.0.1:1234/path"]}"#,
+        ] {
+            std::fs::write(file.path(), body).unwrap();
+            assert!(ThresholdBroker::owned_url(file.path()).is_err(), "{body}");
+        }
+        std::fs::write(file.path(), r#"{"nats": ["nats://127.0.0.1:1234"]}"#).unwrap();
+        assert_eq!(
+            ThresholdBroker::owned_url(file.path()).unwrap().as_deref(),
+            Some("nats://127.0.0.1:1234")
+        );
     }
 }

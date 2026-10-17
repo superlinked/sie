@@ -192,10 +192,7 @@ mod tests {
                     "nats://127.0.0.1:{}",
                     broker.context.client().server_info().port
                 ),
-                credentials: NatsCredentials {
-                    user: "sie-gateway".into(),
-                    password: "GatewayThresholdTestPassword0123456789".into(),
-                },
+                credentials: broker.credentials(),
                 replicas: 1,
             },
         );
