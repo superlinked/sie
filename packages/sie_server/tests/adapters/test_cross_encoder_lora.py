@@ -1,7 +1,8 @@
-"""Real BERT/Transformers/PEFT lifecycle checks without model downloads."""
+"""Real BERT/XLM-R/Transformers/PEFT lifecycle checks without model downloads."""
 
 from __future__ import annotations
 
+import asyncio
 import builtins
 import gc
 import json
@@ -9,6 +10,7 @@ import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import numpy as np
@@ -18,20 +20,36 @@ import yaml
 from peft import LoraConfig
 from peft.tuners.tuners_utils import BaseTunerLayer
 from safetensors.torch import load_file, save_file
+from sie_sdk import SIEClient
 from sie_server.adapters.cross_encoder import CrossEncoderAdapter
 from sie_server.adapters.lora import LoraStateUncertainError, LoraUnavailableError
+from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin
 from sie_server.app.app_factory import AppFactory
 from sie_server.app.app_state_config import AppStateConfig
+from sie_server.core.prepared import ScorePreparedItem
 from sie_server.core.registry import ModelRegistry
-from transformers import BertConfig, BertForSequenceClassification, BertTokenizerFast
+from sie_server.core.worker import ModelWorker, WorkerConfig
+from sie_server.core.worker.model_worker import PreformedScoreRequest
+from sie_server.types.inputs import Item
+from tokenizers import Tokenizer, models, normalizers, pre_tokenizers, processors
+from transformers import (
+    BertConfig,
+    BertForSequenceClassification,
+    BertTokenizerFast,
+    PreTrainedTokenizerFast,
+    RobertaConfig,
+    RobertaForSequenceClassification,
+    XLMRobertaConfig,
+    XLMRobertaForSequenceClassification,
+)
 
 QUERY = {"text": "how do i reset my password"}
 DOCS = [{"text": "reset your password by email"}, {"text": "the capital is paris"}]
 
 
-@pytest.fixture(scope="module")
-def checkpoint(tmp_path_factory):
-    directory = tmp_path_factory.mktemp("cross-encoder-base")
+@pytest.fixture(scope="module", params=("bert", "xlmr"))
+def checkpoint(tmp_path_factory, request):
+    directory = tmp_path_factory.mktemp(f"cross-encoder-{request.param}")
     vocab = [
         "[PAD]",
         "[UNK]",
@@ -41,28 +59,75 @@ def checkpoint(tmp_path_factory):
         *["how", "do", "i", "reset", "my", "password", "your", "by", "email", "the", "capital", "is", "paris"],
     ]
     vocab = list(dict.fromkeys(vocab))
-    vocab_path = directory / "vocab.txt"
-    vocab_path.write_text("\n".join(vocab))
-    BertTokenizerFast(vocab_file=str(vocab_path), model_max_length=64).save_pretrained(directory)
-    config = BertConfig(
-        vocab_size=len(vocab),
-        hidden_size=16,
-        num_hidden_layers=2,
-        num_attention_heads=2,
-        intermediate_size=32,
-        max_position_embeddings=64,
-        num_labels=1,
-        hidden_dropout_prob=0,
-        attention_probs_dropout_prob=0,
-    )
+    common = {
+        "hidden_size": 16,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 2,
+        "intermediate_size": 32,
+        "max_position_embeddings": 96,
+        "num_labels": 1,
+        "hidden_dropout_prob": 0,
+        "attention_probs_dropout_prob": 0,
+    }
+    if request.param == "bert":
+        vocab_path = directory / "vocab.txt"
+        vocab_path.write_text("\n".join(vocab))
+        BertTokenizerFast(vocab_file=str(vocab_path), model_max_length=64).save_pretrained(directory)
+        config = BertConfig(vocab_size=len(vocab), **{**common, "max_position_embeddings": 64})
+        model_class = BertForSequenceClassification
+    else:
+        # Local WordLevel fixture with XLM-R pair boundaries; no SentencePiece or
+        # pretrained checkpoint/adapter quality is being qualified by these tests.
+        vocab[:5] = ["<s>", "<pad>", "</s>", "<unk>", "<mask>"]
+        vocab.extend(["change", "london", "a", "city"])
+        bos, pad, eos, unk, mask = vocab[:5]
+        backend = Tokenizer(models.WordLevel({word: i for i, word in enumerate(vocab)}, unk_token=unk))
+        backend.normalizer = normalizers.Lowercase()
+        backend.pre_tokenizer = pre_tokenizers.Whitespace()
+        backend.post_processor = processors.TemplateProcessing(
+            single="<s> $A </s>",
+            pair="<s> $A </s> </s> $B </s>",
+            special_tokens=[("<s>", 0), ("</s>", 2)],
+        )
+        PreTrainedTokenizerFast(
+            tokenizer_object=backend,
+            bos_token=bos,
+            pad_token=pad,
+            eos_token=eos,
+            unk_token=unk,
+            mask_token=mask,
+            model_max_length=64,
+            model_input_names=["input_ids", "attention_mask"],
+        ).save_pretrained(directory)
+        config = XLMRobertaConfig(
+            vocab_size=len(vocab),
+            type_vocab_size=1,
+            pad_token_id=1,
+            bos_token_id=0,
+            eos_token_id=2,
+            classifier_dropout=0,
+            **{**common, "hidden_size": 32, "num_attention_heads": 4, "intermediate_size": 64},
+        )
+        model_class = XLMRobertaForSequenceClassification
     config.sbert_ce_default_activation_function = "torch.nn.modules.linear.Identity"
     with torch.random.fork_rng():
-        torch.manual_seed(29)
-        BertForSequenceClassification(config).save_pretrained(directory)
+        torch.manual_seed(29 if request.param == "bert" else 20261017)
+        model_class(config).save_pretrained(directory)
     return directory
 
 
-def save_adapter(path, seed=1, *, targets=("query", "value"), **overrides):
+def encoder_prefix(checkpoint):
+    model_type = json.loads((checkpoint / "config.json").read_text())["model_type"]
+    return {"bert": "bert.encoder", "xlm-roberta": "roberta.encoder"}[model_type]
+
+
+def fixture_lora_bytes(checkpoint, *, targets=2):
+    config = json.loads((checkpoint / "config.json").read_text())
+    # Each generated projection has two float32 rank-4 matrices.
+    return config["num_hidden_layers"] * targets * 2 * 4 * config["hidden_size"] * 4
+
+
+def save_adapter(checkpoint, path, seed=1, *, targets=("query", "value"), **overrides):
     path.mkdir()
     LoraConfig(
         task_type="SEQ_CLS",
@@ -80,18 +145,19 @@ def save_adapter(path, seed=1, *, targets=("query", "value"), **overrides):
         config_path.write_text(json.dumps(config))
     generator = torch.Generator().manual_seed(seed)
     weights = {}
+    hidden_size = json.loads((checkpoint / "config.json").read_text())["hidden_size"]
     for layer in range(2):
         for target in targets:
-            prefix = f"base_model.model.bert.encoder.layer.{layer}.attention.self.{target}"
-            weights[f"{prefix}.lora_A.weight"] = torch.randn(4, 16, generator=generator) * 0.4
-            weights[f"{prefix}.lora_B.weight"] = torch.randn(16, 4, generator=generator) * 0.4
+            prefix = f"base_model.model.{encoder_prefix(checkpoint)}.layer.{layer}.attention.self.{target}"
+            weights[f"{prefix}.lora_A.weight"] = torch.randn(4, hidden_size, generator=generator) * 0.4
+            weights[f"{prefix}.lora_B.weight"] = torch.randn(hidden_size, 4, generator=generator) * 0.4
     save_file(weights, path / "adapter_model.safetensors")
     return str(path)
 
 
 @pytest.fixture
 def adapter(checkpoint, tmp_path):
-    paths = {name: save_adapter(tmp_path / name, seed) for seed, name in enumerate(("a", "b", "c"), 1)}
+    paths = {name: save_adapter(checkpoint, tmp_path / name, seed) for seed, name in enumerate(("a", "b", "c"), 1)}
     adapter = CrossEncoderAdapter(checkpoint, lora_paths=paths, max_loaded_loras=2)
     adapter.load("cpu")
     yield adapter
@@ -99,8 +165,6 @@ def adapter(checkpoint, tmp_path):
 
 
 def scores(adapter):
-    from sie_server.types.inputs import Item
-
     query, docs = Item(**QUERY), [Item(**doc) for doc in DOCS]
     direct = np.asarray(adapter.score(query, docs))
     pairs = adapter.score_pairs([query] * len(docs), docs)
@@ -122,16 +186,20 @@ def base_snapshot(adapter):
         dict(outer.model.named_modules()),
         {name: value.detach().clone() for name, value in outer.model.state_dict().items()},
         [(parameter, parameter.requires_grad) for parameter in outer.model.parameters()],
+        [(module, module.training) for module in outer.model.modules()],
     )
 
 
 def assert_base_preserved(adapter, snapshot, *, unwrapped=False):
-    outer, model, head, tokenizer, activation, modules, weights, grad = snapshot
+    outer, model, head, tokenizer, activation, modules, weights, grad, training = snapshot
     assert adapter._model is outer
     assert outer.model is model
     assert model.classifier is head
     assert outer.tokenizer is tokenizer
     assert outer.activation_fn is activation
+    for name, original in modules.items():
+        if name == "classifier" or name.startswith("classifier."):
+            assert model.get_submodule(name) is original, name
     for name, expected in weights.items():
         parent, _, leaf = name.rpartition(".")
         module = model.get_submodule(parent)
@@ -139,6 +207,7 @@ def assert_base_preserved(adapter, snapshot, *, unwrapped=False):
             module = module.get_base_layer()
         assert torch.equal(getattr(module, leaf), expected), name
     assert all(parameter.requires_grad == flag for parameter, flag in grad)
+    assert all(module.training == flag for module, flag in training)
     if unwrapped:
         assert dict(model.named_modules()) == modules
         assert not hasattr(model, "peft_config")
@@ -170,7 +239,7 @@ def test_never_lora_has_no_manager_or_optional_imports(checkpoint, monkeypatch):
     adapter.unload()
 
 
-def test_actual_effect_restoration_head_and_final_module_identity(adapter):
+def test_actual_effect_restoration_head_and_final_module_identity(adapter, checkpoint):
     snapshot = base_snapshot(adapter)
     baseline = scores(adapter)
     np.testing.assert_array_equal(scores(adapter), baseline)
@@ -182,7 +251,7 @@ def test_actual_effect_restoration_head_and_final_module_identity(adapter):
     assert not runtime.pinned
     with pytest.raises(LoraUnavailableError):
         adapter.set_active_lora("a")
-    assert adapter.load_lora("a") == 2048
+    assert adapter.load_lora("a") == fixture_lora_bytes(checkpoint)
     # Successful attachment must leave base selected, including SEQ_CLS configs.
     np.testing.assert_array_equal(scores(adapter), baseline)
     adapter.set_active_lora("a")
@@ -212,22 +281,30 @@ def test_actual_effect_restoration_head_and_final_module_identity(adapter):
     np.testing.assert_array_equal(scores(adapter), a)
 
 
-def test_resident_adapters_leave_the_exact_base_tree_and_preserve_layer_hooks(adapter):
+def test_resident_adapters_leave_the_exact_base_tree_and_preserve_layer_hooks(adapter, checkpoint):
     snapshot = base_snapshot(adapter)
     baseline = scores(adapter)
-    original_query = snapshot[1].bert.encoder.layer[0].attention.self.query
+    prefix = encoder_prefix(checkpoint)
+    original_query = snapshot[1].get_submodule(f"{prefix}.layer.0.attention.self.query")
     original_calls, wrapper_calls = [], []
     base_hook = original_query.register_forward_hook(lambda *_: original_calls.append(True))
     adapter.load_lora("a")
     manager = adapter._lora
     assert dict(snapshot[1].named_modules()) == snapshot[5]
-    wrapper = manager._resident_layers["bert.encoder.layer.0.attention.self.query"]
-    wrapper_hook = wrapper.register_forward_hook(lambda *_: wrapper_calls.append(True))
+    wrapper = manager._resident_layers[f"{prefix}.layer.0.attention.self.query"]
+
+    def observed_wrapper(module, inputs, output):
+        assert inputs[0].shape[0] > 0
+        assert torch.isfinite(output).all()
+        assert not module.training
+        wrapper_calls.append((tuple(module.active_adapters), module.disable_adapters))
+
+    wrapper_hook = wrapper.register_forward_hook(observed_wrapper)
     adapter.load_lora("b")
     identities = {name: id(layer) for name, layer in manager._resident_layers.items()}
     assert dict(snapshot[1].named_modules()) == snapshot[5]
     assert len(manager._loaded) == 2
-    assert sum(manager._loaded.values()) == 4096
+    assert sum(manager._loaded.values()) == 2 * fixture_lora_bytes(checkpoint)
     expected = {None: baseline}
     for selection in ("a", None, "b", None, "a", None, "b", None):
         old_wrapper_calls = len(wrapper_calls)
@@ -240,6 +317,10 @@ def test_resident_adapters_leave_the_exact_base_tree_and_preserve_layer_hooks(ad
             assert len(wrapper_calls) == old_wrapper_calls
         else:
             assert len(wrapper_calls) > old_wrapper_calls
+            expected_name = PEFTLoRAMixin._peft_adapter_name(manager._aliases[selection])
+            assert all(
+                names == (expected_name,) and not disabled for names, disabled in wrapper_calls[old_wrapper_calls:]
+            )
             assert all(id(snapshot[1].get_submodule(name)) == identity for name, identity in identities.items())
             assert np.max(np.abs(actual - baseline)) > 1e-6
         if selection in expected:
@@ -254,8 +335,8 @@ def test_resident_adapters_leave_the_exact_base_tree_and_preserve_layer_hooks(ad
 
 def test_disjoint_targets_evict_only_their_wrappers_and_final_unload_releases_weights(checkpoint, tmp_path):
     paths = {
-        "a": save_adapter(tmp_path / "a", 1, targets=("query",)),
-        "b": save_adapter(tmp_path / "b", 2, targets=("value",)),
+        "a": save_adapter(checkpoint, tmp_path / "a", 1, targets=("query",)),
+        "b": save_adapter(checkpoint, tmp_path / "b", 2, targets=("value",)),
     }
     adapter = CrossEncoderAdapter(checkpoint, lora_paths=paths, max_loaded_loras=2)
     adapter.load("cpu")
@@ -270,7 +351,9 @@ def test_disjoint_targets_evict_only_their_wrappers_and_final_unload_releases_we
         parameter_refs = [weakref.ref(p) for parameters in manager._parameters.values() for p in parameters]
         assert dict(snapshot[1].named_modules()) == snapshot[5]
         assert set(refs) == {
-            f"bert.encoder.layer.{i}.attention.self.{target}" for i in range(2) for target in ("query", "value")
+            f"{encoder_prefix(checkpoint)}.layer.{i}.attention.self.{target}"
+            for i in range(2)
+            for target in ("query", "value")
         }
         adapter.set_active_lora("b")
         b = scores(adapter)
@@ -283,7 +366,7 @@ def test_disjoint_targets_evict_only_their_wrappers_and_final_unload_releases_we
         assert all(ref() is None for name, ref in refs.items() if name.endswith("query"))
         assert all(ref() is not None for name, ref in refs.items() if name.endswith("value"))
         assert dict(snapshot[1].named_modules()) == snapshot[5]
-        assert sum(manager._loaded.values()) == 1024
+        assert sum(manager._loaded.values()) == fixture_lora_bytes(checkpoint, targets=1)
         adapter.set_active_lora("b")
         np.testing.assert_array_equal(scores(adapter), b)
         adapter.unload_lora("b")
@@ -300,7 +383,9 @@ def test_disjoint_targets_evict_only_their_wrappers_and_final_unload_releases_we
 
 
 @pytest.mark.parametrize("operation", ["attach", "detach"])
-def test_partial_tree_swap_failure_poisoning_preserves_residency_until_teardown(adapter, monkeypatch, operation):
+def test_partial_tree_swap_failure_poisoning_preserves_residency_until_teardown(
+    adapter, checkpoint, monkeypatch, operation
+):
     snapshot = base_snapshot(adapter)
     adapter.load_lora("a")
     adapter.load_lora("b")
@@ -324,7 +409,7 @@ def test_partial_tree_swap_failure_poisoning_preserves_residency_until_teardown(
         with pytest.raises(LoraStateUncertainError, match="Failed to select"):
             adapter.set_active_lora("a" if operation == "attach" else None)
     assert len(manager._loaded) == 2
-    assert sum(manager._loaded.values()) == 4096
+    assert sum(manager._loaded.values()) == 2 * fixture_lora_bytes(checkpoint)
     with pytest.raises(LoraStateUncertainError, match="uncertain"):
         adapter.set_active_lora(None)
     adapter.unload()
@@ -444,8 +529,12 @@ def test_bad_weights_rejected_before_model_mutation(adapter, damage):
     "change",
     [
         {"modules_to_save": ["classifier"]},
+        {"modules_to_save": ["classifier", "score"]},
         {"bias": "all"},
         {"target_modules": ["classifier"]},
+        {"target_modules": ["classifier.dense"]},
+        {"target_modules": ["classifier.out_proj"]},
+        {"target_modules": ["out_proj"]},
         {"target_modules": ["dense"]},
         {"target_modules": ["does_not_exist"]},
         {"target_modules": "query"},
@@ -467,8 +556,8 @@ def test_unsafe_or_unqualified_config_is_rejected(adapter, change):
     assert_base_preserved(adapter, snapshot, unwrapped=True)
 
 
-def test_only_declared_private_snapshot_can_attach(adapter, tmp_path):
-    unknown = save_adapter(tmp_path / "unknown")
+def test_only_declared_private_snapshot_can_attach(adapter, checkpoint, tmp_path):
+    unknown = save_adapter(checkpoint, tmp_path / "unknown")
     with pytest.raises(ValueError, match="not declared"):
         adapter.fetch_lora(unknown)
     with pytest.raises(ValueError, match="validated snapshot"):
@@ -520,7 +609,7 @@ def test_discard_and_model_unload_release_owned_sources(adapter):
 
 
 def test_revision_and_capacity_validation(checkpoint, tmp_path):
-    path = save_adapter(tmp_path / "a")
+    path = save_adapter(checkpoint, tmp_path / "a")
     with pytest.raises(ValueError, match="positive integer"):
         CrossEncoderAdapter(checkpoint, lora_paths={"a": path}, max_loaded_loras=0)
     adapter = CrossEncoderAdapter(checkpoint, lora_paths={"a": path}, lora_revisions={path: "a" * 40})
@@ -649,6 +738,123 @@ def test_source_cleanup_failure_cannot_skip_whole_model_teardown(adapter, monkey
     temporary.cleanup()
 
 
+@pytest.mark.parametrize("kind", ["subclass", "quantized", "ordinary_roberta"])
+def test_exact_model_class_and_unquantized_admission(adapter, kind):
+    from sie_server.adapters.cross_encoder._lora import CrossEncoderLora
+
+    original = adapter._model.model
+    if kind == "subclass":
+
+        class CustomClassifier(type(original)):
+            pass
+
+        model = CustomClassifier(original.config)
+    elif kind == "quantized":
+        model = type(original)(original.config)
+        model.is_quantized = True
+    else:
+        model = RobertaForSequenceClassification(RobertaConfig(**original.config.to_dict()))
+    before = dict(model.named_modules())
+    manager = CrossEncoderLora(adapter._lora._aliases, None, 2)
+    with pytest.raises(ValueError, match="standard, unquantized"):
+        manager.bind(SimpleNamespace(model=model))
+    assert dict(model.named_modules()) == before
+    assert manager._model is None
+    assert manager._encoder_prefix is None
+    assert not hasattr(model, "peft_config")
+
+
+def test_fully_qualified_encoder_dense_target_preserves_classifier(adapter, checkpoint):
+    source = Path(adapter._lora._aliases["a"])
+    prefix = encoder_prefix(checkpoint)
+    target = f"{prefix}.layer.0.attention.output.dense"
+    config_path = source / "adapter_config.json"
+    config = json.loads(config_path.read_text())
+    config["target_modules"] = [target]
+    config_path.write_text(json.dumps(config))
+    weights_path = source / "adapter_model.safetensors"
+    weights = {
+        key.replace("attention.self.query", "attention.output.dense"): value
+        for key, value in load_file(weights_path).items()
+        if ".layer.0.attention.self.query." in key
+    }
+    assert len(weights) == 2
+    save_file(weights, weights_path)
+    snapshot, baseline = base_snapshot(adapter), scores(adapter)
+    adapter.load_lora("a")
+    assert set(adapter._lora._resident_layers) == {target}
+    adapter.set_active_lora("a")
+    assert np.max(np.abs(scores(adapter) - baseline)) > 1e-6
+    assert_base_preserved(adapter, snapshot)
+    adapter.unload_lora("a")
+    assert_base_preserved(adapter, snapshot, unwrapped=True)
+    np.testing.assert_array_equal(scores(adapter), baseline)
+
+
+def test_mixed_original_grad_flags_and_inference_training_survive_lifecycle(adapter):
+    manager = adapter._lora
+    manager.close()
+    parameters = list(adapter._model.model.parameters())
+    for index, parameter in enumerate(parameters):
+        parameter.requires_grad_(index % 2 == 0)
+    manager.bind(adapter._model)
+    snapshot, baseline = base_snapshot(adapter), scores(adapter)
+    assert {flag for _, flag in snapshot[7]} == {True, False}
+    adapter.load_lora("a")
+    adapter.load_lora("b")
+    for selection in ("a", None, "b", None):
+        adapter.set_active_lora(selection)
+        actual = scores(adapter)
+        assert_base_preserved(adapter, snapshot, unwrapped=False)
+        assert all(not parameter.requires_grad for values in manager._parameters.values() for parameter in values)
+        if selection is None:
+            assert dict(adapter._model.model.named_modules()) == snapshot[5]
+            np.testing.assert_array_equal(actual, baseline)
+    adapter.unload_lora("a")
+    adapter.unload_lora("b")
+    assert_base_preserved(adapter, snapshot, unwrapped=True)
+    np.testing.assert_array_equal(scores(adapter), baseline)
+
+
+@pytest.mark.asyncio
+async def test_real_preformed_worker_groups_loras_and_preserves_order(adapter, monkeypatch):
+    adapter.load_lora("a")
+    adapter.load_lora("b")
+    expected = {}
+    for selection in (None, "a", "b"):
+        adapter.set_active_lora(selection)
+        expected[selection] = scores(adapter)
+    calls = []
+    original = adapter.score_pairs
+
+    def observed(queries, items, **kwargs):
+        result = original(queries, items, **kwargs)
+        calls.append((adapter._lora._active, len(items)))
+        return result
+
+    monkeypatch.setattr(adapter, "score_pairs", observed)
+    selections = ["a", "b", "a", None]
+    requests = [
+        PreformedScoreRequest(
+            prepared_items=[ScorePreparedItem(cost=20, original_index=i) for i in range(len(DOCS))],
+            query=Item(**QUERY),
+            items=[Item(**doc) for doc in DOCS],
+            options={"lora": selection},
+        )
+        for selection in selections
+    ]
+    worker = ModelWorker(adapter, WorkerConfig())
+    await worker.start()
+    try:
+        futures = await worker.submit_score_preformed_batch(requests)
+        results = await asyncio.wait_for(asyncio.gather(*futures), 10)
+        for selection, result in zip(selections, results, strict=True):
+            np.testing.assert_allclose(result.output.scores, expected[selection], atol=1e-6, rtol=0)
+        assert calls == [(adapter._lora._aliases["a"], 4), (adapter._lora._aliases["b"], 2), (None, 2)]
+    finally:
+        await worker.stop()
+
+
 @pytest.mark.usefixtures("_offline_apps")
 def test_real_score_routes_authorize_aliases_isolate_batches_and_evict(
     checkpoint,
@@ -658,7 +864,9 @@ def test_real_score_routes_authorize_aliases_isolate_batches_and_evict(
 ):
     from sie_server.adapters.cross_encoder._lora import CrossEncoderLora
 
-    paths = {name: save_adapter(tmp_path / name, index) for index, name in enumerate(("a", "b", "c", "other"), 1)}
+    paths = {
+        name: save_adapter(checkpoint, tmp_path / name, index) for index, name in enumerate(("a", "b", "c", "other"), 1)
+    }
     models = tmp_path / "models"
     models.mkdir()
     config = {
@@ -697,6 +905,7 @@ def test_real_score_routes_authorize_aliases_isolate_batches_and_evict(
     with (
         serve_on_loopback(app) as url,
         httpx.Client(base_url=url, timeout=15, headers={"Accept": "application/json"}) as client,
+        SIEClient(base_url=url, timeout_s=15, remote="forbid") as sdk,
     ):
 
         def request(selection=None, *, profile=None):
@@ -748,14 +957,32 @@ def test_real_score_routes_authorize_aliases_isolate_batches_and_evict(
         assert set(metadata["lora_adapters"]) == {"a", "b"}
         assert not any(source in json.dumps(metadata["lora_adapters"]) for source in paths.values())
         assert len(app.state.registry._loaded[model].loras) == 2
-        assert all(value.memory_bytes == 2048 for value in app.state.registry._loaded[model].loras.values())
+        assert all(
+            value.memory_bytes == fixture_lora_bytes(checkpoint)
+            for value in app.state.registry._loaded[model].loras.values()
+        )
         expected = {None: baseline, "a": a, "b": b}
         selections = ["a", None, "b"] * 8
+        # Preserve the original warmed wire assertion: no hidden cold-load retry.
         with ThreadPoolExecutor(max_workers=6) as executor:
             futures = [(selection, executor.submit(ready, selection)) for selection in selections]
             for selection, future in futures:
                 actual, statuses = future.result(timeout=20)
                 assert statuses == [200]
+                np.testing.assert_allclose(actual, expected[selection], atol=1e-6, rtol=0)
+
+        def sdk_score(selection):
+            result = sdk.score(
+                model, QUERY, DOCS, options={"lora": selection}, provision_timeout_s=15, max_oom_retries=0
+            )
+            return np.asarray([row["score"] for row in sorted(result["scores"], key=lambda row: row["item_id"])])
+
+        # The wire-level cold/denial checks above remain explicit. Concurrent
+        # served selections exercise the supported SDK through the actual worker.
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            futures = [(selection, executor.submit(sdk_score, selection)) for selection in selections]
+            for selection, future in futures:
+                actual = future.result(timeout=20)
                 np.testing.assert_allclose(actual, expected[selection], atol=1e-6, rtol=0)
         ready("b")  # A is now the least recently used resident.
         ready("c")

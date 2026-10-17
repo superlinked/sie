@@ -1,7 +1,7 @@
 """Opt-in LoRA lifecycle for the ordinary sentence-transformers CrossEncoder.
 
 The outer wrapper, tokenizer, classifier and activation are never replaced.
-Transformers injects ordinary LoRA layers into declared BERT encoder Linear
+Transformers injects ordinary LoRA layers into declared BERT/XLM-R encoder Linear
 modules. The worker owns selection/mutation exclusion; only background source
 preparation needs a separate lock here. Resident layers stay outside the model's
 module tree while base is selected. No scoring code calls into this module.
@@ -25,12 +25,16 @@ from peft.functional import delete_adapter
 from peft.tuners.lora.layer import Linear as LoraLinear
 from safetensors.torch import load_file
 from sentence_transformers import CrossEncoder
-from transformers import BertForSequenceClassification
+from transformers import BertForSequenceClassification, XLMRobertaForSequenceClassification
 
 from sie_server.adapters.lora import LoraRuntimeConfig, LoraStateUncertainError, LoraUnavailableError
 from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin
 
 _FILES = ("adapter_config.json", "adapter_model.safetensors")
+_ENCODER_PREFIXES: dict[type[torch.nn.Module], str] = {
+    BertForSequenceClassification: "bert.encoder.",
+    XLMRobertaForSequenceClassification: "roberta.encoder.",
+}
 _UNSUPPORTED = (
     "use_dora",
     "use_rslora",
@@ -93,6 +97,7 @@ class CrossEncoderLora:
         self._active: str | None = None
         self._outer: CrossEncoder | None = None
         self._model: Any = None
+        self._encoder_prefix: str | None = None
         self._originals: dict[str, torch.nn.Linear] = {}
         # An ordinary dict deliberately keeps resident adapters outside nn.Module's
         # traversal while base is selected. CrossEncoder.predict calls to()/eval()
@@ -108,13 +113,16 @@ class CrossEncoderLora:
 
     def bind(self, outer: CrossEncoder) -> None:
         model = outer.model
-        if type(model) is not BertForSequenceClassification or getattr(model, "is_quantized", False):
+        encoder_prefix = _ENCODER_PREFIXES.get(type(model))
+        if encoder_prefix is None or getattr(model, "is_quantized", False):
             raise ValueError(
-                "CrossEncoder LoRA currently requires a standard, unquantized BertForSequenceClassification"
+                "CrossEncoder LoRA requires a standard, unquantized BertForSequenceClassification "
+                "or XLMRobertaForSequenceClassification"
             )
         if getattr(model, "peft_config", None) or getattr(model, "_hf_peft_config_loaded", False):
             raise ValueError("The cross-encoder must start from a base checkpoint without attached adapters")
         self._outer, self._model = outer, model
+        self._encoder_prefix = encoder_prefix
         self._originals = {name: module for name, module in model.named_modules() if type(module) is torch.nn.Linear}
         self._grad_flags = [(parameter, parameter.requires_grad) for parameter in model.parameters()]
         self._active = None
@@ -160,8 +168,14 @@ class CrossEncoderLora:
         expected: dict[str, tuple[int, int]] = {}
         for target in config.target_modules or []:
             matches = [name for name in self._originals if name == target or name.endswith(f".{target}")]
-            if not matches or any(not name.startswith("bert.encoder.") for name in matches):
-                raise ValueError(f"LoRA target {target!r} must resolve only to BERT encoder Linear modules")
+            if (
+                self._encoder_prefix is None
+                or not matches
+                or any(not name.startswith(self._encoder_prefix) for name in matches)
+            ):
+                raise ValueError(
+                    f"LoRA target {target!r} must resolve only to the supported model encoder Linear modules"
+                )
             for name in matches:
                 module = self._originals[name]
                 expected[f"{name}.lora_A.weight"] = (config.r, module.in_features)
@@ -430,6 +444,7 @@ class CrossEncoderLora:
             self._originals.clear()
             self._grad_flags.clear()
             self._outer = self._model = None
+            self._encoder_prefix = None
             self._uncertain = False
         if errors:
             raise ExceptionGroup("Failed to remove owned LoRA source snapshots", errors)
