@@ -246,6 +246,124 @@ def test_real_named_effects_eviction_and_full_restoration(raw_model: GLiNER2, tm
     adapter.unload()
 
 
+@pytest.mark.parametrize("order", [("a", "b"), ("b", "a")])
+@pytest.mark.parametrize("removed", ["a", "b"])
+@pytest.mark.parametrize("reset_to_base", [False, True])
+@pytest.mark.parametrize("disjoint", [False, True])
+def test_remove_last_selected_resident_synchronizes_controller_and_survivor(
+    raw_model: GLiNER2,
+    tmp_path: Path,
+    order: tuple[str, str],
+    removed: str,
+    reset_to_base: bool,
+    disjoint: bool,
+) -> None:
+    targets = {
+        "a": _resolve_targets(raw_model, ["encoder.query"]),
+        "b": _resolve_targets(raw_model, ["span_rep"]),
+    }
+    paths = {
+        name: make_checkpoint(tmp_path, raw_model, name, targets=targets[name] if disjoint else None) for name in order
+    }
+    for index, parameter in enumerate(raw_model.parameters()):
+        parameter.requires_grad_(index % 2 == 0)
+    adapter = adapter_for(raw_model, paths)
+    before = snapshot(raw_model)
+    base = serve(adapter, None)
+    for name in order:
+        adapter.load_lora(name)
+    survivor = "a" if removed == "b" else "b"
+    expected = serve(adapter, survivor)
+    adapter.set_active_lora(removed)
+    if reset_to_base:
+        adapter.set_active_lora(None)
+    removed_parameters = [weakref.ref(parameter) for parameter in adapter._lora._loaded[paths[removed]]]
+    adapter.unload_lora(removed)
+    assert set(adapter._lora._loaded) == {paths[survivor]}
+    internal = PEFTLoRAMixin._peft_adapter_name(paths[survivor])
+    assert adapter._lora._controller.active_adapter == internal
+    assert adapter._lora._tuner().active_adapters == [internal]
+    assert adapter._lora._active is None
+    assert not adapter._lora._uncertain
+    assert all(layer.disable_adapters for layer in raw_model.modules() if isinstance(layer, LoraLinear))
+    assert all(not parameter.requires_grad for values in adapter._lora._loaded.values() for parameter in values)
+    assert all(parameter.requires_grad is flag for parameter, flag in adapter._lora._grad)
+    assert all(reference() is None for reference in removed_parameters)
+    assert serve(adapter, None) == base
+    assert serve(adapter, survivor) == expected
+    adapter.load_lora(removed)
+    assert serve(adapter, None) == base
+    adapter.unload_lora(removed)
+    assert serve(adapter, survivor) == expected
+    adapter.unload_lora(survivor)
+    assert_restored(raw_model, before)
+    adapter.unload()
+
+
+@pytest.mark.parametrize("disjoint", [False, True])
+def test_second_attach_rollback_restores_survivor_after_failed_adapter_became_active(
+    raw_model: GLiNER2, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, disjoint: bool
+) -> None:
+    paths = {
+        "a": make_checkpoint(
+            tmp_path, raw_model, "a", targets=_resolve_targets(raw_model, ["span_rep"]) if disjoint else None
+        ),
+        "b": make_checkpoint(
+            tmp_path, raw_model, "b", targets=_resolve_targets(raw_model, ["encoder.query"]) if disjoint else None
+        ),
+    }
+    adapter = adapter_for(raw_model, paths)
+    before = snapshot(raw_model)
+    base = serve(adapter, None)
+    adapter.load_lora("a")
+    expected = serve(adapter, "a")
+    original = PeftModel.load_adapter
+
+    def fail(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        self.set_adapter(kwargs["adapter_name"])
+        raise RuntimeError("second attachment sentinel")
+
+    monkeypatch.setattr(PeftModel, "load_adapter", fail)
+    with pytest.raises(RuntimeError, match="second attachment sentinel"):
+        adapter.load_lora("b")
+    assert not adapter._lora._uncertain
+    assert set(adapter._lora._loaded) == {paths["a"]}
+    assert adapter._lora._prepared == {}
+    internal = PEFTLoRAMixin._peft_adapter_name(paths["a"])
+    assert adapter._lora._controller.active_adapter == internal
+    assert adapter._lora._tuner().active_adapters == [internal]
+    assert all(layer.disable_adapters for layer in raw_model.modules() if isinstance(layer, LoraLinear))
+    assert all(not parameter.requires_grad for values in adapter._lora._loaded.values() for parameter in values)
+    assert serve(adapter, None) == base
+    assert serve(adapter, "a") == expected
+    monkeypatch.setattr(PeftModel, "load_adapter", original)
+    adapter.load_lora("b")
+    adapter.unload_lora("b")
+    adapter.unload_lora("a")
+    assert_restored(raw_model, before)
+    adapter.unload()
+
+
+def test_survivor_selection_failure_during_removal_refuses_all_inference(
+    raw_model: GLiNER2, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = {name: make_checkpoint(tmp_path, raw_model, name) for name in ("a", "b")}
+    adapter = adapter_for(raw_model, paths)
+    before = snapshot(raw_model)
+    adapter.load_lora("a")
+    adapter.load_lora("b")
+    adapter.set_active_lora("b")
+    monkeypatch.setattr(adapter._lora._controller, "set_adapter", Mock(side_effect=RuntimeError("selection sentinel")))
+    with pytest.raises(LoraStateUncertainError, match="removal failed"):
+        adapter.unload_lora("b")
+    for name in (None, "a", "b"):
+        with pytest.raises(LoraStateUncertainError, match="uncertain"):
+            serve(adapter, name)
+    adapter.unload()
+    assert_restored(raw_model, before)
+
+
 @pytest.mark.parametrize("teardown", [False, True])
 def test_selection_and_final_unload_restore_mixed_grad_training_and_peft_layout(
     raw_model: GLiNER2, tmp_path: Path, teardown: bool

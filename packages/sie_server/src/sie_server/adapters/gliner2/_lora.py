@@ -317,6 +317,16 @@ class GLiNER2Lora:
         getattr(self._model, "peft_config", {}).pop(internal, None)
         if self._controller is not None:
             self._controller.peft_config.pop(internal, None)
+            # The low-level helper updates leaf layers, not the controller or
+            # tuner root. Its returned first-layer selection can also be empty
+            # for disjoint targets even while another resident survives.
+            # Synchronize all levels to a known resident before callers disable
+            # and refreeze them; final removal restores/drops the controller.
+            for canonical in self._loaded:
+                remaining = PEFTLoRAMixin._peft_adapter_name(canonical)
+                if remaining != internal:
+                    self._controller.set_adapter(remaining, inference_mode=True)
+                    break
 
     def load(self, name: str, revision: str | None = None, *, source: str | None = None) -> int:
         canonical = self.source(name)
