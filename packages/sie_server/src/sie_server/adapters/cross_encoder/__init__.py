@@ -46,12 +46,15 @@ class CrossEncoderAdapter(BaseAdapter):
 
     Runtime LoRA is opt-in through ``lora_paths={served_name: source}``.
     Only ordinary A/B LoRA matrices targeting encoder Linear modules in a
-    standard, unquantized ``BertForSequenceClassification`` are supported.
+    standard, unquantized ``BertForSequenceClassification`` or
+    ``XLMRobertaForSequenceClassification`` are supported.
     The scoring head and activation stay those of the base checkpoint;
     trained replacement heads, causal rerankers and custom model classes
     are rejected when LoRA is enabled. Adapters load on demand under the
     registry's resident limit. ``options.lora=None`` selects the base model.
     Configurations without declarations use the original model and scoring path.
+    Use an explicit generic CrossEncoder profile; native BertFlash defaults are
+    separate implementations and do not gain LoRA support from this adapter.
 
     Performance optimizations:
     - SDPA attention (default): Uses PyTorch's scaled_dot_product_attention
@@ -93,7 +96,7 @@ class CrossEncoderAdapter(BaseAdapter):
                 loading the model. If None, the default branch is used. Forwarded
                 to ``CrossEncoder(..., revision=...)``.
             lora_paths: Declared adapter aliases/sources. Enables deferred runtime
-                loading for standard BERT encoder projections only. Served names
+                loading for standard BERT/XLM-R encoder projections only. Served names
                 use letters, digits, underscores, dots and hyphens; sources may
                 be local directories or Hugging Face repositories.
             lora_revisions: Source revisions supplied by the model loader.
