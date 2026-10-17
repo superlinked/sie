@@ -64,6 +64,7 @@ DECISION_ADAPTERS = frozenset(
     {
         "sie_server.adapters.gliner2.decide:GLiNER2DecideAdapter",
         "sie_server.adapters.laya.adapter:LayaAdapter",
+        "sie_server.adapters.pplx_decider.adapter:PerplexityDecisionAdapter",
     }
 )
 

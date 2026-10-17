@@ -11,6 +11,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sie_server.adapters.base import ModelCapabilities, ModelDims
 from sie_server.adapters.errors import InputTooLongError
+from sie_server.adapters.pplx_decider.questions import answer as pplx_answer
+from sie_server.adapters.pplx_decider.questions import parse_questions as pplx_questions
 from sie_server.api.systemone import (
     MAX_RETRY_AFTER_S,
     choice_confidence,
@@ -29,6 +31,7 @@ from sie_server.types.responses import ErrorCode
 DECIDE = "fastino/GLiNER2.5-Decide"
 EMBEDDER = "org/embedder"
 DECIDE_ADAPTER = "sie_server.adapters.gliner2.decide:GLiNER2DecideAdapter"
+PPLX_ADAPTER = "sie_server.adapters.pplx_decider.adapter:PerplexityDecisionAdapter"
 
 QUESTIONS: dict[str, Any] = {
     "spam": {"type": "noul", "instructions": "Is this message spam?"},
@@ -105,14 +108,14 @@ def _worker(adapter: MagicMock) -> MagicMock:
     return worker
 
 
-@pytest.fixture
-def registry(adapter: MagicMock) -> MagicMock:
+@pytest.fixture(params=[DECIDE_ADAPTER, PPLX_ADAPTER])
+def registry(adapter: MagicMock, request: pytest.FixtureRequest) -> MagicMock:
     configs = {
         DECIDE: ModelConfig(
             sie_id=DECIDE,
             hf_id=DECIDE,
             tasks=Tasks(extract=ExtractTask()),
-            profiles={"default": ProfileConfig(adapter_path=DECIDE_ADAPTER, max_batch_tokens=8192)},
+            profiles={"default": ProfileConfig(adapter_path=request.param, max_batch_tokens=8192)},
         ),
         EMBEDDER: ModelConfig(
             sie_id=EMBEDDER,
@@ -150,6 +153,26 @@ def _post(client: TestClient, **body: Any) -> Any:
 
 
 class TestAnswers:
+    @pytest.mark.parametrize("probability", [0.0, 0.2, 0.5, 0.8, 1.0])
+    def test_native_perplexity_noul_includes_system_one_fields(self, client, adapter, probability):
+        def extract(items, *, output_schema, **kwargs):
+            question = pplx_questions(output_schema)[0]
+            return ExtractOutput(
+                entities=[[] for _ in items],
+                data=[{question.id: pplx_answer(question, [1 - probability, probability])} for _ in items],
+                input_token_counts=[42 for _ in items],
+            )
+
+        adapter.extract.side_effect = extract
+        response = _post(client, questions={"spam": QUESTIONS["spam"]})
+        assert response.status_code == 200
+        assert response.json()["answers"]["spam"] == {
+            "type": "noul",
+            "noul": probability,
+            "answer": probability > 0.5,
+            "confidence": max(probability, 1 - probability),
+        }
+
     def test_envelope(self, client: TestClient) -> None:
         response = _post(client)
         assert response.status_code == 200
