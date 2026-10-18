@@ -15,7 +15,7 @@
     "uv_lock_sha256": "536b7f46b5560f0dfbe5a503ecf4166514658f1340c4721d1ea263a43b3e5aa5"
   },
   "lock_sha256": "1bc8a0f417323c67420e71cf16b71e562c7db5842b50d4c5cd60efea8106141b",
-  "policy_sha256": "ad0ea4aba9172f1b79f0c8fb274af90d4d3d161c74e0eb578f9d63c3cd3b5bea",
+  "policy_sha256": "a45cf878a0bfa686c968587850a783557448e69b63e75d04bd445b6b772d5ed6",
   "schema_version": 1,
   "source_pins_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
   "target": {

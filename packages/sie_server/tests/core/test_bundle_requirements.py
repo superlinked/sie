@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 from packaging.requirements import Requirement
 from sie_server.bundle_requirements import (
+    UvLock,
     bundle_requirements_sha256,
     lock_constraint_lines,
     locked_versions_from_uv_lock,
@@ -462,3 +464,80 @@ version = "3.1.0"
     assert "stable==3.1.0" in constraints
     assert not any(line.startswith("split==") for line in constraints)
     assert "# split skipped: uv.lock has multiple public versions" in constraints
+
+
+@pytest.fixture
+def ambiguous_dependency_lock() -> UvLock:
+    return parse_uv_lock("""
+version = 1
+[[package]]
+name = "parent"
+version = "1.0.0"
+dependencies = [{ name = "split", extra = ["feature"] }]
+
+[[package]]
+name = "split"
+version = "1.0.0"
+dependencies = [{ name = "old-only" }]
+[package.optional-dependencies]
+feature = [{ name = "optional-only" }]
+
+[[package]]
+name = "split"
+version = "2.0.0"
+dependencies = [{ name = "new-only" }]
+
+[[package]]
+name = "independent"
+version = "1.0.0"
+dependencies = [{ name = "old-only" }, { name = "optional-only" }]
+
+[[package]]
+name = "untrusted"
+version = "1.0.0"
+dependencies = [{ name = "split", extra = ["feature"] }]
+
+[[package]]
+name = "old-only"
+version = "3.0.0"
+dependencies = [{ name = "leaf" }]
+
+[[package]]
+name = "leaf"
+version = "4.0.0"
+
+[[package]]
+name = "optional-only"
+version = "5.0.0"
+
+[[package]]
+name = "new-only"
+version = "6.0.0"
+""")
+
+
+@pytest.mark.parametrize("root", ["split[feature]>=2", "parent>=1", "parent==1.0.0"])
+@pytest.mark.parametrize("independent", [False, True])
+def test_ambiguous_dependencies_need_an_independent_trusted_path(
+    ambiguous_dependency_lock: UvLock, root: str, independent: bool
+) -> None:
+    requirements = [root, "independent>=1"] if independent else [root]
+    constraints = lock_constraint_lines(requirements, ambiguous_dependency_lock)
+
+    assert "# split skipped: uv.lock has multiple public versions" in constraints
+    assert not any(line.startswith("split==") for line in constraints)
+    # Neither version's combined dependency graph describes a known install.
+    assert "new-only==6.0.0" not in constraints
+    for pin in ("old-only==3.0.0", "optional-only==5.0.0", "leaf==4.0.0"):
+        assert (pin in constraints) is independent
+
+
+@pytest.mark.parametrize("untrusted", ["untrusted==9", "untrusted @ https://example.com/untrusted.whl"])
+def test_untrusted_paths_through_ambiguous_dependencies_still_unpin_shared_neighbors(
+    ambiguous_dependency_lock: UvLock, untrusted: str
+) -> None:
+    constraints = lock_constraint_lines(["independent>=1", untrusted], ambiguous_dependency_lock)
+
+    assert "independent==1.0.0" in constraints
+    for pin in ("old-only==3.0.0", "optional-only==5.0.0", "leaf==4.0.0"):
+        assert pin not in constraints

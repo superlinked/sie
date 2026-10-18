@@ -213,7 +213,8 @@ def lock_constraint_lines(requirements: Sequence[str], lock: UvLock) -> list[str
     distribution (``huggingface-hub`` 0.36 from ``sentence-transformers``
     versus ``huggingface-hub>=1`` from transformers 5). The constrained
     requirement itself stays pinned. A package with two public versions is
-    skipped with a comment instead of aborting.
+    skipped with a comment instead of aborting. Its combined outgoing edges
+    cannot establish trusted pins, but still exclude pins on untrusted paths.
     """
     grouped = _requirement_groups(requirements)
     constrained: list[tuple[str, frozenset[str]]] = []
@@ -231,8 +232,8 @@ def lock_constraint_lines(requirements: Sequence[str], lock: UvLock) -> list[str
         else:
             untrusted.append(root)
 
-    constrained_reach = _reachable(constrained, lock)
-    exact_reach = _reachable(exact, lock)
+    constrained_reach = _reachable(constrained, lock, follow_ambiguous=False)
+    exact_reach = _reachable(exact, lock, follow_ambiguous=False)
     untrusted_reach = _reachable(untrusted, lock)
     # A transitive package an untrusted root can reach stays unpinned, even
     # when a constrained root reaches it too. The image installs the untrusted
@@ -362,13 +363,17 @@ def _root_extras(reqs: Sequence[Requirement]) -> frozenset[str]:
     return frozenset(extras)
 
 
-def _reachable(roots: Sequence[tuple[str, frozenset[str]]], lock: UvLock) -> set[str]:
+def _reachable(roots: Sequence[tuple[str, frozenset[str]]], lock: UvLock, *, follow_ambiguous: bool = True) -> set[str]:
     seen_packages: set[str] = set()
     seen_extras: set[tuple[str, str]] = set()
     stack = list(roots)
     while stack:
         name, extras = stack.pop()
         if name not in lock.versions and name not in lock.ambiguous:
+            continue
+        if not follow_ambiguous and name in lock.ambiguous:
+            # Keep the skip diagnostic, but not edges from an unknown version.
+            seen_packages.add(name)
             continue
         if name not in seen_packages:
             seen_packages.add(name)
