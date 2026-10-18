@@ -69,7 +69,8 @@ From a bootstrapped clean checkout:
 ```console
 mise exec -- uv run --frozen --no-sync python tools/ci/bundle_lock.py check
 mise install uv@0.9.28
-export SIE_BUNDLE_LOCK_UV="$(mise exec --no-deps uv@0.9.28 -- which uv)"
+SIE_BUNDLE_LOCK_UV="$(mise exec --no-deps uv@0.9.28 -- which uv)"
+export SIE_BUNDLE_LOCK_UV
 SIE_RUN_IMAGE_RESOLUTION=1 mise exec -- uv run --frozen --no-sync pytest -q packages/sie_server/tests/core/test_bundle_image_resolution.py
 ```
 

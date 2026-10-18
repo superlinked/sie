@@ -128,7 +128,8 @@ jobs:
         env:
           SIE_RUN_IMAGE_RESOLUTION: "1"
         run: |
-          export SIE_BUNDLE_LOCK_UV="$(mise exec --no-deps uv@0.9.28 -- which uv)"
+          SIE_BUNDLE_LOCK_UV="$(mise exec --no-deps uv@0.9.28 -- which uv)"
+          export SIE_BUNDLE_LOCK_UV
           mise exec -- uv run --frozen --project . --no-sync pytest -q packages/sie_server/tests/core/test_bundle_image_resolution.py
 
   typescript:
