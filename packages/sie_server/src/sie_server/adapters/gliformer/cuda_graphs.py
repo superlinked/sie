@@ -63,9 +63,14 @@ def _out_of_memory(error: BaseException) -> bool:
 def _capture_device_bytes(graph: Any, device: torch.device, free_before: int) -> int:
     """Count the private pool outside capture, without relying on a device delta."""
     pool = graph.pool()
-    segments = torch.cuda.memory_snapshot(pool)
+    # Torch 2.9's pool-argument binding decrements borrowed tuple references.
+    # Snapshot all pools and filter in Python to avoid that native-code defect.
+    snapshot = torch.cuda.memory_snapshot()
+    if not isinstance(snapshot, list) or any(not isinstance(segment, dict) for segment in snapshot):
+        raise RuntimeError("GLiFormer graph memory snapshot is unavailable")
+    segments = [segment for segment in snapshot if segment.get("segment_pool_id") == pool]
     index = device.index if device.index is not None else torch.cuda.current_device()
-    if not isinstance(segments, list) or not segments:
+    if not segments:
         raise RuntimeError("GLiFormer graph memory snapshot is unavailable")
     addresses: set[int] = set()
     pool_bytes = 0

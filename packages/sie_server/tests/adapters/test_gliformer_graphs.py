@@ -150,20 +150,24 @@ def test_over_budget_capture_is_not_retained(room: dict[str, Any]) -> None:
 def test_private_pool_accounting_survives_unrelated_driver_frees(
     monkeypatch: pytest.MonkeyPatch, free_after: int, expected: int
 ) -> None:
-    pool = (42, 0)
+    pool = (1000000, 0)
     snapshot = Mock(
         return_value=[
             {"segment_pool_id": pool, "device": 0, "total_size": 4096, "address": 4096},
             {"segment_pool_id": pool, "device": 0, "total_size": 8192, "address": 8192},
+            {"segment_pool_id": (1000001, 0), "device": 0, "total_size": 65536, "address": 16384},
+            {"segment_pool_id": (0, 0), "device": 1, "total_size": 65536, "address": 32768},
         ]
     )
     monkeypatch.setattr(torch.cuda, "memory_snapshot", snapshot)
     monkeypatch.setattr(graphs, "free_memory", lambda _: free_after)
     assert graphs._capture_device_bytes(SimpleNamespace(pool=lambda: pool), torch.device("cuda:0"), 15000) == expected
-    snapshot.assert_called_once_with(pool)
+    snapshot.assert_called_once_with()
 
 
-@pytest.mark.parametrize("invalid", ["missing", "error", "wrong_pool", "wrong_device", "negative", "duplicate"])
+@pytest.mark.parametrize(
+    "invalid", ["missing", "error", "wrong_pool", "wrong_device", "negative", "duplicate", "nonlist", "malformed"]
+)
 def test_failed_pool_accounting_cannot_publish_a_graph(
     room: dict[str, Any], monkeypatch: pytest.MonkeyPatch, invalid: str
 ) -> None:
@@ -180,8 +184,13 @@ def test_failed_pool_accounting_cannot_publish_a_graph(
         segments.append(segment.copy())
     elif invalid == "missing":
         segments.clear()
+    value: Any = segments
+    if invalid == "nonlist":
+        value = {}
+    elif invalid == "malformed":
+        value = [None]
     snapshot = (
-        Mock(side_effect=RuntimeError("snapshot unavailable")) if invalid == "error" else Mock(return_value=segments)
+        Mock(side_effect=RuntimeError("snapshot unavailable")) if invalid == "error" else Mock(return_value=value)
     )
     monkeypatch.setattr(torch.cuda, "memory_snapshot", snapshot)
     runner = _PolicyRunner()
@@ -207,7 +216,7 @@ def test_private_pool_total_rejects_capture_even_when_driver_memory_increases(
     monkeypatch.setattr(
         torch.cuda,
         "memory_snapshot",
-        lambda _: [{"segment_pool_id": pool, "device": 0, "total_size": 8192, "address": 4096}],
+        lambda: [{"segment_pool_id": pool, "device": 0, "total_size": 8192, "address": 4096}],
     )
     monkeypatch.setattr(graphs, "free_memory", lambda _: 20000)
     runner = _PolicyRunner()
