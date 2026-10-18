@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
+from packaging.requirements import Requirement
 from sie_server.bundle_requirements import (
     bundle_requirements_sha256,
     lock_constraint_lines,
@@ -82,8 +83,11 @@ def test_exact_pins_and_url_specs_override_the_lock() -> None:
     for requirement in url_specs:
         assert requirement in merged
     # Ranges that do not contain the locked version stay as written.
-    assert "transformers>=5.14,<6" in merged
-    assert "sentence-transformers>=5.6,<6" in merged
+    for name in ("transformers", "sentence-transformers"):
+        declared = [raw for raw in original if Requirement(raw).name == name]
+        assert len(declared) == 1
+        assert not Requirement(declared[0]).specifier.contains(locked[name], prereleases=True)
+        assert declared[0] in merged
     constraints = lock_constraint_lines(original, parsed)
     assert "gliner2==2.0.0" not in constraints
     assert f"gliner2=={locked['gliner2']}" not in constraints
