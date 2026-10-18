@@ -21,10 +21,14 @@ from sie_server.adapters.cross_encoder import CrossEncoderAdapter
 from sie_server.adapters.cross_encoder.runtime_lora import CrossEncoderLoraAdapter
 from sie_server.adapters.docling.adapter import DoclingAdapter
 from sie_server.adapters.pytorch_embedding import PyTorchEmbeddingAdapter
+from sie_server.adapters.sglang import generation as sglang_generation
+from sie_server.adapters.sglang_vision_extract import adapter as sglang_vision
 from sie_server.adapters.siglip.adapter import SiglipAdapter
 from sie_server.types.inputs import Item
 from transformers import (
     AutoConfig,
+    AutoProcessor,
+    AutoTokenizer,
     BertConfig,
     BertForSequenceClassification,
     BertModel,
@@ -148,6 +152,156 @@ def test_direct_load_rejects_config_structure_before_model_construction(
         adapter.load("cpu")
     assert adapter._model is None
     kernel_boundary.assert_not_called()
+
+
+@_EXACT_TF4
+@pytest.mark.parametrize("field", _PRIVATE_FIELDS)
+def test_sglang_parent_processor_guards_actual_config_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    tokenizer = _tokenizer(tmp_path)
+    _bert_config(tokenizer).save_pretrained(tmp_path)
+    expected = AutoProcessor.from_pretrained(tmp_path, trust_remote_code=False)
+    _update_config(tmp_path / "config.json", **{field: _ATTACK})
+    native = AutoConfig.from_pretrained
+    observations = []
+
+    def observed_config(cls: type, *args: Any, **kwargs: Any) -> Any:
+        assert getattr(PretrainedConfig.__init__, "_sie_kernel_security_backport", False)
+        config = native(*args, **kwargs)
+        observations.append(config)
+        return config
+
+    monkeypatch.setattr(AutoConfig, "from_pretrained", classmethod(observed_config))
+    engine = Mock()
+    monkeypatch.setattr(sglang_vision.SGLangGenerationAdapter, "load", engine)
+    adapter = sglang_vision.SGLangVisionExtractAdapter(tmp_path, trust_remote_code=False)
+    start_loop = Mock()
+    monkeypatch.setattr(adapter, "_start_request_loop", start_loop)
+    try:
+        adapter.load("cuda:0")  # Only the real CPU processor runs; the engine boundary is mocked.
+        assert observations
+        assert all(getattr(config, field, None) is None for config in observations)
+        assert type(adapter._processor) is type(expected) is BertTokenizerFast
+        assert adapter._processor(["alice", "bob"]) == expected(["alice", "bob"])
+        engine.assert_called_once_with("cuda:0")
+        start_loop.assert_called_once_with()
+    finally:
+        adapter.unload()
+
+
+@_EXACT_TF4
+@pytest.mark.parametrize("field", _STRUCTURE_FIELDS)
+def test_sglang_parent_processor_rejects_config_structure_before_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    _bert_config(_tokenizer(tmp_path)).save_pretrained(tmp_path)
+    _update_config(tmp_path / "config.json", **{field: {"__class__": "owned-marker"}})
+    engine = Mock()
+    monkeypatch.setattr(sglang_vision.SGLangGenerationAdapter, "load", engine)
+    adapter = sglang_vision.SGLangVisionExtractAdapter(tmp_path, trust_remote_code=False)
+    start_loop = Mock()
+    monkeypatch.setattr(adapter, "_start_request_loop", start_loop)
+    with pytest.raises(ValueError, match="config attribute structure"):
+        adapter.load("cuda:0")
+    assert adapter._processor is None
+    engine.assert_not_called()
+    start_loop.assert_not_called()
+
+
+@_EXACT_TF4
+def test_sglang_parent_processor_refuses_unsupported_version_before_constructor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("transformers.__version__", "4.57.5")
+    processor = Mock(side_effect=AssertionError("Processor must not run"))
+    engine = Mock(side_effect=AssertionError("Engine must not run"))
+    monkeypatch.setattr(AutoProcessor, "from_pretrained", processor)
+    monkeypatch.setattr(sglang_vision.SGLangGenerationAdapter, "load", engine)
+    adapter = sglang_vision.SGLangVisionExtractAdapter(tmp_path, trust_remote_code=False)
+    with pytest.raises(RuntimeError, match=r"requires transformers==4\.57\.6"):
+        adapter.load("cuda:0")
+    assert adapter._processor is None
+    processor.assert_not_called()
+    engine.assert_not_called()
+
+
+def _reasoning_tokenizer(directory: Path) -> BertTokenizerFast:
+    tokenizer = _tokenizer(directory)
+    tokenizer.add_special_tokens({"additional_special_tokens": ["<think>", "</think>"]})
+    tokenizer.save_pretrained(directory)
+    _bert_config(tokenizer).save_pretrained(directory)
+    config_path = directory / "tokenizer_config.json"
+    config = json.loads(config_path.read_text())
+    del config["tokenizer_class"]  # Exercise AutoTokenizer's actual AutoConfig fallback.
+    config_path.write_text(json.dumps(config))
+    return tokenizer
+
+
+@_EXACT_TF4
+@pytest.mark.parametrize("field", _PRIVATE_FIELDS)
+def test_sglang_parent_reasoning_tokenizer_guards_actual_config_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    tokenizer = _reasoning_tokenizer(tmp_path)
+    _update_config(tmp_path / "config.json", **{field: _ATTACK})
+    native = AutoConfig.from_pretrained
+    observations = []
+
+    def observed_config(cls: type, *args: Any, **kwargs: Any) -> Any:
+        assert getattr(PretrainedConfig.__init__, "_sie_kernel_security_backport", False)
+        config = native(*args, **kwargs)
+        observations.append(config)
+        return config
+
+    monkeypatch.setattr(AutoConfig, "from_pretrained", classmethod(observed_config))
+    ids = sglang_generation._reasoning_control_token_ids(
+        str(tmp_path), revision=None, trust_remote_code=False, reasoning_format="qwen3"
+    )
+    assert observations
+    assert all(getattr(config, field, None) is None for config in observations)
+    assert ids == {
+        "open": tokenizer.convert_tokens_to_ids("<think>"),
+        "close": tokenizer.convert_tokens_to_ids("</think>"),
+        "newline": None,
+    }
+
+
+@_EXACT_TF4
+@pytest.mark.parametrize("field", _STRUCTURE_FIELDS)
+def test_sglang_parent_reasoning_tokenizer_rejects_structure_before_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    _reasoning_tokenizer(tmp_path)
+    _update_config(tmp_path / "config.json", **{field: {"__class__": "owned-marker"}})
+    reserve_port = Mock(side_effect=AssertionError("Engine resources must not be reserved"))
+    monkeypatch.setattr(sglang_generation._server, "find_free_port", reserve_port)
+    adapter = sglang_generation.SGLangGenerationAdapter(
+        str(tmp_path), reasoning_parser="qwen3", thinking_budget=32, trust_remote_code=False
+    )
+    with pytest.raises(ValueError, match="config attribute structure"):
+        adapter.load("cuda:0")
+    assert adapter._thinking_budget_tokens is None
+    reserve_port.assert_not_called()
+
+
+@_EXACT_TF4
+def test_sglang_parent_reasoning_tokenizer_refuses_unsupported_version_before_constructor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("transformers.__version__", "4.57.5")
+    tokenizer = Mock(side_effect=AssertionError("Tokenizer must not run"))
+    reserve_port = Mock(side_effect=AssertionError("Engine resources must not be reserved"))
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", tokenizer)
+    monkeypatch.setattr(sglang_generation._server, "find_free_port", reserve_port)
+    adapter = sglang_generation.SGLangGenerationAdapter(
+        str(tmp_path), reasoning_parser="qwen3", thinking_budget=32, trust_remote_code=False
+    )
+    with pytest.raises(RuntimeError, match=r"requires transformers==4\.57\.6"):
+        adapter.load("cuda:0")
+    assert adapter._thinking_budget_tokens is None
+    tokenizer.assert_not_called()
+    reserve_port.assert_not_called()
 
 
 @_EXACT_TF4

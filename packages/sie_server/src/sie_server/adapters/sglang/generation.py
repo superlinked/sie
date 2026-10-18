@@ -53,6 +53,7 @@ from sie_server.adapters._generation_base import (
     resolve_reasoning_format,
 )
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters.sglang import _server
 from sie_server.adapters.sglang._compat.sie_thinking_budget import PARAM as THINKING_BUDGET_PARAM
@@ -221,6 +222,7 @@ def _reasoning_control_token_ids(
     """
     from transformers import AutoTokenizer
 
+    install_transformers_security_fixes()
     tokenizer = AutoTokenizer.from_pretrained(
         model_name_or_path, revision=revision, trust_remote_code=trust_remote_code
     )
