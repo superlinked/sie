@@ -202,7 +202,10 @@ def read_packages(path: Path, target: Target) -> dict[str, dict[str, Any]]:
         if name in result:
             msg = f"duplicate locked distribution: {name}"
             raise ValueError(msg)
-        wheels = row.get("wheels", [])
+        wheels = list(row.get("wheels", []))
+        archive = row.get("archive")
+        if archive and urlsplit(archive["url"]).path.endswith(".whl"):
+            wheels.append(archive)
         if wheels:
             compatible = False
             for wheel in wheels:
@@ -278,6 +281,39 @@ def validate_exceptions(
             raise ValueError(msg)
 
 
+def source_constraints(pins: Mapping[str, Mapping[str, str]]) -> list[str]:
+    """Bind an undated platform wheel without relaxing the global cutoff."""
+    result = []
+    for name, pin in sorted(pins.items()):
+        url = _public_url(pin.get("url"))
+        sha = pin.get("sha256", "")
+        filename = unquote(urlsplit(url).path).rsplit("/", maxsplit=1)[-1]
+        wheel_name, version, _build, _tags = parse_wheel_filename(filename)
+        if (
+            canonicalize_name(name) != name
+            or wheel_name != name
+            or version != Version(pin["version"])
+            or not _SHA256.fullmatch(sha)
+            or urlsplit(url).fragment
+            or not pin.get("reason", "").strip()
+        ):
+            msg = f"platform source pin is not exact or documented: {name}"
+            raise ValueError(msg)
+        result.append(f"{name} @ {url}#sha256={sha}")
+    return result
+
+
+def validate_source_pins(packages: Mapping[str, Mapping[str, Any]], pins: Mapping[str, Mapping[str, str]]) -> None:
+    """A recorded platform source is mandatory, not merely an index hint."""
+    source_constraints(pins)
+    for name, pin in pins.items():
+        package = packages.get(name)
+        expected = [{"url": pin["url"], "sha256": pin["sha256"]}]
+        if package is None or package["version"] != pin["version"] or artifact_sources(package) != expected:
+            msg = f"locked platform source differs: {name}"
+            raise ValueError(msg)
+
+
 def _check_requirement_source(requirement: Requirement, package: Mapping[str, Any]) -> None:
     if requirement.url is None:
         return
@@ -314,8 +350,12 @@ def check_lock(
     requirements = bundle_requirements(bundles, target)
     expected_inputs = {"uv_lock_sha256": digest(root_lock), "requirements_sha256": canonical_digest(requirements)}
     exceptions = exception_file["targets"].get(target.name, {})
+    source_pins = exception_file.get("source_pins", {}).get(target.name, {})
     if manifest.get("inputs") != expected_inputs or manifest.get("exceptions_sha256") != canonical_digest(exceptions):
         msg = "bundle lock inputs changed; recompile and review the complete closure"
+        raise ValueError(msg)
+    if manifest.get("source_pins_sha256") != canonical_digest(source_pins):
+        msg = "bundle platform source pins changed; recompile and review"
         raise ValueError(msg)
     lock = folder / "pylock.toml"
     if manifest.get("lock_sha256") != digest(lock):
@@ -323,6 +363,7 @@ def check_lock(
         raise ValueError(msg)
     packages = read_packages(lock, target)
     validate_exceptions(packages, root_lock, exceptions)
+    validate_source_pins(packages, source_pins)
     for line in requirements:
         requirement = Requirement(line)
         if requirement.marker is not None and not requirement.marker.evaluate(target.marker_environment()):
@@ -443,6 +484,7 @@ def verify_inventory(
         "lock_sha256": checked["manifest"]["lock_sha256"],
         "inputs": checked["manifest"]["inputs"],
         "exceptions_sha256": checked["manifest"]["exceptions_sha256"],
+        "source_pins_sha256": checked["manifest"]["source_pins_sha256"],
         "policy_sha256": checked["manifest"]["policy_sha256"],
         "uv_version": checked["manifest"]["uv_version"],
         "runtime_python_version": host_platform.python_version(),

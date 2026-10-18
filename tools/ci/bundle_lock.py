@@ -32,7 +32,9 @@ from sie_server.bundle_lock import (
     policy_digest,
     read_packages,
     root_constraints,
+    source_constraints,
     validate_exceptions,
+    validate_source_pins,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -138,8 +140,9 @@ def complete_artifact_hashes(lock: Path) -> list[dict[str, object]]:
 def compile_target(root: Path, target: Target, uv: str, cutoff: str, cache: Path | None) -> None:
     policy = json.loads((root / LOCKS / "exceptions.json").read_text())
     exceptions = policy["targets"].get(target.name, {})
+    source_pins = policy.get("source_pins", {}).get(target.name, {})
     requirements = bundle_requirements(root / BUNDLES, target)
-    constraints = root_constraints(root / "uv.lock", exceptions)
+    constraints = root_constraints(root / "uv.lock", exceptions) + source_constraints(source_pins)
     version = subprocess.run(  # noqa: S603 - explicit compiler executable, no shell
         [uv, "--version"], check=True, capture_output=True, text=True
     ).stdout.split()
@@ -182,6 +185,7 @@ def compile_target(root: Path, target: Target, uv: str, cutoff: str, cache: Path
         completed_hashes = complete_artifact_hashes(directory / "pylock.toml")
         packages = read_packages(directory / "pylock.toml", target)
         validate_exceptions(packages, root / "uv.lock", exceptions)
+        validate_source_pins(packages, source_pins)
         manifest = {
             "schema_version": SCHEMA_VERSION,
             "target": target.as_dict(),
@@ -195,6 +199,7 @@ def compile_target(root: Path, target: Target, uv: str, cutoff: str, cache: Path
                 "requirements_sha256": canonical_digest(requirements),
             },
             "exceptions_sha256": canonical_digest(exceptions),
+            "source_pins_sha256": canonical_digest(source_pins),
             "lock_sha256": digest(directory / "pylock.toml"),
         }
         destination = root / LOCKS / target.name

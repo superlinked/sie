@@ -1005,13 +1005,13 @@ wheels = [{ url = "https://files.pythonhosted.org/packages/5d/40/e1e72872c6354b3
 
 [[packages]]
 name = "sgl-deep-ep"
-version = "0.1.2"
-wheels = [{ url = "https://files.pythonhosted.org/packages/e5/4d/eff6ebd61e34c4e617f1373a4ebc35a25b884cf54a4879664dfd6327c87d/sgl_deep_ep-0.1.2-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", upload-time = 2026-08-19T23:29:21Z, size = 15331145, hashes = { sha256 = "63c90e60b5cbb63dac10ab62b432306c37ce2f7777ffb3f05bee765210a31c80" } }]
+version = "0.1.2+cu130"
+archive = { url = "https://github.com/sgl-project/whl/releases/download/v0.1.2/sgl_deep_ep-0.1.2+cu130-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hashes = { sha256 = "9c15cb83b56bcc1ec1a838f47a06e9e067c69e0f0b16498d0e7451a548c2047a" } }
 
 [[packages]]
 name = "sgl-deep-gemm"
-version = "0.2.0"
-wheels = [{ url = "https://files.pythonhosted.org/packages/d3/7e/f334fc133f1a710841b0d6ddf8d29148c6b367f32b270f8664529e622559/sgl_deep_gemm-0.2.0-py3-none-manylinux2014_x86_64.whl", upload-time = 2026-09-14T06:16:37Z, size = 5419649, hashes = { sha256 = "f208c333fca6686b482abc1e2dbb1960cd73be92f632829dc46fd6f7e9b9fb4d" } }]
+version = "0.2.0+cu130"
+archive = { url = "https://github.com/sgl-project/whl/releases/download/v0.2.0/sgl_deep_gemm-0.2.0+cu130-py3-none-manylinux2014_x86_64.whl", hashes = { sha256 = "acdb102d1e0ba82b64af343412214d92e0f192f4ddc07101e8763c0c1e638ac0" } }
 
 [[packages]]
 name = "sglang"
@@ -1020,8 +1020,8 @@ wheels = [{ url = "https://files.pythonhosted.org/packages/34/33/a253bf07c3973f2
 
 [[packages]]
 name = "sglang-kernel"
-version = "0.4.7"
-wheels = [{ url = "https://files.pythonhosted.org/packages/63/db/45fcc5dc66de8e8f2e63c908b30bc309f20086d6b063a1aaa813c6dc478f/sglang_kernel-0.4.7-cp310-abi3-manylinux2014_x86_64.whl", upload-time = 2026-09-13T22:54:51Z, size = 373107099, hashes = { sha256 = "666f39de214a1558c5a98f43e6562e1032d8d08823b61f6a307830882f3241ce" } }]
+version = "0.4.7+cu130"
+archive = { url = "https://github.com/sgl-project/whl/releases/download/v0.4.7/sglang_kernel-0.4.7+cu130-cp310-abi3-manylinux2014_x86_64.whl", hashes = { sha256 = "d312128f33e95dec2f7e9f6b7f4295d092e430cb9ef3e07a3a970e0741c7023e" } }
 
 [[packages]]
 name = "shellingham"

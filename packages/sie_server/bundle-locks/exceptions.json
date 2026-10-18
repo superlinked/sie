@@ -1,5 +1,27 @@
 {
   "schema_version": 1,
+  "source_pins": {
+    "cuda13-sglang-cu130-amd64": {
+      "sgl-deep-ep": {
+        "reason": "Preserve the CUDA13 bundle's native cu130 variant. The official cu130 index omits upload timestamps, so uv0.9.28 excludes this artifact under the global cutoff. This exact public wheel and SHA256 are an explicit source exception; the cutoff still applies to index-resolved candidates.",
+        "sha256": "9c15cb83b56bcc1ec1a838f47a06e9e067c69e0f0b16498d0e7451a548c2047a",
+        "url": "https://github.com/sgl-project/whl/releases/download/v0.1.2/sgl_deep_ep-0.1.2+cu130-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "version": "0.1.2+cu130"
+      },
+      "sgl-deep-gemm": {
+        "reason": "Preserve the CUDA13 compatibility smoke's required 0.2.0+cu130 variant. The official cu130 index omits upload timestamps, so uv0.9.28 excludes this artifact under the global cutoff. This exact public wheel and SHA256 are an explicit source exception; the cutoff still applies to index-resolved candidates.",
+        "sha256": "acdb102d1e0ba82b64af343412214d92e0f192f4ddc07101e8763c0c1e638ac0",
+        "url": "https://github.com/sgl-project/whl/releases/download/v0.2.0/sgl_deep_gemm-0.2.0+cu130-py3-none-manylinux2014_x86_64.whl",
+        "version": "0.2.0+cu130"
+      },
+      "sglang-kernel": {
+        "reason": "Preserve the CUDA13 compatibility smoke's required 0.4.7+cu130 variant. The official cu130 index omits upload timestamps, so uv0.9.28 excludes this artifact under the global cutoff. This exact public wheel and SHA256 are an explicit source exception; the cutoff still applies to index-resolved candidates.",
+        "sha256": "d312128f33e95dec2f7e9f6b7f4295d092e430cb9ef3e07a3a970e0741c7023e",
+        "url": "https://github.com/sgl-project/whl/releases/download/v0.4.7/sglang_kernel-0.4.7+cu130-cp310-abi3-manylinux2014_x86_64.whl",
+        "version": "0.4.7+cu130"
+      }
+    }
+  },
   "scope": "Exact version and artifact-source departures for the bundle-libs overlay only. Root-compatible overlaps remain pinned.",
   "targets": {
     "cpu-ctranslate2-amd64": {},

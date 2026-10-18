@@ -15,8 +15,9 @@
     "uv_lock_sha256": "70fa46eb35df2c928eb419caec58a8cda544aea28196ef127006a65bb062ef94"
   },
   "lock_sha256": "a74358f2ff818ad75d589987a4dd34ca9340a9a6739c8bc041671f658330bea8",
-  "policy_sha256": "843447f263635fd10ec336d2e678de73ef23dfc1ae1cd07cc83ee9c204a6b203",
+  "policy_sha256": "ad0ea4aba9172f1b79f0c8fb274af90d4d3d161c74e0eb578f9d63c3cd3b5bea",
   "schema_version": 1,
+  "source_pins_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
   "target": {
     "architecture": "amd64",
     "bundle": "sglang-vision-extract",

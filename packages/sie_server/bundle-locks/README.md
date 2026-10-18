@@ -54,6 +54,14 @@ and engine-required Transformers, Torch, and related versions are also explicit.
 Same-byte public mirrors and a root entry without artifact records are labeled
 source differences; they are not reported as dependency incompatibilities.
 
+The CUDA 13 SGLang index omits upload timestamps for its native cu130 wheels.
+The global cutoff therefore excludes those index candidates in uv 0.9.28.
+The `source_pins` records preserve the established cu130 variants with exact
+public wheel URLs, versions, SHA256 hashes, and reasons. These are explicit
+exceptions for the named artifacts, not a disabled cutoff: all index-resolved
+candidates still obey the compilation cutoff. The verifier rejects a missing,
+changed, or substituted source pin, and binds its digest into the build receipt.
+
 ## Validation and updates
 
 From a bootstrapped clean checkout:

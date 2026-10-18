@@ -18,7 +18,9 @@ from sie_server.bundle_lock import (
     read_packages,
     required_exceptions,
     root_constraints,
+    source_constraints,
     validate_exceptions,
+    validate_source_pins,
     verify_inventory,
 )
 
@@ -65,6 +67,7 @@ def locked(tmp_path):
         "inputs": {"uv_lock_sha256": digest(root_lock), "requirements_sha256": canonical_digest(["demo>=1,<2"])},
         "lock_sha256": digest(lock),
         "exceptions_sha256": canonical_digest({}),
+        "source_pins_sha256": canonical_digest({}),
     }
     (folder / "manifest.json").write_text(json.dumps(manifest))
     (locks / "exceptions.json").write_text(json.dumps({"schema_version": 1, "targets": {}}))
@@ -81,7 +84,7 @@ def test_clean_metadata_inventory_is_checked_without_importing_package(locked, t
     assert receipt["lock_sha256"] == checked["manifest"]["lock_sha256"]
 
 
-@pytest.mark.parametrize("mutation", ["root", "requirements", "target", "lock", "exception", "policy"])
+@pytest.mark.parametrize("mutation", ["root", "requirements", "target", "lock", "exception", "source_pin", "policy"])
 def test_stale_inputs_and_wrong_target_fail_before_install(locked, mutation):
     locks, bundles, root_lock = locked
     manifest_path = locks / TARGET.name / "manifest.json"
@@ -99,6 +102,10 @@ def test_stale_inputs_and_wrong_target_fail_before_install(locked, mutation):
     elif mutation == "policy":
         manifest["policy_sha256"] = "c" * 64
         manifest_path.write_text(json.dumps(manifest))
+    elif mutation == "source_pin":
+        (locks / "exceptions.json").write_text(
+            json.dumps({"schema_version": 1, "targets": {}, "source_pins": {TARGET.name: {"demo": {}}}})
+        )
     else:
         (locks / "exceptions.json").write_text(
             json.dumps({"schema_version": 1, "targets": {TARGET.name: {"demo": {"version": "2.0"}}}})
@@ -181,6 +188,56 @@ def test_root_pins_do_not_use_a_post_release_wildcard(tmp_path):
         '[[package]]\nname="torch"\nversion="2.9.1+cu129"\nsource={registry="https://download.pytorch.org/whl/cu129"}\n'
     )
     assert root_constraints(lock, {}) == ["torch==2.9.1"]
+
+
+def pinned_source():
+    return {"demo": {"version": "1.0", "url": WHEEL_URL, "sha256": HASH, "reason": "Exact undated platform wheel."}}
+
+
+def test_platform_source_pin_constrains_version_url_and_hash(locked):
+    pins = pinned_source()
+    assert source_constraints(pins) == [f"demo @ {WHEEL_URL}#sha256={HASH}"]
+    packages = read_packages(locked[0] / TARGET.name / "pylock.toml", TARGET)
+    validate_source_pins(packages, pins)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "version", "url", "hash", "stale"])
+def test_platform_source_substitution_is_rejected(locked, mutation):
+    packages = read_packages(locked[0] / TARGET.name / "pylock.toml", TARGET)
+    pins = pinned_source()
+    if mutation == "missing":
+        packages.pop("demo")
+    elif mutation == "version":
+        packages["demo"]["version"] = "1.1"
+    elif mutation == "url":
+        packages["demo"]["wheels"][0]["url"] = WHEEL_URL.replace("files.pythonhosted.org", "example.test")
+    elif mutation == "hash":
+        packages["demo"]["wheels"][0]["hashes"]["sha256"] = "b" * 64
+    else:
+        pins["other"] = pins.pop("demo") | {"url": WHEEL_URL.replace("demo-", "other-")}
+    with pytest.raises(ValueError, match="locked platform source differs"):
+        validate_source_pins(packages, pins)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"), [("sha256", "unpinned"), ("version", "1.1"), ("reason", ""), ("url", WHEEL_URL + "#unreviewed")]
+)
+def test_inexact_platform_pin_is_refused_before_compile(field, value):
+    pins = pinned_source()
+    pins["demo"][field] = value
+    with pytest.raises(ValueError, match="not exact or documented"):
+        source_constraints(pins)
+
+
+def test_direct_wheel_source_still_checks_target_architecture(locked):
+    path = locked[0] / TARGET.name / "pylock.toml"
+    arm_url = WHEEL_URL.replace("py3-none-any", "cp312-cp312-manylinux_2_28_aarch64")
+    path.write_text(
+        'lock-version = "1.0"\n[[packages]]\nname = "demo"\nversion = "1.0"\n'
+        f'archive = {{url = "{arm_url}", hashes = {{sha256 = "{HASH}"}}}}\n'
+    )
+    with pytest.raises(ValueError, match="wheel architecture differs"):
+        read_packages(path, TARGET)
 
 
 @pytest.mark.parametrize(

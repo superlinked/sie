@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sie_server.bundle_lock import Target
@@ -104,3 +106,30 @@ def test_saved_target_and_index_policy_cannot_drift(tmp_path, monkeypatch):
 
 def test_repository_locks_bind_current_public_inputs():
     bundle_lock.check_all(bundle_lock.ROOT)
+
+
+def test_direct_platform_pins_keep_the_global_index_cutoff(tmp_path, monkeypatch):
+    target = Target("cuda13", "sglang-cu130", "amd64")
+    locks = tmp_path / bundle_lock.LOCKS
+    locks.mkdir(parents=True)
+    url = "https://example.test/demo-1.0+cu130-cp312-cp312-manylinux_2_28_x86_64.whl"
+    pin = {"version": "1.0+cu130", "url": url, "sha256": "a" * 64, "reason": "Undated native platform wheel."}
+    (locks / "exceptions.json").write_text(json.dumps({"targets": {}, "source_pins": {target.name: {"demo": pin}}}))
+    monkeypatch.setattr(bundle_lock, "bundle_requirements", lambda *_args: ["demo==1.0"])
+    monkeypatch.setattr(bundle_lock, "root_constraints", lambda *_args: ["packaging==24.2"])
+    calls = []
+
+    def compile_probe(command, **kwargs):
+        if command == ["uv", "--version"]:
+            return SimpleNamespace(stdout="uv 0.9.28\n")
+        calls.append(command)
+        constraints = (Path(kwargs["cwd"]) / "constraints.txt").read_text().splitlines()
+        assert constraints == ["packaging==24.2", f"demo @ {url}#sha256={'a' * 64}"]
+        assert command[command.index("--exclude-newer") + 1] == "2026-10-18T00:00:00Z"
+        assert "--exclude-newer-package" not in command
+        raise RuntimeError("stop before resolver")
+
+    monkeypatch.setattr(bundle_lock.subprocess, "run", compile_probe)
+    with pytest.raises(RuntimeError, match="stop before resolver"):
+        bundle_lock.compile_target(tmp_path, target, "uv", "2026-10-18T00:00:00Z", None)
+    assert len(calls) == 1
