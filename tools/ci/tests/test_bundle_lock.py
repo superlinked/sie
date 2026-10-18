@@ -108,6 +108,54 @@ def test_repository_locks_bind_current_public_inputs():
     bundle_lock.check_all(bundle_lock.ROOT)
 
 
+def test_compile_another_checkout_binds_its_compiler_policy(tmp_path, monkeypatch):
+    target = Target("cpu", "default", "amd64")
+    compiler = tmp_path / "tools/ci/bundle_lock.py"
+    compiler.parent.mkdir(parents=True)
+    compiler.write_text("# Another checkout's independently reviewed compiler.\n")
+    locks = tmp_path / bundle_lock.LOCKS
+    locks.mkdir(parents=True)
+    (locks / "exceptions.json").write_text(json.dumps({"schema_version": 1, "targets": {}}))
+    bundles = tmp_path / bundle_lock.BUNDLES
+    bundles.mkdir(parents=True)
+    (bundles / "default.yaml").write_text('deps:\n  demo: ">=1,<2"\n')
+    url = "https://files.pythonhosted.org/packages/demo-1.0-py3-none-any.whl"
+    sha = "a" * 64
+    (tmp_path / "uv.lock").write_text(
+        'version = 1\n[[package]]\nname = "demo"\nversion = "1.0"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        f'wheels = [{{url = "{url}", hash = "sha256:{sha}"}}]\n'
+    )
+    calls = []
+
+    def controlled_resolver(command, **kwargs):
+        calls.append(command)
+        if command == ["uv", "--version"]:
+            return SimpleNamespace(stdout="uv 0.9.28\n")
+        assert command[:3] == ["uv", "pip", "compile"]
+        directory = Path(kwargs["cwd"])
+        assert (directory / "requirements.in").read_text() == "demo>=1,<2\n"
+        assert (directory / "constraints.txt").read_text() == "demo==1.0\n"
+        (directory / "pylock.toml").write_text(
+            'lock-version = "1.0"\n[[packages]]\nname = "demo"\nversion = "1.0"\n'
+            f'wheels = [{{url = "{url}", hashes = {{sha256 = "{sha}"}}}}]\n'
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(bundle_lock.subprocess, "run", controlled_resolver)
+    bundle_lock.compile_target(tmp_path, target, "uv", "2026-10-18T00:00:00Z", None)
+    assert len(calls) == 2
+    checked = bundle_lock.check_lock(locks, bundles, tmp_path / "uv.lock", target, compiler=compiler)
+    assert checked["manifest"]["policy_sha256"] == bundle_lock.policy_digest(compiler)
+    assert checked["manifest"]["policy_sha256"] != bundle_lock.policy_digest()
+    assert checked["packages"]["demo"]["version"] == "1.0"
+    with pytest.raises(ValueError, match="policy changed"):
+        bundle_lock.check_lock(locks, bundles, tmp_path / "uv.lock", target)
+    compiler.write_text("# Unreviewed change in the other checkout.\n")
+    with pytest.raises(ValueError, match="policy changed"):
+        bundle_lock.check_lock(locks, bundles, tmp_path / "uv.lock", target, compiler=compiler)
+
+
 def test_direct_platform_pins_keep_the_global_index_cutoff(tmp_path, monkeypatch):
     target = Target("cuda13", "sglang-cu130", "amd64")
     locks = tmp_path / bundle_lock.LOCKS

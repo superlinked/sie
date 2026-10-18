@@ -206,7 +206,7 @@ def compile_target(root: Path, target: Target, uv: str, cutoff: str, cache: Path
         destination.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(directory / "pylock.toml", destination / "pylock.toml")
         (destination / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    check_lock(root / LOCKS, root / BUNDLES, root / "uv.lock", target)
+    check_lock(root / LOCKS, root / BUNDLES, root / "uv.lock", target, compiler=root / "tools/ci/bundle_lock.py")
 
 
 def main() -> int:
