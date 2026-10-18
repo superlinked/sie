@@ -43,9 +43,9 @@ from __future__ import annotations
 import json
 from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import islice
-from typing import Any
+from typing import Any, Self
 
 # A longer word is read in pieces of this many characters.
 MAX_WORD_CHARS = 256
@@ -65,11 +65,6 @@ WINDOW_OVERLAP_WORDS = 64
 # Most windows read of one document (about 40,000 words at 384 words a window).
 # A longer document fails with ``INPUT_TOO_LONG`` rather than being read in part.
 MAX_DOCUMENT_WINDOWS = 128
-# Characters of a document read to find one window, doubled until the window
-# ends this far inside them (or the document ends), so that a window of a long
-# document is found without copying the rest of the document each time.
-_WINDOW_SLICE_CHARS = 16384
-_WINDOW_SLICE_MARGIN = MAX_WORD_CHARS
 # Words are counted in blocks, so reading stops at most one block past the window.
 _READ_BLOCK = 64
 _COUNT_CACHE_SIZE = 16384
@@ -204,7 +199,7 @@ class WindowedSplitter:
     def window(self, text: str, *args: Any, **kwargs: Any) -> Window:
         return read_window(
             text,
-            self.splitter(text, *args, **kwargs),
+            text.words if isinstance(text, _WindowText) else self.splitter(text, *args, **kwargs),
             max_words=self.max_words,
             max_subwords=self.max_subwords,
             count_subwords=self.count_subwords,
@@ -221,6 +216,39 @@ class DocumentWindow:
     read_end: int
     # Words shared with the window before, or None for the first window.
     overlap: int | None
+    # Canonical document pieces, with offsets relative to this window. The
+    # retained pieces do not change comparisons of window boundaries/overlap.
+    words: tuple[Word, ...] | None = field(default=None, repr=False, compare=False)
+
+
+class _WindowText(str):
+    """A GLiNER input string retaining its planned word pieces and local offsets.
+
+    GLiNER passes the original string to ``words_splitter`` for both metering
+    and inference. Re-splitting a slice would lose the document's piece grid
+    when it starts inside a word (notably on a hyphen). Keeping the pieces on
+    the input avoids mutable state on the shared model or splitter.
+    """
+
+    __slots__ = ("words",)
+
+    words: tuple[Word, ...]
+
+    def __new__(cls, text: str, words: tuple[Word, ...]) -> Self:
+        instance = super().__new__(cls, text)
+        instance.words = words
+        return instance
+
+
+def _counted_pieces(text: str, splitter: WindowedSplitter) -> Iterator[tuple[Word, int]]:
+    """Read the original word grid once, counting at most one block ahead."""
+    source = pieces(splitter.splitter(text), text)
+    while block := list(islice(source, _READ_BLOCK)):
+        counts = splitter.count_subwords([word for word, _, _, _ in block])
+        if len(counts) != len(block):
+            raise RuntimeError("subword counts do not match the words counted")
+        for (word, start, end, _), count in zip(block, counts, strict=True):
+            yield (word, start, end), count
 
 
 def document_windows(
@@ -234,33 +262,39 @@ def document_windows(
 
     A text read whole is one window of all of it, so a model is given exactly
     the text it was given before. A longer text is read as successive windows,
-    each ending where ``splitter`` stops reading (``Window.cut``) and each
-    after the first starting at the start of the last ``overlap_words`` words
-    of the one before it (at most half of that window's words, so that every
-    window reads new words).
+    each after the first starting at the start of the last ``overlap_words``
+    words of the one before it (at most half of that window's words, so that
+    every window reads new words). Words are split once and retained on each
+    window: re-splitting a slice starting inside a long word need not give the
+    same pieces. Tokenization is bounded by one block beyond the words read,
+    even when a document exceeds ``max_windows``.
     """
     windows: list[DocumentWindow] = []
+    source = _counted_pieces(text, splitter)
+    following = next(source, None)
+    kept: list[tuple[Word, int]] = []
     start = 0
     overlap: int | None = None
     while True:
-        window, rest, end = _window_from(text, start, splitter)
-        words = window.words
-        if window.cut is None or not words:
-            read_end = start + (words[-1][2] if words else len(rest))
-            windows.append(DocumentWindow(start, len(text), read_end, overlap))
+        subwords = sum(count for _, count in kept)
+        while following is not None and len(kept) < splitter.max_words:
+            word, count = following
+            if kept and subwords + count > splitter.max_subwords:
+                break
+            kept.append((word, count))
+            subwords += count
+            following = next(source, None)
+        read_end = kept[-1][0][2] if kept else len(text)
+        words = tuple((word, begin - start, end - start) for (word, begin, end), _ in kept)
+        end = len(text) if following is None else read_end
+        windows.append(DocumentWindow(start, end, read_end, overlap, words))
+        if following is None or not kept:
             return windows
-        windows.append(DocumentWindow(start, start + end, start + words[-1][2], overlap))
         if len(windows) >= max_windows:
             return None
-        shared = min(overlap_words, len(words) // 2)
-        if shared:
-            start += words[len(words) - shared][1]
-        else:
-            # One word read: the next window starts at the first piece not read.
-            following = _second_piece_start(splitter, rest) or _second_piece_start(splitter, text[start:])
-            if not following:
-                raise RuntimeError("a window stopped before the end of a document, but no word follows it")
-            start += following
+        shared = min(overlap_words, len(kept) // 2)
+        kept = kept[-shared:] if shared else []
+        start = kept[0][0][1] if kept else following[0][1]
         overlap = shared
 
 
@@ -285,7 +319,8 @@ def window_rows(
     overlaps: list[int | None] = []
     for index, (text, windows) in enumerate(zip(texts, plans, strict=True)):
         for window in windows or []:
-            rows.append(text[window.start : window.end])
+            row = text[window.start : window.end]
+            rows.append(_WindowText(row, window.words) if window.words is not None else row)
             owners.append(index)
             overlaps.append(window.overlap)
     return rows, owners, overlaps
@@ -299,44 +334,6 @@ def window_item_counts(row_counts: Sequence[int] | None, owners: Sequence[int], 
     for owner, count in zip(owners, row_counts, strict=True):
         counts[owner] += count
     return counts
-
-
-def _second_piece_start(splitter: WindowedSplitter, text: str) -> int | None:
-    second = next(islice(pieces(splitter.splitter(text), text), 1, 2), None)
-    return None if second is None else second[1]
-
-
-def _window_from(text: str, start: int, splitter: WindowedSplitter) -> tuple[Window, str, int]:
-    """The window ``splitter`` reads of ``text[start:]``, the text it was read from, and where the window's text ends.
-
-    Reads a prefix of ``text[start:]`` that grows until the first piece the
-    window does not read ends at least ``_WINDOW_SLICE_MARGIN`` characters
-    before the prefix does: a word splitter matching words by pattern then
-    reads the same pieces up to it as in the whole text, and so the same
-    window. The window's text is ``rest[:cut]`` when that ends inside the
-    prefix, or else the prefix itself (a word too long for the prefix is read
-    in pieces of which the window reads only the first).
-    """
-    size = _WINDOW_SLICE_CHARS
-    while True:
-        rest = text[start : start + size]
-        window = splitter.window(rest)
-        if start + size >= len(text):
-            return window, rest, len(rest) if window.cut is None else window.cut
-        if window.cut is not None and window.words:
-            if window.cut + _WINDOW_SLICE_MARGIN <= len(rest):
-                return window, rest, window.cut
-            following = _piece_end_after(splitter, rest, window.words[-1][2])
-            if following is not None and following + _WINDOW_SLICE_MARGIN <= len(rest):
-                return window, rest, len(rest)
-        size *= 2
-
-
-def _piece_end_after(splitter: WindowedSplitter, text: str, offset: int) -> int | None:
-    """The end of the first piece of ``text`` after ``offset`` (the end of a piece), or None when there is none."""
-    tail = text[offset:]
-    first = next(pieces(splitter.splitter(tail), tail), None)
-    return None if first is None else offset + first[2]
 
 
 def merge_window_spans(

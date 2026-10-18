@@ -275,7 +275,7 @@ class BGEM3FlashAdapter(BGEM3ScoreMixin, PEFTLoRAMixin, FlashBaseAdapter):
         pos_emb = embeddings.position_embeddings(position_ids)
         token_type_emb = embeddings.token_type_embeddings(torch.zeros_like(input_ids))
 
-        hidden = word_emb + pos_emb + token_type_emb
+        hidden = word_emb + token_type_emb + pos_emb
         hidden = embeddings.LayerNorm(hidden)
         hidden = embeddings.dropout(hidden)
 

@@ -249,6 +249,7 @@ processors:
       - context: metric
         statements:
           - 'set(unit, "") where name == "sie.gateway.pool.pinned_model.loaded"'
+          - 'set(unit, "") where name == "sie.gateway.model_loads_in_progress"'
   transform/prometheus_application_identity:
     error_mode: propagate
     metric_statements:

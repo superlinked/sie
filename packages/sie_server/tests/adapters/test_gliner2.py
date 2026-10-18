@@ -2,7 +2,7 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -22,6 +22,8 @@ def test_classification_mode_maps_single_label_confidence() -> None:
         default_labels=["safe", "unsafe"],
     )
     adapter._model = MagicMock()
+    adapter._count_prompt = lambda _schema: 8
+    adapter._model._parse_field_spec.return_value = ("name", "str", None, None)
     adapter._model.classify_text.return_value = {"prompt_safety": {"label": "unsafe", "confidence": 0.91}}
 
     output = adapter.extract(
@@ -52,6 +54,8 @@ def test_request_labels_override_configured_defaults() -> None:
         default_labels=["safe", "unsafe"],
     )
     adapter._model = MagicMock()
+    adapter._count_prompt = lambda _schema: 8
+    adapter._model._parse_field_spec.return_value = ("name", "str", None, None)
     adapter._model.classify_text.return_value = {"prompt_safety": {"label": "review", "confidence": 0.7}}
 
     adapter.extract(
@@ -72,6 +76,8 @@ def test_configured_default_labels_are_validated(default_labels: Any) -> None:
 def test_classification_mode_maps_batch_multi_label_runtime_overrides() -> None:
     adapter = GLiNER2Adapter("test-model", classification_task="prompt_safety")
     adapter._model = MagicMock()
+    adapter._count_prompt = lambda _schema: 8
+    adapter._model._parse_field_spec.return_value = ("name", "str", None, None)
     adapter._model.batch_classify_text.return_value = [
         {
             "jailbreak_detection": [
@@ -121,6 +127,8 @@ def test_classification_mode_maps_batch_multi_label_runtime_overrides() -> None:
 def test_entity_mode_remains_the_default() -> None:
     adapter = GLiNER2Adapter("test-model")
     adapter._model = MagicMock()
+    adapter._count_prompt = lambda _schema: 8
+    adapter._model._parse_field_spec.return_value = ("name", "str", None, None)
     adapter._model.extract_entities.return_value = {
         "entities": {
             "person": [
@@ -158,6 +166,8 @@ def test_entity_mode_remains_the_default() -> None:
 def test_classification_task_rejects_empty_runtime_override() -> None:
     adapter = GLiNER2Adapter("test-model", classification_task="prompt_safety")
     adapter._model = MagicMock()
+    adapter._count_prompt = lambda _schema: 8
+    adapter._model._parse_field_spec.return_value = ("name", "str", None, None)
 
     with pytest.raises(ValueError, match="classification_task must be a non-empty string"):
         adapter.extract(
@@ -170,6 +180,8 @@ def test_classification_task_rejects_empty_runtime_override() -> None:
 def test_multi_label_rejects_non_boolean_runtime_values() -> None:
     adapter = GLiNER2Adapter("test-model", classification_task="prompt_safety")
     adapter._model = MagicMock()
+    adapter._count_prompt = lambda _schema: 8
+    adapter._model._parse_field_spec.return_value = ("name", "str", None, None)
 
     with pytest.raises(ValueError, match="multi_label must be boolean"):
         adapter.extract(
@@ -183,6 +195,8 @@ def test_multi_label_rejects_non_boolean_runtime_values() -> None:
 def test_classification_rejects_invalid_confidence(confidence: object) -> None:
     adapter = GLiNER2Adapter("test-model", classification_task="prompt_safety")
     adapter._model = MagicMock()
+    adapter._count_prompt = lambda _schema: 8
+    adapter._model._parse_field_spec.return_value = ("name", "str", None, None)
     adapter._model.classify_text.return_value = {"prompt_safety": {"label": "safe", "confidence": confidence}}
 
     with pytest.raises(ValueError, match="invalid classification confidence"):
@@ -198,7 +212,7 @@ def test_transformers5_bundle_carries_gliner2_classification_runtime() -> None:
     model = yaml.safe_load(model_path.read_text())
 
     assert "sie_server.adapters.gliner2.adapter" in default["adapters"]
-    assert default["deps"]["gliner2"] == ">=1.3.1,<2"
+    assert default["deps"]["gliner2"] == ">=1.3.2,<=2.0.0"
     assert "sie_server.adapters.gliner2.classification" not in default["adapters"]
     assert "sie_server.adapters.gliner2.classification" in transformers5["adapters"]
     assert "sie_server.adapters.gliner2.adapter" not in transformers5["adapters"]
@@ -224,6 +238,8 @@ def test_gliguard_profile_executes_without_request_labels() -> None:
     adapter = load_adapter(config, models_dir, device="cpu")
     assert isinstance(adapter, GLiNER2ClassificationAdapter)
     adapter._model = MagicMock()
+    adapter._count_prompt = lambda _schema: 8
+    adapter._model._parse_field_spec.return_value = ("name", "str", None, None)
     adapter._model.classify_text.return_value = {"prompt_safety": {"label": "safe", "confidence": 0.8}}
 
     output = adapter.extract([Item(text="Write a birthday greeting")])
@@ -241,8 +257,10 @@ def test_classification_routing_seam_reuses_general_implementation() -> None:
 def _adapter_with_counting_model(*, max_seq_length: int = 512) -> tuple[GLiNER2Adapter, MagicMock]:
     adapter = GLiNER2Adapter("test-model", max_seq_length=max_seq_length)
     model = MagicMock()
-    model.processor.tokenizer.return_value = {"input_ids": [[1, 2, 3]]}
+    cast("Any", adapter)._read = lambda text: (text, 3, None)
     adapter._model = model
+    adapter._count_prompt = lambda _schema: 8
+    model._parse_field_spec.return_value = ("name", "str", None, None)
     return adapter, model
 
 
@@ -645,8 +663,17 @@ def test_structured_extraction_rejects_schema_invalid_model_output(
         "additionalProperties": False,
     }
 
+    # The validator remains strict, but malformed generated output is isolated
+    # to the item instead of aborting every sibling in a fused model batch.
     with pytest.raises(ValueError, match=match):
-        adapter.extract([Item(text="Renée founded Acme")], output_schema=schema)
+        adapter._flatten_structured_result({"_sie_root": [raw_data]}, output_schema=schema)
+    output = adapter.extract([Item(text="Renée founded Acme")], output_schema=schema)
+    assert output.data == [{}]
+    assert output.input_token_counts == [0]
+    assert output.errors is not None
+    assert output.errors[0] is not None
+    assert output.errors[0].code == "INFERENCE_ERROR"
+    assert output.errors[0].message == "GLiNER2 returned structured output that does not match output_schema"
 
 
 SAFE, UNSAFE = "safe", "unsafe"
@@ -706,7 +733,11 @@ def test_multi_label_windows_pool_each_label_to_its_highest_confidence() -> None
 def _linear_processor() -> Any:
     """A processor with gliner2 1.x's word splitter and one subword per word."""
     return SimpleNamespace(
-        word_splitter=_Gliner2V1WordSplitter(), tokenizer=SimpleNamespace(tokenize=lambda word: [word])
+        word_splitter=_Gliner2V1WordSplitter(),
+        tokenizer=SimpleNamespace(tokenize=lambda word: [word]),
+        sampling_config=None,
+        _token_cache={},
+        change_mode=MagicMock(),
     )
 
 
@@ -715,6 +746,8 @@ def test_multi_label_classification_of_a_long_text_filters_pooled_labels_by_the_
     adapter._use_linear_word_splitter(_linear_processor())
     model = MagicMock()
     adapter._model = model
+    adapter._count_prompt = lambda _schema: 8
+    model._parse_field_spec.return_value = ("name", "str", None, None)
     model.batch_classify_text.return_value = [
         {"jailbreak": [{"label": "benign", "confidence": 0.3}]},  # gliner2's fallback below the threshold
         {"jailbreak": [{"label": "prompt_injection", "confidence": 0.8}]},

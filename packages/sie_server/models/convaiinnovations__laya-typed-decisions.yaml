@@ -1,4 +1,6 @@
 sie_id: convaiinnovations/laya-typed-decisions
+description: "Typed-decision classifier (Laya): answers noul, choice and score questions, one row per question. 1,024-token rows."
+release_date: "2026-09-23"
 hf_id: convaiinnovations/laya-typed-decisions
 hf_revision: bc76315b568af04bc19f133c8bca9a2b3a2d9905
 inputs:

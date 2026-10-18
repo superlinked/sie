@@ -9,7 +9,7 @@ import yaml
 from sie_sdk.bundle_utils import match_bundle_models
 from sie_server.adapters.lighton_ocr.adapter import LightOnOCR3Adapter
 from sie_server.adapters.sglang_vision_extract.adapter import SGLangVisionExtractAdapter
-from sie_server.core.loader import load_adapter, load_model_config, validate_pinned_revision
+from sie_server.core.loader import expand_profile_variants, load_adapter, load_model_config, validate_pinned_revision
 
 _SERVER = Path(__file__).resolve().parents[2]
 _MODELS = _SERVER / "models"
@@ -29,7 +29,7 @@ def test_catalog_pins_checkpoint_and_upstream_generation() -> None:
     assert config["inputs"] == {"text": False, "image": True, "audio": False, "video": False}
     assert config["tasks"] == {"encode": None, "score": None, "extract": {}}
     assert config["max_sequence_length"] == 24576
-    assert list(config["profiles"]) == ["default", "transformers"]
+    assert list(config["profiles"]) == ["default", "markdown", "transformers"]
     default = config["profiles"]["default"]
     assert default["adapter_path"] == f"{_SGLANG_ADAPTER}:SGLangVisionExtractAdapter"
     assert default["compute_precision"] == "bfloat16"
@@ -48,6 +48,8 @@ def test_catalog_pins_checkpoint_and_upstream_generation() -> None:
     assert loadtime["extra_launch_args"] == ["--disable-radix-cache"]
     assert "system_prompt" not in loadtime
     assert "extra_env" not in loadtime
+    assert "default_prompt" not in loadtime
+    assert "output_postprocess" not in loadtime
     assert default["adapter_options"]["runtime"] == {"max_new_tokens": 12288, "num_beams": 1}
     transformers = config["profiles"]["transformers"]
     assert transformers["adapter_path"] == f"{_ADAPTER}:LightOnOCR3Adapter"
@@ -85,10 +87,44 @@ def test_transformers_profile_builds_profile_generation() -> None:
     assert adapter._model_name_or_path == _MODEL
     assert adapter._revision == _REVISION
     assert adapter._compute_precision == "bfloat16"
+    assert adapter._output_postprocess is None
     assert adapter._generation_options({}) == _GENERATION
     assert adapter._generation_options({"max_new_tokens": 1024})["max_new_tokens"] == 1024
     with pytest.raises(ValueError, match="max_new_tokens"):
         adapter._generation_options({"max_new_tokens": 12289})
+
+
+def test_markdown_profile_retains_default_generation_context_and_engine_options() -> None:
+    config = load_model_config(_CONFIG)
+    default = config.resolve_profile("default")
+    markdown = config.resolve_profile("markdown")
+    assert config.max_sequence_length == 24576
+    assert markdown.max_batch_tokens == default.max_batch_tokens == 16384
+    assert markdown.compute_precision == default.compute_precision == "bfloat16"
+    assert markdown.adapter_path == default.adapter_path == f"{_SGLANG_ADAPTER}:SGLangVisionExtractAdapter"
+    assert dict(markdown.runtime) == dict(default.runtime) == {"max_new_tokens": 12288, "num_beams": 1}
+    assert dict(markdown.loadtime) == {
+        **default.loadtime,
+        "default_prompt": "grounding",
+        "output_postprocess": "lightonocr3_markdown",
+    }
+    variants = expand_profile_variants([config])
+    variant = variants[f"{_MODEL}:markdown"]
+    validate_pinned_revision(variant)
+    adapter = load_adapter(variant, _MODELS, device="cuda:0")
+    assert isinstance(adapter, SGLangVisionExtractAdapter)
+    assert adapter._revision == _REVISION
+    assert adapter._compute_precision == "bfloat16"
+    assert adapter._max_seq_length == 24576
+    assert adapter._output_postprocess == "lightonocr3_markdown"
+    assert adapter._resolve_prompt_and_label(None, {}) == ("grounding", "markdown")
+    assert adapter._max_new_tokens == 12288
+    assert (adapter._temperature, adapter._top_p) == (0.1, 1.0)
+    assert adapter._chat_template_kwargs == {"enable_thinking": False}
+    assert adapter._allowed_instructions == frozenset({"grounding"})
+    assert adapter._meter_pages is True
+    assert adapter.max_concurrent_dispatch() == 128
+    assert adapter._extra_launch_args == ["--disable-radix-cache"]
 
 
 def test_default_routes_to_sglang_vision_extract_bundle_only() -> None:
@@ -96,3 +132,7 @@ def test_default_routes_to_sglang_vision_extract_bundle_only() -> None:
     for bundle in sorted(_BUNDLES.glob("*.yaml")):
         expected = bundle.name == "sglang-vision-extract.yaml"
         assert (_MODEL in match_bundle_models(bundle, _MODELS)) == expected, bundle.name
+        assert (f"{_MODEL}:markdown" in match_bundle_models(bundle, _MODELS)) == expected, bundle.name
+        assert (f"{_MODEL}:transformers" in match_bundle_models(bundle, _MODELS)) == (
+            bundle.name == "transformers5.yaml"
+        )

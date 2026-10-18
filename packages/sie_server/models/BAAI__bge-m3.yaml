@@ -20,7 +20,7 @@ max_sequence_length: 8192
 profiles:
   default:
     max_batch_tokens: 16384
-    compute_precision: bfloat16
+    compute_precision: float16
     adapter_path: sie_server.adapters.bge_m3_flash:BGEM3FlashAdapter
     adapter_options:
       loadtime: {}
@@ -53,6 +53,7 @@ profiles:
         - multivector
   candle:
     extends: default
+    compute_precision: bfloat16
     adapter_path: sie_server_rust.adapters.candle:CandleEmbeddingAdapter
     adapter_options:
       runtime:
@@ -60,6 +61,7 @@ profiles:
         normalize: true
   banking:
     extends: default
+    compute_precision: bfloat16
     adapter_options:
       runtime:
         pooling: cls
@@ -68,6 +70,7 @@ profiles:
         instruction: Classify banking intent
   medical-vn:
     extends: default
+    compute_precision: bfloat16
     adapter_options:
       runtime:
         pooling: cls

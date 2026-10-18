@@ -110,6 +110,8 @@ class ModelInfo(BaseModel):
 
     max_sequence_length: int | None = None
     profiles: dict[str, ProfileInfo] = {}
+    lora_adapters: list[str] = Field(default_factory=list)
+    """LoRA served names currently ready on this worker, excluding loading/evicting adapters."""
 
     revision: str | None = None
     """Pinned HF commit SHA for the model's weights (design §6.6).
@@ -120,11 +122,23 @@ class ModelInfo(BaseModel):
     ``package_backed`` models (no Hub revision) or an unpinned dev config.
     """
 
+    description: str = ""
+    """One line about the model (System One model-list compatibility); ``""`` when unset."""
+
+    release_date: str = ""
+    """Release date of the served weights, ``YYYY-MM-DD`` (System One model-list compatibility); ``""`` when unset."""
+
     capabilities: ModelCapabilities | None = None
     """Advertised generation capabilities, ``None`` for non-generate models."""
 
     routing: ModelRouting = Field(default_factory=ModelRouting)
     """Routing policy and upstream kind. Always present."""
+
+
+def _config_text(config: Any, field: str) -> str:
+    """A string field of a model config, or ``""`` when it is unset."""
+    value = getattr(config, field, None)
+    return value if isinstance(value, str) else ""
 
 
 def _resolve_routing(config: ModelConfig) -> ModelRouting:
@@ -250,11 +264,14 @@ async def list_models(http_request: Request) -> ModelsListResponse:
                 outputs=config.outputs,
                 dims=config.dims,
                 loaded=registry.is_loaded(name),
+                lora_adapters=registry.loaded_lora_names(name),
                 state=state,
                 last_error=last_error,
                 max_sequence_length=config.max_sequence_length,
                 profiles=profiles,
                 revision=getattr(config, "hf_revision", None),
+                description=_config_text(config, "description"),
+                release_date=_config_text(config, "release_date"),
                 capabilities=_resolve_capabilities(config),
                 routing=_resolve_routing(config),
             )
@@ -300,11 +317,14 @@ async def get_model(model: str, http_request: Request) -> ModelInfo:
         outputs=config.outputs,
         dims=config.dims,
         loaded=registry.is_loaded(model),
+        lora_adapters=registry.loaded_lora_names(model),
         state=state,
         last_error=last_error,
         max_sequence_length=config.max_sequence_length,
         profiles=profiles,
         revision=getattr(config, "hf_revision", None),
+        description=_config_text(config, "description"),
+        release_date=_config_text(config, "release_date"),
         capabilities=_resolve_capabilities(config),
         routing=_resolve_routing(config),
     )

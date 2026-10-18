@@ -1,0 +1,25 @@
+[project]
+name = "superlinked-sie-systemone-local-example"
+version = "0.1.0"
+description = "Run TypeSafe SDK code against a local SIE System One model, and check it"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "typesafe-sdk==0.7.4",
+]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "ruff>=0.14",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"

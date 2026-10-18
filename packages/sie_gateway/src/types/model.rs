@@ -14,6 +14,12 @@ pub struct ModelInfoExtras {
     /// of worker/gateway parity and is absent for unpinned or package-backed
     /// models.
     pub revision: Option<String>,
+    /// One line about the model and the release date of its served weights
+    /// (``YYYY-MM-DD``), from the model YAML. ``/v1/models`` reports both, ``""``
+    /// when unset, because the System One model list (the TypeSafe SDKs) reads
+    /// them as strings from every entry.
+    pub description: Option<String>,
+    pub release_date: Option<String>,
     /// Bare-model policy; explicit profile variants never apply it.
     pub routing: Option<RoutingConfig>,
     /// Per-request hard cap on ``max_new_tokens``. Mirrors
@@ -122,6 +128,15 @@ impl ModelInfoExtras {
             .get("hf_revision")
             .and_then(|value| value.as_str())
             .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+
+        extras.description = raw
+            .get("description")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned);
+        extras.release_date = raw
+            .get("release_date")
+            .and_then(|value| value.as_str())
             .map(str::to_owned);
 
         extras.routing = raw
@@ -347,6 +362,8 @@ impl ModelInfoExtras {
                 dims: HashMap::new(),
                 max_sequence_length: config.max_sequence_length,
                 revision: None,
+                description: config.description.clone(),
+                release_date: config.release_date.clone(),
                 routing: None,
                 max_output_tokens: None,
                 profile_max_output_tokens: HashMap::new(),
@@ -553,6 +570,12 @@ pub struct ModelConfig {
     pub name: String,
     #[serde(default)]
     pub hf_revision: Option<String>,
+    /// One line about the model, reported by ``/v1/models``.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Release date of the served weights (``YYYY-MM-DD``), reported by ``/v1/models``.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_date: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<RoutingConfig>,
     #[serde(default)]
@@ -674,6 +697,8 @@ impl ModelEntry {
             "last_error": Value::Null,
             "max_sequence_length": self.info_extras.max_sequence_length,
             "revision": self.info_extras.revision,
+            "description": self.info_extras.description.as_deref().unwrap_or(""),
+            "release_date": self.info_extras.release_date.as_deref().unwrap_or(""),
             "profiles": Value::Object(profiles),
             // Advertised model capabilities. ``lora_adapters`` lists the
             // public served-names of declared LoRA adapters (union across
@@ -1272,6 +1297,8 @@ profiles: {}
         let config = ModelConfig {
             name: "test/model".into(),
             hf_revision: Some("0123456789abcdef0123456789abcdef01234567".into()),
+            description: None,
+            release_date: None,
             routing: None,
             adapter_module: Some("mod".into()),
             default_bundle: None,

@@ -44,7 +44,6 @@ profiles:
     kv_budget_tokens: 8192
     adapter_options:
       loadtime:
-        mem_fraction_static: 0.85
         served_model_name: ibm-granite/granite-guardian-3.0-2b
         # CHECK POLICY precision dial. The adapter reads the verdict-token
         # logprobs, computes P(unsafe) over Yes/No, and returns "Yes" iff

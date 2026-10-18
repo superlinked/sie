@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -25,6 +25,8 @@ def _adapter(*, lower: bool = True, max_words: int = 8, max_subwords: int = 1000
     model = MagicMock()
     model.processor.tokenizer = _Tokenizer()
     adapter._model = model
+    adapter._count_prompt = lambda _schema: 8
+    model._parse_field_spec.return_value = ("name", "str", None, None)
     adapter._lower_text_first = lower
     adapter._word_splitter = WindowedSplitter(
         LinearWordSplitter(lower_text_first=lower),
@@ -88,7 +90,7 @@ def test_overlong_items_fail_without_losing_short_items_or_their_positions(task:
         None,
         "INPUT_TOO_LONG",
     ]
-    assert output.input_token_counts == [4, 0, 4, 0]
+    assert output.input_token_counts == [5, 0, 4, 0]
     assert output.entities[1] == output.entities[3] == []
     if task == "entities":
         assert [output.entities[i][0]["text"] for i in [0, 2]] == ["Alice", "Bob"]
@@ -109,7 +111,7 @@ def test_overlong_items_fail_without_losing_short_items_or_their_positions(task:
 
     handler = ExtractHandler()
     assembled = handler.assemble_output({i: handler.slice_output(output, i) for i in range(4)}, batch_size=4)
-    assert assembled.input_token_counts == [4, 0, 4, 0]
+    assert assembled.input_token_counts == [5, 0, 4, 0]
     formatted = handler.format_output(assembled)
     assert "error" not in formatted[0]
     assert "error" not in formatted[2]
@@ -203,7 +205,7 @@ def test_queue_outcome_preserves_length_error_and_zero_billing(index: int) -> No
     else:
         assert "error" not in result
         assert result["entities"][0]["text"] == "Alice"
-        assert outcome.units.input_tokens == 4
+        assert outcome.units.input_tokens == 5
 
 
 def test_queue_length_error_keeps_zero_billing_when_sibling_metering_fails() -> None:
@@ -214,7 +216,7 @@ def test_queue_length_error_keeps_zero_billing_when_sibling_metering_fails() -> 
     from sie_server.queue_executor import _extract_success_outcome
 
     adapter, _ = _adapter()
-    adapter._doc_input_token_counts = lambda _texts: None
+    cast("Any", adapter)._doc_input_token_counts = lambda _windows: None
     items = [Item(text="word " * 20), Item(text="Alice Acme")]
     output = adapter.extract(items, labels=["person"])
     assert output.input_token_counts is None

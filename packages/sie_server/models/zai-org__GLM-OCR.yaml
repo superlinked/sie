@@ -27,7 +27,6 @@ profiles:
     adapter_path: sie_server.adapters.sglang_vision_extract.adapter:SGLangVisionExtractAdapter
     adapter_options:
       loadtime:
-        mem_fraction_static: 0.85
         served_model_name: zai-org/GLM-OCR
         max_concurrent_requests: 64
         # SGLang's default fast (torch) image processor. The slow PIL processor runs

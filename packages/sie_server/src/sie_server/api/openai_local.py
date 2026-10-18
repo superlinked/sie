@@ -13,6 +13,7 @@ directly in either the Apple-Silicon or CUDA image.
   generation does (:mod:`sie_server.processors.schema_prompt`). Remote generation profiles use their
   adapter's normalized chat methods instead; the operator-configured upstream
   owns chat rendering, and the worker retains validation and output policy.
+  The weightless fake answers through the same methods from a script.
 - ``/v1/rerank`` wraps the in-process score adapter in the Cohere/OpenAI rerank
   shape (``{query, documents, top_n}`` -> ``{results: [{index, relevance_score}]}``).
 
@@ -31,7 +32,9 @@ import json
 import logging
 import math
 import os
+import re
 from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Annotated, Any, cast
 from urllib.parse import urlsplit
@@ -43,16 +46,24 @@ from jsonschema import Draft202012Validator, SchemaError
 from sie_sdk.queue_types import denormalize_model_id
 
 from sie_server.adapters._generation_base import (
+    REASONING_CONTROL_TOKENS,
     GenerationAdapter,
     GenerationError,
     GenerationUnsupportedFieldError,
+    GenerationUpstreamError,
     ReasoningFormat,
     ThinkingBlockStripper,
     aclose_with_error_precedence,
     resolve_reasoning_format,
     thinking_blocks_must_be_hidden,
 )
-from sie_server.adapters.errors import InputTooLongError, UpstreamUnavailableError
+from sie_server.adapters.errors import (
+    UPSTREAM_FAILURE_MESSAGES,
+    InputTooLongError,
+    UpstreamFailureReason,
+    UpstreamUnavailableError,
+)
+from sie_server.adapters.fake.adapter import FakeAdapter
 from sie_server.adapters.mlx.generation import MLXGenerationAdapter, normalize_mlx_seed
 from sie_server.adapters.remote._http import RemoteUpstreamError
 from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
@@ -69,6 +80,7 @@ from sie_server.api.helpers import (
     openai_error_response,
     upstream_unavailable_exception,
 )
+from sie_server.api.lora import LeasedStreamingResponse, ensure_generation_lora, validate_generation_lora
 from sie_server.api.options import resolve_runtime_options
 from sie_server.api.routing import error_code, fallback_refusal, remote_routing, route_request
 from sie_server.api.score import score_usage_from_output
@@ -79,7 +91,11 @@ from sie_server.config.upstreams import RemoteServingDisabledError
 from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.inference_output import ScoreOutput
 from sie_server.core.loader import serves_remotely
-from sie_server.core.runtime_options import GenerationTimeoutError, grammar_default_sampling
+from sie_server.core.runtime_options import (
+    GenerationTimeoutError,
+    grammar_default_sampling,
+    resolve_generation_timeouts,
+)
 from sie_server.core.score_cost import MAX_SCORE_ITEMS, build_score_prepared_items
 from sie_server.core.timing import RequestTiming
 from sie_server.core.video_frames import (
@@ -89,6 +105,7 @@ from sie_server.core.video_frames import (
     sniff_video_container,
 )
 from sie_server.observability.tracing import tracer
+from sie_server.processors.remote_chat import _check_tools
 from sie_server.processors.remote_chat_prompt import collect_rendered_chat, prepare_rendered_chat
 from sie_server.processors.schema_prompt import (
     json_schema_response_format,
@@ -107,6 +124,7 @@ from sie_server.processors.strict_grammar import (
 )
 from sie_server.types.grammar import GrammarSpec
 from sie_server.types.inputs import InvalidInputError, Item, item_size_error
+from sie_server.types.openapi import OpenAIGenerationErrorResponse
 from sie_server.types.responses import ErrorCode
 
 logger = logging.getLogger(__name__)
@@ -118,6 +136,9 @@ router = APIRouter(prefix="/v1", tags=["openai-compat"], dependencies=[Depends(r
 # it applies to either managed generation child on this route.
 _PROXY_READ_TIMEOUT_S = float(os.environ.get("SIE_MLX_READ_TIMEOUT_S", "300"))
 _PROXY_TIMEOUT = httpx.Timeout(connect=10.0, read=_PROXY_READ_TIMEOUT_S, write=10.0, pool=10.0)
+# Same cadence as the gateway's SSE keep-alive, so client idle limits see bytes
+# while the child is silent.
+_SSE_KEEPALIVE_S = 15.0
 # Cap the request body so a huge messages/documents array can't be buffered/forwarded
 # unbounded (the gateway caps prod ingress; these local routes must cap themselves).
 _MAX_BODY_BYTES = int(os.environ.get("SIE_CHAT_MAX_BODY_BYTES", str(8 * 1024 * 1024)))
@@ -126,16 +147,19 @@ _MAX_BODY_BYTES = int(os.environ.get("SIE_CHAT_MAX_BODY_BYTES", str(8 * 1024 * 1
 # fence for malformed/non-token responses.
 _MAX_CHAT_RESPONSE_BYTES = int(os.environ.get("SIE_CHAT_MAX_RESPONSE_BYTES", str(32 * 1024 * 1024)))
 _MAX_CHAT_TOOLS = 64
+_TOOL_NAME = re.compile(r"[a-zA-Z0-9_-]{1,64}")
 _MAX_CHAT_MESSAGES = 4096
 _MAX_CHAT_CHOICES = 128
 _MAX_CHAT_VIDEOS = 1
 _MAX_U32 = (1 << 32) - 1
+_FAKE_ADAPTER_PATH = f"{FakeAdapter.__module__}:{FakeAdapter.__name__}"
 _ALLOWED_CHAT_ROLES = frozenset({"system", "user", "assistant", "tool", "developer"})
+_ANSWER_FINISH_REASONS = frozenset({"stop", "tool_calls"})
 # Compatibility requests project onto the same native score bound.
 _MAX_RERANK_DOCS = MAX_SCORE_ITEMS
 
 # Mirror the gateway's public chat field boundary, minus controls that require
-# gateway-owned admission/routing translation (best_of, LoRA selection, cache
+# gateway-owned admission/routing translation (best_of, cache
 # keys). Most importantly this excludes SGLang's backend/DP/custom-processor
 # extensions, so the public body cannot steer the managed child or execute a
 # client-supplied logit processor.
@@ -163,17 +187,20 @@ _CUDA_CHAT_FIELDS = frozenset(
         "logit_bias",
         "response_format",
         "schema_in_prompt",
+        "include_reasoning",
         "stream",
         "tools",
         "tool_choice",
         "parallel_tool_calls",
         "stream_options",
+        "lora_adapter",
     }
 )
 
 # mlx_lm's public chat request fields, excluding child process controls such as
-# model adapters and speculative-decoding configuration. Validate this boundary
-# before a potentially expensive MLX model download.
+# model adapters and speculative-decoding configuration, plus the tool-choice
+# fields this route resolves itself because mlx_lm reads neither. Validate this
+# boundary before a potentially expensive MLX model download.
 _MLX_CHAT_FIELDS = frozenset(
     {
         "model",
@@ -194,7 +221,10 @@ _MLX_CHAT_FIELDS = frozenset(
         "stop",
         "stream",
         "stream_options",
+        "include_reasoning",
         "tools",
+        "tool_choice",
+        "parallel_tool_calls",
         "role_mapping",
     }
 )
@@ -270,6 +300,13 @@ async def _read_json_body(http_request: Request) -> dict[str, Any]:
     return body
 
 
+def _adapter_answers_chat(config: Any) -> bool:
+    """Whether the adapter answers chat through its own chat methods rather than a managed child."""
+    return serves_remotely(config) or (
+        "default" in config.profiles and config.resolve_profile("default").adapter_path == _FAKE_ADAPTER_PATH
+    )
+
+
 def _unsupported_chat(model: str, device: object) -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_501_NOT_IMPLEMENTED,
@@ -287,18 +324,12 @@ def _upstream_error_response(
     message: str = "upstream generation request failed",
     *,
     response_status: int = status.HTTP_502_BAD_GATEWAY,
+    reason: UpstreamFailureReason | None = None,
 ) -> JSONResponse:
-    return JSONResponse(
-        status_code=response_status,
-        content={
-            "error": {
-                "message": message,
-                "type": "upstream_error",
-                "param": None,
-                "code": "upstream_error",
-            }
-        },
-    )
+    error: dict[str, Any] = {"message": message, "type": "upstream_error", "param": None, "code": "upstream_error"}
+    if reason is not None:
+        error["reason"] = reason
+    return JSONResponse(status_code=response_status, content={"error": error})
 
 
 def _translated_upstream_status(upstream_status: int) -> int:
@@ -313,18 +344,12 @@ def _upstream_error_event(
     *,
     code: str = "upstream_error",
     error_type: str = "upstream_error",
+    reason: UpstreamFailureReason | None = None,
 ) -> bytes:
-    payload = json.dumps(
-        {
-            "error": {
-                "message": message,
-                "type": error_type,
-                "param": None,
-                "code": code,
-            }
-        },
-        separators=(",", ":"),
-    )
+    error: dict[str, Any] = {"message": message, "type": error_type, "param": None, "code": code}
+    if reason is not None:
+        error["reason"] = reason
+    payload = json.dumps({"error": error}, separators=(",", ":"))
     return f"data: {payload}\n\ndata: [DONE]\n\n".encode()
 
 
@@ -383,6 +408,47 @@ def _strict_output_error_response(message: str) -> JSONResponse:
             detail={"code": MODEL_OUTPUT_PARSE_ERROR, "message": message},
         )
     )
+
+
+def _mlx_tool_call_limit(body: dict[str, Any], proxied: dict[str, Any]) -> int | None:
+    """Most tool calls one choice may carry, or ``None`` for no limit.
+
+    ``mlx_lm`` parses tool calls out of the model's output whether or not the
+    request offered tools, and never limits how many it returns.
+    """
+    if not proxied.get("tools"):
+        return 0
+    if body.get("parallel_tool_calls") is False:
+        return 1
+    return None
+
+
+def _excess_tool_call(payload: dict[str, Any], limit: int, calls: dict[int, set[object]]) -> str | None:
+    """Record each choice's distinct tool calls and describe the first over ``limit``."""
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return None
+    for position, choice in enumerate(choices):
+        if not isinstance(choice, dict):
+            continue
+        choice_obj = cast("dict[str, Any]", choice)
+        raw_index = choice_obj.get("index", position)
+        index = raw_index if isinstance(raw_index, int) and not isinstance(raw_index, bool) else position
+        delta = choice_obj.get("delta")
+        message = choice_obj.get("message")
+        container = message if isinstance(message, dict) else delta if isinstance(delta, dict) else None
+        tool_calls = container.get("tool_calls") if container is not None else None
+        if not isinstance(tool_calls, list) or not tool_calls:
+            continue
+        seen = calls.setdefault(index, set())
+        for call in tool_calls:
+            key = call.get("index") if container is delta and isinstance(call, dict) else None
+            seen.add(key if isinstance(key, int) and not isinstance(key, bool) else object())
+        if len(seen) > limit:
+            if limit == 0:
+                return "generation child returned a tool call the request did not offer"
+            return "generation child returned more than one tool call with parallel_tool_calls=false"
+    return None
 
 
 def _validate_optional_positive_int(body: dict[str, Any], field: str) -> int | None:
@@ -530,7 +596,7 @@ def _validate_common_chat_body(body: dict[str, Any]) -> None:
         isinstance(stop, str) or (isinstance(stop, list) and all(isinstance(value, str) for value in stop))
     ):
         raise _bad_request("'stop' must be a string or array of strings", param="stop")
-    for field in ("parallel_tool_calls", "schema_in_prompt"):
+    for field in ("parallel_tool_calls", "schema_in_prompt", "include_reasoning"):
         if body.get(field) is not None and not isinstance(body[field], bool):
             raise _bad_request(f"'{field}' must be a boolean", param=field)
     for field in ("user", "safety_identifier"):
@@ -545,13 +611,18 @@ def _validate_chat_tools(body: dict[str, Any]) -> None:
     if tools is not None:
         if not isinstance(tools, list) or len(tools) > _MAX_CHAT_TOOLS:
             raise _bad_request("'tools' must be an array of at most 64 functions", param="tools")
-        for tool in tools:
+        for index, tool in enumerate(cast("list[Any]", tools)):
             function = tool.get("function") if isinstance(tool, dict) else None
             if not isinstance(function, dict) or tool.get("type") != "function":
                 raise _bad_request("'tools' entries must declare a function object", param="tools")
             name = function.get("name")
             if not isinstance(name, str) or not name:
                 raise _bad_request("tool function names must be non-empty strings", param="tools")
+            if not _TOOL_NAME.fullmatch(name):
+                raise _bad_request(
+                    f"'tools[{index}].function.name' must match ^[a-zA-Z0-9_-]{{1,64}}$",
+                    param=f"tools[{index}].function.name",
+                )
             names.add(name)
             if function.get("description") is not None and not isinstance(function["description"], str):
                 raise _bad_request("tool descriptions must be strings", param="tools")
@@ -590,6 +661,13 @@ def _validate_mlx_chat_body(body: dict[str, Any]) -> None:
         raise _bad_request(f"field '{unknown}' is not supported", param=unknown, code="unsupported_field")
 
     _validate_common_chat_body(body)
+    choice = body.get("tool_choice")
+    if choice is not None and choice not in ("auto", "none"):
+        raise _bad_request(
+            "'tool_choice' must be 'auto' or 'none' on this device, which cannot force a tool call",
+            param="tool_choice",
+            code="unsupported_field",
+        )
 
     min_p = body.get("min_p")
     if min_p is not None and (isinstance(min_p, bool) or not isinstance(min_p, int | float) or not 0 <= min_p <= 1):
@@ -755,6 +833,8 @@ def _prepare_chat_body(
     # the engine process.
     proxied.pop("safety_identifier", None)
     proxied.pop("schema_in_prompt", None)
+    proxied.pop("include_reasoning", None)
+    proxied.pop("lora_adapter", None)
     if proxied.get("parallel_tool_calls") is None:
         proxied.pop("parallel_tool_calls", None)
 
@@ -894,6 +974,7 @@ def _prepare_mlx_body(
     seed: int | None,
 ) -> dict[str, Any]:
     proxied = dict(body)
+    proxied.pop("include_reasoning", None)
     proxied["model"] = adapter.mlx_repo
     requested_cap = max_completion_tokens if max_completion_tokens is not None else max_tokens
     if requested_cap is not None and requested_cap > cap:
@@ -905,6 +986,9 @@ def _prepare_mlx_body(
     proxied["max_tokens"] = requested_cap if requested_cap is not None else cap
     # mlx_lm versions used by the Mac bundle consume the legacy field.
     proxied.pop("max_completion_tokens", None)
+    proxied.pop("parallel_tool_calls", None)
+    if proxied.pop("tool_choice", None) == "none":
+        proxied.pop("tools", None)
     if seed is not None:
         proxied["seed"] = seed
 
@@ -946,7 +1030,9 @@ def _sanitize_chat_payload(
     initial_inside_thinking: bool,
     reasoning_format: ReasoningFormat,
     states: dict[int, ThinkingBlockStripper] | None = None,
+    held_contents: dict[int, list[str]] | None = None,
     terminal: bool,
+    include_reasoning: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("child chat response must be a JSON object")
@@ -955,7 +1041,9 @@ def _sanitize_chat_payload(
     if not isinstance(choices, list):
         return payload
 
+    public_reasoning = include_reasoning and hide_thinking_blocks
     state_map = states if states is not None else {}
+    held_map = held_contents if held_contents is not None else {}
     for position, choice in enumerate(choices):
         if not isinstance(choice, dict):
             continue
@@ -977,23 +1065,49 @@ def _sanitize_chat_payload(
 
         if not hide_thinking_blocks:
             continue
-        stripper = state_map.setdefault(
-            index,
-            ThinkingBlockStripper(
-                inside=initial_inside_thinking,
-                reasoning_format=reasoning_format,
-            ),
-        )
         raw_content = container.get("content")
         content = raw_content if isinstance(raw_content, str) else ""
-        visible = stripper.feed(content) if content else ""
+        stripper = state_map.get(index)
+        if stripper is None:
+            if not content and not reasoning_was_present:
+                continue
+            stripper = state_map[index] = ThinkingBlockStripper(
+                inside=initial_inside_thinking,
+                reasoning_format=reasoning_format,
+                keep_reasoning=public_reasoning,
+            )
+            if initial_inside_thinking and reasoning_was_present:
+                held_map[index] = []
         is_terminal_choice = terminal or choice_obj.get("finish_reason") is not None
+        text = content
+        held = held_map.get(index)
+        if held is not None:
+            close = REASONING_CONTROL_TOKENS[reasoning_format][1]
+            closes = close in "".join(held[1 - len(close) :]) + content
+            if content:
+                held.append(content)
+            if closes or is_terminal_choice:
+                del held_map[index]
+                text = "".join(held)
+                if not closes and choice_obj.get("finish_reason") in _ANSWER_FINISH_REASONS:
+                    stripper = state_map[index] = ThinkingBlockStripper(
+                        reasoning_format=reasoning_format, keep_reasoning=public_reasoning
+                    )
+            else:
+                text = ""
+        visible = stripper.feed(text) if text else ""
         if is_terminal_choice:
             visible += stripper.finish()
         if isinstance(raw_content, str) or visible:
             container["content"] = visible
         if visible != content and "logprobs" in choice_obj:
             choice_obj["logprobs"] = None
+        if public_reasoning:
+            captured = stripper.take_reasoning()
+            parsed = next((value for value in (reasoning_content, reasoning) if isinstance(value, str) and value), "")
+            exposed = parsed if captured == parsed else parsed + captured
+            if exposed:
+                container["reasoning_content"] = exposed
     return payload
 
 
@@ -1004,6 +1118,33 @@ async def _read_upstream_body(response: httpx.Response) -> bytes:
             raise ValueError("upstream response exceeded the byte limit")
         body.extend(chunk)
     return bytes(body)
+
+
+def _child_budget(config: Any, proxied: dict[str, Any], *, stream: bool) -> float | None:
+    """Return the overall budget for one request to the generation child, if it has one.
+
+    The child writes nothing while it generates a non-streaming answer, or
+    while its own tool parser holds a streamed call's argument until that
+    argument closes. Those requests are bounded by the generation's overall
+    budget, as the other generation routes are; ``None`` keeps any other
+    stream on the byte-gap bound that catches a wedged child.
+    """
+    holds_output = not stream or (bool(proxied.get("tools")) and proxied.get("tool_choice") != "none")
+    overall = resolve_generation_timeouts(config, None).overall_s if holds_output else None
+    return overall if overall is not None and overall > _PROXY_READ_TIMEOUT_S else None
+
+
+def _child_timeout(budget: float | None) -> httpx.Timeout:
+    if budget is None:
+        return _PROXY_TIMEOUT
+    return httpx.Timeout(connect=10.0, read=budget, write=10.0, pool=10.0)
+
+
+def _generation_timeout_exception() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+        detail={"code": "generation_timeout", "message": "generation timed out"},
+    )
 
 
 def _new_proxy_client() -> httpx.AsyncClient:
@@ -1020,18 +1161,42 @@ async def _sanitize_sse_stream(
     hide_thinking_blocks: bool,
     initial_inside_thinking: bool,
     reasoning_format: ReasoningFormat,
-    slot: asyncio.Semaphore | None,
+    slot: asyncio.Semaphore | None = None,
+    owns_resources: bool = True,
+    tool_call_limit: int | None = None,
     strict_grammar: GrammarSpec | None = None,
+    include_reasoning: bool = False,
+    deadline: float | None = None,
 ) -> AsyncIterator[bytes]:
     states: dict[int, ThinkingBlockStripper] = {}
+    held_contents: dict[int, list[str]] = {}
     strict_contents: dict[int, list[str]] = {}
     strict_tool_choices: set[int] = set()
+    tool_calls: dict[int, set[object]] = {}
     buffered = bytearray()
     received = 0
     saw_done = False
     terminal_outcome_selected = False
+    chunks = response.aiter_bytes()
+    next_chunk: asyncio.Future[bytes | None] | None = None
+    loop = asyncio.get_running_loop()
     try:
-        async for chunk in response.aiter_bytes():
+        while True:
+            if deadline is not None and loop.time() >= deadline:
+                logger.warning("generation child chat stream exceeded its generation budget")
+                terminal_outcome_selected = True
+                yield _upstream_error_event("generation timed out", code="generation_timeout")
+                return
+            next_chunk = next_chunk or asyncio.ensure_future(anext(chunks, None))
+            wait_s = _SSE_KEEPALIVE_S if deadline is None else min(_SSE_KEEPALIVE_S, deadline - loop.time())
+            done, _ = await asyncio.wait({next_chunk}, timeout=wait_s)
+            if not done:
+                yield b": keepalive\n\n"
+                continue
+            chunk = next_chunk.result()
+            next_chunk = None
+            if chunk is None:
+                break
             received += len(chunk)
             if received > _MAX_CHAT_RESPONSE_BYTES:
                 logger.error("generation child SSE exceeded %d bytes", _MAX_CHAT_RESPONSE_BYTES)
@@ -1065,7 +1230,9 @@ async def _sanitize_sse_stream(
                     initial_inside_thinking=initial_inside_thinking,
                     reasoning_format=reasoning_format,
                     states=states,
+                    held_contents=held_contents,
                     terminal=False,
+                    include_reasoning=include_reasoning,
                 )
                 if strict_grammar is not None:
                     violation = await _stream_strict_violation(
@@ -1081,6 +1248,12 @@ async def _sanitize_sse_stream(
                             code=MODEL_OUTPUT_PARSE_ERROR,
                             error_type="server_error",
                         )
+                        return
+                if tool_call_limit is not None:
+                    excess = _excess_tool_call(sanitized, tool_call_limit, tool_calls)
+                    if excess is not None:
+                        terminal_outcome_selected = True
+                        yield _upstream_error_event(excess)
                         return
                 encoded = json.dumps(sanitized, separators=(",", ":"), ensure_ascii=False).encode()
                 yield b"data: " + encoded + b"\n"
@@ -1103,22 +1276,28 @@ async def _sanitize_sse_stream(
             terminal_outcome_selected = True
             yield _upstream_error_event()
     finally:
-        try:
-            await aclose_with_error_precedence(
-                response,
-                outcome_selected=terminal_outcome_selected,
-                context="generation child SSE response",
-            )
-        finally:
+        if next_chunk is not None:
+            next_chunk.cancel()
+            await asyncio.wait({next_chunk})
+            if not next_chunk.cancelled():
+                next_chunk.exception()
+        if owns_resources:
             try:
                 await aclose_with_error_precedence(
-                    client,
+                    response,
                     outcome_selected=terminal_outcome_selected,
-                    context="generation child SSE client",
+                    context="generation child SSE response",
                 )
             finally:
-                if slot is not None:
-                    slot.release()
+                try:
+                    await aclose_with_error_precedence(
+                        client,
+                        outcome_selected=terminal_outcome_selected,
+                        context="generation child SSE client",
+                    )
+                finally:
+                    if slot is not None:
+                        slot.release()
 
 
 async def _stream_strict_violation(
@@ -1164,6 +1343,16 @@ def _check_remote_chat_usage(payload: dict[str, Any], body: dict[str, Any], conf
         raise RemoteUpstreamError("upstream chat usage exceeded the configured token bounds")
 
 
+def _check_remote_chat_tools(payload: dict[str, Any], body: dict[str, Any], calls: dict[int, dict[int, str]]) -> None:
+    for choice in payload["choices"]:
+        message = choice["delta"] if "delta" in choice else choice["message"]
+        names = calls.setdefault(choice["index"], {})
+        for position, tool in enumerate(message.get("tool_calls") or []):
+            index = tool.get("index", position)
+            names[index] = names.get(index, "") + tool.get("function", {}).get("name", "")
+        _check_tools(names, body, finished=choice["finish_reason"] is not None)
+
+
 async def _remote_chat_events(
     iterator: AsyncIterator[dict[str, Any]],
     *,
@@ -1172,16 +1361,19 @@ async def _remote_chat_events(
     config: Any,
     adapter: GenerationAdapter,
     strict_grammar: GrammarSpec | None,
+    include_reasoning: bool = False,
 ) -> AsyncIterator[bytes]:
     states: dict[int, ThinkingBlockStripper] = {}
     strict_contents: dict[int, list[str]] = {}
     strict_tool_choices: set[int] = set()
+    calls: dict[int, dict[int, str]] = {}
     delivered = False
     received = 0
     include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
     try:
         async for payload in iterator:
             _check_remote_chat_usage(payload, body, config)
+            _check_remote_chat_tools(payload, body, calls)
             sanitized = _sanitize_chat_payload(
                 payload,
                 requested_model=requested_model,
@@ -1190,6 +1382,7 @@ async def _remote_chat_events(
                 reasoning_format=resolve_reasoning_format(config, adapter),
                 states=states,
                 terminal=False,
+                include_reasoning=include_reasoning,
             )
             if strict_grammar is not None:
                 violation = await _stream_strict_violation(
@@ -1214,10 +1407,16 @@ async def _remote_chat_events(
             delivered = True
             yield b"data: " + encoded + b"\n\n"
         yield b"data: [DONE]\n\n"
-    except (RemoteUpstreamError, UpstreamUnavailableError, GenerationError, GenerationTimeoutError):
+    except (RemoteUpstreamError, UpstreamUnavailableError, GenerationError, GenerationTimeoutError) as exc:
         if not delivered:
             raise
-        yield _upstream_error_event()
+        logger.warning("remote chat for %s failed after output: %s", requested_model, exc)
+        reason = "upstream_unavailable" if isinstance(exc, GenerationTimeoutError) else exc.upstream_reason
+        yield (
+            _upstream_error_event()
+            if reason is None
+            else _upstream_error_event(UPSTREAM_FAILURE_MESSAGES[reason], reason=reason)
+        )
     finally:
         await aclose_with_error_precedence(iterator, outcome_selected=True, context="remote chat adapter")
 
@@ -1240,23 +1439,33 @@ async def _remote_chat_response(
     stream: bool,
     headers: dict[str, str],
     strict_grammar: GrammarSpec | None,
+    include_reasoning: bool = False,
 ) -> Response:
     try:
         rendered = await prepare_rendered_chat(
-            adapter, body, config=config, requested_model=requested_model, max_response_bytes=_MAX_CHAT_RESPONSE_BYTES
+            adapter,
+            body,
+            config=config,
+            requested_model=requested_model,
+            max_response_bytes=_MAX_CHAT_RESPONSE_BYTES,
+            include_reasoning=include_reasoning,
         )
         if stream:
             iterator = _remote_chat_events(
                 rendered
                 if rendered is not None
                 else adapter.chat_completion_stream(
-                    body, requested_model=requested_model, max_response_bytes=_MAX_CHAT_RESPONSE_BYTES
+                    body,
+                    requested_model=requested_model,
+                    max_response_bytes=_MAX_CHAT_RESPONSE_BYTES,
+                    keep_reasoning=include_reasoning,
                 ),
                 body=body,
                 requested_model=requested_model,
                 config=config,
                 adapter=adapter,
                 strict_grammar=strict_grammar,
+                include_reasoning=include_reasoning,
             )
             # Decide a pre-output refusal before committing the HTTP 200.
             return await prefetched_sse_response(
@@ -1266,10 +1475,14 @@ async def _remote_chat_response(
             await collect_rendered_chat(rendered)
             if rendered is not None
             else await adapter.chat_completion(
-                body, requested_model=requested_model, max_response_bytes=_MAX_CHAT_RESPONSE_BYTES
+                body,
+                requested_model=requested_model,
+                max_response_bytes=_MAX_CHAT_RESPONSE_BYTES,
+                keep_reasoning=include_reasoning,
             )
         )
         _check_remote_chat_usage(payload, body, config)
+        _check_remote_chat_tools(payload, body, {})
         payload = _sanitize_chat_payload(
             payload,
             requested_model=requested_model,
@@ -1277,6 +1490,7 @@ async def _remote_chat_response(
             initial_inside_thinking=False,
             reasoning_format=resolve_reasoning_format(config, adapter),
             terminal=True,
+            include_reasoning=include_reasoning,
         )
         if len(json.dumps(payload, ensure_ascii=False).encode()) > _MAX_CHAT_RESPONSE_BYTES:
             raise RemoteUpstreamError("upstream chat response exceeded the byte limit")
@@ -1285,14 +1499,24 @@ async def _remote_chat_response(
             if violation is not None:
                 return _strict_output_error_response(violation)
         return JSONResponse(content=payload, headers=headers)
+    except GenerationUpstreamError as exc:
+        return _upstream_error_response(UPSTREAM_FAILURE_MESSAGES[exc.upstream_reason], reason=exc.upstream_reason)
     except GenerationError as exc:
         raise _generation_http_exception(exc) from exc
     except GenerationTimeoutError:
         raise HTTPException(
-            status_code=504, detail={"code": "generation_timeout", "message": "remote generation timed out"}
+            status_code=504,
+            detail={
+                "code": "generation_timeout",
+                "message": "remote generation timed out",
+                "reason": "upstream_unavailable",
+            },
         ) from None
     except UpstreamUnavailableError as exc:
-        raise upstream_unavailable_exception(exc, requested_model) from exc
+        logger.warning("remote chat for %s failed: %s", requested_model, exc)
+        unavailable = upstream_unavailable_exception(exc, requested_model)
+        cast("dict[str, Any]", unavailable.detail)["reason"] = exc.upstream_reason
+        raise unavailable from exc
     except (InputTooLongError, InvalidInputError) as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1307,14 +1531,24 @@ async def _remote_chat_response(
             detail={"code": ErrorCode.QUEUE_FULL.value, "message": "remote serving is unavailable"},
             headers={"Retry-After": "1"},
         ) from exc
-    except RemoteUpstreamError:
-        return _upstream_error_response()
+    except RemoteUpstreamError as exc:
+        logger.warning("remote chat for %s failed: %s", requested_model, exc)
+        return _upstream_error_response(UPSTREAM_FAILURE_MESSAGES[exc.upstream_reason], reason=exc.upstream_reason)
 
 
 # -- /v1/chat/completions (managed child or remote generation adapter) -------
 
 
-@router.post("/chat/completions", response_model=None)
+@router.post(
+    "/chat/completions",
+    response_model=None,
+    responses={
+        500: {"description": "Generation failed", "model": OpenAIGenerationErrorResponse},
+        502: {"description": "A remote upstream failed the request", "model": OpenAIGenerationErrorResponse},
+        503: {"description": "Model loading or temporarily unavailable", "model": OpenAIGenerationErrorResponse},
+        504: {"description": "Remote generation timed out", "model": OpenAIGenerationErrorResponse},
+    },
+)
 async def chat_completions(
     http_request: Request,
     x_machine_profile: Annotated[str | None, Header(alias="X-SIE-MACHINE-PROFILE")] = None,
@@ -1328,22 +1562,26 @@ async def chat_completions(
     Errors are emitted as top-level OpenAI ``{"error": {...}}`` envelopes
     (never FastAPI's ``{"detail": ...}`` wrapper), matching ``/v1/completions``.
     """
-    try:
-        response = await _chat_completions(http_request, x_machine_profile)
-        if isinstance(response, JSONResponse) and response.status_code >= status.HTTP_400_BAD_REQUEST:
-            payload = json.loads(bytes(response.body))
-            code = payload.get("error", {}).get("code")
-            refusal = fallback_refusal(http_request, response.status_code, code)
-            if refusal is not None:
-                return openai_error_response(refusal)
-        return response
-    except HTTPException as exc:
-        return openai_error_response(fallback_refusal(http_request, exc.status_code, error_code(exc)) or exc)
+    async with AsyncExitStack() as lifetime:
+        try:
+            response = await _chat_completions(http_request, x_machine_profile, lifetime)
+            if isinstance(response, JSONResponse) and response.status_code >= status.HTTP_400_BAD_REQUEST:
+                payload = json.loads(bytes(response.body))
+                code = payload.get("error", {}).get("code")
+                refusal = fallback_refusal(http_request, response.status_code, code)
+                if refusal is not None:
+                    return openai_error_response(refusal)
+            if isinstance(response, StreamingResponse):
+                return LeasedStreamingResponse(response, lifetime.pop_all())
+            return response
+        except HTTPException as exc:
+            return openai_error_response(fallback_refusal(http_request, exc.status_code, error_code(exc)) or exc)
 
 
 async def _chat_completions(
     http_request: Request,
     x_machine_profile: str | None,
+    lifetime: AsyncExitStack,
 ) -> Response | StreamingResponse:
     validate_machine_profile_header(x_machine_profile)
 
@@ -1401,6 +1639,7 @@ async def _chat_completions(
 
         # Validate capability and all CUDA edge fields before a model download.
         config = registry.get_config(registry_key)
+        lora = validate_generation_lora(config, body.get("lora_adapter"))
         gen_task = getattr(config.tasks, "generate", None)
         if gen_task is None:
             raise _bad_request(
@@ -1422,8 +1661,8 @@ async def _chat_completions(
                 )
             # The child decodes video on its event loop; bound that work here.
             await asyncio.to_thread(_probe_chat_videos, videos)
-        remote_chat = serves_remotely(config)
-        if str(device).startswith("cuda") or remote_chat:
+        adapter_chat = _adapter_answers_chat(config)
+        if str(device).startswith("cuda") or adapter_chat:
             _validate_cuda_chat_body(body)
         else:
             _validate_mlx_chat_body(body)
@@ -1434,7 +1673,7 @@ async def _chat_completions(
             or ("include_usage" in options and not isinstance(options["include_usage"], bool))
         ):
             raise _bad_request("'stream_options' must contain only boolean 'include_usage'", param="stream_options")
-        if remote_chat:
+        if adapter_chat:
             _validate_remote_chat_media(messages)
 
         # Normalize and reject client errors before the bridge owns a local
@@ -1442,12 +1681,14 @@ async def _chat_completions(
         prepared_chat = _prepare_chat_body(
             body, config=config, max_completion_tokens=max_completion_tokens, max_tokens=max_tokens, seed=seed
         )
+        include_reasoning = body.get("include_reasoning") is True
 
         route = await route_request(http_request, requested_key, span, serving_key=registry_key)
 
         adapter = registry.get(route.key)
         registry.touch_lru(route.key)
-        if serves_remotely(registry.get_config(route.key)) and isinstance(adapter, GenerationAdapter):
+        await ensure_generation_lora(registry, route.key, lora, n=body.get("n"))
+        if _adapter_answers_chat(registry.get_config(route.key)) and isinstance(adapter, GenerationAdapter):
             _validate_remote_chat_media(messages)
             return await _remote_chat_response(
                 adapter,
@@ -1457,9 +1698,11 @@ async def _chat_completions(
                 stream=bool(stream_opt),
                 headers=route.headers(),
                 strict_grammar=strict_grammar,
+                include_reasoning=include_reasoning,
             )
         slot: asyncio.Semaphore | None = None
         reasoning_parser: str | None = None
+        tool_call_limit: int | None = None
         if isinstance(adapter, MLXGenerationAdapter) and not str(device).startswith("cuda"):
             if adapter.mlx_repo is None:
                 raise _unsupported_chat(model, device)
@@ -1473,6 +1716,7 @@ async def _chat_completions(
                 max_tokens=max_tokens,
                 seed=seed,
             )
+            tool_call_limit = _mlx_tool_call_limit(body, proxied)
             slot = adapter.generation_slot()
         elif isinstance(adapter, SGLangGenerationAdapter) and str(device).startswith("cuda"):
             server_url = adapter.server_url
@@ -1508,24 +1752,41 @@ async def _chat_completions(
         # in output.
         initial_inside_thinking = hide_thinking_blocks and thinking_enabled and reasoning_parser is None
 
+        if lora is not None:
+            if not isinstance(adapter, SGLangGenerationAdapter):
+                raise _bad_request("This chat backend does not support LoRA selection", param="lora_adapter")
+            try:
+                engine_name = lifetime.enter_context(adapter.lora_request(lora, n=body.get("n")))
+            except GenerationError as exc:
+                raise _generation_http_exception(exc, registry) from exc
+            # The child accepts a backend LoRA name, never a client-supplied path.
+            proxied["lora_path"] = engine_name
+
         if stream:
             if slot is not None:
                 await slot.acquire()
+                lifetime.callback(slot.release)
             client = _new_proxy_client()
+            lifetime.push_async_callback(
+                aclose_with_error_precedence,
+                client,
+                outcome_selected=True,
+                context="generation child SSE client",
+            )
+            budget = _child_budget(config, proxied, stream=True)
+            deadline = None if budget is None else asyncio.get_running_loop().time() + budget
             try:
-                upstream_request = client.build_request("POST", url, json=proxied)
+                upstream_request = client.build_request("POST", url, json=proxied, timeout=_child_timeout(budget))
                 upstream = await client.send(upstream_request, stream=True)
-            except asyncio.CancelledError:
-                await client.aclose()
-                if slot is not None:
-                    slot.release()
-                raise
             except httpx.HTTPError:
                 logger.warning("generation child chat stream connection failed", exc_info=True)
-                await client.aclose()
-                if slot is not None:
-                    slot.release()
                 return _upstream_error_response("generation child is unavailable")
+            lifetime.push_async_callback(
+                aclose_with_error_precedence,
+                upstream,
+                outcome_selected=True,
+                context="generation child SSE response",
+            )
             if upstream.status_code != status.HTTP_200_OK:
                 try:
                     await _read_upstream_body(upstream)
@@ -1533,11 +1794,6 @@ async def _chat_completions(
                     # The body is intentionally discarded; never log child
                     # validation details because they can include user input.
                     pass
-                finally:
-                    await upstream.aclose()
-                    await client.aclose()
-                    if slot is not None:
-                        slot.release()
                 logger.error("generation child chat error status=%d", upstream.status_code)
                 return _upstream_error_response(
                     response_status=_translated_upstream_status(upstream.status_code),
@@ -1550,11 +1806,6 @@ async def _chat_completions(
                     # Drain only for connection reuse and bounded cleanup; the
                     # unexpected response body is intentionally discarded.
                     pass
-                finally:
-                    await upstream.aclose()
-                    await client.aclose()
-                    if slot is not None:
-                        slot.release()
                 logger.error("generation child returned non-SSE content for a streaming request")
                 return _upstream_error_response("generation child returned an invalid streaming response")
             return StreamingResponse(
@@ -1565,8 +1816,11 @@ async def _chat_completions(
                     hide_thinking_blocks=hide_thinking_blocks,
                     initial_inside_thinking=initial_inside_thinking,
                     reasoning_format=reasoning_format,
-                    slot=slot,
+                    owns_resources=False,
+                    tool_call_limit=tool_call_limit,
                     strict_grammar=strict_grammar,
+                    include_reasoning=include_reasoning,
+                    deadline=deadline,
                 ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **route.headers()},
@@ -1574,15 +1828,22 @@ async def _chat_completions(
 
         if slot is not None:
             await slot.acquire()
+        budget = _child_budget(config, proxied, stream=False)
         try:
             async with _new_proxy_client() as client:
                 try:
-                    async with client.stream("POST", url, json=proxied) as upstream:
+                    async with (
+                        asyncio.timeout(budget),
+                        client.stream("POST", url, json=proxied, timeout=_child_timeout(budget)) as upstream,
+                    ):
                         raw = await _read_upstream_body(upstream)
                         upstream_status = upstream.status_code
                 except httpx.HTTPError:
                     logger.warning("generation child chat request failed", exc_info=True)
                     return _upstream_error_response("generation child is unavailable")
+        except TimeoutError:
+            logger.warning("generation child chat request exceeded its generation budget")
+            raise _generation_timeout_exception() from None
         except ValueError:
             logger.error("generation child chat response exceeded its byte limit")
             return _upstream_error_response("upstream response exceeded the byte limit")
@@ -1603,6 +1864,7 @@ async def _chat_completions(
                 initial_inside_thinking=initial_inside_thinking,
                 reasoning_format=reasoning_format,
                 terminal=True,
+                include_reasoning=include_reasoning,
             )
         except (ValueError, TypeError, json.JSONDecodeError):
             logger.warning("generation child returned an invalid chat response", exc_info=True)
@@ -1611,6 +1873,8 @@ async def _chat_completions(
             violation = await _strict_output_violation(strict_grammar, _completed_choice_contents(payload))
             if violation is not None:
                 return _strict_output_error_response(violation)
+        if tool_call_limit is not None and (excess := _excess_tool_call(payload, tool_call_limit, {})) is not None:
+            return _upstream_error_response(excess)
         return JSONResponse(content=payload, headers=route.headers())
 
 

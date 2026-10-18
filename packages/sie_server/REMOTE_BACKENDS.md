@@ -74,7 +74,10 @@ upstreams:
 
 `TEAM_SIE_KEY` is the name of an environment variable, not its value. Supply
 that variable through your deployment's secret mechanism. The adapter reads
-it when sending a request. Do not put a key in the YAML or a URL.
+it when sending a request. A server that starts while the variable is unset
+logs a warning naming the upstream and the variable, and starts anyway. Each
+request to that upstream fails while the variable is unset. Do not put a key
+in the YAML or a URL.
 
 Create `remote-models/sentence-transformers__all-MiniLM-L6-v2.yaml`:
 
@@ -101,6 +104,14 @@ profiles:
 The declared dimensions and input limit must describe the upstream model.
 `remote_backed: true` excludes local weight-source fields such as `hf_id`.
 The model configuration can name an upstream; it cannot create one.
+
+A remote profile's `adapter_options.loadtime` takes `upstream` and
+`upstream_model`, both required. Every other load-time option is refused,
+except `max_seq_length` on a profile other than `default` (see
+[Context window of a remote profile](#context-window-of-a-remote-profile)).
+The `default` profile serves the model's own window, which a remote-backed
+model declares with `max_sequence_length` and, for generation,
+`tasks.generate.context_length`.
 
 From the repository root, start the server:
 
@@ -176,6 +187,41 @@ The operator may add `set_params` and `strip_params` on the upstream. Reserved
 input and response-shaping fields, including `model`, cannot be overridden or
 stripped. Callers cannot pass additional upstream fields or credentials.
 
+## Context window of a remote profile
+
+A generation model with local weights can declare a different window for its
+remote profile than for its local one, for example when the upstream serves a
+longer context than the local accelerators admit:
+
+```yaml
+profiles:
+  remote:
+    adapter_path: sie_server.adapters.remote.openai:OpenAIUpstreamAdapter
+    max_batch_tokens: 16384
+    max_output_tokens: 32768
+    adapter_options:
+      loadtime:
+        upstream: vendor
+        upstream_model: org/model
+        max_seq_length: 131072
+```
+
+A request that names the profile, `org/model:remote`, takes that window as its
+`context_length` and that cap as its `max_output_tokens`, and the usage the
+upstream reports is checked against them. The output cap must fit inside the
+window. A profile without a `max_output_tokens` of its own takes the cap of the
+profile it extends, or else the model's, and that cap must fit too. Load-time
+options are not merged with a parent's, so a profile that extends a remote
+profile and declares a window restates `upstream` and `upstream_model`.
+
+A request for the bare name keeps the model's own `context_length` and
+`max_output_tokens` when its local profile serves it, and when single-node
+fallback sends it to the remote profile. In a cluster, routing sends a
+bare-name request to the remote profile as `org/model:remote`. The gateway
+still holds its output to the model's own `max_output_tokens`, and the remote
+worker checks it against the remote profile's window, as for a request that
+names the profile.
+
 ## Controls and failure behavior
 
 No upstream is configured by default. Without an upstream and a remote
@@ -219,6 +265,76 @@ refused with `PROVISIONING`, because the remote capacity is still starting,
 received no answer, so it is `QUEUE_FULL`. Any other failure is
 `INFERENCE_ERROR` for a server error and `INVALID_INPUT` for a client error.
 
+A single node that answers a remote chat call with `502` `upstream_error`, or
+with `503` because the upstream is unavailable, busy or not ready, logs one
+`WARNING` with a fixed reason, for example
+`remote chat for <model> failed: upstream answered 401` or
+`remote chat for <model> failed: the upstream credential is unavailable`. A
+failure after a stream has started logs `failed after output`. Native
+generation, completions and chat that the server renders through the model's
+template log a failed upstream call, an error the upstream sent in place of an
+answer, and an SIE upstream's terminal error event as
+`remote generation failed: <reason>`, for example
+`remote generation failed: upstream answered 402`,
+`remote generation failed: upstream ended generation with inference_error` or
+`remote generation failed: upstream '<name>' is unavailable: <reason>`.
+Rendered chat logs an answer it refuses as
+`remote chat for <model> failed: <reason>`. No line contains the credential,
+the prompt or anything the upstream sent.
+
+The caller's error names the class of a remote generation failure in a
+`reason` field, next to `code` and `message`: in the response's `error`
+object, or in `detail` for native generation on a single node, and in the
+error event of a stream that has already started. A cluster gateway forwards a
+worker's `reason` only on an `inference_error`, `RESOURCE_EXHAUSTED` or
+`MODEL_LOADING` error, and only when it is one of these values:
+
+| `reason` | Cause |
+| --- | --- |
+| `upstream_credential_unavailable` | The server has no credential to send, for example because the environment variable that holds it is not set. |
+| `upstream_credential_rejected` | The upstream answered `401`, or `403` without a known error code. |
+| `upstream_payment_required` | The upstream answered `402`, for example because its account has no credits. |
+| `upstream_model_not_found` | The upstream answered `404`, for example because it does not serve the configured model. |
+| `upstream_refused` | The upstream answered another `4xx`, including a `403` whose error code names the state of its account or service, such as `ACCOUNT_SUSPENDED`. |
+| `upstream_unavailable` | The upstream could not be reached, timed out, closed a started stream, answered `408` or `5xx`, or reported a failure of its own, or its circuit breaker is open. |
+| `upstream_busy` | The upstream answered `429` or a busy code, or the server's rate or concurrency cap for it is reached. |
+| `upstream_not_ready` | The upstream reports that the model is not ready. |
+| `upstream_invalid_response` | The answer is not one the server accepts: malformed, cut short, too large, compressed, a redirect, or a chat answer that breaks the request's tools or token limits. |
+
+The `reason` names the cause, and the status says whether a retry may help:
+for example a `429` with the final code `COLD_START_RATE_LIMITED` is a final
+failure whose reason is `upstream_busy`. An error object that the upstream
+sends in place of an answer, as the body of a `200` or as an event of a stream,
+is a final failure classed by the HTTP status its numeric `code` names, and
+otherwise as `upstream_unavailable`. An SIE upstream names the class of its own
+upstream's failure in a `reason` of its error, and the server keeps that class.
+When it is not `upstream_unavailable`, `upstream_busy` or `upstream_not_ready`,
+the failure is final here too. A terminal error event of an SIE upstream with
+the code `inference_error` carries the class that event names, or
+`upstream_unavailable` when it names none. One with `RESOURCE_EXHAUSTED` or
+`MODEL_LOADING` carries `upstream_busy` or `upstream_not_ready`, and one with
+any other code, which describes the request or the model's output, carries no
+`reason`.
+
+On a single node, the expiry of a remote profile's `first_chunk_timeout_s` or
+`overall_timeout_s` keeps its `504` and code and carries
+`upstream_unavailable`, and so does chat that times out after output. A cluster
+gateway's own deadline carries no `reason`, because it also covers the queue
+and the worker. A request that falls back to a remote profile answers a failed
+remote attempt with the original local refusal, unchanged, and names that
+attempt's failure only in `X-SIE-Fallback-Error`, so it carries no `reason`.
+
+The status and `code` do not change. A failure that a retry would not fix is
+`502` `upstream_error` from single-node chat and `500` `inference_error` from
+native generation, completions, responses and a cluster, and its message is
+fixed text for the reason, for example
+`the upstream account cannot pay for the request`. A retryable failure stays
+a `503` with `Retry-After` and its message. An upstream's refusal of the
+caller's input stays `400` and carries no `reason`. The `reason` and message
+never contain the upstream's name, URL, model id, answer or account; the
+`WARNING` line above keeps that detail for the operator, and `X-SIE-Upstream`
+still names the upstream as described above.
+
 Each upstream has a required rate cap and a circuit breaker. The limits are
 shared by that worker process's adapters, not across replicas: adding remote
 worker replicas increases the aggregate permitted traffic. Background identity
@@ -232,6 +348,51 @@ returns the worker's code and wait. Under single-node `fallback`, an upstream fa
 returns the original local refusal with its retry delay. A client error is
 never retried remotely, and fallback cannot replay work after local acceptance
 or after output reaches the caller.
+
+A generation request sends the upstream the caller's messages or prompt and
+sampling parameters, together with defaults the model configures, such as
+sampling defaults, stop sequences or chat template arguments. This holds for
+chat, completions and native generation, streamed or buffered, and for chat
+that the server renders through the model's template before it calls the
+upstream's completions or native generation endpoint. An upstream that answers
+a generation request with `400` or `422` and no known SIE error code refused
+that input. An OpenAI-compatible API answers this way, for example, to a
+prompt longer than its context. The caller receives `400` `invalid_request`,
+as for an `INVALID_INPUT` refusal, with fixed text that repeats nothing the
+upstream sent and does not name the upstream. An upstream that refuses a
+configured default answers the same way, so the server logs every refused
+generation request at `WARNING` with the upstream's name and status, where a
+refused default shows as a refusal of every request. Encode, score and
+extraction report the same upstream answer as a server error. A `400` or `422`
+with a known SIE error code other than `INVALID_INPUT` or `INPUT_TOO_LONG`, and
+other upstream `4xx` answers such as `401`, `403` or `404`, point at the
+operator's credential, model name or route rather than at the request, so the
+caller receives a server error. `429` and `5xx` answers are retryable as
+described above.
+
+Chat checks an upstream answer against the request's tools on a single node
+and in a cluster, streamed and buffered. The answer fails as an upstream error
+when it calls a function the request did not declare, calls any function under
+`tool_choice: "none"`, calls a function other than the one `tool_choice` names,
+makes several calls under `parallel_tool_calls: false`, or makes no call when
+`tool_choice` is `"required"` or names a function. Before output, a single node
+answers that failure with `502` `upstream_error` and a cluster with `500`
+`inference_error`, as each answers any other upstream failure, and the reason
+is `upstream_invalid_response`. A stream that
+has already started ends with an error event. A streamed function name is
+checked as OpenAI clients assemble it, by concatenating the fragments of each
+call index. A fragment is delivered while the name so far begins a permitted
+name, so a stream can deliver the start of a name before the call fails. An
+upstream that repeats the whole name on every delta fails, because the
+concatenated name is not one the request declared.
+
+Tool function names must match `^[a-zA-Z0-9_-]{1,64}$`, the pattern
+OpenAI-compatible APIs accept, so a local and a remote profile accept the same
+requests. The gateway and the single-node chat route refuse any other name
+with `400` before dispatch and name the field, for example
+`tools[1].function.name`. The error code is each route's code for an invalid
+chat request: `invalid_request` from the gateway and `INVALID_INPUT` from a
+single node.
 
 TLS is required outside loopback. URLs containing credentials, a query or a
 fragment are rejected. Redirects are refused, ambient proxy variables are

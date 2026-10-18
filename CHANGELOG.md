@@ -1,5 +1,77 @@
 # Changelog
 
+## [0.10.1](https://github.com/superlinked/sie/compare/v0.10.0...v0.10.1) (2026-10-13)
+
+
+### Features
+
+* add high-resolution Gemma thinking profile ([#677](https://github.com/superlinked/sie/issues/677)) ([e619232](https://github.com/superlinked/sie/commit/e619232d4594ff21da299781b3f67fe05efdec54))
+* **api:** opt-in reasoning_content on chat completions via include_reasoning ([#728](https://github.com/superlinked/sie/issues/728)) ([24400df](https://github.com/superlinked/sie/commit/24400dfda0c66d5070162c5bdcdde36ab890994b))
+* **config:** let a remote profile declare its own context window ([#730](https://github.com/superlinked/sie/issues/730)) ([530dcde](https://github.com/superlinked/sie/commit/530dcde89dd0a35500a2346308d30c8e708d7688))
+* **examples:** add a full-frame Earnings21 URL caller ([#680](https://github.com/superlinked/sie/issues/680)) ([461189b](https://github.com/superlinked/sie/commit/461189b3903d8d87a28b2a7d2e026c4af6309eb3))
+* **examples:** add a portable Workflow DEV32 runner ([#671](https://github.com/superlinked/sie/issues/671)) ([5a6180f](https://github.com/superlinked/sie/commit/5a6180f8e3b7c65499a58b4b91f087e19d718b5e))
+* **examples:** add image OCR and fixed-page evaluation ([f7ba07f](https://github.com/superlinked/sie/commit/f7ba07fecea1025c78d7ea6cd71543efdeb04159))
+* **examples:** add portable Markdown frame runner ([#670](https://github.com/superlinked/sie/issues/670)) ([ca6980f](https://github.com/superlinked/sie/commit/ca6980f31f96a35cc2b9c6bd259699e1fbc7c426))
+* **examples:** coding agent with OpenCode, with an agent-loop conformance check ([#727](https://github.com/superlinked/sie/issues/727)) ([d59e8a1](https://github.com/superlinked/sie/commit/d59e8a118417ddf24cc0769c57f97952a4e8234b))
+* **examples:** expose workflow32 top-k sampling ([#686](https://github.com/superlinked/sie/issues/686)) ([a23013c](https://github.com/superlinked/sie/commit/a23013c0dd81223bad60768a4f729b59dcfdbd3f))
+* **examples:** let the typed-decisions workflow32 runner set temperature ([#679](https://github.com/superlinked/sie/issues/679)) ([415f2f4](https://github.com/superlinked/sie/commit/415f2f4dc04ba0bd0dbd3bd843e7994fe4e12353))
+* **models:** claim tool calling on GLM-5.3-Flash ([#726](https://github.com/superlinked/sie/issues/726)) ([3d39f37](https://github.com/superlinked/sie/commit/3d39f3759f0ede2cd4e9bd95ffa55429483d746d))
+* **sdk:** default to SIE Serverless when an API key is set and no base URL is given ([#691](https://github.com/superlinked/sie/issues/691)) ([d680237](https://github.com/superlinked/sie/commit/d680237f02c2b67fd9afd91f30b73a29cb18fae0))
+* **sdk:** type SIE Relay refusals and attach request metadata to TypeScript errors ([#689](https://github.com/superlinked/sie/issues/689)) ([c571e0a](https://github.com/superlinked/sie/commit/c571e0a75d804cb6d49795a99cd03ea901307a69))
+* **server:** add LightOnOCR-3-4B model config ([#666](https://github.com/superlinked/sie/issues/666)) ([51f03ff](https://github.com/superlinked/sie/commit/51f03ff54bdb3e1f2db0c29476b2a18baab35969))
+* **server:** cap private reasoning with a per-profile thinking budget on SGLang ([#700](https://github.com/superlinked/sie/issues/700)) ([6c33b38](https://github.com/superlinked/sie/commit/6c33b38a834eafe12235a5a7da9c45d80dbd79e6))
+* **server:** report SGLang vision extract prompt and completion tokens per item ([#673](https://github.com/superlinked/sie/issues/673)) ([b0020ff](https://github.com/superlinked/sie/commit/b0020ff7497c3402b1cb395660a11b90b610c4dd))
+* **server:** serve LightOnOCR-3-4B on SGLang by default ([#668](https://github.com/superlinked/sie/issues/668)) ([a753964](https://github.com/superlinked/sie/commit/a75396480516a51c9ca84efbd5d78c5e7853c45f))
+* **server:** serve the PII redaction composition as superlinked/pii-redact ([#692](https://github.com/superlinked/sie/issues/692)) ([766f799](https://github.com/superlinked/sie/commit/766f7991410dfb4d3e65206fcab93bcf8be20cb9))
+* **server:** show json_schema response formats to the model ([#697](https://github.com/superlinked/sie/issues/697)) ([f5eac2b](https://github.com/superlinked/sie/commit/f5eac2b644db8c9a1a548dead8785afc06173668))
+
+
+### Bug Fixes
+
+* **cluster:** keep a worker lane up while its model is loading ([#659](https://github.com/superlinked/sie/issues/659)) ([f73cce5](https://github.com/superlinked/sie/commit/f73cce5b53f4851a3618e70f65f49db7ad528681)), closes [#293](https://github.com/superlinked/sie/issues/293)
+* **examples:** align document-ocr models with their image bundles ([#654](https://github.com/superlinked/sie/issues/654)) ([1fce5b5](https://github.com/superlinked/sie/commit/1fce5b5ad5f04b6c6f1a16c46b79dafb883539a2))
+* **examples:** retain server timing headers in Earnings21 evidence ([#690](https://github.com/superlinked/sie/issues/690)) ([1689b17](https://github.com/superlinked/sie/commit/1689b17362f83dbaa2fd346a4db428a8a4dc0134))
+* **examples:** support the LightOn photo transcription output limit ([2884f73](https://github.com/superlinked/sie/commit/2884f7333ead1ad2a1a1ba4498562b3ce8de3d40))
+* **gateway:** bound and re-estimate provisioning Retry-After, name the caller's model ([#698](https://github.com/superlinked/sie/issues/698)) ([ec068c4](https://github.com/superlinked/sie/commit/ec068c4ac3563e730b1495f48fe4c47c62a97700))
+* **gateway:** name the model in cold-start refusals and let the transport set Retry-After ([#688](https://github.com/superlinked/sie/issues/688)) ([ce295a9](https://github.com/superlinked/sie/commit/ce295a970c1357457c5d1150d7d5b5b3abe6a5cd))
+* **gliner2:** time a Decide graph again instead of giving its shape up for good ([#723](https://github.com/superlinked/sie/issues/723)) ([46c736d](https://github.com/superlinked/sie/commit/46c736d13d83f50049283ecef888ed2260c1cd1e))
+* **helm:** keep the h200 machine profile in collector request telemetry ([#702](https://github.com/superlinked/sie/issues/702)) ([d0a76fa](https://github.com/superlinked/sie/commit/d0a76fa9e8e0f227b78b69f93e2c949507a5cc89))
+* **models:** keep json_schema out of the prompt on the Gemma 4 31B screenshot profiles ([#706](https://github.com/superlinked/sie/issues/706)) ([7ec754a](https://github.com/superlinked/sie/commit/7ec754a902283ba371dcacebb7f2f1c3ca0d28ad))
+* **models:** leave page-image headroom on the Gemma 4 31B answer-only hi-res profiles ([#694](https://github.com/superlinked/sie/issues/694)) ([c5b0d01](https://github.com/superlinked/sie/commit/c5b0d01ead1037b03995a9e5c05cce387ac2c28a))
+* **models:** leave prefill headroom on the Gemma 4 31B hi-res thinking profile ([#681](https://github.com/superlinked/sie/issues/681)) ([7a22500](https://github.com/superlinked/sie/commit/7a225000b693c5824e43c17c16beff0f80bb202c))
+* **models:** pin NuNER_Zero-span tokenizer dependency ([#665](https://github.com/superlinked/sie/issues/665)) ([c03a0c7](https://github.com/superlinked/sie/commit/c03a0c7e723c597824361e52811395e311f1b53c))
+* **models:** pin the tokenizer of gliner-relex-large-v1.0 ([#715](https://github.com/superlinked/sie/issues/715)) ([aff7ec4](https://github.com/superlinked/sie/commit/aff7ec4f1b9017d6d610d6e8d1a622a09c34dacb))
+* **models:** put Qwen3Guard's stream interval on both profiles once ([#687](https://github.com/superlinked/sie/issues/687)) ([9fb03ab](https://github.com/superlinked/sie/commit/9fb03abdb504edd8f61394b0cf5d5d88aefd7c66))
+* replace unmaintained YAML parser in Rust services ([#714](https://github.com/superlinked/sie/issues/714)) ([5f6d451](https://github.com/superlinked/sie/commit/5f6d4518e8140cf9cafe0e425027ea13e3af7bfd))
+* **sdk:** bring TypeScript encode, score and extract options in line with the Python SDK ([#704](https://github.com/superlinked/sie/issues/704)) ([b76f698](https://github.com/superlinked/sie/commit/b76f69868d8179d9bce5a0ba1318f622bd923243))
+* **sdk:** declare the TypeScript SDK Apache-2.0 and read sie_sdk.__version__ from package metadata ([#705](https://github.com/superlinked/sie/issues/705)) ([ab4c996](https://github.com/superlinked/sie/commit/ab4c9962d5c0a411b7832f0b7b50cc8ff8d57566))
+* **sdk:** retry once more at the provisioning budget end and attach refusal metadata to capacity errors ([#699](https://github.com/superlinked/sie/issues/699)) ([a796d33](https://github.com/superlinked/sie/commit/a796d332c9477f2241cfcd67d3f4e1de07f3b46f))
+* **server:** accept running usage in remote chat streams ([#662](https://github.com/superlinked/sie/issues/662)) ([d8053bd](https://github.com/superlinked/sie/commit/d8053bd4deb3c9c062ce319415d2ce5ee9de1369))
+* **server:** accept tool_choice and parallel_tool_calls on the MLX chat path ([#729](https://github.com/superlinked/sie/issues/729)) ([a50706c](https://github.com/superlinked/sie/commit/a50706cb2090d069099bd23599a3c18266d3eaf1))
+* **server:** bound GLiFormer decoded text by characters ([#655](https://github.com/superlinked/sie/issues/655)) ([73f888e](https://github.com/superlinked/sie/commit/73f888e149d477a96eaffea6950076100520445e)), closes [#378](https://github.com/superlinked/sie/issues/378)
+* **server:** keep upstream names out of remote profile error messages ([#695](https://github.com/superlinked/sie/issues/695)) ([c8c1c85](https://github.com/superlinked/sie/commit/c8c1c85c9004f5ac648e47809970a4b2cb2ceb58))
+* **server:** let Gemma 4 think before a grammar on the native generate path ([#682](https://github.com/superlinked/sie/issues/682)) ([0770521](https://github.com/superlinked/sie/commit/0770521c81e5a52dd3a28dc64d11da6fa302d19d))
+* **server:** let the IPC socket queue a burst of sidecar stream connects ([#684](https://github.com/superlinked/sie/issues/684)) ([f6e138d](https://github.com/superlinked/sie/commit/f6e138d33663b38fb961b43f929b61c024fe2cbc))
+* **server:** release GLiClass CUDA graphs before evicting models ([#657](https://github.com/superlinked/sie/issues/657)) ([50a3817](https://github.com/superlinked/sie/commit/50a3817663e20bd47f50187b59ed321a3517e0ba)), closes [#370](https://github.com/superlinked/sie/issues/370)
+* **sidecar:** bound costly request waiting ([#708](https://github.com/superlinked/sie/issues/708)) ([8ec90e1](https://github.com/superlinked/sie/commit/8ec90e1eb487ab61e39abf4350079c3432d40266))
+* **sidecar:** bound model-readiness polling ([#731](https://github.com/superlinked/sie/issues/731)) ([c5abbe4](https://github.com/superlinked/sie/commit/c5abbe4f91e11ac6b40c6458259f24ff61ff5284))
+* **sidecar:** keep the caller's key order of output_schema and options through to the engine ([#724](https://github.com/superlinked/sie/issues/724)) ([78fa1b4](https://github.com/superlinked/sie/commit/78fa1b485612f63a0ed51d7c8b6fd3b680d570b5)), closes [#722](https://github.com/superlinked/sie/issues/722)
+
+
+### Performance Improvements
+
+* **gliner2:** CUDA graphs and one pass per batch for GLiNER2.5-Decide ([#721](https://github.com/superlinked/sie/issues/721)) ([dfd25cf](https://github.com/superlinked/sie/commit/dfd25cf2bbea3b56077c97181172f737eaace3ab))
+* **laya:** CUDA graphs for small requests, as an opt-in graphs profile ([#718](https://github.com/superlinked/sie/issues/718)) ([ab6c039](https://github.com/superlinked/sie/commit/ab6c039f434a17f876d6b3ef58e92cc98444e600))
+* **models:** stream Qwen3Guard-Gen-4B every 16 decode steps ([#683](https://github.com/superlinked/sie/issues/683)) ([b1e3f3d](https://github.com/superlinked/sie/commit/b1e3f3dbced6cd873b2fb5355c9eca17bcff640d))
+* **qwen3-reranker:** fused kernels, shared prefixes and CUDA graphs over a cached prefix ([#720](https://github.com/superlinked/sie/issues/720)) ([e3576e7](https://github.com/superlinked/sie/commit/e3576e70fa397b06ae4c962b05962196fd913a86))
+* **server:** give each SGLang OCR item its own worker batch ([#675](https://github.com/superlinked/sie/issues/675)) ([6dfce23](https://github.com/superlinked/sie/commit/6dfce239f10ae13e28883dd10ed9573ba2a9a647))
+* **server:** give GLiClass batches of up to eight rows a graph of their own size ([#719](https://github.com/superlinked/sie/issues/719)) ([2044b28](https://github.com/superlinked/sie/commit/2044b2813be67016b396276c8e1ea8ff2854ccaf))
+* **server:** rebind the LightOnOCR-3 vision patch embedding ([#669](https://github.com/superlinked/sie/issues/669)) ([25a8353](https://github.com/superlinked/sie/commit/25a8353b159db82bfd9b7fd39dea1fb81c4b6383))
+* **server:** serve more LightOnOCR-3-4B pages at once with SGLang overlap scheduling ([#676](https://github.com/superlinked/sie/issues/676)) ([b3546f8](https://github.com/superlinked/sie/commit/b3546f8fc50ecbd88c865af55e86c81c0fde605a))
+* **server:** use SGLang's fast image processor for GLM-OCR ([#678](https://github.com/superlinked/sie/issues/678)) ([2d2090d](https://github.com/superlinked/sie/commit/2d2090d097a24a39835b8c6844f9b5b7aeb29f3b))
+* **sidecar:** hold arrivals while the engine is busy and send them together when its batch returns ([#725](https://github.com/superlinked/sie/issues/725)) ([761a060](https://github.com/superlinked/sie/commit/761a060e0e5ae616f7f81cf9a4805d0565e29485))
+* **sidecar:** send engine-batched extract items one per RunBatch, as wide as the adapter dispatches ([#685](https://github.com/superlinked/sie/issues/685)) ([4d13128](https://github.com/superlinked/sie/commit/4d13128adaa85df42fd32d574cd813334a8bc725))
+
 ## [0.10.0](https://github.com/superlinked/sie/compare/v0.9.0...v0.10.0) (2026-10-09)
 
 

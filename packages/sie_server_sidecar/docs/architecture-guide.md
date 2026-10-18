@@ -88,13 +88,38 @@ Message settlement:
   unchanged. For a `QUEUE_FULL`, `MODEL_LOADING` or `RESOURCE_EXHAUSTED`
   answer the gateway uses a hint of 1 to 60 seconds as `Retry-After`; without
   one, or with a hint outside that range, it uses five seconds.
-- Active local model loads are held with JetStream progress ACKs until
+- Parked encode, score, extract and load work with active local model loads
+  is held with JetStream progress ACKs until
   `EnsureModelReady` returns ready; this preserves the delivery budget during
-  cold starts. The progress delay is clamped below the pool consumer `ack_wait`
-  even if the retry NAK delay is configured higher.
+  cold starts. Loading models are rechecked every second, independently of
+  the transient retry NAK delay. A shared progress-ACK clock spans readiness
+  calls and polling sleeps, refreshing the lease every third of the pool
+  consumer `ack_wait`, not on every probe. The parked wait is bounded by the
+  redelivery envelope; shutdown and deadline expiry take precedence over a
+  simultaneously ready model. Polling sleeps cannot extend that deadline.
+  Generation retains its separate `MODEL_LOADING` response and ACK path.
 - Transient backend, decode, stream, and drain failures are NAKed.
 - Reply publication failure, including a partial chunk sequence, leaves the
   JetStream message unacked for redelivery.
+
+The existing `handle_model_group: done` INFO record includes three unsigned
+millisecond durations measured with a monotonic clock:
+
+- `model_readiness_elapsed_ms` covers the readiness loop, including IPC,
+  bounded polling sleeps, and its cancellation/admission rechecks. It is not
+  pure model-load time.
+- `batch_permit_elapsed_ms` covers acquisition of the batch semaphore only.
+- `prepare_dispatch_elapsed_ms` covers post-permit filtering, descriptor and
+  tokenizer setup, budget/operation handling, scheduler resolution, and
+  preparation/dispatch. With the production scheduler this ends at enqueue;
+  the registry-absent inline fallback also includes backend/result handling.
+
+These values describe one completed group invocation. A parked group starts a
+new invocation; initial parking and other early exits do not emit a completion
+record. They do not partition the existing `elapsed_ms`: initial barriers,
+progress-ACK refresh, and final logging fall outside the three intervals.
+Sub-millisecond durations truncate to zero, and values saturate at the unsigned
+64-bit limit. The record is neither a per-request join nor a CPU-time measure.
 
 Work-item deadlines:
 
@@ -514,10 +539,12 @@ canonical facade. It projects to `sie.worker.ipc.response.chunks` (outcomes
 `sie.worker.ipc.response.chunk.reserved`. The sidecar does not emit a second
 Prometheus-shaped copy.
 
-`EnsureModelReady` returns readiness state and an optional `ModelDescriptor`.
-The descriptor carries tokenizer path, tokenizer content hash, maximum sequence
-length, output types, default text templates, `supports_run_batch`, and
-`max_concurrent_dispatch` (the batches the backend runs through the model's
+`EnsureModelReady` returns readiness state, an optional `ModelDescriptor`, and,
+once the model is ready, its `max_batch_tokens`: the batch cost budget from the
+model's profile, in the model's cost units (tokens for text, milliseconds for
+audio). The descriptor carries tokenizer path, tokenizer content hash, maximum
+sequence length, output types, default text templates, `supports_run_batch`,
+and `max_concurrent_dispatch` (the batches the backend runs through the model's
 adapter at once; see Scheduling).
 `loading_started` and `loading_in_progress` mean the same worker is actively
 loading the model; the dispatcher progress-ACKs and rechecks instead of NAKing
@@ -537,15 +564,117 @@ request count, coalescing windows, adaptive pull timing, and model-specific
 scheduler state. Oversize items flush alone. Per-item outcomes are published
 without dropping the rest of the batch.
 
+Each model's scheduler sizes its cost cap from the model's own
+`max_batch_tokens`, as the Python worker does for its own batcher: the static
+cost cap starts at that budget, and the adaptive cost range runs from
+`min(max(256, budget / 4), budget)` to `4 * budget`. A speech model with a
+720000 ms budget can therefore fill a clip batch up to the request count cap,
+while a text model keeps its token budget. Precedence:
+
+1. `SIE_BATCHER_MAX_BATCH_COST`, when set, pins the cap and the range for every
+   model, as before per-model budgets.
+2. Otherwise the budget `EnsureModelReady` reports for the model.
+3. Otherwise, with a backend that does not report one, 16384.
+
+`SIE_ADAPTIVE_BATCH_MIN_COST`, `SIE_ADAPTIVE_BATCH_MAX_COST`, and
+`SIE_ADAPTIVE_BATCH_INITIAL_COST` still override the range for every model,
+from its first batch on: the static cost cap starts at the adaptive
+controller's starting cost, which is the budget unless one of them clamps it.
+The request count cap and the hard audio duration cap per batch do not change.
+When a ready model later reports a different budget, for example after the
+backend restarts with a changed profile, its scheduler adopts the new budget
+and restarts its adaptive controller.
+
 Encode cost uses prepared-token length when available. Score tokenization stays
 backend-owned, so its scheduler wrapper caches the same model-independent proxy
 as Python: Unicode character count plus 1024 per media input, summed once per
 query/document pair. The cached score estimate never enters the IPC schema,
 never mutates or truncates inputs, and is not an authoritative token or billing
-count. Extract currently uses unit cost.
+count. Extract uses the prepared audio duration in milliseconds when the
+sidecar decoded the item's audio, and unit cost otherwise.
+
+Prepared audio longer than 30 s (Whisper's feature window) never shares a
+batch, whatever the model. Such recordings are served one per batch in arrival
+order, and while other items are pending too the two kinds take turns: a turn
+of the other items, then the oldest long recording. A turn of other items
+serves the items pending when it began, as one batch does in Python. The
+request count cap (12 by default, against Python's 64) can split the turn into
+several batches. Items that arrive during a turn wait for the next one. A turn
+owes the items earlier turns left over: the oldest whatever its length, and
+more of them, oldest first, while they fit the cost cap together. Its budget is
+the cost cap plus the oldest one's cost, and it serves its other items
+cheapest first with the rest, so a long left-over clip does not take the turn
+from shorter ones. Short clips that keep arriving therefore cannot pass a
+longer clip over turn after turn: every turn serves the oldest left-over item,
+and an item is served within the first `n + 1` turns that begin after it
+arrives, where `n` counts it and the older items still pending when the first
+of them ended. Batches stay in cost order. Each batch keeps the request count
+cap and the hard audio duration cap, and the cost cap unless it is a single
+item above it, which runs alone. The turns run only while a long recording is
+pending or has just run. Outside them, batches form as for every other model:
+the oldest request that has waited out the batch window goes first, the rest by
+cost. Inside a turn, nothing is promoted that way, because what the turn owes
+already bounds each item's wait. The Python batcher applies the same rule, but
+there only the Whisper adapter flags audio as long-form, a turn is always one
+batch, and it is ordered by cost alone.
+
+The item cap (`SIE_BATCHER_MAX_BATCH_REQUESTS`, default 12) cuts a request of
+more items than the cap into batches that run one after another.
+`SIE_BATCHER_MAX_REQUEST_ITEMS` (default 0, off) keeps a request of up to that
+many items in one batch past the item cap; the cost cap and the per-item media
+caps still cut. Like the aged promotion, it applies only outside the turns of
+the long-recording lane. It is off by default because whether one large batch
+beats several smaller ones is the adapter's property: one that pads a batch to
+its longest row can be slower on the whole request.
+
+### When a batch leaves
+
+An engine that runs one batch at a time is the scarce thing on its lane. A batch
+sent while another is still with it only waits at the engine's lock, with its
+membership frozen; the requests that come back a moment later start a batch of
+their own behind it, and two groups then take turns, each request waiting for
+the other group's forward. The drain loop therefore asks the model's lane
+([`scheduler/lane.rs`](../src/scheduler/lane.rs)) when the next batch leaves:
+
+1. **Idle lane: at once.** Nothing is with the engine and no batch has just
+   come back. The request leaves immediately with everything else pending. A
+   lone request, of one item or of several, never waits a window.
+2. **Busy lane: hold.** While a batch is with the engine, arrivals stay in the
+   queue, where later arrivals can join them. Two things take the second
+   pipeline slot (`SIE_RUST_PIPELINE_DEPTH`, default 2) instead: the next batch
+   if it is already full (item cap, cost cap, one request over the cost cap, or
+   no room under the cost cap for another item like its largest), because
+   holding it cannot improve it, and the rest of a request whose first part is
+   with the engine, because its caller is waiting on that part. Beside a long
+   recording, only the other items count toward full. A recording that is all
+   that is pending is not full right after another recording: holding it lets
+   the clips that arrive meanwhile take their turn first. The next batch is the
+   one of the `(operation, LoRA)` queue whose head is oldest: a full batch on a
+   younger queue does not overtake an older queue's held one.
+3. **On a return: gather once, then send everything pending.** The callers just
+   answered are the ones most likely to come straight back. The lane waits for
+   as many arrivals as the returned batch answered. It stops waiting when
+   nothing has arrived for the coalesce window (`SIE_BATCHER_COALESCE_MS`,
+   default 5), and in any case after half the returned batch's round trip or
+   the batch wait (`SIE_BATCHER_MAX_BATCH_WAIT_MS`), whichever is shorter.
+   `SIE_BATCHER_COALESCE_MS=0` turns the gather off. A batch that answered
+   nobody (the first part of a request the item cap cut) is followed by an
+   immediate send.
+4. **No gather where it does not pay.** The lane keeps a running score of
+   whether returns are followed by that many arrivals inside the window. A
+   closed loop of callers scores high. Arrivals at random times score low, and a
+   return is then followed by an immediate send of what is pending. The score
+   is updated either way, so the lane notices when callers start coming back.
+
+`SIE_BATCHER_IDLE_BYPASS_ENABLED=false` makes an idle lane wait for the classic
+triggers (caps, batch wait, coalesce window since the last arrival) instead of
+rule 1. `SIE_BATCHER_HOLD_WHILE_BUSY=false` restores the earlier loop for every
+lane: whatever is pending is sent into a free pipeline slot as soon as those
+triggers allow.
 
 A model whose descriptor reports `max_concurrent_dispatch` above 1 fronts an
-engine that batches continuously, such as SGLang serving an OCR model. A shared
+engine that batches continuously, such as SGLang serving an OCR model. Its lane
+keeps the earlier loop: there is no single forward to wait for. A shared
 `RunBatch` would only make each item wait for the slowest one, so the drain
 loop sends each of that model's extract items in a `RunBatch` of its own. The
 model's pipeline depth becomes the larger of `SIE_RUST_PIPELINE_DEPTH` and that

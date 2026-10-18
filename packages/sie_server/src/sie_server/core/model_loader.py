@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from sie_server.adapters.base import ModelAdapter
+from sie_server.adapters.lora import LoraRuntimeConfig
 from sie_server.config.model import ModelConfig, ProfileAdaptiveBatching, lora_entry_ref
 from sie_server.config.serving_artifacts import (
     VerifiedServingArtifact,
@@ -81,6 +82,16 @@ class LoadedLora:
     memory_bytes: int = 0  # Memory footprint of this LoRA
     peft_model: Any | None = None  # PeftModel instance (PEFT adapters only)
     loading: bool = False  # True while async loading is in progress
+    pinned: bool = False  # Engine startup adapters are never LRU-evicted
+    unloading: bool = False  # Stop new requests before draining existing ones
+
+
+@dataclass
+class LoraLoadFailure:
+    """A declared LoRA whose last load failed, held back until ``retry_at`` (``time.monotonic``)."""
+
+    attempts: int
+    retry_at: float
 
 
 @dataclass
@@ -96,6 +107,8 @@ class LoadedModel:
     # LoRA management - OrderedDict maintains LRU order (oldest first)
     loras: OrderedDict[str, LoadedLora] = field(default_factory=OrderedDict)
     max_loras: int = DEFAULT_MAX_LORAS
+    lora_failures: dict[str, LoraLoadFailure] = field(default_factory=dict)
+    lora_runtime: LoraRuntimeConfig | None = None
 
     # Lock for concurrent LoRA loading (created on first use)
     _lora_lock: asyncio.Lock | None = field(default=None, init=False, repr=False)
@@ -240,6 +253,7 @@ class ModelLoader:
             default_compute_precision=self._default_compute_precision,
             attention_backend=self._attention_backend,
             verified_serving_artifact=self._verified_serving_artifacts.get(config.sie_id),
+            max_loras_per_model=self._max_loras_per_model,
         )
 
     def ensure_weights_cached(self, config: ModelConfig) -> None:
@@ -725,30 +739,32 @@ class ModelLoader:
             max_loras=self._max_loras_per_model,
         )
 
-        # Preload profile LoRAs if the adapter exposes a LoRA capability.
-        # Engine-owned adapters (sglang: ``supports_hot_lora_reload() == False``)
-        # consume ``loadtime.lora_paths`` themselves at engine launch, so only
-        # hot-reload (PEFT) adapters take the loadtime declarations from here.
+        # Engine-owned runtimes report their startup residency. Ordinary
+        # PEFT adapters use the existing preload path below.
         lora_cap = adapter.lora_capability()
+        runtime = adapter.lora_runtime_config()
+        if runtime is not None:
+            loaded_model.lora_runtime = runtime
+            loaded_model.max_loras = runtime.max_loaded
+            for source in runtime.preloaded:
+                loaded_model.loras[source] = LoadedLora(adapter_id=source, pinned=source in runtime.pinned)
 
-        # A pinned LoRA revision (#2113) is only honored on the hot-reload path
-        # (``load_lora(revision=...)``). An engine-owned adapter consumes bare
-        # ids at engine launch and a LoRA-less adapter never loads the ref at
-        # all — in both cases a declared pin would silently resolve at the
-        # Hub's default branch, which is exactly the drift the pin exists to
-        # prevent. Fail the load loudly instead.
+        # PEFT resolves pins at fetch/load; SGLang receives the source revision
+        # map and materializes pinned startup and deferred sources itself.
+        # Reject adapters without either capability rather than silently
+        # resolving a declared pin at the Hub's default branch.
         pinned = {ref: rev for ref, rev in config.lora_revisions().items() if rev is not None}
         if pinned and (lora_cap is None or not lora_cap.supports_hot_lora_reload()):
             msg = (
                 f"Model '{name}' pins LoRA revision(s) {pinned!r}, but adapter "
                 f"{type(adapter).__name__!r} cannot honor a pin: it loads LoRAs at engine "
                 "launch (or not at all), where only bare ids exist. Remove the pin, or "
-                "serve via a hot-reload (PEFT) adapter. In the managed path, staging "
+                "serve via a runtime LoRA adapter. In the managed path, staging "
                 "resolves pins to local snapshots before the server sees the config."
             )
             raise ValueError(msg)
 
-        if lora_cap is not None:
+        if lora_cap is not None and runtime is None:
             profile_loras = self._collect_profile_loras(
                 config,
                 include_loadtime_paths=lora_cap.supports_hot_lora_reload(),
@@ -808,9 +824,8 @@ class ModelLoader:
             config: Model configuration.
             include_loadtime_paths: Collect the canonical
                 ``loadtime.lora_paths`` declarations. Pass ``False`` for
-                engine-owned adapters (sglang) that load those at engine
-                launch themselves — preloading them again here would
-                double-load.
+                startup-only adapters that load those at engine launch
+                themselves. Runtime metadata bypasses this preload path.
 
         Returns:
             Mapping of unique LoRA path/id -> pinned 40-hex revision, or

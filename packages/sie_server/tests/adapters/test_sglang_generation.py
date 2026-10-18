@@ -32,7 +32,7 @@ from sie_server.adapters._generation_base import (
     suppress_thinking_blocks,
 )
 from sie_server.adapters._types import ERR_NOT_LOADED
-from sie_server.adapters.sglang import _server
+from sie_server.adapters.sglang import _memory, _server
 from sie_server.adapters.sglang import generation as generation_module
 from sie_server.adapters.sglang.cuda13 import SGLangCuda13Adapter, SGLangStrictThinkingAdapter
 from sie_server.adapters.sglang.gemma import SGLangGemmaAdapter
@@ -360,7 +360,8 @@ def test_load_emits_lora_launch_args(
         max_loras_per_batch=2,
     )
 
-    adapter.load("cuda:0")
+    with patch.object(adapter._lora, "fetch", side_effect=lambda source: source):
+        adapter.load("cuda:0")
 
     cmd = mock_popen.call_args[0][0]
     assert "--enable-lora" in cmd
@@ -594,7 +595,7 @@ def test_generate_n_gt_one_fans_out_into_candidates(mock_async_client: MagicMock
 
 
 @patch("sie_server.adapters.sglang.generation.httpx.AsyncClient")
-def test_generate_forwards_lora_path(mock_async_client: MagicMock, adapter) -> None:
+def test_generate_forwards_lora_path(mock_async_client: MagicMock) -> None:
     """`lora_path` (the served-name) is forwarded as SGLang
     sampling_params.lora_path for per-request adapter selection.
     """
@@ -603,6 +604,8 @@ def test_generate_forwards_lora_path(mock_async_client: MagicMock, adapter) -> N
     ]
     stream = _FakeStreamingResponse(sse_lines)
     mock_async_client.return_value = _make_client_with_stream(stream)
+    adapter = SGLangGenerationAdapter("test-model", lora_paths={"acme-support": "acme/support-lora"})
+    adapter._lora.started()
     adapter._server_url = "http://localhost:30005"
 
     asyncio.run(collect_generation(adapter.generate(prompt="Hi", max_new_tokens=8, lora_path="acme-support")))
@@ -4189,3 +4192,10 @@ def test_reasoning_control_tokens_must_be_single_tokens() -> None:
         generation_module._reasoning_control_token_ids(
             "org/model", revision=None, trust_remote_code=False, reasoning_format="qwen3"
         )
+
+
+@pytest.fixture(autouse=True)
+def mock_memory_hardware(monkeypatch):
+    """Launch lifecycle tests use synthetic weight metadata and CUDA capacity."""
+    monkeypatch.setattr(_memory, "device_memory", lambda _: (80 * _memory.GIB, 80 * _memory.GIB))
+    monkeypatch.setattr(_memory.SGLangMemoryBudget, "static_bytes", 8 * _memory.GIB)

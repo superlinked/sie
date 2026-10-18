@@ -11,7 +11,11 @@ import yaml
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from sie_sdk import SIEClient
-from sie_server.adapters._generation_base import GenerationCapacityError, GenerationUnsupportedFieldError
+from sie_server.adapters._generation_base import (
+    GenerationCapacityError,
+    GenerationUnsupportedFieldError,
+    GenerationUpstreamError,
+)
 from sie_server.adapters.remote._http import RemoteUpstreamError
 from sie_server.adapters.remote._limits import upstream_limiter
 from sie_server.adapters.remote._openai_completions import CompletionStreamParser
@@ -164,8 +168,9 @@ async def test_disconnect_after_text_is_final_and_closes_capacity(adapter: OpenA
     answer_with(adapter, lambda _: httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream))
     iterator = adapter.generate("prompt", max_new_tokens=9)
     assert (await anext(iterator)).text_delta == "answer"
-    with pytest.raises(RemoteUpstreamError, match="failed during generation"):
+    with pytest.raises(GenerationUpstreamError, match="failed during generation") as raised:
         await anext(iterator)
+    assert raised.value.upstream_reason == "upstream_unavailable"
     assert stream.closed
     assert upstream_limiter("generation-test")._in_flight == 0
 

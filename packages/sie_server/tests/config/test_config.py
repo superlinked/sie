@@ -869,6 +869,24 @@ class TestModelConfigProfiles:
                 },
             )
 
+    def test_default_profile_max_output_tokens_must_fit_the_model_context(self) -> None:
+        """The bare model serves the model's context, whatever window the default profile loads."""
+        with pytest.raises(ValidationError, match="max_output_tokens=16384, exceeding its context_length=8192"):
+            ModelConfig(
+                sie_id="test-model",
+                hf_id="org/model",
+                tasks=Tasks(generate=GenerateTask(context_length=8192, max_output_tokens=4096)),
+                profiles={
+                    "default": ProfileConfig(
+                        adapter_path="mod:Cls",
+                        max_batch_tokens=8192,
+                        kv_budget_tokens=8192,
+                        max_output_tokens=16384,
+                        adapter_options=AdapterOptions(loadtime={"max_seq_length": 32768}),
+                    ),
+                },
+            )
+
     def test_chat_template_kwargs_require_generation_task(self) -> None:
         """Tokenizer-render presets are invalid on non-generation profiles."""
         with pytest.raises(ValidationError, match="without a generation task"):

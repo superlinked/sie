@@ -284,8 +284,9 @@ COPY --link --from=base --chown=1000:1000 /app/bundles /app/bundles
 COPY --link --from=builder --chown=1000:1000 /app/bundle-libs /app/bundle-libs
 COPY --link --from=builder --chown=1000:1000 /app/bundle-libs-freeze.txt /app/bundle-libs-freeze.txt
 
-RUN mkdir -p /app/evals /app/.cache/huggingface /app/.cache/sie-kernels \
-    && chown -R sie:sie /app/evals /app/.cache
+RUN mkdir -p /app/evals /app/.cache/huggingface /app/.cache/sie-kernels /app/.cache/sie \
+    && chown -R sie:sie /app/evals /app/.cache \
+    && chmod 700 /app/.cache/sie
 
 # Declare BUNDLE only here (LABEL + ENV) so layers above are bundle-agnostic.
 ARG BUNDLE
@@ -299,6 +300,7 @@ ENV PATH="/app/bundle-libs/bin:/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     HF_HOME=/app/.cache/huggingface \
+    SIE_DATA_DIR=/app/.cache/sie \
     SIE_SGLANG_KERNEL_CACHE_ROOT=/app/.cache/sie-kernels \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \

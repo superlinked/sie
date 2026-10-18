@@ -30,18 +30,6 @@ class HybridCount:
     count_tokens: Callable[[str], Awaitable[int]]
 
 
-def _only_reasoning(chunk: GenerationChunk) -> bool:
-    return (
-        not chunk.text_delta
-        and not chunk.done
-        and chunk.finish_reason is None
-        and chunk.tool_call_delta is None
-        and chunk.logprobs is None
-        and chunk.candidates is None
-        and chunk.error_code is None
-    )
-
-
 def _candidate_texts(candidate: dict[str, Any]) -> list[str]:
     texts = [candidate.get("text") or ""]
     for call in candidate.get("tool_calls") or ():
@@ -51,7 +39,7 @@ def _candidate_texts(candidate: dict[str, Any]) -> list[str]:
 
 
 async def count_hybrid_usage(
-    chunks: AsyncIterator[GenerationChunk], count: HybridCount
+    chunks: AsyncIterator[GenerationChunk], count: HybridCount, *, keep_reasoning: bool = False
 ) -> AsyncIterator[GenerationChunk]:
     """Report the worker's count on the terminal chunk and drop private reasoning.
 
@@ -60,6 +48,8 @@ async def count_hybrid_usage(
     upstream's counts in ``upstream_usage``. A completion the upstream counted
     but that returned no text counts as one token, and no completion counts
     above ``count.completion_limit``. Any other terminal passes through.
+    ``keep_reasoning`` leaves the counted reasoning on the chunks; otherwise a
+    chunk that carried only reasoning stays in the stream, empty, as progress.
     """
     texts: dict[int, list[str]] = {}
     outcome_selected = False
@@ -71,9 +61,7 @@ async def count_hybrid_usage(
                 choice.extend((chunk.tool_call_delta.function_name or "", chunk.tool_call_delta.arguments_delta))
             for index, candidate in enumerate(chunk.candidates or ()):
                 texts.setdefault(index, []).extend(_candidate_texts(candidate))
-            if chunk.reasoning_delta:
-                if _only_reasoning(chunk):
-                    continue
+            if chunk.reasoning_delta and not keep_reasoning:
                 chunk = replace(chunk, reasoning_delta="")
             if chunk.done and chunk.prompt_tokens is not None and chunk.completion_tokens is not None:
                 completion = 0

@@ -367,8 +367,14 @@ export interface ModelInfo {
   maxSequenceLength?: number | null;
   /** Pinned HF commit SHA for the weights; null for unpinned/package-backed models */
   revision?: string | null;
+  /** One line about the model; "" when the catalog sets none */
+  description?: string;
+  /** Release date of the served weights, YYYY-MM-DD; "" when the catalog sets none */
+  releaseDate?: string;
   /** Servable profiles keyed by name; address one as "model@profile" */
   profiles?: Record<string, ProfileInfo>;
+  /** Single-server ready LoRA names; absent on gateways (not fleet residency). */
+  lora_adapters?: string[];
   /** Advertised model capabilities; null for models with no `generate` task */
   capabilities?: ModelCapabilities | null;
   /** Gateway-only queue snapshot; absent when talking to a single server */
@@ -390,7 +396,7 @@ export interface ModelInfo {
 
 /**
  * A `/v1/models` entry exactly as the gateway emits it, before the client
- * camelCases the three renamed top-level keys.
+ * camelCases the four renamed top-level keys.
  *
  * Declared once here (rather than inline per call site) so `listModels` and
  * `getModel` cannot drift apart, and so the emitted key set has a single
@@ -406,7 +412,10 @@ export interface WireModelInfo {
   dims?: ModelDims;
   max_sequence_length?: number | null;
   revision?: string | null;
+  description?: string;
+  release_date?: string;
   profiles?: Record<string, ProfileInfo>;
+  lora_adapters?: string[];
   capabilities?: ModelCapabilities | null;
   pending_generation?: PendingGeneration;
   routing?: ModelRouting;
@@ -423,15 +432,18 @@ export interface WireModelInfo {
 const MODEL_INFO_WIRE_FIELD_SET: Record<keyof WireModelInfo, true> = {
   aliases: true,
   capabilities: true,
+  description: true,
   dims: true,
   inputs: true,
   last_error: true,
   loaded: true,
+  lora_adapters: true,
   max_sequence_length: true,
   name: true,
   outputs: true,
   pending_generation: true,
   profiles: true,
+  release_date: true,
   revision: true,
   routing: true,
   state: true,
@@ -783,8 +795,11 @@ export interface ModelSummary {
 export interface ServerInfo {
   version: string;
   uptime_seconds: number;
+  /** @deprecated Always `""`. Removed no earlier than 0.13.0. */
   user: string;
+  /** @deprecated Always `""`. Removed no earlier than 0.13.0. */
   working_dir: string;
+  /** @deprecated Always `0`. Removed no earlier than 0.13.0. */
   pid: number;
 }
 
@@ -1263,6 +1278,11 @@ export interface ChatMessage {
   tool_call_id?: string;
   /** Populated by the model when calling tools (assistant turns only). */
   tool_calls?: ToolCall[];
+  /**
+   * The model's reasoning on a response message. Present only when the
+   * request set `include_reasoning` and the model produced any.
+   */
+  reasoning_content?: string;
 }
 
 /**
@@ -1367,6 +1387,13 @@ export interface ChatCompletionRequest {
    * still applies. Absent, the serving profile decides (default on).
    */
   schema_in_prompt?: boolean;
+  /**
+   * SIE extension. `true` makes the model's reasoning public as
+   * `reasoning_content` on the message and, when streaming, on each delta.
+   * A model whose configuration declares no reasoning answers the field with
+   * nothing. Absent or `false` keeps reasoning private; `usage` is unchanged.
+   */
+  include_reasoning?: boolean;
   /** Accepted in the OpenAI range [-2, 2]; out-of-range values are rejected. */
   frequency_penalty?: number;
   presence_penalty?: number;
@@ -1480,6 +1507,8 @@ export interface ChatDelta {
   role?: "assistant";
   content?: string;
   tool_calls?: ToolCallDelta[];
+  /** Reasoning delta, present only when the request set `include_reasoning`. */
+  reasoning_content?: string;
 }
 
 /** Partial tool-call materialised across multiple streaming chunks. */

@@ -64,6 +64,68 @@ def _embedder_config() -> ModelConfig:
     )
 
 
+def _lora_config() -> ModelConfig:
+    return ModelConfig.model_validate(
+        {
+            "sie_id": "test/lora-embedder",
+            "hf_id": "test/lora-embedder",
+            "inputs": {"text": True},
+            "tasks": {"encode": {"dense": {"dim": 8}}},
+            "profiles": {
+                "default": {"max_batch_tokens": 8192, "adapter_path": "sie_server.adapters.fake.adapter:FakeAdapter"},
+                "banking": {
+                    "extends": "default",
+                    "adapter_options": {"runtime": {"lora_id": "org/banking-lora"}},
+                },
+                "served": {
+                    "extends": "default",
+                    "adapter_options": {"loadtime": {"lora_paths": {"legal": "org/legal-lora"}}},
+                },
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "request_options",
+    [
+        {"profile": "banking", "lora_id": "org/banking-lora"},
+        {"profile": "banking", "lora": "org/banking-lora"},
+        {"profile": "served", "lora_id": "org/legal-lora"},
+        {"profile": "served", "lora": "org/legal-lora"},
+        {"profile": "served", "lora": "legal"},
+        {"lora": None, "lora_id": None},
+    ],
+)
+def test_a_request_may_select_a_lora_its_profile_declares(request_options: dict[str, Any]) -> None:
+    merged, _ = merge_runtime_options_with_profile(_lora_config(), request_options)
+
+    for key in ("lora", "lora_id"):
+        if key in request_options:
+            assert merged[key] == request_options[key]
+
+
+@pytest.mark.parametrize(
+    "request_options",
+    [
+        {"lora_id": "attacker/lora"},
+        {"lora": "attacker/lora"},
+        {"lora_id": "/srv/any/dir"},
+        {"profile": "served", "lora_id": "legal"},
+        {"profile": "banking", "lora_id": "attacker/lora"},
+        {"lora_id": "org/banking-lora"},
+        {"profile": "banking", "lora_id": "org/legal-lora"},
+        {"profile": "served", "lora": "org/banking-lora"},
+        {"lora": ""},
+        {"lora": 42},
+        {"lora_id": ["org/banking-lora"]},
+    ],
+)
+def test_a_request_may_not_select_a_lora_its_profile_does_not_declare(request_options: dict[str, Any]) -> None:
+    with pytest.raises(runtime_options.UndeclaredLoraError, match="declares"):
+        merge_runtime_options_with_profile(_lora_config(), request_options)
+
+
 def test_merges_profile_runtime_under_request_options() -> None:
     """Profile runtime defaults appear even when the request only sends is_query."""
     config = _embedder_config()

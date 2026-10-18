@@ -2,6 +2,8 @@
 # encoder, boundary architecture; trained with max_len 4096 words), loaded through
 # gliner2 2.x AutoExtractor. Served from the transformers5 bundle, which pins gliner2 2.x.
 sie_id: fastino/GLiNER2.5-multi-Decide
+description: "Multilingual typed-decision classifier (GLiNER2.5, mDeBERTa-v3-base): answers noul, choice and score questions about a text in one pass. 2,048-token window."
+release_date: "2026-09-24"
 hf_id: fastino/GLiNER2.5-multi-Decide
 hf_revision: 6bc1d43d201b0691e733626389af8c57eea3ea68
 inputs:

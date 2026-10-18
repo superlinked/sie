@@ -23,6 +23,7 @@ from sie_server.adapters._word_window import (
     read_window,
     split_word_counter,
     subword_budget,
+    window_rows,
 )
 
 _WORD = re.compile(r"\w+(?:[-_]\w+)*|\S")
@@ -281,12 +282,58 @@ def test_windows_of_a_document_longer_than_the_window_limit_are_none() -> None:
     assert document_windows(text, splitter(20), overlap_words=10, max_windows=9) is not None
 
 
-def test_windows_of_a_long_document_are_read_from_bounded_slices() -> None:
-    text = " ".join(f"w{index}" for index in range(200_000))
+@pytest.mark.parametrize("budget", [1, 256, 512, 768])
+def test_windows_keep_long_word_pieces_when_a_window_starts_on_a_hyphen(budget: int) -> None:
+    text = "x" * MAX_WORD_CHARS + ("-" + "x" * (MAX_WORD_CHARS - 1)) * 7 + " tail"
+    reader = splitter(10, max_subwords=budget)
+    expected = [(word, start, end) for word, start, end, _ in pieces(words(text), text)]
 
-    windows = document_windows(text, splitter(64), max_windows=10)
+    windows = document_windows(text, reader)
+
+    assert windows is not None
+    rows, _, overlaps = window_rows([text], [windows])
+    seen = []
+    for row, window, overlap in zip(rows, windows, overlaps, strict=True):
+        read = list(reader(row))
+        seen.extend((word, window.start + start, window.start + end) for word, start, end in read[overlap or 0 :])
+        # The first word may exceed the budget, but subsequent words may not.
+        assert len(read) == 1 or sum(len(word) for word, _, _ in read) <= budget
+    assert seen == expected
+
+
+def test_identical_window_texts_keep_independent_document_word_boundaries() -> None:
+    suffix = "-" + "x" * (MAX_WORD_CHARS - 1)
+    texts = ["x" * MAX_WORD_CHARS + suffix, suffix]
+    reader = splitter(2, max_subwords=MAX_WORD_CHARS)
+    plans = [document_windows(text, reader) for text in texts]
+
+    rows, owners, _ = window_rows(texts, plans)
+
+    assert owners == [0, 0, 1]
+    assert rows[1] == rows[2] == suffix
+    assert [word for word, _, _ in reader(rows[1])] == [suffix]
+    assert [word for word, _, _ in reader(rows[2])] == ["-", suffix[1:]]
+    # Reading the other document does not alter an already-planned window.
+    assert [word for word, _, _ in reader(rows[1])] == [suffix]
+
+
+def test_windows_of_a_long_document_count_only_a_bounded_prefix() -> None:
+    text = " ".join(f"w{index}" for index in range(200_000))
+    batches: list[list[str]] = []
+
+    def count(batch: Sequence[str]) -> list[int]:
+        batches.append(list(batch))
+        return per_char(batch)
+
+    reader = WindowedSplitter(words, max_words=64, max_subwords=1000, count_subwords=count)
+
+    windows = document_windows(text, reader, max_windows=10)
 
     assert windows is None
+    assert all(len(batch) <= 64 for batch in batches)
+    # First window: 64 words, then 32 new words in each of 9 windows. At most
+    # one counting block may be prefetched; none of the huge remainder is tokenized.
+    assert sum(map(len, batches)) <= 64 + 9 * 32 + 64
 
 
 def span(start: int, end: int, score: float, label: str = "person") -> dict[str, Any]:

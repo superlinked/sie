@@ -766,3 +766,45 @@ def test_chat_completions_extra_body_still_works_for_unknown_fields() -> None:
         assert sent["hypothetical_future_field"] == "future-value"
         assert sent["top_k"] == 99
         client.close()
+
+
+def test_chat_completions_sends_include_reasoning_and_keeps_reasoning_content() -> None:
+    payload = {
+        "id": "chatcmpl-1",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "m",
+        "system_fingerprint": None,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hi", "reasoning_content": "why"},
+                "finish_reason": "stop",
+                "logprobs": None,
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+    with patch("sie_sdk.client.sync.httpx.Client") as mc:
+        mc.return_value.post.return_value = _ok_json(payload)
+        client = SIEClient("http://localhost:8080")
+        out = client.chat_completions("m", [{"role": "user", "content": "hi"}], include_reasoning=True)
+        assert out["choices"][0]["message"]["reasoning_content"] == "why"
+        sent = json.loads(mc.return_value.post.call_args.kwargs["content"].decode("utf-8"))
+        assert sent["include_reasoning"] is True
+        client.close()
+
+
+def test_stream_chat_completions_yields_reasoning_content_deltas_unchanged() -> None:
+    reasoning_chunk = _chat_chunk("")
+    reasoning_chunk["choices"][0]["delta"] = {"role": "assistant", "reasoning_content": "why "}
+    lines = _sse(reasoning_chunk, _chat_chunk("Hi", finish="stop"))
+    with patch("sie_sdk.client.sync.httpx.Client") as mc:
+        mc.return_value.stream.return_value = _FakeStream(lines=lines)
+        client = SIEClient("http://localhost:8080")
+        out = list(client.stream_chat_completions("m", [{"role": "user", "content": "hi"}], include_reasoning=True))
+        assert [c["choices"][0]["delta"].get("reasoning_content") for c in out] == ["why ", None]
+        assert [c["choices"][0]["delta"].get("content") for c in out] == [None, "Hi"]
+        sent = json.loads(mc.return_value.stream.call_args.kwargs["content"].decode("utf-8"))
+        assert sent["include_reasoning"] is True
+        client.close()

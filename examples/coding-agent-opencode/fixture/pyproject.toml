@@ -1,0 +1,18 @@
+[project]
+name = "invoice-totals"
+version = "0.1.0"
+description = "Sum the amount column of an exported invoice"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

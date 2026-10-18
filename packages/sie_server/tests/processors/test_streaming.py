@@ -20,6 +20,7 @@ import re
 import threading
 import time
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -4820,3 +4821,206 @@ async def test_grammar_work_item_without_its_grammar_profile_is_rejected() -> No
     registry.get.assert_not_called()
     assert adapter.close_calls == 0
     msg.ack.assert_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "tools", [None, [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}]]
+)
+@pytest.mark.parametrize("include_reasoning", [False, True])
+async def test_queued_chat_publishes_reasoning_only_when_asked(
+    monkeypatch: pytest.MonkeyPatch, stream: bool, tools: Any, include_reasoning: bool
+) -> None:
+    nc = AsyncMock()
+    adapter = _FakeGenAdapter(
+        [
+            GenerationChunk(text_delta="private reas", is_first=True),
+            GenerationChunk(text_delta="oning</think>Visible answer"),
+            GenerationChunk(text_delta="", done=True, finish_reason="stop", prompt_tokens=1, completion_tokens=8),
+        ]
+    )
+    registry = _make_registry_with_chat_config(
+        adapter, chat_template_kwargs={"enable_thinking": True}, hf_id="Qwen/Qwen3.5-4B", reasoning_parser="qwen3"
+    )
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    monkeypatch.setattr(proc, "_check_context_length", AsyncMock(return_value=None))
+    monkeypatch.setattr(proc, "_render_chat_template", AsyncMock(return_value="rendered prompt<think>"))
+    monkeypatch.setattr("sie_server.processors.streaming._FLUSH_INTERVAL_S", 0)
+    work = _make_work_item(messages=[{"role": "user", "content": "Hello"}])
+    work["generate"]["stream"] = stream
+    work["generate"]["include_reasoning"] = include_reasoning
+    if tools is not None:
+        work["generate"]["tools"] = tools
+
+    await proc.process(_make_msg(work), "Qwen/Qwen3.5-4B")
+
+    decoded = _decode_chunks(nc)
+    assert [chunk["seq"] for chunk in decoded] == list(range(len(decoded)))
+    assert "".join(chunk.get("text_delta", "") for chunk in decoded) == "Visible answer"
+    reasoning = [chunk["reasoning_delta"] for chunk in decoded if "reasoning_delta" in chunk]
+    if include_reasoning:
+        assert "".join(reasoning) == "private reasoning"
+        first_reasoning = next(index for index, chunk in enumerate(decoded) if "reasoning_delta" in chunk)
+        first_text = next(index for index, chunk in enumerate(decoded) if chunk.get("text_delta"))
+        assert first_reasoning < first_text
+        assert all(not chunk["text_delta"] for chunk in decoded if "reasoning_delta" in chunk)
+    else:
+        assert reasoning == []
+        assert "private" not in str(decoded)
+    assert decoded[-1]["done"] is True
+    assert decoded[-1]["usage"]["completion_tokens"] == 8
+
+
+@pytest.mark.asyncio
+async def test_queued_chat_include_reasoning_is_silent_for_a_model_without_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    nc = AsyncMock()
+    adapter = _FakeGenAdapter(
+        [
+            GenerationChunk(text_delta="Plain answer", is_first=True),
+            GenerationChunk(text_delta="", done=True, finish_reason="stop", prompt_tokens=1, completion_tokens=2),
+        ]
+    )
+    registry = _make_registry_with_chat_config(adapter, chat_template_kwargs={})
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    monkeypatch.setattr(proc, "_check_context_length", AsyncMock(return_value=None))
+    work = _make_work_item()
+    work["generate"]["include_reasoning"] = True
+
+    await proc.process(_make_msg(work), "test/model")
+
+    decoded = _decode_chunks(nc)
+    assert "".join(chunk.get("text_delta", "") for chunk in decoded) == "Plain answer"
+    assert not any("reasoning_delta" in chunk for chunk in decoded)
+    assert decoded[-1]["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_queued_chat_rejects_a_non_boolean_include_reasoning() -> None:
+    nc = AsyncMock()
+    adapter = _FakeGenAdapter([])
+    proc = StreamingProcessor(nc=nc, registry=_make_registry_with_chat_config(adapter), worker_id="w1")
+    work = _make_work_item()
+    work["generate"]["include_reasoning"] = "yes"
+
+    await proc.process(_make_msg(work), "test/model")
+
+    terminal = _terminal_chunk(nc)
+    assert terminal["error"]["code"] == "invalid_request"
+    assert "include_reasoning" in terminal["error"]["message"]
+    assert adapter.close_calls == 0
+
+
+def _reasoning_processor(
+    monkeypatch: pytest.MonkeyPatch, script: list[GenerationChunk], *, prompt: str = "rendered prompt<think>"
+) -> tuple[AsyncMock, StreamingProcessor]:
+    nc = AsyncMock()
+    registry = _make_registry_with_chat_config(
+        _FakeGenAdapter(script),
+        chat_template_kwargs={"enable_thinking": True},
+        hf_id="Qwen/Qwen3.5-4B",
+        reasoning_parser="qwen3",
+    )
+    proc = StreamingProcessor(nc=nc, registry=registry, worker_id="w1")
+    monkeypatch.setattr(proc, "_check_context_length", AsyncMock(return_value=None))
+    monkeypatch.setattr(proc, "_render_chat_template", AsyncMock(return_value=prompt))
+    monkeypatch.setattr("sie_server.processors.streaming._FLUSH_INTERVAL_S", 0)
+    return nc, proc
+
+
+def _reasoning_work(**generate: Any) -> dict[str, Any]:
+    work = _make_work_item(messages=[{"role": "user", "content": "Hello"}])
+    work["generate"].update(include_reasoning=True, **generate)
+    return work
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_queued_chat_include_reasoning_keeps_each_candidate_reasoning_on_its_choice(
+    monkeypatch: pytest.MonkeyPatch, stream: bool
+) -> None:
+    terminal = GenerationChunk(text_delta="", done=True, finish_reason="stop", prompt_tokens=1, completion_tokens=8)
+    if stream:
+        script = [
+            GenerationChunk(text_delta="r0</think>a0", choice_index=0, is_first=True),
+            GenerationChunk(text_delta="r1</think>a1", choice_index=1),
+            terminal,
+        ]
+    else:
+        script = [
+            replace(
+                terminal,
+                candidates=(
+                    {"text": "r0</think>a0", "finish_reason": "stop", "logprobs": None},
+                    {"text": "r1</think>a1", "finish_reason": "stop", "logprobs": None},
+                ),
+            )
+        ]
+    nc, proc = _reasoning_processor(monkeypatch, script)
+
+    await proc.process(_make_msg(_reasoning_work(n=2, stream=stream)), "Qwen/Qwen3.5-4B")
+
+    decoded = _decode_chunks(nc)
+    assert decoded[-1]["done"] is True
+    if stream:
+        per_choice: dict[int, dict[str, str]] = {}
+        for chunk in decoded[:-1]:
+            fields = per_choice.setdefault(chunk.get("choice_index", 0), {"reasoning": "", "text": ""})
+            fields["reasoning"] += chunk.get("reasoning_delta", "")
+            fields["text"] += chunk.get("text_delta", "")
+        assert per_choice == {0: {"reasoning": "r0", "text": "a0"}, 1: {"reasoning": "r1", "text": "a1"}}
+    else:
+        assert not any("reasoning_delta" in chunk for chunk in decoded)
+        assert [(item["text"], item["reasoning_content"]) for item in decoded[-1]["candidates"]] == [
+            ("a0", "r0"),
+            ("a1", "r1"),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_queued_chat_include_reasoning_publishes_text_and_reasoning_in_model_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    nc, proc = _reasoning_processor(
+        monkeypatch,
+        [
+            GenerationChunk(text_delta="Hello <think>x</think> world", is_first=True),
+            GenerationChunk(text_delta="", done=True, finish_reason="stop", prompt_tokens=1, completion_tokens=8),
+        ],
+        prompt="rendered prompt",
+    )
+
+    await proc.process(_make_msg(_reasoning_work(stream=True)), "Qwen/Qwen3.5-4B")
+
+    decoded = _decode_chunks(nc)
+    published = [
+        (field, chunk[key])
+        for chunk in decoded
+        for field, key in (("reasoning", "reasoning_delta"), ("text", "text_delta"))
+        if chunk.get(key)
+    ]
+    assert published == [("text", "Hello "), ("reasoning", "x"), ("text", " world")]
+    assert [chunk["seq"] for chunk in decoded] == list(range(len(decoded)))
+
+
+@pytest.mark.asyncio
+async def test_queued_chat_include_reasoning_still_fails_an_answer_that_is_only_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    nc, proc = _reasoning_processor(
+        monkeypatch,
+        [
+            GenerationChunk(text_delta="thinking until the budget ends", is_first=True),
+            GenerationChunk(text_delta="", done=True, finish_reason="length", prompt_tokens=1, completion_tokens=8),
+        ],
+    )
+
+    await proc.process(_make_msg(_reasoning_work(stream=True)), "Qwen/Qwen3.5-4B")
+
+    decoded = _decode_chunks(nc)
+    assert "".join(chunk.get("reasoning_delta", "") for chunk in decoded) == "thinking until the budget ends"
+    assert not any(chunk.get("text_delta") for chunk in decoded)
+    assert decoded[-1]["done"] is True
+    assert decoded[-1]["error"]["code"] == "empty_model_output"

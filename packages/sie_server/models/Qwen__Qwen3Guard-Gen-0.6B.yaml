@@ -60,7 +60,6 @@ profiles:
     kv_budget_tokens: 65536
     adapter_options:
       loadtime:
-        mem_fraction_static: 0.85
         served_model_name: Qwen/Qwen3Guard-Gen-0.6B
       runtime:
         first_chunk_timeout_s: 30

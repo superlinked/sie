@@ -2,12 +2,14 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import msgpack
 import pytest
+from sie_server.adapters.errors import UPSTREAM_FAILURE_MESSAGES
 from sie_server.adapters.remote._limits import upstream_limiter
 from sie_server.adapters.remote.openai import OpenAIUpstreamAdapter
 from sie_server.adapters.remote.sie import SieUpstreamAdapter
@@ -19,6 +21,11 @@ from sie_server.processors.streaming import StreamingProcessor
 MODEL = "queued/chat"
 USAGE = {"prompt_tokens": 37, "completion_tokens": 2, "total_tokens": 39}
 TOOL = {"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}
+WORKER_TERMINAL_ERROR = json.loads(
+    (Path(__file__).resolve().parents[3] / "wire-fixtures" / "upstream_failure_reasons.json").read_text(
+        encoding="utf-8"
+    )
+)["worker_terminal_error"]
 
 
 def choice(content: str = "answer", *, index: int = 0, finish: str | None = None, **extra: Any) -> dict:
@@ -137,8 +144,9 @@ def respond(
     return stream
 
 
-async def run(remote: tuple, **fields: Any) -> tuple[AsyncMock, list[dict]]:
+async def run(remote: tuple, *, prompt: str | None = None, **fields: Any) -> tuple[AsyncMock, list[dict]]:
     _adapter, proc, nc, _requests = remote
+    request = {"messages": [{"role": "user", "content": "question"}]} if prompt is None else {"prompt": prompt}
     msg = AsyncMock()
     msg.data = msgpack.packb(
         {
@@ -154,7 +162,7 @@ async def run(remote: tuple, **fields: Any) -> tuple[AsyncMock, list[dict]]:
             "reply_subject": "_INBOX.router-1.req-1",
             "timestamp": time.time(),
             "generate": {
-                "messages": [{"role": "user", "content": "question"}],
+                **request,
                 "max_new_tokens": 9,
                 "stream": True,
                 **fields,
@@ -203,7 +211,8 @@ async def test_unsupported_chat_fields_refuse_without_dispatch(remote: tuple, fi
 
 
 @pytest.mark.parametrize(
-    ("status", "code"), [(429, "RESOURCE_EXHAUSTED"), (503, "RESOURCE_EXHAUSTED"), (400, "inference_error")]
+    ("status", "code"),
+    [(429, "RESOURCE_EXHAUSTED"), (503, "RESOURCE_EXHAUSTED"), (400, "invalid_request"), (401, "inference_error")],
 )
 async def test_remote_refusal_is_single_attempt_and_sanitized(remote: tuple, status: int, code: str) -> None:
     respond(remote, status=status, payload={"error": {"message": "PRIVATE_UPSTREAM_DETAIL"}})
@@ -408,25 +417,142 @@ async def test_buffered_chat_preserves_tools_and_exact_usage(remote: tuple) -> N
 
 
 @pytest.mark.parametrize(
-    ("code", "expected"), [("INVALID_INPUT", "invalid_request"), ("INPUT_TOO_LONG", "INPUT_TOO_LONG")]
+    ("status", "code", "expected"),
+    [
+        (400, "INVALID_INPUT", "invalid_request"),
+        (400, "INPUT_TOO_LONG", "INPUT_TOO_LONG"),
+        (400, "invalid_request_error", "invalid_request"),
+        (422, None, "invalid_request"),
+        (400, "MODEL_NOT_FOUND", "inference_error"),
+        (413, None, "inference_error"),
+        (401, None, "inference_error"),
+        (403, None, "inference_error"),
+        (404, None, "inference_error"),
+    ],
 )
-async def test_known_input_refusal_preserves_type(remote: tuple, code: str, expected: str) -> None:
-    respond(remote, status=400, payload={"error": {"code": code, "message": "PRIVATE"}})
+async def test_input_refusal_is_the_callers_error_and_other_refusals_are_not(
+    remote: tuple, status: int, code: str | None, expected: str
+) -> None:
+    respond(remote, status=status, payload={"error": {"code": code, "message": "PRIVATE"}})
     _msg, chunks = await run(remote)
     assert chunks[-1]["error"]["code"] == expected
     assert len(remote[3]) == 1
     assert "PRIVATE" not in json.dumps(chunks)
+    assert "queued-chat" not in json.dumps(chunks)
 
 
 async def test_post_output_disconnect_is_final(remote: tuple) -> None:
     stream = respond(remote, stream=ChatStream([choice()], disconnect=True))
     _msg, chunks = await run(remote)
     assert "".join(chunk.get("text_delta", "") for chunk in chunks) == "answer"
-    assert chunks[-1]["error"]["code"] == "inference_error"
+    assert chunks[-1]["error"] == {
+        "code": "inference_error",
+        "message": UPSTREAM_FAILURE_MESSAGES["upstream_unavailable"],
+        "reason": "upstream_unavailable",
+    }
     assert "PRIVATE" not in json.dumps(chunks)
     assert len(remote[3]) == 1
     assert stream is not None
     assert stream.closed
+
+
+_UPSTREAM_DETAIL = "PRIVATE_UPSTREAM_DETAIL for account acct-7Q2Lw0d9"
+_FAILURES = [
+    ("401", "inference_error", "upstream_credential_rejected"),
+    ("402", "inference_error", "upstream_payment_required"),
+    ("403", "inference_error", "upstream_credential_rejected"),
+    ("404", "inference_error", "upstream_model_not_found"),
+    ("connect", "RESOURCE_EXHAUSTED", "upstream_unavailable"),
+    ("malformed", "inference_error", "upstream_invalid_response"),
+]
+
+
+def fail_upstream(remote: tuple, failure: str, *, streaming: bool) -> None:
+    adapter, _proc, _nc, requests = remote
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if failure == "connect":
+            raise httpx.ConnectError(_UPSTREAM_DETAIL)
+        if failure == "malformed" and streaming:
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, stream=ChatStream([{"x": _UPSTREAM_DETAIL}])
+            )
+        status, payload = (
+            (200, {"x": _UPSTREAM_DETAIL})
+            if failure == "malformed"
+            else (int(failure), {"error": {"message": _UPSTREAM_DETAIL, "code": int(failure)}})
+        )
+        return httpx.Response(
+            status, headers={"content-type": "application/json"}, stream=httpx.ByteStream(json.dumps(payload).encode())
+        )
+
+    adapter._async_client = upstream_client(adapter._upstream, transport=httpx.MockTransport(handler))
+
+
+def assert_reason_reaches_the_gateway(
+    remote: tuple, msg: AsyncMock, chunks: list[dict], code: str, reason: str
+) -> None:
+    error = chunks[-1]["error"]
+    assert (error["code"], error["reason"]) == (code, reason)
+    if code == "inference_error":
+        assert error["message"] == UPSTREAM_FAILURE_MESSAGES[reason]
+    published = json.dumps(chunks)
+    for private in ("PRIVATE", "acct-7Q2Lw0d9", "queued-chat", "127.0.0.1", "operator"):
+        assert private not in published
+    assert len(remote[3]) == 1
+    msg.ack.assert_awaited_once()
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize(("failure", "code", "reason"), _FAILURES)
+async def test_an_upstream_failure_reaches_the_gateway_with_its_reason(
+    remote: tuple, streaming: bool, failure: str, code: str, reason: str
+) -> None:
+    fail_upstream(remote, failure, streaming=streaming)
+    msg, chunks = await run(remote, stream=streaming)
+    assert_reason_reaches_the_gateway(remote, msg, chunks, code, reason)
+    if failure == "402":
+        assert chunks[-1]["error"] == WORKER_TERMINAL_ERROR
+
+
+def serve_raw_completions(remote: tuple, monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter, proc, _nc, _requests = remote
+    monkeypatch.setattr(proc, "_check_context_length", AsyncMock(return_value=None))
+    if isinstance(adapter, OpenAIUpstreamAdapter):
+        adapter._upstream = adapter._upstream.model_copy(update={"endpoints": ["chat", "completions"]})
+
+
+@pytest.mark.parametrize(("failure", "code", "reason"), _FAILURES)
+async def test_an_upstream_failure_of_a_queued_prompt_reaches_the_gateway_with_its_reason(
+    remote: tuple, monkeypatch: pytest.MonkeyPatch, failure: str, code: str, reason: str
+) -> None:
+    serve_raw_completions(remote, monkeypatch)
+    fail_upstream(remote, failure, streaming=True)
+    msg, chunks = await run(remote, prompt="question")
+    assert_reason_reaches_the_gateway(remote, msg, chunks, code, reason)
+    sie = isinstance(remote[0], SieUpstreamAdapter)
+    assert remote[3][0].url.path.endswith("/v1/generate/operator__model" if sie else "/completions")
+
+
+@pytest.mark.parametrize("output", [False, True])
+@pytest.mark.parametrize("reason", [None, "upstream_payment_required"])
+async def test_a_failure_the_upstream_reports_in_a_queued_prompt_reaches_the_gateway_with_its_reason(
+    remote: tuple, monkeypatch: pytest.MonkeyPatch, output: bool, reason: str | None
+) -> None:
+    serve_raw_completions(remote, monkeypatch)
+    sie = isinstance(remote[0], SieUpstreamAdapter)
+    if sie:
+        first = {"text_delta": "answer", "done": False}
+        error = {"code": "inference_error", "message": _UPSTREAM_DETAIL, **({"reason": reason} if reason else {})}
+        failure = {"text_delta": "", "done": True, "finish_reason": "error", "error": error}
+    else:
+        first = {"choices": [{"index": 0, "text": "answer", "finish_reason": None}]}
+        failure = {"error": {"message": _UPSTREAM_DETAIL, **({"code": 402} if reason else {})}}
+    respond(remote, frames=[first, failure] if output else [failure])
+    msg, chunks = await run(remote, prompt="question")
+    assert "".join(chunk.get("text_delta", "") for chunk in chunks) == ("answer" if output else "")
+    assert_reason_reaches_the_gateway(remote, msg, chunks, "inference_error", reason or "upstream_unavailable")
 
 
 @pytest.mark.parametrize(
@@ -627,3 +753,76 @@ async def test_onboarded_native_sie_preserves_already_suppressed_answer(remote: 
     assert "".join(chunk.get("text_delta", "") for chunk in chunks) == "answer"
     assert chunks[-1]["finish_reason"] == "stop"
     assert requests[0].url.path.endswith("/generate/operator__model")
+
+
+@pytest.mark.parametrize("declares_reasoning", [False, True])
+async def test_include_reasoning_publishes_upstream_reasoning_only_for_a_reasoning_model(
+    remote: tuple, declares_reasoning: bool
+) -> None:
+    _adapter, proc, _nc, _requests = remote
+    if declares_reasoning:
+        config_data = proc._registry.get_config(MODEL).model_dump()
+        config_data["tasks"]["generate"]["chat_template_kwargs"] = {"enable_thinking": True}
+        proc._registry.get_config.return_value = ModelConfig.model_validate(config_data)
+    frame = choice("")
+    frame["choices"][0]["delta"]["reasoning_content"] = "PRIVATE"
+    respond(remote, frames=[frame, *events()])
+
+    msg, chunks = await run(remote, include_reasoning=True)
+
+    assert "".join(chunk.get("text_delta", "") for chunk in chunks) == "answer"
+    reasoning = "".join(chunk.get("reasoning_delta", "") for chunk in chunks)
+    assert reasoning == ("PRIVATE" if declares_reasoning else "")
+    assert chunks[-1]["usage"] == USAGE
+    msg.ack.assert_awaited_once()
+
+
+def _declare_reasoning(proc: StreamingProcessor) -> None:
+    config_data = proc._registry.get_config(MODEL).model_dump()
+    config_data["tasks"]["generate"]["chat_template_kwargs"] = {"enable_thinking": True}
+    proc._registry.get_config.return_value = ModelConfig.model_validate(config_data)
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_include_reasoning_keeps_each_choice_reasoning_on_its_own_choice(remote: tuple, streaming: bool) -> None:
+    _adapter, proc, _nc, _requests = remote
+    _declare_reasoning(proc)
+    if streaming:
+        frames: list[dict | str] = []
+        for index, (reasoning, text, finish) in enumerate((("R0", "first", "stop"), ("R1", "second", "length"))):
+            frame = choice(text, index=index)
+            frame["choices"][0]["delta"]["reasoning_content"] = reasoning
+            frames += [frame, choice("", index=index, finish=finish)]
+        respond(remote, frames=[*frames, {"choices": [], "usage": USAGE}, "[DONE]"])
+    else:
+        respond(
+            remote,
+            payload={
+                "choices": [
+                    {
+                        "index": 1,
+                        "message": {"role": "assistant", "content": "second", "reasoning_content": "R1"},
+                        "finish_reason": "length",
+                    },
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "first", "reasoning_content": "R0"},
+                        "finish_reason": "stop",
+                    },
+                ],
+                "usage": USAGE,
+            },
+        )
+
+    msg, chunks = await run(remote, n=2, stream=streaming, include_reasoning=True)
+
+    reasoning: dict[int, str] = {}
+    for chunk in chunks:
+        if chunk.get("reasoning_delta"):
+            index = chunk.get("choice_index", 0)
+            reasoning[index] = reasoning.get(index, "") + chunk["reasoning_delta"]
+    assert reasoning == {0: "R0", 1: "R1"}
+    if not streaming:
+        assert [item["text"] for item in chunks[-1]["candidates"]] == ["first", "second"]
+    assert chunks[-1]["usage"] == USAGE
+    msg.ack.assert_awaited_once()

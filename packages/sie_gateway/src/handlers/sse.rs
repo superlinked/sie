@@ -79,6 +79,10 @@ pub enum SseEndpoint {
     Chat {
         /// Whether to emit a trailing usage-only chunk before ``[DONE]``.
         include_usage: bool,
+        /// Whether the request opted into public reasoning; a worker
+        /// ``reasoning_delta`` is forwarded as ``delta.reasoning_content``
+        /// only when it did.
+        include_reasoning: bool,
     },
     /// SIE-native generate chunk shape.
     Generate,
@@ -680,6 +684,7 @@ async fn run_sse_driver_with_lifecycle(
     let overall_deadline = publish_instant + overall_timeout;
     let mut last_chunk_at: Option<tokio::time::Instant> = None;
     let mut first_seen = false;
+    let mut output_seen = false;
     // Per-``choice_index`` ``role_emitted`` set (H4). For n=1 (the default)
     // this only ever contains 0; for streaming n>1 each candidate's first
     // delta gets an ``assistant`` role emitted independently, matching
@@ -740,7 +745,7 @@ async fn run_sse_driver_with_lifecycle(
         if now >= overall_deadline {
             send_error_chunk_before_output(
                 &mut first_output,
-                !first_seen,
+                !output_seen,
                 &event_tx,
                 &endpoint,
                 &stream_chat_id,
@@ -1071,12 +1076,12 @@ async fn run_sse_driver_with_lifecycle(
             Err(broadcast::error::RecvError::Closed) => {
                 // The collector was removed (terminal chunk applied
                 // and outcome fired, or drop_pending_stream raced).
-                // If we never saw a chunk, surface a generic
+                // If no output was forwarded, surface a generic
                 // result-channel-closed; otherwise the terminator
                 // was already sent below on the terminal chunk
                 // arm — guard against a double `[DONE]` by checking
-                // `first_seen`.
-                if !first_seen {
+                // `output_seen`.
+                if !output_seen {
                     send_error_chunk_before_output(
                         &mut first_output,
                         false,
@@ -1103,18 +1108,24 @@ async fn run_sse_driver_with_lifecycle(
         };
 
         // Non-stale chunk arrived. Update timing trackers.
-        if !chunk.text_delta.is_empty()
-            || chunk
-                .tool_calls
-                .as_ref()
-                .is_some_and(|calls| !calls.is_empty())
-        {
+        if chunk.carries_output() {
             if let Some(lifecycle) = lifecycle.as_mut() {
                 lifecycle.first_token();
             }
         }
         first_seen = true;
         last_chunk_at = Some(tokio::time::Instant::now());
+        let progress_only = !chunk.carries_output()
+            && !chunk.done
+            && chunk.finish_reason.is_none()
+            && chunk.error.is_none()
+            && chunk.logprobs.is_none();
+        // A bridge keeps its HTTP refusal until real output; progress only
+        // feeds the deadlines above.
+        if progress_only && first_output.is_some() {
+            continue;
+        }
+        output_seen |= !progress_only;
 
         // Forward as an SSE event, then handle terminal/error/usage.
         let is_terminal = chunk.done;
@@ -1264,12 +1275,15 @@ async fn run_sse_driver_with_lifecycle(
             && !role_emitted.contains(&chunk.choice_index)
             && !skip_forward;
         let event_body = match endpoint {
-            SseEndpoint::Chat { .. } => build_chat_chunk_event(
+            SseEndpoint::Chat {
+                include_reasoning, ..
+            } => build_chat_chunk_event(
                 &stream_chat_id,
                 created,
                 &model,
                 &chunk,
                 emit_role_for_this_chunk,
+                include_reasoning,
             ),
             SseEndpoint::Generate => build_generate_chunk_event(&chunk, &terminal_usage_extras),
             SseEndpoint::Completion { .. } => {
@@ -1326,6 +1340,7 @@ async fn run_sse_driver_with_lifecycle(
                 return;
             }
             if chunk.error.is_none()
+                && (chunk.carries_output() || chunk.done)
                 && !(chunk.done
                     && matches!(chunk.finish_reason.as_deref(), Some("cancelled" | "error")))
             {
@@ -1373,10 +1388,17 @@ fn build_chat_chunk_event(
     model: &str,
     chunk: &ChunkEnvelope,
     emit_role: bool,
+    include_reasoning: bool,
 ) -> Value {
     let mut delta = serde_json::Map::new();
     if emit_role {
         delta.insert("role".to_string(), json!("assistant"));
+    }
+    if include_reasoning && !chunk.reasoning_delta.is_empty() {
+        delta.insert(
+            "reasoning_content".to_string(),
+            json!(chunk.reasoning_delta),
+        );
     }
     if !chunk.text_delta.is_empty() {
         delta.insert("content".to_string(), json!(chunk.text_delta));
@@ -1536,7 +1558,7 @@ fn build_usage_only_chunk_event(
     terminal_extras: &[(String, Value)],
 ) -> Option<Value> {
     let object = match endpoint {
-        SseEndpoint::Chat { include_usage } if include_usage => "chat.completion.chunk",
+        SseEndpoint::Chat { include_usage, .. } if include_usage => "chat.completion.chunk",
         SseEndpoint::Completion { include_usage } if include_usage => "text_completion",
         _ => return None,
     };
@@ -1572,7 +1594,7 @@ fn terminal_carries_usage(endpoint: SseEndpoint, chunk: &ChunkEnvelope) -> bool 
     }
     match endpoint {
         SseEndpoint::Generate => true,
-        SseEndpoint::Chat { include_usage } | SseEndpoint::Completion { include_usage } => {
+        SseEndpoint::Chat { include_usage, .. } | SseEndpoint::Completion { include_usage } => {
             include_usage
         }
     }
@@ -1657,6 +1679,9 @@ fn worker_error_value(error: &ChunkError, include_openai_type: bool) -> Value {
     object.insert("code".to_string(), json!(code));
     if let Some(retry_after_s) = error.validated_retry_after_s() {
         object.insert("retry_after_s".to_string(), json!(retry_after_s));
+    }
+    if let Some(reason) = error.client_safe_reason() {
+        object.insert("reason".to_string(), json!(reason.as_str()));
     }
     Value::Object(object)
 }
@@ -1802,9 +1827,12 @@ async fn send_synthetic_error_chunk(
         executed_bundle_config_hash: None,
         execution_identity_sha256: None,
         execution_binding_sha256: None,
+        reasoning_delta: String::new(),
     };
     let body = match endpoint {
-        SseEndpoint::Chat { .. } => build_chat_chunk_event(chat_id, created, model, &chunk, false),
+        SseEndpoint::Chat { .. } => {
+            build_chat_chunk_event(chat_id, created, model, &chunk, false, false)
+        }
         SseEndpoint::Completion { .. } => {
             build_text_completion_chunk_event(chat_id, created, model, &chunk)
         }
@@ -2033,6 +2061,7 @@ mod tests {
                 executed_bundle_config_hash: None,
                 execution_identity_sha256: None,
                 execution_binding_sha256: None,
+                reasoning: Default::default(),
             }
         }
 
@@ -2214,6 +2243,7 @@ mod tests {
                     message: "sensitive diagnostic".into(),
                     param: None,
                     retry_after_s: None,
+                    reason: None,
                 },
             )
             .await;
@@ -2399,6 +2429,7 @@ mod tests {
             for endpoint in [
                 SseEndpoint::Chat {
                     include_usage: true,
+                    include_reasoning: false,
                 },
                 SseEndpoint::Completion {
                     include_usage: true,
@@ -2413,6 +2444,7 @@ mod tests {
                         message: "scheduler full".to_string(),
                         param: Some("model".to_string()),
                         retry_after_s: Some(12),
+                        reason: None,
                     },
                 )
                 .await;
@@ -2487,6 +2519,7 @@ mod tests {
         for endpoint in [
             SseEndpoint::Chat {
                 include_usage: false,
+                include_reasoning: false,
             },
             SseEndpoint::Completion {
                 include_usage: false,
@@ -2501,6 +2534,7 @@ mod tests {
                     message: "scheduler full".to_string(),
                     param: None,
                     retry_after_s: None,
+                    reason: None,
                 },
             )
             .await;
@@ -2519,6 +2553,7 @@ mod tests {
         for endpoint in [
             SseEndpoint::Chat {
                 include_usage: false,
+                include_reasoning: false,
             },
             SseEndpoint::Completion {
                 include_usage: false,
@@ -2553,6 +2588,7 @@ mod tests {
                         message: "pool republish failed".to_string(),
                         param: None,
                         retry_after_s: None,
+                        reason: None,
                     }),
                     origin: StreamOutcomeOrigin::GatewaySynthetic,
                     tool_calls: None,
@@ -2561,6 +2597,7 @@ mod tests {
                     executed_bundle_config_hash: None,
                     execution_identity_sha256: None,
                     execution_binding_sha256: None,
+                    reasoning: Default::default(),
                 })
                 .expect("outcome receiver is live");
             let (durability_tx, durability_completion) = tokio::sync::oneshot::channel();
@@ -2624,6 +2661,7 @@ mod tests {
         for endpoint in [
             SseEndpoint::Chat {
                 include_usage: false,
+                include_reasoning: false,
             },
             SseEndpoint::Completion {
                 include_usage: false,
@@ -2638,6 +2676,7 @@ mod tests {
                     message: "top_k is unavailable".to_string(),
                     param: Some("top_k".to_string()),
                     retry_after_s: None,
+                    reason: None,
                 },
             )
             .await;
@@ -2729,7 +2768,7 @@ mod tests {
             "bytes": [72, 105],
             "top_logprobs": [],
         })]);
-        let ev = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, true);
+        let ev = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, true, false);
         let lp = &ev["choices"][0]["logprobs"];
         assert_eq!(lp["content"][0]["token"], "Hi");
         assert!(lp["refusal"].is_null());
@@ -2739,8 +2778,31 @@ mod tests {
     #[test]
     fn test_build_chat_chunk_event_logprobs_null_when_absent() {
         let chunk = _delta_chunk(0, "Hi");
-        let ev = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, true);
+        let ev = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, true, false);
         assert!(ev["choices"][0]["logprobs"].is_null());
+    }
+
+    /// A worker chunk carrying ``reasoning_delta`` surfaces it as
+    /// ``delta.reasoning_content`` only for a request that opted in, with no
+    /// ``content`` member when the chunk carried no answer text; a plain text
+    /// chunk has no such member.
+    #[test]
+    fn test_build_chat_chunk_event_surfaces_reasoning_delta_only_when_opted_in() {
+        let mut chunk = _delta_chunk(0, "");
+        chunk.reasoning_delta = "why ".to_string();
+        let ev = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, true, true);
+        let delta = &ev["choices"][0]["delta"];
+        assert_eq!(delta["reasoning_content"], "why ");
+        assert_eq!(delta["role"], "assistant");
+        assert!(delta.get("content").is_none());
+
+        let ev = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, true, false);
+        assert!(ev["choices"][0]["delta"].get("reasoning_content").is_none());
+
+        let text = _delta_chunk(1, "Hi");
+        let ev = build_chat_chunk_event("chatcmpl-1", 0, "m", &text, false, true);
+        assert!(ev["choices"][0]["delta"].get("reasoning_content").is_none());
+        assert_eq!(ev["choices"][0]["delta"]["content"], "Hi");
     }
 
     fn _delta_chunk(seq: u32, text: &str) -> ChunkEnvelope {
@@ -2763,6 +2825,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning_delta: String::new(),
         }
     }
 
@@ -2786,6 +2849,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning_delta: String::new(),
         }
     }
 
@@ -2796,7 +2860,7 @@ mod tests {
     #[test]
     fn test_sse_chat_first_chunk_emits_role() {
         let chunk = _delta_chunk(0, "Hello");
-        let v = build_chat_chunk_event("chatcmpl-1", 1_700_000_000, "m", &chunk, true);
+        let v = build_chat_chunk_event("chatcmpl-1", 1_700_000_000, "m", &chunk, true, false);
         assert_eq!(v["object"], "chat.completion.chunk");
         assert_eq!(v["id"], "chatcmpl-1");
         assert_eq!(v["model"], "m");
@@ -2811,7 +2875,7 @@ mod tests {
         // choices[0].index = 2 so clients can reassemble per-candidate streams.
         let mut chunk = _delta_chunk(0, "B");
         chunk.choice_index = 2;
-        let v = build_chat_chunk_event("chatcmpl-1", 1_700_000_000, "m", &chunk, false);
+        let v = build_chat_chunk_event("chatcmpl-1", 1_700_000_000, "m", &chunk, false, false);
         assert_eq!(v["choices"][0]["index"], 2);
         assert_eq!(v["choices"][0]["delta"]["content"], "B");
     }
@@ -2828,7 +2892,7 @@ mod tests {
         chunk.finish_reason = Some("length".to_string());
         // done=false — this is the per-choice closure, not the global terminal.
         chunk.done = false;
-        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
         assert_eq!(v["choices"][0]["index"], 1);
         assert_eq!(v["choices"][0]["finish_reason"], "length");
         assert_eq!(v["choices"][0]["delta"]["content"], "last");
@@ -2848,7 +2912,7 @@ mod tests {
             "bytes": [116, 111, 107],
             "top_logprobs": [],
         })]);
-        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
         let lps = &v["choices"][0]["logprobs"];
         assert!(!lps.is_null());
         assert_eq!(lps["content"][0]["token"], "tok");
@@ -2880,6 +2944,7 @@ mod tests {
             message: "SENSITIVE_WORKER_FAILURE_SENTINEL".to_string(),
             param: None,
             retry_after_s: None,
+            reason: None,
         });
 
         let value = build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk);
@@ -2907,6 +2972,7 @@ mod tests {
             message: "top_k is unavailable".to_string(),
             param: Some("top_k".to_string()),
             retry_after_s: None,
+            reason: None,
         });
 
         let value = build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk);
@@ -2922,7 +2988,7 @@ mod tests {
     #[test]
     fn test_sse_chat_subsequent_chunk_omits_role() {
         let chunk = _delta_chunk(1, " world");
-        let v = build_chat_chunk_event("chatcmpl-1", 1_700_000_000, "m", &chunk, false);
+        let v = build_chat_chunk_event("chatcmpl-1", 1_700_000_000, "m", &chunk, false, false);
         let delta = &v["choices"][0]["delta"];
         assert!(delta.get("role").is_none(), "role must not be re-emitted");
         assert_eq!(delta["content"], " world");
@@ -2933,7 +2999,7 @@ mod tests {
     #[test]
     fn test_sse_chat_terminal_finish_reason_stop() {
         let chunk = _terminal_chunk("stop", None);
-        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
         assert_eq!(v["choices"][0]["finish_reason"], "stop");
         // The terminal chunk has an empty delta — content must not
         // surface, but the delta object itself is still present.
@@ -2943,7 +3009,7 @@ mod tests {
     #[test]
     fn test_sse_chat_terminal_finish_reason_length_preserved() {
         let chunk = _terminal_chunk("length", None);
-        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
         assert_eq!(v["choices"][0]["finish_reason"], "length");
     }
 
@@ -2956,7 +3022,7 @@ mod tests {
         chunk.execution_binding_sha256 = Some(binding.clone());
 
         for value in [
-            build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false),
+            build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false),
             build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk),
             build_generate_chunk_event(&chunk, &[]),
         ] {
@@ -2980,6 +3046,7 @@ mod tests {
             message: "upstream gone".to_string(),
             param: None,
             retry_after_s: None,
+            reason: None,
         });
 
         for value in [
@@ -3002,8 +3069,9 @@ mod tests {
             message: "top_k is unavailable".to_string(),
             param: Some("top_k".to_string()),
             retry_after_s: None,
+            reason: None,
         });
-        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
         assert_eq!(v["error"]["code"], "unsupported_field");
         assert_eq!(v["error"]["type"], "invalid_request_error");
         assert_eq!(v["error"]["param"], "top_k");
@@ -3022,9 +3090,10 @@ mod tests {
             message: "SENSITIVE_WORKER_FAILURE_SENTINEL".to_string(),
             param: None,
             retry_after_s: None,
+            reason: None,
         });
 
-        let value = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let value = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
         assert_eq!(
             value["error"]["code"],
             crate::queue::streaming::MODEL_LOAD_FAILED_ERROR_CODE
@@ -3042,10 +3111,17 @@ mod tests {
     /// deltas and clean terminals keep the exact pre-existing chat shape.
     #[test]
     fn test_sse_chat_non_error_chunks_omit_request_id() {
-        let delta = build_chat_chunk_event("chatcmpl-1", 0, "m", &_delta_chunk(0, "Hi"), true);
+        let delta =
+            build_chat_chunk_event("chatcmpl-1", 0, "m", &_delta_chunk(0, "Hi"), true, false);
         assert!(delta.get("request_id").is_none());
-        let terminal =
-            build_chat_chunk_event("chatcmpl-1", 0, "m", &_terminal_chunk("stop", None), false);
+        let terminal = build_chat_chunk_event(
+            "chatcmpl-1",
+            0,
+            "m",
+            &_terminal_chunk("stop", None),
+            false,
+            false,
+        );
         assert!(terminal.get("request_id").is_none());
     }
 
@@ -3108,6 +3184,7 @@ mod tests {
             message: "upstream gone".to_string(),
             param: None,
             retry_after_s: None,
+            reason: None,
         });
         let v = build_generate_chunk_event(&chunk, &[]);
         assert_eq!(v["error"]["code"], "transport_failure");
@@ -3122,6 +3199,7 @@ mod tests {
             message: "SENSITIVE_WORKER_FAILURE_SENTINEL".to_string(),
             param: None,
             retry_after_s: None,
+            reason: None,
         });
 
         let value = build_generate_chunk_event(&chunk, &[]);
@@ -3146,10 +3224,11 @@ mod tests {
             message: "SENSITIVE_WORKER_FAILURE_SENTINEL".to_string(),
             param: None,
             retry_after_s: None,
+            reason: None,
         });
 
         let values = [
-            build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false),
+            build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false),
             build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk),
             build_generate_chunk_event(&chunk, &[]),
         ];
@@ -3166,6 +3245,48 @@ mod tests {
     }
 
     #[test]
+    fn test_sse_upstream_failure_reason_reaches_all_generation_shapes() {
+        for (reason, expected) in [
+            (
+                "upstream_payment_required",
+                Some("the upstream account cannot pay for the request"),
+            ),
+            ("SENSITIVE_REASON_SENTINEL", None),
+        ] {
+            let mut chunk = _terminal_chunk("error", None);
+            chunk.error = Some(ChunkError {
+                code: "inference_error".to_string(),
+                message: "SENSITIVE_WORKER_FAILURE_SENTINEL".to_string(),
+                param: None,
+                retry_after_s: None,
+                reason: Some(reason.to_string()),
+            });
+
+            for value in [
+                build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false),
+                build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk),
+                build_generate_chunk_event(&chunk, &[]),
+            ] {
+                let error = &value["error"];
+                assert_eq!(error["code"], "inference_error");
+                match expected {
+                    Some(message) => {
+                        assert_eq!(error["reason"], reason);
+                        assert_eq!(error["message"], message);
+                    }
+                    None => {
+                        assert!(error.get("reason").is_none());
+                        assert_eq!(error["message"], "internal error during generation");
+                    }
+                }
+                let serialized = value.to_string();
+                assert!(!serialized.contains("SENSITIVE_WORKER_FAILURE_SENTINEL"));
+                assert!(!serialized.contains("SENSITIVE_REASON_SENTINEL"));
+            }
+        }
+    }
+
+    #[test]
     fn test_sse_payload_too_large_preserves_worker_code_on_all_generation_shapes() {
         let mut chunk = _terminal_chunk("error", None);
         chunk.error = Some(ChunkError {
@@ -3173,10 +3294,11 @@ mod tests {
             message: "payload exceeds limit".to_string(),
             param: None,
             retry_after_s: None,
+            reason: None,
         });
 
         for value in [
-            build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false),
+            build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false),
             build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk),
             build_generate_chunk_event(&chunk, &[]),
         ] {
@@ -3193,9 +3315,10 @@ mod tests {
             message: "resource pressure".to_string(),
             param: Some("model".to_string()),
             retry_after_s: Some(12),
+            reason: None,
         });
 
-        let chat = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let chat = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
         let completion = build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk);
         let generate = build_generate_chunk_event(&chunk, &[]);
 
@@ -3213,19 +3336,21 @@ mod tests {
                 message: "resource pressure".to_string(),
                 param: None,
                 retry_after_s: Some(61),
+                reason: None,
             },
             ChunkError {
                 code: "MODEL_LOADING".to_string(),
                 message: "draining".to_string(),
                 param: None,
                 retry_after_s: Some(12),
+                reason: None,
             },
         ] {
             let mut chunk = _terminal_chunk("error", None);
             chunk.error = Some(error);
 
             for value in [
-                build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false),
+                build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false),
                 build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk),
                 build_generate_chunk_event(&chunk, &[]),
             ] {
@@ -3243,9 +3368,10 @@ mod tests {
             message: sentinel.to_string(),
             param: Some(sentinel.to_string()),
             retry_after_s: None,
+            reason: None,
         });
 
-        let chat = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let chat = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
         let completion = build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk);
         let generate = build_generate_chunk_event(&chunk, &[]);
 
@@ -3268,6 +3394,7 @@ mod tests {
             message: sentinel.to_string(),
             param: Some(sentinel.to_string()),
             retry_after_s: None,
+            reason: None,
         });
 
         let value = build_generate_chunk_event(&chunk, &[]);
@@ -3289,9 +3416,10 @@ mod tests {
             message: sentinel.to_string(),
             param: Some(sentinel.to_string()),
             retry_after_s: None,
+            reason: None,
         });
 
-        let chat = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let chat = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
         let completion = build_text_completion_chunk_event("cmpl-1", 0, "m", &chunk);
         let generate = build_generate_chunk_event(&chunk, &[]);
 
@@ -3315,6 +3443,7 @@ mod tests {
             &tx,
             &SseEndpoint::Chat {
                 include_usage: false,
+                include_reasoning: false,
             },
             "chatcmpl-x",
             1,
@@ -3384,6 +3513,7 @@ mod tests {
                 SseEndpoint::Generate,
                 SseEndpoint::Chat {
                     include_usage: false,
+                    include_reasoning: false,
                 },
                 SseEndpoint::Completion {
                     include_usage: false,
@@ -3394,6 +3524,7 @@ mod tests {
                     message: "SENSITIVE_WORKER_FAILURE_SENTINEL".to_string(),
                     param: None,
                     retry_after_s: None,
+                    reason: None,
                 };
                 let (tx, mut rx) = tokio::sync::mpsc::channel(4);
                 send_synthetic_error_chunk(&tx, &endpoint, "cmpl-1", 1, "m", "req-1", &error).await;
@@ -3514,21 +3645,21 @@ mod tests {
 
         // First chunk — must carry role.
         let c1 = tap.recv().await.unwrap();
-        let v1 = build_chat_chunk_event("chatcmpl-1", 0, "m", &c1, true);
+        let v1 = build_chat_chunk_event("chatcmpl-1", 0, "m", &c1, true, false);
         assert_eq!(v1["choices"][0]["delta"]["role"], "assistant");
         assert_eq!(v1["choices"][0]["delta"]["content"], "Hello");
         assert!(v1["choices"][0]["finish_reason"].is_null());
 
         // Second chunk — role omitted, content only.
         let c2 = tap.recv().await.unwrap();
-        let v2 = build_chat_chunk_event("chatcmpl-1", 0, "m", &c2, false);
+        let v2 = build_chat_chunk_event("chatcmpl-1", 0, "m", &c2, false, false);
         assert!(v2["choices"][0]["delta"].get("role").is_none());
         assert_eq!(v2["choices"][0]["delta"]["content"], " world");
 
         // Terminal — finish_reason populated, content empty.
         let c3 = tap.recv().await.unwrap();
         assert!(c3.done);
-        let v3 = build_chat_chunk_event("chatcmpl-1", 0, "m", &c3, false);
+        let v3 = build_chat_chunk_event("chatcmpl-1", 0, "m", &c3, false, false);
         assert_eq!(v3["choices"][0]["finish_reason"], "stop");
     }
 
@@ -3554,6 +3685,7 @@ mod tests {
             (
                 SseEndpoint::Chat {
                     include_usage: true,
+                    include_reasoning: false,
                 },
                 "chat.completion.chunk",
             ),
@@ -3593,6 +3725,7 @@ mod tests {
         let chat = build_usage_only_chunk_event(
             SseEndpoint::Chat {
                 include_usage: true,
+                include_reasoning: false,
             },
             "cmpl-1",
             1700,
@@ -3639,6 +3772,7 @@ mod tests {
         let chat = build_usage_only_chunk_event(
             SseEndpoint::Chat {
                 include_usage: true,
+                include_reasoning: false,
             },
             "cmpl-1",
             1700,
@@ -3677,6 +3811,7 @@ mod tests {
         for endpoint in [
             SseEndpoint::Chat {
                 include_usage: false,
+                include_reasoning: false,
             },
             SseEndpoint::Completion {
                 include_usage: false,
@@ -3726,6 +3861,7 @@ mod tests {
         for endpoint in [
             SseEndpoint::Chat {
                 include_usage: true,
+                include_reasoning: false,
             },
             SseEndpoint::Completion {
                 include_usage: true,
@@ -3758,7 +3894,8 @@ mod tests {
         let countless = _terminal_chunk("error", None);
         assert!(build_usage_only_chunk_event(
             SseEndpoint::Chat {
-                include_usage: true
+                include_usage: true,
+                include_reasoning: false,
             },
             "cmpl-1",
             1700,
@@ -3795,6 +3932,7 @@ mod tests {
         let body = build_usage_only_chunk_event(
             SseEndpoint::Chat {
                 include_usage: true,
+                include_reasoning: false,
             },
             "cmpl-1",
             1700,
@@ -3832,7 +3970,10 @@ mod tests {
         );
         for include_usage in [true, false] {
             for endpoint in [
-                SseEndpoint::Chat { include_usage },
+                SseEndpoint::Chat {
+                    include_usage,
+                    include_reasoning: false,
+                },
                 SseEndpoint::Completion { include_usage },
             ] {
                 assert_eq!(terminal_carries_usage(endpoint, &terminal), include_usage);
@@ -3857,6 +3998,7 @@ mod tests {
             SseEndpoint::Generate,
             SseEndpoint::Chat {
                 include_usage: true,
+                include_reasoning: false,
             },
             SseEndpoint::Completion {
                 include_usage: true,
@@ -3872,7 +4014,8 @@ mod tests {
             .is_none());
         assert!(build_usage_only_chunk_event(
             SseEndpoint::Chat {
-                include_usage: true
+                include_usage: true,
+                include_reasoning: false,
             },
             "cmpl-1",
             1700,
@@ -3898,11 +4041,12 @@ mod tests {
             message: "saturated".to_string(),
             param: None,
             retry_after_s: None,
+            reason: None,
         });
         collector.apply(err_chunk);
         let got = tap.recv().await.unwrap();
         assert!(got.done);
-        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &got, true);
+        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &got, true, false);
         assert_eq!(v["error"]["code"], "rate_limit_exceeded");
         assert_eq!(v["error"]["type"], "rate_limit_error");
         // The SIE-native generate shape would carry it too.
@@ -3933,6 +4077,7 @@ mod tests {
                 message: "top_k is unavailable".to_string(),
                 param: Some("top_k".to_string()),
                 retry_after_s: None,
+                reason: None,
             });
             collector.apply(error);
 
@@ -4016,8 +4161,9 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning_delta: String::new(),
         };
-        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, true);
+        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, true, false);
         let delta = &v["choices"][0]["delta"];
         // Tool-call announcement: id + function.name set, arguments empty.
         let tcs = delta["tool_calls"].as_array().expect("tool_calls array");
@@ -4039,7 +4185,7 @@ mod tests {
     #[test]
     fn test_sse_terminal_finish_reason_tool_calls_passthrough() {
         let chunk = _terminal_chunk("tool_calls", None);
-        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false);
+        let v = build_chat_chunk_event("chatcmpl-1", 0, "m", &chunk, false, false);
         assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
     }
 
@@ -4059,6 +4205,314 @@ mod tests {
         assert_eq!(got.finish_reason.as_deref(), Some("stop"));
     }
 
+    // ── Long tool calls ────────────────────────────────────────────
+
+    struct DrivenStream {
+        payloads: Vec<String>,
+        local_successes: usize,
+        bridge: Option<Result<(), PreOutputFailure>>,
+    }
+
+    /// Feed the real stream collector and SSE driver a worker's chunk
+    /// timeline: each chunk is applied after its delay and numbered in order.
+    /// A terminal resolves the outcome; a timeline without one drops the
+    /// collector. With `bridge`, the driver holds a first-output gate the way
+    /// a remote bridge does.
+    async fn drive_worker_timeline(
+        timeline: Vec<(Duration, ChunkEnvelope)>,
+        bridge: bool,
+    ) -> DrivenStream {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::queue::streaming::StreamCollector;
+        use crate::state::demand_tracker::PhysicalLaneCatalog;
+
+        let recorder = Arc::new(client_disconnect_grace::TeardownRecorder::default());
+        let publisher: Arc<dyn WorkDispatcher> = recorder as Arc<dyn WorkDispatcher>;
+        let catalog = PhysicalLaneCatalog::try_from_raw([(
+            "default".to_string(),
+            "default".to_string(),
+            "default".to_string(),
+        )])
+        .expect("catalog");
+        let demand_tracker = Arc::new(DemandTracker::new(catalog));
+        let physical_lane = demand_tracker
+            .resolve_lane("default", "default", "default")
+            .expect("lane");
+        let (collector_tx, _collector_rx) = tokio::sync::oneshot::channel();
+        let mut collector = StreamCollector::new(
+            collector_tx,
+            "test/model".to_string(),
+            "default".to_string(),
+        );
+        let chunk_rx = collector.install_chunk_tap();
+        let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
+        let (durability_tx, durability_completion) = tokio::sync::oneshot::channel();
+        durability_tx
+            .send(Ok::<(), String>(()))
+            .expect("durability receiver is live");
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
+        let (gate_tx, mut gate_rx) = tokio::sync::oneshot::channel();
+        let local_successes = Arc::new(AtomicUsize::new(0));
+        let recorded = Arc::clone(&local_successes);
+        let driver = tokio::spawn(run_sse_driver_with_lifecycle(
+            SseDriverArgs {
+                first_output: bridge.then_some(gate_tx),
+                local_serving_model: Some("test/model".to_string()),
+                event_tx,
+                chunk_rx,
+                outcome_rx,
+                durability_completion,
+                publisher,
+                demand_tracker,
+                physical_lane,
+                request_id: "req-test".to_string(),
+                model: "test/model".to_string(),
+                pool: "default".to_string(),
+                bundle: "default".to_string(),
+                gpu: "test".to_string(),
+                endpoint: SseEndpoint::Chat {
+                    include_usage: false,
+                    include_reasoning: false,
+                },
+                stream_chat_id: "chatcmpl-test".to_string(),
+                created: 1,
+                first_chunk_timeout: Duration::from_secs(90),
+                inter_chunk_timeout: Duration::from_secs(30),
+                overall_timeout: Duration::from_secs(600),
+                was_direct_dispatched: false,
+                pool_fallback_lane_worker_count: 1,
+            },
+            None,
+            move |_: &str| {
+                recorded.fetch_add(1, Ordering::SeqCst);
+            },
+        ));
+        let worker = tokio::spawn(async move {
+            for (seq, (delay, mut chunk)) in (0u32..).zip(timeline) {
+                tokio::time::sleep(delay).await;
+                chunk.seq = seq;
+                if chunk.done {
+                    assert!(matches!(collector.apply(chunk), ChunkApplied::Terminal));
+                    let _ = outcome_tx.send(collector.build_outcome().expect("terminal outcome"));
+                    return;
+                }
+                assert!(matches!(collector.apply(chunk), ChunkApplied::Delta));
+            }
+        });
+
+        let mut payloads = Vec::new();
+        while let Some(event) = event_rx.recv().await {
+            payloads.push(_event_data(event.expect("infallible event")).await);
+        }
+        driver.await.expect("driver task");
+        worker.abort();
+        DrivenStream {
+            payloads,
+            local_successes: local_successes.load(Ordering::SeqCst),
+            bridge: bridge.then(|| gate_rx.try_recv().expect("bridge gate resolved")),
+        }
+    }
+
+    fn progress_beat(every: Duration) -> (Duration, ChunkEnvelope) {
+        (every, _delta_chunk(0, ""))
+    }
+
+    fn failed_terminal() -> ChunkEnvelope {
+        let mut failed = _terminal_chunk("error", None);
+        failed.error = Some(
+            serde_json::from_value(json!({
+                "code": "MODEL_OUTPUT_PARSE_ERROR",
+                "message": "unterminated <tool_call> block",
+            }))
+            .expect("chunk error"),
+        );
+        failed
+    }
+
+    /// An agent's long `write` call: a preamble, two minutes decoding inside
+    /// the call with a chunk every `progress` (or none), then the call.
+    fn long_tool_call_timeline(
+        progress: Option<Duration>,
+        arguments: &str,
+    ) -> Vec<(Duration, ChunkEnvelope)> {
+        let call_chunk = |name: Option<&str>, arguments: &str| {
+            let mut chunk = _delta_chunk(0, "");
+            chunk.tool_calls = Some(vec![ToolCallDeltaWire {
+                index: 0,
+                id: name.map(|_| "call_write".to_string()),
+                kind: "function".to_string(),
+                function: Some(ToolCallFunctionWire {
+                    name: name.map(str::to_string),
+                    arguments: arguments.to_string(),
+                }),
+            }]);
+            chunk
+        };
+        let decode = Duration::from_secs(120);
+        let mut timeline = vec![(Duration::ZERO, _delta_chunk(0, "Writing the file now.\n"))];
+        let call_after = match progress {
+            Some(every) => {
+                let beats = (decode.as_secs() / every.as_secs()) as usize;
+                timeline.extend((0..beats).map(|_| progress_beat(every)));
+                Duration::ZERO
+            }
+            None => decode,
+        };
+        timeline.push((call_after, call_chunk(Some("write"), "")));
+        timeline.push((Duration::ZERO, call_chunk(None, arguments)));
+        timeline.push((Duration::ZERO, _terminal_chunk("tool_calls", None)));
+        timeline
+    }
+
+    fn chat_events(payloads: &[String]) -> Vec<Value> {
+        assert_eq!(payloads.last().map(String::as_str), Some("[DONE]"));
+        payloads[..payloads.len() - 1]
+            .iter()
+            .map(|payload| serde_json::from_str(payload).expect("chat chunk JSON"))
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_worker_silent_through_a_long_tool_call_ends_at_the_inter_chunk_deadline() {
+        let driven = drive_worker_timeline(long_tool_call_timeline(None, "{}"), false).await;
+        let events = chat_events(&driven.payloads);
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0]["choices"][0]["delta"]["content"],
+            "Writing the file now.\n"
+        );
+        assert_eq!(events[1]["error"]["code"], "inter_chunk_timeout");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progress_chunks_carry_a_long_tool_call_past_the_inter_chunk_deadline() {
+        let arguments = json!({
+            "filePath": "src/handlers.py",
+            "content": "    return {\"ok\": True}\n".repeat(4096),
+        })
+        .to_string();
+        assert!(arguments.len() > 64 * 1024);
+
+        let driven = drive_worker_timeline(
+            long_tool_call_timeline(Some(Duration::from_secs(1)), &arguments),
+            false,
+        )
+        .await;
+        let events = chat_events(&driven.payloads);
+
+        assert!(events.iter().all(|event| event.get("error").is_none()));
+        let progress: Vec<&Value> = events
+            .iter()
+            .filter(|event| {
+                event["choices"][0]["delta"] == json!({})
+                    && event["choices"][0]["finish_reason"].is_null()
+            })
+            .collect();
+        assert_eq!(progress.len(), 120);
+        assert!(progress
+            .iter()
+            .all(|event| event["object"] == "chat.completion.chunk"));
+        let streamed: String = events
+            .iter()
+            .filter_map(|event| event["choices"][0]["delta"]["tool_calls"].as_array())
+            .flatten()
+            .map(|call| call["function"]["arguments"].as_str().unwrap_or_default())
+            .collect();
+        assert_eq!(streamed, arguments);
+        assert_eq!(
+            events.last().expect("terminal")["choices"][0]["finish_reason"],
+            "tool_calls"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progress_alone_is_not_local_serving_output() {
+        let second = Duration::from_secs(1);
+        let failed = drive_worker_timeline(
+            vec![
+                progress_beat(second),
+                progress_beat(second),
+                (Duration::ZERO, failed_terminal()),
+            ],
+            false,
+        )
+        .await;
+        assert!(chat_events(&failed.payloads)
+            .iter()
+            .any(|event| event["error"]["code"] == "MODEL_OUTPUT_PARSE_ERROR"));
+        assert_eq!(failed.local_successes, 0);
+
+        let empty = drive_worker_timeline(
+            vec![
+                progress_beat(second),
+                (Duration::ZERO, _terminal_chunk("stop", None)),
+            ],
+            false,
+        )
+        .await;
+        assert_eq!(empty.local_successes, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_closed_tap_after_progress_alone_still_ends_the_stream() {
+        let second = Duration::from_secs(1);
+        let driven =
+            drive_worker_timeline(vec![progress_beat(second), progress_beat(second)], false).await;
+        let events = chat_events(&driven.payloads);
+
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[2]["error"]["code"], "transport_failure");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bridge_keeps_its_refusal_through_progress() {
+        let second = Duration::from_secs(1);
+        let failed = drive_worker_timeline(
+            vec![
+                progress_beat(second),
+                progress_beat(second),
+                (Duration::ZERO, failed_terminal()),
+            ],
+            true,
+        )
+        .await;
+        let refusal = failed.bridge.expect("bridge").expect_err("refusal kept");
+        assert_eq!(refusal.code.as_deref(), Some("MODEL_OUTPUT_PARSE_ERROR"));
+        assert!(!failed
+            .payloads
+            .iter()
+            .any(|payload| payload.contains("\"delta\":{}")));
+
+        let stalled = drive_worker_timeline(
+            (0..70)
+                .map(|_| progress_beat(Duration::from_secs(10)))
+                .collect(),
+            true,
+        )
+        .await;
+        let refusal = stalled.bridge.expect("bridge").expect_err("refusal kept");
+        assert_eq!(refusal.code.as_deref(), Some("overall_timeout"));
+        assert!(refusal.unanswered);
+
+        let answered = drive_worker_timeline(
+            vec![
+                progress_beat(second),
+                (Duration::ZERO, _delta_chunk(0, "answer")),
+                progress_beat(second),
+                (Duration::ZERO, _terminal_chunk("stop", None)),
+            ],
+            true,
+        )
+        .await;
+        assert!(answered.bridge.expect("bridge").is_ok());
+        let events = chat_events(&answered.payloads);
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0]["choices"][0]["delta"]["content"], "answer");
+        assert_eq!(events[1]["choices"][0]["delta"], json!({}));
+    }
+
     // ── Helpers ────────────────────────────────────────────────────
 
     /// Extract the `data:` payload from an `axum::response::sse::Event`
@@ -4076,7 +4530,7 @@ mod tests {
         use axum::body::to_bytes;
         let stream = futures_util::stream::once(async move { Ok::<_, Infallible>(ev) });
         let resp = Sse::new(stream).into_response();
-        let bytes = to_bytes(resp.into_body(), 64 * 1024)
+        let bytes = to_bytes(resp.into_body(), 1024 * 1024)
             .await
             .expect("collect");
         let s = std::str::from_utf8(&bytes).expect("utf8");

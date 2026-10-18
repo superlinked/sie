@@ -541,6 +541,7 @@ mod tests {
                 state: ReadinessState::Ready,
                 batch_budget: Some(32),
                 descriptor: None,
+                max_batch_tokens: None,
             })
         }
         async fn process_encode_batch(

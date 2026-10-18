@@ -142,6 +142,27 @@ class TimingInfo(TypedDict, total=False):
     inference_ms: float
 
 
+class GatewayTimingInfo(TypedDict, total=False):
+    """Terminal response-header durations, in milliseconds.
+
+    Queue gateways report independent worker maxima, not additive request
+    phases. Their worker queue timing can include execution because it is
+    measured from publication to result. Queue/inference zero can be a gateway
+    missing-value fallback; any zero can also reflect header rounding. Direct
+    servers can report their own stage timings under the same worker headers.
+    Missing fields stay absent. These durations do not measure the complete
+    gateway request or client round trip.
+    """
+
+    publish_ms: float
+    result_wait_ms: float
+    worker_queue_ms_max: float
+    worker_inference_ms_max: float
+    worker_tokenization_ms_max: float
+    worker_postprocessing_ms_max: float
+    worker_payload_fetch_ms_max: float
+
+
 class RequestUsage(TypedDict, total=False):
     """Authoritative metered units for one completed inference request.
 
@@ -256,6 +277,8 @@ class EncodeResult(TypedDict, total=False):
             the default dtype; an explicit output_dtype request overrides it.
         request: Request-scoped id, metered usage, and settled debit when
             supplied by the gateway.
+        gateway_timing: Optional terminal response-header durations,
+            distinct from the response body's timing breakdown.
     """
 
     model: str
@@ -264,6 +287,7 @@ class EncodeResult(TypedDict, total=False):
     sparse: SparseResult
     multivector: NDArray[np.float16] | NDArray[np.float32]
     timing: TimingInfo
+    gateway_timing: GatewayTimingInfo
     request: RequestMetadata
 
 
@@ -404,8 +428,15 @@ class ModelInfo(TypedDict, total=False):
     dims: ModelDims
     max_sequence_length: int | None
     revision: str | None
+    description: str
+    """One line about the model; ``""`` when the catalog sets none."""
+    release_date: str
+    """Release date of the served weights, ``YYYY-MM-DD``; ``""`` when the catalog sets none."""
     profiles: dict[str, ProfileInfo]
     """Servable profiles keyed by name; address one as ``"model@profile"``."""
+
+    lora_adapters: list[str]
+    """Single-server ready LoRA names; absent on gateways (not fleet residency)."""
 
     capabilities: ModelCapabilities | None
     """``None`` for models that declare no ``generate`` task."""
@@ -572,6 +603,35 @@ class ExtractResult(TypedDict, total=False):
     data: dict[str, Any]
     error: ExtractItemErrorDetail
     request: RequestMetadata
+
+
+class SystemOneUsage(TypedDict):
+    """Tokens a System One call read. Decision models generate none.
+
+    ``input_tokens`` is the metered count the response reported (SIE
+    Serverless meters every request); ``0`` when the deployment reports no
+    metering. ``POST /v1/systemone`` itself always returns the worker's count.
+    """
+
+    input_tokens: int
+    output_tokens: int
+
+
+class SystemOneResult(TypedDict):
+    """Answers to typed questions, in the System One response shape.
+
+    Attributes:
+        model: The decision model that answered.
+        answers: One answer per question id. ``noul``: ``noul``, the
+            probability of yes. ``choice``: ``choice``, ``confidence`` and
+            ``probabilities`` by option. ``score``: ``score``, ``confidence``,
+            and ``legend`` and ``probabilities`` by level index (``"0"``...).
+        usage: Tokens the model read.
+    """
+
+    model: str
+    answers: dict[str, dict[str, Any]]
+    usage: SystemOneUsage
 
 
 # Streaming generation result. Streaming happens inside the gateway/worker;
@@ -788,6 +848,8 @@ class ChatMessage(TypedDict, total=False):
     for vision-capable generation models, base64 ``data:`` image parts);
     ``tool_calls`` / ``tool_call_id`` are honoured on the multi-turn tool-replay
     path. See the gateway schema for the canonical accepted subset.
+    ``reasoning_content`` is the model's reasoning on a response message,
+    present only when the request set ``include_reasoning``.
     """
 
     role: ChatRole
@@ -795,6 +857,7 @@ class ChatMessage(TypedDict, total=False):
     name: str
     tool_call_id: str
     tool_calls: list[dict[str, Any]]
+    reasoning_content: str
 
 
 class ChatUsage(TypedDict):
@@ -830,11 +893,16 @@ class ChatCompletion(TypedDict, total=False):
 
 
 class ChatDelta(TypedDict, total=False):
-    """Incremental delta emitted on each streaming chunk."""
+    """Incremental delta emitted on each streaming chunk.
+
+    ``reasoning_content`` carries the model's reasoning, present only when
+    the request set ``include_reasoning``.
+    """
 
     role: str
     content: str
     tool_calls: list[dict[str, Any]]
+    reasoning_content: str
 
 
 class ChatChunkChoice(TypedDict, total=False):
@@ -1247,7 +1315,12 @@ ClusterModelInfo = ModelSummary
 
 
 class ServerInfo(TypedDict):
-    """Server metadata included in worker status."""
+    """Server metadata included in worker status.
+
+    ``user``, ``working_dir`` and ``pid`` are deprecated: the server sends
+    ``""``, ``""`` and ``0``, and the fields will be removed no earlier than
+    0.13.0.
+    """
 
     version: str
     uptime_seconds: int

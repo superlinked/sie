@@ -372,4 +372,31 @@ describe("SIEClient.chatCompletions", () => {
     // stream must be forced false on the non-streaming method.
     expect(body.stream).toBe(false);
   });
+
+  it("forwards include_reasoning and surfaces reasoning_content on the message", async () => {
+    const completion: ChatCompletion = {
+      ...SAMPLE_COMPLETION,
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content: "Hi there!", reasoning_content: "why" },
+          finish_reason: "stop",
+          logprobs: null,
+        },
+      ],
+    };
+    mockFetch.mockResolvedValueOnce(jsonResponse(completion));
+
+    const client = new SIEClient("http://localhost:8080");
+    const result = await client.chatCompletions({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+      include_reasoning: true,
+    });
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.include_reasoning).toBe(true);
+    expect(result.choices[0]?.message.reasoning_content).toBe("why");
+    expect(result.choices[0]?.message.content).toBe("Hi there!");
+  });
 });

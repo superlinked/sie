@@ -4,6 +4,9 @@ import logging
 import os
 import platform
 import random
+import re
+import secrets
+import stat
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -12,6 +15,7 @@ from pathlib import Path
 
 import httpx
 
+from sie_server.core.data_dir import ensure_data_dir, remove_stale_files, resolve_data_dir
 from sie_server.observability.gpu import get_gpu_metrics
 
 logger = logging.getLogger(__name__)
@@ -26,40 +30,113 @@ _UPDATE_MIN_S = 55 * 60  # 55 minutes
 _UPDATE_MAX_S = 65 * 60  # 65 minutes
 
 _SEND_TIMEOUT_S = 10
+_WORKER_ID_FILE = "worker-id"
+_WORKER_ID_TEMP_PREFIX = f".{_WORKER_ID_FILE}.sie-server-"
+_WORKER_ID_TEMP_NAME = re.compile(rf"{re.escape(_WORKER_ID_TEMP_PREFIX)}[0-9a-f]{{16}}")
+_MAX_WORKER_ID_BYTES = 64
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _CONSECUTIVE_FAILURE_WARN_THRESHOLD = 3
 
+_DEFAULT_ENABLED = True
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+_DEFAULT_ON_NOTICE = (
+    "Anonymous usage telemetry is on by default. From 0.13.0 it is off unless SIE_TELEMETRY_ENABLED=1. "
+    "Set SIE_TELEMETRY_ENABLED=1 to keep sending it, or SIE_TELEMETRY_DISABLED=1 to stop now. "
+    "What is sent: https://github.com/superlinked/sie#telemetry"
+)
 
-def _is_telemetry_disabled() -> bool:
-    disabled_val = os.environ.get("SIE_TELEMETRY_DISABLED", "").lower()
-    if disabled_val in ("1", "true", "yes"):
-        return True
-    return os.environ.get("DO_NOT_TRACK") == "1"
+_default_on_notice_shown = False
+
+
+def _warn_unrecognised(name: str) -> None:
+    logger.warning(
+        "%s has a value that is not recognised, so telemetry is off. Use 1, true, yes or on, or 0, false, no or off.",
+        name,
+    )
+
+
+def _resolve_telemetry() -> tuple[bool, str]:
+    disabled = os.environ.get("SIE_TELEMETRY_DISABLED", "").strip().lower()
+    if disabled and disabled not in _FALSE_VALUES:
+        if disabled not in _TRUE_VALUES:
+            _warn_unrecognised("SIE_TELEMETRY_DISABLED")
+        return False, "SIE_TELEMETRY_DISABLED"
+    if os.environ.get("DO_NOT_TRACK", "").strip() == "1":
+        return False, "DO_NOT_TRACK"
+    enabled = os.environ.get("SIE_TELEMETRY_ENABLED", "").strip().lower()
+    if not enabled:
+        return _DEFAULT_ENABLED, "default"
+    if enabled in _TRUE_VALUES:
+        return True, "SIE_TELEMETRY_ENABLED"
+    if enabled not in _FALSE_VALUES:
+        _warn_unrecognised("SIE_TELEMETRY_ENABLED")
+    return False, "SIE_TELEMETRY_ENABLED"
+
+
+def _warn_default_on_once() -> None:
+    global _default_on_notice_shown
+    if _default_on_notice_shown:
+        return
+    _default_on_notice_shown = True
+    logger.warning(_DEFAULT_ON_NOTICE)
+
+
+def _read_worker_id(path: Path) -> str | None:
+    """The stored worker id; ``None`` when the file is missing, not a regular file, or not a UUID."""
+    try:
+        fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        raw = os.read(fd, _MAX_WORKER_ID_BYTES + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    existing = raw.decode("ascii", errors="replace").strip()
+    try:
+        uuid.UUID(existing)
+    except ValueError:
+        return None
+    return existing
+
+
+def _store_worker_id(directory: Path, path: Path, worker_id: str) -> None:
+    """Replace whatever is at ``path`` with ``worker_id``, never writing through a link."""
+    staged = directory / f"{_WORKER_ID_TEMP_PREFIX}{secrets.token_hex(8)}"
+    fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o600)
+    try:
+        try:
+            os.write(fd, worker_id.encode())
+        finally:
+            os.close(fd)
+        staged.replace(path)
+    except OSError:
+        staged.unlink(missing_ok=True)
+        raise
 
 
 def _get_or_create_worker_id(data_dir: str | None = None) -> str:
     if data_dir is None:
-        data_dir = os.environ.get("SIE_DATA_DIR", "/tmp/sie-server")  # noqa: S108
+        resolved = resolve_data_dir()
+        if resolved is None:
+            return str(uuid.uuid4())
+        data_dir = str(resolved)
 
-    id_path = os.path.join(data_dir, "worker-id")
-
-    # Try to read existing ID
-    id_file = Path(id_path)
-
-    # Try to read existing ID
-    try:
-        existing = id_file.read_text().strip()
-        uuid.UUID(existing)  # validate
+    directory = Path(data_dir)
+    id_path = directory / _WORKER_ID_FILE
+    remove_stale_files(directory, _WORKER_ID_TEMP_NAME)
+    existing = _read_worker_id(id_path)
+    if existing is not None:
         return existing
-    except (OSError, ValueError):
-        pass
 
-    # Generate new ID
     new_id = str(uuid.uuid4())
-
-    # Try to persist
     try:
-        Path(data_dir).mkdir(parents=True, exist_ok=True)
-        id_file.write_text(new_id)
+        ensure_data_dir(directory)
+        _store_worker_id(directory, id_path, new_id)
     except OSError:
         logger.debug("Could not persist worker ID to %s, using ephemeral ID", id_path)
 
@@ -156,10 +233,13 @@ async def _telemetry_loop(
 
 @asynccontextmanager
 async def telemetry_sender() -> AsyncGenerator[None, None]:
-    if _is_telemetry_disabled():
-        logger.info("telemetry: disabled via env var")
+    enabled, source = _resolve_telemetry()
+    logger.info("telemetry: %s (%s)", "on" if enabled else "off", source)
+    if not enabled:
         yield
         return
+    if source == "default":
+        _warn_default_on_once()
 
     url = os.environ.get("SIE_TELEMETRY_URL", _DEFAULT_TELEMETRY_URL)
     worker_id = _get_or_create_worker_id()

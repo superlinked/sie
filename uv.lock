@@ -1373,17 +1373,17 @@ wheels = [
 
 [[package]]
 name = "gliner2"
-version = "1.3.2"
+version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "peft" },
     { name = "pydantic" },
     { name = "requests" },
+    { name = "tqdm" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/06/ea/d6091c70ba05d5611e49520198f40c11e5df3b0f5cedc629e4ec01c496ea/gliner2-1.3.2.tar.gz", hash = "sha256:0c07befb66c031d288c7fe0398880885a6a4016f14ff3f6e17568439fe6019d8", size = 133808 }
+sdist = { url = "https://files.pythonhosted.org/packages/b2/a8/2dcfdb8862dbeb488b6b86047075a213cc101ca592eae1a43b824cca74dd/gliner2-2.0.0.tar.gz", hash = "sha256:82b149f893ba0f6adf75ef1db599b6dbecd9811cca34dbd0bac7cd9e90b90ce4", size = 565826 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5e/e5/ce58a45306747714072179d24f9a6c59d642a588cededf35132bdbfd74f8/gliner2-1.3.2-py3-none-any.whl", hash = "sha256:d4e5e2f76a2eec1da5e4d6c205b6fc99dfc6c3c82ff29ea07a27565040730802", size = 96814 },
+    { url = "https://files.pythonhosted.org/packages/00/44/87d2803c5c5c6c0bd22bce4d52c66c965dacae29e0121d7e04c9883711df/gliner2-2.0.0-py3-none-any.whl", hash = "sha256:6f7c4cba0ef3173636d8bd9404aa94d4e0ccf36d4b4b9a0d27d740dd2d3236c3", size = 326214 },
 ]
 
 [[package]]
@@ -4476,12 +4476,12 @@ dev = [
 
 [[package]]
 name = "sie-audio-prep"
-version = "0.10.0"
+version = "0.10.1"
 source = { editable = "packages/sie_audio_prep" }
 
 [[package]]
 name = "sie-chroma"
-version = "0.10.0"
+version = "0.10.1"
 source = { editable = "integrations/sie_chroma" }
 dependencies = [
     { name = "chromadb" },
@@ -4504,7 +4504,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-config"
-version = "0.10.0"
+version = "0.10.1"
 source = { editable = "packages/sie_config" }
 dependencies = [
     { name = "fastapi" },
@@ -4563,7 +4563,7 @@ dev = [
 
 [[package]]
 name = "sie-crewai"
-version = "0.10.0"
+version = "0.10.1"
 source = { editable = "integrations/sie_crewai" }
 dependencies = [
     { name = "crewai" },
@@ -4588,7 +4588,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-dspy"
-version = "0.10.0"
+version = "0.10.1"
 source = { editable = "integrations/sie_dspy" }
 dependencies = [
     { name = "dspy" },
@@ -4613,7 +4613,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-haystack"
-version = "0.10.0"
+version = "0.10.1"
 source = { editable = "integrations/sie_haystack" }
 dependencies = [
     { name = "haystack-ai" },
@@ -4640,7 +4640,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-lancedb"
-version = "0.10.0"
+version = "0.10.1"
 source = { editable = "integrations/sie_lancedb" }
 dependencies = [
     { name = "lancedb" },
@@ -4667,7 +4667,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-langchain"
-version = "0.10.0"
+version = "0.10.1"
 source = { editable = "integrations/sie_langchain" }
 dependencies = [
     { name = "langchain-core" },
@@ -4694,7 +4694,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-llamaindex"
-version = "0.10.0"
+version = "0.10.1"
 source = { editable = "integrations/sie_llamaindex" }
 dependencies = [
     { name = "llama-index-core" },
@@ -4721,7 +4721,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-mcp"
-version = "0.10.0"
+version = "0.10.1"
 source = { editable = "packages/sie_mcp" }
 dependencies = [
     { name = "jsonschema" },
@@ -4760,7 +4760,7 @@ dev = [
 
 [[package]]
 name = "sie-qdrant"
-version = "0.10.0"
+version = "0.10.1"
 source = { editable = "integrations/sie_qdrant" }
 dependencies = [
     { name = "qdrant-client" },
@@ -4783,7 +4783,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-sdk"
-version = "0.10.0"
+version = "0.10.1"
 source = { editable = "packages/sie_sdk" }
 dependencies = [
     { name = "aiohttp" },
@@ -4840,7 +4840,7 @@ requires-dist = [
 
 [[package]]
 name = "sie-server"
-version = "0.10.0"
+version = "0.10.1"
 source = { editable = "packages/sie_server" }
 dependencies = [
     { name = "blake3" },
@@ -4926,7 +4926,7 @@ requires-dist = [
     { name = "gliclass", specifier = ">=0.1.17,<1" },
     { name = "gliformer", specifier = "==0.1.2" },
     { name = "gliner", specifier = ">=0.2.26,<1" },
-    { name = "gliner2", specifier = ">=1.3.1,<2" },
+    { name = "gliner2", specifier = ">=1.3.2,<=2.0.0" },
     { name = "glirel", specifier = ">=1.0,<2" },
     { name = "httpcore", specifier = ">=1.0.7,<2" },
     { name = "httpx", specifier = ">=0.28.1" },
@@ -4981,7 +4981,7 @@ dev = []
 
 [[package]]
 name = "sie-weaviate"
-version = "0.10.0"
+version = "0.10.1"
 source = { editable = "integrations/sie_weaviate" }
 dependencies = [
     { name = "sie-sdk" },

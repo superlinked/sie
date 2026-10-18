@@ -468,6 +468,11 @@ def remote_serving_from_env(raw: str | None) -> bool:
 
 def install_upstreams(upstreams: Mapping[str, Upstream], *, remote_serving: bool = True) -> None:
     """Install the startup upstreams. ``remote_serving=False`` refuses every remote profile."""
+    for name, upstream in upstreams.items():
+        try:
+            upstream.api_key()
+        except UpstreamCredentialError as exc:
+            logger.warning("requests to upstream %r fail until its credential is usable: %s", name, exc)
     _INSTALLED.upstreams = MappingProxyType(dict(upstreams))
     _INSTALLED.remote_serving = remote_serving
 

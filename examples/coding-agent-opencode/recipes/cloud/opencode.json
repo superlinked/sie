@@ -1,0 +1,34 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "sie/zai-org/GLM-5.3-Flash:relay",
+  "provider": {
+    "sie": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "SIE Cloud",
+      "options": {
+        "baseURL": "{env:SIE_BASE_URL}/v1",
+        "apiKey": "{env:SIE_API_KEY}",
+        "timeout": 1800000,
+        "headerTimeout": 600000,
+        "chunkTimeout": 600000
+      },
+      "models": {
+        "zai-org/GLM-5.3-Flash:relay": {
+          "name": "GLM-5.3-Flash via SIE Relay",
+          "limit": {
+            "context": 131072,
+            "output": 32768
+          },
+          "tool_call": true,
+          "reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content"
+          },
+          "options": {
+            "include_reasoning": true
+          }
+        }
+      }
+    }
+  }
+}

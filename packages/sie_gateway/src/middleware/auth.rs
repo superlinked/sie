@@ -3,6 +3,7 @@ use axum::http::{Method, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use subtle::ConstantTimeEq;
@@ -46,6 +47,8 @@ pub struct AuthLayer {
     /// interpretation, which this middleware serves as a refusal rather than
     /// as "auth off" — see [`AuthMiddleware::call`].
     misconfigured: Option<Arc<str>>,
+    /// Set once the warning about repeated `Authorization` values is logged.
+    repeated_authorization_warned: Arc<AtomicBool>,
 }
 
 impl AuthLayer {
@@ -60,6 +63,7 @@ impl AuthLayer {
         Self {
             config,
             misconfigured,
+            repeated_authorization_warned: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -72,6 +76,7 @@ impl<S> Layer<S> for AuthLayer {
             inner,
             config: Arc::clone(&self.config),
             misconfigured: self.misconfigured.clone(),
+            repeated_authorization_warned: Arc::clone(&self.repeated_authorization_warned),
         }
     }
 }
@@ -81,6 +86,7 @@ pub struct AuthMiddleware<S> {
     inner: S,
     config: Arc<Config>,
     misconfigured: Option<Arc<str>>,
+    repeated_authorization_warned: Arc<AtomicBool>,
 }
 
 impl<S> Service<Request<Body>> for AuthMiddleware<S>
@@ -99,6 +105,7 @@ where
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         let config = Arc::clone(&self.config);
         let misconfigured = self.misconfigured.clone();
+        let repeated_authorization_warned = Arc::clone(&self.repeated_authorization_warned);
         let mut inner = self.inner.clone();
 
         Box::pin(async move {
@@ -141,14 +148,30 @@ where
                 return inner.call(req).await;
             }
 
-            let token = match extract_bearer_token(req.headers()) {
-                Some(t) => t,
-                None => {
+            let token = match extract_request_credential(req.headers()) {
+                RequestCredential::Token(t) => t,
+                RequestCredential::Missing => {
                     record_admission_rejection(&req, AdmissionOutcome::Unauthenticated);
                     return Ok(error_response(
                         StatusCode::UNAUTHORIZED,
                         err_code::UNAUTHORIZED,
-                        "Missing Authorization header",
+                        "Missing Authorization or x-api-key header",
+                    ));
+                }
+                RequestCredential::Conflicting => {
+                    record_admission_rejection(&req, AdmissionOutcome::Unauthenticated);
+                    return Ok(error_response(
+                        StatusCode::UNAUTHORIZED,
+                        err_code::UNAUTHORIZED,
+                        "Repeated x-api-key headers carry different tokens",
+                    ));
+                }
+                RequestCredential::Unreadable => {
+                    record_admission_rejection(&req, AdmissionOutcome::Unauthenticated);
+                    return Ok(error_response(
+                        StatusCode::UNAUTHORIZED,
+                        err_code::UNAUTHORIZED,
+                        "Invalid token",
                     ));
                 }
             };
@@ -174,6 +197,7 @@ where
                     ));
                 }
 
+                warn_on_repeated_authorization(&req, &repeated_authorization_warned);
                 return inner.call(req).await;
             }
 
@@ -191,8 +215,22 @@ where
                 ));
             }
 
+            warn_on_repeated_authorization(&req, &repeated_authorization_warned);
             inner.call(req).await
         })
+    }
+}
+
+/// Log, once per gateway, that an authenticated request repeated
+/// `Authorization` with values that 0.13.0 refuses. Only requests that pass
+/// authentication count, so an unauthenticated client cannot spend the
+/// warning.
+fn warn_on_repeated_authorization(req: &Request<Body>, warned: &AtomicBool) {
+    if authorization_values_disagree(req.headers()) && !warned.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            audit = "auth",
+            "A request repeated the Authorization header with different values. The gateway used the first value; from 0.13.0 it refuses such requests with 401. Send one Authorization header."
+        );
     }
 }
 
@@ -227,27 +265,103 @@ fn is_admin_endpoint(method: &Method, path: &str) -> bool {
 /// Extract the token from an `Authorization` header, accepting
 /// `Bearer <token>` (case-insensitive prefix) or a raw token value.
 ///
-/// Canonical shared implementation: also consumed by `handlers::proxy`
-/// and downstream authentication layers.
+/// Exported through the crate's library target (`src/lib.rs`) for
+/// composition crates that read `Authorization` only. This gateway reads
+/// request credentials with [`extract_request_credential`].
+#[allow(dead_code)]
 pub fn extract_bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
-    let header = headers
-        .get("authorization")?
-        .to_str()
-        .ok()?
-        .trim()
-        .to_string();
+    authorization_token(headers.get("authorization")?.to_str().ok()?)
+}
+
+fn authorization_token(header: &str) -> Option<String> {
+    let header = header.trim();
     if header.is_empty() {
         return None;
     }
     let token = if header.to_lowercase().starts_with("bearer ") {
-        header[7..].trim().to_string()
+        header[7..].trim()
     } else {
         header
     };
     if token.is_empty() {
         None
     } else {
-        Some(token)
+        Some(token.to_string())
+    }
+}
+
+/// The credential a request presents.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RequestCredential {
+    Missing,
+    Token(String),
+    /// Repeated `x-api-key` values carry different tokens.
+    Conflicting,
+    /// A credential header whose value is not visible ASCII.
+    Unreadable,
+}
+
+/// Read the request's token. The first `Authorization` value (`Bearer
+/// <token>` or a raw value, as [`extract_bearer_token`]) decides when it
+/// carries a token, and `x-api-key` is then ignored. Otherwise `x-api-key`
+/// decides, and its repeated values must carry the same token. Later
+/// `Authorization` values are ignored, as they always were; see
+/// [`authorization_values_disagree`].
+pub fn extract_request_credential(headers: &axum::http::HeaderMap) -> RequestCredential {
+    let authorization = match headers.get("authorization").map(|value| value.to_str()) {
+        None => RequestCredential::Missing,
+        Some(Err(_)) => RequestCredential::Unreadable,
+        Some(Ok(raw)) => {
+            authorization_token(raw).map_or(RequestCredential::Missing, RequestCredential::Token)
+        }
+    };
+    match authorization {
+        RequestCredential::Missing => header_credential(headers.get_all("x-api-key"), |raw| {
+            let raw = raw.trim();
+            (!raw.is_empty()).then(|| raw.to_string())
+        }),
+        decided => decided,
+    }
+}
+
+fn header_credential<'a>(
+    values: impl IntoIterator<Item = &'a axum::http::HeaderValue>,
+    parse: impl Fn(&str) -> Option<String>,
+) -> RequestCredential {
+    let mut found: Option<String> = None;
+    for value in values {
+        let Ok(raw) = value.to_str() else {
+            return RequestCredential::Unreadable;
+        };
+        let Some(token) = parse(raw) else {
+            continue;
+        };
+        match &found {
+            None => found = Some(token),
+            Some(existing) if *existing == token => {}
+            Some(_) => return RequestCredential::Conflicting,
+        }
+    }
+    found.map_or(RequestCredential::Missing, RequestCredential::Token)
+}
+
+/// Whether the request repeats `Authorization` with values that carry
+/// different tokens, or one that cannot be read. Until 0.13.0 the gateway
+/// uses the first value; from 0.13.0 such a request is refused.
+pub fn authorization_values_disagree(headers: &axum::http::HeaderMap) -> bool {
+    headers.get_all("authorization").iter().nth(1).is_some()
+        && matches!(
+            header_credential(headers.get_all("authorization"), authorization_token),
+            RequestCredential::Conflicting | RequestCredential::Unreadable
+        )
+}
+
+/// The masked request token for audit records, empty when the request
+/// presents no single readable token.
+pub fn request_token_id(headers: &axum::http::HeaderMap) -> String {
+    match extract_request_credential(headers) {
+        RequestCredential::Token(token) => mask_token(&token),
+        _ => String::new(),
     }
 }
 
@@ -284,7 +398,14 @@ fn error_response(status: StatusCode, code: &'static str, message: &str) -> Resp
             "message": message,
         }
     });
-    (status, axum::Json(body)).into_response()
+    let mut response = (status, axum::Json(body)).into_response();
+    if status == StatusCode::UNAUTHORIZED {
+        response.headers_mut().insert(
+            axum::http::header::WWW_AUTHENTICATE,
+            axum::http::HeaderValue::from_static("Bearer"),
+        );
+    }
+    response
 }
 
 #[cfg(test)]
@@ -788,6 +909,474 @@ mod tests {
         assert_eq!(
             send(r, Method::GET, "/health", None).await,
             StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> axum::http::HeaderMap {
+        let mut map = axum::http::HeaderMap::new();
+        for (name, value) in pairs {
+            map.append(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                axum::http::HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        map
+    }
+
+    #[test]
+    fn request_credential_reads_either_header() {
+        for pairs in [
+            vec![("authorization", "Bearer tok")],
+            vec![("authorization", "bearer tok")],
+            vec![("authorization", "tok")],
+            vec![("x-api-key", "tok")],
+            vec![("x-api-key", "  tok  ")],
+            vec![("authorization", "Bearer tok"), ("x-api-key", "tok")],
+            vec![("authorization", "Bearer tok"), ("x-api-key", "other")],
+            vec![("authorization", "Bearer tok"), ("authorization", "tok")],
+            vec![
+                ("authorization", "Bearer tok"),
+                ("authorization", "Bearer other"),
+            ],
+            vec![("authorization", ""), ("x-api-key", "tok")],
+        ] {
+            assert_eq!(
+                extract_request_credential(&headers(&pairs)),
+                RequestCredential::Token("tok".into()),
+                "{pairs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn request_credential_lets_authorization_decide() {
+        let unreadable_key = {
+            let mut map = headers(&[("authorization", "Bearer tok")]);
+            map.insert(
+                "x-api-key",
+                axum::http::HeaderValue::from_bytes(b"t\xffk").unwrap(),
+            );
+            map
+        };
+        assert_eq!(
+            extract_request_credential(&unreadable_key),
+            RequestCredential::Token("tok".into())
+        );
+        let unreadable_authorization = {
+            let mut map = headers(&[("x-api-key", "tok")]);
+            map.insert(
+                "authorization",
+                axum::http::HeaderValue::from_bytes(b"t\xffk").unwrap(),
+            );
+            map
+        };
+        assert_eq!(
+            extract_request_credential(&unreadable_authorization),
+            RequestCredential::Unreadable
+        );
+    }
+
+    fn with_unreadable(
+        mut map: axum::http::HeaderMap,
+        name: &'static str,
+    ) -> axum::http::HeaderMap {
+        map.append(
+            name,
+            axum::http::HeaderValue::from_bytes(b"t\xffk").unwrap(),
+        );
+        map
+    }
+
+    #[test]
+    fn request_credential_refuses_repeated_x_api_key_that_disagrees() {
+        assert_eq!(
+            extract_request_credential(&headers(&[("x-api-key", "tok"), ("x-api-key", "other")])),
+            RequestCredential::Conflicting
+        );
+        assert_eq!(
+            extract_request_credential(&with_unreadable(
+                headers(&[("x-api-key", "tok")]),
+                "x-api-key"
+            )),
+            RequestCredential::Unreadable
+        );
+    }
+
+    #[test]
+    fn request_credential_uses_the_first_authorization_value() {
+        assert_eq!(
+            extract_request_credential(&with_unreadable(
+                headers(&[("authorization", "Bearer tok")]),
+                "authorization"
+            )),
+            RequestCredential::Token("tok".into())
+        );
+        assert_eq!(
+            extract_request_credential(&headers(&[
+                ("authorization", ""),
+                ("authorization", "Bearer other")
+            ])),
+            RequestCredential::Missing
+        );
+        let mut unreadable_first = with_unreadable(axum::http::HeaderMap::new(), "authorization");
+        unreadable_first.append(
+            "authorization",
+            axum::http::HeaderValue::from_static("Bearer tok"),
+        );
+        assert_eq!(
+            extract_request_credential(&unreadable_first),
+            RequestCredential::Unreadable
+        );
+    }
+
+    #[test]
+    fn authorization_values_disagree_only_for_repeats_with_another_token() {
+        for pairs in [
+            vec![
+                ("authorization", "Bearer tok"),
+                ("authorization", "Bearer other"),
+            ],
+            vec![("authorization", "Bearer tok"), ("authorization", "other")],
+        ] {
+            assert!(authorization_values_disagree(&headers(&pairs)), "{pairs:?}");
+        }
+        assert!(authorization_values_disagree(&with_unreadable(
+            headers(&[("authorization", "Bearer tok")]),
+            "authorization"
+        )));
+        for pairs in [
+            vec![("authorization", "Bearer tok")],
+            vec![("authorization", "Bearer tok"), ("authorization", "tok")],
+            vec![("authorization", "Bearer tok"), ("authorization", "")],
+            vec![("x-api-key", "tok"), ("x-api-key", "other")],
+        ] {
+            assert!(
+                !authorization_values_disagree(&headers(&pairs)),
+                "{pairs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn request_credential_missing_and_unreadable() {
+        assert_eq!(
+            extract_request_credential(&headers(&[])),
+            RequestCredential::Missing
+        );
+        assert_eq!(
+            extract_request_credential(&headers(&[("authorization", ""), ("x-api-key", " ")])),
+            RequestCredential::Missing
+        );
+        let mut map = axum::http::HeaderMap::new();
+        map.insert(
+            "x-api-key",
+            axum::http::HeaderValue::from_bytes(b"t\xffk").unwrap(),
+        );
+        assert_eq!(
+            extract_request_credential(&map),
+            RequestCredential::Unreadable
+        );
+    }
+
+    #[test]
+    fn request_token_id_masks_either_header() {
+        assert_eq!(
+            request_token_id(&headers(&[("x-api-key", "secret-token-123")])),
+            "************-123"
+        );
+        assert_eq!(
+            request_token_id(&headers(&[("authorization", "Bearer secret-token-123")])),
+            "************-123"
+        );
+        assert_eq!(
+            request_token_id(&headers(&[
+                ("authorization", "Bearer secret-token-123"),
+                ("x-api-key", "other-token-456")
+            ])),
+            "************-123"
+        );
+        assert_eq!(
+            request_token_id(&headers(&[
+                ("authorization", "Bearer a-token-111"),
+                ("authorization", "Bearer b-token-222")
+            ])),
+            mask_token("a-token-111")
+        );
+        assert_eq!(
+            request_token_id(&headers(&[
+                ("x-api-key", "a-token-111"),
+                ("x-api-key", "b-token-222")
+            ])),
+            ""
+        );
+    }
+
+    async fn send_headers(
+        router: Router,
+        method: Method,
+        path: &str,
+        pairs: &[(&str, &str)],
+    ) -> StatusCode {
+        let mut req = HttpRequest::builder().method(method).uri(path);
+        for (name, value) in pairs {
+            req = req.header(*name, *value);
+        }
+        router
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn middleware_401_names_the_bearer_scheme() {
+        let cfg = cfg_for_middleware("token", vec!["user"], "admin", false);
+        let response = test_router(cfg)
+            .oneshot(
+                HttpRequest::builder()
+                    .method(Method::POST)
+                    .uri("/v1/encode/any")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()["www-authenticate"], "Bearer");
+    }
+
+    #[tokio::test]
+    async fn middleware_accepts_x_api_key() {
+        let cfg = cfg_for_middleware("token", vec!["user"], "admin", false);
+        let r = test_router(Arc::clone(&cfg));
+        assert_eq!(
+            send_headers(r, Method::POST, "/v1/encode/any", &[("x-api-key", "user")]).await,
+            StatusCode::OK
+        );
+        let r = test_router(Arc::clone(&cfg));
+        assert_eq!(
+            send_headers(r, Method::POST, "/v1/encode/any", &[("x-api-key", "bogus")]).await,
+            StatusCode::UNAUTHORIZED
+        );
+        let r = test_router(cfg);
+        assert_eq!(
+            send_headers(
+                r,
+                Method::POST,
+                "/v1/encode/any",
+                &[("authorization", "Bearer user"), ("x-api-key", "user")]
+            )
+            .await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn middleware_lets_authorization_decide_over_x_api_key() {
+        let cfg = cfg_for_middleware("token", vec!["user"], "admin", false);
+        for (pairs, path, expected) in [
+            (
+                [("authorization", "Bearer user"), ("x-api-key", "bogus")],
+                "/v1/encode/any",
+                StatusCode::OK,
+            ),
+            (
+                [("authorization", "Bearer bogus"), ("x-api-key", "user")],
+                "/v1/encode/any",
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                [("authorization", "Bearer admin"), ("x-api-key", "user")],
+                "/v1/pools",
+                StatusCode::OK,
+            ),
+            (
+                [("authorization", "Bearer user"), ("x-api-key", "admin")],
+                "/v1/pools",
+                StatusCode::FORBIDDEN,
+            ),
+        ] {
+            let r = test_router(Arc::clone(&cfg));
+            assert_eq!(
+                send_headers(r, Method::POST, path, &pairs).await,
+                expected,
+                "{pairs:?} {path}"
+            );
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl CapturedLog {
+        fn count(&self, needle: &str) -> usize {
+            String::from_utf8_lossy(&self.0.lock().unwrap())
+                .matches(needle)
+                .count()
+        }
+    }
+
+    #[tokio::test]
+    async fn middleware_uses_the_first_authorization_value_and_warns_once() {
+        use tracing::instrument::WithSubscriber;
+
+        let log = CapturedLog::default();
+        let dispatch = tracing::Dispatch::new(
+            tracing_subscriber::fmt()
+                .with_writer(log.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+        let cfg = cfg_for_middleware("token", vec!["user"], "admin", false);
+        let router = test_router(cfg);
+        let repeated = || {
+            HttpRequest::builder()
+                .method(Method::POST)
+                .uri("/v1/encode/any")
+                .header("authorization", "Bearer user")
+                .header("authorization", "Bearer bogus")
+        };
+        let unreadable_repeat = HttpRequest::builder()
+            .method(Method::POST)
+            .uri("/v1/encode/any")
+            .header("authorization", "Bearer user")
+            .header(
+                "authorization",
+                axum::http::HeaderValue::from_bytes(b"t\xffk").unwrap(),
+            );
+        let bogus_first = HttpRequest::builder()
+            .method(Method::POST)
+            .uri("/v1/encode/any")
+            .header("authorization", "Bearer bogus")
+            .header("authorization", "Bearer user");
+        let user_first_admin_key = HttpRequest::builder()
+            .method(Method::POST)
+            .uri("/v1/pools")
+            .header("authorization", "Bearer user")
+            .header("authorization", "Bearer admin")
+            .header("x-api-key", "admin");
+
+        for (request, expected) in [
+            (repeated(), StatusCode::OK),
+            (repeated(), StatusCode::OK),
+            (unreadable_repeat, StatusCode::OK),
+            (bogus_first, StatusCode::UNAUTHORIZED),
+            (user_first_admin_key, StatusCode::FORBIDDEN),
+        ] {
+            let status = router
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .with_subscriber(dispatch.clone())
+                .await
+                .unwrap()
+                .status();
+            assert_eq!(status, expected);
+        }
+        assert_eq!(log.count("repeated the Authorization header"), 1);
+        assert_eq!(log.count("from 0.13.0 it refuses such requests"), 1);
+    }
+
+    fn repeated_authorization(path: &str, first: &str, second: &str) -> Request<Body> {
+        HttpRequest::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header("authorization", format!("Bearer {first}"))
+            .header("authorization", format!("Bearer {second}"))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn middleware_warns_only_for_a_repeat_that_passes_authentication() {
+        use tracing::instrument::WithSubscriber;
+
+        for (refused, passing) in [
+            (
+                repeated_authorization("/v1/encode/any", "bogus", "user"),
+                repeated_authorization("/v1/encode/any", "user", "bogus"),
+            ),
+            (
+                repeated_authorization("/v1/pools", "user", "admin"),
+                repeated_authorization("/v1/pools", "admin", "user"),
+            ),
+        ] {
+            let log = CapturedLog::default();
+            let dispatch = tracing::Dispatch::new(
+                tracing_subscriber::fmt()
+                    .with_writer(log.clone())
+                    .with_ansi(false)
+                    .finish(),
+            );
+            let router = test_router(cfg_for_middleware("token", vec!["user"], "admin", false));
+
+            let status = router
+                .clone()
+                .oneshot(refused)
+                .with_subscriber(dispatch.clone())
+                .await
+                .unwrap()
+                .status();
+            assert!(status.is_client_error(), "{status}");
+            assert_eq!(log.count("repeated the Authorization header"), 0);
+
+            let status = router
+                .oneshot(passing)
+                .with_subscriber(dispatch)
+                .await
+                .unwrap()
+                .status();
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(log.count("repeated the Authorization header"), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn middleware_refuses_repeated_x_api_key_that_disagrees() {
+        let cfg = cfg_for_middleware("token", vec!["user", "other"], "admin", false);
+        let r = test_router(cfg);
+        assert_eq!(
+            send_headers(
+                r,
+                Method::POST,
+                "/v1/encode/any",
+                &[("x-api-key", "user"), ("x-api-key", "other")]
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn middleware_admin_routes_accept_the_admin_token_in_x_api_key() {
+        let cfg = cfg_for_middleware("token", vec!["user"], "admin", false);
+        let r = test_router(Arc::clone(&cfg));
+        assert_eq!(
+            send_headers(r, Method::POST, "/v1/pools", &[("x-api-key", "admin")]).await,
+            StatusCode::OK
+        );
+        let r = test_router(cfg);
+        assert_eq!(
+            send_headers(r, Method::POST, "/v1/pools", &[("x-api-key", "user")]).await,
+            StatusCode::FORBIDDEN
         );
     }
 }

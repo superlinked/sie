@@ -10,6 +10,18 @@ from packages.sie_server.tests import test_all_models as models
 
 
 @pytest.mark.parametrize("kind", ["dense", "sparse", "multivector"])
+def test_bge_m3_cpu_numeric_xfail_applies_only_to_dense_and_multivector(kind: str) -> None:
+    test = getattr(models, f"test_baai_bge_m3_{kind}")
+    markers = [mark for mark in getattr(test, "pytestmark", []) if mark.name == "xfail"]
+    if kind == "sparse":
+        assert markers == []
+    else:
+        assert len(markers) == 1
+        assert markers[0].kwargs["strict"] is True
+        assert markers[0].kwargs["raises"] is models._NumericalReferenceMismatchError
+
+
+@pytest.mark.parametrize("kind", ["dense", "sparse", "multivector"])
 @pytest.mark.parametrize("defect", [None, "absent", "shape", "nonfinite", "numerical"])
 def test_bge_m3_xfail_preserves_output_structure(
     monkeypatch: pytest.MonkeyPatch, kind: str, defect: str | None
@@ -37,9 +49,9 @@ def test_bge_m3_xfail_preserves_output_structure(
     output = SimpleNamespace(**{kind: payload})
     monkeypatch.setattr(models, "_get_adapter", lambda _: SimpleNamespace(encode=lambda *_args, **_kwargs: output))
 
-    expected_failure = models._BGE_M3_CPU_BFLOAT16.kwargs["raises"]
+    expected_failure = models._BGE_M3_CPU_FLOAT16.kwargs["raises"]
     assert expected_failure is models._NumericalReferenceMismatchError
-    assert models._BGE_M3_CPU_BFLOAT16.kwargs["strict"] is True
+    assert models._BGE_M3_CPU_FLOAT16.kwargs["strict"] is True
     if defect is None:
         check()
     elif defect == "numerical":

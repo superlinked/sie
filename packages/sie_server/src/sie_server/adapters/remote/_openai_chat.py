@@ -8,7 +8,7 @@ import time
 import uuid
 from typing import Any, cast
 
-from sie_server.adapters.remote._http import RemoteUpstreamError
+from sie_server.adapters.remote._http import RemoteUpstreamError, in_band_failure
 
 _MAX_CHOICES = 128
 _MAX_COUNT = 1 << 32
@@ -28,8 +28,10 @@ def _json(data: bytes, *, max_bytes: int) -> dict[str, Any]:
         payload = json.loads(data)
     except (ValueError, RecursionError):
         raise _invalid() from None
-    if not isinstance(payload, dict) or "error" in payload:
+    if not isinstance(payload, dict):
         raise _invalid()
+    if "error" in payload:
+        raise in_band_failure(payload["error"], instead_of="a chat answer")
     return payload
 
 

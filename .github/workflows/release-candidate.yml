@@ -29,6 +29,10 @@ on:
       - packages/sie_server_rust/**
       - packages/sie_telemetry/**
       - packages/sie_server/bundles/**
+      - packages/sie_server/models/**
+      - packages/sie_server/src/sie_server/adapters/sglang/**
+      - packages/sie_server/src/sie_server/adapters/sglang_vision_extract/**
+      - conformance/engine-flags/**
       - integrations/**/pyproject.toml
       - integrations/**/package.json
       - deploy/helm/**

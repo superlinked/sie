@@ -9,8 +9,8 @@
 //!
 //! Only inference endpoints (`/v1/encode/*`, `/v1/score/*`,
 //! `/v1/extract/*`, `/v1/generate/*`, `/v1/embeddings`, `/v1/moderations`, and
-//! the OpenAI-compatible generation/audio routes) populate `sie.gateway.requests` +
-//! `sie.gateway.request.duration`. Infrastructure paths
+//! the OpenAI-compatible generation/audio and System One routes) populate
+//! `sie.gateway.requests` + `sie.gateway.request.duration`. Infrastructure paths
 //! (`/health*`, `/ws/*`, `/v1/configs/*`, `/v1/pools`,
 //! `/v1/models`) are intentionally skipped: they are not traffic, and
 //! counting them would drown the inference error-rate dashboards.
@@ -314,8 +314,8 @@ impl HttpBody for ObservedBody {
 /// otherwise `None`. Every generation surface
 /// intentionally collapses to `generate`: the route spelling is bounded HTTP
 /// metadata, while the operational work and service-level objective are shared.
-/// The OpenAI audio transcription surface similarly collapses to its native
-/// `extract` primitive.
+/// The OpenAI audio transcription and System One decision surfaces similarly
+/// collapse to their native `extract` primitive.
 /// Non-inference
 /// paths are intentionally excluded — see module-level docs.
 ///
@@ -332,7 +332,7 @@ fn classify_endpoint(path: &str) -> Option<&'static str> {
     } else if path.starts_with("/v1/generate/")
         || matches!(
             path,
-            "/v1/chat/completions" | "/v1/completions" | "/v1/responses"
+            "/v1/chat/completions" | "/v1/completions" | "/v1/responses" | "/v1/messages"
         )
     {
         Some("generate")
@@ -340,7 +340,10 @@ fn classify_endpoint(path: &str) -> Option<&'static str> {
         Some("embeddings")
     } else if path == "/v1/moderations" {
         Some("moderations")
-    } else if path == "/v1/audio/transcriptions" {
+    } else if matches!(
+        path,
+        "/v1/audio/transcriptions" | "/v1/systemone" | "/v1/decisions"
+    ) {
         Some("extract")
     } else {
         None
@@ -890,6 +893,8 @@ mod tests {
         assert_eq!(classify_endpoint("/v1/chat/completions"), Some("generate"));
         assert_eq!(classify_endpoint("/v1/completions"), Some("generate"));
         assert_eq!(classify_endpoint("/v1/responses"), Some("generate"));
+        assert_eq!(classify_endpoint("/v1/messages"), Some("generate"));
+        assert_eq!(classify_endpoint("/v1/messages/count_tokens"), None);
         assert_eq!(classify_endpoint("/v1/chat/completions/extra"), None);
         assert_eq!(classify_endpoint("/v1/embeddings"), Some("embeddings"));
         assert_eq!(classify_endpoint("/v1/moderations"), Some("moderations"));
@@ -898,6 +903,10 @@ mod tests {
             classify_endpoint("/v1/audio/transcriptions"),
             Some("extract")
         );
+        assert_eq!(classify_endpoint("/v1/systemone"), Some("extract"));
+        assert_eq!(classify_endpoint("/v1/systemone/extra"), None);
+        assert_eq!(classify_endpoint("/v1/decisions"), Some("extract"));
+        assert_eq!(classify_endpoint("/v1/decisions/extra"), None);
         assert_eq!(classify_endpoint("/health"), None);
         assert_eq!(classify_endpoint("/healthz"), None);
         assert_eq!(classify_endpoint("/readyz"), None);

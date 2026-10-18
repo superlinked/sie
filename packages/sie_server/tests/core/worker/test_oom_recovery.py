@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import sie_server.core.worker.oom_recovery as oom_recovery_module
+from sie_server.adapters.base import released_bytes
+from sie_server.config.model import EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
 from sie_server.core.oom import (
     OomRecoveryAction,
     OomRecoveryConfig,
     OomRecoveryStats,
     ResourceExhaustedError,
 )
+from sie_server.core.registry import ModelRegistry
 from sie_server.core.residency import EvictionResult
 from sie_server.core.worker.oom_recovery import BatchExecutor, ConfigGroup
 from sie_server.types.inputs import InvalidInputError
@@ -186,16 +191,38 @@ async def test_managed_oom_records_one_outcome_per_attempt(monkeypatch: pytest.M
 
 @pytest.mark.asyncio
 async def test_eviction_path() -> None:
-    """cache_clear fails; evict_lru frees a sibling; retry succeeds."""
+    """cache_clear fails; evict_lru frees a sibling; retry succeeds.
+
+    Optional-memory release runs before eviction. Returning 0 must not skip
+    ``EVICT_LRU`` — models with nothing to drop still need the sibling gone.
+    """
     config = OomRecoveryConfig(
         strategy=(OomRecoveryAction.CACHE_CLEAR, OomRecoveryAction.EVICT_LRU),
     )
     stats = OomRecoveryStats()
 
-    registry = AsyncMock()
-    registry.evict_lru_excluding = AsyncMock(return_value=EvictionResult.EVICTED)
+    events: list[str] = []
 
-    executor = BatchExecutor(model_name="m", registry=registry, config=config, stats=stats)
+    def release_optional_memory() -> int:
+        events.append("release")
+        return 0
+
+    async def evict(exclude_name: str, *, timeout_s: float) -> EvictionResult:
+        events.append("evict")
+        assert exclude_name == "m"
+        assert timeout_s == 5.0
+        return EvictionResult.EVICTED
+
+    registry = AsyncMock()
+    registry.evict_lru_excluding = AsyncMock(side_effect=evict)
+
+    executor = BatchExecutor(
+        model_name="m",
+        registry=registry,
+        config=config,
+        stats=stats,
+        release_optional_memory=release_optional_memory,
+    )
 
     group, metas = _make_group(3)
     handler = _FakeHandler()
@@ -215,9 +242,143 @@ async def test_eviction_path() -> None:
     assert stats.cache_clears == 1
     assert stats.evictions_triggered == 1
     assert stats.recoveries_succeeded == 1
+    # CACHE_CLEAR releases before its retry; EVICT_LRU releases again, then
+    # evicts. Nothing was freed, and the sibling is still unloaded.
+    assert events == ["release", "release", "evict"]
     registry.evict_lru_excluding.assert_awaited_once_with("m", timeout_s=5.0)
     for m in metas:
         assert m._partial_results is not None
+
+
+def _registry_model(name: str) -> ModelConfig:
+    return ModelConfig(
+        sie_id=name,
+        hf_id=f"org/{name}",
+        tasks=Tasks(encode=EncodeTask(dense=EmbeddingDim(dim=768))),
+        profiles={
+            "default": ProfileConfig(
+                adapter_path="sie_server.adapters.sentence_transformer:SentenceTransformerDenseAdapter",
+                max_batch_tokens=8192,
+            )
+        },
+    )
+
+
+def _mock_adapter() -> MagicMock:
+    adapter = MagicMock()
+    adapter.capabilities.outputs = ["dense"]
+    adapter.memory_footprint.return_value = 1000
+    return adapter
+
+
+@pytest.mark.asyncio
+@patch("sie_sdk.cache.ensure_model_cached", return_value=Path("/fake/cache/models--org--test"))
+@patch("sie_server.core.model_loader.load_adapter")
+async def test_oom_recovery_releases_sibling_memory_before_eviction(
+    mock_load_adapter: MagicMock,
+    ensure_model_cached: MagicMock,
+) -> None:
+    """A sibling's releasable memory is dropped before ``evict_lru_excluding``.
+
+    ``test_eviction_path`` stubs the registry, so its sibling release is not a
+    byte count. This uses a real registry: the caller's device sibling holds
+    memory, the release runs on that sibling's inference thread, and eviction
+    still follows.
+    """
+    registry = ModelRegistry()
+    registry.add_config(_registry_model("caller"))
+    registry.add_config(_registry_model("sibling"))
+
+    release_thread: list[str] = []
+
+    def release_sibling() -> int:
+        release_thread.append(threading.current_thread().name)
+        return 4096
+
+    caller = _mock_adapter()
+    sibling = _mock_adapter()
+    caller.has_releasable_memory.return_value = True
+    sibling.has_releasable_memory.return_value = True
+    sibling.release_optional_memory.side_effect = release_sibling
+    mock_load_adapter.side_effect = [caller, sibling]
+
+    events: list[str] = []
+    released_counts: list[int] = []
+    workers: list[Any] = []
+    try:
+        await registry.load_async("caller", "cpu")
+        await registry.load_async("sibling", "cpu")
+        assert ensure_model_cached.called
+        workers = [registry._loaded[name].worker for name in ("caller", "sibling")]
+
+        async def track_release(exclude_name: str) -> int:
+            assert exclude_name == "caller"
+            released = await ModelRegistry.release_optional_memory(registry, exclude_name)
+            released_counts.append(released)
+            events.append("release")
+            return released
+
+        async def track_evict(exclude_name: str, *, timeout_s: float) -> EvictionResult:
+            assert exclude_name == "caller"
+            assert timeout_s == 5.0
+            events.append("evict")
+            return await ModelRegistry.evict_lru_excluding(registry, exclude_name, timeout_s=timeout_s)
+
+        registry.release_optional_memory = track_release  # type: ignore[method-assign]
+        registry.evict_lru_excluding = track_evict  # type: ignore[method-assign]
+
+        stats = OomRecoveryStats()
+        executor = BatchExecutor(
+            model_name="caller",
+            registry=registry,
+            config=OomRecoveryConfig(
+                strategy=(OomRecoveryAction.CACHE_CLEAR, OomRecoveryAction.EVICT_LRU),
+            ),
+            stats=stats,
+        )
+        group, metas = _make_group(1)
+        attempts = 0
+
+        async def dispatch(_handler: Any, _group: ConfigGroup) -> str:
+            nonlocal attempts
+            attempts += 1
+            if attempts <= 2:
+                raise _oom()
+            return "ok"
+
+        await executor.run(_FakeHandler(), group, dispatch)
+
+        # CACHE_CLEAR releases the sibling, the retry still OOMs, and EVICT_LRU
+        # releases again before unloading. The caller is excluded both times.
+        assert events == ["release", "release", "evict"]
+        assert released_counts == [4096, 4096]
+        assert len(release_thread) == 2
+        assert all(name.startswith("inference") for name in release_thread)
+        sibling.release_optional_memory.assert_called()
+        assert sibling.release_optional_memory.call_count == 2
+        caller.release_optional_memory.assert_not_called()
+        assert stats.cache_clears == 1
+        assert stats.evictions_triggered == 1
+        assert stats.recoveries_succeeded == 1
+        assert not registry.is_loaded("sibling")
+        assert registry.is_loaded("caller")
+        assert metas[0]._partial_results is not None
+    finally:
+        for worker in workers:
+            if worker is not None:
+                worker._inference_executor.shutdown(wait=False, cancel_futures=True)
+        await registry.unload_all_async()
+
+
+def test_released_bytes_rejects_a_bool() -> None:
+    """``bool`` subclasses ``int`` and must not count as a released-byte total."""
+    assert released_bytes(True) == 0
+    assert released_bytes(False) == 0
+    assert released_bytes(0) == 0
+    assert released_bytes(-5) == 0
+    assert released_bytes("4096") == 0
+    assert released_bytes(None) == 0
+    assert released_bytes(4096) == 4096
 
 
 @pytest.mark.asyncio

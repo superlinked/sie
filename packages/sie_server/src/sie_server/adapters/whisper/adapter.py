@@ -192,15 +192,22 @@ class WhisperAdapter(BaseAdapter):
                 timestamp_mode = "word"
             else:
                 timestamp_mode = long_form or "segment" in granularities
-            group_outputs = self._pipeline(
-                [pipeline_inputs[index] for index in indices],
-                # Long-form features keep each recording's full frame count, and
-                # the pipeline cannot pad different lengths into one batch.
-                batch_size=1 if long_form else self._pipeline_batch_size,
-                return_timestamps=timestamp_mode,
-                return_language=True,
-                generate_kwargs=generation_kwargs,
-            )
+            attn_implementation = self._model.config._attn_implementation
+            try:
+                group_outputs = self._pipeline(
+                    [pipeline_inputs[index] for index in indices],
+                    # Long-form features keep each recording's full frame count, and
+                    # the pipeline cannot pad different lengths into one batch.
+                    batch_size=1 if long_form else self._pipeline_batch_size,
+                    return_timestamps=timestamp_mode,
+                    return_language=True,
+                    generate_kwargs=generation_kwargs,
+                )
+            finally:
+                # Word timestamps make Whisper's generate() switch the shared
+                # model config to eager attention, and it never switches back,
+                # so every later batch in this process would run eager too.
+                self._model.config._attn_implementation = attn_implementation
             if isinstance(group_outputs, dict):
                 group_outputs = [group_outputs]
             if len(group_outputs) != len(indices):

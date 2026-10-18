@@ -103,7 +103,6 @@ profiles:
     kv_budget_tokens: 32768
     adapter_options:
       loadtime:
-        mem_fraction_static: 0.85
         served_model_name: Qwen/Qwen3-4B-Instruct-2507
         # XGrammar (not the adapter-default Outlines): Outlines' interegular
         # FSM engine raises ``Unsupported`` on regex anchors (``^``/``$``) and
