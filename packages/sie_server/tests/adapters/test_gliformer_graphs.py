@@ -146,6 +146,86 @@ def test_over_budget_capture_is_not_retained(room: dict[str, Any]) -> None:
     runner.close()
 
 
+@pytest.mark.parametrize(("free_after", "expected"), [(20000, 12288), (0, 15000)])
+def test_private_pool_accounting_survives_unrelated_driver_frees(
+    monkeypatch: pytest.MonkeyPatch, free_after: int, expected: int
+) -> None:
+    pool = (42, 0)
+    snapshot = Mock(
+        return_value=[
+            {"segment_pool_id": pool, "device": 0, "total_size": 4096, "address": 4096},
+            {"segment_pool_id": pool, "device": 0, "total_size": 8192, "address": 8192},
+        ]
+    )
+    monkeypatch.setattr(torch.cuda, "memory_snapshot", snapshot)
+    monkeypatch.setattr(graphs, "free_memory", lambda _: free_after)
+    assert graphs._capture_device_bytes(SimpleNamespace(pool=lambda: pool), torch.device("cuda:0"), 15000) == expected
+    snapshot.assert_called_once_with(pool)
+
+
+@pytest.mark.parametrize("invalid", ["missing", "error", "wrong_pool", "wrong_device", "negative", "duplicate"])
+def test_failed_pool_accounting_cannot_publish_a_graph(
+    room: dict[str, Any], monkeypatch: pytest.MonkeyPatch, invalid: str
+) -> None:
+    pool = (42, 0)
+    segment = {"segment_pool_id": pool, "device": 0, "total_size": 4096, "address": 4096}
+    segments = [segment]
+    if invalid == "wrong_pool":
+        segment["segment_pool_id"] = (43, 0)
+    elif invalid == "wrong_device":
+        segment["device"] = 1
+    elif invalid == "negative":
+        segment["total_size"] = -1
+    elif invalid == "duplicate":
+        segments.append(segment.copy())
+    elif invalid == "missing":
+        segments.clear()
+    snapshot = (
+        Mock(side_effect=RuntimeError("snapshot unavailable")) if invalid == "error" else Mock(return_value=segments)
+    )
+    monkeypatch.setattr(torch.cuda, "memory_snapshot", snapshot)
+    runner = _PolicyRunner()
+    original_capture = runner._capture
+
+    def accounted_capture(key: graphs.Key, device: torch.device) -> graphs._Graph:
+        entry = original_capture(key, device)
+        entry.device_bytes = graphs._capture_device_bytes(SimpleNamespace(pool=lambda: pool), torch.device("cuda:0"), 0)
+        return entry
+
+    monkeypatch.setattr(runner, "_capture", accounted_capture)
+    assert runner.offer() is None
+    assert runner.graph_count == runner.held_bytes == runner.replays == 0
+    assert runner.stats.recording_failures == 1
+    assert not RECORDING_LOCK.locked()
+    runner.close()
+
+
+def test_private_pool_total_rejects_capture_even_when_driver_memory_increases(
+    room: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pool = (42, 0)
+    monkeypatch.setattr(
+        torch.cuda,
+        "memory_snapshot",
+        lambda _: [{"segment_pool_id": pool, "device": 0, "total_size": 8192, "address": 4096}],
+    )
+    monkeypatch.setattr(graphs, "free_memory", lambda _: 20000)
+    runner = _PolicyRunner()
+    original_capture = runner._capture
+
+    def accounted_capture(key: graphs.Key, device: torch.device) -> graphs._Graph:
+        entry = original_capture(key, device)
+        entry.device_bytes = graphs._capture_device_bytes(SimpleNamespace(pool=lambda: pool), torch.device("cuda:0"), 0)
+        return entry
+
+    monkeypatch.setattr(runner, "_capture", accounted_capture)
+    room["budget"] = 4096
+    assert runner.offer() is None
+    assert runner.graph_count == runner.held_bytes == runner.replays == 0
+    assert runner.stats.eager == {"budget_full": 1}
+    runner.close()
+
+
 @pytest.mark.parametrize("oom", [False, True])
 def test_capture_failure_restores_eager_and_bounds_retries(room: dict[str, Any], oom: bool) -> None:
     runner = _PolicyRunner()

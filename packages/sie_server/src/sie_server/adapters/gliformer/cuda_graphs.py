@@ -16,6 +16,9 @@ one per two seconds. Capture failures fall back eagerly; OOM drops graphs
 and pauses recording for a minute. The cache can be released independently
 of model weights. Captures that exceed the retained-memory budget are dropped.
 Each shape owns a separate graph pool so shapes can replay in arbitrary order.
+After capture, allocator snapshots count the pool's complete segments; the
+larger of that total and the driver-memory delta is charged along with static
+buffers. Missing or inconsistent accounting rejects the optional capture.
 
 Each replay runs on a private stream and copies its result before returning.
 The caller owns that copy: concurrent callers cannot overwrite hidden states
@@ -55,6 +58,32 @@ Key = tuple[int, int]
 
 def _out_of_memory(error: BaseException) -> bool:
     return isinstance(error, torch.OutOfMemoryError) or is_oom_error(error)
+
+
+def _capture_device_bytes(graph: Any, device: torch.device, free_before: int) -> int:
+    """Count the private pool outside capture, without relying on a device delta."""
+    pool = graph.pool()
+    segments = torch.cuda.memory_snapshot(pool)
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    if not isinstance(segments, list) or not segments:
+        raise RuntimeError("GLiFormer graph memory snapshot is unavailable")
+    addresses: set[int] = set()
+    pool_bytes = 0
+    for segment in segments:
+        size, address = segment.get("total_size"), segment.get("address")
+        if (
+            segment.get("segment_pool_id") != pool
+            or segment.get("device") != index
+            or type(size) is not int
+            or size <= 0
+            or type(address) is not int
+            or address <= 0
+            or address in addresses
+        ):
+            raise RuntimeError("GLiFormer graph memory snapshot is inconsistent")
+        addresses.add(address)
+        pool_bytes += size
+    return max(pool_bytes, 0, free_before - free_memory(device))
 
 
 def graph_shape(rows: int, length: int, *, mode: str, window: int, max_tokens: int) -> Key | None:
@@ -343,7 +372,7 @@ class EncoderGraphRunner:
                         graph.capture_end()
                     raise
                 graph.capture_end()
-                device_bytes = max(0, free_before - free_memory(device))
+                device_bytes = _capture_device_bytes(graph, device, free_before)
         finally:
             current.wait_stream(stream)
         return _Graph(graph, ids, mask, hidden, device_bytes)
