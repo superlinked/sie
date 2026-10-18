@@ -311,3 +311,20 @@ def test_finished_startup_generation_before_schedule_is_retained(tmp_path, recor
     clients, servers = cohort(tmp_path, records)
     save(servers / "background-startup.json", {"started_ns": 1, "finished_ns": 2, "clock_domain": "same-boot"})
     assert analyze(clients, servers, 10, 4)["background_calls_outside_schedule"] == 1
+
+
+def test_unfinished_unrelated_chat_is_rejected_before_its_first_event(tmp_path, records):
+    clients, servers = cohort(tmp_path, records)
+    save(
+        servers / "stream-open.json",
+        {
+            "id": "unrelated",
+            "started_ns": 1_500_000_000,
+            "finished_ns": None,
+            "clock_domain": "same-boot",
+            "completed": False,
+            "events": [],
+        },
+    )
+    with pytest.raises(ValueError, match="unexpected backend stream"):
+        analyze(clients, servers, 10, 4)

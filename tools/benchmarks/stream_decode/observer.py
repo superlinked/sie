@@ -149,6 +149,10 @@ def patch_manager(module: ModuleType, output: Path, manifest: dict[str, Any]) ->
             "served_model_name": self.served_model_name,
             "incremental_streaming_output": self.incremental_streaming_output,
         }
+        path = output / f"stream-{record['id']}.json"
+        # A second stream can remain open when the measured client finishes.
+        # Persist its occupancy once so offline analysis cannot miss it.
+        save(path, record)
         try:
             # The ordinary route already parsed this body. Never record headers,
             # credentials, or arbitrary environment values.
@@ -177,7 +181,7 @@ def patch_manager(module: ModuleType, output: Path, manifest: dict[str, Any]) ->
             raise
         finally:
             record["finished_ns"] = time.perf_counter_ns()
-            save(output / f"stream-{record['id']}.json", record)
+            save(path, record)
 
     manager.generate_request, manager._tokenize_one_request = generated, tokenized
     setattr(manager, MARKER, True)

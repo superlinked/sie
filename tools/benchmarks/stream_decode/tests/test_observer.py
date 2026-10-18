@@ -129,6 +129,30 @@ async def test_concurrent_stream_records_and_early_close_preserve_original_gener
     assert not hasattr(cls, observer.MARKER)
 
 
+@pytest.mark.asyncio
+async def test_chat_occupancy_is_visible_while_stream_is_open(tmp_path):
+    cls = manager_type()
+    restore = observer.patch_manager(SimpleNamespace(TokenizerManager=cls), tmp_path, {"cohort": "active"})
+    obj = SimpleNamespace(rid="active-chat", stream=True, sampling_params={})
+    manager = cls()
+    try:
+        async with contextlib.aclosing(manager.generate_request(obj, request({}))) as stream:
+            await anext(stream)
+            paths = list(tmp_path.glob("stream-*.json"))
+            assert len(paths) == 1
+            active = json.loads(paths[0].read_text())
+            assert active["completed"] is False
+            assert active["finished_ns"] is None
+            assert active["events"] == []
+        closed = json.loads(paths[0].read_text())
+        assert closed["id"] == active["id"]
+        assert closed["finished_ns"] > active["started_ns"]
+        assert len(closed["events"]) == 1
+        assert closed["error"]["type"] == "GeneratorExit"
+    finally:
+        restore()
+
+
 def test_real_sie_cuda_chat_route_and_sdk_reach_child_observer(monkeypatch, tmp_path):
     """A native adapter.generate hook cannot make this integration pass."""
     monkeypatch.setattr(observer, "clock_domain", lambda: "test-boot")

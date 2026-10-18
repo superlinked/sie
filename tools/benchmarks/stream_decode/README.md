@@ -13,8 +13,9 @@ It chains SIE's production startup hooks, then observes
 The observer retains actual prepared input IDs, effective sampling, raw output
 events and cumulative completion counts. SDK chunk IDs must match the backend
 request ID. Prompt, model, source manifest, clock domain and fixed trial count
-must also match. Events stay in memory until stream completion or cancellation;
-no per-event file writes or retokenization occur. This instrumentation adds host
+must also match. Each call writes one initial occupancy record; events stay in
+memory until stream completion or cancellation. No per-event file writes or
+retokenization occur. This instrumentation adds host
 overhead and must be identical in every compared arm.
 
 ## Run in a dedicated, bounded Linux GPU environment
