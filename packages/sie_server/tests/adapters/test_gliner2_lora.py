@@ -650,6 +650,19 @@ def test_ordinary_gliner2_remains_without_lora_manager_or_admission() -> None:
     assert not adapter.supports_lora()
 
 
+@pytest.mark.parametrize("version", ["1.3.1", "1.3.3", "2.0.0rc1", "2.0.1", "2.1.0"])
+def test_entity_lora_rejects_unreviewed_versions_before_binding(raw_model, monkeypatch, version):
+    controller = _lora.GLiNER2Lora({"a": "org/a"}, None, 1)
+    before = snapshot(raw_model)
+    monkeypatch.setattr(_lora.importlib.metadata, "version", lambda _name: version)
+    with pytest.raises(ValueError, match=r"requires GLiNER2 1\.3\.2 or 2\.0\.0"):
+        controller.bind(raw_model)
+    assert controller._model is None
+    assert controller._closed
+    assert not controller._originals
+    assert snapshot(raw_model)["modules"] == before["modules"]
+
+
 @pytest.mark.parametrize("value", [[], "", False, 0])
 def test_direct_guard_rejects_empty_nonobject_options_before_model_use(value):
     adapter = GLiNER2EntityLoraAdapter("unloaded", lora_paths={"a": "org/a"})

@@ -133,8 +133,8 @@ class GLiNER2Lora:
 
     def bind(self, model: Any) -> None:
         with self.lock:
-            if importlib.metadata.version("gliner2") != "1.3.2":
-                raise ValueError("The entity LoRA adapter requires GLiNER2 1.3.2")
+            if importlib.metadata.version("gliner2") not in {"1.3.2", "2.0.0"}:
+                raise ValueError("The entity LoRA adapter requires GLiNER2 1.3.2 or 2.0.0")
             if type(model) is not GLiNER2 or type(model.encoder) not in (BertModel, DebertaV2Model):
                 raise ValueError("Entity LoRA requires the ordinary GLiNER2 BERT or DeBERTaV2 encoder")
             if getattr(model.encoder, "is_quantized", False) or any(isinstance(m, LoraLinear) for m in model.modules()):

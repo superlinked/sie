@@ -1,4 +1,4 @@
-"""Explicit entity-only GLiNER2 1.3.2 runtime LoRA profile.
+"""Explicit entity-only GLiNER2 1.3.2/2.0.0 runtime LoRA profile.
 
 Configure this class explicitly with a nonempty ``lora_paths`` map. Declarations
 are deferred, never preloaded. Requests select ``options.lora``; ``lora_id`` and

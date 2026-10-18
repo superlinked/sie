@@ -1,4 +1,4 @@
-"""Long and pathological documents in the GLiNER2 adapter (gliner2 1.x).
+"""Long and pathological documents in the GLiNER2 adapter (gliner2 1.x/2.x).
 
 gliner2 lowercases a document, splits all of it into words with a regex that
 takes quadratic time on runs like ``"...."``, keeps the first ``max_len``
@@ -192,6 +192,19 @@ class Gliner2V2Splitter:
 Gliner2V2Splitter.__name__ = "WhitespaceTokenSplitter"
 
 
+class Gliner2V1Splitter(Gliner2V2Splitter):
+    """gliner2 1.x's splitter: lowercase before finding word offsets."""
+
+    def __call__(self, text: str, lower: bool = True) -> Iterator[tuple[str, int, int]]:
+        if lower:
+            text = text.lower()
+        for match in self._PATTERN.finditer(text):
+            yield match.group(), match.start(), match.end()
+
+
+Gliner2V1Splitter.__name__ = "WhitespaceTokenSplitter"
+
+
 # Texts with words longer than the window reads whole, or more subwords than it allows.
 LONG_WORD_TEXTS = [
     "x" * 5000 + " tail words here",
@@ -219,8 +232,7 @@ LONG_WORD_IDS = [
 def test_the_prefix_gives_gliner2_the_same_input_as_the_whole_text(text: str, max_len: int, splitting: str) -> None:
     adapter = GLiNER2Adapter("fake/gliner2", max_seq_length=max_len)
     processor = make_processor()
-    if splitting == "gliner2-2.x":
-        processor.word_splitter = Gliner2V2Splitter()
+    processor.word_splitter = Gliner2V2Splitter() if splitting == "gliner2-2.x" else Gliner2V1Splitter()
     reference = collated(processor, text, max_len)  # gliner2's own splitter, on the whole text
 
     adapter._use_linear_word_splitter(processor)
@@ -237,8 +249,7 @@ def test_the_prefix_gives_gliner2_the_same_input_as_the_whole_text(text: str, ma
 def test_long_words_are_read_in_pieces_within_the_subword_budget(text: str, max_len: int, splitting: str) -> None:
     adapter = GLiNER2Adapter("fake/gliner2", max_seq_length=max_len)
     processor = make_processor()
-    if splitting == "gliner2-2.x":
-        processor.word_splitter = Gliner2V2Splitter()
+    processor.word_splitter = Gliner2V2Splitter() if splitting == "gliner2-2.x" else Gliner2V1Splitter()
     adapter._use_linear_word_splitter(processor)
 
     prefix = adapter._model_text(text)
@@ -381,8 +392,7 @@ def test_the_prefix_reads_what_gliner2_reads_with_its_sentence_end(text: str, ma
     # gliner2 appends "." to a text without a sentence end, and a URL word absorbs it.
     adapter = GLiNER2Adapter("fake/gliner2", max_seq_length=max_len)
     processor = make_processor()
-    if splitting == "gliner2-2.x":
-        processor.word_splitter = Gliner2V2Splitter()
+    processor.word_splitter = Gliner2V2Splitter() if splitting == "gliner2-2.x" else Gliner2V1Splitter()
     adapter._use_linear_word_splitter(processor)
 
     prefix = adapter._model_text(text)
@@ -508,11 +518,15 @@ def test_load_refuses_a_word_splitter_it_has_no_equivalent_for() -> None:
 
 
 def test_the_processor_gets_the_bounded_linear_splitter() -> None:
+    # Read the real loaded package's offset convention rather than assuming
+    # the installed processor always lowercases before splitting (1.x).
+    original = make_processor().word_splitter
+    expected_lower_first = max(end for _, _, end in original("İ")) == len("İ".lower())
     _, model = make_adapter()
     splitter = model.processor.word_splitter
     assert isinstance(splitter, WindowedSplitter)
     assert isinstance(splitter.splitter, LinearWordSplitter)
-    assert splitter.splitter.lower_text_first
+    assert splitter.splitter.lower_text_first == expected_lower_first
     assert splitter.max_words == 512
     assert splitter.max_subwords == subword_budget(512, per_word=_SUBWORDS_PER_WORD)
 
@@ -772,8 +786,7 @@ def test_windows_read_every_word_of_a_long_text_as_gliner2_reads_it(
     max_len = 7
     adapter = GLiNER2Adapter("fake/gliner2", max_seq_length=max_len)
     processor = make_processor()
-    if splitting == "gliner2-2.x":
-        processor.word_splitter = Gliner2V2Splitter()
+    processor.word_splitter = Gliner2V2Splitter() if splitting == "gliner2-2.x" else Gliner2V1Splitter()
     reference = [word for word, _, _ in processor.word_splitter(text, lower=True)]
     adapter._use_linear_word_splitter(processor)
 

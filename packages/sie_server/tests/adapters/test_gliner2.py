@@ -212,7 +212,7 @@ def test_transformers5_bundle_carries_gliner2_classification_runtime() -> None:
     model = yaml.safe_load(model_path.read_text())
 
     assert "sie_server.adapters.gliner2.adapter" in default["adapters"]
-    assert default["deps"]["gliner2"] == ">=1.3.1,<2"
+    assert default["deps"]["gliner2"] == ">=1.3.2,<=2.0.0"
     assert "sie_server.adapters.gliner2.classification" not in default["adapters"]
     assert "sie_server.adapters.gliner2.classification" in transformers5["adapters"]
     assert "sie_server.adapters.gliner2.adapter" not in transformers5["adapters"]
@@ -663,8 +663,17 @@ def test_structured_extraction_rejects_schema_invalid_model_output(
         "additionalProperties": False,
     }
 
+    # The validator remains strict, but malformed generated output is isolated
+    # to the item instead of aborting every sibling in a fused model batch.
     with pytest.raises(ValueError, match=match):
-        adapter.extract([Item(text="Renée founded Acme")], output_schema=schema)
+        adapter._flatten_structured_result({"_sie_root": [raw_data]}, output_schema=schema)
+    output = adapter.extract([Item(text="Renée founded Acme")], output_schema=schema)
+    assert output.data == [{}]
+    assert output.input_token_counts == [0]
+    assert output.errors is not None
+    assert output.errors[0] is not None
+    assert output.errors[0].code == "INFERENCE_ERROR"
+    assert output.errors[0].message == "GLiNER2 returned structured output that does not match output_schema"
 
 
 SAFE, UNSAFE = "safe", "unsafe"

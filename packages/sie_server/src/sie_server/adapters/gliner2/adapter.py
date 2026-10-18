@@ -29,11 +29,12 @@ from sie_server.adapters.gliner2._prompt import prompt_counter, structure_schema
 from sie_server.adapters.gliner2.words import linear_equivalent
 from sie_server.core.inference_output import ExtractItemError, ExtractOutput
 from sie_server.types.inputs import InvalidInputError, Item
-from sie_server.types.responses import Classification, Entity, Relation
+from sie_server.types.responses import Classification, Entity, ErrorCode, Relation
 
 _ERR_REQUIRES_LABELS = "GLiNER2 requires labels parameter for extraction"
 _STRUCTURE_NAME = "_sie_root"
 _STRUCTURE_DELIMITERS = ("::", "|", "[", "]")
+_ERR_STRUCTURED_OUTPUT = "GLiNER2 returned structured output that does not match output_schema"
 # Words a document is read up to when the model config sets no max_seq_length.
 _DEFAULT_MAX_WORDS = 512
 # Subword tokens a document may take per word it reads. The GLiNER2 checkpoints
@@ -94,6 +95,11 @@ class GLiNER2Adapter(BaseAdapter):
     a text that fits one window is classified exactly as before. Usage counts
     the document subwords encoded in every window, including repeated overlap,
     and excludes the schema prompt, document separator and padding.
+
+    Distinct entity mentions retain their source offsets, including repeated
+    surface forms returned by GLiNER2 2.x. A null known optional structured
+    field is omitted. Invalid or missing required fields fail only that item
+    with ``INFERENCE_ERROR``, empty data and zero billed input tokens.
 
     Reference models:
     - fastino/gliner2-base-v1
@@ -317,15 +323,27 @@ class GLiNER2Adapter(BaseAdapter):
                     input_token_counts=input_token_counts,
                     rows_per_pass=len(texts),
                 )
+            data: list[dict[str, Any]] = [{} for _ in texts]
+            item_errors = list(errors) if errors is not None else [None for _ in texts]
+            for index, result in enumerate(raw_results):
+                if item_errors[index] is not None:
+                    continue
+                try:
+                    data[index] = self._flatten_structured_result(result, output_schema=output_schema)
+                except ValueError:
+                    # Do not expose generated field names/values in errors or
+                    # discard valid siblings from the same model batch.
+                    item_errors[index] = ExtractItemError(
+                        code=ErrorCode.INFERENCE_ERROR.value, message=_ERR_STRUCTURED_OUTPUT
+                    )
+                    if input_token_counts is not None:
+                        input_token_counts[index] = 0
+            if input_token_counts is None and all(error is not None for error in item_errors):
+                input_token_counts = [0 for _ in texts]
             return ExtractOutput(
                 entities=[[] for _ in texts],
-                data=[
-                    {}
-                    if errors is not None and errors[index] is not None
-                    else self._flatten_structured_result(result, output_schema=output_schema)
-                    for index, result in enumerate(raw_results)
-                ],
-                errors=errors,
+                data=data,
+                errors=item_errors if any(error is not None for error in item_errors) else None,
                 input_token_counts=input_token_counts,
             )
 
@@ -971,13 +989,23 @@ class GLiNER2Adapter(BaseAdapter):
         *,
         output_schema: dict[str, Any],
     ) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            raise ValueError("GLiNER2 structured extraction did not return an object")
         values = result.get(_STRUCTURE_NAME, [])
         if values in (None, []):
             data: dict[str, Any] = {}
         elif not isinstance(values, list) or len(values) != 1 or not isinstance(values[0], dict):
             raise ValueError("GLiNER2 structured extraction did not return exactly one root object")
         else:
-            data = dict(values[0])
+            if any(not isinstance(name, str) for name in values[0]):
+                raise ValueError("GLiNER2 structured extraction returned a non-string property name")
+            properties = output_schema["properties"]
+            required = output_schema.get("required", [])
+            data = {
+                name: value
+                for name, value in values[0].items()
+                if value is not None or name not in properties or name in required
+            }
         cls._validate_structured_result(data, output_schema)
         return data
 
