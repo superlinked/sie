@@ -1,6 +1,5 @@
 """Scalar-alignment and loading-boundary controls without model downloads."""
 
-import builtins
 import ctypes
 import gc
 import json
@@ -221,18 +220,16 @@ def test_unsupported_models_are_unchanged(model, unsupported):
         ("darwin", "arm64", "cuda:0"),
     ],
 )
-def test_off_platform_load_does_not_import_or_invoke_alignment(monkeypatch, system, machine, device):
+def test_off_platform_load_does_not_invoke_alignment(monkeypatch, system, machine, device):
     outer = SimpleNamespace(max_length=0)
     monkeypatch.setattr(cross_encoder.sys, "platform", system)
     monkeypatch.setattr(cross_encoder.platform, "machine", lambda: machine)
     monkeypatch.setattr(cross_encoder, "CrossEncoder", lambda *args, **kwargs: outer)
-    original_import = builtins.__import__
 
-    def guard(name, *args, **kwargs):
-        assert name != "sie_server.adapters.cross_encoder._cpu_alignment"
-        return original_import(name, *args, **kwargs)
+    def forbidden_alignment(*args, **kwargs):
+        raise AssertionError("off-platform load must not normalize storage")
 
-    monkeypatch.setattr(builtins, "__import__", guard)
+    monkeypatch.setattr(cross_encoder, "normalize_bert_cpu_storage", forbidden_alignment)
     adapter = cross_encoder.CrossEncoderAdapter("unused", max_length=17)
     adapter.load(device)
     assert adapter._model is outer
@@ -338,6 +335,15 @@ def test_real_unpadded_checkpoint_load_scoring_and_reload(model, tmp_path, monke
     tokenizer = write_unpadded_checkpoint(model, tmp_path)
     monkeypatch.setattr(cross_encoder.sys, "platform", "darwin")
     monkeypatch.setattr(cross_encoder.platform, "machine", lambda: "arm64")
+    unaligned_before = []
+
+    def normalize_after_precondition(inner):
+        names = [name for name, parameter in inner.named_parameters() if parameter.data_ptr() % 4]
+        assert names, "the actual tiny checkpoint must reach normalization with unaligned parameters"
+        unaligned_before.append(names)
+        normalize_bert_cpu_storage(inner)
+
+    monkeypatch.setattr(cross_encoder, "normalize_bert_cpu_storage", normalize_after_precondition)
     queries, documents = ["query", "query"], ["one two", "three four"]
     inputs = tokenizer(queries, documents, padding=True, return_tensors="pt")
     with torch.inference_mode():
@@ -355,6 +361,7 @@ def test_real_unpadded_checkpoint_load_scoring_and_reload(model, tmp_path, monke
         np.testing.assert_allclose(pairs.scores, expected, atol=1e-7, rtol=0)
         adapter.unload()
         assert adapter._model is None
+    assert len(unaligned_before) == 2
 
 
 def test_explicit_lora_binds_only_after_real_unpadded_base_is_aligned(model, tmp_path, monkeypatch):
