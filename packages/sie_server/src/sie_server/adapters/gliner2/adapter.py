@@ -15,6 +15,7 @@ from huggingface_hub import snapshot_download
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._prompt_limit import DEFAULT_MAX_SCHEMA_PROMPT_TOKENS, PromptLimit, check_label_chars
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters._word_window import (
     MAX_WORD_CHARS,
@@ -196,6 +197,7 @@ class GLiNER2Adapter(BaseAdapter):
             model_path = snapshot_download(repo_id=model_path, revision=self._revision)
 
         use_quantize = device != "cpu" and self._compute_precision == "float16"
+        install_transformers_security_fixes()
         model = GLiNER2.from_pretrained(
             model_path,
             map_location=device,

@@ -16,6 +16,7 @@ from sie_server.adapters._modernbert_flash_graphs import (
 )
 from sie_server.adapters._packed_rope import packed_rope_available, rotate_packed_qkv_
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters._utils import extract_text
 from sie_server.core.inference_output import ScoreOutput
@@ -120,6 +121,7 @@ class ModernBertFlashCrossEncoderAdapter(FlashBaseAdapter):
             shared_kwargs["revision"] = self._revision
 
         # Load tokenizer
+        install_transformers_security_fixes()
         self._tokenizer = AutoTokenizer.from_pretrained(
             self._model_name_or_path,
             **shared_kwargs,

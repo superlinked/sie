@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.core.inference_output import ExtractItemError, ExtractOutput
 from sie_server.types.inputs import InvalidMediaError, is_image_input, media_bytes
 from sie_server.types.responses import ErrorCode
@@ -164,6 +165,7 @@ class DoclingAdapter(BaseAdapter):
         # Models cache globally, so subsequent per-task converters are cheap.
         # This is the born-digital parse path that BOTH profiles depend on, so
         # a staged artifact root keeps it fail-closed.
+        install_transformers_security_fixes()
         try:
             warm_converter = self._get_converter(ocr_enabled=False)
             _payload, _pages, warm_error = self._convert_bytes(

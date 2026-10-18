@@ -11,6 +11,7 @@ import torch
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._prompt_limit import check_label_chars
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters._word_window import (
     MAX_DOCUMENT_WINDOWS,
@@ -169,6 +170,7 @@ class GLiNERBiAdapter(BaseAdapter):
         if self._revision is not None:
             load_kwargs["revision"] = self._revision
 
+        install_transformers_security_fixes()
         self._model = GLiNER.from_pretrained(
             self._model_name_or_path,
             **load_kwargs,

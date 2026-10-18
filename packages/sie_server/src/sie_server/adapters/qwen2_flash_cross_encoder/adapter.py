@@ -11,6 +11,7 @@ from sie_server.adapters._flash_base import FlashBaseAdapter
 from sie_server.adapters._flash_pack import build_position_ids
 from sie_server.adapters._modernbert_flash_graphs import PackedForward, VarlenGraphRunner, unsupported_reason
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters._utils import apply_rotary_pos_emb
 from sie_server.adapters.qwen2_flash import _fused_layers
@@ -311,6 +312,7 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
             shared_kwargs["revision"] = self._revision
 
         # Load tokenizer
+        install_transformers_security_fixes()
         self._tokenizer = AutoTokenizer.from_pretrained(
             self._model_name_or_path,
             **shared_kwargs,

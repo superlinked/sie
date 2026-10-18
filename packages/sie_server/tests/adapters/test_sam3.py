@@ -194,6 +194,7 @@ def test_load_uses_sam3_classes_revision_and_dtype(monkeypatch, device, precisio
         sys.modules,
         "transformers",
         SimpleNamespace(
+            __version__="5.17.0",
             Sam3Processor=SimpleNamespace(from_pretrained=processor_loader),
             Sam3Model=SimpleNamespace(from_pretrained=model_loader),
         ),

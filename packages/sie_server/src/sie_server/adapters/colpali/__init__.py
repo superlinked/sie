@@ -29,6 +29,7 @@ import torch
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._multivector import maxsim_scores
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ComputePrecision
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
@@ -153,6 +154,7 @@ class ColPaliAdapter(BaseAdapter):
         self._processor_load_kwargs = dict(shared_kwargs)
 
         # Load processor
+        install_transformers_security_fixes()
         self._processor = ColPaliProcessor.from_pretrained(
             self._model_name_or_path,
             **shared_kwargs,

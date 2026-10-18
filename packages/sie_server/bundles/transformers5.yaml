@@ -28,9 +28,9 @@ deps:
   # installs already resolved to the latest 5.x, so the floor is the
   # guarantee, not a version change in practice.
   transformers: '>=5.17,<6'
-  # Multimodal SparseEncoder (image documents) landed on the 5.6 line
-  # (st_sparse_vision adapter).
-  sentence-transformers: '>=5.6,<6'
+  # Includes multimodal SparseEncoder (image documents), with the local-code
+  # trust boundary validated against this exact release.
+  sentence-transformers: '==5.7.0'
   # Pin torch — flash-attn's unpinned torch dep can pull in 2.10+ which breaks torchvision
   torch: '>=2.9,<2.10'
   # Keep the compiled torchvision operators paired with torch 2.9.x. A broad

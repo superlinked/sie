@@ -125,10 +125,13 @@ class NativeCausalCrossEncoderAdapter(BaseAdapter):
         from sentence_transformers.cross_encoder.modules import LogitScore
         from sentence_transformers.util import batch_to_device
 
+        from sie_server.adapters._sentence_transformer_trust import load_sentence_transformer
+
         self._require_saved_modules()
         precision = self._compute_precision or ("bfloat16" if device.startswith("cuda") else "float32")
         dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[precision]
-        model = CrossEncoder(
+        model = load_sentence_transformer(
+            CrossEncoder,
             self._model_name_or_path,
             revision=self._revision,
             device=device,

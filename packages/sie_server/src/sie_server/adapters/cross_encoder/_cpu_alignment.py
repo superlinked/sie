@@ -10,7 +10,7 @@ import torch
 from transformers import BertForSequenceClassification
 
 
-def normalize_bert_cpu_storage(model: torch.nn.Module) -> None:
+def normalize_bert_cpu_storage(model: torch.nn.Module | None) -> None:
     """Copy unsafe standard BERT float32 storage once, retaining tensor objects.
 
     The caller restricts this optional compatibility path to Darwin arm64 CPU.

@@ -21,6 +21,7 @@ from sie_server.adapters._modernbert_flash_graphs import (
     parse_graph_mode,
 )
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision, PoolingStrategy
 from sie_server.adapters._utils import (
     extract_texts,
@@ -154,6 +155,7 @@ class ModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         if self._revision is not None:
             shared_kwargs["revision"] = self._revision
 
+        install_transformers_security_fixes()
         self._tokenizer = AutoTokenizer.from_pretrained(
             self._model_name_or_path,
             **shared_kwargs,

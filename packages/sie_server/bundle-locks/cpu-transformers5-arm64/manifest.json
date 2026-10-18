@@ -11,7 +11,7 @@
       "url": "https://download.pytorch.org/whl/markupsafe-3.0.3-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl"
     }
   ],
-  "exceptions_sha256": "2d808969e86d3da417f7b52a9ea461f2d281baa48e1cda74b257f65a6f67ab34",
+  "exceptions_sha256": "64c9465f53fd7f93019e442ad0a7ffb206205ce8072b07aec6f8bc8373f748ef",
   "exclude_newer": "2026-10-18T00:00:00Z",
   "indexes": [
     "--default-index",
@@ -22,8 +22,8 @@
     "unsafe-best-match"
   ],
   "inputs": {
-    "requirements_sha256": "529fd129d457b6820b48a3acbb4dee1f9eb83806e0a6730f122ff3826861a3f2",
-    "uv_lock_sha256": "70fa46eb35df2c928eb419caec58a8cda544aea28196ef127006a65bb062ef94"
+    "requirements_sha256": "4dead3d74b9a8041b14e230522c1f6d9db6a24d7455fe0d6e7e821524951483c",
+    "uv_lock_sha256": "536b7f46b5560f0dfbe5a503ecf4166514658f1340c4721d1ea263a43b3e5aa5"
   },
   "lock_sha256": "f0243e01019a55d573ceffa9798460b0a503d128e5f1942e8901d83658995219",
   "policy_sha256": "ad0ea4aba9172f1b79f0c8fb274af90d4d3d161c74e0eb578f9d63c3cd3b5bea",

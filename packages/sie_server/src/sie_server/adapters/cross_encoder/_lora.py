@@ -113,12 +113,12 @@ class CrossEncoderLora:
 
     def bind(self, outer: CrossEncoder) -> None:
         model = outer.model
-        encoder_prefix = _ENCODER_PREFIXES.get(type(model))
-        if encoder_prefix is None or getattr(model, "is_quantized", False):
+        if model is None or type(model) not in _ENCODER_PREFIXES or getattr(model, "is_quantized", False):
             raise ValueError(
                 "CrossEncoder LoRA requires a standard, unquantized BertForSequenceClassification "
                 "or XLMRobertaForSequenceClassification"
             )
+        encoder_prefix = _ENCODER_PREFIXES[type(model)]
         if getattr(model, "peft_config", None) or getattr(model, "_hf_peft_config_loaded", False):
             raise ValueError("The cross-encoder must start from a base checkpoint without attached adapters")
         self._outer, self._model = outer, model

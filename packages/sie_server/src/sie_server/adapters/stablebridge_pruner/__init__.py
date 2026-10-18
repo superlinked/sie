@@ -13,6 +13,7 @@ from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 from torch import nn
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
 from sie_server.core.inference_output import ExtractOutput, ScoreOutput
 from sie_server.core.preprocessor import CharCountPreprocessor
@@ -125,6 +126,7 @@ class StablebridgePrunerAdapter(ModelAdapter):
         if self._revision is not None:
             shared_kwargs["revision"] = self._revision
 
+        install_transformers_security_fixes()
         self._tokenizer = AutoTokenizer.from_pretrained(
             self._model_name_or_path,
             **shared_kwargs,

@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from sie_server.adapters._flash_base import FlashBaseAdapter
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.core.extract_cost import MAX_EXTRACT_LABELS
 from sie_server.core.inference_output import ExtractOutput
@@ -113,6 +114,7 @@ class NLIClassificationFlashAdapter(FlashBaseAdapter):
             shared_kwargs["revision"] = self._revision
 
         # Load tokenizer
+        install_transformers_security_fixes()
         self._tokenizer = AutoTokenizer.from_pretrained(self._model_name_or_path, **shared_kwargs)
 
         # Load model (use 'dtype' not deprecated 'torch_dtype')

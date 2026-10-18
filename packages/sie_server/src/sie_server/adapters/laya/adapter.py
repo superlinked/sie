@@ -85,6 +85,7 @@ from sie_server.adapters._modernbert_flash_graphs import (
     unsupported_reason,
 )
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters.laya.model import LayaDecisionHead, LayaModel, apply_rope_parameters, split_checkpoint
 from sie_server.adapters.laya.questions import (
@@ -309,6 +310,7 @@ class LayaAdapter(BaseAdapter):
         trained_max_len = int(cfg.get("max_len", 512))
         self._max_len = min(trained_max_len, self._max_seq_length) if self._max_seq_length else trained_max_len
         self._head_max_len = int(cfg.get("head_max_len", 192))
+        install_transformers_security_fixes()
         self._calibration = Calibration.from_config(cfg)
 
         tokenizer = self._load_tokenizer(checkpoint_dir / "tokenizer")

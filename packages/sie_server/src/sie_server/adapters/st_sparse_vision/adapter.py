@@ -4,9 +4,9 @@ Serves sentence-transformers ``SparseEncoder`` models that accept image
 documents in addition to text (visual-SPLADE family, e.g.
 naver/v-splade-quality): text or page-image in, sparse vocab-sized vector out.
 
-Requires the ``transformers5`` bundle (sentence-transformers >=5.6 /
-transformers >=5.14); the multimodal ``SparseEncoder`` routing does not exist
-on the sentence-transformers 5.0 line the default bundle pins.
+Requires the ``transformers5`` bundle for the checkpoint's Transformers >=5.14
+modeling support. Both this bundle and the default bundle pin
+sentence-transformers 5.7.0, which includes multimodal ``SparseEncoder`` routing.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from huggingface_hub import snapshot_download
 from sentence_transformers import SparseEncoder
 
 from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._sentence_transformer_trust import load_sentence_transformer
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters._utils import validate_output_types
@@ -106,7 +107,7 @@ class SparseEncoderVisionAdapter(BaseAdapter):
             load_kwargs["revision"] = self._revision
         if self._trust_remote_code:
             self._register_remote_code_dir()
-        self._model = SparseEncoder(self._model_name_or_path, **load_kwargs)
+        self._model = load_sentence_transformer(SparseEncoder, self._model_name_or_path, **load_kwargs)
 
         if self._max_seq_length is not None:
             self._model.max_seq_length = self._max_seq_length

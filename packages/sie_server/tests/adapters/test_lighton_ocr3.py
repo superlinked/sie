@@ -286,6 +286,7 @@ def test_native_loader_pins_processor_and_qwen35_without_remote_code(
 
     transformers = ModuleType("transformers")
     transformers.__dict__.update(
+        __version__="5.17.0",
         AutoProcessor=SimpleNamespace(from_pretrained=load_processor),
         Qwen3_5ForConditionalGeneration=SimpleNamespace(from_pretrained=load_model),
     )
@@ -353,6 +354,7 @@ def test_load_rebinds_qwen35_patch_embed_to_equivalent_linear(monkeypatch: pytes
         expected = conv(patches).clone()
     transformers = ModuleType("transformers")
     transformers.__dict__.update(
+        __version__="5.17.0",
         AutoProcessor=SimpleNamespace(from_pretrained=lambda *_, **__: _Processor()),
         Qwen3_5ForConditionalGeneration=SimpleNamespace(from_pretrained=lambda *_, **__: loaded_model),
     )

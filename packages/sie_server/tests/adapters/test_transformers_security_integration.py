@@ -1,0 +1,467 @@
+"""Offline controls at SIE's actual native/dependent model-load boundaries."""
+
+from __future__ import annotations
+
+import importlib
+import json
+import os
+import subprocess
+import sys
+from collections.abc import Iterator
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import Mock
+
+import pytest
+import torch
+import transformers
+from sie_server.adapters import _transformers_compat as compat
+from sie_server.adapters.cross_encoder import CrossEncoderAdapter
+from sie_server.adapters.cross_encoder.runtime_lora import CrossEncoderLoraAdapter
+from sie_server.adapters.docling.adapter import DoclingAdapter
+from sie_server.adapters.pytorch_embedding import PyTorchEmbeddingAdapter
+from sie_server.adapters.siglip.adapter import SiglipAdapter
+from sie_server.types.inputs import Item
+from transformers import (
+    AutoConfig,
+    BertConfig,
+    BertForSequenceClassification,
+    BertModel,
+    BertTokenizerFast,
+    PretrainedConfig,
+    modeling_utils,
+)
+from transformers.integrations import hub_kernels
+
+_EXACT_TF4 = pytest.mark.skipif(transformers.__version__ != "4.57.6", reason="Exact TF4 backport controls")
+_ATTACK = "sie-security-probe.invalid/owned-marker:attention"
+_PRIVATE_FIELDS = (
+    "_attn_implementation_internal",
+    "_attn_implementation",
+    "_experts_implementation_internal",
+    "_experts_implementation",
+)
+_STRUCTURE_FIELDS = ("__dict__", "__class__", "attribute_map", "sub_configs")
+_NATIVE_CONFIG_INIT = PretrainedConfig.__init__
+_NATIVE_HUB_IS_KERNEL = hub_kernels.is_kernel
+_NATIVE_MODEL_IS_KERNEL = modeling_utils.is_kernel
+
+
+@pytest.fixture(autouse=True)
+def offline_native_loader(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
+    assert not getattr(_NATIVE_CONFIG_INIT, "_sie_kernel_security_backport", False)
+    monkeypatch.setattr(PretrainedConfig, "__init__", _NATIVE_CONFIG_INIT)
+    monkeypatch.setattr(hub_kernels, "is_kernel", _NATIVE_HUB_IS_KERNEL)
+    monkeypatch.setattr(modeling_utils, "is_kernel", _NATIVE_MODEL_IS_KERNEL)
+    threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    yield
+    torch.set_num_threads(threads)
+
+
+@pytest.fixture
+def kernel_boundary(monkeypatch: pytest.MonkeyPatch) -> Mock:
+    boundary = Mock(side_effect=AssertionError("Forbidden kernel loader reached"))
+    monkeypatch.setattr(hub_kernels, "_kernels_available", True)
+    monkeypatch.setattr(hub_kernels, "get_kernel", boundary, raising=False)
+    return boundary
+
+
+def _update_config(path: Path, **values: Any) -> None:
+    config = json.loads(path.read_text())
+    config.update(values)
+    path.write_text(json.dumps(config))
+
+
+def _tokenizer(directory: Path) -> BertTokenizerFast:
+    directory.mkdir(exist_ok=True)
+    vocab = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "alice", "bob", "met", "person", "."]
+    vocabulary = directory / "vocab.txt"
+    vocabulary.write_text("\n".join(vocab) + "\n")
+    tokenizer = BertTokenizerFast(vocab_file=str(vocabulary), model_max_length=64)
+    tokenizer.save_pretrained(directory)
+    return tokenizer
+
+
+def _bert_config(tokenizer: BertTokenizerFast) -> BertConfig:
+    return BertConfig(
+        vocab_size=len(tokenizer),
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        max_position_embeddings=128,
+        hidden_dropout_prob=0,
+        attention_probs_dropout_prob=0,
+        num_labels=1,
+    )
+
+
+@pytest.fixture
+def bert_checkpoints(tmp_path: Path) -> tuple[Path, Path]:
+    embedding, cross_encoder = tmp_path / "embedding", tmp_path / "cross-encoder"
+    with torch.random.fork_rng():
+        torch.manual_seed(81)
+        BertModel(_bert_config(_tokenizer(embedding))).save_pretrained(embedding)
+        BertForSequenceClassification(_bert_config(_tokenizer(cross_encoder))).save_pretrained(cross_encoder)
+    return embedding, cross_encoder
+
+
+@_EXACT_TF4
+@pytest.mark.parametrize("field", _PRIVATE_FIELDS)
+def test_direct_embedding_load_drops_serialized_private_settings(
+    bert_checkpoints: tuple[Path, Path], kernel_boundary: Mock, field: str
+) -> None:
+    path, _ = bert_checkpoints
+    tokens = torch.tensor([[2, 5, 6, 3]])
+    native = BertModel.from_pretrained(path, attn_implementation="eager").eval()
+    with torch.inference_mode():
+        expected = native(tokens).last_hidden_state
+    _update_config(path / "config.json", **{field: _ATTACK})
+    adapter = PyTorchEmbeddingAdapter(path, attn_implementation="eager", compute_precision="float32")
+    try:
+        adapter.load("cpu")
+        assert type(adapter._model) is BertModel
+        assert "forward" not in adapter._model.__dict__
+        assert adapter._model.config._attn_implementation == "eager"
+        for key, value in native.state_dict().items():
+            assert torch.equal(value, adapter._model.state_dict()[key])
+        with torch.inference_mode():
+            assert torch.equal(expected, adapter._model(tokens).last_hidden_state)
+        kernel_boundary.assert_not_called()
+    finally:
+        adapter.unload()
+
+
+@_EXACT_TF4
+@pytest.mark.parametrize("field", _STRUCTURE_FIELDS)
+def test_direct_load_rejects_config_structure_before_model_construction(
+    bert_checkpoints: tuple[Path, Path], kernel_boundary: Mock, field: str
+) -> None:
+    path, _ = bert_checkpoints
+    _update_config(path / "config.json", **{field: {"__class__": "marker"}})
+    adapter = PyTorchEmbeddingAdapter(path)
+    with pytest.raises(ValueError, match="config attribute structure"):
+        adapter.load("cpu")
+    assert adapter._model is None
+    kernel_boundary.assert_not_called()
+
+
+@_EXACT_TF4
+@pytest.mark.parametrize("adapter_class", [CrossEncoderAdapter, CrossEncoderLoraAdapter])
+@pytest.mark.parametrize("trust", [False, True])
+def test_st_and_inherited_lora_load_install_before_native_constructor(
+    bert_checkpoints: tuple[Path, Path], kernel_boundary: Mock, adapter_class: type, trust: bool
+) -> None:
+    _, path = bert_checkpoints
+    _update_config(path / "config.json", _attn_implementation_internal=_ATTACK)
+    kwargs = {"lora_paths": {"deferred": str(path / "never-read")}} if adapter_class is CrossEncoderLoraAdapter else {}
+    adapter = adapter_class(path, trust_remote_code=trust, compute_precision="float32", **kwargs)
+    try:
+        adapter.load("cpu")
+        assert type(adapter._model.model) is BertForSequenceClassification
+        assert "forward" not in adapter._model.model.__dict__
+        scores = adapter.score(Item(text="alice"), [Item(text="alice met bob"), Item(text="bob")])
+        assert len(scores) == 2
+        assert torch.isfinite(torch.tensor(scores)).all()
+        kernel_boundary.assert_not_called()
+    finally:
+        adapter.unload()
+
+
+@_EXACT_TF4
+@pytest.mark.parametrize("variant", ["entities", "classification", "entity_lora"])
+def test_actual_dependent_gliner2_load_and_inherited_variants(
+    tmp_path: Path, kernel_boundary: Mock, variant: str
+) -> None:
+    gliner2 = pytest.importorskip("gliner2")
+    from gliner2.model import ExtractorConfig
+    from sie_server.adapters.gliner2.adapter import GLiNER2Adapter
+    from sie_server.adapters.gliner2.classification import GLiNER2ClassificationAdapter
+    from sie_server.adapters.gliner2.entity_lora import GLiNER2EntityLoraAdapter
+
+    checkpoint = tmp_path / "extractor"
+    tokenizer = _tokenizer(checkpoint)
+    with torch.random.fork_rng():
+        torch.manual_seed(83)
+        native = gliner2.GLiNER2(
+            ExtractorConfig(model_name="generated-local", max_width=3, counting_layer="count_lstm"),
+            encoder_config=_bert_config(tokenizer),
+            tokenizer=tokenizer,
+        )
+        native.save_pretrained(str(checkpoint))
+    _update_config(checkpoint / "encoder_config/config.json", _attn_implementation_internal=_ATTACK)
+    adapter_class = {"entities": GLiNER2Adapter, "classification": GLiNER2ClassificationAdapter}.get(variant)
+    if adapter_class is None:
+        adapter = GLiNER2EntityLoraAdapter(checkpoint, lora_paths={"deferred": str(tmp_path / "never-read")})
+    else:
+        adapter = adapter_class(checkpoint)
+    try:
+        adapter.load("cpu")
+        assert type(adapter._model) is type(native)
+        assert type(adapter._model.encoder) is BertModel
+        assert "forward" not in adapter._model.encoder.__dict__
+        for name, value in native.state_dict().items():
+            assert torch.equal(value, adapter._model.state_dict()[name])
+        tokens = torch.tensor([[2, 5, 6, 3]])
+        native.eval()
+        adapter._model.eval()
+        with torch.inference_mode():
+            assert torch.equal(
+                native.encoder(tokens).last_hidden_state, adapter._model.encoder(tokens).last_hidden_state
+            )
+        kernel_boundary.assert_not_called()
+    finally:
+        adapter.unload()
+
+
+@_EXACT_TF4
+def test_docling_guard_failure_is_not_swallowed_by_prewarm(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("transformers.__version__", "4.57.5")
+    adapter = DoclingAdapter("owned-fixture")
+    converter = Mock(side_effect=AssertionError("Converter must not run"))
+    monkeypatch.setattr(adapter, "_get_converter", converter)
+    monkeypatch.setattr(adapter, "_resolve_artifacts_path", lambda: None)
+    with pytest.raises(RuntimeError, match=r"requires transformers==4\.57\.6"):
+        adapter.load("cpu")
+    assert not adapter._loaded
+    converter.assert_not_called()
+
+
+@_EXACT_TF4
+def test_docling_lazy_models_inherit_permanent_load_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kernel_boundary: Mock
+) -> None:
+    BertConfig().save_pretrained(tmp_path)
+    _update_config(tmp_path / "config.json", _attn_implementation_internal=_ATTACK)
+    adapter = DoclingAdapter("owned-fixture")
+    monkeypatch.setattr(adapter, "_resolve_artifacts_path", lambda: None)
+    calls: list[bool] = []
+
+    def converter(ocr_enabled: bool) -> object:
+        config = AutoConfig.from_pretrained(tmp_path, local_files_only=True)
+        assert config._attn_implementation is None
+        calls.append(ocr_enabled)
+        return object()
+
+    monkeypatch.setattr(adapter, "_make_converter", converter)
+    monkeypatch.setattr(adapter, "_convert_bytes", lambda *args, **kwargs: ([], 0, None))
+    adapter.load("cpu")
+    assert adapter._loaded
+    assert calls == [False, True]
+    # The native lazy cache can reconstruct a converter after prewarming. It
+    # still sees the permanent policy, without a request-time installer call.
+    adapter._converters.clear()
+    adapter._get_converter(ocr_enabled=True)
+    assert calls == [False, True, True]
+    kernel_boundary.assert_not_called()
+
+
+@_EXACT_TF4
+@pytest.mark.parametrize("variant", ["pplx", "nemo"])
+def test_guard_precedes_dependent_and_fallback_native_loaders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variant: str
+) -> None:
+    monkeypatch.setattr("transformers.__version__", "4.57.5")
+    model = Mock(side_effect=AssertionError("Model constructor must not run"))
+    if variant == "pplx":
+        module = importlib.import_module("sie_server.adapters.pplx_decider.adapter")
+        monkeypatch.setattr(module, "checkpoint_config", lambda path: {})
+        monkeypatch.setattr(module, "load_model", model)
+        adapter = module.PerplexityDecisionAdapter(str(tmp_path))
+    else:
+        module = importlib.import_module("sie_server.adapters.nemo_colembed")
+        adapter = module.NemoColEmbedAdapter(str(tmp_path))
+        monkeypatch.setattr(adapter, "_load_v1_dynamic", model)
+        monkeypatch.setattr(transformers.AutoModel, "from_pretrained", model)
+    with pytest.raises(RuntimeError, match=r"requires transformers==4\.57\.6"):
+        adapter.load("cpu")
+    model.assert_not_called()
+
+
+@pytest.mark.parametrize("hub", [False, True])
+@pytest.mark.parametrize("hf_text", [False, True])
+def test_open_clip_checks_the_selected_text_tower(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: bool, hf_text: bool
+) -> None:
+    open_clip = pytest.importorskip("open_clip")
+    module = importlib.import_module("sie_server.adapters.siglip.adapter")
+    text_config = {"context_length": 16, **({"hf_model_name": "owned-tiny"} if hf_text else {})}
+    model_config = {"embed_dim": 8, "vision_cfg": {}, "text_cfg": text_config}
+    selected: list[str] = []
+    events: list[str] = []
+    monkeypatch.setattr(module, "install_transformers_security_fixes", lambda: events.append("guard"))
+
+    def get_config(name: str) -> dict[str, Any]:
+        selected.append(name)
+        return model_config
+
+    def create(*args: Any, **kwargs: Any) -> tuple[Any, object, object]:
+        assert events == (["guard"] if hf_text else [])
+        events.append("construct")
+        return SimpleNamespace(to=lambda **kw: None, eval=lambda: None), object(), object()
+
+    monkeypatch.setattr(open_clip, "get_model_config", get_config)
+    monkeypatch.setattr(open_clip, "create_model_and_transforms", create)
+    monkeypatch.setattr(open_clip, "get_tokenizer", lambda name: object())
+    model_id = "ViT/owned"  # The real factory normalizes legacy slash names.
+    if hub:
+        model_id = "hf-hub:owned/tiny"
+        (tmp_path / "open_clip_model.safetensors").write_bytes(b"owned-placeholder-not-loaded")
+        (tmp_path / "open_clip_config.json").write_text(
+            json.dumps(
+                {
+                    "model_cfg": model_config,
+                    "preprocess_cfg": {
+                        "mean": [0, 0, 0],
+                        "std": [1, 1, 1],
+                        "interpolation": "bicubic",
+                        "resize_mode": "shortest",
+                    },
+                }
+            )
+        )
+        monkeypatch.setattr("huggingface_hub.snapshot_download", lambda **kwargs: str(tmp_path))
+        monkeypatch.setattr(open_clip, "add_model_config", lambda path: None)
+    adapter = SiglipAdapter(
+        "owned", backend="open_clip", open_clip_model_id=model_id, dense_dim=8, revision="a" * 40 if hub else None
+    )
+    adapter.load("cpu")
+    assert events == (["guard", "construct"] if hf_text else ["construct"])
+    assert selected == ([] if hub else ["ViT-owned"])
+
+
+@_EXACT_TF4
+def test_actual_open_clip_hf_text_constructor_sees_guard(
+    bert_checkpoints: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, kernel_boundary: Mock
+) -> None:
+    open_clip = pytest.importorskip("open_clip")
+    from open_clip.model import CustomTextCLIP
+
+    path, _ = bert_checkpoints
+    _update_config(path / "config.json", _attn_implementation_internal=_ATTACK)
+    config = {
+        "embed_dim": 8,
+        "vision_cfg": {"layers": 1, "width": 32, "head_width": 16, "patch_size": 4, "image_size": 8},
+        "text_cfg": {
+            "hf_model_name": str(path),
+            "hf_model_pretrained": True,
+            "hf_proj_type": "linear",
+            "hf_pooler_type": "mean_pooler",
+        },
+    }
+    monkeypatch.setattr(open_clip.factory, "_MODEL_CONFIGS", {**open_clip.factory._MODEL_CONFIGS, "owned-tiny": config})
+    # Tokenizer choice is independent of the HF model loader under test.
+    monkeypatch.setattr(open_clip, "get_tokenizer", lambda name: object())
+    adapter = SiglipAdapter(
+        "owned", backend="open_clip", open_clip_model_id="owned-tiny", dense_dim=8, compute_precision="float32"
+    )
+    try:
+        adapter.load("cpu")
+        assert type(adapter._model) is CustomTextCLIP
+        assert type(adapter._model.text.transformer) is BertModel
+        assert "forward" not in adapter._model.text.transformer.__dict__
+        with torch.inference_mode():
+            output = adapter._model.encode_text(torch.tensor([[2, 5, 6, 3]]))
+        assert output.shape == (1, 8)
+        assert torch.isfinite(output).all()
+        kernel_boundary.assert_not_called()
+    finally:
+        adapter.unload()
+
+
+@pytest.mark.parametrize(
+    "module",
+    ["sie_server.adapters.remote.sie", "sie_server.adapters._transformers_compat"],
+)
+def test_optional_paths_do_not_import_transformers(module: str, tmp_path: Path) -> None:
+    script = """
+import importlib, importlib.abc, sys
+class DenyTransformers(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == 'transformers' or fullname.startswith('transformers.'):
+            raise AssertionError('Optional path imported Transformers')
+sys.meta_path.insert(0, DenyTransformers())
+importlib.import_module(sys.argv[1])
+assert not any(name == 'transformers' or name.startswith('transformers.') for name in sys.modules)
+"""
+    result = subprocess.run(  # noqa: S603 — fixed interpreter, inline script and parametrized internal module
+        [sys.executable, "-c", script, module],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_actual_ctranslate2_import_adds_no_model_loading_guard(tmp_path: Path) -> None:
+    # CT2 already imports AutoTokenizer. Its actual adapter must not acquire a
+    # native model-loading policy merely by importing the shared base classes.
+    script = """
+import importlib.abc, sys
+class DenyCompat(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == 'sie_server.adapters._transformers_compat':
+            raise AssertionError('CT2 imported a native model-loading guard')
+sys.meta_path.insert(0, DenyCompat())
+from sie_server.adapters.ctranslate2.generation import CTranslate2GenerationAdapter, AutoTokenizer
+assert CTranslate2GenerationAdapter.__module__ == 'sie_server.adapters.ctranslate2.generation'
+assert AutoTokenizer.__module__ == 'transformers.models.auto.tokenization_auto'
+assert 'sie_server.adapters._transformers_compat' not in sys.modules
+"""
+    result = subprocess.run(  # noqa: S603 — fixed interpreter and inline script
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_actual_native_open_clip_stays_available_without_transformers(tmp_path: Path) -> None:
+    pytest.importorskip("open_clip")
+    script = """
+import importlib.abc, sys
+class NoTransformers(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == 'transformers' or fullname.startswith('transformers.'):
+            raise ImportError('Transformers intentionally unavailable')
+sys.meta_path.insert(0, NoTransformers())
+import open_clip, torch
+from sie_server.adapters.siglip.adapter import SiglipAdapter
+torch.set_num_threads(1)
+open_clip.factory._MODEL_CONFIGS['owned-native'] = {
+    'embed_dim': 8,
+    'vision_cfg': {'layers': 1, 'width': 32, 'head_width': 16, 'patch_size': 4, 'image_size': 8},
+    'text_cfg': {'context_length': 8, 'vocab_size': 49408, 'width': 16, 'heads': 2, 'layers': 1},
+}
+adapter = SiglipAdapter('owned', backend='open_clip', open_clip_model_id='owned-native', dense_dim=8, compute_precision='float32')
+try:
+    adapter.load('cpu')
+    assert type(adapter._model) is open_clip.model.CLIP
+    with torch.inference_mode():
+        result = adapter._model.encode_text(open_clip.tokenize(['hello'], context_length=8))
+    assert result.shape == (1, 8) and torch.isfinite(result).all()
+    assert not any(n == 'transformers' or n.startswith('transformers.') for n in sys.modules)
+finally:
+    adapter.unload()
+"""
+    result = subprocess.run(  # noqa: S603 — fixed interpreter and inline offline native fixture
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

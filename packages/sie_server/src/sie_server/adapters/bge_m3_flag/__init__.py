@@ -22,6 +22,7 @@ import torch
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters.bge_m3_score_mixin import BGEM3ScoreMixin
 from sie_server.core.inference_output import EncodeOutput, SparseVector
@@ -122,6 +123,7 @@ class BGEM3FlagAdapter(BGEM3ScoreMixin, BaseAdapter):
         # kwarg — its constructor forwards nothing to the internal
         # ``from_pretrained`` load — so ``self._revision`` cannot be honored on this
         # path. Use the ``bge_m3`` / ``bge_m3_flash`` adapters to pin a revision.
+        install_transformers_security_fixes()
         self._model = BGEM3FlagModel(
             self._model_name_or_path,
             use_fp16=use_fp16,

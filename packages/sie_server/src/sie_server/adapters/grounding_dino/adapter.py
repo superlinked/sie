@@ -36,6 +36,7 @@ import torch
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.core.inference_output import EncodeOutput, ExtractOutput
 from sie_server.core.preprocessor import DetectionPreprocessor
@@ -156,6 +157,7 @@ class GroundingDINOAdapter(BaseAdapter):
             dtype,
         )
 
+        install_transformers_security_fixes()
         self._processor = AutoProcessor.from_pretrained(
             self._model_name_or_path,
             **shared_kwargs,

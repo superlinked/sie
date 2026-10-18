@@ -763,9 +763,9 @@ wheels = [{ url = "https://files.pythonhosted.org/packages/f8/95/12d226ee4d207cb
 
 [[packages]]
 name = "sentence-transformers"
-version = "5.4.1"
-sdist = { url = "https://files.pythonhosted.org/packages/4d/68/7f98c221940ce783b492ad6140384daf2e2918cd7175009d6a362c22b9ee/sentence_transformers-5.4.1.tar.gz", upload-time = 2026-04-14T13:34:59Z, size = 428910, hashes = { sha256 = "436bcb1182a0ff42a8fb2b1c43498a70d0a75b688d182f2cd0d1dd115af61ddc" } }
-wheels = [{ url = "https://files.pythonhosted.org/packages/c5/d9/3a9b6f2ccdedc9dc00fe37b2fc58f58f8efbff44565cf4bf39d8568bb13a/sentence_transformers-5.4.1-py3-none-any.whl", upload-time = 2026-04-14T13:34:57Z, size = 571311, hashes = { sha256 = "a6d640fc363849b63affb8e140e9d328feabab86f83d58ac3e16b1c28140b790" } }]
+version = "5.7.0"
+sdist = { url = "https://files.pythonhosted.org/packages/9d/59/867381b1414a975da6c9953f48a07c05cb0629305e2d37c9bcc9764367b2/sentence_transformers-5.7.0.tar.gz", upload-time = 2026-08-06T12:12:33Z, size = 466382, hashes = { sha256 = "fd8c8fc35e6323631dff9f3760969ebf7980dc3cfda0ab1354bc6a774cc0e5d8" } }
+wheels = [{ url = "https://files.pythonhosted.org/packages/e8/c8/f63d99e354532f5b83e735dd1e001bda92495fbfde934f65d924abf2b071/sentence_transformers-5.7.0-py3-none-any.whl", upload-time = 2026-08-06T12:12:31Z, size = 611333, hashes = { sha256 = "b78141da3d8137e70d965866e2ca43190b9266f3d4d8752e250ded75e7136730" } }]
 
 [[packages]]
 name = "sentencepiece"

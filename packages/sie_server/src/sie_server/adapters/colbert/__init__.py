@@ -39,6 +39,7 @@ from sie_server.adapters._flash_pack import build_position_ids
 from sie_server.adapters._multivector import maxsim_scores_batched
 from sie_server.adapters._pylate_dense import apply_dense_chain, load_pylate_dense_chain
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters._utils import grouped_score_pairs
 from sie_server.core.inference_output import EncodeOutput, ScoreOutput
@@ -221,6 +222,7 @@ class ColBERTAdapter(BaseAdapter):
         if self._code_revision is not None:
             shared_kwargs["code_revision"] = self._code_revision
 
+        install_transformers_security_fixes()
         self._tokenizer = AutoTokenizer.from_pretrained(
             self._model_name_or_path,
             **shared_kwargs,

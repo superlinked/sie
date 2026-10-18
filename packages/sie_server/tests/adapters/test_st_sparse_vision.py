@@ -218,7 +218,7 @@ class TestSparseEncoderVisionAdapter:
         assert "modeling_st_vsplade" not in sys.modules
         assert sys.path[0] == str(snapshot.resolve())
 
-    @patch("sie_server.adapters.st_sparse_vision.adapter.SparseEncoder")
+    @patch("sie_server.adapters.st_sparse_vision.adapter.load_sentence_transformer")
     def test_load_without_trust_remote_code_skips_registration(
         self,
         mock_class: MagicMock,

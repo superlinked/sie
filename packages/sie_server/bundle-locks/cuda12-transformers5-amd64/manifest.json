@@ -1,14 +1,14 @@
 {
   "completed_artifact_hashes": [],
-  "exceptions_sha256": "37835b8c8b636bca70edb39f0252652c5d021bd5521a6690ab324b887905b80e",
+  "exceptions_sha256": "539c12f58e63826dbe46b14ae71e3274b8f38feeb4596bb36e84db9f71ab0db8",
   "exclude_newer": "2026-10-18T00:00:00Z",
   "indexes": [
     "--default-index",
     "https://pypi.org/simple"
   ],
   "inputs": {
-    "requirements_sha256": "72ca3b4c7893a0ca42603d3a60e435ee1efd1f9a57533ae19d24d1610037398f",
-    "uv_lock_sha256": "70fa46eb35df2c928eb419caec58a8cda544aea28196ef127006a65bb062ef94"
+    "requirements_sha256": "09de69f6e9247a6e45234bf584c6689c964fc472380a02e21d1e4f511b2ccbeb",
+    "uv_lock_sha256": "536b7f46b5560f0dfbe5a503ecf4166514658f1340c4721d1ea263a43b3e5aa5"
   },
   "lock_sha256": "b1c1101c295e2283084a6bd7d893508c1733e611458a164d94d3b6e389665a56",
   "policy_sha256": "ad0ea4aba9172f1b79f0c8fb274af90d4d3d161c74e0eb578f9d63c3cd3b5bea",

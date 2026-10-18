@@ -190,11 +190,6 @@
         "reason": "The required Transformers5 or TensorRT diffusers dependency requires safetensors>=0.8.0, excluding root0.7.0.",
         "version": "0.8.0"
       },
-      "sentence-transformers": {
-        "artifacts_sha256": "9ee2aaf2ea1d65127c9d15578e8314e474987bdeef677b68a61b2b18f797b269",
-        "reason": "The transformers5 bundle explicitly requires sentence-transformers>=5.6,<6, excluding the root version.",
-        "version": "5.7.0"
-      },
       "tokenizers": {
         "artifacts_sha256": "38395faa2b65845b5b92aba3072a24aec7c26e3a4fe9c080521bf6e099362850",
         "reason": "The declared transformers>=5.17 bundle requires tokenizers>=0.23.1,<0.24, excluding root0.22.2.",
@@ -236,11 +231,6 @@
         "artifacts_sha256": "0be19b01af2cd153a366c1600f0d2d600216df3bf0877c5d78c26027ad511b21",
         "reason": "The required Transformers5 or TensorRT diffusers dependency requires safetensors>=0.8.0, excluding root0.7.0.",
         "version": "0.8.0"
-      },
-      "sentence-transformers": {
-        "artifacts_sha256": "9ee2aaf2ea1d65127c9d15578e8314e474987bdeef677b68a61b2b18f797b269",
-        "reason": "The transformers5 bundle explicitly requires sentence-transformers>=5.6,<6, excluding the root version.",
-        "version": "5.7.0"
       },
       "tokenizers": {
         "artifacts_sha256": "d9691de410ad294639cdad634ab9ff1e08bd5f456c9375e25de0e350647510da",
@@ -575,11 +565,6 @@
         "artifacts_sha256": "fa734f2119039a9ecdbccada46a9e199e91f2376597acb480847a60246950ba1",
         "reason": "The required Transformers5 or TensorRT diffusers dependency requires safetensors>=0.8.0, excluding root0.7.0.",
         "version": "0.8.0"
-      },
-      "sentence-transformers": {
-        "artifacts_sha256": "9ee2aaf2ea1d65127c9d15578e8314e474987bdeef677b68a61b2b18f797b269",
-        "reason": "The transformers5 bundle explicitly requires sentence-transformers>=5.6,<6, excluding the root version.",
-        "version": "5.7.0"
       },
       "tokenizers": {
         "artifacts_sha256": "38395faa2b65845b5b92aba3072a24aec7c26e3a4fe9c080521bf6e099362850",

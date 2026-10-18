@@ -225,7 +225,7 @@ def test_off_platform_load_does_not_invoke_alignment(monkeypatch, system, machin
     cache_calls = []
     monkeypatch.setattr(cross_encoder.sys, "platform", system)
     monkeypatch.setattr(cross_encoder.platform, "machine", lambda: machine)
-    monkeypatch.setattr(cross_encoder, "CrossEncoder", lambda *args, **kwargs: outer)
+    monkeypatch.setattr(cross_encoder, "load_sentence_transformer", lambda *args, **kwargs: outer)
     # Both the model and its accelerator are simulated, including cache cleanup.
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: cache_calls.append("cuda"))
     monkeypatch.setattr(torch.mps, "empty_cache", lambda: cache_calls.append("mps"))
@@ -250,7 +250,7 @@ def test_failed_normalization_never_publishes_outer(model, monkeypatch):
     outer = SimpleNamespace(model=model)
     monkeypatch.setattr(cross_encoder.sys, "platform", "darwin")
     monkeypatch.setattr(cross_encoder.platform, "machine", lambda: "arm64")
-    monkeypatch.setattr(cross_encoder, "CrossEncoder", lambda *args, **kwargs: outer)
+    monkeypatch.setattr(cross_encoder, "load_sentence_transformer", lambda *args, **kwargs: outer)
     adapter = cross_encoder.CrossEncoderAdapter("unused")
     with pytest.raises(ValueError, match="storage overlaps"):
         adapter.load("cpu")
@@ -263,7 +263,9 @@ def test_failed_copy_never_publishes_outer(model, monkeypatch):
     before = pointers(model)
     monkeypatch.setattr(cross_encoder.sys, "platform", "darwin")
     monkeypatch.setattr(cross_encoder.platform, "machine", lambda: "arm64")
-    monkeypatch.setattr(cross_encoder, "CrossEncoder", lambda *args, **kwargs: SimpleNamespace(model=model))
+    monkeypatch.setattr(
+        cross_encoder, "load_sentence_transformer", lambda *args, **kwargs: SimpleNamespace(model=model)
+    )
 
     def fail_copy(*args, **kwargs):
         raise MemoryError("controlled load copy failure")
@@ -305,7 +307,7 @@ def test_failed_load_releases_temporary_outer_model_and_copies(model, monkeypatc
 
     monkeypatch.setattr(cross_encoder.sys, "platform", "darwin")
     monkeypatch.setattr(cross_encoder.platform, "machine", lambda: "arm64")
-    monkeypatch.setattr(cross_encoder, "CrossEncoder", factory)
+    monkeypatch.setattr(cross_encoder, "load_sentence_transformer", factory)
     adapter = cross_encoder.CrossEncoderAdapter("unused")
 
     def attempt():
