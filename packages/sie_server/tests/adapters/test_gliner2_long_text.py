@@ -459,10 +459,13 @@ def test_prefixes_are_short_for_long_documents() -> None:
     ],
     ids=["words", "cjk", "one-run", "short", "prose-then-dots"],
 )
-def test_metering_long_documents_counts_what_tokenizing_all_of_them_counts(text: str) -> None:
-    tokenizer = FakeTokenizer()
-    full = len(tokenizer(text, add_special_tokens=True, truncation=True, max_length=512)["input_ids"])
-    assert GLiNER2Adapter._long_doc_input_tokens(tokenizer, text, 512) == full
+def test_metering_reuses_the_bounded_document_compiler_count(text: str) -> None:
+    adapter, model = make_adapter()
+    window = adapter._window(text)
+    schema = gliner2_engine.Schema().entities(["person"])
+    batch = model.processor.collate_fn_inference([(window[0], schema)], max_len=512)
+    prompt = model.processor.transform_and_format("", schema.build())
+    assert adapter._doc_input_token_counts([window]) == [batch.original_lengths[0] - len(prompt.input_ids)]
 
 
 @pytest.mark.parametrize("cls", [GLiNER2Adapter, GLiNER2ClassificationAdapter])
@@ -631,7 +634,7 @@ def test_a_text_that_fits_the_window_is_classified_exactly_as_before(text: str) 
     assert batch.input_ids.tolist() == expected_input.input_ids.tolist()
     assert batch.text_tokens == expected_input.text_tokens
     assert output.classifications == [[{"label": "safe", "score": 1.0 - (0.01 + len(model.rows[0]) / 100_000)}]]
-    assert output.input_token_counts == adapter._doc_input_token_counts([text])
+    assert output.input_token_counts == adapter._doc_input_token_counts([adapter._window(text)])
     assert adapter._classification_windows(text, adapter._read(text)) == [adapter._window(text)]
 
 
@@ -723,18 +726,18 @@ def test_metering_counts_every_window_a_long_text_is_read_in() -> None:
     text = benign_email(1500, planted_at=1420)
     adapter, _ = make_guard()
     windows = adapter._classification_windows(text, adapter._read(text))
-    per_window = adapter._doc_input_token_counts([model_text for model_text, _ in windows])
+    per_window = adapter._doc_input_token_counts(windows)
     assert per_window is not None
 
     output = adapter.extract([Item(text=text), Item(text="Write a birthday greeting.")])
 
-    assert output.input_token_counts == [
-        sum(per_window),
-        adapter._doc_input_token_counts(["Write a birthday greeting."])[0],
-    ]
-    # Each window is metered as the same text sent alone, up to max_seq_length tokens; the overlaps count twice.
-    assert per_window == [512, 512, 512, per_window[-1]]
-    assert 0 < per_window[-1] < 512
+    short = adapter._doc_input_token_counts([adapter._window("Write a birthday greeting.")])
+    assert short is not None
+    assert output.input_token_counts == [sum(per_window), short[0]]
+    # Every encoded subword is charged, even when 512 words take more than 512
+    # tokens. The shared 64 words are charged in each window that encodes them.
+    assert all(count > 512 for count in per_window[:3])
+    assert 0 < per_window[-1] < per_window[0]
 
 
 def test_a_text_longer_than_the_window_cap_is_rejected_before_the_model_runs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -823,3 +826,82 @@ def test_long_item_rejection_uses_the_pinned_package_processor(task: str) -> Non
     assert output.errors[0].code == "INPUT_TOO_LONG"
     assert output.input_token_counts == [0]
     assert not model.inputs
+
+
+@pytest.mark.parametrize("task", ["entities", "relations", "structured", "classification"])
+@pytest.mark.parametrize("text", ["", "Alice Acme", "Alice Acme.", "İstanbul 東京 café!"])
+def test_usage_equals_compiled_document_without_prompt_or_padding(task: str, text: str) -> None:
+    adapter, model = make_adapter()
+    items = [Item(text=text), Item(text="Alice Acme " + "electroencephalography " * 100 + ".")]
+    kwargs: dict[str, Any] = {"labels": ["person"]}
+    schema = gliner2_engine.Schema().entities(["person"])
+    if task == "relations":
+        # Relations require real nonempty caller spans; use the shared Acme suffix.
+        items = [
+            Item(
+                text=(one.text or "") + " Acme",
+                metadata={
+                    "entities": [{"text": "Acme", "start": len(one.text or "") + 1, "end": len(one.text or "") + 5}]
+                },
+            )
+            for one in items
+        ]
+        kwargs = {"labels": ["knows"]}
+        schema = gliner2_engine.Schema().relations(["knows"])
+    elif task == "structured":
+        kwargs = {
+            "output_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "A long description",
+                        "enum": ["first option", "second option"],
+                    }
+                },
+            }
+        }
+        schema = gliner2_engine.Schema()
+        schema.structure("_sie_root").field(
+            "name", dtype="str", choices=["first option", "second option"], description="A long description"
+        )
+    elif task == "classification":
+        kwargs = {"labels": ["yes", "no"], "options": {"classification_task": "topic"}}
+        schema = gliner2_engine.Schema().classification("topic", ["yes", "no"])
+
+    output = adapter.extract(items, **kwargs)
+
+    prefix = model.processor.transform_and_format("", schema.build())
+    compiled = [length - len(prefix.input_ids) for batch in model.inputs for length in batch.original_lengths]
+    assert output.input_token_counts == compiled
+    assert output.errors is None
+    assert compiled[1] > 512  # A word limit must not become a token cap.
+    assert any(batch.input_ids.shape[1] > min(batch.original_lengths) for batch in model.inputs)
+
+
+def test_usage_never_calls_the_whole_text_tokenizer_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter, model = make_guard()
+    monkeypatch.setattr(FakeTokenizer, "__call__", MagicMock(side_effect=AssertionError("second tokenization")))
+    texts = ["electroencephalography " * 1000 + ".", "Hello."]
+    output = adapter.extract([Item(text=text) for text in texts])
+    schema = gliner2_engine.Schema().classification("prompt_safety", ["safe", "unsafe"])
+    prompt = len(model.processor.transform_and_format("", schema.build()).input_ids)
+    # Forward planning may reorder rows by size; join the short row by its
+    # actual document words, not its position in the planned passes.
+    document_rows = [
+        (tokens, length - prompt)
+        for batch in model.inputs
+        for tokens, length in zip(batch.text_tokens, batch.original_lengths, strict=True)
+    ]
+    short = [count for tokens, count in document_rows if tokens == ["hello", "."]]
+    assert len(short) == 1
+    assert output.input_token_counts == [sum(count for _, count in document_rows) - short[0], short[0]]
+    assert len(document_rows) > len(texts)
+
+
+def test_missing_window_counts_remain_unknown() -> None:
+    adapter = GLiNER2Adapter("test")
+    assert adapter._doc_input_token_counts([("known", 6), ("unknown", None)]) is None
+    assert adapter._windowed_input_token_counts([[("known", 6)], [("unknown", None)]]) is None
+    assert adapter._doc_input_token_counts([]) == []
+    assert adapter._windowed_input_token_counts([]) == []

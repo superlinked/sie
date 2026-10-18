@@ -34,14 +34,6 @@ from sie_server.types.responses import Classification, Entity, Relation
 _ERR_REQUIRES_LABELS = "GLiNER2 requires labels parameter for extraction"
 _STRUCTURE_NAME = "_sie_root"
 _STRUCTURE_DELIMITERS = ("::", "|", "[", "]")
-# Metering tokenizes a prefix of this many characters per token of the window
-# (then 4x more, up to the whole text) and stops once the prefix alone fills
-# the window.
-_METER_CHARS_PER_TOKEN = 16
-_METER_MARGIN_TOKENS = 64
-# A space after a non-space character, matched in reversed text: the tokenizers
-# of these checkpoints split pre-tokens at spaces, after normalizing whitespace.
-_SPACE_AFTER_TEXT = re.compile(r" (?=\S)")
 # Words a document is read up to when the model config sets no max_seq_length.
 _DEFAULT_MAX_WORDS = 512
 # Subword tokens a document may take per word it reads. The GLiNER2 checkpoints
@@ -99,7 +91,9 @@ class GLiNER2Adapter(BaseAdapter):
     relation and structured extraction read that first window. Classification
     reads all of a longer text, as overlapping windows of that many words, and
     pools the windows' results into one (see ``pool_window_classifications``);
-    a text that fits one window is classified exactly as before.
+    a text that fits one window is classified exactly as before. Usage counts
+    the document subwords encoded in every window, including repeated overlap,
+    and excludes the schema prompt, document separator and padding.
 
     Reference models:
     - fastino/gliner2-base-v1
@@ -304,7 +298,7 @@ class GLiNER2Adapter(BaseAdapter):
             )
             reads = [self._read(text) for text in texts]
             windows = [(model_text, subwords) for model_text, subwords, _ in reads]
-            input_token_counts = self._doc_input_token_counts(texts)
+            input_token_counts = self._doc_input_token_counts(windows)
             rows = self._row_tokens(windows, prompt)
             with torch.inference_mode():
                 raw_results, errors, input_token_counts = self._run_complete(
@@ -354,7 +348,7 @@ class GLiNER2Adapter(BaseAdapter):
             )
             reads = [self._read(text) for text in texts]
             windows = [(model_text, subwords) for model_text, subwords, _ in reads]
-            input_token_counts = self._doc_input_token_counts(texts)
+            input_token_counts = self._doc_input_token_counts(windows)
             rows = self._row_tokens(windows, prompt)
             with torch.inference_mode():
                 raw_results, errors, input_token_counts = self._run_complete(
@@ -400,10 +394,8 @@ class GLiNER2Adapter(BaseAdapter):
                 ),
             )
             reads = [self._read(text) for text in texts]
-            input_token_counts = self._doc_input_token_counts(texts)
             item_windows = [self._classification_windows(text, read) for text, read in zip(texts, reads, strict=True)]
-            if any(len(one) > 1 for one in item_windows):
-                input_token_counts = self._windowed_input_token_counts(texts, item_windows)
+            input_token_counts = self._windowed_input_token_counts(item_windows)
             return self._classify(
                 item_windows,
                 normalized_labels,
@@ -444,7 +436,7 @@ class GLiNER2Adapter(BaseAdapter):
         )
         reads = [self._read(text) for text in texts]
         windows = [(model_text, subwords) for model_text, subwords, _ in reads]
-        input_token_counts = self._doc_input_token_counts(texts)
+        input_token_counts = self._doc_input_token_counts(windows)
         with torch.inference_mode():
             raw_results, errors, input_token_counts = self._run_complete(
                 texts,
@@ -1133,28 +1125,19 @@ class GLiNER2Adapter(BaseAdapter):
                 return read
             size *= 2
 
-    def _windowed_input_token_counts(
-        self, texts: list[str], item_windows: list[list[tuple[str, int | None]]]
-    ) -> list[int] | None:
-        """Input tokens of each item classified in ``item_windows``.
+    def _windowed_input_token_counts(self, item_windows: list[list[tuple[str, int | None]]]) -> list[int] | None:
+        """Sum the document subwords encoded for every classification window.
 
-        A text read in one window is metered as before. A text read in several
-        is metered as the sum of its windows, each as the same text sent alone
-        is metered (its tokens up to ``max_seq_length``), so the words two
-        windows share count twice: the model encodes them twice.
+        Shared words count once per window that reads them. Counts come from
+        the existing bounded reader, not a second whole-text tokenization.
+        Schema tokens, the document separator and batch padding are excluded.
         """
-        metered = [
-            [text] if len(windows) == 1 else [model_text for model_text, _ in windows]
-            for text, windows in zip(texts, item_windows, strict=True)
-        ]
-        counts = self._doc_input_token_counts([one for parts in metered for one in parts])
-        if counts is None:
-            return None
         totals = []
-        offset = 0
-        for parts in metered:
-            totals.append(sum(counts[offset : offset + len(parts)]))
-            offset += len(parts)
+        for windows in item_windows:
+            counts = self._doc_input_token_counts(windows)
+            if counts is None:
+                return None
+            totals.append(sum(counts))
         return totals
 
     def _effective_positive_label(self, options: dict[str, Any], labels: list[str]) -> str | None:
@@ -1176,74 +1159,17 @@ class GLiNER2Adapter(BaseAdapter):
             raise InvalidInputError("GLiNER2 positive_label must be one of the labels")
         return label
 
-    def _doc_input_token_counts(self, texts: list[str]) -> list[int] | None:
-        processor = getattr(self._model, "processor", None)
-        tokenizer = getattr(processor, "tokenizer", None)
-        if tokenizer is None:
-            return None
-        limit = self._max_seq_length
-        try:
-            counts: list[int | None] = [None] * len(texts)
-            short = [index for index, text in enumerate(texts) if limit is None or len(text) <= _meter_budget(limit)]
-            if short:
-                encoded = tokenizer(
-                    [texts[index] for index in short],
-                    add_special_tokens=True,
-                    truncation=limit is not None,
-                    max_length=limit,
-                )
-                ids = encoded["input_ids"]
-                if len(ids) != len(short):
-                    return None
-                for index, row in zip(short, ids, strict=True):
-                    counts[index] = len(row)
-            if limit is not None:
-                for index, text in enumerate(texts):
-                    if counts[index] is None:
-                        counts[index] = self._long_doc_input_tokens(tokenizer, text, limit)
-        except Exception:  # noqa: BLE001 -- metering must not fail extraction
-            return None
-        complete = [count for count in counts if count is not None]
-        return complete if len(complete) == len(texts) else None
-
     @staticmethod
-    def _long_doc_input_tokens(tokenizer: Any, text: str, limit: int) -> int:
-        """Tokens of a long ``text`` with special tokens, truncated to ``limit``.
+    def _doc_input_token_counts(windows: list[tuple[str, int | None]]) -> list[int] | None:
+        """Reuse the subwords of each document window actually sent to gliner2.
 
-        Tokenizing a multi-megabyte text takes about a second, so prefixes are
-        tokenized first, from ``_METER_CHARS_PER_TOKEN`` characters per window
-        token up. A prefix ending just before a space tokenizes like the start of
-        the text (these tokenizers split pre-tokens at spaces), so once it fills
-        the window, so does the text. Without a space in the second half of the
-        prefix, the prefix must fill the window with ``_METER_MARGIN_TOKENS`` to
-        spare, for the tokens at its cut.
+        ``max_seq_length`` limits words, not subwords. The reader already
+        counts their per-word tokenization, including the package's sentence
+        end when read; gliner2 adds no separate CLS/SEP tokens to that document.
+        A missing bounded reader leaves usage unknown rather than guessing.
         """
-        budget = _meter_budget(limit)
-        while budget < len(text):
-            cut = _last_space(text, budget)
-            if cut is not None:
-                if _token_count(tokenizer, text[:cut]) >= limit:
-                    return limit
-            elif _token_count(tokenizer, text[:budget]) >= limit + _METER_MARGIN_TOKENS:
-                return limit
-            budget *= 4
-        encoded = tokenizer(text, add_special_tokens=True, truncation=True, max_length=limit)
-        return len(encoded["input_ids"])
-
-
-def _meter_budget(limit: int) -> int:
-    return limit * _METER_CHARS_PER_TOKEN
-
-
-def _token_count(tokenizer: Any, text: str) -> int:
-    return len(tokenizer(text, add_special_tokens=True)["input_ids"])
-
-
-def _last_space(text: str, end: int) -> int | None:
-    """Index of the last space after a non-space character in the second half of ``text[:end]``, or None."""
-    begin = end // 2
-    match = _SPACE_AFTER_TEXT.search(text[begin:end][::-1])
-    return None if match is None else end - 1 - match.start()
+        counts = [subwords for _, subwords in windows if subwords is not None]
+        return counts if len(counts) == len(windows) else None
 
 
 def pool_window_classifications(

@@ -2,7 +2,7 @@ import sys
 from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -257,7 +257,7 @@ def test_classification_routing_seam_reuses_general_implementation() -> None:
 def _adapter_with_counting_model(*, max_seq_length: int = 512) -> tuple[GLiNER2Adapter, MagicMock]:
     adapter = GLiNER2Adapter("test-model", max_seq_length=max_seq_length)
     model = MagicMock()
-    model.processor.tokenizer.return_value = {"input_ids": [[1, 2, 3]]}
+    cast("Any", adapter)._read = lambda text: (text, 3, None)
     adapter._model = model
     adapter._count_prompt = lambda _schema: 8
     model._parse_field_spec.return_value = ("name", "str", None, None)

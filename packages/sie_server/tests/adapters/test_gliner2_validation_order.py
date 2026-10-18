@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from threading import RLock
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, call
 
 import pytest
@@ -19,6 +19,7 @@ _SCHEMA = {"type": "object", "properties": {"name": {"type": "string"}}}
 def _adapter(*, max_prompt_tokens: int = 2048) -> GLiNER2Adapter:
     adapter = GLiNER2Adapter("test", max_seq_length=8, max_prompt_tokens=max_prompt_tokens)
     adapter._model = MagicMock()
+    cast("Any", adapter)._read = lambda text: (text, 4, None)
     adapter._model._parse_field_spec.return_value = ("name", "str", None, None)
     adapter._count_prompt = MagicMock(return_value=8)
     return adapter
@@ -234,6 +235,7 @@ def test_classification_subclass_preserves_defaults_and_early_prompt_validation(
         "test", classification_task="topic", default_labels=["yes", "no"], max_seq_length=8, max_prompt_tokens=16
     )
     adapter._model = _responding_model()
+    cast("Any", adapter)._read = lambda text: (text, 4, None)
     adapter._count_prompt = lambda _schema: 8
     if reject:
         adapter._count_prompt = lambda _schema: 100
@@ -258,6 +260,7 @@ def test_entity_lora_subclass_keeps_selection_and_final_base_restoration(
     controller = SimpleNamespace(lock=RLock(), select=MagicMock(), source=MagicMock(return_value="org/a"))
     monkeypatch.setattr(adapter, "_lora", controller, raising=False)
     adapter._model = _responding_model()
+    cast("Any", adapter)._read = lambda text: (text, 4, None)
     adapter._count_prompt = lambda _schema: 8
     if reject:
         adapter._count_prompt = lambda _schema: 100
