@@ -439,6 +439,18 @@
           ],
           "default": null
         },
+        "bounded_batch_progress": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bounded Batch Progress"
+        },
         "kv_budget_tokens": {
           "anyOf": [
             {

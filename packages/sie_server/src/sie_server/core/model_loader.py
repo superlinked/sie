@@ -712,6 +712,7 @@ class ModelLoader:
             max_queue_size=self._max_queue_size or WorkerConfig().max_queue_size,
             instrumentation=self._instrumentation,
             adaptive_batching=adaptive_params,
+            bounded_batch_progress=resolved.bounded_batch_progress,
             oom_recovery=self._oom_recovery,
         )
         worker = ModelWorker(

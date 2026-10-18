@@ -7,7 +7,17 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    SerializerFunctionWrapHandler,
+    StrictBool,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from sie_server.config.device_groups import validate_tensor_parallel_size
 from sie_server.config.engine import ComputePrecision
@@ -566,11 +576,22 @@ class ProfileConfig(BaseModel):
     adapter_path: str | None = None
     adapter_options: AdapterOptions = AdapterOptions()
     adaptive_batching: ProfileAdaptiveBatching | None = None
+    # None inherits the parent, or resolves to False on a standalone profile.
+    bounded_batch_progress: StrictBool | None = None
     kv_budget_tokens: int | None = None
     admission_enabled: bool | None = None
     max_output_tokens: int | None = Field(default=None, gt=0)
     chat_template_kwargs: dict[str, Any] | None = None
     grammar_profile: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_profile(self, handler: SerializerFunctionWrapHandler):  # noqa: ANN202 -- retain field-level serialization schema
+        data = handler(self)
+        # Preserve existing serialized configs / equivalence digests when the
+        # new option is omitted. Explicit False must survive parent overrides.
+        if data.get("bounded_batch_progress") is None:
+            data.pop("bounded_batch_progress", None)
+        return data
 
     @field_validator("chat_template_kwargs")
     @classmethod
@@ -679,11 +700,21 @@ class ResolvedProfile(BaseModel):
     loadtime: MappingProxyType[str, Any]
     runtime: MappingProxyType[str, Any]
     adaptive_batching: ProfileAdaptiveBatching | None = None
+    bounded_batch_progress: StrictBool = False
     kv_budget_tokens: int | None = None
     admission_enabled: bool | None = None
     max_output_tokens: int | None = None
     chat_template_kwargs: MappingProxyType[str, Any] | None = None
     grammar_profile: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_profile(self, handler: SerializerFunctionWrapHandler):  # noqa: ANN202 -- retain field-level serialization schema
+        data = handler(self)
+        # Default profile identity remains unchanged; enabled scheduling is
+        # part of the identity because it can change native batch composition.
+        if data.get("bounded_batch_progress") is False:
+            data.pop("bounded_batch_progress", None)
+        return data
 
     def lora_ids(self) -> frozenset[str]:
         """The LoRAs this profile declares, by the id a load names: each ``loadtime.lora_paths`` source and ``runtime.lora_id``."""
@@ -1202,6 +1233,7 @@ class ModelConfig(BaseModel):
             compatible = (
                 source.adapter_path == target.adapter_path
                 and source.max_batch_tokens == target.max_batch_tokens
+                and source.bounded_batch_progress == target.bounded_batch_progress
                 and source.compute_precision == target.compute_precision
                 and source.kv_budget_tokens == target.kv_budget_tokens
                 and source.max_output_tokens == target.max_output_tokens
@@ -1402,6 +1434,7 @@ class ModelConfig(BaseModel):
                 loadtime=MappingProxyType(dict(profile.adapter_options.loadtime)),
                 runtime=MappingProxyType(dict(profile.adapter_options.runtime)),
                 adaptive_batching=profile.adaptive_batching,
+                bounded_batch_progress=profile.bounded_batch_progress is True,
                 kv_budget_tokens=profile.kv_budget_tokens,
                 admission_enabled=profile.admission_enabled,
                 max_output_tokens=profile.max_output_tokens,
@@ -1440,6 +1473,11 @@ class ModelConfig(BaseModel):
 
         # Adaptive batching: fieldwise merge (child overrides parent per-field)
         adaptive_batching = _merge_profile_adaptive_batching(parent.adaptive_batching, profile.adaptive_batching)
+        bounded_batch_progress = (
+            profile.bounded_batch_progress
+            if profile.bounded_batch_progress is not None
+            else parent.bounded_batch_progress
+        )
 
         # Child non-None overrides parent for the admission fields.
         kv_budget_tokens = profile.kv_budget_tokens if profile.kv_budget_tokens is not None else parent.kv_budget_tokens
@@ -1471,6 +1509,7 @@ class ModelConfig(BaseModel):
             loadtime=MappingProxyType(loadtime),
             runtime=MappingProxyType(runtime),
             adaptive_batching=adaptive_batching,
+            bounded_batch_progress=bounded_batch_progress is True,
             kv_budget_tokens=kv_budget_tokens,
             admission_enabled=admission_enabled,
             max_output_tokens=max_output_tokens,

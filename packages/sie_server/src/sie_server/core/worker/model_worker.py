@@ -33,6 +33,7 @@ from sie_server.core.adaptive_batching import (
     LatencyTracker,
 )
 from sie_server.core.batcher import BatchConfig, BatchFormer, FormattedBatch, HasCost
+from sie_server.core.progress_batcher import ProgressBatchFormer
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker.handlers import EncodeHandler, ExtractHandler, OperationHandler, ScoreHandler
 from sie_server.core.worker.oom_recovery import BatchExecutor, RegistryCallbacks
@@ -279,8 +280,9 @@ class ModelWorker:
         # Each LoRA gets its own batcher for FCFS fairness on the direct
         # Python HTTP path. Sidecar IPC uses submit_preformed* below and
         # bypasses these batchers explicitly.
+        self._batcher_type = ProgressBatchFormer if self._config.bounded_batch_progress else BatchFormer
         self._batchers: dict[str | None, BatchFormer[HasCost, RequestMetadata]] = {
-            None: BatchFormer(self._batch_config)
+            None: self._batcher_type(self._batch_config)
         }
 
         # Thread pool for running inference (doesn't block event loop)
@@ -1153,7 +1155,7 @@ class ModelWorker:
             BatchFormer for the specified LoRA.
         """
         if lora not in self._batchers:
-            self._batchers[lora] = BatchFormer(self._batch_config)
+            self._batchers[lora] = self._batcher_type(self._batch_config)
             logger.debug("Created batcher for LoRA '%s'", lora)
         return self._batchers[lora]
 
