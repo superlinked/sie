@@ -333,7 +333,7 @@ async def encode(
         # Check if LoRA is specified and ensure it's loaded
         lora = options.get("lora_id")
         if lora is not None:
-            await ModelStateChecker(registry, route.key, span).ensure_lora_loaded(lora)
+            await ModelStateChecker(registry, route.key, span).ensure_lora_loaded(lora, request_options)
             # Worker batcher routes on options["lora"]; profile uses "lora_id".
             options["lora"] = lora
 

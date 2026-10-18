@@ -15,7 +15,7 @@ GLiFormer and GLiNER2.5-Decide bound theirs. A request is rejected with
 The defaults sit far above the label sets these models are used with: the
 largest label set among this repository's examples takes about 40 tokens, a
 60-type PII list about 230, and a structured-extraction schema of 50 described
-fields about 1,200, while ``DEFAULT_MAX_PROMPT_TOKENS`` holds several hundred
+fields about 1,260, while ``DEFAULT_MAX_PROMPT_TOKENS`` holds several hundred
 entity types and ``DEFAULT_MAX_SCHEMA_PROMPT_TOKENS`` a schema of dozens of
 described fields with their choices.
 

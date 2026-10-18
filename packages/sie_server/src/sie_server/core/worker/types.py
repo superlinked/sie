@@ -139,6 +139,23 @@ class WorkerDrainedError(RuntimeError):
     """
 
 
+class LoraNotReadyError(RuntimeError):
+    """Raised on a request whose declared LoRA is not loaded when its batch runs.
+
+    The registry has started loading it, or is holding a failed load behind
+    its backoff, so the condition is transient: the HTTP surface answers a
+    retryable 503 ``LORA_LOADING`` with ``Retry-After``, and the queue surface
+    publishes the same code.
+
+    Attributes:
+        retry_after_s: Seconds the caller should wait before retrying.
+    """
+
+    def __init__(self, message: str, *, retry_after_s: int) -> None:
+        super().__init__(message)
+        self.retry_after_s = retry_after_s
+
+
 @dataclass
 class AdaptiveBatchingParams:
     """Parameters for adaptive batch wait control (passed from EngineConfig).

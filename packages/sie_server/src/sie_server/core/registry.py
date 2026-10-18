@@ -14,19 +14,22 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import hashlib
 import json
 import logging
+import math
 import threading
 import time
-from collections.abc import AsyncIterator, Collection, Coroutine, Iterable, Mapping
+from collections.abc import AsyncIterator, Callable, Collection, Coroutine, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
 from sie_sdk.storage import is_cloud_path
 
 from sie_server.adapters._generation_base import GenerationAdapter
-from sie_server.adapters.base import ModelAdapter
+from sie_server.adapters.base import ModelAdapter, released_bytes
+from sie_server.adapters.lora import LoraStateUncertainError
 from sie_server.config.device_groups import resolve_device_group, validate_tensor_parallel_size
 from sie_server.config.engine import EngineConfig
 from sie_server.config.model import ModelConfig
@@ -50,7 +53,7 @@ from sie_server.core.loader import (
     validate_loadtime_options,
 )
 from sie_server.core.memory import MemoryConfig, MemoryManager
-from sie_server.core.model_loader import DEFAULT_MAX_LORAS, LoadedModel, ModelLoader
+from sie_server.core.model_loader import DEFAULT_MAX_LORAS, LoadedModel, LoraLoadFailure, ModelLoader
 from sie_server.core.oom import is_oom_error
 from sie_server.core.pool_isolation import (
     counts_toward_pool_isolation,
@@ -72,6 +75,14 @@ _ERR_MODEL_NOT_LOADED = "Model '{name}' is not loaded"
 _ERR_MODEL_ALREADY_LOADED = "Model '{name}' is already loaded"
 
 _ENGINE_STABLE_UPTIME_S = 600.0
+# Same bound as ``evict_lru_excluding``'s load-lock wait. A graph drop finishes
+# well inside it; a stuck adapter must not pin the memory monitor past it.
+_OPTIONAL_MEMORY_RELEASE_TIMEOUT_S = 5.0
+
+# A failed LoRA load is retried after 5 s, doubling per consecutive failure up
+# to 5 minutes.
+_LORA_RETRY_BASE_S = 5.0
+_LORA_RETRY_MAX_S = 300.0
 
 
 class _ConfigChangedDuringLoadError(RuntimeError):
@@ -150,6 +161,15 @@ def _engine_exit_code(adapter: ModelAdapter) -> int | None:
     if isinstance(exit_code, bool) or not isinstance(exit_code, int):
         return None
     return exit_code
+
+
+def _adapter_has_releasable_memory(adapter: ModelAdapter) -> bool:
+    """Whether the adapter can drop optional memory without taking its lock."""
+    try:
+        return bool(adapter.has_releasable_memory())
+    except Exception:
+        logger.exception("has_releasable_memory failed; treating the adapter as holding nothing")
+        return False
 
 
 def _adapter_load_required_bytes(adapter: ModelAdapter, memory_manager: MemoryManager) -> int | None:
@@ -364,6 +384,10 @@ class ModelRegistry:
         # Background memory monitor
         self._monitor_task: asyncio.Task[None] | None = None
         self._monitor_running = False
+        # Optional-memory releases still running after the monitor stopped
+        # waiting. Unloading one of these would join the inference thread the
+        # release is on and pin the monitor, so eviction skips them.
+        self._optional_release_tasks: dict[str, asyncio.Task[int]] = {}
 
         # Background idle-evictor (proactive cold-model unload). None unless
         # ``engine_config.idle_evict_s`` is set.
@@ -1100,17 +1124,14 @@ class ModelRegistry:
         against memory this model already holds, and the eviction that would
         have prevented the collision never fires.
 
-        The estimate is divided across members because sharding divides the
-        weights, so the total across the group is the figure a single-device
-        load of the same model would have registered, to within the truncation
-        of an integer division.
+        The adapter reports a group-wide estimate, which is divided across
+        members. SGLang's explicit-fraction budget is per device, so its adapter
+        multiplies by the group width before reporting it.
 
-        For the engine this work exists for that figure is zero by design: the
-        SGLang adapter reports no footprint because its child allocates in a
-        subprocess, and the registry reads the device instead. So the division
-        matters only for adapters that do report one. What matters on every
-        adapter is the registration itself, which is what placement scoring,
-        the eviction order and the group-free check all read.
+        SGLang reports its reservation across the full group because its child
+        processes own the allocations. Device pressure still comes from actual
+        free memory. Registration also feeds placement scoring, the eviction
+        order and the group-free check.
         """
         members = self._claimed_members(name) or [loaded.device]
         share = loaded.memory_bytes // len(members) if loaded.memory_bytes else 0
@@ -2845,6 +2866,10 @@ class ModelRegistry:
         adapter teardown takes it again, so an eviction does not stall other
         models' requests or registry operations for the drain.
 
+        A sibling whose optional-memory release is still running is not
+        chosen. Unload waits for that inference thread with no deadline, so
+        evicting it after a timed-out release would hang recovery.
+
         Args:
             exclude_name: The calling worker's own model. Never evicted, even
                 if it happens to be the LRU entry — the caller still needs
@@ -2881,6 +2906,7 @@ class ModelRegistry:
                 is_pinned=self._is_pinned,
                 loaded=self._loaded,
                 unloading=self._unloading,
+                releasing=self._optional_release_inflight(),
             )
             if candidate is None:
                 return EvictionResult.NO_CANDIDATE
@@ -2898,6 +2924,115 @@ class ModelRegistry:
             logger.exception("OOM recovery: failed to evict '%s'", candidate)
             return EvictionResult.UNLOAD_FAILED
         return EvictionResult.EVICTED
+
+    async def release_optional_memory(self, exclude_name: str) -> int:
+        """Release optional memory of models other than ``exclude_name``.
+
+        Used by OOM recovery while the caller still holds its own adapter
+        lock, so that model is skipped and siblings are released without
+        waiting: a peer recovery holding its lock cannot deadlock this one.
+        Adapters with nothing releasable are not locked. Least recently used
+        first, on the caller's device. Zero means nothing was released;
+        ``EVICT_LRU`` must still run.
+        """
+        manager = self._memory_manager_for_model(exclude_name)
+        return await self._release_optional_memory_on(manager, exclude_name=exclude_name)
+
+    async def _release_optional_memory_on(
+        self,
+        manager: MemoryManager,
+        *,
+        exclude_name: str | None,
+    ) -> int:
+        """Release optional memory for ``manager``'s models, oldest first.
+
+        When ``exclude_name`` is None (the memory monitor), stop once pressure
+        has cleared. OOM recovery passes the caller and does not consult
+        pressure: an allocation can fail below the monitor threshold.
+        A model whose inference lock is busy is skipped instead of waiting
+        for its in-flight batches. A release already running is joined within
+        the same bound; its bytes count when that wait finishes. Timing out
+        does not unload the model.
+        """
+        total = 0
+        for name in list(manager.loaded_models):
+            if exclude_name is None and not manager.check_pressure():
+                break
+            if name == exclude_name or name in self._unloading:
+                continue
+            loaded = self._loaded.get(name)
+            if loaded is None or not _adapter_has_releasable_memory(loaded.adapter):
+                continue
+            released = await self._release_loaded_optional_memory(name, loaded)
+            if released <= 0:
+                continue
+            total += released
+            logger.info(
+                "Released %d bytes of optional memory from '%s' on %s",
+                released,
+                name,
+                manager.device,
+            )
+        return total
+
+    def _optional_release_inflight(self) -> frozenset[str]:
+        """Models whose optional-memory release is still running, lowercased."""
+        return frozenset(name.lower() for name, task in self._optional_release_tasks.items() if not task.done())
+
+    async def _release_loaded_optional_memory(self, name: str, loaded: LoadedModel) -> int:
+        """Run one adapter's ``release_optional_memory`` off the event loop.
+
+        Prefers the model worker so the call sits on the inference thread,
+        under the same adapter lock dispatch uses. A worker-less adapter
+        (tests, or a load that has not attached one) is skipped: running it
+        on the default executor can block on a lock the inference thread
+        still holds.
+
+        A release already running for ``name`` is joined instead of started
+        again. The wait, for that task or a new one, is bounded. Finishing
+        inside the bound returns its byte count and leaves ``name`` evictable.
+        On timeout the release keeps the dispatch lock until the adapter call
+        returns, and this method returns 0 so the caller can move on. A later
+        eviction must skip ``name`` while that task is still running; joining
+        the inference thread would pin the monitor.
+        """
+        inflight = self._optional_release_tasks.get(name)
+        if inflight is None or inflight.done():
+            inflight = asyncio.create_task(
+                self._run_optional_memory_release(name, loaded),
+                name=f"optional-memory-{name}",
+            )
+            self._optional_release_tasks[name] = inflight
+        return await self._await_optional_release(name, inflight)
+
+    async def _await_optional_release(self, name: str, task: asyncio.Task[int]) -> int:
+        """Wait out ``task`` up to the release bound. A timeout leaves it running."""
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), _OPTIONAL_MEMORY_RELEASE_TIMEOUT_S)
+        except TimeoutError:
+            logger.warning(
+                "Optional-memory release for '%s' timed out after %.1fs; continuing",
+                name,
+                _OPTIONAL_MEMORY_RELEASE_TIMEOUT_S,
+            )
+            return 0
+        except Exception:
+            logger.exception("release_optional_memory failed for '%s'; continuing", name)
+            return 0
+
+    async def _run_optional_memory_release(self, name: str, loaded: LoadedModel) -> int:
+        released = 0
+        try:
+            if loaded.worker is not None:
+                released = await loaded.worker.release_optional_memory()
+        except Exception:
+            logger.exception("release_optional_memory failed for '%s'; continuing", name)
+            released = 0
+        finally:
+            current = self._optional_release_tasks.get(name)
+            if current is asyncio.current_task():
+                self._optional_release_tasks.pop(name, None)
+        return released_bytes(released)
 
     async def start_memory_monitor(self) -> None:
         """Start the background memory monitor task.
@@ -3124,7 +3259,17 @@ class ModelRegistry:
                 logger.exception("Unloading model '%s' after its engine exited failed", name)
 
     async def _memory_monitor_loop(self) -> None:
-        """Background task that reaps exited engines and evicts LRU models under memory pressure."""
+        """Reap exited engines, drop optional caches, then evict under pressure.
+
+        Optional memory (CUDA graphs and similar) is released from loaded
+        models that are actually holding some, least recently used first,
+        before any model is unloaded. Adapters with nothing to drop are not
+        locked. A busy model is skipped rather than draining its in-flight
+        batches. A model is evicted only if pressure remains after those
+        releases. A release that times out is not itself a reason to unload,
+        and a model whose release is still running is left resident so the
+        monitor does not join that inference thread.
+        """
         while self._monitor_running:
             try:
                 await asyncio.sleep(self._memory_config.memory_check_interval_s)
@@ -3135,13 +3280,19 @@ class ModelRegistry:
                 if not pressured_managers:
                     continue
 
-                # Pressure detected - decide under the lock, evict outside it
+                # Pressure detected - release outside the lock, evict outside it.
+                # Decide which model to unload under the lock.
                 lock = self._get_load_lock()
                 for manager in pressured_managers:
                     while True:
                         # Memory an in-flight unload is about to free may
                         # already resolve the pressure.
                         await self._wait_for_unloads()
+                        if not manager.check_pressure():
+                            break
+                        # Adapters with nothing cached are not locked. A busy model is
+                        # skipped instead of draining its in-flight batches.
+                        await self._release_optional_memory_on(manager, exclude_name=None)
                         async with lock:
                             # Re-check under lock (may have resolved)
                             if not manager.check_pressure():
@@ -3155,7 +3306,12 @@ class ModelRegistry:
                                 )
                                 break
 
-                            lru_model = manager.get_lru_model(exclude=self._pinned_models)
+                            # A timed-out release still holds the inference thread.
+                            # Joining it from unload would pin the monitor, and
+                            # the timeout itself is not a reason to unload.
+                            lru_model = manager.get_lru_model(
+                                exclude=self._pinned_models | self._optional_release_inflight()
+                            )
                             if lru_model is None:
                                 break
 
@@ -3203,12 +3359,12 @@ class ModelRegistry:
         if loaded is None:
             return False
 
-        lora_state = loaded.loras.get(lora)
+        lora_state = loaded.loras.get(self._lora_source(loaded, lora))
         if lora_state is None:
             return False
 
         # LoRA exists and is not in loading state
-        return not lora_state.loading
+        return not lora_state.loading and not lora_state.unloading
 
     def is_lora_loading(self, model: str, lora: str) -> bool:
         """Check if a LoRA adapter is currently being loaded.
@@ -3224,11 +3380,27 @@ class ModelRegistry:
         if loaded is None:
             return False
 
-        lora_state = loaded.loras.get(lora)
+        lora_state = loaded.loras.get(self._lora_source(loaded, lora))
         if lora_state is None:
             return False
 
-        return lora_state.loading
+        return lora_state.loading or lora_state.unloading
+
+    def loaded_lora_names(self, model: str) -> list[str]:
+        """Public served names currently ready on this worker; never expose source paths."""
+        loaded = self._loaded.get(model)
+        if loaded is None or loaded.lora_runtime is None or model in self._unloading:
+            return []
+        return [
+            name
+            for name, source in loaded.lora_runtime.aliases.items()
+            if (state := loaded.loras.get(source)) is not None and not state.loading and not state.unloading
+        ]
+
+    @staticmethod
+    def _lora_source(loaded: LoadedModel, name: str) -> str:
+        runtime = loaded.lora_runtime
+        return runtime.aliases.get(name, name) if runtime is not None else name
 
     async def ensure_lora_loaded_async(self, model: str, lora: str) -> tuple[bool, bool]:
         """Ensure a LoRA adapter is loaded, triggering load if needed.
@@ -3243,7 +3415,9 @@ class ModelRegistry:
         Returns:
             Tuple of (is_ready, is_loading):
             - (True, False): LoRA is loaded and ready
-            - (False, True): LoRA is loading, caller should retry
+            - (False, True): LoRA is loading, or its last load failed and a
+              new one waits for the backoff; caller should retry after
+              :meth:`lora_retry_after_s`
             - (False, False): LoRA load failed or not supported
 
         Raises:
@@ -3261,14 +3435,31 @@ class ModelRegistry:
             raise KeyError(msg)
 
         loaded_model = self._loaded[model]
+        if model in self._unloading:
+            return (False, True)
         adapter = loaded_model.adapter
 
         # One LoRA capability handle for the whole load path, in place of the
         # scattered supports_lora() / supports_hot_lora_reload() flag-checks.
         lora_cap = adapter.lora_capability()
         if lora_cap is None:
-            msg = f"Model '{model}' does not support LoRA"
+            msg = f"Model '{model}' cannot load a LoRA adapter at runtime"
             raise ValueError(msg)
+
+        lora = self._lora_source(loaded_model, lora)
+        declared = (
+            set(loaded_model.lora_runtime.aliases.values())
+            if loaded_model.lora_runtime is not None
+            else loaded_model.config.lora_revisions()
+        )
+        if lora not in declared:
+            msg = f"Model '{model}' does not declare this LoRA adapter"
+            raise ValueError(msg)
+
+        lora_state = loaded_model.loras.get(lora)
+        if lora_state is not None and not lora_state.loading and not lora_state.unloading:
+            loaded_model.loras.move_to_end(lora)
+            return (True, False)
 
         # Get or create LoRA lock for this model
         lora_lock = loaded_model.get_lora_lock()
@@ -3277,13 +3468,34 @@ class ModelRegistry:
             # Check if already loaded
             lora_state = loaded_model.loras.get(lora)
             if lora_state is not None:
-                if lora_state.loading:
+                if lora_state.loading or lora_state.unloading:
                     # Still loading - return loading status
                     return (False, True)
                 # Already loaded
                 # Touch to update LRU (move to end of OrderedDict)
                 loaded_model.loras.move_to_end(lora)
                 return (True, False)
+
+            if self._lora_backoff_s(loaded_model, lora) is not None:
+                return (False, True)
+
+            # Loading placeholders reserve slots. Never evict one, or drop a
+            # pinned startup adapter. A victim remains tracked until the
+            # engine confirms removal; its replacement owns that one slot.
+            victim: str | None = None
+            occupied = sum(not state.unloading for state in loaded_model.loras.values())
+            if occupied >= loaded_model.max_loras:
+                victim = next(
+                    (
+                        name
+                        for name, state in loaded_model.loras.items()
+                        if not state.loading and not state.unloading and not state.pinned
+                    ),
+                    None,
+                )
+                if victim is None:
+                    return (False, True)
+                loaded_model.loras[victim].unloading = True
 
             # Not loaded - start loading
             logger.info("Starting LoRA load for model '%s': %s", model, lora)
@@ -3294,136 +3506,187 @@ class ModelRegistry:
                 loading=True,
             )
 
-            # LRU eviction if needed (evict oldest LoRA)
-            while len(loaded_model.loras) > loaded_model.max_loras:
-                oldest_lora = next(iter(loaded_model.loras))
-                if oldest_lora == lora:
-                    # Don't evict the one we're loading
-                    break
-                logger.info(
-                    "LoRA LRU eviction for model '%s': evicting '%s' (max=%d)",
-                    model,
-                    oldest_lora,
-                    loaded_model.max_loras,
-                )
-                try:
-                    lora_cap.unload_lora(oldest_lora)
-                except Exception:
-                    logger.exception("Error unloading LoRA '%s'", oldest_lora)
-                del loaded_model.loras[oldest_lora]
-
         # Load outside the lock if adapter supports hot reload
-        # (PEFT can load while other inference continues)
         if lora_cap.supports_hot_lora_reload():
             # Non-blocking load in background
             task = asyncio.create_task(
-                self._load_lora_background(model, lora),
+                self._load_lora(model, lora, loaded_model=loaded_model, victim=victim),
                 name=f"lora-load-{model}-{lora}",
             )
             self._background_tasks.add(task)
             task.add_done_callback(self._background_tasks.discard)
             return (False, True)
 
-        # Blocking load (SGLang) - load synchronously
-        await self._load_lora_blocking(model, lora)
-        return (self.is_lora_loaded(model, lora), False)
+        # Blocking load - load synchronously
+        await self._load_lora(model, lora, loaded_model=loaded_model, victim=victim)
+        return (self.is_lora_loaded(model, lora), self.lora_load_failed(model, lora))
 
-    async def _load_lora_background(self, model: str, lora: str) -> None:
-        """Load a LoRA adapter in the background (for hot-reload adapters).
+    async def _load_lora(
+        self, model: str, lora: str, *, loaded_model: LoadedModel | None = None, victim: str | None = None
+    ) -> None:
+        """Load a LoRA adapter and record it, or drop its placeholder and back off when the load fails.
+
+        A hot-reload adapter fetches the LoRA's files outside inference and
+        attaches them while no batch of the model is in flight. A LoRA
+        evicted while it was loading is unloaded again as soon as its load
+        finishes, so the adapter never holds one the registry does not track.
 
         Args:
             model: Model name.
             lora: LoRA adapter name/path.
         """
-        loop = asyncio.get_running_loop()
-
+        loaded_model = loaded_model or self._loaded.get(model)
         try:
-            loaded_model = self._loaded.get(model)
             if loaded_model is None:
                 logger.warning("Model '%s' unloaded during LoRA load", model)
                 return
 
-            adapter = loaded_model.adapter
+            lora_cap = loaded_model.adapter.lora_capability()
+            if lora_cap is None:
+                msg = f"Model '{model}' does not support LoRA"
+                raise ValueError(msg)
             # Config-pinned revision (#2113): an on-demand load of a
             # profile-declared LoRA (e.g. a reload after LRU eviction) must
             # honor the same pin the preload used, or eviction would silently
             # reintroduce the drift the pin exists to prevent.
             revision = loaded_model.config.lora_revisions().get(lora)
-
-            # Run blocking load in thread pool
-            def _do_load() -> int:
-                return adapter.load_lora(lora, revision=revision)
-
-            memory_bytes = await loop.run_in_executor(None, _do_load)
-
-            # Update LoRA state
-            lora_lock = loaded_model.get_lora_lock()
-            async with lora_lock:
-                lora_state = loaded_model.loras.get(lora)
-                if lora_state is not None:
-                    lora_state.loading = False
-                    lora_state.memory_bytes = memory_bytes
-                    logger.info(
-                        "LoRA '%s' loaded for model '%s' (%.2f MB)",
-                        lora,
-                        model,
-                        memory_bytes / 1024 / 1024,
-                    )
-
-        except Exception:
-            logger.exception("Error loading LoRA '%s' for model '%s'", lora, model)
-            # Remove failed LoRA from tracking
-            loaded_model = self._loaded.get(model)
-            if loaded_model:
-                loaded_model.loras.pop(lora, None)
-
-    async def _load_lora_blocking(self, model: str, lora: str) -> None:
-        """Load a LoRA adapter with blocking semantics (for SGLang).
-
-        For adapters that don't support hot reload, we block until loading
-        completes. This ensures the LoRA is ready when we return.
-
-        Args:
-            model: Model name.
-            lora: LoRA adapter name/path.
-        """
-        loop = asyncio.get_running_loop()
-
-        try:
-            loaded_model = self._loaded.get(model)
-            if loaded_model is None:
+            if lora_cap.supports_hot_lora_reload():
+                source = await asyncio.get_running_loop().run_in_executor(
+                    None, functools.partial(lora_cap.fetch_lora, lora, revision)
+                )
+                attach = functools.partial(lora_cap.load_lora, lora, revision=revision, source=source)
+            else:
+                attach = functools.partial(lora_cap.load_lora, lora, revision=revision)
+            if self._loaded.get(model) is not loaded_model or model in self._unloading:
+                lora_cap.discard_lora_source(lora)
                 return
 
-            adapter = loaded_model.adapter
-            # Config-pinned revision (#2113): an on-demand load of a
-            # profile-declared LoRA (e.g. a reload after LRU eviction) must
-            # honor the same pin the preload used, or eviction would silently
-            # reintroduce the drift the pin exists to prevent.
-            revision = loaded_model.config.lora_revisions().get(lora)
+            if victim is not None:
+                await self._unload_lora(loaded_model, victim, model=model)
+                async with loaded_model.get_lora_lock():
+                    loaded_model.loras.pop(victim, None)
 
-            # Run blocking load in thread pool
-            def _do_load() -> int:
-                return adapter.load_lora(lora, revision=revision)
+            def attach_current() -> int:
+                if self._loaded.get(model) is not loaded_model or model in self._unloading:
+                    raise RuntimeError("Model unloaded before LoRA attach")
+                return attach()
 
-            memory_bytes = await loop.run_in_executor(None, _do_load)
+            memory_bytes = await self._run_lora_mutation(loaded_model, attach_current)
 
-            # Update LoRA state
-            lora_lock = loaded_model.get_lora_lock()
-            async with lora_lock:
+            async with loaded_model.get_lora_lock():
+                if self._loaded.get(model) is not loaded_model or model in self._unloading:
+                    return
+                loaded_model.lora_failures.pop(lora, None)
                 lora_state = loaded_model.loras.get(lora)
-                if lora_state is not None:
-                    lora_state.loading = False
-                    lora_state.memory_bytes = memory_bytes
-                    logger.info(
-                        "LoRA '%s' loaded for model '%s' (%.2f MB)",
-                        lora,
-                        model,
-                        memory_bytes / 1024 / 1024,
-                    )
+                if lora_state is None:
+                    logger.info("LoRA '%s' for model '%s' was evicted while it loaded", lora, model)
+                    await self._unload_lora(loaded_model, lora)
+                    return
+                lora_state.loading = False
+                lora_state.memory_bytes = memory_bytes
+                logger.info(
+                    "LoRA '%s' loaded for model '%s' (%.2f MB)",
+                    lora,
+                    model,
+                    memory_bytes / 1024 / 1024,
+                )
 
-        except Exception:
+        except Exception as error:
             logger.exception("Error loading LoRA '%s' for model '%s'", lora, model)
-            # Remove failed LoRA from tracking
-            loaded_model = self._loaded.get(model)
-            if loaded_model:
-                loaded_model.loras.pop(lora, None)
+            if loaded_model is not None and (capability := loaded_model.adapter.lora_capability()) is not None:
+                capability.discard_lora_source(lora)
+            # Never mutate a newly loaded incarnation of the same model. An
+            # uncertain backend mutation retains its reservation until reload.
+            if loaded_model is not None and self._loaded.get(model) is loaded_model:
+                uncertain = isinstance(error, LoraStateUncertainError)
+                if not uncertain or victim in loaded_model.loras:
+                    loaded_model.loras.pop(lora, None)
+                if victim is not None and victim in loaded_model.loras:
+                    victim_state = loaded_model.loras[victim]
+                    victim_state.unloading = False
+                    victim_state.loading = uncertain
+                previous = loaded_model.lora_failures.get(lora)
+                attempts = previous.attempts + 1 if previous is not None else 1
+                delay_s = min(_LORA_RETRY_BASE_S * 2 ** (attempts - 1), _LORA_RETRY_MAX_S)
+                loaded_model.lora_failures[lora] = LoraLoadFailure(
+                    attempts=attempts, retry_at=time.monotonic() + delay_s
+                )
+
+    @staticmethod
+    def _lora_backoff_s(loaded_model: LoadedModel, lora: str) -> int | None:
+        failure = loaded_model.lora_failures.get(lora)
+        if failure is None:
+            return None
+        remaining = failure.retry_at - time.monotonic()
+        return math.ceil(remaining) if remaining > 0 else None
+
+    def lora_retry_after_s(self, model: str, lora: str) -> int:
+        """Seconds a caller should wait before asking for ``lora`` again: the rest of a failed load's backoff, else 1."""
+        loaded_model = self._loaded.get(model)
+        if loaded_model is not None:
+            lora = self._lora_source(loaded_model, lora)
+        backoff = self._lora_backoff_s(loaded_model, lora) if loaded_model is not None else None
+        return backoff if backoff is not None else 1
+
+    def lora_load_failed(self, model: str, lora: str) -> bool:
+        """True while ``lora``'s last load failed and the next one waits for the backoff."""
+        loaded_model = self._loaded.get(model)
+        if loaded_model is not None:
+            lora = self._lora_source(loaded_model, lora)
+        return loaded_model is not None and self._lora_backoff_s(loaded_model, lora) is not None
+
+    def request_lora_load(self, model: str, lora: str) -> int | None:
+        """Start loading a declared LoRA that a batch found absent.
+
+        Called by the worker, which holds its dispatch lock, so the load runs
+        as a background task. Returns the seconds the caller should wait
+        before retrying, or ``None`` when no load can make ``lora`` available:
+        the model is not loaded, does not support LoRA, or does not declare
+        ``lora`` as a LoRA to load.
+        """
+        loaded_model = self._loaded.get(model)
+        if loaded_model is not None:
+            lora = self._lora_source(loaded_model, lora)
+        if (
+            loaded_model is None
+            or loaded_model.adapter.lora_capability() is None
+            or lora
+            not in (
+                set(loaded_model.lora_runtime.aliases.values())
+                if loaded_model.lora_runtime is not None
+                else loaded_model.config.lora_revisions()
+            )
+        ):
+            return None
+        lora_state = loaded_model.loras.get(lora)
+        if lora_state is not None and not lora_state.loading and not lora_state.unloading:
+            loaded_model.loras.pop(lora)
+        task = asyncio.create_task(self._ensure_lora_quietly(model, lora), name=f"lora-request-{model}-{lora}")
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return self.lora_retry_after_s(model, lora)
+
+    async def _ensure_lora_quietly(self, model: str, lora: str) -> None:
+        try:
+            await self.ensure_lora_loaded_async(model, lora)
+        except Exception:
+            logger.exception("Error starting LoRA load for model '%s': %s", model, lora)
+
+    async def _unload_lora(self, loaded_model: LoadedModel, lora: str, *, model: str | None = None) -> None:
+        lora_cap = loaded_model.adapter.lora_capability()
+        if lora_cap is None:
+            return
+
+        def unload_current() -> None:
+            if model is not None and (self._loaded.get(model) is not loaded_model or model in self._unloading):
+                raise RuntimeError("Model unloaded before LoRA eviction")
+            lora_cap.unload_lora(lora)
+
+        await self._run_lora_mutation(loaded_model, unload_current)
+
+    @staticmethod
+    async def _run_lora_mutation[T](loaded_model: LoadedModel, mutation: Callable[[], T]) -> T:
+        """Run a LoRA load or unload where no batch of the model can observe it half done."""
+        if loaded_model.worker is None:
+            return await asyncio.get_running_loop().run_in_executor(None, mutation)
+        return await loaded_model.worker.run_adapter_mutation(mutation)

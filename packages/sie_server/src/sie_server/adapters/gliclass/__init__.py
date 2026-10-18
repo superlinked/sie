@@ -75,6 +75,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizerFast
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
+from sie_server.adapters.base import released_bytes
 from sie_server.adapters.errors import InputTooLongError
 from sie_server.adapters.gliclass.cuda_graphs import GRAPH_MODES, CudaGraphRunner, GraphMode, unsupported_reason
 from sie_server.adapters.gliclass.modernbert_flash import ModernBertFlashEncoder
@@ -1075,8 +1076,50 @@ class GLiClassAdapter(BaseAdapter):
             # Graph memory is held until its graphs go; drop them so the
             # worker's OOM recovery can reuse it.
             if self._graphs is not None and is_oom_error(exc):
-                self._graphs.clear()
+                self.release_optional_memory()
             raise
+
+    def has_releasable_memory(self) -> bool:
+        """True only when the graph runner is holding graphs or their buffers.
+
+        A missing runner, or one that has not recorded anything, has nothing
+        to drop. The counters are read without the runner lock: the monitor
+        calls this on the event loop and must not block behind a forward.
+        """
+        runner = self._graphs
+        if runner is None:
+            return False
+        try:
+            return runner.graph_count > 0 or runner.held_bytes > 0
+        except RuntimeError:
+            # The inference thread may be mutating the runner's tables.
+            # Skipping this tick is safer than taking the dispatch lock.
+            return False
+
+    def release_optional_memory(self) -> int:
+        """Drop recorded CUDA graphs and return their accounted bytes.
+
+        Uses the runner's ``clear()`` path, then ``torch.cuda.empty_cache()``
+        when CUDA is available, so the graph pool can return to the device.
+        ``empty_cache`` runs only after graphs or accounted bytes were
+        actually dropped. Nothing held means no ``clear`` and no CUDA call.
+        The count is ``CudaGraphRunner.held_bytes`` from before the clear:
+        the runner's own tally of pool growth and recorded graphs, not a
+        driver query. Without a GPU the bytes actually freed are not
+        measurable; after a successful clear the runner accounts 0. Returns
+        0 when no runner exists, which does not touch CUDA.
+        """
+        runner = self._graphs
+        if runner is None or not self.has_releasable_memory():
+            return 0
+        released = runner.held_bytes
+        runner.clear()
+        if torch.cuda.is_available():
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                logger.exception("GLiClass CUDA graph release could not empty the CUDA cache")
+        return released_bytes(released)
 
     def _graph_runner(self, pipe: Any, tokenizer: PreTrainedTokenizerBase) -> CudaGraphRunner | None:
         """The CUDA graph runner for a loaded model; None when graphs are off or unsupported."""

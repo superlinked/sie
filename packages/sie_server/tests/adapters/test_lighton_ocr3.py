@@ -124,6 +124,55 @@ def test_multi_image_order_and_generation_overrides(adapter: LightOnOCR3Adapter)
     assert all(call["max_new_tokens"] == 8 and call["temperature"] == 0.2 for call in adapter._model.calls)
 
 
+class _GroundingProcessor(_Processor):
+    def decode(self, generated: torch.Tensor, *, skip_special_tokens: bool) -> str:
+        assert skip_special_tokens is True
+        self.decoded.append(generated.clone())
+        if int(generated[0]) == 106:
+            return "![header](0,0,1000,1000)only margin"
+        return (
+            "prefix\n![header+](0,0,1000,100)header\n"
+            f"![text](0,100,1000,800)body {int(generated[0])}\nsecond line\n"
+            "![aside_text](0,0,100,100)aside\n"
+            "![footnote](0,800,1000,900)retained footnote\n"
+            "![footer](0,900,1000,1000)footer"
+        )
+
+
+def test_native_markdown_opt_in_converts_each_decoded_page() -> None:
+    value = LightOnOCR3Adapter(
+        "lightonai/LightOnOCR-3-4B", max_new_tokens=32, output_postprocess="lightonocr3_markdown"
+    )
+    value._model = _Model()
+    value._processor = _GroundingProcessor()
+    value._device = "cpu"
+    value._create_preprocessor()
+
+    result = value.extract([_item(2), _item(6)], instruction="grounding")
+
+    assert result.entities == [
+        [{"text": "body 102\nsecond line\n\nretained footnote", "label": "markdown", "score": 1.0}],
+        [{"text": "", "label": "markdown", "score": 1.0}],
+    ]
+    assert result.pages == [1, 1]
+    assert result.input_token_counts is result.output_token_counts is None
+    assert len(value._model.calls) == len(value._processor.decoded) == 2
+    assert all(
+        {key: call[key] for key in ("max_new_tokens", "do_sample", "num_beams", "temperature", "top_p")}
+        == {"max_new_tokens": 32, "do_sample": True, "num_beams": 1, "temperature": 0.1, "top_p": 1.0}
+        for call in value._model.calls
+    )
+    assert all(
+        call["messages"][0]["content"][1:] == [{"type": "text", "text": "grounding"}] for call in value._processor.calls
+    )
+
+
+@pytest.mark.parametrize("output_postprocess", ["unknown", "", False, 1, {}, []])
+def test_native_rejects_unknown_output_postprocessors(output_postprocess: Any) -> None:
+    with pytest.raises(ValueError, match="output_postprocess"):
+        LightOnOCR3Adapter("lightonai/LightOnOCR-3-4B", output_postprocess=output_postprocess)
+
+
 @pytest.mark.parametrize("instruction", ["Grounding", " grounding", "Text Recognition:", "Extract tables only"])
 def test_untrained_prompt_rejected_before_processing(adapter: LightOnOCR3Adapter, instruction: str) -> None:
     with pytest.raises(ValueError, match="supports only"):
@@ -155,6 +204,7 @@ def test_single_image_contract_rejects_complete_request(adapter: LightOnOCR3Adap
         {"do_sample": False},
         {"num_beams": 2},
         {"enable_thinking": True},
+        {"output_postprocess": "lightonocr3_markdown"},
     ],
 )
 def test_invalid_generation_controls_fail_before_model(adapter: LightOnOCR3Adapter, options: dict[str, Any]) -> None:

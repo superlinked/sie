@@ -1,8 +1,8 @@
 //! [`BatchFormer`] — async pending queue + flush loop.
 //!
 //! Ported from `sie_server/core/batcher.py::BatchFormer`. The port preserves
-//! its batching/packing contract, with Rust queue-path differences for
-//! bounded waiting and timer refresh called out below:
+//! its batching/packing contract, with the intentional Rust differences
+//! called out below:
 //!
 //! 1. **Flush triggers**: cost cap, count cap, `max_batch_wait_ms`
 //!    timeout since the *first* item, or the coalesce window
@@ -16,20 +16,100 @@
 //!    greedily under the cost and count caps. This prevents replenishing
 //!    cheap requests from indefinitely overtaking an aged expensive one.
 //!    Progress requires a downstream dispatch slot; the wait window is not
-//!    an end-to-end latency guarantee.
+//!    an end-to-end latency guarantee. Nothing is promoted during a
+//!    batchable turn or while a runs-alone item is pending: there, what a
+//!    turn owes bounds the wait instead (point 5).
 //! 4. **Timer refresh**: after a partial cost-sorted extract, first/last
 //!    timestamps are re-anchored to the requests that remain; once the queue
 //!    empties both are cleared so the next submit starts a fresh window.
+//! 5. **Runs-alone lane** (long-form audio, #585): items whose
+//!    [`HasCost::runs_alone`] is true never share a batch. They are served
+//!    one per batch in arrival order, and while batchable items are pending
+//!    too the two lanes take turns: a batchable turn, then the oldest flagged
+//!    item. A batchable turn serves the batchable items that were pending
+//!    when it began, in as many batches as the request count cap and drain
+//!    budgets need; items that arrive during the turn wait for the next one.
+//!    A turn begins after each flagged item runs, even if no other flagged
+//!    item is pending yet, so the items that waited behind it get a turn
+//!    before the next one. Before any batch has been taken, the first turn
+//!    goes to the lane holding the oldest pending item. Batchable batches
+//!    outside turns (none under way, nothing pending flagged, and the last
+//!    batch not a flagged item) are packed as points 3 and 6.
+//!
+//!    What a turn takes: it owes the items earlier turns left over, the
+//!    oldest whatever its cost, then, oldest first, as many more as fit the
+//!    cost cap it began with together. Its budget is that cost cap plus the
+//!    oldest left-over item's cost. Besides what it owes, it takes the items
+//!    it serves cheapest first, while what is left of its budget still covers
+//!    what it owes and the next one fits. Until it has taken an item it does
+//!    not owe, it takes the cheapest one even above what is left, as point 2
+//!    takes an oversize item. Each batch is packed in cost order under the
+//!    cost cap, the request count cap and items' hard caps, a single item
+//!    above the cost cap running alone (point 2). Owed items join the batch
+//!    at which the next cheapest item would leave too little budget for them,
+//!    so a batch stops early only to keep that budget.
+//!
+//!    Wait bound: every turn serves the oldest left-over item, and no later
+//!    arrival is older. So a batchable item is served by the first turn that
+//!    begins after it arrives or, if that turn leaves it over, within the
+//!    next `n` turns, where `n` counts it and the batchable items that
+//!    arrived before it and were still pending when that turn ended: at most
+//!    `n + 1` turns in all. Later arrivals never add to `n`, so cheaper items
+//!    that keep arriving cannot pass it over turn after turn. A turn takes at
+//!    most its cost cap plus two items: the oldest left-over one and the
+//!    cheapest other one. A flagged item still waits at most one turn per
+//!    flagged item ahead of it, plus one.
+//!
+//!    The extra budget keeps the share of a turn that goes cheapest first at
+//!    no less than the cost cap minus what the other owed items cost, so a
+//!    costly left-over item, even one above the cost cap, does not take a
+//!    turn from the cheaper ones. Under a load the turns cannot keep up with,
+//!    owed items take most of each turn, in arrival order: no item waits
+//!    indefinitely and more items are served than in cost order alone, but
+//!    the median wait grows, most where the cost cap holds few items (such as
+//!    4096 ms, the adaptive floor for a backend that reports no budget, or a
+//!    cap set low through `SIE_ADAPTIVE_BATCH_MAX_COST`). Point 3's
+//!    promotion makes the same trade between turns.
+//! 6. **A request can be kept whole** (`max_request_items`, off by
+//!    default): the request at the head of an extract is then taken with
+//!    all of its pending items even past the item cap, so one caller's
+//!    request is not cut into batches that run one after another. The cost
+//!    cap still cuts. Like point 3's promotion, this applies only outside
+//!    batchable turns with nothing flagged pending: a turn's batches keep
+//!    the item cap and their cost order (point 5). Python has no such rule.
 //!
 //! Python currently retains its original first/last timers after a partial
 //! extract and clears them only when empty. Rust re-anchors them to the actual
 //! remainder because the sidecar's cross-key FCFS selector reads that state:
 //! retaining a removed request's timestamp can repeatedly prioritize a hot key
 //! and can make a newer tail skip its own coalescing window. Python's packing
-//! remains strictly cost-sorted; Rust promotes one aged request per extract.
-//! Caps and flush triggers otherwise follow the Python test contract. The async
-//! primitives differ as expected (`tokio::sync` rather than asyncio).
+//! remains strictly cost-sorted; Rust promotes at most one aged request per
+//! extract, outside batchable turns (points 3 and 5).
+//!
+//! The runs-alone lane (point 5) is the Python batcher's rule too (#601),
+//! with three differences:
+//!
+//! * What gets flagged: Python flags audio only in the Whisper adapter, at
+//!   its feature window, while the sidecar flags every prepared audio item
+//!   longer than [`crate::audio_prep::RUNS_ALONE_ABOVE_SAMPLES`], whatever
+//!   the model, Parakeet included.
+//! * How long a batchable turn lasts: Python's turn is one batch. Its request
+//!   count cap is 64, so in practice the cost cap bounds the turn. The
+//!   sidecar's count cap is 12 (see [`BatchConfig::default`]), and a turn of
+//!   one batch would then leave the costliest pending items behind every
+//!   turn, so they could wait indefinitely. The sidecar's turn takes what
+//!   Python's batch takes, bounded by the cost cap, split into batches that
+//!   respect the count cap.
+//! * What a batchable turn serves: Python orders every turn by cost alone,
+//!   so cheaper items that keep arriving can pass a costlier one over turn
+//!   after turn. The sidecar's turn owes the items earlier turns left over,
+//!   which gives the wait bound of point 5.
+//!
+//! Caps and flush triggers otherwise follow the Python test contract. The
+//! async primitives differ as expected (`tokio::sync` rather than asyncio).
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -56,10 +136,26 @@ pub trait HasCost {
         None
     }
 
+    /// Whether this item must be served in a batch of its own (long-form
+    /// audio). Mirrors Python's `PreparedItem.runs_alone`; see point 5 of
+    /// the module docs for how such items are ordered.
+    fn runs_alone(&self) -> bool {
+        false
+    }
+
     /// Original position within the originating request's item list.
     /// Used by the adapter-side output router to zip results back to
     /// the correct request item.
     fn original_index(&self) -> usize;
+
+    /// Identity of the request this item came from, when it has one.
+    /// Items that share a key were sent by one caller in one request:
+    /// the packer keeps them in one batch where the caps allow (see
+    /// [`BatchConfig::max_request_items`]) and the lane counts them as one
+    /// arrival. `None` means the item stands for itself.
+    fn request_key(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// A single request waiting to be batched, together with
@@ -95,6 +191,12 @@ impl<I: HasCost, T> FormattedBatch<I, T> {
     #[must_use]
     pub fn total_tokens(&self) -> u64 {
         self.total_cost
+    }
+
+    /// Number of requests the batch's items came from.
+    #[must_use]
+    pub fn request_count(&self) -> usize {
+        super::engine::distinct_requests(self.items.iter())
     }
 
     /// Return a new batch sorted by cost (ascending). Preserves the
@@ -162,10 +264,58 @@ struct Inner<I: HasCost, T> {
     total_cost: u64,
     first_request_time: Option<Instant>,
     last_submit_time: Option<Instant>,
+    /// Lane of the last batch taken: `Some(true)` when it was a runs-alone
+    /// item, `None` before the first batch. Decides whose turn is next while
+    /// both lanes are pending.
+    last_batch_alone: Option<bool>,
+    /// The batchable turn under way, if any. See point 5 of the module docs.
+    batchable_turn: Option<BatchableTurn>,
+    /// Latest cutoff of a batchable turn begun so far. A pending batchable
+    /// request that arrived no later than it was left over by an earlier turn.
+    last_turn_cutoff: Option<Instant>,
     /// Cached snapshot of the current knobs. Mutations happen via
     /// [`BatchFormer::update_config`] which takes the same lock so
     /// reads of `config` and reads of `pending` stay consistent.
     config: BatchConfig,
+}
+
+/// A batchable turn of the runs-alone lane (point 5 of the module docs). It
+/// serves the batchable requests that were pending when it began. Of those,
+/// it owes the ones earlier turns left over, oldest first, as many as fit its
+/// cost cap together and at least the oldest, and serves them whatever their
+/// place in cost order; the rest it serves cheapest first while its budget
+/// lasts.
+#[derive(Debug, Clone, Copy)]
+struct BatchableTurn {
+    /// Latest arrival among the requests pending when the turn began.
+    /// Requests that arrive later wait for the next turn.
+    cutoff: Instant,
+    /// Latest arrival among the requests the turn owes, while it still owes
+    /// any: a request the turn serves that arrived no later than this was
+    /// left over by an earlier turn and is owed.
+    owed_cutoff: Option<Instant>,
+    /// Cost the turn may still take: the cost cap it began with plus the
+    /// cost of the oldest request it owes, less what its batches took.
+    cost_left: u64,
+    /// Whether the turn has taken a request it does not owe. Until it has,
+    /// it takes its cheapest such request even above `cost_left`, as the
+    /// first batch of a turn takes an oversize item (point 2).
+    took_unowed: bool,
+}
+
+impl BatchableTurn {
+    /// Whether `request` is one of the batchable requests this turn serves.
+    fn serves<I: HasCost, T>(&self, request: &PendingRequest<I, T>) -> bool {
+        !request.item.runs_alone() && request.arrival_time <= self.cutoff
+    }
+
+    /// Whether `request` is one the turn owes.
+    fn owes<I: HasCost, T>(&self, request: &PendingRequest<I, T>) -> bool {
+        self.serves(request)
+            && self
+                .owed_cutoff
+                .is_some_and(|owed| request.arrival_time <= owed)
+    }
 }
 
 /// Async batch former.
@@ -210,6 +360,9 @@ impl<I: HasCost, T> BatchFormer<I, T> {
                 total_cost: 0,
                 first_request_time: None,
                 last_submit_time: None,
+                last_batch_alone: None,
+                batchable_turn: None,
+                last_turn_cutoff: None,
                 config,
             }),
             ready: Notify::new(),
@@ -384,9 +537,10 @@ impl<I: HasCost, T> BatchFormer<I, T> {
     /// The scheduler drain loop uses this to bound one continuous-batching
     /// wave to the backlog count observed when its first continuation slot
     /// opens. A newer cheap item can participate ahead of an unaged expensive
-    /// item; the oldest request gets the first packing opportunity once its
-    /// wait window expires. The count budget bounds wave size but does not
-    /// identify an exact request cohort.
+    /// item; outside a batchable turn (module docs, point 5), the oldest
+    /// request gets the first packing opportunity once its wait window
+    /// expires. The count budget bounds wave size but does not identify an
+    /// exact request cohort.
     pub async fn try_drain_up_to(&self, max_items: usize) -> Option<FormattedBatch<I, T>> {
         if max_items == 0 {
             return None;
@@ -399,6 +553,37 @@ impl<I: HasCost, T> BatchFormer<I, T> {
             self.refresh_fcfs_head(&guard);
             Some(batch)
         }
+    }
+
+    /// What a lane's dispatch rule ([`super::lane::Lane`]) reads from this
+    /// queue: whether the pending work already fills a batch, and the
+    /// classic flush triggers for a lane that has the idle bypass off.
+    pub(crate) async fn gate_view(&self) -> GateView {
+        let guard = self.inner.lock().await;
+        GateView {
+            full: full_reason(&guard),
+            classic: flush_reason(&guard, false),
+            classic_wait: wait_timeout(&guard),
+        }
+    }
+
+    /// Take the next batch now, whatever the flush triggers say, under the
+    /// usual caps. `reason` records why the lane sent it; a batch that is
+    /// full keeps its cap as the reason. `None` when nothing is pending.
+    ///
+    /// The second value is the number of requests the batch completes:
+    /// those with no item left pending here. A request cut by a cap is
+    /// completed by the batch that takes its last items.
+    pub(crate) async fn take(&self, reason: FlushReason) -> Option<(FormattedBatch<I, T>, usize)> {
+        let mut guard = self.inner.lock().await;
+        if guard.pending.is_empty() {
+            return None;
+        }
+        let reason = full_reason(&guard).unwrap_or(reason);
+        let batch = extract_batch(&mut guard, reason);
+        self.refresh_fcfs_head(&guard);
+        let completes = completed_requests(&batch.items, &guard.pending);
+        Some((batch, completes))
     }
 
     /// Refresh the atomic FCFS head from the queue while `inner` is locked.
@@ -421,6 +606,23 @@ impl<I: HasCost, T> BatchFormer<I, T> {
         // Zero is reserved for an empty batcher.
         nanos.max(1)
     }
+}
+
+/// Snapshot of one queue for the lane's dispatch rule.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct GateView {
+    /// The cap the pending work has reached, if it already fills a batch:
+    /// the item cap, the cost cap, one request over the cost cap, or no
+    /// room under the cost cap for another item like its largest. Waiting
+    /// cannot improve such a batch. Beside runs-alone items, only the
+    /// batchable items count (see `full_reason`).
+    pub full: Option<FlushReason>,
+    /// The classic flush trigger that has fired, if any (caps, batch wait,
+    /// coalesce window since the last arrival).
+    pub classic: Option<FlushReason>,
+    /// Time until a classic trigger fires by itself; `None` when nothing is
+    /// pending.
+    pub classic_wait: Option<Duration>,
 }
 
 // ---------------------------------------------------------------------
@@ -509,6 +711,56 @@ fn flush_reason<I: HasCost, T>(inner: &Inner<I, T>, immediate: bool) -> Option<F
     None
 }
 
+/// The cap the pending work has reached, if any: one request over the cost
+/// cap, the cost cap, the item cap, or a cost so close to the cap that
+/// another item like the largest one pending would not fit.
+///
+/// The last case is what makes a single large item full by itself: a
+/// 15,000-cost request under a 16,384 cap cannot share a batch with another
+/// like it, so holding it for company only delays the engine-side
+/// preparation that could overlap the forward before it.
+///
+/// Beside a pending runs-alone item, only the batchable items count: a
+/// runs-alone item never joins their batch (point 5), so a long recording
+/// must not make a clip batch that could still grow look full. With only
+/// runs-alone items pending, the next batch is the oldest of them. Right
+/// after a runs-alone item it is not full: held while the engine is busy,
+/// it lets the clips that arrive meanwhile take their turn first. After a
+/// batchable batch it goes next whatever arrives, so the whole queue counts.
+fn full_reason<I: HasCost, T>(inner: &Inner<I, T>) -> Option<FlushReason> {
+    let alone_pending = inner.pending.iter().any(|r| r.item.runs_alone());
+    let batchable_pending = inner.pending.iter().any(|r| !r.item.runs_alone());
+    if alone_pending && !batchable_pending && inner.last_batch_alone == Some(true) {
+        return None;
+    }
+    let batchable_only = alone_pending && batchable_pending;
+    let (mut count, mut total, mut largest) = (0usize, 0u64, 0u64);
+    for request in inner
+        .pending
+        .iter()
+        .filter(|r| !batchable_only || !r.item.runs_alone())
+    {
+        let cost = request.item.cost();
+        count += 1;
+        total = total.saturating_add(cost);
+        largest = largest.max(cost);
+    }
+    if count == 0 {
+        return None;
+    }
+    let max_cost = effective_max_cost(inner);
+    if count == 1 && total > max_cost {
+        return Some(FlushReason::SingleOversize);
+    }
+    if total >= max_cost {
+        return Some(FlushReason::CostCap);
+    }
+    if count >= inner.config.max_batch_requests {
+        return Some(FlushReason::CountCap);
+    }
+    (total.saturating_add(largest) > max_cost).then_some(FlushReason::CostCap)
+}
+
 /// Time remaining until the next guaranteed flush, given current
 /// state. `None` means "wait indefinitely" (no pending items).
 fn wait_timeout<I: HasCost, T>(inner: &Inner<I, T>) -> Option<Duration> {
@@ -532,6 +784,231 @@ fn wait_timeout<I: HasCost, T>(inner: &Inner<I, T>) -> Option<Duration> {
     Some(Duration::try_from_secs_f64(effective_ms.max(0.0) / 1000.0).unwrap_or(Duration::MAX))
 }
 
+/// Decide the lane of the next batch, keeping the batchable turn in step,
+/// and order pending requests so that packing takes the batch from the front.
+/// Returns `true` when the next batch is a runs-alone item.
+///
+/// Lane decision (point 5 of the module docs): a batchable turn under way
+/// goes on while it owes a request, while a request it serves still fits
+/// what is left of its budget, or, until it has taken a request it does not
+/// owe, while it serves any. Otherwise, while both lanes are pending, the
+/// lane that did not take the last batch goes next, and before the first
+/// batch the lane holding the oldest pending request. A batchable turn opens
+/// with the first batchable batch after a runs-alone item ran, even if no
+/// other runs-alone item is pending yet, and with the first batchable batch
+/// while runs-alone items are pending.
+///
+/// Order: batchable requests first, those the turn serves ahead of later
+/// arrivals, each group sorted by cost; runs-alone requests after them in
+/// arrival order, the oldest moved to the front when it is its turn. The sort
+/// is stable, so FIFO order holds within equal costs (Python's `list.sort` is
+/// stable too). Then [`make_room_for_owed`] moves the requests the turn owes
+/// forward where packing would otherwise leave no room for them. Outside
+/// batchable turns, with no runs-alone request pending, this is point 3: the
+/// oldest request that has waited `max_batch_wait_ms` first, the rest by
+/// cost. Mirrors Python's
+/// `BatchFormer._order_runs_alone_lane`, except that a batchable turn can
+/// span several batches and serves the requests earlier turns left over.
+///
+/// `max_cost` is the batch cost cap before the turn's own budget, and the
+/// cost cap a turn opened now begins with; `max_take` is the most requests
+/// the batch may take.
+fn order_for_next_batch<I: HasCost, T>(
+    inner: &mut Inner<I, T>,
+    max_cost: u64,
+    max_take: usize,
+) -> bool {
+    let alone_pending = inner.pending.iter().any(|r| r.item.runs_alone());
+    let batchable_pending = inner.pending.iter().any(|r| !r.item.runs_alone());
+    if let Some(turn) = inner.batchable_turn {
+        // Owed requests always fit (see `make_room_for_owed`).
+        let goes_on = |r: &PendingRequest<I, T>| {
+            turn.serves(r) && (!turn.took_unowed || r.item.cost() <= turn.cost_left)
+        };
+        if !inner.pending.iter().any(goes_on) {
+            inner.batchable_turn = None;
+        }
+    }
+    let alone_next = alone_pending
+        && (!batchable_pending
+            || (inner.batchable_turn.is_none()
+                && match inner.last_batch_alone {
+                    Some(last_alone) => !last_alone,
+                    None => inner
+                        .pending
+                        .iter()
+                        .min_by_key(|r| r.arrival_time)
+                        .is_some_and(|oldest| oldest.item.runs_alone()),
+                }));
+    if !alone_next
+        && inner.batchable_turn.is_none()
+        && (alone_pending || inner.last_batch_alone == Some(true))
+    {
+        let cutoff = inner
+            .pending
+            .iter()
+            .map(|r| r.arrival_time)
+            .max()
+            .expect("batchable requests are pending");
+        let (owed_cutoff, oldest_cost) =
+            owed_left_over(&inner.pending, inner.last_turn_cutoff, max_cost);
+        inner.batchable_turn = Some(BatchableTurn {
+            cutoff,
+            owed_cutoff,
+            cost_left: max_cost.saturating_add(oldest_cost),
+            took_unowed: false,
+        });
+        inner.last_turn_cutoff = inner.last_turn_cutoff.max(Some(cutoff));
+    }
+
+    // Outside batchable turns, with no runs-alone request pending, packing is
+    // point 3's: a timeout must give the oldest request an extraction
+    // opportunity even while cheaper arrivals keep the queue full. Inside a
+    // turn, what the turn owes bounds the wait instead (point 5). Select
+    // before sorting so tied arrival timestamps retain their pending order.
+    let oldest_aged = if inner.batchable_turn.is_none() && !alone_pending {
+        inner
+            .pending
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, request)| request.arrival_time)
+            .filter(|(_, request)| {
+                request.arrival_time.elapsed().as_secs_f64() * 1000.0
+                    >= inner.config.max_batch_wait_ms
+            })
+            .map(|(index, _)| index)
+    } else {
+        None
+    };
+    let promoted = oldest_aged.map(|index| inner.pending.remove(index));
+
+    // Cost order keeps each batch's items close in length, minimising
+    // padding waste on the adapter side.
+    let turn = inner.batchable_turn;
+    let served = |r: &PendingRequest<I, T>| turn.is_some_and(|t| t.serves(r));
+    inner.pending.sort_by(|a, b| {
+        let alone = a.item.runs_alone();
+        alone
+            .cmp(&b.item.runs_alone())
+            .then_with(|| served(b).cmp(&served(a)))
+            .then_with(|| {
+                if alone {
+                    a.arrival_time.cmp(&b.arrival_time)
+                } else {
+                    a.item.cost().cmp(&b.item.cost())
+                }
+            })
+    });
+    if let Some(request) = promoted {
+        inner.pending.insert(0, request);
+    }
+    if alone_next {
+        if let Some(head) = inner.pending.iter().position(|r| r.item.runs_alone()) {
+            inner.pending[..=head].rotate_right(1);
+        }
+    } else if let Some(turn) = inner
+        .batchable_turn
+        .as_mut()
+        .filter(|t| t.owed_cutoff.is_some())
+    {
+        let room = max_cost.min(turn.cost_left);
+        if !make_room_for_owed(&mut inner.pending, turn, room, max_take) {
+            turn.owed_cutoff = None;
+        }
+    }
+    alone_next
+}
+
+/// The requests a turn opened now owes: of those that arrived no later than
+/// `carried_cutoff` (left over by earlier turns), the oldest and, oldest
+/// first, as many more as fit `max_cost` together with them. Requests that
+/// arrived at the same instant are owed together. Returns the latest arrival
+/// among the owed requests and the cost of the oldest ones, which the turn
+/// adds to its budget.
+fn owed_left_over<I: HasCost, T>(
+    pending: &[PendingRequest<I, T>],
+    carried_cutoff: Option<Instant>,
+    max_cost: u64,
+) -> (Option<Instant>, u64) {
+    let Some(carried_cutoff) = carried_cutoff else {
+        return (None, 0);
+    };
+    // A min-heap by arrival: only the owed few are popped, so a long queue
+    // costs one linear pass rather than a sort.
+    let mut left_over: BinaryHeap<Reverse<(Instant, u64)>> = pending
+        .iter()
+        .filter(|r| !r.item.runs_alone() && r.arrival_time <= carried_cutoff)
+        .map(|r| Reverse((r.arrival_time, r.item.cost())))
+        .collect();
+    // Pops the next group of requests that arrived at the same instant.
+    let mut next_group = || {
+        let Reverse((arrival, mut cost)) = left_over.pop()?;
+        while let Some(&Reverse((next, next_cost))) = left_over.peek() {
+            if next != arrival {
+                break;
+            }
+            cost += next_cost;
+            left_over.pop();
+        }
+        Some((arrival, cost))
+    };
+    let Some((mut owed_cutoff, oldest_cost)) = next_group() else {
+        return (None, 0);
+    };
+    let mut owed_cost = oldest_cost;
+    while let Some((arrival, cost)) = next_group() {
+        if owed_cost + cost > max_cost {
+            break;
+        }
+        owed_cost += cost;
+        owed_cutoff = arrival;
+    }
+    (Some(owed_cutoff), oldest_cost)
+}
+
+/// Makes sure packing leaves room for the requests `turn` owes. `pending`
+/// holds the requests the turn serves first, sorted by cost. Packing takes
+/// them in that order while each next one still leaves what is left of the
+/// turn's budget enough for the owed requests not yet taken; at the first
+/// one that would not, the owed requests move ahead of it, still in cost
+/// order, and go next. The batch therefore stays in cost order, a request the
+/// turn owes is never left over again, and packing stops only where the
+/// cost cap `room`, the request count `max_take` or what the turn owes stops
+/// it. Returns whether the turn still owes a pending request.
+fn make_room_for_owed<I: HasCost, T>(
+    pending: &mut [PendingRequest<I, T>],
+    turn: &BatchableTurn,
+    room: u64,
+    max_take: usize,
+) -> bool {
+    let mut owes_any = false;
+    let mut owed_left: u64 = 0;
+    for request in pending.iter().filter(|r| turn.owes(r)) {
+        owes_any = true;
+        owed_left += request.item.cost();
+    }
+    if !owes_any {
+        return false;
+    }
+    let served = pending.iter().take_while(|r| turn.serves(r)).count();
+    let mut batch_cost: u64 = 0;
+    for (count, at) in (0..served).enumerate() {
+        let request = &pending[at];
+        let cost = request.item.cost();
+        if count >= max_take || (batch_cost + cost > room && count > 0) {
+            break;
+        }
+        if turn.owes(request) {
+            owed_left -= cost;
+        } else if batch_cost + cost + owed_left > turn.cost_left {
+            pending[at..served].sort_by_key(|r| !turn.owes(r));
+            break;
+        }
+        batch_cost += cost;
+    }
+    true
+}
+
 fn extract_batch<I: HasCost, T>(
     inner: &mut Inner<I, T>,
     flush_reason: FlushReason,
@@ -545,32 +1022,35 @@ fn extract_batch_up_to<I: HasCost, T>(
     max_items: usize,
 ) -> FormattedBatch<I, T> {
     debug_assert!(max_items > 0, "zero-item drains are rejected by the caller");
-    // A timeout must give the waiting request an extraction opportunity,
-    // even while cheaper arrivals keep the queue full. Select before sorting
-    // so tied arrival timestamps retain their pending order. Removing only
-    // the oldest aged request keeps the remaining cost buckets stable.
-    let oldest_aged = inner
-        .pending
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, request)| request.arrival_time)
-        .filter(|(_, request)| {
-            request.arrival_time.elapsed().as_secs_f64() * 1000.0 >= inner.config.max_batch_wait_ms
-        })
-        .map(|(index, _)| index);
-    let promoted = oldest_aged.map(|index| inner.pending.remove(index));
-
-    // Cost-sort pending before slicing — keeps each sub-batch's
-    // items close in length, minimising padding waste on the adapter
-    // side. Stable sort preserves FIFO order within equal-cost items
-    // (matches Python's stable `list.sort`).
-    inner.pending.sort_by_key(|r| r.item.cost());
-    if let Some(request) = promoted {
-        inner.pending.insert(0, request);
-    }
-
+    let pending_before = inner.pending.len();
+    let pending_alone = inner.pending.iter().filter(|r| r.item.runs_alone()).count();
     let max_cost = effective_max_cost(inner);
     let max_requests = inner.config.max_batch_requests;
+    let max_take = max_items.min(max_requests).max(1);
+    let alone_next = order_for_next_batch(inner, max_cost, max_take);
+
+    // A batch of a batchable turn takes only requests the turn serves, within
+    // what is left of the turn's budget.
+    let turn = if alone_next {
+        None
+    } else {
+        inner.batchable_turn
+    };
+    let max_cost = turn.map_or(max_cost, |t| max_cost.min(t.cost_left));
+
+    // The request whose turn has come leaves whole: bring its other pending
+    // items to the front, in their sorted order, and let the item cap stop
+    // the pack only after them. The cap is there to bound how many arrivals
+    // are merged, not to cut one caller's request into batches that run one
+    // after another. The cost cap below still cuts, and a request of more
+    // than `max_request_items` items is packed item by item as before. Only
+    // outside batchable turns with nothing flagged pending (point 6): a
+    // turn's batches keep the item cap and the order the turn set.
+    let head_request_len = if !alone_next && turn.is_none() && pending_alone == 0 {
+        bring_head_request_forward(inner)
+    } else {
+        0
+    };
 
     // Greedy pack. Always take at least one item so a single large
     // request (cost ≥ max_cost) doesn't starve.
@@ -578,6 +1058,16 @@ fn extract_batch_up_to<I: HasCost, T>(
     let mut take_count: usize = 0;
     for req in &inner.pending {
         if take_count >= max_items {
+            break;
+        }
+        let runs_alone = req.item.runs_alone();
+        // A runs-alone item never shares a batch: stop in front of one
+        // unless it is the first item taken.
+        if runs_alone && take_count > 0 {
+            break;
+        }
+        // Requests that arrived during a batchable turn wait for the next.
+        if turn.is_some_and(|t| !t.serves(req)) && take_count > 0 {
             break;
         }
         let c = req.item.cost();
@@ -591,14 +1081,38 @@ fn extract_batch_up_to<I: HasCost, T>(
         }
         batch_cost += c;
         take_count += 1;
-        if take_count >= max_requests {
+        if runs_alone || (take_count >= max_requests && take_count >= head_request_len) {
             break;
+        }
+    }
+    let alone = take_count > 0 && inner.pending[0].item.runs_alone();
+    if take_count > 0 {
+        // Whose turn is next when both lanes are pending.
+        inner.last_batch_alone = Some(alone);
+        if alone {
+            inner.batchable_turn = None;
+        } else if let Some(turn) = inner.batchable_turn.as_mut() {
+            let snapshot = *turn;
+            turn.took_unowed |= inner.pending[..take_count]
+                .iter()
+                .any(|r| !snapshot.owes(r));
+            turn.cost_left = turn.cost_left.saturating_sub(batch_cost);
         }
     }
 
     // Drain the taken prefix into parallel vecs.
     let drained: Vec<PendingRequest<I, T>> = inner.pending.drain(..take_count).collect();
     inner.total_cost -= batch_cost;
+    tracing::debug!(
+        flush_reason = flush_reason.as_label(),
+        lane = if alone { "alone" } else { "batched" },
+        batch_size = take_count,
+        total_cost = batch_cost,
+        pending = pending_before,
+        pending_alone,
+        remaining = inner.pending.len(),
+        "scheduler batch formed",
+    );
 
     let mut items = Vec::with_capacity(drained.len());
     let mut metadata = Vec::with_capacity(drained.len());
@@ -627,6 +1141,58 @@ fn extract_batch_up_to<I: HasCost, T>(
         total_cost: batch_cost,
         flush_reason,
     }
+}
+
+/// Number of requests among `taken` that have no item left in `pending`.
+/// An item without a request key is a request of its own.
+fn completed_requests<I: HasCost, T>(taken: &[I], pending: &[PendingRequest<I, T>]) -> usize {
+    let still_pending: std::collections::HashSet<&str> = pending
+        .iter()
+        .filter_map(|request| request.item.request_key())
+        .collect();
+    let mut completed: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut unkeyed = 0usize;
+    for item in taken {
+        match item.request_key() {
+            Some(key) if still_pending.contains(key) => {}
+            Some(key) => {
+                completed.insert(key);
+            }
+            None => unkeyed += 1,
+        }
+    }
+    completed.len() + unkeyed
+}
+
+/// Move the other pending items of the head item's request to the front,
+/// keeping their order, and return how many items that request has pending.
+/// Returns 0 (and moves nothing) when the head item has no request key, is
+/// its request's only pending item, or its request is larger than
+/// `max_request_items`.
+fn bring_head_request_forward<I: HasCost, T>(inner: &mut Inner<I, T>) -> usize {
+    let limit = inner.config.max_request_items;
+    if limit <= 1 || inner.pending.len() <= 1 {
+        return 0;
+    }
+    let Some(key) = inner.pending[0].item.request_key().map(str::to_owned) else {
+        return 0;
+    };
+    let same_request =
+        |request: &PendingRequest<I, T>| request.item.request_key() == Some(key.as_str());
+    let len = inner
+        .pending
+        .iter()
+        .filter(|request| same_request(request))
+        .count();
+    if len <= 1 || len > limit {
+        return 0;
+    }
+    let (mut head, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut inner.pending)
+        .into_iter()
+        .partition(same_request);
+    head.extend(rest);
+    inner.pending = head;
+    len
 }
 
 #[cfg(test)]
@@ -677,6 +1243,227 @@ mod tests {
         fn original_index(&self) -> usize {
             0
         }
+    }
+
+    /// An item that belongs to a request, as production items do.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct RequestItem {
+        request: &'static str,
+        cost: u64,
+        idx: usize,
+    }
+
+    impl HasCost for RequestItem {
+        fn cost(&self) -> u64 {
+            self.cost
+        }
+        fn original_index(&self) -> usize {
+            self.idx
+        }
+        fn request_key(&self) -> Option<&str> {
+            Some(self.request)
+        }
+    }
+
+    fn request_items(request: &'static str, count: usize, cost: u64) -> Vec<(RequestItem, usize)> {
+        (0..count)
+            .map(|idx| (RequestItem { request, cost, idx }, idx))
+            .collect()
+    }
+
+    fn batch_requests(batch: &FormattedBatch<RequestItem, usize>) -> Vec<(&'static str, usize)> {
+        let mut counts: Vec<(&'static str, usize)> = Vec::new();
+        for item in &batch.items {
+            match counts
+                .iter_mut()
+                .find(|(request, _)| *request == item.request)
+            {
+                Some((_, count)) => *count += 1,
+                None => counts.push((item.request, 1)),
+            }
+        }
+        counts
+    }
+
+    /// The default caps with whole requests of up to 64 items switched on.
+    fn whole_requests() -> BatchConfig {
+        BatchConfig {
+            max_request_items: 64,
+            ..BatchConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn by_default_the_item_cap_cuts_a_request_and_the_last_batch_completes_it() {
+        let former = BatchFormer::<RequestItem, usize>::new(BatchConfig::default());
+        former.submit_many(request_items("a", 32, 1)).await;
+
+        let (first, completes) = former.take(FlushReason::IdleBypass).await.unwrap();
+        assert_eq!((first.size(), completes), (12, 0));
+        assert_eq!(first.flush_reason, FlushReason::CountCap);
+        let (second, completes) = former.take(FlushReason::IdleBypass).await.unwrap();
+        assert_eq!((second.size(), completes), (12, 0));
+        // The remainder is no longer full, and it is the batch that answers
+        // the request.
+        assert_eq!(former.gate_view().await.full, None);
+        let (third, completes) = former.take(FlushReason::IdleBypass).await.unwrap();
+        assert_eq!((third.size(), completes), (8, 1));
+        assert_eq!(third.flush_reason, FlushReason::IdleBypass);
+        assert_eq!(former.fcfs_head_ns(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_whole_request_larger_than_the_item_cap_leaves_in_one_batch() {
+        // 12 items merged across requests, a request of up to 64 items
+        // whole: 32 states in one request leave together, not as 12, 12
+        // and 8.
+        let former = BatchFormer::<RequestItem, usize>::new(whole_requests());
+        former.submit_many(request_items("a", 32, 1)).await;
+
+        let view = former.gate_view().await;
+        assert_eq!(view.full, Some(FlushReason::CountCap));
+        let (batch, completes) = former.take(FlushReason::IdleBypass).await.unwrap();
+        assert_eq!(batch.size(), 32);
+        assert_eq!(batch.request_count(), 1);
+        assert_eq!(completes, 1);
+        assert_eq!(batch.flush_reason, FlushReason::CountCap);
+        let indices: Vec<usize> = batch.items.iter().map(HasCost::original_index).collect();
+        assert_eq!(
+            indices,
+            (0..32).collect::<Vec<_>>(),
+            "equal-cost items keep their order"
+        );
+        assert_eq!(former.pending_count().await, 0);
+        assert_eq!(former.fcfs_head_ns(), 0);
+    }
+
+    #[tokio::test]
+    async fn two_whole_requests_leave_as_two_batches() {
+        let former = BatchFormer::<RequestItem, usize>::new(whole_requests());
+        former.submit_many(request_items("a", 32, 1)).await;
+        former.submit_many(request_items("b", 32, 1)).await;
+
+        let first = former.try_drain().await.unwrap();
+        assert_eq!(batch_requests(&first), vec![("a", 32)]);
+        let second = former.try_drain().await.unwrap();
+        assert_eq!(batch_requests(&second), vec![("b", 32)]);
+        assert_eq!(former.pending_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn the_item_cap_still_bounds_how_many_whole_requests_are_merged() {
+        // Three requests of 8 items under an item cap of 12: the head
+        // request whole, then the pack fills to the cap as it always did.
+        let former = BatchFormer::<RequestItem, usize>::new(whole_requests());
+        for request in ["a", "b", "c"] {
+            former.submit_many(request_items(request, 8, 1)).await;
+        }
+        let (first, completes) = former.take(FlushReason::Drain).await.unwrap();
+        assert_eq!(batch_requests(&first), vec![("a", 8), ("b", 4)]);
+        assert_eq!(completes, 1, "b still has items pending");
+        let (second, completes) = former.take(FlushReason::Drain).await.unwrap();
+        assert_eq!(batch_requests(&second), vec![("b", 4), ("c", 8)]);
+        assert_eq!(completes, 2);
+    }
+
+    #[tokio::test]
+    async fn the_cost_cap_still_cuts_a_whole_request() {
+        let former = BatchFormer::<RequestItem, usize>::new(BatchConfig {
+            max_batch_cost: 100,
+            ..whole_requests()
+        });
+        former.submit_many(request_items("a", 32, 10)).await;
+        let sizes: Vec<usize> = [
+            former.try_drain().await.unwrap(),
+            former.try_drain().await.unwrap(),
+            former.try_drain().await.unwrap(),
+            former.try_drain().await.unwrap(),
+        ]
+        .iter()
+        .map(FormattedBatch::size)
+        .collect();
+        assert_eq!(sizes, vec![10, 10, 10, 2]);
+    }
+
+    #[tokio::test]
+    async fn a_request_over_the_whole_request_limit_is_cut_by_the_item_cap() {
+        let former = BatchFormer::<RequestItem, usize>::new(whole_requests());
+        former.submit_many(request_items("a", 65, 1)).await;
+        assert_eq!(former.try_drain().await.unwrap().size(), 12);
+    }
+
+    #[tokio::test]
+    async fn the_head_request_is_the_one_whose_turn_it_is() {
+        // A cheap single-item request sorts ahead of a costlier large one,
+        // and takes its turn first; the large request then leaves whole.
+        let former = BatchFormer::<RequestItem, usize>::new(BatchConfig {
+            max_batch_requests: 4,
+            ..whole_requests()
+        });
+        former.submit_many(request_items("large", 6, 5)).await;
+        former.submit_many(request_items("small", 1, 1)).await;
+        let first = former.try_drain().await.unwrap();
+        assert_eq!(batch_requests(&first), vec![("small", 1), ("large", 3)]);
+        let second = former.try_drain().await.unwrap();
+        assert_eq!(batch_requests(&second), vec![("large", 3)]);
+    }
+
+    #[tokio::test]
+    async fn pending_work_with_no_room_for_another_like_its_largest_is_full() {
+        let config = BatchConfig {
+            max_batch_cost: 100,
+            max_batch_wait_ms: 1_000_000.0,
+            coalesce_ms: 1_000_000.0,
+            coalesce_ratio: 1.0,
+            ..BatchConfig::default()
+        };
+        // One item that could share the batch with another like it: not
+        // full, the lane may hold it for company.
+        let former = BatchFormer::<StubItem, usize>::new(config);
+        former.submit(StubItem::with_idx(40, 0), 0).await;
+        assert_eq!(former.gate_view().await.full, None);
+        // A second one leaves no room for a third.
+        former.submit(StubItem::with_idx(40, 1), 1).await;
+        assert_eq!(former.gate_view().await.full, Some(FlushReason::CostCap));
+        let (batch, _) = former.take(FlushReason::IdleBypass).await.unwrap();
+        assert_eq!(batch.size(), 2);
+        assert_eq!(batch.flush_reason, FlushReason::CostCap);
+
+        // One item under the cap that another like it could not join (a
+        // 20-candidate rerank request under the default cap): full alone.
+        let former = BatchFormer::<StubItem, usize>::new(config);
+        former.submit(StubItem::with_idx(60, 0), 0).await;
+        assert_eq!(former.gate_view().await.full, Some(FlushReason::CostCap));
+        // The classic triggers are unchanged: nothing has fired for it.
+        assert_eq!(former.gate_view().await.classic, None);
+        assert!(former.try_get_batch().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn take_sends_what_is_pending_without_a_flush_trigger() {
+        let former = BatchFormer::<StubItem, usize>::new(BatchConfig {
+            max_batch_wait_ms: 1_000_000.0,
+            coalesce_ms: 1_000_000.0,
+            coalesce_ratio: 1.0,
+            ..BatchConfig::default()
+        });
+        assert!(former.take(FlushReason::IdleBypass).await.is_none());
+        former.submit(StubItem::with_idx(3, 0), 0).await;
+        former.submit(StubItem::with_idx(2, 1), 1).await;
+        let view = former.gate_view().await;
+        assert_eq!(view.full, None);
+        assert_eq!(view.classic, None);
+        assert!(view.classic_wait.is_some());
+
+        let (batch, completes) = former.take(FlushReason::Coalesce).await.unwrap();
+        assert_eq!(batch.metadata, vec![1, 0], "still cost-sorted");
+        assert_eq!(batch.flush_reason, FlushReason::Coalesce);
+        assert_eq!(batch.request_count(), 2);
+        assert_eq!(
+            completes, 2,
+            "an item without a key is a request of its own"
+        );
+        assert_eq!(former.fcfs_head_ns(), 0);
     }
 
     // Arrival age is a std::Instant value, so these tests backdate the real
@@ -927,6 +1714,7 @@ mod tests {
             max_batch_wait_ms: 10_000.0, // big so only cost triggers
             coalesce_ms: 10_000.0,
             coalesce_ratio: 1.0,
+            ..BatchConfig::default()
         };
         let b = BatchFormer::<StubItem, u32>::new(cfg);
         b.submit(StubItem::new(15), 1).await;
@@ -946,6 +1734,7 @@ mod tests {
             max_batch_wait_ms: 10_000.0,
             coalesce_ms: 10_000.0,
             coalesce_ratio: 1.0,
+            ..BatchConfig::default()
         };
         let b = BatchFormer::<HardCapItem, u32>::new(cfg);
         b.submit(
@@ -980,6 +1769,7 @@ mod tests {
             max_batch_wait_ms: 10_000.0,
             coalesce_ms: 10_000.0,
             coalesce_ratio: 1.0,
+            ..BatchConfig::default()
         };
         let b = BatchFormer::<StubItem, u32>::new(cfg);
         b.submit(StubItem::new(1), 1).await;
@@ -1103,6 +1893,7 @@ mod tests {
             max_batch_wait_ms: 20.0,
             coalesce_ms: 1_000.0,
             coalesce_ratio: 1.0, // coalesce ties max-wait; timeout wins by priority
+            ..BatchConfig::default()
         };
         let b = BatchFormer::<StubItem, u32>::new(cfg);
         b.submit(StubItem::new(1), 1).await;
@@ -1145,6 +1936,7 @@ mod tests {
             max_batch_wait_ms: 1_000_000.0,
             coalesce_ms: 1_000_000.0,
             coalesce_ratio: 1.0,
+            ..BatchConfig::default()
         };
         let b = std::sync::Arc::new(BatchFormer::<StubItem, u32>::new(original));
         b.submit(StubItem::new(5), 1).await;
@@ -1198,6 +1990,9 @@ mod tests {
             total_cost: 1,
             first_request_time: Some(now - Duration::from_millis(5)),
             last_submit_time: Some(now),
+            last_batch_alone: None,
+            batchable_turn: None,
+            last_turn_cutoff: None,
             config: cfg,
         };
         let t = wait_timeout(&inner).expect("pending → Some");
@@ -1223,6 +2018,9 @@ mod tests {
             total_cost: 1,
             first_request_time: Some(now),
             last_submit_time: Some(now),
+            last_batch_alone: None,
+            batchable_turn: None,
+            last_turn_cutoff: None,
             config: cfg,
         };
         assert_eq!(wait_timeout(&inner), Some(Duration::MAX));
@@ -1236,6 +2034,9 @@ mod tests {
             total_cost: 0,
             first_request_time: None,
             last_submit_time: None,
+            last_batch_alone: None,
+            batchable_turn: None,
+            last_turn_cutoff: None,
             config: cfg,
         };
         assert!(wait_timeout(&inner).is_none());
@@ -1251,5 +2052,1309 @@ mod tests {
             ..BatchConfig::default()
         };
         assert!((cfg.effective_coalesce_ms() - 2.0).abs() < f64::EPSILON);
+    }
+
+    // ---- Runs-alone lane (long-form audio, #585) ----
+
+    /// Audio stub: cost is duration in ms and the hard cap is the audio batch
+    /// cap, as `SchedulerItem` sets them for prepared audio. `alone` marks
+    /// long-form audio.
+    #[derive(Debug, Clone, Copy)]
+    struct LaneItem {
+        cost: u64,
+        alone: bool,
+        hard_cap: Option<u64>,
+        request: Option<&'static str>,
+    }
+
+    impl HasCost for LaneItem {
+        fn cost(&self) -> u64 {
+            self.cost
+        }
+        fn hard_batch_cost_cap(&self) -> Option<u64> {
+            self.hard_cap
+        }
+        fn runs_alone(&self) -> bool {
+            self.alone
+        }
+        fn original_index(&self) -> usize {
+            0
+        }
+        fn request_key(&self) -> Option<&str> {
+            self.request
+        }
+    }
+
+    fn clip_ms(cost: u64) -> LaneItem {
+        LaneItem {
+            cost,
+            alone: false,
+            hard_cap: Some(crate::audio_prep::MAX_AUDIO_BATCH_DURATION_MS),
+            request: None,
+        }
+    }
+
+    fn long_form_ms(cost: u64) -> LaneItem {
+        LaneItem {
+            alone: true,
+            ..clip_ms(cost)
+        }
+    }
+
+    fn clip(seconds: u64) -> LaneItem {
+        clip_ms(seconds * 1_000)
+    }
+
+    fn long_form(seconds: u64) -> LaneItem {
+        long_form_ms(seconds * 1_000)
+    }
+
+    /// A batcher queue driven with explicit arrival times, in ms after `epoch`.
+    struct Lanes {
+        inner: Inner<LaneItem, String>,
+        epoch: Instant,
+    }
+
+    impl Lanes {
+        fn new(max_batch_cost: u64) -> Self {
+            Self {
+                inner: Inner {
+                    pending: Vec::new(),
+                    total_cost: 0,
+                    first_request_time: None,
+                    last_submit_time: None,
+                    last_batch_alone: None,
+                    batchable_turn: None,
+                    last_turn_cutoff: None,
+                    config: BatchConfig {
+                        max_batch_cost,
+                        // Arrival times here are simulated, while point 3's
+                        // aging reads the real clock: keep it out of reach
+                        // unless a test opts in (see `Lanes::aged`).
+                        max_batch_wait_ms: f64::INFINITY,
+                        ..BatchConfig::default()
+                    },
+                },
+                epoch: Instant::now(),
+            }
+        }
+
+        /// Like [`Lanes::new`], but every request counts as having waited
+        /// `max_batch_wait_ms`, so point 3's aged promotion applies wherever
+        /// it may.
+        fn aged(max_batch_cost: u64) -> Self {
+            let mut lanes = Self::new(max_batch_cost);
+            lanes.inner.config.max_batch_wait_ms = 0.0;
+            lanes
+        }
+
+        fn with_aging(max_batch_cost: u64, aged: bool) -> Self {
+            if aged {
+                Self::aged(max_batch_cost)
+            } else {
+                Self::new(max_batch_cost)
+            }
+        }
+
+        /// Queue `item` as if it arrived `at_ms` after the epoch.
+        fn arrive(&mut self, item: LaneItem, name: &str, at_ms: u64) {
+            append_item(&mut self.inner, item, name.to_string());
+            let request = self.inner.pending.last_mut().expect("just appended");
+            request.arrival_time = self.epoch + Duration::from_millis(at_ms);
+        }
+
+        fn take_up_to(&mut self, max_items: usize) -> FormattedBatch<LaneItem, String> {
+            extract_batch_up_to(&mut self.inner, FlushReason::Drain, max_items)
+        }
+
+        fn take(&mut self) -> Vec<String> {
+            self.take_up_to(usize::MAX).metadata
+        }
+
+        fn pending_names(&self) -> Vec<String> {
+            self.inner
+                .pending
+                .iter()
+                .map(|request| request.metadata.clone())
+                .collect()
+        }
+    }
+
+    /// SplitMix64: reproducible test data without a `rand` dependency.
+    struct TestRng(u64);
+
+    impl TestRng {
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+
+        /// Uniform in `low..=high`.
+        fn range(&mut self, low: u64, high: u64) -> u64 {
+            low + self.next_u64() % (high - low + 1)
+        }
+
+        fn chance(&mut self, percent: u64) -> bool {
+            self.range(0, 99) < percent
+        }
+
+        fn pick<T: Copy>(&mut self, choices: &[T]) -> T {
+            choices[self.range(0, choices.len() as u64 - 1) as usize]
+        }
+    }
+
+    /// Greedy packing exactly as `extract_batch_up_to` does without the
+    /// runs-alone lane and with whole requests off (points 3 and 6): with
+    /// `aged`, every request has waited out the batch window, so the oldest
+    /// goes first and the rest by cost; otherwise all by cost. `pending`
+    /// holds `(cost, hard_cap, name, arrival_ms)` in queue order and is
+    /// updated in place, as the batcher updates its own queue.
+    fn previous_packing(
+        pending: &mut Vec<(u64, Option<u64>, String, u64)>,
+        config: &BatchConfig,
+        max_items: usize,
+        aged: bool,
+    ) -> (Vec<String>, u64) {
+        let oldest = aged
+            .then(|| {
+                pending
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, (_, _, _, arrival))| *arrival)
+                    .map(|(index, _)| index)
+            })
+            .flatten();
+        let promoted = oldest.map(|index| pending.remove(index));
+        pending.sort_by_key(|(cost, _, _, _)| *cost);
+        if let Some(request) = promoted {
+            pending.insert(0, request);
+        }
+        let max_cost = pending
+            .iter()
+            .filter_map(|(_, cap, _, _)| *cap)
+            .fold(config.max_batch_cost, u64::min);
+        let mut batch_cost = 0;
+        let mut take_count = 0;
+        for (cost, _, _, _) in pending.iter() {
+            if take_count >= max_items {
+                break;
+            }
+            if batch_cost + cost > max_cost && take_count > 0 {
+                break;
+            }
+            batch_cost += cost;
+            take_count += 1;
+            if take_count >= config.max_batch_requests {
+                break;
+            }
+        }
+        let taken = pending.drain(..take_count).map(|(_, _, name, _)| name);
+        (taken.collect(), batch_cost)
+    }
+
+    #[test]
+    fn unflagged_batches_match_previous_cost_sorted_packing() {
+        for (seed, aged) in (0..20).flat_map(|seed| [(seed, false), (seed, true)]) {
+            let mut rng = TestRng(seed);
+            let mut lanes = Lanes::with_aging(rng.range(1, 4_000), aged);
+            lanes.inner.config.max_batch_requests = rng.range(1, 8) as usize;
+            let config = lanes.inner.config;
+            let mut reference: Vec<(u64, Option<u64>, String, u64)> = Vec::new();
+            let mut now_ms = 0;
+            let mut next_id = 0;
+
+            for _ in 0..60 {
+                for _ in 0..rng.range(0, 5) {
+                    now_ms += rng.range(0, 3);
+                    let cost = rng.range(1, 1_500);
+                    let hard_cap = rng.chance(20).then(|| rng.range(500, 4_000));
+                    let name = format!("item-{next_id}");
+                    next_id += 1;
+                    let item = LaneItem {
+                        cost,
+                        alone: false,
+                        hard_cap,
+                        request: None,
+                    };
+                    lanes.arrive(item, &name, now_ms);
+                    reference.push((cost, hard_cap, name, now_ms));
+                }
+                if reference.is_empty() {
+                    continue;
+                }
+                let max_items = rng.pick(&[usize::MAX, usize::MAX, 1, 2, 5]);
+
+                let batch = lanes.take_up_to(max_items);
+
+                let (expected, expected_cost) =
+                    previous_packing(&mut reference, &config, max_items, aged);
+                assert_eq!(batch.metadata, expected, "seed {seed}, aged {aged}");
+                assert_eq!(batch.total_cost, expected_cost, "seed {seed}, aged {aged}");
+                let remaining: Vec<&String> =
+                    reference.iter().map(|(_, _, name, _)| name).collect();
+                assert_eq!(
+                    lanes.pending_names().iter().collect::<Vec<_>>(),
+                    remaining,
+                    "seed {seed}, aged {aged}"
+                );
+                let remaining_cost: u64 = reference.iter().map(|(cost, _, _, _)| cost).sum();
+                assert_eq!(
+                    lanes.inner.total_cost, remaining_cost,
+                    "seed {seed}, aged {aged}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn long_form_runs_alone_after_clips_that_arrived_around_it() {
+        // Clips are not held in a long recording's batch (head-of-line wait).
+        let mut lanes = Lanes::new(720_000);
+        lanes.arrive(clip(5), "clip-5s", 0);
+        lanes.arrive(long_form(240), "long-240s", 1_000);
+        lanes.arrive(clip(8), "clip-8s", 2_000);
+
+        assert_eq!(lanes.take(), ["clip-5s", "clip-8s"]);
+        assert_eq!(lanes.take(), ["long-240s"]);
+        assert!(lanes.inner.pending.is_empty());
+        assert_eq!(lanes.inner.total_cost, 0);
+    }
+
+    #[test]
+    fn long_form_items_run_in_arrival_order() {
+        // An older long recording is not starved by a newer, shorter one.
+        let mut lanes = Lanes::new(720_000);
+        lanes.arrive(long_form(250), "long-250s", 0);
+        lanes.arrive(long_form(190), "long-190s", 1_000);
+
+        assert_eq!(lanes.take(), ["long-250s"]);
+        assert_eq!(lanes.take(), ["long-190s"]);
+    }
+
+    #[test]
+    fn first_batch_comes_from_the_lane_of_the_oldest_request() {
+        for (long_arrival_ms, order) in [(0, ["long", "clip"]), (2_000, ["clip", "long"])] {
+            let mut lanes = Lanes::new(720_000);
+            lanes.arrive(clip(5), "clip", 1_000);
+            lanes.arrive(long_form(240), "long", long_arrival_ms);
+
+            let first = lanes.take();
+            let second = lanes.take();
+            assert_eq!([first, second].concat(), order);
+        }
+    }
+
+    #[test]
+    fn lanes_take_turns_while_both_are_pending() {
+        // Two long recordings and clips that keep arriving: clips, long, clips, long.
+        let mut lanes = Lanes::new(720_000);
+        lanes.arrive(clip(4), "clip-a", 0);
+        lanes.arrive(clip(6), "clip-b", 1_000);
+        lanes.arrive(long_form(240), "long-1", 2_000);
+        lanes.arrive(long_form(200), "long-2", 3_000);
+
+        let mut served = Vec::new();
+        for second in 4..9 {
+            served.push(lanes.take());
+            // One clip lands while each batch runs.
+            lanes.arrive(clip(5), &format!("clip@{second}"), second * 1_000);
+        }
+
+        assert_eq!(
+            served,
+            [
+                vec!["clip-a", "clip-b"],
+                vec!["long-1"],
+                vec!["clip@4", "clip@5"],
+                vec!["long-2"],
+                vec!["clip@6", "clip@7"],
+            ]
+        );
+        assert_eq!(lanes.pending_names(), ["clip@8"]);
+    }
+
+    /// What a closed-loop run served: per client, how many requests were
+    /// served and the most clip turns one of them waited. A request waits one
+    /// turn when the first clip turn that begins after it arrives serves it.
+    struct ClosedLoopTurns {
+        served: Vec<usize>,
+        worst_wait_turns: Vec<usize>,
+        clip_turns: usize,
+    }
+
+    /// Extracts `batches` batches from `lanes`, whose pending requests are
+    /// named by client index; every served client resubmits its item at once.
+    /// Clip turns are counted as runs of clip batches, so this needs a long
+    /// recording pending throughout: then every clip turn is followed by one.
+    fn closed_loop_turns(
+        lanes: &mut Lanes,
+        clients: &[LaneItem],
+        batches: usize,
+        now_ms: &mut u64,
+    ) -> ClosedLoopTurns {
+        let mut run = ClosedLoopTurns {
+            served: vec![0; clients.len()],
+            worst_wait_turns: vec![0; clients.len()],
+            clip_turns: 0,
+        };
+        // Clip turns begun before each pending client's request arrived.
+        let mut turns_at_submit = vec![0; clients.len()];
+        let mut last_alone = None;
+        for _ in 0..batches {
+            assert!(
+                lanes.inner.pending.iter().any(|r| r.item.alone),
+                "a long recording stays pending"
+            );
+            let batch = lanes.take_up_to(usize::MAX);
+            let alone = batch.items[0].alone;
+            if !alone && last_alone != Some(false) {
+                run.clip_turns += 1;
+            }
+            last_alone = Some(alone);
+            *now_ms += 1;
+            for name in &batch.metadata {
+                let client: usize = name.parse().expect("client index");
+                run.served[client] += 1;
+                if !alone {
+                    let waited = run.clip_turns - turns_at_submit[client];
+                    run.worst_wait_turns[client] = run.worst_wait_turns[client].max(waited);
+                }
+                turns_at_submit[client] = run.clip_turns;
+                lanes.arrive(clients[client], name, *now_ms);
+            }
+        }
+        // Requests still pending have waited at least the turns begun since.
+        for request in &lanes.inner.pending {
+            let client: usize = request.metadata.parse().expect("client index");
+            let waited = run.clip_turns - turns_at_submit[client];
+            run.worst_wait_turns[client] = run.worst_wait_turns[client].max(waited);
+        }
+        run
+    }
+
+    #[test]
+    fn aged_recording_waits_while_a_clip_turn_is_under_way() {
+        // Every request has waited out the batch window, so outside clip
+        // turns the oldest would go first (point 3). A clip turn still serves
+        // the clips that waited behind the last recording before the next
+        // recording runs, however long that recording has waited.
+        let mut lanes = Lanes::aged(720_000);
+        lanes.arrive(long_form(60), "first-recording", 0);
+        lanes.arrive(long_form(60), "second-recording", 1);
+        lanes.arrive(clip(10), "clip", 2);
+
+        assert_eq!(lanes.take(), ["first-recording"]);
+        assert_eq!(lanes.take(), ["clip"]);
+        assert_eq!(lanes.take(), ["second-recording"]);
+    }
+
+    #[test]
+    fn aged_promotion_resumes_once_the_turn_after_the_last_recording_ends() {
+        // The clip turn after the last recording serves its clips cheapest
+        // first, like every clip turn, and leaves the 20 s clip over. Once
+        // that turn ends and nothing flagged is pending, packing is point 3's
+        // again: the 20 s clip, now the oldest request, goes before a cheaper
+        // clip that arrived since.
+        let mut lanes = Lanes::aged(10_000);
+        lanes.arrive(long_form(60), "recording", 0);
+        lanes.arrive(clip(20), "long-clip", 1);
+        lanes.arrive(clip(5), "short-clip-1", 2);
+        lanes.arrive(clip(5), "short-clip-2", 3);
+
+        assert_eq!(lanes.take(), ["recording"]);
+        assert_eq!(lanes.take(), ["short-clip-1", "short-clip-2"]);
+        lanes.arrive(clip(1), "late-clip", 4);
+        assert_eq!(lanes.take(), ["long-clip"]);
+        assert_eq!(lanes.take(), ["late-clip"]);
+
+        // Without aging, cost order alone would keep passing the 20 s clip
+        // over.
+        let mut lanes = Lanes::new(10_000);
+        lanes.arrive(clip(20), "long-clip", 1);
+        lanes.arrive(clip(1), "late-clip", 4);
+        assert_eq!(lanes.take(), ["late-clip"]);
+    }
+
+    #[test]
+    fn whole_requests_keep_the_item_cap_inside_a_clip_turn() {
+        // A request of four clips arrives behind a recording, with whole
+        // requests on and an item cap of 2. The clip turn after the
+        // recording keeps the item cap (point 6). With nothing flagged
+        // pending and no turn under way, the same request leaves whole.
+        let request = |seconds| LaneItem {
+            request: Some("four-clips"),
+            ..clip(seconds)
+        };
+        let mut lanes = Lanes::new(720_000);
+        lanes.inner.config.max_batch_requests = 2;
+        lanes.inner.config.max_request_items = 64;
+        lanes.arrive(long_form(60), "recording", 0);
+        for (name, seconds) in [("a", 4), ("b", 3), ("c", 2), ("d", 1)] {
+            lanes.arrive(request(seconds), name, 1);
+        }
+        assert_eq!(lanes.take(), ["recording"]);
+        assert_eq!(lanes.take(), ["d", "c"]);
+        assert_eq!(lanes.take(), ["b", "a"]);
+
+        let mut lanes = Lanes::new(720_000);
+        lanes.inner.config.max_batch_requests = 2;
+        lanes.inner.config.max_request_items = 64;
+        for (name, seconds) in [("a", 4), ("b", 3), ("c", 2), ("d", 1)] {
+            lanes.arrive(request(seconds), name, 1);
+        }
+        assert_eq!(lanes.take(), ["d", "c", "b", "a"]);
+    }
+
+    #[test]
+    fn clip_left_over_by_a_turn_is_served_by_the_next_turn() {
+        // At a speech model's adaptive floor (180000 ms), 18 clips of 10 s
+        // fill a clip turn's cost cap, and their clients resubmit at once. The
+        // 30 s clip, costliest, is left over by its first turn. The next turn
+        // owes it, so the 10 s clips that arrived since cannot pass it over
+        // again; that turn's budget grows by its 30 s, so it still serves all
+        // 18 of them. A long recording still runs after every clip turn.
+        let mut lanes = Lanes::new(180_000);
+        let mut clients = vec![long_form_ms(240_000), clip_ms(30_000)];
+        clients.extend([clip_ms(10_000); 18]);
+        let mut now_ms = 0;
+        for (client, item) in clients.iter().enumerate() {
+            lanes.arrive(*item, &client.to_string(), now_ms);
+            now_ms += 1;
+        }
+
+        let run = closed_loop_turns(&mut lanes, &clients, 300, &mut now_ms);
+
+        // One recording, then 100 rounds of a clip turn of two batches and a
+        // recording, the last round cut short by the 300-batch horizon.
+        assert_eq!(run.clip_turns, 100);
+        assert_eq!(run.served[0], 100, "a recording runs after every clip turn");
+        assert_eq!(run.worst_wait_turns[0], 1);
+        // The 30 s clip's client resubmits during a turn, so each request has
+        // a first turn that leaves it over and is served by the next.
+        assert_eq!(run.served[1], 50, "the 30 s clip is served every 2 turns");
+        assert_eq!(run.worst_wait_turns[1], 2);
+        for client in 2..clients.len() {
+            assert_eq!(run.served[client], 100, "10 s clip client {client}");
+            assert_eq!(run.worst_wait_turns[client], 1, "10 s clip client {client}");
+        }
+    }
+
+    #[test]
+    fn turn_batches_stay_in_cost_order_and_full_around_owed_clips() {
+        // Two costly clips are left over by a turn. The next turn owes the
+        // older one (L1); the other (L2) does not fit the cost cap with it,
+        // so it is served cheapest first like the newer 5 s clips. Its first
+        // batch takes the 5 s clips and L2, in cost order, and stops only at
+        // the cost cap; L1 follows in the same turn, before the next
+        // recording. Arrival-order leaders would instead stop the first batch
+        // at L2 and take three batches.
+        let mut lanes = Lanes::new(180_000);
+        lanes.arrive(long_form(240), "r0", 0);
+        lanes.arrive(clip_ms(100_000), "L1", 1);
+        lanes.arrive(clip_ms(90_000), "L2", 2);
+        lanes.arrive(long_form(240), "r1", 3);
+        lanes.arrive(long_form(240), "r2", 4);
+        for i in 0..9 {
+            lanes.arrive(clip(20), &format!("m{i}"), 5 + i);
+        }
+        assert_eq!(lanes.take(), ["r0"]);
+        let turn_1: Vec<String> = (0..9).map(|i| format!("m{i}")).collect();
+        assert_eq!(lanes.take(), turn_1, "20 s clips fill the cost cap");
+        assert_eq!(lanes.take(), ["r1"]);
+        for i in 0..10 {
+            lanes.arrive(clip(5), &format!("s{i}"), 100 + i);
+        }
+
+        let mut first: Vec<String> = (0..10).map(|i| format!("s{i}")).collect();
+        first.push("L2".into());
+        assert_eq!(lanes.take(), first);
+        assert_eq!(lanes.take(), ["L1"]);
+        assert_eq!(lanes.take(), ["r2"]);
+        assert!(lanes.inner.pending.is_empty());
+    }
+
+    #[test]
+    fn oversize_left_over_clip_runs_alone_beside_the_turn() {
+        // At 16384 ms (the cost cap for a backend that reports no budget) a
+        // 20 s clip runs alone. Left over, it is owed by the next turn, whose
+        // budget grows by its cost, so the 2 s clips still get the turn's
+        // whole cost cap instead of losing the turn to it.
+        let mut lanes = Lanes::new(16_384);
+        lanes.arrive(long_form(240), "r0", 0);
+        lanes.arrive(clip(20), "big", 1);
+        lanes.arrive(long_form(240), "r1", 2);
+        for i in 0..8 {
+            lanes.arrive(clip(2), &format!("a{i}"), 3 + i);
+        }
+        assert_eq!(lanes.take(), ["r0"]);
+        let turn_1: Vec<String> = (0..8).map(|i| format!("a{i}")).collect();
+        assert_eq!(lanes.take(), turn_1, "8 clips of 2 s fit 16384 ms");
+        assert_eq!(lanes.take(), ["r1"]);
+        lanes.arrive(long_form(240), "r2", 50);
+        for i in 0..8 {
+            lanes.arrive(clip(2), &format!("b{i}"), 100 + i);
+        }
+
+        let turn_2: Vec<String> = (0..8).map(|i| format!("b{i}")).collect();
+        assert_eq!(lanes.take(), turn_2, "the cheaper clips keep the cost cap");
+        assert_eq!(lanes.take(), ["big"], "the owed clip runs alone");
+        assert_eq!(lanes.take(), ["r2"]);
+    }
+
+    #[test]
+    fn clip_left_over_before_the_last_recording_is_owed_after_it() {
+        // The batch after the last recording opens a turn although nothing
+        // flagged is pending any more, so a clip left over before it is still
+        // owed: cheaper clips that arrive during that turn wait for the next
+        // one, while plain cost-sorted packing (point 3) would take them
+        // ahead of it.
+        let mut lanes = Lanes::new(180_000);
+        lanes.arrive(clip(30), "x", 0);
+        for i in 0..18 {
+            lanes.arrive(clip(10), &format!("c{i}"), 1 + i);
+        }
+        lanes.arrive(long_form(240), "r", 100);
+        assert_eq!(lanes.take().len(), 12);
+        assert_eq!(lanes.take().len(), 6);
+        assert_eq!(lanes.pending_names(), ["x", "r"]);
+        assert_eq!(lanes.take(), ["r"]);
+
+        for i in 0..12 {
+            lanes.arrive(clip(1), &format!("n{i}"), 200 + i);
+        }
+        let n: Vec<String> = (0..12).map(|i| format!("n{i}")).collect();
+        assert_eq!(lanes.take(), n, "the request count cap splits the turn");
+        for i in 0..12 {
+            lanes.arrive(clip(1), &format!("k{i}"), 300 + i);
+        }
+        assert_eq!(lanes.take(), ["x"], "the turn still owes x");
+        let k: Vec<String> = (0..12).map(|i| format!("k{i}")).collect();
+        assert_eq!(lanes.take(), k);
+    }
+
+    #[test]
+    fn long_form_amid_steady_clips_waits_for_one_clip_batch() {
+        // Clip traffic that never lets up delays a flagged recording just
+        // over 30 s by one clip batch, not for as long as clips keep coming.
+        let mut lanes = Lanes::new(720_000);
+        lanes.arrive(long_form(240), "long-240s", 0);
+        assert_eq!(lanes.take(), ["long-240s"]);
+
+        // A clip and a 31 s recording land while long-240s runs, and one more
+        // clip lands while each later batch runs.
+        lanes.arrive(clip(4), "clip@1", 1_000);
+        lanes.arrive(long_form(31), "long-31s", 2_000);
+        let mut served = Vec::new();
+        for second in 3..7 {
+            lanes.arrive(clip(4), &format!("clip@{second}"), second * 1_000);
+            served.push(lanes.take());
+        }
+
+        assert_eq!(
+            served,
+            [
+                vec!["clip@1", "clip@3"],
+                vec!["long-31s"],
+                vec!["clip@4", "clip@5"],
+                vec!["clip@6"],
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn try_drain_takes_turns_and_keeps_counts_consistent() {
+        let b = BatchFormer::<LaneItem, &str>::new(BatchConfig {
+            max_batch_cost: 720_000,
+            ..BatchConfig::default()
+        });
+        b.submit_many(vec![
+            (clip(5), "clip-5s"),
+            (long_form(240), "long-240s"),
+            (clip(8), "clip-8s"),
+            (long_form(200), "long-200s"),
+            (clip(3), "clip-3s"),
+        ])
+        .await;
+
+        // A drain budget of one item cuts the first clip turn short; the
+        // turn goes on with the clips it began with before long-240s runs,
+        // while a clip that lands meanwhile waits for the next turn.
+        let expected: [(usize, &[&str], usize, u64); 5] = [
+            (1, &["clip-3s"], 4, 453_000),
+            (4, &["clip-5s", "clip-8s"], 3, 441_000),
+            (2, &["long-240s"], 2, 201_000),
+            (usize::MAX, &["clip-1s"], 1, 200_000),
+            (usize::MAX, &["long-200s"], 0, 0),
+        ];
+        for (step, (max_items, names, pending_count, pending_cost)) in
+            expected.into_iter().enumerate()
+        {
+            if step == 1 {
+                tsleep(TDuration::from_millis(2)).await;
+                b.submit(clip(1), "clip-1s").await;
+            }
+            let batch = b.try_drain_up_to(max_items).await.expect("work is pending");
+            assert_eq!(batch.metadata, names, "step {step}");
+            assert_eq!(
+                batch.total_cost,
+                batch.items.iter().map(|item| item.cost).sum::<u64>()
+            );
+            assert_eq!(b.pending_count().await, pending_count, "step {step}");
+            assert_eq!(b.pending_cost().await, pending_cost, "step {step}");
+        }
+        assert!(b.try_drain().await.is_none());
+        assert!(b.first_request_time().await.is_none());
+        assert_eq!(b.fcfs_head_ns(), 0);
+    }
+
+    #[tokio::test]
+    async fn runs_alone_batch_keeps_flush_reason_and_reanchors_timers() {
+        let b = BatchFormer::<LaneItem, &str>::new(BatchConfig {
+            max_batch_cost: 16_384,
+            max_batch_wait_ms: 10_000.0,
+            coalesce_ms: 10_000.0,
+            coalesce_ratio: 1.0,
+            ..BatchConfig::default()
+        });
+        b.submit(long_form(240), "long").await;
+        // Keep the two arrivals distinct so the long recording is the oldest.
+        tsleep(TDuration::from_millis(2)).await;
+        b.submit(clip(5), "clip").await;
+        let clip_arrival = b.inner.lock().await.pending[1].arrival_time;
+
+        // 245 s pending reaches the cost cap; the oldest request's lane goes first.
+        let batch = b.try_get_batch().await.expect("cost cap should trigger");
+        assert_eq!(batch.metadata, ["long"]);
+        assert_eq!(batch.flush_reason, FlushReason::CostCap);
+        {
+            let guard = b.inner.lock().await;
+            assert_eq!(guard.first_request_time, Some(clip_arrival));
+            assert_eq!(guard.last_submit_time, Some(clip_arrival));
+        }
+        assert_ne!(b.fcfs_head_ns(), 0, "the clip stays visible to FCFS");
+        assert!(
+            b.try_get_batch().await.is_none(),
+            "the clip waits for its own window"
+        );
+    }
+
+    /// What a closed-loop run measured: completion latencies, in ms, of clips
+    /// and of long recordings. Requests still pending at the end count as
+    /// waiting until then.
+    struct ClosedLoopLatency {
+        clips: Vec<u64>,
+        recordings: Vec<u64>,
+    }
+
+    impl ClosedLoopLatency {
+        fn worst_clip_ms(&self) -> u64 {
+            self.clips.iter().copied().max().unwrap_or(0)
+        }
+
+        fn worst_recording_ms(&self) -> u64 {
+            self.recordings.iter().copied().max().unwrap_or(0)
+        }
+
+        fn median_clip_ms(&self) -> u64 {
+            let mut clips = self.clips.clone();
+            clips.sort_unstable();
+            clips[clips.len() / 2]
+        }
+    }
+
+    /// Closed-loop clients keep one request each in flight on one speech
+    /// model served one batch at a time with the cost cap `max_batch_cost`,
+    /// for 30 minutes.
+    ///
+    /// Clips are 2-30 s and mostly short; recordings are 240 s and take
+    /// 11.3 s of GPU time each; a clip batch takes 0.3 s plus 0.12 s per
+    /// clip. Some extracts are cut short by a drain's item budget, as the
+    /// dispatcher's continuation waves do.
+    fn closed_loop_latency(
+        clip_clients: usize,
+        long_clients: usize,
+        seed: u64,
+        max_batch_cost: u64,
+    ) -> ClosedLoopLatency {
+        const HORIZON_MS: u64 = 1_800_000;
+        let mut rng = TestRng(seed);
+        let mut lanes = Lanes::new(max_batch_cost);
+        let total = clip_clients + long_clients;
+        // Next submit time per client; a client is idle while its request is pending.
+        let mut next_submit: Vec<Option<u64>> =
+            (0..total).map(|client| Some(client as u64)).collect();
+        let mut submitted_at = vec![0u64; total];
+        let mut run = ClosedLoopLatency {
+            clips: Vec::new(),
+            recordings: Vec::new(),
+        };
+        let mut now_ms = 0u64;
+        while now_ms < HORIZON_MS {
+            for client in 0..total {
+                if next_submit[client].is_some_and(|at| at <= now_ms) {
+                    let at = next_submit[client].take().expect("checked above");
+                    let item = if client < clip_clients {
+                        let seconds = match rng.range(0, 99) {
+                            0..=79 => rng.range(2, 10),
+                            80..=92 => rng.range(10, 20),
+                            _ => rng.range(20, 30),
+                        };
+                        clip(seconds)
+                    } else {
+                        long_form(240)
+                    };
+                    lanes.arrive(item, &client.to_string(), at);
+                    submitted_at[client] = at;
+                }
+            }
+            if lanes.inner.pending.is_empty() {
+                now_ms = next_submit
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .min()
+                    .expect("a client is idle");
+                continue;
+            }
+            let max_items = rng.pick(&[usize::MAX, usize::MAX, usize::MAX, 1, 3]);
+            let batch = lanes.take_up_to(max_items);
+            now_ms += if batch.items[0].alone {
+                11_300
+            } else {
+                300 + 120 * batch.size() as u64
+            };
+            for name in &batch.metadata {
+                let client: usize = name.parse().expect("client index");
+                let latency = now_ms - submitted_at[client];
+                if client < clip_clients {
+                    run.clips.push(latency);
+                } else {
+                    run.recordings.push(latency);
+                }
+                next_submit[client] = Some(now_ms + rng.range(1, 50));
+            }
+        }
+        for request in &lanes.inner.pending {
+            let client: usize = request.metadata.parse().expect("client index");
+            let waited = now_ms - submitted_at[client];
+            if client < clip_clients {
+                run.clips.push(waited);
+            } else {
+                run.recordings.push(waited);
+            }
+        }
+        run
+    }
+
+    #[test]
+    fn closed_loop_clips_and_recordings_are_served_within_a_few_turns() {
+        // More clips pend at a clip turn than the request count cap (12)
+        // takes in one batch. A turn still serves every clip that was
+        // pending when it began, so the longest clips are not passed over
+        // turn after turn, and recordings keep their turns.
+        for (clip_clients, long_clients) in [(16, 4), (16, 1), (32, 4), (48, 4)] {
+            for seed in 0..3 {
+                let run = closed_loop_latency(clip_clients, long_clients, seed, 720_000);
+                let case =
+                    format!("{clip_clients} clip / {long_clients} long clients, seed {seed}");
+                let (clip_ms, long_ms) = (run.worst_clip_ms(), run.worst_recording_ms());
+                assert!(clip_ms < 60_000, "{case}: a clip waited {clip_ms} ms");
+                assert!(long_ms < 120_000, "{case}: a recording waited {long_ms} ms");
+            }
+        }
+    }
+
+    #[test]
+    fn closed_loop_clips_are_served_at_the_adaptive_floor_too() {
+        // At a speech model's adaptive floor (180000 ms) a clip turn takes a
+        // quarter of what it takes at 720000 ms, so a turn leaves clips over
+        // whenever those pending add up to more than 180 s. The next turn
+        // owes them, so the costliest clips are not passed over turn after
+        // turn by the clips their clients resubmit. Without that, with 32 or
+        // more clip clients a clip waited most of the 30-minute run.
+        for (clip_clients, long_clients) in [(16, 4), (16, 1), (32, 4), (48, 4)] {
+            for seed in 0..3 {
+                let run = closed_loop_latency(clip_clients, long_clients, seed, 180_000);
+                let case =
+                    format!("{clip_clients} clip / {long_clients} long clients, seed {seed}");
+                let (clip_ms, long_ms) = (run.worst_clip_ms(), run.worst_recording_ms());
+                assert!(clip_ms < 90_000, "{case}: a clip waited {clip_ms} ms");
+                assert!(long_ms < 120_000, "{case}: a recording waited {long_ms} ms");
+            }
+        }
+    }
+
+    #[test]
+    fn closed_loop_at_small_cost_caps_bounds_waits_and_keeps_short_clips_quick() {
+        // A cost cap below the longer clips: 16384 ms, the cap for a backend
+        // that reports no budget, and 4096 ms, its adaptive floor. Clips
+        // above the cap run alone, and the load is more than the lanes can
+        // serve. Cost-first packing alone then served the costliest clips
+        // only when nothing cheaper was pending, so some waited the whole
+        // 30-minute run. Serving every left-over clip first instead served
+        // clips in about arrival order, so most waited minutes. Owing the
+        // oldest left-over clips, with the turn's budget raised by the
+        // oldest one's cost, bounds every wait and keeps cheaper clips first
+        // otherwise: at 16384 ms the median clip stays within seconds of
+        // what cost-first packing gives.
+        for (clip_clients, long_clients) in [(16, 4), (32, 4), (48, 4)] {
+            for seed in 0..3 {
+                let case =
+                    format!("{clip_clients} clip / {long_clients} long clients, seed {seed}");
+                let run = closed_loop_latency(clip_clients, long_clients, seed, 16_384);
+                let (worst, median) = (run.worst_clip_ms(), run.median_clip_ms());
+                assert!(
+                    worst < 600_000,
+                    "{case}, 16384 ms: a clip waited {worst} ms"
+                );
+                assert!(median < 60_000, "{case}, 16384 ms: median clip {median} ms");
+                assert!(
+                    run.clips.len() > 450,
+                    "{case}, 16384 ms: {} clips",
+                    run.clips.len()
+                );
+
+                let run = closed_loop_latency(clip_clients, long_clients, seed, 4_096);
+                let worst = run.worst_clip_ms();
+                assert!(worst < 900_000, "{case}, 4096 ms: a clip waited {worst} ms");
+                assert!(
+                    run.clips.len() > 280,
+                    "{case}, 4096 ms: {} clips",
+                    run.clips.len()
+                );
+            }
+        }
+    }
+
+    /// The batchable turn the audit sees under way.
+    struct AuditTurn {
+        /// Turns begun so far, this one included.
+        index: usize,
+        /// The clips it may still serve, by name with their cost.
+        clips: std::collections::HashMap<String, u64>,
+        /// The clips it owes and has not served yet, by name with their cost.
+        owed: std::collections::HashMap<String, u64>,
+        /// What is left of its budget.
+        cost_left: u64,
+        /// Whether it has taken a clip it does not owe.
+        took_unowed: bool,
+    }
+
+    /// A pending clip that a turn's cutoff covered.
+    struct AuditClip {
+        arrival: Instant,
+        /// The first turn whose cutoff covered it.
+        first_turn: usize,
+        /// The turn by which it must be served, set when its first turn
+        /// leaves it over: the first turn's index plus the number of clips,
+        /// itself included, that arrived no later than it and were still
+        /// pending then (point 5 of the module docs).
+        serve_by: Option<usize>,
+    }
+
+    /// Checks each extract against the lane rules (point 5 of the module
+    /// docs) and the per-batch caps while a randomized load runs.
+    #[derive(Default)]
+    struct LaneAudit {
+        served: Vec<String>,
+        last_alone: Option<bool>,
+        turn: Option<AuditTurn>,
+        turns_begun: usize,
+        /// Turns that began with clips left over by an earlier turn pending.
+        turns_with_left_over: usize,
+        /// Pending clips that a turn's cutoff covered, by name.
+        clips: std::collections::HashMap<String, AuditClip>,
+        /// Pending flagged item -> (flagged items ahead of it on arrival,
+        /// clip turns begun since it arrived).
+        flagged_waits: std::collections::HashMap<String, (usize, usize)>,
+    }
+
+    impl LaneAudit {
+        /// Takes one batch of at most `max_items` and returns its names.
+        fn extract(&mut self, lanes: &mut Lanes, max_items: usize) -> Vec<String> {
+            // Every stub carries the hard audio cap.
+            let max_cost = lanes
+                .inner
+                .config
+                .max_batch_cost
+                .min(crate::audio_prep::MAX_AUDIO_BATCH_DURATION_MS);
+            let max_requests = lanes.inner.config.max_batch_requests;
+            let pending: Vec<(String, bool, u64, Instant)> = lanes
+                .inner
+                .pending
+                .iter()
+                .map(|r| {
+                    (
+                        r.metadata.clone(),
+                        r.item.alone,
+                        r.item.cost,
+                        r.arrival_time,
+                    )
+                })
+                .collect();
+            let batch = lanes.take_up_to(max_items);
+            assert!(batch.size() > 0 && batch.size() <= max_items.min(max_requests));
+            assert!(
+                batch.total_cost <= max_cost || batch.size() == 1,
+                "a batch of {} items costs {} ms, over the {max_cost} ms cap",
+                batch.size(),
+                batch.total_cost
+            );
+            let alone = batch.items[0].alone;
+            assert!(
+                batch.items.iter().all(|item| item.alone == alone),
+                "lanes never share a batch"
+            );
+            let alone_pending = pending.iter().any(|(_, a, _, _)| *a);
+            let clips_pending = pending.iter().any(|(_, a, _, _)| !*a);
+
+            // A turn is over once none of its clips fits what is left of its
+            // budget, or, before it has taken a clip it does not owe, once
+            // none is pending.
+            if let Some(turn) = &self.turn {
+                let goes_on = pending.iter().any(|(name, _, cost, _)| {
+                    turn.clips.contains_key(name) && (!turn.took_unowed || *cost <= turn.cost_left)
+                });
+                if !goes_on {
+                    self.end_turn(&pending);
+                }
+            }
+            if alone_pending && clips_pending {
+                // The lanes take turns, starting with the lane of the oldest request.
+                let expected = self.turn.is_none()
+                    && self.last_alone.map_or_else(
+                        || pending.iter().min_by_key(|r| r.3).unwrap().1,
+                        |last| !last,
+                    );
+                assert_eq!(alone, expected, "lane of the next batch");
+            }
+
+            if alone {
+                assert_eq!(batch.size(), 1, "a flagged item runs alone");
+                let oldest = pending.iter().filter(|r| r.1).min_by_key(|r| r.3).unwrap();
+                assert_eq!(
+                    batch.metadata[0], oldest.0,
+                    "flagged items run in arrival order"
+                );
+                let (ahead, clip_turns) = self
+                    .flagged_waits
+                    .remove(&batch.metadata[0])
+                    .expect("flagged item was pending");
+                assert!(
+                    clip_turns <= ahead + 1,
+                    "{clip_turns} clip turns with {ahead} ahead"
+                );
+                assert!(self.turn.is_none(), "a flagged item runs between turns");
+            } else {
+                if self.turn.is_none() && (alone_pending || self.last_alone == Some(true)) {
+                    self.begin_turn(&pending, max_cost);
+                }
+                if let Some(turn) = &mut self.turn {
+                    Self::check_turn_batch(turn, &batch, max_cost, max_items.min(max_requests));
+                }
+            }
+            for name in &batch.metadata {
+                self.clips.remove(name);
+            }
+            self.last_alone = Some(alone);
+            self.served.extend(batch.metadata.iter().cloned());
+            batch.metadata
+        }
+
+        /// Checks a batch of the turn under way and books it to the turn.
+        fn check_turn_batch(
+            turn: &mut AuditTurn,
+            batch: &FormattedBatch<LaneItem, String>,
+            max_cost: u64,
+            max_take: usize,
+        ) {
+            for name in &batch.metadata {
+                assert!(
+                    turn.clips.contains_key(name),
+                    "{name}: a turn serves only the clips pending when it began"
+                );
+            }
+            let costs: Vec<u64> = batch.items.iter().map(|item| item.cost).collect();
+            assert!(
+                costs.windows(2).all(|pair| pair[0] <= pair[1]),
+                "a turn's batch is in cost order: {costs:?}"
+            );
+            // Clips the turn does not owe go cheapest first.
+            let unowed = |name: &String| !turn.owed.contains_key(name);
+            let dearest_taken = batch
+                .metadata
+                .iter()
+                .filter(|n| unowed(n))
+                .map(|n| turn.clips[n])
+                .max();
+            let cheapest_left = turn
+                .clips
+                .iter()
+                .filter(|(name, _)| unowed(name) && !batch.metadata.contains(name))
+                .map(|(_, cost)| *cost)
+                .min();
+            if let (Some(taken), Some(left)) = (dearest_taken, cheapest_left) {
+                assert!(
+                    taken <= left,
+                    "took a {taken} ms clip before a {left} ms one"
+                );
+            }
+            // Within what is left of the budget, except for a single clip the
+            // turn owes or, before it has taken a clip it does not owe, the
+            // cheapest such clip.
+            let owed_taken = batch
+                .metadata
+                .iter()
+                .filter(|n| turn.owed.contains_key(*n))
+                .count();
+            assert!(
+                batch.total_cost <= turn.cost_left
+                    || (batch.size() == 1 && (owed_taken == 1 || !turn.took_unowed)),
+                "turn batch of {} ms with {} ms left",
+                batch.total_cost,
+                turn.cost_left
+            );
+            let room = max_cost
+                .min(turn.cost_left)
+                .saturating_sub(batch.total_cost);
+            for name in &batch.metadata {
+                turn.clips.remove(name);
+                turn.owed.remove(name);
+            }
+            turn.took_unowed |= owed_taken < batch.size();
+            turn.cost_left = turn.cost_left.saturating_sub(batch.total_cost);
+            let owed_left: u64 = turn.owed.values().sum();
+            assert!(
+                owed_left <= turn.cost_left,
+                "the turn keeps room for the {owed_left} ms it owes"
+            );
+            // A batch stops short of its request limit only where no clip the
+            // turn could still take fits.
+            if batch.size() < max_take {
+                for (name, cost) in &turn.clips {
+                    let fits = *cost <= room
+                        && (turn.owed.contains_key(name) || cost + owed_left <= turn.cost_left);
+                    assert!(
+                        !fits,
+                        "a batch of {} stopped with {name} ({cost} ms) still fitting",
+                        batch.size()
+                    );
+                }
+            }
+        }
+
+        /// A turn begins: it serves the clips pending now and owes those that
+        /// earlier turns left over: the oldest (and any that arrived at the
+        /// same instant), then oldest first as many as fit its cost cap
+        /// together. Its budget is the cost cap plus the oldest ones' cost.
+        fn begin_turn(&mut self, pending: &[(String, bool, u64, Instant)], max_cost: u64) {
+            self.turns_begun += 1;
+            let index = self.turns_begun;
+            for (name, clip) in &self.clips {
+                if let Some(serve_by) = clip.serve_by {
+                    assert!(
+                        index <= serve_by,
+                        "{name} is still pending at turn {index}, past turn {serve_by}"
+                    );
+                }
+            }
+            if !self.clips.is_empty() {
+                self.turns_with_left_over += 1;
+            }
+            let mut left_over: Vec<(Instant, &String, u64)> = pending
+                .iter()
+                .filter(|r| !r.1 && self.clips.contains_key(&r.0))
+                .map(|r| (r.3, &r.0, r.2))
+                .collect();
+            left_over.sort();
+            let mut owed = std::collections::HashMap::new();
+            let (mut owed_cost, mut extra) = (0, 0);
+            for group in left_over.chunk_by(|a, b| a.0 == b.0) {
+                let cost: u64 = group.iter().map(|&(_, _, cost)| cost).sum();
+                if owed.is_empty() {
+                    extra = cost;
+                } else if owed_cost + cost > max_cost {
+                    break;
+                }
+                owed_cost += cost;
+                owed.extend(group.iter().map(|&(_, name, cost)| (name.clone(), cost)));
+            }
+            let mut clips = std::collections::HashMap::new();
+            for (name, _, cost, arrival) in pending.iter().filter(|r| !r.1) {
+                clips.insert(name.clone(), *cost);
+                self.clips.entry(name.clone()).or_insert(AuditClip {
+                    arrival: *arrival,
+                    first_turn: index,
+                    serve_by: None,
+                });
+            }
+            for wait in self.flagged_waits.values_mut() {
+                wait.1 += 1;
+            }
+            self.turn = Some(AuditTurn {
+                index,
+                clips,
+                owed,
+                cost_left: max_cost + extra,
+                took_unowed: false,
+            });
+        }
+
+        /// The turn under way is over: it served everything it owed. Set the
+        /// bound of each clip it was the first turn of and left over.
+        fn end_turn(&mut self, pending: &[(String, bool, u64, Instant)]) {
+            let turn = self.turn.take().expect("a turn is under way");
+            assert!(
+                turn.owed.is_empty(),
+                "turn {} ended owing {:?}",
+                turn.index,
+                turn.owed.keys().collect::<Vec<_>>()
+            );
+            let arrivals: Vec<Instant> = pending.iter().filter(|r| !r.1).map(|r| r.3).collect();
+            for clip in self.clips.values_mut() {
+                if clip.first_turn == turn.index {
+                    let ahead = arrivals.iter().filter(|a| **a <= clip.arrival).count();
+                    clip.serve_by = Some(turn.index + ahead);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lanes_never_mix_and_take_turns_at_any_cost_cap() {
+        // The default adaptive cost range (4096-65536 ms) and its 16384 ms
+        // start, for backends that report no budget; a speech model's floor
+        // (180000 ms) and its 720000 ms start, which is also the hard audio
+        // cap.
+        // Each runs with and without point 3's aged promotion, which applies
+        // only between clip turns while nothing flagged is pending.
+        let caps = [4_096, 16_384, 65_536, 180_000, 720_000];
+        for (max_batch_cost, aged) in caps.into_iter().flat_map(|cap| [(cap, false), (cap, true)]) {
+            let mut rng = TestRng(max_batch_cost);
+            let mut lanes = Lanes::with_aging(max_batch_cost, aged);
+            let mut audit = LaneAudit::default();
+            let mut submitted = Vec::new();
+            let mut now_ms = 0;
+
+            for index in 0..300 {
+                now_ms += rng.range(1, 2_000);
+                if rng.chance(60) {
+                    let name = format!("item-{index}");
+                    let item = if rng.chance(30) {
+                        let ahead = audit.flagged_waits.len();
+                        audit.flagged_waits.insert(name.clone(), (ahead, 0));
+                        long_form_ms(rng.range(30_001, 300_000))
+                    } else {
+                        clip_ms(rng.range(1_000, 30_000))
+                    };
+                    lanes.arrive(item, &name, now_ms);
+                    submitted.push(name);
+                }
+                if !lanes.inner.pending.is_empty() && rng.chance(50) {
+                    let max_items = rng.pick(&[usize::MAX, 1, 3]);
+                    audit.extract(&mut lanes, max_items);
+                }
+            }
+            while !lanes.inner.pending.is_empty() {
+                let max_items = rng.pick(&[usize::MAX, 1, 3]);
+                audit.extract(&mut lanes, max_items);
+            }
+
+            audit.served.sort();
+            submitted.sort();
+            assert_eq!(audit.served, submitted, "cap {max_batch_cost}, aged {aged}");
+            assert!(audit.flagged_waits.is_empty());
+            assert_eq!(lanes.inner.total_cost, 0);
+        }
+    }
+
+    /// Queues `item` one ms after the previous arrival, under a fresh name
+    /// that starts with `kind`.
+    fn arrive_next(
+        lanes: &mut Lanes,
+        audit: &mut LaneAudit,
+        item: LaneItem,
+        kind: &str,
+        now_ms: &mut u64,
+    ) {
+        *now_ms += 1;
+        let name = format!("{kind}-{now_ms}");
+        if item.alone {
+            let ahead = audit.flagged_waits.len();
+            audit.flagged_waits.insert(name.clone(), (ahead, 0));
+        }
+        lanes.arrive(item, &name, *now_ms);
+    }
+
+    #[test]
+    fn every_clip_is_served_within_its_turn_bound_under_replenishment() {
+        // Long recordings stay pending throughout (their clients resubmit at
+        // once), so clip turns never stop. Clip clients resubmit at once too,
+        // and one-off bursts add more clips. Clips cost up to 30 s, above the
+        // cap at the lower caps; drain budgets cut some batches short, and the
+        // cost cap moves between batches as the adaptive controller moves it.
+        // The audit checks every batch against the caps and the lane rules,
+        // and every clip against its bound: a clip its first turn leaves over
+        // is served by the turn numbered that turn plus the clips, itself
+        // included, that arrived no later than it and were still pending then.
+        // Recordings stay pending, so every batch belongs to a clip turn or a
+        // recording, and point 3's aged promotion never applies: the aged
+        // runs must match the others batch for batch.
+        let caps = [4_096, 16_384, 65_536, 180_000, 720_000];
+        let mut turns_with_left_over = 0;
+        let mut unaged_served = Vec::new();
+        for (seed, aged) in (0..24).flat_map(|seed| [(seed, false), (seed, true)]) {
+            let mut rng = TestRng(1_000 + seed);
+            let mut lanes = Lanes::with_aging(rng.pick(&caps), aged);
+            let mut audit = LaneAudit::default();
+            let mut now_ms = 0;
+            for _ in 0..rng.range(1, 3) {
+                let item = long_form_ms(rng.range(30_001, 300_000));
+                arrive_next(&mut lanes, &mut audit, item, "recording", &mut now_ms);
+            }
+            for _ in 0..rng.range(4, 48) {
+                let item = clip_ms(rng.range(1_000, 30_000));
+                arrive_next(&mut lanes, &mut audit, item, "client", &mut now_ms);
+            }
+
+            for _ in 0..400 {
+                if rng.chance(10) {
+                    lanes.inner.config.max_batch_cost = rng.pick(&caps);
+                }
+                if rng.chance(10) {
+                    for _ in 0..rng.range(1, 8) {
+                        let item = clip_ms(rng.range(1_000, 30_000));
+                        arrive_next(&mut lanes, &mut audit, item, "burst", &mut now_ms);
+                    }
+                }
+                let max_items = rng.pick(&[usize::MAX, usize::MAX, 1, 3, 5]);
+                for name in audit.extract(&mut lanes, max_items) {
+                    if name.starts_with("recording") {
+                        let item = long_form_ms(rng.range(30_001, 300_000));
+                        arrive_next(&mut lanes, &mut audit, item, "recording", &mut now_ms);
+                    } else if name.starts_with("client") {
+                        let item = clip_ms(rng.range(1_000, 30_000));
+                        arrive_next(&mut lanes, &mut audit, item, "client", &mut now_ms);
+                    }
+                }
+            }
+            assert!(
+                audit.turns_begun >= 70,
+                "seed {seed}, aged {aged}: clip turns keep coming"
+            );
+            turns_with_left_over += audit.turns_with_left_over;
+            if aged {
+                assert_eq!(audit.served, unaged_served, "seed {seed}");
+            } else {
+                unaged_served = audit.served;
+            }
+        }
+        assert!(
+            turns_with_left_over >= 3_000,
+            "the load leaves clips over: {turns_with_left_over} turns began with some"
+        );
     }
 }

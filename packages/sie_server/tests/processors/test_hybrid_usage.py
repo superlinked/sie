@@ -78,7 +78,7 @@ async def test_terminal_reports_the_worker_count_and_keeps_the_upstream_figure_b
         ],
         _count(),
     )
-    assert [chunk.text_delta for chunk in out] == ["answer here", ""]
+    assert [chunk.text_delta for chunk in out] == ["", "answer here", ""]
     assert all(not chunk.reasoning_delta for chunk in out)
     terminal = out[-1]
     assert (terminal.prompt_tokens, terminal.completion_tokens, terminal.cached_tokens) == (2, 5, None)
@@ -302,6 +302,23 @@ async def test_queued_upstream_chat_reports_the_worker_count(hybrid: tuple, stre
     assert sent["messages"] == [{"role": "user", "content": "question"}]
 
 
+async def test_private_upstream_reasoning_keeps_the_queued_stream_publishing(
+    hybrid: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("sie_server.processors.streaming._FLUSH_INTERVAL_S", 0)
+    reasoning = [
+        {"choices": [{"index": 0, "delta": {"reasoning_content": f"step {step} "}, "finish_reason": None}]}
+        for step in range(3)
+    ]
+    respond(hybrid, frames=[*reasoning, *_frames()[1:]])
+    chunks = await run(hybrid)
+    answer = next(index for index, chunk in enumerate(chunks) if chunk.get("text_delta"))
+    assert answer >= len(reasoning)
+    assert all(chunk["text_delta"] == "" and not chunk["done"] for chunk in chunks[:answer])
+    assert chunks[answer]["text_delta"] == "answer here"
+    assert "step" not in json.dumps(chunks)
+
+
 async def test_a_platform_upstream_reports_its_own_count() -> None:
     setup = _processor("sie", [])
     setup[1]._get_tokenizer.side_effect = AssertionError("a platform upstream counts with its own tokenizer")
@@ -410,3 +427,19 @@ async def test_cancellation_closes_the_counted_upstream_chat(hybrid: tuple) -> N
     assert chunks[-1]["finish_reason"] == "cancelled"
     assert "usage" not in chunks[-1]
     assert stream.closed
+
+
+async def test_keep_reasoning_counts_it_and_leaves_it_on_the_chunks() -> None:
+    source = _Chunks(
+        [
+            GenerationChunk(text_delta="", reasoning_delta="think one two "),
+            GenerationChunk(text_delta="answer here", is_first=True),
+            _terminal(),
+        ]
+    )
+
+    out = [chunk async for chunk in count_hybrid_usage(source, _count(), keep_reasoning=True)]
+
+    assert [chunk.reasoning_delta for chunk in out] == ["think one two ", "", ""]
+    assert [chunk.text_delta for chunk in out] == ["", "answer here", ""]
+    assert out[-1].completion_tokens == 5

@@ -1,6 +1,7 @@
 ## The Fake Engine catalog entry (#1836): ONE model, every supported surface
-# (encode + score + generate via the combined FakeAdapter), with profiles for
-# the different cases. Non-default profiles are addressable as
+# (encode + score + generate via the combined FakeAdapter, and scripted chat on
+# the single-node /v1/chat/completions route), with profiles for the different
+# cases. Non-default profiles are addressable as
 # `sie-fake:<profile>` through the loader's variant expansion; each variant is
 # a separate registry model with its own adapter instance, footprint, and
 # fault spec.
@@ -12,6 +13,8 @@
 #   slow-load  — load holds the MODEL_LOADING window for 5 s.
 #   oom-3rd    — the 3rd dispatch raises an OOM the real is_oom_error
 #                classifier recognizes; the recovery ladder retries.
+#   chat       — chat with reasoning (enable_thinking), a 131,072-token window
+#                and a 4,096-token output cap, for agent-loop wire checks.
 #
 # Note: adapter_options replacement is all-or-nothing per profile (non-empty
 # child loadtime REPLACES the parent's), so every profile repeats the full
@@ -83,4 +86,15 @@ profiles:
         fault_key: sie-fake:oom-3rd
         faults:
           oom_on_dispatch: 3
+      runtime: {}
+  chat:
+    extends: default
+    max_output_tokens: 4096
+    chat_template_kwargs:
+      enable_thinking: true
+    adapter_options:
+      loadtime:
+        memory_footprint_bytes: 67108864
+        fault_key: sie-fake:chat
+        max_seq_length: 131072
       runtime: {}

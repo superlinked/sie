@@ -57,6 +57,8 @@ from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters.sglang import _server
 from sie_server.adapters.sglang._compat.sie_thinking_budget import PARAM as THINKING_BUDGET_PARAM
 from sie_server.adapters.sglang._compat.sie_thinking_budget import PROCESSOR_REFERENCE as THINKING_BUDGET_PROCESSOR
+from sie_server.adapters.sglang._lora import SGLangLoraManager, SGLangLoraMixin, leased_generation
+from sie_server.adapters.sglang._memory import SGLangMemoryBudget
 from sie_server.observability.generation_diagnostics import GenerationStreamTimer
 from sie_server.types.grammar import (
     OUTLINES_JSON_SCHEMA_TYPE_DIAGNOSTIC,
@@ -449,7 +451,7 @@ def _translate_to_mlx_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in kwargs.items() if k in _MLX_PASSTHROUGH_KWARGS}
 
 
-class SGLangGenerationAdapter(GenerationAdapter):
+class SGLangGenerationAdapter(SGLangLoraMixin, GenerationAdapter):
     """Streaming SGLang generation adapter.
 
     Lifecycle is identical to :class:`SGLangEmbeddingAdapter`: one subprocess
@@ -483,7 +485,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
         model_name_or_path: str,
         *,
         max_seq_length: int = 32768,
-        mem_fraction_static: float = 0.85,
+        mem_fraction_static: float | None = None,
+        kv_budget_tokens: int | None = None,
         compute_precision: ComputePrecision = "bfloat16",
         trust_remote_code: bool = True,
         # Pinned HuggingFace revision (commit SHA / branch / tag). Forwarded to
@@ -524,6 +527,11 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # adapters in one batch (SGLang ``--max-loras-per-batch``).
         lora_paths: dict[str, str] | None = None,
         max_loras_per_batch: int = 4,
+        max_loaded_loras: int | None = None,
+        preload_loras: list[str] | None = None,
+        lora_revisions: dict[str, str | None] | None = None,
+        max_lora_rank: int | None = None,
+        lora_target_modules: list[str] | None = None,
         # Tensor-parallel width. One is every existing profile and keeps the
         # launch argv byte-identical. Above one, this adapter owns that many
         # whole accelerators for the life of the load, which is an exclusive
@@ -574,6 +582,16 @@ class SGLangGenerationAdapter(GenerationAdapter):
         self._max_seq_length = max_seq_length
         self._mem_fraction_static = mem_fraction_static
         self._tensor_parallel_size = _server.validate_tensor_parallel_size(tensor_parallel_size)
+        self._memory_budget = SGLangMemoryBudget(
+            model_name_or_path=str(model_name_or_path),
+            revision=revision,
+            compute_precision=compute_precision,
+            max_seq_length=max_seq_length,
+            kv_budget_tokens=kv_budget_tokens,
+            mem_fraction_static=mem_fraction_static,
+            tensor_parallel_size=self._tensor_parallel_size,
+            has_auxiliary_weights=bool(lora_paths or (speculative and speculative.get("enabled"))),
+        )
         self._watchdog_timeout_s = _server.validate_optional_positive(watchdog_timeout_s, field="watchdog_timeout_s")
         self._declared_nccl_port = _server.validate_optional_port(nccl_port)
         if self._declared_nccl_port is not None and self._tensor_parallel_size == 1:
@@ -638,12 +656,45 @@ class SGLangGenerationAdapter(GenerationAdapter):
         self._speculative = speculative
         self._speculative_needs_extra_buffer = speculative_needs_extra_buffer
         self._extra_launch_args = list(extra_launch_args or [])
+        if mem_fraction_static is None and any(
+            arg.partition("=")[0] in {"--mem-fraction-static", "--max-total-tokens"} for arg in self._extra_launch_args
+        ):
+            raise ValueError("Set mem_fraction_static or kv_budget_tokens in the profile instead of extra_launch_args")
         self._extra_env = dict(extra_env or {})
         self._startup_timeout_s = _resolve_profile_startup_timeout(
             startup_timeout_s,
             tensor_parallel_size=self._tensor_parallel_size,
         )
         self._lora_paths = dict(lora_paths or {})
+        self._lora = SGLangLoraManager(
+            lora_paths,
+            preload=preload_loras,
+            revisions=lora_revisions,
+            max_rank=max_lora_rank,
+            target_modules=lora_target_modules,
+            max_per_batch=max_loras_per_batch,
+            max_loaded=max_loaded_loras,
+            server_url=lambda: self._server_url,
+        )
+        if self._lora.deferred and any(
+            any(arg.partition("=")[0] == flag for arg in self._extra_launch_args)
+            and _mamba_strategy_value(self._extra_launch_args, flag) != "1"
+            for flag in ("--tokenizer-worker-num", "--dp-size", "--data-parallel-size")
+        ):
+            raise ValueError("Deferred LoRAs require one tokenizer worker and one data-parallel worker")
+        if self._lora.aliases and any(
+            arg.partition("=")[0]
+            in {
+                "--enable-lora",
+                "--lora-paths",
+                "--max-loras-per-batch",
+                "--max-loaded-loras",
+                "--max-lora-rank",
+                "--lora-target-modules",
+            }
+            for arg in self._extra_launch_args
+        ):
+            raise ValueError("Configure LoRA capacity and sources through the profile, not extra_launch_args")
         self._max_loras_per_batch = max_loras_per_batch
 
         self._process: subprocess.Popen[bytes] | None = None
@@ -882,8 +933,6 @@ class SGLangGenerationAdapter(GenerationAdapter):
             self._compute_precision,
             "--context-length",
             str(self._max_seq_length),
-            "--mem-fraction-static",
-            str(self._mem_fraction_static),
             # Full flag name, not the "--tp" abbreviation. Nothing upstream
             # disables abbreviation matching, so a future upstream flag sharing
             # that prefix would break every SIE launch with an ambiguous-option
@@ -895,6 +944,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
             "--served-model-name",
             self._served_model_name,
         ]
+        cmd.extend(self._memory_budget.launch_args(device_indices[0]))
         if self._trust_remote_code:
             cmd.append("--trust-remote-code")
         if self._revision is not None:
@@ -927,11 +977,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # Multi-LoRA serving: one base, N adapters, per-request selection via
         # ``sampling_params["lora_path"]``. Only emitted when the profile
         # declared adapters, so non-LoRA deployments are byte-identical.
-        if self._lora_paths:
-            cmd.append("--enable-lora")
-            cmd.extend(["--max-loras-per-batch", str(self._max_loras_per_batch)])
-            cmd.append("--lora-paths")
-            cmd.extend(f"{served_name}={path}" for served_name, path in self._lora_paths.items())
+        cmd.extend(self._lora.launch_args())
         cmd.extend(self._extra_launch_args)
 
         self._output_file = _server.open_output_log()
@@ -944,6 +990,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
         # A100-40GB. Set unconditionally when speculative is on — the env var
         # is a no-op when sglang doesn't see speculative args.
         extra_env: dict[str, str] = dict(self._extra_env)
+        if self._lora.deferred:
+            extra_env["SIE_SGLANG_LORA_COMPAT"] = "1"
         if self._speculative and self._speculative.get("enabled"):
             extra_env["SGLANG_ENABLE_SPEC_V2"] = "1"
             # The pair is required: setting ``SGLANG_ENABLE_SPEC_V2=1``
@@ -1007,6 +1055,8 @@ class SGLangGenerationAdapter(GenerationAdapter):
             # Build the error before `load`'s abort deletes the log it reads.
             raise _server.startup_failure_error(self._output_file, crash_exit_code=crash_exit_code)
 
+        self._lora.started()
+
         # Best-effort runtime verification that the
         # ``--grammar-backend`` flag actually took effect. SGLang's
         # exact startup-log token varies across versions; we scan for
@@ -1033,6 +1083,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
         log, and clear _server_url/_device so the adapter does not look "loaded"
         (_check_loaded() gates only on _server_url). Mirrors the MLX sibling.
         """
+        self._lora.stop_mutations()
         _server.terminate_process(self._process)
         self._process = None
         _server.release_port(self._port)
@@ -1044,6 +1095,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
         self._nccl_port = None
         self._port = None
         self._server_url = None
+        self._lora.close()
         self._device = None
         self._cleanup_output_log()
 
@@ -1316,6 +1368,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
             logger.warning("aclose_client() failed: %s", exc)
 
     def unload(self) -> None:
+        self._lora.stop_mutations()
         if self._http_client is not None:
             client = self._http_client
             self._http_client = None
@@ -1373,6 +1426,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
         self._nccl_port = None
         self._port = None
         self._server_url = None
+        self._lora.close()
         self._device = None
         self._cleanup_output_log()
 
@@ -1391,15 +1445,13 @@ class SGLangGenerationAdapter(GenerationAdapter):
             self._output_file = None
 
     def memory_footprint(self) -> int:
-        # SGLang pre-allocates in the subprocess; let the registry measure GPU.
-        return 0
+        return self._memory_budget.reserved_bytes if self._process is not None else 0
 
     def load_required_memory_bytes(self, *, device_type: str, device_total_bytes: int) -> int | None:
         """Return SGLang's startup reservation requirement for load staging."""
-        return _server.estimate_load_required_memory_bytes(
+        return self._memory_budget.required_bytes(
             device_type=device_type,
             device_total_bytes=device_total_bytes,
-            mem_fraction_static=self._mem_fraction_static,
         )
 
     # -- Inference -----------------------------------------------------------
@@ -1484,6 +1536,7 @@ class SGLangGenerationAdapter(GenerationAdapter):
                 )
             return self._http_client
 
+    @leased_generation
     async def generate(
         self,
         prompt: str,

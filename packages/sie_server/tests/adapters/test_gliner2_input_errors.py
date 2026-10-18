@@ -40,6 +40,7 @@ def test_invalid_request_is_invalid_input_on_the_queue_path(
 ) -> None:
     adapter = GLiNER2Adapter("test-model")
     adapter._model = MagicMock()
+    adapter._count_prompt = lambda _schema: 8
     item = Item(text="Alice works at Acme.", metadata=metadata)
 
     with pytest.raises(ValueError, match="GLiNER2") as error:
@@ -71,6 +72,7 @@ def test_invalid_request_is_invalid_input_on_the_queue_path(
 def test_invalid_model_result_remains_an_inference_error_on_the_queue_path() -> None:
     adapter = GLiNER2Adapter("test-model")
     adapter._model = MagicMock()
+    adapter._count_prompt = lambda _schema: 8
     adapter._model.extract_entities.return_value = {
         "entities": {"PERSON": [{"text": "Alice", "start": 0, "end": 5, "confidence": "bad"}]},
     }

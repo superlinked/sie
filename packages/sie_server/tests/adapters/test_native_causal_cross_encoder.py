@@ -13,7 +13,6 @@ from unittest.mock import Mock
 
 import numpy as np
 import pytest
-import sentence_transformers
 import torch
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 from sentence_transformers.base import modules as native_modules
@@ -141,7 +140,10 @@ def native_loader(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[ToyC
         return model
 
     loader = Mock(side_effect=construct)
-    monkeypatch.setattr(sentence_transformers, "CrossEncoder", loader)
+    monkeypatch.setattr(
+        "sie_server.adapters._sentence_transformer_trust.load_sentence_transformer",
+        lambda model_class, *args, **kwargs: loader(*args, **kwargs),
+    )
     monkeypatch.setattr(native_modules, "Transformer", ToyTransformer)
     modules_file = tmp_path / "modules.json"
     modules_file.write_text(

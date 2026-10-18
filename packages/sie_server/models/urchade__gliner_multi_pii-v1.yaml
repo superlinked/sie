@@ -16,7 +16,7 @@ max_sequence_length: 384
 profiles:
   default:
     max_batch_tokens: 16384
-    compute_precision: null
+    compute_precision: float32
     adapter_path: sie_server.adapters.gliner:GLiNERAdapter
     adapter_options:
       loadtime: {}

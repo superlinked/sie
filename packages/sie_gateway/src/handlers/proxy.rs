@@ -26,8 +26,8 @@ use crate::queue::lane_admission::LaneKey;
 use crate::queue::publisher;
 use crate::queue::streaming::{
     client_safe_worker_error_code, client_safe_worker_error_message,
-    client_safe_worker_error_param, is_lower_sha256, MODEL_LOAD_FAILED_ERROR_CODE,
-    MODEL_LOAD_FAILED_PUBLIC_MESSAGE,
+    client_safe_worker_error_param, is_lower_sha256, UpstreamFailureReason,
+    MODEL_LOAD_FAILED_ERROR_CODE, MODEL_LOAD_FAILED_PUBLIC_MESSAGE,
 };
 
 use crate::server::{
@@ -41,7 +41,7 @@ use crate::state::worker_registry::{QueueRoute, WorkerRegistry};
 use crate::types::model::FallbackTrigger;
 use crate::types::AuditEntry;
 
-use crate::middleware::auth::{extract_bearer_token, mask_token};
+use crate::middleware::auth::request_token_id;
 
 use super::serving_disclosure::{
     remote_forbidden, DeferredFallbackFinish, FallbackAttempt, ServingDisclosure,
@@ -278,7 +278,10 @@ pub fn is_length_limit_error(error: &axum::Error) -> bool {
     false
 }
 
-fn request_body_error(error: &axum::Error, limit: usize) -> (StatusCode, &'static str, String) {
+pub(crate) fn request_body_error(
+    error: &axum::Error,
+    limit: usize,
+) -> (StatusCode, &'static str, String) {
     if is_length_limit_error(error) {
         (
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -3895,9 +3898,7 @@ async fn proxy_request_inner(
         }
     };
 
-    let token_id = extract_bearer_token(req.headers())
-        .map(|t| mask_token(&t))
-        .unwrap_or_default();
+    let token_id = request_token_id(req.headers());
     let content_length = req
         .headers()
         .get("content-length")
@@ -4496,6 +4497,24 @@ async fn queue_mode_proxy(
 
     if let Some(response) = queue_items_error(endpoint, &items) {
         return response;
+    }
+
+    if matches!(endpoint, "encode" | "extract" | "score") {
+        if let Some((key, value)) = undeclared_lora_option(params.options.as_ref(), || {
+            state.model_registry.get_model_info(model)
+        }) {
+            return endpoint_error_response(
+                endpoint,
+                StatusCode::BAD_REQUEST,
+                err_code::INVALID_REQUEST,
+                oai_type::INVALID_REQUEST,
+                oai_code::UNKNOWN_LORA_ADAPTER,
+                Some(key),
+                format!(
+                    "'{key}' must name a LoRA adapter that model '{display_model}' declares; {value} is not one of them."
+                ),
+            );
+        }
     }
 
     // Generate has its own publish + result-collection path
@@ -5450,6 +5469,7 @@ pub(crate) enum StreamingDriverErr {
         message: String,
         param: Option<String>,
         retry_after_s: Option<u16>,
+        reason: Option<UpstreamFailureReason>,
         request_id: String,
         attempt_id: String,
     },
@@ -5985,6 +6005,7 @@ pub(crate) async fn run_streaming_generate(
             message: err.client_safe_message().to_string(),
             param: err.client_safe_param().map(str::to_string),
             retry_after_s: err.validated_retry_after_s(),
+            reason: err.client_safe_reason(),
             request_id: request_id.clone(),
             attempt_id: outcome.attempt_id.clone(),
         });
@@ -6150,6 +6171,7 @@ fn build_streaming_error_response(err: &StreamingDriverErr) -> Response {
             message,
             param,
             retry_after_s,
+            reason,
             request_id,
             attempt_id,
         } => {
@@ -6174,7 +6196,7 @@ fn build_streaming_error_response(err: &StreamingDriverErr) -> Response {
             let status = worker_error_http_status(stable_code);
             let err_type = worker_error_openai_type(stable_code);
             let mut body = json_openai_error(
-                client_safe_worker_error_message(code, message),
+                client_safe_worker_error_message(code, message, *reason),
                 err_type,
                 client_safe_worker_error_param(code, param.as_deref()),
                 openai_code,
@@ -6187,6 +6209,9 @@ fn build_streaming_error_response(err: &StreamingDriverErr) -> Response {
                         "attempt_id".to_string(),
                         serde_json::Value::String(attempt_id.clone()),
                     );
+                    if let Some(reason) = reason {
+                        err_obj.insert("reason".to_string(), json!(reason.as_str()));
+                    }
                 }
             }
             let mut resp = (status, Json(body)).into_response();
@@ -6436,6 +6461,10 @@ struct ChatRequestParams {
     /// rendered prompt. ``None`` leaves it to the serving profile
     /// (default on).
     schema_in_prompt: Option<bool>,
+    /// SIE extension ``include_reasoning``: ``true`` asks the worker to
+    /// publish the model's reasoning as ``reasoning_content`` on the
+    /// message and on stream deltas. Absent or ``false`` keeps it private.
+    include_reasoning: Option<bool>,
     /// OpenAI ``stream`` flag. ``true`` switches the handler to the
     /// SSE response branch; ``false`` (default) uses the existing
     /// aggregating path. Parsed by :func:`chat_params_from_json`;
@@ -6519,6 +6548,7 @@ impl ChatRequestParams {
                 chat_template_kwargs: self.chat_template_kwargs,
                 grammar: self.grammar,
                 schema_in_prompt: self.schema_in_prompt,
+                include_reasoning: self.include_reasoning,
                 routing_key: self.routing_key.clone(),
                 prompt_cache_key: self.prompt_cache_key.clone(),
                 tools: self.tools,
@@ -7782,6 +7812,19 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
             );
         }
     };
+    // SIE extension: ``include_reasoning: true`` makes the model's reasoning
+    // public as ``reasoning_content``. Absent or ``null`` keeps it private.
+    let include_reasoning = match obj.get("include_reasoning") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::Bool(b)) => Some(*b),
+        Some(_) => {
+            return bad(
+                "'include_reasoning' must be a boolean",
+                Some("include_reasoning"),
+                oai_code::INVALID_REQUEST,
+            );
+        }
+    };
     // ``tool_choice`` without ``tools`` is meaningless; OpenAI itself
     // returns a 400 in that case. We mirror the behaviour so SDKs that
     // accidentally send ``tool_choice: "auto"`` on a plain chat call
@@ -7856,6 +7899,7 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
         "routing_key",
         "response_format",
         "schema_in_prompt",
+        "include_reasoning",
         "stream",
         "tools",
         "tool_choice",
@@ -7907,6 +7951,7 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
         prompt_cache_key,
         grammar,
         schema_in_prompt,
+        include_reasoning,
         stream,
         stream_include_usage,
         tools,
@@ -7929,6 +7974,8 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
 /// * Must be a non-empty JSON array.
 /// * Each entry must be ``{type: "function", function: {name: string,
 ///   description?: string, parameters?: object}}``.
+/// * ``function.name`` must match the OpenAI pattern
+///   ``^[a-zA-Z0-9_-]{1,64}$``.
 /// * ``function.parameters`` (when present) is run through the shared
 ///   JSON-Schema safety walker so the same depth / size / unsupported-
 ///   keyword caps that apply to ``response_format.json_schema`` also
@@ -8009,6 +8056,17 @@ fn validate_chat_tools(v: &serde_json::Value) -> Result<Vec<serde_json::Value>, 
         if name.is_empty() {
             return Err(bad(
                 format!("tools[{i}].function.name must be non-empty"),
+                &format!("tools[{i}].function.name"),
+                oai_code::INVALID_REQUEST,
+            ));
+        }
+        if name.len() > 64
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err(bad(
+                format!("tools[{i}].function.name must match ^[a-zA-Z0-9_-]{{1,64}}$"),
                 &format!("tools[{i}].function.name"),
                 oai_code::INVALID_REQUEST,
             ));
@@ -8300,6 +8358,7 @@ fn build_chat_completion_body(
     model: &str,
     request_id: &str,
     outcome: &crate::queue::streaming::StreamOutcome,
+    include_reasoning: bool,
 ) -> Result<Vec<u8>, Response> {
     let Some(usage) = outcome.usage.as_ref() else {
         return Err((
@@ -8345,6 +8404,9 @@ fn build_chat_completion_body(
         } else {
             message.insert("content".to_string(), json!(outcome.text));
         }
+        if let Some(reasoning) = outcome.reasoning.get(&0).filter(|_| include_reasoning) {
+            message.insert("reasoning_content".to_string(), json!(reasoning));
+        }
         vec![json!({
             "index": 0,
             "message": Value::Object(message),
@@ -8375,6 +8437,14 @@ fn build_chat_completion_body(
                     }
                 } else {
                     message.insert("content".to_string(), json!(cand.text));
+                }
+                let reasoning = cand
+                    .reasoning_content
+                    .as_ref()
+                    .or_else(|| outcome.reasoning.get(&(i as u32)))
+                    .filter(|_| include_reasoning);
+                if let Some(reasoning) = reasoning {
+                    message.insert("reasoning_content".to_string(), json!(reasoning));
                 }
                 json!({
                     "index": i,
@@ -9187,9 +9257,7 @@ async fn resolve_generation_route(
         }
     }
 
-    let token_id = extract_bearer_token(hdr)
-        .map(|t| mask_token(&t))
-        .unwrap_or_default();
+    let token_id = request_token_id(hdr);
     let content_length = hdr
         .get("content-length")
         .and_then(|v| v.to_str().ok())
@@ -9686,6 +9754,7 @@ async fn proxy_chat_inner(
     let requested_model = params.model.clone();
     let stream = params.stream;
     let stream_include_usage = params.stream_include_usage;
+    let include_reasoning = params.include_reasoning == Some(true);
     let mut work_params = params.into_work_params();
     work_params.require_execution_authority_v1 = require_execution_authority_v1;
     work_params.fallback_reason = fallback_reason;
@@ -9720,6 +9789,7 @@ async fn proxy_chat_inner(
             work_params,
             endpoint: super::sse::SseEndpoint::Chat {
                 include_usage: stream_include_usage,
+                include_reasoning,
             },
             route: RouteKind::Compatibility,
         })
@@ -9755,10 +9825,11 @@ async fn proxy_chat_inner(
     };
     let elapsed = start.elapsed();
 
-    let body_bytes = match build_chat_completion_body(&model_name, &request_id, &outcome) {
-        Ok(b) => b,
-        Err(resp) => return resp,
-    };
+    let body_bytes =
+        match build_chat_completion_body(&model_name, &request_id, &outcome, include_reasoning) {
+            Ok(b) => b,
+            Err(resp) => return resp,
+        };
 
     state.registry.record_request("queue").await;
     emit_audit_log(AuditEntry {
@@ -11679,6 +11750,79 @@ pub(crate) fn validate_lora_for_profile(
     }
 }
 
+/// The caller's ``options.lora`` or ``options.lora_id`` as ``(param, value)``
+/// when it is set and names no LoRA that the selected profile
+/// (``options.profile``, else ``default``) of the model ``entry`` returns
+/// declares. ``options.lora_id`` names a LoRA to load: a
+/// ``loadtime.lora_paths`` source or a ``runtime.lora_id``. ``options.lora``
+/// selects a loaded LoRA, so a ``lora_paths`` served name and a
+/// ``runtime.lora`` also qualify. ``entry`` is called only when the options
+/// select a LoRA; a model it does not return is not checked.
+pub(crate) fn undeclared_lora_option(
+    options: Option<&Value>,
+    entry: impl FnOnce() -> Option<crate::types::model::ModelEntry>,
+) -> Option<(&'static str, Value)> {
+    let options = options?.as_object()?;
+    let requested: Vec<(&'static str, bool, &Value)> = [
+        ("options.lora", "lora", true),
+        ("options.lora_id", "lora_id", false),
+    ]
+    .into_iter()
+    .filter_map(|(param, key, served_names)| {
+        let value = options.get(key).filter(|value| !value.is_null())?;
+        Some((param, served_names, value))
+    })
+    .collect();
+    if requested.is_empty() {
+        return None;
+    }
+    let entry = entry()?;
+    let profile_name = options
+        .get("profile")
+        .and_then(Value::as_str)
+        .unwrap_or("default");
+    let adapter_options = entry
+        .profile_configs
+        .get(profile_name)
+        .and_then(|profile| profile.adapter_options.as_ref());
+    requested
+        .into_iter()
+        .find(|(_, served_names, value)| {
+            !value.as_str().is_some_and(|name| {
+                adapter_options
+                    .is_some_and(|options| profile_declares_lora(options, name, *served_names))
+            })
+        })
+        .map(|(param, _, value)| (param, value.clone()))
+}
+
+fn profile_declares_lora(adapter_options: &Value, name: &str, served_names: bool) -> bool {
+    let runtime = adapter_options.get("runtime");
+    let runtime_names = |key: &str| {
+        runtime
+            .and_then(|runtime| runtime.get(key))
+            .and_then(Value::as_str)
+            == Some(name)
+    };
+    if runtime_names("lora_id") || (served_names && runtime_names("lora")) {
+        return true;
+    }
+    match adapter_options
+        .get("loadtime")
+        .and_then(|loadtime| loadtime.get("lora_paths"))
+    {
+        Some(Value::Object(paths)) => paths.iter().any(|(served, source)| {
+            (served_names && served == name)
+                || source
+                    .as_str()
+                    .or_else(|| source.get("id").and_then(Value::as_str))
+                    == Some(name)
+        }),
+        Some(Value::Array(paths)) => paths.iter().any(|path| path.as_str() == Some(name)),
+        _ => false,
+    }
+}
+
 fn parse_model_spec(spec: &str) -> (String, String) {
     if let Some(idx) = spec.find(":/") {
         (spec[..idx].to_string(), spec[idx + 2..].to_string())
@@ -12100,6 +12244,7 @@ pub(crate) fn is_openai_compat_forwarded_header(name: &str) -> bool {
 pub(crate) fn is_openai_compat_inner_request_header(name: &str) -> bool {
     [
         "authorization",
+        "x-api-key",
         "x-sie-machine-profile",
         "x-sie-pool",
         "x-sie-engine",
@@ -12429,7 +12574,7 @@ fn build_generate_success_body(
 
 /// Check client SDK version skew.
 /// Warns once per minor version if client SDK differs by >1 minor version.
-fn check_sdk_version(headers: &HeaderMap) {
+pub(crate) fn check_sdk_version(headers: &HeaderMap) {
     let Some(sdk_version) = headers
         .get("x-sie-sdk-version")
         .and_then(|v| v.to_str().ok())
@@ -14103,6 +14248,7 @@ fn generate_params_from_json(
         best_of: None,
         stream,
         lora_adapter,
+        include_reasoning: None,
     }))
 }
 
@@ -14532,6 +14678,7 @@ fn generate_params_from_rmpv(
         best_of: None,
         stream,
         lora_adapter,
+        include_reasoning: None,
     }))
 }
 
@@ -15780,7 +15927,10 @@ fn normalize_rerank_request(
     })
 }
 
-fn compatibility_model_uri(endpoint: &str, model: &str) -> Result<axum::http::Uri, String> {
+pub(crate) fn compatibility_model_uri(
+    endpoint: &str,
+    model: &str,
+) -> Result<axum::http::Uri, String> {
     let model = model.trim_start_matches('/');
     if model.is_empty() {
         return Err("'model' must contain a model id".to_string());
@@ -16849,6 +16999,7 @@ mod tests {
             executed_bundle_config_hash: Some(execution_hash.clone()),
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
         insert_buffered_generation_model_revision_header(
             &mut headers,
@@ -16958,6 +17109,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: Some(identity.clone()),
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
         insert_stream_execution_identity_header(&mut headers, &outcome);
         assert_eq!(
@@ -17093,6 +17245,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: Some(binding.clone()),
+            reasoning: Default::default(),
         };
         insert_stream_execution_binding_header(&mut headers, &outcome);
         assert_eq!(
@@ -17477,9 +17630,36 @@ mod tests {
     struct GenerationTargetProbe {
         targets: std::sync::Mutex<Vec<(String, PublishTarget)>>,
         params: std::sync::Mutex<Vec<WorkParams>>,
+        worker_chunks: std::sync::Mutex<Vec<serde_json::Value>>,
     }
 
     impl GenerationTargetProbe {
+        fn collect_worker_chunks(
+            &self,
+            display_model: &str,
+        ) -> Option<(
+            oneshot::Receiver<StreamOutcome>,
+            broadcast::Receiver<ChunkEnvelope>,
+        )> {
+            let chunks = self.worker_chunks.lock().expect("chunk probe lock").clone();
+            if chunks.is_empty() {
+                return None;
+            }
+            let (tx, rx) = oneshot::channel();
+            let mut collector = crate::queue::streaming::StreamCollector::new(
+                tx,
+                display_model.to_string(),
+                "default".to_string(),
+            );
+            let tap = collector.install_chunk_tap();
+            for chunk in chunks {
+                collector.apply(serde_json::from_value(chunk).expect("worker chunk"));
+            }
+            let outcome = collector.build_outcome().expect("worker terminal");
+            collector.sender.take().unwrap().send(outcome).unwrap();
+            Some((rx, tap))
+        }
+
         fn take_params(&self) -> WorkParams {
             self.params
                 .lock()
@@ -17561,6 +17741,14 @@ mod tests {
                 .lock()
                 .expect("target probe lock")
                 .push((display_model.to_string(), target));
+            if let Some((rx, _tap)) = self.collect_worker_chunks(display_model) {
+                return Ok((
+                    "request-1".to_string(),
+                    rx,
+                    Arc::new(Notify::new()),
+                    DispatchDurability::accepted(),
+                ));
+            }
             let (tx, rx) = oneshot::channel();
             tx.send(StreamOutcome {
                 text: "ok".to_string(),
@@ -17585,6 +17773,7 @@ mod tests {
                 executed_bundle_config_hash: None,
                 execution_identity_sha256: None,
                 execution_binding_sha256: None,
+                reasoning: Default::default(),
             })
             .expect("target probe outcome receiver");
             Ok((
@@ -17620,6 +17809,14 @@ mod tests {
                 .lock()
                 .expect("target probe lock")
                 .push((display_model.to_string(), target));
+            if let Some((rx, tap)) = self.collect_worker_chunks(display_model) {
+                return Ok((
+                    "request-1".to_string(),
+                    rx,
+                    tap,
+                    DispatchDurability::accepted(),
+                ));
+            }
             let (tx, rx) = oneshot::channel();
             let mut collector = crate::queue::streaming::StreamCollector::new(
                 tx,
@@ -17724,6 +17921,8 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/h".to_string(),
                 hf_revision: None,
+                description: None,
+                release_date: None,
                 routing: None,
                 adapter_module: None,
                 default_bundle: None,
@@ -18144,6 +18343,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_tool_names_outside_the_openai_pattern_are_refused_before_routing() {
+        let chat = |name: &str| {
+            serde_json::json!({
+                "model": "org/g",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 4,
+                "tools": [
+                    {"type": "function", "function": {"name": "get_weather"}},
+                    {"type": "function", "function": {"name": name}}
+                ]
+            })
+        };
+        let too_long = "a".repeat(65);
+        let longest = "A".repeat(64);
+        for (name, valid) in [
+            ("math.factorial", false),
+            ("two words", false),
+            ("caf\u{e9}", false),
+            ("a/b", false),
+            (too_long.as_str(), false),
+            ("get-weather_2", true),
+            (longest.as_str(), true),
+        ] {
+            let (state, policy) = recording_generation_state().await;
+            let response = proxy_chat(
+                State(state),
+                json_request("/v1/chat/completions", chat(name)),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{name}");
+            let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("read body");
+            let error: serde_json::Value = serde_json::from_slice(&body).expect("body is JSON");
+            assert!(policy.take_calls().is_empty(), "{name} reached routing");
+            if valid {
+                // The fixture model declares no tool support, so a request
+                // that passed validation is refused by the capability gate.
+                assert_eq!(error["error"]["code"], "unsupported_field", "{name}");
+                assert_eq!(error["error"]["param"], "tools", "{name}");
+            } else {
+                assert_eq!(error["error"]["code"], "invalid_request", "{name}");
+                assert_eq!(error["error"]["param"], "tools[1].function.name", "{name}");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn governed_generation_dispatch_targets_are_exact_and_order_independent() {
         for reverse_insertion in [false, true] {
             let (state, probe) = mixed_governed_generation_state(reverse_insertion).await;
@@ -18311,6 +18558,148 @@ mod tests {
                     .unwrap();
             }
         }
+    }
+
+    fn reasoning_worker_chunk(seq: u32, fields: serde_json::Value) -> serde_json::Value {
+        let mut chunk = json!({
+            "kind": "chunk", "request_id": "request-1", "attempt_id": "attempt-1",
+            "seq": seq, "text_delta": "", "done": false,
+        });
+        chunk
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        chunk
+    }
+
+    fn reasoning_worker_terminal(seq: u32, fields: serde_json::Value) -> serde_json::Value {
+        let mut terminal = json!({
+            "done": true, "finish_reason": "stop",
+            "usage": {"prompt_tokens": 1, "completion_tokens": 3, "total_tokens": 4},
+        });
+        terminal
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        reasoning_worker_chunk(seq, terminal)
+    }
+
+    #[tokio::test]
+    async fn chat_include_reasoning_reaches_the_worker_and_the_answer_only_when_set() {
+        for include_reasoning in [None, Some(false), Some(true)] {
+            for stream in [false, true] {
+                let (state, probe) = mixed_governed_generation_state(false).await;
+                *probe.worker_chunks.lock().unwrap() = vec![
+                    reasoning_worker_chunk(0, json!({"reasoning_delta": "why "})),
+                    reasoning_worker_chunk(1, json!({"text_delta": "Hi", "is_first": true})),
+                    reasoning_worker_terminal(2, json!({})),
+                ];
+                let mut body = json!({
+                    "model": "org/g",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 4,
+                    "stream": stream,
+                });
+                if let Some(value) = include_reasoning {
+                    body["include_reasoning"] = json!(value);
+                }
+                let response = proxy_chat(
+                    State(Arc::clone(&state)),
+                    json_request("/v1/chat/completions", body),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(
+                    probe
+                        .take_params()
+                        .generate
+                        .expect("generate")
+                        .include_reasoning,
+                    include_reasoning
+                );
+                let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+                    .await
+                    .unwrap();
+                let expected = (include_reasoning == Some(true)).then_some("why ");
+                if stream {
+                    let text = String::from_utf8(bytes.to_vec()).unwrap();
+                    let deltas: Vec<serde_json::Value> = text
+                        .lines()
+                        .filter_map(|line| line.strip_prefix("data: "))
+                        .filter(|data| *data != "[DONE]")
+                        .map(|data| serde_json::from_str::<serde_json::Value>(data).unwrap())
+                        .filter_map(|event| event["choices"].get(0).map(|c| c["delta"].clone()))
+                        .collect();
+                    let reasoning: String = deltas
+                        .iter()
+                        .filter_map(|delta| delta["reasoning_content"].as_str())
+                        .collect();
+                    let content: String = deltas
+                        .iter()
+                        .filter_map(|delta| delta["content"].as_str())
+                        .collect();
+                    assert_eq!(content, "Hi");
+                    assert_eq!(
+                        (!reasoning.is_empty()).then_some(reasoning.as_str()),
+                        expected
+                    );
+                } else {
+                    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    let message = &value["choices"][0]["message"];
+                    assert_eq!(message["content"], "Hi");
+                    assert_eq!(
+                        message.get("reasoning_content").and_then(|v| v.as_str()),
+                        expected
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_include_reasoning_keeps_each_candidate_reasoning_on_its_choice() {
+        let (state, probe) = mixed_governed_generation_state(false).await;
+        *probe.worker_chunks.lock().unwrap() = vec![
+            reasoning_worker_chunk(0, json!({"reasoning_delta": "R0"})),
+            reasoning_worker_chunk(1, json!({"reasoning_delta": "R1", "choice_index": 1})),
+            reasoning_worker_terminal(
+                2,
+                json!({"candidates": [
+                    {"text": "A", "finish_reason": "stop"},
+                    {"text": "B", "finish_reason": "length"},
+                ]}),
+            ),
+        ];
+        let response = proxy_chat(
+            State(state),
+            json_request(
+                "/v1/chat/completions",
+                json!({
+                    "model": "org/g",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 4,
+                    "n": 2,
+                    "include_reasoning": true,
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let choices = value["choices"].as_array().expect("choices");
+        let answered: Vec<(&str, &str)> = choices
+            .iter()
+            .map(|choice| {
+                (
+                    choice["message"]["content"].as_str().unwrap(),
+                    choice["message"]["reasoning_content"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(answered, vec![("A", "R0"), ("B", "R1")]);
     }
 
     #[tokio::test]
@@ -18832,6 +19221,69 @@ mod tests {
             ..Default::default()
         };
         assert_reason_first_order(&queued_json_schema(&params));
+    }
+
+    /// An extract request's `output_schema` and `options`, keys deliberately
+    /// not alphabetical: an adapter that reads a mapping of options in order
+    /// answers differently when they arrive sorted.
+    const CALLER_ORDER_EXTRACT_PARAMS: &str = r#"{
+        "output_schema": {
+            "priority": "string",
+            "intent": {"choice": {"refund": "asks for money back", "cancel": "wants to stop", "billing": "asks about a charge"}},
+            "frustration": "number"
+        },
+        "options": {"threshold": 0.5, "label_criteria": {"refund": "r", "cancel": "c", "billing": "b"}, "multi_label": false}
+    }"#;
+
+    fn assert_caller_order_extract_params(params: &WorkParams) {
+        let queued = |value: &serde_json::Value| -> rmpv::Value {
+            let bytes = rmp_serde::to_vec_named(value).expect("encode queue field");
+            rmpv::decode::read_value(&mut bytes.as_slice()).expect("decode queue field")
+        };
+        let schema = queued(params.output_schema.as_ref().expect("output_schema"));
+        assert_eq!(msgpack_keys(&schema), ["priority", "intent", "frustration"]);
+        assert_eq!(
+            msgpack_keys(&msgpack_field(&msgpack_field(&schema, "intent"), "choice")),
+            ["refund", "cancel", "billing"]
+        );
+        let options = queued(params.options.as_ref().expect("options"));
+        assert_eq!(
+            msgpack_keys(&options),
+            ["threshold", "label_criteria", "multi_label"]
+        );
+        assert_eq!(
+            msgpack_keys(&msgpack_field(&options, "label_criteria")),
+            ["refund", "cancel", "billing"]
+        );
+    }
+
+    #[test]
+    fn extract_output_schema_and_options_reach_queue_in_caller_key_order() {
+        let json_body =
+            format!(r#"{{"items": [{{"text": "hi"}}], "params": {CALLER_ORDER_EXTRACT_PARAMS}}}"#);
+        let (_, params) =
+            parse_queue_request(json_body.as_bytes(), false, "extract").expect("json body");
+        assert_caller_order_extract_params(&params);
+
+        // Decode the params straight into rmpv so the msgpack body keeps the
+        // text's key order without going through serde_json::Value.
+        let params_msgpack: rmpv::Value =
+            serde_json::from_str(CALLER_ORDER_EXTRACT_PARAMS).expect("params as msgpack value");
+        let body = rmpv::Value::Map(vec![
+            (
+                rmpv::Value::from("items"),
+                rmpv::Value::Array(vec![rmpv::Value::Map(vec![(
+                    rmpv::Value::from("text"),
+                    rmpv::Value::from("hi"),
+                )])]),
+            ),
+            (rmpv::Value::from("params"), params_msgpack),
+        ]);
+        let mut msgpack_body = Vec::new();
+        rmpv::encode::write_value(&mut msgpack_body, &body).expect("encode msgpack body");
+        let (_, params) =
+            parse_queue_request(&msgpack_body, true, "extract").expect("msgpack body");
+        assert_caller_order_extract_params(&params);
     }
 
     #[tokio::test]
@@ -21823,6 +22275,8 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/slow".to_string(),
                 hf_revision: None,
+                description: None,
+                release_date: None,
                 routing: None,
                 adapter_module: None,
                 default_bundle: None,
@@ -21886,6 +22340,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
         let body = build_generate_success_body_v2("Qwen/Qwen3-4B-Instruct", &outcome, false);
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -22928,6 +23383,7 @@ mod tests {
         // path — every other endpoint injects queue trace context).
         for name in [
             "authorization",
+            "x-api-key",
             "x-sie-machine-profile",
             "x-sie-pool",
             "x-sie-engine",
@@ -25178,6 +25634,8 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/buffered".to_string(),
                 hf_revision: None,
+                description: None,
+                release_date: None,
                 routing: None,
                 adapter_module: None,
                 default_bundle: None,
@@ -25241,6 +25699,8 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/g".to_string(),
                 hf_revision: None,
+                description: None,
+                release_date: None,
                 routing: None,
                 adapter_module: None,
                 default_bundle: None,
@@ -25324,6 +25784,8 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/plain".to_string(),
                 hf_revision: None,
+                description: None,
+                release_date: None,
                 routing: None,
                 adapter_module: None,
                 default_bundle: None,
@@ -25391,6 +25853,8 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/g2".to_string(),
                 hf_revision: None,
+                description: None,
+                release_date: None,
                 routing: None,
                 adapter_module: None,
                 default_bundle: None,
@@ -25454,6 +25918,8 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/g3".to_string(),
                 hf_revision: None,
+                description: None,
+                release_date: None,
                 routing: None,
                 adapter_module: None,
                 default_bundle: None,
@@ -25636,6 +26102,46 @@ mod tests {
         body["schema_in_prompt"] = serde_json::json!("no");
         let err = _expect_chat_err(body).await;
         assert_eq!(err["error"]["param"], "schema_in_prompt");
+        assert_eq!(err["error"]["code"], "invalid_request");
+    }
+
+    // ── include_reasoning: public reasoning on chat completions ──
+
+    #[test]
+    fn test_chat_include_reasoning_is_forwarded_and_defaults_to_private() {
+        let mut body = _chat_body_min("m");
+        let generate = _expect_chat_ok(body.clone())
+            .into_work_params()
+            .generate
+            .expect("generate params");
+        assert_eq!(generate.include_reasoning, None);
+        let wire = serde_json::to_value(&generate).unwrap();
+        assert!(wire.get("include_reasoning").is_none());
+
+        for (value, expected) in [
+            (serde_json::json!(true), Some(true)),
+            (serde_json::json!(false), Some(false)),
+            (serde_json::Value::Null, None),
+        ] {
+            body["include_reasoning"] = value;
+            let generate = _expect_chat_ok(body.clone())
+                .into_work_params()
+                .generate
+                .expect("generate params");
+            assert_eq!(generate.include_reasoning, expected);
+        }
+        body["include_reasoning"] = serde_json::json!(true);
+        let generate = _expect_chat_ok(body).into_work_params().generate.unwrap();
+        let wire = serde_json::to_value(&generate).unwrap();
+        assert_eq!(wire["include_reasoning"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn test_chat_include_reasoning_must_be_a_boolean() {
+        let mut body = _chat_body_min("m");
+        body["include_reasoning"] = serde_json::json!("yes");
+        let err = _expect_chat_err(body).await;
+        assert_eq!(err["error"]["param"], "include_reasoning");
         assert_eq!(err["error"]["code"], "invalid_request");
     }
 
@@ -26900,19 +27406,22 @@ mod tests {
                     finish_reason: Some("stop".to_string()),
                     logprobs: None,
                     tool_calls: None,
+                    reasoning_content: None,
                 },
                 CandidateData {
                     text: "Beta".to_string(),
                     finish_reason: Some("length".to_string()),
                     logprobs: None,
                     tool_calls: None,
+                    reasoning_content: None,
                 },
             ],
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "req", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "req", &outcome, false).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let choices = v["choices"].as_array().expect("choices array");
         assert_eq!(choices.len(), 2);
@@ -26966,19 +27475,22 @@ mod tests {
                             "arguments": "{\"city\":\"Tokyo\"}"
                         }
                     })]),
+                    reasoning_content: None,
                 },
                 CandidateData {
                     text: "plain answer".to_string(),
                     finish_reason: Some("stop".to_string()),
                     logprobs: None,
                     tool_calls: None,
+                    reasoning_content: None,
                 },
             ],
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "req-tc", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "req-tc", &outcome, false).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let c0 = &v["choices"][0];
         assert!(c0["message"]["content"].is_null());
@@ -27029,12 +27541,14 @@ mod tests {
                 finish_reason: Some("stop".to_string()),
                 logprobs: Some(cand_lp),
                 tool_calls: None,
+                reasoning_content: None,
             }],
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "req-lp", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "req-lp", &outcome, false).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let lps = &v["choices"][0]["logprobs"];
         assert!(!lps.is_null(), "candidate logprobs must surface (M4)");
@@ -27414,6 +27928,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
         let bytes = build_text_completion_body("m", "req-1", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -28041,6 +28556,7 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
         let bytes = build_responses_body("m", "req-1", &outcome).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -28127,9 +28643,11 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("Qwen/Qwen3-4B-Instruct-2507", "req-1", &outcome)
-            .expect("ok");
+        let bytes =
+            build_chat_completion_body("Qwen/Qwen3-4B-Instruct-2507", "req-1", &outcome, false)
+                .expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["object"], "chat.completion");
         assert_eq!(v["model"], "Qwen/Qwen3-4B-Instruct-2507");
@@ -28226,8 +28744,9 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "r", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "r", &outcome, false).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let lp = &v["choices"][0]["logprobs"];
         assert!(lp["content"].is_array(), "logprobs.content must be present");
@@ -28262,10 +28781,87 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "r", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "r", &outcome, false).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(v["choices"][0]["logprobs"].is_null());
+    }
+
+    #[test]
+    fn test_build_chat_completion_body_surfaces_reasoning_only_when_collected() {
+        use crate::queue::streaming::CandidateData;
+        let mut outcome = crate::queue::streaming::StreamOutcome {
+            text: "Hi".to_string(),
+            finish_reason: "stop".to_string(),
+            usage: Some(crate::queue::streaming::UsageBlock {
+                upstream_usage: None,
+                gpu_second: None,
+                images: None,
+                prompt_tokens_details: None,
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+            }),
+            attempt_id: "a".to_string(),
+            ttft_ms: None,
+            tpot_ms: None,
+            error: None,
+            origin: crate::queue::streaming::StreamOutcomeOrigin::WorkerTerminal,
+            tool_calls: None,
+            logprobs: None,
+            candidates: Vec::new(),
+            executed_bundle_config_hash: None,
+            execution_identity_sha256: None,
+            execution_binding_sha256: None,
+            reasoning: Default::default(),
+        };
+        let bytes = build_chat_completion_body("m", "r", &outcome, true).expect("ok");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["choices"][0]["message"]
+            .get("reasoning_content")
+            .is_none());
+
+        outcome.reasoning.insert(0, "why".to_string());
+        let bytes = build_chat_completion_body("m", "r", &outcome, true).expect("ok");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["choices"][0]["message"]["reasoning_content"], "why");
+        assert_eq!(v["choices"][0]["message"]["content"], "Hi");
+
+        let bytes = build_chat_completion_body("m", "r", &outcome, false).expect("ok");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["choices"][0]["message"]
+            .get("reasoning_content")
+            .is_none());
+
+        outcome.candidates = vec![
+            CandidateData {
+                text: "Alpha".to_string(),
+                finish_reason: Some("stop".to_string()),
+                logprobs: None,
+                tool_calls: None,
+                reasoning_content: Some("because".to_string()),
+            },
+            CandidateData {
+                text: "Beta".to_string(),
+                finish_reason: Some("stop".to_string()),
+                logprobs: None,
+                tool_calls: None,
+                reasoning_content: None,
+            },
+        ];
+        let bytes = build_chat_completion_body("m", "r", &outcome, true).expect("ok");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["choices"][0]["message"]["reasoning_content"], "because");
+        assert!(v["choices"][1]["message"]
+            .get("reasoning_content")
+            .is_none());
+
+        let bytes = build_chat_completion_body("m", "r", &outcome, false).expect("ok");
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["choices"][0]["message"]
+            .get("reasoning_content")
+            .is_none());
     }
 
     /// When the worker observed tool-call deltas across the stream
@@ -28304,8 +28900,9 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "req-tc", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "req-tc", &outcome, false).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
         let msg = &v["choices"][0]["message"];
@@ -28336,8 +28933,10 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
-        let resp = build_chat_completion_body("m", "req-1", &outcome).expect_err("missing usage");
+        let resp =
+            build_chat_completion_body("m", "req-1", &outcome, false).expect_err("missing usage");
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let body = axum::body::to_bytes(resp.into_body(), 16 * 1024)
             .await
@@ -28422,6 +29021,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-rl-1".to_string(),
             attempt_id: "att-rl-1".to_string(),
+            reason: None,
         };
         let resp = build_streaming_error_response(&err);
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -28455,6 +29055,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-large-1".to_string(),
             attempt_id: "att-large-1".to_string(),
+            reason: None,
         };
         let response = build_streaming_error_response(&err);
 
@@ -28481,6 +29082,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-too-long-1".to_string(),
             attempt_id: "att-too-long-1".to_string(),
+            reason: None,
         };
         let response = build_streaming_error_response(&err);
 
@@ -28508,6 +29110,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-unsupported-1".to_string(),
             attempt_id: "att-unsupported-1".to_string(),
+            reason: None,
         };
         let response = build_streaming_error_response(&err);
 
@@ -28536,6 +29139,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-cold-1".to_string(),
             attempt_id: "att-cold-1".to_string(),
+            reason: None,
         };
         let resp = build_streaming_error_response(&err);
 
@@ -28563,6 +29167,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-empty-1".to_string(),
             attempt_id: "att-empty-1".to_string(),
+            reason: None,
         };
         let resp = build_streaming_error_response(&err);
 
@@ -28596,6 +29201,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-load-failed-1".to_string(),
             attempt_id: "att-load-failed-1".to_string(),
+            reason: None,
         };
         let resp = build_streaming_error_response(&err);
 
@@ -28631,6 +29237,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-unknown-1".to_string(),
             attempt_id: "att-unknown-1".to_string(),
+            reason: None,
         };
         let resp = build_streaming_error_response(&err);
 
@@ -28660,6 +29267,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-sensitive-1".to_string(),
             attempt_id: "att-sensitive-1".to_string(),
+            reason: None,
         };
 
         let response = build_streaming_error_response(&err);
@@ -28687,6 +29295,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-future-1".to_string(),
             attempt_id: "att-future-1".to_string(),
+            reason: None,
         };
 
         let response = build_streaming_error_response(&err);
@@ -28716,6 +29325,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-retry-1".to_string(),
             attempt_id: "att-retry-1".to_string(),
+            reason: None,
         };
         let resp = build_streaming_error_response(&err);
 
@@ -28760,6 +29370,7 @@ mod tests {
             retry_after_s: Some(12),
             request_id: "req-retry-configured".to_string(),
             attempt_id: "att-retry-configured".to_string(),
+            reason: None,
         };
 
         let response = build_streaming_error_response(&err);
@@ -28787,6 +29398,7 @@ mod tests {
                 retry_after_s,
                 request_id: "req-loading".to_string(),
                 attempt_id: "att-loading".to_string(),
+                reason: None,
             };
 
             let response = build_streaming_error_response(&err);
@@ -28954,14 +29566,213 @@ mod tests {
             executed_bundle_config_hash: None,
             execution_identity_sha256: None,
             execution_binding_sha256: None,
+            reasoning: Default::default(),
         };
-        let bytes = build_chat_completion_body("m", "req-x", &outcome).expect("ok");
+        let bytes = build_chat_completion_body("m", "req-x", &outcome, false).expect("ok");
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         // Non-streaming uses `chat.completion`, not `chat.completion.chunk`.
         assert_eq!(v["object"], "chat.completion");
         // And the message is fully assembled (no `delta` field).
         assert_eq!(v["choices"][0]["message"]["content"], "Hi");
         assert!(v["choices"][0].get("delta").is_none());
+    }
+
+    // ── Declared LoRA selection on encode, extract and score ───────
+
+    const LORA_MODEL: &str = "\
+sie_id: acme/lora
+hf_id: acme/lora
+tasks:
+  encode:
+    dense:
+      dim: 2
+  score: {}
+  extract: {}
+profiles:
+  default:
+    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter
+    max_batch_tokens: 4096
+  banking:
+    extends: default
+    adapter_options:
+      runtime:
+        lora_id: org/banking-lora
+  tuned:
+    extends: default
+    adapter_options:
+      runtime:
+        lora: org/tuned-lora
+  served:
+    extends: default
+    adapter_options:
+      loadtime:
+        lora_paths:
+          legal: org/legal-lora
+          pinned:
+            id: org/pinned-lora
+            revision: 0123456789abcdef0123456789abcdef01234567
+  listed:
+    extends: default
+    adapter_options:
+      loadtime:
+        lora_paths:
+          - org/listed-lora
+";
+
+    #[tokio::test]
+    async fn undeclared_lora_option_accepts_only_what_the_selected_profile_declares() {
+        let gateway = TestGateway::new(&[LORA_MODEL]).await;
+        let entry = gateway
+            .state
+            .model_registry
+            .get_model_info("acme/lora")
+            .expect("model entry");
+
+        for (profile, name, keys) in [
+            ("banking", "org/banking-lora", &["lora", "lora_id"][..]),
+            ("served", "org/legal-lora", &["lora", "lora_id"][..]),
+            ("served", "org/pinned-lora", &["lora", "lora_id"][..]),
+            ("listed", "org/listed-lora", &["lora", "lora_id"][..]),
+            ("tuned", "org/tuned-lora", &["lora"][..]),
+            ("served", "legal", &["lora"][..]),
+            ("served", "pinned", &["lora"][..]),
+        ] {
+            for key in keys {
+                let options = json!({ "profile": profile, *key: name });
+                assert_eq!(
+                    undeclared_lora_option(Some(&options), || Some(entry.clone())),
+                    None,
+                    "{options}"
+                );
+            }
+        }
+        let not_looked_up = || -> Option<crate::types::model::ModelEntry> {
+            panic!("no LoRA is selected, so the model is not looked up")
+        };
+        assert_eq!(
+            undeclared_lora_option(Some(&json!({"lora": null, "lora_id": null})), not_looked_up),
+            None
+        );
+        assert_eq!(
+            undeclared_lora_option(Some(&json!({"profile": "banking"})), not_looked_up),
+            None
+        );
+        assert_eq!(undeclared_lora_option(None, not_looked_up), None);
+        assert_eq!(
+            undeclared_lora_option(Some(&json!({"lora": "attacker/lora"})), || None),
+            None
+        );
+
+        for (options, expected) in [
+            (
+                json!({"lora_id": "attacker/lora"}),
+                ("options.lora_id", json!("attacker/lora")),
+            ),
+            (
+                json!({"lora": "/srv/any/dir"}),
+                ("options.lora", json!("/srv/any/dir")),
+            ),
+            (
+                json!({"lora_id": "org/banking-lora"}),
+                ("options.lora_id", json!("org/banking-lora")),
+            ),
+            (
+                json!({"profile": "served", "lora_id": "org/banking-lora"}),
+                ("options.lora_id", json!("org/banking-lora")),
+            ),
+            (
+                json!({"profile": "missing", "lora": "legal"}),
+                ("options.lora", json!("legal")),
+            ),
+            (
+                json!({"profile": "served", "lora_id": "legal"}),
+                ("options.lora_id", json!("legal")),
+            ),
+            (
+                json!({"profile": "tuned", "lora_id": "org/tuned-lora"}),
+                ("options.lora_id", json!("org/tuned-lora")),
+            ),
+            (json!({"lora": ""}), ("options.lora", json!(""))),
+            (json!({"lora": 42}), ("options.lora", json!(42))),
+            (
+                json!({"profile": "served", "lora": "legal", "lora_id": "attacker/lora"}),
+                ("options.lora_id", json!("attacker/lora")),
+            ),
+        ] {
+            assert_eq!(
+                undeclared_lora_option(Some(&options), || Some(entry.clone())),
+                Some(expected),
+                "{options}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_undeclared_lora_is_refused_on_encode_extract_and_score_before_dispatch() {
+        let gateway = TestGateway::new(&[LORA_MODEL]).await;
+        gateway.add_worker("local-1", LOCAL_LANE, &[]).await;
+        let requests = |options: Value| {
+            [
+                (
+                    "encode",
+                    json!({"items": [{"text": "x"}], "params": {"options": options.clone()}}),
+                ),
+                (
+                    "extract",
+                    json!({"items": [{"text": "x"}], "params": {"labels": ["a"], "options": options.clone()}}),
+                ),
+                (
+                    "score",
+                    json!({"query": {"text": "q"}, "items": [{"text": "x"}], "options": options}),
+                ),
+            ]
+        };
+
+        for (endpoint, body) in requests(json!({"lora_id": "attacker/lora"})) {
+            let response = proxy_request(
+                State(Arc::clone(&gateway.state)),
+                json_request(&format!("/v1/{endpoint}/acme/lora"), body),
+                endpoint,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{endpoint}");
+            let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["detail"]["code"], "INVALID_REQUEST", "{endpoint}");
+            assert!(
+                value["detail"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("attacker/lora")),
+                "{endpoint}: {value}"
+            );
+        }
+        assert_eq!(gateway.dispatcher.dispatched(), Vec::new());
+
+        let msgpack = Request::builder()
+            .uri("/v1/encode/acme/lora")
+            .header("content-type", "application/msgpack")
+            .body(Body::from(
+                rmp_serde::to_vec_named(&json!({
+                    "items": [{"text": "x"}],
+                    "params": {"options": {"lora_id": "attacker/lora"}}
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let response = proxy_request(State(Arc::clone(&gateway.state)), msgpack, "encode").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "msgpack encode");
+        assert_eq!(gateway.dispatcher.dispatched(), Vec::new());
+
+        for (endpoint, body) in requests(json!({"profile": "served", "lora": "legal"})) {
+            let response = proxy_request(
+                State(Arc::clone(&gateway.state)),
+                json_request(&format!("/v1/{endpoint}/acme/lora"), body),
+                endpoint,
+            )
+            .await;
+            assert_ne!(response.status(), StatusCode::BAD_REQUEST, "{endpoint}");
+        }
+        assert_eq!(gateway.dispatcher.dispatched().len(), 3);
     }
 
     // ── M10: per-profile LoRA adapter validation ───────────────────
@@ -28986,6 +29797,8 @@ mod tests {
             dims: std::collections::HashMap::new(),
             max_sequence_length: None,
             revision: None,
+            description: None,
+            release_date: None,
             routing: None,
             max_output_tokens: None,
             profile_max_output_tokens: std::collections::HashMap::new(),

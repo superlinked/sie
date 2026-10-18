@@ -21,7 +21,7 @@ code, unchanged.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import numpy as np
@@ -41,6 +41,11 @@ MAX_RECORD_SPANS = 65536
 # the text alone grows with spans x document length. Flat single-label
 # removal keeps disjoint spans per slot: at most 100 slots x 2048 words.
 MAX_RECORD_WORDS = 262144
+# Characters of that field text (#378). The constant is MAX_RECORD_WORDS * 32:
+# 32 characters per counted word, including the joining space. The bound is
+# per document, so text averaging under 31 characters a word reaches the word
+# cap first, and text made of very long tokens reaches this cap.
+MAX_RECORD_CHARS = MAX_RECORD_WORDS * 32
 
 
 def make_structuring_decode(
@@ -49,6 +54,7 @@ def make_structuring_decode(
     *,
     max_spans: int = MAX_RECORD_SPANS,
     max_words: int = MAX_RECORD_WORDS,
+    max_chars: int = MAX_RECORD_CHARS,
 ) -> Callable[..., Any]:
     """A replacement for ``gliformer.tasks.structuring.decoder.StructuringDecoder.decode``.
 
@@ -57,6 +63,7 @@ def make_structuring_decode(
         unflatten_by_batch_origin: The package's helper of that name.
         max_spans: Most field spans per document, across its record slots.
         max_words: Most words of field text per document, across its slots.
+        max_chars: Most characters of decoded field text per document.
 
     Returns:
         The ``decode`` method.
@@ -145,6 +152,8 @@ def make_structuring_decode(
             kept = _within_word_limit(
                 [(anchor_idx, self.greedy_search(spans, flat_ner, multi_label)) for anchor_idx, spans in slot_spans],
                 max_words,
+                tokens=None if texts is None or text_idx >= len(texts) else texts[text_idx],
+                max_chars=max_chars,
             )
             for anchor_idx, spans in kept:
                 fields = self._spans_to_fields(spans, texts, text_idx)
@@ -283,27 +292,59 @@ def _slot_spans(
     return result
 
 
-def _within_word_limit(slots: list[tuple[int, list[Any]]], max_words: int) -> list[tuple[int, list[Any]]]:
-    """Drop the lowest-scoring kept fields until their text fits ``max_words``.
+def _span_chars(tokens: Sequence[str] | None, start: int, end: int) -> int:
+    """Characters of one span's decoded text.
+
+    The package copies ``" ".join(tokens[start:end + 1])``. With no tokens it
+    copies nothing, so the character cap does not apply.
+    """
+    if not tokens or start >= len(tokens):
+        return 0
+    span = tokens[start : end + 1]
+    if not span:
+        return 0
+    return sum(len(token) for token in span) + len(span) - 1
+
+
+def _within_word_limit(
+    slots: list[tuple[int, list[Any]]],
+    max_words: int,
+    *,
+    tokens: Sequence[str] | None = None,
+    max_chars: int = MAX_RECORD_CHARS,
+) -> list[tuple[int, list[Any]]]:
+    """Drop the lowest-scoring kept fields until their text fits both bounds.
 
     Fields are ranked best score first, and among equal scores by slot and
-    then position; the best ones whose words add up to at most ``max_words``
-    stay, in their original order.
+    then position. Taking stops at the first field that would exceed
+    ``max_words`` words or ``max_chars`` characters of decoded text. The ones
+    taken stay in their original order.
+
+    When the word total is already over ``max_words``, token text is read
+    only for the best-first prefix that still fits in that word budget. The
+    tail the word cap rejects is not walked.
     """
     words = sum(span.end - span.start + 1 for _, spans in slots for span in spans)
     if words <= max_words:
-        return slots
+        chars = sum(_span_chars(tokens, span.start, span.end) for _, spans in slots for span in spans)
+        if chars <= max_chars:
+            return slots
     ranked = sorted(
         ((slot, index, span) for slot, (_, spans) in enumerate(slots) for index, span in enumerate(spans)),
         key=lambda entry: -entry[2].score,
     )
     keep: set[tuple[int, int]] = set()
-    used = 0
+    used_words = 0
+    used_chars = 0
     for slot, index, span in ranked:
         width = span.end - span.start + 1
-        if used + width > max_words:
+        if used_words + width > max_words:
             break
-        used += width
+        span_chars = _span_chars(tokens, span.start, span.end)
+        if used_chars + span_chars > max_chars:
+            break
+        used_words += width
+        used_chars += span_chars
         keep.add((slot, index))
     return [
         (anchor_idx, [span for index, span in enumerate(spans) if (slot, index) in keep])

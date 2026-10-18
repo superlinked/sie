@@ -60,7 +60,6 @@ profiles:
     kv_budget_tokens: 32768
     adapter_options:
       loadtime:
-        mem_fraction_static: 0.85
         served_model_name: Qwen/Qwen3Guard-Gen-4B
         # Stream every 16 decode steps instead of every step. The verdict is
         # about ten tokens, so a streaming caller gets it in one event after

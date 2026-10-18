@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from docling.datamodel.base_models import ConversionStatus
+from docling_core.types.doc import DocItemLabel, DoclingDocument
 from sie_server.adapters.docling.adapter import DoclingAdapter
 from sie_server.types.inputs import Item
 
@@ -54,6 +55,36 @@ def _stub_converter(tag: str) -> MagicMock:
 
 
 class TestDoclingExtract:
+    @pytest.mark.parametrize("format_hint", ["png", "pdf"])
+    def test_exports_recognized_text_nested_in_pictures(self, format_hint: str) -> None:
+        document = DoclingDocument(name="scanned-receipt")
+        document.add_text(label=DocItemLabel.TEXT, text="Receipt summary")
+        picture = document.add_picture()
+        document.add_text(label=DocItemLabel.TEXT, text="Coffee beans 9.40", parent=picture)
+        document.add_text(label=DocItemLabel.TEXT, text="TOTAL 15.40", parent=picture)
+        converter = MagicMock()
+        converter.convert.return_value = SimpleNamespace(
+            status=ConversionStatus.SUCCESS, document=document, pages=[object()]
+        )
+        adapter, _ = _make_adapter()
+        adapter._make_converter = MagicMock(return_value=converter)  # type: ignore[method-assign]
+        item = (
+            Item(images=[{"data": b"image", "format": format_hint}])
+            if format_hint == "png"
+            else Item(document={"data": b"pdf", "format": format_hint})
+        )
+
+        out = adapter.extract([item], options={"ocr": True})
+
+        assert out.errors is None
+        assert out.pages == [1]
+        assert out.data is not None
+        for output_format in ("text", "markdown"):
+            rendered = out.data[0][output_format]
+            for expected in ("Receipt summary", "Coffee beans 9.40", "TOTAL 15.40"):
+                assert rendered.count(expected) == 1
+        assert out.data[0]["document"] == document.export_to_dict()
+
     def test_returns_text_markdown_and_document(self) -> None:
         adapter, _ = _make_adapter()
 

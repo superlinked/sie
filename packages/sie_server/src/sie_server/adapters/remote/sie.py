@@ -55,7 +55,14 @@ from sie_server.adapters._generation_base import (
 )
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED
-from sie_server.adapters.errors import RETRY_AFTER_MAX_S, RETRY_AFTER_MIN_S, InputTooLongError, UpstreamUnavailableError
+from sie_server.adapters.errors import (
+    RETRY_AFTER_MAX_S,
+    RETRY_AFTER_MIN_S,
+    InputTooLongError,
+    UpstreamFailureReason,
+    UpstreamUnavailableError,
+    known_upstream_failure_reason,
+)
 from sie_server.adapters.remote._batching import (
     RequestScores,
     UpstreamUsage,
@@ -116,6 +123,10 @@ _ITEM_ERRORS = {
     ErrorCode.INPUT_TOO_LONG.value: "the upstream refused this item as too long",
 }
 _ITEM_FAILED = "the upstream could not extract from this item"
+_ERROR_CODE_REASONS: dict[str, UpstreamFailureReason] = {
+    "MODEL_LOADING": "upstream_not_ready",
+    "RESOURCE_EXHAUSTED": "upstream_busy",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +140,7 @@ class _GenerationEvent:
     cached_tokens: int | None = None
     error_code: str | None = None
     retry_after_s: int = DEFAULT_RETRY_AFTER_S
+    upstream_reason: UpstreamFailureReason | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,8 +339,14 @@ class SieUpstreamAdapter(BaseAdapter, GenerationAdapter):
                     seen_text = seen_text or bool(event.text)
             raise RemoteUpstreamError("upstream stream ended before its terminal event")
         except UpstreamUnavailableError as error:
+            logger.warning("remote generation failed: %s", error)
             if yielded:
-                raise RemoteUpstreamError("the upstream failed during generation") from None
+                raise generation_error(
+                    RemoteUpstreamError("the upstream failed during generation", upstream_reason=error.upstream_reason)
+                ) from None
+            raise generation_error(error) from None
+        except RemoteUpstreamError as error:
+            logger.warning("remote generation failed: %s", error)
             raise generation_error(error) from None
         except InputTooLongError:
             raise GenerationInputTooLongError("the upstream refused the prompt as too long") from None
@@ -694,12 +712,14 @@ def _generation_event(data: bytes) -> _GenerationEvent:
     error = event.get("error")
     error_code = None
     retry_after_s = DEFAULT_RETRY_AFTER_S
+    upstream_reason = None
     if error is not None or finish_reason == "error":
         code = error.get("code") if isinstance(error, dict) else None
         error_code = client_safe_generation_error_code(code if isinstance(code, str) else None)
         wait = error.get("retry_after_s") if isinstance(error, dict) else None
         if isinstance(wait, int) and not isinstance(wait, bool) and RETRY_AFTER_MIN_S <= wait <= RETRY_AFTER_MAX_S:
             retry_after_s = wait
+        upstream_reason = known_upstream_failure_reason(error.get("reason")) if isinstance(error, dict) else None
     return _GenerationEvent(
         text=text,
         done=True,
@@ -710,6 +730,7 @@ def _generation_event(data: bytes) -> _GenerationEvent:
         cached_tokens=cached_tokens,
         error_code=error_code,
         retry_after_s=retry_after_s,
+        upstream_reason=upstream_reason,
     )
 
 
@@ -744,8 +765,16 @@ def _terminal_chunk(event: _GenerationEvent, *, yielded: bool, seen_text: bool) 
     An upstream that reports, before any output, that the model is loading,
     that it is busy, or that the prompt is too long, raises the matching
     generation error. Any other upstream error ends the generation with an
-    allowlisted code and fixed text.
+    allowlisted code and fixed text. An ``inference_error`` carries the class
+    the upstream named for its own upstream's failure, else
+    ``upstream_unavailable``, and ``MODEL_LOADING`` or ``RESOURCE_EXHAUSTED``
+    carries ``upstream_not_ready`` or ``upstream_busy``.
     """
+    if event.error_code is not None:
+        logger.warning(
+            "remote generation failed: upstream ended generation with %s",
+            " ".join(part for part in (event.error_code, event.upstream_reason) if part),
+        )
     if event.error_code is None:
         return GenerationChunk(
             text_delta=event.text,
@@ -759,9 +788,15 @@ def _terminal_chunk(event: _GenerationEvent, *, yielded: bool, seen_text: bool) 
         )
     if not yielded and not event.text:
         if event.error_code == "MODEL_LOADING":
-            raise GenerationDrainingError("the upstream is not ready, please retry", retry_after_s=event.retry_after_s)
+            raise GenerationDrainingError(
+                "the upstream is not ready, please retry",
+                retry_after_s=event.retry_after_s,
+                upstream_reason="upstream_not_ready",
+            )
         if event.error_code == "RESOURCE_EXHAUSTED":
-            raise GenerationCapacityError("the upstream is busy, please retry", retry_after_s=event.retry_after_s)
+            raise GenerationCapacityError(
+                "the upstream is busy, please retry", retry_after_s=event.retry_after_s, upstream_reason="upstream_busy"
+            )
         if event.error_code == "INPUT_TOO_LONG":
             raise GenerationInputTooLongError("the upstream refused the prompt as too long")
     return GenerationChunk(
@@ -774,6 +809,9 @@ def _terminal_chunk(event: _GenerationEvent, *, yielded: bool, seen_text: bool) 
         cached_tokens=event.cached_tokens,
         error_code=event.error_code,
         error_message=f"the upstream ended generation with {event.error_code}",
+        upstream_reason=(event.upstream_reason or "upstream_unavailable")
+        if event.error_code == "inference_error"
+        else _ERROR_CODE_REASONS.get(event.error_code),
     )
 
 

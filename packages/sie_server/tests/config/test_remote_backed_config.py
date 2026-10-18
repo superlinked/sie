@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 from sie_server.config.model import ModelConfig
 from sie_server.config.upstreams import Upstream, install_upstreams, validate_profile_upstreams
+from sie_server.core.loader import expand_profile_variants
 from sie_server.core.registry import ModelRegistry
 from sie_server.ipc_types import ReplaceModelConfigEntry, ReplaceModelConfigsRequest
 from sie_server.queue_executor import QueueExecutor
@@ -93,6 +94,63 @@ def test_a_model_config_cannot_define_an_upstream(loadtime: dict[str, Any]) -> N
 def test_a_remote_profile_names_both_the_upstream_and_its_model() -> None:
     with pytest.raises(ValidationError, match="must set load-time options: upstream_model"):
         ModelConfig.model_validate(remote_backed(profiles={"default": remote_profile(upstream="team-sie")}))
+
+
+def test_a_remote_profile_may_declare_the_window_its_upstream_serves() -> None:
+    config = ModelConfig.model_validate(
+        remote_backed(
+            profiles={
+                "default": remote_profile(),
+                "relay": remote_profile(upstream="team-sie", upstream_model="sie-fake", max_seq_length=8192),
+            }
+        )
+    )
+
+    assert config.resolve_profile("relay").loadtime["max_seq_length"] == 8192
+    assert expand_profile_variants([config])["acme/remote-fake:relay"].max_sequence_length == 8192
+    validate_profile_upstreams(config)
+
+
+def test_the_default_profile_serves_the_models_own_window() -> None:
+    with pytest.raises(ValidationError, match="Remote profile 'default' cannot declare 'max_seq_length'"):
+        ModelConfig.model_validate(
+            remote_backed(
+                profiles={
+                    "default": remote_profile(upstream="team-sie", upstream_model="sie-fake", max_seq_length=8192)
+                }
+            )
+        )
+
+
+def test_a_declared_window_does_not_stand_in_for_the_upstream_or_its_model() -> None:
+    with pytest.raises(ValidationError, match="must set load-time options: upstream_model"):
+        ModelConfig.model_validate(
+            remote_backed(
+                profiles={
+                    "default": remote_profile(),
+                    "relay": remote_profile(upstream="team-sie", max_seq_length=8192),
+                }
+            )
+        )
+    with pytest.raises(ValidationError, match="must set load-time options: upstream, upstream_model"):
+        ModelConfig.model_validate(
+            remote_backed(profiles={"default": remote_profile(), "relay": remote_profile(max_seq_length=8192)})
+        )
+
+
+@pytest.mark.parametrize("max_seq_length", [0, -1, True, "8192", 8192.0, None])
+def test_a_declared_window_is_a_positive_integer(max_seq_length: Any) -> None:
+    with pytest.raises(ValidationError, match="'max_seq_length' must be a positive integer"):
+        ModelConfig.model_validate(
+            remote_backed(
+                profiles={
+                    "default": remote_profile(),
+                    "relay": remote_profile(
+                        upstream="team-sie", upstream_model="sie-fake", max_seq_length=max_seq_length
+                    ),
+                }
+            )
+        )
 
 
 @pytest.mark.parametrize(

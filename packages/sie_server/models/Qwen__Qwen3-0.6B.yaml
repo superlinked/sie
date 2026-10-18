@@ -47,9 +47,6 @@ profiles:
     kv_budget_tokens: 8192
     adapter_options:
       loadtime:
-        # 0.8 leaves headroom on a 22 GiB L4 for a second SGLang instance. If
-        # the 0.6B is the only model on the card, 0.9 is fine.
-        mem_fraction_static: 0.8
         served_model_name: Qwen/Qwen3-0.6B
         # Modal sandbox lacks flashinfer's JIT prerequisites; switch backends.
         disable_cuda_graph: true

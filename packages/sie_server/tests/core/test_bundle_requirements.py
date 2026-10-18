@@ -83,11 +83,13 @@ def test_exact_pins_and_url_specs_override_the_lock() -> None:
     for requirement in url_specs:
         assert requirement in merged
     # Ranges that do not contain the locked version stay as written.
-    for name in ("transformers", "sentence-transformers"):
-        declared = [raw for raw in original if Requirement(raw).name == name]
-        assert len(declared) == 1
-        assert not Requirement(declared[0]).specifier.contains(locked[name], prereleases=True)
-        assert declared[0] in merged
+    declared = [raw for raw in original if Requirement(raw).name == "transformers"]
+    assert len(declared) == 1
+    assert not Requirement(declared[0]).specifier.contains(locked["transformers"], prereleases=True)
+    assert declared[0] in merged
+    # An exact override remains a requirement even when it matches the lock.
+    assert f"sentence-transformers=={locked['sentence-transformers']}" in original
+    assert f"sentence-transformers=={locked['sentence-transformers']}" in merged
     constraints = lock_constraint_lines(original, parsed)
     assert "gliner2==2.0.0" not in constraints
     assert f"gliner2=={locked['gliner2']}" not in constraints
@@ -98,7 +100,7 @@ def test_exact_pins_and_url_specs_override_the_lock() -> None:
     # The 4.x lock's huggingface-hub and safetensors do not satisfy transformers 5.
     assert f"huggingface-hub=={locked['huggingface-hub']}" not in constraints
     assert f"safetensors=={locked['safetensors']}" not in constraints
-    # gliner2==2.0.0 moves off the lock, so its 1.x edges are not pinned.
+    # The TF5 override also prevents pinning shared transitive dependencies.
     # torch stays because the bundle range still contains the locked version.
     assert f"peft=={locked['peft']}" not in constraints
     assert f"torch=={locked['torch']}" in constraints
@@ -148,12 +150,12 @@ def test_default_bundle_constraints_pin_transitive_deps_and_name_the_downgrade()
     assert constraints[0] == "# Ranged dependencies are pinned to uv.lock. This can install an older"
     assert "older" in constraints[0]
     assert "release than an unconstrained build" in constraints[1]
-    assert any(line.startswith("# For example, sentence-transformers and gliner ") for line in constraints)
+    assert any(line.startswith("# For example, gliner follows ") for line in constraints)
     assert f"onnxruntime=={parsed.versions['onnxruntime']}" in constraints
     assert f"docling-core=={parsed.versions['docling-core']}" in constraints
-    assert f"sentence-transformers=={parsed.versions['sentence-transformers']}" in constraints
     assert f"gliner=={parsed.versions['gliner']}" in constraints
     # Exact bundle pins stay requirements, not constraints.
+    assert not any(line.startswith("sentence-transformers==") for line in constraints)
     assert not any(line.startswith("pillow==") for line in constraints)
     assert not any(line.startswith("gliformer==") for line in constraints)
     assert all("[" not in line for line in constraints)

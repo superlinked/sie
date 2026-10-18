@@ -206,6 +206,7 @@ CANDLE_PATHS = (
     "packages/sie_server_rust/src/observability/tracing.rs",
     "packages/sie_server_rust/src/observability/transport.rs",
     "packages/sie_server_rust/src/text_prep.rs",
+    "packages/sie_server_rust/tests/candle_zip.rs",
     "packages/sie_server_rust/vendor/candle-cublaslt/Cargo.toml",
     "packages/sie_server_rust/vendor/candle-cublaslt/LICENSE-APACHE",
     "packages/sie_server_rust/vendor/candle-cublaslt/LICENSE-MIT",
@@ -833,7 +834,7 @@ def candle_source_errors() -> list[str]:
     expected = set(CANDLE_PATHS)
     if actual != expected:
         errors.append(
-            "Candle source closure differs from the reviewed 66-path allowlist: "
+            f"Candle source closure differs from the reviewed {len(expected)}-path allowlist: "
             f"missing={sorted(expected - actual)}, unexpected={sorted(actual - expected)}"
         )
         return errors

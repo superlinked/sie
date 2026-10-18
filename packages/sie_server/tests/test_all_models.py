@@ -451,27 +451,26 @@ def test_openai_clip_vit_large_patch14_image_dense() -> None:
 # =============================================================================
 
 
-_BGE_M3_CPU_BFLOAT16 = pytest.mark.xfail(
+_BGE_M3_CPU_FLOAT16 = pytest.mark.xfail(
     reason=(
-        "The default profile's compute_precision: bfloat16 also applies on CPU, so BGEM3Adapter runs in "
-        "bfloat16 and drifts from the float32 FlagEmbedding output pinned here (bge_m3_flag still matches it)"
+        "The default profile's compute_precision: float16 also applies on CPU, so BGEM3Adapter's "
+        "dense and multivector outputs differ from the float32 FlagEmbedding reference pinned here"
     ),
     raises=_NumericalReferenceMismatchError,
     strict=True,
 )
 
 
-@_BGE_M3_CPU_BFLOAT16
+@_BGE_M3_CPU_FLOAT16
 def test_baai_bge_m3_dense() -> None:
     _assert_dense("BAAI/bge-m3", 1024, [0.001247406005859375, 0.0228271484375, -0.02349853515625])
 
 
-@_BGE_M3_CPU_BFLOAT16
 def test_baai_bge_m3_sparse() -> None:
     _assert_sparse("BAAI/bge-m3", [3034], [0.342041015625])
 
 
-@_BGE_M3_CPU_BFLOAT16
+@_BGE_M3_CPU_FLOAT16
 def test_baai_bge_m3_multivector() -> None:
     _assert_multivector("BAAI/bge-m3", 1024, [0.01641845703125, 0.0304718017578125, -0.036468505859375])
 

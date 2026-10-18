@@ -14,6 +14,7 @@ import httpx
 import pytest
 import yaml
 from sie_server.adapters._generation_base import GenerationChunk, GenerationResult
+from sie_server.adapters.sglang import _memory
 from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
 from sie_server.adapters.sglang_vision_extract.adapter import SGLangVisionExtractAdapter
 from sie_server.config.model import ModelConfig
@@ -404,7 +405,7 @@ def test_page_metering_replaces_image_units_and_stamps_successes() -> None:
     items = [Item(images=[_image("page")])]
     future = MagicMock()
     future.result.return_value = [
-        GenerationResult(text="# page", finish_reason="stop", prompt_tokens=2590, completion_tokens=836)
+        GenerationResult(text=" \n# page \n ", finish_reason="stop", prompt_tokens=2590, completion_tokens=836)
     ]
 
     def submit(coroutine: Any, loop: Any) -> MagicMock:
@@ -671,10 +672,10 @@ class _KwargsProcessor(_FakeProcessor):
 _LIGHTONOCR3 = "lightonai/LightOnOCR-3-4B"
 
 
-def _lightonocr3_default_adapter() -> SGLangVisionExtractAdapter:
+def _lightonocr3_adapter(profile_name: str = "default") -> SGLangVisionExtractAdapter:
     model_path = Path(__file__).resolve().parents[2] / "models" / "lightonai__LightOnOCR-3-4B.yaml"
     config = ModelConfig.model_validate(yaml.safe_load(model_path.read_text()))
-    profile = config.resolve_profile("default")
+    profile = config.resolve_profile(profile_name)
     assert profile.adapter_path == "sie_server.adapters.sglang_vision_extract.adapter:SGLangVisionExtractAdapter"
     loadtime: dict[str, Any] = dict(profile.loadtime)
     instance = SGLangVisionExtractAdapter(_LIGHTONOCR3, revision=config.hf_revision, **loadtime)
@@ -685,7 +686,7 @@ def _lightonocr3_default_adapter() -> SGLangVisionExtractAdapter:
 
 @pytest.mark.parametrize("instruction", [None, "", "grounding"])
 def test_lightonocr3_profile_uses_trained_prompts_without_system_or_thinking(instruction: str | None) -> None:
-    instance = _lightonocr3_default_adapter()
+    instance = _lightonocr3_adapter()
     prompt, label = instance._resolve_prompt_and_label(instruction, {})
     assert label == "markdown"
     instance._build_prompt(prompt)
@@ -700,7 +701,7 @@ def test_lightonocr3_profile_uses_trained_prompts_without_system_or_thinking(ins
 
 @pytest.mark.parametrize("instruction", ["Grounding", "Text Recognition:", "Extract tables only"])
 def test_lightonocr3_profile_rejects_untrained_instructions(instruction: str) -> None:
-    instance = _lightonocr3_default_adapter()
+    instance = _lightonocr3_adapter()
     instance._request_loop = MagicMock()
     with pytest.raises(ValueError, match="instruction must be omitted or one of"):
         instance.extract([Item(images=[_image("page")])], instruction=instruction)
@@ -708,7 +709,7 @@ def test_lightonocr3_profile_rejects_untrained_instructions(instruction: str) ->
 
 @pytest.mark.asyncio
 async def test_lightonocr3_profile_sampling_reaches_sglang_request() -> None:
-    instance = _lightonocr3_default_adapter()
+    instance = _lightonocr3_adapter()
     bodies: list[dict[str, Any]] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -735,6 +736,95 @@ async def test_lightonocr3_profile_sampling_reaches_sglang_request() -> None:
 def test_sampling_defaults_stay_greedy(adapter: SGLangVisionExtractAdapter) -> None:
     assert (adapter._temperature, adapter._top_p, adapter._chat_template_kwargs) == (0.0, 1.0, {})
     assert adapter._allowed_instructions is None
+    assert adapter._output_postprocess is None
+
+
+@pytest.mark.parametrize("instruction", [None, "", "grounding"])
+def test_markdown_profile_defaults_to_grounding_and_preserves_engine_usage(instruction: str | None) -> None:
+    instance = _lightonocr3_adapter("markdown")
+    generated_images: list[ImageInput] = []
+    processor = instance._processor
+
+    async def generate(prompt: str, *, images: list[ImageInput], **sampling: Any) -> AsyncIterator[GenerationChunk]:
+        assert prompt == "rendered prompt"
+        assert sampling == {"max_new_tokens": 12288, "temperature": 0.1, "top_p": 1.0}
+        assert len(images) == 1
+        generated_images.extend(images)
+        raw = (
+            "prefix\n![header](0,0,1000,100)header\n"
+            "![text](0,100,1000,900)We use \\$x^2\\$ here. Price \\$5.\n"
+            "![footer](0,900,1000,1000)footer"
+        )
+        yield GenerationChunk(
+            text_delta=raw, done=True, finish_reason="stop", prompt_tokens=2590, completion_tokens=836
+        )
+
+    instance.generate = generate  # ty: ignore[invalid-assignment]
+    instance._start_request_loop()
+    try:
+        result = instance.extract([Item(images=[_image("page")])], instruction=instruction)
+    finally:
+        instance.unload()
+
+    assert instance._processor is None
+    assert processor.messages == [
+        {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "grounding"}]}
+    ]
+    assert processor.template_kwargs == {"enable_thinking": False}
+    assert generated_images == [_image("page")]
+    assert result.entities == [[{"text": r"We use $x^2$ here. Price \$5.", "label": "markdown", "score": 1.0}]]
+    assert result.pages == [1]
+    assert result.input_token_counts == [2590]
+    assert result.output_token_counts == [836]
+
+
+def test_markdown_profile_keeps_empty_page_and_original_generated_token_counts() -> None:
+    instance = _lightonocr3_adapter("markdown")
+    generated_images: list[ImageInput] = []
+    processor = instance._processor
+
+    async def generate(prompt: str, *, images: list[ImageInput], **sampling: Any) -> AsyncIterator[GenerationChunk]:
+        assert prompt == "rendered prompt"
+        generated_images.extend(images)
+        raw = "![header](0,0,1000,1000)discarded"
+        if images[0]["data"] == b"body":
+            raw = "![text](0,0,1000,1000)body"
+        yield GenerationChunk(text_delta=raw[:10])
+        yield GenerationChunk(
+            text_delta=raw[10:], done=True, finish_reason="stop", prompt_tokens=2048, completion_tokens=90
+        )
+
+    instance.generate = generate  # ty: ignore[invalid-assignment]
+    instance._start_request_loop()
+    try:
+        result = instance.extract([Item(images=[_image("body")]), Item(images=[_image("margin")])])
+    finally:
+        instance.unload()
+
+    assert generated_images == [_image("body"), _image("margin")]
+    assert processor.messages == [
+        {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "grounding"}]}
+    ]
+    assert processor.template_kwargs == {"enable_thinking": False}
+    assert result.entities == [
+        [{"text": "body", "label": "markdown", "score": 1.0}],
+        [{"text": "", "label": "markdown", "score": 1.0}],
+    ]
+    assert result.pages == [1, 1]
+    assert result.input_token_counts == [2048, 2048]
+    assert result.output_token_counts == [90, 90]
+
+
+@pytest.mark.parametrize("output_postprocess", ["unknown", "", False, 1, {}, []])
+def test_sglang_rejects_unknown_output_postprocessors(output_postprocess: Any) -> None:
+    with pytest.raises(ValueError, match="output_postprocess"):
+        SGLangVisionExtractAdapter(_LIGHTONOCR3, output_postprocess=output_postprocess)
+
+
+def test_output_postprocess_cannot_be_a_runtime_option(adapter: SGLangVisionExtractAdapter) -> None:
+    adapter._request_loop = MagicMock()
+    with pytest.raises(ValueError, match="output_postprocess is a loadtime option"):
+        adapter.extract([Item(images=[_image("page")])], options={"output_postprocess": "lightonocr3_markdown"})
 
 
 @pytest.mark.parametrize(
@@ -743,3 +833,10 @@ def test_sampling_defaults_stay_greedy(adapter: SGLangVisionExtractAdapter) -> N
 def test_invalid_sampling_options_rejected(options: dict[str, Any]) -> None:
     with pytest.raises(ValueError, match=r"temperature|top_p"):
         SGLangVisionExtractAdapter("lightonai/LightOnOCR-3-4B", **options)
+
+
+@pytest.fixture(autouse=True)
+def mock_memory_hardware(monkeypatch):
+    """Launch lifecycle tests use synthetic weight metadata and CUDA capacity."""
+    monkeypatch.setattr(_memory, "device_memory", lambda _: (80 * _memory.GIB, 80 * _memory.GIB))
+    monkeypatch.setattr(_memory.SGLangMemoryBudget, "static_bytes", 8 * _memory.GIB)

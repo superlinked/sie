@@ -22,6 +22,9 @@ into a 400 response; the adapter maps its fixed message to ``invalid_request``.
 When the adapter sets ``SIE_SGLANG_JSON_NUMBER_MAX_DIGITS``, the hook also
 bounds the digit runs of numbers in XGrammar's JSON-schema grammars (see the
 section at the end of this module).
+
+``SIE_SGLANG_LORA_COMPAT`` enables the exact-version LoRA GPU slot release
+backport needed for runtime eviction on the pinned SGLang 0.5.10 engine.
 """
 
 from __future__ import annotations
@@ -151,6 +154,9 @@ def _install_mm_process_config_compat() -> None:
 
 if os.environ.get("SIE_SGLANG_MM_PROCESS_CONFIG_COMPAT") == "1":
     _install_mm_process_config_compat()
+
+if os.environ.get("SIE_SGLANG_LORA_COMPAT") == "1":
+    importlib.import_module("sie_lora_compat").install_lora_compat()
 
 
 # --- JSON number digit bound ---------------------------------------------

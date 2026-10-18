@@ -81,6 +81,7 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         doc_template: str | None = None,
         trust_remote_code: bool = True,
         revision: str | None = None,
+        code_revision: str | None = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the adapter.
@@ -94,6 +95,7 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             trust_remote_code: Whether to trust remote code (required for NewForMaskedLM).
             revision: Optional HuggingFace revision/branch/commit SHA to pin when
                 loading model artifacts. Forwarded to ``from_pretrained(..., revision=...)``.
+            code_revision: Optional revision for custom code, independent of model artifacts.
             **kwargs: Additional arguments (ignored, for compatibility).
         """
         _ = kwargs
@@ -104,6 +106,7 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         self._doc_template = doc_template
         self._trust_remote_code = trust_remote_code
         self._revision = revision
+        self._code_revision = code_revision
 
         self._model: Any = None
         self._tokenizer: PreTrainedTokenizerFast | None = None
@@ -144,6 +147,8 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         shared_kwargs: dict[str, Any] = {"trust_remote_code": self._trust_remote_code}
         if self._revision is not None:
             shared_kwargs["revision"] = self._revision
+        if self._code_revision is not None:
+            shared_kwargs["code_revision"] = self._code_revision
 
         self._tokenizer = AutoTokenizer.from_pretrained(
             self._model_name_or_path,

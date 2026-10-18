@@ -41,7 +41,7 @@ from sie_server.core.score_cost import build_score_prepared_items_timed
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker.handlers.extract import ExtractHandler
 from sie_server.core.worker.model_worker import PreformedExtractRequest, PreformedScoreRequest
-from sie_server.core.worker.types import WorkerDrainedError
+from sie_server.core.worker.types import LoraNotReadyError, WorkerDrainedError
 from sie_server.ipc_types import (
     ApplyModelConfigRequest,
     ApplyModelConfigResponse,
@@ -1063,6 +1063,26 @@ class QueueExecutor:
             return None
         budget = getattr(batch_config, "max_batch_requests", None)
         if isinstance(budget, int) and budget > 0:
+            return budget
+        return None
+
+    def get_max_batch_tokens(self, model_id: str) -> int | None:
+        """Return the model's batch cost budget, or ``None`` if unknown / not loaded.
+
+        Reads the worker's static ``config.max_batch_tokens`` (the resolved
+        profile value), not ``_batch_config.max_batch_cost``, which the
+        direct-path adaptive controller rewrites as it steps. The
+        worker-sidecar derives the model's batch cost cap and adaptive cost
+        range from it.
+        """
+        try:
+            worker = self._registry.get_worker(model_id)
+        except (KeyError, AttributeError):
+            return None
+        if worker is None:
+            return None
+        budget = getattr(getattr(worker, "config", None), "max_batch_tokens", None)
+        if isinstance(budget, int) and not isinstance(budget, bool) and budget > 0:
             return budget
         return None
 
@@ -2336,6 +2356,16 @@ def _inference_exception_outcome(
         return _nak_outcome(bi)
     if isinstance(exc, UpstreamUnavailableError):
         return _upstream_refusal_outcome(bi, exc)
+    if isinstance(exc, LoraNotReadyError):
+        return ItemOutcome(
+            work_item_id=bi.work_item_id,
+            request_id=bi.request_id,
+            item_index=bi.item_index,
+            disposition="publish_error_and_ack",
+            error=str(exc),
+            error_code=ErrorCode.LORA_LOADING.value,
+            retry_after_s=exc.retry_after_s,
+        )
     if isinstance(exc, InputTooLongError):
         # The input exceeds the model's window: INPUT_TOO_LONG (HTTP 400), as
         # the HTTP path reports it, not a server-side inference failure.

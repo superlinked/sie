@@ -35,13 +35,13 @@ pip install sie-server
   ```
 
 - **Transformers 5 bundle** (LightOnOCR, GLM-OCR, GLiGuard, GLiNER2.5 entity and Decide models, Privacy Filter, and the TopK-Embed-V1
-  multi-vector models) — requires `transformers` 5.x, and is served with `-b transformers5`. The GLiNER2.5-Decide
+  multi-vector models, and Perplexity decisions) — requires `transformers` 5.x, and is served with `-b transformers5`. The GLiNER2.5-Decide
   and entity models also need `gliner2` 2.x. `sie-server` itself asks for `gliner2<2`, which the default bundle's GLiNER2
   models need, so pip reports that conflict when the second command below installs 2.x; the transformers5
   bundle's GLiNER2 models are pinned to 2.0.0:
 
   ```bash
-  pip install sie-server "transformers>=5,<6"
+  pip install sie-server "transformers>=5.17,<6"
   pip install "gliner2==2.0.0"  # for the GLiNER2.5 and GLiNER2 PII models
   sie-server serve -b transformers5
   ```
@@ -58,6 +58,44 @@ pip install sie-server
 ```bash
 sie-server serve --port 8080 --device cuda:0
 ```
+
+### Perplexity typed decisions
+
+`perplexity-ai/pplx-decider-v1.1-27b` uses its native 255-option decision head
+in the `transformers5` bundle. It accepts text through `extract` with typed
+`output_schema` questions, `/v1/systemone`, and the OpenAI-compatible
+`/v1/decisions` route. The upstream image input is not supported by this adapter.
+
+The pinned checkpoint's attention mode, pooling and calibration temperature
+are preserved. Every state/question pair runs as a separate row, with at most
+8,192 tokens including the chat template and answer options. Oversized items
+return `INPUT_TOO_LONG`; inputs are never truncated. The request limits are
+32 questions, 255 options per question, 1,024 options total and 65,536 question
+characters. An item may occupy at most 32,768 tokens across all its rows.
+The decision compatibility routes also apply their existing limits, including
+at most 10 levels for a score question.
+Input usage counts every complete row processed; no output tokens are generated.
+
+```python
+from sie_sdk import SIEClient
+
+client = SIEClient("http://localhost:8080")
+result = client.extract(
+    "perplexity-ai/pplx-decider-v1.1-27b",
+    ["The customer was charged twice and wants a refund."],
+    output_schema={
+        "intent": {
+            "type": "choice",
+            "instructions": "Which team should handle this message?",
+            "criteria": {"billing": "Payments and refunds", "support": "Technical problems"},
+        },
+    },
+)
+```
+
+Use a GPU with enough memory for the approximately 52 GB BF16 checkpoint plus
+inference activations. This model uses native forward passes, not generation,
+and has no runtime LoRA or image support in this adapter.
 
 ### LightOnOCR-3 extraction
 
@@ -1035,7 +1073,103 @@ as a profile an operator chooses.
 `sie-server` reads its config from `SIE_*` environment variables (Pydantic
 `BaseSettings`). Common knobs:
 
+### Authentication and exposure
+
+| Env var | Default | Effect |
+|--|--|--|
+| `SIE_SERVER_HOST` | `0.0.0.0` | Address `sie-server serve` binds, same as `--host`. `127.0.0.1` accepts connections from this machine only. The default becomes `127.0.0.1` in 0.13.0. |
+| `SIE_AUTH_MODE` | unset | `token` (alias `static`) requires a token on every route of the HTTP port except `/healthz`, `/livez` and `/readyz`, including `/ws/status`. `none` turns authentication off. `auto` requires a token when the bind address is not loopback; it is a `sie-server` value, which the gateway refuses. Unset behaves as `none`, or as `token` when a token is configured. Values are lowercase and case-sensitive, as on the gateway; any other value stops startup. |
+| `SIE_AUTH_TOKENS` | unset | Comma-separated accepted tokens. `SIE_AUTH_TOKEN` is read when it is unset. Setting a token with `SIE_AUTH_MODE=none` stops startup, and so does a token variable that is set but holds no token, unless `SIE_AUTH_MODE=none`. |
+| `SIE_DATA_DIR` | `$XDG_DATA_HOME/sie`, else `~/.local/share/sie` | Holds the generated token (`auth-token`, mode `0600`) and the telemetry worker id. Images set `/app/.cache/sie`. |
+
+Clients send the token as `Authorization: Bearer <token>` or `x-api-key: <token>`;
+when both are sent, `Authorization` is used and `x-api-key` is ignored, as on the
+gateway. The SDKs send `SIE_API_KEY`
+as a Bearer token. Repeated headers differ from the gateway until 0.13.0: the
+server reads every value of a repeated header, skips empty ones, and refuses
+values that carry different tokens, while the gateway uses only the first
+`Authorization` value.
+
+Token auth covers the HTTP port. The other listeners are local: the IPC socket
+that a worker sidecar uses (`SIE_IPC_SOCKET_PATH`, mode `0600`) and the
+loopback ports of the engines the server launches.
+
+When token auth is on and no token is configured, the server generates one on
+first start and saves it in `SIE_DATA_DIR`. When stderr is a terminal it prints
+the token once; otherwise, as in a container without a terminal or under a
+service manager whose output is kept in logs, it prints only the file's path
+and the command that reads it. Later starts reuse the token and print only its
+path. They only read it, so a read-only directory or volume works once it holds
+the token. A container started with a terminal (`docker run -t`, Compose
+`tty: true`, or a Kubernetes container with `tty: true`) counts as a terminal,
+and the container runtime keeps that one print in the container's logs. In
+containers, set `SIE_AUTH_TOKEN` yourself instead. The server refuses a token
+directory that another user owns or can write to, and a token file that is a
+symbolic link, not a regular file, hard-linked, owned by another user, or
+readable by others. To rotate a generated token, delete `auth-token` from
+`SIE_DATA_DIR` and restart the server. In Docker, keep the token across
+containers with a volume:
+
+```bash
+docker run -p 127.0.0.1:8080:8080 -e SIE_AUTH_MODE=token \
+  -v sie-data:/app/.cache/sie \
+  -v sie-hf-cache:/app/.cache/huggingface \
+  ghcr.io/superlinked/sie-server:latest-cpu-default
+```
+
+A server that listens beyond loopback without authentication logs a warning on
+every start. From 0.13.0 such a server requires a token unless
+`SIE_AUTH_MODE=none` is set explicitly.
+
+A server bound to loopback (`127.0.0.0/8`, `::1` or `localhost`) with
+authentication off checks that the `Host` header names this machine:
+`localhost`, `127.0.0.1`, `[::1]` or the bind address, with any port. A web
+page that rebinds its own domain to `127.0.0.1` sends another `Host`. Until
+0.13.0 such a request is still answered, and the server logs a warning once for
+each such `Host`. From 0.13.0 it gets `400`. That also affects a reverse proxy
+on the same machine that passes the client's `Host` on, and a container that
+reaches the server as `host.docker.internal`: have them send one of the names
+above, or turn on token authentication.
+
 ### Memory & OOM resilience
+
+SGLang generation, embedding and vision-extraction adapters size memory per
+model when `adapter_options.loadtime.mem_fraction_static` is omitted. SIE reads
+the pinned local safetensors headers at the serving precision and the model's
+attention geometry. It reserves the weights (with a 5% allowance), the KV pool,
+1 GiB for startup and 2 GiB for runtime work such as CUDA graphs. No weights are
+loaded onto a GPU to compute this estimate.
+
+The KV pool uses the resolved profile's `kv_budget_tokens`; embedding and
+extraction profiles without that field use `max_seq_length`. Capacity rounds
+up to 512 tokens, with another 512 tokens accounted for as allocation padding.
+SIE passes `--max-total-tokens` to bound the pool. SGLang's static fraction is
+derived from free memory immediately before launch, so loading a second model
+does not reduce its requested capacity. The load-staging check uses the same
+reservation and evicts idle eligible models when it cannot fit. Resident-model
+accounting reports the reservation; the pressure monitor continues to use
+actual device usage, including every SGLang subprocess.
+
+To dedicate most of a GPU to one model, explicitly set a fraction:
+
+```yaml
+profiles:
+  default:
+    # Other required profile fields omitted here.
+    kv_budget_tokens: 32768
+    adapter_options:
+      loadtime:
+        mem_fraction_static: 0.90
+```
+
+An explicit fraction keeps the previous SGLang launch and admission behavior:
+SIE requires that fraction of total GPU memory plus 1 GiB of load headroom,
+and does not cap the engine's KV pool to `kv_budget_tokens`. Explicit fractions
+are required for tensor-parallel engines, speculative or LoRA weights,
+quantized checkpoints and nonstandard KV layouts such as MLA or linear
+attention. Calibrated profiles for these configurations retain their overrides.
+Automatic sizing is an estimate; unusually large runtime workspaces can still
+invoke the existing OOM recovery path.
 
 | Env var | Default | Effect |
 |--|--|--|
@@ -1060,8 +1194,74 @@ auto-retries; see `packages/sie_sdk/README.md` for client-side controls.
 | `SIE_MAX_BATCH_REQUESTS` | `64` | Maximum number of items per batched inference call. |
 | `SIE_MAX_BATCH_WAIT_MS` | `15.0` | Initial value for the adaptive first-request batch timeout. At runtime the PI batching controller steers it between `SIE_ADAPTIVE_BATCHING__MIN_WAIT_MS` and `SIE_ADAPTIVE_BATCHING__MAX_WAIT_MS`, so it is a starting point rather than a fixed wait. |
 | `SIE_MAX_CONCURRENT_REQUESTS` | `512` | Per-worker queue size; admission control returns `QUEUE_FULL` above this. |
-| `SIE_MAX_LORAS_PER_MODEL` | `10` | Maximum concurrent LoRA adapters per base model. |
+| `SIE_MAX_LORAS_PER_MODEL` | `10` | Maximum concurrent LoRA adapters per base model. A request loads or selects only the adapters its selected profile declares. `options.lora` or `options.lora_id` naming any other is rejected with HTTP 400: `INVALID_INPUT` from this server, and `INVALID_REQUEST` from the gateway (code `unknown_lora_adapter` where it answers in the OpenAI error envelope). |
 | `SIE_MAX_ITEM_TEXT_BYTES` | `2097152` (2 MiB) | Most bytes of UTF-8 one encode, score, or extract item may carry in its `text` and `metadata` together. A larger item is rejected with `INVALID_INPUT` (HTTP 400) before it is tokenized. Generation prompts are not items and are not affected. |
+
+SGLang generation and embedding profiles can defer declared LoRAs until a
+request selects them. Keep one source allowlist in `lora_paths` and use
+`preload_loras` to select startup adapters:
+
+```yaml
+adapter_options:
+  loadtime:
+    mem_fraction_static: 0.80
+    lora_paths:
+      support:
+        id: acme/support-lora
+        revision: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa # replace with the repository's immutable commit
+      legal: acme/legal-lora
+    preload_loras: []
+    max_lora_rank: 16
+    lora_target_modules: [q_proj, v_proj]
+    max_loras_per_batch: 2
+```
+
+Omitting `preload_loras` keeps the existing behavior: every declared source
+loads at startup and remains pinned in SIE. An empty list defers every source;
+a nonempty list preloads and pins only those served names. Names must be unique
+members of the selected profile's map. Profile `loadtime` blocks use full
+replacement when a child supplies one, so restate the source map and its other
+options when changing only a child's preload selection.
+
+Deferred adapters require the maximum rank and target modules at engine launch
+because SGLang allocates its LoRA buffers then. LoRA profiles require an explicit
+memory fraction. For profiles with deferred adapters, the resolved
+`max_loras_per_model` engine setting (normally `SIE_MAX_LORAS_PER_MODEL`)
+bounds resident adapters, including pinned preloads
+and in-flight loads; `max_loras_per_batch` and the preload count cannot exceed
+it. When full, SIE drains and evicts the least-recently-used unpinned adapter. An
+adapter being loaded or drained retains its slot, and all-pinned/full capacity
+returns a retry response. Unconfirmed attach rollback or unload retains the
+slot and requires a model reload rather than risking unbounded residency.
+Startup-only profiles retain every declared adapter: their effective capacity
+is at least the pinned source count and `max_loras_per_batch`, even when the
+configured runtime limit is lower.
+
+Generation and chat requests select a selected-profile declared name with
+`lora_adapter` (a served alias or its declared source id);
+embedding requests use `options.lora` (or a declared source `options.lora_id`).
+The first request for a cold adapter returns HTTP 503 `LORA_LOADING` with
+`Retry-After`; retry after loading finishes. Source files are downloaded outside
+the inference mutation lock, while attachment may briefly pause SGLang's
+scheduler. Requests cannot supply a new repository or override its configured
+revision. Runtime adapters must contain ordinary LoRA A/B safetensors, without
+base-weight transforms, saved base modules, variable rank/alpha patterns,
+rsLoRA, or DoRA.
+
+Generation streams keep independent adapter leases and can run concurrently
+through SGLang's continuous batcher. Eviction refuses new leases and waits for
+active streams to finish. Embedding dispatch remains serialized by selected
+LoRA; this change does not introduce a mixed-adapter embedding forward. Deferred
+LoRA profiles require one tokenizer worker and one data-parallel worker;
+LoRA generation on those profiles supports `n=1` and `best_of=1` because pinned
+upstream versions have unsafe multi-candidate unload accounting. SGLang
+0.5.10.post1 uses SIE's scoped GPU-slot release compatibility hook; 0.5.20
+already implements that cleanup natively.
+
+The single-server `/v1/models` response includes top-level `lora_adapters` with
+ready served names, excluding adapters being loaded or evicted. Gateways omit
+this worker-local snapshot. Their `capabilities.lora_adapters` continues to
+advertise the declared allowlist, including cold adapters.
 
 ### Compute & precision
 

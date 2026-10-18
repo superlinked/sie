@@ -1,0 +1,1758 @@
+{
+  "description": "Chat completion SSE data payloads in, Anthropic Messages events out. The stream ends after the last frame. Pings are timer-driven and not part of these vectors.",
+  "streams": [
+    {
+      "name": "text",
+      "message_id": "msg_r",
+      "model": "m",
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "role": "assistant"
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "Hel"
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "lo"
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "stop"
+            }
+          ]
+        },
+        {
+          "choices": [],
+          "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 2,
+            "total_tokens": 12
+          }
+        },
+        "[DONE]"
+      ],
+      "events": [
+        {
+          "event": "message_start",
+          "data": {
+            "type": "message_start",
+            "message": {
+              "id": "msg_r",
+              "type": "message",
+              "role": "assistant",
+              "model": "m",
+              "content": [],
+              "stop_reason": null,
+              "stop_sequence": null,
+              "usage": {
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 0
+              }
+            }
+          }
+        },
+        {
+          "event": "content_block_start",
+          "data": {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+              "type": "text",
+              "text": ""
+            }
+          }
+        },
+        {
+          "event": "content_block_delta",
+          "data": {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+              "type": "text_delta",
+              "text": "Hel"
+            }
+          }
+        },
+        {
+          "event": "content_block_delta",
+          "data": {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+              "type": "text_delta",
+              "text": "lo"
+            }
+          }
+        },
+        {
+          "event": "content_block_stop",
+          "data": {
+            "type": "content_block_stop",
+            "index": 0
+          }
+        },
+        {
+          "event": "message_delta",
+          "data": {
+            "type": "message_delta",
+            "delta": {
+              "stop_reason": "end_turn",
+              "stop_sequence": null
+            },
+            "usage": {
+              "input_tokens": 10,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "output_tokens": 2
+            }
+          }
+        },
+        {
+          "event": "message_stop",
+          "data": {
+            "type": "message_stop"
+          }
+        }
+      ]
+    },
+    {
+      "name": "cached prompt tokens",
+      "message_id": "msg_r",
+      "model": "m",
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "ok"
+              },
+              "finish_reason": "stop"
+            }
+          ]
+        },
+        {
+          "choices": [],
+          "usage": {
+            "prompt_tokens": 100,
+            "completion_tokens": 1,
+            "total_tokens": 101,
+            "prompt_tokens_details": {
+              "cached_tokens": 60
+            }
+          }
+        },
+        "[DONE]"
+      ],
+      "events": [
+        {
+          "event": "message_start",
+          "data": {
+            "type": "message_start",
+            "message": {
+              "id": "msg_r",
+              "type": "message",
+              "role": "assistant",
+              "model": "m",
+              "content": [],
+              "stop_reason": null,
+              "stop_sequence": null,
+              "usage": {
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 0
+              }
+            }
+          }
+        },
+        {
+          "event": "content_block_start",
+          "data": {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+              "type": "text",
+              "text": ""
+            }
+          }
+        },
+        {
+          "event": "content_block_delta",
+          "data": {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+              "type": "text_delta",
+              "text": "ok"
+            }
+          }
+        },
+        {
+          "event": "content_block_stop",
+          "data": {
+            "type": "content_block_stop",
+            "index": 0
+          }
+        },
+        {
+          "event": "message_delta",
+          "data": {
+            "type": "message_delta",
+            "delta": {
+              "stop_reason": "end_turn",
+              "stop_sequence": null
+            },
+            "usage": {
+              "input_tokens": 40,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 60,
+              "output_tokens": 1
+            }
+          }
+        },
+        {
+          "event": "message_stop",
+          "data": {
+            "type": "message_stop"
+          }
+        }
+      ]
+    },
+    {
+      "name": "leading whitespace before a tool call is dropped",
+      "message_id": "msg_r",
+      "model": "m",
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "role": "assistant",
+                "content": "\n\n"
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                      "name": "Read",
+                      "arguments": ""
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "function": {
+                      "arguments": "{\"file_path\": \"/a\"}"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "tool_calls"
+            }
+          ]
+        },
+        {
+          "choices": [],
+          "usage": {
+            "prompt_tokens": 50,
+            "completion_tokens": 9,
+            "total_tokens": 59
+          }
+        },
+        "[DONE]"
+      ],
+      "events": [
+        {
+          "event": "message_start",
+          "data": {
+            "type": "message_start",
+            "message": {
+              "id": "msg_r",
+              "type": "message",
+              "role": "assistant",
+              "model": "m",
+              "content": [],
+              "stop_reason": null,
+              "stop_sequence": null,
+              "usage": {
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 0
+              }
+            }
+          }
+        },
+        {
+          "event": "content_block_start",
+          "data": {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+              "type": "tool_use",
+              "id": "call_1",
+              "name": "Read",
+              "input": {}
+            }
+          }
+        },
+        {
+          "event": "content_block_delta",
+          "data": {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+              "type": "input_json_delta",
+              "partial_json": "{\"file_path\": \"/a\"}"
+            }
+          }
+        },
+        {
+          "event": "content_block_stop",
+          "data": {
+            "type": "content_block_stop",
+            "index": 0
+          }
+        },
+        {
+          "event": "message_delta",
+          "data": {
+            "type": "message_delta",
+            "delta": {
+              "stop_reason": "tool_use",
+              "stop_sequence": null
+            },
+            "usage": {
+              "input_tokens": 50,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "output_tokens": 9
+            }
+          }
+        },
+        {
+          "event": "message_stop",
+          "data": {
+            "type": "message_stop"
+          }
+        }
+      ]
+    },
+    {
+      "name": "leading whitespace before text is kept",
+      "message_id": "msg_r",
+      "model": "m",
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": " "
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "\n"
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "Hi"
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "stop"
+            }
+          ]
+        },
+        {
+          "choices": [],
+          "usage": {
+            "prompt_tokens": 1,
+            "completion_tokens": 3,
+            "total_tokens": 4
+          }
+        },
+        "[DONE]"
+      ],
+      "events": [
+        {
+          "event": "message_start",
+          "data": {
+            "type": "message_start",
+            "message": {
+              "id": "msg_r",
+              "type": "message",
+              "role": "assistant",
+              "model": "m",
+              "content": [],
+              "stop_reason": null,
+              "stop_sequence": null,
+              "usage": {
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 0
+              }
+            }
+          }
+        },
+        {
+          "event": "content_block_start",
+          "data": {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+              "type": "text",
+              "text": ""
+            }
+          }
+        },
+        {
+          "event": "content_block_delta",
+          "data": {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+              "type": "text_delta",
+              "text": " \nHi"
+            }
+          }
+        },
+        {
+          "event": "content_block_stop",
+          "data": {
+            "type": "content_block_stop",
+            "index": 0
+          }
+        },
+        {
+          "event": "message_delta",
+          "data": {
+            "type": "message_delta",
+            "delta": {
+              "stop_reason": "end_turn",
+              "stop_sequence": null
+            },
+            "usage": {
+              "input_tokens": 1,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "output_tokens": 3
+            }
+          }
+        },
+        {
+          "event": "message_stop",
+          "data": {
+            "type": "message_stop"
+          }
+        }
+      ]
+    },
+    {
+      "name": "reasoning then text",
+      "message_id": "msg_r",
+      "model": "m",
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "reasoning_content": "Compare"
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "reasoning_content": " tenths."
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "9.9"
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "stop"
+            }
+          ]
+        },
+        {
+          "choices": [],
+          "usage": {
+            "prompt_tokens": 8,
+            "completion_tokens": 30,
+            "total_tokens": 38
+          }
+        },
+        "[DONE]"
+      ],
+      "events": [
+        {
+          "event": "message_start",
+          "data": {
+            "type": "message_start",
+            "message": {
+              "id": "msg_r",
+              "type": "message",
+              "role": "assistant",
+              "model": "m",
+              "content": [],
+              "stop_reason": null,
+              "stop_sequence": null,
+              "usage": {
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 0
+              }
+            }
+          }
+        },
+        {
+          "event": "content_block_start",
+          "data": {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+              "type": "thinking",
+              "thinking": "",
+              "signature": ""
+            }
+          }
+        },
+        {
+          "event": "content_block_delta",
+          "data": {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+              "type": "thinking_delta",
+              "thinking": "Compare"
+            }
+          }
+        },
+        {
+          "event": "content_block_delta",
+          "data": {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+              "type": "thinking_delta",
+              "thinking": " tenths."
+            }
+          }
+        },
+        {
+          "event": "content_block_delta",
+          "data": {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+              "type": "signature_delta",
+              "signature": "sie-unsigned"
+            }
+          }
+        },
+        {
+          "event": "content_block_stop",
+          "data": {
+            "type": "content_block_stop",
+            "index": 0
+          }
+        },
+        {
+          "event": "content_block_start",
+          "data": {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+              "type": "text",
+              "text": ""
+            }
+          }
+        },
+        {
+          "event": "content_block_delta",
+          "data": {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {
+              "type": "text_delta",
+              "text": "9.9"
+            }
+          }
+        },
+        {
+          "event": "content_block_stop",
+          "data": {
+            "type": "content_block_stop",
+            "index": 1
+          }
+        },
+        {
+          "event": "message_delta",
+          "data": {
+            "type": "message_delta",
+            "delta": {
+              "stop_reason": "end_turn",
+              "stop_sequence": null
+            },
+            "usage": {
+              "input_tokens": 8,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "output_tokens": 30
+            }
+          }
+        },
+        {
+          "event": "message_stop",
+          "data": {
+            "type": "message_stop"
+          }
+        }
+      ]
+    },
+    {
+      "name": "text then parallel tool calls",
+      "message_id": "msg_r",
+      "model": "m",
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "Running both."
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "t1",
+                    "type": "function",
+                    "function": {
+                      "name": "Bash",
+                      "arguments": "{\"command\":\"echo one\"}"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 1,
+                    "id": "t2",
+                    "type": "function",
+                    "function": {
+                      "name": "Bash",
+                      "arguments": "{\"command\""
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 1,
+                    "function": {
+                      "arguments": ":\"echo two\"}"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "tool_calls"
+            }
+          ]
+        },
+        {
+          "choices": [],
+          "usage": {
+            "prompt_tokens": 30,
+            "completion_tokens": 20,
+            "total_tokens": 50
+          }
+        },
+        "[DONE]"
+      ],
+      "events": [
+        {
+          "event": "message_start",
+          "data": {
+            "type": "message_start",
+            "message": {
+              "id": "msg_r",
+              "type": "message",
+              "role": "assistant",
+              "model": "m",
+              "content": [],
+              "stop_reason": null,
+              "stop_sequence": null,
+              "usage": {
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 0
+              }
+            }
+          }
+        },
+        {
+          "event": "content_block_start",
+          "data": {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+              "type": "text",
+              "text": ""
+            }
+          }
+        },
+        {
+          "event": "content_block_delta",
+          "data": {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+              "type": "text_delta",
+              "text": "Running both."
+            }
+          }
+        },
+        {
+          "event": "content_block_stop",
+          "data": {
+            "type": "content_block_stop",
+            "index": 0
+          }
+        },
+        {
+          "event": "content_block_start",
+          "data": {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+              "type": "tool_use",
+              "id": "t1",
+              "name": "Bash",
+              "input": {}
+            }
+          }
+        },
+        {
+          "event": "content_block_delta",
+          "data": {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {
+              "type": "input_json_delta",
+              "partial_json": "{\"command\":\"echo one\"}"
+            }
+          }
+        },
+        {
+          "event": "content_block_stop",
+          "data": {
+            "type": "content_block_stop",
+            "index": 1
+          }
+        },
+        {
+          "event": "content_block_start",
+          "data": {
+            "type": "content_block_start",
+            "index": 2,
+            "content_block": {
+              "type": "tool_use",
+              "id": "t2",
+              "name": "Bash",
+              "input": {}
+            }
+          }
+        },
+        {
+          "event": "content_block_delta",
+          "data": {
+            "type": "content_block_delta",
+            "index": 2,
+            "delta": {
+              "type": "input_json_delta",
+              "partial_json": "{\"command\""
+            }
+          }
+        },
+        {
+          "event": "content_block_delta",
+          "data": {
+            "type": "content_block_delta",
+            "index": 2,
+            "delta": {
+              "type": "input_json_delta",
+              "partial_json": ":\"echo two\"}"
+            }
+          }
+        },
+        {
+          "event": "content_block_stop",
+          "data": {
+            "type": "content_block_stop",
+            "index": 2
+          }
+        },
+        {
+          "event": "message_delta",
+          "data": {
+            "type": "message_delta",
+            "delta": {
+              "stop_reason": "tool_use",
+              "stop_sequence": null
+            },
+            "usage": {
+              "input_tokens": 30,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "output_tokens": 20
+            }
+          }
+        },
+        {
+          "event": "message_stop",
+          "data": {
+            "type": "message_stop"
+          }
+        }
+      ]
+    },
+    {
+      "name": "length",
+      "message_id": "msg_r",
+      "model": "m",
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "partial"
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "length"
+            }
+          ]
+        },
+        {
+          "choices": [],
+          "usage": {
+            "prompt_tokens": 5,
+            "completion_tokens": 16,
+            "total_tokens": 21
+          }
+        },
+        "[DONE]"
+      ],
+      "events": [
+        {
+          "event": "message_start",
+          "data": {
+            "type": "message_start",
+            "message": {
+              "id": "msg_r",
+              "type": "message",
+              "role": "assistant",
+              "model": "m",
+              "content": [],
+              "stop_reason": null,
+              "stop_sequence": null,
+              "usage": {
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 0
+              }
+            }
+          }
+        },
+        {
+          "event": "content_block_start",
+          "data": {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+              "type": "text",
+              "text": ""
+            }
+          }
+        },
+        {
+          "event": "content_block_delta",
+          "data": {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+              "type": "text_delta",
+              "text": "partial"
+            }
+          }
+        },
+        {
+          "event": "content_block_stop",
+          "data": {
+            "type": "content_block_stop",
+            "index": 0
+          }
+        },
+        {
+          "event": "message_delta",
+          "data": {
+            "type": "message_delta",
+            "delta": {
+              "stop_reason": "max_tokens",
+              "stop_sequence": null
+            },
+            "usage": {
+              "input_tokens": 5,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "output_tokens": 16
+            }
+          }
+        },
+        {
+          "event": "message_stop",
+          "data": {
+            "type": "message_stop"
+          }
+        }
+      ]
+    },
+    {
+      "name": "whitespace-only answer has no content block",
+      "message_id": "msg_r",
+      "model": "m",
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "\n"
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "stop"
+            }
+          ]
+        },
+        {
+          "choices": [],
+          "usage": {
+            "prompt_tokens": 5,
+            "completion_tokens": 1,
+            "total_tokens": 6
+          }
+        },
+        "[DONE]"
+      ],
+      "events": [
+        {
+          "event": "message_start",
+          "data": {
+            "type": "message_start",
+            "message": {
+              "id": "msg_r",
+              "type": "message",
+              "role": "assistant",
+              "model": "m",
+              "content": [],
+              "stop_reason": null,
+              "stop_sequence": null,
+              "usage": {
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 0
+              }
+            }
+          }
+        },
+        {
+          "event": "message_delta",
+          "data": {
+            "type": "message_delta",
+            "delta": {
+              "stop_reason": "end_turn",
+              "stop_sequence": null
+            },
+            "usage": {
+              "input_tokens": 5,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "output_tokens": 1
+            }
+          }
+        },
+        {
+          "event": "message_stop",
+          "data": {
+            "type": "message_stop"
+          }
+        }
+      ]
+    },
+    {
+      "name": "finish without usage completes with zero usage at the end",
+      "message_id": "msg_r",
+      "model": "m",
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "ok"
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "stop"
+            }
+          ]
+        },
+        "[DONE]"
+      ],
+      "events": [
+        {
+          "event": "message_start",
+          "data": {
+            "type": "message_start",
+            "message": {
+              "id": "msg_r",
+              "type": "message",
+              "role": "assistant",
+              "model": "m",
+              "content": [],
+              "stop_reason": null,
+              "stop_sequence": null,
+              "usage": {
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 0
+              }
+            }
+          }
+        },
+        {
+          "event": "content_block_start",
+          "data": {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+              "type": "text",
+              "text": ""
+            }
+          }
+        },
+        {
+          "event": "content_block_delta",
+          "data": {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+              "type": "text_delta",
+              "text": "ok"
+            }
+          }
+        },
+        {
+          "event": "content_block_stop",
+          "data": {
+            "type": "content_block_stop",
+            "index": 0
+          }
+        },
+        {
+          "event": "message_delta",
+          "data": {
+            "type": "message_delta",
+            "delta": {
+              "stop_reason": "end_turn",
+              "stop_sequence": null
+            },
+            "usage": {
+              "input_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "output_tokens": 0
+            }
+          }
+        },
+        {
+          "event": "message_stop",
+          "data": {
+            "type": "message_stop"
+          }
+        }
+      ]
+    },
+    {
+      "name": "error after output",
+      "message_id": "msg_r",
+      "model": "m",
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "par"
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": null
+            }
+          ],
+          "error": {
+            "message": "Generation aborted: inter_chunk timeout",
+            "type": "server_error",
+            "param": null,
+            "code": "inter_chunk_timeout"
+          },
+          "request_id": "r"
+        },
+        "[DONE]"
+      ],
+      "events": [
+        {
+          "event": "message_start",
+          "data": {
+            "type": "message_start",
+            "message": {
+              "id": "msg_r",
+              "type": "message",
+              "role": "assistant",
+              "model": "m",
+              "content": [],
+              "stop_reason": null,
+              "stop_sequence": null,
+              "usage": {
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 0
+              }
+            }
+          }
+        },
+        {
+          "event": "content_block_start",
+          "data": {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+              "type": "text",
+              "text": ""
+            }
+          }
+        },
+        {
+          "event": "content_block_delta",
+          "data": {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+              "type": "text_delta",
+              "text": "par"
+            }
+          }
+        },
+        {
+          "event": "error",
+          "data": {
+            "type": "error",
+            "error": {
+              "type": "timeout_error",
+              "message": "Generation aborted: inter_chunk timeout"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "capacity error before output",
+      "message_id": "msg_r",
+      "model": "m",
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": null
+            }
+          ],
+          "error": {
+            "message": "The upstream serving the model is busy, please retry",
+            "type": "server_error",
+            "param": null,
+            "code": "RESOURCE_EXHAUSTED",
+            "retry_after_s": 5
+          }
+        },
+        "[DONE]"
+      ],
+      "events": [
+        {
+          "event": "message_start",
+          "data": {
+            "type": "message_start",
+            "message": {
+              "id": "msg_r",
+              "type": "message",
+              "role": "assistant",
+              "model": "m",
+              "content": [],
+              "stop_reason": null,
+              "stop_sequence": null,
+              "usage": {
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 0
+              }
+            }
+          }
+        },
+        {
+          "event": "error",
+          "data": {
+            "type": "error",
+            "error": {
+              "type": "overloaded_error",
+              "message": "The upstream serving the model is busy, please retry"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "prompt too long mid-stream",
+      "message_id": "msg_r",
+      "model": "m",
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": null
+            }
+          ],
+          "error": {
+            "message": "prompt_tokens (140000) + max_new_tokens (4096) = 144096 exceeds context_length (131072) for model 'm'",
+            "type": "context_length_exceeded",
+            "param": null,
+            "code": "context_exceeded"
+          }
+        },
+        "[DONE]"
+      ],
+      "events": [
+        {
+          "event": "message_start",
+          "data": {
+            "type": "message_start",
+            "message": {
+              "id": "msg_r",
+              "type": "message",
+              "role": "assistant",
+              "model": "m",
+              "content": [],
+              "stop_reason": null,
+              "stop_sequence": null,
+              "usage": {
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 0
+              }
+            }
+          }
+        },
+        {
+          "event": "error",
+          "data": {
+            "type": "error",
+            "error": {
+              "type": "invalid_request_error",
+              "message": "prompt is too long: 144096 tokens > 131072 maximum"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "end without a finish reason",
+      "message_id": "msg_r",
+      "model": "m",
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "x"
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        "[DONE]"
+      ],
+      "events": [
+        {
+          "event": "message_start",
+          "data": {
+            "type": "message_start",
+            "message": {
+              "id": "msg_r",
+              "type": "message",
+              "role": "assistant",
+              "model": "m",
+              "content": [],
+              "stop_reason": null,
+              "stop_sequence": null,
+              "usage": {
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 0
+              }
+            }
+          }
+        },
+        {
+          "event": "content_block_start",
+          "data": {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+              "type": "text",
+              "text": ""
+            }
+          }
+        },
+        {
+          "event": "content_block_delta",
+          "data": {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+              "type": "text_delta",
+              "text": "x"
+            }
+          }
+        },
+        {
+          "event": "error",
+          "data": {
+            "type": "error",
+            "error": {
+              "type": "api_error",
+              "message": "the generation stream ended without a finish reason"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "stream closed without DONE after a finish",
+      "message_id": "msg_r",
+      "model": "m",
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "x"
+              },
+              "finish_reason": "stop"
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event": "message_start",
+          "data": {
+            "type": "message_start",
+            "message": {
+              "id": "msg_r",
+              "type": "message",
+              "role": "assistant",
+              "model": "m",
+              "content": [],
+              "stop_reason": null,
+              "stop_sequence": null,
+              "usage": {
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 0
+              }
+            }
+          }
+        },
+        {
+          "event": "content_block_start",
+          "data": {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+              "type": "text",
+              "text": ""
+            }
+          }
+        },
+        {
+          "event": "content_block_delta",
+          "data": {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+              "type": "text_delta",
+              "text": "x"
+            }
+          }
+        },
+        {
+          "event": "content_block_stop",
+          "data": {
+            "type": "content_block_stop",
+            "index": 0
+          }
+        },
+        {
+          "event": "message_delta",
+          "data": {
+            "type": "message_delta",
+            "delta": {
+              "stop_reason": "end_turn",
+              "stop_sequence": null
+            },
+            "usage": {
+              "input_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cache_read_input_tokens": 0,
+              "output_tokens": 0
+            }
+          }
+        },
+        {
+          "event": "message_stop",
+          "data": {
+            "type": "message_stop"
+          }
+        }
+      ]
+    },
+    {
+      "name": "tool arguments for a closed call",
+      "message_id": "msg_r",
+      "model": "m",
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "a",
+                    "type": "function",
+                    "function": {
+                      "name": "x",
+                      "arguments": ""
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 1,
+                    "id": "b",
+                    "type": "function",
+                    "function": {
+                      "name": "y",
+                      "arguments": ""
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "function": {
+                      "arguments": "{}"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event": "message_start",
+          "data": {
+            "type": "message_start",
+            "message": {
+              "id": "msg_r",
+              "type": "message",
+              "role": "assistant",
+              "model": "m",
+              "content": [],
+              "stop_reason": null,
+              "stop_sequence": null,
+              "usage": {
+                "input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": 0
+              }
+            }
+          }
+        },
+        {
+          "event": "content_block_start",
+          "data": {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+              "type": "tool_use",
+              "id": "a",
+              "name": "x",
+              "input": {}
+            }
+          }
+        },
+        {
+          "event": "content_block_stop",
+          "data": {
+            "type": "content_block_stop",
+            "index": 0
+          }
+        },
+        {
+          "event": "content_block_start",
+          "data": {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+              "type": "tool_use",
+              "id": "b",
+              "name": "y",
+              "input": {}
+            }
+          }
+        },
+        {
+          "event": "error",
+          "data": {
+            "type": "error",
+            "error": {
+              "type": "api_error",
+              "message": "tool call arguments arrived after another content block started"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

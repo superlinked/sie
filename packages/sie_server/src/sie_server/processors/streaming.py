@@ -71,6 +71,7 @@ from sie_server.adapters._generation_base import (
     suppress_thinking_blocks,
     thinking_blocks_must_be_hidden,
 )
+from sie_server.adapters.errors import UpstreamFailureReason
 from sie_server.adapters.remote.openai import OpenAIUpstreamAdapter
 from sie_server.adapters.remote.sie import SieUpstreamAdapter
 from sie_server.api.helpers import oom_retry_after_from_registry
@@ -821,6 +822,10 @@ class _GenerateRequestParams:
     # Multi-LoRA — served-name of the adapter to apply (passed to SGLang as
     # ``sampling_params.lora_path``). ``None`` → base model.
     lora_adapter: str | None = None
+    # Chat ``include_reasoning``: publish the model's reasoning as
+    # ``reasoning_delta`` chunks instead of dropping it. Honoured only for a
+    # model whose config declares reasoning.
+    include_reasoning: bool = False
 
 
 def _remote_chat_parameters(params: _GenerateRequestParams) -> dict[str, Any]:
@@ -1863,6 +1868,36 @@ class StreamingProcessor:
             )
             return
         params = validation
+        if params.lora_adapter is not None and adapter.lora_capability() is not None:
+            try:
+                ready, _ = await self._registry.ensure_lora_loaded_async(model_id, params.lora_adapter)
+            except ValueError:
+                await self._terminal_error_then_settle(
+                    reply_subject,
+                    request_id=request_id,
+                    attempt_id=attempt_id,
+                    seq=0,
+                    code="invalid_request",
+                    message="The selected profile does not support this LoRA adapter",
+                    param="lora_adapter",
+                    msg=msg,
+                )
+                return
+            except KeyError:
+                ready = False
+            if not ready:
+                await self._terminal_error_then_settle(
+                    reply_subject,
+                    request_id=request_id,
+                    attempt_id=attempt_id,
+                    seq=0,
+                    code="LORA_LOADING",
+                    message="The selected LoRA is loading; retry the request",
+                    param="lora_adapter",
+                    retry_after_s=self._registry.lora_retry_after_s(model_id, params.lora_adapter),
+                    msg=msg,
+                )
+                return
         if (
             params.stream
             and config is not None
@@ -1881,6 +1916,7 @@ class StreamingProcessor:
             )
             return
         suppress_thinking = thinking_blocks_must_be_hidden(config)
+        keep_reasoning = params.include_reasoning and suppress_thinking
         reasoning_format = resolve_reasoning_format(config, adapter)
 
         # Resolve ``tool_choice`` mode up front. When the caller set
@@ -2197,7 +2233,7 @@ class StreamingProcessor:
                     remote_body,
                     requested_model=model_id,
                     context_length=config.tasks.generate.context_length,
-                    keep_reasoning=hybrid_count is not None,
+                    keep_reasoning=hybrid_count is not None or keep_reasoning,
                 )
                 preflight_result = None
             else:
@@ -2301,6 +2337,7 @@ class StreamingProcessor:
                 suppress_thinking=suppress_thinking,
                 thinking_starts_in_prompt=thinking_starts_in_prompt,
                 reasoning_format=reasoning_format,
+                keep_reasoning=keep_reasoning,
                 grammar=effective_grammar,
                 tools=effective_tools,
                 enable_tool_parser=enable_tool_parser,
@@ -2346,6 +2383,7 @@ class StreamingProcessor:
         suppress_thinking: bool = False,
         thinking_starts_in_prompt: bool = False,
         reasoning_format: ReasoningFormat = "qwen3",
+        keep_reasoning: bool = False,
         grammar: GrammarSpec | None = None,
         tools: tuple[dict[str, Any], ...] | None = None,
         enable_tool_parser: bool | None = None,
@@ -2389,12 +2427,13 @@ class StreamingProcessor:
             else adapter.generate_with_preflight(gen_kwargs, preflight_result)
         )
         if hybrid_count is not None:
-            chunks_iter = count_hybrid_usage(chunks_iter, hybrid_count)
+            chunks_iter = count_hybrid_usage(chunks_iter, hybrid_count, keep_reasoning=keep_reasoning)
         if suppress_thinking:
             chunks_iter = suppress_thinking_blocks(
                 chunks_iter,
                 start_inside=thinking_starts_in_prompt,
                 reasoning_format=reasoning_format,
+                keep_reasoning=keep_reasoning,
             )
         # OpenAI tools: when enabled, wrap the adapter iterator with the
         # tool-call parser so ``<tool_call>{...}</tool_call>`` blocks
@@ -2431,6 +2470,11 @@ class StreamingProcessor:
         # (no cross-candidate text coalescing).
         multi_candidate_stream = bool(stream) and n is not None and n > 1
         pending_text: list[str] = []
+        # Public reasoning, coalesced per choice like text. A chunk's reasoning
+        # precedes its text, so pending reasoning is published ahead of
+        # pending text and new reasoning first flushes the text before it.
+        pending_reasoning: list[str] = []
+        pending_reasoning_choice = 0
         # OpenAI per-token logprob entries accumulated alongside
         # ``pending_text`` and flushed in the same coalesced chunk. The
         # adapter aligns each entry with the tokens in ``text_delta``.
@@ -2473,6 +2517,27 @@ class StreamingProcessor:
             stream error).
             """
             nonlocal seq, pending_count, last_flush_ts, first_text_published
+            if pending_reasoning:
+                reasoning_payload = _encode_chunk(
+                    kind="chunk",
+                    request_id=request_id,
+                    attempt_id=attempt_id,
+                    seq=seq,
+                    text_delta="",
+                    done=False,
+                    choice_index=pending_reasoning_choice,
+                    reasoning_delta="".join(pending_reasoning),
+                )
+                try:
+                    await _wait_for(chunk_queue.put((reasoning_payload, False)), timeout=_CHUNK_PUT_TIMEOUT_S)
+                except (asyncio.QueueFull, TimeoutError):
+                    return False
+                seq += 1
+                pending_reasoning.clear()
+                last_flush_ts = time.monotonic()
+                if not pending_text:
+                    pending_count = 0
+                    return True
             if not pending_text and not progress:
                 return True
             text = "".join(pending_text)
@@ -2496,6 +2561,16 @@ class StreamingProcessor:
             pending_logprobs.clear()
             pending_count = 0
             last_flush_ts = time.monotonic()
+            return True
+
+        async def _pend_reasoning(chunk: GenerationChunk) -> bool:
+            nonlocal pending_count, pending_reasoning_choice
+            other_choice = bool(pending_reasoning) and chunk.choice_index != pending_reasoning_choice
+            if (pending_text or other_choice) and not await _flush_pending():
+                return False
+            pending_reasoning_choice = chunk.choice_index
+            pending_reasoning.append(chunk.reasoning_delta)
+            pending_count += max(1, len(chunk.reasoning_delta))
             return True
 
         next_task: asyncio.Task[GenerationChunk] | None = None
@@ -2613,14 +2688,16 @@ class StreamingProcessor:
                     logger.warning("Generate iterator raised for %s/%s", request_id, attempt_id, exc_info=True)
                     if isinstance(exc, GenerationError):
                         error_code = exc.code
-                        error_message = client_safe_generation_error_message(exc.code, str(exc))
+                        error_message = client_safe_generation_error_message(exc.code, str(exc), exc.upstream_reason)
                         error_param = client_safe_generation_error_param(exc)
                         error_retry_after_s = _generation_error_retry_after_s(exc, self._registry)
+                        error_reason = exc.upstream_reason
                     else:
                         error_code = "inference_error"
                         error_message = _INTERNAL_GENERATION_MESSAGE
                         error_param = None
                         error_retry_after_s = None
+                        error_reason = None
                     err_payload = _encode_chunk(
                         kind="chunk",
                         request_id=request_id,
@@ -2633,6 +2710,7 @@ class StreamingProcessor:
                         error_message=error_message,
                         error_param=error_param,
                         error_retry_after_s=error_retry_after_s,
+                        error_reason=error_reason,
                     )
                     try:
                         await _wait_for(
@@ -2672,6 +2750,7 @@ class StreamingProcessor:
                         choice_index=chunk.choice_index,
                         logprobs=list(chunk.logprobs) if chunk.logprobs else None,
                         tool_call_delta=chunk.tool_call_delta,
+                        reasoning_delta=chunk.reasoning_delta,
                     )
                     # H6: seq advances ONLY after the put succeeds. Per-choice
                     # deltas are required content chunks: a dropped delta
@@ -2695,6 +2774,11 @@ class StreamingProcessor:
 
                 if chunk.done:
                     # Flush any coalesced text before the terminal chunk.
+                    if chunk.reasoning_delta and not await _pend_reasoning(chunk):
+                        _record_failure()
+                        transport_failure_published = True
+                        terminal_sent = await self._enqueue_transport_failure(chunk_queue, request_id, attempt_id, seq)
+                        break
                     if chunk.text_delta:
                         pending_text.append(chunk.text_delta)
                         pending_count += max(1, len(chunk.text_delta))
@@ -2740,10 +2824,13 @@ class StreamingProcessor:
                         ttft_ms=_compute_ttft_ms(publish_at, first_text_at),
                         error_code=(chunk.error_code or "inference_error") if terminal_has_error else None,
                         error_message=(
-                            client_safe_generation_error_message(chunk.error_code, chunk.error_message)
+                            client_safe_generation_error_message(
+                                chunk.error_code, chunk.error_message, chunk.upstream_reason
+                            )
                             if terminal_has_error
                             else None
                         ),
+                        error_reason=chunk.upstream_reason if terminal_has_error else None,
                         candidates=list(chunk.candidates) if chunk.candidates else None,
                     )
                     try:
@@ -2798,6 +2885,11 @@ class StreamingProcessor:
                     continue
 
                 # Non-terminal delta: accumulate, flush on time/count.
+                if chunk.reasoning_delta and not await _pend_reasoning(chunk):
+                    _record_failure()
+                    transport_failure_published = True
+                    terminal_sent = await self._enqueue_transport_failure(chunk_queue, request_id, attempt_id, seq)
+                    break
                 if chunk.text_delta:
                     pending_text.append(chunk.text_delta)
                     pending_count += max(1, len(chunk.text_delta))
@@ -3457,6 +3549,10 @@ class StreamingProcessor:
             if schema_in_prompt_raw is not None
             else (config is None or profile_schema_in_prompt(config))
         )
+        include_reasoning_raw = params.get("include_reasoning")
+        if include_reasoning_raw is not None and not isinstance(include_reasoning_raw, bool):
+            return _ValidationError(code="invalid_request", message="'include_reasoning' must be a boolean")
+        include_reasoning = bool(include_reasoning_raw)
 
         # OpenAI ``seed`` / ``logit_bias`` / ``logprobs`` / ``top_logprobs``
         # round-trips. Gateway is the authority for shape validation
@@ -3536,6 +3632,16 @@ class StreamingProcessor:
         # Multi-LoRA — served-name of the adapter (gateway-validated shape).
         lora_adapter_raw = params.get("lora_adapter")
         lora_adapter = lora_adapter_raw if isinstance(lora_adapter_raw, str) and lora_adapter_raw else None
+        if lora_adapter_raw is not None:
+            if lora_adapter is None:
+                return _ValidationError(code="invalid_request", message="'lora_adapter' must be a nonempty string")
+            if config is None:
+                return _ValidationError(code="invalid_request", message="LoRA selection requires a declared profile")
+            profile_name = (options or {}).get("profile") or "default"
+            if lora_adapter not in config.resolve_profile(profile_name).lora_names():
+                return _ValidationError(
+                    code="invalid_request", message="The selected profile does not declare this LoRA adapter"
+                )
 
         # OpenAI ``tools`` / ``tool_choice`` / ``parallel_tool_calls``.
         # The gateway is the authority for shape validation (JSON-schema
@@ -3593,6 +3699,7 @@ class StreamingProcessor:
             best_of=best_of,
             stream=stream,
             lora_adapter=lora_adapter,
+            include_reasoning=include_reasoning,
         )
 
     async def _get_tokenizer(self, model_id: str) -> TokenizerLike:
@@ -4589,10 +4696,12 @@ def _encode_chunk(
     error_message: str | None = None,
     error_param: str | None = None,
     error_retry_after_s: int | None = None,
+    error_reason: UpstreamFailureReason | None = None,
     tool_call_delta: ToolCallDelta | None = None,
     logprobs: list[dict[str, Any]] | None = None,
     candidates: list[dict[str, Any]] | None = None,
     choice_index: int = 0,
+    reasoning_delta: str = "",
 ) -> bytes:
     """Encode one chunk envelope as msgpack bytes.
 
@@ -4654,6 +4763,8 @@ def _encode_chunk(
             and 1 <= error_retry_after_s <= _RESOURCE_EXHAUSTED_RETRY_AFTER_MAX_S
         ):
             error["retry_after_s"] = error_retry_after_s
+        if error_reason is not None:
+            error["reason"] = error_reason
         payload["error"] = error
     if logprobs:
         # OpenAI ``ChatCompletionTokenLogprob`` entries, produced by the
@@ -4668,6 +4779,8 @@ def _encode_chunk(
     if choice_index:
         # Streaming multi-candidate: the candidate ordinal this delta belongs to.
         payload["choice_index"] = choice_index
+    if reasoning_delta:
+        payload["reasoning_delta"] = reasoning_delta
     if tool_call_delta is not None:
         function_block: dict[str, Any] = {}
         if tool_call_delta.function_name is not None:

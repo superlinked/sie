@@ -34,6 +34,25 @@ sie-config admin token: kubectl get secret -n {{ include "sie-cluster.namespace"
 {{- if and .Values.config.enabled (include "sie-cluster.config.generatesReadToken" .) }}
 sie-config read token (reads only): kubectl get secret -n {{ include "sie-cluster.namespace" . }} {{ include "sie-cluster.config.generatedReadTokenSecretName" . }} -o jsonpath='{.data.{{ include "sie-cluster.config.readTokenSecretKey" . | replace "." "\\." }}}' | base64 -d
 {{- end }}
+{{- if include "sie-cluster.gateway.generatesToken" . }}
+Gateway token: kubectl get secret -n {{ include "sie-cluster.namespace" . }} {{ include "sie-cluster.gateway.generatedTokenSecretName" . }} -o jsonpath='{.data.{{ include "sie-cluster.gateway.tokenSecretKey" . | replace "." "\\." }}}' | base64 -d
+{{- $gatewayAuth := include "sie-cluster.gateway.effectiveAuthMode" . | fromJson }}
+{{- if not $gatewayAuth.known }}
+The gateway auth mode comes from gateway.extraEnv and is known only at run time. The gateway receives
+this token and requires it when that mode is token or static.
+{{- else if not (include "sie-cluster.gateway.authenticates" .) }}
+The gateway does not require this token yet (gateway auth mode none). Give it to your clients, then
+run helm upgrade again with --set gateway.auth.mode=token.
+{{- end }}
+{{- end }}
+{{- if and (include "sie-cluster.workers.authEnabled" .) (not (include "sie-cluster.workers.authEnforced" .)) }}
+
+WARNING: workers.auth.allowUnauthenticated=true. The gateway presents the worker token, but the
+workers do not require it yet: any pod that can reach a worker can call its API. This setting is
+only for the first step of the upgrade. Once every gateway pod has restarted, run helm upgrade again
+with --set workers.auth.allowUnauthenticated=false. --reuse-values and --reset-then-reuse-values
+keep it on.
+{{- end }}
 {{- if $kubePrometheusStack.install }}
 Prometheus: enabled - kubectl port-forward -n {{ include "sie-cluster.kubePrometheusStack.namespace" . }} svc/{{ include "sie-cluster.kubePrometheusStack.prometheusServiceName" . }} 9090:{{ include "sie-cluster.kubePrometheusStack.prometheusServicePort" . }}
 {{- end }}
@@ -43,6 +62,12 @@ Grafana password: kubectl get secret -n {{ include "sie-cluster.kubePrometheusSt
 {{- end }}
 {{- if .Values.keda.install }}
 KEDA:       enabled
+{{- end }}
+{{- if and .Values.telemetry .Values.telemetry.enabled }}
+
+Telemetry: the workers send anonymous usage telemetry (telemetry.enabled=true). The chart default
+changes to false in 0.13.0. Set telemetry.enabled=true to keep sending it after that release, or
+telemetry.enabled=false to stop now. What is sent: see the chart README section "Telemetry".
 {{- end }}
 {{- if eq (include "sie-cluster.worker.remoteLaneEnabled" .) "true" }}
 
