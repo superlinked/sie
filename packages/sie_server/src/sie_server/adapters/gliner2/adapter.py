@@ -277,16 +277,14 @@ class GLiNER2Adapter(BaseAdapter):
         """Extract entities, relations, classifications, or flat structured data."""
         self._check_loaded()
         texts = [self._extract_text(item) for item in items]
-        # gliner2 reads a bounded window of words: pass it only the prefix holding them.
-        reads = [self._read(text) for text in texts]
-        windows = [(model_text, subwords) for model_text, subwords, _ in reads]
+        # Validate the selected task's prompt before reading or metering document
+        # windows. Text and option errors retain their precedence over prompt errors.
         opts = options or {}
         effective_threshold = self._validate_threshold(opts.get("threshold", self._threshold))
         classification_task = opts.get("classification_task", self._classification_task)
         multi_label = opts.get("multi_label", self._multi_label)
         if not isinstance(multi_label, bool):
             raise InvalidInputError("GLiNER2 multi_label must be boolean")
-        input_token_counts = self._doc_input_token_counts(texts)
 
         if output_schema is not None:
             if labels:
@@ -302,6 +300,9 @@ class GLiNER2Adapter(BaseAdapter):
             check_label_chars("GLiNER2", "output_schema property names", output_schema["properties"])
             check_label_chars("GLiNER2", "output_schema enum values", choices)
             prompt = self._prompt_tokens(specs, key=("json", tuple(specs)), extra=len(choices))
+            reads = [self._read(text) for text in texts]
+            windows = [(model_text, subwords) for model_text, subwords, _ in reads]
+            input_token_counts = self._doc_input_token_counts(texts)
             rows = self._row_tokens(windows, prompt)
             with torch.inference_mode():
                 raw_results, errors, input_token_counts = self._run_complete(
@@ -347,6 +348,9 @@ class GLiNER2Adapter(BaseAdapter):
             prompt = self._prompt_tokens(
                 normalized_labels, per_entry=_PROMPT_TOKENS_PER_RELATION, key=("relations", tuple(normalized_labels))
             )
+            reads = [self._read(text) for text in texts]
+            windows = [(model_text, subwords) for model_text, subwords, _ in reads]
+            input_token_counts = self._doc_input_token_counts(texts)
             rows = self._row_tokens(windows, prompt)
             with torch.inference_mode():
                 raw_results, errors, input_token_counts = self._run_complete(
@@ -388,6 +392,8 @@ class GLiNER2Adapter(BaseAdapter):
                 [classification_task, *normalized_labels],
                 key=("classification", classification_task, tuple(normalized_labels)),
             )
+            reads = [self._read(text) for text in texts]
+            input_token_counts = self._doc_input_token_counts(texts)
             item_windows = [self._classification_windows(text, read) for text, read in zip(texts, reads, strict=True)]
             if any(len(one) > 1 for one in item_windows):
                 input_token_counts = self._windowed_input_token_counts(texts, item_windows)
@@ -425,6 +431,9 @@ class GLiNER2Adapter(BaseAdapter):
 
         check_label_chars("GLiNER2", "labels", normalized_labels)
         prompt = self._prompt_tokens(normalized_labels, key=("entities", tuple(normalized_labels)))
+        reads = [self._read(text) for text in texts]
+        windows = [(model_text, subwords) for model_text, subwords, _ in reads]
+        input_token_counts = self._doc_input_token_counts(texts)
         with torch.inference_mode():
             raw_results, errors, input_token_counts = self._run_complete(
                 texts,
