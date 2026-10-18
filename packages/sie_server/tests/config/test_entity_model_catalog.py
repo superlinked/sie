@@ -61,7 +61,7 @@ def test_existing_gliner2_routes_keep_their_adapter_and_default_dependency():
             == "sie_server.adapters.gliner2.decide:GLiNER2DecideAdapter"
         )
     default = yaml.safe_load((BUNDLES / "default.yaml").read_text())
-    assert default["deps"]["gliner2"] == ">=1.3.1,<2"
+    assert default["deps"]["gliner2"] == ">=1.3.2,<=2.0.0"
 
 
 @pytest.mark.parametrize("model_id", ["knowledgator/gliner-relex-large-v1.0", "Ihor/gliner-biomed-large-v1.0"])
