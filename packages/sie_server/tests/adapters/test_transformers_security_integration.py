@@ -284,7 +284,7 @@ def test_guard_precedes_dependent_and_fallback_native_loaders(
 
 @pytest.mark.parametrize("hub", [False, True])
 @pytest.mark.parametrize("hf_text", [False, True])
-def test_open_clip_checks_the_selected_text_tower(
+def test_open_clip_guards_available_transformers_before_factory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: bool, hf_text: bool
 ) -> None:
     open_clip = pytest.importorskip("open_clip")
@@ -297,10 +297,10 @@ def test_open_clip_checks_the_selected_text_tower(
 
     def get_config(name: str) -> dict[str, Any]:
         selected.append(name)
-        return model_config
+        raise AssertionError("A separate config preview cannot authorize the later factory read")
 
     def create(*args: Any, **kwargs: Any) -> tuple[Any, object, object]:
-        assert events == (["guard"] if hf_text else [])
+        assert events == ["guard"]
         events.append("construct")
         return SimpleNamespace(to=lambda **kw: None, eval=lambda: None), object(), object()
 
@@ -330,8 +330,88 @@ def test_open_clip_checks_the_selected_text_tower(
         "owned", backend="open_clip", open_clip_model_id=model_id, dense_dim=8, revision="a" * 40 if hub else None
     )
     adapter.load("cpu")
-    assert events == (["guard", "construct"] if hf_text else ["construct"])
-    assert selected == ([] if hub else ["ViT-owned"])
+    assert events == ["guard", "construct"]
+    assert selected == []
+
+
+@_EXACT_TF4
+def test_open_clip_native_model_refuses_installed_unsupported_transformers(monkeypatch: pytest.MonkeyPatch) -> None:
+    open_clip = pytest.importorskip("open_clip")
+    monkeypatch.setattr("transformers.__version__", "4.57.5")
+    constructor = Mock(side_effect=AssertionError("Factory must not run"))
+    monkeypatch.setattr(open_clip, "create_model_and_transforms", constructor)
+    adapter = SiglipAdapter("owned", backend="open_clip", open_clip_model_id="ViT-B-32", dense_dim=8)
+    with pytest.raises(RuntimeError, match=r"requires transformers==4\.57\.6"):
+        adapter.load("cpu")
+    constructor.assert_not_called()
+
+
+@pytest.mark.parametrize("error", [ImportError("broken discovery"), ValueError("missing module spec")])
+def test_open_clip_does_not_hide_transformers_discovery_errors(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    open_clip = pytest.importorskip("open_clip")
+    constructor = Mock(side_effect=AssertionError("Factory must not run"))
+    monkeypatch.setattr(open_clip, "create_model_and_transforms", constructor)
+    module = importlib.import_module("sie_server.adapters.siglip.adapter")
+    monkeypatch.setattr(module, "find_spec", Mock(side_effect=error))
+    adapter = SiglipAdapter("owned", backend="open_clip", open_clip_model_id="ViT-B-32", dense_dim=8)
+    with pytest.raises(type(error), match=str(error)):
+        adapter.load("cpu")
+    constructor.assert_not_called()
+
+
+def test_open_clip_installer_failure_prevents_factory(monkeypatch: pytest.MonkeyPatch) -> None:
+    open_clip = pytest.importorskip("open_clip")
+    constructor = Mock(side_effect=AssertionError("Factory must not run"))
+    monkeypatch.setattr(open_clip, "create_model_and_transforms", constructor)
+    module = importlib.import_module("sie_server.adapters.siglip.adapter")
+    monkeypatch.setattr(
+        module, "install_transformers_security_fixes", Mock(side_effect=RuntimeError("Owned installation failure"))
+    )
+    adapter = SiglipAdapter("owned", backend="open_clip", open_clip_model_id="ViT-B-32", dense_dim=8)
+    with pytest.raises(RuntimeError, match="Owned installation failure"):
+        adapter.load("cpu")
+    constructor.assert_not_called()
+
+
+@pytest.mark.parametrize("version", ["5.3.0", "5.17.0"])
+def test_open_clip_fixed_version_policy_preserves_native_bindings(
+    monkeypatch: pytest.MonkeyPatch, version: str
+) -> None:
+    open_clip = pytest.importorskip("open_clip")
+    # This is a version-dispatch control, not a claim of loading those wheels.
+    monkeypatch.setattr("transformers.__version__", version)
+    before = (PretrainedConfig.__init__, hub_kernels.is_kernel, modeling_utils.is_kernel)
+    model = SimpleNamespace(to=lambda **kw: None, eval=lambda: None)
+    factory = Mock(return_value=(model, object(), object()))
+    monkeypatch.setattr(open_clip, "create_model_and_transforms", factory)
+    monkeypatch.setattr(open_clip, "get_tokenizer", lambda name: object())
+    adapter = SiglipAdapter("owned", backend="open_clip", open_clip_model_id="owned-native", dense_dim=8)
+    adapter.load("cpu")
+    after = (PretrainedConfig.__init__, hub_kernels.is_kernel, modeling_utils.is_kernel)
+    assert all(left is right for left, right in zip(before, after, strict=True))
+    factory.assert_called_once_with("owned-native")
+    adapter.unload()
+
+
+@pytest.mark.parametrize("kind", ["unknown", "absent", "malformed", "invalid-json", "empty"])
+def test_open_clip_preserves_native_identifier_errors(tmp_path: Path, kind: str) -> None:
+    open_clip = pytest.importorskip("open_clip")
+    identifier = f"local-dir:{tmp_path / 'missing'}"
+    if kind == "unknown":
+        identifier = "owned-unregistered-model"
+    elif kind == "empty":
+        identifier = "local-dir:"
+    elif kind in {"malformed", "invalid-json"}:
+        identifier = f"local-dir:{tmp_path}"
+        (tmp_path / "open_clip_config.json").write_text("{}" if kind == "malformed" else "{invalid-json")
+    with pytest.raises((ValueError, RuntimeError, FileNotFoundError)) as native:
+        open_clip.create_model_and_transforms(identifier)
+    adapter = SiglipAdapter("owned", backend="open_clip", open_clip_model_id=identifier, dense_dim=8)
+    with pytest.raises(type(native.value)) as guarded:
+        adapter.load("cpu")
+    assert str(guarded.value) == str(native.value)
 
 
 @_EXACT_TF4
@@ -359,15 +439,102 @@ def test_actual_open_clip_hf_text_constructor_sees_guard(
     adapter = SiglipAdapter(
         "owned", backend="open_clip", open_clip_model_id="owned-tiny", dense_dim=8, compute_precision="float32"
     )
+    # OpenCLIP captured its AutoModel/AutoConfig aliases before installation.
+    assert open_clip.hf_model.AutoModel is transformers.AutoModel
+    assert open_clip.hf_model.AutoConfig is AutoConfig
+    installed = None
+    first_output = None
+    for _ in range(2):
+        try:
+            with torch.random.fork_rng():
+                torch.manual_seed(187)
+                adapter.load("cpu")
+            bindings = (PretrainedConfig.__init__, hub_kernels.is_kernel, modeling_utils.is_kernel)
+            if installed is None:
+                installed = bindings
+            else:
+                assert all(before is after for before, after in zip(installed, bindings, strict=True))
+            assert type(adapter._model) is CustomTextCLIP
+            assert type(adapter._model.text.transformer) is BertModel
+            assert "forward" not in adapter._model.text.transformer.__dict__
+            with torch.inference_mode():
+                output = adapter._model.encode_text(torch.tensor([[2, 5, 6, 3]]))
+            assert output.shape == (1, 8)
+            assert torch.isfinite(output).all()
+            if first_output is None:
+                first_output = output
+            else:
+                assert torch.equal(first_output, output)
+            kernel_boundary.assert_not_called()
+        finally:
+            adapter.unload()
+
+
+@_EXACT_TF4
+@pytest.mark.parametrize("case", ["absolute", "collision", "factory-change"])
+def test_actual_open_clip_local_directory_cannot_bypass_guard(
+    tmp_path: Path,
+    bert_checkpoints: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    kernel_boundary: Mock,
+    case: str,
+) -> None:
+    open_clip = pytest.importorskip("open_clip", minversion="3.0.0")
+    path, _ = bert_checkpoints
+    tokens = torch.tensor([[2, 5, 6, 3]])
+    expected = BertModel.from_pretrained(path, add_pooling_layer=False).eval()
+    _update_config(path / "config.json", _attn_implementation_internal=_ATTACK)
+    vision = {"layers": 1, "width": 32, "head_width": 16, "patch_size": 4, "image_size": 8}
+    native = {
+        "embed_dim": 8,
+        "vision_cfg": vision,
+        "text_cfg": {"context_length": 8, "vocab_size": 49408, "width": 16, "heads": 2, "layers": 1},
+    }
+    hf = {
+        "embed_dim": 8,
+        "vision_cfg": vision,
+        "text_cfg": {
+            "hf_model_name": str(path),
+            "hf_tokenizer_name": str(path),
+            "hf_model_pretrained": True,
+            "hf_proj_type": "linear",
+            "hf_pooler_type": "mean_pooler",
+        },
+    }
+    selected = tmp_path / "nested" / "selected"
+    selected.mkdir(parents=True)
+    # OpenCLIP 3 loads a local-dir tokenizer from that same directory, even
+    # when text_cfg names a separate model path.
+    _tokenizer(selected)
+    config_path = selected / "open_clip_config.json"
+    config_path.write_text(json.dumps({"model_cfg": hf}))
+    monkeypatch.chdir(tmp_path)
+    identifier = f"local-dir:{selected}" if case == "absolute" else "local-dir:nested/selected"
+    if case == "collision":
+        sibling = tmp_path / "nested-selected"
+        sibling.mkdir()
+        (sibling / "open_clip_config.json").write_text(json.dumps({"model_cfg": native}))
+    elif case == "factory-change":
+        # A file can change after a security preview but before the native
+        # factory reads it. The permanent policy must already be installed.
+        config_path.write_text(json.dumps({"model_cfg": native}))
+        factory = open_clip.create_model_and_transforms
+
+        def changed_factory(*args: Any, **kwargs: Any) -> Any:
+            config_path.write_text(json.dumps({"model_cfg": hf}))
+            return factory(*args, **kwargs)
+
+        monkeypatch.setattr(open_clip, "create_model_and_transforms", changed_factory)
+    adapter = SiglipAdapter("owned", backend="open_clip", open_clip_model_id=identifier, dense_dim=8)
     try:
         adapter.load("cpu")
-        assert type(adapter._model) is CustomTextCLIP
         assert type(adapter._model.text.transformer) is BertModel
         assert "forward" not in adapter._model.text.transformer.__dict__
+        assert adapter._model.text.transformer.config._attn_implementation == expected.config._attn_implementation
         with torch.inference_mode():
-            output = adapter._model.encode_text(torch.tensor([[2, 5, 6, 3]]))
-        assert output.shape == (1, 8)
-        assert torch.isfinite(output).all()
+            assert torch.equal(
+                adapter._model.text.transformer(tokens).last_hidden_state, expected(tokens).last_hidden_state
+            )
         kernel_boundary.assert_not_called()
     finally:
         adapter.unload()
@@ -427,24 +594,38 @@ assert 'sie_server.adapters._transformers_compat' not in sys.modules
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_actual_native_open_clip_stays_available_without_transformers(tmp_path: Path) -> None:
-    pytest.importorskip("open_clip")
+@pytest.mark.parametrize("local_directory", [False, True])
+def test_actual_native_open_clip_stays_available_without_transformers(tmp_path: Path, local_directory: bool) -> None:
+    pytest.importorskip("open_clip", minversion="3.0.0" if local_directory else None)
     script = """
-import importlib.abc, sys
-class NoTransformers(importlib.abc.MetaPathFinder):
+import importlib.machinery, importlib.util, json, pathlib, sys
+# Model an absent optional package through actual import discovery in this
+# subprocess; do not suppress a discoverable-but-broken package's errors.
+class WithoutTransformers(importlib.machinery.PathFinder):
+    @classmethod
     def find_spec(self, fullname, path=None, target=None):
         if fullname == 'transformers' or fullname.startswith('transformers.'):
-            raise ImportError('Transformers intentionally unavailable')
-sys.meta_path.insert(0, NoTransformers())
+            return None
+        return super().find_spec(fullname, path, target)
+sys.meta_path[:] = [WithoutTransformers if x is importlib.machinery.PathFinder else x for x in sys.meta_path]
+assert importlib.util.find_spec('transformers') is None
 import open_clip, torch
 from sie_server.adapters.siglip.adapter import SiglipAdapter
 torch.set_num_threads(1)
-open_clip.factory._MODEL_CONFIGS['owned-native'] = {
+config = {
     'embed_dim': 8,
     'vision_cfg': {'layers': 1, 'width': 32, 'head_width': 16, 'patch_size': 4, 'image_size': 8},
     'text_cfg': {'context_length': 8, 'vocab_size': 49408, 'width': 16, 'heads': 2, 'layers': 1},
 }
-adapter = SiglipAdapter('owned', backend='open_clip', open_clip_model_id='owned-native', dense_dim=8, compute_precision='float32')
+identifier = 'owned-native'
+if sys.argv[1] == 'local':
+    directory = pathlib.Path.cwd() / 'nested' / 'native'
+    directory.mkdir(parents=True)
+    (directory / 'open_clip_config.json').write_text(json.dumps({'model_cfg': config}))
+    identifier = f'local-dir:{directory}'
+else:
+    open_clip.factory._MODEL_CONFIGS[identifier] = config
+adapter = SiglipAdapter('owned', backend='open_clip', open_clip_model_id=identifier, dense_dim=8, compute_precision='float32')
 try:
     adapter.load('cpu')
     assert type(adapter._model) is open_clip.model.CLIP
@@ -456,7 +637,7 @@ finally:
     adapter.unload()
 """
     result = subprocess.run(  # noqa: S603 — fixed interpreter and inline offline native fixture
-        [sys.executable, "-c", script],
+        [sys.executable, "-c", script, "local" if local_directory else "registered"],
         cwd=tmp_path,
         env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
         capture_output=True,
