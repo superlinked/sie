@@ -745,7 +745,7 @@ def test_base_and_overlong_item_metering_match_generic_adapter(raw_model, tmp_pa
     assert baseline["input_token_counts"][0] > 0
     adapter = GLiNER2EntityLoraAdapter("generated-local", lora_paths=paths, threshold=0, max_seq_length=64)
     adapter._model = raw_model
-    for attr in ("_word_splitter", "_count_subwords", "_lower_text_first", "_quadratic_attention"):
+    for attr in ("_word_splitter", "_count_subwords", "_count_prompt", "_lower_text_first", "_quadratic_attention"):
         setattr(adapter, attr, getattr(ordinary, attr))
     adapter._lora.bind(raw_model)
     assert msgspec.to_builtins(adapter.extract(items, labels=LABELS)) == baseline

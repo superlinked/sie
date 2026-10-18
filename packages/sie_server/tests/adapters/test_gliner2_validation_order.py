@@ -19,7 +19,8 @@ _SCHEMA = {"type": "object", "properties": {"name": {"type": "string"}}}
 def _adapter(*, max_prompt_tokens: int = 2048) -> GLiNER2Adapter:
     adapter = GLiNER2Adapter("test", max_seq_length=8, max_prompt_tokens=max_prompt_tokens)
     adapter._model = MagicMock()
-    adapter._count_subwords = MagicMock(side_effect=lambda values: [len(value) for value in values])
+    adapter._model._parse_field_spec.return_value = ("name", "str", None, None)
+    adapter._count_prompt = MagicMock(return_value=8)
     return adapter
 
 
@@ -111,8 +112,8 @@ def test_token_limit_checks_only_the_prompt_and_reuses_its_cached_rejection(
     monkeypatch: pytest.MonkeyPatch, task: str
 ) -> None:
     adapter = _adapter(max_prompt_tokens=16)
-    count = MagicMock(side_effect=lambda values: [100] * len(values))
-    adapter._count_subwords = count
+    count = MagicMock(return_value=100)
+    adapter._count_prompt = count
     guards = _forbid_document_work(monkeypatch, adapter)
     items, kwargs = _request(task)
 
@@ -121,7 +122,7 @@ def test_token_limit_checks_only_the_prompt_and_reuses_its_cached_rejection(
             adapter.extract(items, **kwargs)
 
     count.assert_called_once()
-    assert all(_TEXT not in value for value in count.call_args.args[0])
+    assert _TEXT not in repr(count.call_args)
     for guard in guards:
         guard.assert_not_called()
 
@@ -147,6 +148,7 @@ def test_existing_text_option_and_task_error_precedence(
 
 def _responding_model() -> MagicMock:
     model = MagicMock()
+    model._parse_field_spec.return_value = ("name", "str", None, None)
     model.processor.tokenizer.side_effect = lambda texts, **_kwargs: {
         "input_ids": [[1] * (len(text.split()) + 2) for text in texts]
     }
@@ -232,8 +234,9 @@ def test_classification_subclass_preserves_defaults_and_early_prompt_validation(
         "test", classification_task="topic", default_labels=["yes", "no"], max_seq_length=8, max_prompt_tokens=16
     )
     adapter._model = _responding_model()
+    adapter._count_prompt = lambda _schema: 8
     if reject:
-        adapter._count_subwords = lambda values: [100] * len(values)
+        adapter._count_prompt = lambda _schema: 100
         guards = _forbid_document_work(monkeypatch, adapter)
         with pytest.raises(InvalidInputError, match="at most 16 tokens"):
             adapter.extract([Item(text=_TEXT)])
@@ -255,8 +258,9 @@ def test_entity_lora_subclass_keeps_selection_and_final_base_restoration(
     controller = SimpleNamespace(lock=RLock(), select=MagicMock(), source=MagicMock(return_value="org/a"))
     monkeypatch.setattr(adapter, "_lora", controller, raising=False)
     adapter._model = _responding_model()
+    adapter._count_prompt = lambda _schema: 8
     if reject:
-        adapter._count_subwords = lambda values: [100] * len(values)
+        adapter._count_prompt = lambda _schema: 100
         guards = _forbid_document_work(monkeypatch, adapter)
         with pytest.raises(InvalidInputError, match="at most 16 tokens"):
             adapter.extract([Item(text=_TEXT)], labels=["person"], options={"lora": "a"})

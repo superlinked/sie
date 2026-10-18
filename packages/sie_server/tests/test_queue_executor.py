@@ -1627,6 +1627,7 @@ class TestProcessExtractBatch:
     async def test_gliner2_invalid_request_does_not_fail_valid_sibling(self) -> None:
         adapter = GLiNER2Adapter("test-model")
         adapter._model = MagicMock()
+        adapter._count_prompt = lambda _schema: 8
         adapter._model.extract_entities.return_value = {"entities": {}}
         reg = _make_registry()
         worker = AsyncMock()

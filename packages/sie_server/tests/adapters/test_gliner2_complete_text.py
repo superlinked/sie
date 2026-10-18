@@ -25,6 +25,8 @@ def _adapter(*, lower: bool = True, max_words: int = 8, max_subwords: int = 1000
     model = MagicMock()
     model.processor.tokenizer = _Tokenizer()
     adapter._model = model
+    adapter._count_prompt = lambda _schema: 8
+    model._parse_field_spec.return_value = ("name", "str", None, None)
     adapter._lower_text_first = lower
     adapter._word_splitter = WindowedSplitter(
         LinearWordSplitter(lower_text_first=lower),

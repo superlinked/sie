@@ -21,7 +21,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from sie_server.adapters._word_window import ATTENTION_BUDGET, MAX_WORD_CHARS, WindowedSplitter, subword_budget
-from sie_server.adapters.gliner2.adapter import _PROMPT_TOKENS_PER_RELATION, _SUBWORDS_PER_WORD, GLiNER2Adapter
+from sie_server.adapters.gliner2.adapter import _SUBWORDS_PER_WORD, GLiNER2Adapter
 from sie_server.adapters.gliner2.classification import GLiNER2ClassificationAdapter
 from sie_server.adapters.gliner2.words import PACKAGE_PATTERN, LinearWordSplitter
 from sie_server.types.inputs import InvalidInputError, Item
@@ -80,6 +80,13 @@ class PackageModel:
     def __init__(self, processor: Any) -> None:
         self.processor = processor
         self.inputs: list[Any] = []
+
+    @staticmethod
+    def create_schema() -> Any:
+        return gliner2_engine.Schema()
+
+    def _parse_field_spec(self, spec: str) -> Any:
+        return gliner2_engine.GLiNER2._parse_field_spec(None, spec)
 
     def _collate(self, texts: list[str], schema: Any, max_len: int | None) -> None:
         self.inputs.append(self.processor.collate_fn_inference([(text, schema) for text in texts], max_len=max_len))
@@ -392,7 +399,9 @@ def test_relation_rows_run_in_passes_within_the_attention_budget() -> None:
 
     adapter.extract([Item(text=text, metadata={"entities": entities}) for _ in range(8)], labels=labels)
 
-    prompt = adapter._prompt_tokens(labels, per_entry=_PROMPT_TOKENS_PER_RELATION, key=("relations", tuple(labels)))
+    prompt = adapter._prompt_tokens(
+        labels, key=("relations", tuple(labels)), schema=lambda: model.create_schema().relations(labels)
+    )
     estimated = adapter._row_tokens([adapter._window(text)], prompt)
     assert estimated is not None
     for batch in model.inputs:
@@ -635,6 +644,7 @@ def test_a_batch_of_fitting_texts_makes_the_same_single_call() -> None:
         positive_label="unsafe",
     )
     model = MagicMock()
+    model.create_schema.side_effect = gliner2_engine.Schema
     adapter._use_linear_word_splitter(make_processor())
     adapter._model = model
     model.batch_classify_text.return_value = [

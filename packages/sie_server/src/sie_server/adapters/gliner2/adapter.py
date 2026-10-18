@@ -25,6 +25,7 @@ from sie_server.adapters._word_window import (
     quadratic_attention,
     subword_budget,
 )
+from sie_server.adapters.gliner2._prompt import prompt_counter, structure_schema
 from sie_server.adapters.gliner2.words import linear_equivalent
 from sie_server.core.inference_output import ExtractItemError, ExtractOutput
 from sie_server.types.inputs import InvalidInputError, Item
@@ -55,14 +56,7 @@ _WORD_CACHE_SIZE = 16384
 _CACHED_WORD_CHARS = 32
 # Rows gliner2 puts in one forward pass when not told otherwise.
 _PACKAGE_BATCH_SIZE = 8
-# Task prompt tokens per label or task name beyond its own tokens: gliner2
-# marks each entity type or class with one token, and builds one structure of
-# about ten tokens around each relation type.
-_PROMPT_TOKENS_PER_ENTRY = 2
-_PROMPT_TOKENS_PER_RELATION = 12
 _SENTENCE_END = (".", "!", "?")
-# The prompt's own markers, [SEP_TEXT], and the tokenizer's specials.
-_ROW_OVERHEAD_TOKENS = 8
 _DEBERTA_CONFIG = {"model_type": "deberta-v2"}
 # Classification reads a text longer than one window as overlapping windows of
 # the same size (see ``_classification_windows``). A window starts this many
@@ -97,7 +91,9 @@ class GLiNER2Adapter(BaseAdapter):
     names, descriptions and choices), which gliner2 encodes with every document
     and does not bill, may take at most ``max_prompt_tokens`` tokens (default
     2048), and each label, task name, field name or choice at most 128
-    characters; a longer prompt is rejected with ``INVALID_INPUT``.
+    characters; a longer prompt is rejected with ``INVALID_INPUT``. Prompt
+    counts use the loaded inference schema compiler, including its markers,
+    descriptions and choice prefixes, without changing document token usage.
 
     gliner2 reads at most ``max_seq_length`` words of a document. Entity,
     relation and structured extraction read that first window. Classification
@@ -115,7 +111,7 @@ class GLiNER2Adapter(BaseAdapter):
     spec: ClassVar[AdapterSpec] = AdapterSpec(
         inputs=("text",),
         outputs=("json",),
-        unload_fields=("_model",),
+        unload_fields=("_model", "_count_prompt"),
     )
 
     def __init__(
@@ -172,6 +168,7 @@ class GLiNER2Adapter(BaseAdapter):
         self._revision = revision
 
         self._model: Any = None
+        self._count_prompt: Callable[[Any], int] | None = None
         # How the loaded gliner2 splits words (see ``_model_text``); None until loaded.
         self._lower_text_first: bool | None = None
         # The splitter gliner2 reads words with, bounded to the window it reads (see ``_window``).
@@ -206,6 +203,8 @@ class GLiNER2Adapter(BaseAdapter):
         )
         encoder = getattr(model, "encoder", None)
         self._use_linear_word_splitter(model.processor, getattr(encoder, "config", None))
+        # Counts belong to this processor/tokenizer, not a previous load.
+        self._prompt_limit = PromptLimit("GLiNER2", self._prompt_limit.max_tokens)
         self._model = model
 
     def _use_linear_word_splitter(self, processor: Any, encoder_config: Any = None) -> None:
@@ -231,6 +230,7 @@ class GLiNER2Adapter(BaseAdapter):
             )
         # An unknown encoder is taken to be DeBERTa, the encoder of every GLiNER2 checkpoint.
         config = encoder_config if encoder_config is not None else _DEBERTA_CONFIG
+        count_prompt = prompt_counter(processor)
         tokenize = self._bounded_tokenization(processor)
         count_subwords = SubwordCounter(lambda words: [len(tokenize(word)) for word in words])
         max_words = self._max_seq_length or _DEFAULT_MAX_WORDS
@@ -245,6 +245,7 @@ class GLiNER2Adapter(BaseAdapter):
         self._word_splitter = windowed
         self._count_subwords = count_subwords
         self._quadratic_attention = quadratic_attention(config)
+        self._count_prompt = count_prompt
 
     @staticmethod
     def _bounded_tokenization(processor: Any) -> Callable[[str], list[str]]:
@@ -293,13 +294,14 @@ class GLiNER2Adapter(BaseAdapter):
                 raise InvalidInputError("GLiNER2 structured extraction does not accept classification_task")
             structures = self._json_schema_to_structures(output_schema)
             specs = [spec for fields in structures.values() for spec in fields]
-            # A field's choices are listed in its structure, and each again in a prefix before the document.
             choices = [
                 choice for definition in output_schema["properties"].values() for choice in definition.get("enum") or []
             ]
             check_label_chars("GLiNER2", "output_schema property names", output_schema["properties"])
             check_label_chars("GLiNER2", "output_schema enum values", choices)
-            prompt = self._prompt_tokens(specs, key=("json", tuple(specs)), extra=len(choices))
+            prompt = self._prompt_tokens(
+                specs, key=("json", tuple(specs)), schema=lambda: structure_schema(self._model, structures)
+            )
             reads = [self._read(text) for text in texts]
             windows = [(model_text, subwords) for model_text, subwords, _ in reads]
             input_token_counts = self._doc_input_token_counts(texts)
@@ -346,7 +348,9 @@ class GLiNER2Adapter(BaseAdapter):
             ]
             check_label_chars("GLiNER2", "labels", normalized_labels)
             prompt = self._prompt_tokens(
-                normalized_labels, per_entry=_PROMPT_TOKENS_PER_RELATION, key=("relations", tuple(normalized_labels))
+                normalized_labels,
+                key=("relations", tuple(normalized_labels)),
+                schema=lambda: self._model.create_schema().relations(normalized_labels),
             )
             reads = [self._read(text) for text in texts]
             windows = [(model_text, subwords) for model_text, subwords, _ in reads]
@@ -390,7 +394,10 @@ class GLiNER2Adapter(BaseAdapter):
             positive_label = self._effective_positive_label(opts, normalized_labels)
             prompt = self._prompt_tokens(
                 [classification_task, *normalized_labels],
-                key=("classification", classification_task, tuple(normalized_labels)),
+                key=("classification", classification_task, tuple(normalized_labels), multi_label, effective_threshold),
+                schema=lambda: self._model.create_schema().classification(
+                    classification_task, normalized_labels, multi_label=multi_label, cls_threshold=effective_threshold
+                ),
             )
             reads = [self._read(text) for text in texts]
             input_token_counts = self._doc_input_token_counts(texts)
@@ -430,7 +437,11 @@ class GLiNER2Adapter(BaseAdapter):
             )
 
         check_label_chars("GLiNER2", "labels", normalized_labels)
-        prompt = self._prompt_tokens(normalized_labels, key=("entities", tuple(normalized_labels)))
+        prompt = self._prompt_tokens(
+            normalized_labels,
+            key=("entities", tuple(normalized_labels)),
+            schema=lambda: self._model.create_schema().entities(normalized_labels),
+        )
         reads = [self._read(text) for text in texts]
         windows = [(model_text, subwords) for model_text, subwords, _ in reads]
         input_token_counts = self._doc_input_token_counts(texts)
@@ -595,30 +606,24 @@ class GLiNER2Adapter(BaseAdapter):
         entries: list[str],
         *,
         key: tuple[Any, ...],
-        per_entry: int = _PROMPT_TOKENS_PER_ENTRY,
-        extra: int = 0,
-    ) -> int | None:
-        """Estimated tokens of the task prompt gliner2 builds from ``entries``, checked against the limit.
+        schema: Callable[[], Any],
+    ) -> int:
+        """Tokens of the actual compiled inference prompt, checked before document work.
 
-        Each label, class label, relation type and schema field is counted
-        with the tokens gliner2 adds around it, plus ``extra`` (a token per
-        field choice, which gliner2 lists again before the document). None when words are
-        not counted (no bounded splitter is installed); the prompt's
-        characters are still checked.
+        Build and compile only after the aggregate character check. The result
+        includes markers, descriptions, JSON choice prefixes and the document
+        separator; it is used for admission/batch planning, not reported usage.
 
         Raises:
             InvalidInputError: The prompt takes more than ``max_prompt_tokens``.
         """
-        count = self._count_subwords
-        strings = [entry for entry in entries if isinstance(entry, str)]
 
         def tokens() -> int:
-            if count is None:
-                return 0
-            return sum(count(strings)) + per_entry * len(strings) + extra + _ROW_OVERHEAD_TOKENS
+            if self._count_prompt is None:
+                raise RuntimeError("GLiNER2 prompt counter is not loaded")
+            return self._count_prompt(schema())
 
-        prompt = self._prompt_limit.check(strings, tokens, (per_entry, extra, *key))
-        return prompt if count is not None else None
+        return self._prompt_limit.check(entries, tokens, key)
 
     def _row_tokens(self, windows: list[tuple[str, int | None]], prompt: int | None) -> list[int] | None:
         """Estimated tokens of each item's encoder row: the task prompt, then the words it reads.
