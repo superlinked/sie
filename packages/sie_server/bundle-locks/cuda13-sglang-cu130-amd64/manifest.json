@@ -1,0 +1,43 @@
+{
+  "completed_artifact_hashes": [
+    {
+      "bytes": 134899,
+      "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67",
+      "url": "https://download.pytorch.org/whl/jinja2-3.1.6-py3-none-any.whl"
+    },
+    {
+      "bytes": 22947,
+      "sha256": "d6dd0be5b5b189d31db7cda48b91d7e0a9795f31430b7f271219ab30f1d3ac9d",
+      "url": "https://download.pytorch.org/whl/markupsafe-3.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl"
+    }
+  ],
+  "exceptions_sha256": "2dd348b07e31ef1b1bbd28fe47fca6e702d194085d2cef6825a2610845cd8852",
+  "exclude_newer": "2026-10-18T00:00:00Z",
+  "indexes": [
+    "--default-index",
+    "https://pypi.org/simple",
+    "--index",
+    "https://download.pytorch.org/whl/cu130",
+    "--index",
+    "https://docs.sglang.ai/whl/cu130/",
+    "--index-strategy",
+    "unsafe-best-match",
+    "--prerelease",
+    "allow"
+  ],
+  "inputs": {
+    "requirements_sha256": "6d29b7815d5f5105dbc70e23f5c3c51a225c6b2e0127eca3834a327d94eeec4a",
+    "uv_lock_sha256": "70fa46eb35df2c928eb419caec58a8cda544aea28196ef127006a65bb062ef94"
+  },
+  "lock_sha256": "619a3c7eedc61badcd94a3a19988aa204fc53299b63e8c721723d0697c28d787",
+  "policy_sha256": "843447f263635fd10ec336d2e678de73ef23dfc1ae1cd07cc83ee9c204a6b203",
+  "schema_version": 1,
+  "target": {
+    "architecture": "amd64",
+    "bundle": "sglang-cu130",
+    "platform": "cuda13",
+    "python_platform": "x86_64-manylinux_2_35",
+    "python_version": "3.12"
+  },
+  "uv_version": "0.9.28"
+}

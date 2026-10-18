@@ -147,60 +147,41 @@ RUN set -eux; \
 FROM base AS builder
 
 ARG BUNDLE
+ARG TARGETARCH
 
-# Ranged bundle deps are constrained to uv.lock. Exact pins and URL/VCS specs stay overrides.
+# Freeze the entire overlay, including packages absent from the root lock.
+# The base .venv above is a separate boundary; this does not claim a fully
+# reproducible image or change the public bundle declarations.
 COPY uv.lock /tmp/uv.lock
+COPY packages/sie_server/bundle-locks /tmp/bundle-locks
+COPY tools/ci/bundle_lock.py /tmp/bundle-lock-compiler.py
 
-RUN .venv/bin/python -m sie_server.cli resolve-deps \
-    --bundle "${BUNDLE}" \
-    --models-dir models \
-    --lock /tmp/uv.lock \
-    --constraints-output /tmp/bundle-constraints.txt \
-    > /tmp/bundle-requirements.txt \
-    && echo "Bundle ${BUNDLE} requirements:" \
-    && cat /tmp/bundle-requirements.txt \
-    && echo "Bundle ${BUNDLE} lock constraints:" \
-    && cat /tmp/bundle-constraints.txt
+RUN test "$(uv --version)" = "uv 0.9.28" \
+    && .venv/bin/python -m sie_server.bundle_lock check \
+        --lock-dir /tmp/bundle-locks --bundles-dir /app/bundles \
+        --root-lock /tmp/uv.lock --compiler /tmp/bundle-lock-compiler.py --platform cuda13 \
+        --bundle "${BUNDLE}" --architecture "${TARGETARCH}"
 
-# cu130 bundle deps go into a separate site-packages tree (``bundle-libs``,
-# prepended to sys.path via the .pth above). CUDA 13 engines need torch 2.11
-# from the cu130 PyTorch index, where the only ``2.11.0`` is the ``+cu130``
-# local-version wheel; pip's multi-index resolution does not reliably prefer it
-# over PyPI's default-CUDA build, so cuda13 bundles resolve with ``uv`` and
-# ``--index-strategy unsafe-best-match`` against the cu130 PyTorch + sglang
-# indexes (so torch 2.11 + sgl-kernel/flashinfer land for cu130). This uv +
-# cu130-index resolution was validated with sglang 0.5.13, torch 2.11, and a
-# cu130 runtime in a fresh GPU environment.
+# COVERAGE NOTE: the cu130 bundle-libs overlay shadows a cu12 Torch in the
+# base venv. CPU image checks do not prove GPU namespace isolation: a cu130
+# missing nvidia submodule can fall through to a cu12 .so at first decode.
+# The saved closure and inventory do not replace live GPU validation of this
+# dual-Torch configuration (removing the base carry remains separate work).
 #
-# COVERAGE NOTE: the CUDA 13 image CI callers
-# builds this image and asserts on CPU that the bundle-libs cu130 overlay
-# SHADOWS the base venv (import torch -> 2.11+cu130, transformers 5.x). It does
-# NOT exercise GPU init: the cu12 base venv + cu130 bundle-libs both expose the
-# ``nvidia/`` namespace package, and a cu130-missing submodule could in theory
-# fall through to a cu12 ``.so`` at first decode. That dual-torch GPU path is
-# covered only by live GPU runs (Modal; first release health-check) — slimming
-# torch out of sie-server core to remove the carry is the tracked fix (#1415).
-# UV_NO_CACHE=0 makes the --mount uv cache effective; UV_COMPILE_BYTECODE=0 for
-# --no-compile parity. UV_HTTP_TIMEOUT=600 raises uv's per-request timeout from
-# the 30s default: the cu130 closure pulls several very large NVIDIA wheels from
-# pypi.nvidia.com (cufft ~204 MB, cusolver ~191 MB, nccl/cusparselt/nvshmem
-# 130-190 MB), and downloading them concurrently over a congested link exceeds
-# 30s, which previously failed the build with "nvidia-nvshmem-cu13 ... operation
-# timed out" after retries.
-RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=cache,target=/root/.cache/uv \
-    mkdir -p /app/bundle-libs; \
-    if [ -s /tmp/bundle-requirements.txt ]; then \
-        UV_NO_CACHE=0 UV_COMPILE_BYTECODE=0 UV_HTTP_TIMEOUT=600 uv pip install \
-            --python /app/.venv/bin/python \
-            --target=/app/bundle-libs \
-            --index-strategy unsafe-best-match \
-            --prerelease=allow \
-            --extra-index-url https://download.pytorch.org/whl/cu130 \
-            --extra-index-url https://docs.sglang.ai/whl/cu130/ \
-            --constraint /tmp/bundle-constraints.txt \
-            -r /tmp/bundle-requirements.txt ; \
-    fi
+# PEP751 supplies exact versions, wheel/archive hashes and VCS commits. There
+# is no fresh dependency resolution against a moving index during installation.
+# Source builds may still use build-time dependencies; those and the base venv
+# are outside this runtime-overlay inventory contract.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_NO_CACHE=0 UV_COMPILE_BYTECODE=0 UV_HTTP_TIMEOUT=600 uv pip sync \
+        --no-config --python /app/.venv/bin/python \
+        --target /app/bundle-libs \
+        "/tmp/bundle-locks/cuda13-${BUNDLE}-${TARGETARCH}/pylock.toml" \
+    && .venv/bin/python -m sie_server.bundle_lock verify \
+        --lock-dir /tmp/bundle-locks --bundles-dir /app/bundles \
+        --root-lock /tmp/uv.lock --compiler /tmp/bundle-lock-compiler.py --platform cuda13 \
+        --bundle "${BUNDLE}" --architecture "${TARGETARCH}" \
+        --installed /app/bundle-libs --receipt /app/bundle-libs-inventory.json
 
 # bundle-libs cleanup (symmetric to the .venv cleanup in base). Preserve
 # dist-info RECORD files so tvm_ffi can find xgrammar's native binding.
@@ -216,7 +197,7 @@ RUN set -eux; \
     fi; \
     find /app/bundle-libs -exec touch -h -d @0 {} + 2>/dev/null || true; \
     /app/.venv/bin/pip freeze --path /app/bundle-libs > /app/bundle-libs-freeze.txt; \
-    touch -d @0 /app/bundle-libs-freeze.txt
+    touch -d @0 /app/bundle-libs-freeze.txt /app/bundle-libs-inventory.json
 
 # =============================================================================
 # Runtime image (CUDA 13 devel — nvcc for flashinfer/tvm_ffi first-decode JIT)
@@ -283,6 +264,7 @@ COPY --link --from=base --chown=1000:1000 /app/bundles /app/bundles
 # Bundle-specific extras — last layer so shared layers above stay cached.
 COPY --link --from=builder --chown=1000:1000 /app/bundle-libs /app/bundle-libs
 COPY --link --from=builder --chown=1000:1000 /app/bundle-libs-freeze.txt /app/bundle-libs-freeze.txt
+COPY --link --from=builder --chown=1000:1000 /app/bundle-libs-inventory.json /app/bundle-libs-inventory.json
 
 RUN mkdir -p /app/evals /app/.cache/huggingface /app/.cache/sie-kernels /app/.cache/sie \
     && chown -R sie:sie /app/evals /app/.cache \

@@ -1,0 +1,39 @@
+{
+  "completed_artifact_hashes": [
+    {
+      "bytes": 134899,
+      "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67",
+      "url": "https://download.pytorch.org/whl/jinja2-3.1.6-py3-none-any.whl"
+    },
+    {
+      "bytes": 24332,
+      "sha256": "3a7e8ae81ae39e62a41ec302f972ba6ae23a5c5396c8e60113e9066ef893da0d",
+      "url": "https://download.pytorch.org/whl/markupsafe-3.0.3-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl"
+    }
+  ],
+  "exceptions_sha256": "2d808969e86d3da417f7b52a9ea461f2d281baa48e1cda74b257f65a6f67ab34",
+  "exclude_newer": "2026-10-18T00:00:00Z",
+  "indexes": [
+    "--default-index",
+    "https://pypi.org/simple",
+    "--index",
+    "https://download.pytorch.org/whl/cpu",
+    "--index-strategy",
+    "unsafe-best-match"
+  ],
+  "inputs": {
+    "requirements_sha256": "529fd129d457b6820b48a3acbb4dee1f9eb83806e0a6730f122ff3826861a3f2",
+    "uv_lock_sha256": "70fa46eb35df2c928eb419caec58a8cda544aea28196ef127006a65bb062ef94"
+  },
+  "lock_sha256": "f0243e01019a55d573ceffa9798460b0a503d128e5f1942e8901d83658995219",
+  "policy_sha256": "843447f263635fd10ec336d2e678de73ef23dfc1ae1cd07cc83ee9c204a6b203",
+  "schema_version": 1,
+  "target": {
+    "architecture": "arm64",
+    "bundle": "transformers5",
+    "platform": "cpu",
+    "python_platform": "aarch64-manylinux_2_35",
+    "python_version": "3.12"
+  },
+  "uv_version": "0.9.28"
+}

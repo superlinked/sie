@@ -128,37 +128,35 @@ RUN set -eux; \
 FROM base AS builder
 
 ARG BUNDLE
+ARG TARGETARCH
 
-# Ranged bundle deps are constrained to uv.lock. Exact pins and URL/VCS specs stay overrides.
+# Freeze the entire overlay, including packages absent from the root lock.
+# The base .venv above is a separate boundary; this does not claim a fully
+# reproducible image or change the public bundle declarations.
 COPY uv.lock /tmp/uv.lock
+COPY packages/sie_server/bundle-locks /tmp/bundle-locks
+COPY tools/ci/bundle_lock.py /tmp/bundle-lock-compiler.py
 
-RUN .venv/bin/python -m sie_server.cli resolve-deps \
-    --bundle "${BUNDLE}" \
-    --models-dir models \
-    --cpu \
-    --lock /tmp/uv.lock \
-    --constraints-output /tmp/bundle-constraints.txt \
-    > /tmp/bundle-requirements.txt \
-    && echo "Bundle ${BUNDLE} requirements:" \
-    && cat /tmp/bundle-requirements.txt \
-    && echo "Bundle ${BUNDLE} lock constraints:" \
-    && cat /tmp/bundle-constraints.txt
+RUN test "$(uv --version)" = "uv 0.9.28" \
+    && .venv/bin/python -m sie_server.bundle_lock check \
+        --lock-dir /tmp/bundle-locks --bundles-dir /app/bundles \
+        --root-lock /tmp/uv.lock --compiler /tmp/bundle-lock-compiler.py --platform cpu \
+        --bundle "${BUNDLE}" --architecture "${TARGETARCH}"
 
-# Bundle-specific deps land in a separate site-packages tree so the shared
-# venv layer stays byte-identical across bundles of the same platform.
-# Even if /tmp/bundle-requirements.txt is empty, create /app/bundle-libs so
-# the runtime `COPY --from` never fails.
-RUN --mount=type=cache,target=/root/.cache/pip \
-    mkdir -p /app/bundle-libs; \
-    if [ -s /tmp/bundle-requirements.txt ]; then \
-        .venv/bin/pip install \
-            --index-url https://download.pytorch.org/whl/cpu \
-            --extra-index-url https://pypi.org/simple \
-            --target=/app/bundle-libs \
-            --no-compile \
-            -c /tmp/bundle-constraints.txt \
-            -r /tmp/bundle-requirements.txt; \
-    fi
+# PEP751 supplies exact versions, wheel/archive hashes and VCS commits. There
+# is no fresh dependency resolution against a moving index during installation.
+# Source builds may still use build-time dependencies; those and the base venv
+# are outside this runtime-overlay inventory contract.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_NO_CACHE=0 UV_COMPILE_BYTECODE=0 UV_HTTP_TIMEOUT=600 uv pip sync \
+        --no-config --python /app/.venv/bin/python \
+        --target /app/bundle-libs \
+        "/tmp/bundle-locks/cpu-${BUNDLE}-${TARGETARCH}/pylock.toml" \
+    && .venv/bin/python -m sie_server.bundle_lock verify \
+        --lock-dir /tmp/bundle-locks --bundles-dir /app/bundles \
+        --root-lock /tmp/uv.lock --compiler /tmp/bundle-lock-compiler.py --platform cpu \
+        --bundle "${BUNDLE}" --architecture "${TARGETARCH}" \
+        --installed /app/bundle-libs --receipt /app/bundle-libs-inventory.json
 
 # bundle-libs cleanup (symmetric to the .venv cleanup in base). Preserve
 # dist-info RECORD files for runtime native-library discovery.
@@ -173,7 +171,7 @@ RUN set -eux; \
     fi; \
     find /app/bundle-libs -exec touch -h -d @0 {} + 2>/dev/null || true; \
     /app/.venv/bin/pip freeze --path /app/bundle-libs > /app/bundle-libs-freeze.txt; \
-    touch -d @0 /app/bundle-libs-freeze.txt
+    touch -d @0 /app/bundle-libs-freeze.txt /app/bundle-libs-inventory.json
 
 # =============================================================================
 # Runtime image
@@ -231,6 +229,7 @@ COPY --link --from=base --chown=1000:1000 /app/bundles /app/bundles
 # Bundle-specific extras — last layer so shared layers above stay cached.
 COPY --link --from=builder --chown=1000:1000 /app/bundle-libs /app/bundle-libs
 COPY --link --from=builder --chown=1000:1000 /app/bundle-libs-freeze.txt /app/bundle-libs-freeze.txt
+COPY --link --from=builder --chown=1000:1000 /app/bundle-libs-inventory.json /app/bundle-libs-inventory.json
 
 RUN mkdir -p /app/evals /app/.cache/huggingface /app/.cache/sie && chown -R sie:sie /app/evals /app/.cache \
     && chmod 700 /app/.cache/sie

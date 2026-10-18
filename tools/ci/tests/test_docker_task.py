@@ -332,27 +332,22 @@ def _dockerfile_logical_lines(text: str) -> list[str]:
 def test_bundle_image_installs_are_constrained_to_the_lock(dockerfile: str) -> None:
     text = (Path(__file__).resolve().parents[3] / "packages" / "sie_server" / dockerfile).read_text()
     assert "COPY uv.lock /tmp/uv.lock" in text
-    assert "--constraints-output /tmp/bundle-constraints.txt" in text
+    assert "COPY packages/sie_server/bundle-locks /tmp/bundle-locks" in text
+    assert "ARG TARGETARCH" in text
+    assert 'test "$(uv --version)" = "uv 0.9.28"' in text
+    logical = _dockerfile_logical_lines(text)
+    check = next(i for i, line in enumerate(logical) if "sie_server.bundle_lock check" in line)
+    sync = next(i for i, line in enumerate(logical) if "uv pip sync" in line)
+    assert check < sync
+    assert "--no-config --python /app/.venv/bin/python" in logical[sync]
+    assert "--target /app/bundle-libs" in logical[sync]
+    assert "${BUNDLE}-${TARGETARCH}/pylock.toml" in logical[sync]
+    assert "sie_server.bundle_lock verify" in logical[sync]
+    assert "--installed /app/bundle-libs --receipt /app/bundle-libs-inventory.json" in logical[sync]
     assert "pip freeze --path /app/bundle-libs > /app/bundle-libs-freeze.txt" in text
-    assert "/app/bundle-libs-freeze.txt /app/bundle-libs-freeze.txt" in text
-    installs = [
-        line
-        for line in _dockerfile_logical_lines(text)
-        if "-r /tmp/bundle-requirements.txt" in line and ("pip install" in line or "uv pip install" in line)
-    ]
-    assert installs
-    constraints_file = "/tmp/bundle-constraints.txt"  # noqa: S108
-    # A case/if arm ends at `;;`. One logical RUN can hold both CUDA 12
-    # branches, so each install command is checked on its own.
-    commands = [
-        part.strip()
-        for line in installs
-        for part in line.split(";;")
-        if "-r /tmp/bundle-requirements.txt" in part and ("pip install" in part or "uv pip install" in part)
-    ]
-    assert commands
-    for command in commands:
-        assert f"-c {constraints_file}" in command or f"--constraint {constraints_file}" in command
+    for receipt in ("bundle-libs-freeze.txt", "bundle-libs-inventory.json"):
+        assert f"/app/{receipt} /app/{receipt}" in text
+    assert "-r /tmp/bundle-requirements.txt" not in text
 
 
 def test_expected_release_set_has_sixteen_tags_and_six_names(complete_source):

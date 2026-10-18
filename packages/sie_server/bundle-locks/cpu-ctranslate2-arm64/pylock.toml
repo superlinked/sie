@@ -1,0 +1,26 @@
+lock-version = "1.0"
+created-by = "uv"
+requires-python = ">=3.12"
+
+[[packages]]
+name = "ctranslate2"
+version = "4.8.1"
+wheels = [{ url = "https://files.pythonhosted.org/packages/2c/d4/03428106134a0a58922461074f8942f92c5ed0bb3a8d018677ad64a9c476/ctranslate2-4.8.1-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", upload-time = 2026-07-03T12:39:17Z, size = 16882768, hashes = { sha256 = "5ca144b93035b9f53e6d67b7cdf5802c3fffca9aa0247940eecbd4592c68ce2f" } }]
+
+[[packages]]
+name = "numpy"
+version = "2.4.4"
+sdist = { url = "https://files.pythonhosted.org/packages/d7/9f/b8cef5bffa569759033adda9481211426f12f53299629b410340795c2514/numpy-2.4.4.tar.gz", upload-time = 2026-03-29T13:22:01Z, size = 20731587, hashes = { sha256 = "2d390634c5182175533585cc89f3608a4682ccb173cc9bb940b2881c8d6f8fa0" } }
+wheels = [{ url = "https://files.pythonhosted.org/packages/7f/37/eed308a8f56cba4d1fdf467a4fc67ef4ff4bf1c888f5fc980481890104b1/numpy-2.4.4-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", upload-time = 2026-03-29T13:19:00Z, size = 15670666, hashes = { sha256 = "f9e75681b59ddaa5e659898085ae0eaea229d054f2ac0c7e563a62205a700121" } }]
+
+[[packages]]
+name = "pyyaml"
+version = "6.0.3"
+sdist = { url = "https://files.pythonhosted.org/packages/05/8e/961c0007c59b8dd7729d542c61a4d537767a59645b82a0b521206e1e25c2/pyyaml-6.0.3.tar.gz", upload-time = 2025-09-25T21:33:16Z, size = 130960, hashes = { sha256 = "d76623373421df22fb4cf8817020cbb7ef15c725b9d5e45f17e189bfc384190f" } }
+wheels = [{ url = "https://files.pythonhosted.org/packages/ed/23/7a778b6bd0b9a8039df8b1b1d80e2e2ad78aa04171592c8a5c43a56a6af4/pyyaml-6.0.3-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", upload-time = 2025-09-25T21:32:13Z, size = 775116, hashes = { sha256 = "9149cad251584d5fb4981be1ecde53a1ca46c891a79788c0df828d2f166bda28" } }]
+
+[[packages]]
+name = "setuptools"
+version = "83.0.0"
+sdist = { url = "https://files.pythonhosted.org/packages/34/26/f5d29e25ffdb535afef2d35cdb55b325298f96debd670da4c325e08d70f4/setuptools-83.0.0.tar.gz", upload-time = 2026-07-04T15:31:22Z, size = 1154254, hashes = { sha256 = "025bccbbf0fa05b6192bc64ae1e7b16e001fd6d6d4d5de03c97b1c1ade523bef" } }
+wheels = [{ url = "https://files.pythonhosted.org/packages/5d/40/e1e72872c6354b306daef1703549e8e83b4d43cfea356311bf722a043752/setuptools-83.0.0-py3-none-any.whl", upload-time = 2026-07-04T15:31:20Z, size = 1008090, hashes = { sha256 = "29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3" } }]

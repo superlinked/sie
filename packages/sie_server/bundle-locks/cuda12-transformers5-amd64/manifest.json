@@ -1,0 +1,24 @@
+{
+  "completed_artifact_hashes": [],
+  "exceptions_sha256": "37835b8c8b636bca70edb39f0252652c5d021bd5521a6690ab324b887905b80e",
+  "exclude_newer": "2026-10-18T00:00:00Z",
+  "indexes": [
+    "--default-index",
+    "https://pypi.org/simple"
+  ],
+  "inputs": {
+    "requirements_sha256": "72ca3b4c7893a0ca42603d3a60e435ee1efd1f9a57533ae19d24d1610037398f",
+    "uv_lock_sha256": "70fa46eb35df2c928eb419caec58a8cda544aea28196ef127006a65bb062ef94"
+  },
+  "lock_sha256": "b1c1101c295e2283084a6bd7d893508c1733e611458a164d94d3b6e389665a56",
+  "policy_sha256": "843447f263635fd10ec336d2e678de73ef23dfc1ae1cd07cc83ee9c204a6b203",
+  "schema_version": 1,
+  "target": {
+    "architecture": "amd64",
+    "bundle": "transformers5",
+    "platform": "cuda12",
+    "python_platform": "x86_64-manylinux_2_35",
+    "python_version": "3.12"
+  },
+  "uv_version": "0.9.28"
+}

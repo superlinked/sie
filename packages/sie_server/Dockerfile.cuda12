@@ -147,53 +147,35 @@ RUN set -eux; \
 FROM base AS builder
 
 ARG BUNDLE
+ARG TARGETARCH
 
-# Ranged bundle deps are constrained to uv.lock. Exact pins and URL/VCS specs stay overrides.
+# Freeze the entire overlay, including packages absent from the root lock.
+# The base .venv above is a separate boundary; this does not claim a fully
+# reproducible image or change the public bundle declarations.
 COPY uv.lock /tmp/uv.lock
+COPY packages/sie_server/bundle-locks /tmp/bundle-locks
+COPY tools/ci/bundle_lock.py /tmp/bundle-lock-compiler.py
 
-RUN .venv/bin/python -m sie_server.cli resolve-deps \
-    --bundle "${BUNDLE}" \
-    --models-dir models \
-    --lock /tmp/uv.lock \
-    --constraints-output /tmp/bundle-constraints.txt \
-    > /tmp/bundle-requirements.txt \
-    && echo "Bundle ${BUNDLE} requirements:" \
-    && cat /tmp/bundle-requirements.txt \
-    && echo "Bundle ${BUNDLE} lock constraints:" \
-    && cat /tmp/bundle-constraints.txt
+RUN test "$(uv --version)" = "uv 0.9.28" \
+    && .venv/bin/python -m sie_server.bundle_lock check \
+        --lock-dir /tmp/bundle-locks --bundles-dir /app/bundles \
+        --root-lock /tmp/uv.lock --compiler /tmp/bundle-lock-compiler.py --platform cuda12 \
+        --bundle "${BUNDLE}" --architecture "${TARGETARCH}"
 
-# Bundle-specific deps go into a separate site-packages tree (``bundle-libs``,
-# prepended to sys.path via a .pth) so the shared venv layer stays
-# byte-identical across bundles. Branches resolve with ``.venv/bin/pip`` (shared
-# torch/transformers/nvidia wheels visible on the venv's sys.path); bundle-libs
-# carries each bundle's closure for any package whose version differs from the
-# shared venv. flash-attn deps carry `sys_platform == 'linux'` markers so they
-# install on Linux (this image) but not on developer machines.
-#
-# Per-bundle CUDA wheel index. SGLang's sgl-kernel/flashinfer wheels live on the
-# docs.sglang.ai cu129 index (not PyPI), so the SGLang-family bundles add it.
-# The sglang-cu130 bundle (sglang 0.5.13 / torch 2.11 / cu130, CUDA 13) is built by the
-# separate ``cuda13`` platform — see Dockerfile.cuda13 — not here.
-RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=cache,target=/root/.cache/uv \
-    mkdir -p /app/bundle-libs; \
-    if [ -s /tmp/bundle-requirements.txt ]; then \
-        case "$BUNDLE" in \
-        sglang | sglang-embedding | sglang-vision-extract) \
-            .venv/bin/pip install \
-                --target=/app/bundle-libs \
-                --no-compile \
-                --extra-index-url https://docs.sglang.ai/whl/cu129/ \
-                -c /tmp/bundle-constraints.txt \
-                -r /tmp/bundle-requirements.txt ;; \
-        *) \
-            .venv/bin/pip install \
-                --target=/app/bundle-libs \
-                --no-compile \
-                -c /tmp/bundle-constraints.txt \
-                -r /tmp/bundle-requirements.txt ;; \
-        esac; \
-    fi
+# PEP751 supplies exact versions, wheel/archive hashes and VCS commits. There
+# is no fresh dependency resolution against a moving index during installation.
+# Source builds may still use build-time dependencies; those and the base venv
+# are outside this runtime-overlay inventory contract.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_NO_CACHE=0 UV_COMPILE_BYTECODE=0 UV_HTTP_TIMEOUT=600 uv pip sync \
+        --no-config --python /app/.venv/bin/python \
+        --target /app/bundle-libs \
+        "/tmp/bundle-locks/cuda12-${BUNDLE}-${TARGETARCH}/pylock.toml" \
+    && .venv/bin/python -m sie_server.bundle_lock verify \
+        --lock-dir /tmp/bundle-locks --bundles-dir /app/bundles \
+        --root-lock /tmp/uv.lock --compiler /tmp/bundle-lock-compiler.py --platform cuda12 \
+        --bundle "${BUNDLE}" --architecture "${TARGETARCH}" \
+        --installed /app/bundle-libs --receipt /app/bundle-libs-inventory.json
 
 # bundle-libs cleanup (symmetric to the .venv cleanup in base). The .venv
 # tree is already final in the base stage; only the per-bundle tree needs
@@ -212,7 +194,7 @@ RUN set -eux; \
     # Normalize mtimes so rebuilds of the same bundle produce identical layer bytes.
     find /app/bundle-libs -exec touch -h -d @0 {} + 2>/dev/null || true; \
     /app/.venv/bin/pip freeze --path /app/bundle-libs > /app/bundle-libs-freeze.txt; \
-    touch -d @0 /app/bundle-libs-freeze.txt
+    touch -d @0 /app/bundle-libs-freeze.txt /app/bundle-libs-inventory.json
 
 # =============================================================================
 # Runtime image
@@ -319,6 +301,7 @@ COPY --link --from=base --chown=1000:1000 /app/bundles /app/bundles
 # A `.pth` file in the shared venv puts /app/bundle-libs at sys.path[0] at startup.
 COPY --link --from=builder --chown=1000:1000 /app/bundle-libs /app/bundle-libs
 COPY --link --from=builder --chown=1000:1000 /app/bundle-libs-freeze.txt /app/bundle-libs-freeze.txt
+COPY --link --from=builder --chown=1000:1000 /app/bundle-libs-inventory.json /app/bundle-libs-inventory.json
 
 RUN mkdir -p /app/evals /app/.cache/huggingface /app/.cache/sie-kernels /app/.cache/sie \
     && chown -R sie:sie /app/evals /app/.cache \

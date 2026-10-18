@@ -120,11 +120,15 @@ jobs:
           install_args: --jobs=1
           cache: false
       - run: mise run sync
-      - name: Resolve release bundle constraints
+      - name: Install the Docker-pinned lock reader
+        run: mise install uv@0.9.28
+      - name: Verify saved bundle closures and input drift
+        run: mise exec -- uv run --frozen --project . --no-sync python tools/ci/bundle_lock.py check
+      - name: Validate every saved target with the Docker installer
         env:
           SIE_RUN_IMAGE_RESOLUTION: "1"
         run: >-
-          mise exec -- uv run --frozen --project . --no-sync pytest -q
+          mise exec --no-deps uv@0.9.28 -- uv run --frozen --project . --no-sync pytest -q
           packages/sie_server/tests/core/test_bundle_image_resolution.py
 
   typescript:
