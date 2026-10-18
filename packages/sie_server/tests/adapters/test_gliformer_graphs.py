@@ -56,7 +56,7 @@ class _PolicyRunner(graphs.EncoderGraphRunner):
         self.replays = 0
         super().__init__(
             _Transformer().eval(),
-            mode=kwargs.pop("mode", "bucketed"),
+            mode=kwargs.pop("mode", "exact"),
             window=256,
             pad_token_id=0,
             clock=lambda: self.now,
@@ -92,18 +92,28 @@ def room(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     return state
 
 
-@pytest.mark.parametrize("mode", ["exact", "bucketed"])
-def test_shape_policy_is_bounded_and_preserves_batch_rows(mode: str) -> None:
+def test_shape_policy_is_bounded_and_preserves_exact_dimensions() -> None:
     for rows in (1, 2, 3, 8, 31, 64, 1024):
         for length in (1, 15, 31, 32, 33, 100, 255, 256, 257):
-            key = graphs.graph_shape(rows, length, mode=mode, window=256, max_tokens=1024)
+            key = graphs.graph_shape(rows, length, mode="exact", window=256, max_tokens=1024)
             if key is not None:
-                assert key[0] == rows
-                assert length <= key[1] <= 256
+                assert key == (rows, length)
+                assert length <= 256
                 assert key[0] * key[1] <= 1024
-                assert key[1] == (length if mode == "exact" else -(-length // 32) * 32)
     for shape in ((0, 4), (1, 0), (1, 257), (9, 256)):
-        assert graphs.graph_shape(*shape, mode=mode, window=256, max_tokens=1024) is None
+        assert graphs.graph_shape(*shape, mode="exact", window=256, max_tokens=1024) is None
+
+
+def test_bucketed_mode_is_rejected_before_model_or_forward_access() -> None:
+    class UnavailableModel:
+        def __getattr__(self, name: str) -> Any:
+            pytest.fail(f"invalid mode accessed model attribute {name}")
+
+    assert graphs.GRAPH_MODES == ("off", "exact")
+    for length in (31, 32, 33, 256):
+        assert graphs.graph_shape(1, length, mode="bucketed", window=256, max_tokens=1024) is None
+    with pytest.raises(ValueError, match="exact mode"):
+        graphs.EncoderGraphRunner(UnavailableModel(), mode="bucketed", window=256, pad_token_id=0)
 
 
 def test_second_sighting_records_and_cache_replays(room: dict[str, Any]) -> None:
@@ -119,6 +129,7 @@ def test_second_sighting_records_and_cache_replays(room: dict[str, Any]) -> None
 
 def test_no_headroom_global_recording_lock_and_credit_limits(room: dict[str, Any]) -> None:
     runner = _PolicyRunner()
+    assert runner.offer() is None  # exact mode's first sighting
     room["headroom"] = False
     assert runner.offer() is None
     room["headroom"] = True
@@ -128,12 +139,13 @@ def test_no_headroom_global_recording_lock_and_credit_limits(room: dict[str, Any
     assert runner.offer() is None
     runner.now = 2
     assert runner.offer() is not None
-    assert set(runner.stats.eager) == {"no_headroom", "busy", "recording_paused"}
+    assert set(runner.stats.eager) == {"first_shape", "no_headroom", "busy", "recording_paused"}
     runner.close()
 
 
 def test_over_budget_capture_is_not_retained(room: dict[str, Any]) -> None:
     runner = _PolicyRunner()
+    assert runner.offer() is None  # exact mode's first sighting
     room["budget"] = 1
     assert runner.offer() is None
     assert runner.held_bytes == runner.graph_count == 0
@@ -202,6 +214,7 @@ def test_failed_pool_accounting_cannot_publish_a_graph(
         return entry
 
     monkeypatch.setattr(runner, "_capture", accounted_capture)
+    assert runner.offer() is None  # exact mode's first sighting
     assert runner.offer() is None
     assert runner.graph_count == runner.held_bytes == runner.replays == 0
     assert runner.stats.recording_failures == 1
@@ -229,9 +242,10 @@ def test_private_pool_total_rejects_capture_even_when_driver_memory_increases(
 
     monkeypatch.setattr(runner, "_capture", accounted_capture)
     room["budget"] = 4096
+    assert runner.offer() is None  # exact mode's first sighting
     assert runner.offer() is None
     assert runner.graph_count == runner.held_bytes == runner.replays == 0
-    assert runner.stats.eager == {"budget_full": 1}
+    assert runner.stats.eager == {"first_shape": 1, "budget_full": 1}
     runner.close()
 
 
@@ -240,6 +254,7 @@ def test_capture_failure_restores_eager_and_bounds_retries(room: dict[str, Any],
     runner = _PolicyRunner()
     runner.capture_error = torch.OutOfMemoryError("allocation failed") if oom else RuntimeError("not graphable")
     for length in (1, 33, 65, 97):
+        assert runner.offer(length=length) is None  # first sighting, or still paused/disabled
         assert runner.offer(length=length) is None
     assert runner.held_bytes == 0
     if oom:
@@ -247,6 +262,7 @@ def test_capture_failure_restores_eager_and_bounds_retries(room: dict[str, Any],
         assert not runner._failed
         runner.now = 61
         runner.capture_error = None
+        assert runner.offer() is None  # first sighting of this shape
         assert runner.offer() is not None
     else:
         assert len(runner._failed) == graphs._MAX_FAILURES
@@ -257,6 +273,7 @@ def test_capture_failure_restores_eager_and_bounds_retries(room: dict[str, Any],
 
 def test_existing_replay_oom_releases_cache_and_propagates(room: dict[str, Any]) -> None:
     runner = _PolicyRunner()
+    assert runner.offer() is None  # exact mode's first sighting
     assert runner.offer() is not None
     runner.replay_error = torch.OutOfMemoryError("allocation failed")
     with pytest.raises(torch.OutOfMemoryError):
@@ -358,6 +375,7 @@ def test_replay_copies_and_slices_outputs_on_the_owned_stream(monkeypatch: pytes
 
 def test_pressure_clear_waits_before_dropping_graph_storage(room: dict[str, Any]) -> None:
     runner = _PolicyRunner()
+    assert runner.offer() is None  # exact mode's first sighting
     assert runner.offer() is not None
     observed: list[int] = []
     runner._stream = SimpleNamespace(synchronize=lambda: observed.append(runner.graph_count))
@@ -368,7 +386,7 @@ def test_pressure_clear_waits_before_dropping_graph_storage(room: dict[str, Any]
     runner.close()
 
 
-@pytest.mark.parametrize("mode", ["off", False, "exact", "bucketed"])
+@pytest.mark.parametrize("mode", ["off", False, "exact"])
 def test_operator_option_and_default_eager_path(mode: str | bool, monkeypatch: pytest.MonkeyPatch) -> None:
     reject_unknown_loadtime_options(GLiFormerAdapter, {"cuda_graphs": mode}, model_name="tiny")
     adapter = GLiFormerAdapter("tiny", cuda_graphs=mode)
@@ -382,7 +400,7 @@ def test_operator_option_and_default_eager_path(mode: str | bool, monkeypatch: p
     assert adapter.release_optional_memory() == 0
 
 
-@pytest.mark.parametrize("mode", [True, None, 1, "on", "EXACT", []])
+@pytest.mark.parametrize("mode", [True, None, 1, "on", "EXACT", "bucketed", []])
 def test_invalid_modes_fail_before_loading(mode: Any) -> None:
     with pytest.raises(ValueError, match="cuda_graphs"):
         GLiFormerAdapter("tiny", cuda_graphs=mode)
@@ -390,10 +408,11 @@ def test_invalid_modes_fail_before_loading(mode: Any) -> None:
 
 def test_pressure_release_keeps_weights_and_unload_restores_forward(room: dict[str, Any]) -> None:
     runner = _PolicyRunner()
-    adapter = GLiFormerAdapter("tiny", cuda_graphs="bucketed")
+    adapter = GLiFormerAdapter("tiny", cuda_graphs="exact")
     transformer = runner._transformer
     adapter._model = transformer
     adapter._graphs = runner
+    assert runner.offer() is None  # exact mode's first sighting
     assert runner.offer() is not None
     held = runner.held_bytes
     assert adapter.has_releasable_memory()
@@ -534,28 +553,37 @@ def test_layout_capture_override_keeps_other_threads_on_original_eager_code(monk
     ids = torch.arange(7).reshape(1, 7).long()
     mask = torch.ones_like(ids)
     outputs: list[torch.Tensor] = []
+    baseline_ready, capture_ready = threading.Event(), threading.Event()
 
     def eager_call() -> None:
         with torch.inference_mode():
             outputs.append(runner._forward(input_ids=ids, attention_mask=mask))
+            baseline_ready.set()
+            assert capture_ready.wait(timeout=5)
+            outputs.append(runner._forward(input_ids=ids, attention_mask=mask))
 
+    thread = threading.Thread(target=eager_call)
     try:
         with torch.inference_mode():
             expected = runner._forward(input_ids=ids, attention_mask=mask)
+            thread.start()
+            assert baseline_ready.wait(timeout=5)
             table = runner._build_relative_pos(torch.empty((1, 7, 1)))
             with runner._layout_attention_scales(torch.device("cpu")), runner._recording(table):
                 calls.clear()
                 assert torch.equal(runner._forward(input_ids=ids, attention_mask=mask), expected)
                 assert calls == []
-                thread = threading.Thread(target=eager_call)
-                thread.start()
+                capture_ready.set()
                 thread.join(timeout=5)
                 assert not thread.is_alive()
                 assert calls == [thread.ident] * len(runner._layers.layer)
                 assert deberta_2d.scaled_size_sqrt is observed_helper
-            assert len(outputs) == 1
-            assert torch.equal(outputs[0], expected)
+            assert len(outputs) == 2
+            assert torch.equal(outputs[1], outputs[0])
     finally:
+        capture_ready.set()
+        if thread.ident is not None:
+            thread.join(timeout=5)
         runner.close()
 
 
@@ -846,16 +874,14 @@ def _assert_output_close(actual: Any, expected: Any, tolerance: float) -> None:
         assert actual == expected
 
 
-@pytest.mark.parametrize("mode", ["exact", "bucketed"])
-def test_real_all_task_heads_and_usage_survive_encoder_only_padding(
+def test_real_all_task_heads_and_usage_survive_exact_encoder_replay(
     tiny_checkpoint: Path,
-    mode: str,
     room: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Exercise the actual SIE load/inference/unload path on a generated checkpoint."""
     baseline = GLiFormerAdapter(tiny_checkpoint, max_seq_length=128, compute_precision="float32")
-    candidate = GLiFormerAdapter(tiny_checkpoint, max_seq_length=128, compute_precision="float32", cuda_graphs=mode)
+    candidate = GLiFormerAdapter(tiny_checkpoint, max_seq_length=128, compute_precision="float32", cuda_graphs="exact")
     monkeypatch.setattr(adapter_module, "unsupported_reason", lambda *_: None)
     monkeypatch.setattr(adapter_module, "EncoderGraphRunner", _EagerReplay)
     items = [Item(text="Alice works at Acme."), Item(text="Bob likes coffee.")]
@@ -869,19 +895,18 @@ def test_real_all_task_heads_and_usage_survive_encoder_only_padding(
 
     hook = candidate._model.model.register_forward_hook(observe)
     try:
-        tolerance = 0 if mode == "exact" else 1e-5  # synthetic fp32 padding, not a pretrained/GPU bound
         for task in _TASKS:
             expected = baseline.extract(items, **task)
             candidate.extract(items, **task)  # exact mode's first sighting
             candidate.extract(items, **task)  # capture, then test an ordinary replay
             actual = candidate.extract(items, **task)
             for field in ("entities", "classifications", "relations", "data", "errors", "input_token_counts"):
-                _assert_output_close(getattr(actual, field), getattr(expected, field), tolerance)
+                _assert_output_close(getattr(actual, field), getattr(expected, field), 0)
         eager_dense = baseline.encode(items, ["dense"]).dense
         candidate.encode(items, ["dense"])
         candidate.encode(items, ["dense"])
         dense = candidate.encode(items, ["dense"]).dense
-        torch.testing.assert_close(torch.from_numpy(dense), torch.from_numpy(eager_dense), rtol=0, atol=tolerance)
+        torch.testing.assert_close(torch.from_numpy(dense), torch.from_numpy(eager_dense), rtol=0, atol=0)
         assert observed
         assert {"ner_logits", "cat_logits", "joint_rel_logits", "structuring_logits"} <= set().union(
             *(set(row) for row in observed)
@@ -903,14 +928,13 @@ def test_real_all_task_heads_and_usage_survive_encoder_only_padding(
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="actual CUDA graph parity needs a GPU")
 @pytest.mark.parametrize("layout", [False, True], ids=["deberta", "layout-deberta"])
-@pytest.mark.parametrize("mode", ["exact", "bucketed"])
-def test_actual_cuda_capture_matches_eager_padded_shape_and_owns_output(layout: bool, mode: str) -> None:
+def test_actual_cuda_capture_matches_eager_shape_and_owns_output(layout: bool) -> None:
     transformer = _tiny_transformer(layout).to(device="cuda", dtype=torch.float16)
     original = transformer.forward
     ids = torch.arange(14, device="cuda").reshape(2, 7).long()
     mask = torch.ones_like(ids)
     mask[1, -2:] = 0
-    runner = graphs.EncoderGraphRunner(transformer, mode=mode, window=64, pad_token_id=0)
+    runner = graphs.EncoderGraphRunner(transformer, mode="exact", window=64, pad_token_id=0)
     try:
         with torch.inference_mode():
             key = runner.key(*ids.shape)

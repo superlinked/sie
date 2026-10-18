@@ -674,17 +674,17 @@ class GLiFormerAdapter(BaseAdapter):
                 decoded in float32. CPU runs float32.
             revision: HuggingFace revision to pin when downloading artifacts.
             dense_dim: Catalog-declared embedding dimension, checked at load.
-            cuda_graphs: Operator setting: "off" (default), "exact" or
-                "bucketed". Capture the supported text encoder on CUDA;
-                task heads and decoding stay eager. Bucketed mode adds
-                masked padding and can change floating-point rounding.
+            cuda_graphs: Operator setting: "off" (default) or "exact".
+                Capture the supported text encoder on CUDA without adding
+                padding; task heads and decoding stay eager. Bucketed mode
+                is unsupported because it failed pretrained output parity.
             **kwargs: Additional arguments (ignored, for compatibility).
         """
         _ = kwargs
         if cuda_graphs is False:  # YAML's unquoted off
             cuda_graphs = "off"
         if not isinstance(cuda_graphs, str) or cuda_graphs not in GRAPH_MODES:
-            raise ValueError("GLiFormer cuda_graphs must be 'off', 'exact' or 'bucketed'")
+            raise ValueError("GLiFormer cuda_graphs must be 'off' or 'exact'; bucketed mode is unsupported")
         for name, value in (
             ("inference_batch_tokens", inference_batch_tokens),
             ("max_prompt_tokens", max_prompt_tokens),

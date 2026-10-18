@@ -4,11 +4,10 @@ Only the ``TextTransformer`` token-id/mask forward is captured. Word gathering,
 the packed word RNN, task heads, output checks and decoding stay eager. Layout,
 image, packed and otherwise nonstandard encoder inputs also stay eager.
 
-``exact`` records a repeated input shape without padding; ``bucketed`` rounds
-lengths up to multiples of 32, preserving the batch size. Graphs hold at most
+``exact`` records a repeated input shape without padding. Graphs hold at most
 2,048 tokens (1,024 for encoders wider than 768), and at most 64 shapes. These
 are admission bounds, not a performance or numerical-equivalence claim.
-Bucketed execution can change floating-point rounding through padding.
+Bucketed execution is not supported: padding failed pretrained output parity.
 
 Recording follows the process-wide lock, 10% free-memory headroom and 4%
 device-memory budget. A token bucket permits 16 recordings initially, then
@@ -49,7 +48,7 @@ from sie_server.core.oom import is_oom_error
 
 logger = logging.getLogger(__name__)
 
-GRAPH_MODES = ("off", "exact", "bucketed")
+GRAPH_MODES = ("off", "exact")
 _MAX_GRAPHS = 64
 _MAX_SIGHTINGS = 4096
 _RECORDING_BURST = 16
@@ -96,11 +95,10 @@ def _capture_device_bytes(graph: Any, device: torch.device, free_before: int) ->
 
 
 def graph_shape(rows: int, length: int, *, mode: str, window: int, max_tokens: int) -> Key | None:
-    """Choose a bounded shape without adding batch rows."""
-    if mode not in ("exact", "bucketed") or rows < 1 or not 0 < length <= window:
+    """Admit a bounded exact shape without adding rows or token positions."""
+    if mode != "exact" or rows < 1 or not 0 < length <= window:
         return None
-    padded = length if mode == "exact" else min(window, -(-length // 32) * 32)
-    return (rows, padded) if rows * padded <= max_tokens else None
+    return (rows, length) if rows * length <= max_tokens else None
 
 
 def unsupported_reason(transformer: Any, device: str | torch.device) -> str | None:
@@ -153,8 +151,8 @@ class EncoderGraphRunner:
         name: str = "",
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        if mode not in ("exact", "bucketed") or window < 1:
-            raise ValueError("GLiFormer graph runner needs exact/bucketed mode and a positive window")
+        if mode != "exact" or window < 1:
+            raise ValueError("GLiFormer graph runner needs exact mode and a positive window")
         self._transformer = transformer
         self._encoder = transformer.model
         self._layers = self._encoder.encoder
