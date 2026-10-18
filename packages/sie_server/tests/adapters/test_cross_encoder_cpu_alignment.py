@@ -118,7 +118,9 @@ def test_same_object_ties_and_float_buffer_identity_survive(model):
     assert torch.equal(buffer, expected)
 
 
-@pytest.mark.parametrize("alias_kind", ["parameter", "byte_buffer", "separate_storage_view", "disjoint_view", "empty_view"])
+@pytest.mark.parametrize(
+    "alias_kind", ["parameter", "byte_buffer", "separate_storage_view", "disjoint_view", "empty_view"]
+)
 def test_distinct_shared_storage_is_rejected_before_any_copy(model, monkeypatch, alias_kind):
     weight = query_weight(model)
     raw = shifted(torch.arange(weight.numel() * 2, dtype=torch.float32), 1)
