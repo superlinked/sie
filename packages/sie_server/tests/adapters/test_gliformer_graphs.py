@@ -12,7 +12,7 @@ import threading
 import weakref
 from contextlib import nullcontext
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
@@ -408,7 +408,14 @@ def test_pressure_release_keeps_weights_and_unload_restores_forward(room: dict[s
     assert "forward" not in transformer.__dict__
 
 
-def _tiny_transformer(layout: bool, fuse: bool = False) -> Any:
+def _tiny_transformer(
+    layout: bool,
+    fuse: bool = False,
+    *,
+    pos_att_type: tuple[str, ...] = ("p2c", "c2p"),
+    relative_attention: bool = True,
+    share_att_key: bool = False,
+) -> Any:
     _import_gliformer()
     from gliformer.backbones.deberta_2d import LayoutDebertaConfig
     from gliformer.encoders.text import TextTransformer
@@ -421,10 +428,11 @@ def _tiny_transformer(layout: bool, fuse: bool = False) -> Any:
         intermediate_size=48,
         num_hidden_layers=2,
         num_attention_heads=4,
-        relative_attention=True,
+        relative_attention=relative_attention,
+        share_att_key=share_att_key,
         max_relative_positions=64,
         position_buckets=16,
-        pos_att_type=["p2c", "c2p"],
+        pos_att_type=list(pos_att_type),
         position_biased_input=False,
         max_position_embeddings=64,
         hidden_dropout_prob=0,
@@ -466,6 +474,233 @@ def test_real_encoder_relative_position_seam_is_exact(layout: bool, fuse: bool) 
         assert torch.equal(transformer(input_ids=ids, attention_mask=mask), expected)
         assert runner.graph_count == 0
         runner.close()
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("positions", [(), ("c2p",), ("p2c",), ("p2c", "c2p")])
+def test_layout_capture_scalars_preserve_exact_upstream_outputs_and_relative_attention(
+    dtype: torch.dtype, positions: tuple[str, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transformer = _tiny_transformer(True, pos_att_type=positions, relative_attention=bool(positions)).to(dtype=dtype)
+    from gliformer.backbones import deberta_2d
+
+    helper = deberta_2d.scaled_size_sqrt
+    called = Mock(wraps=helper)
+    monkeypatch.setattr(deberta_2d, "scaled_size_sqrt", called)
+    runner = graphs.EncoderGraphRunner(transformer, mode="exact", window=64, pad_token_id=0)
+    modules = [layer.attention.self for layer in runner._layers.layer]
+    original = [module.forward for module in modules]
+    ids = torch.arange(14).reshape(2, 7).long()
+    mask = torch.ones_like(ids)
+    mask[1, -2:] = 0
+    try:
+        with torch.inference_mode():
+            expected = runner._forward(input_ids=ids, attention_mask=mask)
+            table = runner._build_relative_pos(torch.empty((1, 7, 1)))
+            called.reset_mock()
+            with runner._layout_attention_scales(torch.device("cpu")) as scales:
+                assert len(scales) == 1  # two layers share the same head size and factor
+                assert called.call_count == 1
+                factor = 1 + len(positions)
+                exact = helper(torch.empty((0, modules[0].attention_head_size)), factor)
+                assert scales[0].dtype == torch.float32
+                assert torch.equal(scales[0], exact)
+                assert called.call_args.args[0].shape == (0, modules[0].attention_head_size)
+                with runner._recording(table):
+                    actual = runner._forward(input_ids=ids, attention_mask=mask)
+                assert torch.equal(actual, expected)
+                assert called.call_count == 1, "recording called the CPU-to-device helper"
+                assert deberta_2d.scaled_size_sqrt is called, "module global was modified"
+            assert all("forward" not in module.__dict__ for module in modules)
+            assert all(module.forward.__func__ is before.__func__ for module, before in zip(modules, original))
+            assert torch.equal(runner._forward(input_ids=ids, attention_mask=mask), expected)
+    finally:
+        runner.close()
+
+
+def test_layout_capture_override_keeps_other_threads_on_original_eager_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    transformer = _tiny_transformer(True, share_att_key=True)
+    from gliformer.backbones import deberta_2d
+
+    helper = deberta_2d.scaled_size_sqrt
+    calls: list[int] = []
+
+    def observed_helper(*args: Any) -> torch.Tensor:
+        calls.append(threading.get_ident())
+        return helper(*args)
+
+    monkeypatch.setattr(deberta_2d, "scaled_size_sqrt", observed_helper)
+    runner = graphs.EncoderGraphRunner(transformer, mode="exact", window=64, pad_token_id=0)
+    ids = torch.arange(7).reshape(1, 7).long()
+    mask = torch.ones_like(ids)
+    outputs: list[torch.Tensor] = []
+
+    def eager_call() -> None:
+        with torch.inference_mode():
+            outputs.append(runner._forward(input_ids=ids, attention_mask=mask))
+
+    try:
+        with torch.inference_mode():
+            expected = runner._forward(input_ids=ids, attention_mask=mask)
+            table = runner._build_relative_pos(torch.empty((1, 7, 1)))
+            with runner._layout_attention_scales(torch.device("cpu")), runner._recording(table):
+                calls.clear()
+                assert torch.equal(runner._forward(input_ids=ids, attention_mask=mask), expected)
+                assert calls == []
+                thread = threading.Thread(target=eager_call)
+                thread.start()
+                thread.join(timeout=5)
+                assert not thread.is_alive()
+                assert calls == [thread.ident] * len(runner._layers.layer)
+                assert deberta_2d.scaled_size_sqrt is observed_helper
+            assert len(outputs) == 1
+            assert torch.equal(outputs[0], expected)
+    finally:
+        runner.close()
+
+
+@pytest.mark.parametrize("instance_override", [False, True])
+@pytest.mark.parametrize("error", [RuntimeError, KeyboardInterrupt])
+def test_layout_capture_failure_restores_exact_forward_attributes_and_releases_constants(
+    instance_override: bool, error: type[BaseException]
+) -> None:
+    transformer = _tiny_transformer(True)
+    runner = graphs.EncoderGraphRunner(transformer, mode="exact", window=64, pad_token_id=0)
+    modules = [layer.attention.self for layer in runner._layers.layer]
+    if instance_override:
+        for module in modules:
+            module.forward = module.forward
+    before = [module.__dict__.get("forward") for module in modules]
+    refs: list[Any] = []
+    with pytest.raises(error, match="capture failed"):
+        with runner._layout_attention_scales(torch.device("cpu")) as scales, runner._recording(None):
+            refs.extend(weakref.ref(scale) for scale in scales)
+            raise error("capture failed")
+    assert not runner._local.recording
+    assert all(module.__dict__.get("forward") is value for module, value in zip(modules, before))
+    del scales
+    gc.collect()
+    assert all(ref() is None for ref in refs)
+    runner.close()
+
+
+def test_layout_capture_partial_override_failure_restores_prior_layer(monkeypatch: pytest.MonkeyPatch) -> None:
+    transformer = _tiny_transformer(True)
+    runner = graphs.EncoderGraphRunner(transformer, mode="exact", window=64, pad_token_id=0)
+    first, second = [layer.attention.self for layer in runner._layers.layer]
+    original_setattr = type(second).__setattr__
+
+    def refusing_setattr(module: Any, name: str, value: Any) -> None:
+        if module is second and name == "forward":
+            raise RuntimeError("second layer refused override")
+        original_setattr(module, name, value)
+
+    monkeypatch.setattr(type(second), "__setattr__", refusing_setattr)
+    with (
+        pytest.raises(RuntimeError, match="second layer refused"),
+        runner._layout_attention_scales(torch.device("cpu")),
+    ):
+        pytest.fail("failed setup yielded")
+    assert "forward" not in first.__dict__
+    assert "forward" not in second.__dict__
+    runner.close()
+
+
+def test_layout_capture_refuses_custom_attention_forward_without_changing_it() -> None:
+    transformer = _tiny_transformer(True)
+    runner = graphs.EncoderGraphRunner(transformer, mode="exact", window=64, pad_token_id=0)
+    first, second = [layer.attention.self for layer in runner._layers.layer]
+    custom = MethodType(lambda *_args, **_kwargs: None, second)
+    second.forward = custom
+    with (
+        pytest.raises(RuntimeError, match="unsupported forward override"),
+        runner._layout_attention_scales(torch.device("cpu")),
+    ):
+        pytest.fail("unsupported forward was admitted")
+    assert "forward" not in first.__dict__
+    assert second.forward is custom
+    runner.close()
+
+
+def test_stock_deberta_has_no_layout_constants_or_overrides() -> None:
+    transformer = _tiny_transformer(False)
+    runner = graphs.EncoderGraphRunner(transformer, mode="exact", window=64, pad_token_id=0)
+    with runner._layout_attention_scales(torch.device("cpu")) as scales:
+        assert scales == ()
+        assert all("forward" not in layer.attention.self.__dict__ for layer in runner._layers.layer)
+    runner.close()
+
+
+def test_layout_constants_are_counted_and_released_with_graph_storage() -> None:
+    transformer = _tiny_transformer(True)
+    runner = graphs.EncoderGraphRunner(transformer, mode="exact", window=64, pad_token_id=0)
+    ids = torch.zeros((1, 7), dtype=torch.long)
+    hidden = torch.zeros((1, 7, 32))
+    with runner._layout_attention_scales(torch.device("cpu")) as scales:
+        refs = [weakref.ref(scale) for scale in scales]
+        runner._graphs[(1, 7)] = graphs._Graph(None, ids, ids.clone(), hidden, 512, scales)
+        assert runner.held_bytes == 512 + 2 * ids.nbytes + hidden.nbytes + 4
+    del scales
+    assert all(ref() is not None for ref in refs)
+    runner.clear()
+    gc.collect()
+    assert runner.held_bytes == 0
+    assert all(ref() is None for ref in refs)
+    runner.close()
+
+
+def test_layout_scalar_storage_can_reject_a_capture_at_the_budget_boundary(
+    room: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = _PolicyRunner(mode="exact")
+    capture = runner._capture
+    references: list[Any] = []
+
+    def with_scalar(key: graphs.Key, device: torch.device) -> graphs._Graph:
+        entry = capture(key, device)
+        entry.attention_scales = (torch.ones(()),)
+        references.append(weakref.ref(entry.attention_scales[0]))
+        room["budget"] = (
+            entry.device_bytes
+            + entry.input_ids.nbytes
+            + entry.attention_mask.nbytes
+            + entry.hidden.nbytes
+            + runner._relative_pos[key[1]].nbytes
+            + 3
+        )
+        return entry
+
+    monkeypatch.setattr(runner, "_capture", with_scalar)
+    assert runner.offer() is None  # first sighting
+    assert runner.offer() is None  # the four-byte scalar crosses the fixed budget
+    assert runner.stats.eager["budget_full"] == 1
+    assert runner.graph_count == runner.held_bytes == 0
+    assert all(ref() is None for ref in references)
+    runner.close()
+
+
+def test_layout_scalar_storage_releases_on_shape_eviction(
+    room: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = _PolicyRunner(mode="exact")
+    monkeypatch.setattr(graphs, "_MAX_GRAPHS", 1)
+    capture = runner._capture
+    references: list[Any] = []
+
+    def with_scalar(key: graphs.Key, device: torch.device) -> graphs._Graph:
+        entry = capture(key, device)
+        entry.attention_scales = (torch.ones(()),)
+        references.append(weakref.ref(entry.attention_scales[0]))
+        return entry
+
+    monkeypatch.setattr(runner, "_capture", with_scalar)
+    for length in (7, 8):
+        assert runner.offer(length=length) is None
+        assert runner.offer(length=length) is not None
+    assert references[0]() is None
+    assert references[1]() is not None
+    runner.close()
+    assert references[1]() is None
 
 
 def test_training_custom_backbones_and_flash_are_not_admitted(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -688,6 +923,12 @@ def test_actual_cuda_capture_matches_eager_padded_shape_and_owns_output(layout: 
             assert runner.stats.recorded == 1
             assert runner.graph_count == 1
             assert torch.equal(got, expected)
+            scales = tuple(scale for entry in runner._graphs.values() for scale in entry.attention_scales)
+            assert len(scales) == int(layout)
+            assert all(scale.device == ids.device and scale.dtype == torch.float32 for scale in scales)
+            assert all("forward" not in layer.attention.self.__dict__ for layer in runner._layers.layer)
+            scale_refs = [weakref.ref(scale) for scale in scales]
+            del scales
             kept = got.clone()
             transformer(input_ids=ids.flip(1), attention_mask=mask)
             assert torch.equal(got, kept)
@@ -711,6 +952,7 @@ def test_actual_cuda_capture_matches_eager_padded_shape_and_owns_output(layout: 
             allocated_before_clear = torch.cuda.memory_allocated(ids.device)
             runner.clear()
             assert runner.held_bytes == 0
+            assert all(ref() is None for ref in scale_refs)
             assert torch.cuda.memory_allocated(ids.device) < allocated_before_clear
     finally:
         runner.close()

@@ -25,6 +25,9 @@ The caller owns that copy: concurrent callers cannot overwrite hidden states
 while eager heads still read them. Clear/unload waits for queued replay work
 before releasing graph storage. The relative-position override is local to
 the instance and recording thread; close restores the original attributes.
+Layout attention's CPU-computed scale is copied to the device before capture.
+Only the recording thread uses that constant through a temporary instance
+override; the upstream method and module globals remain unchanged otherwise.
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from types import FunctionType, MethodType
 from typing import Any
 
 import torch
@@ -133,6 +137,7 @@ class _Graph:
     attention_mask: torch.Tensor
     hidden: torch.Tensor
     device_bytes: int
+    attention_scales: tuple[torch.Tensor, ...] = ()
 
 
 class EncoderGraphRunner:
@@ -336,6 +341,67 @@ class EncoderGraphRunner:
         finally:
             self._local.recording, self._local.relative_pos = False, None
 
+    @contextlib.contextmanager
+    def _layout_attention_scales(self, device: torch.device) -> Iterator[tuple[torch.Tensor, ...]]:
+        # GLiFormer is optional and already imported for the admitted encoder.
+        from gliformer.backbones.deberta_2d import LayoutDisentangledSelfAttention
+
+        original = LayoutDisentangledSelfAttention.forward
+        modules = [module for module in self._encoder.modules() if type(module) is LayoutDisentangledSelfAttention]
+        if not modules:
+            yield ()
+            return
+        scales: dict[tuple[int, int], torch.Tensor] = {}
+        helper = original.__globals__["scaled_size_sqrt"]
+        for module in modules:
+            bound = module.forward
+            if not isinstance(bound, MethodType) or bound.__self__ is not module or bound.__func__ is not original:
+                raise RuntimeError("GLiFormer layout attention has an unsupported forward override")
+            factor = 1 + ("c2p" in module.pos_att_type) + ("p2c" in module.pos_att_type)
+            key = (module.attention_head_size, factor)
+            if key not in scales:
+                # Preserve upstream CPU float32 sqrt, device transfer, then the
+                # forward's dtype conversion. A Python float sqrt can round
+                # differently. This transfer must finish before capture.
+                shape = torch.empty((0, key[0]), dtype=torch.float32, device="cpu")
+                scales[key] = helper(shape, factor).to(device=device)
+
+        def scaled_size_sqrt(query_layer: torch.Tensor, scale_factor: int) -> torch.Tensor:
+            if query_layer.device != device:
+                raise RuntimeError("GLiFormer layout attention changed devices during capture")
+            return scales[(query_layer.size(-1), scale_factor)]
+
+        # Reuse the upstream code rather than fork its attention implementation.
+        # A private globals dictionary changes this one helper only; other
+        # methods (including relative attention) still use their original code.
+        cloned = FunctionType(
+            original.__code__,
+            {**original.__globals__, "scaled_size_sqrt": scaled_size_sqrt},
+            original.__name__,
+            original.__defaults__,
+            original.__closure__,
+        )
+        cloned.__kwdefaults__ = original.__kwdefaults__
+        local = self._local
+
+        def forward(module: Any, *args: Any, **kwargs: Any) -> Any:
+            selected = cloned if getattr(local, "recording", False) else original
+            return selected(module, *args, **kwargs)
+
+        attributes: list[tuple[Any, Any]] = []
+        try:
+            for module in modules:
+                attributes.append((module, module.__dict__.get("forward", _MISSING)))
+                module.forward = MethodType(forward, module)
+            yield tuple(scales.values())
+        finally:
+            for module, attribute in reversed(attributes):
+                if attribute is _MISSING:
+                    if "forward" in module.__dict__:
+                        delattr(module, "forward")
+                else:
+                    module.forward = attribute
+
     def _capture(self, key: Key, device: torch.device) -> _Graph:
         rows, length = key
         current = torch.cuda.current_stream(device)
@@ -350,37 +416,38 @@ class EncoderGraphRunner:
             self._stream = torch.cuda.Stream(device=device)
         stream = self._stream
         graph = torch.cuda.CUDAGraph()
-        stream.wait_stream(current)
         try:
-            with torch.inference_mode(), torch.cuda.stream(stream), self._recording(relative_pos):
-                if getattr(self._local, "warmed_stream", None) is not stream:
-                    # Each serving thread needs its own cuBLAS state initialized
-                    # outside capture, even when another thread warmed this model.
-                    self._forward(input_ids=ids[:1], attention_mask=mask[:1])
-                    self._local.warmed_stream = stream
-                free_before = free_memory(device)
-                # Sharing pools requires capture-order replay. Requests can
-                # revisit shapes in any order, so every shape owns its pool.
-                graph.capture_begin(capture_error_mode="thread_local")
-                try:
-                    output = self._forward(input_ids=ids, attention_mask=mask)
-                    if (
-                        not isinstance(output, torch.Tensor)
-                        or output.shape != hidden.shape
-                        or output.dtype != hidden.dtype
-                    ):
-                        raise RuntimeError("GLiFormer encoder graph returned an unexpected hidden-state tensor")
-                    hidden.copy_(output)
-                    del output
-                except BaseException:
-                    with contextlib.suppress(Exception):
-                        graph.capture_end()
-                    raise
-                graph.capture_end()
-                device_bytes = _capture_device_bytes(graph, device, free_before)
+            with torch.inference_mode(), self._layout_attention_scales(device) as attention_scales:
+                stream.wait_stream(current)
+                with torch.cuda.stream(stream), self._recording(relative_pos):
+                    if getattr(self._local, "warmed_stream", None) is not stream:
+                        # Each serving thread needs its own cuBLAS state initialized
+                        # outside capture, even when another thread warmed this model.
+                        self._forward(input_ids=ids[:1], attention_mask=mask[:1])
+                        self._local.warmed_stream = stream
+                    free_before = free_memory(device)
+                    # Sharing pools requires capture-order replay. Requests can
+                    # revisit shapes in any order, so every shape owns its pool.
+                    graph.capture_begin(capture_error_mode="thread_local")
+                    try:
+                        output = self._forward(input_ids=ids, attention_mask=mask)
+                        if (
+                            not isinstance(output, torch.Tensor)
+                            or output.shape != hidden.shape
+                            or output.dtype != hidden.dtype
+                        ):
+                            raise RuntimeError("GLiFormer encoder graph returned an unexpected hidden-state tensor")
+                        hidden.copy_(output)
+                        del output
+                    except BaseException:
+                        with contextlib.suppress(Exception):
+                            graph.capture_end()
+                        raise
+                    graph.capture_end()
+                    device_bytes = _capture_device_bytes(graph, device, free_before)
         finally:
             current.wait_stream(stream)
-        return _Graph(graph, ids, mask, hidden, device_bytes)
+        return _Graph(graph, ids, mask, hidden, device_bytes, attention_scales)
 
     def _replay(self, entry: _Graph, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         stream = self._stream
@@ -408,7 +475,11 @@ class EncoderGraphRunner:
     @property
     def held_bytes(self) -> int:
         tensors = sum(
-            entry.device_bytes + entry.input_ids.nbytes + entry.attention_mask.nbytes + entry.hidden.nbytes
+            entry.device_bytes
+            + entry.input_ids.nbytes
+            + entry.attention_mask.nbytes
+            + entry.hidden.nbytes
+            + sum(scale.nbytes for scale in entry.attention_scales)
             for entry in self._graphs.values()
         )
         tables = sum(table.nbytes for table in self._relative_pos.values() if table is not None)
