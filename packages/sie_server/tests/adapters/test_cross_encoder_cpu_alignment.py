@@ -222,9 +222,13 @@ def test_unsupported_models_are_unchanged(model, unsupported):
 )
 def test_off_platform_load_does_not_invoke_alignment(monkeypatch, system, machine, device):
     outer = SimpleNamespace(max_length=0)
+    cache_calls = []
     monkeypatch.setattr(cross_encoder.sys, "platform", system)
     monkeypatch.setattr(cross_encoder.platform, "machine", lambda: machine)
     monkeypatch.setattr(cross_encoder, "CrossEncoder", lambda *args, **kwargs: outer)
+    # Both the model and its accelerator are simulated, including cache cleanup.
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: cache_calls.append("cuda"))
+    monkeypatch.setattr(torch.mps, "empty_cache", lambda: cache_calls.append("mps"))
 
     def forbidden_alignment(*args, **kwargs):
         raise AssertionError("off-platform load must not normalize storage")
@@ -235,6 +239,8 @@ def test_off_platform_load_does_not_invoke_alignment(monkeypatch, system, machin
     assert adapter._model is outer
     assert outer.max_length == 17
     adapter.unload()
+    assert adapter._model is None
+    assert cache_calls == ([] if device == "cpu" else [device.split(":", 1)[0]])
 
 
 def test_failed_normalization_never_publishes_outer(model, monkeypatch):
