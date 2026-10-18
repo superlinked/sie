@@ -69,19 +69,22 @@ From a bootstrapped clean checkout:
 ```console
 mise exec -- uv run --frozen --no-sync python tools/ci/bundle_lock.py check
 mise install uv@0.9.28
-SIE_RUN_IMAGE_RESOLUTION=1 mise exec --no-deps uv@0.9.28 -- uv run --frozen --no-sync pytest -q packages/sie_server/tests/core/test_bundle_image_resolution.py
+export SIE_BUNDLE_LOCK_UV="$(mise exec --no-deps uv@0.9.28 -- which uv)"
+SIE_RUN_IMAGE_RESOLUTION=1 mise exec -- uv run --frozen --no-sync pytest -q packages/sie_server/tests/core/test_bundle_image_resolution.py
 ```
 
 The required Bundle resolution CI job runs these checks for all 15 targets.
 Its dry runs check the actual saved-lock reader without installing model
 packages. Image builds perform the additional installed-inventory check.
+The explicit installer path prevents `uv run` from selecting the separate uv
+version installed in the project environment; its version is still checked.
 
 For an intentional update, first review any new root/bundle conflicts and edit
 the exact exception records. Compile with an explicit cutoff using only public
 indexes, then review the complete lock and manifest diff:
 
 ```console
-mise exec --no-deps uv@0.9.28 -- uv run --frozen --no-sync python tools/ci/bundle_lock.py compile --target cpu-default-amd64 --exclude-newer 2026-10-18T00:00:00Z
+mise exec -- uv run --frozen --no-sync python tools/ci/bundle_lock.py compile --uv "$SIE_BUNDLE_LOCK_UV" --target cpu-default-amd64 --exclude-newer 2026-10-18T00:00:00Z
 ```
 
 The compiler rejects a different uv version and strips ambient pip/uv index,

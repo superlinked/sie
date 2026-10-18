@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sie_server.bundle_lock import UV_VERSION, Target, check_lock
@@ -28,20 +29,45 @@ _TARGETS = compiler.targets(_REPO_ROOT)
 
 
 def _uv_executable() -> str:
-    found = shutil.which("uv")
+    # uv run prepends the project environment, which contains the separately
+    # root-pinned uv. CI resolves the Docker installer before entering it.
+    found = os.environ.get("SIE_BUNDLE_LOCK_UV") or shutil.which("uv")
     if not found:
         pytest.fail("SIE_RUN_IMAGE_RESOLUTION=1 but uv is not installed")
     version = subprocess.run(  # noqa: S603 - version-check the explicitly selected uv executable
         [found, "--version"], check=True, text=True, capture_output=True
     ).stdout.split()
     if version[:2] != ["uv", UV_VERSION]:
-        pytest.fail(f"bundle image validation requires the Docker-pinned uv {UV_VERSION}")
+        pytest.fail(
+            f"bundle image validation requires the Docker-pinned uv {UV_VERSION}; found {version[:2]} at {found}"
+        )
     return found
 
 
 def test_missing_uv_fails_the_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SIE_BUNDLE_LOCK_UV", raising=False)
     monkeypatch.setattr(shutil, "which", lambda _name: None)
     with pytest.raises(pytest.fail.Exception, match="uv is not installed"):
+        _uv_executable()
+
+
+def test_explicit_installer_wins_over_the_project_uv(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SIE_BUNDLE_LOCK_UV", "/docker-pinned/uv")
+    monkeypatch.setattr(shutil, "which", lambda _name: pytest.fail("must not select the project uv"))
+
+    def version(command, **_kwargs):
+        assert command == ["/docker-pinned/uv", "--version"]
+        return SimpleNamespace(stdout=f"uv {UV_VERSION}\n")
+
+    monkeypatch.setattr(subprocess, "run", version)
+    assert _uv_executable() == "/docker-pinned/uv"
+
+
+def test_explicit_wrong_installer_is_not_a_version_bypass(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SIE_BUNDLE_LOCK_UV", "/wrong/uv")
+    monkeypatch.setattr(shutil, "which", lambda _name: pytest.fail("must not silently fall back"))
+    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(stdout="uv 0.5.31\n"))
+    with pytest.raises(pytest.fail.Exception, match="requires the Docker-pinned uv"):
         _uv_executable()
 
 
