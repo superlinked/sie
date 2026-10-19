@@ -317,7 +317,12 @@ def _single_server_prompts(
     profile = SimpleNamespace(runtime={"default_sampling": {}}, loadtime={})
     config = SimpleNamespace(
         tasks=SimpleNamespace(
-            generate=SimpleNamespace(max_output_tokens=64, chat_template_kwargs=dict(_TEMPLATE_KWARGS)), score=None
+            generate=SimpleNamespace(
+                max_output_tokens=64,
+                chat_template_kwargs=dict(_TEMPLATE_KWARGS),
+                capabilities=SimpleNamespace(tools=True),
+            ),
+            score=None,
         ),
         resolve_profile=MagicMock(return_value=profile),
         inputs=SimpleNamespace(video=False),

@@ -49,6 +49,7 @@ from sie_server.adapters._generation_base import (
     REASONING_CONTROL_TOKENS,
     GenerationAdapter,
     GenerationError,
+    GenerationInputTooLongError,
     GenerationUnsupportedFieldError,
     GenerationUpstreamError,
     ReasoningFormat,
@@ -536,6 +537,15 @@ def _validate_chat_messages(messages: list[Any]) -> None:
                     param=f"{part_path}.type",
                     code="unsupported_field",
                 )
+
+
+def _has_image_parts(messages: list[Any]) -> bool:
+    return any(
+        part["type"] in ("image_url", "input_image")
+        for message in messages
+        if isinstance(message.get("content"), list)
+        for part in message["content"]
+    )
 
 
 def _validate_cuda_chat_body(body: dict[str, Any]) -> None:
@@ -1674,6 +1684,17 @@ async def _chat_completions(
                 param="stream",
                 code="unsupported_field",
             )
+        if body.get("tools") is not None and not gen_task.capabilities.tools:
+            raise _bad_request(
+                f"Model '{model}' does not support tool calling", param="tools", code="unsupported_field"
+            )
+        adapter_chat = _adapter_answers_chat(config)
+        if _has_image_parts(messages) and not (
+            config.inputs.image and str(device).startswith("cuda") and not adapter_chat
+        ):
+            raise _bad_request(
+                f"Model '{model}' does not support image input", param="messages", code="unsupported_field"
+            )
         if videos:
             if not (config.inputs.video and str(device).startswith("cuda")):
                 raise _bad_request(
@@ -1683,7 +1704,6 @@ async def _chat_completions(
                 )
             # The child decodes video on its event loop; bound that work here.
             await asyncio.to_thread(_probe_chat_videos, videos)
-        adapter_chat = _adapter_answers_chat(config)
         if str(device).startswith("cuda") or adapter_chat:
             _validate_cuda_chat_body(body)
         else:
@@ -1738,6 +1758,10 @@ async def _chat_completions(
                 max_tokens=max_tokens,
                 seed=seed,
             )
+            try:
+                await adapter.check_chat_window(proxied, requested_model=model)
+            except GenerationInputTooLongError as exc:
+                raise _generation_http_exception(exc, registry) from exc
             tool_call_limit = _mlx_tool_call_limit(body, proxied)
             slot = adapter.generation_slot()
         elif isinstance(adapter, SGLangGenerationAdapter) and str(device).startswith("cuda"):

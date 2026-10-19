@@ -41,6 +41,7 @@ tasks:
     max_output_tokens: 1024
     capabilities:
       streaming: true
+      tools: true
 max_sequence_length: 512
 profiles:
   default:

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import logging
 import os
@@ -35,6 +36,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import AsyncIterator, Mapping
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, cast
 
@@ -44,12 +46,14 @@ from sie_server.adapters._generation_base import (
     FinishReason,
     GenerationAdapter,
     GenerationChunk,
+    GenerationInputTooLongError,
     GenerationUnsupportedFieldError,
 )
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED
 from sie_server.adapters.mlx import _server
 from sie_server.core.load_errors import EngineExitedError, EngineStartupError, ModelConfigurationError
+from sie_server.core.tokenizer import load_tokenizer
 from sie_server.types.inputs import ImageInput, VideoInput
 
 logger = logging.getLogger(__name__)
@@ -96,6 +100,35 @@ def _reject_grammar(grammar: object) -> None:
         )
 
 
+@lru_cache(maxsize=8)
+def _chat_tokenizer(repo: str, trust_remote_code: bool) -> Any:
+    return load_tokenizer(repo, trust_remote_code=trust_remote_code)
+
+
+def _chat_prompt_tokens(tokenizer: Any, body: Mapping[str, Any]) -> int:
+    """Count the prompt ``mlx_lm.server`` renders for a chat body: text parts joined, tool-call arguments parsed."""
+    messages = copy.deepcopy(body["messages"])
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            message["content"] = "".join(part["text"] for part in content if part.get("type") == "text")
+        elif content is None:
+            message["content"] = ""
+        for call in message.get("tool_calls") or []:
+            function = call.get("function") or {}
+            arguments = function.get("arguments")
+            if isinstance(arguments, str) and arguments:
+                function["arguments"] = json.loads(arguments)
+    prompt = tokenizer.apply_chat_template(
+        messages,
+        tools=body.get("tools"),
+        tokenize=False,
+        add_generation_prompt=True,
+        **(body.get("chat_template_kwargs") or {}),
+    )
+    return len(tokenizer.encode(prompt, add_special_tokens=False))
+
+
 def normalize_mlx_seed(seed: int) -> int:
     """Convert a signed i64 seed to MLX's equivalent uint64 bit pattern."""
     if isinstance(seed, bool) or not isinstance(seed, int) or not -(1 << 63) <= seed <= (1 << 63) - 1:
@@ -127,7 +160,7 @@ class MLXGenerationAdapter(GenerationAdapter):
         model_name_or_path: str,
         *,
         mlx_repo: str | None = None,
-        max_seq_length: int = 32768,
+        max_seq_length: int | None = 32768,
         default_sampling: dict[str, Any] | None = None,
         stop_tokens: list[str] | None = None,
         served_model_name: str | None = None,
@@ -346,6 +379,33 @@ class MLXGenerationAdapter(GenerationAdapter):
         """Reject controls that ``mlx_lm.server`` cannot honour before dispatch."""
         _ = stream
         _reject_grammar(parameters.get("grammar"))
+
+    async def check_chat_window(self, body: Mapping[str, Any], *, requested_model: str) -> None:
+        """Refuse a chat body whose prompt and ``max_tokens`` exceed ``max_seq_length``.
+
+        ``mlx_lm.server`` serves any prompt length, so the declared window is
+        enforced here, on the prompt the child renders with this repo's
+        tokenizer and chat template. A prompt that cannot be counted is left
+        to the child.
+
+        Raises:
+            GenerationInputTooLongError: The prompt and output do not fit.
+        """
+        if self._max_seq_length is None or self._mlx_repo is None:
+            return
+        try:
+            tokenizer = await asyncio.to_thread(_chat_tokenizer, self._mlx_repo, self._trust_remote_code)
+            prompt_tokens = await asyncio.to_thread(_chat_prompt_tokens, tokenizer, body)
+        except Exception as exc:  # noqa: BLE001 - the child refuses what cannot be rendered
+            logger.warning("the chat prompt for %s was not counted (%s)", self._mlx_repo, type(exc).__name__)
+            return
+        max_new_tokens = body["max_tokens"]
+        total = prompt_tokens + max_new_tokens
+        if total > self._max_seq_length:
+            raise GenerationInputTooLongError(
+                f"prompt_tokens ({prompt_tokens}) + max_new_tokens ({max_new_tokens}) = {total} "
+                f"exceeds context_length ({self._max_seq_length}) for model '{requested_model}'"
+            )
 
     def _build_sampling_body(
         self,

@@ -196,7 +196,33 @@ def test_the_window_bounds_the_prompt_and_the_answer() -> None:
     assert near.json()["usage"] == {"prompt_tokens": window - 4, "completion_tokens": 4, "total_tokens": window}
     assert near.json()["choices"][0]["finish_reason"] == "length"
     assert full.status_code == 400
-    assert full.json()["error"]["code"] == "INPUT_TOO_LONG"
+    assert full.json()["error"] == {
+        "message": f"prompt_tokens ({window + 1}) exceeds context_length ({window}) for model 'sie-fake'",
+        "type": "invalid_request_error",
+        "param": "prompt",
+        "code": "INPUT_TOO_LONG",
+    }
+
+
+def test_an_image_is_refused_as_unsupported_even_when_the_model_declares_image_input() -> None:
+    client = _client()
+    config = _config("sie-fake:chat")
+    registry = client.app.state.registry
+    registry.device = "cuda:0"
+    registry.get_config.return_value = config.model_copy(
+        update={"inputs": config.inputs.model_copy(update={"image": True})}
+    )
+    pixel = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    response = _chat(client, [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": pixel}}]}])
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"] == {
+        "message": "Model 'sie-fake:chat' does not support image input",
+        "type": "invalid_request_error",
+        "param": "messages",
+        "code": "unsupported_field",
+    }
+    registry.get.assert_not_called()
 
 
 def test_a_profile_without_thinking_never_returns_reasoning() -> None:
