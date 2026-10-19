@@ -5,8 +5,8 @@ One vocabulary with the gateway: ``SIE_AUTH_MODE`` selects the mode,
 request presents one in ``Authorization: Bearer`` or ``x-api-key``, with
 ``Authorization`` taking precedence when both carry a token. Repeated headers
 are read differently until 0.13.0: the gateway reads only the first
-``Authorization`` value and uses ``x-api-key`` when that value carries no token,
-while this server reads every value, skips empty ones and refuses values that
+``Authorization`` value and uses ``x-api-key`` when that value is empty or
+blank, while this server reads every value, skips empty ones and refuses values that
 carry different tokens.
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import functools
 import hmac
 import ipaddress
 import logging
@@ -30,7 +31,13 @@ from typing import Literal
 import orjson
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from sie_server.core.data_dir import ensure_data_dir, owned_files, remove_stale_files, resolve_data_dir
+from sie_server.core.data_dir import (
+    DATA_DIR_ENV,
+    ensure_data_dir,
+    owned_files,
+    remove_stale_files,
+    resolve_data_dir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +61,9 @@ _TEMP_NAME = re.compile(rf"{re.escape(_TEMP_PREFIX)}[0-9a-f]{{16}}")
 _READ_ONLY_ERRNOS = frozenset({errno.EACCES, errno.EROFS})
 _NO_ACL_ERRNOS = frozenset({errno.ENOENT, errno.ENOTSUP, errno.EOPNOTSUPP})
 _ACL_TYPE_EXTENDED = 0x100
+_ACL_FIRST_ENTRY = 0
+_ACL_NEXT_ENTRY = -1
+_ACL_EXTENDED_DENY = 2
 _HOST_CHECK_RELEASE = "0.13.0"
 _MAX_WARNED_HOSTS = 64
 _MAX_LOGGED_HOST_CHARS = 100
@@ -220,36 +230,68 @@ def load_or_create_token(directory: Path) -> StoredToken:
 
 
 def check_private_directory(directory: Path) -> None:
-    """Refuse a token directory that another user owns or can write to, and on macOS one with an access control list."""
+    """Refuse a token directory that another user owns or can write to, including through a macOS access control list."""
     try:
-        info = directory.stat()
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    except NotADirectoryError as exc:
+        raise TokenFileError(f"{directory} must be a directory.") from exc
     except OSError as exc:
         raise TokenFileError(f"Cannot read {directory}: {exc.strerror or exc}") from exc
-    if not stat.S_ISDIR(info.st_mode):
-        raise TokenFileError(f"{directory} must be a directory.")
-    if info.st_uid != os.getuid():
-        raise TokenFileError(f"{directory} must be owned by the user that runs sie-server.")
-    if stat.S_IMODE(info.st_mode) & 0o022:
-        raise TokenFileError(f"{directory} must not be writable by others (chmod 700 {directory}).")
-    if sys.platform == "darwin" and _has_access_control_list(directory):
-        raise TokenFileError(f"{directory} must not have an access control list (chmod -N {directory}).")
+    try:
+        info = os.fstat(fd)
+        if info.st_uid != os.getuid():
+            raise TokenFileError(f"{directory} must be owned by the user that runs sie-server.")
+        if stat.S_IMODE(info.st_mode) & 0o022:
+            raise TokenFileError(f"{directory} must not be writable by others (chmod 700 {directory}).")
+        if _acl_allows_access(fd, directory):
+            raise TokenFileError(
+                f"{directory} has an access control list entry that allows access, which its mode does not show. "
+                f"List the entries with ls -led {directory} and remove each allow entry with chmod -a# <number> "
+                f"{directory}, or set {DATA_DIR_ENV} to a directory of its own."
+            )
+    finally:
+        os.close(fd)
 
 
-def _has_access_control_list(directory: Path) -> bool:
-    """Whether macOS reports an access control list on ``directory``, whose entries can grant what its mode does not."""
-    libc = ctypes.CDLL(None, use_errno=True)
-    get_acl = libc.acl_get_file
-    get_acl.restype = ctypes.c_void_p
-    get_acl.argtypes = (ctypes.c_char_p, ctypes.c_int)
-    ctypes.set_errno(0)
-    acl = get_acl(os.fsencode(directory), _ACL_TYPE_EXTENDED)
-    if acl:
-        libc.acl_free(ctypes.c_void_p(acl))
-        return True
-    code = ctypes.get_errno()
-    if code in _NO_ACL_ERRNOS:
+@functools.cache
+def _libsystem() -> ctypes.CDLL:
+    libsystem = ctypes.CDLL(None, use_errno=True)
+    libsystem.acl_get_fd_np.restype = ctypes.c_void_p
+    libsystem.acl_get_fd_np.argtypes = (ctypes.c_int, ctypes.c_int)
+    libsystem.acl_get_entry.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p))
+    libsystem.acl_get_tag_type.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_int))
+    libsystem.acl_free.argtypes = (ctypes.c_void_p,)
+    return libsystem
+
+
+def _acl_allows_access(fd: int, target: Path) -> bool:
+    """Whether the macOS access control list of ``fd`` has an entry other than a deny entry.
+
+    Such an entry can grant access that the mode bits do not show. Deny entries, such as the one macOS puts on a
+    home folder, only take access away. An entry whose kind cannot be read counts as allowing access, and a list
+    that cannot be read is refused.
+    """
+    if sys.platform != "darwin":
         return False
-    raise TokenFileError(f"Cannot read the access control list of {directory}: {os.strerror(code)}")
+    libsystem = _libsystem()
+    ctypes.set_errno(0)
+    acl = libsystem.acl_get_fd_np(fd, _ACL_TYPE_EXTENDED)
+    if not acl:
+        code = ctypes.get_errno()
+        if code in _NO_ACL_ERRNOS:
+            return False
+        raise TokenFileError(f"Cannot read the access control list of {target}: {os.strerror(code)}")
+    try:
+        entry = ctypes.c_void_p()
+        tag = ctypes.c_int()
+        position = _ACL_FIRST_ENTRY
+        while libsystem.acl_get_entry(acl, position, ctypes.byref(entry)) == 0:
+            position = _ACL_NEXT_ENTRY
+            if libsystem.acl_get_tag_type(entry, ctypes.byref(tag)) != 0 or tag.value != _ACL_EXTENDED_DENY:
+                return True
+        return False
+    finally:
+        libsystem.acl_free(acl)
 
 
 def read_stored_token(directory: Path) -> str:
@@ -275,6 +317,11 @@ def read_stored_token(directory: Path) -> str:
             raise TokenFileError(f"{path} must be owned by the user that runs sie-server.")
         if stat.S_IMODE(info.st_mode) & 0o077:
             raise TokenFileError(f"{path} must not be readable or writable by others (chmod 600 {path}).")
+        if _acl_allows_access(fd, path):
+            raise TokenFileError(
+                f"{path} has an access control list entry that allows access, so others may have read the token. "
+                f"Delete {path} to have sie-server generate a new one, or remove the entries with chmod -N {path}."
+            )
         raw = os.read(fd, _MAX_TOKEN_FILE_BYTES + 1)
     finally:
         os.close(fd)
