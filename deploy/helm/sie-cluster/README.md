@@ -1565,14 +1565,14 @@ the same), the gateway requires a token on every request except its probes and
 API description. Clients send it as `Authorization: Bearer <token>` or
 `x-api-key: <token>`. The first `Authorization` value decides when it
 carries a token, and the gateway then ignores `x-api-key`. When that value is
-empty or blank, `x-api-key` decides; an unreadable first value, or `Bearer`
-without a token, is refused. Later `Authorization` values are ignored. Until 0.13.0, a
-repeated `Authorization` header whose values carry different tokens, include
-one the gateway cannot read, or carry a token only after the first value logs
-a warning; from 0.13.0 it gets `401`. SDK clients pass the token as
-`api_key`/`apiKey`, or read it from `SIE_API_KEY` when their base URL comes
-from `SIE_BASE_URL`. The tokens come from one Secret, generated or managed by
-the operator:
+empty or blank, `x-api-key` decides. An unreadable first value is refused, and
+`Bearer` alone counts as the token `Bearer`. Later `Authorization` values are
+ignored. Until 0.13.0, a repeated `Authorization` header whose values carry
+different tokens, include one the gateway cannot read, or carry a token only
+after the first value logs a warning; from 0.13.0 it gets `401`. SDK clients
+pass the token as `api_key`/`apiKey`, or read it from `SIE_API_KEY` when their
+base URL comes from `SIE_BASE_URL`. The tokens come from one Secret, generated
+or managed by the operator:
 
 - **Generated.** With `gateway.auth.tokenSecretName` empty and
   `gateway.auth.generateToken=true`, the chart creates the Secret

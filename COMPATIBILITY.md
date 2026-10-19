@@ -252,9 +252,9 @@ The changes:
     `Authorization` value decides when it carries a token, and `x-api-key` is
     then ignored, so a request that passes today still passes, including one
     where a proxy in front of the gateway adds an `x-api-key` of its own.
-    When that value is empty or blank, `x-api-key` decides; an unreadable
-    first value, or `Bearer` without a token, is refused. Repeated `x-api-key`
-    values that carry different tokens get `401`.
+    When that value is empty or blank, `x-api-key` decides. An unreadable
+    first value is refused, and `Bearer` alone counts as the token `Bearer`.
+    Repeated `x-api-key` values that carry different tokens get `401`.
   - Later `Authorization` values are still ignored. The gateway logs a
     warning, once per process, the first time a request that passes
     authentication repeats `Authorization` with values that carry different

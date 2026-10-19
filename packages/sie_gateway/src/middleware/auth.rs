@@ -1031,6 +1031,18 @@ mod tests {
             extract_request_credential(&unreadable_first),
             RequestCredential::Unreadable
         );
+        unreadable_first.append("x-api-key", axum::http::HeaderValue::from_static("tok"));
+        assert_eq!(
+            extract_request_credential(&unreadable_first),
+            RequestCredential::Unreadable
+        );
+        assert_eq!(
+            extract_request_credential(&headers(&[
+                ("authorization", "Bearer "),
+                ("x-api-key", "tok")
+            ])),
+            RequestCredential::Token("Bearer".into())
+        );
     }
 
     #[test]
