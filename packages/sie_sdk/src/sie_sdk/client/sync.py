@@ -184,7 +184,7 @@ from ._shared import (
     validate_generate_request_body,
     websocket_matches_base_url_origin,
 )
-from ._sse import iter_sse_payloads
+from ._sse import SSECompletion, iter_sse_payloads
 from .errors import (
     JobFailedError,
     LoraLoadingError,
@@ -3200,7 +3200,8 @@ class SIEClient:
         Yields :class:`ChatCompletionChunk` events. Pass
         ``stream_options={"include_usage": True}`` to receive a final
         usage-only chunk (``choices: []``) before the stream ends. Raises
-        :class:`ServerError` if the gateway emits a mid-stream error chunk;
+        :class:`ServerError` if the gateway emits a mid-stream error chunk, or
+        :class:`SIEConnectionError` if the response ends before completion;
         breaking out of the iterator early closes the stream so the worker
         stops generating.
 
@@ -3365,6 +3366,8 @@ class SIEClient:
         failure is terminal (non-idempotent). Yielding inside the ``with``
         keeps the stream open while the caller consumes it; an early ``break``
         tears the context down and the worker sees the disconnect.
+        A natural EOF requires an explicit or semantic completion marker;
+        an interrupted generation is never retried.
         """
         self._reset_retry_count()
         timeout = provision_timeout_s if provision_timeout_s is not None else DEFAULT_PROVISION_TIMEOUT_S
@@ -3401,7 +3404,13 @@ class SIEClient:
                     else:
                         self._check_server_version(response)
                         yielded_chunk = False
-                        for payload in iter_sse_payloads(response.iter_lines()):
+                        chat_choices = None
+                        if url == "/v1/chat/completions":
+                            chat_choices = json.loads(body).get("n")
+                            if chat_choices is None:
+                                chat_choices = 1
+                        completion = SSECompletion(chat_choices=chat_choices)
+                        for payload in iter_sse_payloads(response.iter_lines(), completion=completion):
                             try:
                                 chunk = json.loads(payload)
                             except json.JSONDecodeError as e:
@@ -3456,9 +3465,11 @@ class SIEClient:
                                         request=parse_request_metadata(error_headers),
                                         retry_after=float(retry_after_s) if retry_after_s is not None else None,
                                     )
+                            completion.observe(chunk)
                             yield chunk
                             yielded_chunk = True
                         else:
+                            completion.require_complete()
                             return
             except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):

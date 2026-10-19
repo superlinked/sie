@@ -10,6 +10,7 @@ import torch
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters._vision_patch_embed import rebind_vision_patch_embed
 from sie_server.core.inference_output import ScoreOutput
@@ -151,6 +152,7 @@ class Qwen3VLRerankerAdapter(BaseAdapter):
         # file reference is None in some transformers versions). Try
         # AutoProcessor first; if that fails, load processor from the base
         # Qwen3-VL-2B-Instruct model and override its tokenizer.
+        install_transformers_security_fixes()
         try:
             self._processor = AutoProcessor.from_pretrained(
                 self._model_name_or_path,

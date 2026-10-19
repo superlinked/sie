@@ -24,6 +24,56 @@ import { SIEConnectionError, SIEStreamError } from "./errors.js";
 
 const SSE_DONE = "[DONE]";
 
+/** Track generation completion separately from a clean HTTP body EOF. */
+export class SSECompletion {
+  done = false;
+  private nativeTerminal = false;
+  private readonly chatChoices: number | undefined;
+  private readonly finishedChoices = new Set<number>();
+
+  constructor(chatChoices?: number) {
+    this.chatChoices =
+      chatChoices === undefined
+        ? undefined
+        : Number.isSafeInteger(chatChoices) && chatChoices > 0
+          ? chatChoices
+          : 1;
+  }
+
+  observe(chunk: unknown): void {
+    if (typeof chunk !== "object" || chunk === null) return;
+    const record = chunk as Record<string, unknown>;
+    if (this.chatChoices === undefined) {
+      if (record.done === true) this.nativeTerminal = true;
+      return;
+    }
+    if (!Array.isArray(record.choices)) return;
+    for (const choice of record.choices) {
+      if (typeof choice !== "object" || choice === null) continue;
+      const { index, finish_reason: finish } = choice;
+      if (
+        typeof index === "number" &&
+        Number.isInteger(index) &&
+        index >= 0 &&
+        index < this.chatChoices &&
+        typeof finish === "string" &&
+        finish.length > 0
+      ) {
+        this.finishedChoices.add(index);
+      }
+    }
+  }
+
+  requireComplete(): void {
+    if (this.done || this.nativeTerminal) return;
+    if (this.chatChoices !== undefined && this.finishedChoices.size === this.chatChoices) return;
+    throw new SIEConnectionError(
+      "Connection lost during stream: response ended before generation completed",
+      "other",
+    );
+  }
+}
+
 /**
  * Hard cap on the in-progress event buffer.
  *
@@ -49,6 +99,8 @@ const MAX_SSE_BUFFER_CHARS = 8 * 1024 * 1024;
  * @param signal     Optional `AbortSignal`; when fired, the generator throws
  *                   `SIEConnectionError` (kind `"other"`) and releases the
  *                   reader so the upstream fetch is cancelled.
+ * @param completion Optional generation tracker; records explicit `[DONE]`
+ *                   separately from transport EOF for the consuming client.
  * @returns          A generator of `data:` payload strings. The generator
  *                   completes (without throwing) when the server emits
  *                   `[DONE]` or the underlying stream is closed cleanly.
@@ -56,6 +108,7 @@ const MAX_SSE_BUFFER_CHARS = 8 * 1024 * 1024;
 export async function* parseSseStream(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   signal?: AbortSignal,
+  completion?: SSECompletion,
 ): AsyncGenerator<string, void, undefined> {
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
@@ -195,6 +248,7 @@ export async function* parseSseStream(
           // Clean terminus: server signalled end-of-stream. No need to
           // cancel the body — it has already drained the relevant work.
           completedCleanly = true;
+          if (completion) completion.done = true;
           return;
         }
         yield payload;
@@ -211,7 +265,9 @@ export async function* parseSseStream(
     const tail = buffer.replace(/\r?\n$/, "");
     if (tail !== "") {
       const payload = extractDataPayload(tail);
-      if (payload !== null && payload !== SSE_DONE) {
+      if (payload === SSE_DONE) {
+        if (completion) completion.done = true;
+      } else if (payload !== null) {
         yield payload;
       }
     }

@@ -29,6 +29,7 @@ from transformers.models.auto import modeling_auto
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters.base import released_bytes
 from sie_server.adapters.gliformer.cuda_graphs import GRAPH_MODES, EncoderGraphRunner, unsupported_reason
@@ -724,6 +725,7 @@ class GLiFormerAdapter(BaseAdapter):
                 ignore_patterns=_SNAPSHOT_IGNORE_PATTERNS,
             )
 
+        install_transformers_security_fixes()
         with warnings.catch_warnings():
             # The checkpoints request the optional flashdeberta kernels. Without
             # them GLiFormer uses its eager attention, which is what SIE serves.

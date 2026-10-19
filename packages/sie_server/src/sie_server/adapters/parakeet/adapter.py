@@ -47,6 +47,7 @@ from packaging.version import Version
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters.parakeet.decoding import TdtHypothesis, greedy_tdt_decode
 from sie_server.core.inference_output import EncodeOutput, ExtractOutput
@@ -191,6 +192,7 @@ class ParakeetTDTAdapter(BaseAdapter):
             device,
             self._dtype,
         )
+        install_transformers_security_fixes()
         processor = AutoProcessor.from_pretrained(self._model_name_or_path, **revision_kwargs)
         model = AutoModelForTDT.from_pretrained(self._model_name_or_path, dtype=self._dtype, **revision_kwargs)
         model.to(device)

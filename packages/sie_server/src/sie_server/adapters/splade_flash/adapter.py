@@ -15,6 +15,7 @@ from sie_server.adapters._flash_base import FlashBaseAdapter
 from sie_server.adapters._flash_pack import build_position_ids
 from sie_server.adapters._sparse_rows import sparse_rows
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters._utils import extract_texts, resolve_query_instruction, validate_output_types
 from sie_server.adapters.base import ModelAdapter
@@ -128,6 +129,7 @@ class SPLADEFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         if self._revision is not None:
             shared_kwargs["revision"] = self._revision
 
+        install_transformers_security_fixes()
         self._tokenizer = AutoTokenizer.from_pretrained(
             self._model_name_or_path,
             **shared_kwargs,

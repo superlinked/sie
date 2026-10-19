@@ -17,6 +17,7 @@ from huggingface_hub import snapshot_download
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters.errors import InputTooLongError
 from sie_server.adapters.pplx_decider.model import DecisionModel, checkpoint_config, load_model, validate_tokenizer
@@ -119,6 +120,7 @@ class PerplexityDecisionAdapter(BaseAdapter):
                 )
             )
         config = checkpoint_config(directory)
+        install_transformers_security_fixes()
         processor = AutoProcessor.from_pretrained(str(directory), local_files_only=True, trust_remote_code=False)
         processor.tokenizer.padding_side = "left"
         validate_tokenizer(processor.tokenizer, config)

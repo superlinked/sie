@@ -20,6 +20,7 @@ from huggingface_hub import snapshot_download
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._prompt_limit import MAX_PROMPT_CHARS_PER_TOKEN, check_label_chars
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters._word_window import plan_forwards
 from sie_server.adapters.gliner2.decisions import MARKERS
@@ -119,6 +120,7 @@ class GLiNER2EntitiesAdapter(BaseAdapter):
         path = self._model_name_or_path
         if not Path(path).is_dir():
             path = snapshot_download(repo_id=path, revision=self._revision, allow_patterns=list(_CHECKPOINT_FILES))
+        install_transformers_security_fixes()
         model = AutoExtractor.from_pretrained(path, map_location=device, quantize=False)
         architecture = getattr(model, "architecture", None)
         if architecture not in {"span", "boundary"}:

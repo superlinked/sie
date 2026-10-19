@@ -15,6 +15,8 @@ from typing import Any
 import sentence_transformers
 from sentence_transformers import CrossEncoder, SentenceTransformer, SparseEncoder
 
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
+
 _SUPPORTED_VERSIONS = frozenset({"5.4.1", "5.6.0", "5.7.0"})
 _ROOT_CLASSES = (SentenceTransformer, SparseEncoder, CrossEncoder)
 _RESOLVER = "_load_module_class_from_ref"
@@ -139,6 +141,7 @@ def load_sentence_transformer[T: (SentenceTransformer, SparseEncoder, CrossEncod
     releases. An unknown version fails before an untrusted model is loaded.
     Explicit True preserves the original constructor path exactly.
     """
+    install_transformers_security_fixes()
     if trust_remote_code is True:
         return model_class(model_name_or_path, trust_remote_code=True, **kwargs)
     if trust_remote_code is not False and trust_remote_code is not None:

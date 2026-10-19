@@ -11,6 +11,7 @@ import torch
 from sie_server.adapters._flash_base import FlashBaseAdapter
 from sie_server.adapters._sparse_rows import sparse_rows
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters._utils import (
     apply_rotary_pos_emb,
@@ -150,6 +151,7 @@ class GTESparseFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
         if self._code_revision is not None:
             shared_kwargs["code_revision"] = self._code_revision
 
+        install_transformers_security_fixes()
         self._tokenizer = AutoTokenizer.from_pretrained(
             self._model_name_or_path,
             **shared_kwargs,

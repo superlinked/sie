@@ -71,6 +71,7 @@ from huggingface_hub import snapshot_download
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters.errors import InputTooLongError
 from sie_server.adapters.gliner2.decide_graphs import (
@@ -473,6 +474,7 @@ class GLiNER2DecideAdapter(BaseAdapter):
 
         checkpoint = self._checkpoint_dir()
         encoder_config = _read_json(checkpoint / "encoder_config" / "config.json")
+        install_transformers_security_fixes()
         with loadable_checkpoint(checkpoint) as path:
             model = AutoExtractor.from_pretrained(str(path), map_location=device)
         if not hasattr(model, "classifier") or not hasattr(model, "encoder"):

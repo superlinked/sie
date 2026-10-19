@@ -25,6 +25,7 @@ from torch.nn import functional
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters.bge_m3_score_mixin import BGEM3ScoreMixin
 from sie_server.core.inference_output import EncodeOutput, SparseVector
@@ -122,6 +123,7 @@ class BGEM3Adapter(BGEM3ScoreMixin, BaseAdapter):
             shared_kwargs["revision"] = self._revision
 
         # Load tokenizer (fast Rust tokenizer)
+        install_transformers_security_fixes()
         self._tokenizer = AutoTokenizer.from_pretrained(self._model_name_or_path, **shared_kwargs)
 
         # Load base model with Flash Attention 2 if available

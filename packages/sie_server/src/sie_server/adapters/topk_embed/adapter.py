@@ -53,6 +53,7 @@ from torch.nn import functional as F
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._multivector import maxsim_scores_batched
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters._utils import grouped_score_pairs, validate_output_types
 from sie_server.adapters.topk_embed import vision_rotary
@@ -276,6 +277,7 @@ class TopkEmbedAdapter(BaseAdapter):
         topk = {key: raw.pop(key) for key in _TOPK_CONFIG_KEYS if key in raw}
         for key in _REMOTE_CODE_CONFIG_KEYS:
             raw.pop(key, None)
+        install_transformers_security_fixes()
         config = Qwen3_5Config(**raw)
         # Bidirectional full-attention layers; the linear-attention layers stay causal recurrences.
         config.text_config.is_causal = False

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import torch
 import torch.nn.functional as F
 
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._vision_patch_embed import rebind_vision_patch_embed
 from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
 from sie_server.adapters.lighton_ocr._markdown import lightonocr3_markdown
@@ -131,6 +132,7 @@ class LightOnOCRAdapter(ModelAdapter):
             self._attn_implementation,
         )
 
+        install_transformers_security_fixes()
         self._processor = LightOnOcrProcessor.from_pretrained(
             self._model_name_or_path,
             **shared_kwargs,
@@ -577,6 +579,7 @@ class LightOnOCR3Adapter(LightOnOCRAdapter):
         shared_kwargs: dict[str, Any] = {"trust_remote_code": False}
         if self._revision is not None:
             shared_kwargs["revision"] = self._revision
+        install_transformers_security_fixes()
         self._processor = AutoProcessor.from_pretrained(self._model_name_or_path, **shared_kwargs)
         self._model = Qwen3_5ForConditionalGeneration.from_pretrained(
             self._model_name_or_path,
