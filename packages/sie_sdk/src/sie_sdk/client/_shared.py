@@ -306,6 +306,7 @@ class _HttpResponse(Protocol):
 
 from sie_sdk.types import (
     Classification,
+    CostEstimate,
     DetectedObject,
     EncodeResult,
     EntityResult,
@@ -524,6 +525,13 @@ def build_estimate_envelope(endpoint: str, request: Mapping[str, Any]) -> dict[s
         msg = f"estimate request must be the target request body mapping (got {type(request).__name__})"
         raise ValueError(msg)
     return {"endpoint": endpoint, "request": dict(request)}
+
+
+def parse_cost_estimate(body: Any) -> CostEstimate:
+    """The ``/v1/estimate`` quote, without a malformed ``estimated_credits_decimal``."""
+    if isinstance(body, MutableMapping) and parse_credits_decimal(body.get("estimated_credits_decimal")) is None:
+        body.pop("estimated_credits_decimal", None)
+    return cast("CostEstimate", body)
 
 
 def raise_if_estimate_unroutable(response: _HttpResponse) -> None:

@@ -1253,13 +1253,16 @@ export class SIEClient {
     options: { timeout?: number } = {},
   ): Promise<CostEstimate> {
     const body = buildEstimateEnvelope(endpoint, request);
-    return this.jsonRequest<CostEstimate>(
+    const quote = await this.jsonRequest<CostEstimate>(
       ESTIMATE_PATH,
       "POST",
       body,
       options.timeout ?? this.timeout,
       throwIfEstimateUnroutable,
     );
+    const { estimated_credits_decimal, ...rest } = quote;
+    const decimal = parseCreditsDecimal(estimated_credits_decimal);
+    return decimal === undefined ? rest : { ...rest, estimated_credits_decimal: decimal };
   }
 
   /**

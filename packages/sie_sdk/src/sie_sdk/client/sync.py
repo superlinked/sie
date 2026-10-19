@@ -157,6 +157,7 @@ from ._shared import (
     is_transient_connect_error,
     modal_continuation_path,
     next_stream_retry_delay,
+    parse_cost_estimate,
     parse_encode_results,
     parse_extract_results,
     parse_gpu_param,
@@ -1864,7 +1865,7 @@ class SIEClient:
             raise_if_estimate_unroutable(response)
             handle_error(response)
 
-        return cast("CostEstimate", response.json())
+        return parse_cost_estimate(response.json())
 
     def recommend(
         self,
