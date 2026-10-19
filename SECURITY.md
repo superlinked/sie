@@ -45,7 +45,7 @@ What a default install exposes, and how to close it.
   with `SIE_AUTH_TOKEN` (or comma-separated `SIE_AUTH_TOKENS`). Without a
   configured token, the server generates one and keeps it in `SIE_DATA_DIR`.
   Clients send it as `Authorization: Bearer <token>` or `x-api-key: <token>`;
-  when both are sent, `Authorization` is used. `/healthz`, `/livez` and
+  when both carry a token, `Authorization` is used. `/healthz`, `/livez` and
   `/readyz` stay open. Token authentication covers the HTTP port; the IPC
   socket and the engines' ports listen on this machine only.
 - Keep it on this machine with `--host 127.0.0.1`. In Docker, publish the port
@@ -64,10 +64,12 @@ What a default install exposes, and how to close it.
   `SIE_AUTH_MODE=token` and `SIE_AUTH_TOKENS`. Mutations of pools, admin and
   config routes also need `SIE_ADMIN_TOKEN`.
 - Clients send a token as `Authorization: Bearer <token>` or
-  `x-api-key: <token>`. When both are sent, `Authorization` is used and
-  `x-api-key` is ignored. Until 0.13.0, a repeated `Authorization` header uses
-  its first value and logs a warning; from 0.13.0, repeated values that carry
-  different tokens are refused.
+  `x-api-key: <token>`. The first `Authorization` value decides when it
+  carries a token, and `x-api-key` is then ignored; otherwise `x-api-key`
+  decides. Later `Authorization` values are ignored. Until 0.13.0, a repeated
+  `Authorization` header whose values carry different tokens, include one the
+  gateway cannot read, or carry a token only after the first value logs a
+  warning; from 0.13.0 it is refused.
 - `/healthz`, `/readyz`, `/openapi.json` and `/docs` are always reachable.
   `/`, `/health` and `/ws/*` require a token unless
   `SIE_AUTH_EXEMPT_OPERATIONAL=true`.

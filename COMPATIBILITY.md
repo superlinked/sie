@@ -224,9 +224,9 @@ The changes:
   - Opt-in token authentication, with the gateway's variables:
     `SIE_AUTH_MODE` (`none`, `token`, `auto`) and `SIE_AUTH_TOKENS` or
     `SIE_AUTH_TOKEN`. A configured token turns it on. Clients send
-    `Authorization: Bearer <token>` or `x-api-key: <token>`; when a request
-    sends both, `Authorization` is used and `x-api-key` is ignored. `/healthz`,
-    `/livez` and `/readyz` stay open.
+    `Authorization: Bearer <token>` or `x-api-key: <token>`; when both
+    carry a token, `Authorization` is used and `x-api-key` is ignored.
+    `/healthz`, `/livez` and `/readyz` stay open.
   - In token mode without a configured token, the server generates one and
     saves it with mode `0600` in `SIE_DATA_DIR`. It prints the token once when
     stderr is a terminal, and otherwise only the file's path. A container with
@@ -248,15 +248,17 @@ The changes:
 - Rust/Candle worker: logs a notice when it binds `0.0.0.0` only because
   `SIE_SERVER_HOST` is unset.
 - Gateway:
-  - Accepts `x-api-key` alongside `Authorization`. When a request sends both,
-    `Authorization` is used and `x-api-key` is ignored, so a request that
-    passes today still passes, including one where a proxy in front of the
-    gateway adds an `x-api-key` of its own. Repeated `x-api-key` values that
-    carry different tokens get `401`.
-  - A repeated `Authorization` header still uses its first value. The gateway
-    logs a warning, once per process, the first time a request that passes
+  - Accepts `x-api-key` alongside `Authorization`. The first
+    `Authorization` value decides when it carries a token, and `x-api-key` is
+    then ignored, so a request that passes today still passes, including one
+    where a proxy in front of the gateway adds an `x-api-key` of its own.
+    Otherwise `x-api-key` decides. Repeated `x-api-key` values that carry
+    different tokens get `401`.
+  - Later `Authorization` values are still ignored. The gateway logs a
+    warning, once per process, the first time a request that passes
     authentication repeats `Authorization` with values that carry different
-    tokens or with a value it cannot read. A refused request never logs it.
+    tokens, with a value it cannot read, or with a token only after a first
+    value that carries none. A refused request never logs it.
   - `SIE_WORKER_AUTH_TOKEN` is the token the gateway presents to workers.
   - Logs a warning when `SIE_AUTH_MODE` is unset on a non-loopback bind.
 - Telemetry: `SIE_TELEMETRY_ENABLED=1` opts in explicitly. The default stays on,
@@ -273,7 +275,7 @@ The changes:
 | `sie-server` beyond loopback | No authentication | A token is required. Without `SIE_AUTH_TOKEN`, one is generated, and printed once on a terminal | `SIE_AUTH_MODE=none` |
 | `sie-server` on loopback without authentication | A request whose `Host` does not name this machine is answered, with a warning | It gets `400`. So does a request whose `Origin` names another site, at least for WebSocket upgrades and methods other than `GET` | Token authentication, or a setting for more allowed `Host` names, designed together with this change |
 | Rust/Candle worker bind | `0.0.0.0` | `127.0.0.1` | `SIE_SERVER_HOST=0.0.0.0` (the image sets it) |
-| Gateway in token mode, repeated `Authorization` values that carry different tokens | The first value is used, with a warning | `401` | Send one `Authorization` header |
+| Gateway in token mode, a repeated `Authorization` header whose values carry different tokens, include one it cannot read, or carry a token only after the first value | The later values are ignored, with a warning | `401` | Send one `Authorization` header |
 | Gateway binary beyond loopback with `SIE_AUTH_MODE` unset | Starts without authentication | Refuses to start | `SIE_AUTH_MODE=none`, or `token` with `SIE_AUTH_TOKENS` |
 | Telemetry | On unless disabled | Off unless `SIE_TELEMETRY_ENABLED=1` | `SIE_TELEMETRY_ENABLED=1` |
 | Helm `gateway.auth.mode` | `none` | `token`, with a generated Secret (needs the chart change above) | `gateway.auth.mode=none` |

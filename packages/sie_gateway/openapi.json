@@ -4688,7 +4688,7 @@
     },
     "securitySchemes": {
       "apiKeyAuth": {
-        "description": "The same SIE token as bearerAuth, sent in the x-api-key header. When a request sends both, the Authorization header is used and x-api-key is ignored.",
+        "description": "The same SIE token as bearerAuth, sent in the x-api-key header. When the first Authorization value carries a token, that token is used and x-api-key is ignored.",
         "in": "header",
         "name": "x-api-key",
         "type": "apiKey"
