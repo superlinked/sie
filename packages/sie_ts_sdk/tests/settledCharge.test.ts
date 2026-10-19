@@ -168,4 +168,95 @@ describe("settled charge", () => {
       expect(result.request?.rateBookVersion).toBeUndefined();
     }
   });
+
+  it("reads the decimal charge from the body when present", async () => {
+    const result = await chat(
+      completion({
+        prompt_tokens: 9,
+        completion_tokens: 3,
+        total_tokens: 12,
+        credits_charged: 0,
+        credits_charged_decimal: "0.140000",
+        rate_book_version: BOOK,
+      }),
+      { "x-sie-credits-debited": "0", "x-sie-credits-debited-decimal": "0.140000" },
+    );
+
+    expect(result.usage.credits_charged_decimal).toBe("0.140000");
+    expect(result.request?.creditsDebited).toBe(0);
+    expect(result.request?.creditsDebitedDecimal).toBe("0.140000");
+    expect(result.request?.usage?.creditsChargedDecimal).toBe("0.140000");
+  });
+
+  it("reads the decimal charge from the header when the body has no charge", async () => {
+    const result = await chat(
+      completion({ prompt_tokens: 9, completion_tokens: 3, total_tokens: 12 }),
+      { "x-sie-credits-debited": "7", "x-sie-credits-debited-decimal": "7.250000" },
+    );
+
+    expect(result.request?.creditsDebited).toBe(7);
+    expect(result.request?.creditsDebitedDecimal).toBe("7.250000");
+  });
+
+  it("leaves the decimal charge absent when it is not reported", async () => {
+    const result = await chat(
+      completion({
+        prompt_tokens: 9,
+        completion_tokens: 3,
+        total_tokens: 12,
+        credits_charged: 7,
+        rate_book_version: BOOK,
+      }),
+      { "x-sie-credits-debited": "7" },
+    );
+
+    expect(result.request?.creditsDebited).toBe(7);
+    expect(result.request?.creditsDebitedDecimal).toBeUndefined();
+    expect(result.request?.usage).not.toHaveProperty("creditsChargedDecimal");
+  });
+
+  it("ignores a malformed decimal charge", async () => {
+    for (const value of ["0.14", "0.1400000", "-0.140000", "00.140000", "1e-1", "", 0.14]) {
+      const result = await chat(
+        completion({
+          prompt_tokens: 1,
+          completion_tokens: 1,
+          total_tokens: 2,
+          credits_charged: 0,
+          credits_charged_decimal: value,
+          rate_book_version: BOOK,
+        }),
+      );
+      expect(result.request?.creditsDebited).toBe(0);
+      expect(result.request?.creditsDebitedDecimal).toBeUndefined();
+    }
+  });
+
+  it("carries the decimal charge through the generate result's usage block", async () => {
+    for (const [decimal, expected] of [
+      ["0.140000", "0.140000"],
+      [undefined, undefined],
+    ] as const) {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse({
+          model: "m",
+          text: "hi",
+          finish_reason: "stop",
+          usage: {
+            prompt_tokens: 9,
+            completion_tokens: 3,
+            total_tokens: 12,
+            credits_charged: 0,
+            rate_book_version: BOOK,
+            ...(decimal !== undefined ? { credits_charged_decimal: decimal } : {}),
+          },
+        }),
+      );
+      const client = new SIEClient("http://localhost:8080");
+      const result = await client.generate("m", "hi", { maxNewTokens: 16 });
+
+      expect(result.usage.creditsCharged).toBe(0);
+      expect(result.usage.creditsChargedDecimal).toBe(expected);
+    }
+  });
 });

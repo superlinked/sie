@@ -26,6 +26,7 @@ from sie_sdk.client._shared import (
 )
 from sie_sdk.types import (
     DECLARED_USAGE_FIELDS,
+    OPTIONAL_SETTLED_CHARGE_FIELDS,
     SETTLED_CHARGE_FIELDS,
     TERMINAL_UNIT_FIELDS,
     ModelInfo,
@@ -57,6 +58,8 @@ def test_request_usage_partition_matches_golden_fixture() -> None:
     fixture = _load("request_usage.json")
     assert set(fixture["terminal_unit_fields"]) == TERMINAL_UNIT_FIELDS
     assert set(fixture["settled_charge_fields"]) == SETTLED_CHARGE_FIELDS
+    assert set(fixture["optional_settled_charge_fields"]) == OPTIONAL_SETTLED_CHARGE_FIELDS
+    assert OPTIONAL_SETTLED_CHARGE_FIELDS < SETTLED_CHARGE_FIELDS
     assert fixture["usage_container"] == "usage"
 
 

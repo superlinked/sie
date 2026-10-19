@@ -412,6 +412,7 @@ def test_job_chunks_extracts_ref_metadata() -> None:
             "ref": "payload-store/c0",
             "units": 15,
             "credits_charged": 15,
+            "credits_charged_decimal": None,
             "rate_book_version": "book-v1",
             "error": None,
         }
@@ -428,4 +429,20 @@ def test_job_chunks_leave_an_unsettled_chunk_uncharged() -> None:
     }
     (chunk,) = job_chunks(job)
     assert chunk["credits_charged"] is None
+    assert chunk["credits_charged_decimal"] is None
     assert chunk["rate_book_version"] is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("15.140000", "15.140000"), ("0.000000", "0.000000"), (15.14, None), ("15.14", None), ("015.140000", None)],
+)
+def test_job_chunks_carry_a_well_formed_decimal_charge(raw: object, expected: str | None) -> None:
+    job = {
+        "output": {
+            "chunks": [{"seq": 0, "credits_charged": 15, "credits_charged_decimal": raw, "rate_book_version": "v1"}],
+        }
+    }
+    (chunk,) = job_chunks(job)
+    assert chunk["credits_charged"] == 15
+    assert chunk["credits_charged_decimal"] == expected

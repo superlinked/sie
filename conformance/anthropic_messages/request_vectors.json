@@ -302,6 +302,56 @@
       }
     },
     {
+      "name": "tool result images come before the turn's own text and images",
+      "body": {
+        "model": "m",
+        "max_tokens": 16,
+        "messages": [
+          {"role": "user", "content": "Take a screenshot."},
+          {"role": "assistant", "content": [{"type": "tool_use", "id": "s1", "name": "screenshot", "input": {}}]},
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "s1",
+                "content": [
+                  {"type": "text", "text": "shot.png"},
+                  {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}}
+                ]
+              },
+              {"type": "text", "text": "Compare it with this one."},
+              {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "/9j/AA=="}}
+            ]
+          }
+        ]
+      },
+      "first_image": "messages.2.content.0.tool_result.content.1.image",
+      "chat": {
+        "model": "m",
+        "messages": [
+          {"role": "user", "content": "Take a screenshot."},
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{"id": "s1", "type": "function", "function": {"name": "screenshot", "arguments": "{}"}}]
+          },
+          {"role": "tool", "tool_call_id": "s1", "content": "shot.png"},
+          {
+            "role": "user",
+            "content": [
+              {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}},
+              {"type": "text", "text": "Compare it with this one."},
+              {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,/9j/AA=="}}
+            ]
+          }
+        ],
+        "max_tokens": 16,
+        "stream": false,
+        "include_reasoning": false
+      }
+    },
+    {
       "name": "user image between text keeps its position",
       "body": {
         "model": "m",

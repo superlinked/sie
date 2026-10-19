@@ -138,10 +138,23 @@ profiles:
     # Same H100-80GB target as ``default`` with the model-card 3/4 NEXTN draft
     # preserved from main. Keep the public H100 context at the 8K
     # base-model window until a separate 32K H100 smoke lands.
+    #
+    # Memory fit, measured on one H100 80GB with SGLang 0.5.10.post1: the
+    # BF16 target weights take 51.05 GB of 77.98 GB. NEXTN reserves
+    # intermediate mamba state for every running request and draft token
+    # (about 0.14 GB per request per token), so SGLang's default of 48
+    # running requests needs about 27.5 GB and the pool cannot be sized at
+    # any fraction. With 8 running requests at 0.93 the pool fits, but the
+    # draft model then needs 5.53 GB (its embedding and head are loaded
+    # before they are shared) with only 4.64 GB left. At 0.88 with 8 running
+    # requests: mamba cache 42 slots (6.17 GB) plus 5.16 GB of speculative
+    # state, a 113,971-token KV pool and the draft loaded with 2.54 GB to
+    # spare. It served 8 concurrent requests, and a 7,027-token prompt
+    # alongside 7 short ones.
     kv_budget_tokens: 32768
     adapter_options:
       loadtime:
-        mem_fraction_static: 0.93
+        mem_fraction_static: 0.88
         served_model_name: Qwen/Qwen3.6-27B
         disable_cuda_graph: true
         attention_backend: triton
@@ -163,6 +176,8 @@ profiles:
           - "--mamba-scheduler-strategy"
           - "extra_buffer"
           - "--disable-overlap-schedule"
+          - "--max-running-requests"
+          - "8"
       runtime:
         first_chunk_timeout_s: 90
         inter_chunk_timeout_s: 15

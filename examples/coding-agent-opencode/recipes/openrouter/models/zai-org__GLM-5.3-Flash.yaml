@@ -1,0 +1,31 @@
+sie_id: zai-org/GLM-5.3-Flash
+remote_backed: true
+routing:
+  policy: remote_only
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: null
+  generate:
+    context_length: 131072
+    max_output_tokens: 32768
+    chat_template_kwargs:
+      enable_thinking: true
+    capabilities:
+      grammar: []
+      streaming: true
+      tools: true
+max_sequence_length: 131072
+profiles:
+  default:
+    adapter_path: sie_server.adapters.remote.openai:OpenAIUpstreamAdapter
+    max_batch_tokens: 131072
+    adapter_options:
+      loadtime:
+        upstream: openrouter
+        upstream_model: z-ai/glm-5.3-flash

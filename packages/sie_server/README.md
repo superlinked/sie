@@ -1117,12 +1117,12 @@ as a profile an operator chooses.
 | `SIE_DATA_DIR` | `$XDG_DATA_HOME/sie`, else `~/.local/share/sie` | Holds the generated token (`auth-token`, mode `0600`) and the telemetry worker id. Images set `/app/.cache/sie`. |
 
 Clients send the token as `Authorization: Bearer <token>` or `x-api-key: <token>`;
-when both are sent, `Authorization` is used and `x-api-key` is ignored, as on the
-gateway. The SDKs send `SIE_API_KEY`
+when both carry a token, `Authorization` is used and `x-api-key` is ignored, as on
+the gateway. The SDKs send `SIE_API_KEY`
 as a Bearer token. Repeated headers differ from the gateway until 0.13.0: the
 server reads every value of a repeated header, skips empty ones, and refuses
-values that carry different tokens, while the gateway uses only the first
-`Authorization` value.
+values that carry different tokens, while the gateway reads only the first
+`Authorization` value and uses `x-api-key` when that value is empty or blank.
 
 Token auth covers the HTTP port. The other listeners are local: the IPC socket
 that a worker sidecar uses (`SIE_IPC_SOCKET_PATH`, mode `0600`) and the
@@ -1140,7 +1140,10 @@ and the container runtime keeps that one print in the container's logs. In
 containers, set `SIE_AUTH_TOKEN` yourself instead. The server refuses a token
 directory that another user owns or can write to, and a token file that is a
 symbolic link, not a regular file, hard-linked, owned by another user, or
-readable by others. To rotate a generated token, delete `auth-token` from
+readable by others. On macOS it also refuses a token directory or file whose
+access control list has an entry that allows access (`ls -le` lists the
+entries); deny entries, such as the one macOS puts on the home folder, are
+accepted. To rotate a generated token, delete `auth-token` from
 `SIE_DATA_DIR` and restart the server. In Docker, keep the token across
 containers with a volume:
 

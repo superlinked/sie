@@ -306,6 +306,7 @@ class _HttpResponse(Protocol):
 
 from sie_sdk.types import (
     Classification,
+    CostEstimate,
     DetectedObject,
     EncodeResult,
     EntityResult,
@@ -319,6 +320,7 @@ from sie_sdk.types import (
     ScoreEntry,
     ScoreResult,
     SparseResult,
+    parse_credits_decimal,
 )
 
 from .errors import (
@@ -525,6 +527,13 @@ def build_estimate_envelope(endpoint: str, request: Mapping[str, Any]) -> dict[s
     return {"endpoint": endpoint, "request": dict(request)}
 
 
+def parse_cost_estimate(body: Any) -> CostEstimate:
+    """The ``/v1/estimate`` quote, without a malformed ``estimated_credits_decimal``."""
+    if isinstance(body, MutableMapping) and parse_credits_decimal(body.get("estimated_credits_decimal")) is None:
+        body.pop("estimated_credits_decimal", None)
+    return cast("CostEstimate", body)
+
+
 def raise_if_estimate_unroutable(response: _HttpResponse) -> None:
     """Raise :class:`EstimateUnroutableError` for an unpriceable estimate.
 
@@ -687,6 +696,7 @@ EXECUTION_IDENTITY_SHA256_HEADER = "X-SIE-Execution-Identity-SHA256"
 EXECUTION_BINDING_SHA256_HEADER = "X-SIE-Execution-Binding-SHA256"
 REQUEST_ID_HEADER = "X-SIE-Request-ID"
 CREDITS_DEBITED_HEADER = "X-SIE-Credits-Debited"
+CREDITS_DEBITED_DECIMAL_HEADER = "X-SIE-Credits-Debited-Decimal"
 REMOTE_HEADER = "X-SIE-Remote"
 SERVED_BY_HEADER = "X-SIE-Served-By"
 UPSTREAM_HEADER = "X-SIE-Upstream"
@@ -1149,10 +1159,17 @@ def parse_request_metadata(headers: Any, body: Any = None) -> RequestMetadata | 
         usage["rate_book_version"] = rate_book_version
         metadata["credits_debited"] = credits_charged
         metadata["rate_book_version"] = rate_book_version
+        credits_decimal = parse_credits_decimal(body["usage"].get("credits_charged_decimal"))
+        if credits_decimal is not None:
+            usage["credits_charged_decimal"] = credits_decimal
+            metadata["credits_debited_decimal"] = credits_decimal
     else:
         credits_debited = _parse_nonnegative_meter_header(headers, CREDITS_DEBITED_HEADER)
         if credits_debited is not None:
             metadata["credits_debited"] = credits_debited
+            credits_decimal = parse_credits_decimal(_header_value(headers, CREDITS_DEBITED_DECIMAL_HEADER))
+            if credits_decimal is not None:
+                metadata["credits_debited_decimal"] = credits_decimal
 
     if usage:
         metadata["usage"] = usage

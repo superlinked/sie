@@ -1563,12 +1563,17 @@ An Ingress or a `LoadBalancer`/`NodePort` gateway Service also needs TLS; see
 With `gateway.auth.mode` set to `token` (or `static`, which the gateway treats
 the same), the gateway requires a token on every request except its probes and
 API description. Clients send it as `Authorization: Bearer <token>` or
-`x-api-key: <token>`. When a request sends both, the gateway uses
-`Authorization` and ignores `x-api-key`; until 0.13.0, a repeated
-`Authorization` header uses its first value. SDK clients pass the token as
-`api_key`/`apiKey`, or read it from `SIE_API_KEY` when their base URL comes
-from `SIE_BASE_URL`. The tokens come from one Secret, generated or managed by
-the operator:
+`x-api-key: <token>`. The first `Authorization` value decides when it
+carries a token, and the gateway then ignores `x-api-key`. When that value is
+empty or blank, `x-api-key` decides. An unreadable first value is refused, and
+`Bearer` alone counts as the token `Bearer`. Later `Authorization` values are
+ignored. Until 0.13.0, a request that passes authentication with a repeated
+`Authorization` header whose values carry different tokens, include one the
+gateway cannot read, or carry a token only after the first value logs a
+warning, once per process; a refused request never logs it. From 0.13.0 such a
+request gets `401`. SDK clients pass the token as `api_key`/`apiKey`, or read
+it from `SIE_API_KEY` when their base URL comes from `SIE_BASE_URL`. The tokens
+come from one Secret, generated or managed by the operator:
 
 - **Generated.** With `gateway.auth.tokenSecretName` empty and
   `gateway.auth.generateToken=true`, the chart creates the Secret

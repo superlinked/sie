@@ -9,5 +9,6 @@
     "pages",
     "pairs"
   ],
-  "settled_charge_fields": ["credits_charged", "rate_book_version"]
+  "settled_charge_fields": ["credits_charged", "credits_charged_decimal", "rate_book_version"],
+  "optional_settled_charge_fields": ["credits_charged_decimal"]
 }

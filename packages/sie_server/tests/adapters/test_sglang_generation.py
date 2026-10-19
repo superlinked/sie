@@ -205,6 +205,7 @@ def test_load_drops_is_embedding(
     assert adapter._server_url == "http://localhost:30005"
     child_env = mock_popen.call_args.kwargs["env"]
     assert child_env["SIE_SGLANG_MM_PROCESS_CONFIG_COMPAT"] == "1"
+    assert child_env["SIE_SGLANG_CHAT_TOOLS_AS_SENT"] == "1"
     expected_compat_dir = Path(__file__).resolve().parents[2] / "src/sie_server/adapters/sglang/_compat"
     assert child_env["PYTHONPATH"].split(os.pathsep)[0] == str(expected_compat_dir)
 

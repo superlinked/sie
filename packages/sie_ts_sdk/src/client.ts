@@ -76,6 +76,7 @@ import {
   getRetryAfter,
   handleError,
   parseCapacityInfo,
+  parseCreditsDecimal,
   parseEncodeResults,
   parseExtractResults,
   parseGenerateResult,
@@ -1252,13 +1253,16 @@ export class SIEClient {
     options: { timeout?: number } = {},
   ): Promise<CostEstimate> {
     const body = buildEstimateEnvelope(endpoint, request);
-    return this.jsonRequest<CostEstimate>(
+    const quote = await this.jsonRequest<CostEstimate>(
       ESTIMATE_PATH,
       "POST",
       body,
       options.timeout ?? this.timeout,
       throwIfEstimateUnroutable,
     );
+    const { estimated_credits_decimal, ...rest } = quote;
+    const decimal = parseCreditsDecimal(estimated_credits_decimal);
+    return decimal === undefined ? rest : { ...rest, estimated_credits_decimal: decimal };
   }
 
   /**
@@ -3323,6 +3327,7 @@ export class SIEClient {
         state,
         total_items: totalItems,
         settled_credits: job.settled_credits,
+        settled_credits_decimal: parseCreditsDecimal(job.settled_credits_decimal),
         chunks,
         retrieved,
         dims: withDims ? withDims.dims : null,

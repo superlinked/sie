@@ -1,0 +1,14 @@
+upstreams:
+  openrouter:
+    kind: openai
+    base_url: https://openrouter.ai/api/v1
+    api_key_secret: OPENROUTER_API_KEY
+    endpoints: [chat]
+    rate_cap:
+      requests_per_minute: 60
+      max_concurrency: 4
+    breaker:
+      failures: 5
+      window_s: 30
+      cooldown_s: 60
+    strip_params: [chat_template_kwargs]

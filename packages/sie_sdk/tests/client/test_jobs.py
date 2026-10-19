@@ -354,6 +354,28 @@ def test_results_reads_local_refs_and_decodes(tmp_path: Any) -> None:
         client.close()
 
 
+@pytest.mark.parametrize("settled", ["15.140000", None])
+def test_results_carry_settled_credits_decimal_when_reported(tmp_path: Any, settled: str | None) -> None:
+    ref = tmp_path / "chunk0.msgpack"
+    ref.write_bytes(_result_chunk("0"))
+    job: dict[str, Any] = {
+        "id": "job-1",
+        "state": "succeeded",
+        "total_items": 1,
+        "settled_credits": 15,
+        "output": {"kind": "refs", "chunks": [{"seq": 0, "items": 1, "state": "succeeded", "ref": str(ref)}]},
+    }
+    if settled is not None:
+        job["settled_credits_decimal"] = settled
+    with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+        mock_client.return_value.request = MagicMock(return_value=_resp(200, job))
+        client = SIEClient(GW, api_key=KEY)
+        results = client.jobs.results("job-1")
+        assert results["settled_credits"] == 15
+        assert results["settled_credits_decimal"] == settled
+        client.close()
+
+
 def test_results_refreshes_job_after_replica_miss_without_duplicating_partial_items() -> None:
     stale = _result_job("https://gw.test/stale-0", "https://gw.test/stale-1")
     fresh = _result_job("https://gw.test/fresh-0", "https://gw.test/fresh-1")
