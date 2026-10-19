@@ -303,10 +303,11 @@ pub enum RequestCredential {
 
 /// Read the request's token. The first `Authorization` value (`Bearer
 /// <token>` or a raw value, as [`extract_bearer_token`]) decides when it
-/// carries a token, and `x-api-key` is then ignored. Otherwise `x-api-key`
-/// decides, and its repeated values must carry the same token. Later
-/// `Authorization` values are ignored, as they always were; see
-/// [`authorization_values_disagree`].
+/// carries a token, and `x-api-key` is then ignored. A first value that
+/// cannot be read is refused, and `Bearer` alone is read as the raw token
+/// `Bearer`. When the first value is empty or blank, `x-api-key` decides, and
+/// its repeated values must carry the same token. Later `Authorization` values
+/// are ignored, as they always were; see [`authorization_values_disagree`].
 pub fn extract_request_credential(headers: &axum::http::HeaderMap) -> RequestCredential {
     let authorization = match headers.get("authorization").map(|value| value.to_str()) {
         None => RequestCredential::Missing,

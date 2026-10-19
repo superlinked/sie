@@ -65,8 +65,9 @@ What a default install exposes, and how to close it.
   config routes also need `SIE_ADMIN_TOKEN`.
 - Clients send a token as `Authorization: Bearer <token>` or
   `x-api-key: <token>`. The first `Authorization` value decides when it
-  carries a token, and `x-api-key` is then ignored; otherwise `x-api-key`
-  decides. Later `Authorization` values are ignored. Until 0.13.0, a repeated
+  carries a token, and `x-api-key` is then ignored. When that value is empty
+  or blank, `x-api-key` decides; an unreadable first value, or `Bearer`
+  without a token, is refused. Later `Authorization` values are ignored. Until 0.13.0, a repeated
   `Authorization` header whose values carry different tokens, include one the
   gateway cannot read, or carry a token only after the first value logs a
   warning; from 0.13.0 it is refused.

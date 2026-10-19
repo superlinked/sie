@@ -1564,8 +1564,9 @@ With `gateway.auth.mode` set to `token` (or `static`, which the gateway treats
 the same), the gateway requires a token on every request except its probes and
 API description. Clients send it as `Authorization: Bearer <token>` or
 `x-api-key: <token>`. The first `Authorization` value decides when it
-carries a token, and the gateway then ignores `x-api-key`; otherwise
-`x-api-key` decides. Later `Authorization` values are ignored. Until 0.13.0, a
+carries a token, and the gateway then ignores `x-api-key`. When that value is
+empty or blank, `x-api-key` decides; an unreadable first value, or `Bearer`
+without a token, is refused. Later `Authorization` values are ignored. Until 0.13.0, a
 repeated `Authorization` header whose values carry different tokens, include
 one the gateway cannot read, or carry a token only after the first value logs
 a warning; from 0.13.0 it gets `401`. SDK clients pass the token as
