@@ -1092,7 +1092,11 @@ values that carry different tokens, while the gateway reads only the first
 
 Token auth covers the HTTP port. The other listeners are local: the IPC socket
 that a worker sidecar uses (`SIE_IPC_SOCKET_PATH`, mode `0600`) and the
-loopback ports of the engines the server launches.
+loopback ports of the engines the server launches. On macOS a socket can
+inherit an entry that allows access from its directory's access control list,
+and its mode does not remove that access, so the server refuses to create the
+IPC socket in a directory whose access control list has an entry that allows
+access (`ls -led <directory>` lists the entries).
 
 When token auth is on and no token is configured, the server generates one on
 first start and saves it in `SIE_DATA_DIR`. When stderr is a terminal it prints

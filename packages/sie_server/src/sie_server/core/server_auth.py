@@ -268,11 +268,18 @@ def _libsystem() -> ctypes.CDLL:
 
 
 def _acl_allows_access(fd: int, target: Path) -> bool:
+    try:
+        return acl_allows_access(fd)
+    except OSError as exc:
+        raise TokenFileError(f"Cannot read the access control list of {target}: {exc.strerror}") from exc
+
+
+def acl_allows_access(fd: int) -> bool:
     """Whether the macOS access control list of ``fd`` has an entry other than a deny entry.
 
     Such an entry can grant access that the mode bits do not show. Deny entries, such as the one macOS puts on a
     home folder, only take access away. An entry whose kind cannot be read counts as allowing access, and a list
-    that cannot be read is refused.
+    that cannot be read raises ``OSError``. Always false on other platforms.
     """
     if sys.platform != "darwin":
         return False
@@ -283,7 +290,7 @@ def _acl_allows_access(fd: int, target: Path) -> bool:
         code = ctypes.get_errno()
         if code in _NO_ACL_ERRNOS:
             return False
-        raise TokenFileError(f"Cannot read the access control list of {target}: {os.strerror(code)}")
+        raise OSError(code, os.strerror(code))
     try:
         entry = ctypes.c_void_p()
         tag = ctypes.c_int()
