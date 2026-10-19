@@ -794,9 +794,11 @@ What runs anywhere, and in this repository's CI, is the test suite:
   included, and what each case observed: the call's id and name on its first
   delta, the tool result in the answer, reasoning only with the flag and the
   same usage without it, the long prompt's size against the window, and
-  `max_tokens: 8` spending exactly 8 tokens. It needs the repository's
-  environment, from `mise run sync` at the root, and is skipped without it
-  outside CI.
+  `max_tokens: 8` spending exactly 8 tokens. It also runs
+  `conformance.py --api messages` against the same server, whose
+  `/v1/messages` translates onto that chat route, and asserts that table. It
+  needs the repository's environment, from `mise run sync` at the root, and is
+  skipped without it outside CI.
 - `tests/test_conformance.py` starts a scripted OpenAI-compatible stub that
   plays a conforming wire, then breaks one thing per test: tool-call deltas
   without ids, one call where two were asked for, `tool_choice: "required"`
@@ -840,7 +842,8 @@ uv run pytest
 
 `tests/test_conformance.py`, `tests/test_session_load.py` and
 `tests/test_run_gate.py` check the checkers,
-and `tests/test_fake_engine.py` checks SIE's chat route with a scripted model.
+and `tests/test_fake_engine.py` checks SIE's chat and Messages routes with a
+scripted model.
 A model's endpoint is only checked by running `conformance.py` against it.
 
 ## What this does NOT establish

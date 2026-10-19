@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -97,6 +98,24 @@ def _stage_artifact(
         compute_type="bfloat16",
     )
     return declaration, repo_root
+
+
+def _link_through_shared_blob_store(repo_root: Path, relative: str, *, store: Path | None = None) -> Path:
+    """Lay one snapshot file out the way huggingface_hub stores a Xet-backed blob."""
+    snapshot_entry = repo_root / "snapshots" / DERIVED_REVISION / relative
+    content = snapshot_entry.read_bytes()
+    xet_hash = _sha256(b"xet:" + content)
+    store = store if store is not None else repo_root.parent / "blobs"
+    store_entry = store / xet_hash[:2] / xet_hash
+    store_entry.parent.mkdir(parents=True, exist_ok=True)
+    store_entry.write_bytes(content)
+    store_entry.chmod(0o444)
+    repo_blob = repo_root / "blobs" / _sha256(content)[:40]
+    repo_blob.parent.mkdir(exist_ok=True)
+    repo_blob.symlink_to(os.path.relpath(store_entry, repo_blob.parent))
+    snapshot_entry.unlink()
+    snapshot_entry.symlink_to(os.path.relpath(repo_blob, snapshot_entry.parent))
+    return store_entry
 
 
 def _materialize(
@@ -300,6 +319,70 @@ def test_rejects_source_symlink_escaping_repository_cache(tmp_path: Path) -> Non
     model.symlink_to(outside)
 
     with pytest.raises(ValueError, match="escapes"):
+        _materialize(declaration, repo_root, tmp_path / "materialized")
+
+
+def test_accepts_files_hugging_face_keeps_in_its_cache_wide_shared_blob_store(tmp_path: Path) -> None:
+    declaration, repo_root = _stage_artifact(tmp_path / "hub")
+    for relative in ("model.bin", "spiece.model", declaration.manifest_path):
+        _link_through_shared_blob_store(repo_root, relative)
+    model = repo_root / "snapshots" / DERIVED_REVISION / "model.bin"
+    assert model.resolve().is_relative_to(tmp_path / "hub" / "blobs")
+
+    verified = _materialize(declaration, repo_root, tmp_path / "materialized")
+
+    assert verified.artifact_count == 4
+    assert (verified.root / "model.bin").read_bytes() == b"converted model bytes"
+    assert (verified.root / "model.bin").stat().st_ino != model.resolve().stat().st_ino
+
+
+@pytest.mark.parametrize(
+    "relocate",
+    [
+        pytest.param(
+            lambda hub, path: hub.parent / "elsewhere" / "blobs" / path.parent.name / path.name, id="other-cache"
+        ),
+        pytest.param(lambda hub, path: hub / "blobs" / path.name, id="no-prefix-directory"),
+        pytest.param(lambda hub, path: hub / "blobs" / "zz" / path.name, id="wrong-prefix"),
+        pytest.param(lambda hub, path: hub / "blobs" / path.parent.name / "model.bin", id="not-a-content-hash"),
+        pytest.param(lambda hub, path: hub / "other" / path.parent.name / path.name, id="other-directory"),
+    ],
+)
+def test_rejects_source_outside_the_shared_blob_store_layout(
+    tmp_path: Path, relocate: Callable[[Path, Path], Path]
+) -> None:
+    hub = tmp_path / "hub"
+    declaration, repo_root = _stage_artifact(hub)
+    store_entry = _link_through_shared_blob_store(repo_root, "model.bin")
+    moved = relocate(hub, store_entry)
+    moved.parent.mkdir(parents=True, exist_ok=True)
+    store_entry.rename(moved)
+    repo_blob = next((repo_root / "blobs").iterdir())
+    repo_blob.unlink()
+    repo_blob.symlink_to(os.path.relpath(moved, repo_blob.parent))
+
+    with pytest.raises(ValueError, match=r"escapes its repository cache: 'model\.bin'"):
+        _materialize(declaration, repo_root, tmp_path / "materialized")
+
+
+def test_rejects_a_shared_blob_store_linked_from_outside_the_cache(tmp_path: Path) -> None:
+    hub = tmp_path / "hub"
+    declaration, repo_root = _stage_artifact(hub)
+    outside = tmp_path / "outside-store"
+    outside.mkdir()
+    (hub / "blobs").symlink_to(outside, target_is_directory=True)
+    _link_through_shared_blob_store(repo_root, "model.bin")
+
+    with pytest.raises(ValueError, match=r"escapes its repository cache: 'model\.bin'"):
+        _materialize(declaration, repo_root, tmp_path / "materialized")
+
+
+def test_rejects_manifest_outside_the_repository_cache_and_shared_blob_store(tmp_path: Path) -> None:
+    hub = tmp_path / "hub"
+    declaration, repo_root = _stage_artifact(hub)
+    _link_through_shared_blob_store(repo_root, declaration.manifest_path, store=tmp_path / "elsewhere" / "blobs")
+
+    with pytest.raises(ValueError, match="manifest is not a safe regular file"):
         _materialize(declaration, repo_root, tmp_path / "materialized")
 
 

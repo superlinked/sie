@@ -5,6 +5,7 @@
 #   SIE_BASE_URL=https://... SIE_API_KEY=sk-sie-... ./run_gate.sh      # SIE Cloud (recipes/cloud.sh)
 #   SIE_BASE_URL=https://... SIE_API_KEY=... SIE_MODEL=... \
 #     SIE_CONTEXT_TOKENS=... SIE_OUTPUT_TOKENS=... ./run_gate.sh cluster  # your gateway (recipes/cluster.sh)
+#   ./run_gate.sh laptop     # sie-server on this machine (recipes/laptop.sh)
 #
 # Needs claude and uv on PATH. The fixture is the OpenCode example's, unchanged. Writes
 # run-output/gate-<timestamp>-<suffix>/ with the worked copy of the fixture, Claude Code's
@@ -12,8 +13,9 @@
 #
 # Claude Code runs with --bare and an empty config directory, so no user settings, hooks,
 # MCP servers or CLAUDE.md files take part. Its key comes from an apiKeyHelper that prints
-# SIE_API_KEY. The run is bounded: GATE_TURNS turns (default 50), and a run still going
-# after GATE_DEADLINE_SECONDS (default 1800) is stopped and fails.
+# SIE_API_KEY, which the laptop recipe defaults. The run is bounded: GATE_TURNS turns
+# (default 50), and a run still going after GATE_DEADLINE_SECONDS (default 1800) is stopped
+# and fails.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,7 +23,7 @@ FIXTURE="$HERE/../coding-agent-opencode/fixture"
 RECIPE="${1:-cloud}"
 ENV_FILE="$HERE/recipes/$RECIPE.sh"
 if [[ ! -f "$ENV_FILE" ]]; then
-    echo "unknown recipe '$RECIPE'; pick cloud or cluster" >&2
+    echo "unknown recipe '$RECIPE'; pick cloud, cluster or laptop" >&2
     exit 2
 fi
 for tool in claude uv; do
@@ -38,11 +40,12 @@ for var in GATE_TURNS GATE_DEADLINE_SECONDS; do
         exit 2
     fi
 done
-REQUIRED=(SIE_BASE_URL SIE_API_KEY)
-if [[ "$RECIPE" == "cluster" ]]; then
-    REQUIRED+=(SIE_MODEL SIE_CONTEXT_TOKENS SIE_OUTPUT_TOKENS)
-fi
-for var in "${REQUIRED[@]}"; do
+case "$RECIPE" in
+    cloud) REQUIRED=(SIE_BASE_URL SIE_API_KEY) ;;
+    cluster) REQUIRED=(SIE_BASE_URL SIE_API_KEY SIE_MODEL SIE_CONTEXT_TOKENS SIE_OUTPUT_TOKENS) ;;
+    *) REQUIRED=() ;;
+esac
+for var in ${REQUIRED[@]+"${REQUIRED[@]}"}; do
     if [[ -z "${!var:-}" ]]; then
         echo "$var is not set" >&2
         exit 2
