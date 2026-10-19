@@ -1107,8 +1107,8 @@ containers, set `SIE_AUTH_TOKEN` yourself instead. The server refuses a token
 directory that another user owns or can write to, and a token file that is a
 symbolic link, not a regular file, hard-linked, owned by another user, or
 readable by others. On macOS it also refuses a token directory or file whose
-access control list has an entry that allows access (`ls -le` lists the
-entries); deny entries, such as the one macOS puts on the home folder, are
+access control list has an entry that allows access (`ls -led <path>` lists
+the entries); deny entries, such as the one macOS puts on the home folder, are
 accepted. To rotate a generated token, delete `auth-token` from
 `SIE_DATA_DIR` and restart the server. In Docker, keep the token across
 containers with a volume:

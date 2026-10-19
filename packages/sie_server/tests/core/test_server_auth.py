@@ -48,6 +48,15 @@ OTHER = "another-token-value"
 _MACOS_ACL = pytest.mark.skipif(sys.platform != "darwin", reason="macOS access control lists, set with chmod +a")
 
 
+@pytest.fixture
+def add_acl_entry(tmp_path: Path) -> Iterator[Callable[[Path, str], None]]:
+    def add(path: Path, entry: str) -> None:
+        subprocess.run(["/bin/chmod", "+a", entry, str(path)], check=True)  # noqa: S603
+
+    yield add
+    subprocess.run(["/bin/chmod", "-RN", str(tmp_path)], check=True)  # noqa: S603
+
+
 @pytest.fixture(autouse=True)
 def _clean_auth_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     saved = dict(os.environ)
@@ -169,11 +178,12 @@ class TestPersistedToken:
         assert second.token == first.token
 
     def test_a_token_others_can_read_is_refused(self, tmp_path: Path) -> None:
-        stored = load_or_create_token(tmp_path)
+        directory = tmp_path / "Application Support"
+        stored = load_or_create_token(directory)
         stored.path.chmod(0o644)
 
-        with pytest.raises(TokenFileError, match="chmod 600"):
-            read_stored_token(tmp_path)
+        with pytest.raises(TokenFileError, match=re.escape(f"(chmod 600 '{stored.path}')")):
+            read_stored_token(directory)
 
     def test_concurrent_first_starts_agree_on_one_token(self, tmp_path: Path) -> None:
         for trial in range(10):
@@ -544,57 +554,93 @@ class TestPersistedToken:
 
     @pytest.mark.parametrize("mode", [0o770, 0o707, 0o777])
     def test_a_directory_others_can_write_is_refused(self, tmp_path: Path, mode: int) -> None:
-        directory = tmp_path / "shared"
+        directory = tmp_path / "shared dir"
         directory.mkdir()
         directory.chmod(mode)
 
-        with pytest.raises(TokenFileError, match="chmod 700"):
+        with pytest.raises(TokenFileError, match=re.escape(f"(chmod 700 '{directory}')")):
             load_or_create_token(directory)
         assert not token_path(directory).exists()
 
     @_MACOS_ACL
-    def test_a_directory_with_an_access_control_list_entry_that_allows_access_is_refused(self, tmp_path: Path) -> None:
-        existing = tmp_path / "existing"
+    def test_a_directory_with_an_access_control_list_entry_that_allows_access_is_refused(
+        self, tmp_path: Path, add_acl_entry: Callable[[Path, str], None]
+    ) -> None:
+        existing = tmp_path / "Application Support"
         load_or_create_token(existing)
         empty = tmp_path / "empty"
         empty.mkdir(mode=0o700)
         for directory in (existing, empty):
-            _add_acl_entry(directory, "everyone deny delete")
-            _add_acl_entry(directory, "everyone allow add_file,add_subdirectory,delete_child")
+            add_acl_entry(directory, "everyone deny delete")
+            add_acl_entry(directory, "everyone allow add_file,add_subdirectory,delete_child")
 
-        with pytest.raises(TokenFileError, match=re.escape(f"chmod -a# <number> {existing}, or set SIE_DATA_DIR")):
+        with pytest.raises(TokenFileError) as refused:
             read_stored_token(existing)
+        quoted = f"'{existing}'"
+        message = str(refused.value)
+        assert f"List the entries with ls -led {quoted} and remove" in message
+        assert f'remove each allow entry with chmod -a "<entry>" {quoted}, giving the entry' in message
         with pytest.raises(TokenFileError, match="entry that allows access"):
             load_or_create_token(empty)
         assert not token_path(empty).exists()
 
     @_MACOS_ACL
-    def test_deny_entries_like_the_home_folder_default_are_accepted(self, tmp_path: Path) -> None:
+    def test_removing_each_allow_entry_by_its_text_keeps_the_deny_entries(
+        self, tmp_path: Path, add_acl_entry: Callable[[Path, str], None]
+    ) -> None:
+        add_acl_entry(tmp_path, "everyone deny delete,directory_inherit")
+        add_acl_entry(tmp_path, "everyone allow list,directory_inherit")
+        directory = tmp_path / "sie"
+        directory.mkdir(mode=0o700)
+        add_acl_entry(directory, "user:nobody allow list")
+        add_acl_entry(directory, "user:daemon allow search")
+        with pytest.raises(TokenFileError, match="without its number or the word inherited"):
+            load_or_create_token(directory)
+
+        for entry in _acl_entries(directory):
+            if " allow " in entry:
+                subprocess.run(  # noqa: S603
+                    ["/bin/chmod", "-a", entry.replace(" inherited ", " "), str(directory)], check=True
+                )
+
+        assert _acl_entries(directory) == ["group:everyone inherited deny delete,directory_inherit"]
+        assert load_or_create_token(directory).created
+
+    @_MACOS_ACL
+    def test_deny_entries_like_the_home_folder_default_are_accepted(
+        self, tmp_path: Path, add_acl_entry: Callable[[Path, str], None]
+    ) -> None:
         directory = tmp_path / "home"
         directory.mkdir(mode=0o700)
-        _add_acl_entry(directory, "everyone deny delete")
+        add_acl_entry(directory, "everyone deny delete")
 
         stored = load_or_create_token(directory)
-        _add_acl_entry(stored.path, "everyone deny delete")
+        add_acl_entry(stored.path, "everyone deny delete")
 
         assert stored.created
         assert read_stored_token(directory) == stored.token
 
     @_MACOS_ACL
-    def test_a_token_file_with_an_access_control_list_entry_that_allows_access_is_refused(self, tmp_path: Path) -> None:
-        stored = load_or_create_token(tmp_path)
-        _add_acl_entry(stored.path, "everyone allow read")
+    def test_a_token_file_with_an_access_control_list_entry_that_allows_access_is_refused(
+        self, tmp_path: Path, add_acl_entry: Callable[[Path, str], None]
+    ) -> None:
+        directory = tmp_path / "Application Support"
+        stored = load_or_create_token(directory)
+        add_acl_entry(stored.path, "everyone allow read")
 
-        with pytest.raises(TokenFileError, match=re.escape(f"Delete {stored.path} to have sie-server generate")):
-            read_stored_token(tmp_path)
+        with pytest.raises(TokenFileError) as refused:
+            read_stored_token(directory)
+        message = str(refused.value)
+        assert f"so others may have read the token. Delete the file (rm '{stored.path}')" in message
+        assert f"Removing the entries with chmod -N '{stored.path}' instead keeps the current token." in message
 
     @_MACOS_ACL
     def test_a_token_file_that_inherited_an_entry_is_refused_after_the_directory_is_cleared(
-        self, tmp_path: Path
+        self, tmp_path: Path, add_acl_entry: Callable[[Path, str], None]
     ) -> None:
         directory = tmp_path / "sie"
         directory.mkdir(mode=0o700)
-        _add_acl_entry(directory, "everyone allow read,file_inherit")
+        add_acl_entry(directory, "everyone allow read,file_inherit")
         token_path(directory).write_text(f"{TOKEN}\n")
         token_path(directory).chmod(0o600)
         subprocess.run(["/bin/chmod", "-N", str(directory)], check=True)  # noqa: S603
@@ -617,9 +663,9 @@ class TestPersistedToken:
 
     @_MACOS_ACL
     def test_an_access_control_list_entry_of_unknown_kind_counts_as_allowing_access(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, add_acl_entry: Callable[[Path, str], None]
     ) -> None:
-        _add_acl_entry(tmp_path, "everyone deny delete")
+        add_acl_entry(tmp_path, "everyone deny delete")
         monkeypatch.setattr(server_auth._libsystem(), "acl_get_tag_type", lambda entry, tag: -1)
 
         with pytest.raises(TokenFileError, match="entry that allows access"):
@@ -1125,8 +1171,11 @@ def _refuse_unlink(target: Path, monkeypatch: pytest.MonkeyPatch, code: int) -> 
     monkeypatch.setattr(Path, "unlink", refusing_unlink)
 
 
-def _add_acl_entry(path: Path, entry: str) -> None:
-    subprocess.run(["/bin/chmod", "+a", entry, str(path)], check=True)  # noqa: S603
+def _acl_entries(path: Path) -> list[str]:
+    listing = subprocess.run(  # noqa: S603
+        ["/bin/ls", "-led", str(path)], capture_output=True, text=True, check=True
+    ).stdout
+    return [line.split(": ", 1)[1] for line in listing.splitlines()[1:]]
 
 
 def _capture(call: Callable[[], object], outcome: list[BaseException]) -> None:
