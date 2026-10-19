@@ -274,8 +274,8 @@ def _drop_temporary_links(path: Path, fd: int, token: os.stat_result) -> bool:
     scan: one link after the scan means the temporary links are gone, and an
     unchanged count equal to the temporary links found plus one means they are
     the only extra links. A count that changes during the scan means a
-    concurrent start is still adding or removing its link, so the scan is
-    repeated a few times before the token is refused.
+    concurrent start is still removing its link, so the scan is repeated a
+    few times before the token is refused.
     """
     before = token.st_nlink
     for _ in range(_LINK_SCAN_ATTEMPTS):
@@ -290,7 +290,7 @@ def _drop_temporary_links(path: Path, fd: int, token: os.stat_result) -> bool:
         after = os.fstat(fd).st_nlink
         if after == 1:
             return True
-        if after == before == len(linked) + 1:
+        if after == before == len({entry.name for entry in linked}) + 1:
             for entry in linked:
                 try:
                     entry.unlink(missing_ok=True)

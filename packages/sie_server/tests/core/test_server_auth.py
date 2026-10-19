@@ -282,7 +282,33 @@ class TestPersistedToken:
 
         with pytest.raises(TokenFileError, match="hard links"):
             read_stored_token(tmp_path)
-        assert 1 < len(scans) <= 5
+        assert len(scans) == server_auth._LINK_SCAN_ATTEMPTS
+
+    @pytest.mark.parametrize("foreign", [False, True], ids=["temporary-only", "with-foreign-link"])
+    def test_a_temporary_link_listed_twice_by_the_scan_counts_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, foreign: bool
+    ) -> None:
+        stored = load_or_create_token(tmp_path)
+        if foreign:
+            os.link(stored.path, tmp_path / "copy")
+        staged = tmp_path / ".auth-token.sie-server-0123456789abcdef"
+        os.link(stored.path, staged)
+
+        def scan_listing_each_entry_twice(directory: Path, name: re.Pattern[str]) -> Iterator[Any]:
+            for found in list(owned_files(directory, name)):
+                yield found
+                yield found
+
+        monkeypatch.setattr(server_auth, "owned_files", scan_listing_each_entry_twice)
+
+        if foreign:
+            with pytest.raises(TokenFileError, match="hard links"):
+                read_stored_token(tmp_path)
+            assert (tmp_path / "copy").exists()
+            assert staged.exists()
+        else:
+            assert read_stored_token(tmp_path) == stored.token
+            assert not staged.exists()
 
     def test_a_symbolic_link_named_like_a_temporary_file_does_not_hide_a_foreign_link(self, tmp_path: Path) -> None:
         stored = load_or_create_token(tmp_path)
