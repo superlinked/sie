@@ -17,6 +17,9 @@ executable.
   key — a silently renamed meter — without also rejecting the settled charge
   that legitimately rides alongside it. See issue #3063 for the failure this
   exists to prevent.
+  `optional_settled_charge_fields` lists the settled fields a settled response
+  may omit; `credits_charged_decimal` is the charge with up to six decimals as
+  a string such as `"0.140000"`, next to the integer `credits_charged`.
 - `model_info.json` — the field set of one `/v1/models` entry, split into
   `typed` (an SDK `ModelInfo` MUST declare it) and `excluded` (an SDK MUST NOT
   declare it, with the reason recorded per key).

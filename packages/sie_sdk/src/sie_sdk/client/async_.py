@@ -95,6 +95,7 @@ from sie_sdk.types import (
     StatusMessage,
     SystemOneResult,
     WorkerInfo,
+    parse_credits_decimal,
 )
 
 from ._shared import (
@@ -295,6 +296,9 @@ def _parse_generate_result_async(
         settled = settled_charge_from_usage(usage)
         if settled is not None:
             parsed_usage["credits_charged"], parsed_usage["rate_book_version"] = settled
+            credits_decimal = parse_credits_decimal(usage.get("credits_charged_decimal"))
+            if credits_decimal is not None:
+                parsed_usage["credits_charged_decimal"] = credits_decimal
         result["usage"] = parsed_usage
     attempt_id = data.get("attempt_id")
     if isinstance(attempt_id, str):
@@ -3624,6 +3628,7 @@ class _AsyncJobs(_AsyncNamespace):
                 "state": state,
                 "total_items": total_items,
                 "settled_credits": job.get("settled_credits"),
+                "settled_credits_decimal": parse_credits_decimal(job.get("settled_credits_decimal")),
                 "chunks": chunks,
                 "retrieved": retrieved,
                 "dims": dims,

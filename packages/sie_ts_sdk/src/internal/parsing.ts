@@ -98,6 +98,13 @@ export function validateRequestId(value: unknown): string | undefined {
   return undefined;
 }
 
+const CREDITS_DECIMAL = /^(0|[1-9]\d*)\.\d{6}$/;
+
+/** `value` when it is a six-decimal credit string such as `"0.140000"`, else `undefined`. */
+export function parseCreditsDecimal(value: unknown): string | undefined {
+  return typeof value === "string" && CREDITS_DECIMAL.test(value) ? value : undefined;
+}
+
 function parseNonnegativeMeterHeader(headers: Headers, name: string): number | undefined {
   const raw = headers.get(name);
   if (raw === null || !/^(0|[1-9]\d*)$/.test(raw)) return undefined;
@@ -183,9 +190,17 @@ export function parseRequestMetadata(
     usage.rateBookVersion = settled.rateBookVersion;
     metadata.creditsDebited = settled.creditsCharged;
     metadata.rateBookVersion = settled.rateBookVersion;
+    if (settled.creditsChargedDecimal !== undefined) {
+      usage.creditsChargedDecimal = settled.creditsChargedDecimal;
+      metadata.creditsDebitedDecimal = settled.creditsChargedDecimal;
+    }
   } else {
     const creditsDebited = parseNonnegativeMeterHeader(headers, "x-sie-credits-debited");
-    if (creditsDebited !== undefined) metadata.creditsDebited = creditsDebited;
+    if (creditsDebited !== undefined) {
+      metadata.creditsDebited = creditsDebited;
+      const decimal = parseCreditsDecimal(headers.get("x-sie-credits-debited-decimal"));
+      if (decimal !== undefined) metadata.creditsDebitedDecimal = decimal;
+    }
   }
   if (Object.keys(usage).length > 0) metadata.usage = usage;
   return Object.keys(metadata).length > 0 ? metadata : undefined;
@@ -201,13 +216,13 @@ export function parseRequestMetadata(
  */
 function settledChargeFromBody(
   body: unknown,
-): { creditsCharged: number; rateBookVersion: string } | undefined {
+): { creditsCharged: number; rateBookVersion: string; creditsChargedDecimal?: string } | undefined {
   if (typeof body !== "object" || body === null || Array.isArray(body)) return undefined;
-  const { creditsCharged, rateBookVersion } = settledChargeFields(
+  const { creditsCharged, rateBookVersion, creditsChargedDecimal } = settledChargeFields(
     (body as Record<string, unknown>).usage,
   );
   if (creditsCharged === undefined || rateBookVersion === undefined) return undefined;
-  return { creditsCharged, rateBookVersion };
+  return { creditsCharged, rateBookVersion, creditsChargedDecimal };
 }
 
 /**
@@ -952,13 +967,19 @@ function describeType(value: unknown): string {
 export function settledChargeFields(usage: unknown): {
   creditsCharged?: number;
   rateBookVersion?: string;
+  creditsChargedDecimal?: string;
 } {
   if (typeof usage !== "object" || usage === null || Array.isArray(usage)) return {};
   const credits = (usage as Record<string, unknown>).credits_charged;
   const version = (usage as Record<string, unknown>).rate_book_version;
   if (typeof credits !== "number" || !Number.isSafeInteger(credits) || credits < 0) return {};
   if (typeof version !== "string" || version.length === 0) return {};
-  return { creditsCharged: credits, rateBookVersion: version };
+  const decimal = parseCreditsDecimal((usage as Record<string, unknown>).credits_charged_decimal);
+  return {
+    creditsCharged: credits,
+    rateBookVersion: version,
+    ...(decimal !== undefined ? { creditsChargedDecimal: decimal } : {}),
+  };
 }
 
 /** `usage.prompt_tokens_details.cached_tokens`, or an empty object when absent or malformed. */
