@@ -417,6 +417,7 @@ def test_release_workflows_are_pinned_and_fail_closed() -> None:
     "retention",
     [
         "5",
+        "5 # too short for release recovery",
         "29",
         "${{ github.event_name == 'release' && 5 || 30 }}",
         "${{ github.event_name == 'release' && 29 || 5 }}",
@@ -428,7 +429,16 @@ def test_artifact_retention_rejects_short_or_unverified_release_recovery(retenti
     assert contract.artifact_retention_errors("release-docker.yml", f"          retention-days: {retention}\n")
 
 
-@pytest.mark.parametrize("retention", ["30", "90", "${{ github.event_name == 'release' && 30 || 5 }}"])
+@pytest.mark.parametrize(
+    "retention",
+    [
+        "30",
+        "30 # retain release recovery artifacts",
+        "90",
+        "${{ github.event_name == 'release' && 30 || 5 }}",
+        "${{ github.event_name == 'release' && 30 || 5 }} # shorter rehearsals",
+    ],
+)
 def test_artifact_retention_allows_full_release_recovery(retention):
     assert contract.artifact_retention_errors("release-docker.yml", f"          retention-days: {retention}\n") == []
 

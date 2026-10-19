@@ -542,7 +542,7 @@ def release_queue_errors(top: str, ci: str) -> list[str]:
 def artifact_retention_errors(name: str, text: str) -> list[str]:
     errors = []
     for retention in re.findall(r"^\s*retention-days:\s*([^\n]*)$", text, re.MULTILINE):
-        retention = retention.strip()
+        retention = re.split(r"[ \t]+#", retention, maxsplit=1)[0].strip()
         if retention == ARTIFACT_RETENTION_EXPRESSION:
             continue
         if retention.isdecimal() and int(retention) >= ARTIFACT_RETENTION_DAYS:
