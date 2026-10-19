@@ -424,7 +424,8 @@ def openapi_export(
     # init, model registry, telemetry, or NATS). NOTE: the direct-container convenience routes
     # are intentionally excluded from the committed openapi.json — the ``openai_local`` router
     # (/v1/chat/completions + /v1/rerank) proxies managed MLX/SGLang children for single-node
-    # serving, while the Rust gateway owns the published production chat contract. The
+    # serving, and /v1/messages is translated onto it, while the Rust gateway owns the
+    # published production chat and Messages contracts. The
     # SIE-native ``generate`` route is part of the worker contract and is published here.
     app_ = FastAPI(
         title="SIE Server",

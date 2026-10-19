@@ -67,7 +67,11 @@ env | grep -E '^(ANTHROPIC|CLAUDE_CODE|CLAUDE_CONFIG_DIR|API_TIMEOUT_MS)' | sort
 
 
 def _gate(
-    tmp_path: Path, agent: str, recipe: str = "cloud", extra_env: dict[str, str] | None = None
+    tmp_path: Path,
+    agent: str,
+    recipe: str = "cloud",
+    extra_env: dict[str, str] | None = None,
+    unset: tuple[str, ...] = (),
 ) -> tuple[int, str, Path]:
     root = tmp_path / "examples"
     example = root / "coding-agent-claude-code"
@@ -102,6 +106,8 @@ def _gate(
             **(extra_env or {}),
         }
     )
+    for name in unset:
+        env.pop(name, None)
     completed = subprocess.run(
         ["bash", str(example / "run_gate.sh"), recipe],
         capture_output=True,
@@ -159,10 +165,44 @@ def test_the_cluster_recipe_needs_the_model_and_window(tmp_path: Path, missing: 
     assert f"{missing} is not set" in output
 
 
+def test_the_laptop_recipe_defaults_to_the_local_server_and_its_32k_profile(tmp_path: Path) -> None:
+    unset = ("SIE_BASE_URL", "SIE_API_KEY")
+    status, output, record = _gate(tmp_path, f"{FIX}\ncat <<'EOF'\n{_events()}\nEOF", "laptop", unset=unset)
+    assert status == 0, output
+    env = dict(line.split("=", 1) for line in (record / "env").read_text().splitlines())
+    assert env["ANTHROPIC_BASE_URL"] == "http://localhost:8080"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "local"
+    assert env["ANTHROPIC_MODEL"] == "Qwen/Qwen3.5-4B:long-context"
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "Qwen/Qwen3.5-4B:long-context"
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "Qwen/Qwen3.5-4B:long-context"
+    assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "32768"
+    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "4096"
+    assert env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] == "1"
+    assert "ANTHROPIC_API_KEY" not in env
+
+
+def test_the_laptop_recipe_takes_the_server_key_and_model_from_the_environment(tmp_path: Path) -> None:
+    extra = {
+        "SIE_BASE_URL": "http://127.0.0.1:9000",
+        "SIE_API_KEY": "server-token",
+        "SIE_MODEL": "sie-fake:chat",
+        "SIE_CONTEXT_TOKENS": "131072",
+        "SIE_OUTPUT_TOKENS": "1024",
+    }
+    status, output, record = _gate(tmp_path, f"{FIX}\ncat <<'EOF'\n{_events()}\nEOF", "laptop", extra)
+    assert status == 0, output
+    env = dict(line.split("=", 1) for line in (record / "env").read_text().splitlines())
+    assert env["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:9000"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "server-token"
+    assert env["ANTHROPIC_MODEL"] == "sie-fake:chat"
+    assert env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "131072"
+    assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "1024"
+
+
 def test_an_unknown_recipe_is_refused(tmp_path: Path) -> None:
-    status, output, _ = _gate(tmp_path, "exit 0", "laptop")
+    status, output, _ = _gate(tmp_path, "exit 0", "desktop")
     assert status == 2
-    assert "unknown recipe 'laptop'" in output
+    assert "unknown recipe 'desktop'; pick cloud, cluster or laptop" in output
 
 
 def test_no_change_fails_on_the_seeded_tests(tmp_path: Path) -> None:

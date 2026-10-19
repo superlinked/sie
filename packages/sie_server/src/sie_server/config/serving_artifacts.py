@@ -7,6 +7,7 @@ import errno
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -42,6 +43,8 @@ _ROLE_PATTERN = r"^[a-z][a-z0-9_.-]{0,63}$"
 _MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 _MAX_TOKENIZER_CONFIG_BYTES = 1024 * 1024
 _HASH_CHUNK_BYTES = 1024 * 1024
+_SHARED_BLOB_STORE = "blobs"
+_SHARED_BLOB_NAME = re.compile(r"[0-9a-f]{64}")
 
 
 def _validate_relative_posix_path(value: str, *, label: str) -> str:
@@ -250,6 +253,21 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _is_cache_owned_file(resolved: Path, repo_root: Path) -> bool:
+    if not resolved.is_file():
+        return False
+    if resolved.is_relative_to(repo_root):
+        return True
+    # huggingface_hub keeps one copy of each Xet-backed blob per cache, at
+    # <cache>/blobs/<first two hex digits>/<xet hash>, and links the
+    # repository's blobs/<etag> entry to it.
+    return (
+        resolved.parent.parent == repo_root.parent / _SHARED_BLOB_STORE
+        and _SHARED_BLOB_NAME.fullmatch(resolved.name) is not None
+        and resolved.parent.name == resolved.name[:2]
+    )
+
+
 def _load_manifest(
     declaration: ServingArtifactDeclaration,
     *,
@@ -273,7 +291,7 @@ def _load_manifest(
         resolved_manifest = manifest_path.resolve(strict=True)
     except OSError as exc:
         raise ValueError("derived serving artifact manifest does not exist") from exc
-    if not resolved_manifest.is_file() or not resolved_manifest.is_relative_to(repo_root):
+    if not _is_cache_owned_file(resolved_manifest, repo_root):
         raise ValueError("derived serving artifact manifest is not a safe regular file")
     if resolved_manifest.stat().st_size > _MAX_MANIFEST_BYTES:
         raise ValueError("derived serving artifact manifest exceeds the size limit")
@@ -397,7 +415,7 @@ def _safe_source_file(snapshot_root: Path, repo_root: Path, artifact: ServingArt
         resolved = source_path.resolve(strict=True)
     except OSError as exc:
         raise ValueError(f"derived serving artifact is missing: {artifact.path!r}") from exc
-    if not resolved.is_file() or not resolved.is_relative_to(repo_root):
+    if not _is_cache_owned_file(resolved, repo_root):
         raise ValueError(f"derived serving artifact escapes its repository cache: {artifact.path!r}")
     file_stat = resolved.stat()
     if file_stat.st_size != artifact.size_bytes:

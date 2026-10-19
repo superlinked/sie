@@ -13,6 +13,11 @@ cap refuses the 32,000 tokens a 64 KiB call needs, so ``long_tool_call`` is
 recorded as not run. The fake does not read
 the long prompt, so the needle is never found; the case passes on the prompt
 size and the answer, as it does for any model.
+
+The same server answers ``conformance.py --api messages``: ``/v1/messages``
+on ``sie-server`` translates each request onto the chat route above and the
+answer back, so the Messages cases check that translation over the same
+scripted turns.
 """
 
 from __future__ import annotations
@@ -181,3 +186,73 @@ def test_tool_choice_required_forces_a_call(report: dict[str, Any]) -> None:
     observed = _cases(report)["tool_choice_required"]["observed"]
     assert observed["support"] == "supported"
     assert json.loads(observed["tool_calls"][0]["arguments"]) == {"city": "Say hello."}
+
+
+@pytest.fixture(scope="module")
+def messages_report(server: str) -> dict[str, Any]:
+    return conformance.run_messages(f"{server}/v1", "", MODEL)
+
+
+def test_each_messages_case_against_the_fake(messages_report: dict[str, Any]) -> None:
+    statuses = {name: case["status"] for name, case in _cases(messages_report).items()}
+    assert statuses == {
+        "streaming_tool_use": "pass",
+        "parallel_tool_use": "fail",
+        "tool_result_round_trip": "pass",
+        "prompt_above_64k_tokens": "pass",
+        "stop_reason_end_turn": "pass",
+        "stop_reason_tool_use": "pass",
+        "stop_reason_max_tokens": "pass",
+        "usage_on_message_delta": "pass",
+        "thinking_blocks": "pass",
+        "tool_choice_any": "recorded",
+        "buffered_message": "pass",
+        "inert_fields_accepted": "pass",
+        "effort_refusal": "pass",
+        "system_turn_refusal": "pass",
+        "unknown_model": "pass",
+        "event_grammar": "pass",
+        "ping_events": "recorded",
+        "count_tokens": "recorded",
+    }, messages_report["cases"]
+    assert messages_report["served_by"] == "local"
+    assert messages_report["warm_up"]["error"] is None
+
+
+def test_the_tool_use_block_streams_the_scripted_call(messages_report: dict[str, Any]) -> None:
+    observed = _cases(messages_report)["streaming_tool_use"]["observed"]
+    [call] = observed["tool_calls"]
+    question = "What is the weather in Paris right now? Use the get_weather tool."
+    assert call["first_delta_has_id_and_name"] is True
+    assert json.loads(call["arguments"]) == {"city": question}
+    assert observed["stop_reason"] == "tool_use"
+    assert observed["reasoning_deltas"] > 0
+
+
+def test_messages_usage_is_the_chat_usage_translated(messages_report: dict[str, Any]) -> None:
+    cases = _cases(messages_report)
+    usage = cases["usage_on_message_delta"]["observed"]["usage"]
+    long_prompt = cases["prompt_above_64k_tokens"]["observed"]["usage"]
+    assert usage["input_tokens"] > 0
+    assert usage["output_tokens"] > 0
+    assert usage["cache_creation_input_tokens"] == 0
+    assert cases["usage_on_message_delta"]["observed"]["message_start_usage"]["input_tokens"] == 0
+    assert conformance.LONG_PROMPT_MIN_TOKENS < long_prompt["input_tokens"] < WINDOW
+    assert cases["stop_reason_max_tokens"]["observed"]["usage"]["output_tokens"] == 8
+
+
+def test_thinking_blocks_come_back_only_when_asked(messages_report: dict[str, Any]) -> None:
+    observed = _cases(messages_report)["thinking_blocks"]["observed"]
+    assert observed["with_thinking"]["reasoning_deltas"] > 0
+    assert observed["without_thinking"]["reasoning_deltas"] == 0
+    assert observed["non_streamed_with_thinking"]["reasoning_chars"] == observed["with_thinking"]["reasoning_chars"]
+
+
+def test_the_messages_refusals_use_the_anthropic_wording(messages_report: dict[str, Any]) -> None:
+    cases = _cases(messages_report)
+    assert cases["effort_refusal"]["detail"] == (
+        "400 invalid_request_error: output_config.effort: Extra inputs are not permitted"
+    )
+    assert cases["unknown_model"]["observed"]["error"]["type"] == "not_found_error"
+    assert cases["count_tokens"]["observed"]["status"] == 404
+    assert cases["count_tokens"]["observed"]["body"]["error"]["type"] == "not_found_error"
