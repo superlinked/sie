@@ -101,6 +101,9 @@ uv run --project ../coding-agent-opencode python ../coding-agent-opencode/confor
 ./run_gate.sh laptop
 ```
 
+Both were run on one Apple Silicon machine with the MLX backend; see
+[the recorded result](#laptop-apple-silicon-recorded).
+
 ## The recipe
 
 `recipes/cloud.sh` in full:
@@ -219,6 +222,78 @@ Busy refusals are retried as in the chat check: a `429` or `503`, or an
 
 ## What result to expect
 
+### Laptop, Apple Silicon, recorded
+
+`Qwen/Qwen3.5-4B:long-context` on an Apple M3 Max with 48 GB under macOS
+15.7, MLX backend (`mlx-community/Qwen3.5-4B-4bit`), `sie-server` from this
+repository started with `mise run serve -- -b sglang --host 127.0.0.1`, Claude
+Code 2.1.300, 2026-10-19.
+
+The conformance check:
+
+```
+  streaming_tool_use       pass      1 tool_use: get_weather({"city": "Paris"}); 1 input_json_delta; stop_reason=tool_use
+  parallel_tool_use        pass      2 tool_use in one turn: get_weather({"city": "Paris"}), get_weather({"city": "Tokyo"})
+  tool_result_round_trip   pass      final answer used the tool result: 'The weather in Paris is currently overcast with a temperature of 18°C.'
+  prompt_above_64k_tokens  pass      74847 prompt tokens accepted and answered; needle found
+  stop_reason_end_turn     pass      stop_reason=end_turn after 'ready'
+  stop_reason_tool_use     pass      stop_reason=tool_use on the tool turn
+  stop_reason_max_tokens   pass      stop_reason=max_tokens at max_tokens=8 (output_tokens=8)
+  usage_on_message_delta   pass      message_delta carries usage {'input_tokens': 4, 'cache_creation_input_tokens': 0, 'cache_read_input_tokens': 16, 'output_tokens': 2}
+  thinking_blocks          recorded  no thinking block came back; the model did not reason here or reasons privately
+  tool_choice_any          recorded  refused: 400 invalid_request_error: tool_choice: 'tool_choice' must be 'auto' or 'none' on this device, which cannot force a tool call
+  buffered_message         pass      stop_reason=end_turn, usage {'input_tokens': 20, 'cache_creation_input_tokens': 0, 'cache_read_input_tokens': 0, 'output_tokens': 2}
+  inert_fields_accepted    pass      metadata, cache_control and anthropic-beta accepted
+  effort_refusal           pass      400 invalid_request_error: output_config.effort: Extra inputs are not permitted
+  system_turn_refusal      pass      400 invalid_request_error: messages.1.role: role "system" is not supported in messages; use the top-level system parameter
+  unknown_model            pass      404 not_found_error: Model 'sie-conformance/no-such-model' not found
+  event_grammar            pass      9 streams: message_start, one block at a time, message_delta then message_stop
+  ping_events              recorded  9 ping events across the streams
+  count_tokens             recorded  not served: 404; Claude Code then estimates locally
+
+14 pass, 0 fail, 4 recorded
+```
+
+- The profile does not ask the model to reason, so no thinking came back.
+- The MLX backend cannot force a tool call, so `tool_choice: any` is
+  refused. Claude Code does not send it.
+- The pings came during the 74,847-token prompt, which the server accepted
+  although the profile declares a 32,768-token window. Set
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the declared window, as the recipe does,
+  so Claude Code compacts before that.
+- Prompt tokens served from the prefix cache come back as
+  `cache_read_input_tokens`.
+
+`./run_gate.sh laptop` passed three times out of three on the same server.
+The first run, Claude Code's JSON event lines left out:
+
+```
+== before: the seeded tests
+FAILED tests/test_amounts.py::test_credit_in_parentheses_is_negative - decima...
+FAILED tests/test_amounts.py::test_total_nets_credits - decimal.InvalidOperat...
+2 failed, 1 passed in 0.02s
+== claude run, recipe laptop, up to 50 turns and 1800 s
+== the run
+{
+  "turns": 5,
+  "duration_ms": 12443,
+  "usage": {"input_tokens": 2688, "cache_read_input_tokens": 8858, "output_tokens": 513},
+  "tool_uses": ["Bash", "Read", "Edit", "Bash"],
+  "api_retries": 0,
+  "problems": []
+}
+== after: the seeded tests must be untouched
+== after: pytest in a fresh environment, pinned to the seeded config and tests
+...                                                                      [100%]
+3 passed in 0.01s
+GATE PASS (.../run-output/gate-20261019T105944Z-2izeas)
+```
+
+The other two took 5 turns each, in 12.1 s and 13.8 s. Each run's first
+request carried `output_config.effort`, which the server refused with the
+wording Claude Code retries on, and Claude Code sent it again without effort.
+That refusal is not an API retry, so `api_retries` stays 0.
+
 ### The gate against a recording stub, recorded
 
 `run_gate.sh` with Claude Code 2.1.300 and a stub on `SIE_BASE_URL` that
@@ -288,6 +363,9 @@ uv run pytest
   sends. The capture above is how to re-check a new version.
 - **Not a live result yet.** The cloud and cluster recipes have not been run
   against a live endpoint.
+- **Not a claim about every laptop.** The laptop recipe was run on one Apple
+  Silicon machine with the MLX backend and one 4B model. It has not been run
+  on an NVIDIA machine.
 - **Not a coding benchmark.** The fixture is two failing tests in a
   twenty-line module.
 - **The single-node server answers in its chat route's words.** `sie-server`
