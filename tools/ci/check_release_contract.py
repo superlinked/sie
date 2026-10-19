@@ -130,6 +130,10 @@ SHELL_CONTROL_FLOW = frozenset(
 ACTION_PIN = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
 JOB_FIELD_INDENT = 4
 ARTIFACT_RETENTION_DAYS = 30
+REHEARSAL_ARTIFACT_RETENTION_DAYS = 5
+ARTIFACT_RETENTION_EXPRESSION = (
+    f"${{{{ github.event_name == 'release' && {ARTIFACT_RETENTION_DAYS} || {REHEARSAL_ARTIFACT_RETENTION_DAYS} }}}}"
+)
 REQUIRED_OCI_LABEL_OCCURRENCES = 2
 RELEASE_BOOTSTRAP_SHA = "60996d9c30168e0f8e85b680295f147fdee87f61"
 MPL_LICENSE_EXCEPTION_NAMES = frozenset(
@@ -535,6 +539,18 @@ def release_queue_errors(top: str, ci: str) -> list[str]:
     return errors
 
 
+def artifact_retention_errors(name: str, text: str) -> list[str]:
+    errors = []
+    for retention in re.findall(r"^\s*retention-days:\s*([^\n]*)$", text, re.MULTILINE):
+        retention = retention.strip()
+        if retention == ARTIFACT_RETENTION_EXPRESSION:
+            continue
+        if retention.isdecimal() and int(retention) >= ARTIFACT_RETENTION_DAYS:
+            continue
+        errors.append(f"{name} must retain published-release retry artifacts for at least 30 days")
+    return errors
+
+
 def release_workflow_errors() -> list[str]:
     errors: list[str] = []
     top = (ROOT / ".github/workflows/release.yml").read_text()
@@ -557,9 +573,7 @@ def release_workflow_errors() -> list[str]:
         for token_name in ("PYPI_TOKEN", "NPM_TOKEN", "NODE_AUTH_TOKEN"):
             if token_name in text:
                 errors.append(f"{path.name} references forbidden publication token {token_name}")
-        for retention in re.findall(r"retention-days:\s*(\d+)", text):
-            if int(retention) < ARTIFACT_RETENTION_DAYS:
-                errors.append(f"{path.name} expires retry artifacts before 30 days")
+        errors.extend(artifact_retention_errors(path.name, text))
         if path.name not in {"release.yml", "release-candidate.yml"} and "workflow_dispatch" in text:
             errors.append(f"{path.name} must not expose a separate recovery writer")
     blocks = workflow_job_blocks(".github/workflows/release.yml")

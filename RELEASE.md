@@ -113,6 +113,12 @@ native sidecar from its tested image, as well as building Python, npm, audio,
 and the packaged Helm chart. Require its final `Release candidate / Complete`
 check on the final release PR head before merging that PR.
 
+PR and manually dispatched rehearsal artifacts expire after five days. This
+includes Docker archives and verification evidence; the native sidecar still
+consumes its tested image within the same run. After expiry, start a new
+rehearsal instead of relying on its old artifacts. Published-release builds
+and their original-run retries retain artifacts for 30 days for recovery.
+
 On a stable release, every builder must pass the `artifacts-ready` gate before
 any publisher can start. Publishers consume the retained archives. This keeps
 a failed image or chart build from leaving packages partially published.
