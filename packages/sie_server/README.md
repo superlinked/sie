@@ -1310,11 +1310,24 @@ advertise the declared allowlist, including cold adapters.
 |--|--|--|
 | `SIE_DEFAULT_COMPUTE_PRECISION` | `float16` | One of `float16`, `bfloat16`, `float32`. |
 | `SIE_ATTENTION_BACKEND` | `auto` | One of `auto`, `flash_attention_2`, `sdpa`, `eager`. |
+| `SIE_DISABLE_TF32` | unset (off) | Set `1` to disable Torch CUDA matmul and cuDNN TF32 at Python worker startup. Unset or `0` enables both, preserving SIE's default policy. |
 | `SIE_DISABLE_CUDNN_SDP` | unset (off) | Set `1` to disable cuDNN for Torch scaled dot-product attention at Python worker startup. Unset or `0` leaves the current backend policy alone. |
 
-This startup policy applies throughout the Python worker process, across all
-models that use Torch SDPA. Other eligible SDPA backends remain available; it
-does not guarantee Flash attention or better performance and does not disable
+TF32 can accelerate float32 operations at reduced precision, and its numerical
+effects depend on the model and batch shape. `SIE_DISABLE_TF32=1` applies before
+model loading throughout the Python worker process. It does not convert model
+weights: select a model profile with `compute_precision: float32` when assessing
+float32 output consistency. Disabling TF32 can reduce throughput and does not
+guarantee identical outputs across batch shapes or higher task accuracy.
+cuDNN autotuning and the SDPA backend policy remain unchanged. The effective
+TF32 flags are included in profile identity. Use separate worker processes for
+different TF32 policies; changing the environment of a running worker does not
+reconfigure it. The policy is not restored at shutdown; a fresh worker started
+with the variable unset or `0` enables TF32 again.
+
+The `SIE_DISABLE_CUDNN_SDP` startup policy applies throughout the Python worker
+process, across all models that use Torch SDPA. Other eligible SDPA backends
+remain available; it does not guarantee Flash attention or better performance and does not disable
 cuDNN generally. The policy is applied before model loading and readiness and
 is not restored at shutdown. Start a fresh worker process with the variable
 unset or `0` to restore Torch's defaults; unset or `0` does not reset a backend
