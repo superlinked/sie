@@ -121,3 +121,103 @@ def test_a_body_that_is_not_an_envelope_is_ignored() -> None:
         metadata = parse_request_metadata({"x-sie-credits-debited": "5"}, body)
         assert metadata is not None
         assert metadata["credits_debited"] == 5
+
+
+@pytest.mark.parametrize("parse", _GENERATE_PARSERS)
+def test_generate_usage_block_carries_the_decimal_charge(parse) -> None:
+    result = parse(
+        {
+            "model": "m",
+            "text": "hi",
+            "usage": {
+                "prompt_tokens": 9,
+                "completion_tokens": 3,
+                "total_tokens": 12,
+                "credits_charged": 0,
+                "credits_charged_decimal": "0.140000",
+                "rate_book_version": BOOK,
+            },
+        },
+        request=None,
+    )
+
+    assert result["usage"]["credits_charged"] == 0
+    assert result["usage"]["credits_charged_decimal"] == "0.140000"
+
+
+@pytest.mark.parametrize("parse", _GENERATE_PARSERS)
+def test_generate_usage_block_omits_an_absent_decimal_charge(parse) -> None:
+    result = parse(
+        {
+            "model": "m",
+            "text": "hi",
+            "usage": {
+                "prompt_tokens": 9,
+                "completion_tokens": 3,
+                "total_tokens": 12,
+                "credits_charged": 7,
+                "rate_book_version": BOOK,
+            },
+        },
+        request=None,
+    )
+
+    assert result["usage"]["credits_charged"] == 7
+    assert "credits_charged_decimal" not in result["usage"]
+
+
+def test_body_carries_the_decimal_charge() -> None:
+    metadata = parse_request_metadata(
+        {"x-sie-credits-debited": "0", "x-sie-credits-debited-decimal": "0.140000"},
+        {"usage": {"credits_charged": 0, "credits_charged_decimal": "0.140000", "rate_book_version": BOOK}},
+    )
+
+    assert metadata is not None
+    assert metadata["credits_debited"] == 0
+    assert metadata["credits_debited_decimal"] == "0.140000"
+    assert metadata["usage"]["credits_charged_decimal"] == "0.140000"
+
+
+def test_header_carries_the_decimal_charge_when_the_body_does_not() -> None:
+    metadata = parse_request_metadata(
+        {"x-sie-credits-debited": "7", "x-sie-credits-debited-decimal": "7.250000"},
+        {"model": "m"},
+    )
+
+    assert metadata is not None
+    assert metadata["credits_debited"] == 7
+    assert metadata["credits_debited_decimal"] == "7.250000"
+
+
+def test_decimal_charge_is_absent_when_not_reported() -> None:
+    metadata = parse_request_metadata(
+        {"x-sie-credits-debited": "7"},
+        {"usage": {"credits_charged": 7, "rate_book_version": BOOK}},
+    )
+
+    assert metadata is not None
+    assert metadata["credits_debited"] == 7
+    assert "credits_debited_decimal" not in metadata
+    assert "credits_charged_decimal" not in metadata["usage"]
+
+
+@pytest.mark.parametrize("value", ["0.14", "0.1400000", "-0.140000", "00.140000", "1e-1", "", " 0.140000"])
+def test_malformed_decimal_charge_is_absent(value: str) -> None:
+    metadata = parse_request_metadata(
+        {"x-sie-credits-debited": "0", "x-sie-credits-debited-decimal": value},
+        {"usage": {"credits_charged": 0, "credits_charged_decimal": value, "rate_book_version": BOOK}},
+    )
+
+    assert metadata is not None
+    assert metadata["credits_debited"] == 0
+    assert "credits_debited_decimal" not in metadata
+    assert "credits_charged_decimal" not in metadata["usage"]
+
+
+def test_numeric_decimal_charge_is_absent() -> None:
+    metadata = parse_request_metadata(
+        {}, {"usage": {"credits_charged": 0, "credits_charged_decimal": 0.14, "rate_book_version": BOOK}}
+    )
+
+    assert metadata is not None
+    assert "credits_debited_decimal" not in metadata

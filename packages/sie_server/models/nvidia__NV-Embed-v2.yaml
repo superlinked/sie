@@ -45,3 +45,15 @@ profiles:
         # The rendered prefix is passed as the model's `instruction`, so
         # is_mask_instruction excludes it from the pooling mean.
         query_template: "Instruct: {instruction}\nQuery: {text}"
+  # NV-Embed-v2 needs an 80 GB card. The checkpoint's code builds its Mistral
+  # body from a float32 text config, so the weights take about 28 GB on the
+  # GPU, and a forward pass under the checkpoint's float16 autocast adds about
+  # 14 GB. Measured through sie-server on one H100 80GB: 29,065 MiB after
+  # load, 42,993 MiB after a one-sentence query, 67,113 MiB for 32 documents
+  # of 642 tokens, and 75,041 MiB for one 21,122-token document; a
+  # 41,602-token document did not raise the peak. It does not load on a
+  # 24 GB L4 and runs out of memory on its first request on an A100 40GB.
+  # The hardware name records the tested pairing; callers and operators
+  # still select the machine profile.
+  h100:
+    extends: default

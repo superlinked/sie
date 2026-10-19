@@ -9,6 +9,8 @@ import torch
 from fastapi import FastAPI
 
 from sie_server import __version__
+from sie_server.api.anthropic_messages import AnthropicErrorEnvelopeMiddleware
+from sie_server.api.anthropic_messages import router as anthropic_messages_router
 from sie_server.api.decisions import router as decisions_router
 from sie_server.api.encode import router as encode_router
 from sie_server.api.extract import router as extract_router
@@ -99,6 +101,7 @@ class AppFactory:
             app.add_middleware(ServerAuthMiddleware, tokens=server_tokens(os.environ))
         elif config.bind_host and is_loopback_host(config.bind_host):
             app.add_middleware(LoopbackHostMiddleware, allowed_hosts=loopback_host_allowlist(config.bind_host))
+        app.add_middleware(AnthropicErrorEnvelopeMiddleware)
 
         install_upstreams(
             load_upstreams(config.upstreams_file) if config.upstreams_file else {},
@@ -139,6 +142,7 @@ class AppFactory:
         # Local-only convenience (single-node/dev); intentionally NOT in the published
         # openapi.json — see cli.openapi_export. The Rust gateway is the prod API authority.
         app.include_router(openai_local_router)  # local /v1/chat/completions + /v1/rerank
+        app.include_router(anthropic_messages_router)  # local /v1/messages over /v1/chat/completions
         setup_custom_openapi_schema(app)
 
         return app

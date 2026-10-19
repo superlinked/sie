@@ -1023,6 +1023,7 @@ class SGLangGenerationAdapter(SGLangLoraMixin, GenerationAdapter):
         # auto-imports sitecustomize from PYTHONPATH during child startup.
         extra_env["PYTHONPATH"] = os.pathsep.join(self._compat_pythonpath_entries())
         extra_env["SIE_SGLANG_MM_PROCESS_CONFIG_COMPAT"] = "1"
+        extra_env["SIE_SGLANG_CHAT_TOOLS_AS_SENT"] = "1"
         if self._json_number_max_digits is not None:
             extra_env[_JSON_NUMBER_MAX_DIGITS_ENV] = str(self._json_number_max_digits)
         logger.warning(

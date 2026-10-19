@@ -135,6 +135,8 @@ export interface RequestUsage {
   audioMs?: number;
   creditsCharged?: number;
   rateBookVersion?: string;
+  /** `creditsCharged` with up to six decimals, such as `"0.140000"`, when reported. */
+  creditsChargedDecimal?: string;
 }
 
 /** Optional gateway metadata from the successful terminal response. */
@@ -177,6 +179,12 @@ export interface RequestMetadata {
    * charge rides the terminal usage chunk.
    */
   creditsDebited?: number;
+  /**
+   * `creditsDebited` with up to six decimals, such as `"0.140000"`, when the
+   * response reported it (`usage.credits_charged_decimal` or the
+   * `x-sie-credits-debited-decimal` header).
+   */
+  creditsDebitedDecimal?: string;
   /** Immutable rate-book version that rated `creditsDebited`, when reported. */
   rateBookVersion?: string;
   /** Which side served the request: `local` capacity, or a `remote` upstream named in `upstream`. */
@@ -1132,6 +1140,8 @@ export interface GenerationUsage {
   cachedPromptTokens?: number;
   creditsCharged?: number;
   rateBookVersion?: string;
+  /** `creditsCharged` with up to six decimals, such as `"0.140000"`, when reported. */
+  creditsChargedDecimal?: string;
 }
 
 interface GrammarMetadata {
@@ -1478,6 +1488,8 @@ export interface ChatUsage {
   prompt_tokens_details?: { cached_tokens: number };
   credits_charged?: number;
   rate_book_version?: string;
+  /** `credits_charged` with up to six decimals, such as `"0.140000"`, when reported. */
+  credits_charged_decimal?: string;
 }
 
 /** A single choice in a `ChatCompletion` (non-streaming). */
@@ -1723,6 +1735,8 @@ export interface CostEstimate {
   endpoint: string;
   identity: RateIdentity;
   estimated_credits: number;
+  /** `estimated_credits` with up to six decimals, such as `"0.140000"`, when reported. */
+  estimated_credits_decimal?: string;
   unit_ceilings: Record<string, number>;
   applied_rates: AppliedRate[];
   rate_book_version: string;

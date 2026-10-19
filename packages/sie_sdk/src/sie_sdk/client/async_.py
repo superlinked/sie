@@ -95,6 +95,7 @@ from sie_sdk.types import (
     StatusMessage,
     SystemOneResult,
     WorkerInfo,
+    parse_credits_decimal,
 )
 
 from ._shared import (
@@ -147,6 +148,7 @@ from ._shared import (
     is_transient_connect_error,
     modal_continuation_path,
     next_stream_retry_delay,
+    parse_cost_estimate,
     parse_encode_results,
     parse_extract_results,
     parse_gpu_param,
@@ -175,7 +177,7 @@ from ._shared import (
     validate_generate_request_body,
     websocket_matches_base_url_origin,
 )
-from ._sse import aiter_sse_payloads
+from ._sse import SSECompletion, aiter_sse_payloads
 from .errors import (
     JobFailedError,
     LoraLoadingError,
@@ -295,6 +297,9 @@ def _parse_generate_result_async(
         settled = settled_charge_from_usage(usage)
         if settled is not None:
             parsed_usage["credits_charged"], parsed_usage["rate_book_version"] = settled
+            credits_decimal = parse_credits_decimal(usage.get("credits_charged_decimal"))
+            if credits_decimal is not None:
+                parsed_usage["credits_charged_decimal"] = credits_decimal
         result["usage"] = parsed_usage
     attempt_id = data.get("attempt_id")
     if isinstance(attempt_id, str):
@@ -1824,7 +1829,7 @@ class SIEAsyncClient:
             raise_if_estimate_unroutable(response)
             handle_error(response)
 
-        return cast("CostEstimate", response.json())
+        return parse_cost_estimate(response.json())
 
     async def get_model(self, model: str) -> ModelInfo:
         """Async version of get_model(). See SIEClient.get_model() for details."""
@@ -2961,6 +2966,8 @@ class SIEAsyncClient:
         an HTTP 503 or as the first SSE event. Once a chunk has been yielded a
         failure is terminal (non-idempotent). The ``async with`` keeps the
         connection open while the caller consumes the generator.
+        A natural EOF requires an explicit or semantic completion marker;
+        an interrupted generation is never retried.
         """
         self._reset_retry_count()
         timeout = provision_timeout_s if provision_timeout_s is not None else DEFAULT_PROVISION_TIMEOUT_S
@@ -3018,7 +3025,13 @@ class SIEAsyncClient:
                     else:
                         self._check_server_version(_AioResponse(raw.status, b"", raw.headers))
                         yielded_chunk = False
-                        async for payload in aiter_sse_payloads(_aiter_text_lines(raw.content)):
+                        chat_choices = None
+                        if url == "/v1/chat/completions":
+                            chat_choices = json.loads(body).get("n")
+                            if chat_choices is None:
+                                chat_choices = 1
+                        completion = SSECompletion(chat_choices=chat_choices)
+                        async for payload in aiter_sse_payloads(_aiter_text_lines(raw.content), completion=completion):
                             try:
                                 chunk = json.loads(payload)
                             except json.JSONDecodeError as e:
@@ -3074,9 +3087,11 @@ class SIEAsyncClient:
                                         request=parse_request_metadata(error_headers),
                                         retry_after=float(retry_after_s) if retry_after_s is not None else None,
                                     )
+                            completion.observe(chunk)
                             yield chunk
                             yielded_chunk = True
                         else:
+                            completion.require_complete()
                             return
             except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):
@@ -3614,6 +3629,7 @@ class _AsyncJobs(_AsyncNamespace):
                 "state": state,
                 "total_items": total_items,
                 "settled_credits": job.get("settled_credits"),
+                "settled_credits_decimal": parse_credits_decimal(job.get("settled_credits_decimal")),
                 "chunks": chunks,
                 "retrieved": retrieved,
                 "dims": dims,

@@ -122,6 +122,7 @@ def test_profile_variants_carry_their_profile_and_width():
     assert (variant["model"], variant["profile"], variant["gpu_class"]) == ("Qwen/Qwen3.8-27B-FP8", "h100-256k", "h100")
     assert cells["cuda13-sglang-cu130", "zai-org/GLM-5.3-Flash"]["tp_width"] == 8
     assert cells["cuda12-sglang", "Qwen/Qwen3-0.6B"]["profile"] == "default"
+    assert cells["cuda12-default", "nvidia/NV-Embed-v2:h100"]["gpu_class"] == "h100"
 
 
 def run(lane, route, image, result="passed", **extra):

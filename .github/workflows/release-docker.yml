@@ -88,7 +88,7 @@ jobs:
           name: docker-server-${{ matrix.platform }}-${{ matrix.bundle }}-${{ inputs.version }}
           path: artifact/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: ${{ github.event_name == 'release' && 30 || 5 }}
           compression-level: 0
       - id: restore-evidence
         name: Reuse original image verification evidence on retry
@@ -112,7 +112,7 @@ jobs:
           name: docker-evidence-server-${{ matrix.platform }}-${{ matrix.bundle }}-${{ inputs.version }}
           path: evidence/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: ${{ github.event_name == 'release' && 30 || 5 }}
 
   build-service:
     needs: matrix
@@ -159,7 +159,7 @@ jobs:
           name: docker-service-${{ matrix.service }}-${{ inputs.version }}
           path: artifact/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: ${{ github.event_name == 'release' && 30 || 5 }}
           compression-level: 0
       - id: restore-evidence
         name: Reuse original image verification evidence on retry
@@ -183,4 +183,4 @@ jobs:
           name: docker-evidence-service-${{ matrix.service }}-${{ inputs.version }}
           path: evidence/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: ${{ github.event_name == 'release' && 30 || 5 }}

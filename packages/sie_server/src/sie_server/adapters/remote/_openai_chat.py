@@ -183,6 +183,18 @@ def _message(value: Any, *, stream: bool, keep_reasoning: bool = False) -> dict[
     return clean
 
 
+def _restates_finish(choice: dict[str, Any], reason: str) -> bool:
+    """Whether a streamed ``choice`` repeats a finished choice's ``reason`` and carries nothing else."""
+    delta = choice.get("delta")
+    return (
+        choice.get("finish_reason") == reason
+        and choice.get("logprobs") is None
+        and isinstance(delta, dict)
+        and delta.get("role") in (None, "assistant")
+        and all(value in (None, "", []) for field, value in delta.items() if field != "role")
+    )
+
+
 class ChatStreamParser:
     """Normalize chat events; require each choice to finish and exact final usage."""
 
@@ -195,7 +207,7 @@ class ChatStreamParser:
         self.done = False
         self._id = f"chatcmpl-{uuid.uuid4().hex}"
         self._created = int(time.time())
-        self._finished: set[int] = set()
+        self._finished: dict[int, str] = {}
         self._usage: dict[str, Any] | None = None
         self._tools: dict[int, dict[int, dict[str, Any]]] = {}
 
@@ -218,7 +230,7 @@ class ChatStreamParser:
             self.done = True
             return None
         payload = _json(data, max_bytes=_MAX_EVENT_BYTES)
-        choices = self._parse_choices(payload.get("choices"), stream=True)
+        choices = self._parse_choices(payload.get("choices"), stream=True, accounting=payload.get("usage") is not None)
         clean = self._envelope(choices, stream=True)
         # Upstreams may stream a running count on every chunk. Only the last
         # usage after every choice finishes is the request's usage.
@@ -246,7 +258,7 @@ class ChatStreamParser:
         if not self.done:
             raise RemoteUpstreamError("upstream chat stream ended before its terminal event")
 
-    def _parse_choices(self, value: Any, *, stream: bool) -> list[dict[str, Any]]:
+    def _parse_choices(self, value: Any, *, stream: bool, accounting: bool = False) -> list[dict[str, Any]]:
         if not isinstance(value, list) or len(value) > self.choices:
             raise _invalid()
         seen: set[int] = set()
@@ -255,9 +267,14 @@ class ChatStreamParser:
             if not isinstance(choice, dict):
                 raise _invalid()
             index = _count(choice.get("index"), maximum=self.choices)
-            if index in seen or index in self._finished:
+            if index in seen:
                 raise _invalid()
             seen.add(index)
+            if index in self._finished:
+                # Some upstreams restate a finished choice on the event that carries usage.
+                if not (accounting and _restates_finish(choice, self._finished[index])):
+                    raise _invalid()
+                continue
             reason = choice.get("finish_reason")
             if reason is not None and (not isinstance(reason, str) or reason not in _FINISH_REASONS):
                 raise _invalid()
@@ -280,7 +297,7 @@ class ChatStreamParser:
                 )
                 result["logprobs"] = None if has_reasoning else _logprobs(choice["logprobs"])
             if reason is not None:
-                self._finished.add(index)
+                self._finished[index] = reason
             clean.append(result)
         return clean
 

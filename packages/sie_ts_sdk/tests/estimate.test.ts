@@ -160,6 +160,24 @@ describe("client.estimate", () => {
     mockFetch.mockClear();
   });
 
+  it("keeps the decimal estimate only when it is well formed", async () => {
+    for (const [raw, expected] of [
+      ["261.140000", "261.140000"],
+      ["261.14", undefined],
+      [261.14, undefined],
+    ] as const) {
+      mockFetch.mockResolvedValueOnce(
+        jsonResponse(200, { ...QUOTE, estimated_credits_decimal: raw }),
+      );
+      const client = new SIEClient("http://localhost:8080");
+
+      const quote = await client.estimate("/v1/encode/BAAI/bge-m3", { items: [{ text: "Hello" }] });
+
+      expect(quote.estimated_credits).toBe(261);
+      expect(quote.estimated_credits_decimal).toBe(expected);
+    }
+  });
+
   it("posts the envelope to /v1/estimate and returns the quote", async () => {
     mockFetch.mockResolvedValueOnce(jsonResponse(200, QUOTE));
     const client = new SIEClient("http://localhost:8080");

@@ -21,7 +21,10 @@ profiles:
     compute_precision: null
     adapter_path: sie_server.adapters.sentence_transformer:SentenceTransformerDenseAdapter
     adapter_options:
-      loadtime: {}
+      loadtime:
+        config_kwargs:
+          use_memory_efficient_attention: false
+          unpad_inputs: false
       runtime:
         pooling: cls
         normalize: true

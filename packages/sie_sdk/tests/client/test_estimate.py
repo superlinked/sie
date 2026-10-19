@@ -124,6 +124,20 @@ class TestSyncEstimate:
             }
             client.close()
 
+    @pytest.mark.parametrize(("raw", "expected"), [("261.140000", "261.140000"), ("261.14", None), (261.14, None)])
+    def test_decimal_estimate_is_kept_only_when_well_formed(self, raw: Any, expected: str | None) -> None:
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            mock_client.return_value.post = MagicMock(
+                return_value=_resp(200, {**QUOTE, "estimated_credits_decimal": raw})
+            )
+            client = SIEClient("http://localhost:8080")
+
+            quote = client.estimate("/v1/encode/BAAI/bge-m3", {"items": [{"text": "Hello"}]})
+
+            assert quote["estimated_credits"] == 261
+            assert quote.get("estimated_credits_decimal") == expected
+            client.close()
+
     def test_compat_body_rides_through_untouched(self) -> None:
         """The model stays in the BODY for an OpenAI-compatible target."""
         body = {
@@ -340,3 +354,18 @@ class TestAsyncEstimate:
             sync_client.close()
 
         assert async_body == sync_body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("raw", "expected"), [("261.140000", "261.140000"), ("261.14", None)])
+async def test_async_decimal_estimate_is_kept_only_when_well_formed(raw: Any, expected: str | None) -> None:
+    with patch("sie_sdk.client.async_.aiohttp.ClientSession"):
+        client = SIEAsyncClient("http://localhost:8080")
+        client._post = AsyncMock(  # type: ignore[method-assign]
+            return_value=_aio(200, {**QUOTE, "estimated_credits_decimal": raw})
+        )
+
+        quote = await client.estimate("/v1/encode/BAAI/bge-m3", {"items": [{"text": "Hello"}]})
+
+    assert quote["estimated_credits"] == 261
+    assert quote.get("estimated_credits_decimal") == expected
