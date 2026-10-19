@@ -346,14 +346,17 @@ fn header_credential<'a>(
 }
 
 /// Whether the request repeats `Authorization` with values that carry
-/// different tokens, or one that cannot be read. Until 0.13.0 the gateway
-/// ignores the later values; from 0.13.0 such a request is refused.
+/// different tokens, with one that cannot be read, or with a token only after
+/// a first value that carries none. Until 0.13.0 the gateway ignores the later
+/// values; from 0.13.0 such a request is refused.
 pub fn authorization_values_disagree(headers: &axum::http::HeaderMap) -> bool {
-    headers.get_all("authorization").iter().nth(1).is_some()
-        && matches!(
-            header_credential(headers.get_all("authorization"), authorization_token),
-            RequestCredential::Conflicting | RequestCredential::Unreadable
-        )
+    let values = headers.get_all("authorization");
+    values.iter().nth(1).is_some()
+        && match header_credential(values, authorization_token) {
+            RequestCredential::Conflicting | RequestCredential::Unreadable => true,
+            RequestCredential::Token(_) => extract_bearer_token(headers).is_none(),
+            RequestCredential::Missing => false,
+        }
 }
 
 /// The masked request token for audit records, empty when the request
@@ -1037,6 +1040,13 @@ mod tests {
                 ("authorization", "Bearer other"),
             ],
             vec![("authorization", "Bearer tok"), ("authorization", "other")],
+            vec![("authorization", ""), ("authorization", "Bearer tok")],
+            vec![
+                ("authorization", " "),
+                ("authorization", "tok"),
+                ("authorization", "Bearer tok"),
+                ("x-api-key", "other"),
+            ],
         ] {
             assert!(authorization_values_disagree(&headers(&pairs)), "{pairs:?}");
         }
@@ -1048,6 +1058,7 @@ mod tests {
             vec![("authorization", "Bearer tok")],
             vec![("authorization", "Bearer tok"), ("authorization", "tok")],
             vec![("authorization", "Bearer tok"), ("authorization", "")],
+            vec![("authorization", ""), ("authorization", " ")],
             vec![("x-api-key", "tok"), ("x-api-key", "other")],
         ] {
             assert!(
@@ -1308,7 +1319,7 @@ mod tests {
     fn repeated_authorization_after_an_empty_one(x_api_keys: &[&str]) -> axum::http::HeaderMap {
         let mut pairs = vec![
             ("authorization", ""),
-            ("authorization", "Bearer user"),
+            ("authorization", "Bearer later"),
             ("authorization", "Bearer bogus"),
         ];
         pairs.extend(x_api_keys.iter().map(|key| ("x-api-key", *key)));
@@ -1417,6 +1428,107 @@ mod tests {
                 log.count("The gateway ignored the later Authorization values"),
                 1,
                 "{case}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn middleware_lets_x_api_key_decide_after_an_empty_authorization_and_warns() {
+        use tracing::instrument::WithSubscriber;
+
+        let cfg = cfg_for_middleware(
+            "token",
+            vec!["user-token-aaaa", "key-token-bbbb"],
+            "admin-token-zzzz",
+            false,
+        );
+        for (path, pairs, expected, token, warnings) in [
+            (
+                "/v1/encode/any",
+                vec![
+                    ("authorization", ""),
+                    ("authorization", "Bearer user-token-aaaa"),
+                    ("x-api-key", "key-token-bbbb"),
+                ],
+                StatusCode::OK,
+                Some("key-token-bbbb"),
+                1,
+            ),
+            (
+                "/v1/encode/any",
+                vec![
+                    ("authorization", " "),
+                    ("authorization", "Bearer unknown-cccc"),
+                    ("x-api-key", "key-token-bbbb"),
+                ],
+                StatusCode::OK,
+                Some("key-token-bbbb"),
+                1,
+            ),
+            (
+                "/v1/pools",
+                vec![
+                    ("authorization", ""),
+                    ("authorization", "Bearer user-token-aaaa"),
+                    ("x-api-key", "admin-token-zzzz"),
+                ],
+                StatusCode::OK,
+                Some("admin-token-zzzz"),
+                1,
+            ),
+            (
+                "/v1/pools",
+                vec![
+                    ("authorization", ""),
+                    ("authorization", "Bearer admin-token-zzzz"),
+                    ("x-api-key", "user-token-aaaa"),
+                ],
+                StatusCode::FORBIDDEN,
+                Some("user-token-aaaa"),
+                0,
+            ),
+            (
+                "/v1/encode/any",
+                vec![
+                    ("authorization", ""),
+                    ("authorization", "Bearer user-token-aaaa"),
+                ],
+                StatusCode::UNAUTHORIZED,
+                None,
+                0,
+            ),
+        ] {
+            let request_headers = headers(&pairs);
+            assert_eq!(
+                request_token_id(&request_headers),
+                token.map(mask_token).unwrap_or_default(),
+                "{pairs:?}"
+            );
+            let log = CapturedLog::default();
+            let dispatch = tracing::Dispatch::new(
+                tracing_subscriber::fmt()
+                    .with_writer(log.clone())
+                    .with_ansi(false)
+                    .finish(),
+            );
+            let mut request = HttpRequest::builder()
+                .method(Method::POST)
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            *request.headers_mut() = request_headers;
+
+            let status = test_router(Arc::clone(&cfg))
+                .oneshot(request)
+                .with_subscriber(dispatch)
+                .await
+                .unwrap()
+                .status();
+            assert_eq!(status, expected, "{pairs:?}");
+            assert_eq!(
+                log.count("The gateway ignored the later Authorization values"),
+                warnings,
+                "{pairs:?}"
             );
         }
     }
