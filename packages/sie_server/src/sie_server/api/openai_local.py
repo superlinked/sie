@@ -829,6 +829,14 @@ def _prepare_chat_body(
     seed: int | None,
 ) -> dict[str, Any]:
     proxied = dict(body)
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        proxied["messages"] = [
+            {**message, "role": "system"}
+            if isinstance(message, dict) and message.get("role") == "developer"
+            else message
+            for message in messages
+        ]
     # SIE owns these edge-only identifiers; do not send unknown metadata into
     # the engine process.
     proxied.pop("safety_identifier", None)
