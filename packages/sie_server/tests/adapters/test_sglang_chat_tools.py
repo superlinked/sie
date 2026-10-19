@@ -460,15 +460,22 @@ def test_sglang_own_tool_dump_changes_the_prompt(monkeypatch: pytest.MonkeyPatch
     assert '"strict": false}, "defer_loading": null}' in single
 
 
-@pytest.mark.parametrize("template", [_QWEN_TEMPLATE, _GLM_TEMPLATE], ids=["qwen", "glm"])
+@pytest.mark.parametrize(
+    ("template", "reordered"),
+    [(_QWEN_TEMPLATE, "tools"), (_GLM_TEMPLATE, "tools"), (_QWEN_TEMPLATE, "arguments")],
+    ids=["qwen-tools", "glm-tools", "qwen-arguments"],
+)
 def test_requests_differing_only_in_key_order_keep_their_own_prompts(
-    monkeypatch: pytest.MonkeyPatch, template: str
+    monkeypatch: pytest.MonkeyPatch, template: str, reordered: str
 ) -> None:
     tokenizer = _tokenizer(template)
     first = copy.deepcopy(_REQUESTS["tool_exchange"])
     first["messages"][2]["tool_calls"][0]["function"]["arguments"] = '{"city": "Paris", "unit": "C"}'
-    second = json.loads(json.dumps(first, sort_keys=True))
-    second["messages"][2]["tool_calls"][0]["function"]["arguments"] = '{"unit": "C", "city": "Paris"}'
+    second = copy.deepcopy(first)
+    if reordered == "tools":
+        second["tools"] = json.loads(json.dumps(first["tools"], sort_keys=True))
+    else:
+        second["messages"][2]["tool_calls"][0]["function"]["arguments"] = '{"unit": "C", "city": "Paris"}'
 
     prompts = _single_server_prompts(monkeypatch, [first, second], _sglang_serving_chat("0.5.20", tokenizer), hook=True)
 
