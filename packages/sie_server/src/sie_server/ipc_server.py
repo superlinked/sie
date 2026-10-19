@@ -300,15 +300,15 @@ class IpcServer:
 
     async def start(self) -> None:
         """Bind the UDS and begin serving. Unlinks any stale socket file first."""
+        self._socket_path.parent.mkdir(parents=True, exist_ok=True)
+        if sys.platform == "darwin":
+            _refuse_shared_socket_directory(self._socket_path.parent)
         if self._socket_path.exists():
             try:
                 self._socket_path.unlink()
             except OSError:
                 logger.warning("Could not unlink existing socket at %s", self._socket_path)
 
-        self._socket_path.parent.mkdir(parents=True, exist_ok=True)
-        if sys.platform == "darwin":
-            _refuse_shared_socket_directory(self._socket_path.parent)
         self._server = await asyncio.start_unix_server(
             self._handle_connection,
             path=str(self._socket_path),

@@ -799,6 +799,19 @@ class TestSocketDirectoryAccessControlList:
             await server.start()
         assert not (socket_directory / "ipc.sock").exists()
 
+    @pytest.mark.parametrize("socket_directory", ["everyone allow read,write,file_inherit"], indirect=True)
+    async def test_a_refused_directory_keeps_the_socket_already_there(self, socket_directory: Path) -> None:
+        path = socket_directory / "ipc.sock"
+        with socket.socket(socket.AF_UNIX) as running:
+            running.bind(str(path))
+            bound = path.stat().st_ino
+            executor, _reg = _make_executor()
+            server = IpcServer(path, executor, worker_id="w")
+
+            with pytest.raises(PermissionError):
+                await server.start()
+            assert path.stat().st_ino == bound
+
     @pytest.mark.parametrize("socket_directory", ["everyone deny delete"], indirect=True)
     async def test_a_directory_with_only_a_deny_entry_is_accepted(self, socket_directory: Path) -> None:
         executor, _reg = _make_executor()
