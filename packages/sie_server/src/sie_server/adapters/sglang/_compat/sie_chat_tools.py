@@ -16,6 +16,11 @@ none, and a named ``tool_choice`` renders every tool, as the worker does. The
 sent tools are used only when each one validates to the tool SGLang parsed
 from the same position, so any other body keeps SGLang's own dump.
 
+SGLang 0.5.20 also caches the render of a multimodal model's chat request
+under a key that sorts every object's keys. Two requests whose tools or
+tool-call arguments differ only in key order would then share one prompt, so
+the hook turns that cache off.
+
 Only the SGLang child opts into this hook. It waits for the engine's normal
 import of the chat serving module.
 """
@@ -89,6 +94,15 @@ def _patch_serving_chat_module(module: ModuleType) -> None:
 
     serving_class.handle_request = handle_request
     serving_class._apply_jinja_template = apply_jinja_template
+    original_encode = getattr(serving_class, "_render_and_encode_chat_template", None)
+    if original_encode is not None:
+
+        @wraps(original_encode)
+        def render_and_encode(self: Any, *args: Any, **kwargs: Any) -> Any:
+            kwargs["use_cache"] = False
+            return original_encode(self, *args, **kwargs)
+
+        serving_class._render_and_encode_chat_template = render_and_encode
     setattr(serving_class, _CLASS_MARKER, True)
 
 

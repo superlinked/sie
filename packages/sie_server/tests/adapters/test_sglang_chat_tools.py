@@ -217,6 +217,9 @@ def _sglang_serving_chat(version: str, tokenizer: PreTrainedTokenizerFast) -> Mo
         chat_template_kwargs: dict[str, Any] | None = None
 
     class OpenAIServingChat:
+        def __init__(self) -> None:
+            self._chat_template_cache: dict[str, str] = {}
+
         async def handle_request(self, request: ChatCompletionRequest, raw_request: Any) -> str:
             return self._convert_to_internal_request(request, raw_request)
 
@@ -246,13 +249,33 @@ def _sglang_serving_chat(version: str, tokenizer: PreTrainedTokenizerFast) -> Mo
                     if isinstance(call["function"]["arguments"], str):
                         call["function"]["arguments"] = json.loads(call["function"]["arguments"])
                 messages.append(rendered)
+            template_kwargs = dict(request.chat_template_kwargs or {})
+            if version == "0.5.20":
+                return self._render_and_encode_chat_template(
+                    messages, tools=tools, template_kwargs=template_kwargs, encode_kwargs={}, use_cache=True
+                )
             return tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                tools=tools,
-                **(request.chat_template_kwargs or {}),
+                messages, tokenize=False, add_generation_prompt=True, tools=tools, **template_kwargs
             )
+
+        def _render_and_encode_chat_template(
+            self,
+            messages: list[dict[str, Any]],
+            *,
+            tools: Any,
+            template_kwargs: dict[str, Any],
+            encode_kwargs: dict[str, Any],
+            use_cache: bool,
+        ) -> str:
+            key = json.dumps((messages, tools, template_kwargs, encode_kwargs), sort_keys=True) if use_cache else None
+            if key is not None and key in self._chat_template_cache:
+                return self._chat_template_cache[key]
+            rendered = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True, tools=tools, **template_kwargs
+            )
+            if key is not None:
+                self._chat_template_cache[key] = rendered
+            return rendered
 
     module = ModuleType(_SERVING_CHAT)
     module.ChatCompletionRequest = ChatCompletionRequest  # type: ignore[attr-defined]
@@ -268,10 +291,10 @@ class _RawRequest:
         return json.loads(self._body)
 
 
-def _single_server_prompt(
-    monkeypatch: pytest.MonkeyPatch, request: dict[str, Any], serving_chat: ModuleType, *, hook: bool
-) -> str:
-    """Send the request through the single-server route and render what reaches the child."""
+def _single_server_prompts(
+    monkeypatch: pytest.MonkeyPatch, requests: list[dict[str, Any]], serving_chat: ModuleType, *, hook: bool
+) -> list[str]:
+    """Send the requests through the single-server route and render what reaches one child."""
     proxied: list[bytes] = []
 
     def _child(child_request: httpx.Request) -> httpx.Response:
@@ -316,15 +339,21 @@ def _single_server_prompt(
     app = FastAPI()
     app.include_router(openai_local.router)
     app.state.registry = registry
-    response = TestClient(app).post("/v1/chat/completions", json={"model": _MODEL, **request})
-    assert response.status_code == 200, response.text
+    client = TestClient(app)
+    for request in requests:
+        response = client.post("/v1/chat/completions", json={"model": _MODEL, **request})
+        assert response.status_code == 200, response.text
 
     if hook:
         monkeypatch.setitem(sys.modules, _SERVING_CHAT, serving_chat)
         _load_hook().install_chat_tools_as_sent()
-    body = proxied[0]
-    chat_request = serving_chat.ChatCompletionRequest.model_validate_json(body)
-    return asyncio.run(serving_chat.OpenAIServingChat().handle_request(chat_request, _RawRequest(body)))
+    serving = serving_chat.OpenAIServingChat()
+    return [
+        asyncio.run(
+            serving.handle_request(serving_chat.ChatCompletionRequest.model_validate_json(body), _RawRequest(body))
+        )
+        for body in proxied
+    ]
 
 
 class _CapturingAdapter(GenerationAdapter):
@@ -416,7 +445,7 @@ def test_single_server_and_queued_routes_render_the_same_prompt(
     tokenizer = _tokenizer(template)
 
     queued = _queued_prompt(monkeypatch, request, tokenizer)
-    single = _single_server_prompt(monkeypatch, request, _sglang_serving_chat(version, tokenizer), hook=True)
+    (single,) = _single_server_prompts(monkeypatch, [request], _sglang_serving_chat(version, tokenizer), hook=True)
 
     assert single == queued
 
@@ -425,10 +454,26 @@ def test_sglang_own_tool_dump_changes_the_prompt(monkeypatch: pytest.MonkeyPatch
     tokenizer = _tokenizer(_QWEN_TEMPLATE)
     request = _REQUESTS["one_tool"]
 
-    single = _single_server_prompt(monkeypatch, request, _sglang_serving_chat("0.5.20", tokenizer), hook=False)
+    (single,) = _single_server_prompts(monkeypatch, [request], _sglang_serving_chat("0.5.20", tokenizer), hook=False)
 
     assert single != _queued_prompt(monkeypatch, request, tokenizer)
     assert '"strict": false}, "defer_loading": null}' in single
+
+
+@pytest.mark.parametrize("template", [_QWEN_TEMPLATE, _GLM_TEMPLATE], ids=["qwen", "glm"])
+def test_requests_differing_only_in_key_order_keep_their_own_prompts(
+    monkeypatch: pytest.MonkeyPatch, template: str
+) -> None:
+    tokenizer = _tokenizer(template)
+    first = copy.deepcopy(_REQUESTS["tool_exchange"])
+    first["messages"][2]["tool_calls"][0]["function"]["arguments"] = '{"city": "Paris", "unit": "C"}'
+    second = json.loads(json.dumps(first, sort_keys=True))
+    second["messages"][2]["tool_calls"][0]["function"]["arguments"] = '{"unit": "C", "city": "Paris"}'
+
+    prompts = _single_server_prompts(monkeypatch, [first, second], _sglang_serving_chat("0.5.20", tokenizer), hook=True)
+
+    assert prompts == [_queued_prompt(monkeypatch, first, tokenizer), _queued_prompt(monkeypatch, second, tokenizer)]
+    assert prompts[0] != prompts[1]
 
 
 def test_tools_as_sent_keeps_sglang_tools_for_another_body() -> None:
