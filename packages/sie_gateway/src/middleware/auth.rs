@@ -229,7 +229,7 @@ fn warn_on_repeated_authorization(req: &Request<Body>, warned: &AtomicBool) {
     if authorization_values_disagree(req.headers()) && !warned.swap(true, Ordering::Relaxed) {
         tracing::warn!(
             audit = "auth",
-            "A request repeated the Authorization header with different values. The gateway used the first value; from 0.13.0 it refuses such requests with 401. Send one Authorization header."
+            "A request repeated the Authorization header with different values. The gateway ignored the later Authorization values; from 0.13.0 it refuses such requests with 401. Send one Authorization header."
         );
     }
 }
@@ -347,7 +347,7 @@ fn header_credential<'a>(
 
 /// Whether the request repeats `Authorization` with values that carry
 /// different tokens, or one that cannot be read. Until 0.13.0 the gateway
-/// uses the first value; from 0.13.0 such a request is refused.
+/// ignores the later values; from 0.13.0 such a request is refused.
 pub fn authorization_values_disagree(headers: &axum::http::HeaderMap) -> bool {
     headers.get_all("authorization").iter().nth(1).is_some()
         && matches!(
@@ -1305,18 +1305,79 @@ mod tests {
             .unwrap()
     }
 
+    fn repeated_authorization_after_an_empty_one(x_api_keys: &[&str]) -> axum::http::HeaderMap {
+        let mut pairs = vec![
+            ("authorization", ""),
+            ("authorization", "Bearer user"),
+            ("authorization", "Bearer bogus"),
+        ];
+        pairs.extend(x_api_keys.iter().map(|key| ("x-api-key", *key)));
+        headers(&pairs)
+    }
+
+    fn encode_with(headers: axum::http::HeaderMap) -> Request<Body> {
+        let mut request = HttpRequest::builder()
+            .method(Method::POST)
+            .uri("/v1/encode/any")
+            .body(Body::empty())
+            .unwrap();
+        *request.headers_mut() = headers;
+        request
+    }
+
     #[tokio::test]
     async fn middleware_warns_only_for_a_repeat_that_passes_authentication() {
         use tracing::instrument::WithSubscriber;
 
-        for (refused, passing) in [
+        let empty_first = repeated_authorization_after_an_empty_one;
+        for (case, admin, refused, refusal, passing) in [
             (
+                "invalid token",
+                "admin",
                 repeated_authorization("/v1/encode/any", "bogus", "user"),
+                (StatusCode::UNAUTHORIZED, "Invalid token"),
                 repeated_authorization("/v1/encode/any", "user", "bogus"),
             ),
             (
+                "admin token required",
+                "admin",
                 repeated_authorization("/v1/pools", "user", "admin"),
+                (StatusCode::FORBIDDEN, "Admin token required"),
                 repeated_authorization("/v1/pools", "admin", "user"),
+            ),
+            (
+                "admin token not configured",
+                "",
+                repeated_authorization("/v1/pools", "admin", "user"),
+                (StatusCode::FORBIDDEN, "Admin token not configured"),
+                repeated_authorization("/v1/encode/any", "user", "bogus"),
+            ),
+            (
+                "missing x-api-key",
+                "admin",
+                encode_with(empty_first(&[])),
+                (
+                    StatusCode::UNAUTHORIZED,
+                    "Missing Authorization or x-api-key header",
+                ),
+                encode_with(empty_first(&["user"])),
+            ),
+            (
+                "unreadable x-api-key",
+                "admin",
+                encode_with(with_unreadable(empty_first(&[]), "x-api-key")),
+                (StatusCode::UNAUTHORIZED, "Invalid token"),
+                encode_with(empty_first(&["user"])),
+            ),
+            (
+                "conflicting x-api-key",
+                "admin",
+                encode_with(empty_first(&["user", "other"])),
+                (
+                    StatusCode::UNAUTHORIZED,
+                    "Repeated x-api-key headers carry different tokens",
+                ),
+                encode_with(empty_first(&["user"])),
             ),
         ] {
             let log = CapturedLog::default();
@@ -1326,17 +1387,23 @@ mod tests {
                     .with_ansi(false)
                     .finish(),
             );
-            let router = test_router(cfg_for_middleware("token", vec!["user"], "admin", false));
+            let router = test_router(cfg_for_middleware("token", vec!["user"], admin, false));
 
-            let status = router
+            let response = router
                 .clone()
                 .oneshot(refused)
                 .with_subscriber(dispatch.clone())
                 .await
-                .unwrap()
-                .status();
-            assert!(status.is_client_error(), "{status}");
-            assert_eq!(log.count("repeated the Authorization header"), 0);
+                .unwrap();
+            assert_eq!(response.status(), refusal.0, "{case}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&body).contains(refusal.1),
+                "{case}: {body:?}"
+            );
+            assert_eq!(log.count("repeated the Authorization header"), 0, "{case}");
 
             let status = router
                 .oneshot(passing)
@@ -1344,8 +1411,13 @@ mod tests {
                 .await
                 .unwrap()
                 .status();
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(log.count("repeated the Authorization header"), 1);
+            assert_eq!(status, StatusCode::OK, "{case}");
+            assert_eq!(log.count("repeated the Authorization header"), 1, "{case}");
+            assert_eq!(
+                log.count("The gateway ignored the later Authorization values"),
+                1,
+                "{case}"
+            );
         }
     }
 
