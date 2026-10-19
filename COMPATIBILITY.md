@@ -276,7 +276,7 @@ The changes:
 | `sie-server` beyond loopback | No authentication | A token is required. Without `SIE_AUTH_TOKEN`, one is generated, and printed once on a terminal | `SIE_AUTH_MODE=none` |
 | `sie-server` on loopback without authentication | A request whose `Host` does not name this machine is answered, with a warning | It gets `400`. So does a request whose `Origin` names another site, at least for WebSocket upgrades and methods other than `GET` | Token authentication, or a setting for more allowed `Host` names, designed together with this change |
 | Rust/Candle worker bind | `0.0.0.0` | `127.0.0.1` | `SIE_SERVER_HOST=0.0.0.0` (the image sets it) |
-| Gateway in token mode, a repeated `Authorization` header whose values carry different tokens, include one it cannot read, or carry a token only after the first value | The later values are ignored, with a warning | `401` | Send one `Authorization` header |
+| Gateway in token mode, a repeated `Authorization` header whose values carry different tokens, include one it cannot read, or carry a token only after the first value | The later values are ignored; a request that passes authentication logs a warning, once per process | `401` | Send one `Authorization` header |
 | Gateway binary beyond loopback with `SIE_AUTH_MODE` unset | Starts without authentication | Refuses to start | `SIE_AUTH_MODE=none`, or `token` with `SIE_AUTH_TOKENS` |
 | Telemetry | On unless disabled | Off unless `SIE_TELEMETRY_ENABLED=1` | `SIE_TELEMETRY_ENABLED=1` |
 | Helm `gateway.auth.mode` | `none` | `token`, with a generated Secret (needs the chart change above) | `gateway.auth.mode=none` |

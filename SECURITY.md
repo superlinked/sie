@@ -68,9 +68,11 @@ What a default install exposes, and how to close it.
   carries a token, and `x-api-key` is then ignored. When that value is empty
   or blank, `x-api-key` decides. An unreadable first value is refused, and
   `Bearer` alone counts as the token `Bearer`. Later `Authorization` values
-  are ignored. Until 0.13.0, a repeated `Authorization` header whose values
-  carry different tokens, include one the gateway cannot read, or carry a
-  token only after the first value logs a warning; from 0.13.0 it is refused.
+  are ignored. Until 0.13.0, a request that passes authentication with a
+  repeated `Authorization` header whose values carry different tokens, include
+  one the gateway cannot read, or carry a token only after the first value logs
+  a warning, once per process; a refused request never logs it. From 0.13.0
+  such a request is refused.
 - `/healthz`, `/readyz`, `/openapi.json` and `/docs` are always reachable.
   `/`, `/health` and `/ws/*` require a token unless
   `SIE_AUTH_EXEMPT_OPERATIONAL=true`.
