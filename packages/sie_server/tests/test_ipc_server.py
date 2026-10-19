@@ -4,8 +4,12 @@ import asyncio
 import contextlib
 import hashlib
 import os
+import shutil
 import socket
+import stat
 import struct
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -768,6 +772,56 @@ async def server_and_path():
         yield srv, sock
     finally:
         await srv.stop(drain_timeout_s=1.0)
+
+
+@pytest.fixture
+def socket_directory(request: pytest.FixtureRequest) -> Iterator[Path]:
+    directory = _short_sock_path().with_suffix("")
+    directory.mkdir(mode=0o700)
+    try:
+        subprocess.run(["/bin/chmod", "+a", request.param, str(directory)], check=True)  # noqa: S603
+        yield directory
+    finally:
+        subprocess.run(["/bin/chmod", "-RN", str(directory)], check=True)  # noqa: S603
+        shutil.rmtree(directory)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS access control lists, set with chmod +a")
+class TestSocketDirectoryAccessControlList:
+    @pytest.mark.parametrize("socket_directory", ["everyone allow read,write,file_inherit"], indirect=True)
+    async def test_a_directory_whose_allow_entry_a_socket_would_inherit_is_refused(
+        self, socket_directory: Path
+    ) -> None:
+        executor, _reg = _make_executor()
+        server = IpcServer(socket_directory / "ipc.sock", executor, worker_id="w")
+
+        with pytest.raises(PermissionError, match=f"ls -led {socket_directory}.*SIE_IPC_SOCKET_PATH"):
+            await server.start()
+        assert not (socket_directory / "ipc.sock").exists()
+
+    @pytest.mark.parametrize("socket_directory", ["everyone allow read,write,file_inherit"], indirect=True)
+    async def test_a_refused_directory_keeps_the_socket_already_there(self, socket_directory: Path) -> None:
+        path = socket_directory / "ipc.sock"
+        with socket.socket(socket.AF_UNIX) as running:
+            running.bind(str(path))
+            bound = path.stat().st_ino
+            executor, _reg = _make_executor()
+            server = IpcServer(path, executor, worker_id="w")
+
+            with pytest.raises(PermissionError):
+                await server.start()
+            assert path.stat().st_ino == bound
+
+    @pytest.mark.parametrize("socket_directory", ["everyone deny delete"], indirect=True)
+    async def test_a_directory_with_only_a_deny_entry_is_accepted(self, socket_directory: Path) -> None:
+        executor, _reg = _make_executor()
+        server = IpcServer(socket_directory / "ipc.sock", executor, worker_id="w")
+
+        await server.start()
+        try:
+            assert stat.S_IMODE((socket_directory / "ipc.sock").stat().st_mode) == 0o600
+        finally:
+            await server.stop(drain_timeout_s=1.0)
 
 
 # -----------------------------------------------------------------------------

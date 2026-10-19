@@ -16,7 +16,7 @@ use super::request::{messages_to_chat, MAX_TOOLS};
 use super::response::chat_completion_to_message;
 use super::stream::{stream_body, FrameParser, StreamMachine};
 use super::{messages_dispatch_inputs, proxy_messages};
-use crate::handlers::proxy::chat_completions_dispatch_inputs;
+use crate::handlers::proxy::{chat_completions_dispatch_inputs, proxy_chat};
 use crate::handlers::test_support::{TestGateway, HYBRID_GENERATE_MODEL, LOCAL_LANE};
 
 const CODER_MODEL: &str = "\
@@ -797,6 +797,67 @@ async fn a_tool_request_on_a_tool_model_is_dispatched() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(gateway.dispatcher.dispatched().len(), 1);
+}
+
+fn capability_model(model: &str, capabilities: &Value) -> String {
+    let tools = capabilities["tools"].as_bool().unwrap();
+    let image = capabilities["image"].as_bool().unwrap();
+    format!(
+        "sie_id: {model}\nhf_id: {model}\ninputs:\n  text: true\n  image: {image}\ntasks:\n  generate:\n    max_output_tokens: 64\n    capabilities:\n      tools: {tools}\nprofiles:\n  default:\n    adapter_path: sie_server.adapters.sglang:SGLangAdapter\n    max_batch_tokens: 8192\n"
+    )
+}
+
+#[tokio::test]
+async fn capability_vectors_are_refused_by_both_routes_before_dispatch() {
+    let vectors = vectors("capability_vectors.json");
+    for case in vectors["refusals"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let model = case["request"]["model"].as_str().unwrap();
+        let yaml = capability_model(model, &case["capabilities"]);
+        let gateway = chat_gateway(&[yaml.as_str()], &[model]).await;
+
+        let translation = messages_to_chat(&case["request"], None).unwrap();
+        let chat_request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(Body::from(translation.chat.to_string()))
+            .unwrap();
+        let chat = proxy_chat(State(Arc::clone(&gateway.state)), chat_request).await;
+        assert_eq!(
+            chat.status().as_u16() as u64,
+            case["chat"]["status"].as_u64().unwrap(),
+            "{name}"
+        );
+        assert_eq!(json_body(chat).await, case["chat"]["body"], "{name}");
+
+        let response = proxy_messages(
+            State(Arc::clone(&gateway.state)),
+            messages_request(case["request"].clone()),
+        )
+        .await;
+        let expect = &case["expect"];
+        assert_eq!(
+            response.status().as_u16() as u64,
+            expect["status"].as_u64().unwrap(),
+            "{name}"
+        );
+        for (header, value) in expect["headers"].as_object().unwrap() {
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header.as_str())
+                    .map(|v| v.to_str().unwrap()),
+                value.as_str(),
+                "{name}: {header}"
+            );
+        }
+        let body = json_body(response).await;
+        assert_eq!(body["type"], "error", "{name}");
+        assert_eq!(body["error"]["type"], expect["type"], "{name}");
+        assert_eq!(body["error"]["message"], expect["message"], "{name}");
+        assert!(gateway.dispatcher.dispatched().is_empty(), "{name}");
+    }
 }
 
 #[tokio::test]

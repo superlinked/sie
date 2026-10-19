@@ -95,7 +95,7 @@ def remote_chat(
         {
             "sie_id": MODEL,
             "remote_backed": True,
-            "tasks": {"generate": {"context_length": 4096, "max_output_tokens": 64}},
+            "tasks": {"generate": {"context_length": 4096, "max_output_tokens": 64, "capabilities": {"tools": True}}},
             "profiles": {
                 "default": {
                     "adapter_path": f"{adapter_class.__module__}:{adapter_class.__name__}",
@@ -844,13 +844,14 @@ _GENERATION_SURFACES = [
 ]
 
 
-def _cold_generation_bridge(remote_chat: tuple) -> MagicMock:
+def _cold_generation_bridge(remote_chat: tuple, *, image: bool = False) -> MagicMock:
     client, _, remote_config, _ = remote_chat
     remote_config.profiles["default"].adapter_options.runtime.clear()
     data = remote_config.model_dump(mode="json")
     data.update(
         remote_backed=False, hf_id="weights/model", routing={"policy": "fallback", "fallback_profile": "remote"}
     )
+    data["inputs"]["image"] = image
     data["profiles"] = {
         "remote": data["profiles"]["default"],
         "default": {
@@ -1049,28 +1050,41 @@ def test_malformed_chat_stream_options_never_start_a_bridge(remote_chat: tuple, 
     registry.start_load_async.assert_not_awaited()
 
 
+_IMAGE_CHAT = {
+    "model": MODEL,
+    "messages": [
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}]}
+    ],
+}
+
+
 def test_chat_bridge_does_not_dispatch_unsupported_media(remote_chat: tuple) -> None:
     client, _, _, requests = remote_chat
-    registry = _cold_generation_bridge(remote_chat)
+    registry = _cold_generation_bridge(remote_chat, image=True)
+    registry.device = "cuda"
     answer_with(remote_chat, json_response(200, completion()))
-    response = client.post(
-        "/v1/chat/completions",
-        json={
-            "model": MODEL,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}},
-                    ],
-                }
-            ],
-        },
-    )
+    response = client.post("/v1/chat/completions", json=_IMAGE_CHAT)
     assert response.status_code == 503, response.text
     assert response.json()["error"]["code"] == "MODEL_LOADING"
     assert not requests
-    registry.start_load_async.assert_awaited_once_with(MODEL, "cpu")
+    registry.start_load_async.assert_awaited_once_with(MODEL, "cuda")
+
+
+def test_an_image_on_a_model_without_image_input_starts_no_load_or_bridge(remote_chat: tuple) -> None:
+    client, _, _, requests = remote_chat
+    registry = _cold_generation_bridge(remote_chat)
+    registry.device = "cuda"
+    answer_with(remote_chat, json_response(200, completion()))
+    response = client.post("/v1/chat/completions", json=_IMAGE_CHAT)
+    assert response.status_code == 400, response.text
+    assert response.json()["error"] == {
+        "message": f"Model '{MODEL}' does not support image input",
+        "type": "invalid_request_error",
+        "param": "messages",
+        "code": "unsupported_field",
+    }
+    assert not requests
+    registry.start_load_async.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

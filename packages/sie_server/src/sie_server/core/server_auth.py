@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import secrets
+import shlex
 import stat
 import sys
 from collections.abc import Iterable, Mapping, Sequence
@@ -239,15 +240,17 @@ def check_private_directory(directory: Path) -> None:
         raise TokenFileError(f"Cannot read {directory}: {exc.strerror or exc}") from exc
     try:
         info = os.fstat(fd)
+        quoted = shlex.quote(str(directory))
         if info.st_uid != os.getuid():
             raise TokenFileError(f"{directory} must be owned by the user that runs sie-server.")
         if stat.S_IMODE(info.st_mode) & 0o022:
-            raise TokenFileError(f"{directory} must not be writable by others (chmod 700 {directory}).")
+            raise TokenFileError(f"{directory} must not be writable by others (chmod 700 {quoted}).")
         if _acl_allows_access(fd, directory):
             raise TokenFileError(
                 f"{directory} has an access control list entry that allows access, which its mode does not show. "
-                f"List the entries with ls -led {directory} and remove each allow entry with chmod -a# <number> "
-                f"{directory}, or set {DATA_DIR_ENV} to a directory of its own."
+                f'List the entries with ls -led {quoted} and remove each allow entry with chmod -a "<entry>" '
+                f"{quoted}, giving the entry's text as listed, without its number or the word inherited. "
+                f"Or set {DATA_DIR_ENV} to a directory of its own."
             )
     finally:
         os.close(fd)
@@ -265,11 +268,18 @@ def _libsystem() -> ctypes.CDLL:
 
 
 def _acl_allows_access(fd: int, target: Path) -> bool:
+    try:
+        return acl_allows_access(fd)
+    except OSError as exc:
+        raise TokenFileError(f"Cannot read the access control list of {target}: {exc.strerror}") from exc
+
+
+def acl_allows_access(fd: int) -> bool:
     """Whether the macOS access control list of ``fd`` has an entry other than a deny entry.
 
     Such an entry can grant access that the mode bits do not show. Deny entries, such as the one macOS puts on a
     home folder, only take access away. An entry whose kind cannot be read counts as allowing access, and a list
-    that cannot be read is refused.
+    that cannot be read raises ``OSError``. Always false on other platforms.
     """
     if sys.platform != "darwin":
         return False
@@ -280,7 +290,7 @@ def _acl_allows_access(fd: int, target: Path) -> bool:
         code = ctypes.get_errno()
         if code in _NO_ACL_ERRNOS:
             return False
-        raise TokenFileError(f"Cannot read the access control list of {target}: {os.strerror(code)}")
+        raise OSError(code, os.strerror(code))
     try:
         entry = ctypes.c_void_p()
         tag = ctypes.c_int()
@@ -315,12 +325,14 @@ def read_stored_token(directory: Path) -> str:
             )
         if info.st_uid != os.getuid():
             raise TokenFileError(f"{path} must be owned by the user that runs sie-server.")
+        quoted = shlex.quote(str(path))
         if stat.S_IMODE(info.st_mode) & 0o077:
-            raise TokenFileError(f"{path} must not be readable or writable by others (chmod 600 {path}).")
+            raise TokenFileError(f"{path} must not be readable or writable by others (chmod 600 {quoted}).")
         if _acl_allows_access(fd, path):
             raise TokenFileError(
                 f"{path} has an access control list entry that allows access, so others may have read the token. "
-                f"Delete {path} to have sie-server generate a new one, or remove the entries with chmod -N {path}."
+                f"Delete the file (rm {quoted}) to have sie-server generate a new token. Removing the entries "
+                f"with chmod -N {quoted} instead keeps the current token."
             )
         raw = os.read(fd, _MAX_TOKEN_FILE_BYTES + 1)
     finally:

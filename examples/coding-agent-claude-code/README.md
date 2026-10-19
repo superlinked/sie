@@ -229,42 +229,53 @@ Busy refusals are retried as in the chat check: a `429` or `503`, or an
 repository started with `mise run serve -- -b sglang --host 127.0.0.1`, Claude
 Code 2.1.300, 2026-10-19.
 
-The conformance check:
+The conformance check, with the server checking the declared window on the
+MLX backend:
 
 ```
   streaming_tool_use       pass      1 tool_use: get_weather({"city": "Paris"}); 1 input_json_delta; stop_reason=tool_use
   parallel_tool_use        pass      2 tool_use in one turn: get_weather({"city": "Paris"}), get_weather({"city": "Tokyo"})
   tool_result_round_trip   pass      final answer used the tool result: 'The weather in Paris is currently overcast with a temperature of 18°C.'
-  prompt_above_64k_tokens  pass      74847 prompt tokens accepted and answered; needle found
+  prompt_above_64k_tokens  recorded  declared window 32768 is under 65536; refused with Claude Code's compaction wording: prompt is too long: 78943 tokens > 32768 maximum
   stop_reason_end_turn     pass      stop_reason=end_turn after 'ready'
   stop_reason_tool_use     pass      stop_reason=tool_use on the tool turn
   stop_reason_max_tokens   pass      stop_reason=max_tokens at max_tokens=8 (output_tokens=8)
   usage_on_message_delta   pass      message_delta carries usage {'input_tokens': 4, 'cache_creation_input_tokens': 0, 'cache_read_input_tokens': 16, 'output_tokens': 2}
   thinking_blocks          recorded  no thinking block came back; the model did not reason here or reasons privately
   tool_choice_any          recorded  refused: 400 invalid_request_error: tool_choice: 'tool_choice' must be 'auto' or 'none' on this device, which cannot force a tool call
-  buffered_message         pass      stop_reason=end_turn, usage {'input_tokens': 20, 'cache_creation_input_tokens': 0, 'cache_read_input_tokens': 0, 'output_tokens': 2}
+  buffered_message         pass      stop_reason=end_turn, usage {'input_tokens': 4, 'cache_creation_input_tokens': 0, 'cache_read_input_tokens': 16, 'output_tokens': 2}
   inert_fields_accepted    pass      metadata, cache_control and anthropic-beta accepted
   effort_refusal           pass      400 invalid_request_error: output_config.effort: Extra inputs are not permitted
   system_turn_refusal      pass      400 invalid_request_error: messages.1.role: role "system" is not supported in messages; use the top-level system parameter
   unknown_model            pass      404 not_found_error: Model 'sie-conformance/no-such-model' not found
-  event_grammar            pass      9 streams: message_start, one block at a time, message_delta then message_stop
-  ping_events              recorded  9 ping events across the streams
+  event_grammar            pass      8 streams: message_start, one block at a time, message_delta then message_stop
+  ping_events              recorded  0 ping events across the streams
   count_tokens             recorded  not served: 404; Claude Code then estimates locally
 
-14 pass, 0 fail, 4 recorded
+13 pass, 0 fail, 5 recorded
 ```
 
 - The profile does not ask the model to reason, so no thinking came back.
 - The MLX backend cannot force a tool call, so `tool_choice: any` is
   refused. Claude Code does not send it.
-- The pings came during the 74,847-token prompt, which the server accepted
-  although the profile declares a 32,768-token window. Set
-  `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the declared window, as the recipe does,
-  so Claude Code compacts before that.
+- The long prompt is 74,847 tokens, as the MLX backend counts it, and the
+  request asks for the 4,096-token output cap. The 78,943 tokens do not fit
+  the profile's 32,768-token window, so the server refuses the request before
+  the backend runs it, in the wording that starts Claude Code's compaction.
+  Set `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the declared window, as the recipe
+  does, so Claude Code compacts before that.
+- No stream went 10 seconds without an event, so no `ping` was sent.
 - Prompt tokens served from the prefix cache come back as
   `cache_read_input_tokens`.
+- An image in a tool result is refused with its path, for example
+  `messages.2.content.0.tool_result.content.1.image: Model
+  'Qwen/Qwen3.5-4B:long-context' does not support image input`, because the
+  MLX backend reads text only.
 
-`./run_gate.sh laptop` passed three times out of three on the same server.
+`./run_gate.sh laptop` passed three times out of three on the same machine,
+recorded before the server checked the window on the MLX backend. The first
+run reports 11,546 prompt tokens, under the 28,672 the window leaves beside
+the 4,096-token output cap, so each of its requests fits the window.
 The first run, Claude Code's JSON event lines left out:
 
 ```
@@ -369,8 +380,8 @@ uv run pytest
 - **Not a coding benchmark.** The fixture is two failing tests in a
   twenty-line module.
 - **The single-node server answers in its chat route's words.** `sie-server`
-  translates the refusals its chat route makes. Its chat route does not
-  report the token counts of a prompt that does not fit on every backend, so
-  such a refusal can read `prompt is too long` without them. On a backend that
-  refuses media, an image is refused for the whole request rather than the
-  image block.
+  translates the refusals its chat route makes. On the MLX backend and the
+  weightless fake it checks the declared window itself and reports the token
+  counts. On the SGLang backend the engine checks the window, and its refusal
+  comes back as `upstream generation request failed`. A remote upstream's
+  refusal reads `prompt is too long` without counts.

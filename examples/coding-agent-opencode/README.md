@@ -510,7 +510,10 @@ repository at commit `530dcde8` started with `mise run serve -- -b sglang`,
 - The server accepted and answered a 74,847-token prompt although this
   profile declares a 32,768-token window. The declared window is what a
   cluster advertises in `/v1/models` and what OpenCode's `limit.context`
-  should match.
+  should match. The server now checks that window on the MLX backend too: on
+  2026-10-19 the same case was refused with `400 INPUT_TOO_LONG:
+  prompt_tokens (74847) + max_new_tokens (4096) = 78943 exceeds context_length
+  (32768) for model 'Qwen/Qwen3.5-4B:long-context'`.
 
 The same check against the bare `Qwen/Qwen3.5-4B` gave the same table, with
 `declared window 8192` in the long-prompt line.

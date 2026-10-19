@@ -232,6 +232,8 @@ class WorkerConfig:
     # Reactive OOM recovery applied inside `_process_batch`. When disabled,
     # OOM exceptions propagate as before (legacy behaviour).
     oom_recovery: OomRecoveryConfig = field(default_factory=OomRecoveryConfig)
+    # Opt-in dispatch-turn progress within each Python batchable lane.
+    bounded_batch_progress: bool = False
 
 
 @dataclass

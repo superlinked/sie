@@ -7,7 +7,9 @@ import hashlib
 import json
 import logging
 import os
+import shlex
 import struct
+import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
@@ -25,6 +27,7 @@ from sie_server.core.gpu_health import gpu_is_healthy_async
 from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.numerical_snapshot import numerical_profile_snapshot
 from sie_server.core.readiness import is_ready
+from sie_server.core.server_auth import acl_allows_access
 from sie_server.ipc_types import (
     IPC_VERSION,
     METHOD_APPLY_MODEL_CONFIG,
@@ -199,6 +202,21 @@ class _IpcGenerateMessage:
         await self._sink.send(GenerateEvent(kind="in_progress"))
 
 
+def _refuse_shared_socket_directory(directory: Path) -> None:
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        shared = acl_allows_access(fd)
+    finally:
+        os.close(fd)
+    if shared:
+        raise PermissionError(
+            f"{directory} has an access control list entry that allows access. A socket created in it can inherit "
+            f"that access, which the socket's mode 0600 does not remove, so other users could connect to it. "
+            f"Remove the allow entries (ls -led {shlex.quote(str(directory))} lists them) or set "
+            f"SIE_IPC_SOCKET_PATH to a socket in a directory without them."
+        )
+
+
 def _named_admission(item: Any) -> str | None:
     """The numerical admission digest that a batch item names, if any."""
     payloads = (item.encode, item.score) if isinstance(item, RunBatchItem) else (item,)
@@ -282,13 +300,15 @@ class IpcServer:
 
     async def start(self) -> None:
         """Bind the UDS and begin serving. Unlinks any stale socket file first."""
+        self._socket_path.parent.mkdir(parents=True, exist_ok=True)
+        if sys.platform == "darwin":
+            _refuse_shared_socket_directory(self._socket_path.parent)
         if self._socket_path.exists():
             try:
                 self._socket_path.unlink()
             except OSError:
                 logger.warning("Could not unlink existing socket at %s", self._socket_path)
 
-        self._socket_path.parent.mkdir(parents=True, exist_ok=True)
         self._server = await asyncio.start_unix_server(
             self._handle_connection,
             path=str(self._socket_path),

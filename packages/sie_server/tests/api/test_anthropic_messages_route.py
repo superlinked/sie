@@ -23,7 +23,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 from sie_server.adapters.remote._http import RemoteUpstreamError
 from sie_server.api import anthropic_messages
-from sie_server.api.anthropic_translation import StreamMachine
+from sie_server.api.anthropic_translation import StreamMachine, messages_to_chat
 from sie_server.api.lora import LeasedStreamingResponse
 from sie_server.app.app_factory import AppFactory
 from sie_server.app.app_state_config import AppStateConfig
@@ -31,6 +31,7 @@ from sie_server.config.model import ModelConfig
 from sie_server.core.loader import load_adapter, load_model_configs
 
 MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
+VECTORS = Path(__file__).resolve().parents[4] / "conformance" / "anthropic_messages"
 MODEL = "sie-fake:chat"
 QUESTION = "What is the weather in Paris?"
 WEATHER = {
@@ -296,7 +297,12 @@ def test_a_translation_refusal_reaches_no_engine(client: TestClient, registry: M
             "invalid_request_error",
             "max_tokens: 5000 > 4096, which is the maximum allowed number of output tokens for this model",
         ),
-        (_body(" ".join(["w"] * 600), model="sie-fake"), 400, "invalid_request_error", "prompt is too long"),
+        (
+            _body(" ".join(["w"] * 600), model="sie-fake"),
+            400,
+            "invalid_request_error",
+            "prompt is too long: 601 tokens > 512 maximum",
+        ),
         (
             _body(messages=[{"role": "user", "content": "hi"}, {"role": "system", "content": "short answers"}]),
             400,
@@ -313,7 +319,60 @@ def test_refusals_come_back_in_the_anthropic_envelope(
     for stream in (False, True):
         refused = _error(_post(client, {**body, "stream": stream}), status, error_type)
         if message is not None:
-            assert refused.startswith(message), refused
+            assert refused == message
+
+
+def _capability_registry(model: str, capabilities: dict[str, bool]) -> MagicMock:
+    fake = _configs()["sie-fake"]
+    generate = fake.tasks.generate
+    assert generate is not None
+    config = fake.model_copy(
+        update={
+            "sie_id": model,
+            "inputs": fake.inputs.model_copy(update={"image": capabilities["image"]}),
+            "tasks": fake.tasks.model_copy(
+                update={
+                    "generate": generate.model_copy(
+                        update={
+                            "capabilities": generate.capabilities.model_copy(update={"tools": capabilities["tools"]})
+                        }
+                    )
+                }
+            ),
+        }
+    )
+    registry = MagicMock()
+    registry.device = "cpu"
+    registry.has_model.side_effect = {model: config}.__contains__
+    registry.get_config.side_effect = {model: config}.__getitem__
+    registry.is_failed.return_value = False
+    registry.is_unloading.return_value = False
+    registry.is_loading.return_value = False
+    registry.is_loaded.return_value = True
+    return registry
+
+
+@pytest.mark.parametrize(
+    "case",
+    json.loads((VECTORS / "capability_vectors.json").read_text(encoding="utf-8"))["refusals"],
+    ids=lambda case: case["name"],
+)
+def test_a_capability_vector_is_refused_by_both_routes_before_the_engine(
+    case: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = _capability_registry(case["request"]["model"], case["capabilities"])
+    client = _client(registry, monkeypatch)
+
+    chat = client.post("/v1/chat/completions", json=messages_to_chat(case["request"], None).chat)
+    response = _post(client, case["request"])
+
+    assert chat.status_code == case["chat"]["status"]
+    assert chat.json() == case["chat"]["body"]
+    expect = case["expect"]
+    assert _error(response, expect["status"], expect["type"]) == expect["message"]
+    for header, value in expect["headers"].items():
+        assert response.headers[header] == value
+    registry.get.assert_not_called()
 
 
 def test_a_loading_model_is_overloaded_with_its_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:

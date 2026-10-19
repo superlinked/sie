@@ -19,6 +19,40 @@ caller controls, current routing limits and cluster workers. See
 [Moving to self-hosted serving](MIGRATING_TO_SELF_HOSTED.md) to migrate one model
 at a time while keeping its application name.
 
+## Optional bounded batch progress
+
+Model profiles can opt into `bounded_batch_progress: true`. The default is
+`false`; no shipped profile enables it. An extending profile inherits the
+parent's setting when the field is omitted or `null`, and an explicit `false`
+disables it for that child.
+
+```yaml
+profiles:
+  default:
+    adapter_path: "my_adapter:Adapter"
+    max_batch_tokens: 16384
+  progress:
+    extends: default
+    bounded_batch_progress: true
+```
+
+This option applies to the Python worker's batcher for each base model or
+LoRA selection. After an ordinary cost-sorted batch skips the oldest batchable
+item, the next batchable turn starts at that item and packs its cost-sorted
+suffix. It does not wrap around to cheaper items. An item with `k` older
+batchable items therefore runs within at most `2 * (k + 1)` nonempty batchable
+turns. Existing `runs_alone` turns may interleave, cost/request limits still
+apply, and an individually oversized item still runs alone. This is a
+dispatch-turn bound, not a wall-clock deadline. Cancellation and worker
+shutdown retain their existing behavior. Preformed/sidecar batches bypass
+the Python batcher and are unaffected.
+
+Enabled scheduling changes batch composition and can change model scores or
+chosen labels, as well as throughput. It does not change model precision or
+make outputs invariant to batch shape. Evaluate the intended model's output
+and throughput contract before enabling it. The unchanged default uses the
+original batcher without progress bookkeeping.
+
 ## Installation
 
 ```bash
@@ -1092,7 +1126,11 @@ values that carry different tokens, while the gateway reads only the first
 
 Token auth covers the HTTP port. The other listeners are local: the IPC socket
 that a worker sidecar uses (`SIE_IPC_SOCKET_PATH`, mode `0600`) and the
-loopback ports of the engines the server launches.
+loopback ports of the engines the server launches. On macOS a socket can
+inherit an entry that allows access from its directory's access control list,
+and its mode does not remove that access, so the server refuses to create the
+IPC socket in a directory whose access control list has an entry that allows
+access (`ls -led <directory>` lists the entries).
 
 When token auth is on and no token is configured, the server generates one on
 first start and saves it in `SIE_DATA_DIR`. When stderr is a terminal it prints
@@ -1107,8 +1145,8 @@ containers, set `SIE_AUTH_TOKEN` yourself instead. The server refuses a token
 directory that another user owns or can write to, and a token file that is a
 symbolic link, not a regular file, hard-linked, owned by another user, or
 readable by others. On macOS it also refuses a token directory or file whose
-access control list has an entry that allows access (`ls -le` lists the
-entries); deny entries, such as the one macOS puts on the home folder, are
+access control list has an entry that allows access (`ls -led <path>` lists
+the entries); deny entries, such as the one macOS puts on the home folder, are
 accepted. To rotate a generated token, delete `auth-token` from
 `SIE_DATA_DIR` and restart the server. In Docker, keep the token across
 containers with a volume:
