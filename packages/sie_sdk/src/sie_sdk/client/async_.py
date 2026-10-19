@@ -95,6 +95,7 @@ from sie_sdk.types import (
     StatusMessage,
     SystemOneResult,
     WorkerInfo,
+    parse_credits_decimal,
 )
 
 from ._shared import (
@@ -147,6 +148,7 @@ from ._shared import (
     is_transient_connect_error,
     modal_continuation_path,
     next_stream_retry_delay,
+    parse_cost_estimate,
     parse_encode_results,
     parse_extract_results,
     parse_gpu_param,
@@ -295,6 +297,9 @@ def _parse_generate_result_async(
         settled = settled_charge_from_usage(usage)
         if settled is not None:
             parsed_usage["credits_charged"], parsed_usage["rate_book_version"] = settled
+            credits_decimal = parse_credits_decimal(usage.get("credits_charged_decimal"))
+            if credits_decimal is not None:
+                parsed_usage["credits_charged_decimal"] = credits_decimal
         result["usage"] = parsed_usage
     attempt_id = data.get("attempt_id")
     if isinstance(attempt_id, str):
@@ -1824,7 +1829,7 @@ class SIEAsyncClient:
             raise_if_estimate_unroutable(response)
             handle_error(response)
 
-        return cast("CostEstimate", response.json())
+        return parse_cost_estimate(response.json())
 
     async def get_model(self, model: str) -> ModelInfo:
         """Async version of get_model(). See SIEClient.get_model() for details."""
@@ -3624,6 +3629,7 @@ class _AsyncJobs(_AsyncNamespace):
                 "state": state,
                 "total_items": total_items,
                 "settled_credits": job.get("settled_credits"),
+                "settled_credits_decimal": parse_credits_decimal(job.get("settled_credits_decimal")),
                 "chunks": chunks,
                 "retrieved": retrieved,
                 "dims": dims,
