@@ -54,12 +54,15 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         crate::handlers::audio::proxy_openai_transcription,
         crate::handlers::proxy::proxy_rerank,
         crate::handlers::proxy::proxy_rerank_v2,
+        crate::handlers::systemone::proxy_systemone,
+        crate::handlers::decisions::proxy_decisions,
         crate::handlers::proxy::proxy_score,
         crate::handlers::proxy::proxy_extract,
         crate::handlers::proxy::proxy_generate,
         crate::handlers::proxy::proxy_chat,
         crate::handlers::proxy::proxy_completions,
         crate::handlers::proxy::proxy_responses,
+        crate::handlers::messages::proxy_messages,
         crate::handlers::proxy::proxy_moderations,
         docs_ui
     ),
@@ -134,6 +137,7 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         GenerateResponse,
         GenerateChunk,
         GenerateChunkError,
+        UpstreamFailureReason,
         GenerateUsage,
         PromptTokensDetails,
         ChatCompletionRequest,
@@ -148,6 +152,12 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         ResponsesRequest,
         OpenAIErrorBody,
         OpenAIErrorEnvelope,
+        crate::handlers::messages::schema::MessagesRequest,
+        crate::handlers::messages::schema::EmptyOutputConfig,
+        crate::handlers::messages::schema::MessagesResponse,
+        crate::handlers::messages::schema::MessagesUsage,
+        crate::handlers::messages::schema::AnthropicErrorBody,
+        crate::handlers::messages::schema::AnthropicErrorEnvelope,
         PoolListResponse,
         crate::types::pool::PoolSpec,
         crate::types::pool::PoolStatus,
@@ -165,6 +175,12 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         RerankV2Request,
         RerankResponse,
         RerankResult,
+        SystemOneRequest,
+        SystemOneResponse,
+        SystemOneUsage,
+        DecisionRequest,
+        DecisionResponse,
+        DecisionUsage,
         ScoreUsage,
         ScoreEntry,
         crate::handlers::config_api::ResolveRequest,
@@ -267,7 +283,7 @@ fn apply_gateway_openapi_overrides(value: &mut Value) {
         "name": "Apache-2.0",
         "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
     });
-    value["security"] = json!([{ "bearerAuth": [] }]);
+    value["security"] = json!([{ "bearerAuth": [] }, { "apiKeyAuth": [] }]);
 
     let components = value
         .as_object_mut()
@@ -280,6 +296,12 @@ fn apply_gateway_openapi_overrides(value: &mut Value) {
             "scheme": "bearer",
             "bearerFormat": "opaque",
             "description": "SIE bearer token. Mutating pool/config/admin routes require the configured admin token; other protected routes accept a normal gateway token."
+        },
+        "apiKeyAuth": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "x-api-key",
+            "description": "The same SIE token as bearerAuth, sent in the x-api-key header. When the first Authorization value carries a token, that token is used and x-api-key is ignored."
         }
     });
 
@@ -1437,6 +1459,8 @@ fn inject_remote_control_header(paths: &mut serde_json::Map<String, Value>) {
         "/v1/chat/completions",
         "/v1/completions",
         "/v1/responses",
+        "/v1/decisions",
+        "/v1/messages",
         "/v1/audio/transcriptions",
     ] {
         let Some(operation) = paths
@@ -1536,7 +1560,13 @@ fn inject_inference_response_headers(paths: &mut serde_json::Map<String, Value>)
         }
     }
 
-    for path in ["/v1/chat/completions", "/v1/completions", "/v1/responses"] {
+    for path in [
+        "/v1/chat/completions",
+        "/v1/completions",
+        "/v1/responses",
+        "/v1/decisions",
+        "/v1/messages",
+    ] {
         let Some(responses) = paths
             .get_mut(path)
             .and_then(|path_item| path_item.get_mut("post"))
@@ -2127,6 +2157,31 @@ pub struct GenerateChunkError {
     #[schema(minimum = 1, maximum = 60)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after_s: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<UpstreamFailureReason>,
+}
+
+/// Class of a remote upstream's failure, when one ended the generation.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub enum UpstreamFailureReason {
+    #[serde(rename = "upstream_credential_unavailable")]
+    CredentialUnavailable,
+    #[serde(rename = "upstream_credential_rejected")]
+    CredentialRejected,
+    #[serde(rename = "upstream_payment_required")]
+    PaymentRequired,
+    #[serde(rename = "upstream_model_not_found")]
+    ModelNotFound,
+    #[serde(rename = "upstream_refused")]
+    Refused,
+    #[serde(rename = "upstream_unavailable")]
+    Unavailable,
+    #[serde(rename = "upstream_busy")]
+    Busy,
+    #[serde(rename = "upstream_not_ready")]
+    NotReady,
+    #[serde(rename = "upstream_invalid_response")]
+    InvalidResponse,
 }
 
 /// One JSON payload from a SIE-native generation SSE ``data:`` event.
@@ -2582,6 +2637,8 @@ pub struct OpenAIErrorBody {
     pub param: Option<String>,
     /// SIE-native discriminator, see ``http_error::openai_code``.
     pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<UpstreamFailureReason>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -2712,6 +2769,12 @@ pub struct ModelInfoWire {
     pub max_sequence_length: Option<u64>,
     /// Immutable model weights revision, when the catalog pins one.
     pub revision: Option<String>,
+    /// One line about the model; `""` when the catalog sets none. Reported for
+    /// System One model-list clients (the TypeSafe SDKs).
+    pub description: String,
+    /// Release date of the served weights, `YYYY-MM-DD`; `""` when the catalog
+    /// sets none. Reported for System One model-list clients.
+    pub release_date: String,
     pub profiles: std::collections::HashMap<String, ProfileInfoWire>,
     /// Advertised model capabilities. Consumers use this to discover
     /// which features the model supports before composing a request.
@@ -3084,6 +3147,84 @@ pub struct ScoreRequest {
     pub options: Option<Value>,
 }
 
+/// A System One request: one state and its typed questions. Fields the route
+/// does not read are ignored.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct SystemOneRequest {
+    /// SIE model id of a decision model, e.g. `fastino/GLiNER2.5-Decide`.
+    pub model: String,
+    /// The text to judge (a string), a JSON object, or a list of conversation
+    /// turns.
+    pub state: Value,
+    /// Typed questions by id: `{"type": "noul" | "choice" | "score",
+    /// "instructions"?, "criteria"?}`. A score question takes 1 to 10 levels.
+    #[schema(value_type = Object)]
+    pub questions: Value,
+}
+
+/// Tokens the decision model read; it generates none.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct SystemOneUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// Answers by question id, in the System One response shape.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct SystemOneResponse {
+    pub model: String,
+    /// One answer per question: `noul` (`noul`, the probability of yes,
+    /// `answer` and `confidence`),
+    /// `choice` (`choice`, `confidence`, `probabilities` by option) or `score`
+    /// (`score`, `confidence`, `legend` and `probabilities` by level index).
+    #[schema(value_type = Object)]
+    pub answers: Value,
+    pub usage: SystemOneUsage,
+}
+
+/// OpenAI-compatible text decisions. Unsupported fields are rejected.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionRequest {
+    /// SIE decision model id, e.g. `fastino/GLiNER2.5-Decide`.
+    pub model: String,
+    /// A text string or 1 to 4096 text-only messages. Roles: user, developer,
+    /// system, assistant. User/developer/system parts use input_text; assistant
+    /// parts use output_text or refusal. Images, tools, and cache fields fail.
+    pub input: Value,
+    /// Ordered predicate, choice, or score questions with required instructions
+    /// and optional name. Choices contain 2 to 255 unique string/boolean values;
+    /// score levels contain 1 to 10 labels. Both accept optional descriptions.
+    #[schema(min_items = 1, max_items = 200)]
+    pub questions: Vec<Value>,
+    /// Caller-provided identifier; never used as authenticated identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(max_length = 128)]
+    pub safety_identifier: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct DecisionUsage {
+    pub input_tokens: u64,
+    /// cached_tokens and cache_write_tokens, both zero.
+    pub input_tokens_details: std::collections::BTreeMap<String, u64>,
+    /// Decision models generate no tokens.
+    pub output_tokens: u64,
+    /// reasoning_tokens, always zero.
+    pub output_tokens_details: std::collections::BTreeMap<String, u64>,
+    pub total_tokens: u64,
+}
+
+/// Ordered OpenAI-style answers retaining boolean/string choice identities.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct DecisionResponse {
+    pub model: String,
+    /// One predicate, choice, score, or refusal answer per question. Names are
+    /// echoed, including null for unnamed questions and repeated names.
+    pub answers: Vec<Value>,
+    pub usage: DecisionUsage,
+}
+
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RerankRequest {
@@ -3436,7 +3577,19 @@ mod tests {
     #[test]
     fn openapi_json_documents_auth_and_exempt_routes() {
         let spec: serde_json::Value = serde_json::from_str(&OPENAPI_JSON).unwrap();
-        assert_eq!(spec["security"], json!([{ "bearerAuth": [] }]));
+        assert_eq!(
+            spec["security"],
+            json!([{ "bearerAuth": [] }, { "apiKeyAuth": [] }])
+        );
+        assert_eq!(
+            spec["components"]["securitySchemes"]["apiKeyAuth"],
+            json!({
+                "type": "apiKey",
+                "in": "header",
+                "name": "x-api-key",
+                "description": "The same SIE token as bearerAuth, sent in the x-api-key header. When the first Authorization value carries a token, that token is used and x-api-key is ignored."
+            })
+        );
         assert_eq!(spec["paths"]["/healthz"]["get"]["security"], json!([]));
         assert_eq!(spec["paths"]["/readyz"]["get"]["security"], json!([]));
         assert!(spec["paths"]["/readyz"]["get"]["description"]
@@ -3726,6 +3879,22 @@ mod tests {
         );
         assert_eq!(chunk_error["properties"]["retry_after_s"]["minimum"], 1);
         assert_eq!(chunk_error["properties"]["retry_after_s"]["maximum"], 60);
+        let reasons: Vec<&str> = crate::queue::streaming::UpstreamFailureReason::ALL
+            .iter()
+            .map(|reason| reason.as_str())
+            .collect();
+        assert_eq!(
+            spec["components"]["schemas"]["UpstreamFailureReason"]["enum"],
+            json!(reasons)
+        );
+        for schema in ["GenerateChunkError", "OpenAIErrorBody"] {
+            let properties = &spec["components"]["schemas"][schema]["properties"];
+            assert_eq!(
+                properties["reason"]["oneOf"][1]["$ref"],
+                "#/components/schemas/UpstreamFailureReason",
+                "{schema}"
+            );
+        }
         assert_eq!(
             chunk["properties"]["logprobs"]["type"],
             json!(["array", "null"])
@@ -3862,9 +4031,12 @@ mod tests {
             ("/v1/chat/completions", &["post"][..]),
             ("/v1/completions", &["post"][..]),
             ("/v1/responses", &["post"][..]),
+            ("/v1/messages", &["post"][..]),
             ("/v1/moderations", &["post"][..]),
             ("/v1/rerank", &["post"][..]),
             ("/v2/rerank", &["post"][..]),
+            ("/v1/systemone", &["post"][..]),
+            ("/v1/decisions", &["post"][..]),
             ("/ws/cluster-status", &["get"][..]),
             ("/v1/encode/{model}", &["post"][..]),
             ("/v1/score/{model}", &["post"][..]),
@@ -3885,6 +4057,43 @@ mod tests {
             let expected_methods: std::collections::BTreeSet<_> = methods.iter().copied().collect();
             assert_eq!(actual_methods, expected_methods, "{path} methods differ");
         }
+    }
+
+    #[test]
+    fn decisions_contract_documents_bounds_and_routing_headers() {
+        let spec = serde_json::to_value(openapi_document()).unwrap();
+        let operation = &spec["paths"]["/v1/decisions"]["post"];
+        assert_eq!(
+            operation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/DecisionRequest"
+        );
+        let request = &spec["components"]["schemas"]["DecisionRequest"];
+        assert_eq!(request["additionalProperties"], false);
+        assert_eq!(request["properties"]["questions"]["minItems"], 1);
+        assert_eq!(request["properties"]["questions"]["maxItems"], 200);
+        assert_eq!(request["properties"]["safety_identifier"]["maxLength"], 128);
+        for status in ["400", "404", "413", "500", "502", "503"] {
+            assert_eq!(
+                operation["responses"][status]["content"]["application/json"]["schema"]["$ref"],
+                "#/components/schemas/OpenAIErrorEnvelope"
+            );
+        }
+        let exported: Value = serde_json::from_str(&OPENAPI_JSON).unwrap();
+        let operation = &exported["paths"]["/v1/decisions"]["post"];
+        assert!(operation["parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|parameter| {
+                parameter["name"] == "X-SIE-Remote"
+                    && parameter["schema"]["enum"] == json!(["forbid"])
+            }));
+        assert!(operation["responses"]["200"]["headers"]
+            .get("X-SIE-Request-Id")
+            .is_some());
+        assert!(operation["responses"]["503"]["headers"]
+            .get("Retry-After")
+            .is_some());
     }
 
     #[test]
@@ -4107,6 +4316,7 @@ mod tests {
             "/v1/chat/completions",
             "/v1/completions",
             "/v1/responses",
+            "/v1/messages",
         ] {
             let retryable_503_headers = &spec["paths"][path]["post"]["responses"]["503"]["headers"];
             assert!(
@@ -4145,7 +4355,12 @@ mod tests {
                 "/v1/embeddings 200 missing documented {name} header"
             );
         }
-        for path in ["/v1/chat/completions", "/v1/completions", "/v1/responses"] {
+        for path in [
+            "/v1/chat/completions",
+            "/v1/completions",
+            "/v1/responses",
+            "/v1/messages",
+        ] {
             let headers = &spec["paths"][path]["post"]["responses"]["200"]["headers"];
             for name in [
                 "X-SIE-Request-Id",

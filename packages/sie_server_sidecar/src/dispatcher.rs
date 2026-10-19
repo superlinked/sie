@@ -308,6 +308,14 @@ const MODEL_READINESS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const MODEL_READINESS_PROGRESS_INTERVAL: Duration =
     Duration::from_secs(crate::nats_consumer::ACK_WAIT_SECS / 3);
 
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn phase_elapsed_ms(started: Instant, finished: Instant) -> u64 {
+    duration_millis(finished.saturating_duration_since(started))
+}
+
 struct ModelReadinessWait {
     deadline: tokio::time::Instant,
     next_progress: tokio::time::Instant,
@@ -2463,6 +2471,7 @@ impl Dispatcher {
             .await;
             return Ok(());
         }
+        let readiness_started = Instant::now();
         let readiness_resp = loop {
             items = self.retain_uncancelled(items, "model_readiness").await;
             items = self.answer_stale_admissions(items).await;
@@ -2540,16 +2549,20 @@ impl Dispatcher {
             return Ok(());
         };
 
+        let readiness_finished = Instant::now();
+
         // A parked group's last progress ACK may be a full readiness delay
         // old; refresh it so the batch-permit wait starts from a full ACK wait.
         if ready_deadline.is_some() && !progress_all(&items, &self.runtime_state.telemetry).await {
             nak_all(&items, base_delay_ms, &self.runtime_state.telemetry).await;
             return Ok(());
         }
+        let batch_permit_started = Instant::now();
         let Ok(_batch_permit) = self.batch_semaphore.acquire().await else {
             warn!(model = %model_id, "batch semaphore closed — dropping group");
             return Ok(());
         };
+        let batch_permit_acquired = Instant::now();
         let _inflight_batch = self
             .scheduler_registry
             .is_none()
@@ -2716,6 +2729,7 @@ impl Dispatcher {
             self.handle_extract(model_id, extract_items).await
         };
         let (r_enc, r_score, r_ext) = tokio::join!(encode_fut, score_fut, extract_fut);
+        let prepare_dispatch_finished = Instant::now();
         if let Err(e) = &r_enc {
             warn!(model = %model_id, error = %ErrChain(e), "encode batch failed");
         }
@@ -2736,6 +2750,10 @@ impl Dispatcher {
             score_ok = r_score.is_ok(),
             extract_ok = r_ext.is_ok(),
             elapsed_ms = group_started.elapsed().as_millis() as u64,
+            model_readiness_elapsed_ms = phase_elapsed_ms(readiness_started, readiness_finished),
+            batch_permit_elapsed_ms = phase_elapsed_ms(batch_permit_started, batch_permit_acquired),
+            prepare_dispatch_elapsed_ms =
+                phase_elapsed_ms(batch_permit_acquired, prepare_dispatch_finished),
             "handle_model_group: done"
         );
         Ok(())
@@ -6663,9 +6681,155 @@ mod tests {
     use std::path::PathBuf;
 
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tracing::instrument::WithSubscriber;
 
     use crate::delivery::LocalDelivery;
     use crate::scheduler::{BatchConfig, Scheduler};
+
+    #[derive(Clone, Default)]
+    struct GroupLogCapture(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for GroupLogCapture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for GroupLogCapture {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl GroupLogCapture {
+        fn completions(&self) -> Vec<serde_json::Value> {
+            std::str::from_utf8(&self.0.lock().unwrap())
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .filter(|event| event["fields"]["message"] == "handle_model_group: done")
+                .collect()
+        }
+    }
+
+    #[test]
+    fn group_phase_timings_use_separate_monotonic_intervals() {
+        let start = Instant::now();
+        let readiness_finished = start + Duration::from_micros(2_000_999);
+        let permit_started = readiness_finished + Duration::from_secs(10);
+        let permit_acquired = permit_started + Duration::from_millis(123);
+        let dispatch_finished = permit_acquired + Duration::from_micros(4_999);
+
+        assert_eq!(phase_elapsed_ms(start, readiness_finished), 2_000);
+        assert_eq!(phase_elapsed_ms(permit_started, permit_acquired), 123);
+        assert_eq!(phase_elapsed_ms(permit_acquired, dispatch_finished), 4);
+        assert_eq!(phase_elapsed_ms(start, start), 0);
+        assert_eq!(phase_elapsed_ms(readiness_finished, start), 0);
+        assert_eq!(duration_millis(Duration::MAX), u64::MAX);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn group_phase_timings_only_extend_completed_group_events() {
+        let capture = GroupLogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .without_time()
+            .with_writer(capture.clone())
+            .finish();
+        let unobserved = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let backend = LoadingModelBackend::new("cold");
+        let dispatcher = dispatcher_with_backend(backend.clone());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        dispatcher
+            .dispatch_decoded(
+                local_group("unobserved-request", "unobserved", 2..3, &tx),
+                1,
+                Instant::now(),
+            )
+            .with_subscriber(unobserved.clone())
+            .await;
+        assert!(capture.completions().is_empty());
+        dispatcher
+            .dispatch_decoded(
+                local_group("cold-request", "cold", 0..1, &tx),
+                1,
+                Instant::now(),
+            )
+            .await;
+        assert!(capture.completions().is_empty());
+        dispatcher
+            .dispatch_decoded(
+                local_group("warm-request", "warm", 1..2, &tx),
+                1,
+                Instant::now(),
+            )
+            .await;
+        assert_eq!(capture.completions().len(), 1);
+        backend.loaded.store(true, Ordering::SeqCst);
+        dispatcher.join_parked_groups(Duration::from_secs(2)).await;
+
+        let events = capture.completions();
+        assert_eq!(events.len(), 2);
+        assert_eq!(backend.encoded_models(), ["unobserved", "warm", "cold"]);
+        for (event, model) in events.iter().zip(["warm", "cold"]) {
+            assert_eq!(event["level"], "INFO");
+            assert_eq!(event["target"], "sie_server_sidecar::dispatcher");
+            let fields = event["fields"].as_object().unwrap();
+            assert_eq!(fields.len(), 14);
+            assert_eq!(fields["model"], model);
+            for name in ["group_size", "encode"] {
+                assert_eq!(fields[name], 1);
+            }
+            for name in ["score", "extract", "unknown"] {
+                assert_eq!(fields[name], 0);
+            }
+            for name in ["encode_ok", "score_ok", "extract_ok"] {
+                assert_eq!(fields[name], true);
+            }
+            for name in [
+                "elapsed_ms",
+                "model_readiness_elapsed_ms",
+                "batch_permit_elapsed_ms",
+                "prepare_dispatch_elapsed_ms",
+            ] {
+                assert!(fields[name].as_u64().is_some(), "{name}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn filtered_group_phase_logs_do_not_change_dispatch() {
+        let capture = GroupLogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_max_level(tracing::Level::ERROR)
+            .with_writer(capture.clone())
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let backend = LoadingModelBackend::new("cold");
+        let dispatcher = dispatcher_with_backend(backend.clone());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        dispatcher
+            .dispatch_decoded(
+                local_group("warm-request", "warm", 0..1, &tx),
+                1,
+                Instant::now(),
+            )
+            .await;
+
+        assert_eq!(backend.encoded_models(), ["warm"]);
+        assert!(capture.completions().is_empty());
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct PipelineTestItem {

@@ -1163,4 +1163,4 @@ def test_decide_is_served_from_the_bundle_that_pins_gliner2_2() -> None:
     assert "sie_server.adapters.gliner2.decide" in transformers5["adapters"]
     assert transformers5["deps"]["gliner2"] == "==2.0.0"
     assert "sie_server.adapters.gliner2.decide" not in default["adapters"]
-    assert default["deps"]["gliner2"] == ">=1.3.1,<2"
+    assert default["deps"]["gliner2"] == ">=1.3.2,<=2.0.0"

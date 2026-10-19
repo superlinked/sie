@@ -1,4 +1,5 @@
 {{- if .Values.mcpEdge.enabled }}
+{{- include "sie-cluster.mcpEdge.validateGatewayToken" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

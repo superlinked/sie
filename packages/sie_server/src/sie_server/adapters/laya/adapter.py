@@ -31,6 +31,9 @@ Request contract:
   script. A longer text that averages more bytes per token than its budget over
   the cut can keep fewer tokens than the reference would; that takes long runs
   of one character, which ModernBERT merges into tokens of up to 512 characters.
+  With ``options.overflow_policy`` ``"error"``, an item whose state does not
+  fit whole in the row of every question returns a per-item ``INPUT_TOO_LONG``
+  error instead of being cut.
 
 Metering counts every row the model encodes: an item's input tokens are the sum
 of its (state, question) row lengths, so cost scales with items x questions.
@@ -82,6 +85,7 @@ from sie_server.adapters._modernbert_flash_graphs import (
     unsupported_reason,
 )
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters.laya.model import LayaDecisionHead, LayaModel, apply_rope_parameters, split_checkpoint
 from sie_server.adapters.laya.questions import (
@@ -101,6 +105,7 @@ from sie_server.adapters.laya.questions import (
 )
 from sie_server.core.inference_output import ExtractItemError, ExtractOutput
 from sie_server.types.inputs import InvalidInputError, Item
+from sie_server.types.overflow_policy import DEFAULT_OVERFLOW_POLICY, VALID_OVERFLOW_POLICIES
 from sie_server.types.responses import Classification, ErrorCode
 
 if TYPE_CHECKING:
@@ -153,6 +158,11 @@ _ERR_STATE = (
 )
 _ERR_STATE_JSON = "Laya metadata.state must be JSON-serializable"
 _ERR_TOO_MANY_OPTIONS = "Laya accepts at most {limit} {what} per request, got {count}"
+_ERR_DOES_NOT_FIT = (
+    "The state takes {tokens} tokens; with its longest question, this model's {window}-token row has room "
+    "for {room}. Send a shorter state or shorter questions (overflow_policy 'error')"
+)
+_ERR_OVERFLOW_POLICY = "Laya overflow_policy must be one of {choices}"
 
 
 def graph_token_bound(hidden_size: int) -> int:
@@ -300,6 +310,7 @@ class LayaAdapter(BaseAdapter):
         trained_max_len = int(cfg.get("max_len", 512))
         self._max_len = min(trained_max_len, self._max_seq_length) if self._max_seq_length else trained_max_len
         self._head_max_len = int(cfg.get("head_max_len", 192))
+        install_transformers_security_fixes()
         self._calibration = Calibration.from_config(cfg)
 
         tokenizer = self._load_tokenizer(checkpoint_dir / "tokenizer")
@@ -499,22 +510,49 @@ class LayaAdapter(BaseAdapter):
         threshold = _threshold_option(opts) if labels_mode else 0.0
         max_len, head_max_len = self._token_budget(opts)
         self._check_item_tokens(len(questions), max_len)
+        overflow_policy = opts.get("overflow_policy", DEFAULT_OVERFLOW_POLICY)
+        if not isinstance(overflow_policy, str) or overflow_policy not in VALID_OVERFLOW_POLICIES:
+            raise InvalidInputError(_ERR_OVERFLOW_POLICY.format(choices=sorted(VALID_OVERFLOW_POLICIES)))
+        strict = overflow_policy == "error"
 
         state_bytes = self._max_len * STATE_BYTES_PER_TOKEN
         states: list[tuple[str, bool] | None] = []
         errors: list[ExtractItemError | None] = []
+        clipped: list[bool] = []
         for item in items:
             try:
-                states.append(self._item_state(item, state_bytes))
+                state = self._item_state(item, state_bytes)
+                states.append(state)
                 errors.append(None)
+                # A state cut to its byte budget is longer than any row: it cannot fit.
+                clipped.append(strict and self._item_state(item)[0] != state[0])
             except InvalidInputError as exc:
                 states.append(None)
                 errors.append(ExtractItemError(code=ErrorCode.INVALID_INPUT.value, message=str(exc)))
+                clipped.append(False)
 
         valid = [i for i, s in enumerate(states) if s is not None]
+        state_lengths: list[int] = []
         prefixes, rows = self._build_rows(
-            [s for s in states if s is not None], questions, max_len=max_len, head_max_len=head_max_len
+            [s for s in states if s is not None],
+            questions,
+            max_len=max_len,
+            head_max_len=head_max_len,
+            state_lengths=state_lengths,
         )
+        if strict and prefixes:
+            # Rows are state-major: one row per question for each valid state.
+            room = max(0, max_len - max(len(prefix.ids) for prefix in prefixes) - 1)
+            keep: list[int] = []
+            for position, i in enumerate(valid):
+                if clipped[i] or state_lengths[position] > room:
+                    message = _ERR_DOES_NOT_FIT.format(tokens=state_lengths[position], window=max_len, room=room)
+                    errors[i] = ExtractItemError(code=ErrorCode.INPUT_TOO_LONG.value, message=message)
+                else:
+                    keep.append(position)
+            per_state = len(prefixes)
+            rows = [rows[p * per_state + q] for p in keep for q in range(per_state)]
+            valid = [valid[p] for p in keep]
         logits = self._run_rows(rows, [prefixes[r % len(prefixes)] for r in range(len(rows))]) if rows else []
 
         data: list[dict[str, Any]] = [{} for _ in items]
@@ -550,11 +588,14 @@ class LayaAdapter(BaseAdapter):
         *,
         max_len: int,
         head_max_len: int,
+        state_lengths: list[int] | None = None,
     ) -> tuple[list[QuestionPrefix], list[list[int]]]:
         """Tokenize each question once and each state once, then assemble the rows.
 
         Returns the question prefixes and one row per (state, question) pair,
         state-major (row ``s * len(questions) + q``), like the reference batch.
+        A ``state_lengths`` list is filled with each state's token count before
+        it is cut to its rows.
         """
         tokenizer = self._tokenizer
         if tokenizer is None:
@@ -570,6 +611,8 @@ class LayaAdapter(BaseAdapter):
                 for text, truncate_left in states
             ]
             state_ids = tokenizer(texts, add_special_tokens=False)["input_ids"]
+        if state_lengths is not None:
+            state_lengths.extend(len(ids) for ids in state_ids)
         rows = [
             assemble_row(
                 prefix,

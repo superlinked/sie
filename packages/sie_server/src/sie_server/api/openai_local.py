@@ -34,6 +34,7 @@ import math
 import os
 import re
 from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Annotated, Any, cast
 from urllib.parse import urlsplit
@@ -49,13 +50,19 @@ from sie_server.adapters._generation_base import (
     GenerationAdapter,
     GenerationError,
     GenerationUnsupportedFieldError,
+    GenerationUpstreamError,
     ReasoningFormat,
     ThinkingBlockStripper,
     aclose_with_error_precedence,
     resolve_reasoning_format,
     thinking_blocks_must_be_hidden,
 )
-from sie_server.adapters.errors import InputTooLongError, UpstreamUnavailableError
+from sie_server.adapters.errors import (
+    UPSTREAM_FAILURE_MESSAGES,
+    InputTooLongError,
+    UpstreamFailureReason,
+    UpstreamUnavailableError,
+)
 from sie_server.adapters.fake.adapter import FakeAdapter
 from sie_server.adapters.mlx.generation import MLXGenerationAdapter, normalize_mlx_seed
 from sie_server.adapters.remote._http import RemoteUpstreamError
@@ -73,6 +80,7 @@ from sie_server.api.helpers import (
     openai_error_response,
     upstream_unavailable_exception,
 )
+from sie_server.api.lora import LeasedStreamingResponse, ensure_generation_lora, validate_generation_lora
 from sie_server.api.options import resolve_runtime_options
 from sie_server.api.routing import error_code, fallback_refusal, remote_routing, route_request
 from sie_server.api.score import score_usage_from_output
@@ -83,7 +91,11 @@ from sie_server.config.upstreams import RemoteServingDisabledError
 from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.inference_output import ScoreOutput
 from sie_server.core.loader import serves_remotely
-from sie_server.core.runtime_options import GenerationTimeoutError, grammar_default_sampling
+from sie_server.core.runtime_options import (
+    GenerationTimeoutError,
+    grammar_default_sampling,
+    resolve_generation_timeouts,
+)
 from sie_server.core.score_cost import MAX_SCORE_ITEMS, build_score_prepared_items
 from sie_server.core.timing import RequestTiming
 from sie_server.core.video_frames import (
@@ -112,6 +124,7 @@ from sie_server.processors.strict_grammar import (
 )
 from sie_server.types.grammar import GrammarSpec
 from sie_server.types.inputs import InvalidInputError, Item, item_size_error
+from sie_server.types.openapi import OpenAIGenerationErrorResponse
 from sie_server.types.responses import ErrorCode
 
 logger = logging.getLogger(__name__)
@@ -123,6 +136,9 @@ router = APIRouter(prefix="/v1", tags=["openai-compat"], dependencies=[Depends(r
 # it applies to either managed generation child on this route.
 _PROXY_READ_TIMEOUT_S = float(os.environ.get("SIE_MLX_READ_TIMEOUT_S", "300"))
 _PROXY_TIMEOUT = httpx.Timeout(connect=10.0, read=_PROXY_READ_TIMEOUT_S, write=10.0, pool=10.0)
+# Same cadence as the gateway's SSE keep-alive, so client idle limits see bytes
+# while the child is silent.
+_SSE_KEEPALIVE_S = 15.0
 # Cap the request body so a huge messages/documents array can't be buffered/forwarded
 # unbounded (the gateway caps prod ingress; these local routes must cap themselves).
 _MAX_BODY_BYTES = int(os.environ.get("SIE_CHAT_MAX_BODY_BYTES", str(8 * 1024 * 1024)))
@@ -143,7 +159,7 @@ _ANSWER_FINISH_REASONS = frozenset({"stop", "tool_calls"})
 _MAX_RERANK_DOCS = MAX_SCORE_ITEMS
 
 # Mirror the gateway's public chat field boundary, minus controls that require
-# gateway-owned admission/routing translation (best_of, LoRA selection, cache
+# gateway-owned admission/routing translation (best_of, cache
 # keys). Most importantly this excludes SGLang's backend/DP/custom-processor
 # extensions, so the public body cannot steer the managed child or execute a
 # client-supplied logit processor.
@@ -177,6 +193,7 @@ _CUDA_CHAT_FIELDS = frozenset(
         "tool_choice",
         "parallel_tool_calls",
         "stream_options",
+        "lora_adapter",
     }
 )
 
@@ -307,18 +324,12 @@ def _upstream_error_response(
     message: str = "upstream generation request failed",
     *,
     response_status: int = status.HTTP_502_BAD_GATEWAY,
+    reason: UpstreamFailureReason | None = None,
 ) -> JSONResponse:
-    return JSONResponse(
-        status_code=response_status,
-        content={
-            "error": {
-                "message": message,
-                "type": "upstream_error",
-                "param": None,
-                "code": "upstream_error",
-            }
-        },
-    )
+    error: dict[str, Any] = {"message": message, "type": "upstream_error", "param": None, "code": "upstream_error"}
+    if reason is not None:
+        error["reason"] = reason
+    return JSONResponse(status_code=response_status, content={"error": error})
 
 
 def _translated_upstream_status(upstream_status: int) -> int:
@@ -333,18 +344,12 @@ def _upstream_error_event(
     *,
     code: str = "upstream_error",
     error_type: str = "upstream_error",
+    reason: UpstreamFailureReason | None = None,
 ) -> bytes:
-    payload = json.dumps(
-        {
-            "error": {
-                "message": message,
-                "type": error_type,
-                "param": None,
-                "code": code,
-            }
-        },
-        separators=(",", ":"),
-    )
+    error: dict[str, Any] = {"message": message, "type": error_type, "param": None, "code": code}
+    if reason is not None:
+        error["reason"] = reason
+    payload = json.dumps({"error": error}, separators=(",", ":"))
     return f"data: {payload}\n\ndata: [DONE]\n\n".encode()
 
 
@@ -824,11 +829,20 @@ def _prepare_chat_body(
     seed: int | None,
 ) -> dict[str, Any]:
     proxied = dict(body)
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        proxied["messages"] = [
+            {**message, "role": "system"}
+            if isinstance(message, dict) and message.get("role") == "developer"
+            else message
+            for message in messages
+        ]
     # SIE owns these edge-only identifiers; do not send unknown metadata into
     # the engine process.
     proxied.pop("safety_identifier", None)
     proxied.pop("schema_in_prompt", None)
     proxied.pop("include_reasoning", None)
+    proxied.pop("lora_adapter", None)
     if proxied.get("parallel_tool_calls") is None:
         proxied.pop("parallel_tool_calls", None)
 
@@ -1114,6 +1128,33 @@ async def _read_upstream_body(response: httpx.Response) -> bytes:
     return bytes(body)
 
 
+def _child_budget(config: Any, proxied: dict[str, Any], *, stream: bool) -> float | None:
+    """Return the overall budget for one request to the generation child, if it has one.
+
+    The child writes nothing while it generates a non-streaming answer, or
+    while its own tool parser holds a streamed call's argument until that
+    argument closes. Those requests are bounded by the generation's overall
+    budget, as the other generation routes are; ``None`` keeps any other
+    stream on the byte-gap bound that catches a wedged child.
+    """
+    holds_output = not stream or (bool(proxied.get("tools")) and proxied.get("tool_choice") != "none")
+    overall = resolve_generation_timeouts(config, None).overall_s if holds_output else None
+    return overall if overall is not None and overall > _PROXY_READ_TIMEOUT_S else None
+
+
+def _child_timeout(budget: float | None) -> httpx.Timeout:
+    if budget is None:
+        return _PROXY_TIMEOUT
+    return httpx.Timeout(connect=10.0, read=budget, write=10.0, pool=10.0)
+
+
+def _generation_timeout_exception() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+        detail={"code": "generation_timeout", "message": "generation timed out"},
+    )
+
+
 def _new_proxy_client() -> httpx.AsyncClient:
     # Ignore HTTP(S)_PROXY: even a loopback URL must connect directly to the
     # adapter-managed child rather than an operator-shell proxy.
@@ -1128,10 +1169,12 @@ async def _sanitize_sse_stream(
     hide_thinking_blocks: bool,
     initial_inside_thinking: bool,
     reasoning_format: ReasoningFormat,
-    slot: asyncio.Semaphore | None,
+    slot: asyncio.Semaphore | None = None,
+    owns_resources: bool = True,
     tool_call_limit: int | None = None,
     strict_grammar: GrammarSpec | None = None,
     include_reasoning: bool = False,
+    deadline: float | None = None,
 ) -> AsyncIterator[bytes]:
     states: dict[int, ThinkingBlockStripper] = {}
     held_contents: dict[int, list[str]] = {}
@@ -1142,8 +1185,26 @@ async def _sanitize_sse_stream(
     received = 0
     saw_done = False
     terminal_outcome_selected = False
+    chunks = response.aiter_bytes()
+    next_chunk: asyncio.Future[bytes | None] | None = None
+    loop = asyncio.get_running_loop()
     try:
-        async for chunk in response.aiter_bytes():
+        while True:
+            if deadline is not None and loop.time() >= deadline:
+                logger.warning("generation child chat stream exceeded its generation budget")
+                terminal_outcome_selected = True
+                yield _upstream_error_event("generation timed out", code="generation_timeout")
+                return
+            next_chunk = next_chunk or asyncio.ensure_future(anext(chunks, None))
+            wait_s = _SSE_KEEPALIVE_S if deadline is None else min(_SSE_KEEPALIVE_S, deadline - loop.time())
+            done, _ = await asyncio.wait({next_chunk}, timeout=wait_s)
+            if not done:
+                yield b": keepalive\n\n"
+                continue
+            chunk = next_chunk.result()
+            next_chunk = None
+            if chunk is None:
+                break
             received += len(chunk)
             if received > _MAX_CHAT_RESPONSE_BYTES:
                 logger.error("generation child SSE exceeded %d bytes", _MAX_CHAT_RESPONSE_BYTES)
@@ -1223,22 +1284,28 @@ async def _sanitize_sse_stream(
             terminal_outcome_selected = True
             yield _upstream_error_event()
     finally:
-        try:
-            await aclose_with_error_precedence(
-                response,
-                outcome_selected=terminal_outcome_selected,
-                context="generation child SSE response",
-            )
-        finally:
+        if next_chunk is not None:
+            next_chunk.cancel()
+            await asyncio.wait({next_chunk})
+            if not next_chunk.cancelled():
+                next_chunk.exception()
+        if owns_resources:
             try:
                 await aclose_with_error_precedence(
-                    client,
+                    response,
                     outcome_selected=terminal_outcome_selected,
-                    context="generation child SSE client",
+                    context="generation child SSE response",
                 )
             finally:
-                if slot is not None:
-                    slot.release()
+                try:
+                    await aclose_with_error_precedence(
+                        client,
+                        outcome_selected=terminal_outcome_selected,
+                        context="generation child SSE client",
+                    )
+                finally:
+                    if slot is not None:
+                        slot.release()
 
 
 async def _stream_strict_violation(
@@ -1352,7 +1419,12 @@ async def _remote_chat_events(
         if not delivered:
             raise
         logger.warning("remote chat for %s failed after output: %s", requested_model, exc)
-        yield _upstream_error_event()
+        reason = "upstream_unavailable" if isinstance(exc, GenerationTimeoutError) else exc.upstream_reason
+        yield (
+            _upstream_error_event()
+            if reason is None
+            else _upstream_error_event(UPSTREAM_FAILURE_MESSAGES[reason], reason=reason)
+        )
     finally:
         await aclose_with_error_precedence(iterator, outcome_selected=True, context="remote chat adapter")
 
@@ -1435,15 +1507,24 @@ async def _remote_chat_response(
             if violation is not None:
                 return _strict_output_error_response(violation)
         return JSONResponse(content=payload, headers=headers)
+    except GenerationUpstreamError as exc:
+        return _upstream_error_response(UPSTREAM_FAILURE_MESSAGES[exc.upstream_reason], reason=exc.upstream_reason)
     except GenerationError as exc:
         raise _generation_http_exception(exc) from exc
     except GenerationTimeoutError:
         raise HTTPException(
-            status_code=504, detail={"code": "generation_timeout", "message": "remote generation timed out"}
+            status_code=504,
+            detail={
+                "code": "generation_timeout",
+                "message": "remote generation timed out",
+                "reason": "upstream_unavailable",
+            },
         ) from None
     except UpstreamUnavailableError as exc:
         logger.warning("remote chat for %s failed: %s", requested_model, exc)
-        raise upstream_unavailable_exception(exc, requested_model) from exc
+        unavailable = upstream_unavailable_exception(exc, requested_model)
+        cast("dict[str, Any]", unavailable.detail)["reason"] = exc.upstream_reason
+        raise unavailable from exc
     except (InputTooLongError, InvalidInputError) as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1460,13 +1541,22 @@ async def _remote_chat_response(
         ) from exc
     except RemoteUpstreamError as exc:
         logger.warning("remote chat for %s failed: %s", requested_model, exc)
-        return _upstream_error_response()
+        return _upstream_error_response(UPSTREAM_FAILURE_MESSAGES[exc.upstream_reason], reason=exc.upstream_reason)
 
 
 # -- /v1/chat/completions (managed child or remote generation adapter) -------
 
 
-@router.post("/chat/completions", response_model=None)
+@router.post(
+    "/chat/completions",
+    response_model=None,
+    responses={
+        500: {"description": "Generation failed", "model": OpenAIGenerationErrorResponse},
+        502: {"description": "A remote upstream failed the request", "model": OpenAIGenerationErrorResponse},
+        503: {"description": "Model loading or temporarily unavailable", "model": OpenAIGenerationErrorResponse},
+        504: {"description": "Remote generation timed out", "model": OpenAIGenerationErrorResponse},
+    },
+)
 async def chat_completions(
     http_request: Request,
     x_machine_profile: Annotated[str | None, Header(alias="X-SIE-MACHINE-PROFILE")] = None,
@@ -1480,26 +1570,44 @@ async def chat_completions(
     Errors are emitted as top-level OpenAI ``{"error": {...}}`` envelopes
     (never FastAPI's ``{"detail": ...}`` wrapper), matching ``/v1/completions``.
     """
-    try:
-        response = await _chat_completions(http_request, x_machine_profile)
-        if isinstance(response, JSONResponse) and response.status_code >= status.HTTP_400_BAD_REQUEST:
-            payload = json.loads(bytes(response.body))
-            code = payload.get("error", {}).get("code")
-            refusal = fallback_refusal(http_request, response.status_code, code)
-            if refusal is not None:
-                return openai_error_response(refusal)
-        return response
-    except HTTPException as exc:
-        return openai_error_response(fallback_refusal(http_request, exc.status_code, error_code(exc)) or exc)
+    return await serve_chat_completions(http_request, x_machine_profile)
+
+
+async def serve_chat_completions(
+    http_request: Request,
+    x_machine_profile: str | None,
+    body: dict[str, Any] | None = None,
+) -> Response | StreamingResponse:
+    """Answer a chat completions request exactly as ``/v1/chat/completions`` does.
+
+    ``body`` is the chat request to serve in place of the request's own body,
+    for a route that translates its request onto this one in process.
+    """
+    async with AsyncExitStack() as lifetime:
+        try:
+            response = await _chat_completions(http_request, x_machine_profile, lifetime, body)
+            if isinstance(response, JSONResponse) and response.status_code >= status.HTTP_400_BAD_REQUEST:
+                payload = json.loads(bytes(response.body))
+                code = payload.get("error", {}).get("code")
+                refusal = fallback_refusal(http_request, response.status_code, code)
+                if refusal is not None:
+                    return openai_error_response(refusal)
+            if isinstance(response, StreamingResponse):
+                return LeasedStreamingResponse(response, lifetime.pop_all())
+            return response
+        except HTTPException as exc:
+            return openai_error_response(fallback_refusal(http_request, exc.status_code, error_code(exc)) or exc)
 
 
 async def _chat_completions(
     http_request: Request,
     x_machine_profile: str | None,
+    lifetime: AsyncExitStack,
+    chat_body: dict[str, Any] | None = None,
 ) -> Response | StreamingResponse:
     validate_machine_profile_header(x_machine_profile)
 
-    body = await _read_json_body(http_request)
+    body = await _read_json_body(http_request) if chat_body is None else chat_body
 
     model = body.get("model")
     if not isinstance(model, str) or not model.strip():
@@ -1553,6 +1661,7 @@ async def _chat_completions(
 
         # Validate capability and all CUDA edge fields before a model download.
         config = registry.get_config(registry_key)
+        lora = validate_generation_lora(config, body.get("lora_adapter"))
         gen_task = getattr(config.tasks, "generate", None)
         if gen_task is None:
             raise _bad_request(
@@ -1600,6 +1709,7 @@ async def _chat_completions(
 
         adapter = registry.get(route.key)
         registry.touch_lru(route.key)
+        await ensure_generation_lora(registry, route.key, lora, n=body.get("n"))
         if _adapter_answers_chat(registry.get_config(route.key)) and isinstance(adapter, GenerationAdapter):
             _validate_remote_chat_media(messages)
             return await _remote_chat_response(
@@ -1664,24 +1774,41 @@ async def _chat_completions(
         # in output.
         initial_inside_thinking = hide_thinking_blocks and thinking_enabled and reasoning_parser is None
 
+        if lora is not None:
+            if not isinstance(adapter, SGLangGenerationAdapter):
+                raise _bad_request("This chat backend does not support LoRA selection", param="lora_adapter")
+            try:
+                engine_name = lifetime.enter_context(adapter.lora_request(lora, n=body.get("n")))
+            except GenerationError as exc:
+                raise _generation_http_exception(exc, registry) from exc
+            # The child accepts a backend LoRA name, never a client-supplied path.
+            proxied["lora_path"] = engine_name
+
         if stream:
             if slot is not None:
                 await slot.acquire()
+                lifetime.callback(slot.release)
             client = _new_proxy_client()
+            lifetime.push_async_callback(
+                aclose_with_error_precedence,
+                client,
+                outcome_selected=True,
+                context="generation child SSE client",
+            )
+            budget = _child_budget(config, proxied, stream=True)
+            deadline = None if budget is None else asyncio.get_running_loop().time() + budget
             try:
-                upstream_request = client.build_request("POST", url, json=proxied)
+                upstream_request = client.build_request("POST", url, json=proxied, timeout=_child_timeout(budget))
                 upstream = await client.send(upstream_request, stream=True)
-            except asyncio.CancelledError:
-                await client.aclose()
-                if slot is not None:
-                    slot.release()
-                raise
             except httpx.HTTPError:
                 logger.warning("generation child chat stream connection failed", exc_info=True)
-                await client.aclose()
-                if slot is not None:
-                    slot.release()
                 return _upstream_error_response("generation child is unavailable")
+            lifetime.push_async_callback(
+                aclose_with_error_precedence,
+                upstream,
+                outcome_selected=True,
+                context="generation child SSE response",
+            )
             if upstream.status_code != status.HTTP_200_OK:
                 try:
                     await _read_upstream_body(upstream)
@@ -1689,11 +1816,6 @@ async def _chat_completions(
                     # The body is intentionally discarded; never log child
                     # validation details because they can include user input.
                     pass
-                finally:
-                    await upstream.aclose()
-                    await client.aclose()
-                    if slot is not None:
-                        slot.release()
                 logger.error("generation child chat error status=%d", upstream.status_code)
                 return _upstream_error_response(
                     response_status=_translated_upstream_status(upstream.status_code),
@@ -1706,11 +1828,6 @@ async def _chat_completions(
                     # Drain only for connection reuse and bounded cleanup; the
                     # unexpected response body is intentionally discarded.
                     pass
-                finally:
-                    await upstream.aclose()
-                    await client.aclose()
-                    if slot is not None:
-                        slot.release()
                 logger.error("generation child returned non-SSE content for a streaming request")
                 return _upstream_error_response("generation child returned an invalid streaming response")
             return StreamingResponse(
@@ -1721,10 +1838,11 @@ async def _chat_completions(
                     hide_thinking_blocks=hide_thinking_blocks,
                     initial_inside_thinking=initial_inside_thinking,
                     reasoning_format=reasoning_format,
-                    slot=slot,
+                    owns_resources=False,
                     tool_call_limit=tool_call_limit,
                     strict_grammar=strict_grammar,
                     include_reasoning=include_reasoning,
+                    deadline=deadline,
                 ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **route.headers()},
@@ -1732,15 +1850,22 @@ async def _chat_completions(
 
         if slot is not None:
             await slot.acquire()
+        budget = _child_budget(config, proxied, stream=False)
         try:
             async with _new_proxy_client() as client:
                 try:
-                    async with client.stream("POST", url, json=proxied) as upstream:
+                    async with (
+                        asyncio.timeout(budget),
+                        client.stream("POST", url, json=proxied, timeout=_child_timeout(budget)) as upstream,
+                    ):
                         raw = await _read_upstream_body(upstream)
                         upstream_status = upstream.status_code
                 except httpx.HTTPError:
                     logger.warning("generation child chat request failed", exc_info=True)
                     return _upstream_error_response("generation child is unavailable")
+        except TimeoutError:
+            logger.warning("generation child chat request exceeded its generation budget")
+            raise _generation_timeout_exception() from None
         except ValueError:
             logger.error("generation child chat response exceeded its byte limit")
             return _upstream_error_response("upstream response exceeded the byte limit")

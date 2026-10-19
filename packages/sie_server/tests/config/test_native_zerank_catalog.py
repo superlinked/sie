@@ -28,9 +28,9 @@ def test_native_catalog_pin_profile_and_bundle() -> None:
     assert profile["adapter_options"] == {"loadtime": {}, "runtime": {}}
     bundle = yaml.safe_load((_SERVER / "bundles/default.yaml").read_text())
     assert _ADAPTER in bundle["adapters"]
-    assert bundle["deps"]["sentence-transformers"] == ">=5.4.1,<6"
-    assert bundle["deps"]["transformers"] == ">=4.57,<5"
-    assert bundle["deps"]["gliner2"] == ">=1.3.1,<2"
+    assert bundle["deps"]["sentence-transformers"] == "==5.7.0"
+    assert bundle["deps"]["transformers"] == "==4.57.6"
+    assert bundle["deps"]["gliner2"] == ">=1.3.2,<=2.0.0"
 
 
 def test_loader_forwards_native_context_precision_and_revision(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -14,6 +14,7 @@ import httpx
 import pytest
 import yaml
 from sie_server.adapters._generation_base import GenerationChunk, GenerationResult
+from sie_server.adapters.sglang import _memory
 from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
 from sie_server.adapters.sglang_vision_extract.adapter import SGLangVisionExtractAdapter
 from sie_server.config.model import ModelConfig
@@ -832,3 +833,10 @@ def test_output_postprocess_cannot_be_a_runtime_option(adapter: SGLangVisionExtr
 def test_invalid_sampling_options_rejected(options: dict[str, Any]) -> None:
     with pytest.raises(ValueError, match=r"temperature|top_p"):
         SGLangVisionExtractAdapter("lightonai/LightOnOCR-3-4B", **options)
+
+
+@pytest.fixture(autouse=True)
+def mock_memory_hardware(monkeypatch):
+    """Launch lifecycle tests use synthetic weight metadata and CUDA capacity."""
+    monkeypatch.setattr(_memory, "device_memory", lambda _: (80 * _memory.GIB, 80 * _memory.GIB))
+    monkeypatch.setattr(_memory.SGLangMemoryBudget, "static_bytes", 8 * _memory.GIB)

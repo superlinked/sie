@@ -29,4 +29,5 @@ profiles:
     adapter_options:
       loadtime:
         trust_remote_code: true
+        code_revision: e244c9398934a48b4663dacf7ff4965961a6807a
       runtime: {}

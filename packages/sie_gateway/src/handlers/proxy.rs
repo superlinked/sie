@@ -26,8 +26,8 @@ use crate::queue::lane_admission::LaneKey;
 use crate::queue::publisher;
 use crate::queue::streaming::{
     client_safe_worker_error_code, client_safe_worker_error_message,
-    client_safe_worker_error_param, is_lower_sha256, MODEL_LOAD_FAILED_ERROR_CODE,
-    MODEL_LOAD_FAILED_PUBLIC_MESSAGE,
+    client_safe_worker_error_param, is_lower_sha256, UpstreamFailureReason,
+    MODEL_LOAD_FAILED_ERROR_CODE, MODEL_LOAD_FAILED_PUBLIC_MESSAGE,
 };
 
 use crate::server::{
@@ -41,7 +41,7 @@ use crate::state::worker_registry::{QueueRoute, WorkerRegistry};
 use crate::types::model::FallbackTrigger;
 use crate::types::AuditEntry;
 
-use crate::middleware::auth::{extract_bearer_token, mask_token};
+use crate::middleware::auth::request_token_id;
 
 use super::serving_disclosure::{
     remote_forbidden, DeferredFallbackFinish, FallbackAttempt, ServingDisclosure,
@@ -278,7 +278,10 @@ pub fn is_length_limit_error(error: &axum::Error) -> bool {
     false
 }
 
-fn request_body_error(error: &axum::Error, limit: usize) -> (StatusCode, &'static str, String) {
+pub(crate) fn request_body_error(
+    error: &axum::Error,
+    limit: usize,
+) -> (StatusCode, &'static str, String) {
     if is_length_limit_error(error) {
         (
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -3895,9 +3898,7 @@ async fn proxy_request_inner(
         }
     };
 
-    let token_id = extract_bearer_token(req.headers())
-        .map(|t| mask_token(&t))
-        .unwrap_or_default();
+    let token_id = request_token_id(req.headers());
     let content_length = req
         .headers()
         .get("content-length")
@@ -4496,6 +4497,24 @@ async fn queue_mode_proxy(
 
     if let Some(response) = queue_items_error(endpoint, &items) {
         return response;
+    }
+
+    if matches!(endpoint, "encode" | "extract" | "score") {
+        if let Some((key, value)) = undeclared_lora_option(params.options.as_ref(), || {
+            state.model_registry.get_model_info(model)
+        }) {
+            return endpoint_error_response(
+                endpoint,
+                StatusCode::BAD_REQUEST,
+                err_code::INVALID_REQUEST,
+                oai_type::INVALID_REQUEST,
+                oai_code::UNKNOWN_LORA_ADAPTER,
+                Some(key),
+                format!(
+                    "'{key}' must name a LoRA adapter that model '{display_model}' declares; {value} is not one of them."
+                ),
+            );
+        }
     }
 
     // Generate has its own publish + result-collection path
@@ -5450,6 +5469,7 @@ pub(crate) enum StreamingDriverErr {
         message: String,
         param: Option<String>,
         retry_after_s: Option<u16>,
+        reason: Option<UpstreamFailureReason>,
         request_id: String,
         attempt_id: String,
     },
@@ -5985,6 +6005,7 @@ pub(crate) async fn run_streaming_generate(
             message: err.client_safe_message().to_string(),
             param: err.client_safe_param().map(str::to_string),
             retry_after_s: err.validated_retry_after_s(),
+            reason: err.client_safe_reason(),
             request_id: request_id.clone(),
             attempt_id: outcome.attempt_id.clone(),
         });
@@ -6150,6 +6171,7 @@ fn build_streaming_error_response(err: &StreamingDriverErr) -> Response {
             message,
             param,
             retry_after_s,
+            reason,
             request_id,
             attempt_id,
         } => {
@@ -6174,7 +6196,7 @@ fn build_streaming_error_response(err: &StreamingDriverErr) -> Response {
             let status = worker_error_http_status(stable_code);
             let err_type = worker_error_openai_type(stable_code);
             let mut body = json_openai_error(
-                client_safe_worker_error_message(code, message),
+                client_safe_worker_error_message(code, message, *reason),
                 err_type,
                 client_safe_worker_error_param(code, param.as_deref()),
                 openai_code,
@@ -6187,6 +6209,9 @@ fn build_streaming_error_response(err: &StreamingDriverErr) -> Response {
                         "attempt_id".to_string(),
                         serde_json::Value::String(attempt_id.clone()),
                     );
+                    if let Some(reason) = reason {
+                        err_obj.insert("reason".to_string(), json!(reason.as_str()));
+                    }
                 }
             }
             let mut resp = (status, Json(body)).into_response();
@@ -9232,9 +9257,7 @@ async fn resolve_generation_route(
         }
     }
 
-    let token_id = extract_bearer_token(hdr)
-        .map(|t| mask_token(&t))
-        .unwrap_or_default();
+    let token_id = request_token_id(hdr);
     let content_length = hdr
         .get("content-length")
         .and_then(|v| v.to_str().ok())
@@ -11727,6 +11750,79 @@ pub(crate) fn validate_lora_for_profile(
     }
 }
 
+/// The caller's ``options.lora`` or ``options.lora_id`` as ``(param, value)``
+/// when it is set and names no LoRA that the selected profile
+/// (``options.profile``, else ``default``) of the model ``entry`` returns
+/// declares. ``options.lora_id`` names a LoRA to load: a
+/// ``loadtime.lora_paths`` source or a ``runtime.lora_id``. ``options.lora``
+/// selects a loaded LoRA, so a ``lora_paths`` served name and a
+/// ``runtime.lora`` also qualify. ``entry`` is called only when the options
+/// select a LoRA; a model it does not return is not checked.
+pub(crate) fn undeclared_lora_option(
+    options: Option<&Value>,
+    entry: impl FnOnce() -> Option<crate::types::model::ModelEntry>,
+) -> Option<(&'static str, Value)> {
+    let options = options?.as_object()?;
+    let requested: Vec<(&'static str, bool, &Value)> = [
+        ("options.lora", "lora", true),
+        ("options.lora_id", "lora_id", false),
+    ]
+    .into_iter()
+    .filter_map(|(param, key, served_names)| {
+        let value = options.get(key).filter(|value| !value.is_null())?;
+        Some((param, served_names, value))
+    })
+    .collect();
+    if requested.is_empty() {
+        return None;
+    }
+    let entry = entry()?;
+    let profile_name = options
+        .get("profile")
+        .and_then(Value::as_str)
+        .unwrap_or("default");
+    let adapter_options = entry
+        .profile_configs
+        .get(profile_name)
+        .and_then(|profile| profile.adapter_options.as_ref());
+    requested
+        .into_iter()
+        .find(|(_, served_names, value)| {
+            !value.as_str().is_some_and(|name| {
+                adapter_options
+                    .is_some_and(|options| profile_declares_lora(options, name, *served_names))
+            })
+        })
+        .map(|(param, _, value)| (param, value.clone()))
+}
+
+fn profile_declares_lora(adapter_options: &Value, name: &str, served_names: bool) -> bool {
+    let runtime = adapter_options.get("runtime");
+    let runtime_names = |key: &str| {
+        runtime
+            .and_then(|runtime| runtime.get(key))
+            .and_then(Value::as_str)
+            == Some(name)
+    };
+    if runtime_names("lora_id") || (served_names && runtime_names("lora")) {
+        return true;
+    }
+    match adapter_options
+        .get("loadtime")
+        .and_then(|loadtime| loadtime.get("lora_paths"))
+    {
+        Some(Value::Object(paths)) => paths.iter().any(|(served, source)| {
+            (served_names && served == name)
+                || source
+                    .as_str()
+                    .or_else(|| source.get("id").and_then(Value::as_str))
+                    == Some(name)
+        }),
+        Some(Value::Array(paths)) => paths.iter().any(|path| path.as_str() == Some(name)),
+        _ => false,
+    }
+}
+
 fn parse_model_spec(spec: &str) -> (String, String) {
     if let Some(idx) = spec.find(":/") {
         (spec[..idx].to_string(), spec[idx + 2..].to_string())
@@ -12148,6 +12244,7 @@ pub(crate) fn is_openai_compat_forwarded_header(name: &str) -> bool {
 pub(crate) fn is_openai_compat_inner_request_header(name: &str) -> bool {
     [
         "authorization",
+        "x-api-key",
         "x-sie-machine-profile",
         "x-sie-pool",
         "x-sie-engine",
@@ -12477,7 +12574,7 @@ fn build_generate_success_body(
 
 /// Check client SDK version skew.
 /// Warns once per minor version if client SDK differs by >1 minor version.
-fn check_sdk_version(headers: &HeaderMap) {
+pub(crate) fn check_sdk_version(headers: &HeaderMap) {
     let Some(sdk_version) = headers
         .get("x-sie-sdk-version")
         .and_then(|v| v.to_str().ok())
@@ -15830,7 +15927,10 @@ fn normalize_rerank_request(
     })
 }
 
-fn compatibility_model_uri(endpoint: &str, model: &str) -> Result<axum::http::Uri, String> {
+pub(crate) fn compatibility_model_uri(
+    endpoint: &str,
+    model: &str,
+) -> Result<axum::http::Uri, String> {
     let model = model.trim_start_matches('/');
     if model.is_empty() {
         return Err("'model' must contain a model id".to_string());
@@ -17821,6 +17921,8 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/h".to_string(),
                 hf_revision: None,
+                description: None,
+                release_date: None,
                 routing: None,
                 adapter_module: None,
                 default_bundle: None,
@@ -22173,6 +22275,8 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/slow".to_string(),
                 hf_revision: None,
+                description: None,
+                release_date: None,
                 routing: None,
                 adapter_module: None,
                 default_bundle: None,
@@ -23279,6 +23383,7 @@ mod tests {
         // path — every other endpoint injects queue trace context).
         for name in [
             "authorization",
+            "x-api-key",
             "x-sie-machine-profile",
             "x-sie-pool",
             "x-sie-engine",
@@ -25529,6 +25634,8 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/buffered".to_string(),
                 hf_revision: None,
+                description: None,
+                release_date: None,
                 routing: None,
                 adapter_module: None,
                 default_bundle: None,
@@ -25592,6 +25699,8 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/g".to_string(),
                 hf_revision: None,
+                description: None,
+                release_date: None,
                 routing: None,
                 adapter_module: None,
                 default_bundle: None,
@@ -25675,6 +25784,8 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/plain".to_string(),
                 hf_revision: None,
+                description: None,
+                release_date: None,
                 routing: None,
                 adapter_module: None,
                 default_bundle: None,
@@ -25742,6 +25853,8 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/g2".to_string(),
                 hf_revision: None,
+                description: None,
+                release_date: None,
                 routing: None,
                 adapter_module: None,
                 default_bundle: None,
@@ -25805,6 +25918,8 @@ mod tests {
             .add_model_config(ModelConfig {
                 name: "org/g3".to_string(),
                 hf_revision: None,
+                description: None,
+                release_date: None,
                 routing: None,
                 adapter_module: None,
                 default_bundle: None,
@@ -28906,6 +29021,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-rl-1".to_string(),
             attempt_id: "att-rl-1".to_string(),
+            reason: None,
         };
         let resp = build_streaming_error_response(&err);
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -28939,6 +29055,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-large-1".to_string(),
             attempt_id: "att-large-1".to_string(),
+            reason: None,
         };
         let response = build_streaming_error_response(&err);
 
@@ -28965,6 +29082,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-too-long-1".to_string(),
             attempt_id: "att-too-long-1".to_string(),
+            reason: None,
         };
         let response = build_streaming_error_response(&err);
 
@@ -28992,6 +29110,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-unsupported-1".to_string(),
             attempt_id: "att-unsupported-1".to_string(),
+            reason: None,
         };
         let response = build_streaming_error_response(&err);
 
@@ -29020,6 +29139,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-cold-1".to_string(),
             attempt_id: "att-cold-1".to_string(),
+            reason: None,
         };
         let resp = build_streaming_error_response(&err);
 
@@ -29047,6 +29167,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-empty-1".to_string(),
             attempt_id: "att-empty-1".to_string(),
+            reason: None,
         };
         let resp = build_streaming_error_response(&err);
 
@@ -29080,6 +29201,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-load-failed-1".to_string(),
             attempt_id: "att-load-failed-1".to_string(),
+            reason: None,
         };
         let resp = build_streaming_error_response(&err);
 
@@ -29115,6 +29237,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-unknown-1".to_string(),
             attempt_id: "att-unknown-1".to_string(),
+            reason: None,
         };
         let resp = build_streaming_error_response(&err);
 
@@ -29144,6 +29267,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-sensitive-1".to_string(),
             attempt_id: "att-sensitive-1".to_string(),
+            reason: None,
         };
 
         let response = build_streaming_error_response(&err);
@@ -29171,6 +29295,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-future-1".to_string(),
             attempt_id: "att-future-1".to_string(),
+            reason: None,
         };
 
         let response = build_streaming_error_response(&err);
@@ -29200,6 +29325,7 @@ mod tests {
             retry_after_s: None,
             request_id: "req-retry-1".to_string(),
             attempt_id: "att-retry-1".to_string(),
+            reason: None,
         };
         let resp = build_streaming_error_response(&err);
 
@@ -29244,6 +29370,7 @@ mod tests {
             retry_after_s: Some(12),
             request_id: "req-retry-configured".to_string(),
             attempt_id: "att-retry-configured".to_string(),
+            reason: None,
         };
 
         let response = build_streaming_error_response(&err);
@@ -29271,6 +29398,7 @@ mod tests {
                 retry_after_s,
                 request_id: "req-loading".to_string(),
                 attempt_id: "att-loading".to_string(),
+                reason: None,
             };
 
             let response = build_streaming_error_response(&err);
@@ -29449,6 +29577,204 @@ mod tests {
         assert!(v["choices"][0].get("delta").is_none());
     }
 
+    // ── Declared LoRA selection on encode, extract and score ───────
+
+    const LORA_MODEL: &str = "\
+sie_id: acme/lora
+hf_id: acme/lora
+tasks:
+  encode:
+    dense:
+      dim: 2
+  score: {}
+  extract: {}
+profiles:
+  default:
+    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter
+    max_batch_tokens: 4096
+  banking:
+    extends: default
+    adapter_options:
+      runtime:
+        lora_id: org/banking-lora
+  tuned:
+    extends: default
+    adapter_options:
+      runtime:
+        lora: org/tuned-lora
+  served:
+    extends: default
+    adapter_options:
+      loadtime:
+        lora_paths:
+          legal: org/legal-lora
+          pinned:
+            id: org/pinned-lora
+            revision: 0123456789abcdef0123456789abcdef01234567
+  listed:
+    extends: default
+    adapter_options:
+      loadtime:
+        lora_paths:
+          - org/listed-lora
+";
+
+    #[tokio::test]
+    async fn undeclared_lora_option_accepts_only_what_the_selected_profile_declares() {
+        let gateway = TestGateway::new(&[LORA_MODEL]).await;
+        let entry = gateway
+            .state
+            .model_registry
+            .get_model_info("acme/lora")
+            .expect("model entry");
+
+        for (profile, name, keys) in [
+            ("banking", "org/banking-lora", &["lora", "lora_id"][..]),
+            ("served", "org/legal-lora", &["lora", "lora_id"][..]),
+            ("served", "org/pinned-lora", &["lora", "lora_id"][..]),
+            ("listed", "org/listed-lora", &["lora", "lora_id"][..]),
+            ("tuned", "org/tuned-lora", &["lora"][..]),
+            ("served", "legal", &["lora"][..]),
+            ("served", "pinned", &["lora"][..]),
+        ] {
+            for key in keys {
+                let options = json!({ "profile": profile, *key: name });
+                assert_eq!(
+                    undeclared_lora_option(Some(&options), || Some(entry.clone())),
+                    None,
+                    "{options}"
+                );
+            }
+        }
+        let not_looked_up = || -> Option<crate::types::model::ModelEntry> {
+            panic!("no LoRA is selected, so the model is not looked up")
+        };
+        assert_eq!(
+            undeclared_lora_option(Some(&json!({"lora": null, "lora_id": null})), not_looked_up),
+            None
+        );
+        assert_eq!(
+            undeclared_lora_option(Some(&json!({"profile": "banking"})), not_looked_up),
+            None
+        );
+        assert_eq!(undeclared_lora_option(None, not_looked_up), None);
+        assert_eq!(
+            undeclared_lora_option(Some(&json!({"lora": "attacker/lora"})), || None),
+            None
+        );
+
+        for (options, expected) in [
+            (
+                json!({"lora_id": "attacker/lora"}),
+                ("options.lora_id", json!("attacker/lora")),
+            ),
+            (
+                json!({"lora": "/srv/any/dir"}),
+                ("options.lora", json!("/srv/any/dir")),
+            ),
+            (
+                json!({"lora_id": "org/banking-lora"}),
+                ("options.lora_id", json!("org/banking-lora")),
+            ),
+            (
+                json!({"profile": "served", "lora_id": "org/banking-lora"}),
+                ("options.lora_id", json!("org/banking-lora")),
+            ),
+            (
+                json!({"profile": "missing", "lora": "legal"}),
+                ("options.lora", json!("legal")),
+            ),
+            (
+                json!({"profile": "served", "lora_id": "legal"}),
+                ("options.lora_id", json!("legal")),
+            ),
+            (
+                json!({"profile": "tuned", "lora_id": "org/tuned-lora"}),
+                ("options.lora_id", json!("org/tuned-lora")),
+            ),
+            (json!({"lora": ""}), ("options.lora", json!(""))),
+            (json!({"lora": 42}), ("options.lora", json!(42))),
+            (
+                json!({"profile": "served", "lora": "legal", "lora_id": "attacker/lora"}),
+                ("options.lora_id", json!("attacker/lora")),
+            ),
+        ] {
+            assert_eq!(
+                undeclared_lora_option(Some(&options), || Some(entry.clone())),
+                Some(expected),
+                "{options}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_undeclared_lora_is_refused_on_encode_extract_and_score_before_dispatch() {
+        let gateway = TestGateway::new(&[LORA_MODEL]).await;
+        gateway.add_worker("local-1", LOCAL_LANE, &[]).await;
+        let requests = |options: Value| {
+            [
+                (
+                    "encode",
+                    json!({"items": [{"text": "x"}], "params": {"options": options.clone()}}),
+                ),
+                (
+                    "extract",
+                    json!({"items": [{"text": "x"}], "params": {"labels": ["a"], "options": options.clone()}}),
+                ),
+                (
+                    "score",
+                    json!({"query": {"text": "q"}, "items": [{"text": "x"}], "options": options}),
+                ),
+            ]
+        };
+
+        for (endpoint, body) in requests(json!({"lora_id": "attacker/lora"})) {
+            let response = proxy_request(
+                State(Arc::clone(&gateway.state)),
+                json_request(&format!("/v1/{endpoint}/acme/lora"), body),
+                endpoint,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{endpoint}");
+            let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["detail"]["code"], "INVALID_REQUEST", "{endpoint}");
+            assert!(
+                value["detail"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("attacker/lora")),
+                "{endpoint}: {value}"
+            );
+        }
+        assert_eq!(gateway.dispatcher.dispatched(), Vec::new());
+
+        let msgpack = Request::builder()
+            .uri("/v1/encode/acme/lora")
+            .header("content-type", "application/msgpack")
+            .body(Body::from(
+                rmp_serde::to_vec_named(&json!({
+                    "items": [{"text": "x"}],
+                    "params": {"options": {"lora_id": "attacker/lora"}}
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let response = proxy_request(State(Arc::clone(&gateway.state)), msgpack, "encode").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "msgpack encode");
+        assert_eq!(gateway.dispatcher.dispatched(), Vec::new());
+
+        for (endpoint, body) in requests(json!({"profile": "served", "lora": "legal"})) {
+            let response = proxy_request(
+                State(Arc::clone(&gateway.state)),
+                json_request(&format!("/v1/{endpoint}/acme/lora"), body),
+                endpoint,
+            )
+            .await;
+            assert_ne!(response.status(), StatusCode::BAD_REQUEST, "{endpoint}");
+        }
+        assert_eq!(gateway.dispatcher.dispatched().len(), 3);
+    }
+
     // ── M10: per-profile LoRA adapter validation ───────────────────
     //
     // ``validate_lora_for_profile`` is the seam the chat and generate
@@ -29471,6 +29797,8 @@ mod tests {
             dims: std::collections::HashMap::new(),
             max_sequence_length: None,
             revision: None,
+            description: None,
+            release_date: None,
             routing: None,
             max_output_tokens: None,
             profile_max_output_tokens: std::collections::HashMap::new(),

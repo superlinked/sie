@@ -2,6 +2,8 @@
 # span architecture), loaded through gliner2 2.x AutoExtractor. Served from the
 # transformers5 bundle, which pins gliner2 2.x.
 sie_id: fastino/GLiNER2.5-Decide
+description: "English typed-decision classifier (GLiNER2.5, DeBERTa-v3-large): answers noul, choice and score questions about a text in one pass. 512-token window."
+release_date: "2026-09-24"
 hf_id: fastino/GLiNER2.5-Decide
 hf_revision: 7ee5da4c2415e32259bcdc0b1a7367c32ce8d6f6
 inputs:

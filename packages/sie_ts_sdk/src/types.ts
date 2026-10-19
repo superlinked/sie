@@ -367,8 +367,14 @@ export interface ModelInfo {
   maxSequenceLength?: number | null;
   /** Pinned HF commit SHA for the weights; null for unpinned/package-backed models */
   revision?: string | null;
+  /** One line about the model; "" when the catalog sets none */
+  description?: string;
+  /** Release date of the served weights, YYYY-MM-DD; "" when the catalog sets none */
+  releaseDate?: string;
   /** Servable profiles keyed by name; address one as "model@profile" */
   profiles?: Record<string, ProfileInfo>;
+  /** Single-server ready LoRA names; absent on gateways (not fleet residency). */
+  lora_adapters?: string[];
   /** Advertised model capabilities; null for models with no `generate` task */
   capabilities?: ModelCapabilities | null;
   /** Gateway-only queue snapshot; absent when talking to a single server */
@@ -390,7 +396,7 @@ export interface ModelInfo {
 
 /**
  * A `/v1/models` entry exactly as the gateway emits it, before the client
- * camelCases the three renamed top-level keys.
+ * camelCases the four renamed top-level keys.
  *
  * Declared once here (rather than inline per call site) so `listModels` and
  * `getModel` cannot drift apart, and so the emitted key set has a single
@@ -406,7 +412,10 @@ export interface WireModelInfo {
   dims?: ModelDims;
   max_sequence_length?: number | null;
   revision?: string | null;
+  description?: string;
+  release_date?: string;
   profiles?: Record<string, ProfileInfo>;
+  lora_adapters?: string[];
   capabilities?: ModelCapabilities | null;
   pending_generation?: PendingGeneration;
   routing?: ModelRouting;
@@ -423,15 +432,18 @@ export interface WireModelInfo {
 const MODEL_INFO_WIRE_FIELD_SET: Record<keyof WireModelInfo, true> = {
   aliases: true,
   capabilities: true,
+  description: true,
   dims: true,
   inputs: true,
   last_error: true,
   loaded: true,
+  lora_adapters: true,
   max_sequence_length: true,
   name: true,
   outputs: true,
   pending_generation: true,
   profiles: true,
+  release_date: true,
   revision: true,
   routing: true,
   state: true,
@@ -783,8 +795,11 @@ export interface ModelSummary {
 export interface ServerInfo {
   version: string;
   uptime_seconds: number;
+  /** @deprecated Always `""`. Removed no earlier than 0.13.0. */
   user: string;
+  /** @deprecated Always `""`. Removed no earlier than 0.13.0. */
   working_dir: string;
+  /** @deprecated Always `0`. Removed no earlier than 0.13.0. */
   pid: number;
 }
 

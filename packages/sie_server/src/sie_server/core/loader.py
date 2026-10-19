@@ -549,6 +549,7 @@ def load_adapter(
     default_compute_precision: ComputePrecision = "float16",
     attention_backend: AttentionBackend = "auto",
     verified_serving_artifact: VerifiedServingArtifact | None = None,
+    max_loras_per_model: int | None = None,
 ) -> ModelAdapter:
     """Load and instantiate a model adapter.
 
@@ -635,6 +636,14 @@ def load_adapter(
         constructor_parameters = inspect.signature(adapter_class.__init__).parameters
     except (TypeError, ValueError):
         constructor_parameters = {}
+    if "kv_budget_tokens" in constructor_parameters:
+        budget = config.resolve_profile("default").kv_budget_tokens
+        if budget is not None:
+            adapter_kwargs["kv_budget_tokens"] = budget
+    if "lora_revisions" in constructor_parameters:
+        adapter_kwargs["lora_revisions"] = config.lora_revisions()
+    if "max_loaded_loras" in constructor_parameters and max_loras_per_model is not None:
+        adapter_kwargs["max_loaded_loras"] = max_loras_per_model
     for keyword, dim in (
         ("sparse_dim", config.dims.get("sparse")),
         ("multivector_dim", config.dims.get("multivector")),
@@ -837,9 +846,9 @@ def _build_adapter_kwargs(
     # Adapter constructors take ``lora_paths`` as served-name -> bare path/id
     # (the sglang ``--lora-paths`` shape). A pinned ``{id, revision}`` value
     # (#2113) is a *config* spelling: collapse it to the bare id here so no
-    # constructor ever sees the mapping. The revision itself is honored on the
-    # hot-reload preload path (``ModelLoader``), which rejects pins on adapters
-    # that cannot apply them.
+    # constructor ever sees the mapping. Capable constructors receive the
+    # separate source-to-revision map above; the PEFT preload path receives
+    # each revision directly. ModelLoader rejects adapters unable to honor pins.
     lora_paths = kwargs.get("lora_paths")
     if isinstance(lora_paths, Mapping):
         kwargs["lora_paths"] = {

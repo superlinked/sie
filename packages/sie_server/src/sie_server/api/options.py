@@ -3,7 +3,11 @@ from typing import Any
 from fastapi import HTTPException, status
 
 from sie_server.config.model import ModelConfig, ResolvedProfile
-from sie_server.core.runtime_options import InvalidOverflowPolicyError, merge_runtime_options_with_profile
+from sie_server.core.runtime_options import (
+    InvalidOverflowPolicyError,
+    UndeclaredLoraError,
+    merge_runtime_options_with_profile,
+)
 from sie_server.types.responses import ErrorCode
 
 
@@ -43,7 +47,12 @@ def resolve_runtime_options_with_profile(
         merged, resolved_profile = merge_runtime_options_with_profile(config, request_options)
     except ValueError as e:
         # The same check the queue worker applies (core.runtime_options).
-        invalid = "invalid_overflow_policy" if isinstance(e, InvalidOverflowPolicyError) else "invalid_profile"
+        if isinstance(e, InvalidOverflowPolicyError):
+            invalid = "invalid_overflow_policy"
+        elif isinstance(e, UndeclaredLoraError):
+            invalid = "undeclared_lora"
+        else:
+            invalid = "invalid_profile"
         span.set_attribute("error", invalid)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

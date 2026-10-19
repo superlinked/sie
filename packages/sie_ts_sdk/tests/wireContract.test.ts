@@ -33,11 +33,12 @@ function jsonResponse(body: unknown): Response {
   });
 }
 
-/** The three top-level keys the client camelCases; everything else passes through. */
+/** The four top-level keys the client camelCases; everything else passes through. */
 const WIRE_TO_CLIENT_KEY: Record<string, string> = {
   max_sequence_length: "maxSequenceLength",
   last_error: "lastError",
   pending_generation: "pendingGeneration",
+  release_date: "releaseDate",
 };
 
 /**
@@ -64,6 +65,7 @@ function expectEveryTypedFieldPresent(model: ModelInfo | undefined): void {
 const FULL_WIRE_ENTRY = {
   name: "BAAI/bge-m3",
   loaded: true,
+  lora_adapters: ["support"],
   state: "loaded",
   last_error: null,
   inputs: ["text"],
@@ -71,6 +73,8 @@ const FULL_WIRE_ENTRY = {
   dims: { dense: 1024, sparse: 250002 },
   max_sequence_length: 8192,
   revision: "5617a9f61b028005a4858fdac845db406aefb181",
+  description: "BAAI/bge-m3: embedding and reranking model.",
+  release_date: "2024-07-03",
   profiles: { default: { is_default: true }, fp8: { is_default: false } },
   capabilities: { grammar: ["json_schema"], tools: true, code: false, sql: false, guard: false },
   pending_generation: { total: 0, groups: [] },
@@ -140,6 +144,8 @@ describe("getModel wire mapping", () => {
     expect(model.outputs).toEqual(FULL_WIRE_ENTRY.outputs);
     expect(model.dims).toEqual(FULL_WIRE_ENTRY.dims);
     expect(model.revision).toBe(FULL_WIRE_ENTRY.revision);
+    expect(model.description).toBe(FULL_WIRE_ENTRY.description);
+    expect(model.releaseDate).toBe(FULL_WIRE_ENTRY.release_date);
     expect(model.profiles).toEqual(FULL_WIRE_ENTRY.profiles);
     expect(model.capabilities).toEqual(FULL_WIRE_ENTRY.capabilities);
     expect(model.pendingGeneration).toEqual(FULL_WIRE_ENTRY.pending_generation);

@@ -1,0 +1,13 @@
+[project]
+name = "superlinked-sie-decisions-local-example"
+version = "0.1.0"
+description = "Use the OpenAI Decisions SDK with SIE decision models"
+requires-python = ">=3.12,<3.13"
+dependencies = ["openai==3.26.0"]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"

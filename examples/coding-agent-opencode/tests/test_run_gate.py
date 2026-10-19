@@ -49,9 +49,7 @@ def _executable(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
-def _gate(
-    tmp_path: Path, agent: str, extra_env: dict[str, str] | None = None, recipe: str = "laptop"
-) -> tuple[int, list[str]]:
+def _gate(tmp_path: Path, agent: str, extra_env: dict[str, str] | None = None) -> tuple[int, list[str]]:
     root = tmp_path / "example"
     if not root.exists():
         root.mkdir()
@@ -62,11 +60,11 @@ def _gate(
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     _executable(bin_dir / "opencode", agent)
-    env = {key: value for key, value in os.environ.items() if key not in ("VIRTUAL_ENV", "SIE_BASE_URL", "SIE_API_KEY")}
+    env = {key: value for key, value in os.environ.items() if key != "VIRTUAL_ENV"}
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
     env.update(extra_env or {})
     run = subprocess.run(
-        ["bash", str(root / "run_gate.sh"), recipe], check=False, capture_output=True, text=True, env=env, timeout=600
+        ["bash", str(root / "run_gate.sh"), "laptop"], check=False, capture_output=True, text=True, env=env, timeout=600
     )
     return run.returncode, run.stdout.strip().splitlines()
 
@@ -75,23 +73,6 @@ def test_a_real_fix_passes(tmp_path: Path) -> None:
     code, lines = _gate(tmp_path, FIX)
     assert code == 0, lines
     assert lines[-1].startswith("GATE PASS")
-
-
-@pytest.mark.parametrize("recipe", ["laptop", "openrouter"])
-def test_a_local_server_recipe_needs_no_sie_key(tmp_path: Path, recipe: str) -> None:
-    record = tmp_path / "opencode-config.txt"
-    code, lines = _gate(tmp_path, f'echo "$OPENCODE_CONFIG" > {record}\n{FIX}', recipe=recipe)
-    assert code == 0, lines
-    assert lines[-1].startswith("GATE PASS")
-    assert Path(record.read_text().strip()).parts[-3:] == ("recipes", recipe, "opencode.json")
-
-
-@pytest.mark.parametrize("recipe", ["cluster", "cloud"])
-def test_a_remote_recipe_without_the_sie_key_never_starts_opencode(tmp_path: Path, recipe: str) -> None:
-    record = tmp_path / "opencode-ran.txt"
-    code, _ = _gate(tmp_path, f"touch {record}\n{FIX}", recipe=recipe)
-    assert code == 2
-    assert not record.exists()
 
 
 def test_runs_started_in_the_same_second_judge_their_own_copies(tmp_path: Path) -> None:
@@ -182,3 +163,34 @@ def test_a_run_past_its_deadline_is_stopped_and_fails(tmp_path: Path, ignores_te
         time.sleep(0.1)
     else:
         pytest.fail(f"the agent's child process {pid} outlived the deadline")
+
+
+@pytest.mark.parametrize(
+    ("recipe", "needs_sie_variables"), [("gpu", False), ("openrouter", False), ("cluster", True), ("cloud", True)]
+)
+def test_only_a_recipe_that_reads_the_sie_variables_requires_them(
+    tmp_path: Path, recipe: str, needs_sie_variables: bool
+) -> None:
+    root = tmp_path / "example"
+    root.mkdir()
+    shutil.copy(EXAMPLE / "run_gate.sh", root)
+    ignored = shutil.ignore_patterns(".venv", "uv.lock", "__pycache__", ".pytest_cache")
+    shutil.copytree(EXAMPLE / "fixture", root / "fixture", ignore=ignored)
+    shutil.copytree(EXAMPLE / "recipes", root / "recipes")
+    record = tmp_path / "opencode-config.txt"
+    (tmp_path / "bin").mkdir()
+    _executable(tmp_path / "bin" / "opencode", f'echo "$OPENCODE_CONFIG" > {record}\n{FIX}')
+    unset = ("VIRTUAL_ENV", "SIE_BASE_URL", "SIE_API_KEY")
+    env = {key: value for key, value in os.environ.items() if key not in unset}
+    env["PATH"] = f"{tmp_path / 'bin'}{os.pathsep}{env['PATH']}"
+    run = subprocess.run(
+        ["bash", str(root / "run_gate.sh"), recipe], check=False, capture_output=True, text=True, env=env, timeout=600
+    )
+    if needs_sie_variables:
+        assert run.returncode == 2
+        assert run.stderr.strip() == "SIE_BASE_URL is not set"
+        assert not record.exists()
+    else:
+        assert run.returncode == 0, run.stdout
+        assert run.stdout.strip().splitlines()[-1].startswith("GATE PASS")
+        assert Path(record.read_text().strip()).parts[-3:] == ("recipes", recipe, "opencode.json")

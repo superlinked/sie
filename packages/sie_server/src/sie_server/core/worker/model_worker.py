@@ -37,6 +37,7 @@ from sie_server.core.timing import RequestTiming
 from sie_server.core.worker.handlers import EncodeHandler, ExtractHandler, OperationHandler, ScoreHandler
 from sie_server.core.worker.oom_recovery import BatchExecutor, RegistryCallbacks
 from sie_server.core.worker.types import (
+    LoraNotReadyError,
     QueueFullError,
     RequestMetadata,
     WorkerConfig,
@@ -231,6 +232,13 @@ class ModelWorker:
         self._model_name = model_name
         self._postprocessor_registry = postprocessor_registry
         self._registry_callbacks = registry_callbacks
+        # Task-restricted adapters opt in explicitly. Cache the bound method
+        # once; ordinary adapters (including dynamic test doubles) have no
+        # admission callback, and score/encode never consult this hook.
+        declared_admission = getattr(type(adapter), "validate_extract_request", None)
+        self._extract_admission: Callable[..., None] | None = (
+            getattr(adapter, "validate_extract_request", None) if callable(declared_admission) else None
+        )
 
         # Protect adapter-global state, especially active LoRA selection,
         # across the direct HTTP batcher and the sidecar IPC pre-formed batch
@@ -338,6 +346,7 @@ class ModelWorker:
         self._running = False
         self._stopping = False  # True when graceful stop has begun
         self._process_task: asyncio.Task[None] | None = None
+        self._work_available = asyncio.Event()
         self._stats = WorkerStats()
 
         # Batches currently between "extracted from a batcher" and
@@ -469,6 +478,7 @@ class ModelWorker:
             return
 
         self._running = False
+        self._work_available.set()
 
         try:
             if self._process_task is not None:
@@ -581,6 +591,19 @@ class ModelWorker:
         finally:
             self._adapter_dispatch_lock.release()
 
+    async def run_adapter_mutation[T](self, mutation: Callable[[], T]) -> T:
+        """Run ``mutation`` while no batch is in flight, on the inference thread while the worker runs.
+
+        For changes to adapter state that a forward reads, such as loading or
+        unloading a LoRA: the dispatch lock keeps them out of the span between
+        ``set_active_lora`` and the end of the batch that follows it. A stopped
+        worker has shut its inference executor down, so the mutation runs on
+        the default executor instead.
+        """
+        async with self._adapter_dispatch_lock:
+            executor = self._inference_executor if self._running else None
+            return await asyncio.get_running_loop().run_in_executor(executor, mutation)
+
     async def _release_optional_memory_with_slots(self) -> int:
         if not _slots_can_acquire_all(self._dispatch_slots, self._dispatch_width):
             return 0
@@ -681,6 +704,43 @@ class ModelWorker:
             WorkerDrainedError(f"Model '{self._model_name or 'unknown'}' stopped before this request ran; retry")
         )
         return 1
+
+    def _fail_unselectable_batch(
+        self,
+        batch: FormattedBatch[HasCost, RequestMetadata],
+        lora: str | None,
+        error: Exception,
+    ) -> None:
+        """Fail every request of a batch whose LoRA the adapter cannot make active.
+
+        When the registry can load that LoRA, it starts the load and the
+        requests fail with the retryable :class:`LoraNotReadyError`; otherwise
+        they fail with :class:`InvalidInputError`. Neither message names an
+        adapter: a batch's LoRA can be a profile's declared source that its
+        callers never sent.
+        """
+        model = self._model_name or "unknown"
+        logger.warning("LoRA '%s' cannot be made active on model '%s': %s", lora, model, error)
+        retry_after_s = None
+        if lora is not None and self._registry_callbacks is not None and self._model_name is not None:
+            retry_after_s = self._registry_callbacks.request_lora_load(self._model_name, lora)
+        seen: set[int] = set()
+        for metadata in batch.metadata:
+            if id(metadata) in seen or metadata.future.done():
+                continue
+            seen.add(id(metadata))
+            failure: Exception
+            if retry_after_s is not None:
+                failure = LoraNotReadyError(
+                    f"The LoRA adapter this request selects is loading on model '{model}', please retry",
+                    retry_after_s=retry_after_s,
+                )
+            else:
+                failure = InvalidInputError(
+                    f"The LoRA adapter this request selects is not available on model '{model}'"
+                )
+            failure.__cause__ = error
+            metadata.future.set_exception(failure)
 
     def _register_in_flight(self, batch: FormattedBatch[HasCost, RequestMetadata]) -> _InFlightBatch:
         """Record a batch as in flight and return its registration."""
@@ -798,6 +858,10 @@ class ModelWorker:
             QueueFullError: If queue is full and cannot accept more items.
         """
         self._check_queue_capacity(len(prepared_items))
+        if self._extract_admission is not None:
+            self._extract_admission(
+                items, labels=labels, output_schema=output_schema, instruction=instruction, options=options
+            )
 
         future, request_timing = self._create_future_and_timing(timing)
 
@@ -831,7 +895,7 @@ class ModelWorker:
 
         Items are batched with other score requests for efficient GPU utilization.
         (query, doc) pairs from different requests can batch together if they
-        share the same instruction.
+        share the same LoRA, instruction, and options.
 
         Args:
             prepared_items: Pre-processed items with cost for batching (ScorePreparedItem).
@@ -851,6 +915,7 @@ class ModelWorker:
             QueueFullError: If queue is full and cannot accept more items.
         """
         self._check_queue_capacity(len(prepared_items))
+        lora = self._score_lora(options)
 
         future, request_timing = self._create_future_and_timing(timing)
 
@@ -865,8 +930,7 @@ class ModelWorker:
             options=options,
         )
 
-        # Score operations use base model batcher (no LoRA support for reranking)
-        return await self._submit_to_batcher(prepared_items, metadata, None)
+        return await self._submit_to_batcher(prepared_items, metadata, lora)
 
     async def submit_preformed(
         self,
@@ -917,6 +981,10 @@ class ModelWorker:
     ) -> asyncio.Future[WorkerResult]:
         """Run a caller-formed extract batch directly for sidecar IPC."""
         self._check_running()
+        if self._extract_admission is not None:
+            self._extract_admission(
+                items, labels=labels, output_schema=output_schema, instruction=instruction, options=options
+            )
 
         future, request_timing = self._create_future_and_timing(timing)
         metadata = RequestMetadata(
@@ -949,8 +1017,23 @@ class ModelWorker:
         self._check_running()
 
         entries: list[tuple[Sequence[HasCost], RequestMetadata]] = []
+        guarded_futures: list[asyncio.Future[WorkerResult]] | None = [] if self._extract_admission is not None else None
         for req in requests:
             future, request_timing = self._create_future_and_timing(req.timing)
+            if guarded_futures is not None:
+                guarded_futures.append(future)
+            if self._extract_admission is not None:
+                try:
+                    self._extract_admission(
+                        req.items,
+                        labels=req.labels,
+                        output_schema=req.output_schema,
+                        instruction=req.instruction,
+                        options=req.options,
+                    )
+                except Exception as error:  # noqa: BLE001 - preserve each request's independent outcome
+                    future.set_exception(error)
+                    continue
             entries.append(
                 (
                     req.prepared_items,
@@ -968,7 +1051,8 @@ class ModelWorker:
                 )
             )
 
-        return await self._submit_preformed_metadata_batch(entries, lora)
+        admitted = await self._submit_preformed_metadata_batch(entries, lora)
+        return admitted if guarded_futures is None else guarded_futures
 
     async def submit_score_preformed(
         self,
@@ -983,6 +1067,7 @@ class ModelWorker:
     ) -> asyncio.Future[WorkerResult]:
         """Run a caller-formed score batch directly for sidecar IPC."""
         self._check_running()
+        lora = self._score_lora(options)
 
         future, request_timing = self._create_future_and_timing(timing)
         metadata = RequestMetadata(
@@ -995,19 +1080,30 @@ class ModelWorker:
             instruction=instruction,
             options=options,
         )
-        return await self._submit_preformed_batch(prepared_items, metadata, None)
+        return await self._submit_preformed_batch(prepared_items, metadata, lora)
 
     async def submit_score_preformed_batch(
         self,
         requests: Sequence[PreformedScoreRequest],
     ) -> list[asyncio.Future[WorkerResult]]:
-        """Run caller-formed score requests as one sidecar IPC batch."""
+        """Run caller-formed score requests grouped by LoRA.
+
+        Each forward pass shares one active adapter. Preserve caller grouping
+        within each LoRA and return futures in the original request order.
+        """
         self._check_running()
 
-        entries: list[tuple[Sequence[HasCost], RequestMetadata]] = []
+        grouped_entries: dict[str | None, list[tuple[Sequence[HasCost], RequestMetadata]]] = {}
+        futures: list[asyncio.Future[WorkerResult]] = []
         for req in requests:
             future, request_timing = self._create_future_and_timing(req.timing)
-            entries.append(
+            futures.append(future)
+            try:
+                lora = self._score_lora(req.options)
+            except InvalidInputError as exc:
+                future.set_exception(exc)
+                continue
+            grouped_entries.setdefault(lora, []).append(
                 (
                     req.prepared_items,
                     RequestMetadata(
@@ -1023,11 +1119,31 @@ class ModelWorker:
                 )
             )
 
-        return await self._submit_preformed_metadata_batch(entries, None)
+        for lora, entries in grouped_entries.items():
+            await self._submit_preformed_metadata_batch(entries, lora)
+        return futures
 
     # =========================================================================
     # Internal Helpers
     # =========================================================================
+
+    def _score_lora(self, options: dict[str, Any] | None) -> str | None:
+        """Select a profile-authorized LoRA, including legacy ``lora_id`` defaults.
+
+        HTTP and queue ingress validate the selected profile's allowed sources.
+        An explicit ``lora`` (including null for base) takes precedence here.
+        """
+        if not options:
+            return None
+        lora = options.get("lora", options.get("lora_id"))
+        if lora is None:
+            return None
+        if not isinstance(lora, str) or not lora.strip():
+            raise InvalidInputError("Score LoRA selection must be a non-empty string or null")
+        supports_lora = getattr(self._adapter, "supports_lora", None)
+        if not callable(supports_lora) or not supports_lora():
+            raise InvalidInputError("This adapter does not support LoRA scoring")
+        return lora
 
     def _get_batcher(self, lora: str | None) -> BatchFormer[HasCost, RequestMetadata]:
         """Get or create batcher for a LoRA.
@@ -1106,6 +1222,7 @@ class ModelWorker:
         """
         batcher = self._get_batcher(lora)
         await batcher.submit_many([(item, metadata) for item in prepared_items])
+        self._work_available.set()
         self._ensure_process_loop_started()
         return metadata.future
 
@@ -1188,7 +1305,11 @@ class ModelWorker:
             return futures
 
         async with self._adapter_dispatch_lock:
-            self._adapter.set_active_lora(lora)
+            try:
+                self._adapter.set_active_lora(lora)
+            except Exception as exc:  # noqa: BLE001
+                self._fail_unselectable_batch(synthetic_batch, lora, exc)
+                return futures
             await self._process_batch(synthetic_batch)
 
         return futures
@@ -1205,7 +1326,7 @@ class ModelWorker:
         Selects the batcher whose first pending request has waited the longest.
         This ensures fairness across LoRAs - no LoRA starves even with low traffic.
 
-        When the worker was idle (had to poll for requests), a short
+        When the worker was idle (had to wait for requests), a short
         accumulation window (``idle_coalesce_ms``, #2874) caps the coalesce
         wait instead of dispatching immediately: bursty arrivals at an idle
         worker fuse into one batch rather than degenerating into a train of
@@ -1222,7 +1343,7 @@ class ModelWorker:
 
         Returns:
             Tuple of (lora_name, batch, was_idle) where lora_name is None for
-            base model and was_idle indicates whether the worker had to poll
+            base model and was_idle indicates whether the worker had to wait
             (was truly idle).
         """
         while True:
@@ -1249,7 +1370,10 @@ class ModelWorker:
 
             # No batchers have pending items - worker is idle
             was_idle = True
-            await asyncio.sleep(0.001)
+            # Admission latches the signal even if it precedes this wait.
+            # Re-scan every batcher after clearing; queue state owns the work.
+            await self._work_available.wait()
+            self._work_available.clear()
 
             # Check if we should stop
             if not self._running:
@@ -1352,7 +1476,12 @@ class ModelWorker:
                     # immediate drains. The lock also excludes sidecar
                     # pre-formed batches from interleaving a different LoRA
                     # selection between set_active_lora and adapter inference.
-                    self._adapter.set_active_lora(active_lora)
+                    try:
+                        self._adapter.set_active_lora(active_lora)
+                    except Exception as exc:  # noqa: BLE001
+                        self._fail_unselectable_batch(batch, active_lora, exc)
+                        was_idle = True
+                        continue
 
                     # Process the batch and track inference time.
                     await self._process_batch(batch, engine_queue_owned=True)

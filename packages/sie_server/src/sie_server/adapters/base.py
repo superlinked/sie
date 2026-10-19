@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sie_server.types.inputs import Item
 
 if TYPE_CHECKING:
-    from sie_server.adapters.lora import LoraCapability
+    from sie_server.adapters.lora import LoraCapability, LoraRuntimeConfig
     from sie_server.core.inference_output import EncodeOutput, ExtractOutput, ScoreOutput
 
 logger = logging.getLogger(__name__)
@@ -572,26 +572,46 @@ class ModelAdapter(ABC):
         LoRA, else ``None``.
 
         One accessor callers use in place of checking :meth:`supports_lora` and
-        then calling the individual hooks. PEFT (in-process) and SGLang (HTTP)
-        are the two adapters behind this capability.
+        then calling the individual hooks. PEFT and SGLang implement this
+        capability; adapters that cannot load a LoRA at runtime return ``None``.
         """
         return self if self.supports_lora() else None
 
     def supports_hot_lora_reload(self) -> bool:
-        """Return True if LoRAs can be loaded without blocking inference.
+        """Return True for background fetch and immediate ``LORA_LOADING`` retry.
 
-        - PEFT-based adapters: True (can load in thread pool)
-        - SGLang adapters: False (HTTP API blocks during load)
-
-        This affects whether the server returns 503 LORA_LOADING during
-        loading or blocks all requests until loading completes.
-
-        Returns:
-            True for non-blocking LoRA loading, False for blocking.
+        Attachment still runs under the adapter's mutation guard and can
+        briefly pause inference. False waits for loading in the caller.
         """
         return False
 
-    def load_lora(self, lora_path: str, revision: str | None = None) -> int:
+    def lora_runtime_config(self) -> "LoraRuntimeConfig | None":
+        """Describe engine-owned startup LoRAs, or use the ordinary PEFT preload path."""
+        return None
+
+    def fetch_lora(self, lora_path: str, revision: str | None = None) -> str:
+        """Bring a LoRA adapter's files to one local directory, outside inference.
+
+        Runtime LoRA adapters download and validate here, so that
+        :meth:`load_lora` only attaches from local files.
+
+        Args:
+            lora_path: HuggingFace path (e.g., "org/lora-name") or local path.
+            revision: Pinned 40-hex commit SHA, or ``None`` for the default branch.
+
+        Returns:
+            The local directory to pass to :meth:`load_lora` as ``source``.
+
+        Raises:
+            NotImplementedError: If adapter doesn't support LoRA.
+        """
+        msg = f"{self.__class__.__name__} does not support LoRA (supports_lora=False)"
+        raise NotImplementedError(msg)
+
+    def discard_lora_source(self, lora_path: str) -> None:
+        """Release an unused temporary source view; ordinary shared caches stay intact."""
+
+    def load_lora(self, lora_path: str, revision: str | None = None, *, source: str | None = None) -> int:
         """Load a LoRA adapter.
 
         This is called by the LoRA manager to load a new adapter. The adapter
@@ -605,6 +625,7 @@ class ModelAdapter(ABC):
             revision: Pinned 40-hex commit SHA from the config's
                 ``loadtime.lora_paths`` dict form (#2113); ``None`` resolves
                 the Hub's default branch, as before.
+            source: Local directory from :meth:`fetch_lora`; ``None`` fetches first.
 
         Returns:
             Memory usage of the loaded LoRA in bytes.

@@ -17,13 +17,14 @@ dependencies = [
     # ML / Inference
     # torch 2.9.x required - flash-attn prebuilt wheels are version-specific
     "torch>=2.9,<2.10",
-    # Bundle-controlled: each bundle overlays its exact transformers into
-    # bundle-libs (bundles/default.yaml >=4.57,<5; transformers5.yaml / gemma via
-    # sglang >=5). The base range is bounded <6 so the >=5 overlays resolve while
-    # the base venv can't silently jump to a transformers 6 major.
-    "transformers>=4.57,<6",
+    # Bundle-controlled: default/local and the root lock use exactly 4.57.6,
+    # whose loader receives the reviewed security backport. TF5 bundles use
+    # upstream-fixed >=5.3 releases. PEP 440 cannot express that disjoint set:
+    # exclude known unsupported releases here; runtime loading also refuses
+    # any future unreviewed 4.x version. Keep <6 for bundle overlay compatibility.
+    "transformers>=4.57.6,<6,!=5.0.*,!=5.1.*,!=5.2.*",
     "tokenizers>=0.20,<1",
-    "sentence-transformers>=5.0,<6",
+    "sentence-transformers==5.7.0",
     "safetensors>=0.4,<1",
     # Artifact resolution (snapshot_download / hf_hub_download / scan_cache_dir)
     # is imported directly by the adapters and the disk cache, and `requests` by
@@ -46,9 +47,9 @@ dependencies = [
     # never shipped, killing three extract cells at model load (#2873).
     # 0.2.26 is the first release that loads the joint entity-relation checkpoints.
     "gliner>=0.2.26,<1",
-    # gliner2 stays on 1.x with the default bundle (2.0 changes gliner2-base/large
-    # outputs); the transformers5 bundle overlays the 2.x pin its GLiNER2.5 models need.
-    "gliner2>=1.3.1,<2",
+    # Both reviewed span runtimes are supported, including entity LoRA. The
+    # lock selects 2.0.0; do not admit an unreviewed newer decoder/lifecycle.
+    "gliner2>=1.3.2,<=2.0.0",
     "glirel>=1.0,<2",
     # 0.1.17 adds the cross-attention scorer and pass-through pooling used by
     # the multilingual GLiClass checkpoints; 0.1.18+ requires transformers 5.
@@ -130,9 +131,8 @@ gpu-metrics = ["nvidia-ml-py>=13.5,<14"]
 top = ["textual>=3.0,<4"]
 # Local embeddings + reranking on Apple Silicon / CPU (no Docker/mise). The torch /
 # sentence-transformers / FlagEmbedding stack is already in the base deps; the base
-# leaves transformers at >=4.57,<6 so the transformers-5 bundle overlays resolve.
-# This extra tightens it to <5 — the version the embed/rerank adapters need — for a
-# bare install with no bundle overlay:
+# permits upstream-fixed transformers-5 bundle overlays. This extra pins the
+# exact reviewed TF4 loader for a bare install with no bundle overlay:
 #   uv tool install "sie-server[local]" && sie-server serve
 #
 # Generation is deliberately NOT a locked extra. mlx-lm requires transformers>=5; as
@@ -142,7 +142,7 @@ top = ["textual>=3.0,<4"]
 #   uvx --with "mlx-lm>=0.30.7" --from sie-server sie-server serve -b sglang -p 8081
 # (Linux/CUDA generation uses the Docker image: SGLang pins timm==1.0.16, which
 # conflicts with the embed/rerank stack's timm<1.0, so it can't share a pip env.)
-local = ["transformers>=4.57,<5"]
+local = ["transformers==4.57.6"]
 
 [project.scripts]
 sie-server = "sie_server.cli:app"

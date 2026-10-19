@@ -43,6 +43,7 @@ import torch
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.core.inference_output import EncodeOutput, ExtractOutput
 from sie_server.core.preprocessor import DetectionPreprocessor
@@ -232,6 +233,7 @@ class Sam3Adapter(BaseAdapter):
 
         logger.info("Loading SAM 3 model %s on device=%s with dtype=%s", self._model_name_or_path, device, dtype)
 
+        install_transformers_security_fixes()
         self._processor = processor_class.from_pretrained(self._model_name_or_path, **shared_kwargs)
         self._model = model_class.from_pretrained(self._model_name_or_path, dtype=dtype, **shared_kwargs)
         self._model.to(device)

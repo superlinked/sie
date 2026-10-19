@@ -78,7 +78,7 @@ async def test_terminal_reports_the_worker_count_and_keeps_the_upstream_figure_b
         ],
         _count(),
     )
-    assert [chunk.text_delta for chunk in out] == ["answer here", ""]
+    assert [chunk.text_delta for chunk in out] == ["", "answer here", ""]
     assert all(not chunk.reasoning_delta for chunk in out)
     terminal = out[-1]
     assert (terminal.prompt_tokens, terminal.completion_tokens, terminal.cached_tokens) == (2, 5, None)
@@ -300,6 +300,23 @@ async def test_queued_upstream_chat_reports_the_worker_count(hybrid: tuple, stre
     }
     sent = json.loads(hybrid[3][0].content)
     assert sent["messages"] == [{"role": "user", "content": "question"}]
+
+
+async def test_private_upstream_reasoning_keeps_the_queued_stream_publishing(
+    hybrid: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("sie_server.processors.streaming._FLUSH_INTERVAL_S", 0)
+    reasoning = [
+        {"choices": [{"index": 0, "delta": {"reasoning_content": f"step {step} "}, "finish_reason": None}]}
+        for step in range(3)
+    ]
+    respond(hybrid, frames=[*reasoning, *_frames()[1:]])
+    chunks = await run(hybrid)
+    answer = next(index for index, chunk in enumerate(chunks) if chunk.get("text_delta"))
+    assert answer >= len(reasoning)
+    assert all(chunk["text_delta"] == "" and not chunk["done"] for chunk in chunks[:answer])
+    assert chunks[answer]["text_delta"] == "answer here"
+    assert "step" not in json.dumps(chunks)
 
 
 async def test_a_platform_upstream_reports_its_own_count() -> None:

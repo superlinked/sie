@@ -23,7 +23,7 @@ use std::time::Instant;
 use tower::{Layer, Service};
 use tracing::info;
 
-use super::auth::mask_token;
+use super::auth::request_token_id;
 use crate::observability::metrics::AdmissionOutcomeSlot;
 
 #[derive(Clone)]
@@ -71,19 +71,7 @@ where
         let method = req.method().to_string();
         let path = req.uri().path().to_string();
 
-        let token_id = req
-            .headers()
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .map(|h| {
-                let token = if h.to_lowercase().starts_with("bearer ") {
-                    h[7..].trim()
-                } else {
-                    h.trim()
-                };
-                mask_token(token)
-            })
-            .unwrap_or_default();
+        let token_id = request_token_id(req.headers());
 
         let content_length = req
             .headers()

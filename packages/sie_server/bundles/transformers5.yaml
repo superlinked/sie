@@ -15,19 +15,22 @@ adapters:
 - sie_server.adapters.topk_embed.adapter
 # Parakeet-TDT speech-to-text (ParakeetForTDT).
 - sie_server.adapters.parakeet.adapter
+# Perplexity's native calibrated decision readout (Qwen3.8/Qwen3.5 architecture).
+- sie_server.adapters.pplx_decider.adapter
 # SAM 3 open-vocabulary detection (Sam3Model / Sam3Processor exist only in transformers 5.x).
 - sie_server.adapters.sam3.adapter
 deps:
   # Transformers 5.x for models requiring newer architecture support
   # (e.g., LightOnOCR-2-1B needs LightOnOcrForConditionalGeneration,
   # GLM-OCR needs GlmOcrForConditionalGeneration). Floor raised to 5.14
-  # for the visual-SPLADE family (custom modeling code built on 5.13+);
+  # for the visual-SPLADE family (custom modeling code built on 5.13+),
+  # then 5.17 for Perplexity's pinned native Qwen decision checkpoint;
   # installs already resolved to the latest 5.x, so the floor is the
   # guarantee, not a version change in practice.
-  transformers: '>=5.14,<6'
-  # Multimodal SparseEncoder (image documents) landed on the 5.6 line
-  # (st_sparse_vision adapter).
-  sentence-transformers: '>=5.6,<6'
+  transformers: '>=5.17,<6'
+  # Includes multimodal SparseEncoder (image documents), with the local-code
+  # trust boundary validated against this exact release.
+  sentence-transformers: '==5.7.0'
   # Pin torch — flash-attn's unpinned torch dep can pull in 2.10+ which breaks torchvision
   torch: '>=2.9,<2.10'
   # Keep the compiled torchvision operators paired with torch 2.9.x. A broad

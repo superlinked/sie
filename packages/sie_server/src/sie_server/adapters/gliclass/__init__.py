@@ -74,6 +74,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters.base import released_bytes
 from sie_server.adapters.errors import InputTooLongError
@@ -596,6 +597,7 @@ class GLiClassAdapter(BaseAdapter):
         shared_kwargs: dict[str, Any] = {}
         if self._revision is not None:
             shared_kwargs["revision"] = self._revision
+        install_transformers_security_fixes()
         config = GLiClassModelConfig.from_pretrained(self._model_name_or_path, **shared_kwargs)
         if _restore_modernbert_rope_fields(config.encoder_config):
             model = GLiClassModel.from_pretrained(self._model_name_or_path, config=config, **shared_kwargs)

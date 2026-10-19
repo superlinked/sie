@@ -6,7 +6,7 @@ import json
 from typing import Any, cast
 
 from sie_server.adapters._generation_base import FinishReason, GenerationChunk
-from sie_server.adapters.remote._http import RemoteUpstreamError
+from sie_server.adapters.remote._http import RemoteUpstreamError, in_band_failure
 from sie_server.adapters.remote._openai_chat import ChatStreamParser
 
 
@@ -69,7 +69,9 @@ class CompletionStreamParser:
             payload = json.loads(data)
         except (ValueError, RecursionError):
             raise _invalid() from None
-        if not isinstance(payload, dict) or "error" in payload or not isinstance(payload.get("choices"), list):
+        if isinstance(payload, dict) and "error" in payload:
+            raise in_band_failure(payload["error"], instead_of="a completion")
+        if not isinstance(payload, dict) or not isinstance(payload.get("choices"), list):
             raise _invalid()
         choices = []
         for choice in payload["choices"]:

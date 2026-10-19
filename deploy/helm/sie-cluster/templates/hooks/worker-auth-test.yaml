@@ -1,0 +1,181 @@
+{{- if include "sie-cluster.workers.authEnforced" . }}
+{{- $root := . -}}
+{{- $name := printf "%s-worker-auth-test" (include "sie-cluster.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- $lanes := list -}}
+{{- range $poolName, $pool := .Values.workers.pools -}}
+{{- if $pool.enabled -}}
+{{- range $bundleName, $bundleCfg := $pool.bundles -}}
+{{- if dig "enabled" true $bundleCfg -}}
+{{- $engine := default (default $root.Values.workers.common.engine $pool.engine) $bundleCfg.engine -}}
+{{- if ne $engine "candle" -}}
+{{- $lanes = append $lanes (printf "%s-worker-%s-%s" (include "sie-cluster.fullname" $root) $poolName $bundleName) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+# RBAC must be at a lower weight than the Job so it is fully propagated before the pod starts.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    app.kubernetes.io/name: sie-health-test
+    app.kubernetes.io/component: worker-auth
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed
+    helm.sh/hook-weight: "2"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    app.kubernetes.io/name: sie-health-test
+    app.kubernetes.io/component: worker-auth
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed
+    helm.sh/hook-weight: "2"
+rules:
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    resourceNames:
+      {{- toYaml $lanes | nindent 6 }}
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    app.kubernetes.io/name: sie-health-test
+    app.kubernetes.io/component: worker-auth
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed
+    helm.sh/hook-weight: "2"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ include "sie-cluster.namespace" . }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-worker-auth-test-%d" (include "sie-cluster.fullname" .) .Release.Revision | trunc 63 | trimSuffix "-" }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    app.kubernetes.io/name: sie-health-test
+    app.kubernetes.io/component: worker-auth
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+    helm.sh/hook-weight: "5"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        {{- include "sie-cluster.workers.authTestSelectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $name }}
+      restartPolicy: Never
+      containers:
+        - name: test
+          image: {{ include "sie-cluster.keda.hookImage" . }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              set -o pipefail
+              NAMESPACE="{{ include "sie-cluster.namespace" . }}"
+              {{- include "sie-cluster.kubernetes.inClusterKubeconfig" . | nindent 14 }}
+              LANES="{{ join " " $lanes }}"
+              PORT={{ .Values.workers.common.port }}
+              DEADLINE=$(( $(date +%s) + 180 ))
+              echo "=== Worker token test ==="
+              echo "Every ready worker of the current revision must refuse GET /v1/models without a token."
+              verified=0
+              for lane in $LANES; do
+                if ! replicas=$(kubectl get statefulset "$lane" -o jsonpath='{.spec.replicas}'); then
+                  echo "FAILED: StatefulSet $lane not found."
+                  exit 1
+                fi
+                state=waiting
+                if [ "$replicas" = "0" ]; then
+                  echo "SKIPPED: $lane is scaled to zero."
+                  state=skipped
+                fi
+                while [ "$state" = "waiting" ]; do
+                  revision=$(kubectl get statefulset "$lane" -o jsonpath='{.status.updateRevision}')
+                  if ! addresses=$(kubectl get pods -l "controller-revision-hash=$revision" -o json \
+                    | jq -r '.items[] | select(.metadata.deletionTimestamp == null)
+                        | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))
+                        | .status.podIP // empty'); then
+                    echo "FAILED: cannot list the pods of $lane."
+                    exit 1
+                  fi
+                  unreached=0
+                  if [ -n "$addresses" ]; then
+                    for address in $addresses; do
+                      case "$address" in
+                        *:*) host="[$address]" ;;
+                        *) host="$address" ;;
+                      esac
+                      code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://$host:$PORT/v1/models" || true)
+                      case "$code" in
+                        401)
+                          echo "$lane $address: refused without a token"
+                          verified=$((verified + 1)) ;;
+                        000|"")
+                          echo "$lane $address: not reached"
+                          unreached=$((unreached + 1)) ;;
+                        *)
+                          echo "FAILED: $lane $address answered GET /v1/models without a token (HTTP $code)."
+                          echo "Its sie-server image does not enforce workers.auth. Use worker images that support serve --require-auth-mode=token."
+                          exit 1 ;;
+                      esac
+                    done
+                    if [ "$unreached" -eq 0 ]; then
+                      state=checked
+                    fi
+                  fi
+                  if [ "$state" = "waiting" ]; then
+                    if [ "$(date +%s)" -lt "$DEADLINE" ]; then
+                      sleep 5
+                    elif [ "$unreached" -gt 0 ]; then
+                      echo "FAILED: $lane has ready workers that did not answer from this pod."
+                      exit 1
+                    else
+                      echo "WARNING: $lane has no ready worker of the current revision to check (still starting)."
+                      state=skipped
+                    fi
+                  fi
+                done
+              done
+              if [ "$verified" -eq 0 ]; then
+                echo "WARNING: no worker was checked. Every lane was scaled to zero or still starting."
+              else
+                echo "SUCCESS: $verified worker(s) refused a request without a token."
+              fi
+          resources:
+            {{- include "sie-cluster.hooks.resources" . | nindent 12 }}
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+{{- end }}

@@ -1,0 +1,26 @@
+sie_id: perplexity-ai/pplx-decider-v1.1-27b
+description: "Perplexity native typed decisions: text-only choice, noul and score questions, one calibrated 8,192-token row per question."
+release_date: "2026-10-06"
+hf_id: perplexity-ai/pplx-decider-v1.1-27b
+hf_revision: 14c9d90137962d300f3de95633f7b6535e80c5ce
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+# The reference's serving limit, including state, question, options and chat template.
+# The backbone's larger position limit is not a qualified decision serving window.
+max_sequence_length: 8192
+profiles:
+  default:
+    max_batch_tokens: 8192
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.pplx_decider.adapter:PerplexityDecisionAdapter
+    adapter_options:
+      loadtime:
+        max_forward_tokens: 8192
+      runtime: {}

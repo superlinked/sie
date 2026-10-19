@@ -26,6 +26,7 @@ from transformers import PreTrainedModel
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.core.inference_output import EncodeOutput, ExtractOutput
 from sie_server.core.preprocessor.vision import resolve_florence2_prompt
@@ -146,6 +147,7 @@ class Florence2Adapter(BaseAdapter):
 
         # Load the checkpoint's own (remote) processor. AutoProcessor alone is not
         # safe on transformers >= 4.49 — see _load_processor for the incompatibility.
+        install_transformers_security_fixes()
         self._processor = self._load_processor(shared_kwargs)
 
         # Load model with trust_remote_code to use model's custom code

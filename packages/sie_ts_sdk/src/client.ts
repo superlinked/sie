@@ -109,7 +109,15 @@ import {
   requireConnectorIdempotencyKey,
 } from "./jobs.js";
 import { packMessage, unpackMessage } from "./msgpack.js";
-import { parseSseStream } from "./sse.js";
+import { SSECompletion, parseSseStream } from "./sse.js";
+import {
+  SYSTEM_ONE_OPTIONS,
+  type SystemOneOptions,
+  type SystemOneResult,
+  type SystemOneState,
+  systemOneRequest,
+  systemOneResult,
+} from "./systemone.js";
 import type {
   AddConnectionOptions,
   Batch,
@@ -177,7 +185,7 @@ type OpenAiCompatModelKeys = Partial<Record<"id" | "object" | "created" | "owned
 /**
  * Map a wire `/v1/models` entry to the client-facing shape.
  *
- * Total by construction: every key except the three camelCase renames and the
+ * Total by construction: every key except the four camelCase renames and the
  * OpenAI-compat keys flows through the rest spread, so a field added to the
  * endpoint reaches callers without a code change here — only `ModelInfo` and
  * `WireModelInfo` need to declare it. The previous hardcoded allowlist silently
@@ -188,6 +196,7 @@ function toModelInfo(wire: WireModelInfo): ModelInfo {
     max_sequence_length,
     last_error,
     pending_generation,
+    release_date,
     aliases,
     id: _id,
     object: _object,
@@ -205,6 +214,7 @@ function toModelInfo(wire: WireModelInfo): ModelInfo {
     ...(max_sequence_length !== undefined ? { maxSequenceLength: max_sequence_length } : {}),
     ...(last_error !== undefined ? { lastError: last_error } : {}),
     ...(pending_generation !== undefined ? { pendingGeneration: pending_generation } : {}),
+    ...(release_date !== undefined ? { releaseDate: release_date } : {}),
   };
 }
 
@@ -1679,6 +1689,8 @@ export class SIEClient {
    *   - `signal.abort()` mid-stream → the generator throws
    *     `SIEConnectionError` and releases the underlying reader, which
    *     fires `StreamCancelGuard` on the gateway side.
+   *   - EOF before `[DONE]` or all requested choices finish → throws
+   *     `SIEConnectionError`. The request is never replayed.
    *
    * `req.stream` is set to `true` automatically; any existing value is
    * overwritten. We do not validate `req.stream === false` because the
@@ -1717,8 +1729,13 @@ export class SIEClient {
     }
     const body = { ...req, stream: true };
     const url = `${this.baseUrl}/v1/chat/completions`;
-    yield* this.consumeSseStream<ChatCompletionChunk>(url, body, req.model, signal, (chunk) =>
-      extractChatChunkError(chunk),
+    yield* this.consumeSseStream<ChatCompletionChunk>(
+      url,
+      body,
+      req.model,
+      signal,
+      (chunk) => extractChatChunkError(chunk),
+      new SSECompletion(req.n ?? 1),
     );
   }
 
@@ -1735,7 +1752,8 @@ export class SIEClient {
    *
    * Error semantics match {@link streamChatCompletions}: pre-stream HTTP
    * errors throw normally, mid-stream `error` chunks throw
-   * {@link SIEStreamError}.
+   * {@link SIEStreamError}. EOF before `[DONE]` or `done: true` throws
+   * `SIEConnectionError` without replaying the request.
    *
    * @example
    * ```typescript
@@ -1784,6 +1802,7 @@ export class SIEClient {
       model,
       signal,
       (chunk) => extractGenerateChunkError(chunk),
+      new SSECompletion(),
       { pool, gpu },
       { waitForCapacity, timeoutMs: options.timeoutMs },
     );
@@ -1817,6 +1836,7 @@ export class SIEClient {
     model: string,
     signal: AbortSignal | undefined,
     extractError: (chunk: T) => SIEStreamError | null,
+    completion: SSECompletion,
     routing?: { pool?: string; gpu?: string },
     provisioning?: { waitForCapacity?: boolean; timeoutMs?: number },
   ): AsyncGenerator<T, void, undefined> {
@@ -2028,7 +2048,7 @@ export class SIEClient {
         throw new RequestError("Streaming response has no body");
       }
       const reader = bodyStream.getReader();
-      for await (const payload of parseSseStream(reader, signal ?? controller.signal)) {
+      for await (const payload of parseSseStream(reader, signal ?? controller.signal, completion)) {
         let chunk: T;
         try {
           chunk = JSON.parse(payload) as T;
@@ -2039,8 +2059,10 @@ export class SIEClient {
         }
         const streamErr = extractError(chunk);
         if (streamErr) throw streamErr;
+        completion.observe(chunk);
         yield chunk;
       }
+      completion.requireComplete();
     } finally {
       if (signal) signal.removeEventListener("abort", onCallerAbort);
     }
@@ -2103,6 +2125,43 @@ export class SIEClient {
     const result = parseScoreResult(data);
     attachRequestMetadata([result], response.headers, data);
     return result;
+  }
+
+  /**
+   * Answer typed questions about one state (System One).
+   *
+   * Answers `noul` (yes/no), `choice` (pick one) and `score` (ordinal)
+   * questions about a text, a JSON object, or a list of conversation turns with
+   * a decision model, in the response shape of SIE's System One-compatible
+   * `POST /v1/systemone`. It runs as one `extract` call, so it waits for
+   * capacity and model loading like `extract`. A state or question set that
+   * does not fit the model's window throws `RequestError` instead of being
+   * truncated.
+   *
+   * @example
+   * ```typescript
+   * const result = await client.systemOne(
+   *   "fastino/GLiNER2.5-Decide",
+   *   "I was charged twice. Please fix this ASAP.",
+   *   { spam: { type: "noul", instructions: "Is this spam?" } },
+   * );
+   * console.log(result.answers.spam?.noul);
+   * ```
+   */
+  async systemOne(
+    model: string,
+    state: SystemOneState,
+    questions: Record<string, unknown>,
+    options: SystemOneOptions = {},
+  ): Promise<SystemOneResult> {
+    const { item, outputSchema } = systemOneRequest(state, questions);
+    const result = await this.extract(model, item, {
+      outputSchema,
+      gpu: options.gpu,
+      waitForCapacity: options.waitForCapacity,
+      adapterOptions: { ...(options.adapterOptions ?? {}), ...SYSTEM_ONE_OPTIONS },
+    });
+    return systemOneResult(model, result, outputSchema);
   }
 
   /**

@@ -155,6 +155,184 @@ function generateChunk(seq: number, text_delta: string, opts: Partial<GenerateCh
   return JSON.stringify(chunk);
 }
 
+describe("generation stream completion", () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  function stream(surface: "chat" | "native", n = 1) {
+    const client = new SIEClient("http://localhost:8080");
+    return surface === "chat"
+      ? client.streamChatCompletions({ model: "m", messages: [], n })
+      : client.streamGenerate("m", "hello", { maxNewTokens: 8 });
+  }
+
+  async function collect(surface: "chat" | "native", n = 1) {
+    const chunks: unknown[] = [];
+    for await (const chunk of stream(surface, n)) chunks.push(chunk);
+    return chunks;
+  }
+
+  for (const surface of ["chat", "native"] as const) {
+    it.each(["empty", "comments", "partial"])(
+      `rejects ${surface} %s EOF without replaying generation`,
+      async (kind) => {
+        const response =
+          kind === "comments"
+            ? new Response(": keep-alive\n\n", {
+                headers: { "Content-Type": "text/event-stream" },
+              })
+            : sseResponse(
+                kind === "empty"
+                  ? []
+                  : [
+                      surface === "chat"
+                        ? chatChunk("private output")
+                        : generateChunk(0, "private output"),
+                    ],
+                { includeDone: false },
+              );
+        mockFetch.mockResolvedValueOnce(response);
+        await expect(collect(surface)).rejects.toMatchObject({
+          name: "SIEConnectionError",
+          kind: "other",
+          message: "Connection lost during stream: response ended before generation completed",
+        });
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        expect(response.body?.locked).toBe(false);
+      },
+    );
+
+    it.each(["\n\n", ""])(`accepts ${surface} explicit DONE with ending %j`, async (ending) => {
+      mockFetch.mockResolvedValueOnce(new Response(`data: [DONE]${ending}`));
+      await expect(collect(surface)).resolves.toEqual([]);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it(`preserves ${surface} caller return before stream completion`, async () => {
+      mockFetch.mockResolvedValueOnce(
+        sseResponse([surface === "chat" ? chatChunk("partial") : generateChunk(0, "partial")], {
+          includeDone: false,
+        }),
+      );
+      const iterator = stream(surface);
+      expect((await iterator.next()).done).toBe(false);
+      await expect(iterator.return()).resolves.toEqual({ done: true, value: undefined });
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  it.each(["\n\n", ""])("accepts native done=true before EOF with ending %j", async (ending) => {
+    const terminal = generateChunk(1, "", { done: true, finish_reason: "stop" });
+    mockFetch.mockResolvedValueOnce(new Response(`data: ${terminal}${ending}`));
+    await expect(collect("native")).resolves.toEqual([JSON.parse(terminal)]);
+  });
+
+  it.each(["true", 1, false, null])(
+    "does not accept native done=%j as completion",
+    async (done) => {
+      mockFetch.mockResolvedValueOnce(
+        sseResponse([JSON.stringify({ done, text_delta: "partial" })], { includeDone: false }),
+      );
+      await expect(collect("native")).rejects.toBeInstanceOf(SIEConnectionError);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("accepts EOF after all requested chat choices finish, preserving trailing usage", async () => {
+    const payloads = [
+      chatChunk("", {
+        choices: [{ index: 1, delta: {}, finish_reason: "length", logprobs: null }],
+      }),
+      chatChunk("", { choices: [{ index: 0, delta: {}, finish_reason: "stop", logprobs: null }] }),
+      chatChunk("", {
+        choices: [],
+        usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 },
+      }),
+    ];
+    mockFetch.mockResolvedValueOnce(sseResponse(payloads, { includeDone: false }));
+    await expect(collect("chat", 2)).resolves.toEqual(
+      payloads.map((payload) => JSON.parse(payload)),
+    );
+  });
+
+  it("treats an explicit null chat n as one choice", async () => {
+    const terminal = chatChunk("", {
+      choices: [{ index: 0, delta: {}, finish_reason: "stop", logprobs: null }],
+    });
+    mockFetch.mockResolvedValueOnce(sseResponse([terminal], { includeDone: false }));
+    await expect(collect("chat", null as unknown as number)).resolves.toEqual([
+      JSON.parse(terminal),
+    ]);
+  });
+
+  it("does not accept native done=true on chat with explicit null n", async () => {
+    mockFetch.mockResolvedValueOnce(
+      sseResponse([generateChunk(0, "", { done: true })], { includeDone: false }),
+    );
+    await expect(collect("chat", null as unknown as number)).rejects.toBeInstanceOf(
+      SIEConnectionError,
+    );
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [{ index: 0, finish_reason: "stop" }],
+    [
+      { index: 0, finish_reason: "stop" },
+      { index: 0, finish_reason: "length" },
+    ],
+    [
+      { index: 0, finish_reason: "stop" },
+      { index: 2, finish_reason: "stop" },
+    ],
+    [
+      { index: 0, finish_reason: "stop" },
+      { index: true, finish_reason: "stop" },
+    ],
+    [
+      { index: 0, finish_reason: "stop" },
+      { index: "1", finish_reason: "stop" },
+    ],
+    [
+      { index: 0, finish_reason: "stop" },
+      { index: 1, finish_reason: null },
+    ],
+    [
+      { index: 0, finish_reason: "stop" },
+      { index: 1, finish_reason: "" },
+    ],
+  ])("rejects EOF when chat n=2 is not complete: %j", async (...choices) => {
+    mockFetch.mockResolvedValueOnce(
+      sseResponse([JSON.stringify({ choices })], { includeDone: false }),
+    );
+    await expect(collect("chat", 2)).rejects.toBeInstanceOf(SIEConnectionError);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves a stream error after a semantic completion chunk", async () => {
+    mockFetch.mockResolvedValueOnce(
+      sseResponse(
+        [
+          generateChunk(0, "", { done: true, finish_reason: "stop" }),
+          JSON.stringify({
+            request_id: "req-error",
+            error: { message: "generation interrupted", code: "transport_failure" },
+            done: true,
+          }),
+        ],
+        { includeDone: false },
+      ),
+    );
+    await expect(collect("native")).rejects.toMatchObject({
+      name: "SIEStreamError",
+      code: "transport_failure",
+      requestId: "req-error",
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("SIEClient.streamChatCompletions", () => {
   beforeEach(() => {
     mockFetch.mockClear();

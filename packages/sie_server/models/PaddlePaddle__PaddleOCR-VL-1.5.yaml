@@ -31,7 +31,6 @@ profiles:
     adapter_options:
       loadtime:
         trust_remote_code: true
-        mem_fraction_static: 0.85
         served_model_name: PaddlePaddle/PaddleOCR-VL-1.5
         max_concurrent_requests: 64
         processor_use_fast: false

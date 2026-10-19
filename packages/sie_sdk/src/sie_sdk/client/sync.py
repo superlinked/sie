@@ -65,6 +65,7 @@ from sie_sdk.jobs import (
     require_connection_schema_policy,
     require_connector_idempotency_key,
 )
+from sie_sdk.systemone import SYSTEM_ONE_OPTIONS, system_one_request, system_one_result
 from sie_sdk.types import (
     Batch,
     BatchList,
@@ -100,6 +101,7 @@ from sie_sdk.types import (
     ResponseResult,
     ScoreResult,
     StatusMessage,
+    SystemOneResult,
     WorkerInfo,
 )
 
@@ -182,7 +184,7 @@ from ._shared import (
     validate_generate_request_body,
     websocket_matches_base_url_origin,
 )
-from ._sse import iter_sse_payloads
+from ._sse import SSECompletion, iter_sse_payloads
 from .errors import (
     JobFailedError,
     LoraLoadingError,
@@ -1716,6 +1718,66 @@ class SIEClient:
         data = response.json()
         return data["models"]
 
+    def system_one(
+        self,
+        model: str,
+        state: str | Mapping[str, Any] | list[Any],
+        questions: Mapping[str, Any],
+        *,
+        options: dict[str, Any] | None = None,
+        gpu: str | None = None,
+        wait_for_capacity: bool = True,
+        provision_timeout_s: float | None = None,
+    ) -> SystemOneResult:
+        """Answer typed questions about one state (System One).
+
+        Answers ``noul`` (yes/no), ``choice`` (pick one) and ``score``
+        (ordinal) questions about a text, a JSON object, or a list of
+        conversation turns with a decision model, in the response shape of
+        SIE's System One-compatible ``POST /v1/systemone``. It runs as one
+        ``extract`` call, so it waits for capacity and model loading like
+        :meth:`extract`. A state or question set that does not fit the model's
+        window raises instead of being truncated.
+
+        Args:
+            model: A decision model, e.g. ``"fastino/GLiNER2.5-Decide"``.
+            state: The text to judge, a JSON object, or a list of turns.
+            questions: Typed questions by id, ``{"type", "instructions"?,
+                "criteria"?}``; a score question takes at most 10 levels.
+            options: Runtime options, as for :meth:`extract`.
+            gpu: Target GPU type, as for :meth:`extract`.
+            wait_for_capacity: As for :meth:`extract`.
+            provision_timeout_s: As for :meth:`extract`.
+
+        Returns:
+            ``{"model", "answers", "usage"}``, one answer per question id.
+
+        Raises:
+            RequestError: A malformed question or state, input that does not
+                fit the model's window, or a model that does not answer typed
+                questions. Otherwise as :meth:`extract`.
+
+        Example:
+            >>> result = client.system_one(
+            ...     "fastino/GLiNER2.5-Decide",
+            ...     "I was charged twice. Please fix this ASAP.",
+            ...     {"spam": {"type": "noul", "instructions": "Is this spam?"}},
+            ... )
+            >>> sorted(result["answers"]["spam"])
+            ['answer', 'confidence', 'noul', 'type']
+        """
+        item, output_schema = system_one_request(state, questions)
+        result = self.extract(
+            model,
+            item,
+            output_schema=output_schema,
+            options={**(options or {}), **SYSTEM_ONE_OPTIONS},
+            gpu=gpu,
+            wait_for_capacity=wait_for_capacity,
+            provision_timeout_s=provision_timeout_s,
+        )
+        return system_one_result(model, result, output_schema)
+
     def estimate(
         self,
         endpoint: str,
@@ -3138,7 +3200,8 @@ class SIEClient:
         Yields :class:`ChatCompletionChunk` events. Pass
         ``stream_options={"include_usage": True}`` to receive a final
         usage-only chunk (``choices: []``) before the stream ends. Raises
-        :class:`ServerError` if the gateway emits a mid-stream error chunk;
+        :class:`ServerError` if the gateway emits a mid-stream error chunk, or
+        :class:`SIEConnectionError` if the response ends before completion;
         breaking out of the iterator early closes the stream so the worker
         stops generating.
 
@@ -3303,6 +3366,8 @@ class SIEClient:
         failure is terminal (non-idempotent). Yielding inside the ``with``
         keeps the stream open while the caller consumes it; an early ``break``
         tears the context down and the worker sees the disconnect.
+        A natural EOF requires an explicit or semantic completion marker;
+        an interrupted generation is never retried.
         """
         self._reset_retry_count()
         timeout = provision_timeout_s if provision_timeout_s is not None else DEFAULT_PROVISION_TIMEOUT_S
@@ -3339,7 +3404,13 @@ class SIEClient:
                     else:
                         self._check_server_version(response)
                         yielded_chunk = False
-                        for payload in iter_sse_payloads(response.iter_lines()):
+                        chat_choices = None
+                        if url == "/v1/chat/completions":
+                            chat_choices = json.loads(body).get("n")
+                            if chat_choices is None:
+                                chat_choices = 1
+                        completion = SSECompletion(chat_choices=chat_choices)
+                        for payload in iter_sse_payloads(response.iter_lines(), completion=completion):
                             try:
                                 chunk = json.loads(payload)
                             except json.JSONDecodeError as e:
@@ -3394,9 +3465,11 @@ class SIEClient:
                                         request=parse_request_metadata(error_headers),
                                         retry_after=float(retry_after_s) if retry_after_s is not None else None,
                                     )
+                            completion.observe(chunk)
                             yield chunk
                             yielded_chunk = True
                         else:
+                            completion.require_complete()
                             return
             except _CONNECT_PHASE_ERRORS as e:
                 if wait_for_capacity and is_transient_connect_error(e):

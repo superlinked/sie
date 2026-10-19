@@ -19,6 +19,7 @@ from huggingface_hub import snapshot_download
 
 from sie_server.adapters._generation_base import GenerationResult, collect_generation
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters.base import ModelCapabilities, ModelDims
 from sie_server.adapters.lighton_ocr._markdown import lightonocr3_markdown
@@ -56,7 +57,8 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
         model_name_or_path: str | Path,
         *,
         max_seq_length: int = 16384,
-        mem_fraction_static: float = 0.85,
+        mem_fraction_static: float | None = None,
+        kv_budget_tokens: int | None = None,
         compute_precision: ComputePrecision = "bfloat16",
         trust_remote_code: bool = True,
         processor_use_fast: bool | None = None,
@@ -91,6 +93,7 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
             model_name_or_path=str(model_name_or_path),
             max_seq_length=max_seq_length,
             mem_fraction_static=mem_fraction_static,
+            kv_budget_tokens=kv_budget_tokens,
             compute_precision=compute_precision,
             trust_remote_code=trust_remote_code,
             revision=revision,
@@ -173,6 +176,7 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
         processor_kwargs: dict[str, Any] = {"trust_remote_code": self._trust_remote_code}
         if self._processor_use_fast is not None:
             processor_kwargs["use_fast"] = self._processor_use_fast
+        install_transformers_security_fixes()
         self._processor = AutoProcessor.from_pretrained(processor_dir, **processor_kwargs)
 
         try:

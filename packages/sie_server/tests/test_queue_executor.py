@@ -21,6 +21,7 @@ from sie_server.core.inference_output import ExtractOutput, ScoreOutput
 from sie_server.core.loader import expand_profile_variants, load_model_config
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.timing import RequestTiming
+from sie_server.core.worker import ModelWorker
 from sie_server.core.worker.types import WorkerConfig, WorkerResult
 from sie_server.ipc_types import (
     EncodeBatchItem,
@@ -258,10 +259,11 @@ def _runtime_profile_config() -> ModelConfig:
                     "max_batch_tokens": 8192,
                     "adapter_path": "sie_server.adapters.fake.adapter:FakeAdapter",
                     "adapter_options": {
+                        "loadtime": {"lora_paths": ["request-lora"]},
                         "runtime": {
                             "threshold": 0.5,
                             "lora": "profile-lora",
-                        }
+                        },
                     },
                 },
             },
@@ -1071,6 +1073,21 @@ class TestProcessEncodeBatch:
         assert outcome.outcomes[0].disposition == "publish_error_and_ack"
         assert outcome.outcomes[0].error_code == "INVALID_INPUT"
 
+    @pytest.mark.parametrize("key", ["lora", "lora_id"])
+    @pytest.mark.asyncio
+    async def test_an_undeclared_lora_is_invalid_input(self, key: str) -> None:
+        reg = _make_registry()
+        outcome = await QueueExecutor(reg).process_encode_batch(
+            ProcessEncodeBatchRequest(
+                model_id="test/model",
+                items=[_encode_item(options={key: "attacker/lora"})],
+            )
+        )
+
+        assert outcome.outcomes[0].disposition == "publish_error_and_ack"
+        assert outcome.outcomes[0].error_code == "INVALID_INPUT"
+        reg.ensure_lora_loaded_async.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_muvera_profile_translates_managed_adapter_output(self) -> None:
         """Managed queue requests must use the same MuVERA contract as HTTP."""
@@ -1293,6 +1310,70 @@ class TestProcessEncodeBatch:
 
 
 class TestProcessScoreBatch:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("supports_lora", [True, False])
+    @pytest.mark.parametrize("legacy_default", [False, True])
+    async def test_real_worker_preserves_authorized_lora_and_isolates_rejections(
+        self, supports_lora: bool, legacy_default: bool
+    ) -> None:
+        reg = _make_registry()
+        config_data = _runtime_profile_config().model_dump()
+        if legacy_default:
+            runtime = config_data["profiles"]["tuned"]["adapter_options"]["runtime"]
+            runtime["lora_id"] = runtime.pop("lora")
+        reg.get_config.return_value = ModelConfig.model_validate(config_data)
+        adapter = MagicMock()
+        adapter.supports_lora.return_value = supports_lora
+        adapter.max_concurrent_dispatch.return_value = 4
+        active: list[str | None] = [None]
+
+        def select(lora: str | None) -> None:
+            active[0] = lora
+
+        def score(queries, items, **kwargs) -> ScoreOutput:
+            value = {None: 0.0, "profile-lora": 1.0, "request-lora": 2.0}[active[0]]
+            return ScoreOutput(scores=np.full(len(items), value, dtype=np.float32))
+
+        adapter.set_active_lora.side_effect = select
+        adapter.score_pairs.side_effect = score
+        reg.get.return_value = adapter
+        worker = ModelWorker(adapter)
+        reg.start_worker = AsyncMock(return_value=worker)
+        await worker.start()
+        try:
+            outcome = await QueueExecutor(reg).process_score_batch(
+                ProcessScoreBatchRequest(
+                    model_id="test/model",
+                    items=[
+                        _score_item(wiid="profile.0", options={"profile": "tuned"}),
+                        _score_item(wiid="request.0", options={"profile": "tuned", "lora": "request-lora"}),
+                        _score_item(wiid="base.0"),
+                        _score_item(wiid="reset.0", options={"profile": "tuned", "lora": None}),
+                        _score_item(wiid="profile-again.0", options={"profile": "tuned"}),
+                        _score_item(wiid="undeclared.0", options={"profile": "tuned", "lora": "untrusted"}),
+                    ],
+                )
+            )
+        finally:
+            await worker.stop()
+
+        by_id = {item.work_item_id: item for item in outcome.outcomes}
+        for wiid, expected in (("profile.0", 1.0), ("request.0", 2.0), ("profile-again.0", 1.0)):
+            if supports_lora:
+                assert by_id[wiid].disposition == "publish_and_ack"
+                assert by_id[wiid].raw_output.score.scores == [expected]
+            else:
+                assert by_id[wiid].error_code == "INVALID_INPUT"
+                assert "does not support LoRA scoring" in by_id[wiid].error
+        for wiid in ("base.0", "reset.0"):
+            assert by_id[wiid].disposition == "publish_and_ack"
+            assert by_id[wiid].raw_output.score.scores == [0.0]
+        assert by_id["undeclared.0"].error_code == "INVALID_INPUT"
+        assert "declares" in by_id["undeclared.0"].error
+        selections = [call.args[0] for call in adapter.set_active_lora.call_args_list]
+        assert "untrusted" not in selections
+        assert selections == (["profile-lora", "request-lora", None] if supports_lora else [])
+
     @pytest.mark.asyncio
     async def test_single_item_publish_and_ack(self) -> None:
         reg = _make_registry()
@@ -1546,6 +1627,7 @@ class TestProcessExtractBatch:
     async def test_gliner2_invalid_request_does_not_fail_valid_sibling(self) -> None:
         adapter = GLiNER2Adapter("test-model")
         adapter._model = MagicMock()
+        adapter._count_prompt = lambda _schema: 8
         adapter._model.extract_entities.return_value = {"entities": {}}
         reg = _make_registry()
         worker = AsyncMock()
@@ -1793,6 +1875,10 @@ class TestProcessExtractBatch:
                         wiid="invalid.0",
                         options={"profile": "missing"},
                     ),
+                    _extract_item(
+                        wiid="undeclared.0",
+                        options={"profile": "tuned", "lora": "attacker/lora"},
+                    ),
                 ],
             )
         )
@@ -1802,6 +1888,8 @@ class TestProcessExtractBatch:
         assert by_id["override.0"].disposition == "publish_and_ack"
         assert by_id["invalid.0"].disposition == "publish_error_and_ack"
         assert by_id["invalid.0"].error_code == "INVALID_INPUT"
+        assert by_id["undeclared.0"].disposition == "publish_error_and_ack"
+        assert by_id["undeclared.0"].error_code == "INVALID_INPUT"
 
         assert len(calls) == 2
         by_lora = dict(calls)

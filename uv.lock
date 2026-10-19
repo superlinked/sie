@@ -1373,17 +1373,17 @@ wheels = [
 
 [[package]]
 name = "gliner2"
-version = "1.3.2"
+version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "peft" },
     { name = "pydantic" },
     { name = "requests" },
+    { name = "tqdm" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/06/ea/d6091c70ba05d5611e49520198f40c11e5df3b0f5cedc629e4ec01c496ea/gliner2-1.3.2.tar.gz", hash = "sha256:0c07befb66c031d288c7fe0398880885a6a4016f14ff3f6e17568439fe6019d8", size = 133808 }
+sdist = { url = "https://files.pythonhosted.org/packages/b2/a8/2dcfdb8862dbeb488b6b86047075a213cc101ca592eae1a43b824cca74dd/gliner2-2.0.0.tar.gz", hash = "sha256:82b149f893ba0f6adf75ef1db599b6dbecd9811cca34dbd0bac7cd9e90b90ce4", size = 565826 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5e/e5/ce58a45306747714072179d24f9a6c59d642a588cededf35132bdbfd74f8/gliner2-1.3.2-py3-none-any.whl", hash = "sha256:d4e5e2f76a2eec1da5e4d6c205b6fc99dfc6c3c82ff29ea07a27565040730802", size = 96814 },
+    { url = "https://files.pythonhosted.org/packages/00/44/87d2803c5c5c6c0bd22bce4d52c66c965dacae29e0121d7e04c9883711df/gliner2-2.0.0-py3-none-any.whl", hash = "sha256:6f7c4cba0ef3173636d8bd9404aa94d4e0ccf36d4b4b9a0d27d740dd2d3236c3", size = 326214 },
 ]
 
 [[package]]
@@ -4350,22 +4350,23 @@ wheels = [
 
 [[package]]
 name = "sentence-transformers"
-version = "5.4.1"
+version = "5.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "numpy" },
     { name = "scikit-learn" },
     { name = "scipy" },
+    { name = "tokenizers" },
     { name = "torch", version = "2.9.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux'" },
     { name = "torch", version = "2.9.1+cu129", source = { registry = "https://download.pytorch.org/whl/cu129" }, marker = "sys_platform == 'linux'" },
     { name = "tqdm" },
     { name = "transformers" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/4d/68/7f98c221940ce783b492ad6140384daf2e2918cd7175009d6a362c22b9ee/sentence_transformers-5.4.1.tar.gz", hash = "sha256:436bcb1182a0ff42a8fb2b1c43498a70d0a75b688d182f2cd0d1dd115af61ddc", size = 428910 }
+sdist = { url = "https://files.pythonhosted.org/packages/9d/59/867381b1414a975da6c9953f48a07c05cb0629305e2d37c9bcc9764367b2/sentence_transformers-5.7.0.tar.gz", hash = "sha256:fd8c8fc35e6323631dff9f3760969ebf7980dc3cfda0ab1354bc6a774cc0e5d8", size = 466382 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c5/d9/3a9b6f2ccdedc9dc00fe37b2fc58f58f8efbff44565cf4bf39d8568bb13a/sentence_transformers-5.4.1-py3-none-any.whl", hash = "sha256:a6d640fc363849b63affb8e140e9d328feabab86f83d58ac3e16b1c28140b790", size = 571311 },
+    { url = "https://files.pythonhosted.org/packages/e8/c8/f63d99e354532f5b83e735dd1e001bda92495fbfde934f65d924abf2b071/sentence_transformers-5.7.0-py3-none-any.whl", hash = "sha256:b78141da3d8137e70d965866e2ca43190b9266f3d4d8752e250ded75e7136730", size = 611333 },
 ]
 
 [[package]]
@@ -4926,7 +4927,7 @@ requires-dist = [
     { name = "gliclass", specifier = ">=0.1.17,<1" },
     { name = "gliformer", specifier = "==0.1.2" },
     { name = "gliner", specifier = ">=0.2.26,<1" },
-    { name = "gliner2", specifier = ">=1.3.1,<2" },
+    { name = "gliner2", specifier = ">=1.3.2,<=2.0.0" },
     { name = "glirel", specifier = ">=1.0,<2" },
     { name = "httpcore", specifier = ">=1.0.7,<2" },
     { name = "httpx", specifier = ">=0.28.1" },
@@ -4957,7 +4958,7 @@ requires-dist = [
     { name = "requests", specifier = ">=2.32,<3" },
     { name = "rich", specifier = ">=13,<14" },
     { name = "safetensors", specifier = ">=0.4,<1" },
-    { name = "sentence-transformers", specifier = ">=5.0,<6" },
+    { name = "sentence-transformers", specifier = "==5.7.0" },
     { name = "sie-sdk", extras = ["storage"], editable = "packages/sie_sdk" },
     { name = "textual", marker = "extra == 'top'", specifier = ">=3.0,<4" },
     { name = "threadpoolctl", specifier = ">=3.6.0" },
@@ -4967,8 +4968,8 @@ requires-dist = [
     { name = "torch", marker = "sys_platform == 'linux'", specifier = ">=2.9,<2.10", index = "https://download.pytorch.org/whl/cu129" },
     { name = "torchvision", marker = "sys_platform != 'linux'", specifier = ">=0.18,<1" },
     { name = "torchvision", marker = "sys_platform == 'linux'", specifier = ">=0.18,<1", index = "https://download.pytorch.org/whl/cu129" },
-    { name = "transformers", specifier = ">=4.57,<6" },
-    { name = "transformers", marker = "extra == 'local'", specifier = ">=4.57,<5" },
+    { name = "transformers", specifier = ">=4.57.6,!=5.0.*,!=5.1.*,!=5.2.*,<6" },
+    { name = "transformers", marker = "extra == 'local'", specifier = "==4.57.6" },
     { name = "typer", specifier = ">=0.14,<1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32,<1" },
     { name = "uvloop", specifier = ">=0.22" },

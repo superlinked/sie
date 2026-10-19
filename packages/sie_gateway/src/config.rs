@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::time::Duration;
 
+use axum::http::HeaderValue;
 use serde::Deserialize;
 
 use crate::state::demand_tracker::PhysicalLaneCatalog;
@@ -784,6 +785,49 @@ fn env_default(key: &str, fallback: &str) -> String {
     }
 }
 
+/// The `Authorization` value the gateway presents when it dials a worker's
+/// `/ws/status`, from `SIE_WORKER_AUTH_TOKEN`. Like the workers' own
+/// `SIE_AUTH_TOKEN`, the value may list comma-separated tokens; the gateway
+/// presents the first. `None` when it holds no token.
+pub fn worker_authorization_from_env() -> Result<Option<HeaderValue>, String> {
+    worker_authorization(&env::var("SIE_WORKER_AUTH_TOKEN").unwrap_or_default())
+}
+
+fn worker_authorization(tokens: &str) -> Result<Option<HeaderValue>, String> {
+    let Some(token) = tokens
+        .split(',')
+        .map(str::trim)
+        .find(|token| !token.is_empty())
+    else {
+        return Ok(None);
+    };
+    let mut value = HeaderValue::from_str(&format!("Bearer {token}"))
+        .map_err(|_| "SIE_WORKER_AUTH_TOKEN is not a valid HTTP header value".to_string())?;
+    value.set_sensitive(true);
+    Ok(Some(value))
+}
+
+/// Whether `SIE_AUTH_MODE` is set to a non-empty value.
+pub fn auth_mode_is_set() -> bool {
+    env::var("SIE_AUTH_MODE").is_ok_and(|value| !value.is_empty())
+}
+
+/// The startup warning for a gateway that serves other machines without
+/// authentication only because `SIE_AUTH_MODE` is unset. A configuration
+/// [`Config::auth_config_error`] refuses serves nobody, so it gets none.
+pub fn unset_auth_mode_warning(config: &Config, auth_mode_set: bool) -> Option<String> {
+    let host = config.host.as_str();
+    if auth_mode_set
+        || config.auth_config_error().is_some()
+        || host_is_loopback(host.trim_start_matches('[').trim_end_matches(']'))
+    {
+        return None;
+    }
+    Some(format!(
+        "SIE_AUTH_MODE is unset and the gateway listens on {host}, so every client that can reach it is served without authentication. From 0.13.0 the gateway refuses to start this way. Set SIE_AUTH_MODE=token with SIE_AUTH_TOKEN, or set SIE_AUTH_MODE=none to keep it open."
+    ))
+}
+
 /// The bearer the gateway presents to `sie-config`. `SIE_CONFIG_SERVICE_TOKEN`
 /// decides whenever it is set, and a blank value means no credential. Only an
 /// unset `SIE_CONFIG_SERVICE_TOKEN` falls back to `SIE_ADMIN_TOKEN`, the
@@ -932,9 +976,9 @@ impl Config {
     }
 
     /// Report auth configuration soundness. Returns `(level, message)`
-    /// pairs that callers log at startup. Catches fail-open
-    /// misconfigurations (e.g. tokens set while `SIE_AUTH_MODE=none`),
-    /// unknown modes, missing tokens, and explicit operational bypasses.
+    /// pairs that callers log at startup. Catches misconfigurations the
+    /// middleware refuses (e.g. tokens set while `SIE_AUTH_MODE=none`, or an
+    /// unknown mode), missing tokens, and explicit operational bypasses.
     ///
     /// Does not mutate `self` and does not refuse startup; matches the
     /// gateway's "log and continue" posture for config issues.
@@ -951,7 +995,7 @@ impl Config {
             issues.push((
                 AuditLevel::Error,
                 format!(
-                    "SIE_AUTH_MODE='{}' is not recognized; expected 'none', 'static', or 'token'. Auth is currently DISABLED (fail-open) because of the unknown mode — fix SIE_AUTH_MODE.",
+                    "SIE_AUTH_MODE='{}' is not recognized; expected 'none', 'static', or 'token'. Fix SIE_AUTH_MODE.",
                     mode
                 ),
             ));
@@ -968,7 +1012,7 @@ impl Config {
         if !is_enabled && has_tokens {
             issues.push((
                 AuditLevel::Error,
-                "SIE_AUTH_TOKEN(S) is set but SIE_AUTH_MODE is not 'static'/'token'. Auth is DISABLED; the tokens are dead configuration. Set SIE_AUTH_MODE=token to enforce auth.".to_string(),
+                "SIE_AUTH_TOKEN(S) is set but SIE_AUTH_MODE is not 'static'/'token', so the gateway refuses every request except the probes and the API description. Set SIE_AUTH_MODE=token to enforce the tokens, or remove them.".to_string(),
             ));
         } else if !is_enabled && has_admin {
             let usage = if admin_is_config_credential {
@@ -2201,9 +2245,8 @@ mod tests {
         let cfg = cfg_with_auth("none", vec!["t1"], "admin", false);
         let issues = cfg.audit_auth();
         assert!(
-            issues
-                .iter()
-                .any(|(lvl, msg)| *lvl == AuditLevel::Error && msg.contains("DISABLED")),
+            issues.iter().any(|(lvl, msg)| *lvl == AuditLevel::Error
+                && msg.contains("refuses every request except the probes")),
             "expected error about tokens + disabled auth, got {:?}",
             issues
         );
@@ -2352,5 +2395,64 @@ mod tests {
                 );
             },
         );
+    }
+
+    #[test]
+    fn worker_authorization_is_a_sensitive_bearer_value() {
+        let value = worker_authorization("worker-secret").unwrap().unwrap();
+        assert_eq!(value.to_str().unwrap(), "Bearer worker-secret");
+        assert!(value.is_sensitive());
+        assert!(worker_authorization("").unwrap().is_none());
+        let error = worker_authorization("bad\ntoken").unwrap_err();
+        assert!(
+            !error.contains("bad"),
+            "the error must not echo the token: {error}"
+        );
+    }
+
+    #[test]
+    fn worker_authorization_presents_the_first_listed_token() {
+        for (tokens, expected) in [
+            ("new,old", Some("Bearer new")),
+            (" new , old ", Some("Bearer new")),
+            (",new", Some("Bearer new")),
+            (" , ", None),
+        ] {
+            let value = worker_authorization(tokens).unwrap();
+            assert_eq!(
+                value.as_ref().map(|value| value.to_str().unwrap()),
+                expected,
+                "{tokens:?}"
+            );
+        }
+    }
+
+    fn cfg_on_host(host: &str, mode: &str, tokens: Vec<&str>) -> Config {
+        let mut cfg = cfg_with_auth(mode, tokens, "", false);
+        cfg.host = host.to_string();
+        cfg
+    }
+
+    #[test]
+    fn unset_auth_mode_warning_covers_only_an_exposed_unset_mode() {
+        let warning =
+            unset_auth_mode_warning(&cfg_on_host("0.0.0.0", "none", vec![]), false).unwrap();
+        assert!(warning.contains("0.13.0"), "{warning}");
+        assert!(unset_auth_mode_warning(&cfg_on_host("::", "none", vec![]), false).is_some());
+        assert!(unset_auth_mode_warning(&cfg_on_host("10.0.0.5", "none", vec![]), false).is_some());
+        assert!(unset_auth_mode_warning(&cfg_on_host("0.0.0.0", "none", vec![]), true).is_none());
+        for host in ["127.0.0.1", "::1", "[::1]", "localhost"] {
+            assert!(
+                unset_auth_mode_warning(&cfg_on_host(host, "none", vec![]), false).is_none(),
+                "{host}"
+            );
+        }
+    }
+
+    #[test]
+    fn unset_auth_mode_warning_stays_quiet_when_the_gateway_refuses_every_request() {
+        let refusing = cfg_on_host("0.0.0.0", "none", vec!["t1"]);
+        assert!(refusing.auth_config_error().is_some());
+        assert!(unset_auth_mode_warning(&refusing, false).is_none());
     }
 }

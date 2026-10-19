@@ -78,7 +78,8 @@ struct Cli {
     #[arg(long, env = "SIE_GATEWAY_URL")]
     gateway_url: Option<String>,
 
-    /// Bearer token for gateway pool-status reads.
+    /// Bearer token for gateway pool-status reads. The gateway reads its own
+    /// token setting as a comma-separated list; the first token is presented.
     #[arg(long, env = "SIE_GATEWAY_API_KEY", hide_env_values = true)]
     gateway_api_key: Option<String>,
 
@@ -228,7 +229,7 @@ async fn main() -> anyhow::Result<()> {
         model_ready_timeout_s,
         payload_store_url: cli.payload_store_url,
         gateway_url: cli.gateway_url.filter(|url| !url.trim().is_empty()),
-        gateway_api_key: cli.gateway_api_key.filter(|token| !token.trim().is_empty()),
+        gateway_api_key: gateway_api_key(cli.gateway_api_key.as_deref()),
         pool_admission_enabled: env_bool_value(cli.pool_admission_enabled.as_deref(), true),
         pool_admission_check_interval_ms: seconds_to_millis(
             cli.pool_admission_check_interval_s,
@@ -438,10 +439,20 @@ fn validate_model_ready_liveness_budget(
     Ok(())
 }
 
+/// The token presented to the gateway: the first non-empty entry of a
+/// comma-separated list, which is how the gateway reads its own tokens.
+fn gateway_api_key(raw: Option<&str>) -> Option<String> {
+    raw?.split(',')
+        .map(str::trim)
+        .find(|token| !token.is_empty())
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
+    use super::gateway_api_key;
     use super::parse_ipc_socket_paths;
     use super::resolve_config_service_token;
     use super::validate_ingest_mode;
@@ -451,6 +462,25 @@ mod tests {
     use super::Cli;
     use super::IngestMode;
     use clap::CommandFactory;
+
+    #[test]
+    fn gateway_api_key_presents_the_first_listed_token() {
+        assert_eq!(
+            gateway_api_key(Some("new-token")).as_deref(),
+            Some("new-token")
+        );
+        assert_eq!(
+            gateway_api_key(Some(" new-token , old-token ")).as_deref(),
+            Some("new-token")
+        );
+        assert_eq!(
+            gateway_api_key(Some(",, new-token,")).as_deref(),
+            Some("new-token")
+        );
+        assert_eq!(gateway_api_key(Some(" , ")), None);
+        assert_eq!(gateway_api_key(Some("")), None);
+        assert_eq!(gateway_api_key(None), None);
+    }
 
     #[test]
     fn secret_env_args_hide_their_values() {

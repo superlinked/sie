@@ -8,6 +8,10 @@ from typing import Any
 import torch
 from fastapi import FastAPI
 
+from sie_server import __version__
+from sie_server.api.anthropic_messages import AnthropicErrorEnvelopeMiddleware
+from sie_server.api.anthropic_messages import router as anthropic_messages_router
+from sie_server.api.decisions import router as decisions_router
 from sie_server.api.encode import router as encode_router
 from sie_server.api.extract import router as extract_router
 from sie_server.api.generate import router as generate_router
@@ -21,6 +25,7 @@ from sie_server.api.openai_responses import router as openai_responses_router
 from sie_server.api.openapi import setup_custom_openapi_schema
 from sie_server.api.root import router as root_router
 from sie_server.api.score import router as score_router
+from sie_server.api.systemone import router as systemone_router
 from sie_server.api.ws import init_server_start_time
 from sie_server.api.ws import router as ws_router
 from sie_server.app.app_state_config import AppStateConfig
@@ -29,6 +34,13 @@ from sie_server.config.upstreams import install_upstreams, load_upstreams
 from sie_server.core.memory import MemoryConfig
 from sie_server.core.readiness import mark_not_ready, mark_ready, register_liveness_probe
 from sie_server.core.registry import ModelRegistry
+from sie_server.core.server_auth import (
+    LoopbackHostMiddleware,
+    ServerAuthMiddleware,
+    is_loopback_host,
+    loopback_host_allowlist,
+    server_tokens,
+)
 from sie_server.core.shutdown import ShutdownMiddleware, ShutdownState, setup_signal_handlers
 from sie_server.ipc_server import IpcServer
 from sie_server.observability.gpu import _init_nvml, shutdown_nvml
@@ -80,11 +92,16 @@ class AppFactory:
         app = FastAPI(
             title="SIE Server",
             description="Search Inference Engine - GPU inference server for search workloads",
-            version="0.1.0",
+            version=__version__,
             lifespan=cls._create_lifespan(config, shutdown_state),
         )
         # Add graceful shutdown middleware (for spot instance preemption)
         app.add_middleware(ShutdownMiddleware, shutdown_state=shutdown_state)
+        if config.auth_mode == "token":
+            app.add_middleware(ServerAuthMiddleware, tokens=server_tokens(os.environ))
+        elif config.bind_host and is_loopback_host(config.bind_host):
+            app.add_middleware(LoopbackHostMiddleware, allowed_hosts=loopback_host_allowlist(config.bind_host))
+        app.add_middleware(AnthropicErrorEnvelopeMiddleware)
 
         install_upstreams(
             load_upstreams(config.upstreams_file) if config.upstreams_file else {},
@@ -120,9 +137,12 @@ class AppFactory:
         app.include_router(openai_router)  # OpenAI-compatible /v1/embeddings
         app.include_router(openai_completions_router)  # OpenAI-compatible /v1/completions
         app.include_router(openai_responses_router)  # OpenAI-compatible /v1/responses
+        app.include_router(systemone_router)  # System One-compatible /v1/systemone
+        app.include_router(decisions_router)
         # Local-only convenience (single-node/dev); intentionally NOT in the published
         # openapi.json — see cli.openapi_export. The Rust gateway is the prod API authority.
         app.include_router(openai_local_router)  # local /v1/chat/completions + /v1/rerank
+        app.include_router(anthropic_messages_router)  # local /v1/messages over /v1/chat/completions
         setup_custom_openapi_schema(app)
 
         return app

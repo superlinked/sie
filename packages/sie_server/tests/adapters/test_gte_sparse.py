@@ -117,3 +117,74 @@ class TestGTESparseFlashAdapter:
 
         with pytest.raises(ValueError, match="NewForMaskedLM"):
             adapter.load("cuda:0")
+
+    @pytest.mark.parametrize(
+        ("revision", "code_revision"),
+        [
+            ("1" * 40, "2" * 40),
+            ("1" * 40, None),
+            (None, "2" * 40),
+            (None, None),
+        ],
+    )
+    def test_load_forwards_model_and_code_revisions(self, revision: str | None, code_revision: str | None) -> None:
+        adapter = GTESparseFlashAdapter("example/encoder", revision=revision, code_revision=code_revision)
+        expected = {
+            key: value for key, value in {"revision": revision, "code_revision": code_revision}.items() if value
+        }
+        with (
+            patch("transformers.AutoTokenizer.from_pretrained") as tokenizer_load,
+            patch(
+                "transformers.AutoModelForMaskedLM.from_pretrained", side_effect=RuntimeError("model loader reached")
+            ) as model_load,
+            pytest.raises(RuntimeError, match="model loader reached"),
+        ):
+            adapter.load("cpu")
+
+        for loader in (tokenizer_load, model_load):
+            assert loader.call_args.args == ("example/encoder",)
+            actual = {
+                key: loader.call_args.kwargs[key]
+                for key in ("revision", "code_revision")
+                if key in loader.call_args.kwargs
+            }
+            assert actual == expected
+            assert loader.call_args.kwargs["trust_remote_code"] is True
+
+    @pytest.mark.parametrize("code_revision", ["2" * 40, None])
+    def test_load_reaches_auto_config_with_independent_code_revision(self, code_revision: str | None) -> None:
+        adapter = GTESparseFlashAdapter("example/encoder", revision="1" * 40, code_revision=code_revision)
+        with (
+            patch("transformers.AutoTokenizer.from_pretrained"),
+            patch("transformers.models.auto.auto_factory.cached_file", return_value=None),
+            patch("transformers.models.auto.auto_factory.find_adapter_config_file", return_value=None),
+            patch(
+                "transformers.AutoConfig.from_pretrained", side_effect=RuntimeError("config loader reached")
+            ) as config_load,
+            pytest.raises(RuntimeError, match="config loader reached"),
+        ):
+            adapter.load("cpu")
+
+        assert config_load.call_args.args == ("example/encoder",)
+        assert config_load.call_args.kwargs["revision"] == "1" * 40
+        assert config_load.call_args.kwargs["code_revision"] == code_revision
+
+    @pytest.mark.parametrize("code_revision", ["2" * 40, None])
+    def test_load_uses_external_code_revision_for_dynamic_module(self, code_revision: str | None) -> None:
+        adapter = GTESparseFlashAdapter("example/encoder", revision="1" * 40, code_revision=code_revision)
+        config = {"auto_map": {"AutoConfig": "example/code--configuration.Config"}}
+        with (
+            patch("transformers.AutoTokenizer.from_pretrained"),
+            patch("transformers.models.auto.auto_factory.cached_file", return_value=None),
+            patch("transformers.models.auto.auto_factory.find_adapter_config_file", return_value=None),
+            patch("transformers.PretrainedConfig.get_config_dict", return_value=(config, {})),
+            patch(
+                "transformers.dynamic_module_utils.get_cached_module_file",
+                side_effect=RuntimeError("dynamic module loader reached"),
+            ) as module_load,
+            pytest.raises(RuntimeError, match="dynamic module loader reached"),
+        ):
+            adapter.load("cpu")
+
+        assert module_load.call_args.args == ("example/code", "configuration.py")
+        assert module_load.call_args.kwargs["revision"] == code_revision

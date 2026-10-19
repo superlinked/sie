@@ -16,6 +16,8 @@ Performance optimizations:
 - Supports FP16/BF16 inference for reduced memory and faster computation
 """
 
+import platform
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -23,8 +25,10 @@ import torch
 from sentence_transformers import CrossEncoder
 
 from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._sentence_transformer_trust import load_sentence_transformer
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, AttnImplementation, ComputePrecision
+from sie_server.adapters.cross_encoder._cpu_alignment import normalize_bert_cpu_storage
 from sie_server.core.inference_output import ScoreOutput
 from sie_server.types.inputs import Item
 
@@ -124,7 +128,8 @@ class CrossEncoderAdapter(BaseAdapter):
                 model_kwargs["dtype"] = torch.bfloat16
             # float32 -> CrossEncoder default, no dtype kwarg needed
 
-        self._model = CrossEncoder(
+        model = load_sentence_transformer(
+            CrossEncoder,
             self._model_name_or_path,
             device=device,
             trust_remote_code=self._trust_remote_code,
@@ -132,8 +137,14 @@ class CrossEncoderAdapter(BaseAdapter):
             model_kwargs=model_kwargs or None,
         )
 
+        if sys.platform == "darwin" and device.split(":", 1)[0] == "cpu" and platform.machine() == "arm64":
+            # This platform-specific compatibility path must run before a model
+            # is exposed to scoring or an opt-in LoRA manager takes its snapshot.
+            normalize_bert_cpu_storage(model.model)
+
         if self._max_length is not None:
-            self._model.max_length = self._max_length
+            model.max_length = self._max_length
+        self._model = model
 
     def score(
         self,

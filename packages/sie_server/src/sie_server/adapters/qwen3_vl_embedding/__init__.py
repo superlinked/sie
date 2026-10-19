@@ -11,6 +11,7 @@ from torch.nn import functional as F
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters._vision_patch_embed import rebind_vision_patch_embed
 from sie_server.core.inference_output import EncodeOutput
@@ -167,6 +168,7 @@ class Qwen3VLEmbeddingAdapter(BaseAdapter):
         }
         if self._revision is not None:
             proc_kwargs["revision"] = self._revision
+        install_transformers_security_fixes()
         self._processor = AutoProcessor.from_pretrained(
             self._model_name_or_path,
             **proc_kwargs,

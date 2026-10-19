@@ -359,6 +359,8 @@ class TestModelRevisionField:
                 sie_id="pinned",
                 hf_id="org/pinned",
                 hf_revision=self._SHA,
+                description="A pinned test model.",
+                release_date="2024-07-03",
                 tasks=Tasks(encode=EncodeTask(dense=EmbeddingDim(dim=768))),
                 profiles={"default": ProfileConfig(adapter_path="test:Adapter", max_batch_tokens=8192)},
             ),
@@ -389,6 +391,14 @@ class TestModelRevisionField:
         by_name = {m["name"]: m for m in rev_client.get("/v1/models").json()["models"]}
         assert by_name["pinned"]["revision"] == self._SHA
         assert by_name["unpinned"]["revision"] is None
+
+    def test_list_models_carries_system_one_fields(self, rev_client: TestClient) -> None:
+        """System One clients read name, description and release_date as strings from every entry."""
+        by_name = {m["name"]: m for m in rev_client.get("/v1/models").json()["models"]}
+        assert by_name["pinned"]["description"] == "A pinned test model."
+        assert by_name["pinned"]["release_date"] == "2024-07-03"
+        assert by_name["unpinned"]["description"] == ""
+        assert by_name["unpinned"]["release_date"] == ""
 
 
 def test_pinned_builtin_profile_exposes_same_identity_in_list_and_detail(

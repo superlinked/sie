@@ -13,6 +13,8 @@
 # writes them where that version reads them (it would otherwise run the
 # sliding-window layers at 10000).
 sie_id: fastino/GLiNER2.5-Decide-1B
+description: "English typed-decision classifier (GLiNER2.5, Ettin 1B encoder): answers noul, choice and score questions about a text in one pass. 2,048-token window."
+release_date: "2026-09-24"
 hf_id: fastino/GLiNER2.5-Decide-1B
 hf_revision: 52c94d3b698bf6d2619df9d898bdc1523ea3f1ca
 inputs:

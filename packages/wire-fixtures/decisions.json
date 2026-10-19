@@ -1,0 +1,476 @@
+{
+  "requests": [
+    {
+      "name": "ordered_typed_answers",
+      "request": {
+        "model": "fastino/GLiNER2.5-Decide",
+        "input": "I was charged twice and need a refund.",
+        "questions": [
+          {
+            "type": "predicate",
+            "name": "refund",
+            "instructions": "Is the customer asking for a refund?"
+          },
+          {
+            "type": "choice",
+            "name": "department",
+            "instructions": "Which department should respond?",
+            "choices": [
+              {
+                "value": "billing",
+                "description": "Payments and refunds"
+              },
+              {
+                "value": "technical"
+              }
+            ]
+          },
+          {
+            "type": "score",
+            "name": "urgency",
+            "instructions": "How urgent is this?",
+            "levels": [
+              {
+                "label": "Low"
+              },
+              {
+                "label": "Medium",
+                "description": "Needs attention this week"
+              },
+              {
+                "label": "High"
+              }
+            ]
+          }
+        ]
+      },
+      "systemone": {
+        "model": "fastino/GLiNER2.5-Decide",
+        "state": "I was charged twice and need a refund.",
+        "questions": {
+          "question_0": {
+            "type": "noul",
+            "instructions": "Is the customer asking for a refund?"
+          },
+          "question_1": {
+            "type": "choice",
+            "instructions": "Which department should respond?",
+            "criteria": {
+              "option_0": "\"billing\": Payments and refunds",
+              "option_1": "\"technical\""
+            }
+          },
+          "question_2": {
+            "type": "score",
+            "instructions": "How urgent is this?",
+            "criteria": [
+              "Low",
+              "Medium: Needs attention this week",
+              "High"
+            ]
+          }
+        }
+      },
+      "native_answers": {
+        "question_0": {
+          "type": "noul",
+          "noul": 0.9
+        },
+        "question_1": {
+          "type": "choice",
+          "choice": "option_0",
+          "probabilities": {
+            "option_1": 0.1,
+            "option_0": 0.9
+          }
+        },
+        "question_2": {
+          "type": "score",
+          "score": 1.1,
+          "probabilities": {
+            "2": 0.2,
+            "0": 0.1,
+            "1": 0.7
+          }
+        }
+      },
+      "response": {
+        "model": "fastino/GLiNER2.5-Decide",
+        "answers": [
+          {
+            "type": "predicate",
+            "name": "refund",
+            "probability": 0.9
+          },
+          {
+            "type": "choice",
+            "name": "department",
+            "choice": "billing",
+            "probabilities": [
+              {
+                "value": "billing",
+                "probability": 0.9
+              },
+              {
+                "value": "technical",
+                "probability": 0.1
+              }
+            ],
+            "confidence": 0.8
+          },
+          {
+            "type": "score",
+            "name": "urgency",
+            "score": 1.1,
+            "probabilities": [
+              {
+                "value": 0,
+                "label": "Low",
+                "probability": 0.1
+              },
+              {
+                "value": 1,
+                "label": "Medium",
+                "probability": 0.7
+              },
+              {
+                "value": 2,
+                "label": "High",
+                "probability": 0.2
+              }
+            ],
+            "confidence": 0.55
+          }
+        ],
+        "usage": {
+          "input_tokens": 42,
+          "input_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 0
+          },
+          "output_tokens": 0,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 42
+        }
+      }
+    },
+    {
+      "name": "boolean_and_string_choices_unnamed_and_repeated_names",
+      "request": {
+        "model": "convaiinnovations/laya-typed-decisions",
+        "input": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "Please continue."
+              }
+            ]
+          }
+        ],
+        "questions": [
+          {
+            "type": "choice",
+            "instructions": "Choose whether to continue",
+            "choices": [
+              {
+                "value": true
+              },
+              {
+                "value": "true"
+              },
+              {
+                "value": false
+              }
+            ]
+          },
+          {
+            "type": "predicate",
+            "name": "same",
+            "instructions": "Continue?"
+          },
+          {
+            "type": "predicate",
+            "name": "same",
+            "instructions": "Stop?"
+          }
+        ]
+      },
+      "systemone": {
+        "model": "convaiinnovations/laya-typed-decisions",
+        "state": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "Please continue."
+              }
+            ]
+          }
+        ],
+        "questions": {
+          "question_0": {
+            "type": "choice",
+            "instructions": "Choose whether to continue",
+            "criteria": {
+              "option_0": "true",
+              "option_1": "\"true\"",
+              "option_2": "false"
+            }
+          },
+          "question_1": {
+            "type": "noul",
+            "instructions": "Continue?"
+          },
+          "question_2": {
+            "type": "noul",
+            "instructions": "Stop?"
+          }
+        }
+      },
+      "native_answers": {
+        "question_0": {
+          "type": "choice",
+          "choice": "option_0",
+          "probabilities": {
+            "option_0": 1.0,
+            "option_1": 0.0,
+            "option_2": 0.0
+          }
+        },
+        "question_1": {
+          "type": "noul",
+          "noul": 1.0
+        },
+        "question_2": {
+          "type": "refusal"
+        }
+      },
+      "response": {
+        "model": "convaiinnovations/laya-typed-decisions",
+        "answers": [
+          {
+            "type": "choice",
+            "name": null,
+            "choice": true,
+            "probabilities": [
+              {
+                "value": true,
+                "probability": 1.0
+              },
+              {
+                "value": "true",
+                "probability": 0.0
+              },
+              {
+                "value": false,
+                "probability": 0.0
+              }
+            ],
+            "confidence": 1.0
+          },
+          {
+            "type": "predicate",
+            "name": "same",
+            "probability": 1.0
+          },
+          {
+            "type": "refusal",
+            "name": "same"
+          }
+        ],
+        "usage": {
+          "input_tokens": 42,
+          "input_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 0
+          },
+          "output_tokens": 0,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 42
+        }
+      }
+    }
+  ],
+  "invalid_requests": [
+    {
+      "name": "empty_questions",
+      "request": {
+        "model": "m",
+        "input": "hello",
+        "questions": []
+      },
+      "param": "questions"
+    },
+    {
+      "name": "missing_instructions",
+      "request": {
+        "model": "m",
+        "input": "hello",
+        "questions": [
+          {
+            "type": "predicate"
+          }
+        ]
+      },
+      "param": "questions[0].instructions"
+    },
+    {
+      "name": "unknown_type",
+      "request": {
+        "model": "m",
+        "input": "hello",
+        "questions": [
+          {
+            "type": "noul",
+            "instructions": "hello"
+          }
+        ]
+      },
+      "param": "questions[0].type"
+    },
+    {
+      "name": "duplicate_choice",
+      "request": {
+        "model": "m",
+        "input": "hello",
+        "questions": [
+          {
+            "type": "choice",
+            "instructions": "Pick",
+            "choices": [
+              {
+                "value": "a"
+              },
+              {
+                "value": "a"
+              }
+            ]
+          }
+        ]
+      },
+      "param": "questions[0].choices[1].value"
+    },
+    {
+      "name": "numeric_choice",
+      "request": {
+        "model": "m",
+        "input": "hello",
+        "questions": [
+          {
+            "type": "choice",
+            "instructions": "Pick",
+            "choices": [
+              {
+                "value": 1
+              },
+              {
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "param": "questions[0].choices[0].value"
+    },
+    {
+      "name": "no_levels",
+      "request": {
+        "model": "m",
+        "input": "hello",
+        "questions": [
+          {
+            "type": "score",
+            "instructions": "Rate",
+            "levels": []
+          }
+        ]
+      },
+      "param": "questions[0].levels"
+    },
+    {
+      "name": "image_not_ignored",
+      "request": {
+        "model": "m",
+        "input": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "input_text",
+                "text": "Inspect"
+              },
+              {
+                "type": "input_image",
+                "image_url": "https://example.com/a.png"
+              }
+            ]
+          }
+        ],
+        "questions": [
+          {
+            "type": "predicate",
+            "instructions": "Damaged?"
+          }
+        ]
+      },
+      "param": "input[0].content[1].type"
+    },
+    {
+      "name": "tool_call_not_ignored",
+      "request": {
+        "model": "m",
+        "input": [
+          {
+            "type": "function_call",
+            "name": "lookup",
+            "call_id": "call1",
+            "arguments": "{}"
+          }
+        ],
+        "questions": [
+          {
+            "type": "predicate",
+            "instructions": "Done?"
+          }
+        ]
+      },
+      "param": "input[0].name"
+    },
+    {
+      "name": "backend_field_not_forwarded",
+      "request": {
+        "model": "m",
+        "input": "hi",
+        "questions": [
+          {
+            "type": "predicate",
+            "instructions": "OK?"
+          }
+        ],
+        "lora_path": "/tmp/weights"
+      },
+      "param": "lora_path"
+    },
+    {
+      "name": "model_path_traversal",
+      "request": {
+        "model": "../m",
+        "input": "hi",
+        "questions": [
+          {
+            "type": "predicate",
+            "instructions": "OK?"
+          }
+        ]
+      },
+      "param": "model"
+    }
+  ]
+}

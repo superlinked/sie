@@ -287,10 +287,10 @@ class TestConfigApiRejectsWorkerInvalidBodies:
         assert client.get("/v1/configs/epoch").json()["epoch"] == 1
 
     def test_put_with_unknown_top_level_key_is_422(self, client: TestClient) -> None:
-        resp = client.put("/v1/configs/models/acme/bert", content=yaml.safe_dump(_model(description="x")))
+        resp = client.put("/v1/configs/models/acme/bert", content=yaml.safe_dump(_model(summary="x")))
 
         assert resp.status_code == 422
-        assert resp.json()["detail"]["details"] == [{"loc": ["description"], "message": _UNKNOWN}]
+        assert resp.json()["detail"]["details"] == [{"loc": ["summary"], "message": _UNKNOWN}]
         assert client.get("/v1/configs/models/acme/bert").status_code == 404
 
 

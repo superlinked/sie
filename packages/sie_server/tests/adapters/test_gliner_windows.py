@@ -11,17 +11,26 @@ finds names in the words it reads.
 from __future__ import annotations
 
 import re
+from collections import Counter
 from itertools import pairwise
 from typing import Any
 
 import pytest
-from sie_server.adapters._word_window import MAX_DOCUMENT_WINDOWS, WINDOW_OVERLAP_WORDS, gliner_windows
+from sie_server.adapters._word_window import (
+    MAX_DOCUMENT_WINDOWS,
+    MAX_WORD_CHARS,
+    WINDOW_OVERLAP_WORDS,
+    gliner_windows,
+    pieces,
+    subword_budget,
+    window_rows,
+)
 from sie_server.adapters.gliner import GLiNERAdapter
 from sie_server.adapters.gliner_bi import GLiNERBiAdapter
 from sie_server.types.inputs import Item
 from sie_server.types.responses import ErrorCode
 
-from .test_gliner_long_words import DEBERTA, MAX_LEN, FakeGLiNER, load
+from .test_gliner_long_words import DEBERTA, MAX_LEN, FakeGLiNER, gliner_model, load, tokenizers
 
 NAMES = ("Priya Raman", "Tomas Novak", "Ines Duarte")
 
@@ -54,6 +63,32 @@ class NameFinder(FakeGLiNER):
             if text[words[-1][1] : read_end] == first and text[words[-1][1] :].startswith(name):
                 found.append(span(text, words[-1][1], read_end, 0.99))
         return sorted(found, key=lambda one: one["start"])
+
+
+class PreprocessingGLiNER(FakeGLiNER):
+    """Run gliner's real inference and collation up to the weightless encoder."""
+
+    inference = gliner_model.BaseEncoderGLiNER.inference
+    batch_predict_with_embeds = gliner_model.BaseBiEncoderGLiNER.batch_predict_with_embeds
+    _filter_valid_texts = gliner_model.BaseEncoderGLiNER._filter_valid_texts
+    _map_entities_to_original = gliner_model.BaseEncoderGLiNER._map_entities_to_original
+    _inference_packing_config = None
+
+    def __init__(self, *, bi_encoder: bool) -> None:
+        super().__init__(DEBERTA, bi_encoder=bi_encoder, max_len=384)
+        model_class = gliner_model.BiEncoderSpanGLiNER if bi_encoder else gliner_model.UniEncoderSpanGLiNER
+        self.data_collator_class = model_class.data_collator_class
+        self.inferred_words: list[list[str]] = []
+
+    def eval(self) -> PreprocessingGLiNER:
+        return self
+
+    def _process_batches(self, batches: Any, *args: Any, **kwargs: Any) -> list[list[Any]]:
+        result: list[list[Any]] = []
+        for batch in batches:
+            self.inferred_words.extend(batch["tokens"])
+            result.extend([] for _ in batch["tokens"])
+        return result
 
 
 def span(text: str, start: int, end: int, score: float, label: str = "person") -> dict[str, Any]:
@@ -168,6 +203,50 @@ def test_each_token_of_a_long_document_is_counted_once(adapter_and_model: tuple[
     # One subword per character, with [CLS] and [SEP] once per document.
     assert output.input_token_counts == [tokens(text), tokens(short)]
     assert adapter._doc_input_token_counts([text, short], ["person"]) == output.input_token_counts
+
+
+@pytest.mark.parametrize("adapter_class", [GLiNERAdapter, GLiNERBiAdapter], ids=["gliner", "gliner-bi"])
+@pytest.mark.parametrize("repetitions", [1, 20, 120])
+def test_hyphen_start_windows_keep_canonical_pieces_and_count_each_token_once(
+    adapter_class: type[Any], repetitions: int
+) -> None:
+    model = PreprocessingGLiNER(bi_encoder=adapter_class is GLiNERBiAdapter)
+    tokenizer = model.data_processor.transformer_tokenizer
+    # Each x expands to four subwords; each word also gets a prefix subword.
+    # The latter makes a shifted piece grid observable even if no characters
+    # were counted twice. A character cutoff cannot recover these token counts.
+    tokenizer.backend_tokenizer.normalizer = tokenizers.normalizers.Sequence(
+        [tokenizers.normalizers.Replace("x", "abcd"), tokenizers.normalizers.Prepend("p")]
+    )
+    raw_splitter = model.data_processor.words_splitter
+    text = "x" * (2 * MAX_WORD_CHARS) + ("-" + "x" * MAX_WORD_CHARS) * repetitions
+    canonical = [(word, start, end) for word, start, end, _ in pieces(raw_splitter(text), text)]
+    expected = len(tokenizer([word for word, _, _ in canonical], is_split_into_words=True)["input_ids"])
+    adapter = load(adapter_class, model)
+
+    output = adapter.extract([Item(text=text), Item(text="Priya Raman")], labels=["person"])
+
+    assert output.errors is None
+    assert output.input_token_counts is not None
+    assert output.input_token_counts[0] == expected
+    assert adapter._doc_input_token_counts([text], ["person"]) == [expected]
+    windows = gliner_windows(model, [text])[0]
+    assert windows is not None
+    assert len(windows) > 1
+    assert text[windows[1].start] == "-"
+    rows, _, _ = window_rows([text], [windows])
+    seen = []
+    budget = subword_budget(384, DEBERTA)
+    for row, window in zip(rows, windows, strict=True):
+        planned = list(model.data_processor.words_splitter(row))
+        assert sum(model.data_processor.words_splitter.count_subwords([word for word, _, _ in planned])) <= budget
+        seen.extend(
+            (word, window.start + start, window.start + end) for word, start, end in planned[window.overlap or 0 :]
+        )
+    assert seen == canonical
+    expected_rows = [tuple(word for word, _, _ in model.data_processor.words_splitter(row)) for row in rows]
+    expected_rows.append(("Priya", "Raman"))
+    assert Counter(map(tuple, model.inferred_words)) == Counter(expected_rows)
 
 
 def test_a_document_needing_too_many_windows_fails_rather_than_being_read_in_part(

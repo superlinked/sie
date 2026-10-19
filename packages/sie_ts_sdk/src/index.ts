@@ -209,6 +209,13 @@ export {
 
 // Client-side scoring (MaxSim for ColBERT-style models)
 export { maxsim, maxsimDocuments, maxsimBatch } from "./scoring.js";
+export { choiceConfidence, scoreConfidence, MAX_SCORE_LEVELS } from "./systemone.js";
+export type {
+  SystemOneOptions,
+  SystemOneResult,
+  SystemOneState,
+  SystemOneUsage,
+} from "./systemone.js";
 
 // Low-level utilities (for advanced users)
 export { packMessage, unpackMessage } from "./msgpack.js";

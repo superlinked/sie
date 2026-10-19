@@ -28,6 +28,7 @@ from sie_server.adapters._modernbert_flash_graphs import (
 from sie_server.adapters._multivector import maxsim_scores_batched
 from sie_server.adapters._pylate_dense import apply_dense_chain, load_pylate_dense_chain
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters._utils import (
     grouped_score_pairs,
@@ -182,6 +183,7 @@ class ColBERTModernBERTFlashAdapter(PEFTLoRAMixin, FlashBaseAdapter):
             dtype,
         )
 
+        install_transformers_security_fixes()
         self._tokenizer = self._load_tokenizer()
 
         if self._doc_punctuation_skiplist:

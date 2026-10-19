@@ -26,6 +26,7 @@ from torch.nn import functional
 
 from sie_server.adapters._flash_base import FlashBaseAdapter
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision, PoolingStrategy
 from sie_server.adapters._utils import (
     extract_texts,
@@ -154,6 +155,7 @@ class BertFlashAdapter(FlashBaseAdapter):
         if self._revision is not None:
             shared_kwargs["revision"] = self._revision
 
+        install_transformers_security_fixes()
         self._tokenizer = AutoTokenizer.from_pretrained(self._model_name_or_path, **shared_kwargs)
 
         # Load model with eager attention - we'll run our own flash attention

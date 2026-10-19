@@ -7,6 +7,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -59,6 +60,45 @@ def render_template(tmp_path: Path, values: dict, template: str) -> subprocess.C
         text=True,
         check=False,
     )
+
+
+def render_collector_config(tmp_path: Path, *, remote_enabled: bool = True) -> tuple[dict, str]:
+    chart = tmp_path / "collector-chart"
+    (chart / "templates").mkdir(parents=True)
+    (chart / "Chart.yaml").write_text("apiVersion: v2\nname: collector-test\nversion: 0.0.0\n")
+    shutil.copyfile(ROOT / helm.CHART_DIR / "templates/_otel-collector-config.tpl", chart / "templates/_collector.tpl")
+    (chart / "templates/config.yaml").write_text(
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: test\ndata:\n  collector.yaml: |\n"
+        '    {{- include "sie-cluster.otel.collectorConfig" .Values | nindent 4 }}\n'
+    )
+    defaults = yaml.safe_load((ROOT / helm.CHART_DIR / "values.yaml").read_text())
+    collector = defaults["observability"]["otel"]["collector"]
+    collector["betterStack"].update({"enabled": remote_enabled, "endpoint": "https://example.invalid"})
+    values = {
+        "metricsEnabled": True,
+        "logsEnabled": False,
+        "tracesEnabled": False,
+        "prometheusEnabled": True,
+        "collector": collector,
+        "traceEndpoint": "",
+        "logEndpoint": "",
+        "betterStack": collector["betterStack"],
+        "deploymentEnvironment": "dev",
+        "cloudRegion": "test-region",
+        "localTraceExporters": [],
+        "logExporters": [],
+    }
+    (chart / "values.yaml").write_text(yaml.safe_dump(values))
+    rendered = subprocess.run(  # noqa: S603 - fixed local Helm test chart
+        ["mise", "exec", "--", "helm", "template", "test", str(chart)],  # noqa: S607 - mise-managed Helm
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    ).stdout
+    image = collector["image"]
+    return yaml.safe_load(yaml.safe_load(rendered)["data"]["collector.yaml"]), f"{image['repository']}:{image['tag']}"
 
 
 def worker_statefulsets(tmp_path: Path, values: dict) -> list[dict]:
@@ -173,6 +213,10 @@ def test_worker_scaledobject_appends_the_sixth_trigger(tmp_path: Path) -> None:
         "sie_gateway_rejected_rate_l4_default",
         "sie_gateway_model_loads_in_progress_l4_default",
     ]
+    loading = triggers[-1]["metadata"]
+    assert "max(sie_gateway_model_loads_in_progress{" in loading["query"]
+    assert "model_loads_in_progress_ratio" not in loading["query"]
+    assert loading["ignoreNullValues"] == "false"
 
     hook = render_template(tmp_path, values, "templates/hooks/keda-ready-test.yaml")
     assert hook.returncode == 0, hook.stderr
@@ -187,6 +231,37 @@ def test_worker_scaledobject_appends_the_sixth_trigger(tmp_path: Path) -> None:
     timeout = (30 * 3) + (probe_batches * 6 * 5 * 3) + 180
     assert f"TIMEOUT={timeout}" in script
     assert job["spec"]["activeDeadlineSeconds"] == timeout + 60
+
+
+@pytest.mark.parametrize("remote_enabled", [False, True])
+def test_model_loading_unit_override_is_prometheus_only(tmp_path: Path, remote_enabled: bool) -> None:
+    name = "sie.gateway.model_loads_in_progress"
+    contract = yaml.safe_load((ROOT / "telemetry/contract.yaml").read_text())
+    (metric,) = [metric for metric in contract["metrics"] if metric["name"] == name]
+    assert metric["unit"] == "1"
+    assert metric["prometheus_name"] == "sie_gateway_model_loads_in_progress"
+    assert contract["metric_processing"]["prometheus_compatibility"][name] == {
+        "unit_override": "",
+        "prometheus_name": metric["prometheus_name"],
+    }
+    config, _ = render_collector_config(tmp_path, remote_enabled=remote_enabled)
+    processors = config["processors"]
+    compatibility = processors["transform/prometheus_compatibility"]["metric_statements"]
+    assert f'set(unit, "") where name == "{name}"' in compatibility[0]["statements"]
+    canonical = processors["transform/contract_metrics"]["metric_statements"]
+    (descriptor,) = [group for group in canonical if group["context"] == "metric"]
+    assert any(
+        statement.startswith('set(unit, "1")') and "sie[.]gateway[.]model_loads_in_progress" in statement
+        for statement in descriptor["statements"]
+    )
+    pipelines = config["service"]["pipelines"]
+    for receiver in ("gateway", "application"):
+        local = pipelines[f"metrics/prometheus/{receiver}"]["processors"]
+        assert local.index("transform/contract_metrics") < local.index("transform/prometheus_compatibility")
+        if remote_enabled:
+            assert (
+                "transform/prometheus_compatibility" not in pipelines[f"metrics/betterstack/{receiver}"]["processors"]
+            )
 
 
 def test_scaledobject_apply_hook_also_runs_on_rollback(tmp_path: Path) -> None:
@@ -579,6 +654,26 @@ def test_non_production_config_service_may_opt_out_of_the_token(tmp_path: Path, 
     assert env_entries(docs, "SIE_ADMIN_TOKEN") == {}
     assert env_entries(docs, "SIE_CONFIG_READ_TOKEN") == {}
     assert env_entries(docs, "SIE_CONFIG_SERVICE_TOKEN") == dict.fromkeys(CONFIG_CONSUMERS, "")
+
+
+@pytest.mark.parametrize(
+    ("telemetry", "expected"),
+    [
+        ({}, {"SIE_TELEMETRY_ENABLED": "1"}),
+        ({"enabled": True}, {"SIE_TELEMETRY_ENABLED": "1"}),
+        ({"enabled": False}, {"SIE_TELEMETRY_DISABLED": "1"}),
+        ({"enabled": None}, {}),
+    ],
+)
+def test_worker_telemetry_setting_is_explicit(tmp_path: Path, telemetry: dict, expected: dict[str, str]) -> None:
+    (statefulset,) = worker_statefulsets(tmp_path, {**L4_POOL, "telemetry": telemetry})
+    (worker,) = [c for c in statefulset["spec"]["template"]["spec"]["containers"] if c["name"] == "worker"]
+    rendered = {
+        env["name"]: env["value"]
+        for env in worker["env"]
+        if env["name"] in {"SIE_TELEMETRY_ENABLED", "SIE_TELEMETRY_DISABLED"}
+    }
+    assert rendered == expected
 
 
 @pytest.mark.parametrize("setting", ["admin", "read"])
@@ -2871,3 +2966,1033 @@ def test_threshold_long_name_keeps_control_resources_and_gateway_url_aligned(tmp
     gateway = next(doc for doc in yaml.safe_load_all(gateway_result.stdout) if doc and doc["kind"] == "Deployment")
     env = {item["name"]: item for item in gateway["spec"]["template"]["spec"]["containers"][0]["env"]}
     assert env["SIE_THRESHOLD_NATS_URL"]["value"] == f"nats://{name}:4222"
+
+
+GATEWAY_TOKEN_SECRET = "sie-sie-cluster-gateway-token"
+WORKER_TOKEN_SECRET = "sie-sie-cluster-worker-token"
+GENERATED_GATEWAY_TOKEN = {"name": GATEWAY_TOKEN_SECRET, "key": "SIE_AUTH_TOKEN"}
+GENERATED_WORKER_TOKEN = {"name": WORKER_TOKEN_SECRET, "key": "SIE_AUTH_TOKEN"}
+GENERATED_ADMIN_TOKEN_REF = {"tokenSecretName": GENERATED_ADMIN_TOKEN_SECRET, "tokenSecretKey": "SIE_ADMIN_TOKEN"}
+GENERATED_READ_TOKEN_REF = {"tokenSecretName": GENERATED_READ_TOKEN_SECRET, "tokenSecretKey": "SIE_CONFIG_READ_TOKEN"}
+L4_WORKER = "sie-sie-cluster-worker-l4-default/worker"
+L4_SIDECAR = "sie-sie-cluster-worker-l4-default/worker-sidecar"
+# Values as `helm upgrade --reuse-values` sees them from a release that predates
+# these keys: null removes the chart default.
+PREDATING_GATEWAY_AND_WORKER_TOKEN_KEYS = {
+    "gateway": {"auth": {"generateToken": None}},
+    "workers": {"auth": None, **L4_POOL["workers"]},
+}
+
+
+def secret_names(docs: list[dict]) -> set[str]:
+    return {doc["metadata"]["name"] for doc in docs if doc["kind"] == "Secret"}
+
+
+def generated_token(docs: list[dict], name: str, component: str) -> str:
+    (secret,) = [doc for doc in docs if doc["kind"] == "Secret" and doc["metadata"]["name"] == name]
+    assert secret["metadata"]["labels"]["app.kubernetes.io/component"] == component
+    return secret_token(secret, "SIE_AUTH_TOKEN")
+
+
+@pytest.mark.parametrize("values", [L4_POOL, PREDATING_GATEWAY_AND_WORKER_TOKEN_KEYS])
+def test_gateway_and_worker_tokens_are_off_by_default(tmp_path: Path, values: dict) -> None:
+    docs = rendered_documents(tmp_path, values)
+    assert {GATEWAY_TOKEN_SECRET, WORKER_TOKEN_SECRET}.isdisjoint(secret_names(docs))
+    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: "none", L4_WORKER: "none"}
+    for name in ("SIE_AUTH_TOKEN", "SIE_AUTH_TOKENS", "SIE_GATEWAY_API_KEY", "SIE_WORKER_AUTH_TOKEN"):
+        assert env_entries(docs, name) == {}
+
+
+def test_generated_gateway_token_with_auth_mode_none_reaches_only_the_worker_sidecars(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, {**L4_POOL, "gateway": {"auth": {"generateToken": True}}})
+    generated_token(docs, GATEWAY_TOKEN_SECRET, "gateway")
+    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: "none", L4_WORKER: "none"}
+    assert env_entries(docs, "SIE_AUTH_TOKEN") == {}
+    assert env_entries(docs, "SIE_GATEWAY_API_KEY") == {L4_SIDECAR: GENERATED_GATEWAY_TOKEN}
+
+
+@pytest.mark.parametrize("mode", ["token", "static"])
+def test_generated_gateway_token_is_wired_to_every_consumer_with_token_auth(tmp_path: Path, mode: str) -> None:
+    gateway = {"auth": {"mode": mode, "generateToken": True}}
+    docs = rendered_documents(tmp_path, ingress_values(SCOPED_TLS, gateway=gateway, workers=L4_POOL["workers"]))
+    generated_token(docs, GATEWAY_TOKEN_SECRET, "gateway")
+    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: mode, L4_WORKER: "none"}
+    assert env_entries(docs, "SIE_AUTH_TOKEN") == {GATEWAY: GENERATED_GATEWAY_TOKEN}
+    assert env_entries(docs, "SIE_GATEWAY_API_KEY") == {L4_SIDECAR: GENERATED_GATEWAY_TOKEN}
+    assert len(gateway_ingresses(docs)) == 1
+
+
+def test_operator_gateway_token_secret_keeps_its_extra_env_token_override(tmp_path: Path) -> None:
+    extra_env = [{"name": "SIE_AUTH_TOKENS", "value": "override"}]
+    values = {**L4_POOL, "gateway": {**GATEWAY_AUTH, "extraEnv": extra_env}}
+    docs = rendered_documents(tmp_path, values)
+    assert env_entries(docs, "SIE_AUTH_TOKEN") == {GATEWAY: {"name": "sie-gateway-auth", "key": "SIE_AUTH_TOKEN"}}
+    assert env_entries(docs, "SIE_AUTH_TOKENS") == {GATEWAY: "override"}
+
+
+@pytest.mark.parametrize("generate", [False, True])
+def test_operator_gateway_token_secret_is_used_unchanged(tmp_path: Path, generate: bool) -> None:
+    auth = {"mode": "static", "tokenSecretName": "sie-gateway-auth", "tokenSecretKey": "tokens"}
+    docs = rendered_documents(tmp_path, {**L4_POOL, "gateway": {"auth": {**auth, "generateToken": generate}}})
+    assert GATEWAY_TOKEN_SECRET not in secret_names(docs)
+    operator = {"name": "sie-gateway-auth", "key": "tokens"}
+    assert env_entries(docs, "SIE_AUTH_TOKEN") == {GATEWAY: operator}
+    assert env_entries(docs, "SIE_GATEWAY_API_KEY") == {L4_SIDECAR: operator}
+
+
+def test_worker_auth_requires_the_token_on_every_container_that_serves_the_worker_api(tmp_path: Path) -> None:
+    pools = {
+        "l4": {"enabled": True, "gpu": {"count": 2}},
+        "cpu": {
+            "enabled": True,
+            "bundles": {"candle": {"engine": "candle", "minReplicas": 0, "maxReplicas": 1}},
+        },
+    }
+    docs = rendered_documents(tmp_path, {"workers": {"auth": {"enabled": True}, "pools": pools}})
+    generated_token(docs, WORKER_TOKEN_SECRET, "worker")
+    servers = [
+        "sie-sie-cluster-worker-l4-default/worker-0",
+        "sie-sie-cluster-worker-l4-default/worker-1",
+        "sie-sie-cluster-worker-cpu-default/worker",
+    ]
+    assert "sie-sie-cluster-worker-cpu-candle/worker" in env_entries(docs, "SIE_BUNDLE")
+    assert env_entries(docs, "SIE_AUTH_TOKEN") == dict.fromkeys(servers, GENERATED_WORKER_TOKEN)
+    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: "none", **dict.fromkeys(servers, "token")}
+    assert env_entries(docs, "SIE_WORKER_AUTH_TOKEN") == {GATEWAY: GENERATED_WORKER_TOKEN}
+
+
+def test_worker_auth_covers_the_remote_lane(tmp_path: Path) -> None:
+    values = remote_pool_values()
+    values["workers"]["auth"] = {"enabled": True}
+    tokens = env_entries(rendered_documents(tmp_path, values), "SIE_AUTH_TOKEN")
+    assert tokens["sie-sie-cluster-worker-remote-remote/worker"] == GENERATED_WORKER_TOKEN
+
+
+def test_worker_auth_upgrade_aid_gives_the_token_only_to_the_gateway(tmp_path: Path) -> None:
+    auth = {"enabled": True, "allowUnauthenticated": True}
+    docs = rendered_documents(tmp_path, {"workers": {"auth": auth, **L4_POOL["workers"]}})
+    generated_token(docs, WORKER_TOKEN_SECRET, "worker")
+    assert env_entries(docs, "SIE_WORKER_AUTH_TOKEN") == {GATEWAY: GENERATED_WORKER_TOKEN}
+    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: "none", L4_WORKER: "none"}
+    assert env_entries(docs, "SIE_AUTH_TOKEN") == {}
+
+
+def test_operator_worker_token_secret_is_used_unchanged(tmp_path: Path) -> None:
+    auth = {"enabled": True, "tokenSecretName": "sie-worker-auth", "tokenSecretKey": "token"}
+    docs = rendered_documents(tmp_path, {"workers": {"auth": auth, **L4_POOL["workers"]}})
+    assert WORKER_TOKEN_SECRET not in secret_names(docs)
+    operator = {"name": "sie-worker-auth", "key": "token"}
+    assert env_entries(docs, "SIE_WORKER_AUTH_TOKEN") == {GATEWAY: operator}
+    assert env_entries(docs, "SIE_AUTH_TOKEN") == {L4_WORKER: operator}
+
+
+def test_worker_network_policy_admits_the_gateway_with_worker_auth(tmp_path: Path) -> None:
+    workers = {"auth": {"enabled": True}, "networkPolicy": {"enabled": True}, **L4_POOL["workers"]}
+    (policy,) = worker_network_policies(rendered_documents(tmp_path, {"workers": workers}))
+    (rule,) = policy["spec"]["ingress"]
+    gateway, _ = rule["from"]
+    assert gateway["podSelector"]["matchLabels"]["app.kubernetes.io/component"] == "gateway"
+    assert [port["port"] for port in rule["ports"]] == [8080]
+
+
+@pytest.mark.parametrize(
+    ("values", "error"),
+    [
+        (
+            {"workers": {"auth": {"allowUnauthenticated": True}}},
+            "workers.auth.allowUnauthenticated=true needs workers.auth.enabled=true",
+        ),
+        (
+            {
+                "gateway": {"auth": {"generateToken": True}},
+                "workers": {"auth": {"enabled": True, "tokenSecretName": GATEWAY_TOKEN_SECRET}},
+            },
+            "The worker token and the gateway client token are the same Secret key",
+        ),
+        (
+            {"gateway": GATEWAY_AUTH, "workers": {"auth": {"enabled": True, "tokenSecretName": "sie-gateway-auth"}}},
+            "The worker token and the gateway client token are the same Secret key",
+        ),
+        (
+            {
+                "gateway": {"auth": {"adminTokenSecretName": "gateway-admin"}},
+                "workers": {
+                    "auth": {"enabled": True, "tokenSecretName": "gateway-admin", "tokenSecretKey": "SIE_ADMIN_TOKEN"}
+                },
+            },
+            "The worker token and the gateway admin token are the same Secret key",
+        ),
+        (
+            {"workers": {"auth": {"enabled": True, **GENERATED_ADMIN_TOKEN_REF}}},
+            "The worker token and the sie-config admin token are the same Secret key",
+        ),
+        (
+            {"workers": {"auth": {"enabled": True, **GENERATED_READ_TOKEN_REF}}},
+            "The worker token and the sie-config read token are the same Secret key",
+        ),
+        (
+            {"gateway": {"auth": {"mode": "token", **GENERATED_ADMIN_TOKEN_REF}}},
+            "The gateway client token and the sie-config admin token are the same Secret key",
+        ),
+        (
+            {"gateway": {"auth": {"mode": "token", **GENERATED_READ_TOKEN_REF}}},
+            "The gateway client token and the sie-config read token are the same Secret key",
+        ),
+        (
+            {
+                "gateway": {
+                    "auth": {
+                        "generateToken": True,
+                        "adminTokenSecretName": GATEWAY_TOKEN_SECRET,
+                        "adminTokenSecretKey": "SIE_AUTH_TOKEN",
+                    }
+                }
+            },
+            "The gateway client token and the gateway admin token are the same Secret key",
+        ),
+        ({"gateway": {"auth": {"generateToken": "true"}}}, "gateway.auth.generateToken must be a boolean"),
+        ({"workers": {"auth": {"enabled": "false"}}}, "workers.auth.enabled must be a boolean"),
+        (
+            {"workers": {"auth": {"enabled": True, "allowUnauthenticated": "true"}}},
+            "workers.auth.allowUnauthenticated must be a boolean",
+        ),
+        ({"gateway": {"auth": {"generateToken": True, "tokenSecretKey": " "}}}, "gateway.auth.tokenSecretKey is empty"),
+        ({"workers": {"auth": {"enabled": True, "tokenSecretKey": ""}}}, "workers.auth.tokenSecretKey is empty"),
+        (
+            {
+                "gateway": {"extraEnv": [{"name": "SIE_WORKER_AUTH_TOKEN", "value": "override"}]},
+                "workers": {"auth": {"enabled": True}},
+            },
+            "gateway.extraEnv must not override chart-owned variable SIE_WORKER_AUTH_TOKEN",
+        ),
+        (
+            {
+                "workers": {
+                    "auth": {"enabled": True},
+                    "common": {"extraEnv": [{"name": "SIE_AUTH_MODE", "value": "none"}]},
+                }
+            },
+            "workers.common.extraEnv must not override chart-owned variable SIE_AUTH_MODE",
+        ),
+        (
+            {
+                "workers": {
+                    "auth": {"enabled": True},
+                    "common": {"extraEnv": [{"name": "SIE_AUTH_TOKENS", "value": "override"}]},
+                }
+            },
+            "workers.common.extraEnv must not override chart-owned variable SIE_AUTH_TOKENS",
+        ),
+        (
+            {
+                "gateway": {
+                    "auth": {"mode": "token", "generateToken": True},
+                    "extraEnv": [{"name": "SIE_AUTH_TOKENS", "value": "override"}],
+                }
+            },
+            "gateway.extraEnv must not override chart-owned variable SIE_AUTH_TOKENS",
+        ),
+        (
+            {
+                "gateway": {"auth": {"generateToken": True}},
+                "workers": {
+                    "common": {"hfCache": {"tokenSecret": GATEWAY_TOKEN_SECRET, "tokenSecretKey": "SIE_AUTH_TOKEN"}}
+                },
+            },
+            "The gateway client token and the Hugging Face token are the same Secret key",
+        ),
+        (
+            {
+                "workers": {
+                    "auth": {"enabled": True, "tokenSecretName": "sie-nats-auth-worker", "tokenSecretKey": "password"}
+                }
+            },
+            "The worker token and the NATS worker password are the same Secret key",
+        ),
+    ],
+)
+def test_unsafe_gateway_and_worker_token_values_fail_the_render(tmp_path: Path, values: dict, error: str) -> None:
+    workers = {**L4_POOL["workers"], **values.get("workers", {})}
+    assert error in render_error(tmp_path, {**values, "workers": workers})
+
+
+@pytest.mark.parametrize(
+    ("values", "api_key_secret", "owner"),
+    [
+        (
+            {"gateway": {"auth": {"generateToken": True}}},
+            {"name": GATEWAY_TOKEN_SECRET, "key": "SIE_AUTH_TOKEN"},
+            "the generated gateway client token",
+        ),
+        (
+            {"workers": {"auth": {"enabled": True}}},
+            {"name": WORKER_TOKEN_SECRET, "key": "SIE_AUTH_TOKEN"},
+            "the generated worker token",
+        ),
+        (
+            {"workers": {"auth": {"enabled": True, "tokenSecretName": "team-upstream", "tokenSecretKey": "api-key"}}},
+            {"name": "team-upstream", "key": "api-key"},
+            "workers.auth.tokenSecretName",
+        ),
+    ],
+)
+def test_an_upstream_key_cannot_be_the_gateway_client_or_worker_token(
+    tmp_path: Path, values: dict, api_key_secret: dict, owner: str
+) -> None:
+    result = render_workers(tmp_path, {**values, "upstreams": {"team": upstream(api_key_secret=api_key_secret)}})
+    assert result.returncode != 0
+    assert f"upstreams.team.api_key_secret and {owner} name the same Secret key" in result.stderr
+
+
+WORKER_AUTH_TEST_JOB = "sie-sie-cluster-worker-auth-test-1"
+
+
+def worker_with(**auth: object) -> dict:
+    return {"auth": {"enabled": True, **auth}, **L4_POOL["workers"]}
+
+
+@pytest.mark.parametrize(
+    ("values", "error"),
+    [
+        (
+            {"workers": worker_with(tokenSecretName="oauth2-proxy", tokenSecretKey="OAUTH2_PROXY_COOKIE_SECRET")},
+            "The worker token and the oauth2-proxy cookieSecretKey are the same Secret key",
+        ),
+        (
+            {
+                "gateway": {
+                    "auth": {
+                        "mode": "token",
+                        "tokenSecretName": "oauth2-proxy",
+                        "tokenSecretKey": "OAUTH2_PROXY_CLIENT_SECRET",
+                    }
+                }
+            },
+            "The gateway client token and the oauth2-proxy clientSecretKey are the same Secret key",
+        ),
+        (
+            {
+                "global": {"imagePullSecrets": ["regcred"]},
+                "workers": worker_with(tokenSecretName="regcred", tokenSecretKey=".dockerconfigjson"),
+            },
+            "The worker token and the image pull secret are the same Secret key",
+        ),
+        (
+            {
+                "mcpEdge": {"existingSecretName": "mcp-conn"},
+                "gateway": {
+                    "auth": {"mode": "token", "tokenSecretName": "mcp-conn", "tokenSecretKey": "connector-secrets"}
+                },
+            },
+            "The gateway client token and the MCP connector secrets are the same Secret key",
+        ),
+        (
+            {
+                "observability": {"otel": {"collector": {"betterStack": {"existingSecret": "better-stack"}}}},
+                "workers": worker_with(tokenSecretName="better-stack", tokenSecretKey="token"),
+            },
+            "The worker token and the Better Stack token are the same Secret key",
+        ),
+        (
+            {
+                "mcpEdge": {"clusterApiKey": {"existingSecretName": "mcp-key"}},
+                "workers": worker_with(tokenSecretName="mcp-key", tokenSecretKey="api-key"),
+            },
+            "The worker token and the MCP edge cluster API key are the same Secret key",
+        ),
+        (
+            {
+                "mcpEdge": {"clusterApiKey": {"existingSecretName": "hf", "secretKey": "token"}},
+                "workers": {"common": {"hfCache": {"tokenSecret": "hf", "tokenSecretKey": "token"}}},
+            },
+            "The MCP edge cluster API key and the Hugging Face token are the same Secret key",
+        ),
+        (
+            {"workers": worker_with(tokenSecretName="sie-sie-cluster-mcp-tls", tokenSecretKey="tls.key")},
+            "The worker token and the MCP ingress TLS certificate are the same Secret key",
+        ),
+        (
+            {
+                "gateway": {
+                    "auth": {"mode": "token"},
+                    "extraEnv": [
+                        {
+                            "name": "SIE_AUTH_TOKENS",
+                            "valueFrom": {"secretKeyRef": {"name": "client-tokens", "key": "tokens"}},
+                        }
+                    ],
+                },
+                "workers": worker_with(tokenSecretName="client-tokens", tokenSecretKey="tokens"),
+            },
+            "The worker token and the gateway client token from gateway.extraEnv SIE_AUTH_TOKENS are the same",
+        ),
+        (
+            {
+                "gateway": {
+                    "auth": {"mode": "token"},
+                    "extraEnv": [
+                        {
+                            "name": "SIE_AUTH_TOKEN",
+                            "valueFrom": {"secretKeyRef": {"name": "sie-nats-auth-gateway", "key": "password"}},
+                        }
+                    ],
+                }
+            },
+            "gateway.extraEnv SIE_AUTH_TOKEN and the NATS gateway password are the same Secret key",
+        ),
+    ],
+)
+def test_client_and_worker_tokens_are_kept_apart_from_every_wired_secret_key(
+    tmp_path: Path, values: dict, error: str
+) -> None:
+    workers = {**L4_POOL["workers"], **values.get("workers", {})}
+    assert error in render_error(tmp_path, {**values, "workers": workers})
+
+
+@pytest.mark.parametrize("credential", ["worker", "gateway", "upstream"])
+@pytest.mark.parametrize(
+    ("grafana", "secret_name", "secret_key"),
+    [
+        ({}, "sie-grafana", "admin-password"),
+        ({"admin": {"existingSecret": "grafana-admin"}}, "grafana-admin", "admin-user"),
+        (
+            {"admin": {"existingSecret": "{{ .Release.Name }}-admin", "passwordKey": "password"}},
+            "sie-admin",
+            "password",
+        ),
+        (
+            {"fullnameOverride": "dashboard", "admin": {"existingSecret": "{{ .Values.fullnameOverride }}"}},
+            "dashboard",
+            "admin-password",
+        ),
+        (
+            {"admin": {"existingSecret": "{{ .Values.admin.userKey }}-admin", "userKey": "dashboard"}},
+            "dashboard-admin",
+            "dashboard",
+        ),
+    ],
+)
+def test_inference_credentials_cannot_reuse_bundled_grafana_admin_keys(
+    tmp_path: Path, credential: str, grafana: dict, secret_name: str, secret_key: str
+) -> None:
+    values = {"kube-prometheus-stack": {"install": True, "grafana": grafana}}
+    if credential == "worker":
+        values["workers"] = worker_with(tokenSecretName=secret_name, tokenSecretKey=secret_key)
+    elif credential == "gateway":
+        values["gateway"] = {"auth": {"mode": "token", "tokenSecretName": secret_name, "tokenSecretKey": secret_key}}
+    else:
+        values["upstreams"] = {"team": upstream(api_key_secret={"name": secret_name, "key": secret_key})}
+    error = render_error(tmp_path, values)
+    assert "Grafana admin" in error
+    if credential == "upstream":
+        assert "upstreams.team.api_key_secret" in error
+    else:
+        assert f"{secret_name}/{secret_key}" in error
+
+
+@pytest.mark.parametrize(
+    "stack",
+    [
+        {"install": False},
+        {"install": True, "grafana": {"enabled": False}},
+        {"install": True, "grafana": {"namespaceOverride": "monitoring"}},
+        {"install": True, "grafana": {"env": {"GF_SECURITY_ADMIN_PASSWORD": "fixture-password"}}},
+        {"install": True, "grafana": {"env": {"GF_SECURITY_ADMIN_PASSWORD__FILE": "/etc/grafana/password"}}},
+        {"install": True, "grafana": {"env": {"GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION": "true"}}},
+    ],
+)
+def test_grafana_admin_keys_only_reserve_credentials_actually_wired_in_the_worker_namespace(
+    tmp_path: Path, stack: dict
+) -> None:
+    values = {
+        "kube-prometheus-stack": stack,
+        "workers": worker_with(tokenSecretName="sie-grafana", tokenSecretKey="admin-password"),
+    }
+    result = render_workers(tmp_path, values)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("grafana_namespace", ["sie", "workers"])
+def test_grafana_admin_collision_uses_the_effective_worker_namespace(tmp_path: Path, grafana_namespace: str) -> None:
+    values = {
+        "global": {"namespace": "workers"},
+        "kube-prometheus-stack": {"install": True, "grafana": {"namespaceOverride": grafana_namespace}},
+        "workers": worker_with(tokenSecretName="sie-grafana", tokenSecretKey="admin-password"),
+    }
+    result = render_workers(tmp_path, values)
+    if grafana_namespace == "workers":
+        assert result.returncode != 0
+        assert "The worker token and the Grafana admin password are the same Secret key" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+
+
+def test_the_mcp_edge_may_present_the_gateway_client_token(tmp_path: Path) -> None:
+    values = {
+        **L4_POOL,
+        "gateway": {"auth": {"mode": "token", "generateToken": True}},
+        "mcpEdge": {
+            "enabled": True,
+            "clusterApiKey": {"existingSecretName": GATEWAY_TOKEN_SECRET, "secretKey": "SIE_AUTH_TOKEN"},
+        },
+    }
+    docs = rendered_documents(tmp_path, values)
+    assert env_entries(docs, "SIE_API_KEY") == {"sie-sie-cluster-mcp/mcp-edge": GENERATED_GATEWAY_TOKEN}
+
+
+def test_an_upstream_key_cannot_be_a_gateway_extra_env_token(tmp_path: Path) -> None:
+    secret_ref = {"secretKeyRef": {"name": "team-upstream", "key": "api-key"}}
+    values = {
+        "gateway": {"auth": {"mode": "token"}, "extraEnv": [{"name": "SIE_AUTH_TOKENS", "valueFrom": secret_ref}]},
+        "upstreams": {"team": upstream(api_key_secret={"name": "team-upstream", "key": "api-key"})},
+    }
+    result = render_workers(tmp_path, values)
+    assert result.returncode != 0
+    assert (
+        "upstreams.team.api_key_secret and gateway.extraEnv SIE_AUTH_TOKENS name the same Secret key" in result.stderr
+    )
+
+
+@pytest.mark.parametrize(
+    "workers",
+    [
+        L4_POOL["workers"],
+        {"auth": {"enabled": True, "allowUnauthenticated": True}, **L4_POOL["workers"]},
+    ],
+)
+def test_workers_that_do_not_require_the_token_are_explicitly_open(tmp_path: Path, workers: dict) -> None:
+    pools = {
+        **workers["pools"],
+        "cpu": {"enabled": True, "bundles": {"candle": {"engine": "candle", "minReplicas": 0, "maxReplicas": 1}}},
+    }
+    docs = rendered_documents(tmp_path, {"workers": {**workers, "pools": pools}})
+    assert "sie-sie-cluster-worker-cpu-candle/worker" in env_entries(docs, "SIE_BUNDLE")
+    cpu_worker = "sie-sie-cluster-worker-cpu-default/worker"
+    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: "none", L4_WORKER: "none", cpu_worker: "none"}
+    assert env_entries(docs, "SIE_AUTH_TOKEN") == {}
+
+
+def test_an_operator_worker_token_in_extra_env_is_not_overridden(tmp_path: Path) -> None:
+    extra_env = [{"name": "SIE_AUTH_TOKEN", "valueFrom": {"secretKeyRef": {"name": "own-worker", "key": "token"}}}]
+    docs = rendered_documents(tmp_path, {"workers": {"common": {"extraEnv": extra_env}, **L4_POOL["workers"]}})
+    assert env_entries(docs, "SIE_AUTH_MODE") == {GATEWAY: "none"}
+    assert env_entries(docs, "SIE_AUTH_TOKEN") == {L4_WORKER: {"name": "own-worker", "key": "token"}}
+
+
+@pytest.mark.parametrize("name", ["SIE_AUTH_MODE", "SIE_AUTH_TOKEN", "SIE_AUTH_TOKENS"])
+def test_worker_auth_variables_are_reserved_in_the_upgrade_step(tmp_path: Path, name: str) -> None:
+    workers = {
+        "auth": {"enabled": True, "allowUnauthenticated": True},
+        "common": {"extraEnv": [{"name": name, "value": "override"}]},
+        **L4_POOL["workers"],
+    }
+    error = render_error(tmp_path, {"workers": workers})
+    assert f"workers.common.extraEnv must not override chart-owned variable {name}" in error
+
+
+def test_the_sidecar_gateway_key_is_reserved_while_the_chart_wires_it(tmp_path: Path) -> None:
+    sidecar = {"workerSidecar": {"extraEnv": [{"name": "SIE_GATEWAY_API_KEY", "value": "override"}]}}
+    workers = {"common": sidecar, **L4_POOL["workers"]}
+    error = render_error(tmp_path, {"gateway": {"auth": {"generateToken": True}}, "workers": workers})
+    assert "workers.common.workerSidecar.extraEnv must not override chart-owned variable SIE_GATEWAY_API_KEY" in error
+    docs = rendered_documents(tmp_path, {"workers": workers})
+    assert env_entries(docs, "SIE_GATEWAY_API_KEY") == {L4_SIDECAR: "override"}
+
+
+MCP_TOKEN_AUTH = {"gateway": {"auth": {"mode": "token", "generateToken": True}}, "mcpEdge": {"enabled": True}}
+
+
+def test_the_mcp_edge_needs_a_gateway_token_when_the_gateway_requires_one(tmp_path: Path) -> None:
+    error = render_error(tmp_path, {**L4_POOL, **MCP_TOKEN_AUTH})
+    assert "mcpEdge.enabled with gateway token auth" in error
+    assert "needs mcpEdge.clusterApiKey.existingSecretName" in error
+    assert f"mcpEdge.clusterApiKey.existingSecretName={GATEWAY_TOKEN_SECRET}" in error
+
+
+RUNTIME_GATEWAY_MODE = {
+    "auth": {"generateToken": True},
+    "extraEnv": [{"name": "SIE_AUTH_MODE", "valueFrom": {"configMapKeyRef": {"name": "gateway-mode", "key": "mode"}}}],
+}
+
+
+def test_the_mcp_edge_needs_a_gateway_token_when_the_gateway_mode_is_known_only_at_run_time(tmp_path: Path) -> None:
+    error = render_error(tmp_path, {**L4_POOL, "gateway": RUNTIME_GATEWAY_MODE, "mcpEdge": {"enabled": True}})
+    assert "or a gateway auth mode known only at run time" in error
+    assert f"mcpEdge.clusterApiKey.existingSecretName={GATEWAY_TOKEN_SECRET}" in error
+
+
+def rendered_notes(tmp_path: Path, values: dict) -> str:
+    chart = tmp_path / "notes-chart"
+    shutil.copytree(helm.CHART_DIR, chart)
+    notes = (chart / "templates" / "NOTES.txt").read_text(encoding="utf-8")
+    (chart / "templates" / "NOTES.txt").unlink()
+    (chart / "templates" / "_notes_under_test.tpl").write_text(
+        '{{- define "notes.under.test" -}}\n' + notes + "\n{{- end -}}\n", encoding="utf-8"
+    )
+    (chart / "templates" / "notes-under-test.yaml").write_text(
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: notes-under-test\n"
+        'data:\n  notes: {{ include "notes.under.test" . | quote }}\n',
+        encoding="utf-8",
+    )
+    values_file = tmp_path / "notes-values.yaml"
+    values_file.write_text(yaml.safe_dump(values), encoding="utf-8")
+    result = subprocess.run(
+        [
+            "mise",
+            "exec",
+            "--",
+            "helm",
+            "template",
+            "sie",
+            str(chart),
+            "--namespace",
+            "sie",
+            "-f",
+            str(values_file),
+            "--show-only",
+            "templates/notes-under-test.yaml",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return yaml.safe_load(result.stdout)["data"]["notes"]
+
+
+def test_the_notes_say_when_the_gateway_mode_is_known_only_at_run_time(tmp_path: Path) -> None:
+    notes = rendered_notes(tmp_path, {**L4_POOL, "gateway": RUNTIME_GATEWAY_MODE})
+    assert "known only at run time" in notes
+    assert "does not require this token yet" not in notes
+    assert "does not require this token yet (gateway auth mode none)" in rendered_notes(
+        tmp_path / "none", {**L4_POOL, "gateway": {"auth": {"generateToken": True}}}
+    )
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"gateway": {"auth": {"generateToken": True}}, "mcpEdge": {"enabled": True}},
+        {**MCP_TOKEN_AUTH, "mcpEdge": {"enabled": True, "clusterBaseUrl": "https://gateway.example.com"}},
+        {
+            **MCP_TOKEN_AUTH,
+            "mcpEdge": {"enabled": True, "clusterApiKey": {"existingSecretName": "mcp-key", "secretKey": "token"}},
+        },
+    ],
+)
+def test_the_mcp_edge_renders_when_it_has_what_its_gateway_needs(tmp_path: Path, values: dict) -> None:
+    rendered_documents(tmp_path, {**L4_POOL, **values})
+
+
+def test_a_gateway_mode_from_value_from_gets_the_generated_token(tmp_path: Path) -> None:
+    mode = {"name": "SIE_AUTH_MODE", "valueFrom": {"configMapKeyRef": {"name": "gateway-auth", "key": "mode"}}}
+    docs = rendered_documents(tmp_path, {**L4_POOL, "gateway": {"auth": {"generateToken": True}, "extraEnv": [mode]}})
+    assert env_entries(docs, "SIE_AUTH_TOKEN") == {GATEWAY: GENERATED_GATEWAY_TOKEN}
+
+
+def hook_jobs(docs: list[dict]) -> dict[str, dict]:
+    return {doc["metadata"]["name"]: doc for doc in docs if doc["kind"] == "Job"}
+
+
+def test_enforced_worker_auth_adds_a_release_test_of_every_api_lane(tmp_path: Path) -> None:
+    pools = {
+        "l4": {"enabled": True},
+        "cpu": {"enabled": True, "bundles": {"candle": {"engine": "candle", "minReplicas": 0, "maxReplicas": 1}}},
+    }
+    docs = rendered_documents(tmp_path, {"workers": {"auth": {"enabled": True}, "pools": pools}})
+    job = hook_jobs(docs)[WORKER_AUTH_TEST_JOB]
+    assert job["metadata"]["annotations"]["helm.sh/hook"] == "post-install,post-upgrade"
+    (container,) = job["spec"]["template"]["spec"]["containers"]
+    script = container["args"][0]
+    assert 'LANES="sie-sie-cluster-worker-cpu-default sie-sie-cluster-worker-l4-default"' in script
+    assert "candle" not in script
+    assert "http://$host:$PORT/v1/models" in script
+    assert "401)" in script
+    assert "exit 1" in script
+    (role,) = [
+        doc for doc in docs if doc["kind"] == "Role" and doc["metadata"]["name"] == "sie-sie-cluster-worker-auth-test"
+    ]
+    assert role["rules"] == [
+        {
+            "apiGroups": ["apps"],
+            "resources": ["statefulsets"],
+            "resourceNames": ["sie-sie-cluster-worker-cpu-default", "sie-sie-cluster-worker-l4-default"],
+            "verbs": ["get"],
+        },
+        {"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]},
+    ]
+
+
+def test_the_worker_auth_test_job_is_kept_and_ends_well_before_its_deadline(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, {"workers": {"auth": {"enabled": True}, **L4_POOL["workers"]}})
+    job = hook_jobs(docs)[WORKER_AUTH_TEST_JOB]
+    assert job["metadata"]["annotations"]["helm.sh/hook-delete-policy"] == "before-hook-creation"
+    assert job["spec"]["ttlSecondsAfterFinished"] >= 3600
+    (wait,) = re.findall(
+        r"DEADLINE=\$\(\( \$\(date \+%s\) \+ (\d+) \)\)", job["spec"]["template"]["spec"]["containers"][0]["args"][0]
+    )
+    assert job["spec"]["activeDeadlineSeconds"] - int(wait) >= 120
+
+
+@pytest.mark.parametrize(
+    "workers",
+    [L4_POOL["workers"], {"auth": {"enabled": True, "allowUnauthenticated": True}, **L4_POOL["workers"]}],
+)
+def test_there_is_no_worker_auth_test_while_workers_do_not_require_the_token(tmp_path: Path, workers: dict) -> None:
+    assert WORKER_AUTH_TEST_JOB not in hook_jobs(rendered_documents(tmp_path, {"workers": workers}))
+
+
+SERVER_SOURCES = ROOT / "packages" / "sie_server" / "src"
+GATEWAY_SOURCES = ROOT / "packages" / "sie_gateway" / "src"
+
+
+def source_text(root: Path, suffix: str) -> str:
+    return "\n".join(path.read_text(encoding="utf-8") for path in sorted(root.rglob(f"*{suffix}")))
+
+
+def test_the_worker_auth_variables_the_chart_renders_are_read_by_the_images(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, {"workers": {"auth": {"enabled": True}, **L4_POOL["workers"]}})
+    worker_names = set(container_env(docs, "sie-sie-cluster-worker-l4-default", "worker")) & {
+        "SIE_AUTH_MODE",
+        "SIE_AUTH_TOKEN",
+    }
+    gateway_names = set(container_env(docs, "sie-sie-cluster-gateway", "gateway")) & {"SIE_WORKER_AUTH_TOKEN"}
+    assert worker_names == {"SIE_AUTH_MODE", "SIE_AUTH_TOKEN"}
+    assert gateway_names == {"SIE_WORKER_AUTH_TOKEN"}
+    server = source_text(SERVER_SOURCES, ".py")
+    gateway = source_text(GATEWAY_SOURCES, ".rs")
+    for name in sorted(worker_names):
+        assert f'"{name}"' in server, f"sie-server does not read {name}"
+    for name in sorted(gateway_names):
+        assert f'"{name}"' in gateway, f"sie-gateway does not read {name}"
+
+
+AUTH_TEST_POD_LABELS = {
+    "app.kubernetes.io/name": "sie-health-test",
+    "app.kubernetes.io/component": "worker-auth",
+    "app.kubernetes.io/instance": "sie",
+}
+
+
+def ingress_peers(docs: list[dict], policy_name: str) -> list[dict]:
+    (policy,) = [doc for doc in docs if doc["kind"] == "NetworkPolicy" and doc["metadata"]["name"] == policy_name]
+    (rule,) = policy["spec"]["ingress"]
+    return [peer["podSelector"]["matchLabels"] for peer in rule["from"]]
+
+
+@pytest.mark.parametrize(
+    ("auth", "admitted"),
+    [({"enabled": True}, True), ({"enabled": True, "allowUnauthenticated": True}, False), ({}, False)],
+)
+def test_worker_policies_admit_the_auth_test_only_while_workers_require_the_token(
+    tmp_path: Path, auth: dict, admitted: bool
+) -> None:
+    values = remote_pool_values()
+    values["workers"].update({"auth": auth, "networkPolicy": {"enabled": True}})
+    values["workers"]["pools"]["l4"] = {"enabled": True}
+    docs = rendered_documents(tmp_path, values)
+    for policy in ("sie-sie-cluster-worker", "sie-sie-cluster-worker-remote"):
+        assert (AUTH_TEST_POD_LABELS in ingress_peers(docs, policy)) is admitted, policy
+    if admitted:
+        pod_labels = hook_jobs(docs)[WORKER_AUTH_TEST_JOB]["spec"]["template"]["metadata"]["labels"]
+        assert pod_labels == AUTH_TEST_POD_LABELS
+
+
+def test_the_worker_auth_test_fails_closed_and_reports_what_it_checked(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, {"workers": {"auth": {"enabled": True}, **L4_POOL["workers"]}})
+    script = hook_jobs(docs)[WORKER_AUTH_TEST_JOB]["spec"]["template"]["spec"]["containers"][0]["args"][0]
+    assert 'echo "FAILED: StatefulSet $lane not found."' in script
+    assert 'echo "FAILED: $lane has ready workers that did not answer from this pod."' in script
+    assert 'echo "WARNING: no worker was checked. Every lane was scaled to zero or still starting."' in script
+    assert '000|"")' in script
+
+
+WORKER_AUTH_KUBECTL = """
+import json, os, sys
+
+args = sys.argv[1:]
+with open(os.path.join(os.environ["STUB_DIR"], "kubectl.log"), "a") as log:
+    log.write(" ".join(args) + "\\n")
+output = args[args.index("-o") + 1] if "-o" in args else ""
+if args[:2] == ["get", "statefulset"]:
+    if os.environ["STUB_STATEFULSET"] != "present":
+        sys.exit(1)
+    answers = {
+        "jsonpath={.spec.replicas}": os.environ["STUB_REPLICAS"],
+        "jsonpath={.status.updateRevision}": "rev-2",
+    }
+    if output not in answers:
+        sys.exit(2)
+    print(answers[output], end="")
+elif args[:2] == ["get", "pods"] and output == "json" and "-l" in args:
+    if os.environ.get("STUB_PODS_FAIL"):
+        sys.exit(1)
+    key, _, value = args[args.index("-l") + 1].partition("=")
+    items = json.loads(os.environ["STUB_PODS"])["items"]
+    print(json.dumps({"items": [pod for pod in items if pod["metadata"].get("labels", {}).get(key) == value]}))
+else:
+    sys.exit(2)
+"""
+WORKER_AUTH_CURL = """
+import json, os, sys
+
+host = sys.argv[-1].removeprefix("http://").removesuffix("/v1/models").rpartition(":")[0]
+with open(os.path.join(os.environ["STUB_DIR"], "curl.log"), "a") as log:
+    log.write(host + "\\n")
+print(json.loads(os.environ["STUB_HTTP_CODES"]).get(host, os.environ["STUB_HTTP_CODE"]), end="")
+"""
+WORKER_AUTH_SHELL_STUBS = {
+    "date": """#!/bin/sh
+count=$(cat "$STUB_DIR/date-calls" 2>/dev/null || echo 0)
+echo $((count + 1)) > "$STUB_DIR/date-calls"
+if [ "$count" -eq 0 ]; then echo 0; else echo 100000; fi
+""",
+    "sleep": '#!/bin/sh\necho "$@" >> "$STUB_DIR/sleep.log"\n',
+}
+
+
+def worker_pod(ip: str, revision: str = "rev-2", ready: bool = True, terminating: bool = False) -> dict:
+    metadata: dict = {"labels": {"controller-revision-hash": revision}}
+    if terminating:
+        metadata["deletionTimestamp"] = "2026-01-01T00:00:00Z"
+    return {
+        "metadata": metadata,
+        "status": {"podIP": ip, "conditions": [{"type": "Ready", "status": "True" if ready else "False"}]},
+    }
+
+
+READY_POD = {"items": [worker_pod("10.0.0.7")]}
+MIXED_PODS = {
+    "items": [
+        worker_pod("10.0.0.1"),
+        worker_pod("10.0.0.2", ready=False),
+        worker_pod("10.0.0.3", terminating=True),
+        worker_pod("10.0.0.4", revision="rev-1"),
+        worker_pod("fd00::5"),
+    ]
+}
+MIXED_POD_CODES = {"10.0.0.1": "401", "10.0.0.2": "200", "10.0.0.3": "200", "10.0.0.4": "200", "[fd00::5]": "401"}
+
+
+def pipefail_shell() -> str:
+    """A POSIX shell that supports pipefail, as the hook image's BusyBox ash does."""
+    for shell in ("/bin/sh", shutil.which("bash") or "/bin/bash"):
+        if subprocess.run([shell, "-c", "set -o pipefail"], capture_output=True, check=False).returncode == 0:
+            return shell
+    pytest.fail("no POSIX shell with pipefail support")
+
+
+def worker_auth_test_script(tmp_path: Path) -> str:
+    docs = rendered_documents(tmp_path, {"workers": {"auth": {"enabled": True}, **L4_POOL["workers"]}})
+    return hook_jobs(docs)[WORKER_AUTH_TEST_JOB]["spec"]["template"]["spec"]["containers"][0]["args"][0]
+
+
+def run_worker_auth_test(
+    tmp_path: Path,
+    statefulset: str,
+    pods: dict,
+    http_code: str,
+    *,
+    replicas: str = "1",
+    http_codes: dict | None = None,
+    pods_fail: bool = False,
+) -> subprocess.CompletedProcess:
+    script = worker_auth_test_script(tmp_path)
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    for name, body in {
+        "kubectl": f"#!{sys.executable}\n{WORKER_AUTH_KUBECTL}",
+        "curl": f"#!{sys.executable}\n{WORKER_AUTH_CURL}",
+        **WORKER_AUTH_SHELL_STUBS,
+    }.items():
+        (stubs / name).write_text(body, encoding="utf-8")
+        (stubs / name).chmod(0o755)
+    env = {
+        "PATH": f"{stubs}:{os.environ['PATH']}",
+        "STUB_DIR": str(stubs),
+        "STUB_STATEFULSET": statefulset,
+        "STUB_REPLICAS": replicas,
+        "STUB_PODS": json.dumps(pods),
+        "STUB_HTTP_CODE": http_code,
+        "STUB_HTTP_CODES": json.dumps(http_codes or {}),
+        **({"STUB_PODS_FAIL": "1"} if pods_fail else {}),
+    }
+    script = script.replace("KUBECONFIG=/tmp/sie-in-cluster-kubeconfig", f"KUBECONFIG={tmp_path}/kubeconfig")
+    return subprocess.run(
+        [pipefail_shell(), "-c", script], env=env, capture_output=True, text=True, check=False, timeout=60
+    )
+
+
+def stub_log(tmp_path: Path, name: str) -> list[str]:
+    path = tmp_path / "stubs" / f"{name}.log"
+    return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+
+@pytest.mark.parametrize(
+    ("statefulset", "pods", "http_code", "exit_code", "message"),
+    [
+        ("present", READY_POD, "401", 0, "SUCCESS: 1 worker(s) refused a request without a token."),
+        ("present", READY_POD, "200", 1, "answered GET /v1/models without a token (HTTP 200)"),
+        ("present", READY_POD, "404", 1, "answered GET /v1/models without a token (HTTP 404)"),
+        ("present", READY_POD, "000", 1, "has ready workers that did not answer from this pod"),
+        ("missing", READY_POD, "401", 1, "StatefulSet sie-sie-cluster-worker-l4-default not found"),
+        ("present", {"items": []}, "401", 0, "WARNING: no worker was checked."),
+    ],
+)
+def test_the_worker_auth_test_script_decides_on_what_it_observes(
+    tmp_path: Path, statefulset: str, pods: dict, http_code: str, exit_code: int, message: str
+) -> None:
+    result = run_worker_auth_test(tmp_path, statefulset, pods, http_code)
+    assert result.returncode == exit_code, result.stdout + result.stderr
+    assert message in result.stdout
+
+
+def test_the_worker_auth_test_checks_only_ready_workers_of_the_current_revision(tmp_path: Path) -> None:
+    result = run_worker_auth_test(tmp_path, "present", MIXED_PODS, "000", http_codes=MIXED_POD_CODES)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SUCCESS: 2 worker(s) refused a request without a token." in result.stdout
+    assert sorted(stub_log(tmp_path, "curl")) == ["10.0.0.1", "[fd00::5]"]
+    assert "get pods -l controller-revision-hash=rev-2 -o json" in stub_log(tmp_path, "kubectl")
+
+
+def test_the_worker_auth_test_skips_a_lane_scaled_to_zero_at_once(tmp_path: Path) -> None:
+    result = run_worker_auth_test(tmp_path, "present", READY_POD, "200", replicas="0")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SKIPPED: sie-sie-cluster-worker-l4-default is scaled to zero." in result.stdout
+    assert "WARNING: no worker was checked." in result.stdout
+    assert not [call for call in stub_log(tmp_path, "kubectl") if call.startswith("get pods")]
+    assert stub_log(tmp_path, "sleep") == []
+    assert stub_log(tmp_path, "curl") == []
+
+
+def test_the_worker_auth_test_fails_when_it_cannot_list_the_pods(tmp_path: Path) -> None:
+    result = run_worker_auth_test(tmp_path, "present", READY_POD, "401", pods_fail=True)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "FAILED: cannot list the pods of sie-sie-cluster-worker-l4-default." in result.stdout
+    assert "WARNING" not in result.stdout
+
+
+@pytest.mark.parametrize("name", ["SIE_AUTH_MODE", "SIE_AUTH_TOKEN", "SIE_AUTH_TOKENS"])
+def test_worker_auth_variables_are_reserved_for_bundles_in_the_upgrade_step(tmp_path: Path, name: str) -> None:
+    bundle = {"default": {"extraEnv": [{"name": name, "value": "override"}]}}
+    workers = {
+        "auth": {"enabled": True, "allowUnauthenticated": True},
+        "pools": {"l4": {"enabled": True, "bundles": bundle}},
+    }
+    error = render_error(tmp_path, {"workers": workers})
+    assert f"workers.pools.l4.bundles.default.extraEnv must not override chart-owned variable {name}" in error
+
+
+def chart_app_version() -> str:
+    return yaml.safe_load((helm.CHART_DIR / "Chart.yaml").read_text(encoding="utf-8"))["appVersion"]
+
+
+def older_version(version: str) -> str:
+    major, minor, patch = (int(part) for part in version.lstrip("v").split("."))
+    return f"v{major}.{minor}.{patch - 1}" if patch else f"v{major}.{minor - 1}.0" if minor else f"v{major - 1}.0.0"
+
+
+def worker_auth_requirements(docs: list[dict]) -> dict[str, list[str]]:
+    return {
+        f"{doc['metadata']['name']}/{container['name']}": requirements
+        for doc in docs
+        if doc["kind"] in {"Deployment", "StatefulSet"}
+        for container in doc["spec"]["template"]["spec"]["containers"]
+        if (requirements := [arg for arg in container.get("args", []) if arg.startswith("--require-auth-mode=")])
+    }
+
+
+@pytest.mark.parametrize(
+    ("auth", "tag"),
+    [
+        ({"enabled": True}, None),
+        ({"enabled": True}, "same"),
+        ({"enabled": True}, "v99.0.0"),
+        ({"enabled": True}, "main"),
+        ({"enabled": True}, "older"),
+        ({}, "older"),
+    ],
+)
+def test_worker_auth_requires_runtime_capability_independently_of_image_tag(
+    tmp_path: Path, auth: dict, tag: str | None
+) -> None:
+    version = chart_app_version()
+    tags = {"same": version, "older": older_version(version)}
+    common = {"image": {"tag": tags.get(tag, tag)}} if tag else {}
+    docs = rendered_documents(tmp_path, {"workers": {"auth": auth, "common": common, **L4_POOL["workers"]}})
+    expected = {L4_WORKER: ["--require-auth-mode=token"]} if auth.get("enabled") else {}
+    assert worker_auth_requirements(docs) == expected
+
+
+@pytest.mark.parametrize("tag", [None, "v0.10.1"], ids=["default-image", "explicit-v0.10.1"])
+@pytest.mark.parametrize("allow_unauthenticated", [False, True], ids=["enforced", "upgrade-step"])
+def test_worker_auth_requires_capability_for_default_and_legacy_image_tags(
+    tmp_path: Path, tag: str | None, allow_unauthenticated: bool
+) -> None:
+    common = {"image": {"tag": tag}} if tag is not None else {}
+    workers = {
+        "auth": {"enabled": True, "allowUnauthenticated": allow_unauthenticated},
+        "common": common,
+        **L4_POOL["workers"],
+    }
+    docs = rendered_documents(tmp_path, {"workers": workers})
+    mode = "none" if allow_unauthenticated else "token"
+    assert worker_auth_requirements(docs) == {L4_WORKER: [f"--require-auth-mode={mode}"]}
+
+
+@pytest.mark.parametrize("allow_unauthenticated", [False, True])
+def test_worker_auth_capability_covers_every_python_child_even_at_zero_replicas(
+    tmp_path: Path, allow_unauthenticated: bool
+) -> None:
+    pools = {
+        "l4": {
+            "enabled": True,
+            "gpu": {"count": 2},
+            "bundles": {"default": {"minReplicas": 0, "maxReplicas": 1}},
+        },
+        "cpu": {
+            "enabled": True,
+            "bundles": {"candle": {"engine": "candle", "minReplicas": 0, "maxReplicas": 1}},
+        },
+    }
+    auth = {"enabled": True, "allowUnauthenticated": allow_unauthenticated}
+    docs = rendered_documents(tmp_path, {"workers": {"auth": auth, "pools": pools}})
+    mode = "none" if allow_unauthenticated else "token"
+    assert worker_auth_requirements(docs) == {
+        "sie-sie-cluster-worker-l4-default/worker-0": [f"--require-auth-mode={mode}"],
+        "sie-sie-cluster-worker-l4-default/worker-1": [f"--require-auth-mode={mode}"],
+        "sie-sie-cluster-worker-cpu-default/worker": [f"--require-auth-mode={mode}"],
+    }
+    (lane,) = [doc for doc in docs if doc["kind"] == "StatefulSet" and doc["metadata"]["name"].endswith("l4-default")]
+    assert lane["spec"]["replicas"] == 0
+
+
+@pytest.mark.parametrize("allow_unauthenticated", [False, True])
+def test_worker_auth_capability_covers_the_remote_lane(tmp_path: Path, allow_unauthenticated: bool) -> None:
+    values = remote_pool_values()
+    values["workers"]["auth"] = {"enabled": True, "allowUnauthenticated": allow_unauthenticated}
+    mode = "none" if allow_unauthenticated else "token"
+    assert worker_auth_requirements(rendered_documents(tmp_path, values)) == {
+        "sie-sie-cluster-worker-remote-remote/worker": [f"--require-auth-mode={mode}"],
+    }
+
+
+def test_worker_auth_hook_failure_recommends_the_required_capability(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, {"workers": {"auth": {"enabled": True}, **L4_POOL["workers"]}})
+    (job,) = [doc for doc in docs if doc["kind"] == "Job" and doc["metadata"]["name"] == WORKER_AUTH_TEST_JOB]
+    script = job["spec"]["template"]["spec"]["containers"][0]["args"][0]
+    assert "Use worker images that support serve --require-auth-mode=token." in script
+    assert "same release as the chart" not in script
+
+
+@pytest.mark.parametrize("tag", [None, "v0.10.1"], ids=["default-image", "explicit-v0.10.1"])
+@pytest.mark.parametrize("auth", [{}, {"enabled": False}], ids=["default-auth", "explicit-auth-off"])
+def test_worker_auth_off_preserves_existing_image_compatibility(tmp_path: Path, tag: str | None, auth: dict) -> None:
+    common = {"image": {"tag": tag}} if tag is not None else {}
+    docs = rendered_documents(tmp_path, {"workers": {"auth": auth, "common": common, **L4_POOL["workers"]}})
+    env = container_env(docs, "sie-sie-cluster-worker-l4-default", "worker")
+    assert env["SIE_AUTH_MODE"] == {"name": "SIE_AUTH_MODE", "value": "none"}
+    assert "SIE_AUTH_TOKEN" not in env
+    assert WORKER_AUTH_TEST_JOB not in hook_jobs(docs)
+    assert worker_auth_requirements(docs) == {}

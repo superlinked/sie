@@ -46,6 +46,7 @@ import re
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from importlib.util import find_spec
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -55,6 +56,7 @@ from torch.nn import functional
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ComputePrecision
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.preprocessor.image import ImagePreprocessor, OpenCLIPImagePreprocessor
@@ -273,6 +275,7 @@ class SiglipAdapter(BaseAdapter):
         if self._revision is not None:
             shared_kwargs["revision"] = self._revision
 
+        install_transformers_security_fixes()
         self._processor = SiglipProcessor.from_pretrained(
             self._model_name_or_path,
             use_fast=False,
@@ -331,6 +334,14 @@ class SiglipAdapter(BaseAdapter):
         """
         import open_clip
         from huggingface_hub import snapshot_download
+
+        # The factory can reread mutable configs and registries. Guard any
+        # available Transformers runtime before construction, without using a
+        # separate config preview to decide whether its HF text tower is safe.
+        # Native-only OpenCLIP remains usable when Transformers is absent;
+        # an installed unsupported version deliberately fails closed.
+        if find_spec("transformers") is not None:
+            install_transformers_security_fixes()
 
         assert self._open_clip_model_id is not None  # guarded in __init__
         if not self._open_clip_model_id.startswith("hf-hub:"):

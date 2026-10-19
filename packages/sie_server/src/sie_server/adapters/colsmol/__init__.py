@@ -41,6 +41,7 @@ from torch.nn import functional as F
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._multivector import maxsim_scores
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ComputePrecision
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor
@@ -186,6 +187,7 @@ class ColSmolAdapter(BaseAdapter):
 
         # The colSmol-* repos are LoRA adapters; discover the full base checkpoint
         # (which carries the ColIdefics3 projection ``linear``) from adapter_config.
+        install_transformers_security_fixes()
         peft_cfg = PeftConfig.from_pretrained(self._model_name_or_path, revision=self._revision)
         base_id = peft_cfg.base_model_name_or_path
         if not base_id:

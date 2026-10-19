@@ -36,6 +36,7 @@ import torch
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.core.inference_output import EncodeOutput, ExtractOutput
 from sie_server.core.preprocessor import DetectionPreprocessor
@@ -136,6 +137,7 @@ class Owlv2Adapter(BaseAdapter):
         # 0.24 s on a 640 x 480 photo and 15.6 s on an 8192 x 1728 one on an
         # L4-class host, against a 0.1 s forward pass, and produced the same
         # 960 x 960 input to within resampling noise.
+        install_transformers_security_fixes()
         self._processor = Owlv2Processor.from_pretrained(
             self._model_name_or_path,
             use_fast=True,

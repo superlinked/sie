@@ -80,6 +80,7 @@ from sie_server.adapters._generation_base import (
 )
 from sie_server.adapters.remote.sie import SieUpstreamAdapter
 from sie_server.api.helpers import ModelStateChecker, oom_retry_after_from_registry, read_bounded_request_body
+from sie_server.api.lora import ensure_generation_lora, validate_generation_lora
 from sie_server.api.routing import remote_routing, route_request
 from sie_server.api.streaming_response import prefetched_sse_response
 from sie_server.api.validation import validate_machine_profile_header, validate_signed_i64
@@ -96,6 +97,7 @@ from sie_server.processors.strict_grammar import enforce_strict_grammar
 from sie_server.types.grammar import GrammarSpec
 from sie_server.types.inputs import ImageInput
 from sie_server.types.openapi import (
+    GenerateErrorResponse,
     GenerateInputTooLongErrorResponse,
     GenerateModelLoadFailedErrorResponse,
     GenerateResponseModel,
@@ -151,6 +153,7 @@ _SUPPORTED_FIELDS = {
     "prompt_cache_key",
     "safety_identifier",
     "options",
+    "lora_adapter",
 }
 
 
@@ -692,6 +695,7 @@ def _generation_http_exception(error: GenerationError, registry: ModelRegistry |
             param=client_safe_generation_error_param(error),
             code=client_safe_generation_error_code(error.code),
         )
+    reason = {} if error.upstream_reason is None else {"reason": error.upstream_reason}
     if isinstance(error, GenerationCapacityError):
         if error.retry_after_s is not None:
             retry_after = str(error.retry_after_s)
@@ -704,6 +708,7 @@ def _generation_http_exception(error: GenerationError, registry: ModelRegistry |
             detail={
                 "code": client_safe_generation_error_code(error.code),
                 "message": client_safe_generation_error_message(error.code, str(error)),
+                **reason,
             },
             headers={"Retry-After": retry_after},
         )
@@ -711,7 +716,8 @@ def _generation_http_exception(error: GenerationError, registry: ModelRegistry |
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         detail={
             "code": "inference_error",
-            "message": client_safe_generation_error_message("inference_error", str(error)),
+            "message": client_safe_generation_error_message("inference_error", str(error), error.upstream_reason),
+            **reason,
         },
     )
 
@@ -849,8 +855,12 @@ async def _stream_generate_events(
                     finish_reason = "error"
                     terminal_error = {
                         "code": client_safe_generation_error_code(chunk.error_code),
-                        "message": client_safe_generation_error_message(chunk.error_code, chunk.error_message),
+                        "message": client_safe_generation_error_message(
+                            chunk.error_code, chunk.error_message, chunk.upstream_reason
+                        ),
                     }
+                    if chunk.upstream_reason is not None:
+                        terminal_error["reason"] = chunk.upstream_reason
                 if pre_output_errors and seq == 0 and (terminal_error is not None or finish_reason == "cancelled"):
                     break
                 if chunk.prompt_tokens is not None:
@@ -894,10 +904,12 @@ async def _stream_generate_events(
         logger.info("stream_generate refused after preflight: %s", exc)
         error: dict[str, Any] = {
             "code": client_safe_generation_error_code(exc.code),
-            "message": client_safe_generation_error_message(exc.code, str(exc)),
+            "message": client_safe_generation_error_message(exc.code, str(exc), exc.upstream_reason),
         }
         if (param := client_safe_generation_error_param(exc)) is not None:
             error["param"] = param
+        if exc.upstream_reason is not None:
+            error["reason"] = exc.upstream_reason
         retry_after_s = exc.retry_after_s if isinstance(exc, GenerationCapacityError) else None
         if retry_after_s is None:
             retry_after_s = oom_retry_after_s
@@ -1038,8 +1050,12 @@ async def _stream_generate_events(
             ),
             "model": GenerateModelLoadFailedErrorResponse,
         },
-        503: {"description": "Model loading or unavailable"},
-        504: {"description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s"},
+        500: {"description": "Generation failed", "model": GenerateErrorResponse},
+        503: {"description": "Model loading or unavailable", "model": GenerateErrorResponse},
+        504: {
+            "description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s",
+            "model": GenerateErrorResponse,
+        },
     },
     openapi_extra={
         "requestBody": {
@@ -1181,6 +1197,10 @@ async def generate(
             param = "options.profile" if "options.profile" in message else "options"
             raise _bad_request(message, param=param) from exc
 
+        lora = validate_generation_lora(
+            config, body.get("lora_adapter"), profile=(body.get("options") or {}).get("profile") or "default"
+        )
+
         # Explicit top-level sampler fields win; omitted values now carry the
         # resolved profile/request runtime defaults applied above.
         temperature_raw = body.get("temperature")
@@ -1276,6 +1296,7 @@ async def generate(
                 f"Model '{model}' adapter does not support generate (not a GenerationAdapter)",
                 code=ErrorCode.MODEL_NOT_FOUND.value,
             )
+        await ensure_generation_lora(registry, route.key, lora)
         reasoning_format = resolve_reasoning_format(config, adapter)
         thinking_starts_in_prompt = (
             suppress_thinking
@@ -1308,6 +1329,8 @@ async def generate(
             # controls are streaming-only and were absent, not false/null.
             generation_parameters.pop("logprobs")
             generation_parameters.pop("top_logprobs")
+        if lora is not None:
+            generation_parameters["lora_path"] = lora
         try:
             preflight_result = adapter.preflight_generate(generation_parameters, stream=bool(stream_raw))
         except GenerationError as exc:
@@ -1368,10 +1391,10 @@ async def generate(
             chunks = enforce_strict_grammar(chunks, grammar)
             result = await collect_generation(chunks)
         except GenerationTimeoutError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail={"code": exc.code, "message": str(exc)},
-            ) from exc
+            timeout: dict[str, Any] = {"code": exc.code, "message": str(exc)}
+            if route.upstream is not None:
+                timeout["reason"] = "upstream_unavailable"
+            raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail=timeout) from exc
         except GenerationError as exc:
             raise _generation_http_exception(exc, registry) from exc
         except Exception as e:
@@ -1401,13 +1424,15 @@ async def generate(
                 client_safe_generation_error_code(result.error_code),
                 model,
             )
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail={
-                    "code": client_safe_generation_error_code(result.error_code),
-                    "message": client_safe_generation_error_message(result.error_code, result.error_message),
-                },
-            )
+            detail = {
+                "code": client_safe_generation_error_code(result.error_code),
+                "message": client_safe_generation_error_message(
+                    result.error_code, result.error_message, result.upstream_reason
+                ),
+            }
+            if result.upstream_reason is not None:
+                detail["reason"] = result.upstream_reason
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=detail)
         if result.finish_reason == "cancelled":
             # 503 Service Unavailable: the generation was cancelled before it
             # could complete (worker observed a cancel signal mid-stream).

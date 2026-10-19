@@ -113,6 +113,13 @@ native sidecar from its tested image, as well as building Python, npm, audio,
 and the packaged Helm chart. Require its final `Release candidate / Complete`
 check on the final release PR head before merging that PR.
 
+Non-release build artifacts, including CI package archives and PR or manually
+dispatched rehearsals, expire after five days. This includes Docker archives
+and verification evidence; the native sidecar still
+consumes its tested image within the same run. After expiry, start a new
+rehearsal instead of relying on its old artifacts. Published-release builds
+and their original-run retries retain artifacts for 30 days for recovery.
+
 On a stable release, every builder must pass the `artifacts-ready` gate before
 any publisher can start. Publishers consume the retained archives. This keeps
 a failed image or chart build from leaving packages partially published.
@@ -149,6 +156,15 @@ Ordinary PR checks include lint, typechecking, unit tests, public integration,
 packed-distribution checks and CPU/container verification. Full release image
 builds include the declared CUDA variants. Building a CUDA image is not a claim
 that GPU inference was exercised.
+
+Every GPU image build also checks its engine launch contract before the image
+is exported: each routed profile's launch arguments must parse with the
+installed engine's own parser, and the engine's flag set must match its
+snapshot under `conformance/engine-flags/`. Which profiles a GPU run actually
+backs, per release and image lane, is recorded in the
+[compatibility matrix](docs/compatibility.md), together with NVIDIA's minimum
+driver for each lane's CUDA runtime. Engine and CUDA base upgrades follow the
+[engine upgrade playbook](docs/engine-upgrade-playbook.md).
 
 ## Terraform module follow-up
 

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._vision_patch_embed import rebind_vision_patch_embed
 from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
 from sie_server.core.inference_output import EncodeOutput, ExtractOutput
@@ -115,6 +116,7 @@ class GlmOcrAdapter(ModelAdapter):
             self._attn_implementation,
         )
 
+        install_transformers_security_fixes()
         self._processor = AutoProcessor.from_pretrained(self._model_name_or_path, **shared_kwargs)
 
         self._model = AutoModelForImageTextToText.from_pretrained(

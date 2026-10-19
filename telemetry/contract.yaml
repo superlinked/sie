@@ -660,6 +660,9 @@ metric_processing:
     sie.gateway.pool.pinned_model.loaded:
       unit_override: ""
       prometheus_name: sie_gateway_pool_pinned_model_loaded
+    sie.gateway.model_loads_in_progress:
+      unit_override: ""
+      prometheus_name: sie_gateway_model_loads_in_progress
   datapoint_attributes:
     policy: exact_metric_attribute_set
     unknown: drop

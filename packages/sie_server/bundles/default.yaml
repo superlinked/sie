@@ -53,8 +53,8 @@ adapters:
 - sie_server.adapters.paddleocr_vl
 - sie_server.adapters.mineru_vl
 deps:
-  # Most flash adapters; sentence_transformer needs >=4.57
-  transformers: '>=4.57,<5'
+  # Exact TF4 runtime reviewed with the load-time kernel/config security guard.
+  transformers: '==4.57.6'
   # Pin torch — flash-attn's unpinned torch dep can pull in 2.10+ which breaks torchvision
   torch: '>=2.9,<2.10'
   # bge_m3, bge_m3_flash, nemo_colembed, nomic_flash, xlm_roberta_flash
@@ -62,7 +62,8 @@ deps:
   # colbert_rotary_flash, jina_flash_cross_encoder
   einops: '>=0.8'
   # sentence_transformer; native causal CrossEncoder module format requires 5.4.1
-  sentence-transformers: '>=5.4.1,<6'
+  # The local-code trust boundary is validated against this exact release.
+  sentence-transformers: '==5.7.0'
   # bge_m3_flag
   FlagEmbedding: '>=1.3'
   # grounding_dino. EXACT, not a range. `uv run --with-requirements` resolves the
@@ -80,11 +81,10 @@ deps:
   requests: ''
   # gliner, gliner_bi (0.2.26: first release that loads the relex checkpoints)
   gliner: '>=0.2.26,<1'
-  # gliner2. Held at 1.x: gliner2 2.0 changes gliner2-base/large-v1 outputs
-  # (every repeated NER mention is returned, and structured extraction is
-  # rescored). The GLiNER2.5-Decide models, which need 2.x, are served from
-  # the transformers5 bundle.
-  gliner2: '>=1.3.1,<2'
+  # Reviewed span runtimes; the root lock selects 2.0.0. Distinct mentions
+  # retain offsets, optional structured nulls are omitted, and invalid required
+  # output is a per-item error. Decide keeps its transformers5 bundle.
+  gliner2: '>=1.3.2,<=2.0.0'
   # glirel
   glirel: '>=1.0,<2'
   # gliclass (0.1.17: cross-attention scorer for the multilingual checkpoints;

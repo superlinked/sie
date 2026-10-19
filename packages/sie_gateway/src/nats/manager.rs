@@ -786,6 +786,8 @@ adapters:
         let seed = ModelConfig {
             name: "test/model".to_string(),
             hf_revision: None,
+            description: None,
+            release_date: None,
             routing: None,
             adapter_module: None,
             default_bundle: None,

@@ -29,7 +29,10 @@ from transformers.models.auto import modeling_auto
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
+from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_REQUIRES_TEXT, ComputePrecision
+from sie_server.adapters.base import released_bytes
+from sie_server.adapters.gliformer.cuda_graphs import GRAPH_MODES, EncoderGraphRunner, unsupported_reason
 from sie_server.adapters.gliformer.output_schema import (
     MAX_LABEL_CHARS,
     SchemaField,
@@ -649,6 +652,7 @@ class GLiFormerAdapter(BaseAdapter):
         compute_precision: ComputePrecision = "float16",
         revision: str | None = None,
         dense_dim: int | None = None,
+        cuda_graphs: str | bool = "off",
         **kwargs: Any,
     ) -> None:
         """Initialize the adapter.
@@ -671,9 +675,17 @@ class GLiFormerAdapter(BaseAdapter):
                 decoded in float32. CPU runs float32.
             revision: HuggingFace revision to pin when downloading artifacts.
             dense_dim: Catalog-declared embedding dimension, checked at load.
+            cuda_graphs: Operator setting: "off" (default) or "exact".
+                Capture the supported text encoder on CUDA without adding
+                padding; task heads and decoding stay eager. Bucketed mode
+                is unsupported because it failed pretrained output parity.
             **kwargs: Additional arguments (ignored, for compatibility).
         """
         _ = kwargs
+        if cuda_graphs is False:  # YAML's unquoted off
+            cuda_graphs = "off"
+        if not isinstance(cuda_graphs, str) or cuda_graphs not in GRAPH_MODES:
+            raise ValueError("GLiFormer cuda_graphs must be 'off' or 'exact'; bucketed mode is unsupported")
         for name, value in (
             ("inference_batch_tokens", inference_batch_tokens),
             ("max_prompt_tokens", max_prompt_tokens),
@@ -691,6 +703,8 @@ class GLiFormerAdapter(BaseAdapter):
         self._compute_precision = compute_precision
         self._revision = revision
         self._dense_dim = dense_dim
+        self._cuda_graphs = cuda_graphs
+        self._graphs: EncoderGraphRunner | None = None
 
         self._model: Any = None
         self._tokenizer: Any = None
@@ -711,6 +725,7 @@ class GLiFormerAdapter(BaseAdapter):
                 ignore_patterns=_SNAPSHOT_IGNORE_PATTERNS,
             )
 
+        install_transformers_security_fixes()
         with warnings.catch_warnings():
             # The checkpoints request the optional flashdeberta kernels. Without
             # them GLiFormer uses its eager attention, which is what SIE serves.
@@ -750,12 +765,62 @@ class GLiFormerAdapter(BaseAdapter):
         _verify_bounded_decoding(model)
         _probe_forward(model)
 
+        graphs = self._graph_runner(model, tokenizer, device)
+        if self._graphs is not None:
+            self._graphs.close()
+        self._graphs = graphs
+
         self._model = model
         self._tokenizer = tokenizer
         self._normalize_structures = gliformer.processing.schema.normalize_structuring_schemas
         self._build_formatter = gliformer.processing.schema.build_structuring_output_formatter
         self._prompt_counts = OrderedDict()
         self._device = device
+
+    def _graph_runner(self, model: Any, tokenizer: Any, device: str) -> EncoderGraphRunner | None:
+        if self._cuda_graphs == "off":
+            return None
+        transformer = getattr(getattr(model.model, "token_rep_layer", None), "bert_layer", None)
+        reason = unsupported_reason(transformer, device)
+        if reason is not None:
+            logger.warning(
+                "GLiFormer cuda_graphs=%s runs %s eagerly: %s", self._cuda_graphs, self._model_name_or_path, reason
+            )
+            return None
+        return EncoderGraphRunner(
+            transformer,
+            mode=self._cuda_graphs,
+            window=int(model.config.max_len),
+            pad_token_id=int(tokenizer.pad_token_id or 0),
+            name=self._model_name_or_path,
+        )
+
+    def unload(self) -> None:
+        """Restore the original encoder before releasing model and graph storage."""
+        if self._graphs is not None:
+            self._graphs.close()
+            self._graphs = None
+        super().unload()
+
+    def has_releasable_memory(self) -> bool:
+        """Read optional-cache state without blocking the event-loop monitor."""
+        if self._graphs is None:
+            return False
+        try:
+            return self._graphs.graph_count > 0 or self._graphs.held_bytes > 0
+        except RuntimeError:  # cache changed while its nonblocking snapshot was read
+            return False
+
+    def release_optional_memory(self) -> int:
+        """Drop graphs under the runner lock while retaining loaded model weights."""
+        runner = self._graphs
+        if runner is None or not self.has_releasable_memory():
+            return 0
+        held = runner.held_bytes
+        runner.clear()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return released_bytes(held)
 
     def extract(
         self,

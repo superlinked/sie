@@ -685,6 +685,30 @@ class ResolvedProfile(BaseModel):
     chat_template_kwargs: MappingProxyType[str, Any] | None = None
     grammar_profile: str | None = None
 
+    def lora_ids(self) -> frozenset[str]:
+        """The LoRAs this profile declares, by the id a load names: each ``loadtime.lora_paths`` source and ``runtime.lora_id``."""
+        ids: set[str] = set()
+        lora_paths = self.loadtime.get("lora_paths")
+        if isinstance(lora_paths, Mapping):
+            ids.update(lora_entry_ref(ref)[0] for ref in lora_paths.values() if ref)
+        elif isinstance(lora_paths, (list, tuple)):
+            ids.update(str(path) for path in lora_paths if path)
+        lora_id = self.runtime.get("lora_id")
+        if lora_id:
+            ids.add(str(lora_id))
+        return frozenset(ids)
+
+    def lora_names(self) -> frozenset[str]:
+        """Every name that selects one of this profile's LoRAs: its ids, its served names and ``runtime.lora``."""
+        names = set(self.lora_ids())
+        lora_paths = self.loadtime.get("lora_paths")
+        if isinstance(lora_paths, Mapping):
+            names.update(str(name) for name in lora_paths)
+        selected = self.runtime.get("lora")
+        if selected:
+            names.add(str(selected))
+        return frozenset(names)
+
 
 # Coarse per-family KV-bytes-per-token constants used by the derived-budget
 # warning. Real calibration lives in the calibration follow-up; these constants
@@ -862,6 +886,11 @@ class ModelConfig(BaseModel):
     _synthetic_profile_variant_source: tuple[str, str] | None = PrivateAttr(default=None)
 
     sie_id: str
+    # One line about the model, and the date its served weights were released
+    # (YYYY-MM-DD). /v1/models reports both, as the System One API's model list
+    # does, so System One clients can list SIE's models.
+    description: str | None = None
+    release_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     hf_id: str | None = None
     hf_revision: str | None = None
     hf_tokenizer_dependencies: dict[str, str] = Field(default_factory=dict)
@@ -1260,6 +1289,22 @@ class ModelConfig(BaseModel):
                     profile=profile,
                     parent=self.profiles[profile.extends] if profile.extends is not None else None,
                 )
+
+        for name in self.profiles:
+            loadtime = self._resolve_profile_uncached(name).loadtime
+            if "preload_loras" not in loadtime:
+                continue
+            preload = loadtime["preload_loras"]
+            paths = loadtime.get("lora_paths")
+            if (
+                not isinstance(paths, dict)
+                or not paths
+                or not isinstance(preload, list)
+                or any(not isinstance(alias, str) or not alias for alias in preload)
+                or len(preload) != len(set(preload))
+                or not set(preload).issubset(paths)
+            ):
+                raise ValueError(f"Profile '{name}' preload_loras must contain unique declared lora_paths names")
 
         return self
 

@@ -49,7 +49,7 @@ from sie_server.core.runtime_options import (
     resolve_generation_timeouts,
 )
 from sie_server.observability.tracing import tracer
-from sie_server.types.openapi import OpenAIResponsesResponseModel
+from sie_server.types.openapi import OpenAIGenerationErrorResponse, OpenAIResponsesResponseModel
 
 router = APIRouter(prefix="/v1", tags=["openai-compat"], dependencies=[Depends(remote_routing)])
 logger = logging.getLogger(__name__)
@@ -226,9 +226,12 @@ def _parse_params(body: dict[str, Any]) -> _ResponsesParams:
         400: {"description": "Invalid or unsupported request"},
         404: {"description": "Model not found"},
         413: {"description": "Request body or rendered input is too large"},
-        500: {"description": "Generation failed"},
-        503: {"description": "Model loading or temporarily unavailable"},
-        504: {"description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s"},
+        500: {"description": "Generation failed", "model": OpenAIGenerationErrorResponse},
+        503: {"description": "Model loading or temporarily unavailable", "model": OpenAIGenerationErrorResponse},
+        504: {
+            "description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s",
+            "model": OpenAIGenerationErrorResponse,
+        },
     },
     openapi_extra={
         "requestBody": {
@@ -355,7 +358,7 @@ async def responses(
             except _CompletionError:
                 raise
             except GenerationTimeoutError as exc:
-                raise _generation_timeout_error(exc) from exc
+                raise _generation_timeout_error(exc, remote=route.upstream is not None) from exc
             except GenerationError as exc:
                 raise _from_generation_error(exc, registry) from exc
             except Exception as exc:

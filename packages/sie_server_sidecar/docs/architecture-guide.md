@@ -102,6 +102,25 @@ Message settlement:
 - Reply publication failure, including a partial chunk sequence, leaves the
   JetStream message unacked for redelivery.
 
+The existing `handle_model_group: done` INFO record includes three unsigned
+millisecond durations measured with a monotonic clock:
+
+- `model_readiness_elapsed_ms` covers the readiness loop, including IPC,
+  bounded polling sleeps, and its cancellation/admission rechecks. It is not
+  pure model-load time.
+- `batch_permit_elapsed_ms` covers acquisition of the batch semaphore only.
+- `prepare_dispatch_elapsed_ms` covers post-permit filtering, descriptor and
+  tokenizer setup, budget/operation handling, scheduler resolution, and
+  preparation/dispatch. With the production scheduler this ends at enqueue;
+  the registry-absent inline fallback also includes backend/result handling.
+
+These values describe one completed group invocation. A parked group starts a
+new invocation; initial parking and other early exits do not emit a completion
+record. They do not partition the existing `elapsed_ms`: initial barriers,
+progress-ACK refresh, and final logging fall outside the three intervals.
+Sub-millisecond durations truncate to zero, and values saturate at the unsigned
+64-bit limit. The record is neither a per-request join nor a CPU-time measure.
+
 Work-item deadlines:
 
 - The gateway stamps non-streaming work items with an optional `deadline`, an

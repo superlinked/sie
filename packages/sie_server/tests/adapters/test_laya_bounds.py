@@ -397,3 +397,50 @@ def test_cost_hook_is_bounded_for_oversized_requests() -> None:
     row_chars = 4 * adapter._max_len
     costs = adapter.extract_item_costs([Item(text="abc")], labels=["x" * 10] * 1_000_000)
     assert costs == [3 + row_chars]
+
+
+# ---------------------------------------------------------------------------- overflow_policy "error"
+
+
+def _strict_adapter() -> LayaAdapter:
+    adapter = _adapter(WordTokenizer())
+    adapter._run_rows = lambda rows, prefixes: [np.zeros(len(p.markers), dtype=np.float32) for p in prefixes]  # ty: ignore[invalid-assignment]
+    return adapter
+
+
+def test_overflow_error_refuses_only_states_that_do_not_fit() -> None:
+    adapter = _strict_adapter()
+    long_words = " ".join(["word"] * MAX_LEN)  # about 2 * MAX_LEN tokens: more than any row holds
+    items = [Item(text="short state"), Item(text=long_words), Item(metadata={"state": {"body": long_words}})]
+    output = adapter.extract(items, output_schema=ONE_QUESTION, options={"overflow_policy": "error"})
+    assert output.errors is not None
+    assert output.errors[0] is None
+    assert [error.code for error in output.errors[1:] if error is not None] == ["INPUT_TOO_LONG", "INPUT_TOO_LONG"]
+    assert "row has room" in output.errors[1].message
+    assert output.data is not None
+    assert set(output.data[0]) == {"q"}
+    assert output.data[1] == output.data[2] == {}
+    assert output.input_token_counts is not None
+    assert output.input_token_counts[0] > 0
+    assert output.input_token_counts[1:] == [0, 0]
+
+
+def test_overflow_error_refuses_a_state_cut_to_its_byte_budget() -> None:
+    adapter = _strict_adapter()
+    output = adapter.extract([Item(text=LONG_TEXT)], output_schema=ONE_QUESTION, options={"overflow_policy": "error"})
+    assert output.errors is not None
+    assert output.errors[0] is not None
+    assert output.errors[0].code == "INPUT_TOO_LONG"
+
+
+def test_default_overflow_still_cuts_long_states() -> None:
+    adapter = _strict_adapter()
+    output = adapter.extract([Item(text=" ".join(["word"] * MAX_LEN))], output_schema=ONE_QUESTION)
+    assert output.errors is None
+    assert output.data is not None
+    assert set(output.data[0]) == {"q"}
+
+
+def test_unknown_overflow_policy_is_invalid_input() -> None:
+    with pytest.raises(InvalidInputError, match="overflow_policy"):
+        _strict_adapter().extract([Item(text="x")], output_schema=ONE_QUESTION, options={"overflow_policy": "drop"})

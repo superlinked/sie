@@ -15,6 +15,7 @@ import torch
 from sentence_transformers import SentenceTransformer, SparseEncoder
 
 from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters._sentence_transformer_trust import load_sentence_transformer
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.core.inference_output import EncodeOutput, SparseVector
@@ -88,7 +89,7 @@ class SentenceTransformerDenseAdapter(BaseAdapter):
         # Omit revision unless pinned so the library default (main) is unchanged.
         if self._revision is not None:
             load_kwargs["revision"] = self._revision
-        self._model = SentenceTransformer(self._model_name_or_path, **load_kwargs)
+        self._model = load_sentence_transformer(SentenceTransformer, self._model_name_or_path, **load_kwargs)
 
         if self._max_seq_length is not None:
             self._model.max_seq_length = self._max_seq_length
@@ -249,7 +250,7 @@ class SentenceTransformerSparseAdapter(BaseAdapter):
         # Omit revision unless pinned so the library default (main) is unchanged.
         if self._revision is not None:
             load_kwargs["revision"] = self._revision
-        self._model = SparseEncoder(self._model_name_or_path, **load_kwargs)
+        self._model = load_sentence_transformer(SparseEncoder, self._model_name_or_path, **load_kwargs)
 
         if self._max_seq_length is not None:
             self._model.max_seq_length = self._max_seq_length

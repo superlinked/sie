@@ -1,0 +1,177 @@
+{
+  "_comment": [
+    "Golden contract of the System One-compatible POST /v1/systemone, served by",
+    "the single server (packages/sie_server/src/sie_server/api/systemone.py) and",
+    "the gateway (packages/sie_gateway/src/handlers/systemone.rs::proxy_systemone).",
+    "Both translate a System One request into one extract item and the extract",
+    "result back into the System One response; both load this file in tests.",
+    "`requests`: a valid request and the extract call it becomes (one item,",
+    "the normalized questions as output_schema, overflow_policy 'error').",
+    "`invalid_requests`: requests both answer with 422 in FastAPI's",
+    "{\"detail\": [{\"loc\", \"msg\", \"type\"}]} shape before any model runs.",
+    "`responses`: an extract item's data and usage, and the System One response",
+    "body they become. Choice and score confidences are recomputed with the",
+    "System One definitions; every other answer field passes through.",
+    "`confidence`: choice (p_max - 1/n) / (1 - 1/n); score max(0, 1 - spread / even).",
+    "`retry_after`: a retryable error's Retry-After, capped at 60 s and mirrored",
+    "in milliseconds as retry-after-ms."
+  ],
+  "max_score_levels": 10,
+  "max_retry_after_s": 60,
+  "requests": [
+    {
+      "name": "text state, all three question types",
+      "request": {
+        "model": "fastino/GLiNER2.5-Decide",
+        "state": "I was charged twice. Please fix this ASAP.",
+        "questions": {
+          "spam": {"type": "noul", "instructions": "Is this message spam?"},
+          "intent": {
+            "type": "choice",
+            "instructions": "What does the sender want?",
+            "criteria": {"billing": "payments and refunds", "support": null}
+          },
+          "urgency": {"type": "score", "instructions": "How urgent?", "criteria": ["Can wait", "Today"]}
+        }
+      },
+      "extract": {
+        "model": "fastino/GLiNER2.5-Decide",
+        "item": {"text": "I was charged twice. Please fix this ASAP."},
+        "output_schema": {
+          "spam": {"type": "noul", "instructions": "Is this message spam?"},
+          "intent": {
+            "type": "choice",
+            "instructions": "What does the sender want?",
+            "criteria": {"billing": "payments and refunds", "support": null}
+          },
+          "urgency": {"type": "score", "instructions": "How urgent?", "criteria": ["Can wait", "Today"]}
+        },
+        "options": {"overflow_policy": "error"}
+      }
+    },
+    {
+      "name": "object state, missing and null instructions, unknown fields ignored",
+      "request": {
+        "model": "fastino/GLiNER2.5-Decide",
+        "state": {"subject": "refund", "body": "charged twice"},
+        "questions": {
+          "a": {"type": "noul", "criteria": {"true": "asks for money back"}},
+          "b": {"type": "noul", "instructions": null, "weight": 2}
+        },
+        "metadata": {"user": "u1"},
+        "temperature": 0
+      },
+      "extract": {
+        "model": "fastino/GLiNER2.5-Decide",
+        "item": {"metadata": {"state": {"subject": "refund", "body": "charged twice"}}},
+        "output_schema": {
+          "a": {"type": "noul", "criteria": {"true": "asks for money back"}, "instructions": ""},
+          "b": {"type": "noul", "instructions": "", "weight": 2}
+        },
+        "options": {"overflow_policy": "error"}
+      }
+    },
+    {
+      "name": "conversation state",
+      "request": {
+        "model": "fastino/GLiNER2.5-Decide",
+        "state": [{"role": "user", "content": "hi"}, {"role": "user", "content": "refund please"}],
+        "questions": {"refund": {"type": "noul", "instructions": "Asks for a refund?"}}
+      },
+      "extract": {
+        "model": "fastino/GLiNER2.5-Decide",
+        "item": {"metadata": {"state": [{"role": "user", "content": "hi"}, {"role": "user", "content": "refund please"}]}},
+        "output_schema": {"refund": {"type": "noul", "instructions": "Asks for a refund?"}},
+        "options": {"overflow_policy": "error"}
+      }
+    }
+  ],
+  "invalid_requests": [
+    {"name": "missing model", "request": {"state": "hi", "questions": {"q": {"type": "noul"}}}},
+    {"name": "empty model", "request": {"model": "", "state": "hi", "questions": {"q": {"type": "noul"}}}},
+    {"name": "missing state", "request": {"model": "fastino/GLiNER2.5-Decide", "questions": {"q": {"type": "noul"}}}},
+    {"name": "null state", "request": {"model": "fastino/GLiNER2.5-Decide", "state": null, "questions": {"q": {"type": "noul"}}}},
+    {"name": "number state", "request": {"model": "fastino/GLiNER2.5-Decide", "state": 3, "questions": {"q": {"type": "noul"}}}},
+    {"name": "boolean state", "request": {"model": "fastino/GLiNER2.5-Decide", "state": true, "questions": {"q": {"type": "noul"}}}},
+    {"name": "missing questions", "request": {"model": "fastino/GLiNER2.5-Decide", "state": "hi"}},
+    {"name": "empty questions", "request": {"model": "fastino/GLiNER2.5-Decide", "state": "hi", "questions": {}}},
+    {"name": "questions not an object", "request": {"model": "fastino/GLiNER2.5-Decide", "state": "hi", "questions": [{"type": "noul"}]}},
+    {"name": "question not an object", "request": {"model": "fastino/GLiNER2.5-Decide", "state": "hi", "questions": {"q": "spam?"}}},
+    {
+      "name": "eleven score levels",
+      "request": {
+        "model": "fastino/GLiNER2.5-Decide",
+        "state": "hi",
+        "questions": {"q": {"type": "score", "criteria": ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]}}
+      }
+    },
+    {"name": "no score levels", "request": {"model": "fastino/GLiNER2.5-Decide", "state": "hi", "questions": {"q": {"type": "score", "criteria": []}}}},
+    {"name": "null score level", "request": {"model": "fastino/GLiNER2.5-Decide", "state": "hi", "questions": {"q": {"type": "score", "criteria": ["low", null]}}}},
+    {"name": "images", "request": {"model": "fastino/GLiNER2.5-Decide", "state": "hi", "questions": {"q": {"type": "noul"}}, "images": ["https://example.com/a.png"]}},
+    {"name": "audio", "request": {"model": "fastino/GLiNER2.5-Decide", "state": "hi", "questions": {"q": {"type": "noul"}}, "audio": ["https://example.com/a.wav"]}},
+    {"name": "videos", "request": {"model": "fastino/GLiNER2.5-Decide", "state": "hi", "questions": {"q": {"type": "noul"}}, "videos": ["https://example.com/a.mp4"]}}
+  ],
+  "responses": [
+    {
+      "name": "noul, choice and score",
+      "model": "fastino/GLiNER2.5-Decide",
+      "questions": ["spam", "intent", "urgency"],
+      "data": {
+        "spam": {"type": "noul", "noul": 0.9, "answer": true, "confidence": 0.9},
+        "intent": {
+          "type": "choice",
+          "choice": "billing",
+          "probabilities": {"billing": 0.8, "support": 0.1, "other": 0.1},
+          "confidence": 0.123
+        },
+        "urgency": {
+          "type": "score",
+          "score": 1.7,
+          "legend": {"0": "Can wait", "1": "This week", "2": "Today"},
+          "probabilities": {"0": 0.1, "1": 0.1, "2": 0.8},
+          "confidence": 0.123
+        }
+      },
+      "input_tokens": 42,
+      "response": {
+        "model": "fastino/GLiNER2.5-Decide",
+        "answers": {
+          "spam": {"type": "noul", "noul": 0.9, "answer": true, "confidence": 0.9},
+          "intent": {
+            "type": "choice",
+            "choice": "billing",
+            "probabilities": {"billing": 0.8, "support": 0.1, "other": 0.1},
+            "confidence": 0.7
+          },
+          "urgency": {
+            "type": "score",
+            "score": 1.7,
+            "legend": {"0": "Can wait", "1": "This week", "2": "Today"},
+            "probabilities": {"0": 0.1, "1": 0.1, "2": 0.8},
+            "confidence": 0.55
+          }
+        },
+        "usage": {"input_tokens": 42, "output_tokens": 0}
+      }
+    }
+  ],
+  "confidence": {
+    "choice": [
+      {"probabilities": [1.0, 0.0], "confidence": 1.0},
+      {"probabilities": [0.5, 0.5], "confidence": 0.0},
+      {"probabilities": [0.8, 0.1, 0.1], "confidence": 0.7},
+      {"probabilities": [1.0], "confidence": 1.0}
+    ],
+    "score": [
+      {"probabilities": [0.0, 0.0, 1.0], "confidence": 1.0},
+      {"probabilities": [0.1, 0.1, 0.8], "confidence": 0.55},
+      {"probabilities": [0.5, 0.0, 0.5], "confidence": 0.0},
+      {"probabilities": [1.0], "confidence": 1.0}
+    ]
+  },
+  "retry_after": [
+    {"retry_after": "270", "expected": "60", "expected_ms": "60000"},
+    {"retry_after": "60", "expected": "60", "expected_ms": "60000"},
+    {"retry_after": "5", "expected": "5", "expected_ms": "5000"}
+  ]
+}
