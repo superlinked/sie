@@ -191,22 +191,22 @@ answers `503` with `Retry-After`. When OpenRouter refuses the request with
 refused the chat input`, and logs `upstream 'openrouter' refused a generation
 request: the upstream refused the input (400)`, or `(422)`. A missing key, any
 other refusal from OpenRouter and an answer the server does not accept answer
-`502 upstream_error`, `upstream generation request failed`, before output.
-After output, the stream ends with an error event instead. A request
-the server refuses itself answers `400` before anything is sent. For a `502`
-or an error event, the server log names the reason on a `WARNING` line,
-`remote chat for zai-org/GLM-5.3-Flash failed: <reason>`, or `failed after
-output: <reason>`:
+`502 upstream_error` before output, with a message and a `reason` field that
+name the class of the failure. After output, the stream ends with an error
+event instead. A request the server refuses itself answers `400` before
+anything is sent. For a `502` or an error event, the server log names the
+cause on a `WARNING` line, `remote chat for zai-org/GLM-5.3-Flash failed:
+<cause>`, or `failed after output: <cause>`:
 
-| Reason | Cause |
-|---|---|
-| `the upstream credential is unavailable` | `OPENROUTER_API_KEY` is not set in the server's environment, so nothing was sent |
-| `upstream answered 401` | OpenRouter refused the key |
-| `upstream answered 402` | the OpenRouter account has no credits; GLM-5.3-Flash is a paid model on OpenRouter |
-| `upstream answered 404` | OpenRouter found no endpoint for the request, for example under the account's provider or data-policy settings |
-| `upstream answered` another status | OpenRouter refused the request with that status |
-| `upstream sent an error instead of a chat answer` | OpenRouter accepted the request, then sent an error, as it does when the provider it picked fails |
-| anything else | OpenRouter's answer broke a rule the server holds every upstream to, for example a call to a function the request did not declare, or usage above the request's `max_tokens` |
+| Log | Message to the caller | Cause |
+|---|---|---|
+| `the upstream credential is unavailable` | `the server has no usable credential for its upstream` | `OPENROUTER_API_KEY` is not set in the server's environment, so nothing was sent |
+| `upstream answered 401` | `the upstream rejected the server's credential` | OpenRouter refused the key |
+| `upstream answered 402` | `the upstream account cannot pay for the request` | the OpenRouter account has no credits; GLM-5.3-Flash is a paid model on OpenRouter |
+| `upstream answered 404` | `the upstream has no route for the configured model` | OpenRouter found no endpoint for the request, for example under the account's provider or data-policy settings |
+| `upstream answered` another `4xx` | `the upstream refused the request` | OpenRouter refused the request with that status |
+| `upstream sent an error instead of a chat answer` | `the upstream could not be reached, timed out or failed` | OpenRouter accepted the request, then sent an error, as it does when the provider it picked fails. An error whose `code` is an HTTP status is logged as `upstream sent error <status> instead of a chat answer` and gets that status's message |
+| anything else | `the upstream answered with something the server cannot accept` | OpenRouter's answer broke a rule the server holds every upstream to, for example a call to a function the request did not declare, or usage above the request's `max_tokens` |
 
 Pointed at OpenRouter directly, OpenCode would get the same model. Through SIE
 it uses one API and one model name, `zai-org/GLM-5.3-Flash`, which the cluster
@@ -995,7 +995,8 @@ What runs anywhere, and in this repository's CI, is the test suite:
   `tests/openrouter_endpoints.json` holds the endpoints' lists and those names
   as OpenRouter published them. The stand-in also answers `401`, `402`, `404`
   and a stream whose only event is an error, and the test checks that each
-  comes back as a `502` whose reason the server log names. It needs the
+  comes back as a `502` with its class's message, and that the server log
+  names the cause and nothing the stand-in sent. It needs the
   repository's environment, from `mise run sync` at the root, and is skipped
   without it outside CI.
 

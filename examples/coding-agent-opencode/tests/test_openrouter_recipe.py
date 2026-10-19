@@ -378,25 +378,25 @@ def test_the_stand_in_counts_only_openrouter_parameters_for_require_parameters()
 
 
 @pytest.mark.parametrize(
-    ("question", "reason"),
+    ("question", "reason", "message"),
     [
-        ("answer 401", "upstream answered 401"),
-        ("answer 402", "upstream answered 402"),
-        ("answer 404", "upstream answered 404"),
-        (ERROR_EVENT, "upstream sent an error instead of a chat answer"),
+        ("answer 401", "upstream answered 401", "the upstream rejected the server's credential"),
+        ("answer 402", "upstream answered 402", "the upstream account cannot pay for the request"),
+        ("answer 404", "upstream answered 404", "the upstream has no route for the configured model"),
+        (
+            ERROR_EVENT,
+            "upstream sent an error instead of a chat answer",
+            "the upstream could not be reached, timed out or failed",
+        ),
     ],
 )
 def test_a_refusal_answers_502_and_the_server_log_names_why(
-    server: SimpleNamespace, question: str, reason: str
+    server: SimpleNamespace, question: str, reason: str, message: str
 ) -> None:
     client = openai.OpenAI(base_url=f"{server.base}/v1", api_key="none", max_retries=0)
     result = conformance.stream_chat(client, MODEL, [{"role": "user", "content": question}], max_tokens=16)
     assert result.error is not None
-    assert (result.error["status"], result.error["code"], result.error["message"]) == (
-        502,
-        "upstream_error",
-        "upstream generation request failed",
-    )
+    assert (result.error["status"], result.error["code"], result.error["message"]) == (502, "upstream_error", message)
     log = server.log.read_text()
     assert f"remote chat for {MODEL} failed: {reason}" in log
     assert UPSTREAM_DETAIL not in log
