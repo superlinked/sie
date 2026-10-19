@@ -128,7 +128,7 @@ export API_TIMEOUT_MS=1800000
   `/v1/messages`.
 - `ANTHROPIC_AUTH_TOKEN` arrives as `Authorization: Bearer ...`, and
   Claude Code sends `ANTHROPIC_API_KEY` as `x-api-key`. The gateway and
-  `sie-server` read either one; when a request carries both, they use
+  `sie-server` read either one; when both carry a token, they use
   `Authorization` and ignore `x-api-key`.
 - The model id is sent byte for byte, slash and colon included. The four
   model variables keep every request, background tasks and subagents
