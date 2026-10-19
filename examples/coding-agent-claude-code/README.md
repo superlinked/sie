@@ -3,10 +3,11 @@
 ## What this shows
 
 Claude Code talks to models through the Anthropic Messages API. The SIE
-gateway serves `POST /v1/messages`: it translates the request into a
-`/v1/chat/completions` request, serves it on the chat route with all of that
-route's limits, and translates the answer back, streamed or buffered. So Claude
-Code reaches a model served by SIE by changing its base URL.
+gateway and `sie-server`, the single-node server, both serve
+`POST /v1/messages`: each translates the request into a
+`/v1/chat/completions` request, serves it on its own chat route with all of
+that route's limits, and translates the answer back, streamed or buffered. So
+Claude Code reaches a model served by SIE by changing its base URL.
 
 Anthropic does not support Claude Code with models other than Claude behind a
 gateway. Nothing here is supported or endorsed by Anthropic. This example
@@ -15,17 +16,15 @@ agent loop closes.
 
 The pieces:
 
-1. `recipes/cloud.sh` and `recipes/cluster.sh`, the environment Claude Code
-   needs for SIE Cloud and for a self-hosted cluster's gateway.
+1. `recipes/cloud.sh`, `recipes/cluster.sh` and `recipes/laptop.sh`, the
+   environment Claude Code needs for SIE Cloud, for a self-hosted cluster's
+   gateway and for `sie-server` on this machine.
 2. The conformance check of the OpenCode example, run with `--api messages`.
    It drives `/v1/messages` the way Claude Code does and reports each case as
    pass, fail or recorded.
 3. `run_gate.sh`, a seeded gate on the OpenCode example's fixture: a tiny
    package with two failing tests and the task "make the tests pass". Claude
    Code works a copy headless, then pytest judges the result.
-
-`sie-server`, the single-node server, does not serve `/v1/messages`. This
-example needs an SIE gateway: a cluster's or SIE Cloud's.
 
 ## Run it
 
@@ -61,10 +60,46 @@ The seeded gate, which needs `claude` and `uv` on `PATH`:
 ```sh
 ./run_gate.sh            # SIE Cloud
 ./run_gate.sh cluster    # your gateway, with SIE_MODEL, SIE_CONTEXT_TOKENS and SIE_OUTPUT_TOKENS set
+./run_gate.sh laptop     # sie-server on this machine, see below
 ```
 
-Neither recipe has been run against a live endpoint yet. The checks below were
-run against the gateway's own tests and against a recording stub.
+The cloud and cluster recipes have not been run against a live endpoint yet.
+Their checks below were run against the gateway's own tests and against a
+recording stub.
+
+### On this machine
+
+From a checkout of this repository, start `sie-server` with the generation
+bundle:
+
+```sh
+mise run serve -- -b sglang           # generation bundle; MLX on Apple Silicon
+```
+
+Then, from this directory:
+
+```sh
+source recipes/laptop.sh
+claude
+```
+
+`recipes/laptop.sh` points Claude Code at `http://localhost:8080` and names
+`Qwen/Qwen3.5-4B:long-context`, the 32K-window profile of a 4B model that
+declares tool calling, with its 4,096-token output cap. `SIE_BASE_URL`,
+`SIE_API_KEY`, `SIE_MODEL`, `SIE_CONTEXT_TOKENS` and `SIE_OUTPUT_TOKENS`
+override those. A server with authentication off accepts any key. With
+authentication on, `SIE_API_KEY` is the server's token. A 32K window fits the
+gate's `--bare` session, which declares three tools and a short system prompt.
+An interactive session declares about twenty tools, so it reaches the window
+sooner and Claude Code compacts it earlier.
+
+The conformance check and the gate against it:
+
+```sh
+uv run --project ../coding-agent-opencode python ../coding-agent-opencode/conformance.py \
+    --api messages --base-url http://localhost:8080/v1 --model Qwen/Qwen3.5-4B:long-context
+./run_gate.sh laptop
+```
 
 ## The recipe
 
@@ -89,9 +124,9 @@ export API_TIMEOUT_MS=1800000
 - `ANTHROPIC_BASE_URL` is the gateway without `/v1`. Claude Code appends
   `/v1/messages`.
 - `ANTHROPIC_AUTH_TOKEN` arrives as `Authorization: Bearer ...`, and
-  Claude Code sends `ANTHROPIC_API_KEY` as `x-api-key`. The gateway reads
-  either one; when a request carries both, it uses `Authorization` and
-  ignores `x-api-key`.
+  Claude Code sends `ANTHROPIC_API_KEY` as `x-api-key`. The gateway and
+  `sie-server` read either one; when a request carries both, they use
+  `Authorization` and ignore `x-api-key`.
 - The model id is sent byte for byte, slash and colon included. The four
   model variables keep every request, background tasks and subagents
   included, on the SIE model. A request that names a model the gateway does
@@ -223,11 +258,22 @@ nothing about a model.
   request, serve `/v1/messages` through the real chat handler with a scripted
   transport, and check that any chat chunk sequence yields a well-formed event
   sequence.
+- `sie-server`'s tests replay the same vectors and captured requests, check
+  that the server's own chat validation accepts every translation, and check
+  the same event grammar. They also serve `/v1/messages` through the server's
+  app and chat route on the weightless fake: answers that match the chat
+  answer to the same conversation, buffered and streamed, thinking blocks
+  only on request, refusals in the Anthropic envelope, `Authorization` and
+  `x-api-key`, pings during a silent stretch, a failure after output, and a
+  client that goes away.
+- The OpenCode example's `tests/test_fake_engine.py` runs
+  `conformance.py --api messages` against this repository's `sie-server` on
+  the fake engine.
 - `tests/test_run_gate.py` runs `run_gate.sh` with a scripted stand-in for
   `claude`: a real fix, no change, a failed run, a run that ended in an error,
   read no input tokens or took too few turns, edited tests, a run past its
-  deadline, both recipes, and the arguments and environment Claude Code is
-  started with.
+  deadline, the three recipes, and the arguments and environment Claude Code
+  is started with.
 - The OpenCode example's `tests/test_messages_conformance.py` checks the
   `--api messages` checker against a scripted Messages stub.
 
@@ -240,8 +286,13 @@ uv run pytest
 - **Not supported by Anthropic.** Anthropic does not support Claude Code with
   non-Claude models behind a gateway. A Claude Code release can change what it
   sends. The capture above is how to re-check a new version.
-- **Not a live result yet.** Neither recipe has been run against a live
-  endpoint, and no model has worked the fixture through `/v1/messages` here.
+- **Not a live result yet.** The cloud and cluster recipes have not been run
+  against a live endpoint.
 - **Not a coding benchmark.** The fixture is two failing tests in a
   twenty-line module.
-- **Not the single-node server.** `sie-server` does not serve `/v1/messages`.
+- **The single-node server answers in its chat route's words.** `sie-server`
+  translates the refusals its chat route makes. Its chat route does not
+  report the token counts of a prompt that does not fit on every backend, so
+  such a refusal can read `prompt is too long` without them. On a backend that
+  refuses media, an image is refused for the whole request rather than the
+  image block.

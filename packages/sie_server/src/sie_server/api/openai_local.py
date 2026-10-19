@@ -1562,9 +1562,22 @@ async def chat_completions(
     Errors are emitted as top-level OpenAI ``{"error": {...}}`` envelopes
     (never FastAPI's ``{"detail": ...}`` wrapper), matching ``/v1/completions``.
     """
+    return await serve_chat_completions(http_request, x_machine_profile)
+
+
+async def serve_chat_completions(
+    http_request: Request,
+    x_machine_profile: str | None,
+    body: dict[str, Any] | None = None,
+) -> Response | StreamingResponse:
+    """Answer a chat completions request exactly as ``/v1/chat/completions`` does.
+
+    ``body`` is the chat request to serve in place of the request's own body,
+    for a route that translates its request onto this one in process.
+    """
     async with AsyncExitStack() as lifetime:
         try:
-            response = await _chat_completions(http_request, x_machine_profile, lifetime)
+            response = await _chat_completions(http_request, x_machine_profile, lifetime, body)
             if isinstance(response, JSONResponse) and response.status_code >= status.HTTP_400_BAD_REQUEST:
                 payload = json.loads(bytes(response.body))
                 code = payload.get("error", {}).get("code")
@@ -1582,10 +1595,11 @@ async def _chat_completions(
     http_request: Request,
     x_machine_profile: str | None,
     lifetime: AsyncExitStack,
+    chat_body: dict[str, Any] | None = None,
 ) -> Response | StreamingResponse:
     validate_machine_profile_header(x_machine_profile)
 
-    body = await _read_json_body(http_request)
+    body = await _read_json_body(http_request) if chat_body is None else chat_body
 
     model = body.get("model")
     if not isinstance(model, str) or not model.strip():
