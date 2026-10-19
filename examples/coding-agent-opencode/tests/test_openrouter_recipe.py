@@ -82,6 +82,13 @@ def _reply(body: dict[str, Any]) -> dict[str, Any]:
     question = _text(messages, "user")
     tools = body.get("tools")
     paris = ("call_paris", "get_weather", {"city": "Paris"})
+    if tools and tools[0]["function"]["name"] == "write_file":
+        lines = range(1, conformance.LONG_CALL_LINES + 1)
+        content = "\n".join(conformance.long_call_line(number) for number in lines)
+        return {
+            "calls": [("call_file", "write_file", {"path": conformance.LONG_CALL_PATH, "content": content})],
+            "finish": "tool_calls",
+        }
     if body.get("tool_choice") == "required":
         return {"calls": [paris], "finish": "tool_calls"}
     if tools and messages[-1]["role"] == "tool":
@@ -192,8 +199,10 @@ class OpenRouterStub(BaseHTTPRequestHandler):
         for call in _calls(reply):
             head = {**call, "function": {"name": call["function"]["name"], "arguments": ""}}
             self._event([self._delta({"tool_calls": [head]})])
-            tail = {"index": call["index"], "function": {"arguments": call["function"]["arguments"]}}
-            self._event([self._delta({"tool_calls": [tail]})])
+            arguments = call["function"]["arguments"]
+            for start in range(0, len(arguments), 4096):
+                tail = {"index": call["index"], "function": {"arguments": arguments[start : start + 4096]}}
+                self._event([self._delta({"tool_calls": [tail]})])
         for word in (reply.get("content") or "").split(" "):
             if word:
                 self._event([self._delta({"content": word + " "})])
@@ -325,6 +334,11 @@ def test_each_case_reaches_the_upstream_with_exactly_these_fields(report: dict[s
         (ready, ["user"], {**streamed, "max_tokens": budget}),
         ("Write three paragraphs about the sea.", ["user"], {**streamed, "max_tokens": 8}),
         ("Say hello.", ["user"], {**tools, "tool_choice": "required"}),
+        (
+            conformance.LONG_CALL_PROMPT,
+            ["user"],
+            {**tools, "max_tokens": conformance.LONG_CALL_BUDGET, "tools": [conformance.WRITE_TOOL]},
+        ),
     ]
     received = _conformance_requests()
     sent = []

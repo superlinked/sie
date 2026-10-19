@@ -880,6 +880,7 @@ pending.
 | `usage_on_final_chunk` | pending |
 | `include_reasoning` | pending |
 | `tool_choice_required` | pending |
+| `long_tool_call` | pending |
 | `./run_gate.sh openrouter` | pending |
 
 ## Checked without a GPU
@@ -981,7 +982,7 @@ What runs anywhere, and in this repository's CI, is the test suite:
   `127.0.0.1`. The stand-in streams the way OpenRouter documents: SSE comment
   lines, reasoning in a `reasoning` field, tool-call deltas and a closing usage
   event that repeats the finished choice. `conformance.py` against the server
-  gives 10 pass, 0 fail and 1 recorded (`tool_choice_required`, supported).
+  gives 11 pass, 0 fail and 1 recorded (`tool_choice_required`, supported).
   The test pins each request the stand-in received, case by case: the model
   `z-ai/glm-5.3-flash`, the key from `OPENROUTER_API_KEY` as a bearer token,
   and exactly `messages`, `stream`, `max_tokens` and `temperature`, plus
