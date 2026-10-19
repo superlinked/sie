@@ -310,6 +310,88 @@ class TestPersistedToken:
             assert read_stored_token(tmp_path) == stored.token
             assert not staged.exists()
 
+    def test_a_temporary_link_listed_twice_in_a_directory_without_write_permission_counts_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        directory = tmp_path / "sie"
+        stored = load_or_create_token(directory)
+        os.link(stored.path, tmp_path / "elsewhere")
+        os.link(stored.path, directory / ".auth-token.sie-server-0123456789abcdef")
+
+        def scan_listing_each_entry_twice(directory: Path, name: re.Pattern[str]) -> Iterator[Any]:
+            for found in list(owned_files(directory, name)):
+                yield found
+                yield found
+
+        monkeypatch.setattr(server_auth, "owned_files", scan_listing_each_entry_twice)
+        directory.chmod(0o500)
+        try:
+            with pytest.raises(TokenFileError, match="hard links"):
+                read_stored_token(directory)
+        finally:
+            directory.chmod(0o700)
+
+    def test_a_temporary_link_renamed_during_the_scan_does_not_hide_a_foreign_link(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stored = load_or_create_token(tmp_path)
+        os.link(stored.path, tmp_path / "copy")
+        staged = tmp_path / ".auth-token.sie-server-aaaaaaaaaaaaaaaa"
+        renamed = tmp_path / ".auth-token.sie-server-bbbbbbbbbbbbbbbb"
+        os.link(stored.path, staged)
+
+        def scan_while_the_link_is_renamed(directory: Path, name: re.Pattern[str]) -> Iterator[Any]:
+            for entry, info in list(owned_files(directory, name)):
+                yield entry, info
+                if entry == staged:
+                    staged.rename(renamed)
+                    yield renamed, renamed.lstat()
+
+        monkeypatch.setattr(server_auth, "owned_files", scan_while_the_link_is_renamed)
+
+        with pytest.raises(TokenFileError, match="hard links"):
+            read_stored_token(tmp_path)
+        assert (tmp_path / "copy").exists()
+
+    def test_a_temporary_link_added_before_and_removed_after_the_listing_does_not_hide_a_foreign_link(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stored = load_or_create_token(tmp_path)
+        os.link(stored.path, tmp_path / "copy")
+        staged = tmp_path / ".auth-token.sie-server-cccccccccccccccc"
+
+        def scan_around_a_passing_link(directory: Path, name: re.Pattern[str]) -> Iterator[Any]:
+            os.link(stored.path, staged)
+            found = list(owned_files(directory, name))
+            staged.unlink()
+            yield from found
+
+        monkeypatch.setattr(server_auth, "owned_files", scan_around_a_passing_link)
+
+        with pytest.raises(TokenFileError, match="hard links"):
+            read_stored_token(tmp_path)
+        assert (tmp_path / "copy").exists()
+
+    def test_a_temporary_name_that_no_longer_holds_the_token_is_not_removed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stored = load_or_create_token(tmp_path)
+        staged = tmp_path / ".auth-token.sie-server-eeeeeeeeeeeeeeee"
+        os.link(stored.path, staged)
+
+        def scan_then_the_name_is_replaced(directory: Path, name: re.Pattern[str]) -> Iterator[Any]:
+            found = list(owned_files(directory, name))
+            staged.unlink()
+            staged.write_text("unrelated\n")
+            os.link(stored.path, tmp_path / ".auth-token.sie-server-ffffffffffffffff")
+            yield from found
+
+        monkeypatch.setattr(server_auth, "owned_files", scan_then_the_name_is_replaced)
+
+        with pytest.raises(TokenFileError, match="hard links"):
+            read_stored_token(tmp_path)
+        assert staged.read_text() == "unrelated\n"
+
     def test_a_symbolic_link_named_like_a_temporary_file_does_not_hide_a_foreign_link(self, tmp_path: Path) -> None:
         stored = load_or_create_token(tmp_path)
         os.link(stored.path, tmp_path / "copy")
@@ -418,6 +500,24 @@ class TestPersistedToken:
         with pytest.raises(TokenFileError, match="chmod 700"):
             load_or_create_token(directory)
         assert not token_path(directory).exists()
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="chmod +a sets a macOS access control list")
+    def test_a_directory_with_an_access_control_list_is_refused(self, tmp_path: Path) -> None:
+        existing = tmp_path / "existing"
+        load_or_create_token(existing)
+        empty = tmp_path / "empty"
+        empty.mkdir(mode=0o700)
+        for directory in (existing, empty):
+            subprocess.run(  # noqa: S603
+                ["/bin/chmod", "+a", "everyone allow add_file,add_subdirectory,delete_child", str(directory)],
+                check=True,
+            )
+
+        with pytest.raises(TokenFileError, match=re.escape(f"chmod -N {existing}")):
+            read_stored_token(existing)
+        with pytest.raises(TokenFileError, match="access control list"):
+            load_or_create_token(empty)
+        assert not token_path(empty).exists()
 
     def test_a_directory_of_another_user_is_refused(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         load_or_create_token(tmp_path)

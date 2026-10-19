@@ -3,14 +3,16 @@
 One vocabulary with the gateway: ``SIE_AUTH_MODE`` selects the mode,
 ``SIE_AUTH_TOKENS`` (or ``SIE_AUTH_TOKEN``) holds comma-separated tokens, and a
 request presents one in ``Authorization: Bearer`` or ``x-api-key``, with
-``Authorization`` taking precedence when both are sent. Repeated headers are
-read differently until 0.13.0: the gateway uses only the first
-``Authorization`` value, while this server reads every value, skips empty ones
-and refuses values that carry different tokens.
+``Authorization`` taking precedence when both carry a token. Repeated headers
+are read differently until 0.13.0: the gateway reads only the first
+``Authorization`` value and uses ``x-api-key`` when that value carries no token,
+while this server reads every value, skips empty ones and refuses values that
+carry different tokens.
 """
 
 from __future__ import annotations
 
+import ctypes
 import errno
 import hmac
 import ipaddress
@@ -19,6 +21,7 @@ import os
 import re
 import secrets
 import stat
+import sys
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,6 +52,8 @@ _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _TEMP_PREFIX = f".{TOKEN_FILE_NAME}.sie-server-"
 _TEMP_NAME = re.compile(rf"{re.escape(_TEMP_PREFIX)}[0-9a-f]{{16}}")
 _READ_ONLY_ERRNOS = frozenset({errno.EACCES, errno.EROFS})
+_NO_ACL_ERRNOS = frozenset({errno.ENOENT, errno.ENOTSUP, errno.EOPNOTSUPP})
+_ACL_TYPE_EXTENDED = 0x100
 _HOST_CHECK_RELEASE = "0.13.0"
 _MAX_WARNED_HOSTS = 64
 _MAX_LOGGED_HOST_CHARS = 100
@@ -215,7 +220,7 @@ def load_or_create_token(directory: Path) -> StoredToken:
 
 
 def check_private_directory(directory: Path) -> None:
-    """Refuse a token directory that another user owns or can write to."""
+    """Refuse a token directory that another user owns or can write to, and on macOS one with an access control list."""
     try:
         info = directory.stat()
     except OSError as exc:
@@ -226,6 +231,25 @@ def check_private_directory(directory: Path) -> None:
         raise TokenFileError(f"{directory} must be owned by the user that runs sie-server.")
     if stat.S_IMODE(info.st_mode) & 0o022:
         raise TokenFileError(f"{directory} must not be writable by others (chmod 700 {directory}).")
+    if sys.platform == "darwin" and _has_access_control_list(directory):
+        raise TokenFileError(f"{directory} must not have an access control list (chmod -N {directory}).")
+
+
+def _has_access_control_list(directory: Path) -> bool:
+    """Whether macOS reports an access control list on ``directory``, whose entries can grant what its mode does not."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    get_acl = libc.acl_get_file
+    get_acl.restype = ctypes.c_void_p
+    get_acl.argtypes = (ctypes.c_char_p, ctypes.c_int)
+    ctypes.set_errno(0)
+    acl = get_acl(os.fsencode(directory), _ACL_TYPE_EXTENDED)
+    if acl:
+        libc.acl_free(ctypes.c_void_p(acl))
+        return True
+    code = ctypes.get_errno()
+    if code in _NO_ACL_ERRNOS:
+        return False
+    raise TokenFileError(f"Cannot read the access control list of {directory}: {os.strerror(code)}")
 
 
 def read_stored_token(directory: Path) -> str:
@@ -271,36 +295,48 @@ def _drop_temporary_links(path: Path, fd: int, token: os.stat_result) -> bool:
     True when every extra hard link of the token is such a file, even if a
     read-only directory keeps them in place; any other link is left alone and
     the token is refused. The token's link count is read before and after each
-    scan: one link after the scan means the temporary links are gone, and an
-    unchanged count equal to the temporary links found plus one means they are
-    the only extra links. A count that changes during the scan means a
-    concurrent start is still removing its link, so the scan is repeated a
-    few times before the token is refused.
+    scan, and one link after the scan means the temporary links are gone. An
+    unchanged count equal to the temporary links found plus one means they may
+    be the only extra links, so they are removed and the count is read again.
+    It must then be one, because a link renamed, added or removed while the
+    directory is listed can balance the count; only when a read-only directory
+    keeps every one of them in place does the balanced count decide. A count
+    that changes during the scan means a concurrent start is still removing
+    its link, so the scan is repeated a few times before the token is refused.
     """
     before = token.st_nlink
     for _ in range(_LINK_SCAN_ATTEMPTS):
         try:
-            linked = [
-                entry
+            linked = {
+                entry.name: entry
                 for entry, info in owned_files(path.parent, _TEMP_NAME)
-                if (info.st_dev, info.st_ino) == (token.st_dev, token.st_ino)
-            ]
+                if os.path.samestat(info, token)
+            }
         except OSError:
             return False
         after = os.fstat(fd).st_nlink
         if after == 1:
             return True
-        if after == before == len({entry.name for entry in linked}) + 1:
-            for entry in linked:
-                try:
-                    entry.unlink(missing_ok=True)
-                except OSError:
-                    continue
-            return True
+        if after == before == len(linked) + 1:
+            kept = [_unlink_token_link(entry, token) for entry in linked.values()]
+            remaining = os.fstat(fd).st_nlink
+            return remaining == 1 or (remaining == after and all(code in _READ_ONLY_ERRNOS for code in kept))
         if after == before:
             return False
         before = after
     return False
+
+
+def _unlink_token_link(entry: Path, token: os.stat_result) -> int | None:
+    """Unlink ``entry`` if it is still a link of the token; the error number that kept it in place, else ``None``."""
+    try:
+        if os.path.samestat(entry.lstat(), token):
+            entry.unlink()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return exc.errno
+    return None
 
 
 def server_tokens(env: Mapping[str, str]) -> tuple[str, ...]:
@@ -322,8 +358,9 @@ def request_credentials(headers: Iterable[tuple[bytes, bytes]]) -> set[bytes]:
     ignored. Otherwise the ``x-api-key`` values count. Every value of a
     repeated header is read and empty values are ignored, so an empty
     ``Authorization`` followed by a valid one is accepted here, while the
-    gateway reads only the first ``Authorization`` value until 0.13.0. More
-    than one distinct token means repeated headers that disagree.
+    gateway ignores the later value and uses ``x-api-key`` or refuses the
+    request. More than one distinct token means repeated headers that
+    disagree.
     """
     authorization: set[bytes] = set()
     api_key: set[bytes] = set()

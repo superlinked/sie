@@ -1083,12 +1083,12 @@ as a profile an operator chooses.
 | `SIE_DATA_DIR` | `$XDG_DATA_HOME/sie`, else `~/.local/share/sie` | Holds the generated token (`auth-token`, mode `0600`) and the telemetry worker id. Images set `/app/.cache/sie`. |
 
 Clients send the token as `Authorization: Bearer <token>` or `x-api-key: <token>`;
-when both are sent, `Authorization` is used and `x-api-key` is ignored, as on the
-gateway. The SDKs send `SIE_API_KEY`
+when both carry a token, `Authorization` is used and `x-api-key` is ignored, as on
+the gateway. The SDKs send `SIE_API_KEY`
 as a Bearer token. Repeated headers differ from the gateway until 0.13.0: the
 server reads every value of a repeated header, skips empty ones, and refuses
-values that carry different tokens, while the gateway uses only the first
-`Authorization` value.
+values that carry different tokens, while the gateway reads only the first
+`Authorization` value and uses `x-api-key` when that value carries no token.
 
 Token auth covers the HTTP port. The other listeners are local: the IPC socket
 that a worker sidecar uses (`SIE_IPC_SOCKET_PATH`, mode `0600`) and the
@@ -1104,7 +1104,8 @@ the token. A container started with a terminal (`docker run -t`, Compose
 `tty: true`, or a Kubernetes container with `tty: true`) counts as a terminal,
 and the container runtime keeps that one print in the container's logs. In
 containers, set `SIE_AUTH_TOKEN` yourself instead. The server refuses a token
-directory that another user owns or can write to, and a token file that is a
+directory that another user owns or can write to, or that has an access
+control list on macOS (remove it with `chmod -N`), and a token file that is a
 symbolic link, not a regular file, hard-linked, owned by another user, or
 readable by others. To rotate a generated token, delete `auth-token` from
 `SIE_DATA_DIR` and restart the server. In Docker, keep the token across
