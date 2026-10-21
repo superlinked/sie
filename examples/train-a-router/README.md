@@ -1,8 +1,8 @@
 # Train a router to spend less on AI answers
 
-An inexpensive model can answer many requests well. A router decides when to use it and when to pay for a stronger model. This example maps the **tradeoff between money saved and answer quality**. You choose the operating point that suits your application.
+An inexpensive model can answer many requests well. A router decides when to use it and when to pay for a stronger model. Train two kinds of router, compare **money saved against answer quality**, and choose the tradeoff that suits your application.
 
-The answer-model pair in this study is **GPT-6.1 Sol → GPT-6 Luna**. Qwen is the embedding encoder, not either answer model:
+Requests go to **GPT-6.1 Sol or GPT-6 Luna**. The routers use Laya or Qwen embeddings:
 
 | Role | Model |
 |---|---|
@@ -14,29 +14,31 @@ The answer-model pair in this study is **GPT-6.1 Sol → GPT-6 Luna**. Qwen is t
 
 Follow these steps:
 
-1. **Understand the data and establish the endpoints.** Measure always-Sol and always-Luna quality and cost.
-2. **Try Laya without additional training.** Estimate which answer model will be correct.
+1. **Understand the data and baselines.** Measure always-Sol and always-Luna quality and cost.
+2. **Try Laya.** Estimate which answer model will be correct.
 3. **Adapt Laya with LoRA.** Learn from both answer models' successes and failures.
 4. **Train on embeddings.** Keep Qwen fixed and fit two small correctness predictors.
-5. **Compare the cost–quality frontiers.** Find policies for which no other measured choice is both cheaper and at least as accurate, with a strict improvement in one dimension. Choose on calibration data, then check on separate test questions.
-6. **Route a new request at your chosen operating point.** Use live APIs, or serve the encoder yourself.
+5. **Compare the cost–quality frontiers.** Choose a routing policy on calibration data, then check it on separate test questions.
+6. **Route a new request.** Use live APIs, or serve the encoder yourself.
 
-**Two recorded embedding-router operating points** illustrate the tradeoff on 3,043 final questions:
+**Results on 3,043 test questions:**
 
-| Policy | Answer accuracy | Loss vs always Sol | Cost / 10,000 | Savings |
+| Policy | Answer accuracy | Accuracy loss | Cost / 10,000 | Savings |
 |---|---:|---:|---:|---:|
 | Always Sol | 92.64% | 0.00 pp | $14.02 | 0.0% |
 | Embedding router, more quality retained | 91.65% | 0.99 pp | $9.09 | 35.2% |
 | Embedding router, more money saved | 90.67% | 1.97 pp | $6.94 | 50.5% |
 | Always Luna | 88.63% | 4.01 pp | $1.52 | 89.2% |
 
-Embedding costs include the Cloud encoder fee; application hosting for the tiny classifier is separate. These are examples along the tradeoff, not a recommended quality ceiling or the complete frontier. The quality-loss intervals for the two embedding points are **0.56–1.46** and **1.38–2.59 percentage points**. Which point is useful depends on the value of correct answers in your application. Compare Laya, LoRA and the simple controls across the curve too; the embedding method does not win everywhere.
+Always Sol is the baseline for accuracy loss and savings. **pp means percentage points:** 92% accuracy falling to 91% is a 1 pp loss. Savings use %, so spending $65 instead of $100 saves 35%.
 
-For a compact command list, use [the one-page guide](QUICKSTART.md). The complete recorded results, checkpoints and data are in the pinned [artifact release](https://huggingface.co/datasets/superlinked/train-a-router-reasoning/tree/63336f25fc54597a8e161a7245613f91bd60177e).
+Embedding costs include the Cloud encoder fee; classifier application hosting is separate. These policies illustrate the tradeoff. Step 5 compares the full curves, including Laya and simpler alternatives.
 
-## 1. Understand the data and baseline [Sol: 92.64% correct; $14.02 / 10,000]
+Use [the one-page guide](QUICKSTART.md) for a compact command list. Downloadable [data, checkpoints and results](https://huggingface.co/datasets/superlinked/train-a-router-reasoning/tree/63336f25fc54597a8e161a7245613f91bd60177e) support every step below.
 
-The workload combines public questions from [MMLU-Pro](https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro), [BIG-Bench Hard](https://github.com/suzgunmirac/BIG-Bench-Hard), and [KOR-Bench](https://github.com/KOR-Bench/KOR-Bench). They cover knowledge, multi-step reasoning and rule-based puzzles. We use tasks with exact checkable answers: choice labels, integers or specified text. The included source plan records the selected tasks, upstream revisions, licenses and transformations.
+## 1. Understand the data and baselines [Sol: 92.64% accuracy; $14.02 / 10,000]
+
+The workload combines [MMLU-Pro](https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro), [BIG-Bench Hard](https://github.com/suzgunmirac/BIG-Bench-Hard), and [KOR-Bench](https://github.com/KOR-Bench/KOR-Bench): knowledge, multi-step reasoning and rule-based puzzles with checkable answers. The download includes the source versions, licenses and question transformations.
 
 | Split | Questions | Purpose |
 |---|---:|---|
@@ -45,24 +47,24 @@ The workload combines public questions from [MMLU-Pro](https://huggingface.co/da
 | Development | 900 | Check the collection and serving setup; excluded from fitting |
 | Final test | 3,043 | Evaluate all previously selected policies once |
 
-Related questions stay together: exact duplicates, detected close variants, numeric templates and shared KOR rules belong to the same **family**. A family cannot cross training, calibration or final test, or the training folds used to select settings. This reduces leakage from near-duplicate questions. It does not establish whether an answer model saw a public benchmark during pretraining.
+Duplicates, detected close variants and questions sharing templates or KOR rules form a **family**. Families stay within one data split and one training fold to reduce leakage. Public benchmarks may still have appeared in an answer model's pretraining data.
 
-We run **both answer models on every question**, then compare each response with the benchmark's reference answer. Each training row therefore contains two correctness labels and two observed token costs. Invalid or truncated responses count as incorrect and still cost money. The router sees the question, never either model's generated answer or the reference answer.
+We run **both answer models on every question** and grade their responses against the reference answer. Each training row has two correctness labels and two token costs. Invalid or truncated responses count as incorrect and still cost money. The router sees only the question.
 
 The main metrics are:
 
-- **Answer quality:** percentage of final answers that are correct after routing. This measures the user's answer, not agreement with a preferred route label.
-- **Quality loss:** always-Sol accuracy minus routed accuracy, in **percentage points**. Going from 92% to 91% is a loss of 1 point, or one additional incorrect answer per 100 requests on average.
-- **Savings:** `100 × (always-Sol cost − routed cost) / always-Sol cost`. We report answer-model cost separately from router cost.
-- **Uncertainty:** 95% intervals from repeatedly resampling whole question families within each source. These are pointwise intervals, not simultaneous guarantees for every policy. KOR contributes only nine independent families to the final test.
+- **Answer accuracy (%):** how often the answer returned to the user is correct.
+- **Accuracy loss (pp):** always-Sol accuracy minus routed accuracy.
+- **Cost savings (%):** `100 × (always-Sol cost − routed cost) / always-Sol cost`.
+- **Uncertainty:** 95% intervals, calculated by repeatedly resampling whole question families within each benchmark.
 
-Costs are projections per 10,000 requests using the recorded model-token prices and actual response lengths. They are not the bill for collecting the experiment. Embedding totals add the Cloud fee for one embedding request per question. Native-router hosting has a separate measured estimate below; an unknown hosting bill is not entered as zero.
+Costs project serving 10,000 requests using the experiment's token prices and response lengths. Router fees are separate from answer-model costs. See step 5 for hosting costs and latency.
 
 ### Set up the example
 
-Use Python 3.12 and [uv](https://docs.astral.sh/uv/). The **full training sequence requires an NVIDIA GPU** locally or on a virtual machine. We validated LoRA training on an H100 with 80 GB of memory; peak reserved GPU memory was about 29 GB. Smaller GPUs and Apple Silicon training have not been validated for this recipe. A CPU can replay results, train the embedding classifiers and serve Laya more slowly.
+Use Python 3.12 and [uv](https://docs.astral.sh/uv/). **LoRA training requires an NVIDIA GPU**, locally or on a VM. We used an H100 with 80 GB of memory; peak reserved GPU memory was about 29 GB. Smaller GPUs and Apple Silicon training have not been validated for this recipe. A CPU can replay results, train the embedding classifiers and serve Laya more slowly.
 
-The locked dependencies are self-contained in this folder. The complete data and checkpoint download is approximately 4.4 GB. API keys are only needed for fresh model calls, not for training on the supplied recordings or replaying the report.
+Dependencies are pinned in this folder. The data and checkpoints take approximately 4.4 GB. Training and replay use the supplied answers; API keys are needed only for new model calls.
 
 ```bash
 # From a clone of superlinked/sie, install the example's pinned training and API dependencies.
@@ -76,31 +78,31 @@ uv run --frozen python router.py fetch --output data --group core --group weight
 ```
 
 ```bash
-# Recompute the recorded final evaluation, check it against the published report, and print the comparison.
+# Recompute the results from saved answers and compare the routers.
 uv run --frozen python router.py replay --data data --output replay.json
 uv run --frozen python router.py show --report replay.json
 ```
 
-`fetch` checks the pinned manifest and every downloaded file. `replay` makes no model calls. It verifies the original route decisions and final-answer collection, then recomputes the results and uncertainty intervals.
+`fetch` verifies the downloads. `replay` checks the saved routing decisions and recomputes metrics and uncertainty intervals without model calls.
 
-## 2. Try the unchanged decision model [one recorded point: 56.7% answer savings; 2.27-point loss]
+## 2. Try Laya [56.7% answer savings; 2.27 pp accuracy loss]
 
 [Laya](https://huggingface.co/convaiinnovations/laya) is a roughly 421-million-parameter ModernBERT decision model. Here it receives two questions: “Will Luna answer this request correctly?” and “Will Sol answer it correctly?” Its outputs become estimated probabilities of correctness.
 
-Laya produces correctness estimates, not one fixed spending decision. Varying how much to favor lower cost produces different policies. One recorded setting keeps every request on Sol; another saves 56.7% in answer costs with a 2.27-point test-quality loss. The useful comparison is its whole curve against the other approaches. It is not assumed to understand this particular answer-model pair before adaptation.
+Start with Laya's existing weights. It estimates correctness; a cost penalty determines how much the router favors cheaper answers. Varying that penalty traces a cost–quality curve. The heading shows one policy from that curve.
 
 ```bash
-# Inspect the unchanged Laya row alongside the other fixed policies; this does not train or call an API.
+# Inspect Laya's results alongside the other routers.
 uv run --frozen python router.py show --report replay.json
 ```
 
-The comparison uses the same answer models, questions and cost basis for every router. Always-Sol and always-Luna remain available choices, so the policy can bypass routing when doing so is preferable.
+Every router uses the same answer models and questions. Always-Sol and always-Luna remain available choices.
 
-## 3. Adapt Laya with LoRA [recorded points: 25.5–40.4% answer savings; 1.12–1.91-point loss]
+## 3. Adapt Laya with LoRA [40.4% answer savings; 1.91 pp accuracy loss]
 
 **LoRA** trains small additional matrices inside the existing model instead of updating all its weights. We adapt Laya's attention layers and decision head to predict the two observed correctness labels. This step needs a GPU.
 
-The training process compares zero through eight training passes on one held-out training fold, selects the earliest best result, then starts fresh and trains on all training questions for that many passes. It selected **one pass** in the recorded run. Calibration and final answers do not influence this choice. The exported checkpoint merges the adapter for ordinary inference.
+Training compares zero through eight passes using a held-out portion of the training data, then starts fresh and fits all training questions for the best number of passes. It selected **one pass**. Calibration and test answers play no part in that selection. The exported model includes the LoRA weights, ready for inference.
 
 ```bash
 # Create a new run and fit the LoRA decision model using training questions and labels only.
@@ -113,13 +115,13 @@ uv run --frozen --group outcomes --group training python router.py fit-native --
 uv run --frozen --group outcomes --group training python router.py score --data data --run run --method native --device cuda
 ```
 
-The recorded GPU fitting run took about 58 minutes, including selection and the fresh final fit. Changing the model, training settings or split defines a new experiment; do not tune those choices against the published final test and describe it as unseen.
+Training took about **58 minutes on an H100**, including selection and the final fit.
 
-## 4. Train a classifier on embeddings [recorded points: 35.2–50.5% savings; 0.99–1.97-point loss]
+## 4. Train on embeddings [50.5% savings; 1.97 pp accuracy loss]
 
 An **embedding** represents the question as a list of numbers that captures aspects of its meaning. We use the fixed **Qwen3-Embedding-4B** model and a 2,560-number vector. We then fit **two logistic regressions**: a weighted sum followed by a probability conversion, one for Luna correctness and one for Sol correctness. Together they have 5,122 weights and biases, with no hidden layers.
 
-The encoder stays unchanged. Only these small classifiers learn from the labels, so this training step runs on a CPU. Five whole-family training folds choose the regularization strength, which limits overly large learned weights. The recorded run selected an L2 penalty of 1.
+Only these small classifiers learn from the labels, so training runs on a **CPU**. Five training folds, keeping families together, select a penalty that limits overly large weights. The selected L2 penalty was 1.
 
 ```bash
 # Fit the small correctness predictors on the supplied embeddings, then score held-out question vectors.
@@ -127,25 +129,25 @@ uv run --frozen --group outcomes python router.py fit-embedding --data data --ru
 uv run --frozen --group outcomes python router.py score --data data --run run --method embedding
 ```
 
-To regenerate the vectors, create an account at the [SIE Console](https://console.superlinked.com), obtain an API key, and set `SIE_API_KEY` in your environment. The published full collection used about **$0.21** in batched embedding charges. Fresh charges depend on the current service pricing.
+To regenerate the vectors, get an API key from the [SIE Console](https://console.superlinked.com) and set `SIE_API_KEY`. Embedding the full dataset in batches cost about **$0.21** at the experiment's prices.
 
 ```bash
 # Regenerate the fixed question embeddings through SIE Cloud, keeping the downloaded cache unchanged.
 uv run --frozen --group live python router.py encode --data data --output new-features
 ```
 
-Use `--features new-features` on both `fit-embedding` and `score --method embedding` in a fresh run to use those vectors. Completed batches are reused on resume. An interrupted call with unknown billing requires inspecting its receipt before explicitly retrying it with `--retry-unknown`.
+Use `--features new-features` on both `fit-embedding` and `score --method embedding` in a fresh run to use those vectors.
 
-The Qwen encoder is larger than Laya, so these results compare complete approaches, not equal-size architectures. A larger encoder may help; this experiment does not isolate model size as the cause. The practical tradeoff includes how the model is hosted and shared.
+Qwen has 4B parameters; Laya has 421M. Model size may contribute to their results, but this comparison also changes the architecture and training. Compare serving cost and latency alongside accuracy.
 
-## 5. Compare frontiers and choose an operating point [you choose the cost–quality tradeoff]
+## 5. Compare cost–quality frontiers
 
-Correctness predictions alone do not decide where to send a request. We also estimate each answer model's expected cost from training data. A **cost penalty** controls how much the router favors saving money over predicted answer quality. Sweeping that penalty produces many policies. The **Pareto frontier** keeps the choices that cannot be improved in cost without giving up quality, or in quality without spending more, among the measured choices.
+The **Pareto frontier** contains the policies for which no measured alternative is cheaper with equal or better accuracy, or more accurate at equal or lower cost. Choose a policy based on your budget and the consequences of incorrect answers.
 
-There is **no required one-point quality-loss ceiling**. Pick a policy based on your budget, the consequences of incorrect answers, and uncertainty. A point that looks best on these benchmarks may not be best on your own traffic.
+Each router combines predicted correctness with answer costs estimated from training data. Sweep the cost penalty to explore its tradeoffs. Include a simple text/topic classifier and random routing to check whether the more complex approaches earn their cost.
 
 ```bash
-# Fit the simple control and build every method's calibration sweep using calibration answers only.
+# Fit the text/topic control on training data, then build calibration sweeps.
 uv run --frozen --group outcomes python router.py fit-topic --data data --run run
 uv run --frozen --group outcomes python router.py calibrate --data data --run run
 ```
@@ -155,28 +157,28 @@ uv run --frozen --group outcomes python router.py calibrate --data data --run ru
 uv run --frozen python router.py frontier --data data --run run --output calibration-frontier.html
 ```
 
-The interactive view lets you compare methods and inspect each operating point. It shows **answer-model cost** for a common comparison, or **priced total cost**, which includes the embedding fee and excludes native/topic policies whose hosting cost is unknown. The dashed random line is the expected result of randomly mixing always-Sol and always-Luna; it is an important inexpensive control. Lines do not imply that every interpolated point is a deterministic routing threshold.
+Open the HTML to compare routers. Choose **answer-model cost** to compare them before hosting fees, or **priced total cost** to include the Cloud encoder fee. Policies with unpriced hosting are omitted from total-cost view. The dashed line shows the expected cost and accuracy of randomly choosing Sol or Luna.
 
-**Choose an operating point from the calibration curve**, recording its method and candidate ID (the number identifying that saved policy). Then inspect test outcomes separately:
+**Choose on calibration data; check on test data.** Save the method and candidate ID shown in the chart, then inspect its test result:
 
 ```bash
 # Inspect the same saved calibration candidates on published test answers, without fitting or making model calls.
 uv run --frozen python router.py frontier --data data --run run --include-test --output test-frontier.html
 ```
 
-The additional test sweep is **retrospective analysis of saved calibration candidates**. It is useful for comparing curves, but the nondominated test points are a description of this test set, not a place to select a policy or claim a new blind result. The candidates exhaust the calibration routing patterns; they need not cover every distinct routing pattern on the test inputs. Choose on calibration data and validate once on a separate holdout for your own application.
+The test view replays the same candidate policies on published answers. Selecting a policy after seeing those answers would bias the result. If you train or tune further, evaluate the changes on fresh test questions. The displayed candidates cover all calibration routing patterns, which may differ from the patterns possible on test questions.
 
-The original study recorded 0, 1, 2 and 5-point calibration settings, labeling 1 and 2 as its primary and secondary comparisons. Those were experimental sampling choices, not product requirements. Their 26 frozen policies and original uncertainty intervals remain unchanged. The full calibration sweep was already saved; the example now exposes it instead of privileging one sampled setting.
+The report also summarizes policies selected with 0, 1, 2 and 5 pp calibration limits and includes their uncertainty intervals. You can choose any candidate in the frontier view.
 
 ```bash
-# Reproduce the original sampled settings for your refit and inspect their existing uncertainty calculations.
+# Evaluate your trained routers at the report's four calibration limits, including uncertainty intervals.
 uv run --frozen --group outcomes python router.py evaluate-refit --data data --run run --output refit-report.json
 uv run --frozen python router.py show --report refit-report.json
 ```
 
-Some recorded test points show why the whole comparison matters:
+Here is how two calibration limits translate into test results. Both columns show **answer-cost savings / accuracy loss**:
 
-| Router | Answer savings / quality loss at recorded setting 1 | Answer savings / quality loss at recorded setting 2 |
+| Router | 1 pp calibration limit | 2 pp calibration limit |
 |---|---:|---:|
 | Unchanged Laya | 0.0% / 0.00 pp | 56.7% / 2.27 pp |
 | Laya + LoRA | 25.5% / 1.12 pp | 40.4% / 1.91 pp |
@@ -184,11 +186,21 @@ Some recorded test points show why the whole comparison matters:
 | Simple text/topic control | 29.6% / 0.66 pp | 57.9% / 1.61 pp |
 | Random mixture | 26.2% / 1.18 pp | 52.4% / 2.36 pp |
 
-This table uses **answer costs only** for comparability. Including the Cloud encoder changes the embedding savings to **35.2% and 50.5%**. Native/topic hosting remains unpriced; see the serving scenarios below. The random rows are expected mixtures fixed during calibration, not sampled sequences of random decisions.
+Including the Cloud encoder changes embedding savings to **35.2% and 50.5%**. Laya and text/topic hosting must be added separately. Random-routing results are expectations for mixtures chosen on calibration data.
 
-LoRA has no clear advantage over random routing in these recorded comparisons. The simple text/topic router is competitive and has a better cost-and-quality point estimate than embeddings at the second sampled setting. We trained one LoRA recipe with one seed; these results do not establish a universally best architecture. The saved intervals are pointwise intervals for individual policies, not simultaneous confidence bands around a frontier selected after seeing test outcomes.
+LoRA has no clear advantage over random routing at these settings. The text/topic classifier is competitive: at the 2 pp calibration limit, it has lower answer cost and higher test accuracy than the embedding classifier. The best choice depends on where you operate on the curve.
 
-For a CPU-only embedding exercise, use `reuse-controls` in a fresh run instead of `fit-native` and `fit-topic`. This reuses the published comparison predictions and clearly marks them as reused; it does not claim to retrain Laya.
+<details>
+<summary>Uncertainty and evaluation details</summary>
+
+- The two embedding accuracy-loss estimates have 95% intervals of **0.56–1.46 pp** and **1.38–2.59 pp**. Intervals describe individual policies, not the entire frontier at once.
+- Resampling keeps question families together. KOR contributes only nine independent families to the final test.
+- The report's 26 policies were fixed before collecting final answers. The expanded test curve analyzes those published answers retrospectively.
+- LoRA used one training recipe and one seed. These results do not isolate the effect of architecture or establish a universal winner.
+
+</details>
+
+For a CPU-only embedding exercise, prepare a fresh run and use `reuse-controls` instead of `fit-native` and `fit-topic`. This loads the supplied Laya and text/topic predictions.
 
 ```bash
 # Reuse the published Laya and topic comparisons in a CPU-only embedding refit.
@@ -197,7 +209,7 @@ uv run --frozen python router.py reuse-controls --data data --run run
 
 ### Include serving cost and latency
 
-These measurements use the same fixed 90 development questions, with 30 from each source. Native timings include model inference on a warm worker. Cloud timings include the network call, vector handling and the two classifier predictions. They are sequential request timings, not a throughput benchmark.
+Timings use the same 90 development questions, 30 per benchmark, sent one at a time. Laya runs on a warm worker; Cloud timings also include the network call and classifiers.
 
 | Router deployment | Mean latency | 95th percentile | What is included |
 |---|---:|---:|---|
@@ -206,16 +218,16 @@ These measurements use the same fixed 90 development questions, with 30 from eac
 | Adapted Laya, eight CPU cores | 1.59 s | 4.16 s | Local model inference |
 | Qwen embedding through SIE Cloud + classifier | 264 ms | 321 ms | Network, embedding and classifier |
 
-The main final report includes **$0.179 per 10,000 requests** for the Cloud encoder, projected using the actual final question lengths and checked pricing formula. A separate projection reweights the serving sample to the final dataset mix: approximately **$0.27 per 10,000** for busy H100 time or **$1.28** for busy eight-core CPU time for adapted Laya. Those native estimates exclude idle capacity, cold starts and network overhead. A dedicated always-on GPU can cost much more at low traffic; the small classifier's application hosting is also outside the Cloud encoder fee.
+The Cloud encoder adds **$0.179 per 10,000 requests** at the test questions' lengths. Adapting the serving measurements to the same dataset mix gives approximately **$0.27 per 10,000** for LoRA-adapted Laya on a busy H100 or **$1.28** on eight busy CPU cores. These Laya estimates exclude idle time, cold starts and networking. An always-on GPU can cost much more at low traffic. The embedding classifier's application hosting is separate too.
 
-Adding those estimated busy-resource costs to the first sampled LoRA answer bill gives roughly **$10.71 per 10,000 on H100** (23.6% savings) or **$11.73 on eight CPU cores** (16.4% savings). These are deployment scenarios, not observed end-to-end bills. The embedding route costs **$9.09 including its Cloud encoder fee**, compared with **$14.02** for always Sol. The chosen policy sends about half the requests to Luna; its savings differ from that fraction because answer lengths and costs vary by question.
+For the LoRA policy with 1.12 pp accuracy loss, adding those hosting estimates gives **$10.71 per 10,000 on H100** (23.6% savings) or **$11.73 on CPU** (16.4% savings). These are cost projections. The embedding policy with 0.99 pp loss costs **$9.09 including its encoder**, versus **$14.02** for always Sol.
 
-## 6. Route a new request [your chosen operating point; one answer-model call]
+## 6. Route a new request
 
-Set `OPENAI_API_KEY` for the fixed Sol/Luna pair. The embedding router needs `SIE_API_KEY` when it calls SIE Cloud; a self-hosted encoder does not need it. Native Laya loads its local checkpoint. The live command requires an explicit choice: either `--candidate-id` from the selected method's calibration frontier or `--target-gap-pp` for one of the four recorded settings. It has no default quality ceiling. Use the same `--run` that produced the frontier.
+Set `OPENAI_API_KEY` for Sol/Luna and `SIE_API_KEY` for Cloud embeddings. Pass the method, candidate ID and run you chose in step 5. Each request calls one answer model.
 
 ```bash
-# Route at the calibration operating point you selected; replace the candidate ID with the one shown in your frontier.
+# Route a question using the candidate ID you chose in the calibration chart.
 CANDIDATE_ID=YOUR_SELECTED_CANDIDATE_ID
 uv run --frozen --group live python router.py answer --run run --method embedding \
   --candidate-id "$CANDIDATE_ID" \
@@ -223,27 +235,29 @@ uv run --frozen --group live python router.py answer --run run --method embeddin
   --answer-type choice --choices A B --output answers/planet
 ```
 
-Use `--method lora` or `--method base` with the `training` dependency group and a candidate ID from that method to run either Laya variant. Use `--run data/reference` with a candidate from the published reference frontier to skip refitting. `--device cuda` selects GPU inference; CPU inference is supported. Each call writes the route, answer, usage and timing to its own output directory. This command's elapsed time includes checkpoint loading or the Cloud call; use the resident measurements above for serving comparisons.
+For Laya, use `--method lora` or `--method base`, the `training` dependency group and a candidate ID from that method. Add `--device cuda` for GPU inference; CPU is also supported. Laya loads its local checkpoint and needs no SIE key.
+
+To use the supplied models, omit `--run` when generating the frontier, then use `--run data/reference` for live requests. Each request needs a fresh output directory and saves its route, answer, usage and timing. CLI timing includes model loading; the serving table above measures a warm worker.
 
 ### Use your own SIE encoder
 
-Follow [the self-hosted encoder setup](self-host/README.md) to build and start the pinned public SIE embedding server on your GPU. It includes the model configuration, a health check and a one-request smoke test. There is no published image for this bundle; the setup builds from public source. The encoder component has been exercised on a GPU, while this new Compose wrapper has only been checked statically. Pass the endpoint explicitly; there is no need to unset an environment variable or change the example code.
+Follow [the self-hosted encoder setup](self-host/README.md) to build SIE from public source and start Qwen on your GPU. The encoder has passed a GPU check; the Compose wrapper has only static validation. Pass its endpoint explicitly:
 
 ```bash
-# Encode the fixed questions against your own SIE server; local compute is not assigned a Cloud bill.
+# Generate question embeddings with your local SIE server.
 uv run --frozen --group live python router.py encode --data data --output local-features \
   --sie-base-url http://localhost:8000 --self-hosted
 ```
 
-The same endpoint options work with `answer`. This self-hosts the encoder; **Sol and Luna still use OpenAI**. A Qwen-4B/Qwen-27B development comparison showed a larger quality gap, but an adapted router for that pair has not been validated here. Changing the answer-model pair requires collecting its outcomes and fitting new predictors; the supplied Sol/Luna router is not claimed to transfer.
+The same endpoint options work with `answer`, without a SIE key. **Sol and Luna still use OpenAI.** To use a different answer-model pair, collect its outcomes and retrain the predictors.
 
 ### Where do labels come from without reference answers?
 
-Here, model outputs are generated by APIs and correctness comes from the benchmark's reference answers. That is different from **teacher-generated labels**. If your application has no reference answers, a teacher model can judge both candidate answers against a written rubric, producing two quality labels while preserving the observed costs. Keep a separate human-reviewed sample to measure whether those judgments are reliable, and prevent the teacher from using final-test answers to guide training.
+This example grades against reference answers. Without references, a **teacher model** can judge both answers against a written rubric and supply the two training labels. Keep the actual answer costs, and use a separate human-reviewed sample to check the teacher's reliability.
 
-A stronger teacher is useful only if its judgments are more reliable for your task. Qwen 27B, GLM or a frontier API model are candidates, not interchangeable ground truth. This harder-benchmark study has not validated a teacher-label variant; its measured results use the reference-answer grades described above.
+Qwen 27B, GLM or a frontier API model could serve as the teacher. Compare their judgments with that human-reviewed sample before choosing. Teacher-generated labels have not been validated in this example.
 
-To collect new paired API answers on this fixed workload, follow [the label collection instructions](LABELS.md). They preserve the same roles, request settings, first completed response and physical-attempt cost accounting. Fresh responses can differ from the recordings.
+To collect new Sol/Luna answers for this dataset, follow [the label collection instructions](LABELS.md).
 
 ## Files and reproducibility
 
@@ -253,11 +267,9 @@ All runnable code and its dependency lock live in this folder. Large public arti
 |---|---|
 | `router.py` | Download, prepare, train, score, inspect frontiers, evaluate and serve |
 | `frontier_analysis.py`, `frontier.py` | Compare saved operating points and produce an interactive cost–quality view |
-| `paired_*.py`, `utility_router.py` | The unchanged training and evaluation recipe used for the recorded study |
+| `paired_*.py`, `utility_router.py` | Training, routing and evaluation |
 | `encode.py`, `live.py` | SIE embeddings and live routed answers |
 | `collect_labels.py`, `_collection/` | Optional fresh paired-answer collection and grading |
 | `release.json`, `uv.lock` | Exact artifact and dependency versions |
 | Downloaded `data/` | Questions, labels, embeddings, checkpoints, reports and serving evidence |
 | Your `run/` and output files | Newly fitted models, selected policies and results |
-
-The final report retains all methods and quality targets, including the simple controls and outcomes that are less favorable to a learned router. There is no GEPA dependency and no event-specific setup.
