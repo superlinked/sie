@@ -3,6 +3,7 @@
 # Build from repo root:
 #   docker build -f packages/sie_server/Dockerfile.cuda12 -t sie-server:cuda12-default .
 #   docker build -f packages/sie_server/Dockerfile.cuda12 --build-arg BUNDLE=sglang -t sie-server:cuda12-sglang .
+#   docker build -f packages/sie_server/Dockerfile.cuda12 --build-arg BUNDLE=default-sglang -t sie-server:cuda12-default-sglang .
 
 ARG BUNDLE=default
 ARG UV_VERSION=0.9.28
@@ -114,8 +115,10 @@ RUN .venv/bin/python -c "import sie_audio_prep, torch; print(torch.__version__)"
 # processed at interpreter startup. Then move every discovered bundle path
 # ahead of the shared venv so bundle-specific versions SHADOW it (required for
 # the transformers5 bundle). Content is identical for every bundle, so writing
-# it here keeps the shared venv layer byte-identical.
-RUN echo "import site, sys; _sie_bundle_start = len(sys.path); site.addsitedir('/app/bundle-libs'); sys.path[:] = sys.path[_sie_bundle_start:] + sys.path[:_sie_bundle_start]" \
+# it here keeps the shared venv layer byte-identical. SIE_BUNDLE_LIBS selects
+# another overlay: a composite bundle's supervisor starts each component
+# process with its own /app/bundle-libs.d/<component>.
+RUN echo "import os, site, sys; _sie_bundle_start = len(sys.path); site.addsitedir(os.environ.get('SIE_BUNDLE_LIBS') or '/app/bundle-libs'); sys.path[:] = sys.path[_sie_bundle_start:] + sys.path[:_sie_bundle_start]" \
     > /app/.venv/lib/python3.12/site-packages/_sie_bundle.pth
 
 # Conservative venv cleanup — only things known to be runtime-safe. Keep
@@ -156,44 +159,63 @@ COPY uv.lock /tmp/uv.lock
 COPY packages/sie_server/bundle-locks /tmp/bundle-locks
 COPY tools/ci/bundle_lock.py /tmp/bundle-lock-compiler.py
 
+# One "<bundle> <directory>" line per dependency overlay: an ordinary bundle
+# installs its own lock at /app/bundle-libs; a composite bundle (components:)
+# installs each component's saved lock at /app/bundle-libs.d/<component>, and
+# its worker container runs one process per component on the same GPU.
+RUN .venv/bin/python -m sie_server.composite_bundles overlays \
+        --bundles-dir /app/bundles --bundle "${BUNDLE}" > /tmp/bundle-overlays \
+    && cat /tmp/bundle-overlays
+
 RUN test "$(uv --version)" = "uv 0.9.28" \
-    && .venv/bin/python -m sie_server.bundle_lock check \
-        --lock-dir /tmp/bundle-locks --bundles-dir /app/bundles \
-        --root-lock /tmp/uv.lock --compiler /tmp/bundle-lock-compiler.py --platform cuda12 \
-        --bundle "${BUNDLE}" --architecture "${TARGETARCH}"
+    && while read -r overlay target; do \
+        .venv/bin/python -m sie_server.bundle_lock check \
+            --lock-dir /tmp/bundle-locks --bundles-dir /app/bundles \
+            --root-lock /tmp/uv.lock --compiler /tmp/bundle-lock-compiler.py --platform cuda12 \
+            --bundle "${overlay}" --architecture "${TARGETARCH}" || exit 1; \
+    done < /tmp/bundle-overlays
 
 # PEP751 supplies exact versions, wheel/archive hashes and VCS commits. There
 # is no fresh dependency resolution against a moving index during installation.
 # Source builds may still use build-time dependencies; those and the base venv
-# are outside this runtime-overlay inventory contract.
+# are outside this runtime-overlay inventory contract. For an ordinary bundle
+# the target is /app/bundle-libs and the receipt /app/bundle-libs-inventory.json.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    UV_NO_CACHE=0 UV_COMPILE_BYTECODE=0 UV_HTTP_TIMEOUT=600 uv pip sync \
-        --no-config --python /app/.venv/bin/python \
-        --target /app/bundle-libs \
-        "/tmp/bundle-locks/cuda12-${BUNDLE}-${TARGETARCH}/pylock.toml" \
-    && .venv/bin/python -m sie_server.bundle_lock verify \
-        --lock-dir /tmp/bundle-locks --bundles-dir /app/bundles \
-        --root-lock /tmp/uv.lock --compiler /tmp/bundle-lock-compiler.py --platform cuda12 \
-        --bundle "${BUNDLE}" --architecture "${TARGETARCH}" \
-        --installed /app/bundle-libs --receipt /app/bundle-libs-inventory.json
+    mkdir -p /app/bundle-libs /app/bundle-libs.d \
+    && while read -r overlay target; do \
+        UV_NO_CACHE=0 UV_COMPILE_BYTECODE=0 UV_HTTP_TIMEOUT=600 uv pip sync \
+            --no-config --python /app/.venv/bin/python \
+            --target "${target}" \
+            "/tmp/bundle-locks/cuda12-${overlay}-${TARGETARCH}/pylock.toml" \
+        && .venv/bin/python -m sie_server.bundle_lock verify \
+            --lock-dir /tmp/bundle-locks --bundles-dir /app/bundles \
+            --root-lock /tmp/uv.lock --compiler /tmp/bundle-lock-compiler.py --platform cuda12 \
+            --bundle "${overlay}" --architecture "${TARGETARCH}" \
+            --installed "${target}" --receipt "${target}-inventory.json" || exit 1; \
+    done < /tmp/bundle-overlays
 
 # bundle-libs cleanup (symmetric to the .venv cleanup in base). The .venv
-# tree is already final in the base stage; only the per-bundle tree needs
+# tree is already final in the base stage; only the per-bundle trees need
 # cleanup here. Preserve dist-info RECORD files for runtime native-library
-# discovery.
+# discovery. A composite image's /app/bundle-libs stays empty; its top-level
+# receipts name the composite, and each component keeps its own receipts.
 RUN set -eux; \
-    if [ -d /app/bundle-libs ]; then \
-        cd /app/bundle-libs; \
+    while read -r overlay target; do \
+        cd "${target}"; \
         find . -type d -name '__pycache__' -prune -exec rm -rf {} +; \
         find . -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete; \
         find . -type d -name 'tests' -prune -exec rm -rf {} +; \
         rm -rf torch/test torch/utils/tensorboard torch/utils/bottleneck 2>/dev/null || true; \
         find torch -type f -name '*.a' -delete 2>/dev/null || true; \
         find nvidia -type f -name '*.a' -delete 2>/dev/null || true; \
+        /app/.venv/bin/pip freeze --path "${target}" > "${target}-freeze.txt"; \
+    done < /tmp/bundle-overlays; \
+    if [ ! -f /app/bundle-libs-inventory.json ]; then \
+        printf '{"composite": "%s", "overlays": "/app/bundle-libs.d"}\n' "${BUNDLE}" > /app/bundle-libs-inventory.json; \
+        : > /app/bundle-libs-freeze.txt; \
     fi; \
     # Normalize mtimes so rebuilds of the same bundle produce identical layer bytes.
-    find /app/bundle-libs -exec touch -h -d @0 {} + 2>/dev/null || true; \
-    /app/.venv/bin/pip freeze --path /app/bundle-libs > /app/bundle-libs-freeze.txt; \
+    find /app/bundle-libs /app/bundle-libs.d -exec touch -h -d @0 {} + 2>/dev/null || true; \
     touch -d @0 /app/bundle-libs-freeze.txt /app/bundle-libs-inventory.json
 
 # =============================================================================
@@ -223,6 +245,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libswscale5
 FROM runtime-sglang AS runtime-sglang-embedding
 FROM runtime-sglang AS runtime-sglang-vision-extract
+# A composite runs on the base its most demanding component needs.
+FROM runtime-sglang AS runtime-default-sglang
 # NOTE: the sglang-cu130 bundle (CUDA 13 / sglang 0.5.13 / torch 2.11 cu130) is built by
 # the separate ``cuda13`` platform — packages/sie_server/Dockerfile.cuda13 — so
 # this CUDA-12 image never produces a (mislabelled) CUDA-13 ``cuda12-sglang-cu130``
@@ -298,8 +322,10 @@ COPY --from=base --chown=1000:1000 /tmp/sie_sdk/src /tmp/sie_sdk/src
 COPY --link --from=base --chown=1000:1000 /app/models /app/models
 COPY --link --from=base --chown=1000:1000 /app/bundles /app/bundles
 # Bundle-specific extras — last layer so shared layers above stay cached.
-# A `.pth` file in the shared venv puts /app/bundle-libs at sys.path[0] at startup.
+# A `.pth` file in the shared venv puts /app/bundle-libs (or SIE_BUNDLE_LIBS)
+# at sys.path[0] at startup.
 COPY --link --from=builder --chown=1000:1000 /app/bundle-libs /app/bundle-libs
+COPY --link --from=builder --chown=1000:1000 /app/bundle-libs.d /app/bundle-libs.d
 COPY --link --from=builder --chown=1000:1000 /app/bundle-libs-freeze.txt /app/bundle-libs-freeze.txt
 COPY --link --from=builder --chown=1000:1000 /app/bundle-libs-inventory.json /app/bundle-libs-inventory.json
 

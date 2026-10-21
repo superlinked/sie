@@ -33,6 +33,10 @@ pub struct BundleConfig {
     /// ``"pytorch"`` for back-compat with pre-engine bundle YAMLs.
     #[serde(default = "default_engine")]
     pub engine: String,
+    /// Ordinary bundles a composite bundle combines on one accelerator, one
+    /// worker process per component. Empty for an ordinary bundle.
+    #[serde(default)]
+    pub components: Vec<String>,
     #[serde(default)]
     pub machine_profiles: Vec<BundleMachineProfile>,
     #[serde(default)]
@@ -75,6 +79,10 @@ pub struct BundleInfo {
     /// can verify they speak the right engine.
     #[allow(dead_code)]
     pub engine: String,
+    /// See [`BundleConfig::components`]. A composite lane serves requests
+    /// resolved to any of its components when that component has no lane of
+    /// its own on the requested queue pool and machine profile.
+    pub components: Vec<String>,
 }
 
 /// Adapter-module prefixes considered legal for each engine.

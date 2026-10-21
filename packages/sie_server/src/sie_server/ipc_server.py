@@ -21,6 +21,8 @@ import msgspec
 
 from sie_server.adapter_call_loop import handle_run_batch
 from sie_server.adapters._generation_base import GenerationUnsupportedFieldError
+from sie_server.api.ws import BundleMetadataUnavailableError, process_serves_model, served_model_ids
+from sie_server.composite_bundles import active_component
 from sie_server.config.hybrid_admission import NumericalAdmission, bridged_item_refusal, remote_admission
 from sie_server.config.model import ModelConfig
 from sie_server.core.gpu_health import gpu_is_healthy_async
@@ -727,7 +729,33 @@ class IpcServer:
             loading_models=loading_models,
         )
 
+    def _component_refuses(self, model_id: str) -> bool:
+        """Whether this composite component process must not load ``model_id``.
+
+        A composite's component processes share one model catalog but each
+        runs only its own component's adapters, in its own environment. The
+        sidecar places a model only on a process that lists it in
+        ``WorkerCapabilities.supported_models``; this refuses a stale or wrong
+        placement instead of loading the model in the wrong environment.
+        """
+        if active_component() is None or not self._bundle_id:
+            return False
+        registry = self._executor.registry
+        name = registry.resolve_model_id(model_id) or model_id
+        try:
+            return not process_serves_model(registry, self._bundle_id, name)
+        except BundleMetadataUnavailableError:
+            return False
+
     async def _handle_ensure_ready(self, req: EnsureModelReadyRequest) -> EnsureModelReadyResponse:
+        if self._component_refuses(req.model_id):
+            logger.warning(
+                "Refusing EnsureModelReady for %s: component %s of bundle %s does not serve it",
+                req.model_id,
+                active_component(),
+                self._bundle_id,
+            )
+            return EnsureModelReadyResponse(state="retry_later")
         state = await self._executor.ensure_model_ready(req.model_id)
         # Only populate batch_budget, descriptor and max_batch_tokens on the
         # "ready" path — the worker isn't guaranteed to exist in other states
@@ -942,6 +970,11 @@ class IpcServer:
         return await self._executor.replace_model_configs(req)
 
     async def _handle_set_pinned_models(self, req: SetPinnedModelsRequest) -> SetPinnedModelsResponse:
+        if active_component() is not None:
+            # A composite component pins only models it runs, so a pin the
+            # sidecar placed before learning this process's capability never
+            # loads a model in the wrong environment.
+            req = SetPinnedModelsRequest(models=[m for m in req.models if not self._component_refuses(m)])
         return await self._executor.set_pinned_models(req)
 
     async def _handle_numerical_profile_snapshot(
@@ -960,12 +993,22 @@ class IpcServer:
             return WorkerCapabilitiesResponse()
 
         supported_models = sorted(configs)
+        if self._bundle_id and active_component() is not None:
+            # A composite component process holds the composite's catalog but
+            # runs only its own adapters; the sidecar places models by this list.
+            try:
+                supported_models = served_model_ids(self._executor.registry, self._bundle_id)
+            except BundleMetadataUnavailableError:
+                logger.debug("No bundle metadata for %s; reporting every config as supported", self._bundle_id)
         try:
             loaded_models = sorted(self._executor.registry.loaded_model_names)
         except Exception:  # noqa: BLE001
             logger.debug("Could not snapshot loaded models for worker capabilities", exc_info=True)
 
+        served = set(supported_models)
         for model_id, config in configs.items():
+            if model_id not in served:
+                continue
             try:
                 if config.tasks.generate is not None:
                     generation_models.append(model_id)
@@ -1020,6 +1063,14 @@ class IpcServer:
                     except GenerationUnsupportedFieldError:
                         # The processor settles this refusal under the same configuration lease.
                         pass
+            if valid and self._component_refuses(req.model_id):
+                logger.warning(
+                    "Refusing generation for %s: component %s of bundle %s does not serve it",
+                    req.model_id,
+                    active_component(),
+                    self._bundle_id,
+                )
+                valid = False
             if not valid:
                 sink = _IpcGenerateSink(self, writer, request_id)
                 await sink.send(GenerateEvent(kind="nak", delay_ms=5000))

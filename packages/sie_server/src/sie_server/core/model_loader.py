@@ -819,7 +819,7 @@ class ModelLoader:
         alias: it is still accepted here for existing embedding profiles, but
         new profiles should declare ``loadtime.lora_paths`` (the scalar form is
         already rejected outright on generation models — see
-        ``core.pool_isolation.validate_no_legacy_scalar_lora_id``).
+        ``core.legacy_lora.validate_no_legacy_scalar_lora_id``).
 
         Args:
             config: Model configuration.

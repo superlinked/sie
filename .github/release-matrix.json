@@ -5,5 +5,8 @@
     { "platform": "cuda12", "bundle": "sglang-vision-extract" },
     { "platform": "cuda13", "bundle": "sglang-cu130" },
     { "platform": "cuda13", "bundle": "tensorrt-llm" }
+  ],
+  "composites": [
+    { "platform": "cuda12", "bundle": "default-sglang" }
   ]
 }

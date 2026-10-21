@@ -50,6 +50,13 @@ def load_bundles(root: Path) -> dict[str, dict[str, Any]]:
     for path in sorted((root / "packages/sie_server/bundles").glob("*.yaml")):
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         bundles[str(data.get("name", path.stem))] = data
+    # A composite declares no deps of its own; its engines are its components'.
+    for data in bundles.values():
+        if data.get("components") and "deps" not in data:
+            deps: dict[str, Any] = {}
+            for component in data["components"]:
+                deps.update(bundles.get(component, {}).get("deps") or {})
+            data["deps"] = deps
     return bundles
 
 
@@ -57,6 +64,7 @@ def release_targets(root: Path) -> list[tuple[str, str]]:
     data = json.loads((root / ".github/release-matrix.json").read_text(encoding="utf-8"))
     targets = [(platform, bundle) for platform in data["platforms"] for bundle in data["bundles"]]
     targets.extend((item["platform"], item["bundle"]) for item in data.get("include", []))
+    targets.extend((item["platform"], item["bundle"]) for item in data.get("composites", []))
     return targets
 
 

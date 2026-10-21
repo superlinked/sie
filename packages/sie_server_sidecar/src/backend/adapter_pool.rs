@@ -123,6 +123,12 @@ struct AdapterWorkerChild {
     pending_items: AtomicI64,
     pending_cost: AtomicI64,
     models: Mutex<HashSet<String>>,
+    /// Models this child's latest config fan-out reported it cannot serve.
+    unsupported: Mutex<HashSet<String>>,
+    /// Models this child reported it can run (`WorkerCapabilities.supported_models`).
+    /// `None` until the child first answers. The component processes of a
+    /// composite bundle hold one catalog but each runs only its own adapters.
+    served: Mutex<Option<HashSet<String>>>,
 }
 
 struct ChildInflightGuard(Arc<AdapterWorkerChild>);
@@ -147,6 +153,23 @@ impl AdapterWorkerChild {
             .expect("adapter worker child model set poisoned")
             .len()
     }
+
+    /// Whether nothing this child reported rules out serving `model_id`.
+    fn serves(&self, model_id: &str) -> bool {
+        if self
+            .unsupported
+            .lock()
+            .expect("adapter worker child unsupported set poisoned")
+            .contains(model_id)
+        {
+            return false;
+        }
+        self.served
+            .lock()
+            .expect("adapter worker child served set poisoned")
+            .as_ref()
+            .is_none_or(|served| served.contains(model_id))
+    }
 }
 
 /// Shared pool state used by the backend, heartbeat, config fanout, and
@@ -155,6 +178,9 @@ pub struct AdapterWorkerPool {
     execution_authority_v1: Arc<AtomicBool>,
     numerical_admission_v1: Arc<AtomicBool>,
     children: Vec<Arc<AdapterWorkerChild>>,
+    /// Consecutive children that share one serving slot (one accelerator):
+    /// the component processes of a composite bundle. 1 otherwise.
+    sockets_per_slot: usize,
     placements: Mutex<HashMap<String, usize>>,
     pinned_models: Mutex<HashSet<String>>,
     pinned_assignment_revision: AtomicU64,
@@ -166,6 +192,27 @@ pub struct AdapterWorkerPool {
 impl AdapterWorkerPool {
     pub fn new(
         socket_paths: &[PathBuf],
+        ipc_pool_size: usize,
+        ipc_request_timeout_s: u64,
+        model_ready_timeout_s: u64,
+        runtime_state: Arc<RuntimeState>,
+    ) -> Arc<Self> {
+        Self::new_with_slots(
+            socket_paths,
+            1,
+            ipc_pool_size,
+            ipc_request_timeout_s,
+            model_ready_timeout_s,
+            runtime_state,
+        )
+    }
+
+    /// Build a pool whose children come in groups of `sockets_per_slot`
+    /// consecutive sockets per serving slot. A slot is ready when every child
+    /// in its group is ready.
+    pub fn new_with_slots(
+        socket_paths: &[PathBuf],
+        sockets_per_slot: usize,
         ipc_pool_size: usize,
         ipc_request_timeout_s: u64,
         model_ready_timeout_s: u64,
@@ -191,16 +238,24 @@ impl AdapterWorkerPool {
                 pending_items: AtomicI64::new(0),
                 pending_cost: AtomicI64::new(0),
                 models: Mutex::new(HashSet::new()),
+                unsupported: Mutex::new(HashSet::new()),
+                served: Mutex::new(None),
             }));
         }
         assert!(
             !children.is_empty(),
             "AdapterWorkerPool requires at least one IPC socket"
         );
+        let sockets_per_slot = sockets_per_slot.max(1);
+        assert!(
+            children.len().is_multiple_of(sockets_per_slot),
+            "AdapterWorkerPool socket count must be a multiple of sockets per slot"
+        );
         let pool = Arc::new(Self {
             execution_authority_v1: Arc::new(AtomicBool::new(false)),
             numerical_admission_v1: Arc::new(AtomicBool::new(false)),
             children,
+            sockets_per_slot,
             placements: Mutex::new(HashMap::new()),
             pinned_models: Mutex::new(HashSet::new()),
             pinned_assignment_revision: AtomicU64::new(0),
@@ -210,9 +265,28 @@ impl AdapterWorkerPool {
         });
         pool.runtime_state
             .worker_gpu_slots_total
-            .set(pool.children.len() as i64);
+            .set(pool.slot_count() as i64);
         pool.runtime_state.worker_gpu_slots_ready.set(0);
         pool
+    }
+
+    /// Serving slots (accelerators) this pool fronts.
+    pub fn slot_count(&self) -> usize {
+        self.children.len() / self.sockets_per_slot
+    }
+
+    /// Slots whose every child is ready.
+    pub fn ready_slot_count(&self) -> usize {
+        self.children
+            .chunks(self.sockets_per_slot)
+            .filter(|slot| slot.iter().all(|child| child.ready.load(Ordering::Acquire)))
+            .count()
+    }
+
+    fn refresh_ready_slots(&self) {
+        self.runtime_state
+            .worker_gpu_slots_ready
+            .set(self.ready_slot_count() as i64);
     }
 
     pub fn primary_ipc(&self) -> Arc<IpcClient> {
@@ -261,6 +335,13 @@ impl AdapterWorkerPool {
             } else {
                 None
             };
+            if let Some(resp) = capabilities.as_ref() {
+                *child
+                    .served
+                    .lock()
+                    .expect("adapter worker child served set poisoned") =
+                    Some(resp.supported_models.iter().cloned().collect());
+            }
             let supports_authority = capabilities
                 .as_ref()
                 .is_some_and(|resp| resp.supports_execution_authority_v1);
@@ -284,9 +365,8 @@ impl AdapterWorkerPool {
             .into_iter()
             .map(|(index, result, _, _)| (index, result))
             .collect();
-        self.runtime_state
-            .worker_gpu_slots_ready
-            .set(self.ready_child_count() as i64);
+        self.release_placements_on_non_serving_children();
+        self.refresh_ready_slots();
         out
     }
 
@@ -322,9 +402,7 @@ impl AdapterWorkerPool {
                 }
             }
         }
-        self.runtime_state
-            .worker_gpu_slots_ready
-            .set(self.ready_child_count() as i64);
+        self.refresh_ready_slots();
         if any_success {
             combined.generation_models.sort();
             Ok(combined)
@@ -406,6 +484,7 @@ impl AdapterWorkerPool {
                             "adapter-worker-pool: child rejected config apply"
                         );
                     }
+                    record_child_unsupported(child, &resp.unsupported_models);
                     merge_apply_model_config_response(&mut combined, resp);
                 }
                 Err(e) => {
@@ -419,6 +498,7 @@ impl AdapterWorkerPool {
             return Err(e);
         }
         let resp = combined.expect("at least one child exists");
+        self.release_placements_on_non_serving_children();
         if resp.applied {
             self.clear_config_quarantine_after_success("apply_model_config", generation);
         } else {
@@ -443,6 +523,7 @@ impl AdapterWorkerPool {
                             "adapter-worker-pool: child rejected config replace"
                         );
                     }
+                    record_child_unsupported(child, &resp.unsupported_models);
                     merge_replace_model_configs_response(&mut combined, resp);
                 }
                 Err(e) => {
@@ -456,6 +537,7 @@ impl AdapterWorkerPool {
             return Err(e);
         }
         let resp = combined.expect("at least one child exists");
+        self.release_placements_on_non_serving_children();
         if resp.applied {
             self.clear_config_quarantine_after_success("replace_model_configs", generation);
         } else {
@@ -516,9 +598,7 @@ impl AdapterWorkerPool {
                 }
             }
         }
-        self.runtime_state
-            .worker_gpu_slots_ready
-            .set(self.ready_child_count() as i64);
+        self.refresh_ready_slots();
         Ok(SetPinnedModelsResponse {
             applied,
             pinned_count,
@@ -636,7 +716,8 @@ impl AdapterWorkerPool {
             .expect("adapter worker placement map poisoned");
         if let Some(&index) = placements.get(model_id) {
             let child = Arc::clone(&self.children[index]);
-            if child.ready.load(Ordering::Acquire) || self.ready_child_count() == 0 {
+            let available = child.ready.load(Ordering::Acquire) || self.ready_child_count() == 0;
+            if available && (child.serves(model_id) || !self.any_child_serves(model_id)) {
                 return child;
             }
             placements.remove(model_id);
@@ -648,7 +729,7 @@ impl AdapterWorkerPool {
                 .remove(model_id);
         }
 
-        let index = self.choose_child_index();
+        let index = self.choose_child_index(model_id);
         placements.insert(model_id.to_string(), index);
         self.mark_pinned_assignment_changed_if_needed(model_id);
         let child = Arc::clone(&self.children[index]);
@@ -691,10 +772,29 @@ impl AdapterWorkerPool {
         }
     }
 
-    fn choose_child_index(&self) -> usize {
-        let any_ready = self.ready_child_count() > 0;
-        self.children
+    fn any_child_serves(&self, model_id: &str) -> bool {
+        self.children.iter().any(|child| child.serves(model_id))
+    }
+
+    /// Pick a child for `model_id` among the children that serve it, or among
+    /// all children when none reports that it does (an unknown model, or no
+    /// child has reported its capability yet).
+    fn choose_child_index(&self, model_id: &str) -> usize {
+        let serving: Vec<&Arc<AdapterWorkerChild>> = self
+            .children
             .iter()
+            .filter(|child| child.serves(model_id))
+            .collect();
+        let candidates: Vec<&Arc<AdapterWorkerChild>> = if serving.is_empty() {
+            self.children.iter().collect()
+        } else {
+            serving
+        };
+        let any_ready = candidates
+            .iter()
+            .any(|child| child.ready.load(Ordering::Acquire));
+        candidates
+            .into_iter()
             .min_by_key(|child| {
                 let unready_penalty =
                     usize::from(any_ready && !child.ready.load(Ordering::Acquire));
@@ -709,6 +809,38 @@ impl AdapterWorkerPool {
             })
             .expect("at least one child exists")
             .index
+    }
+
+    /// Drop placements on children that now report they cannot serve the
+    /// model while another child can, so the next request is placed on one
+    /// that does. Placements made before a child first reported its
+    /// capability are corrected here.
+    fn release_placements_on_non_serving_children(&self) {
+        let mut placements = self
+            .placements
+            .lock()
+            .expect("adapter worker placement map poisoned");
+        let misplaced: Vec<(String, usize)> = placements
+            .iter()
+            .filter(|(model_id, &index)| {
+                !self.children[index].serves(model_id) && self.any_child_serves(model_id)
+            })
+            .map(|(model_id, &index)| (model_id.clone(), index))
+            .collect();
+        for (model_id, index) in misplaced {
+            placements.remove(&model_id);
+            self.mark_pinned_assignment_changed_if_needed(&model_id);
+            self.children[index]
+                .models
+                .lock()
+                .expect("adapter worker child model set poisoned")
+                .remove(&model_id);
+            info!(
+                model = %model_id,
+                child_index = index,
+                "adapter-worker-pool: placement released; child does not serve this model"
+            );
+        }
     }
 
     fn clear_model_if_on_child(&self, model_id: &str, child_index: usize) {
@@ -734,16 +866,12 @@ impl AdapterWorkerPool {
 
     fn mark_child_call_failed(&self, child: &AdapterWorkerChild) {
         child.ready.store(false, Ordering::Release);
-        self.runtime_state
-            .worker_gpu_slots_ready
-            .set(self.ready_child_count() as i64);
+        self.refresh_ready_slots();
     }
 
     fn mark_child_call_succeeded(&self, child: &AdapterWorkerChild) {
         self.mark_child_ready_from_health_success(child);
-        self.runtime_state
-            .worker_gpu_slots_ready
-            .set(self.ready_child_count() as i64);
+        self.refresh_ready_slots();
     }
 
     fn mark_child_ready_from_health_success(&self, child: &AdapterWorkerChild) {
@@ -826,9 +954,7 @@ impl AdapterWorkerPool {
         for child in &self.children {
             child.ready.store(true, Ordering::Release);
         }
-        self.runtime_state
-            .worker_gpu_slots_ready
-            .set(self.ready_child_count() as i64);
+        self.refresh_ready_slots();
     }
 
     async fn run_child_batch<F, Fut>(
@@ -965,11 +1091,22 @@ fn merge_replace_model_configs_response(
     }
 }
 
-/// A model is unsupported on the pod when any child cannot serve it.
+/// A model is unsupported on the pod only when no child can serve it. Each
+/// child's own list keeps the placement off the children that cannot (see
+/// [`AdapterWorkerChild::serves`]); identical children report identical lists.
 fn merge_unsupported_models(existing: &mut Vec<String>, next: Vec<String>) {
-    existing.extend(next);
+    let next: HashSet<String> = next.into_iter().collect();
+    existing.retain(|model| next.contains(model));
     existing.sort();
     existing.dedup();
+}
+
+fn record_child_unsupported(child: &AdapterWorkerChild, unsupported: &[String]) {
+    *child
+        .unsupported
+        .lock()
+        .expect("adapter worker child unsupported set poisoned") =
+        unsupported.iter().cloned().collect();
 }
 
 fn merge_bundle_hash(applied: &mut bool, existing_hash: &mut String, next_hash: String) {
@@ -1923,7 +2060,7 @@ mod tests {
     }
 
     #[test]
-    fn config_merges_union_unsupported_models_across_children() {
+    fn config_merge_reports_only_models_no_child_serves() {
         let mut applied = None;
         for unsupported in [
             vec!["b".to_string(), "a".to_string()],
@@ -1941,10 +2078,11 @@ mod tests {
         }
         let applied = applied.expect("combined apply");
         assert!(applied.applied);
-        assert_eq!(applied.unsupported_models, ["a", "b"]);
+        assert_eq!(applied.unsupported_models, ["a"]);
 
+        // Identical children (one bundle per pod) report identical lists.
         let mut replaced = None;
-        for unsupported in [Vec::new(), vec!["c".to_string()]] {
+        for unsupported in [vec!["c".to_string()], vec!["c".to_string()]] {
             merge_replace_model_configs_response(
                 &mut replaced,
                 ReplaceModelConfigsResponse {
@@ -1960,6 +2098,95 @@ mod tests {
         let replaced = replaced.expect("combined replace");
         assert!(replaced.applied);
         assert_eq!(replaced.unsupported_models, ["c"]);
+    }
+
+    fn report_served(pool: &AdapterWorkerPool, index: usize, models: &[&str]) {
+        *pool.children[index].served.lock().unwrap() =
+            Some(models.iter().map(|model| model.to_string()).collect());
+    }
+
+    #[test]
+    fn composite_children_place_each_model_on_a_child_that_serves_it() {
+        // One accelerator, two component processes: encoders and SGLang.
+        let pool = pool_with_children(2);
+        report_served(&pool, 0, &["bge", "reranker"]);
+        report_served(&pool, 1, &["qwen"]);
+
+        assert_eq!(pool.child_for_model("qwen").index, 1);
+        assert_eq!(pool.child_for_model("bge").index, 0);
+        assert_eq!(pool.child_for_model("reranker").index, 0);
+        // A model no child lists (not yet configured) keeps the old placement.
+        assert_eq!(pool.child_for_model("unknown").index, 1);
+
+        let pinned = pool.pinned_models_by_child(vec!["qwen".into(), "bge".into()]);
+        assert_eq!(
+            pinned,
+            vec![vec!["bge".to_string()], vec!["qwen".to_string()]]
+        );
+    }
+
+    #[test]
+    fn config_fanout_unsupported_lists_steer_placement() {
+        let pool = pool_with_children(2);
+        record_child_unsupported(&pool.children[0], &["qwen".to_string()]);
+        record_child_unsupported(&pool.children[1], &["bge".to_string()]);
+
+        assert_eq!(pool.child_for_model("qwen").index, 1);
+        assert_eq!(pool.child_for_model("bge").index, 0);
+    }
+
+    #[test]
+    fn learned_capability_releases_an_earlier_wrong_placement() {
+        let pool = pool_with_children(2);
+        // Before either child reports, placement is capability-blind.
+        assert_eq!(pool.child_for_model("qwen").index, 0);
+        let revision = pool.pinned_assignment_revision();
+        pool.update_pinned_model_set(&["qwen".to_string()]);
+        report_served(&pool, 0, &["bge"]);
+        report_served(&pool, 1, &["qwen"]);
+
+        pool.release_placements_on_non_serving_children();
+
+        assert_eq!(placement(&pool, "qwen"), None);
+        assert!(pool.pinned_assignment_revision() > revision);
+        assert_eq!(pool.child_for_model("qwen").index, 1);
+    }
+
+    #[test]
+    fn a_placement_moves_off_a_child_that_stops_serving_the_model() {
+        let pool = pool_with_children(2);
+        assert_eq!(pool.child_for_model("qwen").index, 0);
+        report_served(&pool, 0, &[]);
+        report_served(&pool, 1, &["qwen"]);
+
+        assert_eq!(pool.child_for_model("qwen").index, 1);
+    }
+
+    #[test]
+    fn composite_children_share_one_serving_slot_per_accelerator() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths: Vec<PathBuf> = [
+            "ipc-0.default",
+            "ipc-0.sglang",
+            "ipc-1.default",
+            "ipc-1.sglang",
+        ]
+        .iter()
+        .map(|name| dir.path().join(format!("{name}.sock")))
+        .collect();
+        let pool =
+            AdapterWorkerPool::new_with_slots(&paths, 2, 1, 60, 900, Arc::new(RuntimeState::new()));
+        assert_eq!(pool.slot_count(), 2);
+        assert_eq!(pool.runtime_state.worker_gpu_slots_total.get(), 2);
+
+        pool.children[0].ready.store(true, Ordering::Release);
+        pool.children[2].ready.store(true, Ordering::Release);
+        pool.children[3].ready.store(true, Ordering::Release);
+        assert_eq!(pool.ready_slot_count(), 1);
+
+        pool.children[1].ready.store(true, Ordering::Release);
+        pool.refresh_ready_slots();
+        assert_eq!(pool.runtime_state.worker_gpu_slots_ready.get(), 2);
     }
 
     #[test]

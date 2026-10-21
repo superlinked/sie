@@ -37,6 +37,7 @@ from sie_server.config.routing import validate_model_routing
 from sie_server.config.upstreams import validate_profile_upstreams
 from sie_server.core.disk_cache import DiskCacheConfig, ModelDiskCacheManager
 from sie_server.core.hot_reload import HotReloader
+from sie_server.core.legacy_lora import validate_no_legacy_scalar_lora_id
 from sie_server.core.load_errors import (
     DevicePlacementError,
     EngineExitedError,
@@ -55,11 +56,6 @@ from sie_server.core.loader import (
 from sie_server.core.memory import MemoryConfig, MemoryManager
 from sie_server.core.model_loader import DEFAULT_MAX_LORAS, LoadedModel, LoraLoadFailure, ModelLoader
 from sie_server.core.oom import is_oom_error
-from sie_server.core.pool_isolation import (
-    counts_toward_pool_isolation,
-    validate_no_legacy_scalar_lora_id,
-    validate_pool_isolation,
-)
 from sie_server.core.postprocessor_registry import PostprocessorRegistry
 from sie_server.core.preprocessor_registry import PreprocessorRegistry
 from sie_server.core.residency import EvictionResult, select_eviction_candidate
@@ -608,14 +604,7 @@ class ModelRegistry:
                 before_count,
             )
 
-        # Pool isolation. With the post-filter set in hand,
-        # reject mixed generation/non-generation pools loudly. The
-        # check is best-effort when ``pool_name`` is None (tests).
-        if self._pool_name is not None:
-            self._validate_pool_isolation_of_loaded()
-
-        # Legacy scalar ``lora_id`` exclusion fires regardless of pool_name —
-        # it's a hard invariant, not a pool-fairness concern. Multi-LoRA
+        # Legacy scalar ``lora_id`` exclusion is a hard invariant. Multi-LoRA
         # generation via ``adapter_options.loadtime.lora_paths`` is shipped
         # and is not affected by this check.
         for name, config in self._configs.items():
@@ -2385,40 +2374,6 @@ class ModelRegistry:
         except Exception:  # noqa: BLE001 - telemetry cannot break config apply
             logger.warning("Failed to refresh worker metric catalog; serving config remains active", exc_info=True)
 
-    def _validate_pool_isolation_of_loaded(self) -> None:
-        """Enforce pool isolation across currently-loaded configs.
-
-        Buckets configs by task class (gen vs non-gen) in a single
-        O(n) pass, skipping configs this worker refuses to load, and
-        asserts at most one bucket is non-empty. Raises
-        :class:`PoolIsolationError` naming the first incompatible pair
-        when both buckets are non-empty.
-
-        Called from :meth:`_load_configs_from_dir` (also reached from
-        :meth:`rescan_configs`, which fires on request-handler config
-        misses); the linear shape matters there because hot-discovery
-        storms can rescan repeatedly.
-        """
-        assert self._pool_name is not None  # caller-checked
-        gen_names: list[str] = []
-        non_gen_names: list[str] = []
-        for name, config in self._configs.items():
-            if not counts_toward_pool_isolation(config):
-                continue
-            if config.tasks.generate is not None:
-                gen_names.append(name)
-            else:
-                non_gen_names.append(name)
-        if gen_names and non_gen_names:
-            # Delegate to ``validate_pool_isolation`` so the error message
-            # stays consistent with the single-config add path.
-            validate_pool_isolation(
-                candidate_name=non_gen_names[0],
-                candidate_config=self._configs[non_gen_names[0]],
-                existing_configs={gen_names[0]: self._configs[gen_names[0]]},
-                pool_name=self._pool_name,
-            )
-
     def add_config(self, config: ModelConfig, model_dir: Path | None = None) -> set[str]:
         """Add a model config to the registry.
 
@@ -2434,7 +2389,7 @@ class ModelRegistry:
         """
         self._check_sync_config_mutation()
         expanded, updated_ids, removed_ids = self._prepare_config_update(config)
-        self._preflight_config_update(expanded, updated_ids, removed_ids)
+        self._preflight_config_update(expanded)
         self._check_sync_config_replacement(
             {**{name: value for name, value in self._configs.items() if name not in removed_ids}, **expanded}
         )
@@ -2452,7 +2407,7 @@ class ModelRegistry:
         update_lock = self._get_config_update_lock()
         async with self._config_mutation_lease(), update_lock:
             expanded, updated_ids, removed_ids = self._prepare_config_update(config)
-            await asyncio.to_thread(self._preflight_config_update, expanded, updated_ids, removed_ids)
+            await asyncio.to_thread(self._preflight_config_update, expanded)
             changed_ids = {
                 model_id
                 for model_id, candidate in expanded.items()
@@ -2504,23 +2459,10 @@ class ModelRegistry:
         removed_ids = previously_materialized - updated_ids
         return expanded, updated_ids, removed_ids
 
-    def _preflight_config_update(
-        self,
-        expanded: dict[str, ModelConfig],
-        updated_ids: set[str],
-        removed_ids: set[str],
-    ) -> None:
-        post_update = {
-            name: existing_config
-            for name, existing_config in self._configs.items()
-            if name not in updated_ids and name not in removed_ids
-        }
+    def _preflight_config_update(self, expanded: dict[str, ModelConfig]) -> None:
         for expanded_config in expanded.values():
-            if not self.accepts_config_pool(expanded_config):
-                post_update.pop(expanded_config.sie_id, None)
-                continue
-            self._validate_config_entry(expanded_config, post_update)
-            post_update[expanded_config.sie_id] = expanded_config
+            if self.accepts_config_pool(expanded_config):
+                self._validate_config_entry(expanded_config)
 
     def _synthetic_profile_variant_ids_for_base(self, base_model_id: str) -> set[str]:
         return {
@@ -2541,25 +2483,14 @@ class ModelRegistry:
     def _add_config_entry(self, config: ModelConfig, model_dir: Path | None = None) -> None:
         for expanded_config in expand_profile_variants([config]).values():
             if self.accepts_config_pool(expanded_config):
-                self._validate_config_entry(expanded_config, self._configs)
+                self._validate_config_entry(expanded_config)
         self._apply_config_entry(config, model_dir)
 
-    def _validate_config_entry(self, config: ModelConfig, existing_configs: dict[str, ModelConfig]) -> None:
-        # Pool isolation. Validate before mutating
-        # ``self._configs`` so a rejected add does not leave the
-        # registry in a half-mutated state. ``None`` pool skips the
-        # check (test paths and registries running without a
-        # SIE_POOL context).
-        if self._pool_name is not None:
-            validate_pool_isolation(
-                candidate_name=config.sie_id,
-                candidate_config=config,
-                existing_configs=existing_configs,
-                pool_name=self._pool_name,
-            )
-        # Legacy scalar ``lora_id`` exclusion is *not* pool-scoped (it is a
-        # hard invariant) so it fires regardless of ``self._pool_name``.
-        # Multi-LoRA generation (``loadtime.lora_paths``) is unaffected.
+    def _validate_config_entry(self, config: ModelConfig) -> None:
+        # Validate before mutating ``self._configs`` so a rejected add does
+        # not leave the registry in a half-mutated state. Multi-LoRA
+        # generation (``loadtime.lora_paths``) is unaffected by the legacy
+        # scalar ``lora_id`` check.
         validate_no_legacy_scalar_lora_id(name=config.sie_id, config=config)
         validate_profile_upstreams(config)
         validate_model_routing(
@@ -2642,16 +2573,6 @@ class ModelRegistry:
                         new_configs[name] = config
                         retained_names.add(name)
 
-            if self._pool_name is not None:
-                accepted: dict[str, ModelConfig] = {}
-                for name, config in new_configs.items():
-                    validate_pool_isolation(
-                        candidate_name=name,
-                        candidate_config=config,
-                        existing_configs=accepted,
-                        pool_name=self._pool_name,
-                    )
-                    accepted[name] = config
             for name, config in new_configs.items():
                 validate_no_legacy_scalar_lora_id(name=name, config=config)
                 # These exact current entries were retained after an exported

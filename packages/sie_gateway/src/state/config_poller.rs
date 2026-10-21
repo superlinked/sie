@@ -320,6 +320,7 @@ mod tests {
             priority: 10,
             adapters: vec!["sie_server.adapters.sentence_transformer".to_string()],
             engine: DEFAULT_ENGINE.to_string(),
+            components: Vec::new(),
         }]);
         (registry, temp)
     }

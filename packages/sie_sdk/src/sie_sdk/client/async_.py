@@ -1021,7 +1021,11 @@ class SIEAsyncClient:
             pinned_models: Optional set of model ids to keep loaded so the first
                 request to them pays no cold model-load. Each id must be a model the
                 gateway already tracks and may be profile-qualified
-                (``model-name:profile_name``); unknown ids are rejected. Defaults to none.
+                (``model-name:profile_name``); unknown ids are rejected, and so is
+                an id that no worker lane of the pool can serve. Pins may span
+                bundles (an LLM and encoders); a composite lane such as
+                ``default-sglang`` serves both on one GPU, and the warm floor
+                applies to each lane the pins need. Defaults to none.
             queue_pool: Optional Helm/NATS queue namespace backing this logical
                 pool. Defaults to "default", drawing from base capacity.
 

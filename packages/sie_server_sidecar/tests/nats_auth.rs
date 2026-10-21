@@ -143,6 +143,7 @@ fn worker_config(nats: &NatsServer) -> WorkerConfig {
         bundle: "default".into(),
         ipc_socket_path: PathBuf::from("/tmp/auth-test.sock"),
         ipc_socket_paths: vec![PathBuf::from("/tmp/auth-test.sock")],
+        ipc_sockets_per_slot: 1,
         ipc_pool_size: 1,
         ipc_request_timeout_s: 60,
         model_ready_timeout_s: 900,

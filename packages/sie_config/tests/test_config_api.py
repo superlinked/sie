@@ -545,6 +545,19 @@ class TestConfigAPIBundles:
         resp = self.client.get("/v1/configs/bundles/nonexistent")
         assert resp.status_code == 404
 
+    def test_get_bundle_exports_composite_components(self) -> None:
+        (self._bundles / "default-sglang.yaml").write_text(
+            "name: default-sglang\npriority: 90\ncomponents: [default, sglang]\nadapters:\n"
+            "  - sie_server.adapters.bert_flash\n  - sie_server.adapters.sglang\n"
+        )
+        client = TestClient(_create_test_app(self._bundles, self._models))
+
+        composite = yaml.safe_load(client.get("/v1/configs/bundles/default-sglang").text)
+        ordinary = yaml.safe_load(client.get("/v1/configs/bundles/default").text)
+
+        assert composite["components"] == ["default", "sglang"]
+        assert "components" not in ordinary
+
 
 class TestConfigAPIEdgeCases:
     def setup_method(self) -> None:

@@ -54,6 +54,14 @@ from sie_server.app.app_state_config import (
     ENV_PRELOAD_MODELS,
     AppStateConfig,
 )
+from sie_server.composite_bundles import (
+    COMPONENT_ENV,
+    CompositeBundleError,
+    active_component,
+    is_composite,
+    validate_composite_bundle,
+)
+from sie_server.composite_supervisor import run_composite_supervisor
 from sie_server.config.model import ModelConfig
 from sie_server.config.upstreams import (
     REMOTE_SERVING_ENV,
@@ -559,8 +567,20 @@ def serve(
             help="Require the resolved authentication mode without changing its configuration.",
         ),
     ] = None,
+    uds: Annotated[
+        str | None,
+        typer.Option(
+            "--uds",
+            help="Serve HTTP on this Unix domain socket instead of --host/--port.",
+        ),
+    ] = None,
 ) -> None:
-    """Start the SIE inference server."""
+    """Start the SIE inference server.
+
+    For a composite bundle (one whose definition lists ``components``), this
+    process supervises one server per component on the same device and answers
+    the health probes on ``--host``/``--port`` for all of them.
+    """
     from sie_sdk.storage import is_cloud_path
 
     # An explicit --log-level typo is an immediate, cheap-to-fix mistake at the
@@ -591,9 +611,6 @@ def serve(
             typer.echo(f"Warning: Models directory '{models_path}' does not exist", err=True)
         models_dir_resolved = str(models_path)
 
-    # Resolve device (auto-detect if needed)
-    resolved_device = resolve_device(device)
-    resolved_devices = parse_devices(os.environ.get(ENV_DEVICES))
     pool_name = os.environ.get(ENV_POOL) or None
 
     # Handle bundle/models filter
@@ -620,6 +637,34 @@ def serve(
     # never includes models whose adapter dependencies are absent.
     if not bundle and not models:
         bundle = baked_bundle or "default"
+
+    # A composite bundle runs one server process per component environment on
+    # the same device; this process only supervises them.
+    composite_components: tuple[str, ...] = ()
+    if bundle and is_composite(_DEFAULT_BUNDLES_DIR, bundle):
+        try:
+            composite_components = validate_composite_bundle(_DEFAULT_BUNDLES_DIR, bundle)
+        except CompositeBundleError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(1) from exc
+    serving_component = active_component()
+    if bundle and composite_components and serving_component is None:
+        if reload or uds:
+            typer.echo("Error: --reload and --uds are not supported for a composite bundle", err=True)
+            raise typer.Exit(1)
+        typer.echo(f"Bundle '{bundle}': supervising components {', '.join(composite_components)}")
+        raise typer.Exit(run_composite_supervisor(bundle=bundle, components=composite_components, host=host, port=port))
+    if serving_component is not None and serving_component not in composite_components:
+        typer.echo(
+            f"Error: {COMPONENT_ENV}={serving_component!r} is not a component of bundle {bundle!r}",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    # Resolve device (auto-detect if needed). After the composite branch, so a
+    # supervisor never initialises an accelerator runtime itself.
+    resolved_device = resolve_device(device)
+    resolved_devices = parse_devices(os.environ.get(ENV_DEVICES))
 
     all_configs: dict[str, ModelConfig] | None = None
     model_adapters: ModelAdapterInventory | None = None
@@ -864,6 +909,20 @@ def serve(
                 raise typer.Exit(1)
         typer.echo(f"Pinned (from env): {len(pinned_models)} models will be kept resident")
 
+    if serving_component is not None:
+        # Every component process holds the composite's catalog (so they all
+        # advertise one bundle hash) but loads only its own component's models.
+        component_models = {
+            _canonical_model_id(model_id)
+            for model_id in load_bundle(
+                serving_component, _DEFAULT_BUNDLES_DIR, models_dir_resolved, pool_name=pool_name
+            )
+        }
+        if preload_models:
+            preload_models = [m for m in preload_models if _canonical_model_id(m) in component_models] or None
+        if pinned_models:
+            pinned_models = [m for m in pinned_models if _canonical_model_id(m) in component_models] or None
+
     if remote_serving is None:
         remote_serving = remote_serving_from_env(os.environ.get(REMOTE_SERVING_ENV))
     if upstreams_file:
@@ -902,7 +961,7 @@ def serve(
     if uvicorn_log not in ("critical", "error", "warning", "info", "debug", "trace"):
         uvicorn_log = "info"
 
-    run_server(host=host, port=port, reload=reload, config=config, uvicorn_log_level=uvicorn_log)
+    run_server(host=host, port=port, reload=reload, config=config, uvicorn_log_level=uvicorn_log, uds=uds)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,10 @@ not resolve the overlay again from ranged bundle declarations.
 
 The target set is the 11 Linux amd64 release-matrix combinations plus separate
 CPU arm64 locks for `default`, `ctranslate2`, `sglang`, and `transformers5`.
+Composite images (the release matrix's `composites`, such as
+`cuda12-default-sglang`) have no lock of their own: they install each
+component's saved lock into `/app/bundle-libs.d/<component>` and verify each
+one the same way.
 Python 3.12 and the target architecture are part of each manifest. An image
 combination without a saved lock fails before installation.
 

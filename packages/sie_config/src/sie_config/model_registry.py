@@ -606,6 +606,11 @@ class BundleInfo:
             written before this field existed. The gateway uses
             ``engine`` to disambiguate when a model resolves to
             multiple bundles.
+        components: Ordinary bundles a composite bundle combines on one
+            accelerator, one worker process per component (empty for an
+            ordinary bundle). The gateway serves a request resolved to a
+            component bundle on a composite lane when that component has no
+            lane of its own on the requested queue pool and machine profile.
     """
 
     name: str
@@ -613,6 +618,7 @@ class BundleInfo:
     adapters: list[str] = field(default_factory=list)
     default: bool = False
     engine: str = DEFAULT_ENGINE
+    components: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -766,12 +772,22 @@ class ModelRegistry:
                         )
                         continue
 
+                    components = data.get("components") or []
+                    if not isinstance(components, list) or not all(isinstance(c, str) for c in components):
+                        logger.error(
+                            "Bundle %r at %s declares components that are not a list of bundle names; skipping load.",
+                            name,
+                            bundle_path,
+                        )
+                        continue
+
                     new_bundles[name] = BundleInfo(
                         name=name,
                         priority=priority,
                         adapters=adapters,
                         default=default,
                         engine=engine,
+                        components=list(components),
                     )
                     logger.debug(
                         "Loaded bundle '%s': priority=%d, engine=%s, adapters=%d",
@@ -1111,6 +1127,9 @@ class ModelRegistry:
                 "priority": b.priority,
                 "adapters": sorted(b.adapters),
                 "engine": b.engine,
+                # Only composites carry the key, so ordinary bundles keep the
+                # fingerprint they had before composites existed.
+                **({"components": list(b.components)} if b.components else {}),
             }
             for b in sorted(bundles, key=lambda x: x.name)
         ]

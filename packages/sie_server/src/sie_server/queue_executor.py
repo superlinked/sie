@@ -31,9 +31,9 @@ from sie_server.core.extract_cost import (
     build_extract_prepared_items,
     output_schema_shape_error,
 )
+from sie_server.core.legacy_lora import validate_no_legacy_scalar_lora_id
 from sie_server.core.loader import expand_profile_variants
 from sie_server.core.oom import is_oom_error
-from sie_server.core.pool_isolation import validate_no_legacy_scalar_lora_id
 from sie_server.core.prepared import AudioPayload, AudioPreparedItem
 from sie_server.core.registry import ModelRegistry
 from sie_server.core.runtime_options import merge_runtime_options, merge_runtime_options_with_profile
@@ -764,8 +764,8 @@ class QueueExecutor:
 
         An entry with an invalid schema or per-model options is logged, and
         that model keeps its current registry entries, if any. An invalid entry
-        without an identifiable model, duplicate valid model IDs, and cross-model
-        pool conflicts reject the whole snapshot before any registry mutation.
+        without an identifiable model and duplicate valid model IDs reject the
+        whole snapshot before any registry mutation.
         The returned hash covers the received entries, scoped by the
         control-plane adapter list when the request carries one; a rejected
         model whose retained config differs in hashed fields is reported in

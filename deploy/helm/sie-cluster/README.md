@@ -553,14 +553,16 @@ workers:
     rtx6000:
       enabled: true
       bundles:
-        default:          # embedding/rerank baseline
+        default:          # embedding/rerank baseline, one GPU per pod
           minReplicas: 1
           maxReplicas: 5
-        sglang:           # generation, warm baseline on same GPUs
+        sglang:           # generation on separate GPUs
           minReplicas: 1
           maxReplicas: 5
           preloadModels:
             - Qwen/Qwen3-4B-Instruct-2507
+    # To run the LLM and the encoders on the same GPU instead, use the
+    # default-sglang composite bundle; see "An LLM and encoders on one GPU".
 
 # Gateway configuration
 gateway:
@@ -600,7 +602,101 @@ own multiple models, but one model is not spread across children or replicated
 for throughput. A model too large for one GPU needs a device group instead.
 
 Each worker pod serves exactly one runtime bundle. Different bundles render as
-different worker StatefulSets and therefore different worker identities.
+different worker StatefulSets and therefore different worker identities. A
+composite bundle is one runtime bundle made of several environments; see the
+next section.
+
+### An LLM and encoders on one GPU
+
+On an 80 or 96 GB card (H100, H200, RTX PRO 6000, A100 80GB), one pool and one
+pod can serve an SGLang LLM and encoder models (embeddings, rerankers, GLiNER
+extractors) on the same GPU. Use the `default-sglang` composite bundle:
+
+```yaml
+workers:
+  pools:
+    h100:
+      enabled: true
+      gpuType: h100
+      gpu:
+        count: 1
+        product: NVIDIA-H100-80GB-HBM3
+      resources:
+        requests:
+          cpu: "8"
+          memory: "64Gi"
+        limits:
+          memory: "96Gi"
+      bundles:
+        default-sglang:
+          minReplicas: 1
+          maxReplicas: 4
+```
+
+A composite bundle lists ordinary bundles under `components`. Its image
+(`sie-server:<version>-cuda12-default-sglang`) carries each component's own
+dependency overlay, so the encoders keep the `default` bundle's pinned
+Transformers and the LLM keeps SGLang's. The `worker` container holds the GPU
+and runs one `sie-server` process per component on it. Each process serves
+its own IPC socket, `ipc.default.sock` and `ipc.sglang.sock`, and the
+container's `/healthz`, `/livez` and `/readyz` pass only when every component
+passes. If either process exits, the container restarts. One `worker-sidecar`
+fronts both processes and places each model on the process that runs it.
+Encoder requests are batched by the sidecar scheduler. Each generation request
+goes straight to the SGLang process, where SGLang batches requests
+continuously. With `gpu.count` above 1, every GPU gets its own pair of
+processes. A composite lane needs `workers.common.workerSidecar.enabled`. It
+cannot use `gpu.deviceGroup`.
+
+Routing needs no client change. A request names a model and a machine profile,
+for example `gpu="h100"` or `gpu="rag/h100"`. If the model's own bundle
+(`default` for the encoders, `sglang` for the LLM) has no lane on that queue
+pool and profile, the gateway serves it on the composite lane. Where the bundle
+does have a lane, that lane still wins. A logical pool can pin both kinds of
+model and keep the lane warm:
+
+```python
+from sie_sdk import SIEClient
+
+client = SIEClient("https://sie.example.com", api_key="...")
+client.create_pool(
+    "rag",
+    gpus={"h100": 1},
+    minimum_worker_count=1,
+    pinned_models=["Qwen/Qwen3-4B-Instruct-2507", "BAAI/bge-m3", "BAAI/bge-reranker-v2-m3"],
+)
+vectors = client.encode("BAAI/bge-m3", {"text": "hello"}, gpu="rag/h100")
+answer = client.generate("Qwen/Qwen3-4B-Instruct-2507", "Hello", max_new_tokens=64, gpu="rag/h100")
+```
+
+`POST /v1/pools` refuses a pin that no lane of the pool can serve, and names
+the composite bundles that could serve it. A pool's warm floor keeps each lane
+its pins need warm: here one composite lane, or two lanes if the LLM and the
+encoders ran on separate lanes.
+
+Memory: SGLang reserves its memory when the LLM loads, and the encoders use the
+rest. Give the LLM a profile sized by `kv_budget_tokens` without a fixed
+`adapter_options.loadtime.mem_fraction_static`, such as the default profile of
+`Qwen/Qwen3-4B-Instruct-2507`. That profile reserves only the weights, the KV
+budget and a fixed headroom, measured against the GPU memory free at load. A
+fixed `mem_fraction_static` (for example `0.85`) leaves the encoders only the
+remainder. Each process evicts its own least recently used unpinned models when
+the device as a whole passes `SIE_MEMORY_PRESSURE_THRESHOLD_PERCENT`. Pin the
+models that must stay resident.
+
+What you see when it works: the pod is `2/2` Ready, and the worker log shows
+`Starting component default` and `Starting component sglang`. The worker's
+heartbeat reports the bundle `default-sglang` and both kinds of model in
+`loaded_models`. `nvidia-smi` in the `worker` container lists both the encoder
+process and the SGLang engine on the one GPU.
+
+The chart reads `components` from the bundle files staged into the chart
+(`mise run helm` and the published chart include them).
+
+`default-sglang` is the composite that ships. The CUDA 13 SGLang bundle
+(`sglang-cu130`) and the `transformers5` adapters (for example GLiNER2 Decide)
+are not part of it. On smaller cards such as the L4, keep the LLM on its own
+lane; several encoders per GPU on a `default` lane already share one process.
 
 Example AWS shape for a 4-GPU L4 node:
 

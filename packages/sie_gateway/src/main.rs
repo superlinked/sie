@@ -635,6 +635,7 @@ async fn run_server(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
     {
         let pm = Arc::clone(&pool_manager);
         let reg = Arc::clone(&registry);
+        let model_registry_for_pools = Arc::clone(&model_registry);
         let notify = Arc::clone(&worker_healthy_notify);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(5));
@@ -664,7 +665,14 @@ async fn run_server(cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
                     .collect();
 
                 for pool in &pools {
-                    pm.assign_workers(&pool.spec.name, &worker_tuples).await;
+                    pm.assign_workers_matching(
+                        &pool.spec.name,
+                        &worker_tuples,
+                        |worker_bundle, filter| {
+                            model_registry_for_pools.lane_serves_bundle(worker_bundle, filter)
+                        },
+                    )
+                    .await;
                 }
             }
         });

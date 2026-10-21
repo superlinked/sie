@@ -12,6 +12,7 @@ use utoipa::ToSchema;
 use crate::http_error::{code as err_code, json_detail};
 use crate::server::AppState;
 use crate::state::model_registry::ModelRegistry;
+use crate::state::pool_lanes::{unservable_pins, warm_lane_bundles};
 use crate::state::pool_manager::{PoolLimitError, DEFAULT_POOL_NAME};
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -45,8 +46,11 @@ pub struct CreatePoolRequest {
     pub minimum_worker_count: u32,
     /// Per-pool pinned-model set. Each id is validated against the models the
     /// gateway already tracks and stored canonicalized; ids may be
-    /// profile-qualified (`model-name:profile_name`). Default empty leaves
-    /// lazy-loading unchanged. See `PoolSpec::pinned_models`.
+    /// profile-qualified (`model-name:profile_name`). Every pin must also have
+    /// a worker lane in this pool that can load it: the lane of the bundle it
+    /// routes to, or a composite lane that runs that bundle; otherwise the
+    /// request is rejected. The warm floor applies to each lane the pins need.
+    /// Default empty leaves lazy-loading unchanged. See `PoolSpec::pinned_models`.
     #[serde(default)]
     pub pinned_models: Vec<String>,
 }
@@ -159,6 +163,79 @@ pub async fn create_pool(
                 .into_response()
         }
     };
+
+    // Every pin must have a lane in this pool that can load it: its bundle's
+    // lane, or a composite lane that runs that bundle. A pin no lane serves is
+    // refused here instead of being skipped by every worker, and a warm floor
+    // applies to each lane the pins need.
+    if !pinned_models.is_empty() {
+        let queue_pool = req
+            .queue_pool
+            .as_deref()
+            .map(str::trim)
+            .filter(|pool| !pool.is_empty())
+            .unwrap_or(DEFAULT_POOL_NAME)
+            .to_ascii_lowercase();
+        let mut profiles: Vec<String> = req
+            .gpus
+            .keys()
+            .chain(req.gpu_caps.keys())
+            .map(|profile| profile.to_ascii_lowercase())
+            .collect();
+        profiles.sort();
+        profiles.dedup();
+        let catalog = state.demand_tracker.catalog();
+        let bundle_filter = req
+            .bundle
+            .as_deref()
+            .map(str::trim)
+            .filter(|bundle| !bundle.is_empty());
+        let problems = unservable_pins(
+            &state.model_registry,
+            catalog,
+            &queue_pool,
+            &profiles,
+            bundle_filter,
+            &pinned_models,
+        );
+        if !problems.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json_detail(err_code::INVALID_REQUEST, problems.join("; "))),
+            )
+                .into_response();
+        }
+        let warm_lanes: usize = profiles
+            .iter()
+            .map(|profile| {
+                warm_lane_bundles(
+                    &state.model_registry,
+                    catalog,
+                    &queue_pool,
+                    profile,
+                    bundle_filter,
+                    &pinned_models,
+                )
+                .len()
+            })
+            .sum();
+        let max = state.pool_manager.max_minimum_worker_count();
+        if u64::from(req.minimum_worker_count) * warm_lanes as u64 > u64::from(max) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json_detail(
+                    err_code::INVALID_REQUEST,
+                    format!(
+                        "minimum_worker_count {} applies to each of the {warm_lanes} worker lanes the pinned \
+                         models need, which exceeds the gateway limit of {max} warm workers per pool \
+                         (SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT)",
+                        req.minimum_worker_count
+                    ),
+                )),
+            )
+                .into_response();
+        }
+    }
 
     match state
         .pool_manager

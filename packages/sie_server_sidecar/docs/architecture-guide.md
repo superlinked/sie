@@ -688,6 +688,43 @@ active-model routing list.
 Source: [`scheduler/`](../src/scheduler/), [`latency.rs`](../src/latency.rs),
 and [`dispatcher.rs`](../src/dispatcher.rs).
 
+## Composite Bundles
+
+A composite bundle (one whose bundle YAML lists `components`, such as
+`default-sglang`) runs several bundle environments on each accelerator. Its
+worker container starts one adapter process per component, each in its own
+dependency overlay and on its own socket, `<socket stem>.<component>.sock`. The
+sidecar fronts them as ordinary children of one pod, one lane and one bundle,
+with these rules:
+
+- `SIE_IPC_SOCKETS_PER_SLOT` groups that many consecutive
+  `SIE_IPC_SOCKET_PATHS` entries into one serving slot (one accelerator). The
+  heartbeat's `total_gpu_slots` counts slots, and a slot is ready when every
+  child in it is ready. It must divide the socket count; the default is 1.
+- Each child says what it can run: `WorkerCapabilities.supported_models`,
+  refreshed with each health ping, and the `unsupported_models` of its own
+  config fan-out responses. A model is placed only on a child that can run it.
+  A placement made before the children reported is released once they do, and
+  the next request is placed again. A model that no child lists keeps the
+  load-based placement.
+- Every component process applies the composite's whole catalog and returns
+  the same bundle config hash, so the fan-out merge still requires one hash.
+  The pod reports a model unsupported only when no child can serve it.
+- Pins are split by placement, so each component process eager-loads only the
+  models it runs.
+
+Nothing else changes. Encoder work goes through the per-model scheduler lanes,
+and each generation request goes through `ProcessGenerate` to the SGLang
+component process, where SGLang batches requests continuously. The two kinds of
+work never share a sidecar batch, pipeline slot or permit pool: generation
+arrives on the worker-direct pull loop and encode, score and extract on the
+pool loop. The CUDA driver time-slices the device between the processes, and
+each process evicts its own least recently used unpinned models when the device
+as a whole runs short of memory.
+
+Source: [`backend/adapter_pool.rs`](../src/backend/adapter_pool.rs).
+
+## Preparation And Framing
 ## Preparation And Framing
 
 The sidecar performs GPU-independent preparation and framing:

@@ -360,7 +360,27 @@ pub(crate) async fn keda_capacity_snapshot(
             "JetStream lane backlog reconciliation was partial; successful lanes remain fresh"
         );
     }
-    let pools = state.pool_manager.capacity_pools().await;
+    let mut pools = state.pool_manager.capacity_pools().await;
+    for pool in pools
+        .iter_mut()
+        .filter(|pool| pool.minimum_worker_count > 0)
+    {
+        let (queue_pool, bundle, pinned) = (
+            pool.queue_pool.clone(),
+            pool.bundle.clone(),
+            pool.pinned_models.clone(),
+        );
+        pool.set_warm_lanes(|profile| {
+            crate::state::pool_lanes::warm_lane_bundles(
+                &state.model_registry,
+                catalog,
+                &queue_pool,
+                profile,
+                bundle.as_deref(),
+                &pinned,
+            )
+        });
+    }
     let pending_lanes = state.demand_tracker.active_lanes();
     let workers = state.registry.workers().await;
     let loading_workers =
@@ -1140,7 +1160,9 @@ mod capacity_snapshot_tests {
                 (0..LOGICAL_POOLS_PER_LANE).map(move |pool_index| CapacityPoolSnapshot {
                     name: format!("tenant-{lane_index}-{pool_index}"),
                     queue_pool: format!("pool-{lane_index}"),
-                    bundle: "default".to_string(),
+                    bundle: Some("default".to_string()),
+                    pinned_models: Vec::new(),
+                    warm_lanes: vec![("l4".to_string(), "default".to_string())],
                     machine_profiles: vec!["l4".to_string()],
                     minimum_worker_count: 1,
                     state: PoolState::Active,
@@ -1410,6 +1432,132 @@ mod flat_404_tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
+    }
+
+    /// A router whose registry holds an encoder (`default`), an LLM
+    /// (`sglang`) and the `default-sglang` composite, and whose lane catalog
+    /// holds `lanes` on queue pool `default`.
+    fn composite_router(lanes: &[(&str, &str)]) -> (Router, tempfile::TempDir, tempfile::TempDir) {
+        let bundles_dir = tempfile::TempDir::new().unwrap();
+        let models_dir = tempfile::TempDir::new().unwrap();
+        for (file, body) in [
+            ("default.yaml", "name: default\npriority: 10\nadapters:\n  - sie_server.adapters.sentence_transformer\n"),
+            ("sglang.yaml", "name: sglang\npriority: 20\nadapters:\n  - sie_server.adapters.sglang.generation\n"),
+            (
+                "default-sglang.yaml",
+                "name: default-sglang\npriority: 90\ncomponents: [default, sglang]\nadapters:\n  \
+                 - sie_server.adapters.sentence_transformer\n  - sie_server.adapters.sglang.generation\n",
+            ),
+        ] {
+            std::fs::write(bundles_dir.path().join(file), body).unwrap();
+        }
+        for (file, body) in [
+            (
+                "enc.yaml",
+                "sie_id: acme/enc\nhf_id: acme/enc\ntasks:\n  encode:\n    dense:\n      dim: 8\nprofiles:\n  default:\n    \
+                 adapter_path: sie_server.adapters.sentence_transformer:A\n    max_batch_tokens: 8\n",
+            ),
+            (
+                "llm.yaml",
+                "sie_id: acme/llm\nhf_id: acme/llm\ntasks:\n  generate:\n    context_length: 8\n    max_output_tokens: 8\n\
+                 profiles:\n  default:\n    adapter_path: sie_server.adapters.sglang.generation:G\n    max_batch_tokens: 8\n",
+            ),
+        ] {
+            std::fs::write(models_dir.path().join(file), body).unwrap();
+        }
+        let config = Arc::new(test_config(
+            bundles_dir.path().to_str().unwrap(),
+            models_dir.path().to_str().unwrap(),
+        ));
+        let catalog = crate::state::demand_tracker::PhysicalLaneCatalog::try_from_raw(
+            lanes.iter().map(|(profile, bundle)| {
+                (
+                    "default".to_string(),
+                    profile.to_string(),
+                    bundle.to_string(),
+                )
+            }),
+        )
+        .unwrap();
+        let state = Arc::new(AppState {
+            registry: Arc::new(WorkerRegistry::new(Duration::from_secs(30), None)),
+            config: Arc::clone(&config),
+            model_registry: Arc::new(ModelRegistry::new(
+                bundles_dir.path(),
+                models_dir.path(),
+                true,
+            )),
+            pool_manager: Arc::new(PoolManager::new(Vec::new())),
+            work_publisher: None,
+            lane_backlog_source: None,
+            demand_tracker: Arc::new(DemandTracker::new(catalog)),
+            config_epoch: crate::state::config_epoch::ConfigEpoch::new(),
+            model_access_policy: None,
+        });
+        let router = create_router(Arc::clone(&state), config);
+        (router, bundles_dir, models_dir)
+    }
+
+    #[tokio::test]
+    async fn test_create_pool_refuses_a_pin_no_lane_of_the_pool_serves() {
+        let (app, _bundles_dir, _models_dir) = composite_router(&[("l4", "default")]);
+
+        let (status, body) = post_pool(
+            &app,
+            serde_json::json!({"name": "rag", "gpus": {"l4": 1}, "pinned_models": ["acme/llm", "acme/enc"]}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = body["detail"]["message"].as_str().unwrap();
+        assert!(message.contains("'acme/llm'"), "{message}");
+        assert!(message.contains("default-sglang"), "{message}");
+        assert!(!message.contains("'acme/enc'"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn test_create_pool_accepts_an_llm_and_encoders_on_one_composite_lane() {
+        let (app, _bundles_dir, _models_dir) = composite_router(&[("h100", "default-sglang")]);
+
+        let (status, body) = post_pool(
+            &app,
+            serde_json::json!({
+                "name": "rag",
+                "gpus": {"h100": 1},
+                "minimum_worker_count": 1,
+                "pinned_models": ["acme/llm", "acme/enc"]
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+
+    #[tokio::test]
+    async fn test_create_pool_counts_the_warm_floor_on_every_lane_the_pins_need() {
+        // Separate lanes for the two bundles: a floor of 3 keeps 6 workers warm.
+        let (app, _bundles_dir, _models_dir) =
+            composite_router(&[("h100", "default"), ("h100", "sglang")]);
+
+        let (status, body) = post_pool(
+            &app,
+            serde_json::json!({
+                "name": "rag",
+                "gpus": {"h100": 1},
+                "minimum_worker_count": 3,
+                "pinned_models": ["acme/llm", "acme/enc"]
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["detail"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("2 worker lanes"),
+            "{body}"
+        );
     }
 
     #[tokio::test]

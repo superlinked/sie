@@ -330,8 +330,9 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
     .context("spawn probe server")?;
 
     // --- Adapter worker pool (connects lazily per child socket).
-    let worker_pool = AdapterWorkerPool::new(
+    let worker_pool = AdapterWorkerPool::new_with_slots(
         &config.ipc_socket_paths,
+        config.ipc_sockets_per_slot,
         config.ipc_pool_size,
         config.ipc_request_timeout_s,
         config.model_ready_timeout_s,
@@ -817,8 +818,9 @@ pub async fn run_local(config: WorkerConfig) -> anyhow::Result<()> {
     )
     .context("spawn probe server")?;
 
-    let worker_pool = AdapterWorkerPool::new(
+    let worker_pool = AdapterWorkerPool::new_with_slots(
         &config.ipc_socket_paths,
+        config.ipc_sockets_per_slot,
         config.ipc_pool_size,
         config.ipc_request_timeout_s,
         config.model_ready_timeout_s,

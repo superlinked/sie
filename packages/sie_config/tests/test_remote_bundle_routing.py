@@ -66,7 +66,9 @@ def test_a_remote_backed_model_routes_to_the_remote_bundle(registry: ModelRegist
     _, _, affected_bundles = registry.validate_model_config(copy.deepcopy(REMOTE_BACKED))
     registry.add_model_config(copy.deepcopy(REMOTE_BACKED))
 
-    assert affected_bundles == ["remote", "default"]
+    # The default-sglang composite lists the default adapters too; it ranks
+    # last and never wins by priority.
+    assert affected_bundles == ["remote", "default", "default-sglang"]
     assert registry.resolve_bundle("acme/remote") == "remote"
 
 
@@ -74,8 +76,8 @@ def test_only_the_remote_profile_of_a_local_model_routes_to_the_remote_bundle(re
     registry.add_model_config(copy.deepcopy(HYBRID))
 
     assert registry.get_model_profile_bundles("acme/hybrid") == {
-        "default": ["default"],
-        "remote": ["remote", "default"],
+        "default": ["default", "default-sglang"],
+        "remote": ["remote", "default", "default-sglang"],
     }
     assert registry.resolve_bundle("acme/hybrid") == "default"
     assert registry.resolve_bundle("acme/hybrid:remote") == "remote"

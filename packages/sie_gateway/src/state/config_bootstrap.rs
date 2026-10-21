@@ -167,8 +167,9 @@ struct BundleListEntry {
 }
 
 /// Shape of `GET /v1/configs/bundles/{id}` (YAML). Mirrors `sie-config`'s
-/// `BundleInfo` serialization: `name`, `priority`, `adapters[]`. We
-/// intentionally ignore the `source` field — it's purely informational.
+/// `BundleInfo` serialization: `name`, `priority`, `adapters[]`, `engine`, and
+/// `components[]` for a composite bundle. We intentionally ignore the `source`
+/// field — it's purely informational.
 #[derive(Debug, Deserialize)]
 struct BundleSpec {
     name: String,
@@ -178,6 +179,8 @@ struct BundleSpec {
     adapters: Vec<String>,
     #[serde(default = "BundleSpec::default_engine")]
     engine: String,
+    #[serde(default)]
+    components: Vec<String>,
 }
 
 impl BundleSpec {
@@ -493,6 +496,7 @@ impl BootstrapClient {
                 priority: spec.priority,
                 adapters: spec.adapters,
                 engine: spec.engine,
+                components: spec.components,
             });
         }
 
@@ -895,6 +899,7 @@ mod tests {
             priority: 10,
             adapters: vec!["sie_server.adapters.sentence_transformer".to_string()],
             engine: DEFAULT_ENGINE.to_string(),
+            components: Vec::new(),
         }]);
         (registry, temp)
     }
@@ -2094,12 +2099,14 @@ mod tests {
                 priority: 10,
                 adapters: vec!["mod.a".to_string()],
                 engine: DEFAULT_ENGINE.to_string(),
+                components: Vec::new(),
             },
             BundleInfo {
                 name: "b".to_string(),
                 priority: 20,
                 adapters: vec!["mod.b".to_string()],
                 engine: DEFAULT_ENGINE.to_string(),
+                components: Vec::new(),
             },
         ]);
         let mut listed = registry.list_bundles();
@@ -2112,6 +2119,7 @@ mod tests {
             priority: 10,
             adapters: vec!["mod.a".to_string()],
             engine: DEFAULT_ENGINE.to_string(),
+            components: Vec::new(),
         }]);
         assert_eq!(registry.list_bundles(), vec!["a".to_string()]);
         assert!(registry.get_bundle_info("b").is_none());

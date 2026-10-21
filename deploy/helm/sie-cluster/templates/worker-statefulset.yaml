@@ -207,6 +207,30 @@ fast at render time.
 {{- $ipcSocketPaths = append $ipcSocketPaths (printf "/var/run/sie/ipc-%d.sock" $i) }}
 {{- end }}
 {{- end }}
+{{- /* A composite bundle shares each accelerator between component
+       environments: every worker container runs one adapter process per
+       component, each serving <socket stem>.<component>.sock, and the one
+       sidecar places each model on a process that serves it. */ -}}
+{{- $components := include "sie-cluster.bundle.components" (dict "root" $root "bundle" $bundle) | fromJsonArray }}
+{{- $composite := gt (len $components) 0 }}
+{{- $sidecarSocketPaths := $ipcSocketPaths }}
+{{- if $composite }}
+{{- if not $root.Values.workers.common.workerSidecar.enabled }}
+{{- fail (printf "workers.pools.%s.bundles.%s: composite bundle %q requires workers.common.workerSidecar.enabled=true; the sidecar fronts its component processes" $poolName $bundleName $bundle) }}
+{{- end }}
+{{- if ne $engine "pytorch" }}
+{{- fail (printf "workers.pools.%s.bundles.%s: composite bundle %q runs on the pytorch engine" $poolName $bundleName $bundle) }}
+{{- end }}
+{{- if $deviceGroup }}
+{{- fail (printf "workers.pools.%s.bundles.%s: composite bundle %q shares one accelerator per container and cannot use gpu.deviceGroup" $poolName $bundleName $bundle) }}
+{{- end }}
+{{- $sidecarSocketPaths = list }}
+{{- range $socket := $ipcSocketPaths }}
+{{- range $component := $components }}
+{{- $sidecarSocketPaths = append $sidecarSocketPaths (printf "%s.%s.sock" (trimSuffix ".sock" $socket) $component) }}
+{{- end }}
+{{- end }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -603,12 +627,17 @@ spec:
             - name: SIE_WORKER_PROBE_PORT
               value: {{ $rs.probePort | quote }}
             - name: SIE_IPC_SOCKET_PATH
-              value: {{ index $ipcSocketPaths 0 | quote }}
+              value: {{ index $sidecarSocketPaths 0 | quote }}
             - name: SIE_TOKENIZER_STAGING_DIR
               value: /var/run/sie/tokenizers
-            {{- if $multiWorkerChildren }}
+            {{- if or $multiWorkerChildren $composite }}
             - name: SIE_IPC_SOCKET_PATHS
-              value: {{ join "," $ipcSocketPaths | quote }}
+              value: {{ join "," $sidecarSocketPaths | quote }}
+            {{- end }}
+            {{- if $composite }}
+            # Component processes of one accelerator share a serving slot.
+            - name: SIE_IPC_SOCKETS_PER_SLOT
+              value: {{ len $components | quote }}
             {{- end }}
             - name: SIE_POOL
               value: {{ $queuePool | quote }}

@@ -1651,6 +1651,27 @@ Returns JSON: queuePool, machineProfile, bundle, ownerPath.
 {{- end }}
 
 {{/*
+Components of a composite bundle, as a JSON list (empty for an ordinary
+bundle). Read from the staged bundle definition, the same files the gateway
+ConfigMap carries. A composite lane runs one adapter process per component on
+each accelerator, and its sidecar addresses them as <socket stem>.<component>.sock.
+*/}}
+{{- define "sie-cluster.bundle.components" -}}
+{{- $components := list -}}
+{{- $raw := .root.Files.Get (printf "files/bundles/%s.yaml" .bundle) -}}
+{{- if $raw -}}
+{{- $declared := get (fromYaml $raw) "components" -}}
+{{- if $declared -}}
+{{- if not (kindIs "slice" $declared) -}}
+{{- fail (printf "bundle %s: components must be a list of bundle names" .bundle) -}}
+{{- end -}}
+{{- $components = $declared -}}
+{{- end -}}
+{{- end -}}
+{{- $components | toJson -}}
+{{- end }}
+
+{{/*
 Reject enabled worker entries that collapse onto one physical lane after
 trim/lower normalization. Distinct Kubernetes objects must never select or
 consume the same queuePool/machineProfile/bundle tuple.

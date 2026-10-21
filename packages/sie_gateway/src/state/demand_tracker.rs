@@ -136,6 +136,51 @@ impl PhysicalLaneCatalog {
         self.lanes.contains(lane)
     }
 
+    /// The lane bundle that serves work resolved to `bundle` on `pool`.
+    ///
+    /// `bundle`'s own lane wins. Otherwise the first of `composites` (the
+    /// composite bundles that list `bundle` as a component, most preferred
+    /// first) with a lane serves it: one pod runs every component on the same
+    /// accelerator. Only lanes on `machine_profiles` count; an empty list
+    /// counts every profile of `pool`. When nothing matches, `bundle` is
+    /// returned unchanged, so callers' lane checks behave as before.
+    pub fn serving_bundle(
+        &self,
+        pool: &str,
+        machine_profiles: &[String],
+        bundle: &str,
+        composites: &[String],
+    ) -> String {
+        if composites.is_empty() {
+            return bundle.to_string();
+        }
+        let has_lane = |candidate: &str| {
+            if machine_profiles.is_empty() {
+                self.has_pool_bundle(pool, candidate)
+            } else {
+                machine_profiles
+                    .iter()
+                    .any(|profile| self.resolve(pool, profile, candidate).is_some())
+            }
+        };
+        if has_lane(bundle) {
+            return bundle.to_string();
+        }
+        composites
+            .iter()
+            .find(|composite| has_lane(composite))
+            .cloned()
+            .unwrap_or_else(|| bundle.to_string())
+    }
+
+    fn has_pool_bundle(&self, pool: &str, bundle: &str) -> bool {
+        let pool = pool.trim().to_ascii_lowercase();
+        let bundle = bundle.trim().to_ascii_lowercase();
+        self.lanes
+            .iter()
+            .any(|lane| lane.pool == pool && lane.bundle == bundle)
+    }
+
     pub fn len(&self) -> usize {
         self.lanes.len()
     }
@@ -392,6 +437,59 @@ mod tests {
 
     fn lane(pool: &str, machine_profile: &str, bundle: &str) -> PhysicalLane {
         PhysicalLane::try_new(pool, machine_profile, bundle).unwrap()
+    }
+
+    #[test]
+    fn serving_bundle_prefers_the_bundles_own_lane_then_a_covering_composite() {
+        let catalog = PhysicalLaneCatalog::try_new([
+            lane("default", "l4", "default"),
+            lane("default", "h100", "default-sglang"),
+            lane("tenant", "h100", "default"),
+        ])
+        .unwrap();
+        let composites = vec!["default-sglang".to_string()];
+        let on = |profiles: &[&str]| profiles.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(
+            catalog.serving_bundle("default", &on(&["l4"]), "default", &composites),
+            "default"
+        );
+        assert_eq!(
+            catalog.serving_bundle("default", &on(&["h100"]), "default", &composites),
+            "default-sglang"
+        );
+        assert_eq!(
+            catalog.serving_bundle("default", &on(&["H100"]), "sglang", &composites),
+            "default-sglang"
+        );
+        // Another queue pool keeps its own lanes.
+        assert_eq!(
+            catalog.serving_bundle("tenant", &on(&["h100"]), "default", &composites),
+            "default"
+        );
+        // Several candidate profiles: the bundle's own lane on any of them
+        // wins; without a profile list, any profile of the queue pool counts.
+        assert_eq!(
+            catalog.serving_bundle("default", &on(&["l4", "h100"]), "default", &composites),
+            "default"
+        );
+        assert_eq!(
+            catalog.serving_bundle("default", &[], "default", &composites),
+            "default"
+        );
+        assert_eq!(
+            catalog.serving_bundle("default", &[], "sglang", &composites),
+            "default-sglang"
+        );
+        // No lane anywhere, or no composite runs the bundle: unchanged.
+        assert_eq!(
+            catalog.serving_bundle("default", &on(&["a100"]), "sglang", &composites),
+            "sglang"
+        );
+        assert_eq!(
+            catalog.serving_bundle("default", &on(&["h100"]), "sglang", &[]),
+            "sglang"
+        );
     }
 
     fn tracker(lanes: &[PhysicalLane]) -> DemandTracker {

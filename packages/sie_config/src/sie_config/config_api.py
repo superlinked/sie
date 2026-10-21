@@ -1613,6 +1613,8 @@ async def get_bundle(request: Request, bundle_id: str) -> Response:
         "source": "filesystem",
         "adapters": info.adapters,
     }
+    if info.components:
+        data["components"] = info.components
     return Response(content=yaml.safe_dump(data, default_flow_style=False), media_type="application/x-yaml")
 
 

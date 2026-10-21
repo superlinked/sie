@@ -18,7 +18,8 @@ pub struct WarmFloorValue {
 /// Build the current warm-floor snapshot from pool business state.
 ///
 /// Each pool with a nonzero floor contributes one value per physical
-/// `(queue_pool, machine_profile, bundle)` lane. Logical pools sharing a lane
+/// `(queue_pool, machine_profile, bundle)` lane it keeps warm: its bundle's
+/// lane, or each lane its pinned models are served on. Logical pools sharing a lane
 /// collapse to the maximum requested floor because KEDA scales that physical
 /// lane. Removed lanes are deliberately absent: the telemetry facade compares
 /// complete snapshots and emits the required explicit zero.
@@ -44,13 +45,9 @@ pub fn warm_floor_values_from_capacity(pools: &[CapacityPoolSnapshot]) -> Vec<Wa
             );
             continue;
         }
-        for profile in &pool.machine_profiles {
+        for (profile, bundle) in &pool.warm_lanes {
             values
-                .entry((
-                    pool.queue_pool.clone(),
-                    profile.clone(),
-                    pool.bundle.clone(),
-                ))
+                .entry((pool.queue_pool.clone(), profile.clone(), bundle.clone()))
                 .and_modify(|value| *value = (*value).max(pool.minimum_worker_count))
                 .or_insert(pool.minimum_worker_count);
         }
@@ -150,6 +147,28 @@ mod tests {
                 Some("SGLang"),
             )]),
             vec![value("customer-queue", "l4", "sglang", 1)]
+        );
+    }
+
+    #[test]
+    fn a_pool_keeps_every_lane_its_pins_need_warm() {
+        // The reconciler fills each profile's lanes from the pinned models:
+        // here an LLM and an encoder on separate h100 lanes, and one composite
+        // lane on rtx6000 that runs both.
+        let mut snapshot =
+            CapacityPoolSnapshot::from_pool(&pool("rag", 1, &["h100", "rtx6000"], None));
+        snapshot.set_warm_lanes(|profile| match profile {
+            "h100" => vec!["default".to_string(), "sglang".to_string()],
+            _ => vec!["default-sglang".to_string()],
+        });
+
+        assert_eq!(
+            warm_floor_values_from_capacity(&[snapshot]),
+            vec![
+                value("rag", "h100", "default", 1),
+                value("rag", "h100", "sglang", 1),
+                value("rag", "rtx6000", "default-sglang", 1),
+            ]
         );
     }
 

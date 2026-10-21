@@ -531,11 +531,22 @@ impl ModelRegistry {
             }
         }
 
+        let components: Vec<String> = data
+            .get("components")
+            .and_then(|v| v.as_array())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Ok(BundleInfo {
             name,
             priority,
             adapters,
             engine,
+            components,
         })
     }
 
@@ -1717,6 +1728,34 @@ impl ModelRegistry {
     pub fn get_bundle_info(&self, bundle: &str) -> Option<BundleInfo> {
         let snap = self.snapshot.load();
         snap.bundles.get(bundle).cloned()
+    }
+
+    /// Composite bundles that list `bundle` as a component, most preferred
+    /// first (the `(priority, name)` order of bundle resolution).
+    pub fn composites_covering(&self, bundle: &str) -> Vec<String> {
+        let snap = self.snapshot.load();
+        let mut covering: Vec<(i32, String)> = snap
+            .bundles
+            .values()
+            .filter(|info| {
+                info.components
+                    .iter()
+                    .any(|component| component.eq_ignore_ascii_case(bundle))
+            })
+            .map(|info| (info.priority, info.name.clone()))
+            .collect();
+        covering.sort();
+        covering.into_iter().map(|(_, name)| name).collect()
+    }
+
+    /// Whether a lane or worker running `lane_bundle` serves work resolved to
+    /// `bundle`: the same bundle, or a composite with `bundle` as a component.
+    pub fn lane_serves_bundle(&self, lane_bundle: &str, bundle: &str) -> bool {
+        lane_bundle.eq_ignore_ascii_case(bundle)
+            || self
+                .composites_covering(bundle)
+                .iter()
+                .any(|composite| composite.eq_ignore_ascii_case(lane_bundle))
     }
 
     pub fn get_model_bundles(&self, model: &str) -> Vec<String> {
@@ -6180,6 +6219,7 @@ adapters:
             priority: 10,
             adapters: vec!["sie_server.adapters.sentence_transformer".into()],
             engine: DEFAULT_ENGINE.into(),
+            components: Vec::new(),
         }];
         registry
             .replace_authoritative_surface_if_current(
@@ -6303,6 +6343,7 @@ adapters:
                         priority: 10,
                         adapters: vec!["sie_server.adapters.sentence_transformer".to_string()],
                         engine: DEFAULT_ENGINE.to_string(),
+                        components: Vec::new(),
                     })
                     .collect(),
                 vec![named_cfg_for_test("test/model-0")],
@@ -6341,6 +6382,7 @@ adapters:
             priority: 10,
             adapters: vec!["sie_server.adapters.pytorch_embedding".to_string()],
             engine: DEFAULT_ENGINE.to_string(),
+            components: Vec::new(),
         }];
         registry
             .replace_authoritative_surface(new_bundles, vec![moved])
@@ -6355,6 +6397,7 @@ adapters:
             priority: 10,
             adapters: vec!["sie_server.adapters.nothing_served_uses".to_string()],
             engine: DEFAULT_ENGINE.to_string(),
+            components: Vec::new(),
         }];
         registry
             .replace_authoritative_surface(stranding, vec![named_cfg_for_test("other/model")])
@@ -6496,6 +6539,7 @@ adapters:
                 priority: 10,
                 adapters: vec!["sie_server.adapters.nothing_served_uses".to_string()],
                 engine: DEFAULT_ENGINE.to_string(),
+                components: Vec::new(),
             })
             .collect();
         registry.install_bundles(incompatible);
@@ -7811,6 +7855,30 @@ profiles:
     }
 
     #[test]
+    fn test_repository_composite_covers_its_components() {
+        let (_dir, _bundles_dir, models_dir) = create_test_dirs();
+        let registry = ModelRegistry::new(repository_bundles_dir(), &models_dir, true);
+
+        let composite = registry
+            .get_bundle_info("default-sglang")
+            .expect("composite bundle");
+        assert_eq!(composite.components, vec!["default", "sglang"]);
+        assert_eq!(
+            registry.composites_covering("default"),
+            vec!["default-sglang"]
+        );
+        assert_eq!(
+            registry.composites_covering("sglang"),
+            vec!["default-sglang"]
+        );
+        assert!(registry.composites_covering("transformers5").is_empty());
+        assert!(registry.lane_serves_bundle("default-sglang", "sglang"));
+        assert!(registry.lane_serves_bundle("default", "DEFAULT"));
+        assert!(!registry.lane_serves_bundle("default", "sglang"));
+        assert!(!registry.lane_serves_bundle("sglang", "default-sglang"));
+    }
+
+    #[test]
     fn test_remote_profiles_resolve_to_the_remote_bundle_of_the_repository() {
         let (_dir, _bundles_dir, models_dir) = create_test_dirs();
         let registry = ModelRegistry::new(repository_bundles_dir(), &models_dir, true);
@@ -7837,9 +7905,16 @@ profiles:
             ))
             .unwrap();
 
+        // The default-sglang composite also lists the default adapters, so it
+        // is a candidate too, ranked last: routing reaches it only through
+        // lane coverage, never by priority.
         assert_eq!(
             registry.get_model_bundles("acme/remote"),
-            vec!["remote".to_string(), "default".to_string()]
+            vec![
+                "remote".to_string(),
+                "default".to_string(),
+                "default-sglang".to_string()
+            ]
         );
         assert_eq!(
             registry.resolve_bundle("acme/remote", None).unwrap(),

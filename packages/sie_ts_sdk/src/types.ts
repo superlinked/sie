@@ -672,7 +672,11 @@ export interface CreatePoolOptions {
   /**
    * Model ids to keep loaded so the first request to them pays no cold
    * model-load. Each id must be a model the gateway already tracks and may be
-   * profile-qualified ("model-name:profile_name"); unknown ids are rejected.
+   * profile-qualified ("model-name:profile_name"); unknown ids are rejected,
+   * and so is an id that no worker lane of the pool can serve. Pins may span
+   * bundles (an LLM and encoders); a composite lane such as "default-sglang"
+   * serves both on one GPU, and the warm floor applies to each lane the pins
+   * need.
    */
   pinnedModels?: string[];
 }

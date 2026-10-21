@@ -35,12 +35,14 @@ def run_server(
     config: AppStateConfig,
     *,
     uvicorn_log_level: str = "info",
+    uds: str | None = None,
 ) -> None:
     config.save_to_env_vars()
     uvicorn.run(
         "sie_server.main:_create_app_from_env",
         host=host,
         port=port,
+        uds=uds,
         reload=reload,
         factory=True,
         loop="uvloop",

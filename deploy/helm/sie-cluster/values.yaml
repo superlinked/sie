@@ -1134,6 +1134,13 @@ workers:
   # NOTE: `engine: candle` serves applied Candle catalog models for the
   # lane's bundle/pool, just like PyTorch workers. Use `preloadModels` or pool
   # `pinnedModels` for warm model residency.
+  #
+  # A composite bundle such as `default-sglang` runs an SGLang LLM and the
+  # default encoders on the same GPU: one process per component in the worker
+  # container, one sidecar. Use it as an ordinary bundle key (for example
+  # `bundles: { default-sglang: { minReplicas: 1, maxReplicas: 4 } }`) on an
+  # 80/96 GB pool; it requires the worker sidecar and no gpu.deviceGroup.
+  # See README "An LLM and encoders on one GPU".
   pools:
 
     # L4 GPU

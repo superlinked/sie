@@ -791,6 +791,45 @@ Model: intfloat/e5-small-v2:candle
 
 The `engine` field on a bundle describes the worker runtime shape and can be used as an operator/debug filter, but normal product routing should choose a profile variant or explicit compatible bundle rather than asking application clients to know engine headers.
 
+**Composite bundles** combine ordinary bundles on one accelerator. A composite
+lists them under `components` and lists the union of their adapters, with a
+priority below every component so bundle resolution never picks it:
+
+```yaml
+# bundles/default-sglang.yaml
+name: default-sglang
+priority: 90
+components: [default, sglang]
+adapters:
+- sie_server.adapters.bge_m3_flash
+# … every default adapter …
+- sie_server.adapters.sglang.generation
+```
+
+A composite worker pod runs one adapter process per component on each GPU
+behind one sidecar, and advertises the composite as its bundle. After the
+request's queue pool and machine profile are known, the gateway picks the lane:
+the resolved bundle's own lane when `SIE_GATEWAY_CONFIGURED_PHYSICAL_LANES` has
+one on that queue pool and profile, otherwise the most preferred composite that
+lists the bundle as a component and has a lane there. A request without a
+machine profile looks for a lane on any machine profile its pool can provision. The chosen
+lane bundle then drives everything downstream: the subject, the expected bundle
+config hash, worker selection, admission and pending demand. When no composite
+matches, the resolved bundle is kept, so clusters without composite lanes route
+exactly as before. Deployment-governed and sealed routes keep the lane they
+name. A pool `bundle` filter accepts the workers of a composite that includes
+the filtered bundle.
+
+```
+Model: Qwen/Qwen3-4B-Instruct-2507        (adapter sie_server.adapters.sglang.generation)
+  resolves to "sglang"; lanes on (default, h100): only "default-sglang"
+  → routes to "default-sglang" workers on h100
+
+Model: BAAI/bge-m3                        (adapter sie_server.adapters.bge_m3_flash)
+  resolves to "default"; lanes on (default, l4): "default"
+  → routes to "default" workers on l4; on h100 to "default-sglang" workers
+```
+
 This mapping is computed at startup and whenever the model registry reloads (filesystem hot reload, NATS config delta, or successful bootstrap/poll). No per-model hand-wiring.
 
 ### 16.2 A single request from client to response
@@ -927,9 +966,9 @@ expiry; request cardinality therefore cannot create entries or Tokio tasks.
 
 Each physical queue pool gets its own JetStream stream (`WORK_POOL_{queue_pool}`) with subjects `sie.work.{queue_pool}.*.*.*`. Pool and queue-pool names are validated against `[A-Za-z0-9_-]` and canonicalized to lowercase at the API, gateway request, K8s restore/watch, and Helm render boundaries, so NATS subjects and KEDA labels do not split by case. Workers are deployed with `SIE_POOL={queue_pool}`, `SIE_MACHINE_PROFILE={profile}`, and `SIE_BUNDLE={bundle}`; they consume only from their concrete `sie.work.{queue_pool}.{profile}.{bundle}.*` lane. A logical API pool names the tenant/workload boundary and carries `PoolSpec.queue_pool` to select the physical queue lane; omitted `queue_pool` means `default`. Helm's baseline default puts enabled worker groups in `SIE_POOL=default`, so SDK calls can pass just the machine profile (`gpu="l4"`) for shared-cluster capacity, and API-created pools can borrow that same base capacity with `gpu="pool/l4"`. Dedicated queue deployments override Helm `queuePool` and must declare the same name under `queueRouting.staticQueuePools` before API pools can use it as a non-default `queue_pool`; callers can target the protected static pool directly or create a differently named logical pool backed by that queue, for example `{"name":"customer-acme-workload","queue_pool":"customer-acme"}` plus SDK `gpu="customer-acme-workload/l4"`. A cold `X-SIE-POOL` request without `X-SIE-MACHINE-PROFILE` records lane-specific `pending_demand` for every machine profile the pool can provision. Multi-profile pool demand therefore wakes all candidate lanes from zero instead of relying on an empty `machine_profile` label that no per-lane KEDA ScaledObject can observe. Registration does not clear demand: only a successful gateway work publish clears the exact target lane; other candidate lanes retain demand until work is published to them or the entry expires. This preserves scale-up pressure when registered workers are saturated.
 
-A pool spec may also carry `minimum_worker_count` (a per-pool warm floor, default `0`). It keeps the first request from hitting a cold VM: every five seconds the gateway re-emits `sie.gateway.pool.warm_floor{pool,machine_profile,bundle}` for each backing queue lane the pool can name (clearing lanes that disappear), and a per-lane KEDA trigger reads the collector's Prometheus translation with `or vector(0)` so KEDA keeps machines warm. When multiple logical pools share one backing lane, the emitted value is the maximum requested floor for that physical lane, not a sum. Active lease capacity is labeled the same way. Default `0` emits nothing and leaves scale-from-zero unchanged.
+A pool spec may also carry `minimum_worker_count` (a per-pool warm floor, default `0`). It keeps the first request from hitting a cold VM: every five seconds the gateway re-emits `sie.gateway.pool.warm_floor{pool,machine_profile,bundle}` for each backing queue lane the pool keeps warm (clearing lanes that disappear), and a per-lane KEDA trigger reads the collector's Prometheus translation with `or vector(0)` so KEDA keeps machines warm. On each machine profile those lanes are the pool's `bundle` lane when the pool sets one; otherwise the lane each pinned model is served on, so a pool that pins an LLM and an encoder keeps both of their lanes warm (one composite lane when a composite runs both there); a pool without pins keeps the `default` bundle's lane, served by a composite where `default` has no lane of its own. When multiple logical pools share one backing lane, the emitted value is the maximum requested floor for that physical lane, not a sum. Active lease capacity is labeled the same way. Default `0` emits nothing and leaves scale-from-zero unchanged.
 
-A pool spec may also carry `pinned_models` (a per-pool set of always-loaded models, default empty), chosen from the models the gateway already tracks (`GET /v1/configs/models`); ids may be profile-qualified (`model-name:profile_name`, the registry's `{base}:{profile}` variant entries, with `model:default` folding to the base). The API validates each id against the registry and stores it canonicalized. Every 30 seconds the gateway emits the complete `sie.gateway.pool.pinned_model.loaded{pool,model}` snapshot through its canonical OTel facade: the value is `1` only when a healthy worker assigned to that logical pool reports the model loaded, and removed pools or pins are explicitly zeroed. Actually keeping the models loaded (worker preload) and lazy-load/LRU using spare capacity around the pinned set are worker-side and tracked separately. Default empty leaves lazy-loading unchanged.
+A pool spec may also carry `pinned_models` (a per-pool set of always-loaded models, default empty), chosen from the models the gateway already tracks (`GET /v1/configs/models`); ids may be profile-qualified (`model-name:profile_name`, the registry's `{base}:{profile}` variant entries, with `model:default` folding to the base). The API validates each id against the registry and stores it canonicalized. It also refuses, with `400 INVALID_REQUEST` naming each offending model, a pin that no lane of the pool can serve: the pin's bundle (or a composite that includes it) must have a configured lane on the pool's queue pool for at least one of its machine profiles, and a pool with a `bundle` filter only accepts pins that bundle runs. A warm floor counts every lane the pins need, so `minimum_worker_count` times that number of lanes must fit `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`. Each worker loads the pins it can serve; the sidecar sends a composite worker's pins to the component process that runs each one. Every 30 seconds the gateway emits the complete `sie.gateway.pool.pinned_model.loaded{pool,model}` snapshot through its canonical OTel facade: the value is `1` only when a healthy worker assigned to that logical pool reports the model loaded, and removed pools or pins are explicitly zeroed. Actually keeping the models loaded (worker preload) and lazy-load/LRU using spare capacity around the pinned set are worker-side and tracked separately. Default empty leaves lazy-loading unchanged.
 
 Creating a usable custom pool has two supported shapes. For a dynamic logical pool over base capacity, call `POST /v1/pools` with the logical name and GPU requirements and omit `queue_pool`; it defaults to `default`, so no additional Helm worker group is required. Pool `name` is user/dynamic. Non-default `queue_pool` is infra/admin: it must name a Helm-rendered `queuePool`/`SIE_POOL` backing lane declared under `queueRouting.staticQueuePools`. For a dedicated physical queue, first add that worker group to Helm values and declare the same name under `queueRouting.staticQueuePools`, then create logical pools with `queue_pool` set to that queue. Lease-owned dynamic pools expire after their TTL unless renewed with `POST /v1/pools/{name}/renew`. The gateway bounds API-created pools independently of auth: a `minimum_worker_count` whose total across the pool's machine profiles, or `gpus` requirements whose sum, exceeds `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT` (default 4) and `ttl_seconds` above `SIE_GATEWAY_POOL_MAX_TTL_S` (default 3600) are rejected with `400 INVALID_REQUEST`, and a create beyond `SIE_GATEWAY_MAX_POOLS` live API-created pools (default 64) is rejected with `403 POOL_OPERATION_FORBIDDEN`. Pools restored from Kubernetes or applied from another replica are held to the same TTL and warm-floor caps when their lease expiry and KEDA warm floor are computed. An API-created pool's active lease keeps at most its `gpus` requirement per machine profile warm, and at most `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT` in total, however many workers it is assigned; a stored pool's per-lane warm floor is capped so its total fits the same budget. The live-pool cap is checked by the replica serving the create against every pool it knows, so concurrent creates on different replicas can briefly exceed it. `POST /v1/pools` refuses the name `default` with `403 POOL_OPERATION_FORBIDDEN`. The `default` pool and static Helm queue pools are operator-owned and exempt. Clients target either shape with an explicit `X-SIE-POOL` header, for example `X-SIE-POOL: customer-acme`, or SDK `gpu="customer-acme/l4"`. The `default` pool is protected and cannot be deleted. Missing named pools intentionally fail closed so capped/dynamic pool isolation is not weakened by a silent fallback.
 

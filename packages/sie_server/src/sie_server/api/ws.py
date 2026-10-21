@@ -26,6 +26,7 @@ from sie_sdk.types import (
 )
 
 from sie_server import __version__
+from sie_server.composite_bundles import active_component
 from sie_server.core.batcher import BatchConfig
 from sie_server.core.gpu_health import gpu_is_healthy_async
 from sie_server.core.readiness import is_ready
@@ -193,6 +194,18 @@ def _bundle_adapter_modules(bundle_id: str) -> frozenset[str]:
         msg = f"Invalid adapters list in bundle config {bundle_path}"
         raise BundleMetadataUnavailableError(msg)
     return frozenset(str(adapter) for adapter in adapters if adapter)
+
+
+def _image_adapter_modules(bundle_id: str) -> frozenset[str]:
+    """Return the adapters this process can run for ``bundle_id``.
+
+    In a composite bundle each worker process serves one component's adapters,
+    in that component's environment; elsewhere this is the bundle's own list.
+    The bundle's own list remains the default hash scope, so every component
+    process of a composite advertises the same bundle config hash.
+    """
+    component = active_component()
+    return _bundle_adapter_modules(component or bundle_id)
 
 
 def _adapter_module(adapter_path: str | None) -> str | None:
@@ -437,7 +450,8 @@ def compute_bundle_config_view(
 
     ``unsupported_models`` lists the routable ids (``model`` or
     ``model:profile``) in that scope that this worker cannot serve: the adapter
-    module is not in this image's bundle file, or the entry was rejected and the
+    module is not in this image's bundle file (in a composite bundle, this
+    process's component bundle file), or the entry was rejected and the
     registry holds no config with the same hashed fields.
 
     Raises:
@@ -448,8 +462,10 @@ def compute_bundle_config_view(
     if not configs and not rejected:
         return BundleConfigView("", [])
 
-    image_adapters = _bundle_adapter_modules(bundle_id)
-    scope = frozenset(control_plane_adapters) if control_plane_adapters is not None else image_adapters
+    image_adapters = _image_adapter_modules(bundle_id)
+    scope = (
+        frozenset(control_plane_adapters) if control_plane_adapters is not None else _bundle_adapter_modules(bundle_id)
+    )
     entries = _registry_hash_entries(configs, scope)
     unsupported: set[str] = set()
     replaced: set[str] = set()
@@ -477,6 +493,32 @@ def compute_bundle_config_view(
     return BundleConfigView(_serialize_hash_entries(entries), sorted(unsupported))
 
 
+def served_model_ids(registry: ModelRegistry, bundle_id: str) -> list[str]:
+    """Return the registry's model ids whose adapter this process can run.
+
+    A composite bundle's component process holds the composite's whole catalog
+    but runs only its component's adapters; the sidecar places a model only on
+    a process that lists it here.
+
+    Raises:
+        BundleMetadataUnavailableError: This image's bundle file is missing.
+    """
+    image_adapters = _image_adapter_modules(bundle_id)
+    return sorted(
+        name
+        for name, config in registry.get_configs_snapshot().items()
+        if _adapter_module(config.resolve_profile("default").adapter_path) in image_adapters
+    )
+
+
+def process_serves_model(registry: ModelRegistry, bundle_id: str, model_id: str) -> bool:
+    """Whether this process can run ``model_id`` (see :func:`served_model_ids`)."""
+    config = registry.get_configs_snapshot().get(model_id)
+    if config is None:
+        return False
+    return _adapter_module(config.resolve_profile("default").adapter_path) in _image_adapter_modules(bundle_id)
+
+
 def bundle_model_is_supported(
     registry: ModelRegistry,
     bundle_id: str,
@@ -493,10 +535,14 @@ def bundle_model_is_supported(
     if config is None:
         return False
     try:
-        image_adapters = _bundle_adapter_modules(bundle_id)
+        image_adapters = _image_adapter_modules(bundle_id)
+        scope = (
+            frozenset(control_plane_adapters)
+            if control_plane_adapters is not None
+            else _bundle_adapter_modules(bundle_id)
+        )
     except BundleMetadataUnavailableError:
         return False
-    scope = frozenset(control_plane_adapters) if control_plane_adapters is not None else image_adapters
     return _profile_matches_bundle(config, "default", scope) and _profile_matches_bundle(
         config, "default", image_adapters
     )

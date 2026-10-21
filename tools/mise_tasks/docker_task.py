@@ -136,12 +136,38 @@ def load_release_matrix(path: Path = DEFAULT_MATRIX) -> tuple[ServerTarget, ...]
                 str(target_name) if target_name is not None else None,
             )
         )
+    # Composite images install their components' saved locks, so they are
+    # listed apart from the lock targets above; every component must be one.
+    composites = data.get("composites", [])
+    if not isinstance(composites, list):
+        raise ValueError("release matrix composites must be a list")
+    lock_targets = {(target.platform, target.bundle) for target in targets}
+    for item in composites:
+        if not isinstance(item, dict) or "platform" not in item or "bundle" not in item:
+            raise ValueError("release matrix composite entries require platform and bundle")
+        target = ServerTarget(str(item["platform"]), str(item["bundle"]))
+        components = composite_components(target.bundle)
+        if not components:
+            raise ValueError(f"release composite {target.bundle} declares no components")
+        missing = [component for component in components if (target.platform, component) not in lock_targets]
+        if missing:
+            raise ValueError(f"release composite {target.platform}/{target.bundle} lacks component images {missing}")
+        targets.append(target)
     identities = [(target.platform, target.bundle) for target in targets]
     if len(identities) != len(set(identities)):
         raise ValueError("release matrix contains duplicate platform/bundle targets")
     for target in targets:
         validate_target(target)
     return tuple(targets)
+
+
+def composite_components(bundle: str) -> list[str]:
+    """Return a composite bundle's components (empty for an ordinary bundle)."""
+    data = yaml.safe_load((ROOT / "packages/sie_server/bundles" / f"{bundle}.yaml").read_text()) or {}
+    components = data.get("components") or []
+    if not isinstance(components, list) or not all(isinstance(item, str) for item in components):
+        raise ValueError(f"bundle {bundle} declares invalid components")
+    return components
 
 
 def server_image(registry: str, version: str, target: ServerTarget) -> str:

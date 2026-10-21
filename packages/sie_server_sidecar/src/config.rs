@@ -99,6 +99,12 @@ pub struct WorkerConfig {
     /// [`Self::ipc_socket_path`] for the single-worker baseline.
     pub ipc_socket_paths: Vec<PathBuf>,
 
+    /// Consecutive entries of [`Self::ipc_socket_paths`] that share one serving
+    /// slot (one accelerator). A composite bundle runs one adapter process per
+    /// component on the same device, so its sockets come in groups of the
+    /// component count. Sourced from `SIE_IPC_SOCKETS_PER_SLOT`; default 1.
+    pub ipc_sockets_per_slot: usize,
+
     /// Number of concurrent IPC connections to each adapter worker process. `1`
     /// preserves the legacy single-socket behaviour; higher values let
     /// the dispatcher's `SIE_MAX_CONCURRENT_BATCHES` actually drive
@@ -235,6 +241,7 @@ impl std::fmt::Debug for WorkerConfig {
             bundle,
             ipc_socket_path,
             ipc_socket_paths,
+            ipc_sockets_per_slot,
             ipc_pool_size,
             ipc_request_timeout_s,
             model_ready_timeout_s,
@@ -267,6 +274,7 @@ impl std::fmt::Debug for WorkerConfig {
             .field("bundle", bundle)
             .field("ipc_socket_path", ipc_socket_path)
             .field("ipc_socket_paths", ipc_socket_paths)
+            .field("ipc_sockets_per_slot", ipc_sockets_per_slot)
             .field("ipc_pool_size", ipc_pool_size)
             .field("ipc_request_timeout_s", ipc_request_timeout_s)
             .field("model_ready_timeout_s", model_ready_timeout_s)
@@ -423,6 +431,7 @@ mod tests {
             bundle: "default".into(),
             ipc_socket_path: PathBuf::from("/tmp/sie-ipc.sock"),
             ipc_socket_paths: vec![PathBuf::from("/tmp/sie-ipc.sock")],
+            ipc_sockets_per_slot: 1,
             ipc_pool_size: 1,
             ipc_request_timeout_s: 60,
             model_ready_timeout_s: 900,

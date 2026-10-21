@@ -1117,7 +1117,7 @@
             "type": "string"
           },
           "pinned_models": {
-            "description": "Per-pool pinned-model set. Each id is validated against the models the\ngateway already tracks and stored canonicalized; ids may be\nprofile-qualified (`model-name:profile_name`). Default empty leaves\nlazy-loading unchanged. See `PoolSpec::pinned_models`.",
+            "description": "Per-pool pinned-model set. Each id is validated against the models the\ngateway already tracks and stored canonicalized; ids may be\nprofile-qualified (`model-name:profile_name`). Every pin must also have\na worker lane in this pool that can load it: the lane of the bundle it\nroutes to, or a composite lane that runs that bundle; otherwise the\nrequest is rejected. The warm floor applies to each lane the pins need.\nDefault empty leaves lazy-loading unchanged. See `PoolSpec::pinned_models`.",
             "items": {
               "type": "string"
             },

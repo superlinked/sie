@@ -577,6 +577,38 @@ class TestModelRegistryThreadSafety:
         registry.reload()
         assert registry.compute_bundles_hash() != before
 
+    def test_composite_bundle_components_load_and_change_the_hash(self, temp_config_dirs) -> None:
+        # A composite's components decide which lanes the gateway may serve a
+        # component bundle on, so editing them is bundle drift. Ordinary
+        # bundles keep the fingerprint they had before composites existed.
+        bundles_dir, models_dir = temp_config_dirs
+        registry = ModelRegistry(bundles_dir, models_dir)
+        without_composite = registry.compute_bundles_hash()
+        assert registry.get_bundle_info("default").components == []
+
+        composite = (
+            "name: default-sglang\npriority: 90\ncomponents: [default, sglang]\nadapters:\n"
+            "  - sie_server.adapters.bge_m3\n  - sie_server.adapters.sglang\n"
+        )
+        (bundles_dir / "default-sglang.yaml").write_text(composite)
+        registry.reload()
+        info = registry.get_bundle_info("default-sglang")
+        assert info is not None
+        assert info.components == ["default", "sglang"]
+        with_composite = registry.compute_bundles_hash()
+        assert with_composite != without_composite
+
+        (bundles_dir / "default-sglang.yaml").write_text(composite.replace("[default, sglang]", "[sglang, default]"))
+        registry.reload()
+        assert registry.compute_bundles_hash() != with_composite
+
+    def test_bundle_with_malformed_components_is_skipped(self, temp_config_dirs) -> None:
+        bundles_dir, models_dir = temp_config_dirs
+        (bundles_dir / "broken.yaml").write_text("name: broken\ncomponents: default\nadapters: []\n")
+        registry = ModelRegistry(bundles_dir, models_dir)
+        assert registry.get_bundle_info("broken") is None
+        assert registry.get_bundle_info("default") is not None
+
     def test_compute_bundles_hash_independent_of_adapter_list_order(self, temp_config_dirs) -> None:
         # Two YAMLs that list the same adapters in different order describe
         # the same bundle semantically. The hash MUST NOT change — otherwise

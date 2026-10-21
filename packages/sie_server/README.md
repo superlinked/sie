@@ -87,6 +87,34 @@ pip install sie-server
   pip install "opf @ git+https://github.com/openai/privacy-filter@f7f00ca7fb869683eb732c010299d901457f19c3" "tiktoken==0.12.0"
   ```
 
+### Composite bundles
+
+A composite bundle runs several bundles' environments on one accelerator. Its
+definition lists ordinary bundles under `components` and the union of their
+adapters; `default-sglang` combines the default encoders with SGLang generation:
+
+```yaml
+# bundles/default-sglang.yaml
+name: default-sglang
+priority: 90
+components: [default, sglang]
+adapters: [...]  # every default and sglang adapter
+```
+
+`sie-server serve --bundle default-sglang` supervises one `sie-server serve`
+process per component and answers `/healthz`, `/livez` and `/readyz` on
+`--host`/`--port` with 200 only when every component does. Each component
+process runs in its component's dependency overlay (`/app/bundle-libs.d/<component>`
+in the `cuda12-default-sglang` image, selected with `SIE_BUNDLE_LIBS`), serves
+its own IPC socket, `<SIE_IPC_SOCKET_PATH stem>.<component>.sock`, and its HTTP
+app on a private Unix socket (`--uds`). Every component process holds the
+composite's whole model catalog, so all of them report the same bundle config
+hash. Each one runs only its own component's adapters, reports the rest as
+unsupported, and refuses to load or pin them. A composite needs the
+worker-sidecar, which places each model on the process that runs it; direct HTTP
+inference is not served by the supervisor. The Helm chart's
+"An LLM and encoders on one GPU" section shows the deployment.
+
 ## Quick Start
 
 ```bash
@@ -1202,6 +1230,13 @@ profiles:
       loadtime:
         mem_fraction_static: 0.90
 ```
+
+On a GPU shared with encoders (a composite bundle such as `default-sglang`),
+prefer the automatic sizing above: the engine then takes only its reservation
+and the encoders keep the rest. Each component process evicts its own least
+recently used unpinned models when the device as a whole passes
+`SIE_MEMORY_PRESSURE_THRESHOLD_PERCENT`; a process with a single resident model
+does not evict it for pressure.
 
 An explicit fraction keeps the previous SGLang launch and admission behavior:
 SIE requires that fraction of total GPU memory plus 1 GiB of load headroom,

@@ -1,0 +1,78 @@
+name: default-sglang
+# Composite bundle: an SGLang-served LLM and the default encoders on the same
+# GPU, in one pool lane. The image carries each component bundle's saved
+# dependency overlay under /app/bundle-libs.d/<component>, and the worker
+# container runs one `sie-server serve` process per component, each in its own
+# environment (the default encoders keep transformers 4.57.6; SGLang keeps the
+# engine's own transformers 5 closure for chat templates and grammar). One
+# worker-sidecar fronts every component process: it batches encoder work in its
+# scheduler and passes each generation request through to SGLang's continuous
+# batching.
+#
+# Lowest preference: the gateway never picks this bundle by priority. It routes
+# here only when a request's own bundle (default or sglang) has no lane on the
+# requested queue pool and machine profile, and this composite does.
+priority: 90
+default: false
+# Ordered component bundles. Each must be an ordinary (non-composite) bundle on
+# the same platform. A composite declares no deps of its own: each component
+# process uses that component's saved lock.
+components:
+- default
+- sglang
+# The union of the component adapter lists, kept explicit so every bundle
+# reader (gateway, sie-config, worker, SDK) treats this as an ordinary bundle.
+# When you add an adapter to default.yaml or sglang.yaml, add it here too;
+# tests/test_composite_bundles.py names any module that is missing.
+adapters:
+- sie_server.adapters.bert_flash
+- sie_server.adapters.bert_flash_cross_encoder
+- sie_server.adapters.bge_m3_flag
+- sie_server.adapters.bge_m3_flash
+- sie_server.adapters.clip
+- sie_server.adapters.colbert
+- sie_server.adapters.colbert_modernbert_flash.adapter
+- sie_server.adapters.colbert_rotary_flash
+- sie_server.adapters.colpali
+- sie_server.adapters.colqwen2
+- sie_server.adapters.colqwen3
+- sie_server.adapters.colsmol
+- sie_server.adapters.grounding_dino.adapter
+- sie_server.adapters.gte_sparse_flash
+- sie_server.adapters.jina_flash_cross_encoder
+- sie_server.adapters.modernbert_flash
+- sie_server.adapters.modernbert_flash_cross_encoder
+- sie_server.adapters.native_causal_cross_encoder.adapter
+- sie_server.adapters.nemo_colembed
+- sie_server.adapters.nomic_flash
+- sie_server.adapters.owlv2.adapter
+- sie_server.adapters.pytorch_embedding
+- sie_server.adapters.qwen2_flash
+- sie_server.adapters.qwen2_flash_cross_encoder.adapter
+- sie_server.adapters.qwen3_vl_embedding
+- sie_server.adapters.qwen3_vl_reranker.adapter
+- sie_server.adapters.remote.openai
+- sie_server.adapters.remote.sie
+- sie_server.adapters.rope_flash
+- sie_server.adapters.sentence_transformer
+- sie_server.adapters.siglip.adapter
+- sie_server.adapters.splade_flash.adapter
+- sie_server.adapters.stablebridge_pruner
+- sie_server.adapters.whisper.adapter
+- sie_server.adapters.xlm_roberta_flash
+- sie_server.adapters.nli_classification
+- sie_server.adapters.nli_classification_flash
+- sie_server.adapters.gliner
+- sie_server.adapters.gliner2.adapter
+- sie_server.adapters.gliner_bi
+- sie_server.adapters.gliner_union.adapter
+- sie_server.adapters.glirel
+- sie_server.adapters.gliclass
+- sie_server.adapters.laya.adapter
+- sie_server.adapters.gliformer.adapter
+- sie_server.adapters.donut
+- sie_server.adapters.florence2
+- sie_server.adapters.docling.adapter
+- sie_server.adapters.paddleocr_vl
+- sie_server.adapters.mineru_vl
+- sie_server.adapters.sglang.generation

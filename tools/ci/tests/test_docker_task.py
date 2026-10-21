@@ -33,6 +33,7 @@ def complete_source(tmp_path: Path, monkeypatch):
     ):
         platform = "cuda13" if name in {"sglang-cu130", "tensorrt-llm"} else "cuda12"
         (bundles / f"{name}.yaml").write_text(f"name: {name}\nplatform: {platform}\n")
+    (bundles / "default-sglang.yaml").write_text("name: default-sglang\ncomponents: [default, sglang]\n")
     monkeypatch.setattr(docker_task, "ROOT", tmp_path)
     return docker_task.load_release_matrix(MATRIX)
 
@@ -54,13 +55,34 @@ def archive(tmp_path: Path, image: str = IMAGE):
     )
 
 
-def test_release_matrix_resolves_exact_eleven_pairs(complete_source):
+def test_release_matrix_resolves_exact_twelve_pairs(complete_source):
     assert {(target.platform, target.bundle) for target in complete_source} == {
         (platform, bundle)
         for platform in ("cuda12", "cpu")
         for bundle in ("default", "ctranslate2", "sglang", "transformers5")
-    } | {("cuda12", "sglang-vision-extract"), ("cuda13", "sglang-cu130"), ("cuda13", "tensorrt-llm")}
-    assert len(complete_source) == 11
+    } | {
+        ("cuda12", "sglang-vision-extract"),
+        ("cuda12", "default-sglang"),
+        ("cuda13", "sglang-cu130"),
+        ("cuda13", "tensorrt-llm"),
+    }
+    assert len(complete_source) == 12
+
+
+def test_release_composite_requires_component_images(complete_source, tmp_path):
+    matrix = json.loads(MATRIX.read_text())
+    matrix["composites"] = [{"platform": "cuda12", "bundle": "default-sglang"}]
+    matrix["bundles"] = ["default", "ctranslate2", "transformers5"]
+    path = tmp_path / "matrix.json"
+    path.write_text(json.dumps(matrix))
+    with pytest.raises(ValueError, match=r"lacks component images \['sglang'\]"):
+        docker_task.load_release_matrix(path)
+
+    matrix["composites"] = [{"platform": "cuda12", "bundle": "default"}]
+    matrix["bundles"] = ["default", "ctranslate2", "sglang", "transformers5"]
+    path.write_text(json.dumps(matrix))
+    with pytest.raises(ValueError, match="declares no components"):
+        docker_task.load_release_matrix(path)
 
 
 def test_release_matrix_fails_closed_for_absent_bundle(complete_source, tmp_path):
@@ -340,19 +362,34 @@ def test_bundle_image_installs_are_constrained_to_the_lock(dockerfile: str) -> N
     sync = next(i for i, line in enumerate(logical) if "uv pip sync" in line)
     assert check < sync
     assert "--no-config --python /app/.venv/bin/python" in logical[sync]
-    assert "--target /app/bundle-libs" in logical[sync]
-    assert "${BUNDLE}-${TARGETARCH}/pylock.toml" in logical[sync]
     assert "sie_server.bundle_lock verify" in logical[sync]
-    assert "--installed /app/bundle-libs --receipt /app/bundle-libs-inventory.json" in logical[sync]
-    assert "pip freeze --path /app/bundle-libs > /app/bundle-libs-freeze.txt" in text
+    if dockerfile == "Dockerfile.cuda12":
+        # CUDA 12 images install one saved lock per overlay of the bundle's
+        # plan: /app/bundle-libs for an ordinary bundle, one directory per
+        # component for a composite. Each overlay is checked, installed from its
+        # own lock and verified against what was installed.
+        plan = next(i for i, line in enumerate(logical) if "sie_server.composite_bundles overlays" in line)
+        assert plan < check
+        assert '--bundle "${overlay}"' in logical[check]
+        assert '--target "${target}"' in logical[sync]
+        assert "cuda12-${overlay}-${TARGETARCH}/pylock.toml" in logical[sync]
+        assert '--installed "${target}" --receipt "${target}-inventory.json"' in logical[sync]
+        assert 'pip freeze --path "${target}" > "${target}-freeze.txt"' in text
+        assert "/app/bundle-libs.d /app/bundle-libs.d" in text
+    else:
+        assert "--target /app/bundle-libs" in logical[sync]
+        assert "${BUNDLE}-${TARGETARCH}/pylock.toml" in logical[sync]
+        assert "--installed /app/bundle-libs --receipt /app/bundle-libs-inventory.json" in logical[sync]
+        assert "pip freeze --path /app/bundle-libs > /app/bundle-libs-freeze.txt" in text
     for receipt in ("bundle-libs-freeze.txt", "bundle-libs-inventory.json"):
         assert f"/app/{receipt} /app/{receipt}" in text
     assert "-r /tmp/bundle-requirements.txt" not in text
 
 
-def test_expected_release_set_has_sixteen_tags_and_six_names(complete_source):
+def test_expected_release_set_has_seventeen_tags_and_six_names(complete_source):
     images = docker_task.expected_versioned_images("ghcr.io/superlinked", VERSION, complete_source)
-    assert len(images) == len(set(images)) == 16
+    assert len(images) == len(set(images)) == 17
+    assert f"ghcr.io/superlinked/sie-server:v{VERSION}-cuda12-default-sglang" in images
     assert len({image.split(":")[0] for image in images}) == 6
     assert f"ghcr.io/superlinked/sie-server-rust:v{VERSION}-cuda12-sm89" in images
 
@@ -498,7 +535,7 @@ def test_failed_old_alias_retry_never_rolls_back_newer_success(complete_source, 
         run_id="1235",
     )
     newer_writes = writes[1:].copy()
-    assert len(newer_writes) == 16
+    assert len(newer_writes) == 17
     assert all(":v0.7.5" in command[-1] for command in newer_writes)
     docker_task.move_aliases("ghcr.io/superlinked", VERSION, complete_source, **kwargs)
     assert writes[1:] == newer_writes
@@ -511,7 +548,7 @@ def test_same_release_alias_retry_is_idempotent(complete_source, public_releases
     docker_task.move_aliases("ghcr.io/superlinked", VERSION, complete_source, **kwargs)
     first = writes.copy()
     docker_task.move_aliases("ghcr.io/superlinked", VERSION, complete_source, **kwargs)
-    assert len(first) == 16
+    assert len(first) == 17
     assert writes == first + first
 
 

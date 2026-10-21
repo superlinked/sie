@@ -1001,6 +1001,7 @@ mod tests {
             bundle: "b".into(),
             ipc_socket_path: PathBuf::from("/tmp/s.sock"),
             ipc_socket_paths: vec![PathBuf::from("/tmp/s.sock")],
+            ipc_sockets_per_slot: 1,
             ipc_pool_size: 1,
             ipc_request_timeout_s: 60,
             model_ready_timeout_s: 900,

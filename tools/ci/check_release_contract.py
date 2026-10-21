@@ -942,11 +942,17 @@ def docker_release_errors() -> list[str]:
     matrix = load_json(".github/release-matrix.json")
     pairs = {(platform, bundle) for platform in matrix.get("platforms", []) for bundle in matrix.get("bundles", [])}
     pairs.update((item.get("platform"), item.get("bundle")) for item in matrix.get("include", []))
+    pairs.update((item.get("platform"), item.get("bundle")) for item in matrix.get("composites", []))
     expected_pairs = {
         (platform, bundle)
         for platform in ("cuda12", "cpu")
         for bundle in ("default", "ctranslate2", "sglang", "transformers5")
-    } | {("cuda12", "sglang-vision-extract"), ("cuda13", "sglang-cu130"), ("cuda13", "tensorrt-llm")}
+    } | {
+        ("cuda12", "sglang-vision-extract"),
+        ("cuda12", "default-sglang"),
+        ("cuda13", "sglang-cu130"),
+        ("cuda13", "tensorrt-llm"),
+    }
     if pairs != expected_pairs:
         errors.append("Docker release matrix differs from the supported server pairs")
 

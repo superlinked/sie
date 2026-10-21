@@ -5,8 +5,8 @@ adapters:
 deps:
   # Lockstep with ``bundles/sglang.yaml``. The dependency stack is
   # identical (sglang's grammar backends are unavoidably pulled in even
-  # on embedding-only deployments), and the bundle split exists only for
-  # worker pool isolation. The previous revision pinned ``outlines-core``
+  # on embedding-only deployments), and the bundle split exists only to
+  # give embedding its own worker lane (queue, metrics and autoscaling). The previous revision pinned ``outlines-core``
   # (a transitive of ``outlines``) instead of the actual top-level deps
   # the generation bundle pins, which was both wrong and produced silent
   # pip resolution drift on environments that already had a different

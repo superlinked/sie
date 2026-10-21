@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 from sie_sdk.bundle_utils import match_bundle_models
+from sie_server.composite_bundles import is_composite
 from sie_server.core.loader import load_model_config
 
 SIE_SERVER_ROOT = Path(__file__).resolve().parents[2]
@@ -166,7 +167,12 @@ def test_generative_ocr_defaults_to_isolated_sglang_extract_and_keeps_transforme
     assert f"{model_id}:transformers" in transformers_models
 
 
-@pytest.mark.parametrize("bundle_yaml", sorted(BUNDLES_DIR.glob("*.yaml")))
+@pytest.mark.parametrize(
+    "bundle_yaml",
+    # A composite bundle combines task classes on purpose: each of its
+    # component processes serves one ordinary bundle, which this guard covers.
+    [path for path in sorted(BUNDLES_DIR.glob("*.yaml")) if not is_composite(BUNDLES_DIR, path.stem)],
+)
 def test_bundle_does_not_mix_generation_and_non_generation_models(bundle_yaml: Path) -> None:
     generation_flags = _load_model_generation_flags()
     matched = match_bundle_models(bundle_yaml, MODELS_DIR)

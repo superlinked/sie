@@ -1927,14 +1927,11 @@ profiles:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("reverse_order", [False, True])
-    async def test_replace_model_configs_rejects_pool_conflicts_before_mutation(self, reverse_order: bool) -> None:
+    async def test_replace_model_configs_applies_generation_and_encoders_in_one_pool(self, reverse_order: bool) -> None:
+        # A composite bundle runs an LLM and encoders in one pool, each in its
+        # own component process, so one snapshot may carry both task classes.
         registry = ModelRegistry(models_dir=None, pool_name="default")
         executor = QueueExecutor(registry)
-        previous = ModelConfig(**yaml.safe_load(_worker_telemetry_model_yaml("kept/model")))
-        registry.add_config(previous)
-        registry._loaded["kept/model"] = MagicMock()
-        registry._do_unload = AsyncMock()
-        version = registry._config_version
         entries = [
             ReplaceModelConfigEntry(model_id="Qwen/Qwen3.6-27B", model_config=_qwen_default_only_yaml()),
             ReplaceModelConfigEntry(model_id="new/model", model_config=_worker_telemetry_model_yaml("new/model")),
@@ -1942,14 +1939,12 @@ profiles:
         if reverse_order:
             entries.reverse()
 
-        with pytest.raises(ValueError, match=r"cannot register .* into pool"):
-            await executor.replace_model_configs(
-                ReplaceModelConfigsRequest(bundle_id="default", epoch=8, bundle_config_hash="", models=entries)
-            )
+        response = await executor.replace_model_configs(
+            ReplaceModelConfigsRequest(bundle_id="default", epoch=8, bundle_config_hash="", models=entries)
+        )
 
-        assert registry.get_configs_snapshot() == {"kept/model": previous}
-        assert registry._config_version == version
-        registry._do_unload.assert_not_awaited()
+        assert response.applied
+        assert set(registry.get_configs_snapshot()) >= {"Qwen/Qwen3.6-27B", "new/model"}
 
     @pytest.mark.asyncio
     async def test_replace_model_configs_keeps_loaded_model_for_identical_config(self) -> None:

@@ -29,7 +29,7 @@ from sie_server.config.model import (
     ProfileConfig,
     Tasks,
 )
-from sie_server.core.pool_isolation import (
+from sie_server.core.legacy_lora import (
     LegacyScalarLoraIdError,
     _has_legacy_scalar_lora_id,
     validate_no_legacy_scalar_lora_id,

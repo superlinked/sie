@@ -206,15 +206,23 @@ pub struct PoolAdmissionStatus {
     pub assigned_count: usize,
 }
 
-/// Capacity-reconciler view of one logical pool. Deliberately excludes pinned
-/// models, GPU cap maps, timestamps, and persistence metadata so the
-/// five-second KEDA loop clones only the state that can affect capacity.
+/// Capacity-reconciler view of one logical pool. Deliberately excludes GPU
+/// cap maps, timestamps, and persistence metadata so the five-second KEDA loop
+/// clones only the state that can affect capacity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapacityPoolSnapshot {
     pub name: String,
     pub queue_pool: String,
-    pub bundle: String,
+    /// The pool's bundle filter, lowercased; `None` takes workers of any bundle.
+    pub bundle: Option<String>,
+    /// The pool's pinned models: the warm floor keeps each one's lane warm.
+    pub pinned_models: Vec<String>,
     pub machine_profiles: Vec<String>,
+    /// `(machine_profile, bundle)` lanes the warm floor keeps warm.
+    /// [`Self::from_pool`] fills the bundle filter (or `default`) on every
+    /// profile; the capacity reconciler replaces it with the lanes the pinned
+    /// models need (see [`crate::state::pool_lanes::warm_lane_bundles`]).
+    pub warm_lanes: Vec<(String, String)>,
     pub minimum_worker_count: u32,
     pub state: PoolState,
     pub assigned_workers: Vec<AssignedWorker>,
@@ -222,21 +230,41 @@ pub struct CapacityPoolSnapshot {
 
 impl CapacityPoolSnapshot {
     pub(crate) fn from_pool(pool: &Pool) -> Self {
+        let bundle = pool
+            .spec
+            .bundle
+            .as_deref()
+            .map(|bundle| bundle.trim().to_ascii_lowercase());
+        let machine_profiles = machine_profiles_for_pool(pool);
+        let lane_bundle = bundle.clone().unwrap_or_else(|| "default".to_string());
         Self {
             name: pool.spec.name.clone(),
             queue_pool: normalize_queue_pool(&pool.spec.queue_pool),
-            bundle: pool
-                .spec
-                .bundle
-                .as_deref()
-                .unwrap_or("default")
-                .trim()
-                .to_ascii_lowercase(),
-            machine_profiles: machine_profiles_for_pool(pool),
+            bundle,
+            pinned_models: pool.spec.pinned_models.clone(),
+            warm_lanes: machine_profiles
+                .iter()
+                .map(|profile| (profile.clone(), lane_bundle.clone()))
+                .collect(),
+            machine_profiles,
             minimum_worker_count: pool.spec.minimum_worker_count,
             state: pool.status.state,
             assigned_workers: pool.status.assigned_workers.clone(),
         }
+    }
+
+    /// Replace [`Self::warm_lanes`] with `lanes_for(profile)` on each profile.
+    pub fn set_warm_lanes(&mut self, mut lanes_for: impl FnMut(&str) -> Vec<String>) {
+        self.warm_lanes = self
+            .machine_profiles
+            .iter()
+            .flat_map(|profile| {
+                lanes_for(profile)
+                    .into_iter()
+                    .map(|bundle| (profile.clone(), bundle))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
     }
 }
 
@@ -450,8 +478,18 @@ impl PoolManager {
         } else {
             snapshot.machine_profiles.sort();
             snapshot.machine_profiles.truncate(budget as usize);
+            let kept = &snapshot.machine_profiles;
+            snapshot
+                .warm_lanes
+                .retain(|(profile, _)| kept.contains(profile));
             snapshot.minimum_worker_count = 1;
         }
+    }
+
+    /// The gateway limit on warm workers per pool
+    /// (`SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`).
+    pub fn max_minimum_worker_count(&self) -> u32 {
+        self.limits.max_minimum_worker_count
     }
 
     fn check_pool_spec_limits(
@@ -1055,10 +1093,28 @@ impl PoolManager {
         found_key.is_some()
     }
 
+    /// [`Self::assign_workers_matching`] with an exact bundle filter.
+    #[cfg(test)]
     pub async fn assign_workers(
         &self,
         pool_name: &str,
         available_workers: &[WorkerAssignment], // (name, url, gpu, bundle, queue_pool)
+    ) -> bool {
+        self.assign_workers_matching(pool_name, available_workers, |worker_bundle, filter| {
+            worker_bundle == filter
+        })
+        .await
+    }
+
+    /// [`Self::assign_workers`] with the pool's `bundle` filter decided by
+    /// `serves(worker_bundle, pool_bundle)`. The gateway passes the model
+    /// registry's lane coverage, so a pool restricted to a bundle also takes
+    /// workers of a composite bundle that runs it.
+    pub async fn assign_workers_matching(
+        &self,
+        pool_name: &str,
+        available_workers: &[WorkerAssignment], // (name, url, gpu, bundle, queue_pool)
+        serves: impl Fn(&str, &str) -> bool,
     ) -> bool {
         let is_static_pool = self.is_static_pool(pool_name).await;
         let mut pools = self.pools.write().await;
@@ -1080,7 +1136,7 @@ impl PoolManager {
                 worker_consumes_pool(worker_queue_pool, &queue_pool)
             })
             .filter(|(_, _, _, bundle, _)| match pool.spec.bundle.as_ref() {
-                Some(bundle_filter) => bundle == bundle_filter,
+                Some(bundle_filter) => serves(bundle, bundle_filter),
                 None => true,
             })
             .collect();

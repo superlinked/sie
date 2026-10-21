@@ -2459,6 +2459,15 @@ async fn resolve_routing(
         }
     };
 
+    // A composite lane (one pod running several bundles on one accelerator)
+    // serves this bundle where the bundle has no lane of its own. Governed
+    // routes name their exact lane.
+    let bundle = if governed_route.is_none() {
+        serving_lane_bundle(state, &bundle, &pool_name, &gpu).await
+    } else {
+        bundle
+    };
+
     Ok(RoutingResult {
         caller_selected_route,
         requested_model: model,
@@ -2470,6 +2479,42 @@ async fn resolve_routing(
         pool_name,
         gpu_configured,
     })
+}
+
+/// The lane bundle that serves work resolved to `bundle` for a request on
+/// `pool_name` and machine profile `gpu` (empty when the caller named none, in
+/// which case the pool's machine profiles count).
+///
+/// See [`crate::state::demand_tracker::PhysicalLaneCatalog::serving_bundle`].
+/// An unknown pool keeps `bundle`; the caller then answers `POOL_NOT_FOUND`.
+async fn serving_lane_bundle(state: &AppState, bundle: &str, pool_name: &str, gpu: &str) -> String {
+    let composites = state.model_registry.composites_covering(bundle);
+    if composites.is_empty() {
+        return bundle.to_string();
+    }
+    let Some(queue_pool) = queue_pool_for_request(Some(&state.pool_manager), pool_name).await
+    else {
+        return bundle.to_string();
+    };
+    let profiles = lane_profiles(state, pool_name, gpu).await;
+    state
+        .demand_tracker
+        .catalog()
+        .serving_bundle(&queue_pool, &profiles, bundle, &composites)
+}
+
+/// The machine profiles a request may land on: the one it names, or every
+/// profile its pool can provision.
+async fn lane_profiles(state: &AppState, pool_name: &str, gpu: &str) -> Vec<String> {
+    if !gpu.is_empty() {
+        return vec![gpu.to_string()];
+    }
+    let pool = if pool_name.is_empty() {
+        DEFAULT_POOL_NAME
+    } else {
+        pool_name
+    };
+    demand_profiles_for_pool(Some(&state.pool_manager), pool).await
 }
 
 /// Shared OSS admission for a bridge that never carries numerical outputs.
@@ -8823,6 +8868,24 @@ async fn resolve_generation_route(
             &requested_pool,
             ProvisioningSurface::OpenAiCompat,
         ));
+    };
+    // A composite lane serves this bundle where it has no lane of its own;
+    // sealed and governed routes name their exact lane.
+    let bundle = if sealed.is_none() && governed.is_none() {
+        let composites = state.model_registry.composites_covering(&bundle);
+        if composites.is_empty() {
+            bundle
+        } else {
+            let profiles = lane_profiles(state, &pool_name, &gpu).await;
+            state.demand_tracker.catalog().serving_bundle(
+                &hash_pool,
+                &profiles,
+                &bundle,
+                &composites,
+            )
+        }
+    } else {
+        bundle
     };
     let (bundle_config_hash, model_revision, uses_catalog_scope, served_by) = state
         .model_registry
@@ -17939,6 +18002,257 @@ mod tests {
             })
             .expect("h100 test model");
         registry
+    }
+
+    /// Bundles `default` (encoders), `sglang` (an LLM) and the
+    /// `default-sglang` composite that runs both on one GPU.
+    fn composite_lane_registry() -> crate::state::model_registry::ModelRegistry {
+        use crate::types::model::{ModelConfig, ProfileConfig};
+
+        let bundles_dir = tempfile::TempDir::new().unwrap();
+        let models_dir = tempfile::TempDir::new().unwrap();
+        for (file, body) in [
+            (
+                "default.yaml",
+                "name: default\npriority: 10\nadapters:\n  - sie_server.adapters.sentence_transformer\n",
+            ),
+            (
+                "sglang.yaml",
+                "name: sglang\npriority: 20\nadapters:\n  - sie_server.adapters.sglang.generation\n",
+            ),
+            (
+                "default-sglang.yaml",
+                "name: default-sglang\npriority: 90\ncomponents: [default, sglang]\nadapters:\n  \
+                 - sie_server.adapters.sentence_transformer\n  - sie_server.adapters.sglang.generation\n",
+            ),
+        ] {
+            std::fs::write(bundles_dir.path().join(file), body).unwrap();
+        }
+        let registry = crate::state::model_registry::ModelRegistry::new(
+            bundles_dir.path(),
+            models_dir.path(),
+            true,
+        );
+        let model = |name: &str, adapter: &str, tasks: &str| ModelConfig {
+            name: name.to_string(),
+            hf_revision: None,
+            description: None,
+            release_date: None,
+            routing: None,
+            adapter_module: None,
+            default_bundle: None,
+            pool: None,
+            profiles: [(
+                "default".to_string(),
+                ProfileConfig {
+                    kv_budget_tokens: None,
+                    max_output_tokens: None,
+                    grammar_profile: None,
+                    chat_template_kwargs: None,
+                    adapter_path: Some(adapter.to_string()),
+                    max_batch_tokens: Some(4096),
+                    compute_precision: None,
+                    adapter_options: None,
+                    extends: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            inputs: None,
+            max_sequence_length: None,
+            tasks: Some(serde_saphyr::from_str(tasks).unwrap()),
+        };
+        registry
+            .add_model_config(model(
+                "acme/enc",
+                "sie_server.adapters.sentence_transformer:Adapter",
+                "encode:\n  dense:\n    dim: 8\n",
+            ))
+            .unwrap();
+        registry
+            .add_model_config(model(
+                "acme/llm",
+                "sie_server.adapters.sglang.generation:SGLangGenerationAdapter",
+                "generate:\n  capabilities:\n    streaming: false\n",
+            ))
+            .unwrap();
+        registry
+    }
+
+    /// `l4` has a `default` lane; `h100` only the `default-sglang` composite.
+    async fn composite_lane_state() -> (Arc<AppState>, Arc<GenerationTargetProbe>) {
+        let profiles = vec!["l4".to_string(), "h100".to_string()];
+        let pool_manager = Arc::new(PoolManager::new(profiles.clone()));
+        pool_manager.create_default_pool().await;
+        let mut state = admission_test_state(pool_manager);
+        state.model_registry = Arc::new(composite_lane_registry());
+        let lanes = crate::state::demand_tracker::PhysicalLaneCatalog::try_from_raw(
+            [("l4", "default"), ("h100", "default-sglang")]
+                .into_iter()
+                .map(|(profile, bundle)| {
+                    (
+                        "default".to_string(),
+                        profile.to_string(),
+                        bundle.to_string(),
+                    )
+                }),
+        )
+        .unwrap();
+        let config = Arc::make_mut(&mut state.config);
+        config.configured_gpus = profiles.clone();
+        config.gpu_profile_map = profiles
+            .iter()
+            .map(|profile| (profile.clone(), profile.clone()))
+            .collect();
+        config.configured_physical_lanes = lanes.clone();
+        state.demand_tracker = Arc::new(crate::state::demand_tracker::DemandTracker::new(lanes));
+        for (profile, bundle) in [("l4", "default"), ("h100", "default-sglang")] {
+            let mut status = worker_msg(bundle, profile, "default");
+            status.name = format!("worker-{profile}");
+            status.bundle_config_hash = state
+                .model_registry
+                .compute_bundle_config_hash_for_pool(bundle, "default");
+            status.loaded_models = vec!["acme/enc".to_string(), "acme/llm".to_string()];
+            state
+                .registry
+                .update_worker(&format!("http://worker-{profile}:8080"), status)
+                .await;
+        }
+        let probe = Arc::new(GenerationTargetProbe::default());
+        state.work_publisher = Some(probe.clone());
+        (Arc::new(state), probe)
+    }
+
+    fn target_lane(target: PublishTarget) -> (String, String, String) {
+        match target {
+            PublishTarget::Worker {
+                pool,
+                machine_profile,
+                bundle,
+                ..
+            }
+            | PublishTarget::VerifiedWorker {
+                pool,
+                machine_profile,
+                bundle,
+                ..
+            }
+            | PublishTarget::Pool {
+                pool,
+                machine_profile,
+                bundle,
+                ..
+            } => (pool, machine_profile, bundle),
+        }
+    }
+
+    fn lane(profile: &str, bundle: &str) -> (String, String, String) {
+        (
+            "default".to_string(),
+            profile.to_string(),
+            bundle.to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_composite_lane_serves_both_of_its_bundles_where_they_have_no_lane() {
+        let (state, probe) = composite_lane_state().await;
+        let on = |mut request: Request, profile: &'static str| {
+            request
+                .headers_mut()
+                .insert("x-sie-machine-profile", HeaderValue::from_static(profile));
+            request
+        };
+
+        // The encoder's own bundle has no h100 lane: the composite runs it.
+        let _ = proxy_request(
+            State(state.clone()),
+            on(
+                json_request("/v1/encode/acme%2Fenc", json!({"items": [{"text": "hi"}]})),
+                "h100",
+            ),
+            "encode",
+        )
+        .await;
+        assert_eq!(
+            target_lane(probe.take_target().1),
+            lane("h100", "default-sglang")
+        );
+
+        // Where the bundle has its own lane, that lane still wins.
+        let _ = proxy_request(
+            State(state.clone()),
+            on(
+                json_request("/v1/encode/acme%2Fenc", json!({"items": [{"text": "hi"}]})),
+                "l4",
+            ),
+            "encode",
+        )
+        .await;
+        assert_eq!(target_lane(probe.take_target().1), lane("l4", "default"));
+
+        // The LLM's sglang bundle has no lane at all; on h100 the composite
+        // serves it through both generation entry points.
+        let _ = proxy_request(
+            State(state.clone()),
+            on(
+                json_request(
+                    "/v1/generate/acme%2Fllm",
+                    json!({"prompt": "hi", "max_new_tokens": 4}),
+                ),
+                "h100",
+            ),
+            "generate",
+        )
+        .await;
+        assert_eq!(
+            target_lane(probe.take_target().1),
+            lane("h100", "default-sglang")
+        );
+
+        // Without a machine profile, a logical pool's own profiles decide: a
+        // pool over h100 only reaches the composite lane there.
+        state
+            .pool_manager
+            .create_pool(
+                "rag",
+                [("h100".to_string(), 0)].into_iter().collect(),
+                None,
+                None,
+                0,
+                vec![],
+            )
+            .await
+            .unwrap();
+        let mut request = json_request("/v1/encode/acme%2Fenc", json!({"items": [{"text": "hi"}]}));
+        request
+            .headers_mut()
+            .insert("x-sie-pool", HeaderValue::from_static("rag"));
+        let _ = proxy_request(State(state.clone()), request, "encode").await;
+        assert_eq!(
+            target_lane(probe.take_target().1),
+            lane("h100", "default-sglang")
+        );
+
+        let _ = proxy_chat(
+            State(state.clone()),
+            on(
+                json_request(
+                    "/v1/chat/completions",
+                    json!({
+                        "model": "acme/llm",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "max_tokens": 4
+                    }),
+                ),
+                "h100",
+            ),
+        )
+        .await;
+        assert_eq!(
+            target_lane(probe.take_target().1),
+            lane("h100", "default-sglang")
+        );
     }
 
     async fn mixed_governed_generation_state(

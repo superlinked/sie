@@ -48,6 +48,11 @@ struct Cli {
     #[arg(long, env = "SIE_IPC_SOCKET_PATHS")]
     ipc_socket_paths: Option<String>,
 
+    /// Consecutive `SIE_IPC_SOCKET_PATHS` entries that share one serving slot:
+    /// the component processes of a composite bundle on one accelerator.
+    #[arg(long, env = "SIE_IPC_SOCKETS_PER_SLOT", default_value = "1")]
+    ipc_sockets_per_slot: usize,
+
     /// Number of concurrent IPC connections to each adapter process.
     /// Defaults to `SIE_MAX_CONCURRENT_BATCHES` when unset (falling
     /// back to the dispatcher's own default of 4), so the IPC pool
@@ -199,6 +204,7 @@ async fn main() -> anyhow::Result<()> {
     let ipc_socket_paths = parse_ipc_socket_paths(cli.ipc_socket_paths.as_deref())
         .unwrap_or_else(|| vec![ipc_socket_path.clone()]);
     validate_unique_ipc_socket_paths(&ipc_socket_paths)?;
+    validate_ipc_sockets_per_slot(ipc_socket_paths.len(), cli.ipc_sockets_per_slot)?;
     let config_service_url = cli.config_service_url.filter(|url| !url.trim().is_empty());
     let config_service_token = resolve_config_service_token(
         cli.config_service_token,
@@ -221,6 +227,7 @@ async fn main() -> anyhow::Result<()> {
         bundle,
         ipc_socket_path,
         ipc_socket_paths,
+        ipc_sockets_per_slot: cli.ipc_sockets_per_slot,
         ipc_pool_size: cli
             .ipc_pool_size
             .filter(|&n| n > 0)
@@ -399,6 +406,15 @@ fn parse_ipc_socket_paths(raw: Option<&str>) -> Option<Vec<PathBuf>> {
     }
 }
 
+fn validate_ipc_sockets_per_slot(socket_count: usize, per_slot: usize) -> anyhow::Result<()> {
+    if per_slot == 0 || !socket_count.is_multiple_of(per_slot) {
+        anyhow::bail!(
+            "SIE_IPC_SOCKETS_PER_SLOT={per_slot} must be at least 1 and divide the {socket_count} IPC socket path(s)"
+        );
+    }
+    Ok(())
+}
+
 fn validate_unique_ipc_socket_paths(paths: &[PathBuf]) -> anyhow::Result<()> {
     let mut seen = HashSet::with_capacity(paths.len());
     for path in paths {
@@ -456,6 +472,7 @@ mod tests {
     use super::parse_ipc_socket_paths;
     use super::resolve_config_service_token;
     use super::validate_ingest_mode;
+    use super::validate_ipc_sockets_per_slot;
     use super::validate_lane_segment;
     use super::validate_model_ready_liveness_budget;
     use super::validate_unique_ipc_socket_paths;
@@ -607,6 +624,14 @@ mod tests {
             vec![PathBuf::from("/a.sock"), PathBuf::from("/b.sock")]
         );
         assert!(parse_ipc_socket_paths(Some(" , ")).is_none());
+    }
+
+    #[test]
+    fn validate_ipc_sockets_per_slot_requires_whole_slots() {
+        assert!(validate_ipc_sockets_per_slot(1, 1).is_ok());
+        assert!(validate_ipc_sockets_per_slot(4, 2).is_ok());
+        assert!(validate_ipc_sockets_per_slot(3, 2).is_err());
+        assert!(validate_ipc_sockets_per_slot(2, 0).is_err());
     }
 
     #[test]
