@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import tempfile
 import time
@@ -35,7 +36,7 @@ from sie_server.core.loader import expand_profile_variants
 from sie_server.core.oom import is_oom_error
 from sie_server.core.pool_isolation import validate_no_legacy_scalar_lora_id
 from sie_server.core.prepared import AudioPayload, AudioPreparedItem
-from sie_server.core.registry import ModelRegistry
+from sie_server.core.registry import HOST_WAKE_WAIT_S, ModelRegistry
 from sie_server.core.runtime_options import merge_runtime_options, merge_runtime_options_with_profile
 from sie_server.core.score_cost import build_score_prepared_items_timed
 from sie_server.core.timing import RequestTiming
@@ -75,6 +76,23 @@ from sie_server.types.inputs import InvalidInputError, InvalidMediaError, Item, 
 from sie_server.types.responses import ErrorCode
 
 logger = logging.getLogger(__name__)
+
+
+# The sidecar's EnsureModelReady deadline. When the worker shares it, a wake
+# waited for inline stays well inside it, so the call answers "ready" or
+# "loading" instead of timing out.
+_MODEL_READY_TIMEOUT_ENV: Final = "SIE_MODEL_READY_TIMEOUT_S"
+
+
+def _host_wake_wait_s() -> float:
+    raw = os.environ.get(_MODEL_READY_TIMEOUT_ENV, "").strip()
+    try:
+        deadline = float(raw) if raw else None
+    except ValueError:
+        deadline = None
+    if deadline is None or not math.isfinite(deadline) or deadline <= 0:
+        return HOST_WAKE_WAIT_S
+    return min(HOST_WAKE_WAIT_S, deadline / 2)
 
 
 # ---------------------------------------------------------------------------
@@ -879,6 +897,13 @@ class QueueExecutor:
         failure = self._registry.get_failure(model_id)
         if failure is not None and failure.is_permanent:
             return "failed"
+
+        # A model parked in host RAM wakes in seconds: wait for it so the
+        # dispatcher can run this work now instead of re-polling.
+        if self._registry.is_parked(model_id) and await self._registry.wake_parked(
+            model_id, self._registry.device, timeout_s=_host_wake_wait_s()
+        ):
+            return "ready"
 
         if self._registry.is_loading(model_id):
             return "loading_in_progress"

@@ -468,6 +468,56 @@
           "refId": "B"
         }
       ]
+    },
+    {
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 78 },
+      "id": 76,
+      "title": "Host-RAM Tier Lookups and Wake Time",
+      "description": "Model loads that woke a copy parked in host RAM (hit) or loaded from disk, the cluster cache or the Hub (miss), and the p95 time to wake a parked model back onto its device.",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "sum by (result, lane) (rate(sie_worker_model_host_cache_lookups_total{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[5m]))",
+          "legendFormat": "loads/sec {{result}} / {{lane}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, lane) (rate(sie_worker_model_host_cache_wake_duration_seconds_bucket{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\", outcome=\"success\"}[5m])))",
+          "legendFormat": "wake p95 seconds / {{lane}}",
+          "refId": "B"
+        },
+        {
+          "expr": "sum by (outcome, lane) (rate(sie_worker_model_host_cache_wake_duration_seconds_count{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}[5m]))",
+          "legendFormat": "wakes/sec {{outcome}} / {{lane}}",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 78 },
+      "id": 77,
+      "title": "Host-RAM Tier Memory",
+      "description": "Host RAM the host tier holds for parked models (and for SGLang engines that keep their host copy after waking), by model.",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "options": {
+        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "expr": "max by (model, profile, lane) (sie_worker_model_host_cache_memory_bytes{namespace=\"$namespace\", service=\"$collector\", endpoint=\"prometheus\", producer_service=\"sie-worker\"}) > 0",
+          "legendFormat": "{{model}} / {{profile}} / {{lane}}",
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "10s",

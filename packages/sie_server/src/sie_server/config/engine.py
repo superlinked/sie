@@ -8,8 +8,10 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from sie_server.core.host_cache import parse_host_cache_setting
 
 if TYPE_CHECKING:
     from sie_server.core.oom import OomRecoveryConfig
@@ -337,6 +339,19 @@ class EngineConfig(BaseSettings):
         ),
     ] = None
 
+    # Host-RAM tier for evicted models
+    host_cache_bytes: Annotated[
+        int | str,
+        Field(
+            description=(
+                "Host RAM that evicted models may keep their weights in, so the next request wakes "
+                "them onto the GPU instead of loading from disk. 'auto' (default) uses a quarter of "
+                "the container memory limit (or of physical RAM) on CUDA workers and is off "
+                "elsewhere; a size such as 8GiB sets it explicitly; 0 disables the tier."
+            ),
+        ),
+    ] = "auto"
+
     # Disk cache
     disk_cache_enabled: Annotated[
         bool,
@@ -404,6 +419,13 @@ class EngineConfig(BaseSettings):
         Path,
         Field(description="Directory containing model configs"),
     ] = Path("./models")
+
+    @field_validator("host_cache_bytes")
+    @classmethod
+    def _validate_host_cache_bytes(cls, value: int | str) -> int | str:
+        """Fail at startup on a malformed size rather than guessing a budget."""
+        parse_host_cache_setting(value)
+        return value
 
     @model_validator(mode="after")
     def _apply_oom_kill_switch(self) -> "EngineConfig":

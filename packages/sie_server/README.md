@@ -4,7 +4,8 @@ GPU inference server for embeddings, reranking, and entity extraction.
 
 ## Features
 
-- Multi-model serving with LRU eviction
+- Multi-model serving with LRU eviction, and a host-RAM tier that wakes evicted
+  models back onto the GPU instead of reloading them
 - Token-based dynamic batching
 - Hot reload model configs without restart
 - Unified API: `encode()`, `score()`, `extract()`
@@ -1227,6 +1228,71 @@ invoke the existing OOM recovery path.
 When OOM recovery is exhausted on a request, the server returns
 `HTTP 503 RESOURCE_EXHAUSTED` with `Retry-After`. The Python SDK
 auto-retries; see `packages/sie_sdk/README.md` for client-side controls.
+
+### Host-RAM tier for evicted models
+
+When the worker evicts a model to free GPU memory, it keeps the model's weights
+in host RAM instead of discarding them, up to a budget. The next request for
+the model copies the weights back to the same GPU. It does not rebuild the
+adapter, re-read the local disk cache, or fetch from the cluster cache or
+Hugging Face. When the budget fills, the least recently parked model is
+unloaded first. A model that is not parked loads the ordinary way.
+
+| Env var | Default | Effect |
+|--|--|--|
+| `SIE_HOST_CACHE_BYTES` | `auto` | Host RAM the tier may hold. `auto` uses a quarter of the container memory limit (cgroup v2 or v1), or of physical RAM when there is no limit, on CUDA workers, and is off on CPU and Apple silicon. A size such as `8GiB`, `8Gi` or `8000000000` sets it explicitly. `0` turns the tier off. |
+
+With `auto`, an L4 pool with the chart's 32Gi container limit gets 8 GiB, and
+the 128Gi and 256Gi A100 and H200 pools get 32 GiB and 64 GiB.
+
+What parks:
+
+- Evictions that free memory for other work park the model: memory pressure,
+  making room for another load, OOM recovery, idle eviction
+  (`SIE_IDLE_EVICT_S`) and displacement by a multi-GPU model. A manual unload,
+  a config change, shutdown and a crashed engine unload the model as before.
+  Pinned models are never evicted, so they never park.
+- Adapters that hold their PyTorch model in the worker process
+  (sentence-transformers, the flash encoders, cross-encoders and the other
+  in-process adapters) park on CUDA by copying every tensor the adapter
+  references to ordinary host memory and freeing the GPU copies. Parameters keep their identity, so LoRA adapters loaded through PEFT
+  park and wake with the base model. CUDA graphs are dropped before parking and
+  record again on demand. An adapter declines when it holds GPU tensors the
+  copy cannot rebind or quantized parameters.
+- SGLang generation and embedding engines on one GPU park through SGLang's
+  memory saver. SIE launches these engines with `--enable-memory-saver
+  --enable-weights-cpu-backup` while the tier is on. Parking waits up to 10
+  seconds for in-flight requests and aborts any that remain, then releases the
+  weights, KV cache and CUDA graph memory. The weights go to pinned host memory.
+  The engine process, its compiled kernels and its captured graphs stay alive,
+  so a wake maps memory back at the same addresses, copies the weights, and
+  checks that the engine generates. The memory saver in the pinned SGLang keeps
+  that host copy after a wake, so an engine that has parked once keeps its weights'
+  size charged to the budget until it is fully unloaded. A parked engine also
+  keeps its CUDA context and some workspace on the GPU. The worker drops it
+  when that GPU needs the memory and no resident model can be evicted. Set
+  `adapter_options.loadtime.host_offload: false` on a profile to launch its
+  engine without the memory saver.
+- Tensor-parallel engines, TensorRT-LLM, MLX, CTranslate2, the vision
+  extraction engine, Candle workers and remote profiles unload as before.
+
+A request for a parked model waits up to 15 seconds for the wake instead of
+receiving `503 MODEL_LOADING`. A queued request is held by the sidecar, which
+checks readiness every second. A wake that fails falls back to an ordinary
+load. A wake runs one at a time with loads, so it can wait behind another
+model's cold load.
+
+Wake time is bounded by the host-to-GPU copy. These are estimates, not
+measurements: a 1 GB encoder should wake in about 0.1 to 0.3 seconds from
+ordinary host memory. An 8 GB LLM should take about 1 to 2 seconds from pinned
+memory, plus the engine's one-token health check. A load from the local disk
+cache takes seconds to minutes, because it constructs the model, warms it up
+and, for SGLang, starts an engine and captures its CUDA graphs.
+
+The worker reports `sie.worker.model.host_cache.lookups` (each load, `hit` or
+`miss`), `sie.worker.model.host_cache.wake.duration` and
+`sie.worker.model.host_cache.memory` (host bytes per model); see
+`telemetry/contract.yaml`.
 
 ### Batching & request handling
 

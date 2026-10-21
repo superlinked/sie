@@ -673,3 +673,112 @@ def terminate_process(process: subprocess.Popen[bytes] | None) -> None:
             process.wait(timeout=5)
         except (ProcessLookupError, subprocess.TimeoutExpired):
             pass
+
+
+# -- Host-RAM parking ---------------------------------------------------------
+#
+# With the memory saver on, the engine allocates its weights, KV cache and CUDA
+# graph pools through torch-memory-saver, which can release their physical
+# device memory while keeping their virtual addresses. ``release_memory_occupation``
+# copies the weights to pinned host memory (``--enable-weights-cpu-backup``),
+# then releases all three; ``resume_memory_occupation`` maps fresh device memory
+# at the same addresses and copies the weights back. Captured CUDA graphs stay
+# valid because no address changes. The engine process, its compiled kernels and
+# its graphs survive, so a wake skips everything a cold start pays for except the
+# copy itself. torch-memory-saver 0.0.9 keeps the host buffer after a resume and
+# reuses it for the next release.
+
+MEMORY_SAVER_LAUNCH_ARGS = ("--enable-memory-saver", "--enable-weights-cpu-backup")
+# The engine refuses to release while it runs requests; flush_cache waits up to
+# this long for it to go idle, and empties the allocator cache when it does.
+PARK_IDLE_TIMEOUT_S = 10.0
+# Release copies every weight to host memory; resume copies it back.
+PARK_RELEASE_TIMEOUT_S = 300.0
+WAKE_RESUME_TIMEOUT_S = 300.0
+# After resume, /health generates one token: proof the weights are back.
+WAKE_HEALTH_TIMEOUT_S = 60.0
+_CONTROL_TIMEOUT_S = 30.0
+
+
+def checkpoint_weight_bytes(model_name_or_path: str, revision: str | None) -> int | None:
+    """Bytes of a model's cached checkpoint files, or None when they cannot be found.
+
+    Sized from the safetensors (else ``.bin``) files beside the cached
+    ``config.json``: the weights the engine backs up to host memory when it
+    parks, at checkpoint precision. A checkpoint quantized at load time is
+    over-counted, which only makes the budget conservative.
+    """
+    directory = Path(model_name_or_path)
+    if not directory.is_dir():
+        try:
+            from huggingface_hub import try_to_load_from_cache
+            from sie_sdk.cache import get_cache_config
+
+            cached = try_to_load_from_cache(
+                model_name_or_path,
+                "config.json",
+                revision=revision,
+                cache_dir=get_cache_config().local_cache,
+            )
+        except (ImportError, OSError, ValueError):
+            return None
+        if not isinstance(cached, str):
+            return None
+        directory = Path(cached).parent
+    for pattern in ("*.safetensors", "*.bin"):
+        try:
+            sizes = [path.stat().st_size for path in directory.glob(pattern)]
+        except OSError:
+            return None
+        if sizes:
+            return sum(sizes)
+    return None
+
+
+def _flush_when_idle(server_url: str) -> bool:
+    response = requests.post(
+        f"{server_url}/flush_cache",
+        params={"timeout": PARK_IDLE_TIMEOUT_S},
+        timeout=PARK_IDLE_TIMEOUT_S + _CONTROL_TIMEOUT_S,
+    )
+    return response.status_code == 200
+
+
+def _raise_for_engine_error(response: requests.Response, operation: str) -> None:
+    if response.status_code != 200:
+        msg = f"SGLang {operation} failed with HTTP {response.status_code}: {response.text[:500]}"
+        raise RuntimeError(msg)
+
+
+def park_engine(server_url: str) -> None:
+    """Release an idle engine's device memory, keeping its weights in host RAM.
+
+    Waits for in-flight requests first. Requests still running after the wait
+    are aborted, and the wait repeats; an engine that is still busy is not
+    released.
+
+    Raises:
+        RuntimeError: When the engine stays busy or refuses the release. The
+            caller then unloads the model instead.
+    """
+    if not _flush_when_idle(server_url):
+        logger.warning("SGLang engine at %s is still busy; aborting its requests to park it", server_url)
+        abort = requests.post(f"{server_url}/abort_request", json={"abort_all": True}, timeout=_CONTROL_TIMEOUT_S)
+        _raise_for_engine_error(abort, "abort_request")
+        if not _flush_when_idle(server_url):
+            msg = f"SGLang engine at {server_url} did not become idle; it cannot be parked"
+            raise RuntimeError(msg)
+    response = requests.post(f"{server_url}/release_memory_occupation", json={}, timeout=PARK_RELEASE_TIMEOUT_S)
+    _raise_for_engine_error(response, "release_memory_occupation")
+
+
+def wake_engine(server_url: str) -> None:
+    """Bring a parked engine's weights, KV cache and graphs back onto the device.
+
+    Raises:
+        RuntimeError: When the engine refuses the resume or cannot serve after it.
+    """
+    response = requests.post(f"{server_url}/resume_memory_occupation", json={}, timeout=WAKE_RESUME_TIMEOUT_S)
+    _raise_for_engine_error(response, "resume_memory_occupation")
+    health = requests.get(f"{server_url}/health", timeout=WAKE_HEALTH_TIMEOUT_S)
+    _raise_for_engine_error(health, "health check after resume")

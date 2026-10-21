@@ -44,6 +44,7 @@ from sie_server.adapters._generation_base import (
     FinishReason,
     GenerationAdapter,
     GenerationChunk,
+    GenerationDrainingError,
     GenerationError,
     GenerationInvalidRequestError,
     GenerationResult,
@@ -60,6 +61,7 @@ from sie_server.adapters.sglang._compat.sie_thinking_budget import PARAM as THIN
 from sie_server.adapters.sglang._compat.sie_thinking_budget import PROCESSOR_REFERENCE as THINKING_BUDGET_PROCESSOR
 from sie_server.adapters.sglang._lora import SGLangLoraManager, SGLangLoraMixin, leased_generation
 from sie_server.adapters.sglang._memory import SGLangMemoryBudget
+from sie_server.adapters.sglang._parking import SGLangParkingMixin
 from sie_server.observability.generation_diagnostics import GenerationStreamTimer
 from sie_server.types.grammar import (
     OUTLINES_JSON_SCHEMA_TYPE_DIAGNOSTIC,
@@ -453,7 +455,7 @@ def _translate_to_mlx_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in kwargs.items() if k in _MLX_PASSTHROUGH_KWARGS}
 
 
-class SGLangGenerationAdapter(SGLangLoraMixin, GenerationAdapter):
+class SGLangGenerationAdapter(SGLangParkingMixin, SGLangLoraMixin, GenerationAdapter):
     """Streaming SGLang generation adapter.
 
     Lifecycle is identical to :class:`SGLangEmbeddingAdapter`: one subprocess
@@ -574,9 +576,15 @@ class SGLangGenerationAdapter(SGLangLoraMixin, GenerationAdapter):
         # it, then follows as usual. None leaves reasoning unbounded and the
         # launch unchanged. Needs a reasoning parser with known control tokens.
         thinking_budget: int | None = None,
+        # Launch the engine able to park its weights in host RAM when the
+        # registry evicts it (see ``_parking``). Off keeps the previous launch.
+        host_offload: bool = True,
         **kwargs: Any,  # accept extra args from loader for compatibility
     ) -> None:
         _ = kwargs
+        if not isinstance(host_offload, bool):
+            raise ValueError(f"host_offload must be true or false, got {host_offload!r}")
+        self._host_offload_requested = host_offload
         self._json_number_max_digits = _validate_json_number_max_digits(json_number_max_digits, grammar_backend)
         self._thinking_budget = _validate_thinking_budget(thinking_budget, reasoning_parser)
         self._thinking_budget_tokens: dict[str, int | None] | None = None
@@ -980,6 +988,7 @@ class SGLangGenerationAdapter(SGLangLoraMixin, GenerationAdapter):
         # ``sampling_params["lora_path"]``. Only emitted when the profile
         # declared adapters, so non-LoRA deployments are byte-identical.
         cmd.extend(self._lora.launch_args())
+        cmd.extend(self._memory_saver_launch_args())
         cmd.extend(self._extra_launch_args)
 
         self._output_file = _server.open_output_log()
@@ -1462,6 +1471,8 @@ class SGLangGenerationAdapter(SGLangLoraMixin, GenerationAdapter):
     def _check_loaded(self) -> None:
         if self._server_url is None:
             raise RuntimeError(ERR_NOT_LOADED)
+        if self._parked:
+            raise GenerationDrainingError("The model is parked in host RAM; retry while it wakes")
         self._check_engine_alive()
 
     def _check_engine_alive(self) -> None:
