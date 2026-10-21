@@ -8,6 +8,8 @@ import math
 from pathlib import Path
 
 import evidence
+import frontier
+import frontier_analysis
 import paired_native
 import paired_report
 import paired_topic
@@ -50,23 +52,28 @@ def evaluate_recorded(frozen_routing, final_grades, output, *, expected_report=N
     return {"output": str(output), "sha256": core.sha(output), "questions": result["questions"]}
 
 
-def show_report(path, target):
+def show_report(path, target=None):
     """Present the saved result without fitting, API calls or changing a policy."""
     report = core.read(path)
     core.require(
         report["format"] in ("routerbench-paired-final-report-v1", "train-a-router-reproduction-report-v1"),
         "Use a complete paired evaluation report",
     )
-    names = ["always_strong", "always_cheap"] + [f"{method}@{target}pp" for method in ("base", "lora", "embedding", "topic", "random")]
-    labels = ["Always Sol", "Always Luna", "Laya", "Laya + LoRA", "Embedding + classifier", "Text/topic control", "Random control"]
+    targets = (0, 1, 2, 5) if target is None else (target,)
+    methods = {"base": "Laya", "lora": "Laya + LoRA", "embedding": "Embedding + classifier",
+               "topic": "Text/topic control", "random": "Random control"}
+    rows = [("always_strong", "Always Sol", "—"), ("always_cheap", "Always Luna", "—")]
+    rows.extend((f"{method}@{value}pp", label, f"{value} pp")
+                for method, label in methods.items() for value in targets)
     lines = [
-        f"{report['questions']:,} final questions; policies selected for a {target} percentage-point calibration target.",
-        "The target is not a guarantee on new questions. Gap intervals are 95% family-bootstrap intervals.",
+        f"{report['questions']:,} final questions; GPT-6.1 Sol and GPT-6 Luna answer the requests.",
+        "These are sampled cost–quality operating points, not a required quality-loss ceiling.",
+        "The recorded setting selected a policy on calibration data. Intervals are 95% family-bootstrap intervals.",
         "",
-        "| Method | Answer quality | Quality loss [95% interval], pp | Answer $/10k | Total $/10k | Net savings |",
-        "|---|---:|---:|---:|---:|---:|",
+        "| Method | Recorded setting | Answer quality | Quality loss [95% interval], pp | Answer $/10k | Total $/10k | Net savings |",
+        "|---|---:|---:|---:|---:|---:|---:|",
     ]
-    for name, label in zip(names, labels, strict=True):
+    for name, label, setting in rows:
         row = report["policies"][name]
         metrics = row["metrics"]
         interval = row["confidence95"]["quality_gap_from_always_strong_pp"]
@@ -76,7 +83,7 @@ def show_report(path, target):
         total_text = "hosting unpriced" if total is None else f"${total:.2f}"
         savings_text = "hosting unpriced" if savings is None else f"{savings:.1f}%"
         lines.append(
-            f"| {label} | {metrics['answer_accuracy_percent']:.2f}% | {gap} | "
+            f"| {label} | {setting} | {metrics['answer_accuracy_percent']:.2f}% | {gap} | "
             f"${metrics['answer_model_usd_per_10000']:.2f} | {total_text} | {savings_text} |"
         )
     lines.extend([
@@ -101,7 +108,13 @@ def parser():
 
     c = commands.add_parser("show", help="Print the saved quality/cost comparison and uncertainty")
     c.add_argument("--report", type=Path, required=True)
-    c.add_argument("--target-gap-pp", type=int, choices=(0, 1, 2, 5), default=1)
+    c.add_argument("--target-gap-pp", type=int, choices=(0, 1, 2, 5), help="Show one recorded setting; defaults to all")
+
+    c = commands.add_parser("frontier", help="Explore the cost–quality frontier and choose your own operating point")
+    c.add_argument("--data", type=Path, required=True)
+    c.add_argument("--run", type=Path, help="Defaults to the published data/reference run")
+    c.add_argument("--include-test", action="store_true", help="Also inspect retrospective test outcomes; never use these to select a policy")
+    c.add_argument("--output", type=Path, required=True, help="Standalone interactive HTML; also writes its source JSON")
 
     c = commands.add_parser("prepare", help="Create a new run from fixed question-only IDs, families and folds")
     c.add_argument("--data", type=Path, required=True)
@@ -142,7 +155,7 @@ def parser():
     c.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     c.add_argument("--features", type=Path, help="Regenerated features for the embedding method; defaults to data/features")
 
-    c = commands.add_parser("calibrate", help="Freeze all 0/1/2/5pp policies using calibration grades only")
+    c = commands.add_parser("calibrate", help="Build the full calibration frontier and retain the four recorded comparison settings")
     c.add_argument("--data", type=Path, required=True)
     c.add_argument("--run", type=Path, required=True)
 
@@ -165,7 +178,9 @@ def parser():
     c = commands.add_parser("answer", help="Route a new question and call the chosen answer model")
     c.add_argument("--run", type=Path, required=True)
     c.add_argument("--method", choices=("base", "lora", "embedding"), required=True)
-    c.add_argument("--target-gap-pp", type=int, choices=(0, 1, 2, 5), default=1)
+    choice = c.add_mutually_exclusive_group(required=True)
+    choice.add_argument("--candidate-id", type=int, help="An operating point from this method's calibration frontier")
+    choice.add_argument("--target-gap-pp", type=int, choices=(0, 1, 2, 5), help="Explicitly choose one of the four recorded settings")
     c.add_argument("--question", required=True)
     c.add_argument("--answer-type", choices=("exact_string", "integer", "choice"), default="exact_string")
     c.add_argument("--choices", nargs="+", help="Allowed option labels when answer-type is choice")
@@ -192,6 +207,15 @@ def execute(args):
         return evidence.fetch(url, digest, args.output, groups=args.group or ("core",))
     if args.command == "show":
         return show_report(args.report, args.target_gap_pp)
+    if args.command == "frontier":
+        core.require(args.output.suffix == ".html", "Use an .html output path")
+        json_path = args.output.with_suffix(".json")
+        core.require(not args.output.exists() and not json_path.exists(), "Preserve previous frontier outputs")
+        run = args.run or args.data / "reference"
+        report = frontier_analysis.build(args.data, run, include_test=args.include_test)
+        result = frontier.write_view(report, args.output, run)
+        core.write(json_path, report)
+        return {"html": str(args.output), "data": str(json_path), "view": result}
     if args.command == "encode":
         import encode  # Optional service dependencies are unnecessary for recorded CPU replay.
 
@@ -217,6 +241,7 @@ def execute(args):
             args.output,
             method=args.method,
             target=args.target_gap_pp,
+            candidate_id=args.candidate_id,
             contract=contract,
             sie_base_url=args.sie_base_url,
             self_hosted=args.self_hosted,

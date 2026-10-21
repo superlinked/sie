@@ -14,6 +14,7 @@ import numpy as np
 from sie_sdk import SIEClient
 
 import answer_models
+import frontier_analysis
 import paired_native
 import paired_training as core
 import reproduction
@@ -30,12 +31,14 @@ def sie_client(base_url, *, self_hosted=False):
     return SingleSendClient(base_url=base_url, api_key="" if self_hosted else None, timeout_s=600)
 
 
-def checked_model(run, method, target):
+def checked_model(run, method, target=None, *, candidate_id=None):
     run = Path(run)
     plan, rows = core.checked_plan(run)
     bundle, _ = reproduction.checked_routes(run / "frozen/frozen-final-routes.json", rows)
     core.require(bundle["plan_sha256"] == core.sha(run / "plan.json"), "Routing policy belongs to another run")
-    core.require(method in ("embedding", "base", "lora") and target in (0, 1, 2, 5), "Unknown method or target")
+    core.require(method in ("embedding", "base", "lora"), "Unknown routing method")
+    core.require((target is None) != (candidate_id is None), "Choose a calibration candidate or a recorded setting explicitly")
+    core.require(target is None or (type(target) is int and target in (0, 1, 2, 5)), "Unknown recorded setting")
     family = "embedding" if method == "embedding" else "native"
     scores_path = run / f"{family}-scores.json"
     core.require(core.sha(scores_path) == bundle["scores_sha256"][family], "Saved input scores changed")
@@ -49,8 +52,17 @@ def checked_model(run, method, target):
         and model["training_grades_sha256"] == bundle["training_grades_sha256"],
         "Training lineage changed",
     )
-    policy = bundle["policies"][f"{method}@{target}pp"]
-    return plan, policy["rule"], model
+    if candidate_id is None:
+        rule = bundle["policies"][f"{method}@{target}pp"]["rule"]
+    else:
+        checked_bundle, calibration = frontier_analysis.load_calibration(run)
+        core.require(checked_bundle["calibration_sha256"] == bundle["calibration_sha256"], "Calibration binding changed")
+        candidates = calibration["methods"][method]["candidates"]
+        core.require(type(candidate_id) is int and 0 <= candidate_id < len(candidates), "Unknown calibration candidate")
+        candidate = candidates[candidate_id]
+        core.require(candidate["candidate_id"] == candidate_id, "Calibration candidate identity changed")
+        rule = candidate["policy"]
+    return plan, rule, model
 
 
 def embed(client, request, identity, *, self_hosted=False):
@@ -99,8 +111,8 @@ def embed(client, request, identity, *, self_hosted=False):
     }
 
 
-def route(run, question, method, target, *, client=None, device="cpu", self_hosted=False):
-    plan, rule, model = checked_model(run, method, target)
+def route(run, question, method, target=None, *, candidate_id=None, client=None, device="cpu", self_hosted=False):
+    plan, rule, model = checked_model(run, method, target, candidate_id=candidate_id)
     started = time.perf_counter()
     probabilities, expected, embedding = None, None, None
     if rule["mode"] in ("always_cheap", "always_strong"):
@@ -130,6 +142,7 @@ def route(run, question, method, target, *, client=None, device="cpu", self_host
         "arm": arm,
         "model": plan["pair"]["arms"][arm]["model"],
         "calibration_target_gap_pp": target,
+        "calibration_candidate_id": candidate_id,
         "rule": rule,
         "predicted_correctness": None if probabilities is None else probabilities[0].tolist(),
         "predicted_answer_usd": None if expected is None else expected[0].tolist(),
@@ -236,7 +249,8 @@ def answer(
     output,
     *,
     method="embedding",
-    target=1,
+    target=None,
+    candidate_id=None,
     contract=None,
     sie_base_url=None,
     self_hosted=False,
@@ -250,7 +264,7 @@ def answer(
     )
     contract = contract or {"type": "exact_string", "max_length": 2048}
     answer_models.schema_for(contract, False)
-    plan, rule, _ = checked_model(run, method, target)
+    plan, rule, _ = checked_model(run, method, target, candidate_id=candidate_id)
     needs_sie = (method == "embedding" and not rule["mode"].startswith("always_")) or any(
         answer_models.ARMS[value["arm"]]["provider"] == "sie" for value in plan["pair"]["arms"].values()
     )
@@ -267,6 +281,7 @@ def answer(
             "input": item,
             "method": method,
             "target_gap_pp": target,
+            "calibration_candidate_id": candidate_id,
             "self_hosted": self_hosted,
             "automatic_retries": False,
         },
@@ -278,7 +293,8 @@ def answer(
             else nullcontext(None)
         )
         with context as client:
-            routing, pair = route(run, question, method, target, client=client, device=device, self_hosted=self_hosted)
+            routing, pair = route(run, question, method, target, candidate_id=candidate_id,
+                                  client=client, device=device, self_hosted=self_hosted)
             core.write(output / "routing.json", routing)
             record = solve(item, routing["arm"], pair, sie_client=client, self_hosted=self_hosted)
             core.write(output / "answer.json", record)

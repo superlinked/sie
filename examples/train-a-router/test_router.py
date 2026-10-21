@@ -1,4 +1,6 @@
 import json
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -123,6 +125,8 @@ class PortableRouterTests(unittest.TestCase):
                 str(self.root),
                 "--method",
                 "embedding",
+                "--target-gap-pp",
+                "0",
                 "--question",
                 "2+2?",
                 "--answer-type",
@@ -133,6 +137,32 @@ class PortableRouterTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "Supply --choices"):
             router.execute(args)
+
+    def test_answer_requires_an_explicit_operating_point(self):
+        common = ["answer", "--run", "run", "--method", "embedding", "--question", "Example?", "--output", "answer"]
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                router.parser().parse_args(common)
+            with self.assertRaises(SystemExit):
+                router.parser().parse_args([*common, "--candidate-id", "7", "--target-gap-pp", "1"])
+        args = router.parser().parse_args([*common, "--candidate-id", "7"])
+        self.assertEqual(args.candidate_id, 7)
+        self.assertIsNone(args.target_gap_pp)
+
+    def test_show_defaults_to_every_recorded_operating_point(self):
+        metric = {"quality_gap_from_always_strong_pp": 0.5, "total_usd_per_10000": 9.0,
+                  "net_savings_percent": 35.0, "answer_accuracy_percent": 92.0, "answer_model_usd_per_10000": 8.8}
+        row = {"metrics": metric, "confidence95": {"quality_gap_from_always_strong_pp": {"lower": 0.1, "upper": 0.9}}}
+        names = ["always_strong", "always_cheap"] + [f"{method}@{target}pp"
+                 for method in ("base", "lora", "embedding", "topic", "random") for target in (0, 1, 2, 5)]
+        report = self.write("report.json", {"format": "routerbench-paired-final-report-v1", "questions": 3,
+                                           "policies": {name: row for name in names}})
+        args = router.parser().parse_args(["show", "--report", str(report)])
+        self.assertIsNone(args.target_gap_pp)
+        text = router.execute(args)
+        self.assertEqual(text.count("| Embedding + classifier |"), 4)
+        self.assertIn("GPT-6.1 Sol and GPT-6 Luna", text)
+        self.assertEqual(router.show_report(report, 2).count("| Embedding + classifier |"), 1)
 
     def test_frozen_portable_sources_match_manifest(self):
         directory = Path(router.__file__).parent

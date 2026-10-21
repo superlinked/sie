@@ -74,9 +74,10 @@ recorded recipe, but a different inference runtime need not produce
 bit-identical vectors. The existing recordings remain the exact replay path.
 
 ```bash
-# Use the local encoder with the saved policy; OPENAI_API_KEY is still needed for the selected answer model.
+# Use your selected reference-frontier candidate with the local encoder; OPENAI_API_KEY is still needed for answers.
+CANDIDATE_ID=YOUR_SELECTED_REFERENCE_CANDIDATE_ID
 uv run --frozen --group live python router.py answer \
-  --run data/reference --method embedding \
+  --run data/reference --method embedding --candidate-id "$CANDIDATE_ID" \
   --question 'Which planet is closest to the Sun? A. Mercury B. Venus' \
   --answer-type choice --choices A B --output answers/local-encoder-planet \
   --sie-base-url http://127.0.0.1:8000 --self-hosted
