@@ -191,6 +191,11 @@ pub struct PingResponse {
     /// an empty list is the steady state after Ready, Failed, or Cancelled.
     #[serde(default)]
     pub loading_models: Vec<String>,
+    /// Opaque identity of the answering backend process. When it changes the
+    /// backend has restarted and is given its configs and pinned models again.
+    /// Empty from an older backend.
+    #[serde(default)]
+    pub runtime_instance_id: String,
 }
 
 // -----------------------------------------------------------------------------
@@ -1682,6 +1687,7 @@ mod tests {
         assert_eq!(back.bundle_config_hash, "");
         assert!(back.loaded_models.is_empty());
         assert!(back.loading_models.is_empty());
+        assert!(back.runtime_instance_id.is_empty());
     }
 
     #[test]
@@ -1693,11 +1699,13 @@ mod tests {
             bundle_config_hash: String::new(),
             loaded_models: vec!["org/ready".into()],
             loading_models: vec!["org/loading".into()],
+            runtime_instance_id: "instance-1".into(),
         };
         let bytes = rmp_serde::to_vec_named(&response).unwrap();
         let back: PingResponse = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(back.loading_models, ["org/loading".to_string()]);
         assert_eq!(back.loaded_models, ["org/ready".to_string()]);
+        assert_eq!(back.runtime_instance_id, "instance-1");
     }
 
     #[test]

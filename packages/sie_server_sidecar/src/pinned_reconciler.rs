@@ -4,8 +4,8 @@
 //! set via the `/v1/pools` API or `SIE_GATEWAY_STATIC_QUEUE_POOLS`). This
 //! module polls that source of truth on a timer, computes the union of pins for
 //! logical pools that currently assign this worker, and pushes it to the backend
-//! over IPC on change, so the worker eager-loads pinned models and
-//! excludes them from eviction.
+//! over IPC on change and after the backend process restarts, so the worker
+//! eager-loads pinned models and excludes them from eviction.
 //!
 //! It is deliberately decoupled from the pool admission gate: a deployment may
 //! run with `SIE_POOL_ADMISSION_ENABLED=false` (or use the default,
@@ -96,10 +96,15 @@ impl PinnedReconciler {
         );
         let mut ticker = interval(self.poll_interval);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        // A restarted backend process has no pins. The restart also moves the
+        // assignment revision, so this refresh pushes the set again at once
+        // instead of at the next tick.
+        let mut restarts = self.worker_pool.backend_restarts();
         loop {
             tokio::select! {
                 biased;
                 _ = shutdown.wait() => return,
+                Ok(()) = restarts.changed() => self.refresh().await,
                 _ = ticker.tick() => self.refresh().await,
             }
         }

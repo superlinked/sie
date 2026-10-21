@@ -85,13 +85,14 @@ class TestSGLangEmbeddingAdapter:
         with pytest.raises(ValueError, match="startup_timeout_s"):
             SGLangEmbeddingAdapter("test-model", startup_timeout_s=0)
 
-    def test_startup_timeout_rejects_liveness_budget_mismatch(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_startup_timeout_ignores_the_retired_liveness_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Liveness no longer bounds model loads, so an older chart's budget variable changes nothing."""
         for name in _server.STARTUP_TIMEOUT_ENV_VARS:
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv("SIE_WORKER_LIVENESS_BUDGET_S", "900")
 
-        with pytest.raises(ValueError, match="SIE_WORKER_LIVENESS_BUDGET_S"):
-            _server.resolve_startup_timeout(900)
+        assert _server.resolve_startup_timeout(900) == 900
+        assert _server.resolve_startup_timeout() == _server.DEFAULT_STARTUP_TIMEOUT_S
 
     def test_dims_before_load_returns_none(self) -> None:
         """Dims returns None before first encode."""

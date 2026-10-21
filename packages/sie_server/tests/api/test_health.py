@@ -127,10 +127,10 @@ class TestLivenessProbe:
     """Tests for the GPU-aware /livez liveness probe (issue #1025)."""
 
     def test_livez_returns_503_when_gpu_wedged(self, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A wedged CUDA context fails /livez so the kubelet restarts the pod.
+        """A wedged CUDA context fails /livez and latches the wedge.
 
-        This is the autonomous-recovery path: PyTorch cannot recover a wedged
-        context, so the pod must be restarted rather than left to serve 500s.
+        PyTorch cannot recover a wedged context, so a serving worker exits on
+        the latch and its container restarts rather than serving 500s.
         """
         monkeypatch.setattr(gpu_health.torch.cuda, "is_available", lambda: True)
 

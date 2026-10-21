@@ -3996,3 +3996,39 @@ def test_worker_auth_off_preserves_existing_image_compatibility(tmp_path: Path, 
     assert "SIE_AUTH_TOKEN" not in env
     assert WORKER_AUTH_TEST_JOB not in hook_jobs(docs)
     assert worker_auth_requirements(docs) == {}
+
+
+def adapter_containers(statefulset: dict) -> list[dict]:
+    return [
+        container
+        for container in statefulset["spec"]["template"]["spec"]["containers"]
+        if container["name"] != "worker-sidecar"
+    ]
+
+
+def test_worker_liveness_catches_hangs_and_startup_covers_startup(tmp_path: Path) -> None:
+    """A wedged CUDA context exits the worker; liveness only needs to catch hangs."""
+    (statefulset,) = worker_statefulsets(tmp_path, L4_POOL)
+    (worker,) = adapter_containers(statefulset)
+
+    assert worker["terminationMessagePolicy"] == "FallbackToLogsOnError"
+    assert worker["startupProbe"]["httpGet"]["path"] == "/healthz"
+    liveness = worker["livenessProbe"]
+    assert liveness["httpGet"]["path"] == "/livez"
+    assert liveness["periodSeconds"] * liveness["failureThreshold"] == 60
+    for container in statefulset["spec"]["template"]["spec"]["containers"]:
+        names = {env["name"] for env in container.get("env", [])}
+        assert "SIE_WORKER_LIVENESS_BUDGET_S" not in names
+
+
+def test_model_ready_timeout_is_independent_of_liveness(tmp_path: Path) -> None:
+    """Model loads do not touch the liveness probe, so a long load budget renders."""
+    values = {"workers": {"common": {"modelReadyTimeoutSec": 1800}, "pools": {"l4": {"enabled": True}}}}
+    (statefulset,) = worker_statefulsets(tmp_path, values)
+    timeouts = {
+        env["value"]
+        for container in statefulset["spec"]["template"]["spec"]["containers"]
+        for env in container.get("env", [])
+        if env["name"] == "SIE_MODEL_READY_TIMEOUT_S"
+    }
+    assert timeouts == {"1800"}

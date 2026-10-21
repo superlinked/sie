@@ -887,6 +887,86 @@ async fn smoke_encode_request_round_trips_through_rust_worker() {
     let _ = Arc::new(());
 }
 
+/// Deliveries the stream's consumers have made, redeliveries included.
+async fn stream_deliveries(js: &async_nats::jetstream::Context, stream_name: &str) -> u64 {
+    let stream = js.get_stream(stream_name).await.expect("get work stream");
+    let mut consumers = stream.consumers();
+    let mut delivered = 0;
+    while let Some(info) = consumers.next().await {
+        delivered += info.expect("consumer info").delivered.consumer_sequence;
+    }
+    delivered
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn work_waits_in_the_stream_until_the_backend_is_ready() {
+    // A sidecar whose backend is starting, restarting or wedged must leave work
+    // to healthy peers: pulling it would only NAK it and spend its delivery
+    // budget.
+    if skip_unless_tools_available() {
+        return;
+    }
+    let _guard = smoke_test_guard().await;
+
+    let nats = NatsHarness::start().await;
+    let sock = ShortSocket::new("ipc.sock");
+    let pool = "gate";
+    let bundle = "default";
+    let probe_port = find_free_tcp_port();
+    // No backend listens on the socket yet.
+    let _worker = WorkerHarness::spawn(&nats.url, &sock.path, pool, bundle, probe_port, None);
+    wait_for_tcp(probe_port, Duration::from_secs(30))
+        .await
+        .expect("worker probe port");
+    sleep(Duration::from_millis(500)).await;
+
+    let client = async_nats::connect(&nats.url)
+        .await
+        .expect("client connect");
+    let reply_subject = format!("_INBOX.gate.{}", uuid::Uuid::new_v4());
+    let mut sub = client
+        .subscribe(reply_subject.clone())
+        .await
+        .expect("subscribe reply");
+    let js = async_nats::jetstream::new(client.clone());
+    let model_id = "BAAI/bge-m3";
+    let subject = pool_work_subject(pool, pool, bundle, model_id);
+    let (stream_name, _) = publish_encode_work_item(
+        &js,
+        &subject,
+        "gate-req-1",
+        model_id,
+        pool,
+        "",
+        &reply_subject,
+        None,
+    )
+    .await;
+
+    // Several heartbeat intervals (500 ms here) without a ready backend.
+    sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        stream_deliveries(&js, &stream_name).await,
+        0,
+        "a sidecar without a ready backend must not pull work"
+    );
+
+    let python = PythonHarness::start(sock.path.clone()).await;
+    let reply = timeout(Duration::from_secs(30), sub.next())
+        .await
+        .expect("timed out waiting for WorkResult once the backend is ready")
+        .expect("reply stream closed");
+    let result: WorkResult = rmp_serde::from_slice(&reply.payload).expect("decode WorkResult");
+    assert!(result.success, "expected success, got {:?}", result.error);
+    assert_eq!(result.request_id, "gate-req-1");
+    assert_eq!(stream_deliveries(&js, &stream_name).await, 1);
+
+    drop(_worker);
+    drop(python);
+    drop(nats);
+    sleep(Duration::from_millis(200)).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn smoke_encode_direct_dispatch_round_trips_through_worker_stream() {
     if skip_unless_tools_available() {

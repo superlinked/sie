@@ -73,7 +73,6 @@ STARTUP_TIMEOUT_ENV_VARS = (
     "SIE_ADAPTER_STARTUP_TIMEOUT_S",
     "SIE_SERVER_STARTUP_TIMEOUT_S",
 )
-LIVENESS_BUDGET_ENV_VAR = "SIE_WORKER_LIVENESS_BUDGET_S"
 KERNEL_CACHE_ROOT_ENV_VAR = "SIE_SGLANG_KERNEL_CACHE_ROOT"
 STARTUP_TIMEOUT_S = DEFAULT_STARTUP_TIMEOUT_S
 HEALTH_CHECK_INTERVAL_S = 2.0
@@ -207,32 +206,6 @@ def _kernel_cache_env(env: dict[str, str], *, device_indices: Sequence[int]) -> 
     return defaults
 
 
-def _resolve_liveness_budget() -> float | None:
-    raw = os.environ.get(LIVENESS_BUDGET_ENV_VAR)
-    if raw is None or raw.strip() == "":
-        return None
-    try:
-        value = float(raw)
-    except ValueError:
-        logger.warning("Ignoring invalid %s=%r; expected seconds", LIVENESS_BUDGET_ENV_VAR, raw)
-        return None
-    if math.isfinite(value) and value > 0:
-        return value
-    logger.warning("Ignoring invalid %s=%r; expected finite seconds > 0", LIVENESS_BUDGET_ENV_VAR, raw)
-    return None
-
-
-def _validate_liveness_budget(timeout_s: float) -> float:
-    budget_s = _resolve_liveness_budget()
-    if budget_s is not None and timeout_s >= budget_s:
-        msg = (
-            f"SGLang startup timeout {timeout_s:g}s must be lower than "
-            f"{LIVENESS_BUDGET_ENV_VAR}={budget_s:g}s so kubelet liveness does not kill the worker mid-load"
-        )
-        raise ValueError(msg)
-    return timeout_s
-
-
 def resolve_startup_timeout(timeout_s: float | None = None) -> float:
     """Resolve the SGLang startup-health timeout.
 
@@ -243,12 +216,11 @@ def resolve_startup_timeout(timeout_s: float | None = None) -> float:
 
     Raises:
         ValueError: If an explicit value is not a finite number greater than
-            zero, or the resolved timeout is not below the worker liveness
-            budget.
+            zero.
     """
     declared = validate_optional_positive(timeout_s, field="startup_timeout_s")
     if declared is not None:
-        return _validate_liveness_budget(declared)
+        return declared
 
     for name in STARTUP_TIMEOUT_ENV_VARS:
         raw = os.environ.get(name)
@@ -260,10 +232,10 @@ def resolve_startup_timeout(timeout_s: float | None = None) -> float:
             logger.warning("Ignoring invalid %s=%r; expected seconds", name, raw)
             continue
         if math.isfinite(value) and value > 0:
-            return _validate_liveness_budget(value)
+            return value
         logger.warning("Ignoring invalid %s=%r; expected finite seconds > 0", name, raw)
 
-    return _validate_liveness_budget(DEFAULT_STARTUP_TIMEOUT_S)
+    return DEFAULT_STARTUP_TIMEOUT_S
 
 
 def find_free_port(start_port: int = BASE_PORT) -> int:

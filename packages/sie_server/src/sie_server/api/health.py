@@ -1,9 +1,14 @@
 """Health check endpoints for SIE Server.
 
 Provides Kubernetes-compatible probes:
-- /healthz: Startup/liveness probe - is the process alive? (CPU only, cheap)
+- /healthz: Startup probe - is the process alive? (CPU only, cheap)
 - /livez:   GPU-aware liveness probe - can the device still run kernels?
 - /readyz:  Readiness probe - is the server ready to accept traffic right now?
+
+A wedged CUDA context does not wait for a probe to give up: the first probe that
+finds it (from any of these endpoints, ``/ws/status`` or the sidecar's IPC
+``Ping``) makes a serving worker exit so its container restarts
+(``sie_server.core.gpu_health``).
 """
 
 from fastapi import APIRouter, Response
@@ -31,15 +36,16 @@ async def healthz() -> Response:
 async def livez() -> Response:
     """GPU-aware liveness probe.
 
-    Unlike /healthz (process-alive only), this exercises the GPU with a tiny CUDA
-    sync. A wedged CUDA context (``device-side assert``) is unrecoverable in
-    PyTorch, so failing liveness lets the kubelet restart the pod — the only path
-    back to a serving worker.
+    Unlike /healthz (process-alive only), this runs a tiny kernel on every
+    device that holds a CUDA context. The probe has its own stream and thread,
+    so neither a long batch nor a model load delays it. A wedged context
+    (``device-side assert``) answers 503 and makes a serving worker exit; a hung
+    device or event loop never answers, which the kubelet's ``timeoutSeconds``
+    turns into a failure.
 
     It deliberately does NOT consult the lifecycle ready flag, so graceful
     shutdown draining (when the worker marks itself not-ready) never trips a
-    restart. Wire this to the K8s ``livenessProbe`` with a tolerant
-    ``failureThreshold`` so a momentarily busy GPU is not mistaken for a wedge.
+    restart.
 
     Returns:
         200 OK with "ok" body if the GPU can run a kernel (or this is a CPU

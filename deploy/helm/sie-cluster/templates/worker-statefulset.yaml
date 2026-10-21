@@ -22,16 +22,6 @@ fast at render time.
 {{- if le $modelReadyTimeoutS 0 }}
 {{- fail "workers.common.modelReadyTimeoutSec must be a positive integer number of seconds" }}
 {{- end }}
-{{- $workerLiveness := default dict $root.Values.workers.common.probes.liveness -}}
-{{- $workerLivenessPeriodS := int (default 30 $workerLiveness.periodSeconds) -}}
-{{- $workerLivenessFailures := int (default 36 $workerLiveness.failureThreshold) -}}
-{{- if or (le $workerLivenessPeriodS 0) (le $workerLivenessFailures 0) }}
-{{- fail "workers.common.probes.liveness.periodSeconds and failureThreshold must be positive when modelReadyTimeoutSec is configured" }}
-{{- end }}
-{{- $workerLivenessBudgetS := mul $workerLivenessPeriodS $workerLivenessFailures -}}
-{{- if le $workerLivenessBudgetS $modelReadyTimeoutS }}
-{{- fail (printf "workers.common.modelReadyTimeoutSec=%d must be lower than the adapter worker liveness budget (%d * %d = %ds); increase workers.common.probes.liveness.failureThreshold/periodSeconds or lower modelReadyTimeoutSec" $modelReadyTimeoutS $workerLivenessFailures $workerLivenessPeriodS $workerLivenessBudgetS) }}
-{{- end }}
 {{- $reservedOtelEnv := include "sie-cluster.otel.reservedEnvNames" $root | fromJsonArray -}}
 {{- $reservedWorkerEnv := concat $reservedOtelEnv (list "SIE_BUNDLE" "SIE_GPU_TYPE" "SIE_MACHINE_PROFILE" "SIE_POOL" "SIE_REMOTE_SERVING" "SIE_SGLANG_KERNEL_CACHE_ROOT" "SIE_UPSTREAMS_FILE" "SIE_WORKER_ID" "SIE_THRESHOLD_ROUTING_ENABLED") -}}
 {{- range $upstreamName, $_ := (default dict $root.Values.upstreams) -}}
@@ -359,10 +349,6 @@ spec:
             # Shared cold-load timeout used by worker health waits.
             - name: SIE_MODEL_READY_TIMEOUT_S
               value: {{ $modelReadyTimeoutS | quote }}
-            # Lets engine-backed adapters reject startup budgets kubelet would
-            # kill before completion.
-            - name: SIE_WORKER_LIVENESS_BUDGET_S
-              value: {{ $workerLivenessBudgetS | quote }}
             {{- if eq $engine "candle" }}
             - name: SIE_WORKER_ID
               valueFrom:
@@ -523,16 +509,23 @@ spec:
                 # The 10s sleep gives the K8s endpoints controller time to
                 # remove this pod from the service, so no new traffic arrives.
                 command: ["sleep", "10"]
+          # A worker whose CUDA context is wedged (device-side assert, illegal
+          # memory access) exits with status 75 and the kubelet restarts this
+          # container. With FallbackToLogsOnError the last log lines, which name
+          # the CUDA error, become the termination message in `kubectl describe`.
+          terminationMessagePolicy: FallbackToLogsOnError
           startupProbe:
+            # Covers process start and startup preloads; liveness and readiness
+            # begin once it passes.
             httpGet:
               path: /healthz
               port: {{ $workerPortName }}
             {{- toYaml $root.Values.workers.common.probes.startup | nindent 12 }}
           livenessProbe:
-            # /livez is GPU-aware: it runs a tiny CUDA sync so a wedged context
-            # (device-side assert) escalates to a pod restart instead of serving
-            # 500s forever. /healthz (startupProbe) stays process-alive only.
-            # CPU workers report healthy from /livez, so this is safe for all pools.
+            # /livez runs a tiny kernel on its own stream and thread, so model
+            # loads and long batches do not delay it. It fails only for a hung
+            # process or device: a wedged CUDA context makes the worker exit on
+            # its own within seconds. CPU workers always report healthy.
             httpGet:
               path: /livez
               port: {{ $workerPortName }}
@@ -619,9 +612,6 @@ spec:
             # Shared cold-load timeout used by Rust EnsureModelReady IPC calls.
             - name: SIE_MODEL_READY_TIMEOUT_S
               value: {{ $modelReadyTimeoutS | quote }}
-            # Same budget check on the Rust sidecar before it accepts the IPC timeout.
-            - name: SIE_WORKER_LIVENESS_BUDGET_S
-              value: {{ $workerLivenessBudgetS | quote }}
             - name: SIE_GATEWAY_URL
               value: {{ include "sie-cluster.gateway.internalUrl" $root | quote }}
             {{- with include "sie-cluster.gateway.tokenSecretName" $root }}

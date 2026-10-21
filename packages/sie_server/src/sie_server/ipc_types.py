@@ -94,6 +94,10 @@ class PingResponse(msgspec.Struct):
     # field still decodes; Ready, Failed, and Cancelled clear it because the
     # registry drops the id from ``_loading`` in ``finally``.
     loading_models: list[str] = msgspec.field(default_factory=list)
+    # Opaque identity of the answering process. A change tells the sidecar the
+    # backend restarted and must be given its configs and pinned models again.
+    # Empty from an older peer.
+    runtime_instance_id: str = ""
 
 
 # -----------------------------------------------------------------------------

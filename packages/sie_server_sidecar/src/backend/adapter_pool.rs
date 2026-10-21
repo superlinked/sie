@@ -14,6 +14,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::future::join_all;
 use serde::Serialize;
+use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use crate::backend::python_ipc::map_ipc_error;
@@ -123,6 +124,8 @@ struct AdapterWorkerChild {
     pending_items: AtomicI64,
     pending_cost: AtomicI64,
     models: Mutex<HashSet<String>>,
+    /// Process identity the child last reported in `Ping`; empty until then.
+    runtime_instance_id: Mutex<String>,
 }
 
 struct ChildInflightGuard(Arc<AdapterWorkerChild>);
@@ -160,6 +163,8 @@ pub struct AdapterWorkerPool {
     pinned_assignment_revision: AtomicU64,
     config_quarantined: AtomicBool,
     config_fanout_generation: AtomicU64,
+    /// Counts backend process replacements; see [`Self::backend_restarts`].
+    backend_restarts: watch::Sender<u64>,
     runtime_state: Arc<RuntimeState>,
 }
 
@@ -191,6 +196,7 @@ impl AdapterWorkerPool {
                 pending_items: AtomicI64::new(0),
                 pending_cost: AtomicI64::new(0),
                 models: Mutex::new(HashSet::new()),
+                runtime_instance_id: Mutex::new(String::new()),
             }));
         }
         assert!(
@@ -206,6 +212,7 @@ impl AdapterWorkerPool {
             pinned_assignment_revision: AtomicU64::new(0),
             config_quarantined: AtomicBool::new(false),
             config_fanout_generation: AtomicU64::new(0),
+            backend_restarts: watch::Sender::new(0),
             runtime_state,
         });
         pool.runtime_state
@@ -235,6 +242,14 @@ impl AdapterWorkerPool {
         self.pinned_assignment_revision.load(Ordering::Acquire)
     }
 
+    /// Changes each time a backend child process is replaced, for example after
+    /// a wedged CUDA context made it exit and its container restarted. The new
+    /// process starts with only its image's configs and no pinned models, so the
+    /// config and pinned reconcilers re-apply theirs when this changes.
+    pub fn backend_restarts(&self) -> watch::Receiver<u64> {
+        self.backend_restarts.subscribe()
+    }
+
     pub fn ready_child_count(&self) -> usize {
         self.children
             .iter()
@@ -248,6 +263,9 @@ impl AdapterWorkerPool {
     ) -> Vec<(usize, Result<PingResponse, IpcError>)> {
         let results = join_all(self.children.iter().map(|child| async move {
             let result = child.ipc.ping(timestamp_ms).await;
+            if let Ok(resp) = &result {
+                self.observe_runtime_instance(child, &resp.runtime_instance_id);
+            }
             if result.as_ref().is_ok_and(|resp| resp.ready) {
                 self.mark_child_ready_from_health_success(child);
             } else {
@@ -730,6 +748,38 @@ impl AdapterWorkerPool {
                 "adapter-worker-pool: placement cleared after child failure"
             );
         }
+    }
+
+    /// Record the process identity a child reported. A different identity means
+    /// the process was replaced, so it holds none of the configs or pinned
+    /// models given to its predecessor. The first identity seen and an empty one
+    /// (an older backend) change nothing.
+    fn observe_runtime_instance(&self, child: &AdapterWorkerChild, instance: &str) {
+        if instance.is_empty() {
+            return;
+        }
+        let previous = {
+            let mut current = child
+                .runtime_instance_id
+                .lock()
+                .expect("adapter worker child runtime instance poisoned");
+            if current.as_str() == instance {
+                return;
+            }
+            std::mem::replace(&mut *current, instance.to_string())
+        };
+        if previous.is_empty() {
+            return;
+        }
+        warn!(
+            child_index = child.index,
+            socket = %child.socket_path.display(),
+            "adapter-worker-pool: backend process restarted; re-applying configs and pinned models"
+        );
+        // The pinned reconciler re-pushes when this revision moves.
+        self.pinned_assignment_revision
+            .fetch_add(1, Ordering::AcqRel);
+        self.backend_restarts.send_modify(|restarts| *restarts += 1);
     }
 
     fn mark_child_call_failed(&self, child: &AdapterWorkerChild) {
@@ -1715,6 +1765,27 @@ mod tests {
         assert_eq!(placement(&pool, "model-a"), Some(0));
         assert_eq!(placement(&pool, "model-b"), Some(1));
         assert_eq!(placement(&pool, "model-c"), Some(2));
+    }
+
+    #[test]
+    fn a_replaced_backend_process_signals_a_restart() {
+        let pool = pool_with_children(2);
+        let restarts = pool.backend_restarts();
+        let revision = pool.pinned_assignment_revision();
+
+        // The first identity, a repeat and an older backend's empty identity
+        // are not restarts.
+        pool.observe_runtime_instance(&pool.children[0], "first");
+        pool.observe_runtime_instance(&pool.children[0], "first");
+        pool.observe_runtime_instance(&pool.children[0], "");
+        pool.observe_runtime_instance(&pool.children[1], "other-child");
+        assert_eq!(*restarts.borrow(), 0);
+        assert_eq!(pool.pinned_assignment_revision(), revision);
+
+        pool.observe_runtime_instance(&pool.children[0], "second");
+        assert_eq!(*restarts.borrow(), 1);
+        assert!(restarts.has_changed().expect("sender alive"));
+        assert_eq!(pool.pinned_assignment_revision(), revision + 1);
     }
 
     #[test]

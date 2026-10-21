@@ -23,11 +23,27 @@ import httpx
 import pytest
 from sie_sdk import SIEClient
 from sie_sdk.client.async_ import SIEAsyncClient
+from sie_server.core import gpu_health
 
 logger = logging.getLogger(__name__)
 
 # Project root (for finding models directory, Dockerfiles, etc.)
 _project_root = Path(__file__).parent.parent.parent.parent
+
+
+@pytest.fixture(autouse=True)
+def _isolate_gpu_health(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
+    """Start and end every test with a healthy, unarmed GPU health state.
+
+    A simulated wedge latches for the life of the process, as a real one
+    does, so without this a test that simulates one would make every later
+    test's model work be refused. A serving worker also exits on a wedge; the
+    patch keeps the test process alive if a test armed that exit.
+    """
+    monkeypatch.setattr(gpu_health, "_exit_process", lambda: None)
+    gpu_health.reset_gpu_health_cache()
+    yield
+    gpu_health.reset_gpu_health_cache()
 
 
 @pytest.fixture(scope="session")

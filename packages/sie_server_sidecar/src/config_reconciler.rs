@@ -415,100 +415,116 @@ pub fn spawn(
         let mut ticker = interval(config.poll_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         ticker.tick().await;
+        // A restarted backend process holds only its image's configs. Its
+        // identity change wakes this loop to re-apply the export, which the
+        // epoch poll would otherwise skip as unchanged; a failed re-apply is
+        // retried on every tick until one succeeds.
+        let mut backend_restarts = ipc.backend_restarts();
+        let mut reseed_pending = false;
 
         loop {
-            tokio::select! {
+            let (reason, force_epoch, previous_export_signature, remote_bundle_config_hashes_hash) = tokio::select! {
                 biased;
                 _ = shutdown.wait() => return,
+                Ok(()) = backend_restarts.changed() => {
+                    info!("worker-config: backend process restarted; re-applying the config export");
+                    reseed_pending = true;
+                    ("backend_restart", false, None, String::new())
+                }
                 _ = ticker.tick() => {
-                    let local_epoch = state.epoch();
-                    let remote = match client.fetch_epoch().await {
-                        Ok(snapshot) => snapshot,
-                        Err(e) => {
-                            warn!(error = %e, "worker-config: epoch poll failed");
-                            record_reconcile(&runtime.telemetry, "poll", "epoch_error", None);
-                            continue;
-                        }
-                    };
-                    let remote_epoch = remote.epoch;
-                    let remote_bundle_config_hashes_hash =
-                        remote.bundle_config_hashes_hash.clone();
-
-                    let full_export_due = config.full_export_interval.is_some_and(|interval| {
-                        last_successful_export
-                            .map(|last| last.elapsed() >= interval)
-                            .unwrap_or(true)
-                    });
-
-                    let Some(reason) = drift_reason(
-                        local_epoch,
-                        &remote,
-                        &last_bundle_config_hashes_hash,
-                        full_export_due,
-                    ) else {
-                        debug!(
-                            local_epoch,
-                            remote_epoch,
-                            bundle_config_hashes_hash = %remote_bundle_config_hashes_hash,
-                            "worker-config: epoch poll in sync"
-                        );
-                        continue;
-                    };
-
-                    let force_epoch = remote_epoch < local_epoch;
-                    if force_epoch {
-                        warn!(
-                            local_epoch,
-                            remote_epoch,
-                            "worker-config: local epoch ahead of sie-config; export reconcile will force epoch after successful apply"
-                        );
+                    if reseed_pending {
+                        ("backend_restart", false, None, String::new())
                     } else {
-                        info!(
-                            local_epoch,
-                            remote_epoch,
-                            reason,
-                            bundle_config_hashes_hash = %remote_bundle_config_hashes_hash,
-                            "worker-config: drift detected; fetching export"
-                        );
-                    }
+                        let local_epoch = state.epoch();
+                        let remote = match client.fetch_epoch().await {
+                            Ok(snapshot) => snapshot,
+                            Err(e) => {
+                                warn!(error = %e, "worker-config: epoch poll failed");
+                                record_reconcile(&runtime.telemetry, "poll", "epoch_error", None);
+                                continue;
+                            }
+                        };
+                        let remote_epoch = remote.epoch;
+                        let remote_bundle_config_hashes_hash =
+                            remote.bundle_config_hashes_hash.clone();
 
-                    match reconcile_export(&runtime, force_epoch, reason, last_export_signature)
-                    .await
-                    {
-                        Ok(outcome) if outcome.shutdown => return,
-                        Ok(outcome) if outcome.failed == 0 => {
-                            last_successful_export = Some(Instant::now());
-                            if let Some(signature) = outcome.export_signature {
-                                last_export_signature = Some(signature);
-                            }
-                            if !remote_bundle_config_hashes_hash.is_empty() {
-                                last_bundle_config_hashes_hash =
-                                    remote_bundle_config_hashes_hash.clone();
-                            }
-                            info!(
-                                epoch = outcome.epoch,
-                                applied = outcome.applied,
-                                skipped = outcome.skipped,
-                                state_updated = outcome.state_updated,
-                                reason,
-                                "worker-config: export reconcile complete"
+                        let full_export_due = config.full_export_interval.is_some_and(|interval| {
+                            last_successful_export
+                                .map(|last| last.elapsed() >= interval)
+                                .unwrap_or(true)
+                        });
+
+                        let Some(reason) = drift_reason(
+                            local_epoch,
+                            &remote,
+                            &last_bundle_config_hashes_hash,
+                            full_export_due,
+                        ) else {
+                            debug!(
+                                local_epoch,
+                                remote_epoch,
+                                bundle_config_hashes_hash = %remote_bundle_config_hashes_hash,
+                                "worker-config: epoch poll in sync"
                             );
-                        }
-                        Ok(outcome) => {
+                            continue;
+                        };
+
+                        let force_epoch = remote_epoch < local_epoch;
+                        if force_epoch {
                             warn!(
-                                epoch = outcome.epoch,
-                                applied = outcome.applied,
-                                failed = outcome.failed,
-                                skipped = outcome.skipped,
+                                local_epoch,
+                                remote_epoch,
+                                "worker-config: local epoch ahead of sie-config; export reconcile will force epoch after successful apply"
+                            );
+                        } else {
+                            info!(
+                                local_epoch,
+                                remote_epoch,
                                 reason,
-                                "worker-config: export reconcile partial; epoch/hash not advanced"
+                                bundle_config_hashes_hash = %remote_bundle_config_hashes_hash,
+                                "worker-config: drift detected; fetching export"
                             );
                         }
-                        Err(e) => {
-                            warn!(error = %e, reason, "worker-config: export reconcile failed");
-                            record_reconcile(&runtime.telemetry, "full_export", "fetch_error", None);
-                        }
+                        (reason, force_epoch, last_export_signature, remote_bundle_config_hashes_hash)
                     }
+                }
+            };
+
+            match reconcile_export(&runtime, force_epoch, reason, previous_export_signature).await {
+                Ok(outcome) if outcome.shutdown => return,
+                Ok(outcome) if outcome.failed == 0 => {
+                    // While a re-seed is pending every attempt is one, so a
+                    // success here completes it.
+                    reseed_pending = false;
+                    last_successful_export = Some(Instant::now());
+                    if let Some(signature) = outcome.export_signature {
+                        last_export_signature = Some(signature);
+                    }
+                    if !remote_bundle_config_hashes_hash.is_empty() {
+                        last_bundle_config_hashes_hash = remote_bundle_config_hashes_hash;
+                    }
+                    info!(
+                        epoch = outcome.epoch,
+                        applied = outcome.applied,
+                        skipped = outcome.skipped,
+                        state_updated = outcome.state_updated,
+                        reason,
+                        "worker-config: export reconcile complete"
+                    );
+                }
+                Ok(outcome) => {
+                    warn!(
+                        epoch = outcome.epoch,
+                        applied = outcome.applied,
+                        failed = outcome.failed,
+                        skipped = outcome.skipped,
+                        reason,
+                        "worker-config: export reconcile partial; epoch/hash not advanced"
+                    );
+                }
+                Err(e) => {
+                    warn!(error = %e, reason, "worker-config: export reconcile failed");
+                    record_reconcile(&runtime.telemetry, "full_export", "fetch_error", None);
                 }
             }
         }
@@ -1471,6 +1487,70 @@ mod tests {
         assert_eq!(unchanged.failed, 0);
         assert!(!unchanged.state_updated);
         assert_eq!(replace_calls.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn export_reconcile_reapplies_an_unchanged_snapshot_to_a_restarted_backend() {
+        // A restarted backend holds only its image's configs, so the same export
+        // at the same epoch must reach it again.
+        let state = ConfigApplyState::new("old".into());
+        let telemetry = SidecarTelemetry::for_tests(&[]);
+        let replace_calls = Arc::new(Mutex::new(Vec::new()));
+        let snapshot = || ExportSnapshot {
+            bundle_adapters: HashMap::new(),
+            epoch: 4,
+            bundle_config_hashes: HashMap::from([(
+                "default".to_string(),
+                "control-hash".to_string(),
+            )]),
+            bundle_pool_config_hashes: HashMap::new(),
+            models: vec![exported_model("target-model", &["default"])],
+        };
+        let apply = || {
+            let replace_calls = Arc::clone(&replace_calls);
+            move |req, _epoch| {
+                let replace_calls = Arc::clone(&replace_calls);
+                async move {
+                    replace_calls.lock().await.push(req);
+                    Ok(Some(ReplaceModelConfigsResponse {
+                        unsupported_models: Vec::new(),
+                        applied: true,
+                        bundle_config_hash: "control-hash".into(),
+                        config_version: 1,
+                        applied_models: vec!["target-model".into()],
+                        applied_profiles: vec!["default".into()],
+                    }))
+                }
+            }
+        };
+
+        let startup = reconcile_export_snapshot(
+            snapshot(),
+            scope("default", "default"),
+            &state,
+            &telemetry,
+            reconcile_options("startup"),
+            apply(),
+        )
+        .await;
+        assert_eq!(startup.applied, 1);
+
+        let reseed = reconcile_export_snapshot(
+            snapshot(),
+            scope("default", "default"),
+            &state,
+            &telemetry,
+            reconcile_options("backend_restart"),
+            apply(),
+        )
+        .await;
+
+        assert_eq!(reseed.applied, 1);
+        assert_eq!(reseed.failed, 0);
+        let calls = replace_calls.lock().await;
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].models.len(), 1);
+        assert_eq!(calls[1].bundle_config_hash, "control-hash");
     }
 
     #[tokio::test]

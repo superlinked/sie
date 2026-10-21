@@ -15,6 +15,7 @@ mod candle_residency;
 mod candle_rope;
 mod candle_splade;
 mod candle_xlm_roberta;
+pub mod gpu_health;
 pub mod ipc;
 pub mod ipc_types;
 pub mod native_backend;

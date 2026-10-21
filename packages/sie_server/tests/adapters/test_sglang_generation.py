@@ -3606,7 +3606,7 @@ def test_declared_read_cap_reaches_the_http_client() -> None:
 
 
 def _clear_startup_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in (*_server.STARTUP_TIMEOUT_ENV_VARS, _server.LIVENESS_BUDGET_ENV_VAR):
+    for name in _server.STARTUP_TIMEOUT_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
 
 

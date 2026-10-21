@@ -14,6 +14,7 @@ from fastapi import FastAPI
 
 from sie_server.app.app_factory import AppFactory
 from sie_server.app.app_state_config import AppStateConfig
+from sie_server.core.gpu_health import exit_on_wedge
 
 
 def _create_app_from_env() -> FastAPI:
@@ -23,7 +24,11 @@ def _create_app_from_env() -> FastAPI:
     always does regardless of whether reload=True or reload=False. It deserializes the
     AppStateConfig from environment variables (set by `run_server()` before starting uvicorn)
     and creates the FastAPI app.
+
+    This is the serving process, so a wedged CUDA context makes it exit and
+    leaves recovery to its supervisor (see ``sie_server.core.gpu_health``).
     """
+    exit_on_wedge()
     config = AppStateConfig.from_env_vars()
     return AppFactory.create_app(config)
 

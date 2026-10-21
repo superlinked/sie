@@ -23,9 +23,10 @@ from sie_server.adapter_call_loop import handle_run_batch
 from sie_server.adapters._generation_base import GenerationUnsupportedFieldError
 from sie_server.config.hybrid_admission import NumericalAdmission, bridged_item_refusal, remote_admission
 from sie_server.config.model import ModelConfig
-from sie_server.core.gpu_health import gpu_is_healthy_async
+from sie_server.core.gpu_health import gpu_is_healthy_async, is_wedged
 from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.numerical_snapshot import numerical_profile_snapshot
+from sie_server.core.profile_identity import runtime_instance_id
 from sie_server.core.readiness import is_ready
 from sie_server.core.server_auth import acl_allows_access
 from sie_server.ipc_types import (
@@ -101,6 +102,27 @@ _NUMERICAL_ADMISSION_RETRY_MS = 1000
 _UNVERIFIED_ADMISSION = "this method does not verify numerical admissions"
 _ADMISSION_CHECK_FAILED = "numerical admission check failed"
 _ADMITTED_ITEM_UNANSWERED = "the backend returned no outcome for this admitted item"
+
+# Batch methods: their outcomes say whether inference failed.
+_BATCH_METHODS = frozenset(
+    {
+        METHOD_PROCESS_ENCODE_BATCH,
+        METHOD_PROCESS_SCORE_BATCH,
+        METHOD_PROCESS_EXTRACT_BATCH,
+        METHOD_RUN_BATCH,
+        METHOD_RUN_BATCH_WITH_EXECUTION_AUTHORITY_V1,
+        METHOD_RUN_BATCH_WITH_NUMERICAL_ADMISSION_V1,
+    }
+)
+# Methods that load or run models. A wedged CUDA context refuses them with an
+# IPC error: the sidecar NAKs the work for redelivery, marks this child failed
+# and moves its models, as for any backend that stops answering.
+_MODEL_METHODS = _BATCH_METHODS | {
+    METHOD_ENSURE_MODEL_READY,
+    METHOD_PROCESS_GENERATE,
+    METHOD_PROCESS_GENERATE_WITH_EXECUTION_AUTHORITY_V1,
+}
+_WEDGED_REFUSAL = "the CUDA context is wedged; this worker is restarting"
 
 # A negotiated response may exceed one legacy IPC frame, but remains tightly
 # bounded so a malformed or unexpectedly large backend output cannot grow the
@@ -215,6 +237,15 @@ def _refuse_shared_socket_directory(directory: Path) -> None:
             f"Remove the allow entries (ls -led {shlex.quote(str(directory))} lists them) or set "
             f"SIE_IPC_SOCKET_PATH to a socket in a directory without them."
         )
+
+
+def _has_inference_error(outcome: Any) -> bool:
+    """Whether a batch answered any item with a generic inference failure."""
+    return isinstance(outcome, BatchOutcome) and any(
+        item.disposition == "publish_error_and_ack"
+        and (item.error_code or "").lower() == ErrorCode.INFERENCE_ERROR.value.lower()
+        for item in outcome.outcomes
+    )
 
 
 def _named_admission(item: Any) -> str | None:
@@ -539,6 +570,9 @@ class IpcServer:
     ) -> None:
         import msgspec  # noqa: PLC0415
 
+        if method in _MODEL_METHODS and is_wedged():
+            await self._send_error(writer, request_id, _WEDGED_REFUSAL)
+            return
         try:
             if method in (METHOD_PROCESS_GENERATE, METHOD_PROCESS_GENERATE_WITH_EXECUTION_AUTHORITY_V1):
                 await self._handle_process_generate(
@@ -620,6 +654,14 @@ class IpcServer:
             logger.exception("IPC method %s failed", method)
             await self._send_error(writer, request_id, f"{type(e).__name__}: {e}")
             return
+
+        if method in _BATCH_METHODS and _has_inference_error(resp_body):
+            # A failed batch may have wedged the CUDA context. Probe now rather
+            # than at the next heartbeat, so later work is refused at once. This
+            # batch keeps its answer: it was running when the context broke, so
+            # it may hold the input that broke it, and redelivering that input
+            # could wedge another worker.
+            await gpu_is_healthy_async(use_cache=False)
 
         envelope = ResponseEnvelope(
             version=IPC_VERSION,
@@ -725,6 +767,7 @@ class IpcServer:
             bundle_config_hash=bundle_config_hash,
             loaded_models=loaded_models,
             loading_models=loading_models,
+            runtime_instance_id=runtime_instance_id(),
         )
 
     async def _handle_ensure_ready(self, req: EnsureModelReadyRequest) -> EnsureModelReadyResponse:

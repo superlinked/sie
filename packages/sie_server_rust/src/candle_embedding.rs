@@ -3200,6 +3200,18 @@ fn device_from_spec(spec: CandleDeviceSpec) -> Result<Device> {
     }
 }
 
+/// The CUDA device this worker loads models on, as [`candle_device`] chooses
+/// it, or `None` when it runs on another device or CUDA is unavailable. Creates
+/// no context.
+pub(crate) fn candle_cuda_ordinal() -> Option<usize> {
+    let ordinal = match configured_candle_device_spec() {
+        Ok(Some(CandleDeviceSpec::Cuda(index))) => index,
+        Ok(None) => 0,
+        Ok(Some(_)) | Err(_) => return None,
+    };
+    candle::utils::cuda_is_available().then_some(ordinal)
+}
+
 fn candle_device() -> Result<Device> {
     if let Some(spec) = configured_candle_device_spec()? {
         return device_from_spec(spec);

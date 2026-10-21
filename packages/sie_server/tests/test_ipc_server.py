@@ -2724,6 +2724,121 @@ class TestProcessEncodeBatch:
 
 
 # -----------------------------------------------------------------------------
+# Wedged CUDA context
+# -----------------------------------------------------------------------------
+
+
+def _encode_batch(work_item_id: str) -> dict:
+    return {
+        "model_id": "test/model",
+        "items": [
+            {
+                "work_item_id": work_item_id,
+                "request_id": work_item_id.partition(".")[0],
+                "item_index": 0,
+                "total_items": 1,
+                "timestamp": time.time(),
+                "item": {"text": "hello"},
+                "output_types": ["dense"],
+                "is_query": False,
+                "payload_fetch_ms": 0.0,
+            }
+        ],
+    }
+
+
+class TestWedgedCudaContext:
+    @pytest.mark.asyncio
+    async def test_model_work_is_refused_without_running_once_wedged(self, server_and_path) -> None:
+        """A refusal is an IPC error, so the sidecar NAKs the work and marks this child failed."""
+        _srv, sock = server_and_path
+        client = await _Client.connect(sock)
+        try:
+            with (
+                patch("sie_server.ipc_server.is_wedged", return_value=True),
+                patch(
+                    "sie_server.core.encode_pipeline.EncodePipeline.run_encode",
+                    new_callable=AsyncMock,
+                ) as run_encode,
+            ):
+                encode = await client.rpc("ProcessEncodeBatch", _encode_batch("req-w.0"))
+                ensure = await client.rpc("EnsureModelReady", {"model_id": "test/model"})
+                ping = await client.rpc("Ping", {"timestamp_ms": 1.0})
+                capabilities = await client.rpc("WorkerCapabilities", {})
+
+            assert encode["ok"] is False
+            assert "wedged" in encode["error"]
+            assert ensure["ok"] is False
+            assert "wedged" in ensure["error"]
+            run_encode.assert_not_awaited()
+            # Calls that run no model still answer: the sidecar sees a child
+            # that is not ready, and a config fanout does not fail.
+            assert ping["ok"] is True
+            assert capabilities["ok"] is True
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_a_batch_failing_with_an_inference_error_probes_the_gpu_at_once(self, server_and_path) -> None:
+        """The failed batch keeps its answer: it may hold the input that wedged the context."""
+        _srv, sock = server_and_path
+        client = await _Client.connect(sock)
+        try:
+            with (
+                patch(
+                    "sie_server.core.encode_pipeline.EncodePipeline.run_encode",
+                    new_callable=AsyncMock,
+                    side_effect=RuntimeError("CUDA error: device-side assert triggered"),
+                ),
+                patch(
+                    "sie_server.ipc_server.gpu_is_healthy_async",
+                    new=AsyncMock(return_value=False),
+                ) as health,
+            ):
+                resp = await client.rpc("ProcessEncodeBatch", _encode_batch("req-f.0"))
+
+            assert resp["ok"] is True
+            [outcome] = resp["body"]["outcomes"]
+            assert outcome["disposition"] == "publish_error_and_ack"
+            assert outcome["error_code"] == "inference_error"
+            health.assert_awaited_once_with(use_cache=False)
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_a_successful_batch_does_not_probe_the_gpu(self, server_and_path) -> None:
+        _srv, sock = server_and_path
+        client = await _Client.connect(sock)
+        try:
+            with (
+                patch(
+                    "sie_server.core.encode_pipeline.EncodePipeline.run_encode",
+                    new_callable=AsyncMock,
+                    return_value=([{"dense": [0.5]}], RequestTiming()),
+                ),
+                patch("sie_server.ipc_server.gpu_is_healthy_async", new=AsyncMock(return_value=True)) as health,
+            ):
+                resp = await client.rpc("ProcessEncodeBatch", _encode_batch("req-s.0"))
+
+            assert resp["ok"] is True
+            assert resp["body"]["outcomes"][0]["disposition"] == "publish_and_ack"
+            health.assert_not_awaited()
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_ping_names_this_process(self, server_and_path) -> None:
+        """The sidecar re-seeds configs and pins when this identity changes."""
+        _srv, sock = server_and_path
+        client = await _Client.connect(sock)
+        try:
+            resp = await client.rpc("Ping", {"timestamp_ms": 1.0})
+            assert resp["body"]["runtime_instance_id"] == runtime_instance_id()
+        finally:
+            await client.close()
+
+
+# -----------------------------------------------------------------------------
 # ProcessScoreBatch / ProcessExtractBatch smoke
 # -----------------------------------------------------------------------------
 

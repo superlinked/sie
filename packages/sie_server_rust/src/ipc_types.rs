@@ -84,6 +84,10 @@ pub struct PingResponse {
     pub bundle_config_hash: String,
     #[serde(default)]
     pub loaded_models: Vec<String>,
+    /// Opaque identity of this process; the sidecar re-seeds a backend whose
+    /// identity changes.
+    #[serde(default)]
+    pub runtime_instance_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

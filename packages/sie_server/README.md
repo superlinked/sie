@@ -1228,6 +1228,31 @@ When OOM recovery is exhausted on a request, the server returns
 `HTTP 503 RESOURCE_EXHAUSTED` with `Retry-After`. The Python SDK
 auto-retries; see `packages/sie_sdk/README.md` for client-side controls.
 
+### GPU fault recovery
+
+A sticky CUDA error (a device-side assert, an illegal memory access, a launch
+failure) leaves the process's CUDA context unusable: every later CUDA call
+fails, and only a new process can use the GPU again. Out-of-memory errors are
+not sticky and go through the OOM recovery above instead.
+
+The server checks the GPU with a tiny kernel on its own stream and thread, so
+the check neither waits for inference nor allocates memory. It runs on
+`/livez`, `/readyz`, the `/ws/status` push, each sidecar `Ping`, and at once
+after a queue batch fails with an inference error. Devices on which the
+process holds no CUDA context are skipped: a worker whose GPU work all runs in
+SGLang engine subprocesses has nothing of its own to check. An engine
+subprocess that crashes is reaped and reloaded after a cooldown by the model
+registry, as before.
+
+The first failed check is final. From then on the server reports not ready,
+answers model work from the sidecar (`EnsureModelReady`, batches, generation)
+with an IPC error so the sidecar redelivers it, and `sie-server serve` exits
+with status 75 about a second later. Run the server under a supervisor that
+restarts it: Kubernetes (the Helm chart's worker containers), or
+`docker run --restart unless-stopped`. The batch that was running when the
+context failed keeps its error answer, because it may contain the input that
+caused the failure.
+
 ### Batching & request handling
 
 | Env var | Default | Effect |

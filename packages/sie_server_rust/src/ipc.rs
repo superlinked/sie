@@ -14,6 +14,8 @@ use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn, Instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
+use crate::gpu_health::GpuHealth;
+use crate::ipc_types::Disposition;
 use crate::ipc_types::{
     ApplyModelConfigRequest, ApplyModelConfigResponse, BatchOutcome, DrainRequest, DrainResponse,
     EnsureModelReadyRequest, ProcessEncodeBatchRequest, ProcessExtractBatchRequest,
@@ -33,6 +35,37 @@ const IPC_RESPONSE_CHUNK_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CHUNKED_IPC_RESPONSE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_IPC_RESPONSE_CHUNKS: u32 = 64;
 const IPC_RESPONSE_CHUNK_KIND_V1: &str = "ipc_response_chunk_v1";
+const WEDGED_REFUSAL: &str = "the CUDA context is wedged; this worker is restarting";
+/// Item error codes of a failed model load or forward, after which the device
+/// is probed at once.
+const DEVICE_FAILURE_CODES: &[&str] = &[
+    "candle_inference_failed",
+    "candle_internal_error",
+    "candle_model_load_failed",
+];
+
+/// Methods that load or run models. A wedged CUDA context refuses them with an
+/// IPC error, so the sidecar NAKs the work and marks this child failed.
+fn is_model_method(method: &str) -> bool {
+    matches!(
+        method,
+        METHOD_ENSURE_MODEL_READY
+            | METHOD_PROCESS_ENCODE_BATCH
+            | METHOD_PROCESS_SCORE_BATCH
+            | METHOD_PROCESS_EXTRACT_BATCH
+            | METHOD_RUN_BATCH
+    )
+}
+
+fn has_device_failure(outcome: &BatchOutcome) -> bool {
+    outcome.outcomes.iter().any(|item| {
+        item.disposition == Disposition::PublishErrorAndAck
+            && item
+                .error_code
+                .as_deref()
+                .is_some_and(|code| DEVICE_FAILURE_CODES.contains(&code))
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct IpcServerConfig {
@@ -62,14 +95,37 @@ pub struct IpcServer {
     config: IpcServerConfig,
     backend: Arc<NativeBackend>,
     bundle_config_hash: Arc<RwLock<String>>,
+    health: Arc<GpuHealth>,
+    /// Reported in `Ping`; a new process reports a new one.
+    runtime_instance_id: Arc<str>,
 }
 
 impl IpcServer {
     pub fn new(config: IpcServerConfig, backend: NativeBackend) -> Self {
+        Self::with_gpu_health(config, backend, GpuHealth::for_configured_device())
+    }
+
+    pub fn with_gpu_health(
+        config: IpcServerConfig,
+        backend: NativeBackend,
+        health: GpuHealth,
+    ) -> Self {
         Self {
             config,
             backend: Arc::new(backend),
             bundle_config_hash: Arc::new(RwLock::new(String::new())),
+            health: Arc::new(health),
+            runtime_instance_id: uuid::Uuid::new_v4().simple().to_string().into(),
+        }
+    }
+
+    /// Probe the device at once after a batch failed on it, so later work is
+    /// refused without waiting for the next heartbeat. The batch keeps its
+    /// answer: it was running when the context broke and may hold the input
+    /// that broke it, so redelivering it could wedge another worker.
+    async fn probe_after_device_failure(&self, outcome: &BatchOutcome) {
+        if has_device_failure(outcome) {
+            self.health.healthy(true).await;
         }
     }
 
@@ -163,10 +219,20 @@ impl IpcServer {
             });
         }
 
+        if is_model_method(&envelope.method) && self.health.is_wedged() {
+            return Ok(HandledResponse {
+                payload: response_error(&envelope.request_id, WEDGED_REFUSAL.to_string())?,
+                request_id,
+                accepts_response_chunks_v1,
+            });
+        }
+
         let payload = match envelope.method.as_str() {
             METHOD_PING => {
                 let req = body_as::<crate::ipc_types::PingRequest>(envelope.body)?;
-                let ready = self.backend.health_ready().await;
+                // Probe first: detecting a wedge must not depend on the catalog.
+                let gpu_healthy = self.health.healthy(false).await;
+                let ready = gpu_healthy && self.backend.health_ready().await;
                 let bundle_config_hash = self
                     .bundle_config_hash
                     .read()
@@ -180,6 +246,7 @@ impl IpcServer {
                         ready,
                         bundle_config_hash,
                         loaded_models: self.backend.loaded_models(),
+                        runtime_instance_id: self.runtime_instance_id.to_string(),
                     },
                 )
             }
@@ -202,11 +269,13 @@ impl IpcServer {
             METHOD_PROCESS_ENCODE_BATCH => {
                 let req = body_as::<ProcessEncodeBatchRequest>(envelope.body)?;
                 let resp = self.backend.process_encode_batch(req).await;
+                self.probe_after_device_failure(&resp).await;
                 response_ok(&envelope.request_id, resp)
             }
             METHOD_PROCESS_SCORE_BATCH => {
                 let req = body_as::<ProcessScoreBatchRequest>(envelope.body)?;
                 let resp = self.backend.process_score_batch(req).await;
+                self.probe_after_device_failure(&resp).await;
                 response_ok(&envelope.request_id, resp)
             }
             METHOD_PROCESS_EXTRACT_BATCH => {
@@ -267,6 +336,7 @@ impl IpcServer {
                     // Never put an item's error string into status text.
                     span.set_status(opentelemetry::trace::Status::error(""));
                 }
+                self.probe_after_device_failure(&resp).await;
                 response_ok(&envelope.request_id, resp)
             }
             METHOD_APPLY_MODEL_CONFIG => {
@@ -379,9 +449,23 @@ impl IpcServer {
                     .unwrap_or("/");
 
                 let (status, content_type, body) = match path {
-                    "/healthz" | "/livez" => ("200 OK", "text/plain", "ok".to_string()),
+                    "/healthz" => ("200 OK", "text/plain", "ok".to_string()),
+                    // GPU-aware: a wedged context answers 503 (and the process
+                    // is exiting); a hung device never answers.
+                    "/livez" => {
+                        if server.health.healthy(false).await {
+                            ("200 OK", "text/plain", "ok".to_string())
+                        } else {
+                            (
+                                "503 Service Unavailable",
+                                "text/plain",
+                                "gpu unhealthy".to_string(),
+                            )
+                        }
+                    }
                     "/readyz" => {
-                        if server.backend.health_ready().await {
+                        if server.health.healthy(false).await && server.backend.health_ready().await
+                        {
                             ("200 OK", "text/plain", "ready".to_string())
                         } else {
                             (
@@ -680,7 +764,11 @@ mod tests {
     }
 
     fn test_server() -> IpcServer {
-        IpcServer::new(
+        test_server_with_health(GpuHealth::disabled())
+    }
+
+    fn test_server_with_health(health: GpuHealth) -> IpcServer {
+        IpcServer::with_gpu_health(
             IpcServerConfig {
                 socket_path: PathBuf::from("/tmp/sie-server-rust-test.sock"),
                 worker_id: "worker-test".to_string(),
@@ -689,7 +777,128 @@ mod tests {
                 http_port: 0,
             },
             NativeBackend::Candle(CandleBackend::new(CandleBackendConfig::new(64, true, 1))),
+            health,
         )
+    }
+
+    async fn call(
+        server: &IpcServer,
+        method: &str,
+        body: serde_json::Value,
+    ) -> ResponseEnvelope<serde_json::Value> {
+        let response = server
+            .handle_frame(&request_frame(method, body))
+            .await
+            .expect("handle frame");
+        rmp_serde::from_slice(&response).expect("decode response")
+    }
+
+    #[tokio::test]
+    async fn a_wedged_worker_refuses_model_work_and_reports_not_ready() {
+        let server = test_server_with_health(GpuHealth::with_probe(
+            || crate::gpu_health::ProbeOutcome::Wedged("CUDA_ERROR_ILLEGAL_ADDRESS".to_string()),
+            false,
+        ));
+
+        // The heartbeat's probe finds the wedge.
+        let ping = call(&server, METHOD_PING, json!({"timestamp_ms": 1.0})).await;
+        assert!(ping.ok);
+        assert_eq!(
+            ping.body.as_ref().and_then(|b| b.get("ready")),
+            Some(&json!(false))
+        );
+        assert!(server.health.is_wedged());
+
+        let ensure = call(
+            &server,
+            METHOD_ENSURE_MODEL_READY,
+            json!({"model_id": "BAAI/bge-m3"}),
+        )
+        .await;
+        assert!(!ensure.ok);
+        assert!(ensure
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("wedged")));
+        let batch = call(
+            &server,
+            METHOD_RUN_BATCH,
+            json!({"model_id": "BAAI/bge-m3", "batch_id": 1, "items": []}),
+        )
+        .await;
+        assert!(!batch.ok);
+
+        // Calls that run no model still answer.
+        let capabilities = call(&server, METHOD_WORKER_CAPABILITIES, json!({})).await;
+        assert!(capabilities.ok);
+    }
+
+    #[tokio::test]
+    async fn ping_names_this_process() {
+        let server = test_server();
+        let first = call(&server, METHOD_PING, json!({"timestamp_ms": 1.0})).await;
+        let second = call(&server, METHOD_PING, json!({"timestamp_ms": 2.0})).await;
+        let id = |envelope: &ResponseEnvelope<serde_json::Value>| {
+            envelope
+                .body
+                .as_ref()
+                .and_then(|b| b.get("runtime_instance_id"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        };
+        let first_id = id(&first).expect("runtime_instance_id");
+        assert!(!first_id.is_empty());
+        assert_eq!(id(&second), Some(first_id.clone()));
+        let other = call(&test_server(), METHOD_PING, json!({"timestamp_ms": 1.0})).await;
+        assert_ne!(id(&other), Some(first_id));
+    }
+
+    fn outcome(
+        disposition: Disposition,
+        error_code: Option<&str>,
+    ) -> crate::ipc_types::ItemOutcome {
+        crate::ipc_types::ItemOutcome {
+            work_item_id: "w".to_string(),
+            request_id: "r".to_string(),
+            item_index: 0,
+            disposition,
+            nak_delay_ms: None,
+            result_msgpack: Vec::new(),
+            error: None,
+            error_code: error_code.map(str::to_string),
+            inference_ms: None,
+            tokenization_ms: None,
+            postprocessing_ms: None,
+            raw_output: None,
+            units: None,
+        }
+    }
+
+    #[test]
+    fn only_model_failures_trigger_a_device_probe() {
+        let batch = |items| BatchOutcome {
+            outcomes: items,
+            batched_f16_multivectors: Vec::new(),
+        };
+        assert!(has_device_failure(&batch(vec![
+            outcome(Disposition::PublishAndAck, None),
+            outcome(
+                Disposition::PublishErrorAndAck,
+                Some("candle_inference_failed")
+            ),
+        ])));
+        assert!(has_device_failure(&batch(vec![outcome(
+            Disposition::PublishErrorAndAck,
+            Some("candle_model_load_failed"),
+        )])));
+        assert!(!has_device_failure(&batch(vec![outcome(
+            Disposition::PublishErrorAndAck,
+            Some("candle_invalid_item"),
+        )])));
+        assert!(!has_device_failure(&batch(vec![outcome(
+            Disposition::NakRetry,
+            None
+        )])));
     }
 
     fn request_frame(method: &str, body: serde_json::Value) -> Vec<u8> {

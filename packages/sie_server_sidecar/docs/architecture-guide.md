@@ -773,6 +773,33 @@ The sidecar HTTP server exposes:
 - `/readyz`: readiness based on successful IPC `Ping`, heartbeat freshness, and
   drain state.
 
+The pull loops (pool, worker-direct, execution-authority and
+numerical-admission consumers) take work only while `/readyz` would answer
+200. While the backend is starting, restarting or reports not ready, a loop
+drops its pull stream, as it does for a pool-admission pause, and rechecks
+every 500 ms; work stays in the stream for healthy peers instead of being
+pulled, NAKed and charged a delivery attempt. Readiness lags a backend that
+stops answering by at most the freshness window (`SIE_WORKER_PING_INTERVAL_MS`
+x `SIE_WORKER_READYZ_STALE_MULT`, 6 s by default), and one batch already being
+pulled can still be dispatched and NAKed.
+
+A backend whose CUDA context is wedged answers `EnsureModelReady`, every batch
+method and `ProcessGenerate` with an IPC error, and its `Ping` reports not
+ready. The dispatcher NAKs that work with the base delay, marks the child
+unready and clears its placements, as for any backend call that fails; work
+in flight when the backend process exits is NAKed the same way. The batch that
+was running when the context failed keeps the backend's error answer, because
+it may hold the input that caused the failure. The backend exits about a
+second after the wedge and its container restarts.
+
+Each `Ping` response carries the backend's `runtime_instance_id`, an opaque
+identity of its process. When a child reports an identity different from the
+one it reported before, its process was replaced and holds only its image's
+configs: the export reconciler re-applies the current export (bypassing the
+unchanged-export skip, and retrying on every poll until it succeeds) and the
+pinned reconciler pushes the pinned set again, so pinned models load without
+waiting for a change. An empty identity (an older backend) is ignored.
+
 The probe server listens on `SIE_WORKER_PROBE_PORT` (default `9095`). Metrics
 have no scrape endpoint. Queue, batch, and sidecar-to-engine IPC observations
 are emitted exactly once through the canonical OpenTelemetry facade and pushed

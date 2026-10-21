@@ -676,7 +676,7 @@ workers:
   `startup_timeout_s`, because startup at a width is dominated by per-rank graph
   compilation and capture, so neither `workers.common.modelReadyTimeoutSec` nor
   the built-in default describes it. Keep the declared budget within
-  `workers.common.modelReadyTimeoutSec` and below the liveness probe budget.
+  `workers.common.modelReadyTimeoutSec`.
 - A declared `startup_timeout_s` that is not a finite number of seconds above
   zero is refused when the model loads rather than replaced by a default.
 - Width and placement are declared only through `tensor_parallel_size`. Engine
@@ -1079,6 +1079,53 @@ raised above it, workers ignore every deadline and log a rate-limited warning.
 The comparison spans the gateway and worker clocks, so keep the nodes
 synchronised (for example with NTP). Watch
 `sie_worker_work_item_deadline_exceeded_total` before enabling enforcement.
+
+### Worker probes and crash recovery
+
+Each adapter container (`worker`, or `worker-0` to `worker-N-1` with
+`gpu.count > 1`) has three probes, timed by `workers.common.probes`:
+
+| Probe | Path | Default | Purpose |
+| --- | --- | --- | --- |
+| startup | `/healthz` | every 3 s, 200 failures (600 s) | Process start and startup `preloadModels` |
+| liveness | `/livez` | every 10 s, timeout 10 s, 6 failures (60 s) | A hung process or GPU |
+| readiness | `/readyz` | every 2 s, 3 failures | Ready flag and GPU health |
+
+A sticky CUDA error (a device-side assert, an illegal memory access) leaves
+the process's CUDA context unusable until the process is replaced. Python
+(PyTorch) and Candle workers detect it within seconds: after a batch fails
+with an inference error, and on every health check, a tiny kernel runs on
+its own stream. The first failure latches the wedge. The worker then refuses
+model work over IPC, reports not ready, and exits with status 75 about a
+second later. The kubelet restarts the container at once the first time
+(after 10 s for a second restart within 10 minutes, doubling after that).
+Model weights reload from the pod's local model cache, which survives a
+container restart.
+
+The worker-sidecar keeps running and does not lose work:
+
+- The batch that was running when the context failed keeps its error answer,
+  because it may contain the input that caused the failure; redelivering that
+  input could wedge another worker. Work refused or cut off by the exit is
+  NAKed and JetStream redelivers it, usually to another worker.
+- The sidecar pulls work only while `/readyz` on its probe port would answer
+  200: within about 6 s (`SIE_WORKER_PING_INTERVAL_MS` x
+  `SIE_WORKER_READYZ_STALE_MULT`) of the worker going unready it stops taking
+  work from the pool's queue and leaves it to healthy workers. With
+  `gpu.count > 1`, the other children keep serving and the failed child's
+  models move to them.
+- When the restarted worker answers its first `Ping` with a new process
+  identity, the sidecar re-applies the current config export and pinned
+  models to it, so pinned models load again without waiting for a change.
+
+`kubectl describe pod` shows the restart as `Last State: Terminated`,
+`Exit Code: 75`, with the CUDA error in the termination message. A GPU that
+fails again after every restart (for example after an Xid fault) leaves the
+container in `CrashLoopBackOff`, out of service, until the node is repaired.
+
+Liveness no longer bounds model loading: models the sidecar pushes at
+runtime load after the startup probe has passed and do not touch `/livez`.
+`workers.common.modelReadyTimeoutSec` bounds a cold load on its own.
 
 ### NATS authentication
 

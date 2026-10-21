@@ -12,7 +12,8 @@ Run as::
 
 The process exits on SIGINT / SIGTERM. All stubbed RPCs:
 
-* ``Ping`` — handled by ``IpcServer`` itself.
+* ``Ping`` — handled by ``IpcServer`` itself; the harness marks itself ready
+  once the socket is bound, as a serving worker does after startup.
 * ``EnsureModelReady`` — always returns ``"ready"``.
 * ``ProcessEncodeBatch`` / ``ProcessScoreBatch`` / ``ProcessExtractBatch`` —
   returns ``publish_and_ack`` for every item with a canned ``result_msgpack``
@@ -35,6 +36,7 @@ from typing import Any, cast
 
 import msgpack
 
+from sie_server.core.readiness import mark_ready
 from sie_server.ipc_server import IpcServer
 from sie_server.ipc_types import (
     BatchOutcome,
@@ -404,6 +406,9 @@ async def _main(
         server._streaming_processor = _FakeGenerateProcessor()
 
     async with server:
+        # A serving worker marks itself ready once startup completes, and the
+        # sidecar pulls work only after a ready Ping.
+        mark_ready()
         # Ready marker the test can grep for on stdout.
         print(f"HARNESS_READY socket={socket_path}", flush=True)
         await stop.wait()

@@ -702,10 +702,8 @@ workers:
     # this into both containers as SIE_MODEL_READY_TIMEOUT_S: the adapter worker
     # uses it as an SGLang startup-health timeout fallback, and the Rust
     # worker-sidecar uses it for EnsureModelReady IPC calls. Keep this >= any
-    # SGLang profile adapter_options.loadtime.startup_timeout_s. Helm renders
-    # SIE_WORKER_LIVENESS_BUDGET_S as periodSeconds * failureThreshold and both
-    # Python and sidecar reject larger cold-start timeouts so kubelet does not
-    # kill the pod before the cleanup-safe startup timeout can finish.
+    # SGLang profile adapter_options.loadtime.startup_timeout_s. Model loads do
+    # not touch the liveness probe, so this budget is independent of it.
     # The nginx ingress proxy-read/send-timeout annotations are DERIVED from
     # this value (max(this + 60, 600) seconds, see
     # `sie-cluster.ingress.proxyTimeoutSeconds`) so the edge never 504s a first
@@ -717,31 +715,27 @@ workers:
 
     # -- Liveness/readiness/startup probe timing for worker pods. The httpGet
     # path/port are contracts owned by the template: startup→/healthz (cheap,
-    # process-alive), liveness→/livez (GPU-aware; restarts a wedged CUDA context,
-    # issue #1025), readiness→/readyz (ready flag + GPU). Only the timing fields
-    # below are overridable. The liveness threshold must tolerate long GPU model
-    # startup as well as brief contention: /livez runs a CUDA probe, so it can
-    # block while an engine-backed adapter such as SGLang is loading. Keep this
-    # above workers.common.modelReadyTimeoutSec (30s x 36 = 1080s by default)
-    # so the adapter reaches its cleanup-safe timeout instead of kubelet killing
-    # the pod mid-load.
+    # process-alive), liveness→/livez (GPU-aware), readiness→/readyz (ready
+    # flag + GPU). Only the timing fields below are overridable.
     #
-    # Defaults are tightened to reduce kubelet probe-poll latency on the
-    # cold-start path (issue #814):
-    #   - startupProbe.periodSeconds 10 -> 3, failureThreshold 60 -> 200
-    #     (preserves the >=600s budget: 200 x 3s = 600s for model downloads
-    #     and GPU loading)
-    #   - readinessProbe.initialDelaySeconds dropped, periodSeconds 10 -> 2
-    #     so kubelet flips the pod to Ready within ~2s of mark_ready()
+    # - startup (200 x 3s = 600s) covers process start and any startup
+    #   preloads (`preloadModels`) before the other probes begin. Models the
+    #   sidecar pushes at runtime load after startup and touch no probe.
+    # - liveness only catches a hung process or device (60s by default): /livez
+    #   runs its kernel on its own stream and thread, so model loads and long
+    #   batches do not delay it. A wedged CUDA context does not wait for it:
+    #   the worker exits with status 75 within seconds and the container
+    #   restarts (issue #1025).
+    # - readiness flips the pod to Ready within ~2s of mark_ready() (issue #814).
     probes:
       startup:
         periodSeconds: 3
         failureThreshold: 200
       liveness:
         initialDelaySeconds: 10
-        periodSeconds: 30
+        periodSeconds: 10
         timeoutSeconds: 10
-        failureThreshold: 36
+        failureThreshold: 6
       readiness:
         periodSeconds: 2
         timeoutSeconds: 10

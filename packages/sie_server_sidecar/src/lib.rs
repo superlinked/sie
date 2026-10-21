@@ -288,6 +288,10 @@ fn parse_pull_loop_max_outstanding(
 /// own headroom.
 const PULL_LOOP_TASK_JOIN_DEADLINE_MS: u64 = 10_000;
 
+/// How often a pull loop paused for an unready backend rechecks readiness.
+/// Readiness itself moves with the IPC heartbeat (`SIE_WORKER_PING_INTERVAL_MS`).
+const BACKEND_READY_POLL: Duration = Duration::from_millis(500);
+
 /// Top-level entrypoint: wire everything together and run until shutdown.
 #[allow(clippy::vec_init_then_push)]
 pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
@@ -487,6 +491,7 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
         fetch_ctrl.clone(),
         Arc::clone(&latency_tracker),
         pool_admission.clone(),
+        Arc::clone(&readiness),
         Arc::clone(&worker_pool),
         Arc::clone(&nats_direct_active),
         batch_cancel_state,
@@ -604,6 +609,7 @@ pub async fn run(config: WorkerConfig) -> anyhow::Result<()> {
         &fetch_ctrl,
         Arc::clone(&latency_tracker),
         pool_admission.clone(),
+        Arc::clone(&readiness),
     )
     .await;
     generation_direct_dispatch.abort_and_join().await;
@@ -999,6 +1005,7 @@ struct GenerationDirectDispatch {
     fetch_ctrl: FetchExpiryController,
     latency_tracker: Arc<Mutex<LatencyTracker>>,
     pool_admission: Option<Arc<PoolAdmissionGate>>,
+    readiness: Arc<Readiness>,
     worker_pool: Arc<AdapterWorkerPool>,
     active: Arc<AtomicBool>,
     authority_active: Arc<AtomicBool>,
@@ -1049,6 +1056,7 @@ impl GenerationDirectDispatch {
         fetch_ctrl: FetchExpiryController,
         latency_tracker: Arc<Mutex<LatencyTracker>>,
         pool_admission: Option<Arc<PoolAdmissionGate>>,
+        readiness: Arc<Readiness>,
         worker_pool: Arc<AdapterWorkerPool>,
         active: Arc<AtomicBool>,
         batch_cancel_state: BatchCancelState,
@@ -1063,6 +1071,7 @@ impl GenerationDirectDispatch {
             fetch_ctrl,
             latency_tracker,
             pool_admission,
+            readiness,
             worker_pool,
             active,
             authority_active: Arc::new(AtomicBool::new(false)),
@@ -1131,6 +1140,7 @@ impl GenerationDirectDispatch {
         let direct_shutdown = Arc::clone(&self.shutdown);
         let direct_latency_tracker = Arc::clone(&self.latency_tracker);
         let direct_pool_admission = self.pool_admission.clone();
+        let direct_readiness = Arc::clone(&self.readiness);
         let pull = tokio::spawn(async move {
             run_pull_loop(
                 &nats_worker_consumer,
@@ -1139,6 +1149,7 @@ impl GenerationDirectDispatch {
                 &direct_fetch_ctrl,
                 direct_latency_tracker,
                 direct_pool_admission,
+                direct_readiness,
             )
             .await;
         });
@@ -1179,6 +1190,7 @@ impl GenerationDirectDispatch {
         let fetch_ctrl = self.fetch_ctrl.clone();
         let latency_tracker = Arc::clone(&self.latency_tracker);
         let pool_admission = self.pool_admission.clone();
+        let readiness = Arc::clone(&self.readiness);
         let jetstream = self.jetstream.clone();
         let config = self.config.clone();
         tokio::spawn(async move {
@@ -1209,6 +1221,7 @@ impl GenerationDirectDispatch {
                 &fetch_ctrl,
                 latency_tracker,
                 pool_admission,
+                readiness,
             )
             .await;
         })
@@ -1869,12 +1882,22 @@ async fn acquire_pull_admission_permit(
 /// collapsed to ~1 message per 30 s throughput with the rest 504'ing at
 /// the gateway.
 ///
-/// So: keep one stream open while the worker is admitted to its pool, poll it
-/// continuously, and only rebuild on terminal (`None`) stream death or after a
-/// pool-admission pause. The stream expire inside `pull_stream_expires()`
-/// governs per-pull-request server-side lifetime (default 5 s -> a no-data
-/// `408` every 5 s when idle) and is invisible to callers — `poll_next` handles
-/// the refill.
+/// So: keep one stream open while the worker is admitted to its pool and its
+/// backend is ready, poll it continuously, and only rebuild on terminal
+/// (`None`) stream death or after a pause. The stream expire inside
+/// `pull_stream_expires()` governs per-pull-request server-side lifetime
+/// (default 5 s -> a no-data `408` every 5 s when idle) and is invisible to
+/// callers — `poll_next` handles the refill.
+///
+/// # Backend readiness
+///
+/// The loop pulls only while `readiness` would answer `/readyz` with 200: the
+/// backend has answered a ready `Ping` within the freshness window and the
+/// sidecar is not draining. A backend that is starting, restarting (for
+/// example after a wedged CUDA context made it exit) or otherwise not ready
+/// would NAK every delivery, spending each message's `max_deliver` budget and
+/// delaying it, while healthy peers on the same durable could serve it. The
+/// pull stream is dropped for the pause, as for a pool-admission pause.
 ///
 /// # Batching
 ///
@@ -1901,6 +1924,7 @@ async fn run_pull_loop(
     fetch_ctrl: &FetchExpiryController,
     latency_tracker: Arc<Mutex<LatencyTracker>>,
     pool_admission: Option<Arc<PoolAdmissionGate>>,
+    readiness: Arc<Readiness>,
 ) {
     let fetch_batch = fetch_batch_size();
     let pull_expires = pull_stream_expires();
@@ -1922,6 +1946,7 @@ async fn run_pull_loop(
     );
 
     let mut stream: Option<async_nats::jetstream::consumer::pull::Stream> = None;
+    let mut paused_for_backend = false;
 
     'outer: loop {
         if let Some(gate) = pool_admission.as_ref() {
@@ -1938,6 +1963,24 @@ async fn run_pull_loop(
                     _ = sleep(gate.pause_duration()) => continue 'outer,
                 }
             }
+        }
+
+        let backend = readiness.snapshot();
+        if !backend.is_ready() {
+            if !paused_for_backend {
+                info!(reason = %backend.reason(), "pull loop paused until the backend is ready");
+                paused_for_backend = true;
+            }
+            stream = None;
+            tokio::select! {
+                biased;
+                _ = shutdown.wait() => break 'outer,
+                _ = sleep(BACKEND_READY_POLL) => continue 'outer,
+            }
+        }
+        if paused_for_backend {
+            info!("backend ready; pull loop resuming");
+            paused_for_backend = false;
         }
 
         if stream.is_none() {
