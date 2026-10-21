@@ -3996,3 +3996,36 @@ def test_worker_auth_off_preserves_existing_image_compatibility(tmp_path: Path, 
     assert "SIE_AUTH_TOKEN" not in env
     assert WORKER_AUTH_TEST_JOB not in hook_jobs(docs)
     assert worker_auth_requirements(docs) == {}
+
+
+GKE_ACCELERATOR_LABEL = "cloud.google.com/gke-accelerator-count"
+
+
+def dcgm_exporter_node_selector(tmp_path: Path, overlays: tuple[str, ...] = ()) -> dict:
+    docs = rendered_documents(tmp_path, {"dcgm-exporter": {"install": True}}, overlays)
+    (daemonset,) = [doc for doc in docs if doc["kind"] == "DaemonSet" and "dcgm-exporter" in doc["metadata"]["name"]]
+    return daemonset["spec"]["template"]["spec"].get("nodeSelector") or {}
+
+
+@pytest.mark.parametrize(
+    ("overlay", "expected"),
+    [
+        ("values-aws.yaml", {"sie.superlinked.com/node-type": "gpu"}),
+        ("values-aks.yaml", {"sie.superlinked.com/node-type": "gpu"}),
+        (
+            "values-ack.yaml",
+            {
+                "ack.node.gpu.schedule": "default",
+                "sie.superlinked.com/gpu-type": "a10",
+                "sie.superlinked.com/node-type": "gpu",
+            },
+        ),
+        ("values-gke.yaml", {GKE_ACCELERATOR_LABEL: "1"}),
+    ],
+)
+def test_dcgm_exporter_selects_only_the_cloud_overlay_gpu_labels(tmp_path: Path, overlay: str, expected: dict) -> None:
+    assert dcgm_exporter_node_selector(tmp_path, (overlay,)) == expected
+
+
+def test_dcgm_exporter_has_no_cloud_specific_default_selector(tmp_path: Path) -> None:
+    assert GKE_ACCELERATOR_LABEL not in dcgm_exporter_node_selector(tmp_path)
