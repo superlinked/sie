@@ -8,6 +8,7 @@ adapters:
 - sie_server.adapters.glm_ocr
 - sie_server.adapters.gliner2.classification
 - sie_server.adapters.gliner2.decide
+- sie_server.adapters.gliner2.decide_lora
 - sie_server.adapters.gliner2.entities
 - sie_server.adapters.privacy_filter.adapter
 - sie_server.adapters.st_sparse_vision.adapter
@@ -17,6 +18,7 @@ adapters:
 - sie_server.adapters.parakeet.adapter
 # Perplexity's native calibrated decision readout (Qwen3.8/Qwen3.5 architecture).
 - sie_server.adapters.pplx_decider.adapter
+- sie_server.adapters.pplx_decider.runtime_lora
 # SAM 3 open-vocabulary detection (Sam3Model / Sam3Processor exist only in transformers 5.x).
 - sie_server.adapters.sam3.adapter
 deps:

@@ -14,6 +14,7 @@ adapters:
 - sie_server.adapters.colqwen2
 - sie_server.adapters.colqwen3
 - sie_server.adapters.colsmol
+- sie_server.adapters.cross_encoder.runtime_lora
 - sie_server.adapters.grounding_dino.adapter
 - sie_server.adapters.gte_sparse_flash
 - sie_server.adapters.jina_flash_cross_encoder
@@ -41,11 +42,14 @@ adapters:
 - sie_server.adapters.nli_classification_flash
 - sie_server.adapters.gliner
 - sie_server.adapters.gliner2.adapter
+- sie_server.adapters.gliner2.entity_lora
 - sie_server.adapters.gliner_bi
 - sie_server.adapters.gliner_union.adapter
 - sie_server.adapters.glirel
 - sie_server.adapters.gliclass
+- sie_server.adapters.gliclass.runtime_lora
 - sie_server.adapters.laya.adapter
+- sie_server.adapters.laya.runtime_lora
 - sie_server.adapters.gliformer.adapter
 - sie_server.adapters.donut
 - sie_server.adapters.florence2

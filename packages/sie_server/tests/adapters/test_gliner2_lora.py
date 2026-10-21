@@ -3,6 +3,8 @@
 import asyncio
 import gc
 import json
+import shutil
+import socket
 import threading
 import weakref
 from concurrent.futures import ThreadPoolExecutor
@@ -11,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, Mock
 
+import huggingface_hub
 import msgspec
 import pytest
 import torch
@@ -24,6 +27,7 @@ from peft.tuners.lora.layer import Linear as LoraLinear
 from safetensors.torch import load_file, save_file
 from sie_sdk import SIEClient
 from sie_sdk.client.errors import ServerError
+from sie_server.adapters import _peft_lora_runtime
 from sie_server.adapters.gliner2 import _lora
 from sie_server.adapters.gliner2.adapter import GLiNER2Adapter
 from sie_server.adapters.gliner2.entity_lora import GLiNER2EntityLoraAdapter
@@ -632,7 +636,7 @@ def test_task_and_legacy_selection_denial_before_any_fetch(
     monkeypatch: pytest.MonkeyPatch, lora: str | None, kwargs: dict[str, Any]
 ) -> None:
     fetch = Mock(side_effect=AssertionError("must not fetch"))
-    monkeypatch.setattr(_lora, "snapshot_download", fetch)
+    monkeypatch.setattr(_peft_lora_runtime, "resolve_lora_source", fetch)
     adapter = GLiNER2EntityLoraAdapter("not-loaded", lora_paths={"a": "org/adapter"})
     kwargs = dict(kwargs)
     kwargs["options"] = {**kwargs.get("options", {}), "lora": lora}
@@ -648,6 +652,53 @@ def test_ordinary_gliner2_remains_without_lora_manager_or_admission() -> None:
     assert not hasattr(adapter, "_lora")
     assert not hasattr(adapter, "validate_extract_request")
     assert not adapter.supports_lora()
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+def test_entity_lora_loads_from_cluster_cache_without_hub(raw_model, tmp_path, monkeypatch, pinned):
+    source = Path(make_checkpoint(tmp_path, raw_model, "a"))
+    revision = "a" * 40
+    local, cluster = tmp_path / "local-cache", tmp_path / "cluster-cache"
+    repository = cluster / "models--org--entity-lora"
+    directory = repository / "snapshots" / revision
+    directory.mkdir(parents=True)
+    (repository / "refs").mkdir()
+    (repository / "refs" / "main").write_text(revision)
+    for filename in ("adapter_config.json", "adapter_model.safetensors"):
+        shutil.copyfile(source / filename, directory / filename)
+    monkeypatch.setenv("SIE_LOCAL_CACHE", str(local))
+    monkeypatch.setenv("SIE_CLUSTER_CACHE", str(cluster))
+    monkeypatch.setenv("SIE_HF_FALLBACK", "false")
+    denied = Mock(side_effect=AssertionError("offline adapter attempted network access"))
+    monkeypatch.setattr(socket.socket, "connect", denied)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", denied)
+    monkeypatch.setattr(huggingface_hub, "file_exists", denied)
+    adapter = GLiNER2EntityLoraAdapter(
+        "generated-local",
+        lora_paths={"a": "org/entity-lora"},
+        lora_revisions={"org/entity-lora": revision} if pinned else None,
+        compute_precision="float32",
+        threshold=0,
+        max_seq_length=64,
+    )
+    adapter._model = raw_model
+    adapter._device = "cpu"
+    adapter._use_linear_word_splitter(raw_model.processor, raw_model.encoder.config)
+    adapter._lora.bind(raw_model)
+    try:
+        baseline = serve(adapter, None)
+        assert adapter.load_lora("a") > 0
+        adapted = serve(adapter, "a")
+        assert adapted != baseline
+        assert serve(adapter, None) == baseline
+        assert (local / "models--org--entity-lora" / "snapshots" / revision / "adapter_model.safetensors").is_file()
+        adapter.unload_lora("a")
+        adapter.load_lora("a")
+        assert serve(adapter, "a") == adapted
+        assert serve(adapter, None) == baseline
+        denied.assert_not_called()
+    finally:
+        adapter.unload()
 
 
 @pytest.mark.parametrize("version", ["1.3.1", "1.3.3", "2.0.0rc1", "2.0.1", "2.1.0"])
@@ -681,7 +732,7 @@ def test_entity_constructor_refuses_inherited_modes_and_preload(option):
 )
 def test_revision_policy_never_drops_a_pin_silently(monkeypatch, revisions):
     fetch = Mock(side_effect=AssertionError("invalid declaration fetched"))
-    monkeypatch.setattr(_lora, "snapshot_download", fetch)
+    monkeypatch.setattr(_peft_lora_runtime, "resolve_lora_source", fetch)
     with pytest.raises(ValueError, match="revision"):
         GLiNER2EntityLoraAdapter("unloaded", lora_paths={"a": "org/a"}, lora_revisions=revisions)
     fetch.assert_not_called()
@@ -704,7 +755,7 @@ def test_actual_multi_profile_loader_preserves_canonical_pins_and_resolved_capac
         }
     )
     fetch = Mock(side_effect=AssertionError("construction must not fetch"))
-    monkeypatch.setattr(_lora, "snapshot_download", fetch)
+    monkeypatch.setattr(_peft_lora_runtime, "resolve_lora_source", fetch)
     expanded = expand_profile_variants([config])
     assert config.lora_revisions() == {"org/a": "a" * 40, "org/b": "b" * 40}
     for route, expected in [("entity", {"org/a": "a" * 40}), ("entity:other", {"org/b": "b" * 40})]:
@@ -914,8 +965,8 @@ def test_declared_pin_and_owned_snapshot_survive_source_changes(raw_model, tmp_p
     )
     adapter._model = raw_model
     adapter._lora.bind(raw_model)
-    fetch = Mock(return_value=original)
-    monkeypatch.setattr(_lora, "snapshot_download", fetch)
+    fetch = Mock(return_value=Path(original))
+    monkeypatch.setattr(_peft_lora_runtime, "resolve_lora_source", fetch)
     with pytest.raises(ValueError, match="revision"):
         adapter.fetch_lora("a", "b" * 40)
     with pytest.raises(ValueError, match="declared"):
@@ -923,9 +974,7 @@ def test_declared_pin_and_owned_snapshot_survive_source_changes(raw_model, tmp_p
     fetch.assert_not_called()
     source = adapter.fetch_lora("same", pin)
     assert source != original
-    fetch.assert_called_once_with(
-        "org/a", revision=pin, allow_patterns=["adapter_config.json", "adapter_model.safetensors"]
-    )
+    fetch.assert_called_once_with("org/a", pin)
     (Path(original) / "adapter_config.json").write_text("{}")
     (Path(original) / "adapter_model.safetensors").write_bytes(b"broken")
     with pytest.raises(ValueError, match="revision"):
@@ -964,9 +1013,9 @@ def test_fetch_after_teardown_cannot_attach_to_rebound_model(raw_model, tmp_path
     def fetch(*args, **kwargs):
         entered.set()
         assert release.wait(5)
-        return original
+        return Path(original)
 
-    monkeypatch.setattr(_lora, "snapshot_download", fetch)
+    monkeypatch.setattr(_peft_lora_runtime, "resolve_lora_source", fetch)
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(adapter.fetch_lora, "a")
         try:
