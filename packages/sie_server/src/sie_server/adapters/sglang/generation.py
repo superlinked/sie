@@ -59,7 +59,7 @@ from sie_server.adapters.sglang import _server
 from sie_server.adapters.sglang._compat.sie_thinking_budget import PARAM as THINKING_BUDGET_PARAM
 from sie_server.adapters.sglang._compat.sie_thinking_budget import PROCESSOR_REFERENCE as THINKING_BUDGET_PROCESSOR
 from sie_server.adapters.sglang._lora import SGLangLoraManager, SGLangLoraMixin, leased_generation
-from sie_server.adapters.sglang._memory import SGLangMemoryBudget
+from sie_server.adapters.sglang._memory import LoraCapacity, SGLangMemoryBudget
 from sie_server.observability.generation_diagnostics import GenerationStreamTimer
 from sie_server.types.grammar import (
     OUTLINES_JSON_SCHEMA_TYPE_DIAGNOSTIC,
@@ -592,7 +592,19 @@ class SGLangGenerationAdapter(SGLangLoraMixin, GenerationAdapter):
             kv_budget_tokens=kv_budget_tokens,
             mem_fraction_static=mem_fraction_static,
             tensor_parallel_size=self._tensor_parallel_size,
-            has_auxiliary_weights=bool(lora_paths or (speculative and speculative.get("enabled"))),
+            speculative=bool(speculative and speculative.get("enabled")),
+            lora=(
+                LoraCapacity(
+                    max_per_batch=max_loras_per_batch,
+                    max_rank=max_lora_rank,
+                    target_modules=tuple(lora_target_modules) if lora_target_modules else None,
+                )
+                if lora_paths
+                else None
+            ),
+            launch_options=tuple(extra_launch_args or ()),
+            launch_env=dict(extra_env or {}),
+            mamba_strategy_flag=self._MAMBA_STRATEGY_FLAG,
         )
         self._watchdog_timeout_s = _server.validate_optional_positive(watchdog_timeout_s, field="watchdog_timeout_s")
         self._declared_nccl_port = _server.validate_optional_port(nccl_port)

@@ -36,7 +36,7 @@ from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, ComputePrecision
 from sie_server.adapters.sglang import _server
 from sie_server.adapters.sglang._lora import SGLangLoraManager, SGLangLoraMixin, leased_encode
-from sie_server.adapters.sglang._memory import SGLangMemoryBudget
+from sie_server.adapters.sglang._memory import LoraCapacity, SGLangMemoryBudget
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.tokenizer import load_tokenizer
 
@@ -217,7 +217,15 @@ class SGLangEmbeddingAdapter(SGLangLoraMixin, BaseAdapter):
             kv_budget_tokens=kv_budget_tokens,
             mem_fraction_static=mem_fraction_static,
             tensor_parallel_size=tensor_parallel_size,
-            has_auxiliary_weights=bool(lora_paths),
+            lora=(
+                LoraCapacity(
+                    max_per_batch=max_loras_per_batch,
+                    max_rank=max_lora_rank,
+                    target_modules=tuple(lora_target_modules) if lora_target_modules else None,
+                )
+                if lora_paths
+                else None
+            ),
         )
         self._compute_precision = compute_precision
         self._trust_remote_code = trust_remote_code

@@ -520,6 +520,58 @@ profiles:
           min_new_tokens: 10
         stop_tokens:
           - "<|im_end|>"
+  # Shares one GPU with other models: the grammar-safe ``no-spec`` launch
+  # (BF16 weights, 8K window) without a fixed memory fraction. SIE sizes the
+  # engine from the checkpoint instead: 51 GiB of BF16 weights, a
+  # 16,384-token KV pool (1 GiB) and 17 FP32 recurrent-state slots (2.4 GiB)
+  # for four running requests under the extra_buffer radix cache, about
+  # 60 GiB in all. Standalone because an extending profile replaces the whole
+  # loadtime block.
+  shared:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+    kv_budget_tokens: 16384
+    adapter_options:
+      loadtime:
+        served_model_name: Qwen/Qwen3.6-27B
+        disable_cuda_graph: true
+        attention_backend: triton
+        grammar_backend: xgrammar
+        reasoning_parser: qwen3
+        tool_call_parser: qwen3_coder
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--mamba-scheduler-strategy"
+          - "extra_buffer"
+          - "--disable-overlap-schedule"
+          - "--max-running-requests"
+          - "4"
+      runtime:
+        first_chunk_timeout_s: 90
+        inter_chunk_timeout_s: 15
+        overall_timeout_s: 600
+        # This lane serves prose and grammar requests alike. One forced token
+        # stops the template's EOS-first empty replies without pushing a
+        # finished JSON value past its schema, which ten would.
+        default_sampling:
+          temperature: 0.7
+          top_p: 0.8
+          top_k: 20
+          presence_penalty: 1.5
+          min_new_tokens: 1
+        stop_tokens:
+          - "<|im_end|>"
+  # Names ``shared`` as its own grammar-safe target, so a constrained request
+  # to ``:shared`` stays on the shared engine instead of moving to the
+  # fixed-fraction ``no-spec`` route. Serve ``:shared``; this alias is
+  # identical.
+  shared-no-spec:
+    extends: shared
+    grammar_profile: shared
   # No-speculative baseline — for SIE-vs-raw-SGLang ablation cells so
   # spec-decoding's contribution can be measured independently. Keeps
   # the same ``extra_launch_args`` as ``default`` / ``h100`` so a config

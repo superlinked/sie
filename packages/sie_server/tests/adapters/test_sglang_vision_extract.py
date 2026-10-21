@@ -839,4 +839,4 @@ def test_invalid_sampling_options_rejected(options: dict[str, Any]) -> None:
 def mock_memory_hardware(monkeypatch):
     """Launch lifecycle tests use synthetic weight metadata and CUDA capacity."""
     monkeypatch.setattr(_memory, "device_memory", lambda _: (80 * _memory.GIB, 80 * _memory.GIB))
-    monkeypatch.setattr(_memory.SGLangMemoryBudget, "static_bytes", 8 * _memory.GIB)
+    monkeypatch.setattr(_memory.SGLangMemoryBudget, "reservation", _memory.SGLangReservation(8 * _memory.GIB))

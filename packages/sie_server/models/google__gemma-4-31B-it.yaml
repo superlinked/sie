@@ -90,6 +90,52 @@ profiles:
   # Caller-visible FP8 alias; select the H100-80GB machine profile separately.
   h100-fp8:
     extends: default
+  # Shares one GPU with other models: the grammar-safe ``no-spec`` launch
+  # (online FP8 weights, BF16 KV, 8K window) without a fixed memory fraction.
+  # SIE sizes the engine from the checkpoint instead: ~31 GiB of resident
+  # weights (FP8 decoder, BF16 embeddings and vision tower) and an
+  # 8,192-token KV pool in both the full and the sliding-window layers
+  # (7.3 GiB), about 42.9 GiB in all. Loading briefly
+  # needs ~62 GiB free, because the engine reads the BF16 weights onto the GPU
+  # before quantizing them; SIE evicts idle models to make that room, or load
+  # this model before its neighbours. Standalone because an extending profile
+  # replaces the whole loadtime block.
+  shared:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.gemma:SGLangGemmaAdapter
+    kv_budget_tokens: 8192
+    adapter_options:
+      loadtime:
+        served_model_name: google/gemma-4-31B-it
+        attention_backend: triton
+        grammar_backend: xgrammar
+        reasoning_parser: gemma4
+        tool_call_parser: gemma4
+        speculative_needs_extra_buffer: false
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--quantization"
+          - "fp8"
+      runtime:
+        first_chunk_timeout_s: 90
+        inter_chunk_timeout_s: 15
+        overall_timeout_s: 600
+        default_sampling:
+          temperature: 1.0
+          top_p: 0.95
+          top_k: 64
+          min_new_tokens: 1
+        stop_tokens:
+          - "<end_of_turn>"
+  # Names ``shared`` as its own grammar-safe target, so a constrained request
+  # to ``:shared`` stays on the shared engine instead of moving to the
+  # fixed-fraction ``no-spec`` route. Serve ``:shared``; this alias is
+  # identical.
+  shared-no-spec:
+    extends: shared
+    grammar_profile: shared
   # Gemma 4 supports an explicit tokenizer thinking switch. Use the measured
   # H100 96K shape so the generic reasoning alias has the same decode budget as
   # its hardware-explicit twin; the bare route remains answer-only.

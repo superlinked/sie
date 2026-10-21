@@ -47,6 +47,8 @@ def test_qwen38_uses_the_pinned_official_fp8_checkpoint() -> None:
     assert set(config.profiles) == {
         "default",
         "no-spec",
+        "shared",
+        "shared-no-spec",
         "h100-256k",
         "h100-256k-no-spec",
         "h200-256k",
