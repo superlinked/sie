@@ -10,6 +10,7 @@ adapters:
 - sie_server.adapters.gliner2.decide
 - sie_server.adapters.gliner2.entities
 - sie_server.adapters.privacy_filter.adapter
+- sie_server.adapters.sequence_classification.adapter
 - sie_server.adapters.st_sparse_vision.adapter
 # TopK-Embed-V1 multi-vector text + page-image models (Qwen3.5 backbone, transformers>=5.2).
 - sie_server.adapters.topk_embed.adapter

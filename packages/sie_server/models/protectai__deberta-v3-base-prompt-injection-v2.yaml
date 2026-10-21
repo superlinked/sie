@@ -1,0 +1,22 @@
+# Prompt-injection detection (SAFE, INJECTION), DeBERTa-v3-base. Apache-2.0.
+sie_id: protectai/deberta-v3-base-prompt-injection-v2
+hf_id: protectai/deberta-v3-base-prompt-injection-v2
+hf_revision: 90c9989b1a342275dd0d1a95aad283c04e075671
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 512
+profiles:
+  default:
+    max_batch_tokens: 65536
+    compute_precision: null
+    adapter_path: sie_server.adapters.sequence_classification.adapter:SequenceClassificationAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}
