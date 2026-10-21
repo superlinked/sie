@@ -4,7 +4,7 @@
 
 **Data and metrics:** 9,111 training, 3,056 calibration and 3,043 final questions from MMLU-Pro, BIG-Bench Hard and KOR-Bench, with related question families kept together. Measure final answer accuracy, its percentage-point loss versus always Sol, and dollars per 10,000 requests including the encoder fee. The primary policy targets a 1-point calibration loss; its final-test 95% interval is **0.56–1.46 points**, so it does not guarantee a loss below one point. LoRA/topic hosting is unpriced; the embedding fee excludes the small classifier's application hosting.
 
-**Prerequisites:** Python 3.12, uv and roughly 4.4 GB for artifacts. Use an NVIDIA GPU locally or in a VM for LoRA training; the recorded run used an H100 and took about 58 minutes. CPU works for report replay and embedding-classifier training. Recorded-data work needs no API keys. Live embedding calls need `SIE_API_KEY`; fresh Sol/Luna answers need `OPENAI_API_KEY`.
+**Prerequisites:** Python 3.12, uv and roughly 4.4 GB for artifacts. Use an NVIDIA GPU locally or in a VM for LoRA training; the recorded run used an H100 and took about 58 minutes. CPU works for report replay and embedding-classifier training. Recorded-data work needs no API keys. SIE Cloud embedding calls need `SIE_API_KEY`; fresh Sol/Luna answers need `OPENAI_API_KEY`.
 
 ## 1. Install and inspect the baseline [Sol: 92.64% correct; $14.02 / 10,000]
 

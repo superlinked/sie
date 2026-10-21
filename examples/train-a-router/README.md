@@ -181,7 +181,7 @@ Adding those estimated busy-resource costs to the primary LoRA answer bill gives
 
 ## 6. Route a new request [live APIs; one selected answer model]
 
-Set `OPENAI_API_KEY` for the fixed Sol/Luna pair. The embedding router also needs `SIE_API_KEY`; native Laya loads its local checkpoint. The following command uses the published policy. Substitute `--run run` to use your trained policy.
+Set `OPENAI_API_KEY` for the fixed Sol/Luna pair. The embedding router needs `SIE_API_KEY` when it calls SIE Cloud; a self-hosted encoder does not need it. Native Laya loads its local checkpoint. The following command uses the published policy. Substitute `--run run` to use your trained policy.
 
 ```bash
 # Route a new multiple-choice question with the embedding router and call only the selected answer model.
