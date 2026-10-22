@@ -1,0 +1,35 @@
+{
+  "alpha": 0.1,
+  "baseline_artifacts_unchanged": true,
+  "calibration_or_final_outcomes_accessed": false,
+  "chosen_model": "text_length_log_ridge",
+  "cost_protocol_sha256": "be1a9641d79474b70e7013c7ffaf9a390c66627ca98b6c5cf46adee46a15f872",
+  "decision": "Retain original cost estimates plus one shared text+length cost option for every frozen quality method; no mean/length-only primary variants.",
+  "development_summary_sha256": "4d0552340d1238a0552142676e5e8af7ae0337b5893f1f4e82cbbbb18239046b",
+  "development_terminal_sha256": "db8ef97a6c29373ab320b1b9165b57ce2be08eaa38755f30eaff6c6029504d2c",
+  "fees": "Encoder singleton fees and CPU/native hosting remain separately accounted; cost model is not assumed free.",
+  "format": "bbeh-shared-cost-promotion-v1",
+  "input_only_score_roles": [
+    "calibration",
+    "final"
+  ],
+  "method_naming": "Original method unchanged; added <method>__textcost, with cost and quality identities separate.",
+  "native_extension": [
+    "base",
+    "lora"
+  ],
+  "quality_heads_refitted": false,
+  "quality_methods": [
+    "knn",
+    "embedding",
+    "text_length",
+    "text_topic",
+    "task_metadata"
+  ],
+  "refit": "Fresh TRAIN+development TFIDF vocabulary/IDF/length scaling; same fixed log-Ridge objective, tolerances and residual smearing, no new selection.",
+  "refit_roles": [
+    "train",
+    "development"
+  ],
+  "selection_basis": "Declared development normalized dollar MSE selects alpha0.1. Development frontier shows middle-budget gains and high-budget tradeoffs; no claim of universal dominance."
+}

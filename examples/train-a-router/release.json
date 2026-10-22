@@ -1,16 +1,7 @@
 {
-  "answer_models": {
-    "cheap": "gpt-6-luna",
-    "strong": "gpt-6.1-sol"
-  },
-  "dataset": "superlinked/train-a-router-reasoning",
-  "encoder": {
-    "model": "Qwen/Qwen3-Embedding-4B",
-    "revision": "5cf2132abc99cad020ac570b19d031efec650f2b"
-  },
-  "final_report_sha256": "072487ee9a58475f0d3106a8e227ef35e5cef6ee560b490064e01fdaba203430",
   "format": "train-a-router-release-v1",
-  "manifest_sha256": "7dddae7a2aa113de9d4115457b7939ec2d22284a07580b2c1b028dbee6a51256",
-  "manifest_url": "https://huggingface.co/datasets/superlinked/train-a-router-reasoning/resolve/63336f25fc54597a8e161a7245613f91bd60177e/manifest.json",
-  "revision": "63336f25fc54597a8e161a7245613f91bd60177e"
+  "manifest_url": "https://huggingface.co/datasets/superlinked/train-a-router-bbeh/resolve/86dd7494a4c2396bc9ffa890f994b9722610b357/manifest.json",
+  "manifest_sha256": "4fd8a49d760384ad745c1bd49b3ee61cb58fd8d98c71cef6552ff6dbfda66b55",
+  "dataset": "superlinked/train-a-router-bbeh",
+  "revision": "86dd7494a4c2396bc9ffa890f994b9722610b357"
 }

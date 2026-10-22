@@ -8,6 +8,7 @@ import json
 import math
 import time
 
+import numpy as np
 from sie_sdk import SIEClient
 
 MODEL = "Qwen/Qwen3-Embedding-4B"
@@ -38,6 +39,8 @@ def check_vector(reply):
     if item.get("id") != "encoder-smoke" or item.get("model") != MODEL:
         raise RuntimeError("The response does not match the request")
     vector = item.get("dense")
+    if isinstance(vector, np.ndarray):
+        vector = vector.tolist()
     if not isinstance(vector, list) or len(vector) != DIMENSIONS:
         raise RuntimeError("Wrong vector dimensions")
     if not all(type(value) in (int, float) and math.isfinite(value) for value in vector):

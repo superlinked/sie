@@ -1,0 +1,172 @@
+{
+  "files": {
+    "bbeh/benchmark_tasks/bbeh_boardgame_qa/task.json": {
+      "bytes": 1358526,
+      "git_blob_sha1": "59bfa63f5b98bd93d13137df28297d69fc85ceab",
+      "rows": 200,
+      "sha256": "3d47dc41eb825b2ee77a696e79859d8d2043b1bf04077e120caec4ad324f32a8",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_boardgame_qa/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_boolean_expressions/task.json": {
+      "bytes": 543587,
+      "git_blob_sha1": "3b1b165e0f026d61c1ba8a7112cc5289d978262a",
+      "rows": 200,
+      "sha256": "49e763f10dbea048be56036c8cbf2a6d0bb735235e3806b50809a1addb57eee2",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_boolean_expressions/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_buggy_tables/task.json": {
+      "bytes": 1012820,
+      "git_blob_sha1": "e2eeae579ff119ffd424c7eb269fc4dfb68a8da3",
+      "rows": 200,
+      "sha256": "c27b76200bf1b0d4ada3729f5a40aa1f0062267e42c4f40820b3e40891c3fe85",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_buggy_tables/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_causal_understanding/task.json": {
+      "bytes": 188324,
+      "git_blob_sha1": "1222dc4953e0147aa954c76d8d33910c05ba460d",
+      "rows": 200,
+      "sha256": "b10bbf43f7f5cdde927b0ad03f99a7a78b3525de4bfa90008b36b12b010c9a81",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_causal_understanding/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_disambiguation_qa/task.json": {
+      "bytes": 95806,
+      "git_blob_sha1": "04a553ccada1641884d6b07a3d2aff73ea25b2f5",
+      "rows": 120,
+      "sha256": "6d34e0c89c3b1e1386df5919159b8d67b4668308d1225bd1ee54eb1e946472bd",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_disambiguation_qa/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_dyck_languages/task.json": {
+      "bytes": 586949,
+      "git_blob_sha1": "9c73487fbb6c5e453ad5bbf1b372f79b9a18f668",
+      "rows": 200,
+      "sha256": "a089612502bdfb98a447c8cba84f972724308ea0d059e8561e3cc9785de585cc",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_dyck_languages/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_geometric_shapes/task.json": {
+      "bytes": 491290,
+      "git_blob_sha1": "5ff75c179f5f406967f8b02ec57db2ab7c5817eb",
+      "rows": 200,
+      "sha256": "7ff506d026450cb878a0963ce478724ad1451bc56469c813c791b9345ac1bea7",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_geometric_shapes/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_hyperbaton/task.json": {
+      "bytes": 921276,
+      "git_blob_sha1": "9e276ca2c4b57a7e506f2d7128f7a4cacd55c960",
+      "rows": 200,
+      "sha256": "0fbacc94f4c740c3050021f4c57089f2011d7bd77fcff3346a7f4b9dbef842e2",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_hyperbaton/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_linguini/task.json": {
+      "bytes": 239942,
+      "git_blob_sha1": "e8edd908fb96511855d29c0b128f3a89f163c7b0",
+      "rows": 200,
+      "sha256": "ba387d2aa1bde122e6c9937fca4e075b9cc7d64e6047b170cfcffd6304919ea8",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_linguini/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_movie_recommendation/task.json": {
+      "bytes": 221785,
+      "git_blob_sha1": "c07c9f17ca3def29062934bf79b53cbee99b9ede",
+      "rows": 200,
+      "sha256": "808882647b84c116a57e0975e3d357749525e12d215c4a5dae83de83ae8c4772",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_movie_recommendation/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_multistep_arithmetic/task.json": {
+      "bytes": 205121,
+      "git_blob_sha1": "ac431dc3911aa5640f001c6a4de74588713e8506",
+      "rows": 200,
+      "sha256": "47207086cd2afe74df9968172d24134c82af8c666144092f04e4c1ebad8cf3d2",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_multistep_arithmetic/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_nycc/task.json": {
+      "bytes": 182646,
+      "git_blob_sha1": "09666db9e95cf7b65a0d2d33e7acc3a84104e5c6",
+      "rows": 200,
+      "sha256": "67c9a9dca40e6ec820a279da19a019cedd5427fbaaae3fd175cdb74965474b08",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_nycc/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_object_counting/task.json": {
+      "bytes": 1759338,
+      "git_blob_sha1": "757780e10d5ea8d40c4d2cc9a8444a9c20a0d603",
+      "rows": 200,
+      "sha256": "a0a8b10ca1aa06eae611c7c7e854fbec4f9622c8f74a74ffa00436a9a8609b67",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_object_counting/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_object_properties/task.json": {
+      "bytes": 1061333,
+      "git_blob_sha1": "e8bc36ad02c89d763e4981967ec5235f64a107ad",
+      "rows": 200,
+      "sha256": "d606b3aa0c35d5397afc5937207174593c82ad5dfcaf7e5dfb40a99278aef0e4",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_object_properties/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_sarc_triples/task.json": {
+      "bytes": 267005,
+      "git_blob_sha1": "fcb7b152123953c768f7fb415c29d37df0aa6b62",
+      "rows": 200,
+      "sha256": "4c7b8eb4b542d326152394456c0a1afc8ef5447ee06dd4187b7eb91027a6b821",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_sarc_triples/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_shuffled_objects/task.json": {
+      "bytes": 2687569,
+      "git_blob_sha1": "8099cd6873756c47cbba0538fc11767e5fe2bfc6",
+      "rows": 200,
+      "sha256": "43cda28220c66e8d63e667d3091cd18b0b17aa55c005bb24bbb63144afdba9c1",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_shuffled_objects/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_spatial_reasoning/task.json": {
+      "bytes": 1275134,
+      "git_blob_sha1": "dc362278dac49294d0225c0249e6bf9e7c8e31d4",
+      "rows": 200,
+      "sha256": "e77986b73e0ed15b5f950978b7758f55311b4d50e7215961084b126e4d960cb7",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_spatial_reasoning/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_sportqa/task.json": {
+      "bytes": 355509,
+      "git_blob_sha1": "c7407a7bd287cda7719fb7b7cbdca840a50a79ad",
+      "rows": 200,
+      "sha256": "69b3f164d9617eab9185830eacf4250badb56c2d718ddc75012597ed1a4bc9bf",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_sportqa/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_temporal_sequence/task.json": {
+      "bytes": 758382,
+      "git_blob_sha1": "e0ffd804b234344a967ecf9f6b2dad2b5f960279",
+      "rows": 200,
+      "sha256": "55f6711d3d76925acb5d2fffdc1947e0e7186c686f0a343598394a57df6c7c6e",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_temporal_sequence/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_time_arithmetic/task.json": {
+      "bytes": 238051,
+      "git_blob_sha1": "e1a8fcfe7cb58c0eb12700969904e16f3d5bff51",
+      "rows": 200,
+      "sha256": "2510515a6f12024a742743e29a389f07beacb3bf4c71e0b59be12f3e364cf31b",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_time_arithmetic/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_web_of_lies/task.json": {
+      "bytes": 512076,
+      "git_blob_sha1": "2bccd9eae0f1f10559a0d1e830aa0ccd4ac63c5a",
+      "rows": 200,
+      "sha256": "15f23d32579285701f68dae7947e2191eff21ee97440dfa73cb3565a66c77a6d",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_web_of_lies/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_word_sorting/task.json": {
+      "bytes": 456902,
+      "git_blob_sha1": "2995a286e30f32ce0eac590a52461243d3d383ff",
+      "rows": 200,
+      "sha256": "f49674b7b85774d6190c2844e1682c2ee8ff591ca1eeee4e785a45ef1e20024d",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_word_sorting/task.json"
+    },
+    "bbeh/benchmark_tasks/bbeh_zebra_puzzles/task.json": {
+      "bytes": 2303863,
+      "git_blob_sha1": "4a42b417ae48dda20f34f607ab3f4b2bbcb58066",
+      "rows": 200,
+      "sha256": "0acd979060ee49f063f241dd1a298bd80b63d6b7fbfb08057ff480bff98a6198",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/benchmark_tasks/bbeh_zebra_puzzles/task.json"
+    }
+  },
+  "repository": "https://github.com/google-deepmind/bbeh",
+  "revision": "80d12ca916b7158f22293fcf3144f4d3d854d4be",
+  "total_bytes": 17723234,
+  "total_rows": 4520,
+  "tree_sha256": "cd4e7caa7ac45e18a0bb1a8bf1fbed19f1c9a8de8d05a6f615aeefc3c81d4eea",
+  "tree_url": "https://api.github.com/repos/google-deepmind/bbeh/git/trees/80d12ca916b7158f22293fcf3144f4d3d854d4be?recursive=1",
+  "upstream_code_executed": false
+}

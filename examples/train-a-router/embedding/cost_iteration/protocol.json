@@ -1,0 +1,24 @@
+{
+  "format": "bbeh-shared-input-cost-iteration-v1",
+  "purpose": "Test whether a shared input-only dollar predictor improves routing beyond method-specific global conditional cost means; preserve all original quality heads and baseline costs.",
+  "source_plan_sha256": "b15e9c2d9db284fe170e0460550f02fc2cb48f2b9234b697d181716264984a53",
+  "quality_model_sha256": "2db976ac0db140eae7b608716ccd9ece372f2bcf4dc4b12a55f7ff31a1e0221b",
+  "train_grades_sha256": "fc97681161956f9743a4e25fa1133c4a6683f47b8f1cda708d39df1c939531bf",
+  "development_grades_sha256": "7d8b1e289bde88fc4623088a0432d35ccdb80169829f19bdffb9abc18697b827",
+  "roles": {"fit": "train", "selection_and_diagnostic": "development", "calibration": "not opened", "final": "not opened"},
+  "features": "The existing recipes.text_matrix TRAIN-only word TF-IDF unigrams/bigrams, min_df2, max_features20000, plus the existing five TRAIN-scaled request length/structure features. No explicit task metadata, embeddings or output tokens at prediction time.",
+  "models": {
+    "text_length_log_ridge": "Two independent Ridge models predict natural log actual selected-answer USD, with a shared alpha. Intercept is unpenalized; sklearn solver lsqr, tol1e-8,max_iter10000. Positive dollar prediction is exp(predicted log USD) times the TRAIN mean exp(log USD minus TRAIN prediction), separately per arm.",
+    "length_log_ridge": "Same model and alpha grid using only the existing five TRAIN-scaled length/structure features.",
+    "mean": "Each arm's scalar TRAIN mean actual USD. No tuning."
+  },
+  "alphas": [0.1, 1.0, 10.0, 100.0],
+  "selection": "For each ridge feature set choose one shared alpha minimizing mean squared dollar error across both arms and development rows, after each arm's dollar error is divided by that arm's TRAIN mean USD. Exact ties choose larger alpha. No quality-based alpha selection.",
+  "cost_domain": "All selected costs must be finite and strictly positive. No zero or missing-cost imputation; failures stop the diagnostic.",
+  "quality": "Use only the already selected k32/embedding-lambda1 and fixed text/task controls' stored TRAIN-fitted development probabilities. No new correctness fit or quality hyperparameter choice. Native can consume the same cost predictions later without changing its correctness probabilities.",
+  "comparison": "For every fixed quality method retain original cost predictions and each of the three common cost controls. Retain complete signed-utility development frontiers and descriptive best accuracy under 20/40/60/80 percent of always-Sol answer cost, with analytic random comparators. No calibration/final policy selection here.",
+  "uncertainty": "Pointwise paired whole-family bootstrap within task,2000draws,seed89,fixed observed task weights. These development-selected curves do not provide unbiased or simultaneous guarantees.",
+  "fees": "Answer-model costs only until singleton fee validation. All CPU/encoder hosting fees remain unpriced, not free.",
+  "refit": "This initial study does not refit on development. If selected after review, cost-only train+development refit and input-only scoring will be separately bound; original archives remain immutable.",
+  "compute": "Modal CPU only; no model API, GPU, calibration or final outcomes. Fixed numpy2.4.6/scipy1.17.0/sklearn1.6.1 runtime."
+}

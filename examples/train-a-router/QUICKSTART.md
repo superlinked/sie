@@ -1,75 +1,51 @@
-# Train a router: one-page guide
+# Train a cost-aware router
 
-Train routers to choose between **GPT-6.1 Sol and GPT-6 Luna**, then compare money saved against answer accuracy. Try Laya, adapt it with LoRA, and train small classifiers on **Qwen3-Embedding-4B** vectors from SIE Cloud or your own SIE server.
+**Goal:** send requests to Luna when it is sufficient and pay for Sol when its extra accuracy is worthwhile. The supplied BBEH experiment compares unchanged Laya → LoRA adaptation → embedding neighbors → a small embedding classifier, with an optional learned cost estimate. On 975 held-out questions, an embedding classifier with learned cost estimates saved 16.7% with a 0.9-point accuracy loss; another preselected policy saved 39.7% with a 6.1-point loss. Both savings figures include the Cloud encoder fee.
 
-**Results on 3,043 test questions:**
+**You need:** Python 3.12 and `uv`; an NVIDIA GPU for the full LoRA exercise (validated on H100 80 GB). Replay and classifier training run on CPU. SIE Cloud can supply Qwen3-Embedding-4B vectors; OpenAI supplies live Sol/Luna answers. Cached vectors and answers are included, so replay needs neither API key.
 
-| Policy | Accuracy | Accuracy loss | Cost / 10,000 | Savings |
-|---|---:|---:|---:|---:|
-| Always Sol | 92.64% | 0.00 pp | $14.02 | 0.0% |
-| Embedding router, more quality retained | 91.65% | 0.99 pp | $9.09 | 35.2% |
-| Embedding router, more money saved | 90.67% | 1.97 pp | $6.94 | 50.5% |
-| Always Luna | 88.63% | 4.01 pp | $1.52 | 89.2% |
-
-Always Sol is the baseline. **pp means percentage points:** 92% to 91% accuracy is a 1 pp loss. Costs include Cloud encoder fees and exclude classifier application hosting. Step 4 compares the full curves, with Laya hosting estimated separately in the [README](README.md).
-
-**Data:** 9,111 training, 3,056 calibration and 3,043 test questions from MMLU-Pro, BIG-Bench Hard and KOR-Bench. Related questions stay in the same split. Choose on calibration data; check on test data.
-
-**Prerequisites:** Python 3.12, uv and about 4.4 GB for downloads. LoRA needs an NVIDIA GPU (58 minutes on H100); replay and embedding-classifier training work on CPU. The supplied data needs no API keys. Live requests need `OPENAI_API_KEY` and, for Cloud embeddings, `SIE_API_KEY`.
-
-## 1. Install and compare the baselines [Sol: 92.64%; Luna: 88.63% accuracy]
+1. **Set up and inspect the evidence.** Training/development/calibration/test contain 1,969/589/385/975 questions. Related question families stay in one split. Accuracy measures the chosen answer; savings compare its token cost with always-Sol. An accuracy change from 80% to 78% is a 2-point loss.
 
 ```bash
-# Enter the example, install dependencies, download data and compare the routers.
+# From your repository clone, install dependencies and download the pinned data and decision-model weights.
 cd examples/train-a-router
-uv sync --frozen --group outcomes --group training --group live
+uv sync --frozen --group training --group outcomes
 uv run --frozen python router.py fetch --output data --group core --group weights
-uv run --frozen python router.py replay --data data --output replay.json
-uv run --frozen python router.py show --report replay.json
+uv run --frozen python router.py replay --data data --output published-results
+uv run --frozen python router.py prepare --data data --run my-router
 ```
 
-## 2. Adapt Laya with LoRA [40.4% answer savings; 1.91 pp accuracy loss]
+Open `published-results/explorer/index.html` for the full cost–quality curves. A CPU-only replay needs only `--group core`.
+
+2. **Try and adapt Laya.** Start with unchanged weights, then let development data choose the LoRA training duration. The supplied run selected three passes and refitted from the original model.
 
 ```bash
-# Prepare a run, train LoRA on training labels, and score held-out questions with unchanged and adapted Laya.
-uv run --frozen --group outcomes --group training python router.py prepare --data data --run run
-uv run --frozen --group outcomes --group training python router.py fit-native --data data --run run
-uv run --frozen --group outcomes --group training python router.py score --data data --run run --method native --device cuda
+# Score unchanged Laya, train LoRA, and save input-only predictions for both versions.
+uv run --frozen --group training python router.py base --data data --run my-router --device cuda
+uv run --frozen --group training python router.py fit-native --data data --run my-router
+uv run --frozen --group training python router.py score --data data --run my-router --method native --device cuda
 ```
 
-## 3. Train on embeddings [50.5% savings; 1.97 pp accuracy loss]
+3. **Fit embedding routers on CPU.** The large Qwen encoder stays fixed. The neighbor method averages outcomes of similar questions; two small logistic classifiers learn whether Luna and Sol will answer correctly.
 
 ```bash
-# Train two correctness predictors on fixed embeddings, then score held-out vectors.
-uv run --frozen --group outcomes python router.py fit-embedding --data data --run run
-uv run --frozen --group outcomes python router.py score --data data --run run --method embedding
+# Fit neighbors, classifiers and simple controls, then score held-out question embeddings.
+uv run --frozen --group outcomes python router.py fit-embedding --data data --run my-router
+uv run --frozen --group outcomes python router.py score --data data --run my-router --method embedding
 ```
 
-## 4. Compare cost–quality frontiers
+4. **Estimate cost and choose your tradeoff.** Cost varies by question, so retain both the original and learned cost estimates. Select a policy using calibration, then inspect its test result.
 
 ```bash
-# Fit the simple control, build calibration curves, and open the resulting HTML to choose a method and candidate ID.
-uv run --frozen --group outcomes python router.py fit-topic --data data --run run
-uv run --frozen --group outcomes python router.py calibrate --data data --run run
-uv run --frozen python router.py frontier --data data --run run --output calibration-frontier.html
+# Fit cost predictors, freeze the full calibration frontier, and render the two reports.
+uv run --frozen --group outcomes python router.py fit-cost --data data --run my-router
+uv run --frozen python router.py calibrate --data data --run my-router
+uv run --frozen python router.py frontier --run my-router --output calibration.html
+uv run --frozen python router.py evaluate-refit --data data --run my-router --output my-results
 ```
 
-Choose a method and candidate ID in `calibration-frontier.html`, then check its test result. The test view uses published answers; use fresh test questions to evaluate any further tuning.
+Open `calibration.html` to select a method and candidate ID; open `my-results/explorer/index.html` to assess it. There is no required quality-loss threshold. Evaluation of your refit uses published test answers, so it is a reproduction, not another blind test.
 
-```bash
-# Inspect the same saved candidates on published test answers without retraining or making API calls.
-uv run --frozen python router.py frontier --data data --run run --include-test --output test-frontier.html
-```
+5. **Try a live request.** Add a SIE key for an embedding route and an OpenAI key for the selected answer. Run `router.py answer` with the method and candidate copied from calibration. [The full walkthrough](README.md#7-route-a-new-question) gives the command. Laya routes need no embedding call.
 
-## 5. Route a new request
-
-```bash
-# With API keys set, use the embedding candidate ID you chose in calibration-frontier.html.
-CANDIDATE_ID=YOUR_SELECTED_CANDIDATE_ID
-uv run --frozen --group live python router.py answer --run run --method embedding \
-  --candidate-id "$CANDIDATE_ID" \
-  --question 'Which planet is closest to the Sun? A. Mercury B. Venus' \
-  --answer-type choice --choices A B --output answers/planet
-```
-
-To use the supplied models, omit `--run` from `frontier` and use `--run data/reference` for `answer`. Candidate IDs belong to a specific method and run. Use fresh output paths. The [README](README.md) covers CPU-only training, local embeddings, labels, serving costs and uncertainty.
+To regenerate vectors, use [SIE Cloud](README.md#use-sie-cloud-or-your-own-encoder) or [your own SIE server](self-host/README.md). See [labels and collection](LABELS.md) for a new paired answer run. The [README](README.md) includes measured latency, hardware requirements, uncertainty and the effect of router fees.

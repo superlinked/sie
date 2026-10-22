@@ -63,12 +63,12 @@ does not assign it a Cloud debit or call it free.
 
 ```bash
 # Regenerate question features locally while keeping the published vectors unchanged.
-uv run --frozen --group live python router.py encode \
+uv run --frozen --group encode python router.py encode \
   --data data --output local-features \
   --sie-base-url http://127.0.0.1:8000 --self-hosted
 ```
 
-Use `--features local-features` for both classifier fitting and embedding
+Use `--features local-features/features` for both classifier fitting and embedding
 scoring in a new run. The model revision and encoding settings match the
 recorded recipe, but a different inference runtime need not produce
 bit-identical vectors. The existing recordings remain the exact replay path.
@@ -76,10 +76,10 @@ bit-identical vectors. The existing recordings remain the exact replay path.
 ```bash
 # Use your selected reference-frontier candidate with the local encoder; OPENAI_API_KEY is still needed for answers.
 CANDIDATE_ID=YOUR_SELECTED_REFERENCE_CANDIDATE_ID
-uv run --frozen --group live python router.py answer \
+uv run --frozen --group encode --group collection --group outcomes python router.py answer \
   --run data/reference --method embedding --candidate-id "$CANDIDATE_ID" \
-  --question 'Which planet is closest to the Sun? A. Mercury B. Venus' \
-  --answer-type choice --choices A B --output answers/local-encoder-planet \
+  --question 'Which planet is closest to the Sun? A. Mercury B. Venus. Answer A or B.' \
+  --output answers/local-encoder-planet \
   --sie-base-url http://127.0.0.1:8000 --self-hosted
 ```
 

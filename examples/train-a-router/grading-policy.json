@@ -1,0 +1,13 @@
+{
+  "diagnostics": [
+    "raw official correctness",
+    "literal exact final-answer correctness"
+  ],
+  "format": "bbeh-public-grading-policy-v2",
+  "grader_sha256": "cd5d53a22b024406eecf18de92d24175a287e482dc63d58be6ec01b7a23cbd08",
+  "normalizer_sha256": "258a60874b11b5bbeefe2a4fe304dfcc2da341eba995258262ce1e5931ef5772",
+  "official_grader_sha256": "4b4f06e5babb015de2ba639bae995a5526182ffb5b5890af54dfcf038580eb34",
+  "primary": "Source-aware canonicalization followed by upstream normalization with finite Decimal equality",
+  "source_plan_bytes_unchanged": true,
+  "source_review_decision_sha256": "7f07e78805d20a0a8d6c781a1e8d0b3f4267ff513107a043e1cacb97c798a580"
+}

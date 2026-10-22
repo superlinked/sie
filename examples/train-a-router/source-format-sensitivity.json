@@ -1,0 +1,74 @@
+{
+  "basis": "Public question text only; no acquired response, gold label, model identity or correctness used to identify ambiguity.",
+  "final_sensitivity": {
+    "excluded_ids": [
+      "bbeh:disambiguation_qa:051",
+      "bbeh:disambiguation_qa:052"
+    ],
+    "n_primary": 975,
+    "n_sensitivity": 973,
+    "name": "exclude_source_ambiguous_options",
+    "rule": "Evaluate the same frozen policies and per-row costs on final rows except these fixed source-ambiguous IDs. Recompute the same aggregate metrics and uncertainty protocol; report both denominators. No refitting, recalibration, threshold selection or answer regeneration."
+  },
+  "fixed_before_final_outcomes": true,
+  "format": "bbeh-source-format-sensitivity-v1",
+  "limitations": "A duplicated label can encode two different meanings and identical text can occupy two labels. Upstream label-only references cannot resolve these source defects. Primary scores retain that limitation; the separate sensitivity exposes its final-evaluation effect.",
+  "normalizer_sha256": "258a60874b11b5bbeefe2a4fe304dfcc2da341eba995258262ce1e5931ef5772",
+  "primary_population_and_reference_bytes_unchanged": true,
+  "primary_role_counts": {
+    "calibration": 385,
+    "development": 589,
+    "final": 975,
+    "train": 1969
+  },
+  "source_ambiguous_rows": [
+    {
+      "duplicate_labels": [],
+      "duplicate_text_labels": [
+        [
+          "B",
+          "D"
+        ]
+      ],
+      "family": "2d6679ee5418599e7e79d8eada436d3251c513fd874df67786f41f63e014ab88",
+      "id": "bbeh:disambiguation_qa:018",
+      "index": 18,
+      "request_sha256": "d43a5ad79fd64b28f935dfdd5e308d504200060111f51e7b0bbdfd730927f5be",
+      "retained": true,
+      "role": "train",
+      "task": "disambiguation_qa"
+    },
+    {
+      "duplicate_labels": [
+        "E"
+      ],
+      "duplicate_text_labels": [],
+      "family": "70b9e67438ab0f8bd2e92b6196f9fdb4b82d2011167faddd7115fa9c09132fd8",
+      "id": "bbeh:disambiguation_qa:051",
+      "index": 51,
+      "request_sha256": "3434899c00f908b6f27290e90df888a21c23b739e79357b4d4cad0ecd4046324",
+      "retained": true,
+      "role": "final",
+      "task": "disambiguation_qa"
+    },
+    {
+      "duplicate_labels": [],
+      "duplicate_text_labels": [
+        [
+          "C",
+          "D"
+        ]
+      ],
+      "family": "fd4491ee83e2c6a26a27f2d38f4056681bbf0564742eae2e3a6e8f13694948e2",
+      "id": "bbeh:disambiguation_qa:052",
+      "index": 52,
+      "request_sha256": "f443e7d31db4fabcd10704f8bd58bdf354a5b847c6803fcad013b5f16bfd7b47",
+      "retained": true,
+      "role": "final",
+      "task": "disambiguation_qa"
+    }
+  ],
+  "source_audit_sha256": "bf618b8be32a6391094b984919f802c8f0dd5c5c98417e8475764c56ee579cdd",
+  "source_plan_sha256": "b15e9c2d9db284fe170e0460550f02fc2cb48f2b9234b697d181716264984a53",
+  "training_ambiguity_policy": "Retain disambiguation_qa:018 in the fixed training population with the original source label semantics; do not repair its label or choose an option from model outputs."
+}

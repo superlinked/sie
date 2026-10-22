@@ -1,0 +1,25 @@
+{
+  "revision": "80d12ca916b7158f22293fcf3144f4d3d854d4be",
+  "files": {
+    "bbeh/mini/data.json": {
+      "bytes": 1798615,
+      "sha256": "14e77b3d6be68faa008d268abf53b1f8d2420ffdd762504a304dafc3f8d43026",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/mini/data.json"
+    },
+    "bbeh/evaluate.py": {
+      "bytes": 3701,
+      "sha256": "4b4f06e5babb015de2ba639bae995a5526182ffb5b5890af54dfcf038580eb34",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/bbeh/evaluate.py"
+    },
+    "README.md": {
+      "bytes": 7541,
+      "sha256": "86d16ad213c64a4777a5368ae1a76664d1152b9316c04dede597b8e8cbedf56c",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/README.md"
+    },
+    "LICENSE": {
+      "bytes": 30393,
+      "sha256": "ed714919b09bcaee887dfed4bca3972041cac53453c3089f57a367e05a50704d",
+      "url": "https://raw.githubusercontent.com/google-deepmind/bbeh/80d12ca916b7158f22293fcf3144f4d3d854d4be/LICENSE"
+    }
+  }
+}

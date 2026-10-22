@@ -1,0 +1,44 @@
+{
+  "arms": {
+    "cheap": {
+      "model": "gpt-6-luna",
+      "provider": "openai"
+    },
+    "strong": {
+      "model": "gpt-6.1-sol",
+      "provider": "openai"
+    }
+  },
+  "cost_scope": "Observed selected-response standard token/list-price USD, including reasoning once; physical acquisition retries and router overhead reported separately.",
+  "format": "bbeh-selected-answer-pair-v1",
+  "models": {
+    "cheap": "gpt-6-luna",
+    "strong": "gpt-6.1-sol"
+  },
+  "pair": "sol_luna",
+  "prices_usd_per_million": {
+    "gpt-6-luna": {
+      "cache_write": "0.125",
+      "cached_input": "0.01",
+      "input": "0.10",
+      "output": "0.50"
+    },
+    "gpt-6.1-sol": {
+      "cache_write": "2.50",
+      "cached_input": "0.10",
+      "input": "2",
+      "output": "10"
+    }
+  },
+  "pricing_checked": "2026-10-21",
+  "pricing_source": "https://developers.openai.com/api/docs/pricing",
+  "settings": {
+    "max_output_tokens": 16384,
+    "reasoning": {
+      "effort": "medium"
+    },
+    "service_tier": "default",
+    "store": false
+  },
+  "system_prompt": "Solve the question independently, using the full rules and options supplied. Do not use tools or external sources. Return the requested JSON object. The answer field must contain only the complete final answer in the format requested by the source question. Preserve semantic brackets, quotes, punctuation, nesting, case and internal spaces. JSON is only the transport container; it does not replace or remove any part of the requested answer. "
+}
