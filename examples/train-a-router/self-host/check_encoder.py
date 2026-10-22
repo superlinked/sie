@@ -46,7 +46,9 @@ def check_vector(reply):
     if not all(type(value) in (int, float) and math.isfinite(value) for value in vector):
         raise RuntimeError("The vector contains nonfinite or nonnumeric values")
     norm = math.sqrt(math.fsum(value * value for value in vector))
-    if not math.isclose(norm, 1.0, rel_tol=0, abs_tol=1e-5):
+    # BF16 normalization precedes the float32 output cast; feature collection
+    # subsequently renormalizes in float64 before saving float32 vectors.
+    if not math.isclose(norm, 1.0, rel_tol=0, abs_tol=1e-2):
         raise RuntimeError("Expected a normalized, nonzero vector")
     return norm, hashlib.sha256(json.dumps(vector, separators=(",", ":")).encode()).hexdigest()
 

@@ -2,15 +2,8 @@ name: train-a-router-encoder
 
 services:
   encoder:
-    # This is a locally built tag, not a published SIE image.
-    image: train-a-router-encoder:975d5309
+    image: ghcr.io/superlinked/sie-server:v0.10.1-cuda12-default@sha256:eff8cb767a7c7c7318c0feca7f677738f27e654fd774eaebab72feb4f61f84b4
     platform: linux/amd64
-    build:
-      context: https://github.com/superlinked/sie.git#975d5309ba3af9eaeb13725b20dcf10d906c3e2a
-      dockerfile: packages/sie_server/Dockerfile.cuda12
-      args:
-        BUNDLE: sglang-embedding
-        SIE_SRC_REV: 975d5309ba3af9eaeb13725b20dcf10d906c3e2a
     restart: "no"
     shm_size: 8gb
     environment:
