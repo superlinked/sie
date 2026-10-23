@@ -281,8 +281,9 @@ class TestSGLangEmbeddingAdapter:
         texts = call_args[1]["json"]["input"]
         assert texts == ["Instruct: search\nQuery:hello"]
 
+    @pytest.mark.parametrize("instruction", ["custom", ""])
     @patch("sie_server.adapters.sglang.embedding.requests.post")
-    def test_encode_with_instruction_override(self, mock_post: MagicMock) -> None:
+    def test_encode_with_instruction_override(self, mock_post: MagicMock, instruction: str) -> None:
         """Encode uses provided instruction over default."""
         embeddings = _RNG.standard_normal((1, 4096)).astype(np.float32)
         mock_response = MagicMock()
@@ -299,11 +300,11 @@ class TestSGLangEmbeddingAdapter:
         adapter._server_url = "http://localhost:30000"
 
         items = [Item(text="hello")]
-        adapter.encode(items, output_types=["dense"], instruction="custom", is_query=True)
+        adapter.encode(items, output_types=["dense"], instruction=instruction, is_query=True)
 
         call_args = mock_post.call_args
         texts = call_args[1]["json"]["input"]
-        assert texts == ["Instruct: custom\nQuery:hello"]
+        assert texts == [f"Instruct: {instruction}\nQuery:hello"]
 
     @patch("sie_server.adapters.sglang._server.os.getpgid")
     @patch("sie_server.adapters.sglang._server.os.killpg")

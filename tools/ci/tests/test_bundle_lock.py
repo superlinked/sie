@@ -16,8 +16,8 @@ from tools.ci import bundle_lock
 
 def test_target_matrix_preserves_cpu_arm64_in_addition_to_every_release():
     selected = bundle_lock.targets(bundle_lock.ROOT)
-    assert len(selected) == 15
-    assert len({target.name for target in selected}) == 15
+    assert len(selected) == 16
+    assert len({target.name for target in selected}) == 16
     assert {target.bundle for target in selected if target.architecture == "arm64"} == {
         "default",
         "ctranslate2",

@@ -301,7 +301,7 @@ def smoke_image(image: str, *, bundle: str | None = None) -> None:
         imports = "import sie_server, sie_sdk, sie_audio_prep, torch, transformers; "
         if bundle == "ctranslate2":
             imports += "import ctranslate2; "
-        elif bundle in {"sglang", "sglang-vision-extract"}:
+        elif bundle in {"sglang", "sglang-embedding", "sglang-vision-extract"}:
             imports += "import sglang; "
         imports += "print('release image imports passed')"
         command.extend(["--entrypoint", "python", image, "-c", imports])

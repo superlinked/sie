@@ -55,6 +55,21 @@ combinations. Missing bundle source or build recipes are errors, not an
 instruction to skip a release target. The Rust worker retains its explicit
 CUDA/architecture image suffix.
 
+The CUDA 12 targets include `sglang-embedding`, the isolated worker bundle for
+Qwen3 text embeddings and the catalog's other SGLang embedding models. Its
+versioned image is `ghcr.io/superlinked/sie-server:vX.Y.Z-cuda12-sglang-embedding`.
+It participates in the same build, verification and publication gates as the
+other release images. This target first ships in the release containing this
+matrix entry; it does not add an image to earlier releases.
+
+Qwen3-Embedding-0.6B and 8B now join 4B in that CUDA bundle. Their `:flash`
+profiles retain the previous implementation in the `default` bundle, including
+its CPU/MPS fallback. For example, CPU and Mac users select
+`Qwen/Qwen3-Embedding-0.6B:flash`; a `cpu-default` image serves that explicit
+profile, not the bare SGLang model ID. Model revisions, query instructions and
+vector dimensions are unchanged, but changing inference backends can change
+floating-point results. Rebuild vectors consistently when migrating an index.
+
 The Helm chart is published at
 `oci://ghcr.io/superlinked/charts/sie-cluster` after its versioned images verify.
 
@@ -325,6 +340,11 @@ The manual recovery entrypoint validates an existing version and its original
 run before requesting those reruns. It is not an alternate uploader from newer
 source. npm's automatic provenance uses the run's commit; checking out an older
 tag inside a newer run would not change that identity.
+
+Docker recovery reads the server image matrix from the original release's
+validated source SHA. Adding a bundle to a later release therefore neither
+omits its archive from new-release recovery nor requires it for older releases.
+An unavailable or malformed original matrix stops recovery.
 
 In **Actions → Release → Run workflow**, select `main` and provide `version`
 (without `v`), the numeric `original_run` ID, and an optional `family` selection.

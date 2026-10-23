@@ -865,8 +865,8 @@ class SGLangEmbeddingAdapter(SGLangLoraMixin, BaseAdapter):
             text = item.text
 
             if is_query and query_template:
-                # Use provided instruction or default
-                instr = instruction or default_instruction or ""
+                # An explicit empty instruction disables the configured default.
+                instr = instruction if instruction is not None else (default_instruction or "")
                 text = query_template.format(instruction=instr, text=text)
             elif not is_query and doc_template:
                 text = doc_template.format(text=text)

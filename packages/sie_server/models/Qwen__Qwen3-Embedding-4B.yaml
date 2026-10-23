@@ -33,3 +33,17 @@ profiles:
           Instruct: {instruction}
           Query: {text}
         default_instruction: Given a query, retrieve relevant passages that answer the query
+  flash:
+    extends: default
+    adapter_path: sie_server.adapters.qwen2_flash:Qwen2FlashAdapter
+    adapter_options:
+      loadtime:
+        causal: true
+        fused_kernels: true
+      runtime:
+        pooling: last
+        normalize: true
+        query_template: |-
+          Instruct: {instruction}
+          Query: {text}
+        default_instruction: Given a query, retrieve relevant passages that answer the query

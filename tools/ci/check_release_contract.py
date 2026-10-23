@@ -946,7 +946,12 @@ def docker_release_errors() -> list[str]:
         (platform, bundle)
         for platform in ("cuda12", "cpu")
         for bundle in ("default", "ctranslate2", "sglang", "transformers5")
-    } | {("cuda12", "sglang-vision-extract"), ("cuda13", "sglang-cu130"), ("cuda13", "tensorrt-llm")}
+    } | {
+        ("cuda12", "sglang-embedding"),
+        ("cuda12", "sglang-vision-extract"),
+        ("cuda13", "sglang-cu130"),
+        ("cuda13", "tensorrt-llm"),
+    }
     if pairs != expected_pairs:
         errors.append("Docker release matrix differs from the supported server pairs")
 

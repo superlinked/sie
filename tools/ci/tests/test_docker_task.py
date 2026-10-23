@@ -26,6 +26,7 @@ def complete_source(tmp_path: Path, monkeypatch):
         "default",
         "ctranslate2",
         "sglang",
+        "sglang-embedding",
         "transformers5",
         "sglang-vision-extract",
         "sglang-cu130",
@@ -54,13 +55,18 @@ def archive(tmp_path: Path, image: str = IMAGE):
     )
 
 
-def test_release_matrix_resolves_exact_eleven_pairs(complete_source):
+def test_release_matrix_resolves_exact_twelve_pairs(complete_source):
     assert {(target.platform, target.bundle) for target in complete_source} == {
         (platform, bundle)
         for platform in ("cuda12", "cpu")
         for bundle in ("default", "ctranslate2", "sglang", "transformers5")
-    } | {("cuda12", "sglang-vision-extract"), ("cuda13", "sglang-cu130"), ("cuda13", "tensorrt-llm")}
-    assert len(complete_source) == 11
+    } | {
+        ("cuda12", "sglang-embedding"),
+        ("cuda12", "sglang-vision-extract"),
+        ("cuda13", "sglang-cu130"),
+        ("cuda13", "tensorrt-llm"),
+    }
+    assert len(complete_source) == 12
 
 
 def test_release_matrix_fails_closed_for_absent_bundle(complete_source, tmp_path):
@@ -155,6 +161,7 @@ def test_release_cuda13_smoke_uses_qualified_driverless_checks(bundle, monkeypat
         ("transformers5", ""),
         ("ctranslate2", "import ctranslate2; "),
         ("sglang", "import sglang; "),
+        ("sglang-embedding", "import sglang; "),
         ("sglang-vision-extract", "import sglang; "),
         (None, ""),
     ],
@@ -249,6 +256,7 @@ def build_server_argv(tmp_path: Path, platform: str, bundle: str) -> list[str]:
     ("platform", "bundle", "checked"),
     [
         ("cuda12", "sglang", True),
+        ("cuda12", "sglang-embedding", True),
         ("cuda12", "sglang-vision-extract", True),
         ("cuda13", "sglang-cu130", True),
         ("cuda12", "default", True),
@@ -350,9 +358,9 @@ def test_bundle_image_installs_are_constrained_to_the_lock(dockerfile: str) -> N
     assert "-r /tmp/bundle-requirements.txt" not in text
 
 
-def test_expected_release_set_has_sixteen_tags_and_six_names(complete_source):
+def test_expected_release_set_has_seventeen_tags_and_six_names(complete_source):
     images = docker_task.expected_versioned_images("ghcr.io/superlinked", VERSION, complete_source)
-    assert len(images) == len(set(images)) == 16
+    assert len(images) == len(set(images)) == 17
     assert len({image.split(":")[0] for image in images}) == 6
     assert f"ghcr.io/superlinked/sie-server-rust:v{VERSION}-cuda12-sm89" in images
 
@@ -498,7 +506,7 @@ def test_failed_old_alias_retry_never_rolls_back_newer_success(complete_source, 
         run_id="1235",
     )
     newer_writes = writes[1:].copy()
-    assert len(newer_writes) == 16
+    assert len(newer_writes) == 17
     assert all(":v0.7.5" in command[-1] for command in newer_writes)
     docker_task.move_aliases("ghcr.io/superlinked", VERSION, complete_source, **kwargs)
     assert writes[1:] == newer_writes
@@ -511,7 +519,7 @@ def test_same_release_alias_retry_is_idempotent(complete_source, public_releases
     docker_task.move_aliases("ghcr.io/superlinked", VERSION, complete_source, **kwargs)
     first = writes.copy()
     docker_task.move_aliases("ghcr.io/superlinked", VERSION, complete_source, **kwargs)
-    assert len(first) == 16
+    assert len(first) == 17
     assert writes == first + first
 
 

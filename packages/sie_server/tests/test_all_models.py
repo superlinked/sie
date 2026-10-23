@@ -316,7 +316,9 @@ def test_nvidia_nv_embed_v2_dense() -> None:
 
 
 def test_qwen_qwen3_embedding_0_6b_dense() -> None:
-    _assert_dense("Qwen/Qwen3-Embedding-0.6B", 1024, [-0.0165252685546875, -0.04132080078125, -0.0137786865234375])
+    _assert_dense(
+        "Qwen/Qwen3-Embedding-0.6B:flash", 1024, [-0.0165252685546875, -0.04132080078125, -0.0137786865234375]
+    )
 
 
 def test_qwen_qwen3_embedding_0_6b_custom_dense() -> None:

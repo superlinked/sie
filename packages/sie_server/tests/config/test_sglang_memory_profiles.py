@@ -13,6 +13,8 @@ MODELS = Path(__file__).resolve().parents[2] / "models"
         "Qwen__Qwen3Guard-Gen-0.6B",
         "ibm-granite__granite-guardian-3.0-2b",
         "Qwen__Qwen3-Embedding-4B",
+        "Qwen__Qwen3-Embedding-0.6B",
+        "Qwen__Qwen3-Embedding-8B",
         "lightonai__LightOnOCR-2-1B",
     ],
 )

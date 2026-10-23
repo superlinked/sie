@@ -26,6 +26,7 @@ def test_cuda_runtimes_come_from_each_lanes_final_stage():
 
     assert runtimes["cuda12", "default"] == "12.4.1"
     assert runtimes["cuda12", "sglang"] == "12.9.1"
+    assert runtimes["cuda12", "sglang-embedding"] == runtimes["cuda12", "sglang"]
     assert runtimes["cuda12", "sglang-vision-extract"] == runtimes["cuda12", "sglang"]
     assert runtimes["cuda13", "*"] == "13.0.0"
     assert runtimes["cuda12", matrix.RUST_BUNDLE] == "12.4.1"
@@ -108,8 +109,22 @@ def test_cuda_only_engines_are_unsupported_on_cpu_lanes():
     assert {cell["gpu_class"] for cell in cpu_sglang} == {"cpu"}
 
 
-def test_a_bundle_without_a_published_image_is_unsupported():
+def test_sglang_embeddings_have_a_declared_cuda_release_lane():
     embedding = [cell for cell in generated()["cells"] if cell["bundle"] == "sglang-embedding"]
+
+    assert embedding
+    assert {(cell["lane"], cell["status"]) for cell in embedding} == {("cuda12-sglang-embedding", "declared")}
+
+
+def test_a_bundle_without_a_published_image_is_unsupported(monkeypatch):
+    release_targets = matrix.release_targets
+    monkeypatch.setattr(
+        matrix,
+        "release_targets",
+        lambda root: [target for target in release_targets(root) if target != ("cuda12", "sglang-embedding")],
+    )
+    result = matrix.build(matrix.ROOT, "0.0.0", floors=floors())
+    embedding = [cell for cell in result["cells"] if cell["bundle"] == "sglang-embedding"]
 
     assert embedding
     assert {(cell["lane"], cell["status"]) for cell in embedding} == {(None, "unsupported")}

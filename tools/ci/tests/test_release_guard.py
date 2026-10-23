@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -372,9 +374,84 @@ def test_retry_selector_only_reruns_failed_original_jobs():
         recovery.selected_jobs(jobs, "npm")
 
 
-def test_archive_recovery_scope_contains_all_families():
-    assert len(recovery.artifact_names("docker", "0.7.4")) == 16
-    assert recovery.artifact_names("native", "0.7.4") == {"native-sidecar-0.7.4"}
+@pytest.mark.parametrize("include_embedding", [False, True])
+def test_archive_recovery_uses_the_original_releases_matrix(monkeypatch, include_embedding):
+    source_sha = SHA if include_embedding else "b" * 40
+    monkeypatch.setenv("GITHUB_SHA", "c" * 40)
+    matrix = json.loads((Path(__file__).resolve().parents[3] / ".github/release-matrix.json").read_text())
+    if not include_embedding:
+        matrix["include"] = [entry for entry in matrix["include"] if entry["bundle"] != "sglang-embedding"]
+    calls = []
+
+    def command(*args):
+        calls.append(args)
+        return json.dumps(matrix)
+
+    monkeypatch.setattr(recovery, "command", command)
+    images = recovery.artifact_names("docker", "0.7.4", source_sha=source_sha)
+    assert len(images) == (17 if include_embedding else 16)
+    assert ("docker-server-cuda12-sglang-embedding-0.7.4" in images) is include_embedding
+    assert calls == [("git", "show", f"{source_sha}:.github/release-matrix.json")]
+    archives = [
+        {**artifact(), "name": name, "workflow_run": {"id": 123, "head_sha": source_sha, "head_branch": "v0.7.4"}}
+        for name in images
+    ]
+    kwargs = {"original_run": 123, "source_sha": source_sha, "tag_name": "v0.7.4", "now": NOW}
+    recovery.validate_artifacts(archives, images, **kwargs)
+    if include_embedding:
+        archives = [archive for archive in archives if "sglang-embedding" not in archive["name"]]
+        with pytest.raises(
+            ValueError, match="missing or ambiguous original archive: docker-server-cuda12-sglang-embedding"
+        ):
+            recovery.validate_artifacts(archives, images, **kwargs)
+
+
+@pytest.mark.parametrize("family", ["python", "npm", "helm", "audio", "native"])
+def test_non_docker_recovery_does_not_read_the_docker_matrix(monkeypatch, family):
+    monkeypatch.setattr(recovery, "command", lambda *_args: pytest.fail("must not read Docker matrix"))
+    assert len(recovery.artifact_names(family, "0.7.4")) == 1
+
+
+@pytest.mark.parametrize("source_sha", [None, "", "HEAD", "main", "a" * 39, "A" * 40, "--all"])
+def test_docker_recovery_rejects_unpinned_source_before_reading_git(monkeypatch, source_sha):
+    monkeypatch.setattr(recovery, "command", lambda *_args: pytest.fail("must reject before reading Git"))
+    with pytest.raises(ValueError, match="original full source SHA"):
+        recovery.artifact_names("docker", "0.7.4", source_sha=source_sha)
+
+
+@pytest.mark.parametrize(
+    "matrix",
+    [
+        None,
+        {},
+        {"platforms": [], "bundles": ["default"]},
+        {"platforms": "cuda12", "bundles": ["default"]},
+        {"platforms": ["cuda12"], "bundles": ["default"], "include": None},
+        {"platforms": ["cuda12"], "bundles": ["default", "default"]},
+        {"platforms": ["cuda12"], "bundles": ["../escape"]},
+        {"platforms": [None], "bundles": ["default"]},
+        {"platforms": ["cuda12"], "bundles": ["default"], "exclude": []},
+        {"platforms": ["cuda12"], "bundles": ["default"], "include": [{}]},
+        {
+            "platforms": ["cuda12"],
+            "bundles": ["default"],
+            "include": [{"platform": "cuda12", "bundle": "default"}],
+        },
+    ],
+)
+def test_docker_recovery_rejects_malformed_original_matrix(monkeypatch, matrix):
+    monkeypatch.setattr(recovery, "command", lambda *_args: json.dumps(matrix))
+    with pytest.raises(ValueError, match="original release"):
+        recovery.artifact_names("docker", "0.7.4", source_sha=SHA)
+
+
+def test_docker_recovery_never_substitutes_todays_matrix_when_the_original_is_missing(monkeypatch):
+    def missing(*args):
+        raise subprocess.CalledProcessError(128, args)
+
+    monkeypatch.setattr(recovery, "command", missing)
+    with pytest.raises(subprocess.CalledProcessError):
+        recovery.artifact_names("docker", "0.7.4", source_sha=SHA)
 
 
 def test_retry_never_replays_prepare_or_only_completion():

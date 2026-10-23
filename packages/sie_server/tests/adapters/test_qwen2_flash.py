@@ -16,7 +16,7 @@ import pytest
 import torch
 from sie_server.adapters.qwen2_flash import Qwen2FlashAdapter
 from sie_server.config.model import ModelConfig
-from sie_server.core.loader import load_model_config
+from sie_server.core.loader import expand_profile_variants, load_model_config
 from sie_server.core.runtime_options import merge_runtime_options
 from sie_server.types.inputs import Item
 
@@ -42,7 +42,11 @@ class _RecordingTokenizer:
 
 
 def _config(model_file: str) -> ModelConfig:
-    return load_model_config(_MODELS_DIR / model_file)
+    config = load_model_config(_MODELS_DIR / model_file)
+    if config.resolve_profile("default").adapter_path == _ADAPTER_PATH:
+        return config
+    # Qwen3 keeps Flash as an explicit profile after moving its CUDA default.
+    return expand_profile_variants([config])[f"{config.sie_id}:flash"]
 
 
 def _adapter(monkeypatch: pytest.MonkeyPatch) -> tuple[Qwen2FlashAdapter, _RecordingTokenizer]:

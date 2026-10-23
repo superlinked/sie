@@ -1,0 +1,29 @@
+{
+  "completed_artifact_hashes": [],
+  "exceptions_sha256": "f94e7c7f1d19ac063771a0ddf0e6657d76cf7c0501e0d74656cdc3019f781268",
+  "exclude_newer": "2026-10-18T00:00:00Z",
+  "indexes": [
+    "--default-index",
+    "https://pypi.org/simple",
+    "--index",
+    "https://docs.sglang.ai/whl/cu129/",
+    "--index-strategy",
+    "unsafe-best-match"
+  ],
+  "inputs": {
+    "requirements_sha256": "378dabe9b77bc2c593a05e1113534e8f50093ca205d3344a7ba2e20fe660e38a",
+    "uv_lock_sha256": "536b7f46b5560f0dfbe5a503ecf4166514658f1340c4721d1ea263a43b3e5aa5"
+  },
+  "lock_sha256": "a74358f2ff818ad75d589987a4dd34ca9340a9a6739c8bc041671f658330bea8",
+  "policy_sha256": "dbc9ef2b65ea54bebe46021a7813897c378207508e4d84caf45e93d31faf15d4",
+  "schema_version": 1,
+  "source_pins_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+  "target": {
+    "architecture": "amd64",
+    "bundle": "sglang-embedding",
+    "platform": "cuda12",
+    "python_platform": "x86_64-manylinux_2_35",
+    "python_version": "3.12"
+  },
+  "uv_version": "0.9.28"
+}

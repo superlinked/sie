@@ -24,7 +24,7 @@ needs_cuda_triton = pytest.mark.skipif(not (torch.cuda.is_available() and _HAS_T
 
 
 def test_qwen3_embedding_8b_turns_fused_kernels_on() -> None:
-    profile = load_model_config(_MODELS_DIR / "Qwen__Qwen3-Embedding-8B.yaml").resolve_profile("default")
+    profile = load_model_config(_MODELS_DIR / "Qwen__Qwen3-Embedding-8B.yaml").resolve_profile("flash")
     assert profile.loadtime["fused_kernels"] is True
 
 

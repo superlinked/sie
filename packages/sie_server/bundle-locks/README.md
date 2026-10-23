@@ -6,7 +6,7 @@ exact Git commit. It includes dependencies absent from the root `uv.lock`.
 Image builds consume `pylock.toml` with the pinned uv 0.9.28 installer; they do
 not resolve the overlay again from ranged bundle declarations.
 
-The target set is the 11 Linux amd64 release-matrix combinations plus separate
+The target set is the 12 Linux amd64 release-matrix combinations plus separate
 CPU arm64 locks for `default`, `ctranslate2`, `sglang`, and `transformers5`.
 Python 3.12 and the target architecture are part of each manifest. An image
 combination without a saved lock fails before installation.
@@ -67,6 +67,7 @@ changed, or substituted source pin, and binds its digest into the build receipt.
 From a bootstrapped clean checkout:
 
 ```console
+# Validate every saved lock and dry-run the Docker-pinned installer.
 mise exec -- uv run --frozen --no-sync python tools/ci/bundle_lock.py check
 mise install uv@0.9.28
 SIE_BUNDLE_LOCK_UV="$(mise exec --no-deps uv@0.9.28 -- which uv)"
@@ -74,7 +75,7 @@ export SIE_BUNDLE_LOCK_UV
 SIE_RUN_IMAGE_RESOLUTION=1 mise exec -- uv run --frozen --no-sync pytest -q packages/sie_server/tests/core/test_bundle_image_resolution.py
 ```
 
-The required Bundle resolution CI job runs these checks for all 15 targets.
+The required Bundle resolution CI job runs these checks for all 16 targets.
 Its dry runs check the actual saved-lock reader without installing model
 packages. Image builds perform the additional installed-inventory check.
 The explicit installer path prevents `uv run` from selecting the separate uv
@@ -85,6 +86,7 @@ the exact exception records. Compile with an explicit cutoff using only public
 indexes, then review the complete lock and manifest diff:
 
 ```console
+# Recompile one target with an explicit dependency cutoff.
 mise exec -- uv run --frozen --no-sync python tools/ci/bundle_lock.py compile --uv "$SIE_BUNDLE_LOCK_UV" --target cpu-default-amd64 --exclude-newer 2026-10-18T00:00:00Z
 ```
 

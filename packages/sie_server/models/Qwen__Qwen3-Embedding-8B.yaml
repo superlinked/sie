@@ -19,13 +19,24 @@ profiles:
   default:
     max_batch_tokens: 16384
     compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.embedding:SGLangEmbeddingAdapter
+    adapter_options:
+      loadtime:
+        max_concurrent_dispatch: 4
+      runtime:
+        pooling: last_token
+        normalize: true
+        query_template: |-
+          Instruct: {instruction}
+          Query:{text}
+        default_instruction: Given a web search query, retrieve relevant passages that answer the query
+  # Retain the fused Flash implementation and its CPU/MPS fallback as an explicit route.
+  flash:
+    extends: default
     adapter_path: sie_server.adapters.qwen2_flash:Qwen2FlashAdapter
     adapter_options:
       loadtime:
         causal: true
-        # Fused Triton kernels for each layer's RMSNorm, rotary and SiLU-gated MLP
-        # elementwise work: about 1.28x the documents per second on an H100, with
-        # bit-identical embeddings (the kernels round where the eager ops round).
         fused_kernels: true
       runtime:
         pooling: last

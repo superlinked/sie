@@ -27,16 +27,39 @@ PUBLISH_JOB = re.compile(
 )
 
 
-def artifact_names(family: str, version: str) -> set[str]:
+def docker_pairs_at(source_sha: str | None) -> set[tuple[str, str]]:
+    """Read data from the original release, without executing its source code."""
+    if not isinstance(source_sha, str) or re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+        raise ValueError("Docker recovery requires the original full source SHA")
+    matrix = json.loads(command("git", "show", f"{source_sha}:.github/release-matrix.json"))
+    if not isinstance(matrix, dict) or set(matrix) - {"platforms", "bundles", "include"}:
+        raise ValueError("invalid original release matrix")
+    platforms, bundles, includes = (matrix.get(key, []) for key in ("platforms", "bundles", "include"))
+    if not all(isinstance(value, list) for value in (platforms, bundles, includes)) or not platforms or not bundles:
+        raise ValueError("original release matrix requires nonempty platforms and bundles lists")
+    pairs = [(platform, bundle) for platform in platforms for bundle in bundles]
+    for item in includes:
+        if not isinstance(item, dict) or not {"platform", "bundle"} <= set(item):
+            raise ValueError("original release matrix include entries require platform and bundle")
+        if set(item) - {"platform", "bundle", "target"}:
+            raise ValueError("invalid original release matrix include entry")
+        pairs.append((item["platform"], item["bundle"]))
+    if any(
+        not isinstance(value, str) or re.fullmatch(r"[a-z0-9][a-z0-9-]*", value) is None
+        for pair in pairs
+        for value in pair
+    ):
+        raise ValueError("invalid original release platform or bundle name")
+    if len(set(pairs)) != len(pairs):
+        raise ValueError("original release matrix contains duplicate targets")
+    return set(pairs)
+
+
+def artifact_names(family: str, version: str, *, source_sha: str | None = None) -> set[str]:
     if family in {"python", "npm"}:
         return {f"{family}-distributions"}
     if family == "docker":
-        pairs = [
-            (platform, bundle)
-            for platform in ("cpu", "cuda12")
-            for bundle in ("default", "ctranslate2", "sglang", "transformers5")
-        ]
-        pairs += [("cuda12", "sglang-vision-extract"), ("cuda13", "sglang-cu130"), ("cuda13", "tensorrt-llm")]
+        pairs = docker_pairs_at(source_sha)
         return {f"docker-server-{platform}-{bundle}-{version}" for platform, bundle in pairs} | {
             f"docker-service-{service}-{version}"
             for service in ("sie-gateway", "sie-config", "sie-mcp", "sie-server-sidecar", "sie-server-rust")
@@ -157,7 +180,7 @@ def main() -> None:
     )
     artifacts = [artifact for page in pages for artifact in page["artifacts"]]
     families = FAMILIES if args.family == "all" else (args.family,)
-    wanted = set().union(*(artifact_names(family, args.version) for family in families))
+    wanted = set().union(*(artifact_names(family, args.version, source_sha=source_sha) for family in families))
     validate_artifacts(
         artifacts, wanted, original_run=args.original_run, source_sha=source_sha, tag_name=tag_name, now=now
     )
