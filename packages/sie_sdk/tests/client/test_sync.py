@@ -80,6 +80,84 @@ class TestSIEClientInit:
                 client._pools.clear()
                 client.close()
 
+    def test_create_pool_sends_ttl_seconds(self) -> None:
+        mock_response = MagicMock()
+        mock_response.status_code = 201
+        mock_response.json.return_value = {"spec": {"ttl_seconds": 604800}, "status": {"state": "active"}}
+        thread = MagicMock()
+
+        with (
+            patch("sie_sdk.client.sync.httpx.Client") as mock_client,
+            patch("sie_sdk.client.sync.threading.Thread", return_value=thread),
+        ):
+            mock_client.return_value.post.return_value = mock_response
+            client = SIEClient("http://localhost:8080")
+            try:
+                client.create_pool("eval", gpus={"l4": 1}, ttl_seconds=604800)
+
+                body = mock_client.return_value.post.call_args.kwargs["json"]
+                assert body == {"name": "eval", "gpus": {"l4": 1}, "ttl_seconds": 604800}
+                thread.start.assert_called_once()
+            finally:
+                client._pools.clear()
+                client.close()
+
+    def test_create_pool_that_never_expires_is_not_renewed(self) -> None:
+        mock_response = MagicMock()
+        mock_response.status_code = 201
+        mock_response.json.return_value = {"spec": {"ttl_seconds": "never"}, "status": {"state": "active"}}
+
+        with (
+            patch("sie_sdk.client.sync.httpx.Client") as mock_client,
+            patch("sie_sdk.client.sync.threading.Thread") as thread_cls,
+        ):
+            mock_client.return_value.post.return_value = mock_response
+            client = SIEClient("http://localhost:8080")
+            try:
+                client.create_pool("rag", gpus={"l4": 1}, minimum_worker_count=1, ttl_seconds="never")
+
+                body = mock_client.return_value.post.call_args.kwargs["json"]
+                assert body["ttl_seconds"] == "never"
+                thread_cls.assert_not_called()
+                assert client._pools == {}
+            finally:
+                client.close()
+
+    def test_updating_a_pool_to_never_expire_stops_its_renewal(self) -> None:
+        leased = MagicMock(status_code=201)
+        leased.json.return_value = {"spec": {"ttl_seconds": None}, "status": {"state": "active"}}
+        never = MagicMock(status_code=201)
+        never.json.return_value = {"spec": {"ttl_seconds": "never"}, "status": {"state": "active"}}
+        thread = MagicMock()
+
+        with (
+            patch("sie_sdk.client.sync.httpx.Client") as mock_client,
+            patch("sie_sdk.client.sync.threading.Thread", return_value=thread),
+        ):
+            mock_client.return_value.post.side_effect = [leased, never]
+            client = SIEClient("http://localhost:8080")
+            try:
+                client.create_pool("rag", gpus={"l4": 1})
+                stop_event = client._pools["rag"][1]
+                client.create_pool("rag", gpus={"l4": 1}, ttl_seconds="never")
+
+                assert stop_event.is_set()
+                thread.join.assert_called_once()
+                assert client._pools == {}
+            finally:
+                client.close()
+
+    @pytest.mark.parametrize("ttl_seconds", [0, -5, 1.5, "forever", True])
+    def test_create_pool_rejects_an_invalid_ttl_before_any_request(self, ttl_seconds: object) -> None:
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            client = SIEClient("http://localhost:8080")
+            try:
+                with pytest.raises(ValueError, match="ttl_seconds"):
+                    client.create_pool("rag", gpus={"l4": 1}, ttl_seconds=ttl_seconds)  # type: ignore[arg-type]
+                mock_client.return_value.post.assert_not_called()
+            finally:
+                client.close()
+
     def test_trailing_slash_removed(self) -> None:
         """Base URL trailing slash is removed."""
         with patch("sie_sdk.client.sync.httpx.Client") as mock_client:

@@ -149,6 +149,7 @@ import type {
   ModelInfo,
   PoolInfo,
   PoolSpec,
+  PoolTtl,
   RecommendOptions,
   Recommendation,
   RequestMetadata,
@@ -597,6 +598,8 @@ function abortableSleep(ms: number, signal: AbortSignal): Promise<boolean> {
 }
 
 const _LEASE_RENEWAL_MAX_RETRIES = 5;
+/** `ttlSeconds` for a pool that lives until it is deleted; such a pool is never renewed. */
+const POOL_TTL_NEVER = "never";
 
 type ItemWithWireImages = Omit<Item, "images"> & { images?: ImageWireFormat[] };
 type ItemForWire = Item | ItemWithWireImages;
@@ -2307,8 +2310,9 @@ export class SIEClient {
    * Close the client and cleanup resources.
    *
    * Stops pool lease renewal timers. Note that pools are not deleted
-   * automatically - they are garbage collected by the gateway after inactivity.
-   * This allows pool reuse if the client reconnects.
+   * automatically - a pool with a lease is collected by the gateway once it is
+   * no longer renewed, and one created with `ttlSeconds: "never"` lives until
+   * it is deleted. This allows pool reuse if the client reconnects.
    */
   async close(): Promise<void> {
     // Stop all pool lease renewal timers and cancel in-flight renewals
@@ -2333,8 +2337,8 @@ export class SIEClient {
    * @param gpus - Optional machine profile requirements for pool readiness, e.g., { "l4": 2, "l4-spot": 1 }
    * @param gpuCaps - Optional maximum assigned workers per machine profile
    * @param queuePool - Optional Helm/NATS queue namespace backing this logical pool. Defaults to "default".
-   * @param options - Optional bundle filter, warm floor, and pinned models
-   *                  (Python SDK `create_pool` parity)
+   * @param options - Optional bundle filter, warm floor, pinned models, and
+   *                  TTL (Python SDK `create_pool` parity)
    *
    * @example
    * ```typescript
@@ -2346,6 +2350,12 @@ export class SIEClient {
    *   bundle: "default",
    *   minimumWorkerCount: 1,
    *   pinnedModels: ["BAAI/bge-m3"],
+   * });
+   *
+   * // A pool for a long-lived service: no expiry, no renewal
+   * await client.createPool("rag", { l4: 1 }, undefined, undefined, {
+   *   minimumWorkerCount: 1,
+   *   ttlSeconds: "never",
    * });
    *
    * // Use the pool for requests
@@ -2367,6 +2377,16 @@ export class SIEClient {
     if (options.minimumWorkerCount !== undefined && options.minimumWorkerCount < 0) {
       throw new RangeError("minimumWorkerCount must be >= 0");
     }
+    const { ttlSeconds } = options;
+    if (
+      ttlSeconds !== undefined &&
+      ttlSeconds !== POOL_TTL_NEVER &&
+      !(Number.isInteger(ttlSeconds) && ttlSeconds >= 1)
+    ) {
+      throw new RangeError(
+        `ttlSeconds must be a positive whole number of seconds or "never", got ${String(ttlSeconds)}`,
+      );
+    }
 
     // Build pool creation request
     const requestBody: {
@@ -2377,6 +2397,7 @@ export class SIEClient {
       bundle?: string;
       minimum_worker_count?: number;
       pinned_models?: string[];
+      ttl_seconds?: PoolTtl;
     } = {
       name,
     };
@@ -2397,6 +2418,9 @@ export class SIEClient {
     }
     if (options.pinnedModels !== undefined) {
       requestBody.pinned_models = options.pinnedModels;
+    }
+    if (ttlSeconds !== undefined) {
+      requestBody.ttl_seconds = ttlSeconds;
     }
 
     const url = `${this.baseUrl}/v1/pools`;
@@ -2431,6 +2455,16 @@ export class SIEClient {
           // Use status text
         }
         throw new PoolError(`Failed to create pool '${name}': ${errorMsg}`, name);
+      }
+
+      // A pool that never expires has no lease: stop renewing it if this
+      // client was, and never start.
+      const created = (await response.json().catch(() => null)) as {
+        spec?: { ttl_seconds?: unknown };
+      } | null;
+      if (created?.spec?.ttl_seconds === POOL_TTL_NEVER) {
+        this.stopPoolLeaseRenewal(name);
+        return;
       }
 
       if (alreadyTracking || this.pools.has(name)) {
@@ -2584,15 +2618,7 @@ export class SIEClient {
    * ```
    */
   async deletePool(name: string): Promise<boolean> {
-    // Stop lease renewal first if we're tracking this pool
-    const poolState = this.pools.get(name);
-    if (poolState) {
-      if (poolState.timeoutId !== null) {
-        clearTimeout(poolState.timeoutId);
-      }
-      poolState.abortController.abort();
-      this.pools.delete(name);
-    }
+    this.stopPoolLeaseRenewal(name);
 
     try {
       const url = `${this.baseUrl}/v1/pools/${encodeURIComponent(name)}`;
@@ -2622,6 +2648,19 @@ export class SIEClient {
     } catch {
       return false;
     }
+  }
+
+  /** Stop this client's lease renewal for a pool, if it runs one. */
+  private stopPoolLeaseRenewal(name: string): void {
+    const poolState = this.pools.get(name);
+    if (!poolState) {
+      return;
+    }
+    if (poolState.timeoutId !== null) {
+      clearTimeout(poolState.timeoutId);
+    }
+    poolState.abortController.abort();
+    this.pools.delete(name);
   }
 
   private checkServerVersion(response: Response): void {

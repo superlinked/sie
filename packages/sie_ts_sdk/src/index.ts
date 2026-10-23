@@ -107,6 +107,7 @@ export type {
   StatusMessage,
   // Pool types
   CreatePoolOptions,
+  PoolTtl,
   PoolSpec,
   PoolStatus,
   PoolInfo,

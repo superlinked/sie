@@ -6,13 +6,19 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::state::k8s_pool_backend::K8sPoolBackend;
-use crate::types::pool::{AssignedWorker, Pool, PoolSpec, PoolState, PoolStatus};
+use crate::types::pool::{AssignedWorker, Pool, PoolSpec, PoolState, PoolStatus, PoolTtl};
 
 pub const DEFAULT_POOL_NAME: &str = "default";
-const DEFAULT_LEASE_DURATION_S: f64 = 1200.0; // 20 minutes
+/// Lease of an API pool created without `ttl_seconds`. SDK clients renew it
+/// every 60 s while they run, so it is the grace period after a client stops.
+const DEFAULT_LEASE_SECONDS: u64 = 1200;
 const TIMESTAMP_TOLERANCE_S: f64 = 0.001;
 pub const DEFAULT_POOL_MAX_MINIMUM_WORKER_COUNT: u32 = 4;
-pub const DEFAULT_POOL_MAX_TTL_SECONDS: u64 = 3600;
+/// Default TTL limit when every pool write carries the admin token: 30 days.
+pub const DEFAULT_POOL_MAX_TTL_SECONDS: u64 = 30 * 24 * 60 * 60;
+/// Default TTL limit when pool writes are unauthenticated: one request must
+/// not hold warm capacity for long.
+pub const UNAUTHENTICATED_POOL_MAX_TTL_SECONDS: u64 = 60 * 60;
 pub const DEFAULT_MAX_POOLS: usize = 64;
 type WorkerAssignment = (String, String, String, String, String);
 
@@ -24,25 +30,50 @@ pub struct PoolLimits {
     /// floor summed over the pool's machine profiles (`minimum_worker_count`
     /// applies to each profile) and the `gpus` requirement summed over
     /// profiles, and caps what a stored pool exports through its warm floor
-    /// and active lease.
+    /// and active lease. It bounds only the always-on floor: KEDA scales each
+    /// lane above it on demand, up to the lane's `maxReplicas`.
     pub max_minimum_worker_count: u32,
-    /// Largest accepted `ttl_seconds`; also caps the effective lease of any
-    /// stored pool, including pools restored from Kubernetes.
+    /// Largest accepted numeric `ttl_seconds`; also caps the effective lease
+    /// of any stored pool with a lease, including pools restored from
+    /// Kubernetes. Defaults to 30 days when pool writes are admin-gated and
+    /// to one hour when they are not.
     pub max_ttl_seconds: u64,
     /// Largest number of live API-created pools, checked by the replica that
     /// serves the create against every pool it knows, including pools applied
     /// from other replicas. Concurrent creates on different replicas can pass
     /// the check before either sees the other's pool.
     pub max_pools: usize,
+    /// Whether the API may create a pool with `ttl_seconds: "never"`. The
+    /// gateway allows it only with gateway auth on, where every pool write
+    /// needs the admin token; with auth off, one unauthenticated request
+    /// would otherwise hold warm capacity until someone deletes the pool.
+    pub allow_no_expiry: bool,
 }
 
-impl Default for PoolLimits {
-    fn default() -> Self {
+impl PoolLimits {
+    /// Default bounds for a gateway on which every pool write is checked
+    /// against the admin token (`admin_gated`), or on which it is not. Pass
+    /// `true` only when no caller without the admin token can reach
+    /// `POST /v1/pools`: it allows pools that never expire and leases of up
+    /// to 30 days, where an unauthenticated gateway keeps the one-hour limit.
+    pub fn for_pool_writes(admin_gated: bool) -> Self {
         Self {
             max_minimum_worker_count: DEFAULT_POOL_MAX_MINIMUM_WORKER_COUNT,
-            max_ttl_seconds: DEFAULT_POOL_MAX_TTL_SECONDS,
+            max_ttl_seconds: if admin_gated {
+                DEFAULT_POOL_MAX_TTL_SECONDS
+            } else {
+                UNAUTHENTICATED_POOL_MAX_TTL_SECONDS
+            },
             max_pools: DEFAULT_MAX_POOLS,
+            allow_no_expiry: admin_gated,
         }
+    }
+}
+
+/// The unauthenticated bounds: the safe choice when nothing says otherwise.
+impl Default for PoolLimits {
+    fn default() -> Self {
+        Self::for_pool_writes(false)
     }
 }
 
@@ -63,6 +94,10 @@ pub enum PoolLimitError {
     },
     Ttl {
         requested: u64,
+        max: u64,
+    },
+    ZeroTtl,
+    NoExpiryRequiresAuth {
         max: u64,
     },
     TooManyPools {
@@ -92,6 +127,14 @@ impl std::fmt::Display for PoolLimitError {
             PoolLimitError::Ttl { requested, max } => write!(
                 f,
                 "ttl_seconds {requested} exceeds the gateway limit of {max} (SIE_GATEWAY_POOL_MAX_TTL_S)"
+            ),
+            PoolLimitError::ZeroTtl => write!(
+                f,
+                "ttl_seconds must be at least 1; send \"never\" for a pool that never expires"
+            ),
+            PoolLimitError::NoExpiryRequiresAuth { max } => write!(
+                f,
+                "ttl_seconds \"never\" requires gateway auth (SIE_AUTH_MODE=token), so that only admin-token holders create pools that never expire; send a ttl_seconds of at most {max} instead"
             ),
             PoolLimitError::TooManyPools { max } => write!(
                 f,
@@ -242,7 +285,6 @@ impl CapacityPoolSnapshot {
 
 pub struct PoolManager {
     pools: RwLock<HashMap<String, Pool>>,
-    lease_duration_s: f64,
     configured_profiles: Vec<String>,
     static_pool_names: RwLock<HashSet<String>>,
     /// Optional K8s ConfigMap backend for pool persistence.
@@ -254,7 +296,6 @@ impl PoolManager {
     pub fn new(configured_profiles: Vec<String>) -> Self {
         Self {
             pools: RwLock::new(HashMap::new()),
-            lease_duration_s: DEFAULT_LEASE_DURATION_S,
             configured_profiles,
             static_pool_names: RwLock::new(HashSet::new()),
             k8s_backend: None,
@@ -330,17 +371,39 @@ impl PoolManager {
             .as_secs_f64()
     }
 
-    /// Lease TTL in whole seconds: the pool's own TTL or the gateway default,
-    /// capped at `PoolLimits::max_ttl_seconds`.
-    fn effective_ttl_seconds(&self, pool: &Pool) -> u64 {
-        pool.spec
-            .ttl_seconds
-            .unwrap_or(self.lease_duration_s as u64)
-            .min(self.limits.max_ttl_seconds)
+    /// The one rule for how long a pool lives: seconds after its last renewal,
+    /// or `None` for a pool without a lease. The `default` pool, static Helm
+    /// queue pools, and API pools created with `ttl_seconds: "never"` all
+    /// carry `PoolTtl::Never`, so expiry, renewal, and Kubernetes Leases treat
+    /// them alike. A finite lease is the pool's own TTL or the gateway
+    /// default, capped at `PoolLimits::max_ttl_seconds`, including for pools
+    /// restored from Kubernetes or applied from another replica.
+    fn lease_seconds(&self, pool: &Pool) -> Option<u64> {
+        let ttl = match pool.spec.ttl_seconds {
+            Some(PoolTtl::Never) => return None,
+            Some(PoolTtl::Seconds(ttl)) => ttl,
+            None => DEFAULT_LEASE_SECONDS,
+        };
+        Some(ttl.min(self.limits.max_ttl_seconds))
     }
 
-    fn lease_ttl_seconds(&self, pool: &Pool) -> i32 {
-        self.effective_ttl_seconds(pool).min(i32::MAX as u64) as i32
+    /// Make a stored pool's Kubernetes Lease match its lifetime: create or
+    /// renew it for a pool with a lease, and drop any left over for a pool
+    /// that never expires. Best-effort, like every backend write here.
+    async fn sync_k8s_lease(&self, backend: &K8sPoolBackend, key: &str, pool: &Pool) {
+        match self.lease_seconds(pool) {
+            Some(ttl) => {
+                let ttl = i32::try_from(ttl).unwrap_or(i32::MAX);
+                if let Err(e) = backend.create_or_renew_lease(key, ttl).await {
+                    warn!(error = %e, pool = %key, "failed to create or renew K8s Lease");
+                }
+            }
+            None => {
+                if let Err(e) = backend.delete_lease(key).await {
+                    warn!(error = %e, pool = %key, "failed to delete K8s Lease of a pool that never expires");
+                }
+            }
+        }
     }
 
     fn normalize_gpus_and_caps(
@@ -457,7 +520,7 @@ impl PoolManager {
     fn check_pool_spec_limits(
         &self,
         gpus: &HashMap<String, u32>,
-        ttl_seconds: Option<u64>,
+        ttl_seconds: Option<PoolTtl>,
         minimum_worker_count: u32,
     ) -> Result<(), PoolLimitError> {
         let max = self.limits.max_minimum_worker_count;
@@ -486,15 +549,18 @@ impl PoolManager {
                 max,
             });
         }
-        if let Some(ttl) = ttl_seconds {
-            if ttl > self.limits.max_ttl_seconds {
-                return Err(PoolLimitError::Ttl {
-                    requested: ttl,
-                    max: self.limits.max_ttl_seconds,
-                });
-            }
+        let max_ttl = self.limits.max_ttl_seconds;
+        match ttl_seconds {
+            None => Ok(()),
+            Some(PoolTtl::Seconds(0)) => Err(PoolLimitError::ZeroTtl),
+            Some(PoolTtl::Seconds(ttl)) if ttl > max_ttl => Err(PoolLimitError::Ttl {
+                requested: ttl,
+                max: max_ttl,
+            }),
+            Some(PoolTtl::Seconds(_)) => Ok(()),
+            Some(PoolTtl::Never) if self.limits.allow_no_expiry => Ok(()),
+            Some(PoolTtl::Never) => Err(PoolLimitError::NoExpiryRequiresAuth { max: max_ttl }),
         }
-        Ok(())
     }
 
     async fn is_static_pool(&self, name: &str) -> bool {
@@ -538,7 +604,7 @@ impl PoolManager {
                 bundle,
                 gpus,
                 gpu_caps: spec.gpu_caps.clone(),
-                ttl_seconds: None,
+                ttl_seconds: Some(PoolTtl::Never),
                 minimum_worker_count: spec.minimum_worker_count,
                 pinned_models: spec.pinned_models.clone(),
             };
@@ -643,7 +709,14 @@ impl PoolManager {
             .collect();
 
         match self
-            .create_pool(DEFAULT_POOL_NAME, gpus, None, None, 0, Vec::new())
+            .create_pool(
+                DEFAULT_POOL_NAME,
+                gpus,
+                None,
+                Some(PoolTtl::Never),
+                0,
+                Vec::new(),
+            )
             .await
         {
             Ok(_) => {
@@ -663,7 +736,7 @@ impl PoolManager {
         name: &str,
         gpus: HashMap<String, u32>,
         bundle: Option<String>,
-        ttl_seconds: Option<u64>,
+        ttl_seconds: Option<PoolTtl>,
         minimum_worker_count: u32,
         pinned_models: Vec<String>,
     ) -> Result<Pool, Box<dyn std::error::Error + Send + Sync>> {
@@ -686,7 +759,7 @@ impl PoolManager {
         gpus: HashMap<String, u32>,
         gpu_caps: HashMap<String, u32>,
         bundle: Option<String>,
-        ttl_seconds: Option<u64>,
+        ttl_seconds: Option<PoolTtl>,
         minimum_worker_count: u32,
         pinned_models: Vec<String>,
     ) -> Result<Pool, Box<dyn std::error::Error + Send + Sync>> {
@@ -711,7 +784,7 @@ impl PoolManager {
         gpus: HashMap<String, u32>,
         gpu_caps: HashMap<String, u32>,
         bundle: Option<String>,
-        ttl_seconds: Option<u64>,
+        ttl_seconds: Option<PoolTtl>,
         minimum_worker_count: u32,
         pinned_models: Vec<String>,
     ) -> Result<Pool, Box<dyn std::error::Error + Send + Sync>> {
@@ -751,25 +824,31 @@ impl PoolManager {
             let existing = pools
                 .get_mut(&pool_key)
                 .expect("pool key resolved from the same map");
-            let spec_changed = existing.spec.bundle != bundle
+            // An update that omits `ttl_seconds` keeps the pool's lifetime, so
+            // a client that re-posts a pool at startup never shortens one an
+            // admin made permanent. Send a number to give it a lease again.
+            let ttl_seconds = ttl_seconds.or(existing.spec.ttl_seconds);
+            let assignment_changed = existing.spec.bundle != bundle
                 || existing.spec.queue_pool != queue_pool
                 || existing.spec.gpus != gpus
                 || existing.spec.gpu_caps != gpu_caps
-                || existing.spec.ttl_seconds != ttl_seconds
                 || existing.spec.minimum_worker_count != minimum_worker_count
                 || existing.spec.pinned_models != pinned_models;
+            // A lifetime change keeps the pool's workers: it changes when the
+            // pool expires, not what it serves.
+            let spec_changed = assignment_changed || existing.spec.ttl_seconds != ttl_seconds;
 
             if pool_key.eq_ignore_ascii_case(DEFAULT_POOL_NAME) && spec_changed {
                 return Err(Box::new(DefaultPoolMutationError));
             }
 
             existing.status.last_renewed = now;
-            if spec_changed {
+            existing.spec.ttl_seconds = ttl_seconds;
+            if assignment_changed {
                 existing.spec.bundle = bundle;
                 existing.spec.queue_pool = queue_pool.clone();
                 existing.spec.gpus = gpus;
                 existing.spec.gpu_caps = gpu_caps;
-                existing.spec.ttl_seconds = ttl_seconds;
                 existing.spec.minimum_worker_count = minimum_worker_count;
                 existing.spec.pinned_models = pinned_models.clone();
                 existing.status.state = PoolState::Pending;
@@ -787,10 +866,7 @@ impl PoolManager {
                             warn!(error = %e, pool = %pool_key, "failed to persist pool update to K8s");
                         }
                     }
-                    let ttl = self.lease_ttl_seconds(&result);
-                    if let Err(e) = backend.create_or_renew_lease(&pool_key, ttl).await {
-                        warn!(error = %e, pool = %pool_key, "failed to renew K8s Lease");
-                    }
+                    self.sync_k8s_lease(backend, &pool_key, &result).await;
                 }
             }
 
@@ -833,16 +909,13 @@ impl PoolManager {
         info!(pool = %name, "created pool");
 
         // Persist dynamic named pools to K8s. The default pool is synthetic
-        // per gateway replica and is not a lease-owned runtime pool.
+        // per gateway replica and is not stored.
         if !name.eq_ignore_ascii_case(DEFAULT_POOL_NAME) {
             if let Some(ref backend) = self.k8s_backend {
                 if let Err(e) = backend.save_pool(&pool).await {
                     warn!(error = %e, pool = %name, "failed to persist pool to K8s");
                 }
-                let ttl = self.lease_ttl_seconds(&pool);
-                if let Err(e) = backend.create_or_renew_lease(&name, ttl).await {
-                    warn!(error = %e, pool = %name, "failed to create K8s Lease");
-                }
+                self.sync_k8s_lease(backend, &name, &pool).await;
             }
         }
 
@@ -1025,34 +1098,33 @@ impl PoolManager {
         Ok(removed)
     }
 
+    /// Renew a pool's lease. Renewing a pool that never expires succeeds and
+    /// changes nothing that matters.
     pub async fn renew_pool(&self, name: &str) -> bool {
-        let is_static_pool = self.is_static_pool(name).await;
-        let found_key = {
+        let (key, has_lease) = {
             let mut pools = self.pools.write().await;
-            if let Some(key) = pool_key_for_name(&pools, name) {
-                if let Some(pool) = pools.get_mut(&key) {
-                    pool.status.last_renewed = Self::now_secs();
-                    Some(key)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+            let Some(key) = pool_key_for_name(&pools, name) else {
+                return false;
+            };
+            let pool = pools
+                .get_mut(&key)
+                .expect("pool key resolved from the same map");
+            pool.status.last_renewed = Self::now_secs();
+            let has_lease = self.lease_seconds(pool).is_some();
+            (key, has_lease)
         }; // write lock dropped here
 
-        // Renew the K8s Lease (best-effort, skip default and static Helm pools)
-        if let Some(key) = found_key.as_ref() {
+        // Renew the K8s Lease (best-effort). Pools that never expire, which
+        // include the default and static Helm pools, have none.
+        if has_lease {
             if let Some(ref backend) = self.k8s_backend {
-                if !key.eq_ignore_ascii_case(DEFAULT_POOL_NAME) && !is_static_pool {
-                    if let Err(e) = backend.renew_lease(key).await {
-                        warn!(error = %e, pool = %key, "failed to renew K8s Lease");
-                    }
+                if let Err(e) = backend.renew_lease(&key).await {
+                    warn!(error = %e, pool = %key, "failed to renew K8s Lease");
                 }
             }
         }
 
-        found_key.is_some()
+        true
     }
 
     pub async fn assign_workers(
@@ -1279,15 +1351,14 @@ impl PoolManager {
         let static_pool_names = self.static_pool_names.read().await.clone();
 
         {
+            // Pools without a lease (the default pool, static Helm queue
+            // pools, and API pools that never expire) are never collected.
             let pools = self.pools.read().await;
             for (name, pool) in pools.iter() {
-                if name.eq_ignore_ascii_case(DEFAULT_POOL_NAME)
-                    || static_pool_names.contains(&normalize_pool_name(name))
-                {
+                let Some(ttl) = self.lease_seconds(pool) else {
                     continue;
-                }
-                let ttl = self.effective_ttl_seconds(pool) as f64;
-                if now - pool.status.last_renewed > ttl {
+                };
+                if now - pool.status.last_renewed > ttl as f64 {
                     expired.push(name.clone());
                 }
             }
@@ -1305,11 +1376,34 @@ impl PoolManager {
                         {
                             continue;
                         }
-                        let pools = self.pools.read().await;
-                        let in_memory = pools.contains_key(&name);
-                        drop(pools);
+                        let in_memory_lease = {
+                            let pools = self.pools.read().await;
+                            pools.get(&name).map(|pool| self.lease_seconds(pool))
+                        };
+                        // A Lease left over from before a pool stopped
+                        // expiring must not collect it. A pool this replica
+                        // does not know is read back from its ConfigMap
+                        // first, so it is not mistaken for an orphan; one it
+                        // cannot read is left for a later sweep, never deleted.
+                        let never_expires = match in_memory_lease {
+                            Some(lease) => lease.is_none(),
+                            None => match backend.load_pool(&name).await {
+                                Ok(stored) => stored.is_some_and(|stored| {
+                                    stored.spec.ttl_seconds == Some(PoolTtl::Never)
+                                }),
+                                Err(e) => {
+                                    warn!(pool = %name, error = %e, "cannot read the pool behind an expired K8s Lease; leaving both for a later sweep");
+                                    continue;
+                                }
+                            },
+                        };
 
-                        if in_memory {
+                        if never_expires {
+                            info!(pool = %name, "dropping stale K8s Lease of a pool that never expires");
+                            if let Err(e) = backend.delete_lease(&name).await {
+                                warn!(pool = %name, error = %e, "failed to delete stale Lease from K8s");
+                            }
+                        } else if in_memory_lease.is_some() {
                             info!(pool = %name, "K8s Lease expired (crash-safe TTL)");
                             expired.push(name);
                         } else {
@@ -1629,13 +1723,21 @@ mod tests {
         let mut gpu_caps = HashMap::new();
         gpu_caps.insert("l4-spot".to_string(), 2);
         let pool = pm
-            .create_pool_with_caps("test", updated_gpus, gpu_caps, None, Some(60), 0, vec![])
+            .create_pool_with_caps(
+                "test",
+                updated_gpus,
+                gpu_caps,
+                None,
+                Some(PoolTtl::Seconds(60)),
+                0,
+                vec![],
+            )
             .await
             .unwrap();
 
         assert_eq!(pool.spec.gpus.get("l4-spot"), Some(&0));
         assert_eq!(pool.spec.gpu_caps.get("l4-spot"), Some(&2));
-        assert_eq!(pool.spec.ttl_seconds, Some(60));
+        assert_eq!(pool.spec.ttl_seconds, Some(PoolTtl::Seconds(60)));
         assert_eq!(pool.status.state, PoolState::Pending);
         assert!(pool.status.assigned_workers.is_empty());
     }
@@ -1704,13 +1806,20 @@ mod tests {
         let mut updated_gpus = HashMap::new();
         updated_gpus.insert("l4-spot".to_string(), 2);
         let pool = pm
-            .create_pool("bench", updated_gpus, None, Some(60), 0, vec![])
+            .create_pool(
+                "bench",
+                updated_gpus,
+                None,
+                Some(PoolTtl::Seconds(60)),
+                0,
+                vec![],
+            )
             .await
             .unwrap();
 
         assert_eq!(pool.spec.name, "bench");
         assert_eq!(pool.spec.gpus.get("l4-spot"), Some(&2));
-        assert_eq!(pool.spec.ttl_seconds, Some(60));
+        assert_eq!(pool.spec.ttl_seconds, Some(PoolTtl::Seconds(60)));
         let pools = pm.list_pools().await;
         assert_eq!(pools.len(), 1);
     }
@@ -1756,7 +1865,7 @@ mod tests {
             bundle: None,
             gpus,
             gpu_caps: HashMap::new(),
-            ttl_seconds: Some(1),
+            ttl_seconds: Some(PoolTtl::Seconds(1)),
             minimum_worker_count: 0,
             pinned_models: Vec::new(),
         }];
@@ -1765,7 +1874,7 @@ mod tests {
         assert_eq!(count, 1);
 
         let pool = pm.get_pool("company-a").await.unwrap();
-        assert_eq!(pool.spec.ttl_seconds, None);
+        assert_eq!(pool.spec.ttl_seconds, Some(PoolTtl::Never));
         assert!(pool.spec.gpu_caps.is_empty());
         assert!(pm
             .admitted_worker_names_for_capped_lane("company-a", "l4-spot", "default")
@@ -1775,7 +1884,7 @@ mod tests {
         {
             let mut pools = pm.pools.write().await;
             pools.get_mut("company-a").unwrap().status.last_renewed -=
-                DEFAULT_LEASE_DURATION_S + 10.0;
+                (DEFAULT_POOL_MAX_TTL_SECONDS + 10) as f64;
         }
 
         let expired = pm.check_expired_leases().await;
@@ -1839,7 +1948,14 @@ mod tests {
         let mut changed_gpus = HashMap::new();
         changed_gpus.insert("l4-spot".to_string(), 1);
         let result = pm
-            .create_pool("bench", changed_gpus, None, Some(60), 0, vec![])
+            .create_pool(
+                "bench",
+                changed_gpus,
+                None,
+                Some(PoolTtl::Seconds(60)),
+                0,
+                vec![],
+            )
             .await;
         assert!(result.is_err());
         assert!(result
@@ -1879,7 +1995,14 @@ mod tests {
         let mut changed_gpus = HashMap::new();
         changed_gpus.insert("l4-spot".to_string(), 1);
         let result = pm
-            .create_pool("BENCH", changed_gpus, None, Some(60), 0, vec![])
+            .create_pool(
+                "BENCH",
+                changed_gpus,
+                None,
+                Some(PoolTtl::Seconds(60)),
+                0,
+                vec![],
+            )
             .await;
         assert!(result.is_err());
         assert!(result
@@ -1964,9 +2087,16 @@ mod tests {
 
         let mut dynamic_gpus = HashMap::new();
         dynamic_gpus.insert("l4-spot".to_string(), 1);
-        pm.create_pool("Bench", dynamic_gpus, None, Some(60), 0, vec![])
-            .await
-            .unwrap();
+        pm.create_pool(
+            "Bench",
+            dynamic_gpus,
+            None,
+            Some(PoolTtl::Seconds(60)),
+            0,
+            vec![],
+        )
+        .await
+        .unwrap();
 
         let mut static_gpus = HashMap::new();
         static_gpus.insert("l4-spot".to_string(), 0);
@@ -2016,7 +2146,7 @@ mod tests {
                 bundle: Some("other".to_string()),
                 gpus: remote_gpus,
                 gpu_caps: HashMap::new(),
-                ttl_seconds: Some(60),
+                ttl_seconds: Some(PoolTtl::Seconds(60)),
                 minimum_worker_count: 1,
                 pinned_models: Vec::new(),
             },
@@ -2037,7 +2167,7 @@ mod tests {
         let found = pm.get_pool("bench").await.unwrap();
         assert_eq!(found.spec.bundle, None);
         assert_eq!(found.spec.gpus.get("l4-spot"), Some(&0));
-        assert_eq!(found.spec.ttl_seconds, None);
+        assert_eq!(found.spec.ttl_seconds, Some(PoolTtl::Never));
         assert_eq!(found.status.state, PoolState::Pending);
         assert!(found.status.assigned_workers.is_empty());
 
@@ -2515,9 +2645,16 @@ mod tests {
         gpus.insert("l4-spot".to_string(), 1);
 
         // Pool with short TTL (1 second)
-        pm.create_pool("short-ttl", gpus.clone(), None, Some(1), 0, vec![])
-            .await
-            .unwrap();
+        pm.create_pool(
+            "short-ttl",
+            gpus.clone(),
+            None,
+            Some(PoolTtl::Seconds(1)),
+            0,
+            vec![],
+        )
+        .await
+        .unwrap();
 
         // Pool with no TTL (uses global default = 1200s)
         pm.create_pool("default-ttl", gpus, None, None, 0, vec![])
@@ -2693,7 +2830,14 @@ mod tests {
         let mut gpus = HashMap::new();
         gpus.insert("l4-spot".to_string(), 0);
         let local = pm
-            .create_pool("bench", gpus.clone(), None, Some(60), 0, vec![])
+            .create_pool(
+                "bench",
+                gpus.clone(),
+                None,
+                Some(PoolTtl::Seconds(60)),
+                0,
+                vec![],
+            )
             .await
             .unwrap();
 
@@ -2725,7 +2869,7 @@ mod tests {
                 "bench",
                 gpus,
                 Some("default".to_string()),
-                Some(60),
+                Some(PoolTtl::Seconds(60)),
                 0,
                 vec![],
             )
@@ -2754,7 +2898,7 @@ mod tests {
                 "bench",
                 gpus,
                 Some("default".to_string()),
-                Some(60),
+                Some(PoolTtl::Seconds(60)),
                 0,
                 vec![],
             )
@@ -2780,13 +2924,13 @@ mod tests {
         let mut gpus = HashMap::new();
         gpus.insert("l4-spot".to_string(), 1);
         let local = pm
-            .create_pool("Bench", gpus, None, Some(60), 0, vec![])
+            .create_pool("Bench", gpus, None, Some(PoolTtl::Seconds(60)), 0, vec![])
             .await
             .unwrap();
 
         let mut remote = local.clone();
         remote.spec.name = "bench".to_string();
-        remote.spec.ttl_seconds = Some(120);
+        remote.spec.ttl_seconds = Some(PoolTtl::Seconds(120));
         remote.status.last_renewed += 1.0;
 
         pm.apply_remote_pool(remote).await;
@@ -2795,7 +2939,7 @@ mod tests {
         assert_eq!(pools.len(), 1);
         let found = pm.get_pool("Bench").await.unwrap();
         assert_eq!(found.spec.name, "bench");
-        assert_eq!(found.spec.ttl_seconds, Some(120));
+        assert_eq!(found.spec.ttl_seconds, Some(PoolTtl::Seconds(120)));
     }
 
     #[tokio::test]
@@ -2809,7 +2953,7 @@ mod tests {
                 bundle: None,
                 gpus: HashMap::from([("l4-spot".to_string(), 1)]),
                 gpu_caps: HashMap::new(),
-                ttl_seconds: Some(60),
+                ttl_seconds: Some(PoolTtl::Seconds(60)),
                 minimum_worker_count: 0,
                 pinned_models: Vec::new(),
             },
@@ -2842,7 +2986,7 @@ mod tests {
 
         let mut gpus = HashMap::new();
         gpus.insert("l4-spot".to_string(), 1);
-        pm.create_pool("Bench", gpus, None, Some(60), 0, vec![])
+        pm.create_pool("Bench", gpus, None, Some(PoolTtl::Seconds(60)), 0, vec![])
             .await
             .unwrap();
 
@@ -2874,7 +3018,7 @@ mod tests {
         }
     }
 
-    fn remote_pool(name: &str, ttl_seconds: Option<u64>, minimum_worker_count: u32) -> Pool {
+    fn remote_pool(name: &str, ttl_seconds: Option<PoolTtl>, minimum_worker_count: u32) -> Pool {
         Pool {
             spec: PoolSpec {
                 name: name.to_string(),
@@ -2900,6 +3044,13 @@ mod tests {
         let limits = PoolLimits::default();
         assert_eq!(limits.max_minimum_worker_count, 4);
         assert_eq!(limits.max_ttl_seconds, 3600);
+        assert!(!limits.allow_no_expiry);
+
+        let admin_gated = PoolLimits::for_pool_writes(true);
+        assert_eq!(admin_gated.max_minimum_worker_count, 4);
+        assert_eq!(admin_gated.max_ttl_seconds, 30 * 24 * 3600);
+        assert_eq!(admin_gated.max_pools, 64);
+        assert!(admin_gated.allow_no_expiry);
         assert_eq!(limits.max_pools, 64);
     }
 
@@ -3205,11 +3356,25 @@ mod tests {
             ..PoolLimits::default()
         });
 
-        pm.create_pool("at-limit", l4_gpus(), None, Some(600), 0, vec![])
-            .await
-            .expect("a TTL at the limit is accepted");
+        pm.create_pool(
+            "at-limit",
+            l4_gpus(),
+            None,
+            Some(PoolTtl::Seconds(600)),
+            0,
+            vec![],
+        )
+        .await
+        .expect("a TTL at the limit is accepted");
         let error = pm
-            .create_pool("above-limit", l4_gpus(), None, Some(u64::MAX), 0, vec![])
+            .create_pool(
+                "above-limit",
+                l4_gpus(),
+                None,
+                Some(PoolTtl::Seconds(u64::MAX)),
+                0,
+                vec![],
+            )
             .await
             .expect_err("a TTL above the limit is rejected");
 
@@ -3245,9 +3410,16 @@ mod tests {
             .expect_err("a pool beyond the limit is rejected");
         assert_eq!(limit_error(error), PoolLimitError::TooManyPools { max: 2 });
 
-        pm.create_pool("SECOND", l4_gpus(), None, Some(60), 0, vec![])
-            .await
-            .expect("updating an existing pool at the limit is allowed");
+        pm.create_pool(
+            "SECOND",
+            l4_gpus(),
+            None,
+            Some(PoolTtl::Seconds(60)),
+            0,
+            vec![],
+        )
+        .await
+        .expect("updating an existing pool at the limit is allowed");
 
         pm.delete_pool("first").await.unwrap();
         pm.create_pool("third", l4_gpus(), None, None, 0, vec![])
@@ -3277,8 +3449,12 @@ mod tests {
             max_ttl_seconds: 60,
             ..PoolLimits::default()
         });
-        pm.apply_remote_pool(remote_pool("legacy", Some(u64::from(u32::MAX)), 0))
-            .await;
+        pm.apply_remote_pool(remote_pool(
+            "legacy",
+            Some(PoolTtl::Seconds(u64::from(u32::MAX))),
+            0,
+        ))
+        .await;
         {
             let mut pools = pm.pools.write().await;
             pools.get_mut("legacy").unwrap().status.last_renewed -= 61.0;
@@ -3300,7 +3476,7 @@ mod tests {
             .await
             .unwrap();
         let pool = pm.get_pool("no-ttl").await.unwrap();
-        assert_eq!(pm.lease_ttl_seconds(&pool), 600);
+        assert_eq!(pm.lease_seconds(&pool), Some(600));
         {
             let mut pools = pm.pools.write().await;
             pools.get_mut("no-ttl").unwrap().status.last_renewed -= 601.0;
@@ -3317,7 +3493,236 @@ mod tests {
             .unwrap();
         let pool = pm.get_pool("no-ttl").await.unwrap();
 
-        assert_eq!(pm.lease_ttl_seconds(&pool), DEFAULT_LEASE_DURATION_S as i32);
+        assert_eq!(pm.lease_seconds(&pool), Some(DEFAULT_LEASE_SECONDS));
+    }
+
+    fn no_expiry_pool_manager() -> PoolManager {
+        limited_pool_manager(PoolLimits::for_pool_writes(true))
+    }
+
+    async fn age_pool(pm: &PoolManager, name: &str, seconds: u64) {
+        let mut pools = pm.pools.write().await;
+        pools.get_mut(name).unwrap().status.last_renewed -= seconds as f64;
+    }
+
+    #[tokio::test]
+    async fn test_pool_that_never_expires_outlives_every_lease() {
+        let pm = no_expiry_pool_manager();
+        pm.create_pool("rag", l4_gpus(), None, Some(PoolTtl::Never), 1, vec![])
+            .await
+            .expect("a pool that never expires is accepted when gateway auth is on");
+        let pool = pm.get_pool("rag").await.unwrap();
+        assert_eq!(pool.spec.ttl_seconds, Some(PoolTtl::Never));
+        assert_eq!(pm.lease_seconds(&pool), None);
+
+        age_pool(&pm, "rag", 10 * DEFAULT_POOL_MAX_TTL_SECONDS).await;
+
+        assert!(pm.check_expired_leases().await.is_empty());
+        assert!(
+            pm.renew_pool("rag").await,
+            "renewing it is a harmless no-op"
+        );
+        assert!(pm.get_pool("rag").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_pool_that_never_expires_requires_gateway_auth() {
+        let pm = PoolManager::new(vec!["l4-spot".to_string()]);
+        let error = pm
+            .create_pool("rag", l4_gpus(), None, Some(PoolTtl::Never), 0, vec![])
+            .await
+            .expect_err("without gateway auth a pool must expire");
+
+        assert_eq!(
+            limit_error(error),
+            PoolLimitError::NoExpiryRequiresAuth {
+                max: UNAUTHENTICATED_POOL_MAX_TTL_SECONDS
+            }
+        );
+        assert!(pm.get_pool("rag").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_pool_that_never_expires_keeps_the_warm_floor_budget() {
+        let pm = no_expiry_pool_manager();
+        let error = pm
+            .create_pool("rag", l4_gpus(), None, Some(PoolTtl::Never), 5, vec![])
+            .await
+            .expect_err("no expiry does not lift the warm-floor budget");
+
+        assert!(matches!(
+            limit_error(error),
+            PoolLimitError::MinimumWorkerCount {
+                requested: 5,
+                max: 4
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_zero_ttl_is_rejected_rather_than_read_as_no_expiry() {
+        let pm = no_expiry_pool_manager();
+        let error = pm
+            .create_pool(
+                "bench",
+                l4_gpus(),
+                None,
+                Some(PoolTtl::Seconds(0)),
+                0,
+                vec![],
+            )
+            .await
+            .expect_err("a zero TTL would expire the pool at the next sweep");
+
+        assert_eq!(limit_error(error), PoolLimitError::ZeroTtl);
+    }
+
+    #[tokio::test]
+    async fn test_unauthenticated_pool_writes_keep_the_one_hour_ttl_limit() {
+        let pm = PoolManager::new(vec!["l4-spot".to_string()]);
+        let error = pm
+            .create_pool(
+                "eval",
+                l4_gpus(),
+                None,
+                Some(PoolTtl::Seconds(3601)),
+                0,
+                vec![],
+            )
+            .await
+            .expect_err("without gateway auth a lease stays within an hour");
+
+        assert_eq!(
+            limit_error(error),
+            PoolLimitError::Ttl {
+                requested: 3601,
+                max: 3600
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ttls_far_beyond_an_hour_are_accepted_with_gateway_auth() {
+        let pm = no_expiry_pool_manager();
+        let week = 7 * 24 * 3600;
+        pm.create_pool(
+            "eval",
+            l4_gpus(),
+            None,
+            Some(PoolTtl::Seconds(week)),
+            0,
+            vec![],
+        )
+        .await
+        .unwrap();
+        let pool = pm.get_pool("eval").await.unwrap();
+        assert_eq!(pm.lease_seconds(&pool), Some(week));
+
+        age_pool(&pm, "eval", week - 60).await;
+        assert!(pm.check_expired_leases().await.is_empty());
+        age_pool(&pm, "eval", 120).await;
+        assert_eq!(pm.check_expired_leases().await, vec!["eval".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_update_without_a_ttl_keeps_the_pools_lifetime() {
+        let pm = no_expiry_pool_manager();
+        pm.create_pool("rag", l4_gpus(), None, Some(PoolTtl::Never), 1, vec![])
+            .await
+            .unwrap();
+
+        // A service re-posting the pool at startup without a TTL must not
+        // shorten a pool an admin made permanent.
+        let pool = pm
+            .create_pool("rag", l4_gpus(), None, None, 1, vec![])
+            .await
+            .unwrap();
+        assert_eq!(pool.spec.ttl_seconds, Some(PoolTtl::Never));
+
+        let pool = pm
+            .create_pool(
+                "rag",
+                l4_gpus(),
+                None,
+                Some(PoolTtl::Seconds(600)),
+                1,
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(pool.spec.ttl_seconds, Some(PoolTtl::Seconds(600)));
+        let pool = pm
+            .create_pool("rag", l4_gpus(), None, None, 1, vec![])
+            .await
+            .unwrap();
+        assert_eq!(pool.spec.ttl_seconds, Some(PoolTtl::Seconds(600)));
+    }
+
+    #[tokio::test]
+    async fn test_changing_only_the_ttl_keeps_the_pools_workers() {
+        let pm = no_expiry_pool_manager();
+        pm.create_pool("rag", l4_gpus(), None, None, 0, vec![])
+            .await
+            .unwrap();
+        let workers = vec![worker("w1", "http://w1:8080", "l4-spot", "default")];
+        assert!(pm.assign_workers("rag", &workers).await);
+
+        let pool = pm
+            .create_pool("rag", l4_gpus(), None, Some(PoolTtl::Never), 0, vec![])
+            .await
+            .unwrap();
+
+        assert_eq!(pool.spec.ttl_seconds, Some(PoolTtl::Never));
+        assert_eq!(pool.status.state, PoolState::Active);
+        assert_eq!(pool.status.assigned_workers.len(), 1);
+        age_pool(&pm, "rag", 2 * DEFAULT_LEASE_SECONDS).await;
+        assert!(pm.check_expired_leases().await.is_empty());
+
+        // Back to a lease: the pool expires again once it lapses.
+        pm.create_pool(
+            "rag",
+            l4_gpus(),
+            None,
+            Some(PoolTtl::Seconds(60)),
+            0,
+            vec![],
+        )
+        .await
+        .unwrap();
+        age_pool(&pm, "rag", 61).await;
+        assert_eq!(pm.check_expired_leases().await, vec!["rag".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_stored_pool_that_never_expires_is_honoured_on_every_replica() {
+        // An admin created it on a replica with gateway auth on. A replica
+        // that would refuse to create one still keeps it rather than
+        // collecting it: refusing is about who may create such a pool.
+        let pm = PoolManager::new(vec!["l4-spot".to_string()]);
+        pm.apply_remote_pool(remote_pool("rag", Some(PoolTtl::Never), 1))
+            .await;
+        age_pool(&pm, "rag", 10 * DEFAULT_POOL_MAX_TTL_SECONDS).await;
+
+        assert!(pm.check_expired_leases().await.is_empty());
+        let snapshot = pm.capacity_pools().await.into_iter().next().unwrap();
+        assert_eq!(snapshot.minimum_worker_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_operator_pools_carry_no_expiry_in_their_spec() {
+        let pm = PoolManager::new(vec!["l4-spot".to_string()]);
+        pm.create_default_pool().await;
+        pm.sync_static_pools(&[static_queue_pool("company-a", "l4-spot")])
+            .await
+            .unwrap();
+
+        for name in [DEFAULT_POOL_NAME, "company-a"] {
+            let pool = pm.get_pool(name).await.unwrap();
+            assert_eq!(pool.spec.ttl_seconds, Some(PoolTtl::Never), "{name}");
+            assert_eq!(pm.lease_seconds(&pool), None, "{name}");
+            age_pool(&pm, name, 10 * DEFAULT_POOL_MAX_TTL_SECONDS).await;
+        }
+        assert!(pm.check_expired_leases().await.is_empty());
     }
 
     fn assigned(count: usize, gpu: &str) -> Vec<AssignedWorker> {
