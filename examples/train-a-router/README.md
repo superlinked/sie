@@ -32,26 +32,32 @@ Repeated questions and identified source/context families stay together. Trainin
 The main measurements are:
 
 - **Answer accuracy:** the percentage of chosen model answers judged correct against the benchmark reference. This measures the answers people receive, rather than whether a router matches an arbitrary “best model” label.
-- **Cost per 10,000 requests:** the measured input/output token cost of the selected answers, scaled to a common workload size.
+- **Cost per 10,000 requests:** the selected answers' input/output token cost plus the stated router cost, scaled to a common workload size. API charges and hosting estimates are identified separately.
 - **Savings:** the percentage decrease from always calling Sol.
 - **Accuracy loss:** always-Sol accuracy minus routed accuracy. For example, 80% becoming 78% is a **2-point loss**; a negative loss means the router did better on these questions.
 
 Some questions are answered correctly only by Luna. A good router can therefore occasionally beat always-Sol. The gray random-routing line shows what happens if we choose models without reading the question; a useful router should improve on that tradeoff.
 
-| Method | Answer accuracy | Accuracy loss | Answer cost / 10k | Answer-cost savings |
-|---|---:|---:|---:|---:|
-| Always Sol | 80.8% | 0.0 points | $70.77 | 0.0% |
-| Always Luna | 55.6% | 25.2 points | $12.23 | 82.7% |
-| Unchanged Laya | 68.6% | 12.2 points | $41.82 | 40.9% |
-| Laya + LoRA | 78.3% | 2.6 points | $56.80 | 19.7% |
-| Embedding neighbors | 76.3% | 4.5 points | $53.80 | 24.0% |
-| Embedding classifier | 76.8% | 4.0 points | $54.41 | 23.1% |
-| LoRA + learned cost | 79.0% | 1.8 points | $57.63 | 18.6% |
-| Embedding classifier + learned cost | 79.9% | 0.9 points | $58.16 | 17.8% |
-| Text/length + learned cost | 79.0% | 1.8 points | $55.28 | 21.9% |
-| Text-predicted task + learned cost | 80.1% | 0.7 points | $58.31 | 17.6% |
+All dollar amounts below are **per 10,000 incoming requests**. Each request gets one answer, from either Sol or Luna. **Subtotals include the embedding API fee or the estimated Laya serving cost.** `≈` marks a hosting estimate; `—` means that model is not used. Application hosting, including the small CPU classifiers and cost predictors, idle capacity, and one-time training/data collection are extra.
 
-All router rows use a rule fixed before final collection: select the highest calibration accuracy under an **80% calibration answer-cost cap** relative to always-Sol. It is an illustrative spending level, not a required quality threshold or a guarantee of 20% test savings. The table reports final-test answer costs; add **$0.81 per 10,000 requests** for the Cloud encoder on embedding routes. For embedding + learned cost, that changes $58.16 to **$58.97**, or **16.7% savings** versus always-Sol at $70.77. Native and application hosting are separate. Every method, both cost variants and all preselected spending levels remain in the full report.
+| Method | Answer accuracy | Loss (points) | Sol answers | Luna answers | Laya, H100 estimate | Embeddings, Cloud API | Subtotal | Savings |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Always Sol | 80.8% | 0.0 | $70.77 | — | — | — | $70.77 | 0.0% |
+| Always Luna | 55.6% | 25.2 | — | $12.23 | — | — | $12.23 | 82.7% |
+| Unchanged Laya | 68.6% | 12.2 | $36.06 | $5.76 | ≈$1.08 | — | ≈$42.90 | ≈39.4% |
+| Laya + LoRA | 78.3% | 2.6 | $54.16 | $2.64 | ≈$1.05 | — | ≈$57.85 | ≈18.2% |
+| Embedding neighbors | 76.3% | 4.5 | $50.59 | $3.21 | — | $0.81 | $54.61 | 22.8% |
+| Embedding classifier | 76.8% | 4.0 | $51.51 | $2.90 | — | $0.81 | $55.22 | 22.0% |
+| LoRA + learned cost | 79.0% | 1.8 | $55.34 | $2.29 | ≈$1.05 | — | ≈$58.68 | ≈17.1% |
+| Embedding classifier + learned cost | 79.9% | 0.9 | $56.06 | $2.10 | — | $0.81 | $58.97 | 16.7% |
+| Text/length + learned cost | 79.0% | 1.8 | $52.84 | $2.44 | — | — | $55.28 | 21.9% |
+| Text-predicted task + learned cost | 80.1% | 0.7 | $56.15 | $2.15 | — | — | $58.31 | 17.6% |
+
+Laya's estimate prices the time actively serving requests on a resident H100; the embedding column uses SIE Cloud's per-request price. These are different deployment choices, not a comparison of both models on identical hardware. [Serving speed and costs](#serving-speed-and-costs) shows the calculation and its limits. Savings use the unrounded subtotal; rounded components can differ from it by a cent.
+
+**Neighbors spend less here because they buy different answers.** They send **49.6%** of requests to Sol, compared with **59.7%** for LoRA. Their answer bill is **$53.80 versus $56.80**, before either router's inference cost, and their accuracy is lower: **76.3% versus 78.3%**. Laya is about 0.4B parameters and Qwen's encoder is 4B, but parameter count alone does not determine the full routing bill.
+
+All router rows use a rule fixed before final collection: select the highest calibration accuracy under an **80% calibration answer-cost cap** relative to always-Sol. It is an illustrative spending level, not a required quality threshold or a guarantee of 20% test savings. The router costs above are added after that selection; they do not change the frozen policies. Every method, both cost variants and all preselected spending levels remain in the full report.
 
 The table and default replay use the supplied reference checkpoints. Step 3 also compares a faster training recipe against them. The steps compare different ways to learn the decision; they do not promise that every added model improves every tradeoff. LoRA improves on unchanged Laya. Neighbors provide a simple embedding baseline. Learning request costs improves the embedding classifier at the illustrated spending levels. The inexpensive text controls remain competitive and belong in the comparison.
 
@@ -257,7 +263,17 @@ Each model measurement uses the same 90 development questions after warmup. The 
 
 The Cloud encoder measurement includes network time and saving the raw response to disk; native model timings are resident-model measurements on the stated Modal hardware. The $0.81 fee projects the final-test question mix; the native busy-resource estimates use the 90-question development timing sample. Model loading and CLI startup are separate. These are sequential single-request measurements, not a throughput benchmark. The learned head adds very little work; deploying the 4B encoder is the larger serving requirement.
 
-The default money comparison uses selected answer token costs. The explorer can add per-request Cloud encoder fees, projected from the ratebook and validated against actual batch and singleton calls. Native hosting, application hosting, idle GPU capacity and one-time training are separate: unpriced costs are never entered as zero. The optional Modal cost estimates price busy resource time only; they are not a production hosting bill. Token prices and workloads can change, so the pinned prices and exact usage are included with the data.
+The opening table combines these router estimates with the selected answer costs. The explorer retains the original answer-only curves and can add per-request Cloud encoder fees; it does not insert a native hosting estimate into the frozen evaluation. Its unpriced native and CPU costs remain unknown, not zero.
+
+The cost calculations are:
+
+- **Sol and Luna:** sum each model's token cost only for questions sent to that model, then multiply by `10,000 / 975`. Input, cached-input and cache-write prices follow the saved usage; output tokens already include reasoning tokens, so reasoning is charged once. Multiplying a routing share by the model's overall mean cost would be wrong: routers select different questions, with different answer lengths.
+- **Qwen embeddings:** the recorded Cloud rate is **$0.06 per million input tokens**, rounded up per request to a whole **$0.00001 credit**: `ceil(3 × input_tokens / 500)` credits. The 975 test questions total 1,235,875 encoder tokens and **7,910 credits after rounding**: `$0.07910 × 10,000 / 975 = $0.811282`. Both neighbors and classifiers need **one embedding for every incoming request**, whichever answer model is selected. The rate and rounding rule reproduce all 91 saved singleton charges and 245 successful batch charges. The table prices separate live requests, even when the exercise reuses cached vectors; it does not spread the original batch-collection bill across future requests.
+- **Laya on H100:** the saved resource rate is **$0.00134388 per second** for an H100, eight CPU cores and 64 GiB RAM. For LoRA, `0.078329 seconds × $0.00134388 × 10,000 = $1.05265`; unchanged Laya uses its measured 0.080407 seconds and costs about $1.08. Each timing already includes **both correctness predictions**, tokenization and the original cost arithmetic. LoRA is merged into the model for inference; this is one adapted router, not an extra model call or a training charge.
+
+The Laya estimate assumes the measured sequential serving time is billable active time. Startup, loading and idle capacity add cost; batching, different hardware or lower precision may change it. The CPU-only LoRA scenario above costs about **$6.99 / 10k**, rather than $1.05. Cloud API pricing and a dedicated server's resource cost should not be interpreted as equal-efficiency measurements. Small CPU heads, learned cost predictors and application hosting are still extra, as are one-time training and answer collection.
+
+The downloaded evidence contains [per-question encoder fees](https://huggingface.co/datasets/superlinked/train-a-router-bbeh/blob/86dd7494a4c2396bc9ffa890f994b9722610b357/fees.json), [answer token usage and prices](https://huggingface.co/datasets/superlinked/train-a-router-bbeh/blob/86dd7494a4c2396bc9ffa890f994b9722610b357/grades/grades-final.json), and [Laya timings and resource rates](https://huggingface.co/datasets/superlinked/train-a-router-bbeh/blob/86dd7494a4c2396bc9ffa890f994b9722610b357/metadata/timing/native-hosting-comparison.json). These are pinned study prices, not a promise about future bills.
 
 ## What the results establish
 

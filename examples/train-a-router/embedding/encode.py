@@ -1,12 +1,13 @@
 """Acquire a fresh question-only Qwen feature set and singleton fee validation."""
 
 import argparse
-from decimal import Decimal
 import json
 import os
+from decimal import Decimal
 from pathlib import Path
 
-from embedding import collect_features, recipes as core, selfhost, token_audit, wire
+from embedding import cloud_reader, collect_features, selfhost, token_audit, wire
+from embedding import recipes as core
 from reader_io import ChangedFileSync, require, sha
 
 
@@ -20,7 +21,8 @@ def prepare(source, budget, seconds):
         "format": "bbeh-public-feature-acquisition-v1", "reproduction": True,
         "source_plan_sha256": source_hash, "n": len(rows), "role_inputs_sha256": input_hashes,
         "model": core.MODEL, "hf_revision": core.REVISION, "instruction": core.INSTRUCTION,
-        "source_sha256": {"encode": sha(__file__), "collector": sha(collect_features.__file__),
+        "source_sha256": {"encode": sha(__file__), "cloud_reader": sha(cloud_reader.__file__),
+                          "collector": sha(collect_features.__file__),
                           "wire": sha(wire.__file__), "token_audit": sha(token_audit.__file__)},
         "budget_usd": str(cap), "collection_seconds": seconds,
         "singleton_validation_including_warmup": len(collect_features.singleton_rows(rows)),
@@ -42,7 +44,7 @@ def execute(source, output, plan):
     tokenizer = AutoTokenizer.from_pretrained(root, local_files_only=True, trust_remote_code=False)
     if local:
         return selfhost.run(source, output, plan, tokenizer, binding)
-    return collect_features.run(source, output, plan, tokenizer, binding, ChangedFileSync())
+    return cloud_reader.run(source, output, plan, tokenizer, binding, ChangedFileSync())
 
 
 def main():

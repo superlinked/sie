@@ -17,6 +17,8 @@ uv run --frozen python router.py prepare --data data --run my-router
 
 Open `published-results/explorer/index.html` for the full cost–quality curves.
 
+The [opening comparison table](README.md#1-understand-the-data-and-baseline-sol-808-accuracy-luna-556) separates Sol answers, Luna answers, Laya serving estimates and embedding API fees. Include the router's cost as well as the selected answer; the explorer leaves native hosting unpriced, while the README shows an explicit H100 estimate.
+
 For the **CPU embedding exercise**, install only `--group outcomes`, fetch only `--group core`, and run the following after `prepare`. Then continue at steps 4–5. This uses recorded Laya comparisons; it does not perform LoRA training.
 
 ```bash
