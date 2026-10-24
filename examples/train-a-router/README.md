@@ -62,9 +62,9 @@ For the **complete training sequence**, use a Linux machine with an NVIDIA GPU. 
 Install Python 3.12 and [uv](https://docs.astral.sh/uv/getting-started/installation/). From a clone of this repository:
 
 ```bash
-# Enter the self-contained example and install the locked training and CPU dependencies.
+# Enter the self-contained example and install the locked CPU dependencies.
 cd examples/train-a-router
-uv sync --frozen --group training --group outcomes
+uv sync --frozen --group outcomes
 ```
 
 ```bash
@@ -98,26 +98,36 @@ This path uses the recorded Laya and LoRA comparisons; it does not train or copy
 **Laya is a decision model:** a roughly 0.4-billion-parameter ModernBERT encoder with a small decision head. For each request, we ask two questions: will Luna answer correctly, and will Sol answer correctly? Those scores, together with estimated answer costs, determine whether paying for Sol looks worthwhile. The request is the only input; the router never sees the reference answer.
 
 ```bash
-# Score the held-out question inputs with unchanged Laya; use --device cpu if needed.
-uv run --frozen --group training python router.py base --data data --run my-router --device cuda
+# Install the locked CUDA environment and check a real GPU forward/backward step.
+uv sync --project gpu --frozen
+uv run --project gpu --frozen python gpu/smoke.py --output gpu-smoke.json
 ```
 
-This establishes how much a general decision model knows before seeing this workload. The supplied calibration explorer already includes this baseline, so you can inspect its tradeoffs while your own scoring runs.
+The [GPU setup guide](gpu/README.md) lists the supported system and public binary packages. `--project gpu` selects the GPU environment; keep working in `examples/train-a-router`.
+
+```bash
+# Score the held-out question inputs with unchanged Laya on the GPU.
+uv run --project gpu --frozen python router.py base --data data --run my-router --device cuda
+```
+
+This establishes how much a general decision model knows before seeing this workload. The supplied calibration explorer already includes this baseline, so you can inspect its tradeoffs while your own scoring runs. For CPU inference on Linux or macOS, use the main environment with `--group training` in place of `--project gpu`, and `--device cpu`.
 
 ## 3. Adapt Laya with LoRA [78.3% accuracy; 19.7% answer-cost savings]
 
 **LoRA learns small updates inside an existing model.** We keep Laya’s original encoder weights fixed, learn rank-16 attention updates, and train its existing decision head. The labels are two bits per question: whether Luna’s answer was correct and whether Sol’s was correct. They come from real model answers checked against the benchmark references.
 
-The complete `fit-native` command took **77 minutes on H100**: about **51 minutes** to compare eight training passes using development data, then **26 minutes** for the selected three-pass refit and checkpoint export. Setup and scoring add time. The saved checkpoint and reports let you inspect the result before your own training finishes.
+The fast recipe reduces padding and uses FlashAttention during training. It keeps the same model, labels, effective batch size and development-selection rule. Validation and exported-model inference use the original full-precision computation.
+
+The supplied reference recipe took **77 minutes on H100**: about **51 minutes** to compare eight training passes using development data, then **26 minutes** for the selected three-pass refit and checkpoint export. Setup and scoring add time. The reference recipe remains available with `--recipe reference`.
 
 ```bash
 # Train on training data, select duration on development, then refit from the original model on both.
-uv run --frozen --group training python router.py fit-native --data data --run my-router
+uv run --project gpu --frozen python router.py fit-native --data data --run my-router --recipe fast
 ```
 
 ```bash
 # Apply both unchanged and adapted Laya to calibration/test inputs, without reading their answer labels.
-uv run --frozen --group training python router.py score --data data --run my-router --method native --device cuda
+uv run --project gpu --frozen python router.py score --data data --run my-router --method native --device cuda
 ```
 
 The recipe considers the unchanged model and eight training passes. **Three passes gave the best development loss** in the supplied run; later passes worsened it. We then restarted from the original model and trained for those three passes on training + development. This check is why the example does not simply train for as long as possible. Small differences across hardware can change the selected pass; your run records its own selection.

@@ -16,6 +16,7 @@ def parser():
     c = commands.add_parser("fetch", help="Download and verify the pinned public data; add weights for Laya")
     c.add_argument("--output", type=Path, required=True)
     c.add_argument("--group", choices=("core", "weights", "recordings"), action="append")
+    c.add_argument("--release", type=Path, help="Alternate pinned result package; defaults to the main dataset")
     for name, help_text in (
         ("prepare", "Create a fresh reproduction run from the supplied dataset"),
         ("base", "Apply unchanged Laya before training; CPU or CUDA"),
@@ -30,6 +31,9 @@ def parser():
         c = commands.add_parser(name, help=help_text)
         c.add_argument("--data", type=Path, required=True)
         c.add_argument("--run", type=Path, required=True)
+        if name == "fit-native":
+            c.add_argument("--recipe", choices=("reference", "fast"), default="reference",
+                           help="reference reproduces the published training; fast uses the GPU environment")
         if name in {"base", "score"}:
             c.add_argument("--device", choices=("cpu", "cuda"), default="cpu" if name == "base" else "cuda")
         if name in {"fit-embedding", "score"}:
@@ -71,13 +75,13 @@ def parser():
 
 def execute(a):
     if a.command == "fetch":
-        return workflow.fetch(a.output, a.group or ["core"])
+        return workflow.fetch(a.output, a.group or ["core"], release_path=a.release)
     if a.command == "prepare":
         return workflow.prepare(a.data, a.run)
     if a.command == "base":
         return workflow.base(a.data, a.run, a.device)
     if a.command == "fit-native":
-        return workflow.fit_native(a.data, a.run)
+        return workflow.fit_native(a.data, a.run, recipe=a.recipe)
     if a.command == "fit-embedding":
         return workflow.fit_embedding(a.data, a.run, a.features)
     if a.command == "score":

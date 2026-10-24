@@ -1,0 +1,35 @@
+[project]
+name = "train-a-router-gpu"
+version = "0.1.0"
+description = "Pinned Linux CUDA environment for the faster Laya LoRA recipe"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy==2.4.6",
+    "scipy==1.17.0",
+    "scikit-learn==1.6.1",
+    "torch==2.9.1+cu128",
+    "transformers==4.57.6",
+    "laya==0.3.29",
+    "peft==0.18.1",
+    "einops==0.8.2",
+    "flash-attn==2.8.3.post1+cu.12.8.torch.2.9",
+]
+
+[tool.uv]
+package = false
+no-build-package = ["torch", "flash-attn"]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "astral-cu128"
+url = "https://wheels.astral.sh/simple/cu128/"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+flash-attn = { index = "astral-cu128" }
