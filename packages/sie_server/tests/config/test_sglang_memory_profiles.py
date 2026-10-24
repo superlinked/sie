@@ -1,9 +1,15 @@
+import json
+import math
+import struct
 from pathlib import Path
 
 import pytest
+from sie_server.adapters.sglang import _memory
+from sie_server.adapters.sglang._memory import GIB
 from sie_server.core.loader import expand_profile_variants, load_adapter, load_model_config
 
 MODELS = Path(__file__).resolve().parents[2] / "models"
+L4_TOTAL_BYTES = 23034 * 1024**2
 
 
 @pytest.mark.parametrize(
@@ -14,6 +20,7 @@ MODELS = Path(__file__).resolve().parents[2] / "models"
         "ibm-granite__granite-guardian-3.0-2b",
         "Qwen__Qwen3-Embedding-4B",
         "lightonai__LightOnOCR-2-1B",
+        "tencent__Hy-MT2-1.8B",
     ],
 )
 def test_default_profiles_use_model_sized_memory(name):
@@ -23,6 +30,30 @@ def test_default_profiles_use_model_sized_memory(name):
     adapter = load_adapter(config, MODELS, device="cuda:0")
     assert adapter._memory_budget.mem_fraction_static is None
     assert adapter._memory_budget.kv_budget_tokens == profile.kv_budget_tokens
+
+
+def test_hy_mt2_pool_fits_an_l4_with_room_for_translation_batches(tmp_path, monkeypatch):
+    config = load_model_config(MODELS / "tencent__Hy-MT2-1.8B.yaml")
+    assert config.resolve_profile("default").kv_budget_tokens == 32768
+    # Geometry and bf16 parameter count of the pinned checkpoint: 64 KiB of KV per token.
+    (tmp_path / "config.json").write_text(
+        json.dumps({"num_hidden_layers": 32, "num_attention_heads": 16, "num_key_value_heads": 4, "head_dim": 128})
+    )
+    params = 2_038_515_712
+    header = json.dumps(
+        {"model.weight": {"dtype": "BF16", "shape": [params], "data_offsets": [0, params * 2]}}
+    ).encode()
+    (tmp_path / "model.safetensors").write_bytes(struct.pack("<Q", len(header)) + header)
+    budget = load_adapter(config, MODELS, device="cuda:0")._memory_budget
+    budget.model_name_or_path = str(tmp_path)
+
+    required = budget.required_bytes(device_type="cuda", device_total_bytes=L4_TOTAL_BYTES)
+    assert required == math.ceil(params * 2 * 1.05) + (32768 + 512) * 65536 + 3 * GIB
+    # Half of the card stays available to co-resident models, and a 10 GB GPU still fits the reservation.
+    assert required < L4_TOTAL_BYTES / 2
+    assert required < 10 * GIB
+    monkeypatch.setattr(_memory, "device_memory", lambda _: (L4_TOTAL_BYTES - GIB, L4_TOTAL_BYTES))
+    assert budget.launch_args(0)[2:] == ["--max-total-tokens", "32768"]
 
 
 def test_guard_calibrated_profile_retains_explicit_override():
