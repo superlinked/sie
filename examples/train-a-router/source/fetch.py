@@ -1,12 +1,12 @@
 """Download the pinned public BBEH source; verify bytes before any source use."""
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
+import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 from urllib.request import urlopen
-
 
 REVISION = "80d12ca916b7158f22293fcf3144f4d3d854d4be"
 PREFIX = f"https://raw.githubusercontent.com/google-deepmind/bbeh/{REVISION}/"
@@ -43,10 +43,14 @@ def fetch(output):
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(data)
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        list(pool.map(download, files.items()))
-    for name, data in manifests.items():
-        (output / name).write_bytes(data)
+    try:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(download, files.items()))
+        for name, data in manifests.items():
+            (output / name).write_bytes(data)
+    except BaseException:
+        shutil.rmtree(output, ignore_errors=True)
+        raise
     return {"revision": REVISION, "files": len(files), "bytes": sum(r["bytes"] for r in files.values())}
 
 
