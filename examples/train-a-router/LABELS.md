@@ -52,8 +52,8 @@ uv run --frozen --group collection python router.py collect \
 
 ```bash
 # Fetch the exact public benchmark source and grade the new answers against its references.
-uv run --frozen python source/fetch.py --output bbeh-source
-uv run --frozen --group collection python grade_v2.py \
+uv run --frozen python -X utf8 source/fetch.py --output bbeh-source
+uv run --frozen --group collection python -X utf8 grade_v2.py \
   --prepared data/source --collection fresh-answers/learn \
   --official bbeh-source/bbeh/evaluate.py --pair pair.json --output fresh-grades/learn
 ```
@@ -73,13 +73,13 @@ These commands create new answer and grade directories; they do not replace the 
 
 ```bash
 # Prepare a new CPU study and fit neighbors/classifiers using the fresh training and development labels.
-uv run --frozen python embedding/recipes.py prepare --source data/source --pair pair.json --run fresh-cpu-router
-uv run --frozen --group outcomes python embedding/recipes.py fit \
+uv run --frozen python -X utf8 embedding/recipes.py prepare --source data/source --pair pair.json --run fresh-cpu-router
+uv run --frozen --group outcomes python -X utf8 embedding/recipes.py fit \
   --run fresh-cpu-router --features data/features \
   --train-grades fresh-grades/learn/grades-train.json \
   --development-grades fresh-grades/learn/grades-development.json
 ```
 
-This lower-level study is separate from the README’s published-data reproduction. `native/bbeh_native.py` also accepts explicit grade paths; its prepared plan must bind the new acquisition protocol. Preserve source, answer-pair, grading and acquisition bindings together; changing models or prompts is a new experiment.
+This lower-level study is separate from the README’s published-data reproduction. Direct scripts use `python -X utf8` so multilingual inputs and JSON files use UTF-8 regardless of the host locale; `router.py` sets this mode automatically, including for its child processes. `native/bbeh_native.py` also accepts explicit grade paths; its prepared plan must bind the new acquisition protocol. Preserve source, answer-pair, grading and acquisition bindings together; changing models or prompts is a new experiment.
 
 For production feedback, collect outcomes on a representative sample of **both** routes. Labeling only the arm chosen by the current router hides the alternative’s performance and can reinforce its mistakes. New labels can update the neighbor collection, refit the small embedding heads or support another LoRA adaptation. Re-evaluate before replacing a serving policy.

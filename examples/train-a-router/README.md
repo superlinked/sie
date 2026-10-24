@@ -57,7 +57,7 @@ The steps compare different ways to learn the decision; they do not promise that
 
 ### Set up
 
-For the **complete training sequence**, use a Linux machine with an NVIDIA GPU. The supplied LoRA recipe was validated on one **H100 80 GB**; its longest batches used approximately 51 GB of reserved GPU memory. Other GPU sizes and Apple Silicon LoRA training have not been validated. A Mac or other CPU laptop can replay the results, train the embedding classifiers and run Laya inference; full-population Laya scoring is much faster on a GPU.
+For the **complete training sequence**, use a Linux machine with an NVIDIA GPU. The supplied LoRA recipe was validated on one **H100 80 GB**; its longest batches used approximately 51 GB of reserved GPU memory. Other GPU sizes and Apple Silicon LoRA training have not been validated. A Linux or macOS laptop can replay the results, train the embedding classifiers and run Laya inference; full-population Laya scoring is much faster on a GPU.
 
 Install Python 3.12 and [uv](https://docs.astral.sh/uv/getting-started/installation/). From a clone of this repository:
 

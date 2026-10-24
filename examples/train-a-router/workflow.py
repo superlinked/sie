@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import math
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
-import evidence
 import cost_reader
+import evidence
 from embedding import recipes as core
 from embedding.cost_iteration import refit as cost_refit
 from evaluation import frontier
@@ -20,10 +20,10 @@ ROLES = ("calibration", "final")
 
 
 def invoke(script, *arguments):
-    """Run an optional component with its original sibling import layout."""
+    """Run an optional component with UTF-8 defaults and its original sibling import layout."""
     script = ROOT / script
     environment = {**os.environ, "PYTHONPATH": os.pathsep.join((str(ROOT), str(script.parent)))}
-    subprocess.run([sys.executable, str(script), *map(str, arguments)], env=environment, check=True)
+    subprocess.run([sys.executable, "-X", "utf8", str(script), *map(str, arguments)], env=environment, check=True)
 
 
 def fetch(output, groups, release_path=None):

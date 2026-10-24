@@ -5,8 +5,9 @@ import json
 from pathlib import Path
 
 import calibration_view
-from embedding import recipes as core
 import workflow
+from embedding import recipes as core
+from reader_runtime import ensure_utf8
 
 
 def parser():
@@ -126,4 +127,5 @@ def execute(a):
 
 
 if __name__ == "__main__":
+    ensure_utf8()
     print(json.dumps(execute(parser().parse_args()), indent=2, allow_nan=False))
