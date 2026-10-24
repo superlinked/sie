@@ -9,7 +9,7 @@
 ```bash
 # From your repository clone, install dependencies and download the pinned data and decision-model weights.
 cd examples/train-a-router
-uv sync --frozen --group training --group outcomes
+uv sync --frozen --group outcomes
 uv run --frozen python router.py fetch --output data --group core --group weights
 uv run --frozen python router.py replay --data data --output published-results
 uv run --frozen python router.py prepare --data data --run my-router
@@ -24,13 +24,15 @@ For the **CPU embedding exercise**, install only `--group outcomes`, fetch only 
 uv run --frozen python router.py reuse-native --data data --run my-router
 ```
 
-**2–3. Try and adapt Laya on GPU.** Start with unchanged weights, then let development data choose the LoRA training duration. On H100, comparing eight training passes took about **51 minutes**; the selected three-pass refit and checkpoint export took another **26 minutes**. Allow **77 minutes total**, plus setup and scoring time.
+**2–3. Try and adapt Laya on GPU.** Start with unchanged weights, then let development data choose the LoRA training duration. The fast recipe uses less padding and FlashAttention for training, with the same full-precision validation and export. The supplied reference run took **77 minutes** including selection, refitting and export; `--recipe reference` retains that recipe. [GPU setup](gpu/README.md) explains the separate locked environment.
 
 ```bash
 # Score unchanged Laya, train LoRA, and save input-only predictions for both versions.
-uv run --frozen --group training python router.py base --data data --run my-router --device cuda
-uv run --frozen --group training python router.py fit-native --data data --run my-router
-uv run --frozen --group training python router.py score --data data --run my-router --method native --device cuda
+uv sync --project gpu --frozen
+uv run --project gpu --frozen python gpu/smoke.py --output gpu-smoke.json
+uv run --project gpu --frozen python router.py base --data data --run my-router --device cuda
+uv run --project gpu --frozen python router.py fit-native --data data --run my-router --recipe fast
+uv run --project gpu --frozen python router.py score --data data --run my-router --method native --device cuda
 ```
 
 **4–5. Fit embedding routers on CPU.** The large Qwen encoder stays fixed. Neighbors average outcomes of similar questions; two small classifiers learn whether Luna and Sol will answer correctly.

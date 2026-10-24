@@ -81,14 +81,18 @@ def fit_embedding(data, run, features=None):
     return {"selected": model["selected"], "timing": model["timing"], "run": str(run)}
 
 
-def fit_native(data, run):
+def fit_native(data, run, *, recipe="reference"):
+    core.require(recipe in {"reference", "fast"}, "Choose the reference or fast training recipe")
     data, run = checked_run(data, run)
-    invoke("native/bbeh_native.py", "--phase", "train", "--run", run / "native",
+    script = "native/fast_train.py" if recipe == "fast" else "native/bbeh_native.py"
+    arguments = [] if recipe == "fast" else ["--phase", "train"]
+    invoke(script, *arguments, "--run", run / "native",
            "--training-grades", data / "grades/grades-train.json",
            "--development-grades", data / "grades/grades-development.json",
            "--initial-checkpoint", data / "reference/native/native/base")
     trained = core.read(run / "native/native/trained.json")
-    return {"selected_epoch": trained["selected_epoch"], "elapsed_seconds": trained["elapsed_seconds"]}
+    return {"recipe": recipe, "selected_epoch": trained["selected_epoch"],
+            "elapsed_seconds": trained["elapsed_seconds"]}
 
 
 def base(data, run, device):
