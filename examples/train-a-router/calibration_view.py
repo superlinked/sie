@@ -42,7 +42,7 @@ def render(calibration_path, output, *, reproduction=False):
     mode = "Published-data reproduction. " if reproduction else ""
     text = TEMPLATE.replace("__DATA__", data).replace("__COUNT__", str(len(document["ids"])))
     text = text.replace("__MODE__", html.escape(mode)).replace("__SHA__", core.sha(calibration_path))
-    Path(output).write_text(text)
+    Path(output).write_text(text, encoding="utf-8")
     return {"open": str(output), "calibration_questions": len(document["ids"]), "final_answers_read": False}
 
 
