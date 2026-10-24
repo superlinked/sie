@@ -254,7 +254,7 @@ To try the supplied models directly, fetch `--group weights`, use `--run data/re
 |---|---:|---:|---:|
 | Unchanged Laya, resident H100 | 80 ms | 243 ms | $1.08 busy-resource estimate |
 | Adapted Laya, resident H100 | 78 ms | 235 ms | $1.05 busy-resource estimate |
-| Adapted Laya, 8-core CPU / 32 GB | 3.98 s | 13.70 s | $6.99 busy-resource estimate |
+| Adapted Laya, 8-core CPU / 32 GiB | 3.98 s | 13.70 s | $6.99 busy-resource estimate |
 | SIE Cloud Qwen encoder | 204 ms | 226 ms | $0.81 validated singleton-fee projection |
 | Resident embedding classifier | 0.049 ms | 0.065 ms | Application hosting extra |
 | Classifier + text cost predictors | 2.40 ms | 4.00 ms | Application hosting extra |
