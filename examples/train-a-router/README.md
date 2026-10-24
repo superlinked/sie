@@ -38,22 +38,22 @@ The main measurements are:
 
 Some questions are answered correctly only by Luna. A good router can therefore occasionally beat always-Sol. The gray random-routing line shows what happens if we choose models without reading the question; a useful router should improve on that tradeoff.
 
-All dollar amounts below are **per 10,000 incoming requests**. Each request gets one answer, from either Sol or Luna. **Subtotals include the embedding API fee or the estimated Laya serving cost.** `≈` marks a hosting estimate; `—` means that model is not used. Application hosting, including the small CPU classifiers and cost predictors, idle capacity, and one-time training/data collection are extra.
+All dollar amounts below are **estimates per 10,000 incoming requests**. Each request gets one answer, from either Sol or Luna. **Total cost includes the selected answers and the embedding API fee or Laya serving estimate.** `—` means that model is not used. Application hosting, including the small CPU classifiers and cost predictors, idle capacity, and one-time training/data collection are extra.
 
-| Method | Answer accuracy | Loss (points) | Sol answers | Luna answers | Laya, H100 estimate | Embeddings, Cloud API | Subtotal | Savings |
+| Method | Answer accuracy | Answer accuracy loss (points) | Total cost | Savings | Sol answers | Luna answers | Laya | Embeddings |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Always Sol | 80.8% | 0.0 | $70.77 | — | — | — | $70.77 | 0.0% |
-| Always Luna | 55.6% | 25.2 | — | $12.23 | — | — | $12.23 | 82.7% |
-| Unchanged Laya | 68.6% | 12.2 | $36.06 | $5.76 | ≈$1.08 | — | ≈$42.90 | ≈39.4% |
-| Laya + LoRA | 78.3% | 2.6 | $54.16 | $2.64 | ≈$1.05 | — | ≈$57.85 | ≈18.2% |
-| Embedding neighbors | 76.3% | 4.5 | $50.59 | $3.21 | — | $0.81 | $54.61 | 22.8% |
-| Embedding classifier | 76.8% | 4.0 | $51.51 | $2.90 | — | $0.81 | $55.22 | 22.0% |
-| LoRA + learned cost | 79.0% | 1.8 | $55.34 | $2.29 | ≈$1.05 | — | ≈$58.68 | ≈17.1% |
-| Embedding classifier + learned cost | 79.9% | 0.9 | $56.06 | $2.10 | — | $0.81 | $58.97 | 16.7% |
-| Text/length + learned cost | 79.0% | 1.8 | $52.84 | $2.44 | — | — | $55.28 | 21.9% |
-| Text-predicted task + learned cost | 80.1% | 0.7 | $56.15 | $2.15 | — | — | $58.31 | 17.6% |
+| Always Sol | 80.8% | 0.0 | $70.77 | 0.0% | $70.77 | — | — | — |
+| Always Luna | 55.6% | 25.2 | $12.23 | 82.7% | — | $12.23 | — | — |
+| Unchanged Laya | 68.6% | 12.2 | $42.90 | 39.4% | $36.06 | $5.76 | $1.08 | — |
+| Laya + LoRA | 78.3% | 2.6 | $57.85 | 18.2% | $54.16 | $2.64 | $1.05 | — |
+| Embedding neighbors | 76.3% | 4.5 | $54.61 | 22.8% | $50.59 | $3.21 | — | $0.81 |
+| Embedding classifier | 76.8% | 4.0 | $55.22 | 22.0% | $51.51 | $2.90 | — | $0.81 |
+| LoRA + learned cost | 79.0% | 1.8 | $58.68 | 17.1% | $55.34 | $2.29 | $1.05 | — |
+| Embedding classifier + learned cost | 79.9% | 0.9 | $58.97 | 16.7% | $56.06 | $2.10 | — | $0.81 |
+| Text/length + learned cost | 79.0% | 1.8 | $55.28 | 21.9% | $52.84 | $2.44 | — | — |
+| Text-predicted task + learned cost | 80.1% | 0.7 | $58.31 | 17.6% | $56.15 | $2.15 | — | — |
 
-Laya's estimate prices the time actively serving requests on a resident H100; the embedding column uses SIE Cloud's per-request price. These are different deployment choices, not a comparison of both models on identical hardware. [Serving speed and costs](#serving-speed-and-costs) shows the calculation and its limits. Savings use the unrounded subtotal; rounded components can differ from it by a cent.
+Laya's estimate prices the time actively serving requests on a resident H100; the embedding column uses SIE Cloud's per-request price. These are different deployment choices, not a comparison of both models on identical hardware. [Serving speed and costs](#serving-speed-and-costs) shows the calculation and its limits. Savings use the unrounded total; rounded components can differ from it by a cent.
 
 **Neighbors spend less here because they buy different answers.** They send **49.6%** of requests to Sol, compared with **59.7%** for LoRA. Their answer bill is **$53.80 versus $56.80**, before either router's inference cost, and their accuracy is lower: **76.3% versus 78.3%**. Laya is about 0.4B parameters and Qwen's encoder is 4B, but parameter count alone does not determine the full routing bill.
 
