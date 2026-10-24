@@ -84,6 +84,15 @@ Open `published-results/explorer/index.html` in your browser. It shows all saved
 uv run --frozen python router.py prepare --data data --run my-router
 ```
 
+For an **embedding-only exercise on CPU**, install with `uv sync --frozen --group outcomes` and fetch only `--group core`. After `prepare`, run the following command and continue at step 4:
+
+```bash
+# Reuse the supplied Laya predictions for comparison while you train the embedding routers on CPU.
+uv run --frozen python router.py reuse-native --data data --run my-router
+```
+
+This path uses the recorded Laya and LoRA comparisons; it does not train or copy a Laya checkpoint into `my-router`. The complete GPU path below performs the adaptation itself.
+
 ## 2. Try unchanged Laya [68.6% accuracy; 40.9% answer-cost savings]
 
 **Laya is a decision model:** a roughly 0.4-billion-parameter ModernBERT encoder with a small decision head. For each request, we ask two questions: will Luna answer correctly, and will Sol answer correctly? Those scores, together with estimated answer costs, determine whether paying for Sol looks worthwhile. The request is the only input; the router never sees the reference answer.
@@ -98,6 +107,8 @@ This establishes how much a general decision model knows before seeing this work
 ## 3. Adapt Laya with LoRA [78.3% accuracy; 19.7% answer-cost savings]
 
 **LoRA learns small updates inside an existing model.** We keep Laya’s original encoder weights fixed, learn rank-16 attention updates, and train its existing decision head. The labels are two bits per question: whether Luna’s answer was correct and whether Sol’s was correct. They come from real model answers checked against the benchmark references.
+
+Allow about **77 minutes on the validated H100** for training, development selection and refitting, plus setup and scoring time. The saved checkpoint and reports let you inspect the result before your own training finishes.
 
 ```bash
 # Train on training data, select duration on development, then refit from the original model on both.
@@ -117,21 +128,25 @@ An **embedding** represents a question as a list of numbers that captures simila
 
 This gives a different way to improve with more examples: add their embeddings and observed outcomes to the reference collection. You do not retrain the large encoder.
 
+```bash
+# Fit neighbors and the small classifiers introduced next, using the supplied embeddings on CPU.
+uv run --frozen --group outcomes python router.py fit-embedding --data data --run my-router
+```
+
+The command fits both embedding approaches and inexpensive text controls in one pass. Compare the neighbor method (`knn`) with the classifier (`embedding`) in the calibration explorer in step 6.
+
 ## 5. Train a small classifier on embeddings [76.8% accuracy; 22.0% savings incl. encoder]
 
 Instead of looking up neighbors, we can learn a compact mapping from each embedding to two probabilities. The classifier is **two regularized logistic regressions**—one for Luna’s correctness and one for Sol’s—not another large language model. The frozen encoder produces 2,560 numbers; each predictor learns a weight for those numbers plus an offset.
 
-```bash
-# Fit both the neighbor router and the small classifiers on CPU using the supplied question embeddings.
-uv run --frozen --group outcomes python router.py fit-embedding --data data --run my-router
-```
+The previous command trained these classifiers alongside the neighbors. Now generate predictions from both approaches:
 
 ```bash
 # Generate their calibration/test predictions from question embeddings, without reading answer labels.
 uv run --frozen --group outcomes python router.py score --data data --run my-router --method embedding
 ```
 
-The same command fits inexpensive text and task controls. They matter: if question length or vocabulary explains most of the benefit, a larger model may be unnecessary. The control given the benchmark’s true task name is labeled **metadata-assisted** and cannot be selected for arbitrary live requests.
+The text and task controls fitted in step 4 matter: if question length or vocabulary explains most of the benefit, a larger model may be unnecessary. The control given the benchmark's true task name is labeled **metadata-assisted** and cannot be selected for arbitrary live requests.
 
 The encoder is about ten times larger than Laya. This comparison measures useful systems, not proof that one architecture is intrinsically better. Encoder quality, size, training data and task fit all differ. Its practical advantage here is that the expensive encoder stays fixed while the task-specific training is fast and small.
 
@@ -170,7 +185,7 @@ uv run --frozen python router.py calibrate --data data --run my-router
 uv run --frozen python router.py frontier --run my-router --output calibration.html
 ```
 
-Open `calibration.html`. A **Pareto frontier** keeps choices where you cannot lower cost without losing accuracy, or improve accuracy without paying more. Choose a point that fits your application. There is no built-in one-point accuracy-loss requirement. Increasing the price penalty generally sends more requests to Luna; the saved policy also handles cases where a supposedly stronger answer is predicted to cost less.
+Open `calibration.html`. A **Pareto frontier** keeps choices where you cannot lower cost without losing accuracy, or improve accuracy without paying more. Choose a point that fits your application and record its **method and candidate ID together before opening the test report**. Candidate IDs belong to a particular method and run; the same number can mean a different policy elsewhere. There is no built-in one-point accuracy-loss requirement. Increasing the price penalty generally sends more requests to Luna; the saved policy also handles cases where a supposedly stronger answer is predicted to cost less.
 
 The cost predictor helps some spending levels and hurts others, so the explorer keeps both variants. `embedding` uses the original cost estimate; `embedding__textcost` uses the learned request-cost estimate. The same choice is available for Laya, LoRA, neighbors and simple controls.
 
@@ -194,7 +209,7 @@ Open `my-results/explorer/index.html`. Because these test answers are already pu
 
 ## 7. Route a new question
 
-Use the method and candidate ID copied from **calibration.html**. The command predicts the route first, saves that decision, then calls exactly one answer model.
+Use the method and candidate ID copied from **calibration.html** for the same run. The command below uses `embedding__textcost`, the classifier with learned costs behind the headline result. Choose that method in the explorer and copy one of its frontier candidate IDs, or replace both values with another selected pair. The command predicts the route first, saves that decision, then calls exactly one answer model.
 
 ```bash
 # Enter the OpenAI key used to pay for the selected Sol or Luna answer.
@@ -202,15 +217,18 @@ export OPENAI_API_KEY='your-openai-api-key'
 ```
 
 ```bash
-# Route one new question with your chosen embedding policy and save the request, decision and answer.
+# Route one question using a method and candidate ID selected together from calibration.
+METHOD=embedding__textcost
 CANDIDATE_ID=YOUR_CALIBRATION_CANDIDATE_ID
 uv run --frozen --group collection --group encode --group outcomes python router.py answer \
-  --run my-router --method embedding --candidate-id "$CANDIDATE_ID" \
+  --run my-router --method "$METHOD" --candidate-id "$CANDIDATE_ID" \
   --question 'A robot starts at (0,0), facing north. It turns right, moves 3, turns left, moves 2, then turns left and moves 1. What is its final coordinate? Answer as (x,y).' \
   --output answers/robot
 ```
 
-For Laya or LoRA, select `base` or `lora`, use `--group collection --group training` (add `--group outcomes` for a learned-cost variant), and choose `--device cpu` or `cuda`. These routes need no embedding API call. Use `--run data/reference` with a policy selected from the supplied reference calibration explorer to try the supplied models directly. Each request needs a new output directory so a failed call is not silently repeated.
+For Laya or LoRA, select `base` or `lora` (`base__textcost` or `lora__textcost` for learned costs), use `--group collection --group training` (add `--group outcomes` for learned costs), and choose `--device cpu` or `cuda`. These routes need no embedding API call.
+
+To try the supplied models directly, fetch `--group weights`, use `--run data/reference` and select a policy from the supplied reference calibration explorer. This also provides live Laya inference after the CPU-only exercise, which reused its predictions without copying its checkpoint. Each request needs a new output directory so a failed call is not silently repeated.
 
 ## Serving speed and costs
 
