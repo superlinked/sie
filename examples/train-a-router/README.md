@@ -108,7 +108,7 @@ This establishes how much a general decision model knows before seeing this work
 
 **LoRA learns small updates inside an existing model.** We keep Laya’s original encoder weights fixed, learn rank-16 attention updates, and train its existing decision head. The labels are two bits per question: whether Luna’s answer was correct and whether Sol’s was correct. They come from real model answers checked against the benchmark references.
 
-Allow about **77 minutes on the validated H100** for training, development selection and refitting, plus setup and scoring time. The saved checkpoint and reports let you inspect the result before your own training finishes.
+The complete `fit-native` command took **77 minutes on H100**: about **51 minutes** to compare eight training passes using development data, then **26 minutes** for the selected three-pass refit and checkpoint export. Setup and scoring add time. The saved checkpoint and reports let you inspect the result before your own training finishes.
 
 ```bash
 # Train on training data, select duration on development, then refit from the original model on both.

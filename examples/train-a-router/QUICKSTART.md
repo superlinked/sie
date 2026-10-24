@@ -24,7 +24,7 @@ For the **CPU embedding exercise**, install only `--group outcomes`, fetch only 
 uv run --frozen python router.py reuse-native --data data --run my-router
 ```
 
-**2–3. Try and adapt Laya on GPU.** Start with unchanged weights, then let development data choose the LoRA training duration. The supplied run selected three passes and refitted from the original model. Allow about **77 minutes on H100** for that fit, plus setup and scoring time.
+**2–3. Try and adapt Laya on GPU.** Start with unchanged weights, then let development data choose the LoRA training duration. On H100, comparing eight training passes took about **51 minutes**; the selected three-pass refit and checkpoint export took another **26 minutes**. Allow **77 minutes total**, plus setup and scoring time.
 
 ```bash
 # Score unchanged Laya, train LoRA, and save input-only predictions for both versions.
