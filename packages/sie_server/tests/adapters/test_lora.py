@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import threading
 import time
 from collections import OrderedDict
@@ -1435,13 +1436,13 @@ class TestLoraFetchOutsideInference:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         snapshot = _save_plain_lora(tmp_path / "snapshot")
-        calls: list[tuple[str, dict[str, Any]]] = []
+        calls: list[tuple[str, str | None]] = []
 
-        def snapshot_download(repo_id: str, **kwargs: Any) -> str:
-            calls.append((repo_id, kwargs))
-            return snapshot
+        def resolve_source(repo_id: str, revision: str | None = None) -> Path:
+            calls.append((repo_id, revision))
+            return Path(snapshot)
 
-        monkeypatch.setattr(peft_lora_mixin, "snapshot_download", snapshot_download)
+        monkeypatch.setattr(peft_lora_mixin, "resolve_lora_source", resolve_source)
         adapter = TinyLoRAAdapter()
         adapter.load("cpu")
         expected = adapter._model(_probe()).detach().clone()
@@ -1450,13 +1451,33 @@ class TestLoraFetchOutsideInference:
         adapter.load_lora("org/hub-lora", revision=revision)
         adapter.set_active_lora("org/hub-lora")
 
-        assert calls == [
-            (
-                "org/hub-lora",
-                {"revision": revision, "allow_patterns": ["adapter_config.json", "adapter_model.safetensors"]},
-            )
-        ]
+        assert calls == [("org/hub-lora", revision)]
         assert not torch.allclose(adapter._model(_probe()), expected)
+
+
+def test_peft_loads_pinned_cluster_adapter_with_network_denied(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    revision = "c" * 40
+    cluster = tmp_path / "cluster"
+    cached = cluster / "models--org--adapter" / "snapshots" / revision
+    cached.parent.mkdir(parents=True)
+    _save_plain_lora(cached)
+    monkeypatch.setenv("SIE_LOCAL_CACHE", str(tmp_path / "local"))
+    monkeypatch.setenv("SIE_CLUSTER_CACHE", str(cluster))
+    monkeypatch.setenv("SIE_HF_FALLBACK", "false")
+    monkeypatch.setattr(socket.socket, "connect", MagicMock(side_effect=AssertionError("network forbidden")))
+    monkeypatch.setattr("huggingface_hub.snapshot_download", MagicMock(side_effect=AssertionError("Hub forbidden")))
+    adapter = TinyLoRAAdapter()
+    adapter.load("cpu")
+    try:
+        baseline = adapter._model(_probe()).detach().clone()
+        adapter.load_lora("org/adapter", revision=revision)
+        adapter.set_active_lora("org/adapter")
+        assert not torch.allclose(adapter._model(_probe()), baseline)
+        adapter.set_active_lora(None)
+        assert torch.equal(adapter._model(_probe()), baseline)
+        adapter.unload_lora("org/adapter")
+    finally:
+        adapter.unload()
 
 
 class TestLoraWeightKeys:

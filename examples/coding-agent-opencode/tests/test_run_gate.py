@@ -165,7 +165,9 @@ def test_a_run_past_its_deadline_is_stopped_and_fails(tmp_path: Path, ignores_te
         pytest.fail(f"the agent's child process {pid} outlived the deadline")
 
 
-@pytest.mark.parametrize(("recipe", "needs_sie_variables"), [("gpu", False), ("cluster", True), ("cloud", True)])
+@pytest.mark.parametrize(
+    ("recipe", "needs_sie_variables"), [("gpu", False), ("openrouter", False), ("cluster", True), ("cloud", True)]
+)
 def test_only_a_recipe_that_reads_the_sie_variables_requires_them(
     tmp_path: Path, recipe: str, needs_sie_variables: bool
 ) -> None:

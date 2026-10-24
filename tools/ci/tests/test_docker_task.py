@@ -309,6 +309,47 @@ def test_complete_set_verified_before_alias_commands(complete_source, monkeypatc
     assert commands == []
 
 
+def _dockerfile_logical_lines(text: str) -> list[str]:
+    logical: list[str] = []
+    buffer = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        buffer = f"{buffer} {stripped}".strip() if buffer else stripped
+        if buffer.endswith("\\"):
+            buffer = buffer[:-1].rstrip()
+            continue
+        logical.append(buffer)
+        buffer = ""
+    if buffer:
+        logical.append(buffer)
+    return logical
+
+
+@pytest.mark.parametrize(
+    "dockerfile",
+    ["Dockerfile.cpu", "Dockerfile.cuda12", "Dockerfile.cuda13"],
+)
+def test_bundle_image_installs_are_constrained_to_the_lock(dockerfile: str) -> None:
+    text = (Path(__file__).resolve().parents[3] / "packages" / "sie_server" / dockerfile).read_text()
+    assert "COPY uv.lock /tmp/uv.lock" in text
+    assert "COPY packages/sie_server/bundle-locks /tmp/bundle-locks" in text
+    assert "ARG TARGETARCH" in text
+    assert 'test "$(uv --version)" = "uv 0.9.28"' in text
+    logical = _dockerfile_logical_lines(text)
+    check = next(i for i, line in enumerate(logical) if "sie_server.bundle_lock check" in line)
+    sync = next(i for i, line in enumerate(logical) if "uv pip sync" in line)
+    assert check < sync
+    assert "--no-config --python /app/.venv/bin/python" in logical[sync]
+    assert "--target /app/bundle-libs" in logical[sync]
+    assert "${BUNDLE}-${TARGETARCH}/pylock.toml" in logical[sync]
+    assert "sie_server.bundle_lock verify" in logical[sync]
+    assert "--installed /app/bundle-libs --receipt /app/bundle-libs-inventory.json" in logical[sync]
+    assert "pip freeze --path /app/bundle-libs > /app/bundle-libs-freeze.txt" in text
+    for receipt in ("bundle-libs-freeze.txt", "bundle-libs-inventory.json"):
+        assert f"/app/{receipt} /app/{receipt}" in text
+    assert "-r /tmp/bundle-requirements.txt" not in text
+
+
 def test_expected_release_set_has_sixteen_tags_and_six_names(complete_source):
     images = docker_task.expected_versioned_images("ghcr.io/superlinked", VERSION, complete_source)
     assert len(images) == len(set(images)) == 16

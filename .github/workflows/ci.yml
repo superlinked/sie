@@ -21,17 +21,18 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           persist-credentials: false
+      # Keep the same explicit selection in every exec below to avoid lazy tool installs.
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           version: 2026.5.5
-          install_args: --jobs=1
+          install_args: --jobs=1 python uv github:rhysd/actionlint
           cache: false
       - run: >-
-          mise exec -- uv run --frozen --project . pytest -q
+          mise exec --no-deps python uv github:rhysd/actionlint -- uv run --frozen --project . pytest -q
           tools/ci/tests/test_required_ci.py tools/ci/tests/test_public_tree.py
-      - run: mise exec -- python tools/ci/check_public_tree.py
+      - run: mise exec --no-deps python uv github:rhysd/actionlint -- python tools/ci/check_public_tree.py
       - run: >-
-          mise exec -- actionlint
+          mise exec --no-deps python uv github:rhysd/actionlint -- actionlint
           -ignore '^unexpected key "queue" for "concurrency" section\. expected one of "cancel-in-progress", "group"$'
 
   bootstrap:
@@ -105,6 +106,32 @@ jobs:
         run: |
           mise run helm -- dependencies
           mise exec -- uv run --frozen --project . --no-sync pytest -q -m docker tools/ci/tests/test_collector_*privacy.py
+
+  bundle-resolution:
+    name: CI / Bundle resolution
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          version: 2026.5.5
+          install_args: --jobs=1
+          cache: false
+      - run: mise run sync
+      - name: Install the Docker-pinned lock reader
+        run: mise install uv@0.9.28
+      - name: Verify saved bundle closures and input drift
+        run: mise exec -- uv run --frozen --project . --no-sync python tools/ci/bundle_lock.py check
+      - name: Validate every saved target with the Docker installer
+        env:
+          SIE_RUN_IMAGE_RESOLUTION: "1"
+        run: |
+          SIE_BUNDLE_LOCK_UV="$(mise exec --no-deps uv@0.9.28 -- which uv)"
+          export SIE_BUNDLE_LOCK_UV
+          mise exec -- uv run --frozen --project . --no-sync pytest -q packages/sie_server/tests/core/test_bundle_image_resolution.py
 
   typescript:
     name: CI / TypeScript
@@ -292,7 +319,7 @@ jobs:
   required:
     name: CI / Required
     if: ${{ always() }}
-    needs: [policy, bootstrap, python, typescript, rust, contracts, helm, live-sdk, cpu-stack, python-distributions, npm-distributions]
+    needs: [policy, bootstrap, python, bundle-resolution, typescript, rust, contracts, helm, live-sdk, cpu-stack, python-distributions, npm-distributions]
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     steps:

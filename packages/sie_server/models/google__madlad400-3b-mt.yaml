@@ -36,6 +36,7 @@ profiles:
           compute_type: bfloat16
         native_batch_max_size: 8
         native_batch_max_tokens: 4096
+        unescape_moses_entities: true
       runtime:
         first_chunk_timeout_s: 180
         inter_chunk_timeout_s: 10

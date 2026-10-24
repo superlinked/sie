@@ -1,0 +1,45 @@
+{
+  "completed_artifact_hashes": [
+    {
+      "bytes": 7532,
+      "sha256": "926acba49b2c0a0374c61b7c98f337c085199cf51cdfe4d6423c4129c20547a7",
+      "url": "https://download.pytorch.org/whl/cuda_python-12.9.0-py3-none-any.whl"
+    },
+    {
+      "bytes": 134899,
+      "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67",
+      "url": "https://download.pytorch.org/whl/jinja2-3.1.6-py3-none-any.whl"
+    },
+    {
+      "bytes": 24332,
+      "sha256": "3a7e8ae81ae39e62a41ec302f972ba6ae23a5c5396c8e60113e9066ef893da0d",
+      "url": "https://download.pytorch.org/whl/markupsafe-3.0.3-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl"
+    }
+  ],
+  "exceptions_sha256": "a4235ada14b5015a0a836124fe6ab4778dc9b954dd3e3f4fd8abcf1660c1e3f2",
+  "exclude_newer": "2026-10-18T00:00:00Z",
+  "indexes": [
+    "--default-index",
+    "https://pypi.org/simple",
+    "--index",
+    "https://download.pytorch.org/whl/cpu",
+    "--index-strategy",
+    "unsafe-best-match"
+  ],
+  "inputs": {
+    "requirements_sha256": "943a74a3f4565e0b7b3bab2f87080526604d1e3923a39ed287d444630d33b94c",
+    "uv_lock_sha256": "536b7f46b5560f0dfbe5a503ecf4166514658f1340c4721d1ea263a43b3e5aa5"
+  },
+  "lock_sha256": "6680e1454e1fe6bf0d4aa7b6647b6fb8c948d2eff9646a51cbdcaac56eff09fb",
+  "policy_sha256": "dbc9ef2b65ea54bebe46021a7813897c378207508e4d84caf45e93d31faf15d4",
+  "schema_version": 1,
+  "source_pins_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+  "target": {
+    "architecture": "arm64",
+    "bundle": "sglang",
+    "platform": "cpu",
+    "python_platform": "aarch64-manylinux_2_35",
+    "python_version": "3.12"
+  },
+  "uv_version": "0.9.28"
+}

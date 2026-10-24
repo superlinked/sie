@@ -49,6 +49,7 @@ from sie_server.adapters._generation_base import (
     REASONING_CONTROL_TOKENS,
     GenerationAdapter,
     GenerationError,
+    GenerationInputTooLongError,
     GenerationUnsupportedFieldError,
     GenerationUpstreamError,
     ReasoningFormat,
@@ -538,6 +539,15 @@ def _validate_chat_messages(messages: list[Any]) -> None:
                 )
 
 
+def _has_image_parts(messages: list[Any]) -> bool:
+    return any(
+        part["type"] in ("image_url", "input_image")
+        for message in messages
+        if isinstance(message.get("content"), list)
+        for part in message["content"]
+    )
+
+
 def _validate_cuda_chat_body(body: dict[str, Any]) -> None:
     unknown_fields = body.keys() - _CUDA_CHAT_FIELDS
     if unknown_fields:
@@ -829,6 +839,14 @@ def _prepare_chat_body(
     seed: int | None,
 ) -> dict[str, Any]:
     proxied = dict(body)
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        proxied["messages"] = [
+            {**message, "role": "system"}
+            if isinstance(message, dict) and message.get("role") == "developer"
+            else message
+            for message in messages
+        ]
     # SIE owns these edge-only identifiers; do not send unknown metadata into
     # the engine process.
     proxied.pop("safety_identifier", None)
@@ -1562,9 +1580,22 @@ async def chat_completions(
     Errors are emitted as top-level OpenAI ``{"error": {...}}`` envelopes
     (never FastAPI's ``{"detail": ...}`` wrapper), matching ``/v1/completions``.
     """
+    return await serve_chat_completions(http_request, x_machine_profile)
+
+
+async def serve_chat_completions(
+    http_request: Request,
+    x_machine_profile: str | None,
+    body: dict[str, Any] | None = None,
+) -> Response | StreamingResponse:
+    """Answer a chat completions request exactly as ``/v1/chat/completions`` does.
+
+    ``body`` is the chat request to serve in place of the request's own body,
+    for a route that translates its request onto this one in process.
+    """
     async with AsyncExitStack() as lifetime:
         try:
-            response = await _chat_completions(http_request, x_machine_profile, lifetime)
+            response = await _chat_completions(http_request, x_machine_profile, lifetime, body)
             if isinstance(response, JSONResponse) and response.status_code >= status.HTTP_400_BAD_REQUEST:
                 payload = json.loads(bytes(response.body))
                 code = payload.get("error", {}).get("code")
@@ -1582,10 +1613,11 @@ async def _chat_completions(
     http_request: Request,
     x_machine_profile: str | None,
     lifetime: AsyncExitStack,
+    chat_body: dict[str, Any] | None = None,
 ) -> Response | StreamingResponse:
     validate_machine_profile_header(x_machine_profile)
 
-    body = await _read_json_body(http_request)
+    body = await _read_json_body(http_request) if chat_body is None else chat_body
 
     model = body.get("model")
     if not isinstance(model, str) or not model.strip():
@@ -1652,6 +1684,17 @@ async def _chat_completions(
                 param="stream",
                 code="unsupported_field",
             )
+        if body.get("tools") is not None and not gen_task.capabilities.tools:
+            raise _bad_request(
+                f"Model '{model}' does not support tool calling", param="tools", code="unsupported_field"
+            )
+        adapter_chat = _adapter_answers_chat(config)
+        if _has_image_parts(messages) and not (
+            config.inputs.image and str(device).startswith("cuda") and not adapter_chat
+        ):
+            raise _bad_request(
+                f"Model '{model}' does not support image input", param="messages", code="unsupported_field"
+            )
         if videos:
             if not (config.inputs.video and str(device).startswith("cuda")):
                 raise _bad_request(
@@ -1661,7 +1704,6 @@ async def _chat_completions(
                 )
             # The child decodes video on its event loop; bound that work here.
             await asyncio.to_thread(_probe_chat_videos, videos)
-        adapter_chat = _adapter_answers_chat(config)
         if str(device).startswith("cuda") or adapter_chat:
             _validate_cuda_chat_body(body)
         else:
@@ -1716,6 +1758,10 @@ async def _chat_completions(
                 max_tokens=max_tokens,
                 seed=seed,
             )
+            try:
+                await adapter.check_chat_window(proxied, requested_model=model)
+            except GenerationInputTooLongError as exc:
+                raise _generation_http_exception(exc, registry) from exc
             tool_call_limit = _mlx_tool_call_limit(body, proxied)
             slot = adapter.generation_slot()
         elif isinstance(adapter, SGLangGenerationAdapter) and str(device).startswith("cuda"):

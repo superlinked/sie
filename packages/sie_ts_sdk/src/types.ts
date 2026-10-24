@@ -135,6 +135,8 @@ export interface RequestUsage {
   audioMs?: number;
   creditsCharged?: number;
   rateBookVersion?: string;
+  /** `creditsCharged` with up to six decimals, such as `"0.140000"`, when reported. */
+  creditsChargedDecimal?: string;
 }
 
 /** Optional gateway metadata from the successful terminal response. */
@@ -177,6 +179,12 @@ export interface RequestMetadata {
    * charge rides the terminal usage chunk.
    */
   creditsDebited?: number;
+  /**
+   * `creditsDebited` with up to six decimals, such as `"0.140000"`, when the
+   * response reported it (`usage.credits_charged_decimal` or the
+   * `x-sie-credits-debited-decimal` header).
+   */
+  creditsDebitedDecimal?: string;
   /** Immutable rate-book version that rated `creditsDebited`, when reported. */
   rateBookVersion?: string;
   /** Which side served the request: `local` capacity, or a `remote` upstream named in `upstream`. */
@@ -1132,6 +1140,8 @@ export interface GenerationUsage {
   cachedPromptTokens?: number;
   creditsCharged?: number;
   rateBookVersion?: string;
+  /** `creditsCharged` with up to six decimals, such as `"0.140000"`, when reported. */
+  creditsChargedDecimal?: string;
 }
 
 interface GrammarMetadata {
@@ -1204,7 +1214,7 @@ export interface GenerateOptions {
   /** Opaque privacy-preserving safety identifier. */
   safetyIdentifier?: string;
   /** Served LoRA adapter name. */
-  loraAdapter?: string;
+  loraAdapter?: string | null;
   /**
    * Governed generation runtime options forwarded as `options`. Typed native
    * fields still win when both surfaces provide the same sampler control.
@@ -1441,10 +1451,11 @@ export interface ChatCompletionRequest {
   safety_identifier?: string;
   /**
    * Multi-LoRA: served-name of the adapter to apply on the worker (SIE
-   * extension). Must be a non-empty string; unknown names are rejected by
-   * the gateway with 400 `unknown_lora`.
+   * extension). A non-empty string selects an adapter; explicit `null` or
+   * omission selects the base model. Unknown names are rejected by the
+   * gateway with 400 `unknown_lora`.
    */
-  lora_adapter?: string;
+  lora_adapter?: string | null;
   /** SIE-native routing affinity hint. */
   routing_key?: string;
   /** SIE-native prompt-cache hint. */
@@ -1478,6 +1489,8 @@ export interface ChatUsage {
   prompt_tokens_details?: { cached_tokens: number };
   credits_charged?: number;
   rate_book_version?: string;
+  /** `credits_charged` with up to six decimals, such as `"0.140000"`, when reported. */
+  credits_charged_decimal?: string;
 }
 
 /** A single choice in a `ChatCompletion` (non-streaming). */
@@ -1723,6 +1736,8 @@ export interface CostEstimate {
   endpoint: string;
   identity: RateIdentity;
   estimated_credits: number;
+  /** `estimated_credits` with up to six decimals, such as `"0.140000"`, when reported. */
+  estimated_credits_decimal?: string;
   unit_ceilings: Record<string, number>;
   applied_rates: AppliedRate[];
   rate_book_version: string;

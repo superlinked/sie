@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from importlib.metadata import version
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -614,6 +615,61 @@ class TestModelRegistryConfig:
             pass
 
         assert created_kwargs["pinned_models"] == ["model-x", "model-y"]
+
+
+class TestConfigureCudaDefaults:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("flag", "expected"), [(None, True), ("0", True), ("off", True), ("1", False), (" TRUE ", False)]
+    )
+    async def test_policy_applies_before_registry_and_readiness(
+        self, monkeypatch: pytest.MonkeyPatch, flag: str | None, expected: bool
+    ) -> None:
+        monkeypatch.delenv("SIE_DISABLE_TF32", raising=False)
+        monkeypatch.delenv("SIE_DISABLE_CUDNN_SDP", raising=False)
+        if flag is not None:
+            monkeypatch.setenv("SIE_DISABLE_TF32", flag)
+        matmul = SimpleNamespace(allow_tf32=not expected)
+        cudnn = SimpleNamespace(allow_tf32=not expected, benchmark=False)
+        fake_torch = SimpleNamespace(
+            cuda=SimpleNamespace(is_available=lambda: True),
+            backends=SimpleNamespace(cuda=SimpleNamespace(matmul=matmul), cudnn=cudnn),
+        )
+        monkeypatch.setattr("sie_server.app.app_factory.torch", fake_torch)
+        monkeypatch.setattr(AppFactory, "_configure_torch_threads", MagicMock())
+        for name in ("_tracing", "_metrics", "_nvml", "_ipc_server", "_graceful_shutdown"):
+            monkeypatch.setattr(AppFactory, name, lambda *_args: _async_value(MagicMock()))
+        monkeypatch.setattr("sie_server.app.app_factory.telemetry_sender", _async_value)
+        monkeypatch.setattr("sie_server.app.app_factory.setup_tracing", MagicMock())
+        monkeypatch.setattr("sie_server.app.app_factory.setup_worker_telemetry", MagicMock())
+        events: list[tuple[str, bool, bool, bool]] = []
+
+        @asynccontextmanager
+        async def registry(_config: AppStateConfig) -> AsyncGenerator[MagicMock, None]:
+            events.append(("registry", matmul.allow_tf32, cudnn.allow_tf32, cudnn.benchmark))
+            yield MagicMock()
+
+        @asynccontextmanager
+        async def ready() -> AsyncGenerator[None, None]:
+            events.append(("ready", matmul.allow_tf32, cudnn.allow_tf32, cudnn.benchmark))
+            yield
+
+        monkeypatch.setattr(AppFactory, "_model_registry", registry)
+        monkeypatch.setattr(AppFactory, "_readiness_handling", ready)
+        app = AppFactory.create_app(AppStateConfig())
+
+        async with app.router.lifespan_context(app):
+            assert events == [("registry", expected, expected, True), ("ready", expected, expected, True)]
+        assert (matmul.allow_tf32, cudnn.allow_tf32, cudnn.benchmark) == (expected, expected, True)
+
+    def test_cpu_startup_does_not_access_cuda_backends(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SIE_DISABLE_TF32", "1")
+        monkeypatch.setattr(
+            "sie_server.app.app_factory.torch",
+            SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False)),
+        )
+
+        AppFactory._configure_cuda_defaults()
 
 
 class TestConfigureSdpaBackends:

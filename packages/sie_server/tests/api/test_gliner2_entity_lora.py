@@ -90,10 +90,19 @@ def test_sdk_http_invalid_task_is_400_without_selection_or_fetch(lora: str | Non
     statuses = []
     with TestClient(app, base_url="http://127.0.0.1", follow_redirects=False) as transport:
         transport.event_hooks["response"].append(lambda response: statuses.append(response.status_code))
-        with SIEClient("http://127.0.0.1", http_client=transport) as client:
-            with pytest.raises(RequestError) as error:
-                client.extract("entity", item, labels=["person"], options=options, **kwargs)
-        assert error.value.status_code == 400
+        if denied == "legacy":
+            # The SDK now rejects these conflicting aliases before HTTP; exercise
+            # the independent server boundary with the original raw request.
+            response = transport.post(
+                "/v1/extract/entity",
+                json={"items": [item], "params": {"labels": ["person"], "options": options}},
+            )
+            assert response.status_code == 400
+        else:
+            with SIEClient("http://127.0.0.1", http_client=transport) as client:
+                with pytest.raises(RequestError) as error:
+                    client.extract("entity", item, labels=["person"], options=options, **kwargs)
+            assert error.value.status_code == 400
     assert statuses == [400]
     adapter.set_active_lora.assert_not_called()
     adapter.fetch_lora.assert_not_called()

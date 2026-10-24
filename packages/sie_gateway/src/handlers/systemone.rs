@@ -67,6 +67,7 @@ pub(crate) struct SystemOneRequest {
     pub model: String,
     pub item: Value,
     pub questions: Map<String, Value>,
+    pub lora_options: Map<String, Value>,
 }
 
 /// Where a request failed validation (after `body`) and why.
@@ -167,10 +168,13 @@ pub(crate) fn normalize_request(parsed: &Value) -> Result<SystemOneRequest, Inva
         }
         normalized.insert(qid.clone(), Value::Object(question));
     }
+    let lora_options =
+        super::lora::selectors(body).map_err(|error| invalid(&[error.field], error.message))?;
     Ok(SystemOneRequest {
         model,
         item,
         questions: normalized,
+        lora_options,
     })
 }
 
@@ -327,11 +331,13 @@ pub(crate) fn response_from_extract(
 /// questions as `output_schema`, and `overflow_policy: "error"` so input that
 /// does not fit the model's row is refused rather than cut.
 pub(crate) fn extract_body(request: &SystemOneRequest) -> Value {
+    let mut options = request.lora_options.clone();
+    options.insert("overflow_policy".into(), json!("error"));
     json!({
         "items": [request.item],
         "params": {
             "output_schema": request.questions,
-            "options": {"overflow_policy": "error"},
+            "options": options,
         },
     })
 }
@@ -665,6 +671,23 @@ mod tests {
     fn fixture() -> Value {
         serde_json::from_str(include_str!("../../../wire-fixtures/systemone.json"))
             .expect("systemone fixture")
+    }
+
+    #[test]
+    fn lora_selectors_survive_systemone_translation() {
+        let base = fixture()["requests"][0]["request"].clone();
+        for field in super::super::lora::FIELDS {
+            for value in [Value::Null, json!("org/legal")] {
+                let mut body = base.clone();
+                body[field] = value.clone();
+                let request = normalize_request(&body).unwrap();
+                assert_eq!(extract_body(&request)["params"]["options"][field], value);
+            }
+        }
+        let mut conflict = base;
+        conflict["lora_adapter"] = Value::Null;
+        conflict["lora"] = json!("legal");
+        assert!(normalize_request(&conflict).is_err());
     }
 
     #[test]

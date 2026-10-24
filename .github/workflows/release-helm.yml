@@ -51,4 +51,4 @@ jobs:
           name: helm-sie-cluster-${{ inputs.version }}
           path: artifact/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: ${{ github.event_name == 'release' && 30 || 5 }}

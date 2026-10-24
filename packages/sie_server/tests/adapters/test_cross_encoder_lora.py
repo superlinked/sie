@@ -6,6 +6,7 @@ import asyncio
 import builtins
 import gc
 import json
+import socket
 import subprocess
 import sys
 import time
@@ -13,6 +14,7 @@ import weakref
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import httpx
 import numpy as np
@@ -326,6 +328,37 @@ def test_real_loader_routes_only_the_explicit_profile_and_preserves_base_options
         invalid["profiles"]["default"]["adapter_options"]["loadtime"]["lora_paths"] = {"a": "org/declared"}
         with pytest.raises(ValueError, match=r"does not accept.*lora_paths"):
             load_adapter(ModelConfig.model_validate(invalid), checkpoint, device="cpu")
+
+
+def test_pinned_cluster_adapter_preserves_lifecycle_with_network_denied(checkpoint, tmp_path, monkeypatch):
+    cluster = tmp_path / "cluster"
+    revision = "a" * 40
+    cached = cluster / "models--org--adapter" / "snapshots" / revision
+    cached.parent.mkdir(parents=True)
+    save_adapter(checkpoint, cached)
+    monkeypatch.setenv("SIE_LOCAL_CACHE", str(tmp_path / "local"))
+    monkeypatch.setenv("SIE_CLUSTER_CACHE", str(cluster))
+    monkeypatch.setenv("SIE_HF_FALLBACK", "false")
+    monkeypatch.setattr(socket.socket, "connect", Mock(side_effect=AssertionError("network forbidden")))
+    monkeypatch.setattr("huggingface_hub.snapshot_download", Mock(side_effect=AssertionError("Hub forbidden")))
+    adapter = CrossEncoderLoraAdapter(
+        checkpoint, lora_paths={"a": "org/adapter"}, lora_revisions={"org/adapter": revision}, max_loaded_loras=1
+    )
+    adapter.load("cpu")
+    try:
+        baseline = scores(adapter)
+        original = base_snapshot(adapter)
+        prepared = adapter.fetch_lora("a")
+        adapter.load_lora("a", source=prepared)
+        adapter.set_active_lora("a")
+        assert not np.array_equal(scores(adapter), baseline)
+        adapter.set_active_lora(None)
+        np.testing.assert_array_equal(scores(adapter), baseline)
+        adapter.unload_lora("a")
+        assert_base_preserved(adapter, original, unwrapped=True)
+    finally:
+        adapter.unload()
+    assert not Path(prepared).exists()
 
 
 def test_actual_effect_restoration_head_and_final_module_identity(adapter, checkpoint):

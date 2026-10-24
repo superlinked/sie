@@ -698,7 +698,7 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
             completion_tokens=count,
         )
 
-    async def _chat_turn(self, body: dict[str, Any]) -> _ChatTurn:
+    async def _chat_turn(self, body: dict[str, Any], requested_model: str) -> _ChatTurn:
         if not self._loaded:
             raise RuntimeError(ERR_NOT_LOADED)
         await self._fault_runtime.on_dispatch_async()
@@ -708,8 +708,10 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
         if self._max_seq_length is not None:
             room = self._max_seq_length - prompt_tokens
             if room < 1:
-                msg = f"the prompt is {prompt_tokens} tokens and leaves no room in the {self._max_seq_length}-token window"
-                raise GenerationInputTooLongError(msg)
+                raise GenerationInputTooLongError(
+                    f"prompt_tokens ({prompt_tokens}) exceeds context_length ({self._max_seq_length}) "
+                    f"for model '{requested_model}'"
+                )
             budget = min(budget, room)
         messages = body["messages"]
         tools = [tool["function"] for tool in body.get("tools") or []]
@@ -767,7 +769,7 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
         keep_reasoning: bool = False,
     ) -> dict[str, Any]:
         _ = max_response_bytes
-        turn = await self._chat_turn(body)
+        turn = await self._chat_turn(body, requested_model)
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
@@ -793,7 +795,7 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
         keep_reasoning: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
         _ = max_response_bytes
-        turn = await self._chat_turn(body)
+        turn = await self._chat_turn(body, requested_model)
         envelope = {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion.chunk",

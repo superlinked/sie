@@ -23,7 +23,24 @@ class _FakeTokenizer:
         self.encode_calls = 0
         self.decode_cleanup_calls: list[bool | None] = []
         self.clean_up_tokenization_spaces = clean_up_tokenization_spaces
-        self._tokens = ["<s>", "</s>", "hello", "world", "bonjour", " monde", " !", "!"]
+        self._tokens = [
+            "<s>",
+            "</s>",
+            "hello",
+            "world",
+            "bonjour",
+            " monde",
+            " !",
+            "!",
+            "&amp;",
+            "l",
+            " &apos;",
+            " ami",
+            " &amp;",
+            " co",
+            "<2fr>",
+            "<2en>",
+        ]
         self.eos_token_id = 1
 
     def encode(self, text: str, *, add_special_tokens: bool) -> list[int]:
@@ -59,8 +76,15 @@ class _FakeResult:
 
 
 class _FakeTranslator:
-    def __init__(self, *, block: threading.Event | None = None, append_end_token: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        block: threading.Event | None = None,
+        append_end_token: bool = False,
+        outputs: list[str] | None = None,
+    ) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.outputs = outputs or ["bonjour", " monde"]
         self.block = block
         self.append_end_token = append_end_token
         self.started = threading.Event()
@@ -73,7 +97,7 @@ class _FakeTranslator:
         if self.block is not None:
             self.block.wait(timeout=2)
         max_length = kwargs["max_decoding_length"]
-        outputs = ["bonjour", " monde"][:max_length]
+        outputs = self.outputs[:max_length]
         callback = kwargs["callback"]
         for batch_id in range(len(source)):
             for token in outputs:
@@ -117,6 +141,7 @@ def _adapter(
     native_batch_max_tokens: int = 64,
     native_batch_wait_ms: float = 5,
     max_pending_requests: int = 64,
+    unescape_moses_entities: bool = False,
 ) -> tuple[CTranslate2GenerationAdapter, _FakeTranslator, _FakeCTranslate2, _FakeTokenizer]:
     fake_translator = translator or _FakeTranslator()
     fake_module = _FakeCTranslate2(fake_translator)
@@ -129,6 +154,7 @@ def _adapter(
         native_batch_max_tokens=native_batch_max_tokens,
         native_batch_wait_ms=native_batch_wait_ms,
         max_pending_requests=max_pending_requests,
+        unescape_moses_entities=unescape_moses_entities,
     )
     adapter._translator = fake_translator
     adapter._tokenizer = tokenizer
@@ -330,6 +356,46 @@ def test_natural_end_token_at_max_length_reports_stop_without_counting_or_decodi
     assert "".join(chunk.text_delta for chunk in chunks) == "bonjour monde"
     assert chunks[-1].finish_reason == "stop"
     assert chunks[-1].completion_tokens == 2
+
+
+_ESCAPED_OUTPUT = ["l", " &apos;", " ami", " &amp;", " co"]
+
+
+@pytest.mark.parametrize(
+    ("unescape_moses_entities", "prompt", "expected"),
+    [
+        (False, "<2fr> hello world", "l &apos; ami &amp; co"),
+        (True, "<2fr> hello world", "l'ami & co"),
+        (True, "<2fr> hello &amp; world", "l'ami &amp; co"),
+        # Elision is only rejoined for a French target tag.
+        (True, "<2en> hello world", "l ' ami & co"),
+    ],
+)
+def test_output_unescapes_moses_entities_only_when_enabled(
+    tmp_path: Path,
+    unescape_moses_entities: bool,
+    prompt: str,
+    expected: str,
+) -> None:
+    adapter, _, _, _ = _adapter(
+        tmp_path,
+        translator=_FakeTranslator(outputs=_ESCAPED_OUTPUT),
+        unescape_moses_entities=unescape_moses_entities,
+    )
+
+    chunks = asyncio.run(_collect(adapter.generate(prompt, max_new_tokens=8, seed=0)))
+
+    assert "".join(chunk.text_delta for chunk in chunks) == expected
+    assert chunks[-1].completion_tokens == len(_ESCAPED_OUTPUT)
+
+
+def test_unescape_moses_entities_option_must_be_a_boolean(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unescape_moses_entities must be a boolean"):
+        CTranslate2GenerationAdapter(
+            artifact_path=tmp_path,
+            ct2_compute_type="float16",
+            unescape_moses_entities="yes",  # type: ignore[arg-type]
+        )
 
 
 def test_scheduler_batches_only_exact_compatible_requests(tmp_path: Path) -> None:

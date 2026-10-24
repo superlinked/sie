@@ -301,7 +301,7 @@ fn apply_gateway_openapi_overrides(value: &mut Value) {
             "type": "apiKey",
             "in": "header",
             "name": "x-api-key",
-            "description": "The same SIE token as bearerAuth, sent in the x-api-key header. When a request sends both, the Authorization header is used and x-api-key is ignored."
+            "description": "The same SIE token as bearerAuth, sent in the x-api-key header. When the first Authorization value carries a token, that token is used and x-api-key is ignored."
         }
     });
 
@@ -3587,7 +3587,7 @@ mod tests {
                 "type": "apiKey",
                 "in": "header",
                 "name": "x-api-key",
-                "description": "The same SIE token as bearerAuth, sent in the x-api-key header. When a request sends both, the Authorization header is used and x-api-key is ignored."
+                "description": "The same SIE token as bearerAuth, sent in the x-api-key header. When the first Authorization value carries a token, that token is used and x-api-key is ignored."
             })
         );
         assert_eq!(spec["paths"]["/healthz"]["get"]["security"], json!([]));

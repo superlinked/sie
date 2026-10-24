@@ -12,3 +12,5 @@ pub mod sse;
 pub mod systemone;
 #[cfg(test)]
 pub(crate) mod test_support;
+
+pub(crate) mod lora;

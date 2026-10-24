@@ -229,7 +229,7 @@ fn warn_on_repeated_authorization(req: &Request<Body>, warned: &AtomicBool) {
     if authorization_values_disagree(req.headers()) && !warned.swap(true, Ordering::Relaxed) {
         tracing::warn!(
             audit = "auth",
-            "A request repeated the Authorization header with different values. The gateway used the first value; from 0.13.0 it refuses such requests with 401. Send one Authorization header."
+            "A request repeated the Authorization header with different values. The gateway ignored the later Authorization values; from 0.13.0 it refuses such requests with 401. Send one Authorization header."
         );
     }
 }
@@ -303,10 +303,11 @@ pub enum RequestCredential {
 
 /// Read the request's token. The first `Authorization` value (`Bearer
 /// <token>` or a raw value, as [`extract_bearer_token`]) decides when it
-/// carries a token, and `x-api-key` is then ignored. Otherwise `x-api-key`
-/// decides, and its repeated values must carry the same token. Later
-/// `Authorization` values are ignored, as they always were; see
-/// [`authorization_values_disagree`].
+/// carries a token, and `x-api-key` is then ignored. A first value that
+/// cannot be read is refused, and `Bearer` alone is read as the raw token
+/// `Bearer`. When the first value is empty or blank, `x-api-key` decides, and
+/// its repeated values must carry the same token. Later `Authorization` values
+/// are ignored, as they always were; see [`authorization_values_disagree`].
 pub fn extract_request_credential(headers: &axum::http::HeaderMap) -> RequestCredential {
     let authorization = match headers.get("authorization").map(|value| value.to_str()) {
         None => RequestCredential::Missing,
@@ -346,14 +347,17 @@ fn header_credential<'a>(
 }
 
 /// Whether the request repeats `Authorization` with values that carry
-/// different tokens, or one that cannot be read. Until 0.13.0 the gateway
-/// uses the first value; from 0.13.0 such a request is refused.
+/// different tokens, with one that cannot be read, or with a token only after
+/// a first value that carries none. Until 0.13.0 the gateway ignores the later
+/// values; from 0.13.0 such a request is refused.
 pub fn authorization_values_disagree(headers: &axum::http::HeaderMap) -> bool {
-    headers.get_all("authorization").iter().nth(1).is_some()
-        && matches!(
-            header_credential(headers.get_all("authorization"), authorization_token),
-            RequestCredential::Conflicting | RequestCredential::Unreadable
-        )
+    let values = headers.get_all("authorization");
+    values.iter().nth(1).is_some()
+        && match header_credential(values, authorization_token) {
+            RequestCredential::Conflicting | RequestCredential::Unreadable => true,
+            RequestCredential::Token(_) => extract_bearer_token(headers).is_none(),
+            RequestCredential::Missing => false,
+        }
 }
 
 /// The masked request token for audit records, empty when the request
@@ -1027,6 +1031,18 @@ mod tests {
             extract_request_credential(&unreadable_first),
             RequestCredential::Unreadable
         );
+        unreadable_first.append("x-api-key", axum::http::HeaderValue::from_static("tok"));
+        assert_eq!(
+            extract_request_credential(&unreadable_first),
+            RequestCredential::Unreadable
+        );
+        assert_eq!(
+            extract_request_credential(&headers(&[
+                ("authorization", "Bearer "),
+                ("x-api-key", "tok")
+            ])),
+            RequestCredential::Token("Bearer".into())
+        );
     }
 
     #[test]
@@ -1037,6 +1053,13 @@ mod tests {
                 ("authorization", "Bearer other"),
             ],
             vec![("authorization", "Bearer tok"), ("authorization", "other")],
+            vec![("authorization", ""), ("authorization", "Bearer tok")],
+            vec![
+                ("authorization", " "),
+                ("authorization", "tok"),
+                ("authorization", "Bearer tok"),
+                ("x-api-key", "other"),
+            ],
         ] {
             assert!(authorization_values_disagree(&headers(&pairs)), "{pairs:?}");
         }
@@ -1048,6 +1071,7 @@ mod tests {
             vec![("authorization", "Bearer tok")],
             vec![("authorization", "Bearer tok"), ("authorization", "tok")],
             vec![("authorization", "Bearer tok"), ("authorization", "")],
+            vec![("authorization", ""), ("authorization", " ")],
             vec![("x-api-key", "tok"), ("x-api-key", "other")],
         ] {
             assert!(
@@ -1305,18 +1329,79 @@ mod tests {
             .unwrap()
     }
 
+    fn repeated_authorization_after_an_empty_one(x_api_keys: &[&str]) -> axum::http::HeaderMap {
+        let mut pairs = vec![
+            ("authorization", ""),
+            ("authorization", "Bearer later"),
+            ("authorization", "Bearer bogus"),
+        ];
+        pairs.extend(x_api_keys.iter().map(|key| ("x-api-key", *key)));
+        headers(&pairs)
+    }
+
+    fn encode_with(headers: axum::http::HeaderMap) -> Request<Body> {
+        let mut request = HttpRequest::builder()
+            .method(Method::POST)
+            .uri("/v1/encode/any")
+            .body(Body::empty())
+            .unwrap();
+        *request.headers_mut() = headers;
+        request
+    }
+
     #[tokio::test]
     async fn middleware_warns_only_for_a_repeat_that_passes_authentication() {
         use tracing::instrument::WithSubscriber;
 
-        for (refused, passing) in [
+        let empty_first = repeated_authorization_after_an_empty_one;
+        for (case, admin, refused, refusal, passing) in [
             (
+                "invalid token",
+                "admin",
                 repeated_authorization("/v1/encode/any", "bogus", "user"),
+                (StatusCode::UNAUTHORIZED, "Invalid token"),
                 repeated_authorization("/v1/encode/any", "user", "bogus"),
             ),
             (
+                "admin token required",
+                "admin",
                 repeated_authorization("/v1/pools", "user", "admin"),
+                (StatusCode::FORBIDDEN, "Admin token required"),
                 repeated_authorization("/v1/pools", "admin", "user"),
+            ),
+            (
+                "admin token not configured",
+                "",
+                repeated_authorization("/v1/pools", "admin", "user"),
+                (StatusCode::FORBIDDEN, "Admin token not configured"),
+                repeated_authorization("/v1/encode/any", "user", "bogus"),
+            ),
+            (
+                "missing x-api-key",
+                "admin",
+                encode_with(empty_first(&[])),
+                (
+                    StatusCode::UNAUTHORIZED,
+                    "Missing Authorization or x-api-key header",
+                ),
+                encode_with(empty_first(&["user"])),
+            ),
+            (
+                "unreadable x-api-key",
+                "admin",
+                encode_with(with_unreadable(empty_first(&[]), "x-api-key")),
+                (StatusCode::UNAUTHORIZED, "Invalid token"),
+                encode_with(empty_first(&["user"])),
+            ),
+            (
+                "conflicting x-api-key",
+                "admin",
+                encode_with(empty_first(&["user", "other"])),
+                (
+                    StatusCode::UNAUTHORIZED,
+                    "Repeated x-api-key headers carry different tokens",
+                ),
+                encode_with(empty_first(&["user"])),
             ),
         ] {
             let log = CapturedLog::default();
@@ -1326,17 +1411,23 @@ mod tests {
                     .with_ansi(false)
                     .finish(),
             );
-            let router = test_router(cfg_for_middleware("token", vec!["user"], "admin", false));
+            let router = test_router(cfg_for_middleware("token", vec!["user"], admin, false));
 
-            let status = router
+            let response = router
                 .clone()
                 .oneshot(refused)
                 .with_subscriber(dispatch.clone())
                 .await
-                .unwrap()
-                .status();
-            assert!(status.is_client_error(), "{status}");
-            assert_eq!(log.count("repeated the Authorization header"), 0);
+                .unwrap();
+            assert_eq!(response.status(), refusal.0, "{case}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&body).contains(refusal.1),
+                "{case}: {body:?}"
+            );
+            assert_eq!(log.count("repeated the Authorization header"), 0, "{case}");
 
             let status = router
                 .oneshot(passing)
@@ -1344,8 +1435,114 @@ mod tests {
                 .await
                 .unwrap()
                 .status();
-            assert_eq!(status, StatusCode::OK);
-            assert_eq!(log.count("repeated the Authorization header"), 1);
+            assert_eq!(status, StatusCode::OK, "{case}");
+            assert_eq!(log.count("repeated the Authorization header"), 1, "{case}");
+            assert_eq!(
+                log.count("The gateway ignored the later Authorization values"),
+                1,
+                "{case}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn middleware_lets_x_api_key_decide_after_an_empty_authorization_and_warns() {
+        use tracing::instrument::WithSubscriber;
+
+        let cfg = cfg_for_middleware(
+            "token",
+            vec!["user-token-aaaa", "key-token-bbbb"],
+            "admin-token-zzzz",
+            false,
+        );
+        for (path, pairs, expected, token, warnings) in [
+            (
+                "/v1/encode/any",
+                vec![
+                    ("authorization", ""),
+                    ("authorization", "Bearer user-token-aaaa"),
+                    ("x-api-key", "key-token-bbbb"),
+                ],
+                StatusCode::OK,
+                Some("key-token-bbbb"),
+                1,
+            ),
+            (
+                "/v1/encode/any",
+                vec![
+                    ("authorization", " "),
+                    ("authorization", "Bearer unknown-cccc"),
+                    ("x-api-key", "key-token-bbbb"),
+                ],
+                StatusCode::OK,
+                Some("key-token-bbbb"),
+                1,
+            ),
+            (
+                "/v1/pools",
+                vec![
+                    ("authorization", ""),
+                    ("authorization", "Bearer user-token-aaaa"),
+                    ("x-api-key", "admin-token-zzzz"),
+                ],
+                StatusCode::OK,
+                Some("admin-token-zzzz"),
+                1,
+            ),
+            (
+                "/v1/pools",
+                vec![
+                    ("authorization", ""),
+                    ("authorization", "Bearer admin-token-zzzz"),
+                    ("x-api-key", "user-token-aaaa"),
+                ],
+                StatusCode::FORBIDDEN,
+                Some("user-token-aaaa"),
+                0,
+            ),
+            (
+                "/v1/encode/any",
+                vec![
+                    ("authorization", ""),
+                    ("authorization", "Bearer user-token-aaaa"),
+                ],
+                StatusCode::UNAUTHORIZED,
+                None,
+                0,
+            ),
+        ] {
+            let request_headers = headers(&pairs);
+            assert_eq!(
+                request_token_id(&request_headers),
+                token.map(mask_token).unwrap_or_default(),
+                "{pairs:?}"
+            );
+            let log = CapturedLog::default();
+            let dispatch = tracing::Dispatch::new(
+                tracing_subscriber::fmt()
+                    .with_writer(log.clone())
+                    .with_ansi(false)
+                    .finish(),
+            );
+            let mut request = HttpRequest::builder()
+                .method(Method::POST)
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            *request.headers_mut() = request_headers;
+
+            let status = test_router(Arc::clone(&cfg))
+                .oneshot(request)
+                .with_subscriber(dispatch)
+                .await
+                .unwrap()
+                .status();
+            assert_eq!(status, expected, "{pairs:?}");
+            assert_eq!(
+                log.count("The gateway ignored the later Authorization values"),
+                warnings,
+                "{pairs:?}"
+            );
         }
     }
 

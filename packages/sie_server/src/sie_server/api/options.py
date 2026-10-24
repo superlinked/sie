@@ -4,6 +4,7 @@ from fastapi import HTTPException, status
 
 from sie_server.config.model import ModelConfig, ResolvedProfile
 from sie_server.core.runtime_options import (
+    InvalidLoraOptionError,
     InvalidOverflowPolicyError,
     UndeclaredLoraError,
     merge_runtime_options_with_profile,
@@ -51,6 +52,8 @@ def resolve_runtime_options_with_profile(
             invalid = "invalid_overflow_policy"
         elif isinstance(e, UndeclaredLoraError):
             invalid = "undeclared_lora"
+        elif isinstance(e, InvalidLoraOptionError):
+            invalid = "invalid_lora"
         else:
             invalid = "invalid_profile"
         span.set_attribute("error", invalid)

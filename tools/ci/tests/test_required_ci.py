@@ -100,8 +100,8 @@ def test_mise_workflow_setups_pin_concrete_versions():
                     )
 
 
-def test_mise_bootstrap_serializes_the_complete_toolset():
-    # Partial installs defer the other tools to `mise exec`, outside install_args.
+def test_mise_bootstrap_serializes_required_toolsets():
+    # Unqualified `mise exec` installs missing tools outside install_args.
     for path in sorted((ROOT / ".github/workflows").glob("*.y*ml")):
         workflow = yaml.safe_load(path.read_text())
         for name, job in workflow["jobs"].items():
@@ -110,9 +110,34 @@ def test_mise_bootstrap_serializes_the_complete_toolset():
                     continue
                 inputs = step.get("with", {})
                 if inputs.get("install", True) is not False:
-                    assert shlex.split(inputs.get("install_args", "")) == ["--jobs=1"], (
-                        f"{path.name}: {name} must serialize the full tool install to avoid Node GPG races"
+                    expected = ["--jobs=1"]
+                    if path.name == "ci.yml" and name == "policy":
+                        expected += ["python", "uv", "github:rhysd/actionlint"]
+                    assert shlex.split(inputs.get("install_args", "")) == expected, (
+                        f"{path.name}: {name} must serialize its tool install to avoid Node GPG races"
                     )
+
+
+def test_policy_exec_does_not_lazily_install_unrelated_tools():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    policy = workflow["jobs"]["policy"]
+    commands = [shlex.split(step["run"]) for step in policy["steps"] if "run" in step]
+    prefix = ["mise", "exec", "--no-deps", "python", "uv", "github:rhysd/actionlint", "--"]
+    assert len(commands) == 3
+    assert all(command[: len(prefix)] == prefix for command in commands)
+    assert commands[0][len(prefix) :] == [
+        "uv",
+        "run",
+        "--frozen",
+        "--project",
+        ".",
+        "pytest",
+        "-q",
+        "tools/ci/tests/test_required_ci.py",
+        "tools/ci/tests/test_public_tree.py",
+    ]
+    assert commands[1][len(prefix) :] == ["python", "tools/ci/check_public_tree.py"]
+    assert commands[2][len(prefix)] == "actionlint"
 
 
 @pytest.mark.parametrize("install_status", [0, 1])

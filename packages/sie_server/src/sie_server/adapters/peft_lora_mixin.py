@@ -18,11 +18,11 @@ import gc
 import hashlib
 import logging
 import re
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from huggingface_hub import snapshot_download
 from safetensors import safe_open
+
+from sie_server.adapters._lora_source import resolve_lora_source
 
 if TYPE_CHECKING:
     from collections.abc import Collection
@@ -36,7 +36,6 @@ logger = logging.getLogger(__name__)
 # OLoRA, LoftQ and LoRA-GA instead rewrite the base layer's weights.
 _BASE_PRESERVING_INITIALIZERS = ("gaussian", "eva", "orthogonal")
 
-_ADAPTER_CONFIG_FILE = "adapter_config.json"
 _ADAPTER_WEIGHTS_FILE = "adapter_model.safetensors"
 
 # The tensor names PEFT saves for a LoRA's own parameters. PEFT loads any
@@ -219,9 +218,10 @@ class PEFTLoRAMixin:
     def fetch_lora(self, lora_path: str, revision: str | None = None) -> str:
         """Resolve a LoRA to one local directory, and refuse it there unless it is safe to attach.
 
-        A Hub id is downloaded once, at one commit, with only its
-        ``adapter_config.json`` and ``adapter_model.safetensors``; a local
-        directory is used as it is. :meth:`load_lora` then reads both files
+        A Hub id uses the configured local/cluster cache and allowed Hub
+        fallback at one commit; a local directory is used as it is. The
+        required files are ``adapter_config.json`` and
+        ``adapter_model.safetensors``. :meth:`load_lora` reads both files
         from the returned directory. Network and disk I/O happen here, so a
         caller can run this outside inference.
 
@@ -238,21 +238,13 @@ class PEFTLoRAMixin:
                 the adapter ships no ``adapter_model.safetensors``, or its
                 weights file has a tensor that is not a LoRA parameter.
         """
-        directory = Path(lora_path)
-        if not directory.is_dir():
-            directory = Path(
-                snapshot_download(
-                    lora_path,
-                    revision=revision,
-                    allow_patterns=[_ADAPTER_CONFIG_FILE, _ADAPTER_WEIGHTS_FILE],
-                )
-            )
+        directory = resolve_lora_source(lora_path, revision)
         try:
             from peft import PeftConfig
         except ImportError as e:
             msg = "PEFT is required for LoRA support. Install with: pip install peft"
             raise RuntimeError(msg) from e
-        self._check_lora_config(lora_path, PeftConfig.from_pretrained(str(directory)))
+        self._check_lora_config(lora_path, PeftConfig.from_pretrained(str(directory), local_files_only=True))
         weights = directory / _ADAPTER_WEIGHTS_FILE
         if not weights.is_file():
             msg = f"LoRA '{lora_path}' ships no {_ADAPTER_WEIGHTS_FILE}; adapter weights in other formats are refused."

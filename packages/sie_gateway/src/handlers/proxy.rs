@@ -11764,6 +11764,7 @@ pub(crate) fn undeclared_lora_option(
 ) -> Option<(&'static str, Value)> {
     let options = options?.as_object()?;
     let requested: Vec<(&'static str, bool, &Value)> = [
+        ("options.lora_adapter", "lora_adapter", true),
         ("options.lora", "lora", true),
         ("options.lora_id", "lora_id", false),
     ]
@@ -13348,6 +13349,7 @@ fn work_params_from_json(
 ) -> Result<publisher::WorkParams, QueueParseError> {
     if endpoint == "score" {
         validate_score_grammar_json(parsed)?;
+        super::lora::validate_options(parsed.get("options"))?;
         return Ok(publisher::WorkParams {
             require_execution_authority_v1: false,
             output_types: None,
@@ -13387,6 +13389,7 @@ fn work_params_from_json(
         validate_extract_params(nested_params.cloned().map(json_to_rmpv).as_ref())?;
     }
     let field = |key: &str| nested_params.and_then(|params| params.get(key));
+    super::lora::validate_options(field("options"))?;
     let options = if endpoint == "encode" {
         encode_options_with_output_dtype(field("options").cloned(), field("output_dtype").cloned())
     } else {
@@ -14259,6 +14262,7 @@ fn work_params_from_rmpv(
 ) -> Result<publisher::WorkParams, QueueParseError> {
     if endpoint == "score" {
         validate_score_grammar_rmpv(parsed)?;
+        super::lora::validate_options_rmpv(rmpv_map_get(parsed, "options"))?;
         return Ok(publisher::WorkParams {
             require_execution_authority_v1: false,
             output_types: None,
@@ -14305,6 +14309,7 @@ fn work_params_from_rmpv(
     });
     let field = |key: &str| -> Option<&rmpv::Value> { nested.and_then(|m| rmpv_map_get(m, key)) };
     let options_rmpv = field("options");
+    super::lora::validate_options_rmpv(options_rmpv)?;
     let options = if endpoint == "encode" {
         encode_options_with_output_dtype(
             options_rmpv.map(rmpv_to_json_owned),
@@ -29629,13 +29634,29 @@ profiles:
             .expect("model entry");
 
         for (profile, name, keys) in [
-            ("banking", "org/banking-lora", &["lora", "lora_id"][..]),
-            ("served", "org/legal-lora", &["lora", "lora_id"][..]),
-            ("served", "org/pinned-lora", &["lora", "lora_id"][..]),
-            ("listed", "org/listed-lora", &["lora", "lora_id"][..]),
-            ("tuned", "org/tuned-lora", &["lora"][..]),
-            ("served", "legal", &["lora"][..]),
-            ("served", "pinned", &["lora"][..]),
+            (
+                "banking",
+                "org/banking-lora",
+                &["lora_adapter", "lora", "lora_id"][..],
+            ),
+            (
+                "served",
+                "org/legal-lora",
+                &["lora_adapter", "lora", "lora_id"][..],
+            ),
+            (
+                "served",
+                "org/pinned-lora",
+                &["lora_adapter", "lora", "lora_id"][..],
+            ),
+            (
+                "listed",
+                "org/listed-lora",
+                &["lora_adapter", "lora", "lora_id"][..],
+            ),
+            ("tuned", "org/tuned-lora", &["lora_adapter", "lora"][..]),
+            ("served", "legal", &["lora_adapter", "lora"][..]),
+            ("served", "pinned", &["lora_adapter", "lora"][..]),
         ] {
             for key in keys {
                 let options = json!({ "profile": profile, *key: name });
@@ -29705,6 +29726,122 @@ profiles:
                 "{options}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn conflicting_lora_selectors_fail_before_dispatch_in_json_and_msgpack() {
+        let gateway = TestGateway::new(&[LORA_MODEL]).await;
+        gateway.add_worker("local-1", LOCAL_LANE, &[]).await;
+        for endpoint in ["encode", "extract", "score"] {
+            let options = json!({"profile": "served", "lora_adapter": null, "lora": "legal"});
+            let body = if endpoint == "score" {
+                json!({"query": {"text": "q"}, "items": [{"text": "x"}], "options": options})
+            } else {
+                json!({"items": [{"text": "x"}], "params": {"options": options}})
+            };
+            for msgpack in [false, true] {
+                let request = Request::builder()
+                    .uri(format!("/v1/{endpoint}/acme/lora"))
+                    .header(
+                        "content-type",
+                        if msgpack {
+                            "application/msgpack"
+                        } else {
+                            "application/json"
+                        },
+                    )
+                    .body(Body::from(if msgpack {
+                        rmp_serde::to_vec_named(&body).unwrap()
+                    } else {
+                        serde_json::to_vec(&body).unwrap()
+                    }))
+                    .unwrap();
+                let response =
+                    proxy_request(State(Arc::clone(&gateway.state)), request, endpoint).await;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::BAD_REQUEST,
+                    "{endpoint}/{msgpack}"
+                );
+            }
+        }
+        assert!(gateway.dispatcher.dispatched().is_empty());
+    }
+
+    #[tokio::test]
+    async fn binary_lora_selector_keys_fail_before_dispatch_with_supported_ancestors() {
+        let gateway = TestGateway::new(&[LORA_MODEL]).await;
+        gateway.add_worker("local-1", LOCAL_LANE, &[]).await;
+        let binary = |key: &str| rmpv::Value::Binary(key.as_bytes().to_vec());
+        for endpoint in ["encode", "extract", "score"] {
+            for field in crate::handlers::lora::FIELDS {
+                for invalid in [
+                    vec![(binary(field), rmpv::Value::F64(f64::NAN))],
+                    vec![(binary(field), " ".into())],
+                    vec![
+                        (field.into(), "legal".into()),
+                        (binary(field), rmpv::Value::Nil),
+                    ],
+                ] {
+                    let mut options = vec![("profile".into(), "served".into())];
+                    options.extend(invalid);
+                    let options = rmpv::Value::Map(options);
+                    let mut body = vec![(
+                        "items".into(),
+                        rmpv::Value::Array(vec![rmpv::Value::Map(vec![(
+                            "text".into(),
+                            "x".into(),
+                        )])]),
+                    )];
+                    if endpoint == "score" {
+                        body.push((
+                            "query".into(),
+                            rmpv::Value::Map(vec![("text".into(), "q".into())]),
+                        ));
+                        // Score rejects binary map keys before LoRA validation.
+                        body.push(("options".into(), options));
+                    } else {
+                        body.push((
+                            binary("params"),
+                            rmpv::Value::Map(vec![
+                                (binary("options"), options),
+                                ("labels".into(), rmpv::Value::Array(vec!["a".into()])),
+                            ]),
+                        ));
+                    }
+                    let mut encoded = Vec::new();
+                    rmpv::encode::write_value(&mut encoded, &rmpv::Value::Map(body)).unwrap();
+                    let request = Request::builder()
+                        .uri(format!("/v1/{endpoint}/acme/lora"))
+                        .header("content-type", "application/msgpack")
+                        .body(Body::from(encoded))
+                        .unwrap();
+                    let response =
+                        proxy_request(State(Arc::clone(&gateway.state)), request, endpoint).await;
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::BAD_REQUEST,
+                        "{endpoint}/{field}"
+                    );
+                    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+                    let value: Value = serde_json::from_slice(&body).unwrap();
+                    let expected = if endpoint == "score" {
+                        "'options' field names must be MessagePack strings"
+                    } else {
+                        "lora"
+                    };
+                    assert!(
+                        value["detail"]["message"]
+                            .as_str()
+                            .is_some_and(|message| message
+                                .to_ascii_lowercase()
+                                .contains(&expected.to_ascii_lowercase())),
+                        "{endpoint}/{field}: {value}"
+                    );
+                }
+            }
+        }
+        assert!(gateway.dispatcher.dispatched().is_empty());
     }
 
     #[tokio::test]

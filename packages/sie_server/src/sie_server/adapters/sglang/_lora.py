@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import requests
-from huggingface_hub import snapshot_download
 from safetensors import safe_open
 
 from sie_server.adapters._generation_base import (
@@ -22,6 +21,7 @@ from sie_server.adapters._generation_base import (
     GenerationInvalidRequestError,
     GenerationLoraLoadingError,
 )
+from sie_server.adapters._lora_source import resolve_lora_source
 from sie_server.adapters.lora import LoraRuntimeConfig, LoraStateUncertainError, LoraUnavailableError
 from sie_server.adapters.peft_lora_mixin import is_lora_weight_key
 
@@ -222,9 +222,7 @@ class SGLangLoraManager:
                 raise RuntimeError("The LoRA engine was unloaded during fetch")
             if source in self._snapshots:
                 return self._snapshots[source].name
-        directory = Path(source)
-        if not directory.is_dir():
-            directory = Path(snapshot_download(source, revision=declared_revision or revision, allow_patterns=_FILES))
+        directory = resolve_lora_source(source, declared_revision or revision)
         config = json.loads((directory / _FILES[0]).read_text())
         if not isinstance(config, dict) or config.get("peft_type") != "LORA":
             raise ValueError("SGLang requires a PEFT LoRA adapter")

@@ -3996,3 +3996,58 @@ def test_worker_auth_off_preserves_existing_image_compatibility(tmp_path: Path, 
     assert "SIE_AUTH_TOKEN" not in env
     assert WORKER_AUTH_TEST_JOB not in hook_jobs(docs)
     assert worker_auth_requirements(docs) == {}
+
+
+EXTRA_INIT_CONTAINER = {
+    "name": "wait-for-dependency",
+    "image": "busybox:1.37.0",
+    "command": ["true"],
+    "volumeMounts": [{"name": "extra-config", "mountPath": "/etc/extra"}],
+}
+EXTRA_VOLUME = {"name": "extra-config", "configMap": {"name": "my-extra-config"}}
+
+
+def extra_init_values(**common: object) -> dict:
+    return {"workers": {"common": common, "pools": {"l4": {"enabled": True}}}}
+
+
+def test_workers_render_no_init_containers_by_default(tmp_path: Path) -> None:
+    for statefulset in worker_statefulsets(tmp_path, L4_POOL):
+        pod = statefulset["spec"]["template"]["spec"]
+        assert "initContainers" not in pod
+        assert "extra-config" not in {volume["name"] for volume in pod["volumes"]}
+
+
+def test_extra_init_containers_and_volumes_reach_every_worker(tmp_path: Path) -> None:
+    values = extra_init_values(extraInitContainers=[EXTRA_INIT_CONTAINER], extraVolumes=[EXTRA_VOLUME])
+    statefulsets = worker_statefulsets(tmp_path, values)
+    assert statefulsets
+    for statefulset in statefulsets:
+        pod = statefulset["spec"]["template"]["spec"]
+        assert pod["initContainers"] == [EXTRA_INIT_CONTAINER]
+        volumes = {volume["name"]: volume for volume in pod["volumes"]}
+        assert volumes["extra-config"] == EXTRA_VOLUME
+        assert pod["containers"][0]["name"] == "worker"
+
+
+def test_extra_init_containers_and_volumes_skip_remote_lanes(tmp_path: Path) -> None:
+    values = remote_pool_values(l4={"enabled": True})
+    values["workers"]["common"] = {"extraInitContainers": [EXTRA_INIT_CONTAINER], "extraVolumes": [EXTRA_VOLUME]}
+    pods = {
+        doc["metadata"]["name"]: doc["spec"]["template"]["spec"]
+        for doc in rendered_documents(tmp_path, values)
+        if doc["kind"] == "StatefulSet" and "-worker-" in doc["metadata"]["name"]
+    }
+    remote = pods.pop(REMOTE_WORKER[1])
+    assert "initContainers" not in remote
+    assert "extra-config" not in {volume["name"] for volume in remote["volumes"]}
+    assert pods
+    for pod in pods.values():
+        assert pod["initContainers"] == [EXTRA_INIT_CONTAINER]
+
+
+@pytest.mark.parametrize("name", ["shm", "model-cache", "sie-ipc", "upstreams", "equivalence", "kernel-cache"])
+def test_extra_volumes_cannot_reuse_a_chart_worker_volume_name(tmp_path: Path, name: str) -> None:
+    result = render_workers(tmp_path, extra_init_values(extraVolumes=[{"name": name, "emptyDir": {}}]))
+    assert result.returncode != 0
+    assert f'workers.common.extraVolumes: "{name}" is a chart-owned worker volume name' in result.stderr

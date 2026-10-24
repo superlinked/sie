@@ -28,6 +28,7 @@ from sie_server.adapters._generation_base import (
 )
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
+from sie_server.adapters.ctranslate2._moses_entities import unescape_moses_entities as _unescape_moses_entities
 from sie_server.types.grammar import GrammarSpec
 from sie_server.types.inputs import ImageInput, VideoInput
 
@@ -109,6 +110,7 @@ class _DecodeOptions:
 
 @dataclass(frozen=True, slots=True)
 class _PreparedGeneration:
+    prompt: str
     source_tokens: tuple[str, ...]
     prompt_tokens: int
     options: _DecodeOptions
@@ -171,6 +173,7 @@ class CTranslate2GenerationAdapter(GenerationAdapter):
         native_batch_max_tokens: int = 8192,
         native_batch_wait_ms: float = 2.0,
         max_pending_requests: int = 64,
+        unescape_moses_entities: bool = False,
     ) -> None:
         artifact = Path(artifact_path)
         if not str(artifact_path):
@@ -186,6 +189,11 @@ class CTranslate2GenerationAdapter(GenerationAdapter):
         self._native_batch_max_tokens = _positive_int("native_batch_max_tokens", native_batch_max_tokens)
         self._native_batch_wait_s = _non_negative_float("native_batch_wait_ms", native_batch_wait_ms) / 1000
         self._max_pending_requests = _positive_int("max_pending_requests", max_pending_requests)
+        if not isinstance(unescape_moses_entities, bool):
+            raise ValueError("unescape_moses_entities must be a boolean")
+        # For models that emit Moses-escaped entities such as ``&apos;`` in their
+        # output; see ``_moses_entities``.
+        self._unescape_moses_entities = unescape_moses_entities
 
         self._translator: Any | None = None
         self._tokenizer: Any | None = None
@@ -433,6 +441,7 @@ class CTranslate2GenerationAdapter(GenerationAdapter):
                 f"prompt token count {prompt_tokens} exceeds native_batch_max_tokens={self._native_batch_max_tokens}"
             )
         return _PreparedGeneration(
+            prompt=prompt,
             source_tokens=source_tokens,
             prompt_tokens=prompt_tokens,
             options=_DecodeOptions(
@@ -606,6 +615,8 @@ class CTranslate2GenerationAdapter(GenerationAdapter):
             ended = bool(result_tokens and result_tokens[-1] in end_tokens)
             output_tokens = result_tokens[:-1] if ended else result_tokens
             text = self._decode_tokens(output_tokens)
+            if self._unescape_moses_entities:
+                text = _unescape_moses_entities(text, request.prepared.prompt)
             completion_tokens = len(output_tokens)
             finish_reason: Literal["stop", "length"] = "stop" if ended else "length"
             request.loop.call_soon_threadsafe(request.complete, text, completion_tokens, finish_reason)

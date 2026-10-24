@@ -1342,6 +1342,42 @@
                       }
                     ],
                     "title": "Safety Identifier"
+                  },
+                  "lora_adapter": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "SIE extension: declared LoRA name or source; null selects base, omission keeps the profile default.",
+                    "title": "Lora Adapter"
+                  },
+                  "lora": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Compatibility alias for lora_adapter; supplied aliases must agree.",
+                    "title": "Lora"
+                  },
+                  "lora_id": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Compatibility alias restricted to a declared source id; supplied aliases must agree.",
+                    "title": "Lora Id"
                   }
                 },
                 "required": [

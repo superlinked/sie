@@ -8,6 +8,7 @@
  */
 
 import { MalformedChunkError, RequestError } from "./errors.js";
+import { parseCreditsDecimal } from "./internal/parsing.js";
 import { unpackMessage } from "./msgpack.js";
 
 /** Job lifecycle state (queued → running → terminal). */
@@ -101,6 +102,7 @@ export function requireConnectorIdempotencyKey(key: string | null | undefined): 
 /** The preflight reservation echoed on submit / status. */
 export interface JobPreflight {
   estimated_credits?: number;
+  estimated_credits_decimal?: string;
   estimate_basis?: string;
 }
 
@@ -241,6 +243,11 @@ export interface JobChunk {
    */
   credits_charged?: number | null;
   /**
+   * `credits_charged` with up to six decimals, such as `"0.140000"`, or `null`
+   * when the chunk did not report it.
+   */
+  credits_charged_decimal?: string | null;
+  /**
    * Immutable rate-book version that rated `credits_charged`. Present exactly
    * when `credits_charged` is.
    */
@@ -295,6 +302,7 @@ export interface JobStatus {
   completed_items?: number;
   preflight?: JobPreflight;
   settled_credits?: number;
+  settled_credits_decimal?: string;
   created_at?: number;
   finished_at?: number | null;
   output?: { kind?: string; chunks?: JobChunk[] };
@@ -340,6 +348,7 @@ export interface JobResults {
   state: JobState | undefined;
   total_items: number | undefined;
   settled_credits: number | undefined;
+  settled_credits_decimal: string | undefined;
   chunks: JobChunk[];
   retrieved: number;
   dims: number | null;
@@ -670,6 +679,7 @@ export function jobChunks(jobDoc: JobStatus): JobChunk[] {
     ref: chunk.ref,
     units: chunk.units,
     credits_charged: chunk.credits_charged,
+    credits_charged_decimal: parseCreditsDecimal(chunk.credits_charged_decimal) ?? null,
     rate_book_version: chunk.rate_book_version,
     error: chunk.error ?? null,
   }));

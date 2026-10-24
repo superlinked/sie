@@ -444,6 +444,53 @@ describe("client.jobs", () => {
     expect(Array.from(results.items[0].dense as number[])).toEqual([0.1, 0.2, 0.3, 0.4]);
   });
 
+  it("results carry decimal credits when reported and leave them absent otherwise", async () => {
+    const chunkBytes = packMessage([
+      {
+        success: true,
+        id: "0",
+        units: { input_tokens: 5 },
+        result_msgpack: packMessage({ dense: { dims: 2, values: [0.1, 0.2] } }),
+      },
+    ]);
+    for (const [settled, charged] of [
+      ["5.140000", "5.140000"],
+      [undefined, undefined],
+    ] as const) {
+      const job = {
+        id: "job-1",
+        state: "succeeded",
+        total_items: 1,
+        settled_credits: 5,
+        ...(settled !== undefined ? { settled_credits_decimal: settled } : {}),
+        output: {
+          kind: "refs",
+          chunks: [
+            {
+              seq: 0,
+              items: 1,
+              state: "succeeded",
+              ref: "http://refs.local/c0",
+              credits_charged: 5,
+              rate_book_version: "v1",
+              ...(charged !== undefined ? { credits_charged_decimal: charged } : {}),
+            },
+          ],
+        },
+      };
+      mockFetch
+        .mockResolvedValueOnce(jsonResponse(job))
+        .mockResolvedValueOnce(new Response(chunkBytes, { status: 200 }));
+
+      const client = new SIEClient("http://gw:8080");
+      const results = await client.jobs.results("job-1");
+      expect(results.settled_credits).toBe(5);
+      expect(results.settled_credits_decimal).toBe(settled);
+      expect(results.chunks[0].credits_charged).toBe(5);
+      expect(results.chunks[0].credits_charged_decimal).toBe(charged ?? null);
+    }
+  });
+
   it("results refreshes the job after a replica miss and discards partial items", async () => {
     const chunk = (id: string) =>
       packMessage([

@@ -497,7 +497,7 @@ async def _create_embeddings(
         except HTTPException as error:
             raise _openai_state_error(error) from error
 
-        lora = options.get("lora_id")
+        lora = options.get("lora")
         if lora is not None:
             await ModelStateChecker(registry, route.key, span).ensure_lora_loaded(lora, None)
             options["lora"] = lora

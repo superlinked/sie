@@ -9,6 +9,8 @@ import torch
 from fastapi import FastAPI
 
 from sie_server import __version__
+from sie_server.api.anthropic_messages import AnthropicErrorEnvelopeMiddleware
+from sie_server.api.anthropic_messages import router as anthropic_messages_router
 from sie_server.api.decisions import router as decisions_router
 from sie_server.api.encode import router as encode_router
 from sie_server.api.extract import router as extract_router
@@ -99,6 +101,7 @@ class AppFactory:
             app.add_middleware(ServerAuthMiddleware, tokens=server_tokens(os.environ))
         elif config.bind_host and is_loopback_host(config.bind_host):
             app.add_middleware(LoopbackHostMiddleware, allowed_hosts=loopback_host_allowlist(config.bind_host))
+        app.add_middleware(AnthropicErrorEnvelopeMiddleware)
 
         install_upstreams(
             load_upstreams(config.upstreams_file) if config.upstreams_file else {},
@@ -139,6 +142,7 @@ class AppFactory:
         # Local-only convenience (single-node/dev); intentionally NOT in the published
         # openapi.json — see cli.openapi_export. The Rust gateway is the prod API authority.
         app.include_router(openai_local_router)  # local /v1/chat/completions + /v1/rerank
+        app.include_router(anthropic_messages_router)  # local /v1/messages over /v1/chat/completions
         setup_custom_openapi_schema(app)
 
         return app
@@ -412,18 +416,19 @@ class AppFactory:
 
     @staticmethod
     def _configure_cuda_defaults() -> None:
-        """Enable TF32 and cudnn autotuning for faster matmuls on Ampere+ GPUs.
+        """Configure process-wide CUDA math policy before loading models.
 
-        TF32 uses 19-bit precision for float32 matmuls — negligible accuracy
-        impact for inference, but up to 3x faster on A100/L4/H100.
+        TF32 accelerates float32 operations but can change model scores.
+        SIE_DISABLE_TF32 opts out without changing model compute precision.
         cudnn.benchmark auto-tunes convolution algorithms for static input shapes.
         """
         if not torch.cuda.is_available():
             return
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+        allow_tf32 = not _env_flag("SIE_DISABLE_TF32")
+        torch.backends.cuda.matmul.allow_tf32 = allow_tf32
+        torch.backends.cudnn.allow_tf32 = allow_tf32
         torch.backends.cudnn.benchmark = True
-        logger.info("CUDA defaults: TF32 enabled, cudnn.benchmark enabled")
+        logger.info("CUDA defaults: TF32 %s, cudnn.benchmark enabled", "enabled" if allow_tf32 else "disabled")
 
     @staticmethod
     def _configure_sdpa_backends() -> None:

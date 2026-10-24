@@ -24,11 +24,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from sie_server.config.model import lora_entry_ref
 from sie_server.types.inputs import InvalidInputError
+from sie_server.types.lora import (
+    LORA_SELECTION_FIELDS,
+    InvalidLoraSelectionError,
+    LoraSelection,
+    split_lora_selection,
+)
 from sie_server.types.overflow_policy import VALID_OVERFLOW_POLICIES
 
 if TYPE_CHECKING:
@@ -71,7 +78,16 @@ def check_overflow_policy(options: dict[str, Any]) -> None:
 
 
 class UndeclaredLoraError(InvalidInputError):
-    """``options.lora`` or ``options.lora_id`` names a LoRA the model's configuration does not declare."""
+    """A request selector names a LoRA the model's configuration does not declare."""
+
+
+class InvalidLoraOptionError(InvalidInputError):
+    """A request's LoRA aliases have invalid or conflicting values."""
+
+
+def _profile_lora_aliases(resolved: ResolvedProfile) -> dict[str, str]:
+    paths = resolved.loadtime.get("lora_paths")
+    return {name: lora_entry_ref(ref)[0] for name, ref in paths.items() if ref} if isinstance(paths, Mapping) else {}
 
 
 def _check_declared_lora(
@@ -87,15 +103,57 @@ def _check_declared_lora(
     Raises:
         UndeclaredLoraError: Either option is not null and not one of those names.
     """
-    for key, declared in (("lora_id", resolved.lora_ids), ("lora", resolved.lora_names)):
+    ids = resolved.lora_ids()
+    names = ids | _profile_lora_aliases(resolved).keys()
+    for key, declared in (
+        ("lora_id", ids),
+        ("lora", names),
+        ("lora_adapter", names),
+    ):
         value = request_options.get(key)
         if value is None:
             continue
-        if not isinstance(value, str) or value not in declared():
+        if not isinstance(value, str) or value not in declared:
             raise UndeclaredLoraError(
                 f"'options.{key}' must name a LoRA adapter that profile '{profile_name}' of model "
                 f"'{config.sie_id}' declares; {value!r} is not one of them."
             )
+
+
+def _profile_lora_selection(resolved: ResolvedProfile) -> LoraSelection:
+    """Compare profile aliases by source while preserving the served selector.
+
+    Unlike request aliases, a profile's legacy ``lora_id`` also declares a
+    source to load. ``lora_adapter`` / ``lora`` select that source by served
+    name, or explicitly select the base model with null.
+    """
+    selections = [
+        split_lora_selection({field: resolved.runtime[field]})[0]
+        for field in LORA_SELECTION_FIELDS
+        if field in resolved.runtime
+    ]
+    if not selections:
+        return LoraSelection(provided=False, value=None, fields=())
+
+    aliases = _profile_lora_aliases(resolved)
+    declared = resolved.lora_ids() | aliases.keys()
+    sources: list[str | None] = []
+    for selection in selections:
+        value = selection.value
+        field = selection.fields[0]
+        if value is not None and field != "lora_id" and value not in declared:
+            raise InvalidLoraSelectionError(f"Profile '{field}' must select a declared LoRA adapter")
+        sources.append(aliases.get(value, value) if value is not None and field != "lora_id" else value)
+
+    selected = selections[0]
+    for selection, source in zip(selections[1:], sources[1:], strict=True):
+        # A source declaration is not a competing base selection; likewise,
+        # a declared source must not override an explicit base default.
+        if selection.fields == ("lora_id",) and (selected.value is None or selection.value is None):
+            continue
+        if source != sources[0]:
+            raise InvalidLoraSelectionError("Profile LoRA defaults must resolve to the same declared adapter")
+    return selected
 
 
 def merge_runtime_options_with_profile(
@@ -110,10 +168,21 @@ def merge_runtime_options_with_profile(
             ``overflow_policy`` is not a valid policy name.
     """
     resolved = _resolve_profile_or_raise(config, request_options)
-    merged: dict[str, Any] = dict(resolved.runtime)
-    if request_options:
-        _check_declared_lora(config, resolved, request_options.get("profile") or "default", request_options)
-        merged |= {key: value for key, value in request_options.items() if key != "profile"}
+    try:
+        selection, request = split_lora_selection(request_options or {})
+    except InvalidLoraSelectionError as exc:
+        raise InvalidLoraOptionError(str(exc)) from exc
+    merged = {key: value for key, value in resolved.runtime.items() if key not in LORA_SELECTION_FIELDS}
+    if selection.provided:
+        _check_declared_lora(config, resolved, request.get("profile") or "default", request_options or {})
+    else:
+        try:
+            selection = _profile_lora_selection(resolved)
+        except InvalidLoraSelectionError as exc:
+            raise InvalidLoraOptionError(str(exc)) from exc
+    merged |= {key: value for key, value in request.items() if key != "profile"}
+    if selection.provided:
+        merged["lora"] = selection.value
     check_overflow_policy(merged)
     return merged, resolved
 

@@ -36,7 +36,12 @@ and the legacy representation for mixed-version compatibility.
 The local socket is an access-controlled process boundary, not an
 authentication protocol. The listener restricts its socket node, validates a
 domain-separated request digest and route identity, caps frame/media/request
-sizes, and rejects unresolved payload references.
+sizes, and rejects unresolved payload references. The socket node's mode
+(`0600`) is the access control, and on macOS it does not remove an entry that
+allows access, which a socket can inherit from its directory's access control
+list. On macOS, put `SIE_SIDECAR_LOCAL_SOCKET` in a directory whose access
+control list has no entry that allows access (`ls -led <directory>` lists the
+entries).
 
 NATS credentials come from `SIE_NATS_USER` and `SIE_NATS_PASSWORD`, which are
 read from the environment only and must be set together. Credentials embedded

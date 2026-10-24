@@ -923,11 +923,12 @@ class TestEncodeLoraRouting:
         # The LoRA ensure-loaded path must have been invoked with the resolved id.
         registry.ensure_lora_loaded_async.assert_called_once_with("test-model", "org/test-lora")
 
-        # The adapter must receive options carrying both lora_id (legacy / profile
-        # surface) and lora (worker-batcher routing key) with matching values.
+        # Profile aliases are consumed; the adapter receives the normalized
+        # worker-batcher routing key without a competing legacy selection.
         assert adapter.encode.call_count == 1
         forwarded_options = adapter.encode.call_args.kwargs["options"]
-        assert forwarded_options.get("lora_id") == "org/test-lora"
+        assert "lora_id" not in forwarded_options
+        assert "lora_adapter" not in forwarded_options
         assert forwarded_options.get("lora") == "org/test-lora", (
             "options['lora'] must be set so the worker batcher routes to the "
             "LoRA-specific batch instead of base model weights (issue #94)."

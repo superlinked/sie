@@ -49,6 +49,7 @@ from sie_server.core.worker.handlers.extract import ExtractHandler
 from sie_server.observability.tracing import tracer
 from sie_server.observability.worker_telemetry import worker_telemetry, worker_telemetry_enabled
 from sie_server.types.inputs import Item, item_size_error
+from sie_server.types.lora import LORA_SELECTION_FIELDS
 from sie_server.types.responses import ErrorCode
 
 if TYPE_CHECKING:
@@ -63,8 +64,11 @@ router = APIRouter(prefix="/v1", tags=["systemone"], dependencies=[Depends(remot
 DECISION_ADAPTERS = frozenset(
     {
         "sie_server.adapters.gliner2.decide:GLiNER2DecideAdapter",
+        "sie_server.adapters.gliner2.decide_lora:GLiNER2DecideLoraAdapter",
         "sie_server.adapters.laya.adapter:LayaAdapter",
+        "sie_server.adapters.laya.runtime_lora:LayaLoraAdapter",
         "sie_server.adapters.pplx_decider.adapter:PerplexityDecisionAdapter",
+        "sie_server.adapters.pplx_decider.runtime_lora:PerplexityDecisionLoraAdapter",
     }
 )
 
@@ -372,8 +376,12 @@ async def _system_one(
         if size_error := item_size_error(item, "state"):
             raise _invalid(size_error, ["state"])
 
-        options = resolve_runtime_options(config, {"overflow_policy": "error"}, span)
-        route = await route_request(http_request, model, span, queued_items=1)
+        request_options = {
+            "overflow_policy": "error",
+            **{key: extra[key] for key in LORA_SELECTION_FIELDS if key in extra},
+        }
+        options = resolve_runtime_options(config, request_options, span)
+        route = await route_request(http_request, model, span, queued_items=1, request_options=request_options)
         error_handler = InferenceErrorHandler(
             model,
             "extract",

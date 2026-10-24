@@ -505,7 +505,7 @@ class ModelStateChecker:
                 at runtime or does not declare ``lora``.
         """
         options = request_options or {}
-        if lora in (options.get("lora_id"), options.get("lora")):
+        if lora in (options.get("lora_id"), options.get("lora"), options.get("lora_adapter")):
             subject = f"LoRA '{lora}'"
         else:
             subject = f"The LoRA adapter of profile '{options.get('profile') or 'default'}'"

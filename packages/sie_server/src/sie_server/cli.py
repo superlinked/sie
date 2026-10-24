@@ -41,6 +41,7 @@ from sie_sdk.bundle_utils import (
     match_bundle_model_adapters,
     match_bundle_models,
 )
+from sie_sdk.cache import get_cache_config
 
 import sie_server
 from sie_server.api.decisions import router as decisions_router
@@ -339,6 +340,12 @@ def resolve_deps(
     models_dir: str = typer.Option(DEFAULT_MODELS_DIR, "--models-dir", help="Models directory"),
     output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
     cpu: bool = typer.Option(False, "--cpu", help="Exclude CUDA-only dependencies (flash-attn)"),
+    lock: Path | None = typer.Option(None, "--lock", help="uv.lock used to pin ranged bundle dependencies"),  # noqa: B008
+    constraints_output: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--constraints-output",
+        help="Write uv.lock constraints for the bundle's locked transitive closure",
+    ),
 ) -> None:
     """Resolve and print dependencies for a bundle or model list.
 
@@ -347,8 +354,24 @@ def resolve_deps(
 
     Use --cpu flag when building CPU-only images to exclude flash-attn
     and other CUDA-only dependencies.
+
+    ``--lock`` and ``--constraints-output`` together write a constraints file
+    that pins ranged dependencies and their locked transitive closure to
+    ``uv.lock``. Lines are ``name==version`` only (pip rejects extras). Exact
+    pins, URL/VCS specs, and ranges that do not contain the locked version are
+    not tightened. The file starts with a comment that the pins can install an
+    older release than an unconstrained build of the same commit. Stdout stays
+    the bundle requirements.
     """
+    from sie_server.bundle_requirements import lock_constraint_lines, parse_uv_lock
     from sie_server.core.deps import collect_bundle_deps
+
+    if (lock is None) != (constraints_output is None):
+        typer.echo("Error: --lock and --constraints-output must be used together", err=True)
+        raise typer.Exit(1)
+    if output_json and constraints_output is not None:
+        typer.echo("Error: --constraints-output cannot be combined with --json", err=True)
+        raise typer.Exit(1)
 
     models_path = Path(models_dir).resolve()
     bundles_dir = _DEFAULT_BUNDLES_DIR
@@ -385,6 +408,15 @@ def resolve_deps(
             for conflict in result.conflicts:
                 typer.echo(f"  - {conflict}", err=True)
         raise typer.Exit(1)
+
+    if constraints_output is not None and lock is not None:
+        try:
+            parsed_lock = parse_uv_lock(lock)
+        except (OSError, ValueError) as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        body = "\n".join(lock_constraint_lines(result.requirements, parsed_lock))
+        constraints_output.write_text(f"{body}\n" if body else "", encoding="utf-8")
 
     if output_json:
         import json
@@ -424,7 +456,8 @@ def openapi_export(
     # init, model registry, telemetry, or NATS). NOTE: the direct-container convenience routes
     # are intentionally excluded from the committed openapi.json — the ``openai_local`` router
     # (/v1/chat/completions + /v1/rerank) proxies managed MLX/SGLang children for single-node
-    # serving, while the Rust gateway owns the published production chat contract. The
+    # serving, and /v1/messages is translated onto it, while the Rust gateway owns the
+    # published production chat and Messages contracts. The
     # SIE-native ``generate`` route is part of the worker contract and is published here.
     app_ = FastAPI(
         title="SIE Server",
@@ -481,7 +514,11 @@ def serve(
         "--cluster-cache",
         help="Cluster cache URL (s3://, gs://, abfs(s)://, or oss://)",
     ),
-    hf_fallback: bool = typer.Option(True, "--hf-fallback/--no-hf-fallback", help="Enable HuggingFace Hub fallback"),
+    hf_fallback: bool | None = typer.Option(
+        None,
+        "--hf-fallback/--no-hf-fallback",
+        help="Override HuggingFace Hub fallback (default: SIE_HF_FALLBACK or enabled)",
+    ),
     reload: bool = typer.Option(default=False, help="Enable auto-reload for development"),
     tracing: bool = typer.Option(default=False, help="Enable OpenTelemetry tracing (exports to localhost:4317)"),
     instrumentation: bool = typer.Option(False, "--instrumentation", "-i", help="Enable batch instrumentation logging"),
@@ -739,15 +776,16 @@ def serve(
     # Pass cache config via environment variables
     if local_cache:
         os.environ["SIE_LOCAL_CACHE"] = str(Path(local_cache).resolve())
-    elif "SIE_LOCAL_CACHE" in os.environ:
+    elif local_cache is not None and "SIE_LOCAL_CACHE" in os.environ:
         del os.environ["SIE_LOCAL_CACHE"]
 
     if cluster_cache:
         os.environ["SIE_CLUSTER_CACHE"] = cluster_cache
-    elif "SIE_CLUSTER_CACHE" in os.environ:
+    elif cluster_cache is not None and "SIE_CLUSTER_CACHE" in os.environ:
         del os.environ["SIE_CLUSTER_CACHE"]
 
-    os.environ["SIE_HF_FALLBACK"] = "true" if hf_fallback else "false"
+    if hf_fallback is not None:
+        os.environ["SIE_HF_FALLBACK"] = "true" if hf_fallback else "false"
 
     # Configure tracing via environment variables
     if tracing:
@@ -782,9 +820,10 @@ def serve(
             f"    →  OpenAI base  http://localhost:{port}/v1   (embeddings · rerank; chat/completions with -b sglang)"
         )
         typer.echo("")
-    if cluster_cache:
-        typer.echo(f"Cluster cache: {cluster_cache}")
-    if not hf_fallback:
+    cache_config = get_cache_config()
+    if cache_config.cluster_cache:
+        typer.echo("Cluster cache: configured")
+    if not cache_config.hf_fallback:
         typer.echo("HuggingFace Hub fallback: disabled")
 
     # Handle preload models (CLI flag takes precedence, then env var from Helm configmap)

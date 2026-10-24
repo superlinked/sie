@@ -698,6 +698,25 @@ workers:
     # scope. The sidecar additionally reserves its health/capacity identity.
     extraEnv: []
 
+    # -- Extra init containers for worker pods (standard Kubernetes container
+    # list), run before the worker starts. Not rendered on remote lanes. They
+    # can mount `extraVolumes`, `shm`, `model-cache`, and `sie-ipc` /
+    # `kernel-cache` when enabled:
+    #
+    #   - name: wait-for-dependency
+    #     image: busybox:1.37.0
+    #     command: ["sh", "-c", "until wget -q -O /dev/null http://my-dependency/readyz; do sleep 2; done"]
+    #     volumeMounts:
+    #       - name: extra-config
+    #         mountPath: /etc/extra
+    extraInitContainers: []
+
+    # -- Extra volumes for worker pods (standard Kubernetes volume list), e.g.
+    # for `extraInitContainers`. Not rendered on remote lanes. Names must not
+    # clash with the chart's worker volumes (shm, model-cache, sie-ipc,
+    # upstreams, equivalence, kernel-cache).
+    extraVolumes: []
+
     # -- Shared model cold-start/ready timeout in seconds. The chart renders
     # this into both containers as SIE_MODEL_READY_TIMEOUT_S: the adapter worker
     # uses it as an SGLang startup-health timeout fallback, and the Rust

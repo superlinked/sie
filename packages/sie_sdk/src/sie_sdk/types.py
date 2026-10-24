@@ -9,6 +9,7 @@ These types support flexible Python inputs
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal, Never, NotRequired, Required, TypedDict
 
@@ -182,6 +183,10 @@ class RequestUsage(TypedDict, total=False):
     :attr:`RequestMetadata.credits_debited` for the authoritative answer: the
     SDK fills it from this block when present and from that header otherwise,
     so it is absent only when nothing was charged.
+
+    ``credits_charged_decimal`` is the same charge with up to six decimals, as
+    a string such as ``"0.140000"``. It is optional: a response may carry
+    ``credits_charged`` without it.
     """
 
     input_tokens: int
@@ -193,6 +198,7 @@ class RequestUsage(TypedDict, total=False):
     audio_ms: int
     credits_charged: int
     rate_book_version: str
+    credits_charged_decimal: str
 
 
 #: The metered dimensions of :class:`RequestUsage` — the units a consumer
@@ -205,7 +211,23 @@ TERMINAL_UNIT_FIELDS: frozenset[str] = frozenset(
 #: their only writer; it adds them to the `usage` block of every settled
 #: response it can rewrite. They are NOT metered dimensions and must never be
 #: summed as one.
-SETTLED_CHARGE_FIELDS: frozenset[str] = frozenset({"credits_charged", "rate_book_version"})
+SETTLED_CHARGE_FIELDS: frozenset[str] = frozenset({"credits_charged", "rate_book_version", "credits_charged_decimal"})
+
+#: The settled-charge annotations a settled response may omit.
+OPTIONAL_SETTLED_CHARGE_FIELDS: frozenset[str] = frozenset({"credits_charged_decimal"})
+
+_CREDITS_DECIMAL = re.compile(r"(0|[1-9][0-9]*)\.[0-9]{6}")
+
+
+def parse_credits_decimal(value: Any) -> str | None:
+    """Return ``value`` when it is a six-decimal credit string such as ``"0.140000"``.
+
+    Anything else, including a number, is treated as absent.
+    """
+    if isinstance(value, str) and value.isascii() and _CREDITS_DECIMAL.fullmatch(value):
+        return value
+    return None
+
 
 #: Every key the `usage` block is allowed to carry, as a single set.
 #:
@@ -241,6 +263,10 @@ class RequestMetadata(TypedDict, total=False):
     #: ``usage`` — does mean nothing was charged. Streamed responses carry no
     #: headers at all: their charge rides the terminal usage chunk.
     credits_debited: int
+    #: ``credits_debited`` with up to six decimals, such as ``"0.140000"``, when
+    #: the response reported it (``usage.credits_charged_decimal`` or the
+    #: ``x-sie-credits-debited-decimal`` header).
+    credits_debited_decimal: str
     #: Immutable rate-book version that rated ``credits_debited``, when the
     #: response reported one.
     rate_book_version: str
@@ -716,6 +742,7 @@ class GenerationUsage(TypedDict):
     prompt_tokens_details: NotRequired[PromptTokensDetails]
     credits_charged: NotRequired[int]
     rate_book_version: NotRequired[str]
+    credits_charged_decimal: NotRequired[str]
 
 
 class GenerateResult(TypedDict, total=False):
@@ -1517,6 +1544,7 @@ class JobPreflight(TypedDict, total=False):
     """The preflight reservation echoed on submit / status."""
 
     estimated_credits: int
+    estimated_credits_decimal: str
     estimate_basis: str
 
 
@@ -1611,6 +1639,8 @@ class CostEstimate(TypedDict):
     endpoint: str
     identity: RateIdentity
     estimated_credits: int
+    #: ``estimated_credits`` with up to six decimals, such as ``"0.140000"``.
+    estimated_credits_decimal: NotRequired[str]
     unit_ceilings: dict[str, int]
     applied_rates: list[AppliedRate]
     rate_book_version: str
@@ -1789,6 +1819,9 @@ class JobChunk(TypedDict, total=False):
     #: settlement is acknowledged. A job settles per chunk, so these sum to the
     #: job's ``settled_credits`` exactly.
     credits_charged: int | None
+    #: ``credits_charged`` with up to six decimals, such as ``"0.140000"``, or
+    #: ``None`` when the chunk did not report it.
+    credits_charged_decimal: str | None
     #: Immutable rate-book version that rated ``credits_charged``. Present
     #: exactly when ``credits_charged`` is.
     rate_book_version: str | None
@@ -1845,6 +1878,7 @@ class JobStatus(TypedDict, total=False):
     completed_items: int
     preflight: JobPreflight
     settled_credits: int
+    settled_credits_decimal: str
     created_at: float
     finished_at: float | None
     output: dict[str, Any]
@@ -1896,6 +1930,7 @@ class JobResults(TypedDict, total=False):
     state: JobState | None
     total_items: int | None
     settled_credits: int | None
+    settled_credits_decimal: str | None
     chunks: list[JobChunk]
     retrieved: int
     dims: int | None

@@ -1,0 +1,140 @@
+{
+  "description": "A Messages request to a generation model that declares the capabilities listed, the answer the chat route gives its translation before any engine runs, and the Anthropic answer the Messages route gives. Tool calling is checked before image input. Headers not listed under expect.headers are not asserted.",
+  "refusals": [
+    {
+      "name": "tools on a model without tool calling",
+      "capabilities": {"tools": false, "image": false},
+      "request": {
+        "model": "acme/text",
+        "max_tokens": 16,
+        "tools": [{"name": "Read", "input_schema": {"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]}}],
+        "messages": [{"role": "user", "content": "Read notes.txt."}]
+      },
+      "chat": {"status": 400, "body": {"error": {"message": "Model 'acme/text' does not support tool calling", "type": "invalid_request_error", "param": "tools", "code": "unsupported_field"}}},
+      "expect": {"status": 400, "type": "invalid_request_error", "message": "tools: Model 'acme/text' does not support tool calling", "headers": {"x-sie-error-code": "unsupported_field"}}
+    },
+    {
+      "name": "tools with tool_choice none on a model without tool calling",
+      "capabilities": {"tools": false, "image": false},
+      "request": {
+        "model": "acme/text",
+        "max_tokens": 16,
+        "stream": true,
+        "tools": [{"name": "Read", "input_schema": {"type": "object", "properties": {"file_path": {"type": "string"}}}}],
+        "tool_choice": {"type": "none"},
+        "messages": [{"role": "user", "content": "Say hello."}]
+      },
+      "chat": {"status": 400, "body": {"error": {"message": "Model 'acme/text' does not support tool calling", "type": "invalid_request_error", "param": "tools", "code": "unsupported_field"}}},
+      "expect": {"status": 400, "type": "invalid_request_error", "message": "tools: Model 'acme/text' does not support tool calling", "headers": {"x-sie-error-code": "unsupported_field"}}
+    },
+    {
+      "name": "tool calling is checked before image input",
+      "capabilities": {"tools": false, "image": false},
+      "request": {
+        "model": "acme/text",
+        "max_tokens": 16,
+        "tools": [{"name": "Read", "input_schema": {"type": "object", "properties": {"file_path": {"type": "string"}}}}],
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}},
+              {"type": "text", "text": "What is in this image?"}
+            ]
+          }
+        ]
+      },
+      "chat": {"status": 400, "body": {"error": {"message": "Model 'acme/text' does not support tool calling", "type": "invalid_request_error", "param": "tools", "code": "unsupported_field"}}},
+      "expect": {"status": 400, "type": "invalid_request_error", "message": "tools: Model 'acme/text' does not support tool calling", "headers": {"x-sie-error-code": "unsupported_field"}}
+    },
+    {
+      "name": "tools on a vision model without tool calling",
+      "capabilities": {"tools": false, "image": true},
+      "request": {
+        "model": "acme/vision",
+        "max_tokens": 16,
+        "tools": [{"name": "Read", "input_schema": {"type": "object", "properties": {"file_path": {"type": "string"}}}}],
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {"type": "text", "text": "What is in this image?"},
+              {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}}
+            ]
+          }
+        ]
+      },
+      "chat": {"status": 400, "body": {"error": {"message": "Model 'acme/vision' does not support tool calling", "type": "invalid_request_error", "param": "tools", "code": "unsupported_field"}}},
+      "expect": {"status": 400, "type": "invalid_request_error", "message": "tools: Model 'acme/vision' does not support tool calling", "headers": {"x-sie-error-code": "unsupported_field"}}
+    },
+    {
+      "name": "image in a user turn on a model without image input",
+      "capabilities": {"tools": true, "image": false},
+      "request": {
+        "model": "acme/coder",
+        "max_tokens": 16,
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {"type": "text", "text": "What is in this image?"},
+              {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}}
+            ]
+          }
+        ]
+      },
+      "chat": {"status": 400, "body": {"error": {"message": "Model 'acme/coder' does not support image input", "type": "invalid_request_error", "param": "messages", "code": "unsupported_field"}}},
+      "expect": {"status": 400, "type": "invalid_request_error", "message": "messages.0.content.1.image: Model 'acme/coder' does not support image input", "headers": {"x-sie-error-code": "unsupported_field"}}
+    },
+    {
+      "name": "image in a tool result on a model without image input",
+      "capabilities": {"tools": true, "image": false},
+      "request": {
+        "model": "acme/coder",
+        "max_tokens": 16,
+        "stream": true,
+        "tools": [{"name": "Read", "input_schema": {"type": "object", "properties": {"file_path": {"type": "string"}}, "required": ["file_path"]}}],
+        "messages": [
+          {"role": "user", "content": "Read shot.png and describe it."},
+          {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01", "name": "Read", "input": {"file_path": "shot.png"}}]},
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "tool_result",
+                "tool_use_id": "toolu_01",
+                "content": [
+                  {"type": "text", "text": "Read image (1x1)"},
+                  {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}}
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "chat": {"status": 400, "body": {"error": {"message": "Model 'acme/coder' does not support image input", "type": "invalid_request_error", "param": "messages", "code": "unsupported_field"}}},
+      "expect": {"status": 400, "type": "invalid_request_error", "message": "messages.2.content.0.tool_result.content.1.image: Model 'acme/coder' does not support image input", "headers": {"x-sie-error-code": "unsupported_field"}}
+    },
+    {
+      "name": "the first of several images is named",
+      "capabilities": {"tools": false, "image": false},
+      "request": {
+        "model": "acme/text",
+        "max_tokens": 16,
+        "messages": [
+          {"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}}]},
+          {"role": "assistant", "content": "A white pixel."},
+          {
+            "role": "user",
+            "content": [
+              {"type": "text", "text": "And this one?"},
+              {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}}
+            ]
+          }
+        ]
+      },
+      "chat": {"status": 400, "body": {"error": {"message": "Model 'acme/text' does not support image input", "type": "invalid_request_error", "param": "messages", "code": "unsupported_field"}}},
+      "expect": {"status": 400, "type": "invalid_request_error", "message": "messages.0.content.0.image: Model 'acme/text' does not support image input", "headers": {"x-sie-error-code": "unsupported_field"}}
+    }
+  ]
+}

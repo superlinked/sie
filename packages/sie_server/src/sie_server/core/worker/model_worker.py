@@ -33,6 +33,7 @@ from sie_server.core.adaptive_batching import (
     LatencyTracker,
 )
 from sie_server.core.batcher import BatchConfig, BatchFormer, FormattedBatch, HasCost
+from sie_server.core.progress_batcher import ProgressBatchFormer
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker.handlers import EncodeHandler, ExtractHandler, OperationHandler, ScoreHandler
 from sie_server.core.worker.oom_recovery import BatchExecutor, RegistryCallbacks
@@ -279,8 +280,9 @@ class ModelWorker:
         # Each LoRA gets its own batcher for FCFS fairness on the direct
         # Python HTTP path. Sidecar IPC uses submit_preformed* below and
         # bypasses these batchers explicitly.
+        self._batcher_type = ProgressBatchFormer if self._config.bounded_batch_progress else BatchFormer
         self._batchers: dict[str | None, BatchFormer[HasCost, RequestMetadata]] = {
-            None: BatchFormer(self._batch_config)
+            None: self._batcher_type(self._batch_config)
         }
 
         # Thread pool for running inference (doesn't block event loop)
@@ -346,6 +348,7 @@ class ModelWorker:
         self._running = False
         self._stopping = False  # True when graceful stop has begun
         self._process_task: asyncio.Task[None] | None = None
+        self._work_available = asyncio.Event()
         self._stats = WorkerStats()
 
         # Batches currently between "extracted from a batcher" and
@@ -477,6 +480,7 @@ class ModelWorker:
             return
 
         self._running = False
+        self._work_available.set()
 
         try:
             if self._process_task is not None:
@@ -1153,7 +1157,7 @@ class ModelWorker:
             BatchFormer for the specified LoRA.
         """
         if lora not in self._batchers:
-            self._batchers[lora] = BatchFormer(self._batch_config)
+            self._batchers[lora] = self._batcher_type(self._batch_config)
             logger.debug("Created batcher for LoRA '%s'", lora)
         return self._batchers[lora]
 
@@ -1220,6 +1224,7 @@ class ModelWorker:
         """
         batcher = self._get_batcher(lora)
         await batcher.submit_many([(item, metadata) for item in prepared_items])
+        self._work_available.set()
         self._ensure_process_loop_started()
         return metadata.future
 
@@ -1323,7 +1328,7 @@ class ModelWorker:
         Selects the batcher whose first pending request has waited the longest.
         This ensures fairness across LoRAs - no LoRA starves even with low traffic.
 
-        When the worker was idle (had to poll for requests), a short
+        When the worker was idle (had to wait for requests), a short
         accumulation window (``idle_coalesce_ms``, #2874) caps the coalesce
         wait instead of dispatching immediately: bursty arrivals at an idle
         worker fuse into one batch rather than degenerating into a train of
@@ -1340,7 +1345,7 @@ class ModelWorker:
 
         Returns:
             Tuple of (lora_name, batch, was_idle) where lora_name is None for
-            base model and was_idle indicates whether the worker had to poll
+            base model and was_idle indicates whether the worker had to wait
             (was truly idle).
         """
         while True:
@@ -1367,7 +1372,10 @@ class ModelWorker:
 
             # No batchers have pending items - worker is idle
             was_idle = True
-            await asyncio.sleep(0.001)
+            # Admission latches the signal even if it precedes this wait.
+            # Re-scan every batcher after clearing; queue state owns the work.
+            await self._work_available.wait()
+            self._work_available.clear()
 
             # Check if we should stop
             if not self._running:

@@ -1,0 +1,29 @@
+{
+  "completed_artifact_hashes": [],
+  "exceptions_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+  "exclude_newer": "2026-10-18T00:00:00Z",
+  "indexes": [
+    "--default-index",
+    "https://pypi.org/simple",
+    "--index",
+    "https://download.pytorch.org/whl/cpu",
+    "--index-strategy",
+    "unsafe-best-match"
+  ],
+  "inputs": {
+    "requirements_sha256": "06013808500bdd0b62b916d46f4b7a308290f5c07567315faf967cfe9f7f5888",
+    "uv_lock_sha256": "536b7f46b5560f0dfbe5a503ecf4166514658f1340c4721d1ea263a43b3e5aa5"
+  },
+  "lock_sha256": "1bc8a0f417323c67420e71cf16b71e562c7db5842b50d4c5cd60efea8106141b",
+  "policy_sha256": "dbc9ef2b65ea54bebe46021a7813897c378207508e4d84caf45e93d31faf15d4",
+  "schema_version": 1,
+  "source_pins_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+  "target": {
+    "architecture": "arm64",
+    "bundle": "ctranslate2",
+    "platform": "cpu",
+    "python_platform": "aarch64-manylinux_2_35",
+    "python_version": "3.12"
+  },
+  "uv_version": "0.9.28"
+}

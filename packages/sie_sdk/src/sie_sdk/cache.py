@@ -14,7 +14,8 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
 
 from sie_sdk.exceptions import GatedModelError
@@ -97,6 +98,8 @@ def is_model_cached(
     model_id: str,
     config: CacheConfig | None = None,
     revision: str | None = None,
+    *,
+    required_files: list[str] | None = None,
 ) -> bool:
     """Check if a model is already in local cache.
 
@@ -107,12 +110,23 @@ def is_model_cached(
         config: Cache configuration. If None, reads from environment.
         revision: Exact snapshot commit, branch, or tag to require. Branches
             and tags resolve through the local Hugging Face ``refs`` cache.
+        required_files: Safe relative files required for a cache hit. By
+            default, any file preserves the existing model-cache semantics.
 
     Returns:
         True if model appears to be cached locally.
     """
     if config is None:
         config = get_cache_config()
+
+    if required_files is not None:
+        for name in required_files:
+            if (
+                not isinstance(name, str)
+                or any(character in name for character in ("\\", "\x00", ":"))
+                or any(part in {"", ".", ".."} for part in name.split("/"))
+            ):
+                raise ValueError("Required cache files must be safe relative paths")
 
     # HF Hub cache structure: models--{org}--{model}/snapshots/{revision}/
     cache_dir = config.local_cache / f"models--{model_id.replace('/', '--')}"
@@ -142,15 +156,27 @@ def is_model_cached(
         ):
             return False
         snapshot = snapshots_dir / resolved_revision
-        return snapshot.is_dir() and any(snapshot.iterdir())
+        return (
+            snapshot.is_dir()
+            and any(snapshot.iterdir())
+            and (required_files is None or all((snapshot / name).is_file() for name in required_files))
+        )
 
-    return any(snapshot.is_dir() and any(snapshot.iterdir()) for snapshot in snapshots_dir.iterdir())
+    return any(
+        snapshot.is_dir()
+        and any(snapshot.iterdir())
+        and (required_files is None or all((snapshot / name).is_file() for name in required_files))
+        for snapshot in snapshots_dir.iterdir()
+    )
 
 
 def ensure_model_cached(
     model_id: str,
     config: CacheConfig | None = None,
     revision: str | None = None,
+    *,
+    allow_patterns: list[str] | None = None,
+    required_files: list[str] | None = None,
 ) -> Path:
     """Ensure model weights are in local cache.
 
@@ -163,6 +189,10 @@ def ensure_model_cached(
         model_id: HuggingFace model ID (e.g., "BAAI/bge-m3").
         config: Cache configuration. If None, reads from environment.
         revision: Specific model revision (commit hash, branch, or tag).
+        allow_patterns: Optional file filter for Hub downloads only. Local and
+            cluster cache lookup and population remain unchanged.
+        required_files: Files required for a local or cluster hit. A partial
+            snapshot continues through the existing fallback tiers.
 
     Returns:
         Path to cached model in local cache.
@@ -175,20 +205,22 @@ def ensure_model_cached(
         config = get_cache_config()
 
     # Check local cache first
-    if is_model_cached(model_id, config, revision=revision):
+    if is_model_cached(model_id, config, revision=revision, required_files=required_files):
         logger.debug("Model %s found in local cache", model_id)
         return _get_model_cache_path(model_id, config)
 
     # Try cluster cache if configured
     if config.cluster_cache:
-        if _download_from_cluster_cache(model_id, config) and is_model_cached(model_id, config, revision=revision):
+        if _download_from_cluster_cache(model_id, config) and is_model_cached(
+            model_id, config, revision=revision, required_files=required_files
+        ):
             logger.info("Downloaded %s from cluster cache", model_id)
             return _get_model_cache_path(model_id, config)
 
     # Download from HuggingFace Hub if fallback enabled
     if config.hf_fallback:
         logger.info("Downloading %s from HuggingFace Hub", model_id)
-        return _download_from_huggingface(model_id, config, revision)
+        return _download_from_huggingface(model_id, config, revision, allow_patterns=allow_patterns)
 
     # Not in any cache and HF fallback disabled
     raise RuntimeError(
@@ -240,7 +272,8 @@ def _download_from_cluster_cache(model_id: str, config: CacheConfig) -> bool:
         return False
 
     # Create local cache directory
-    local_model_path = config.local_cache / model_folder
+    cache_root = config.local_cache.resolve()
+    local_model_path = _cache_destination(cache_root, cache_root, model_folder, directory=True)
     local_model_path.mkdir(parents=True, exist_ok=True)
 
     # Download the entire model directory structure
@@ -252,23 +285,59 @@ def _download_from_cluster_cache(model_id: str, config: CacheConfig) -> bool:
 def _download_directory(backend: StorageBackend, src_path: str, dst_path: Path) -> None:
     """Recursively download a directory from cloud storage.
 
+    The explicitly selected root may be a symlink. Descendant directories must
+    not be symlinks, and file links must remain within that root. Downloads are
+    staged privately and replaced atomically, preserving existing files on a
+    failed transfer and never writing through an existing hardlink.
+
     Args:
         backend: Storage backend instance.
         src_path: Source path in cloud storage.
         dst_path: Destination local path.
     """
-    # Download files in current directory
+    root = dst_path.resolve()
+    _download_cache_directory(backend, src_path, root, root)
+
+
+def _cache_destination(root: Path, parent: Path, name: str, *, directory: bool) -> Path:
+    """Validate an immediate backend child and its local destination."""
+    if (
+        not isinstance(name, str)
+        or name in {"", ".", ".."}
+        or any(character in name for character in ("/", "\\", "\x00"))
+        or PureWindowsPath(name).drive
+    ):
+        raise ValueError("Invalid cluster cache child name")
+    path = parent / name
+    if not path.resolve().is_relative_to(root):
+        raise ValueError("Cluster cache destination escapes its repository")
+    # Do not let directory aliases redirect a repository or create cycles.
+    directory_path = path if directory else parent
+    for ancestor in (directory_path, *directory_path.parents):
+        if ancestor == root:
+            break
+        if ancestor.is_symlink():
+            raise ValueError("Cluster cache descendant directories cannot be symlinks")
+    return path
+
+
+def _download_cache_directory(backend: StorageBackend, src_path: str, dst_path: Path, root: Path) -> None:
+    """Walk beneath one admitted root without rebasing through child links."""
     for filename in backend.list_files(src_path):
+        dst_file = _cache_destination(root, dst_path, filename, directory=False)
         src_file = join_path(src_path, filename)
-        dst_file = dst_path / filename
-        backend.download_file(src_file, dst_file)
+        with TemporaryDirectory(prefix=".sie-cache-", dir=root) as temporary:
+            staged_file = Path(temporary) / "download"
+            backend.download_file(src_file, staged_file)
+            _cache_destination(root, dst_path, filename, directory=False)
+            staged_file.replace(dst_file)
 
     # Recursively download subdirectories
     for dirname in backend.list_dirs(src_path):
-        src_subdir = join_path(src_path, dirname)
-        dst_subdir = dst_path / dirname
+        dst_subdir = _cache_destination(root, dst_path, dirname, directory=True)
         dst_subdir.mkdir(parents=True, exist_ok=True)
-        _download_directory(backend, src_subdir, dst_subdir)
+        src_subdir = join_path(src_path, dirname)
+        _download_cache_directory(backend, src_subdir, dst_subdir, root)
 
 
 def _get_hf_ignore_patterns(
@@ -306,6 +375,8 @@ def _download_from_huggingface(
     model_id: str,
     config: CacheConfig,
     revision: str | None = None,
+    *,
+    allow_patterns: list[str] | None = None,
 ) -> Path:
     """Download model from HuggingFace Hub to local cache.
 
@@ -316,6 +387,7 @@ def _download_from_huggingface(
         model_id: HuggingFace model ID.
         config: Cache configuration.
         revision: Specific model revision.
+        allow_patterns: Optional file filter passed to snapshot_download.
 
     Returns:
         Path to the model in local cache.
@@ -341,6 +413,7 @@ def _download_from_huggingface(
             revision=revision,
             token=token,
             cache_dir=str(config.local_cache),  # Points to HF_HOME/hub
+            allow_patterns=allow_patterns,
             ignore_patterns=_get_hf_ignore_patterns(model_id, revision, token),
         )
         return _get_model_cache_path(model_id, config)

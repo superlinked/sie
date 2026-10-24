@@ -19,6 +19,40 @@ caller controls, current routing limits and cluster workers. See
 [Moving to self-hosted serving](MIGRATING_TO_SELF_HOSTED.md) to migrate one model
 at a time while keeping its application name.
 
+## Optional bounded batch progress
+
+Model profiles can opt into `bounded_batch_progress: true`. The default is
+`false`; no shipped profile enables it. An extending profile inherits the
+parent's setting when the field is omitted or `null`, and an explicit `false`
+disables it for that child.
+
+```yaml
+profiles:
+  default:
+    adapter_path: "my_adapter:Adapter"
+    max_batch_tokens: 16384
+  progress:
+    extends: default
+    bounded_batch_progress: true
+```
+
+This option applies to the Python worker's batcher for each base model or
+LoRA selection. After an ordinary cost-sorted batch skips the oldest batchable
+item, the next batchable turn starts at that item and packs its cost-sorted
+suffix. It does not wrap around to cheaper items. An item with `k` older
+batchable items therefore runs within at most `2 * (k + 1)` nonempty batchable
+turns. Existing `runs_alone` turns may interleave, cost/request limits still
+apply, and an individually oversized item still runs alone. This is a
+dispatch-turn bound, not a wall-clock deadline. Cancellation and worker
+shutdown retain their existing behavior. Preformed/sidecar batches bypass
+the Python batcher and are unaffected.
+
+Enabled scheduling changes batch composition and can change model scores or
+chosen labels, as well as throughput. It does not change model precision or
+make outputs invariant to batch shape. Evaluate the intended model's output
+and throughput contract before enabling it. The unchanged default uses the
+original batcher without progress bookkeeping.
+
 ## Installation
 
 ```bash
@@ -1083,16 +1117,20 @@ as a profile an operator chooses.
 | `SIE_DATA_DIR` | `$XDG_DATA_HOME/sie`, else `~/.local/share/sie` | Holds the generated token (`auth-token`, mode `0600`) and the telemetry worker id. Images set `/app/.cache/sie`. |
 
 Clients send the token as `Authorization: Bearer <token>` or `x-api-key: <token>`;
-when both are sent, `Authorization` is used and `x-api-key` is ignored, as on the
-gateway. The SDKs send `SIE_API_KEY`
+when both carry a token, `Authorization` is used and `x-api-key` is ignored, as on
+the gateway. The SDKs send `SIE_API_KEY`
 as a Bearer token. Repeated headers differ from the gateway until 0.13.0: the
 server reads every value of a repeated header, skips empty ones, and refuses
-values that carry different tokens, while the gateway uses only the first
-`Authorization` value.
+values that carry different tokens, while the gateway reads only the first
+`Authorization` value and uses `x-api-key` when that value is empty or blank.
 
 Token auth covers the HTTP port. The other listeners are local: the IPC socket
 that a worker sidecar uses (`SIE_IPC_SOCKET_PATH`, mode `0600`) and the
-loopback ports of the engines the server launches.
+loopback ports of the engines the server launches. On macOS a socket can
+inherit an entry that allows access from its directory's access control list,
+and its mode does not remove that access, so the server refuses to create the
+IPC socket in a directory whose access control list has an entry that allows
+access (`ls -led <directory>` lists the entries).
 
 When token auth is on and no token is configured, the server generates one on
 first start and saves it in `SIE_DATA_DIR`. When stderr is a terminal it prints
@@ -1106,7 +1144,10 @@ and the container runtime keeps that one print in the container's logs. In
 containers, set `SIE_AUTH_TOKEN` yourself instead. The server refuses a token
 directory that another user owns or can write to, and a token file that is a
 symbolic link, not a regular file, hard-linked, owned by another user, or
-readable by others. To rotate a generated token, delete `auth-token` from
+readable by others. On macOS it also refuses a token directory or file whose
+access control list has an entry that allows access (`ls -led <path>` lists
+the entries); deny entries, such as the one macOS puts on the home folder, are
+accepted. To rotate a generated token, delete `auth-token` from
 `SIE_DATA_DIR` and restart the server. In Docker, keep the token across
 containers with a volume:
 
@@ -1269,11 +1310,24 @@ advertise the declared allowlist, including cold adapters.
 |--|--|--|
 | `SIE_DEFAULT_COMPUTE_PRECISION` | `float16` | One of `float16`, `bfloat16`, `float32`. |
 | `SIE_ATTENTION_BACKEND` | `auto` | One of `auto`, `flash_attention_2`, `sdpa`, `eager`. |
+| `SIE_DISABLE_TF32` | unset (off) | Set `1` to disable Torch CUDA matmul and cuDNN TF32 at Python worker startup. Unset or `0` enables both, preserving SIE's default policy. |
 | `SIE_DISABLE_CUDNN_SDP` | unset (off) | Set `1` to disable cuDNN for Torch scaled dot-product attention at Python worker startup. Unset or `0` leaves the current backend policy alone. |
 
-This startup policy applies throughout the Python worker process, across all
-models that use Torch SDPA. Other eligible SDPA backends remain available; it
-does not guarantee Flash attention or better performance and does not disable
+TF32 can accelerate float32 operations at reduced precision, and its numerical
+effects depend on the model and batch shape. `SIE_DISABLE_TF32=1` applies before
+model loading throughout the Python worker process. It does not convert model
+weights: select a model profile with `compute_precision: float32` when assessing
+float32 output consistency. Disabling TF32 can reduce throughput and does not
+guarantee identical outputs across batch shapes or higher task accuracy.
+cuDNN autotuning and the SDPA backend policy remain unchanged. The effective
+TF32 flags are included in profile identity. Use separate worker processes for
+different TF32 policies; changing the environment of a running worker does not
+reconfigure it. The policy is not restored at shutdown; a fresh worker started
+with the variable unset or `0` enables TF32 again.
+
+The `SIE_DISABLE_CUDNN_SDP` startup policy applies throughout the Python worker
+process, across all models that use Torch SDPA. Other eligible SDPA backends
+remain available; it does not guarantee Flash attention or better performance and does not disable
 cuDNN generally. The policy is applied before model loading and readiness and
 is not restored at shutdown. Start a fresh worker process with the variable
 unset or `0` to restore Torch's defaults; unset or `0` does not reset a backend

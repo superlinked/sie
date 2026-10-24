@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 import numpy as np
 
 from sie_sdk._msgpack import unpackb as unpack_msgpack
-from sie_sdk.types import JobChunk, JobItemErrorDetail, JobResultItem
+from sie_sdk.types import JobChunk, JobItemErrorDetail, JobResultItem, parse_credits_decimal
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -428,6 +428,7 @@ def job_chunks(job_doc: Mapping[str, Any]) -> list[JobChunk]:
             "ref": chunk.get("ref"),
             "units": chunk.get("units"),
             "credits_charged": chunk.get("credits_charged"),
+            "credits_charged_decimal": parse_credits_decimal(chunk.get("credits_charged_decimal")),
             "rate_book_version": chunk.get("rate_book_version"),
             "error": chunk.get("error"),
         }

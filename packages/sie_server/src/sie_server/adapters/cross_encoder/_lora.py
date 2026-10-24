@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from huggingface_hub import snapshot_download
 from peft import LoraConfig, PeftConfig
 from peft.functional import delete_adapter
 from peft.tuners.lora.layer import Linear as LoraLinear
@@ -27,6 +26,7 @@ from safetensors.torch import load_file
 from sentence_transformers import CrossEncoder
 from transformers import BertForSequenceClassification, XLMRobertaForSequenceClassification
 
+from sie_server.adapters._lora_source import resolve_lora_source
 from sie_server.adapters.lora import LoraRuntimeConfig, LoraStateUncertainError, LoraUnavailableError
 from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin
 
@@ -211,12 +211,7 @@ class CrossEncoderLora:
             generation = self._generation
             if source in self._prepared:
                 return self._prepared[source].directory.name
-        directory = Path(source)
-        if directory.is_dir():
-            if pinned is not None:
-                raise ValueError("A local LoRA directory cannot honor a Hugging Face revision pin")
-        else:
-            directory = Path(snapshot_download(source, revision=pinned, allow_patterns=list(_FILES)))
+        directory = resolve_lora_source(source, pinned)
         temporary = tempfile.TemporaryDirectory(prefix="sie-cross-encoder-lora-")
         try:
             # A private snapshot prevents later source edits or alternative pickle files

@@ -55,6 +55,11 @@ fast at render time.
 {{- end -}}
 {{- include "sie-cluster.env.assertNoReserved" (dict "path" "workers.common.extraEnv" "entries" $root.Values.workers.common.extraEnv "reserved" $reservedWorkerEnv) -}}
 {{- include "sie-cluster.env.assertNoReserved" (dict "path" "workers.common.workerSidecar.extraEnv" "entries" $root.Values.workers.common.workerSidecar.extraEnv "reserved" $reservedSidecarEnv) -}}
+{{- range $volume := (default (list) $root.Values.workers.common.extraVolumes) -}}
+{{- if has $volume.name (list "shm" "model-cache" "sie-ipc" "upstreams" "equivalence" "kernel-cache") -}}
+{{- fail (printf "workers.common.extraVolumes: %q is a chart-owned worker volume name" $volume.name) -}}
+{{- end -}}
+{{- end -}}
 {{- range $poolName, $pool := .Values.workers.pools }}
 {{- if $pool.enabled }}
 {{- if not $pool.bundles }}
@@ -295,6 +300,10 @@ spec:
         fsGroup: 1000
         runAsUser: 1000
         runAsGroup: 1000
+      {{- with (and (not $remoteLane) $root.Values.workers.common.extraInitContainers) }}
+      initContainers:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         {{- range $workerIndex := $workerIndexes }}
         {{- $workerSocket := "/var/run/sie/ipc.sock" }}
@@ -882,6 +891,9 @@ spec:
           configMap:
             name: {{ $evidenceConfigMap | quote }}
         {{- end }}
+        {{- end }}
+        {{- with (and (not $remoteLane) $root.Values.workers.common.extraVolumes) }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}
 {{- end }}
 {{- end }}

@@ -252,6 +252,7 @@ def _expand_profile_variants(configs: dict[str, ModelConfig]) -> None:
                         runtime=dict(resolved.runtime),
                     ),
                     adaptive_batching=resolved.adaptive_batching,
+                    bounded_batch_progress=True if resolved.bounded_batch_progress else None,
                     kv_budget_tokens=resolved.kv_budget_tokens,
                     admission_enabled=resolved.admission_enabled,
                     max_output_tokens=resolved.max_output_tokens,

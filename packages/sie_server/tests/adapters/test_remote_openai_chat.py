@@ -125,6 +125,53 @@ def test_duplicate_finished_choice_fails() -> None:
         parser.parse(wire([choice(stream=True)]))
 
 
+@pytest.mark.parametrize("finish", ["stop", "tool_calls"])
+def test_usage_event_restating_the_finished_choice_is_accounting_only(finish: str) -> None:
+    parser = ChatStreamParser("model")
+    if finish == "tool_calls":
+        call = {"index": 0, "id": "call_1", "type": "function", "function": {"name": "f", "arguments": "{}"}}
+        parser.parse(wire([choice(stream=True, finish=None, content="", tool_calls=[call])]))
+    finished = parser.parse(wire([choice(stream=True, finish=finish, content="")]))
+    restated = {"content": "", "reasoning": None, "reasoning_details": [], "tool_calls": None}
+    trailing = parser.parse(wire([choice(stream=True, finish=finish, **restated)], usage=USAGE))
+    assert finished is not None
+    assert trailing is not None
+    assert trailing["choices"] == []
+    assert trailing["usage"] == USAGE
+    assert parser.parse(b"[DONE]") is None
+    parser.finish()
+
+
+@pytest.mark.parametrize(
+    ("restated", "usage"),
+    [
+        ({"finish": "stop"}, None),
+        ({"finish": "length"}, USAGE),
+        ({"finish": None}, USAGE),
+        ({"content": "more"}, USAGE),
+        ({"reasoning": "more"}, USAGE),
+        ({"refusal": "no"}, USAGE),
+        ({"role": "tool"}, USAGE),
+        ({"tool_calls": [{"index": 1, "function": {"arguments": "{}"}}]}, USAGE),
+        ({"reasoning_details": [{"type": "reasoning.text", "text": "more"}]}, USAGE),
+    ],
+)
+def test_finished_choice_restated_with_anything_new_fails(restated: dict, usage: dict | None) -> None:
+    parser = ChatStreamParser("model")
+    parser.parse(wire([choice(stream=True)]))
+    fields = {"finish": "stop", "content": "", **restated}
+    with pytest.raises(RemoteUpstreamError):
+        parser.parse(wire([choice(stream=True, **fields)], **({} if usage is None else {"usage": usage})))
+
+
+def test_restated_choice_with_logprobs_fails() -> None:
+    parser = ChatStreamParser("model")
+    parser.parse(wire([choice(stream=True)]))
+    restated = {**choice(stream=True, content=""), "logprobs": {"content": []}}
+    with pytest.raises(RemoteUpstreamError):
+        parser.parse(wire([restated], usage=USAGE))
+
+
 def test_running_usage_is_not_final_and_the_last_usage_after_every_finish_stands() -> None:
     parser = ChatStreamParser("model")
     running = {"prompt_tokens": 37, "completion_tokens": 1, "total_tokens": 38}

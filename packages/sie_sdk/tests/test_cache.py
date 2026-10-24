@@ -12,6 +12,7 @@ from huggingface_hub.errors import (
 )
 from sie_sdk.cache import (
     CacheConfig,
+    _download_directory,
     ensure_model_cached,
     get_cache_config,
     is_model_cached,
@@ -60,6 +61,232 @@ class FakeOSSCacheBucket:
 
     def get_object_to_file(self, key: str, filename: str) -> None:
         Path(filename).write_bytes(self.objects[key])
+
+
+class TestDownloadContainment:
+    @pytest.mark.parametrize("kind", ["file", "directory"])
+    @pytest.mark.parametrize(
+        "name", ["", ".", "..", "../escape", "nested/file", "nested\\file", "C:escape", "bad\x00name"]
+    )
+    def test_backend_child_must_be_a_basename(self, tmp_path: Path, kind: str, name: str) -> None:
+        destination = tmp_path / "repository"
+        destination.mkdir()
+        backend = MagicMock()
+        backend.list_files.side_effect = [[name] if kind == "file" else [], []]
+        backend.list_dirs.side_effect = [[name] if kind == "directory" else [], []]
+
+        with pytest.raises(ValueError, match="cache"):
+            _download_directory(backend, "source", destination)
+
+        backend.download_file.assert_not_called()
+        assert list(destination.iterdir()) == []
+
+    @pytest.mark.parametrize("kind", ["file", "directory"])
+    def test_absolute_backend_child_is_refused(self, tmp_path: Path, kind: str) -> None:
+        destination = tmp_path / "repository"
+        destination.mkdir()
+        outside = tmp_path / "outside"
+        outside.write_bytes(b"protected")
+        backend = MagicMock()
+        backend.list_files.return_value = [str(outside)] if kind == "file" else []
+        backend.list_dirs.return_value = [str(outside)] if kind == "directory" else []
+
+        with pytest.raises(ValueError, match="cache"):
+            _download_directory(backend, "source", destination)
+
+        backend.download_file.assert_not_called()
+        assert outside.read_bytes() == b"protected"
+
+    def test_existing_file_link_cannot_write_outside_repository(self, tmp_path: Path) -> None:
+        destination = tmp_path / "repository"
+        destination.mkdir()
+        outside = tmp_path / "outside"
+        outside.write_bytes(b"protected")
+        (destination / "weights").symlink_to(outside)
+        backend = MagicMock()
+        backend.list_files.return_value = ["weights"]
+        backend.list_dirs.return_value = []
+        backend.download_file.side_effect = lambda _source, target: target.write_bytes(b"replacement")
+
+        with pytest.raises(ValueError, match="cache"):
+            _download_directory(backend, "source", destination)
+
+        backend.download_file.assert_not_called()
+        assert outside.read_bytes() == b"protected"
+
+    @pytest.mark.parametrize("outside_root", [True, False])
+    def test_descendant_directory_links_are_refused(self, tmp_path: Path, outside_root: bool) -> None:
+        destination = tmp_path / "repository"
+        destination.mkdir()
+        target = (tmp_path if outside_root else destination) / "target"
+        target.mkdir()
+        (target / "weights").write_bytes(b"protected")
+        (destination / "snapshot").symlink_to(target, target_is_directory=True)
+        backend = MagicMock()
+        backend.list_files.side_effect = lambda path: ["weights"] if path == "source/snapshot" else []
+        backend.list_dirs.side_effect = lambda path: ["snapshot"] if path == "source" else []
+        backend.download_file.side_effect = lambda _source, path: path.write_bytes(b"replacement")
+
+        with pytest.raises(ValueError, match="cache"):
+            _download_directory(backend, "source", destination)
+
+        backend.download_file.assert_not_called()
+        assert (target / "weights").read_bytes() == b"protected"
+
+    def test_explicit_directory_root_may_be_a_symlink(self, tmp_path: Path) -> None:
+        actual = tmp_path / "actual"
+        actual.mkdir()
+        destination = tmp_path / "selected-root"
+        destination.symlink_to(actual, target_is_directory=True)
+        backend = MagicMock()
+        backend.list_files.return_value = ["weights"]
+        backend.list_dirs.return_value = []
+        backend.download_file.side_effect = lambda _source, path: path.write_bytes(b"new")
+
+        _download_directory(backend, "source", destination)
+
+        assert destination.is_symlink()
+        assert (actual / "weights").read_bytes() == b"new"
+
+    def test_atomic_file_replacement_does_not_overwrite_an_existing_hardlink(self, tmp_path: Path) -> None:
+        destination = tmp_path / "repository"
+        destination.mkdir()
+        outside = tmp_path / "outside"
+        outside.write_bytes(b"protected")
+        (destination / "weights").hardlink_to(outside)
+        backend = MagicMock()
+        backend.list_files.return_value = ["weights"]
+        backend.list_dirs.return_value = []
+        backend.download_file.side_effect = lambda _source, path: path.write_bytes(b"new")
+
+        _download_directory(backend, "source", destination)
+
+        assert outside.read_bytes() == b"protected"
+        assert (destination / "weights").read_bytes() == b"new"
+        assert not (destination / "weights").samefile(outside)
+
+    def test_contained_huggingface_file_link_is_replaced_without_changing_blob(self, tmp_path: Path) -> None:
+        destination = tmp_path / "repository"
+        snapshot = destination / "snapshots" / "commit"
+        snapshot.mkdir(parents=True)
+        blob = destination / "blobs" / "digest"
+        blob.parent.mkdir()
+        blob.write_bytes(b"old")
+        (snapshot / "weights").symlink_to("../../blobs/digest")
+        backend = MagicMock()
+        backend.list_dirs.side_effect = lambda path: {"source": ["snapshots"], "source/snapshots": ["commit"]}.get(
+            path, []
+        )
+        backend.list_files.side_effect = lambda path: ["weights"] if path == "source/snapshots/commit" else []
+        backend.download_file.side_effect = lambda _source, path: path.write_bytes(b"new")
+
+        _download_directory(backend, "source", destination)
+
+        assert blob.read_bytes() == b"old"
+        assert (snapshot / "weights").read_bytes() == b"new"
+        assert not (snapshot / "weights").is_symlink()
+
+    def test_failed_download_preserves_existing_file_and_cleans_temporary_data(self, tmp_path: Path) -> None:
+        destination = tmp_path / "repository"
+        destination.mkdir()
+        (destination / "weights").write_bytes(b"old")
+        backend = MagicMock()
+        backend.list_files.return_value = ["weights"]
+        backend.list_dirs.return_value = []
+
+        def fail(_source: str, path: Path) -> None:
+            path.write_bytes(b"partial")
+            raise OSError("controlled download failure")
+
+        backend.download_file.side_effect = fail
+        with pytest.raises(OSError, match="controlled download failure"):
+            _download_directory(backend, "source", destination)
+
+        assert (destination / "weights").read_bytes() == b"old"
+        assert [path.name for path in destination.iterdir()] == ["weights"]
+
+    def test_destination_is_rechecked_after_download(self, tmp_path: Path) -> None:
+        destination = tmp_path / "repository"
+        destination.mkdir()
+        outside = tmp_path / "outside"
+        outside.write_bytes(b"protected")
+        backend = MagicMock()
+        backend.list_files.return_value = ["weights"]
+        backend.list_dirs.return_value = []
+
+        def substitute_destination(_source: str, staged: Path) -> None:
+            (destination / "weights").symlink_to(outside)
+            staged.write_bytes(b"replacement")
+
+        backend.download_file.side_effect = substitute_destination
+        with pytest.raises(ValueError, match="cache"):
+            _download_directory(backend, "source", destination)
+
+        assert outside.read_bytes() == b"protected"
+        assert [path.name for path in destination.iterdir()] == ["weights"]
+
+    def test_parent_directory_is_rechecked_after_download(self, tmp_path: Path) -> None:
+        destination = tmp_path / "repository"
+        snapshot = destination / "snapshot"
+        snapshot.mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "weights").write_bytes(b"protected")
+        backend = MagicMock()
+        backend.list_dirs.side_effect = lambda path: ["snapshot"] if path == "source" else []
+        backend.list_files.side_effect = lambda path: ["weights"] if path == "source/snapshot" else []
+
+        def substitute_parent(_source: str, staged: Path) -> None:
+            snapshot.rmdir()
+            snapshot.symlink_to(outside, target_is_directory=True)
+            staged.write_bytes(b"replacement")
+
+        backend.download_file.side_effect = substitute_parent
+        with pytest.raises(ValueError, match="cache"):
+            _download_directory(backend, "source", destination)
+
+        assert (outside / "weights").read_bytes() == b"protected"
+        assert [path.name for path in destination.iterdir()] == ["snapshot"]
+
+    def test_derived_repository_root_cannot_alias_another_repository(self, tmp_path: Path) -> None:
+        local = tmp_path / "local"
+        local.mkdir()
+        other = local / "models--tenant-b--adapter"
+        other.mkdir()
+        (local / "models--tenant-a--adapter").symlink_to(other, target_is_directory=True)
+        backend = MagicMock()
+        backend.has_children.return_value = True
+        backend.list_files.return_value = ["injected"]
+        backend.list_dirs.return_value = []
+        backend.download_file.side_effect = lambda _source, path: path.write_bytes(b"injected")
+        config = CacheConfig(local_cache=local, cluster_cache="s3://bucket/cache", hf_fallback=False)
+
+        with (
+            patch("sie_sdk.cache.get_storage_backend", return_value=backend),
+            pytest.raises(ValueError, match="cache"),
+        ):
+            ensure_model_cached("tenant-a/adapter", config)
+
+        backend.download_file.assert_not_called()
+        assert list(other.iterdir()) == []
+
+    def test_configured_cache_root_symlink_supports_cluster_download(self, tmp_path: Path) -> None:
+        actual = tmp_path / "actual"
+        actual.mkdir()
+        selected = tmp_path / "selected"
+        selected.symlink_to(actual, target_is_directory=True)
+        config = CacheConfig(local_cache=selected, cluster_cache="oss://bucket/cache", hf_fallback=False)
+        backend = OSSBackend.__new__(OSSBackend)
+        backend._buckets = {
+            "bucket": FakeOSSCacheBucket({"cache/models--org--model/snapshots/commit/weights": b"cached"})
+        }
+
+        with patch("sie_sdk.cache.get_storage_backend", return_value=backend):
+            result = ensure_model_cached("org/model", config, revision="commit")
+
+        assert result == selected / "models--org--model"
+        assert (actual / "models--org--model/snapshots/commit/weights").read_bytes() == b"cached"
+        assert selected.is_symlink()
 
 
 class TestGetCacheConfig:
@@ -551,3 +778,73 @@ class TestGatedModelErrorHandling:
             mock_download.assert_called_once()
             call_kwargs = mock_download.call_args[1]
             assert call_kwargs["cache_dir"] == str(tmp_path)
+
+
+@pytest.mark.parametrize("allow_patterns", [None, ["adapter_config.json", "adapter_model.safetensors"]])
+def test_hub_download_pattern_filter_is_optional_and_forwarded(
+    tmp_path: Path, allow_patterns: list[str] | None
+) -> None:
+    config = CacheConfig(local_cache=tmp_path, hf_fallback=True)
+    revision = "a" * 40
+    with patch("huggingface_hub.snapshot_download") as download:
+        if allow_patterns is None:
+            result = ensure_model_cached("org/model", config, revision=revision)
+        else:
+            result = ensure_model_cached("org/model", config, revision=revision, allow_patterns=allow_patterns)
+    assert result == tmp_path / "models--org--model"
+    download.assert_called_once()
+    assert download.call_args.args == ("org/model",)
+    assert download.call_args.kwargs["revision"] == revision
+    assert download.call_args.kwargs["cache_dir"] == str(tmp_path)
+    assert download.call_args.kwargs.get("allow_patterns") == allow_patterns
+
+
+@pytest.mark.parametrize("revision", [None, "a" * 40])
+@pytest.mark.parametrize("required_files", [None, [], ["adapter_config.json"], ["adapter_model.safetensors"]])
+def test_opt_in_cache_completeness_keeps_ordinary_semantics(
+    tmp_path: Path, revision: str | None, required_files: list[str] | None
+) -> None:
+    directory = tmp_path / "models--org--model" / "snapshots" / ("a" * 40)
+    directory.mkdir(parents=True)
+    (directory / "adapter_config.json").write_bytes(b"{}")
+    config = CacheConfig(local_cache=tmp_path, hf_fallback=False)
+
+    assert is_model_cached("org/model", config, revision=revision) is True
+    assert is_model_cached("org/model", config, revision=revision, required_files=required_files) is (
+        required_files != ["adapter_model.safetensors"]
+    )
+
+
+@pytest.mark.parametrize("lookup", [is_model_cached, ensure_model_cached])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "",
+        ".",
+        "..",
+        "/absolute",
+        "../weights",
+        "nested/../../weights",
+        "nested//weights",
+        "nested\\weights",
+        "C:weights",
+        "file:stream",
+        "bad\x00name",
+        "./weights",
+    ],
+)
+def test_required_cache_files_refuse_unsafe_relative_names(tmp_path: Path, lookup, name: str) -> None:
+    config = CacheConfig(local_cache=tmp_path, cluster_cache="s3://must-not-contact", hf_fallback=True)
+    with (
+        patch("sie_sdk.cache.get_storage_backend", side_effect=AssertionError("storage must not be contacted")),
+        patch("huggingface_hub.snapshot_download", side_effect=AssertionError("Hub must not be contacted")),
+        pytest.raises(ValueError, match="safe relative paths"),
+    ):
+        lookup("org/model", config, required_files=[name])
+
+
+def test_required_cache_files_support_safe_nested_files(tmp_path: Path) -> None:
+    directory = tmp_path / "models--org--model" / "snapshots" / ("a" * 40)
+    (directory / "nested").mkdir(parents=True)
+    (directory / "nested" / "config.json").write_bytes(b"{}")
+    assert is_model_cached("org/model", CacheConfig(local_cache=tmp_path), required_files=["nested/config.json"])

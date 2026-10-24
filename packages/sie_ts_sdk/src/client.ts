@@ -76,6 +76,7 @@ import {
   getRetryAfter,
   handleError,
   parseCapacityInfo,
+  parseCreditsDecimal,
   parseEncodeResults,
   parseExtractResults,
   parseGenerateResult,
@@ -108,8 +109,9 @@ import {
   requireConnectionSchemaPolicy,
   requireConnectorIdempotencyKey,
 } from "./jobs.js";
+import { normalizeLoraOptions, validateLoraSelectors } from "./lora.js";
 import { packMessage, unpackMessage } from "./msgpack.js";
-import { parseSseStream } from "./sse.js";
+import { SSECompletion, parseSseStream } from "./sse.js";
 import {
   SYSTEM_ONE_OPTIONS,
   type SystemOneOptions,
@@ -548,6 +550,7 @@ function validateGenerateGrammar(grammar: GenerateGrammar | Record<string, unkno
 
 /** Serialize the controls shared by blocking and streaming native generation. */
 function applyGenerateOptions(body: Record<string, unknown>, options: GenerateOptions): void {
+  validateLoraSelectors({ lora_adapter: options.loraAdapter });
   if (options.temperature !== undefined) body.temperature = options.temperature;
   if (options.topP !== undefined) body.top_p = options.topP;
   if (options.adapterOptions !== undefined) body.options = options.adapterOptions;
@@ -889,11 +892,12 @@ function runtimeOptions(
   adapterOptions: Record<string, unknown> | undefined,
   typed: Record<string, unknown>,
 ): Record<string, unknown> | undefined {
+  const normalized = normalizeLoraOptions(adapterOptions);
   const set = Object.fromEntries(Object.entries(typed).filter(([, value]) => value !== undefined));
   if (adapterOptions === undefined && Object.keys(set).length === 0) {
     return undefined;
   }
-  return { ...adapterOptions, ...set };
+  return { ...normalized, ...set };
 }
 
 /** The response-level timing block, in the camelCase `TimingInfo` shape. */
@@ -1252,13 +1256,16 @@ export class SIEClient {
     options: { timeout?: number } = {},
   ): Promise<CostEstimate> {
     const body = buildEstimateEnvelope(endpoint, request);
-    return this.jsonRequest<CostEstimate>(
+    const quote = await this.jsonRequest<CostEstimate>(
       ESTIMATE_PATH,
       "POST",
       body,
       options.timeout ?? this.timeout,
       throwIfEstimateUnroutable,
     );
+    const { estimated_credits_decimal, ...rest } = quote;
+    const decimal = parseCreditsDecimal(estimated_credits_decimal);
+    return decimal === undefined ? rest : { ...rest, estimated_credits_decimal: decimal };
   }
 
   /**
@@ -1627,6 +1634,7 @@ export class SIEClient {
     req: ChatCompletionRequest,
     options: ChatCompletionOptions = {},
   ): Promise<ChatCompletion> {
+    validateLoraSelectors({ lora_adapter: req.lora_adapter });
     if (req.stream === true) {
       throw new RequestError(
         "chatCompletions() cannot be used with stream:true — use streamChatCompletions() instead.",
@@ -1689,6 +1697,8 @@ export class SIEClient {
    *   - `signal.abort()` mid-stream → the generator throws
    *     `SIEConnectionError` and releases the underlying reader, which
    *     fires `StreamCancelGuard` on the gateway side.
+   *   - EOF before `[DONE]` or all requested choices finish → throws
+   *     `SIEConnectionError`. The request is never replayed.
    *
    * `req.stream` is set to `true` automatically; any existing value is
    * overwritten. We do not validate `req.stream === false` because the
@@ -1722,13 +1732,19 @@ export class SIEClient {
     req: ChatCompletionRequest,
     signal?: AbortSignal,
   ): AsyncGenerator<ChatCompletionChunk, void, undefined> {
+    validateLoraSelectors({ lora_adapter: req.lora_adapter });
     if (req.seed !== undefined) {
       validateGenerationSeed(req.seed);
     }
     const body = { ...req, stream: true };
     const url = `${this.baseUrl}/v1/chat/completions`;
-    yield* this.consumeSseStream<ChatCompletionChunk>(url, body, req.model, signal, (chunk) =>
-      extractChatChunkError(chunk),
+    yield* this.consumeSseStream<ChatCompletionChunk>(
+      url,
+      body,
+      req.model,
+      signal,
+      (chunk) => extractChatChunkError(chunk),
+      new SSECompletion(req.n ?? 1),
     );
   }
 
@@ -1745,7 +1761,8 @@ export class SIEClient {
    *
    * Error semantics match {@link streamChatCompletions}: pre-stream HTTP
    * errors throw normally, mid-stream `error` chunks throw
-   * {@link SIEStreamError}.
+   * {@link SIEStreamError}. EOF before `[DONE]` or `done: true` throws
+   * `SIEConnectionError` without replaying the request.
    *
    * @example
    * ```typescript
@@ -1794,6 +1811,7 @@ export class SIEClient {
       model,
       signal,
       (chunk) => extractGenerateChunkError(chunk),
+      new SSECompletion(),
       { pool, gpu },
       { waitForCapacity, timeoutMs: options.timeoutMs },
     );
@@ -1827,6 +1845,7 @@ export class SIEClient {
     model: string,
     signal: AbortSignal | undefined,
     extractError: (chunk: T) => SIEStreamError | null,
+    completion: SSECompletion,
     routing?: { pool?: string; gpu?: string },
     provisioning?: { waitForCapacity?: boolean; timeoutMs?: number },
   ): AsyncGenerator<T, void, undefined> {
@@ -2038,7 +2057,7 @@ export class SIEClient {
         throw new RequestError("Streaming response has no body");
       }
       const reader = bodyStream.getReader();
-      for await (const payload of parseSseStream(reader, signal ?? controller.signal)) {
+      for await (const payload of parseSseStream(reader, signal ?? controller.signal, completion)) {
         let chunk: T;
         try {
           chunk = JSON.parse(payload) as T;
@@ -2049,8 +2068,10 @@ export class SIEClient {
         }
         const streamErr = extractError(chunk);
         if (streamErr) throw streamErr;
+        completion.observe(chunk);
         yield chunk;
       }
+      completion.requireComplete();
     } finally {
       if (signal) signal.removeEventListener("abort", onCallerAbort);
     }
@@ -2080,6 +2101,7 @@ export class SIEClient {
     items: Item[],
     options: ScoreOptions = {},
   ): Promise<ScoreResult> {
+    const adapterOptions = normalizeLoraOptions(options.adapterOptions);
     const queryForWire = await itemImagesForWire(query);
     const itemsForWire = await itemsImagesForWire(items);
 
@@ -2091,8 +2113,8 @@ export class SIEClient {
     if (options.instruction !== undefined) {
       body.instruction = options.instruction;
     }
-    if (options.adapterOptions !== undefined) {
-      body.options = options.adapterOptions;
+    if (adapterOptions !== undefined) {
+      body.options = adapterOptions;
     }
 
     const waitForCapacity = options.waitForCapacity ?? this.defaultWaitForCapacity;
@@ -3311,6 +3333,7 @@ export class SIEClient {
         state,
         total_items: totalItems,
         settled_credits: job.settled_credits,
+        settled_credits_decimal: parseCreditsDecimal(job.settled_credits_decimal),
         chunks,
         retrieved,
         dims: withDims ? withDims.dims : null,

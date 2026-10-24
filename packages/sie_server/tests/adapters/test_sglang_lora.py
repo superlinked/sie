@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -103,7 +104,7 @@ def test_startup_only_capacity_does_not_mask_invalid_limits(field, invalid):
 def test_undeclared_source_never_fetches_or_calls_engine(monkeypatch):
     fetch = Mock()
     post = Mock()
-    monkeypatch.setattr("sie_server.adapters.sglang._lora.snapshot_download", fetch)
+    monkeypatch.setattr("sie_server.adapters.sglang._lora.resolve_lora_source", fetch)
     monkeypatch.setattr("sie_server.adapters.sglang._lora.requests.post", post)
     loras = manager()
     for operation in (loras.fetch, loras.load, loras.unload):
@@ -119,8 +120,8 @@ def test_fetch_uses_immutable_revision_and_only_adapter_files(tmp_path, monkeypa
         {"base_model.model.q_proj.lora_A.weight": np.ones((4, 2), dtype=np.float32)},
         str(tmp_path / "adapter_model.safetensors"),
     )
-    fetch = Mock(return_value=str(tmp_path))
-    monkeypatch.setattr("sie_server.adapters.sglang._lora.snapshot_download", fetch)
+    fetch = Mock(return_value=tmp_path)
+    monkeypatch.setattr("sie_server.adapters.sglang._lora.resolve_lora_source", fetch)
     (tmp_path / "unvalidated.safetensors").write_bytes(b"must not reach the engine")
     loras = manager()
     snapshot = Path(loras.fetch("a"))
@@ -129,14 +130,38 @@ def test_fetch_uses_immutable_revision_and_only_adapter_files(tmp_path, monkeypa
     assert (snapshot / "adapter_model.safetensors").read_bytes() == (
         tmp_path / "adapter_model.safetensors"
     ).read_bytes()
-    fetch.assert_called_once_with(
-        "org/a", revision="a" * 40, allow_patterns=["adapter_config.json", "adapter_model.safetensors"]
-    )
+    fetch.assert_called_once_with("org/a", "a" * 40)
     with pytest.raises(ValueError, match="revision"):
         loras.fetch("a", "b" * 40)
     loras.close()
     assert not snapshot.exists()
     assert (tmp_path / "adapter_model.safetensors").exists()
+
+
+def test_sglang_prepares_pinned_cluster_adapter_with_network_denied(tmp_path, monkeypatch):
+    cluster = tmp_path / "cluster"
+    cached = cluster / "models--org--a" / "snapshots" / ("a" * 40)
+    cached.mkdir(parents=True)
+    (cached / "adapter_config.json").write_text('{"peft_type":"LORA","r":4,"target_modules":["q_proj"]}')
+    save_file(
+        {"base.q_proj.lora_A.weight": np.ones((4, 2), dtype=np.float32)}, str(cached / "adapter_model.safetensors")
+    )
+    monkeypatch.setenv("SIE_LOCAL_CACHE", str(tmp_path / "local"))
+    monkeypatch.setenv("SIE_CLUSTER_CACHE", str(cluster))
+    monkeypatch.setenv("SIE_HF_FALLBACK", "false")
+    monkeypatch.setattr(socket.socket, "connect", Mock(side_effect=AssertionError("network forbidden")))
+    monkeypatch.setattr("huggingface_hub.snapshot_download", Mock(side_effect=AssertionError("Hub forbidden")))
+    loras = manager()
+    try:
+        prepared = Path(loras.fetch("a"))
+        assert prepared != cached
+        assert {path.name for path in prepared.iterdir()} == {"adapter_config.json", "adapter_model.safetensors"}
+        assert (prepared / "adapter_model.safetensors").read_bytes() == (
+            cached / "adapter_model.safetensors"
+        ).read_bytes()
+    finally:
+        loras.close()
+    assert not prepared.exists()
 
 
 @pytest.mark.parametrize(
@@ -153,7 +178,7 @@ def test_fetch_uses_immutable_revision_and_only_adapter_files(tmp_path, monkeypa
 def test_fetch_refuses_unsupported_transform_or_engine_capacity(tmp_path, monkeypatch, override):
     config = {"peft_type": "LORA", "r": 4, "target_modules": ["q_proj"], **override}
     (tmp_path / "adapter_config.json").write_text(json.dumps(config))
-    monkeypatch.setattr("sie_server.adapters.sglang._lora.snapshot_download", lambda *args, **kwargs: str(tmp_path))
+    monkeypatch.setattr("sie_server.adapters.sglang._lora.resolve_lora_source", lambda *args, **kwargs: tmp_path)
     with pytest.raises(ValueError, match="LoRA"):
         manager().fetch("a")
 
@@ -168,9 +193,9 @@ def test_fetch_finishing_after_model_close_does_not_retain_source(tmp_path, monk
     def download(*args, **kwargs):
         entered.set()
         assert release.wait(2)
-        return str(tmp_path)
+        return tmp_path
 
-    monkeypatch.setattr("sie_server.adapters.sglang._lora.snapshot_download", download)
+    monkeypatch.setattr("sie_server.adapters.sglang._lora.resolve_lora_source", download)
     loras = manager()
     with ThreadPoolExecutor() as pool:
         pending = pool.submit(loras.fetch, "a")
@@ -187,7 +212,7 @@ def test_discard_source_keeps_attached_or_uncertain_views_until_model_close(tmp_
     save_file(
         {"base.q_proj.lora_A.weight": np.ones((4, 2), dtype=np.float32)}, str(tmp_path / "adapter_model.safetensors")
     )
-    monkeypatch.setattr("sie_server.adapters.sglang._lora.snapshot_download", lambda *args, **kwargs: str(tmp_path))
+    monkeypatch.setattr("sie_server.adapters.sglang._lora.resolve_lora_source", lambda *args, **kwargs: tmp_path)
     loras = manager()
     unused = Path(loras.fetch("a"))
     loras.discard_source("a")
@@ -251,7 +276,7 @@ def test_fetch_rejects_shared_base_tensor(tmp_path, monkeypatch):
         {"base_model.model.q_proj.weight": np.ones((4, 2), dtype=np.float32)},
         str(tmp_path / "adapter_model.safetensors"),
     )
-    monkeypatch.setattr("sie_server.adapters.sglang._lora.snapshot_download", lambda *args, **kwargs: str(tmp_path))
+    monkeypatch.setattr("sie_server.adapters.sglang._lora.resolve_lora_source", lambda *args, **kwargs: tmp_path)
     with pytest.raises(ValueError, match="outside the adapter"):
         manager().fetch("a")
 

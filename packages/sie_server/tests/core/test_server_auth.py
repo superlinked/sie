@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import errno
 import logging
 import os
@@ -44,6 +45,16 @@ from starlette.testclient import WebSocketDenialResponse
 
 TOKEN = "s3cret-token-value"  # noqa: S105 - test credential
 OTHER = "another-token-value"
+_MACOS_ACL = pytest.mark.skipif(sys.platform != "darwin", reason="macOS access control lists, set with chmod +a")
+
+
+@pytest.fixture
+def add_acl_entry(tmp_path: Path) -> Iterator[Callable[[Path, str], None]]:
+    def add(path: Path, entry: str) -> None:
+        subprocess.run(["/bin/chmod", "+a", entry, str(path)], check=True)  # noqa: S603
+
+    yield add
+    subprocess.run(["/bin/chmod", "-RN", str(tmp_path)], check=True)  # noqa: S603
 
 
 @pytest.fixture(autouse=True)
@@ -167,11 +178,12 @@ class TestPersistedToken:
         assert second.token == first.token
 
     def test_a_token_others_can_read_is_refused(self, tmp_path: Path) -> None:
-        stored = load_or_create_token(tmp_path)
+        directory = tmp_path / "Application Support"
+        stored = load_or_create_token(directory)
         stored.path.chmod(0o644)
 
-        with pytest.raises(TokenFileError, match="chmod 600"):
-            read_stored_token(tmp_path)
+        with pytest.raises(TokenFileError, match=re.escape(f"(chmod 600 '{stored.path}')")):
+            read_stored_token(directory)
 
     def test_concurrent_first_starts_agree_on_one_token(self, tmp_path: Path) -> None:
         for trial in range(10):
@@ -229,7 +241,7 @@ class TestPersistedToken:
 
         def fstat_then_the_other_start_unlinks(fd: int) -> os.stat_result:
             info = real_fstat(fd)
-            if not seen:
+            if not seen and stat.S_ISREG(info.st_mode):
                 seen.append(info.st_nlink)
                 staged.unlink()
             return info
@@ -282,7 +294,115 @@ class TestPersistedToken:
 
         with pytest.raises(TokenFileError, match="hard links"):
             read_stored_token(tmp_path)
-        assert 1 < len(scans) <= 5
+        assert len(scans) == server_auth._LINK_SCAN_ATTEMPTS
+
+    @pytest.mark.parametrize("foreign", [False, True], ids=["temporary-only", "with-foreign-link"])
+    def test_a_temporary_link_listed_twice_by_the_scan_counts_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, foreign: bool
+    ) -> None:
+        stored = load_or_create_token(tmp_path)
+        if foreign:
+            os.link(stored.path, tmp_path / "copy")
+        staged = tmp_path / ".auth-token.sie-server-0123456789abcdef"
+        os.link(stored.path, staged)
+
+        def scan_listing_each_entry_twice(directory: Path, name: re.Pattern[str]) -> Iterator[Any]:
+            for found in list(owned_files(directory, name)):
+                yield found
+                yield found
+
+        monkeypatch.setattr(server_auth, "owned_files", scan_listing_each_entry_twice)
+
+        if foreign:
+            with pytest.raises(TokenFileError, match="hard links"):
+                read_stored_token(tmp_path)
+            assert (tmp_path / "copy").exists()
+            assert staged.exists()
+        else:
+            assert read_stored_token(tmp_path) == stored.token
+            assert not staged.exists()
+
+    def test_a_temporary_link_listed_twice_in_a_directory_without_write_permission_counts_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        directory = tmp_path / "sie"
+        stored = load_or_create_token(directory)
+        os.link(stored.path, tmp_path / "elsewhere")
+        os.link(stored.path, directory / ".auth-token.sie-server-0123456789abcdef")
+
+        def scan_listing_each_entry_twice(directory: Path, name: re.Pattern[str]) -> Iterator[Any]:
+            for found in list(owned_files(directory, name)):
+                yield found
+                yield found
+
+        monkeypatch.setattr(server_auth, "owned_files", scan_listing_each_entry_twice)
+        directory.chmod(0o500)
+        try:
+            with pytest.raises(TokenFileError, match="hard links"):
+                read_stored_token(directory)
+        finally:
+            directory.chmod(0o700)
+
+    def test_a_temporary_link_renamed_during_the_scan_does_not_hide_a_foreign_link(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stored = load_or_create_token(tmp_path)
+        os.link(stored.path, tmp_path / "copy")
+        staged = tmp_path / ".auth-token.sie-server-aaaaaaaaaaaaaaaa"
+        renamed = tmp_path / ".auth-token.sie-server-bbbbbbbbbbbbbbbb"
+        os.link(stored.path, staged)
+
+        def scan_while_the_link_is_renamed(directory: Path, name: re.Pattern[str]) -> Iterator[Any]:
+            for entry, info in list(owned_files(directory, name)):
+                yield entry, info
+                if entry == staged:
+                    staged.rename(renamed)
+                    yield renamed, renamed.lstat()
+
+        monkeypatch.setattr(server_auth, "owned_files", scan_while_the_link_is_renamed)
+
+        with pytest.raises(TokenFileError, match="hard links"):
+            read_stored_token(tmp_path)
+        assert (tmp_path / "copy").exists()
+
+    def test_a_temporary_link_added_before_and_removed_after_the_listing_does_not_hide_a_foreign_link(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stored = load_or_create_token(tmp_path)
+        os.link(stored.path, tmp_path / "copy")
+        staged = tmp_path / ".auth-token.sie-server-cccccccccccccccc"
+
+        def scan_around_a_passing_link(directory: Path, name: re.Pattern[str]) -> Iterator[Any]:
+            os.link(stored.path, staged)
+            found = list(owned_files(directory, name))
+            staged.unlink()
+            yield from found
+
+        monkeypatch.setattr(server_auth, "owned_files", scan_around_a_passing_link)
+
+        with pytest.raises(TokenFileError, match="hard links"):
+            read_stored_token(tmp_path)
+        assert (tmp_path / "copy").exists()
+
+    def test_a_temporary_name_that_no_longer_holds_the_token_is_not_removed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stored = load_or_create_token(tmp_path)
+        staged = tmp_path / ".auth-token.sie-server-eeeeeeeeeeeeeeee"
+        os.link(stored.path, staged)
+
+        def scan_then_the_name_is_replaced(directory: Path, name: re.Pattern[str]) -> Iterator[Any]:
+            found = list(owned_files(directory, name))
+            staged.unlink()
+            staged.write_text("unrelated\n")
+            os.link(stored.path, tmp_path / ".auth-token.sie-server-ffffffffffffffff")
+            yield from found
+
+        monkeypatch.setattr(server_auth, "owned_files", scan_then_the_name_is_replaced)
+
+        with pytest.raises(TokenFileError, match="hard links"):
+            read_stored_token(tmp_path)
+        assert staged.read_text() == "unrelated\n"
 
     def test_a_symbolic_link_named_like_a_temporary_file_does_not_hide_a_foreign_link(self, tmp_path: Path) -> None:
         stored = load_or_create_token(tmp_path)
@@ -302,6 +422,55 @@ class TestPersistedToken:
         directory.chmod(0o500)
         try:
             assert read_stored_token(directory) == stored.token
+        finally:
+            directory.chmod(0o700)
+
+    def test_a_temporary_link_that_a_writable_directory_cannot_remove_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stored = load_or_create_token(tmp_path)
+        staged = tmp_path / ".auth-token.sie-server-0123456789abcdef"
+        os.link(stored.path, staged)
+        _refuse_unlink(staged, monkeypatch, errno.EPERM)
+
+        with pytest.raises(TokenFileError, match="hard links"):
+            read_stored_token(tmp_path)
+        assert staged.exists()
+
+    def test_a_read_only_directory_does_not_excuse_a_link_kept_by_another_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        directory = tmp_path / "sie"
+        stored = load_or_create_token(directory)
+        immutable = directory / ".auth-token.sie-server-0000000000000001"
+        os.link(stored.path, immutable)
+        os.link(stored.path, directory / ".auth-token.sie-server-0000000000000002")
+        _refuse_unlink(immutable, monkeypatch, errno.EPERM)
+        directory.chmod(0o500)
+        try:
+            with pytest.raises(TokenFileError, match="hard links"):
+                read_stored_token(directory)
+        finally:
+            directory.chmod(0o700)
+
+    def test_a_link_added_elsewhere_while_a_read_only_directory_is_cleaned_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        directory = tmp_path / "sie"
+        stored = load_or_create_token(directory)
+        os.link(stored.path, directory / ".auth-token.sie-server-0123456789abcdef")
+        unlink_token_link = server_auth._unlink_token_link
+
+        def unlink_then_a_link_appears_elsewhere(entry: Path, token: os.stat_result) -> int | None:
+            code = unlink_token_link(entry, token)
+            os.link(stored.path, tmp_path / "elsewhere")
+            return code
+
+        monkeypatch.setattr(server_auth, "_unlink_token_link", unlink_then_a_link_appears_elsewhere)
+        directory.chmod(0o500)
+        try:
+            with pytest.raises(TokenFileError, match="hard links"):
+                read_stored_token(directory)
         finally:
             directory.chmod(0o700)
 
@@ -385,13 +554,122 @@ class TestPersistedToken:
 
     @pytest.mark.parametrize("mode", [0o770, 0o707, 0o777])
     def test_a_directory_others_can_write_is_refused(self, tmp_path: Path, mode: int) -> None:
-        directory = tmp_path / "shared"
+        directory = tmp_path / "shared dir"
         directory.mkdir()
         directory.chmod(mode)
 
-        with pytest.raises(TokenFileError, match="chmod 700"):
+        with pytest.raises(TokenFileError, match=re.escape(f"(chmod 700 '{directory}')")):
             load_or_create_token(directory)
         assert not token_path(directory).exists()
+
+    @_MACOS_ACL
+    def test_a_directory_with_an_access_control_list_entry_that_allows_access_is_refused(
+        self, tmp_path: Path, add_acl_entry: Callable[[Path, str], None]
+    ) -> None:
+        existing = tmp_path / "Application Support"
+        load_or_create_token(existing)
+        empty = tmp_path / "empty"
+        empty.mkdir(mode=0o700)
+        for directory in (existing, empty):
+            add_acl_entry(directory, "everyone deny delete")
+            add_acl_entry(directory, "everyone allow add_file,add_subdirectory,delete_child")
+
+        with pytest.raises(TokenFileError) as refused:
+            read_stored_token(existing)
+        quoted = f"'{existing}'"
+        message = str(refused.value)
+        assert f"List the entries with ls -led {quoted} and remove" in message
+        assert f'remove each allow entry with chmod -a "<entry>" {quoted}, giving the entry' in message
+        with pytest.raises(TokenFileError, match="entry that allows access"):
+            load_or_create_token(empty)
+        assert not token_path(empty).exists()
+
+    @_MACOS_ACL
+    def test_removing_each_allow_entry_by_its_text_keeps_the_deny_entries(
+        self, tmp_path: Path, add_acl_entry: Callable[[Path, str], None]
+    ) -> None:
+        add_acl_entry(tmp_path, "everyone deny delete,directory_inherit")
+        add_acl_entry(tmp_path, "everyone allow list,directory_inherit")
+        directory = tmp_path / "sie"
+        directory.mkdir(mode=0o700)
+        add_acl_entry(directory, "user:nobody allow list")
+        add_acl_entry(directory, "user:daemon allow search")
+        with pytest.raises(TokenFileError, match="without its number or the word inherited"):
+            load_or_create_token(directory)
+
+        for entry in _acl_entries(directory):
+            if " allow " in entry:
+                subprocess.run(  # noqa: S603
+                    ["/bin/chmod", "-a", entry.replace(" inherited ", " "), str(directory)], check=True
+                )
+
+        assert _acl_entries(directory) == ["group:everyone inherited deny delete,directory_inherit"]
+        assert load_or_create_token(directory).created
+
+    @_MACOS_ACL
+    def test_deny_entries_like_the_home_folder_default_are_accepted(
+        self, tmp_path: Path, add_acl_entry: Callable[[Path, str], None]
+    ) -> None:
+        directory = tmp_path / "home"
+        directory.mkdir(mode=0o700)
+        add_acl_entry(directory, "everyone deny delete")
+
+        stored = load_or_create_token(directory)
+        add_acl_entry(stored.path, "everyone deny delete")
+
+        assert stored.created
+        assert read_stored_token(directory) == stored.token
+
+    @_MACOS_ACL
+    def test_a_token_file_with_an_access_control_list_entry_that_allows_access_is_refused(
+        self, tmp_path: Path, add_acl_entry: Callable[[Path, str], None]
+    ) -> None:
+        directory = tmp_path / "Application Support"
+        stored = load_or_create_token(directory)
+        add_acl_entry(stored.path, "everyone allow read")
+
+        with pytest.raises(TokenFileError) as refused:
+            read_stored_token(directory)
+        message = str(refused.value)
+        assert f"so others may have read the token. Delete the file (rm '{stored.path}')" in message
+        assert f"Removing the entries with chmod -N '{stored.path}' instead keeps the current token." in message
+
+    @_MACOS_ACL
+    def test_a_token_file_that_inherited_an_entry_is_refused_after_the_directory_is_cleared(
+        self, tmp_path: Path, add_acl_entry: Callable[[Path, str], None]
+    ) -> None:
+        directory = tmp_path / "sie"
+        directory.mkdir(mode=0o700)
+        add_acl_entry(directory, "everyone allow read,file_inherit")
+        token_path(directory).write_text(f"{TOKEN}\n")
+        token_path(directory).chmod(0o600)
+        subprocess.run(["/bin/chmod", "-N", str(directory)], check=True)  # noqa: S603
+
+        with pytest.raises(TokenFileError, match=re.escape(f"chmod -N {token_path(directory)}")):
+            read_stored_token(directory)
+
+    @_MACOS_ACL
+    def test_an_access_control_list_that_cannot_be_read_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def failing_read(fd: int, kind: int) -> None:
+            ctypes.set_errno(errno.EIO)
+
+        monkeypatch.setattr(server_auth._libsystem(), "acl_get_fd_np", failing_read)
+
+        with pytest.raises(TokenFileError, match="Cannot read the access control list"):
+            load_or_create_token(tmp_path)
+        assert not token_path(tmp_path).exists()
+
+    @_MACOS_ACL
+    def test_an_access_control_list_entry_of_unknown_kind_counts_as_allowing_access(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, add_acl_entry: Callable[[Path, str], None]
+    ) -> None:
+        add_acl_entry(tmp_path, "everyone deny delete")
+        monkeypatch.setattr(server_auth._libsystem(), "acl_get_tag_type", lambda entry, tag: -1)
+
+        with pytest.raises(TokenFileError, match="entry that allows access"):
+            load_or_create_token(tmp_path)
 
     def test_a_directory_of_another_user_is_refused(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         load_or_create_token(tmp_path)
@@ -879,6 +1157,25 @@ def _refuse_creates_in(
         return real_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(os, "open", refusing_open)
+
+
+def _refuse_unlink(target: Path, monkeypatch: pytest.MonkeyPatch, code: int) -> None:
+    """Make unlinking ``target`` fail with ``code``, as an immutable file makes it fail with EPERM."""
+    real_unlink = Path.unlink
+
+    def refusing_unlink(self: Path, missing_ok: bool = False) -> None:
+        if self == target:
+            raise OSError(code, os.strerror(code), str(self))
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", refusing_unlink)
+
+
+def _acl_entries(path: Path) -> list[str]:
+    listing = subprocess.run(  # noqa: S603
+        ["/bin/ls", "-led", str(path)], capture_output=True, text=True, check=True
+    ).stdout
+    return [line.split(": ", 1)[1] for line in listing.splitlines()[1:]]
 
 
 def _capture(call: Callable[[], object], outcome: list[BaseException]) -> None:

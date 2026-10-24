@@ -26,9 +26,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
+from sie_server.adapters.mlx import generation as mlx_generation
 from sie_server.adapters.mlx.generation import MLXGenerationAdapter
 from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
-from sie_server.api import openai_local
+from sie_server.api import anthropic_messages, openai_local
 from sie_server.api.openai_local import _validate_mlx_seed, router
 from sie_server.config.model import ModelConfig
 from sie_server.core import video_frames
@@ -37,9 +38,31 @@ from sie_server.core.loader import expand_profile_variants
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import WorkerResult
 from sie_server.types.inputs import MAX_ITEM_TEXT_BYTES
+from tokenizers import Tokenizer, models, pre_tokenizers
+from transformers import PreTrainedTokenizerFast
 
 _GEMMA_OPEN = "<" + "|channel" + ">" + "thought\n"
 _GEMMA_CLOSE = "<" + "channel|" + ">"
+
+
+_UNKNOWN = "[UNK]"
+_WORD_TEMPLATE = (
+    "{% if tools %}{{ 'tools' }}{% for tool in tools %}{{ ' ' ~ tool.function.name }}{% endfor %}{{ ' ' }}{% endif %}"
+    "{% for message in messages %}{{ message.role ~ ' ' ~ message.content }}"
+    "{% for call in message.tool_calls or [] %}{{ ' ' ~ call.function.name }}"
+    "{% for name, value in call.function.arguments.items() %}{{ ' ' ~ name ~ ' ' ~ value }}{% endfor %}"
+    "{% endfor %}{{ ' ' }}{% endfor %}"
+    "{% if enable_thinking %}{{ 'think ' }}{% endif %}{% if add_generation_prompt %}{{ 'assistant' }}{% endif %}"
+)
+
+
+def _word_tokenizer() -> PreTrainedTokenizerFast:
+    """One token per word of a prompt naming each tool, each message's role, text and call arguments, and thinking."""
+    backend = Tokenizer(models.WordLevel({_UNKNOWN: 0}, unk_token=_UNKNOWN))
+    backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, unk_token=_UNKNOWN)
+    tokenizer.chat_template = _WORD_TEMPLATE
+    return tokenizer
 
 
 def _client() -> TestClient:
@@ -73,6 +96,8 @@ def _cuda_chat_client(
     max_output_tokens: int = 64,
     server_url: str = "http://127.0.0.1:30400",
     video: bool = False,
+    image: bool = False,
+    tools: bool = True,
 ) -> tuple[TestClient, MagicMock]:
     adapter = SGLangGenerationAdapter(
         model_name_or_path="upstream/repo",
@@ -83,6 +108,7 @@ def _cuda_chat_client(
     generate_task = SimpleNamespace(
         max_output_tokens=max_output_tokens,
         chat_template_kwargs=chat_template_kwargs or {},
+        capabilities=SimpleNamespace(tools=tools),
     )
     profile = SimpleNamespace(
         runtime={
@@ -94,7 +120,7 @@ def _cuda_chat_client(
     config = SimpleNamespace(
         tasks=SimpleNamespace(generate=generate_task, score=None),
         resolve_profile=MagicMock(return_value=profile),
-        inputs=SimpleNamespace(video=video),
+        inputs=SimpleNamespace(video=video, image=image),
         profiles={},
         routing=None,
     )
@@ -124,15 +150,21 @@ def _mlx_chat_client(
     chat_template_kwargs: dict[str, Any],
     default_sampling: dict[str, Any] | None = None,
     max_output_tokens: int = 64,
+    max_seq_length: int | None = 32768,
+    image: bool = False,
+    tools: bool = True,
 ) -> tuple[TestClient, MagicMock]:
     adapter = MLXGenerationAdapter(
         model_name_or_path="Qwen/Qwen3.5-4B",
         mlx_repo="mlx-community/Qwen3.5-4B-4bit",
+        max_seq_length=max_seq_length,
     )
     adapter._server_url = "http://127.0.0.1:30401"
+    monkeypatch.setattr(mlx_generation, "_chat_tokenizer", lambda _repo, _trust_remote_code: _word_tokenizer())
     generate_task = SimpleNamespace(
         max_output_tokens=max_output_tokens,
         chat_template_kwargs=chat_template_kwargs,
+        capabilities=SimpleNamespace(tools=tools),
     )
     profile = SimpleNamespace(
         runtime={
@@ -144,6 +176,7 @@ def _mlx_chat_client(
     config = SimpleNamespace(
         tasks=SimpleNamespace(generate=generate_task, score=None),
         resolve_profile=MagicMock(return_value=profile),
+        inputs=SimpleNamespace(video=False, image=image),
         profiles={},
         routing=None,
     )
@@ -2867,3 +2900,206 @@ def test_cuda_chat_blocking_ends_at_the_generation_budget(monkeypatch: pytest.Mo
 
     assert response.status_code == 504
     assert "generation_timeout" in response.text
+
+
+_PIXEL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+_IMAGE_TURN = [
+    {"role": "user", "content": [{"type": "text", "text": "Describe it."}, {"type": "image_url", "image_url": _PIXEL}]}
+]
+
+
+@pytest.mark.parametrize("backend", ["cuda", "mlx"])
+def test_chat_refuses_tools_on_a_model_without_tool_calling_before_the_child(
+    monkeypatch: pytest.MonkeyPatch, backend: str
+) -> None:
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        pytest.fail("a refused request must not reach the child")
+
+    if backend == "cuda":
+        client, registry = _cuda_chat_client(monkeypatch, _handler, tools=False)
+    else:
+        client, registry = _mlx_chat_client(monkeypatch, _handler, chat_template_kwargs={}, tools=False)
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "Qwen/Qwen3.5-4B", "messages": [{"role": "user", "content": "hi"}], "tools": [_WEATHER_TOOL]},
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"] == {
+        "message": "Model 'Qwen/Qwen3.5-4B' does not support tool calling",
+        "type": "invalid_request_error",
+        "param": "tools",
+        "code": "unsupported_field",
+    }
+    registry.get.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("backend", "image"),
+    [("cuda", False), ("mlx", False), ("mlx", True)],
+    ids=["cuda text-only model", "mlx text-only model", "mlx child without image input"],
+)
+def test_chat_refuses_an_image_the_backend_cannot_read_before_the_child(
+    monkeypatch: pytest.MonkeyPatch, backend: str, image: bool
+) -> None:
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        pytest.fail("a refused request must not reach the child")
+
+    if backend == "cuda":
+        client, registry = _cuda_chat_client(monkeypatch, _handler, image=image)
+    else:
+        client, registry = _mlx_chat_client(monkeypatch, _handler, chat_template_kwargs={}, image=image)
+    response = client.post("/v1/chat/completions", json={"model": "Qwen/Qwen3.5-4B", "messages": _IMAGE_TURN})
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"] == {
+        "message": "Model 'Qwen/Qwen3.5-4B' does not support image input",
+        "type": "invalid_request_error",
+        "param": "messages",
+        "code": "unsupported_field",
+    }
+    registry.get.assert_not_called()
+
+
+def test_an_input_image_part_is_an_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, registry = _cuda_chat_client(
+        monkeypatch, lambda _request: pytest.fail("a refused request must not reach the child")
+    )
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "Qwen/Qwen3.5-4B",
+            "messages": [{"role": "user", "content": [{"type": "input_image", "image_url": _PIXEL}]}],
+        },
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["message"] == "Model 'Qwen/Qwen3.5-4B' does not support image input"
+    registry.get.assert_not_called()
+
+
+def test_cuda_chat_sends_an_image_to_a_vision_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[dict[str, Any]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json=_chat_completion("a pixel"))
+
+    client, _ = _cuda_chat_client(monkeypatch, _handler, image=True)
+    response = client.post("/v1/chat/completions", json={"model": "Qwen/Qwen3.5-4B", "messages": _IMAGE_TURN})
+
+    assert response.status_code == 200, response.text
+    assert seen[0]["messages"][0]["content"][1] == {"type": "image_url", "image_url": _PIXEL}
+
+
+_WINDOW = 64
+
+
+def _tool_turns(words: int) -> list[dict[str, Any]]:
+    return [
+        {"role": "user", "content": " ".join(["w"] * words)},
+        {"role": "assistant", "content": None, "tool_calls": [_PARIS_CALL]},
+        {"role": "tool", "tool_call_id": "call_paris", "content": "18"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("fields", "template_kwargs", "prompt_tokens"),
+    [
+        ({"messages": [{"role": "user", "content": "w " * 30}]}, {}, 32),
+        (
+            {
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": "w w"}, {"type": "text", "text": " w"}]}
+                ]
+            },
+            {},
+            5,
+        ),
+        ({"messages": [{"role": "user", "content": "w " * 30}], "tools": [_WEATHER_TOOL]}, {}, 34),
+        ({"messages": [{"role": "user", "content": "w " * 30}]}, {"enable_thinking": True}, 33),
+        ({"messages": _tool_turns(10), "tools": [_WEATHER_TOOL]}, {}, 20),
+    ],
+    ids=["text", "text parts", "tools", "template kwargs", "tool call and result"],
+)
+def test_mlx_chat_enforces_the_declared_window_on_the_rendered_prompt(
+    monkeypatch: pytest.MonkeyPatch, fields: dict[str, Any], template_kwargs: dict[str, Any], prompt_tokens: int
+) -> None:
+    seen: list[dict[str, Any]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json=_chat_completion("ok"))
+
+    client, _ = _mlx_chat_client(monkeypatch, _handler, chat_template_kwargs=template_kwargs, max_seq_length=_WINDOW)
+    fits = client.post(
+        "/v1/chat/completions", json={"model": "Qwen/Qwen3.5-4B", "max_tokens": _WINDOW - prompt_tokens, **fields}
+    )
+    over = client.post(
+        "/v1/chat/completions", json={"model": "Qwen/Qwen3.5-4B", "max_tokens": _WINDOW + 1 - prompt_tokens, **fields}
+    )
+
+    assert fits.status_code == 200, fits.text
+    assert len(seen) == 1
+    assert over.status_code == 400, over.text
+    assert over.json()["error"] == {
+        "message": (
+            f"prompt_tokens ({prompt_tokens}) + max_new_tokens ({_WINDOW + 1 - prompt_tokens}) = {_WINDOW + 1} "
+            f"exceeds context_length ({_WINDOW}) for model 'Qwen/Qwen3.5-4B'"
+        ),
+        "type": "invalid_request_error",
+        "param": "prompt",
+        "code": "INPUT_TOO_LONG",
+    }
+
+
+_UNPARSED_CALL = {**_PARIS_CALL, "function": {"name": "get_weather", "arguments": "{"}}
+
+
+@pytest.mark.parametrize(
+    ("max_seq_length", "messages"),
+    [
+        (None, [{"role": "user", "content": "w " * 100}]),
+        (_WINDOW, [*_tool_turns(100)[:1], {"role": "assistant", "content": None, "tool_calls": [_UNPARSED_CALL]}]),
+    ],
+    ids=["no declared window", "arguments the template cannot read"],
+)
+def test_mlx_chat_leaves_a_prompt_it_cannot_count_to_the_child(
+    monkeypatch: pytest.MonkeyPatch, max_seq_length: int | None, messages: list[dict[str, Any]]
+) -> None:
+    seen: list[dict[str, Any]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json=_chat_completion("ok"))
+
+    client, _ = _mlx_chat_client(monkeypatch, _handler, chat_template_kwargs={}, max_seq_length=max_seq_length)
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "Qwen/Qwen3.5-4B", "max_tokens": 8, "messages": messages, "tools": [_WEATHER_TOOL]},
+    )
+
+    assert response.status_code == 200, response.text
+    assert len(seen) == 1
+
+
+def test_mlx_messages_refuse_a_prompt_over_the_window_with_the_compaction_wording(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _ = _mlx_chat_client(
+        monkeypatch,
+        lambda _request: pytest.fail("a refused request must not reach the child"),
+        chat_template_kwargs={},
+        max_seq_length=_WINDOW,
+    )
+    client.app.include_router(anthropic_messages.router)
+    response = client.post(
+        "/v1/messages",
+        json={"model": "Qwen/Qwen3.5-4B", "max_tokens": 32, "messages": [{"role": "user", "content": "w " * 40}]},
+    )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"] == {
+        "type": "invalid_request_error",
+        "message": f"prompt is too long: {42 + 32} tokens > {_WINDOW} maximum",
+    }

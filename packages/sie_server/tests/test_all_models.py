@@ -340,9 +340,10 @@ def test_salesforce_sfr_embedding_mistral_dense() -> None:
     _assert_dense("Salesforce/SFR-Embedding-Mistral", 4096, None)
 
 
-@pytest.mark.xfail(reason="Snowflake model custom code requires xformers", strict=False)
 def test_snowflake_snowflake_arctic_embed_m_v2_0_dense() -> None:
-    _assert_dense("Snowflake/snowflake-arctic-embed-m-v2.0", 768, None)
+    _assert_dense(
+        "Snowflake/snowflake-arctic-embed-m-v2.0", 768, [-0.059539794921875, 0.0238189697265625, -0.069580078125]
+    )
 
 
 def test_sentence_transformers_all_minilm_l6_v2_dense() -> None:
