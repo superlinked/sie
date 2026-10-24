@@ -24,7 +24,7 @@ For the **CPU embedding exercise**, install only `--group outcomes`, fetch only 
 uv run --frozen python router.py reuse-native --data data --run my-router
 ```
 
-**2–3. Try and adapt Laya on GPU.** Start with unchanged weights, then let development data choose the LoRA training duration. The fast recipe uses less padding and FlashAttention for training, with the same full-precision validation and export. The supplied reference run took **77 minutes** including selection, refitting and export; `--recipe reference` retains that recipe. [GPU setup](gpu/README.md) explains the separate locked environment.
+**2–3. Try and adapt Laya on GPU.** Start with unchanged weights, then let development data choose the LoRA training duration. The fast recipe uses less padding and FlashAttention for training, with the same full-precision validation and export. The complete fit took **28.6 minutes on H100**, versus **77.4 minutes** for the supplied reference recipe; setup and input scoring add time. `--recipe reference` retains the original recipe. [GPU setup and comparison](gpu/README.md) explains the locked environment and measured results.
 
 ```bash
 # Score unchanged Laya, train LoRA, and save input-only predictions for both versions.

@@ -27,7 +27,7 @@ We use **Big-Bench Extra Hard (BBEH)**: reasoning problems involving logic, coun
 | Calibration | 385 | Choose routing policies at different spending levels |
 | Final test | 975 | Measure the frozen policies once |
 
-Repeated questions and identified source/context families stay together. Training uses training labels; model settings use development labels. After those choices, each learned router is fitted afresh on training + development. Calibration chooses the routing tradeoffs; final-test answers are collected only after all models and policies are frozen.
+Repeated questions and identified source/context families stay together. Training uses training labels; model settings use development labels. After those choices, each learned router is fitted afresh on training + development. Calibration chooses the routing tradeoffs. In the original study, final-test answers were collected only after all models and policies were frozen.
 
 The main measurements are:
 
@@ -53,11 +53,11 @@ Some questions are answered correctly only by Luna. A good router can therefore 
 
 All router rows use a rule fixed before final collection: select the highest calibration accuracy under an **80% calibration answer-cost cap** relative to always-Sol. It is an illustrative spending level, not a required quality threshold or a guarantee of 20% test savings. The table reports final-test answer costs; add **$0.81 per 10,000 requests** for the Cloud encoder on embedding routes. For embedding + learned cost, that changes $58.16 to **$58.97**, or **16.7% savings** versus always-Sol at $70.77. Native and application hosting are separate. Every method, both cost variants and all preselected spending levels remain in the full report.
 
-The steps compare different ways to learn the decision; they do not promise that every added model improves every tradeoff. LoRA improves on unchanged Laya. Neighbors provide a simple embedding baseline. Learning request costs improves the embedding classifier at the illustrated spending levels. The inexpensive text controls remain competitive and belong in the comparison.
+The table and default replay use the supplied reference checkpoints. Step 3 also compares a faster training recipe against them. The steps compare different ways to learn the decision; they do not promise that every added model improves every tradeoff. LoRA improves on unchanged Laya. Neighbors provide a simple embedding baseline. Learning request costs improves the embedding classifier at the illustrated spending levels. The inexpensive text controls remain competitive and belong in the comparison.
 
 ### Set up
 
-For the **complete training sequence**, use a Linux machine with an NVIDIA GPU. The supplied LoRA recipe was validated on one **H100 80 GB**; its longest batches used approximately 51 GB of reserved GPU memory. Other GPU sizes and Apple Silicon LoRA training have not been validated. A Linux or macOS laptop can replay the results, train the embedding classifiers and run Laya inference; full-population Laya scoring is much faster on a GPU.
+For the **complete training sequence**, use a Linux machine with an NVIDIA GPU. The fast LoRA recipe was validated on one **H100 80 GB**; PyTorch reserved up to **75.8 GiB of GPU memory** during the measured validation stages. Other GPU sizes and Apple Silicon LoRA training have not been validated. A Linux or macOS laptop can replay the results, train the embedding classifiers and run Laya inference; full-population Laya scoring is much faster on a GPU.
 
 Install Python 3.12 and [uv](https://docs.astral.sh/uv/getting-started/installation/). From a clone of this repository:
 
@@ -118,7 +118,7 @@ This establishes how much a general decision model knows before seeing this work
 
 The fast recipe reduces padding and uses FlashAttention during training. It keeps the same model, labels, effective batch size and development-selection rule. Validation and exported-model inference use the original full-precision computation.
 
-The supplied reference recipe took **77 minutes on H100**: about **51 minutes** to compare eight training passes using development data, then **26 minutes** for the selected three-pass refit and checkpoint export. Setup and scoring add time. The reference recipe remains available with `--recipe reference`.
+The complete fast fit took **28.6 minutes on H100**, compared with **77.4 minutes** for the reference recipe: **2.7× faster**. This includes all eight training passes and development checks (**18.2 minutes**), then the selected three-pass refit and checkpoint exports (**10.4 minutes**). Dependency setup and held-out input scoring add time. The reference recipe remains available with `--recipe reference`.
 
 ```bash
 # Train on training data, select duration on development, then refit from the original model on both.
@@ -131,6 +131,8 @@ uv run --project gpu --frozen python router.py score --data data --run my-router
 ```
 
 The recipe considers the unchanged model and eight training passes. **Three passes gave the best development loss** in the supplied run; later passes worsened it. We then restarted from the original model and trained for those three passes on training + development. This check is why the example does not simply train for as long as possible. Small differences across hardware can change the selected pass; your run records its own selection.
+
+At the same 80% calibration spending cap, the faster run reached **77.8% accuracy at $55.94 / 10k answers**, compared with **78.3% at $56.80** for the supplied reference. Adding the learned costs in step 6 gave the faster model **78.9% accuracy at $55.84**: **21.1% answer-cost savings with a 1.9-point loss** versus always-Sol, before native hosting. [The complete training comparison](gpu/README.md#measured-speed-and-routing-quality) includes all spending levels, uncertainty and a download that needs no GPU.
 
 ## 4. Estimate success from similar questions [76.3% accuracy; 22.8% savings incl. encoder]
 

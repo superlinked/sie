@@ -39,6 +39,81 @@ dependency groups. On a preconfigured VM, clear inherited `UV_NO_SYNC`,
 `UV_PROJECT_ENVIRONMENT`, `UV_NO_BUILD` and `VIRTUAL_ENV` settings before installing, so uv
 creates this project's environment.
 
+## Measured speed and routing quality
+
+The complete fast fit took **28.6 minutes**, versus **77.4 minutes** for the
+original H100 run: **2.7× faster, or 63.1% less time**. Both selected three
+epochs on development data and then trained afresh on training + development.
+They visited the same 46,852 decision items and retained all nine development
+checkpoints, including the unchanged model.
+
+| Matching fit stage | Reference | Fast |
+|---|---:|---:|
+| Development selection, through epoch 8 | 51.2 min | 18.2 min |
+| Fresh refit and checkpoint exports | 26.2 min | 10.4 min |
+| Complete fit | 77.4 min | 28.6 min |
+
+These are measured single runs on H100, not repeated timing trials. The fast
+worker took 35.5 minutes through result copying, including a 49-second clean
+dependency installation, diagnostic checks and 4.1 minutes of held-out input
+scoring. VM/image startup and final archival/teardown are outside that worker
+clock. The complete fit includes 11.8 minutes of full-precision validation and
+export checks; these checks were retained when training became faster.
+
+The following comparisons use all **975 published final questions**. Each
+recipe chose its policy on calibration at the same four answer-cost caps;
+actual test spending can differ. Both cost-estimation variants are retained.
+The accuracy and dollar differences are **fast minus reference**; brackets give
+95% paired intervals that keep related question families together.
+
+| Cost estimate | Calibration cap | Accuracy: reference → fast | Answer $ / 10k: reference → fast | Accuracy difference, points [95% interval] | Dollar difference [95% interval] |
+|---|---:|---:|---:|---:|---:|
+| Original | 20% | 55.9% → 56.3% | $12.64 → $13.43 | +0.41 [−0.10, +0.92] | +$0.79 [+$0.09, +$1.56] |
+| Original | 40% | 63.8% → 63.7% | $28.00 → $26.39 | −0.10 [−0.96, +0.79] | −$1.60 [−$2.93, −$0.29] |
+| Original | 60% | 71.0% → 71.5% | $42.44 → $42.60 | +0.51 [−0.73, +1.85] | +$0.16 [−$1.74, +$2.14] |
+| Original | 80% | 78.3% → 77.8% | $56.80 → $55.94 | −0.41 [−1.43, +0.61] | −$0.86 [−$1.79, +$0.05] |
+| Learned | 20% | 57.1% → 57.0% | $13.92 → $13.39 | −0.10 [−0.89, +0.71] | −$0.53 [−$1.01, −$0.04] |
+| Learned | 40% | 66.8% → 66.5% | $27.53 → $26.62 | −0.31 [−1.64, +1.03] | −$0.90 [−$2.09, +$0.31] |
+| Learned | 60% | 74.1% → 74.6% | $41.67 → $41.08 | +0.51 [−0.94, +1.95] | −$0.59 [−$2.48, +$1.20] |
+| Learned | 80% | 79.0% → 78.9% | $57.63 → $55.84 | −0.10 [−1.07, +0.97] | −$1.79 [−$3.01, −$0.58] |
+
+For context, always-Sol achieved **80.8% at $70.77 / 10k**. The last fast policy
+therefore saves **21.1% of answer cost with a 1.9-point accuracy loss**. Native
+hosting and one-time training are separate. The full report includes every
+calibration-frontier policy and the unchanged embedding and text controls.
+These results support the faster training option; the intervals do not prove
+that the recipes are equivalent. They describe question uncertainty for these
+two trained models, not variation across training seeds. This comparison uses
+already public answers and is a reproduction, not a new blind test.
+
+The unchanged base export and its calibration/test probabilities match the
+reference exactly. The adapted checkpoint's maximum margin difference after
+merging and reloading was below 0.000272, within the original checks. Mixed-precision
+loss scaling skipped 8 of 2,936 attempted updates; all 2,928 actual updates and
+skip positions are recorded, with the original scheduler behavior preserved.
+
+Training/validation intervals recorded up to **33.4 GiB allocated and 75.8 GiB
+reserved**. The separate longest-input check recorded **45.0 GiB allocated**.
+These counters reset between stages and do not capture every initialization
+allocation. They establish a working H100 recipe, not a smaller GPU minimum.
+
+### Download the comparison without training
+
+`fast-release.json` pins the supplement independently of the original dataset.
+Its core download contains the report, exact source snapshot, training receipts
+and all eight comparisons. The optional weights group adds the adapted model.
+
+```bash
+# Download and verify the fast-training comparison on CPU; no API keys or model calls.
+uv run --frozen python router.py fetch \
+  --release fast-release.json --output fast-results --group core
+```
+
+Open `fast-results/comparison/explorer/index.html`. Select `fast_lora` or
+`fast_lora · predicted cost` alongside the reference LoRA variants. The bundled
+`fast-results/README.md` also gives commands to recompute the numerical
+comparison from the frozen policies and original public answers.
+
 ## Locked binaries
 
 | Dependency | Version | Public source |
