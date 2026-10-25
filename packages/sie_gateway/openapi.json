@@ -1134,12 +1134,14 @@
             ]
           },
           "ttl_seconds": {
-            "description": "Lease TTL in seconds; omit for the gateway default. Values above the\ngateway limit (`SIE_GATEWAY_POOL_MAX_TTL_S`, default 3600) are rejected.",
-            "format": "int64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PoolTtl",
+                "description": "How long the pool lives after its last renewal. Omit for the gateway\ndefault lease (1200 s), which SDK clients renew while they run. A\nnumber of seconds sets the lease; values above the gateway limit\n(`SIE_GATEWAY_POOL_MAX_TTL_S`; by default 2592000, 30 days, with\ngateway auth on and 3600 without) and `0` are rejected with `400`. `\"never\"` creates a pool that lives until it is\ndeleted and needs no renewal; it requires gateway auth\n(`SIE_AUTH_MODE=token`, so the request carries the admin token) and is\nrefused with `403` otherwise."
+              }
             ]
           }
         },
@@ -3733,11 +3735,14 @@
             "type": "string"
           },
           "ttl_seconds": {
-            "format": "int64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PoolTtl",
+                "description": "How long the pool lives after its last renewal: whole seconds, or\n`\"never\"` for a pool that lives until it is deleted. `null` on an\nAPI-created pool means the gateway's default lease. The `default` pool\nand static Helm queue pools report `\"never\"`."
+              }
             ]
           }
         },
@@ -3778,6 +3783,24 @@
           "state"
         ],
         "type": "object"
+      },
+      "PoolTtl": {
+        "description": "How long a pool lives after its last renewal: a whole number of seconds, or \"never\".",
+        "oneOf": [
+          {
+            "description": "The pool expires this many seconds after its last renewal.",
+            "format": "int64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          {
+            "description": "The pool never expires; it lives until it is deleted.",
+            "enum": [
+              "never"
+            ],
+            "type": "string"
+          }
+        ]
       },
       "ProfileInfoWire": {
         "properties": {
@@ -8217,7 +8240,7 @@
                 }
               }
             },
-            "description": "Invalid pool request, including a TTL or warm floor above the gateway limit"
+            "description": "Invalid pool request, including a zero TTL or a TTL or warm floor above the gateway limit"
           },
           "401": {
             "content": {
@@ -8237,7 +8260,7 @@
                 }
               }
             },
-            "description": "Admin token required for this mutation (or admin token not configured), the pool is named `default`, or the gateway's limit on API-created pools is reached"
+            "description": "Admin token required for this mutation (or admin token not configured), the pool is named `default`, the gateway's limit on API-created pools is reached, or `ttl_seconds: \"never\"` was sent to a gateway without auth"
           },
           "500": {
             "content": {
@@ -8387,6 +8410,7 @@
     },
     "/v1/pools/{name}/renew": {
       "post": {
+        "description": "Restart the pool's lease. A pool created with `ttl_seconds: \"never\"` has no lease and needs no renewal; renewing it succeeds and changes nothing.",
         "operationId": "renew_pool",
         "parameters": [
           {

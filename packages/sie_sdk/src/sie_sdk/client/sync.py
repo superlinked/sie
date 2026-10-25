@@ -102,6 +102,7 @@ from sie_sdk.types import (
     OutputType,
     PoolInfo,
     PoolSpec,
+    PoolTtl,
     Recommendation,
     RequestMetadata,
     ResponseInputMessage,
@@ -172,6 +173,7 @@ from ._shared import (
     parse_score_result,
     parse_terminal_json_object,
     parse_terminal_msgpack_object,
+    pool_never_expires,
     provisioning_retry_delay,
     raise_if_estimate_unroutable,
     raise_if_input_too_long,
@@ -191,6 +193,7 @@ from ._shared import (
     validate_encode_traceparent,
     validate_generate_grammar,
     validate_generate_request_body,
+    validate_pool_ttl,
     websocket_matches_base_url_origin,
 )
 from ._sse import SSECompletion, iter_sse_payloads
@@ -780,6 +783,8 @@ class SIEClient:
                 request_body["minimum_worker_count"] = self._pool_spec["minimum_worker_count"]
             if self._pool_spec.get("pinned_models") is not None:
                 request_body["pinned_models"] = self._pool_spec["pinned_models"]
+            if self._pool_spec.get("ttl_seconds") is not None:
+                request_body["ttl_seconds"] = self._pool_spec["ttl_seconds"]
 
             try:
                 response = self._client.post(
@@ -809,8 +814,9 @@ class SIEClient:
 
             self._pool_created = True
 
-            # Start lease renewal thread
-            self._start_lease_renewal()
+            # A pool that never expires has no lease to renew.
+            if not pool_never_expires(data):
+                self._start_lease_renewal()
 
     def _start_lease_renewal(self) -> None:
         """Start the background lease renewal thread."""
@@ -906,6 +912,7 @@ class SIEClient:
         pinned_models: list[str] | None = None,
         *,
         queue_pool: str | None = None,
+        ttl_seconds: PoolTtl | None = None,
     ) -> None:
         """Create or update a resource pool for isolated capacity.
 
@@ -924,25 +931,40 @@ class SIEClient:
                 {"l4": 4}. If omitted, all matching workers can be assigned.
             bundle: Optional bundle filter. When set, only workers running this
                 bundle will be assigned to the pool.
-            minimum_worker_count: Per-pool warm floor (minimum machines kept warm).
-                The gateway emits canonical ``sie.gateway.pool.warm_floor``
-                telemetry; the collector exposes ``sie_gateway_pool_warm_floor``
-                to KEDA. Defaults to 0 (scale to zero).
+            minimum_worker_count: Per-pool warm floor: machines kept warm even with
+                no traffic. It is only the always-on floor: the lane autoscales
+                above it on demand, up to its KEDA maximum. The gateway emits
+                canonical ``sie.gateway.pool.warm_floor`` telemetry; the collector
+                exposes ``sie_gateway_pool_warm_floor`` to KEDA. Defaults to 0
+                (scale to zero).
             pinned_models: Optional set of model ids to keep loaded so the first
                 request to them pays no cold model-load. Each id must be a model the
                 gateway already tracks and may be profile-qualified
                 (``model-name:profile_name``); unknown ids are rejected. Defaults to none.
             queue_pool: Optional Helm/NATS queue namespace backing this logical
                 pool. Defaults to "default", drawing from base capacity.
+            ttl_seconds: How long the pool lives after this client stops renewing
+                it. Omit for the gateway default (1200 s) on a new pool, or to keep
+                an existing pool's lifetime. While the client runs it renews the
+                pool every 60 s, so the pool lasts as long as the client plus this
+                grace period. Whole seconds, up to the gateway limit
+                (``SIE_GATEWAY_POOL_MAX_TTL_S``: by default 30 days with gateway
+                auth on, 1 hour without). ``"never"`` creates a pool that lives
+                until it is deleted, so it outlives this process and the client
+                does not renew it; it needs gateway auth (an admin ``api_key``).
 
         Raises:
             PoolError: If pool creation fails (e.g., invalid machine profile).
             SIEConnectionError: If unable to connect to the server.
+            ValueError: If ``minimum_worker_count`` is negative or ``ttl_seconds``
+                is neither a positive whole number nor ``"never"``.
 
         Example:
             >>> client.create_pool("eval", {"l4": 2}, bundle="default", minimum_worker_count=1)
             >>> result = client.encode("BAAI/bge-m3", {"text": "Hello"}, gpu="eval/l4")
             >>> client.delete_pool("eval")
+            >>> # A pool for a long-lived service: no expiry, no renewal.
+            >>> client.create_pool("rag", {"l4": 1}, minimum_worker_count=1, ttl_seconds="never")
         """
         with self._pools_lock:
             already_tracking = name in self._pools
@@ -950,6 +972,7 @@ class SIEClient:
         if minimum_worker_count is not None and minimum_worker_count < 0:
             msg = "minimum_worker_count must be >= 0"
             raise ValueError(msg)
+        validate_pool_ttl(ttl_seconds)
 
         logger.info(
             "Creating/updating pool '%s' with gpus=%s, gpu_caps=%s, bundle=%s",
@@ -973,6 +996,8 @@ class SIEClient:
             request_body["minimum_worker_count"] = minimum_worker_count
         if pinned_models is not None:
             request_body["pinned_models"] = pinned_models
+        if ttl_seconds is not None:
+            request_body["ttl_seconds"] = ttl_seconds
 
         try:
             response = self._client.post(
@@ -999,11 +1024,23 @@ class SIEClient:
         state = data.get("status", {}).get("state", "unknown")
         logger.info("Pool '%s' created/updated with state '%s'", name, state)
 
-        # Start lease renewal thread for this pool if this client is not
-        # already tracking it. Repeated create_pool calls intentionally still
-        # POST so callers can update gpus/gpu_caps on the gateway.
-        if not already_tracking:
+        # A pool that never expires has no lease: stop renewing it if this
+        # client was. Otherwise start renewing it if this client is not
+        # already. Repeated create_pool calls intentionally still POST so
+        # callers can update the pool on the gateway.
+        if pool_never_expires(data):
+            self._stop_pool_lease_renewal(name)
+        elif not already_tracking:
             self._start_pool_lease_renewal(name)
+
+    def _stop_pool_lease_renewal(self, pool_name: str) -> None:
+        """Stop this client's lease renewal thread for a pool, if any."""
+        with self._pools_lock:
+            entry = self._pools.pop(pool_name, None)
+        if entry is not None:
+            thread, stop_event = entry
+            stop_event.set()
+            thread.join(timeout=5.0)
 
     def _start_pool_lease_renewal(self, pool_name: str) -> None:
         """Start lease renewal thread for a pool."""
@@ -1130,9 +1167,10 @@ class SIEClient:
     def delete_pool(self, name: str | None = None) -> bool:
         """Delete a pool.
 
-        This explicitly releases pool resources. Normally pools are GC'd
-        automatically after inactivity, so this is only needed for
-        immediate cleanup.
+        This explicitly releases pool resources. A pool with a lease is
+        collected automatically once it is no longer renewed, so this is only
+        needed for immediate cleanup. A pool created with
+        ``ttl_seconds="never"`` lives until it is deleted.
 
         Args:
             name: Pool name to delete. If None, uses the legacy constructor pool.
@@ -1158,12 +1196,7 @@ class SIEClient:
         else:
             return False
 
-        # Stop lease renewal thread for this pool
-        with self._pools_lock:
-            if pool_name in self._pools:
-                thread, stop_event = self._pools.pop(pool_name)
-                stop_event.set()
-                thread.join(timeout=5.0)
+        self._stop_pool_lease_renewal(pool_name)
 
         # Also handle legacy pool cleanup if this is the legacy pool
         if self._pool_spec is not None and pool_name == self._pool_spec.get("name"):

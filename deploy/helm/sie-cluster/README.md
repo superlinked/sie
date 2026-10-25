@@ -764,7 +764,10 @@ Use one of these patterns deliberately:
   through `/v1/pools` with `queue_pool` set to that physical queue. Use a
   logical pool name that does not collide with the protected static queue-pool
   name, or target the static pool directly. SDK calls use
-  `gpu="<logicalPool>/<machineProfile>"`.
+  `gpu="<logicalPool>/<machineProfile>"`. A logical pool created with
+  `ttl_seconds: "never"` does not expire either, like a static queue pool, but
+  stays API-owned: it can be changed and deleted through `/v1/pools` and is held
+  to the pool API bounds below.
 
 Missing named pools intentionally do not fail open. Falling back from
 `pool=default,machineProfile=l4` to `pool=l4,machineProfile=l4` would cross the
@@ -1409,7 +1412,9 @@ and `POST /v1/configs/resolve`. They accept the token in the Secret named by
 `gateway.auth.adminTokenSecretName` (key `gateway.auth.adminTokenSecretKey`,
 default `SIE_ADMIN_TOKEN`), which the chart passes to the gateway as
 `SIE_ADMIN_TOKEN`. When it is empty, those requests get `403` (`Admin token not
-configured`). The chart does not generate this token, and it must be separate
+configured`). The gateway also accepts the admin token wherever it accepts a
+client token, so an engineer who manages pools can use one key to create a
+pool and send it traffic. The chart does not generate this token, and it must be separate
 from the sie-config tokens: the render fails when it names the Secret and key
 of the sie-config admin token, which would give every gateway pod catalog
 write access, or of the read token, which every worker sidecar holds.
@@ -1420,8 +1425,8 @@ write access, or of the read token, which every worker sidecar holds.
 - **sie-config read token:** sie-config, every gateway pod, and every worker
   sidecar. It can read the whole catalog, including every model config, but
   cannot write.
-- **Gateway admin token (when set):** every gateway pod and the tooling that
-  manages pools.
+- **Gateway admin token (when set):** every gateway pod and the tooling and
+  engineers that manage pools. It also works as a client token.
 - **Gateway client token (when set or generated):** API clients, every gateway
   pod, and every worker sidecar, which presents it when it calls the gateway.
   See [Securing the cluster](#securing-the-cluster).
@@ -1961,20 +1966,43 @@ an admin token is configured.
 
 With gateway token auth, pool create, renew, and delete also require the
 gateway admin token (see [Gateway admin token](#gateway-admin-token)).
-Independently of auth, the gateway bounds API-created pools:
+
+The chart sets the envelope that pools work inside: the machine profiles and
+lanes in `workers.pools`, and each lane's KEDA `maxReplicas`. Within it, API
+callers create pools. Independently of auth, the gateway bounds API-created
+pools:
 
 - the warm floor (`minimum_worker_count`, which applies to each of the pool's
   machine profiles) and the `gpus` requirement may each add up to at most 4
   workers per pool by default, and a pool's active lease keeps at most its
-  requirement warm;
-- the lease TTL is capped at 3600 s by default;
-- live API-created pools are capped at 64 by default. Each gateway replica
-  checks the pools it knows, including ones replicated from other replicas,
-  so concurrent creates on different replicas can briefly exceed the cap; it
-  is not a strict cluster-wide limit.
+  requirement warm. This bounds only the always-on floor: KEDA still scales
+  the lane above it on queue depth and pending demand, up to the lane's
+  `maxReplicas`, and a pool without `gpu_caps` is assigned every worker on its
+  lanes;
+- a pool's lease (`ttl_seconds`) is capped at 30 days by default with gateway
+  auth on, and at one hour with it off, so one unauthenticated request cannot
+  hold warm capacity for long. A pool created with `ttl_seconds: "never"` has
+  no lease and lives until it is deleted; the gateway accepts it only with
+  gateway auth on, where the request carries the admin token, and refuses it
+  with `403` otherwise;
+- live API-created pools are capped at 64 by default, pools that never expire
+  included. Each gateway replica checks the pools it knows, including ones
+  replicated from other replicas, so concurrent creates on different replicas
+  can briefly exceed the cap; it is not a strict cluster-wide limit.
 
 Tune them with `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`,
-`SIE_GATEWAY_POOL_MAX_TTL_S`, and `SIE_GATEWAY_MAX_POOLS` in `gateway.extraEnv`.
+`SIE_GATEWAY_POOL_MAX_TTL_S`, and `SIE_GATEWAY_MAX_POOLS` in `gateway.extraEnv`;
+an explicit `SIE_GATEWAY_POOL_MAX_TTL_S` overrides either TTL default.
+
+Give services that only send traffic a client token rather than the admin
+token: the admin token can also change and delete every pool.
+
+> **Upgrade note:** finish rolling out the gateway before you create a pool
+> with `ttl_seconds: "never"`, change an existing pool to it, or give a pool a
+> lease longer than one hour. A gateway replica from an earlier release cannot
+> read a pool that never expires, keeps its older copy of the pool, and caps
+> leases at one hour, so it can delete such a pool when that copy's lease runs
+> out, which removes it from every replica.
 
 > **Upgrade note (breaking):** `values-aws.yaml`, `values-gke.yaml`, and
 > `values-aks.yaml` used to enable a host-less, TLS-less Ingress in front of an

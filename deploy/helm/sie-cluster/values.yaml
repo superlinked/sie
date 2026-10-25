@@ -358,9 +358,9 @@ gateway:
     # -- Existing Secret with the gateway admin token (key:
     # adminTokenSecretKey). With mode token or static, the gateway requires it
     # on POST, PUT, and DELETE under /v1/pools, /v1/admin, and /v1/configs;
-    # when empty, those requests get 403. It must not name the Secret and key
-    # of either sie-config token or the gateway client token (the render
-    # fails).
+    # when empty, those requests get 403. The gateway also accepts it wherever
+    # it accepts the client token. It must not name the Secret and key of
+    # either sie-config token or the gateway client token (the render fails).
     adminTokenSecretName: ""
     adminTokenSecretKey: "SIE_ADMIN_TOKEN"
 
@@ -1842,7 +1842,9 @@ queueRouting:
   # lowercase before gateway storage/routing. Use this when
   # poolAdmission.enabled=true and a worker group sets a named non-default
   # workers.pools.<name>.queuePool but the pool is static/deploy-owned rather
-  # than created through the expiring /v1/pools API.
+  # than created through the /v1/pools API. They report ttl_seconds "never",
+  # like an API pool created to never expire, but stay operator-owned: the API
+  # cannot change or delete them and the pool API limits do not apply.
   #
   # Example:
   # staticQueuePools:

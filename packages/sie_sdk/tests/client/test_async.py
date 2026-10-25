@@ -790,6 +790,73 @@ class TestAsyncPoolOperations:
         await client.close()
 
     @pytest.mark.asyncio
+    async def test_create_pool_that_never_expires_is_not_renewed(self) -> None:
+        resp = _make_json_response(
+            {"name": "rag", "spec": {"ttl_seconds": "never"}, "status": {"state": "active"}},
+            status_code=201,
+        )
+        client = SIEAsyncClient("http://localhost:8080")
+        client._post = AsyncMock(return_value=resp)  # type: ignore
+
+        await client.create_pool("rag", gpus={"l4": 1}, ttl_seconds="never")
+
+        assert client._post.call_args.kwargs["json_data"]["ttl_seconds"] == "never"
+        assert "rag" not in client._pools
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_create_of_a_pool_that_never_expires_settles_waiters(self) -> None:
+        release = asyncio.Event()
+
+        async def gated_post(*_args: object, **_kwargs: object) -> _AioResponse:
+            await release.wait()
+            return _make_json_response({"name": "rag", "spec": {"ttl_seconds": "never"}, "status": {}})
+
+        client = SIEAsyncClient("http://localhost:8080")
+        client._post = gated_post  # type: ignore
+
+        first = asyncio.create_task(client.create_pool("rag", gpus={"l4": 1}, ttl_seconds="never"))
+        await asyncio.sleep(0)
+        second = asyncio.create_task(client.create_pool("rag", gpus={"l4": 1}, ttl_seconds="never"))
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.wait_for(asyncio.gather(first, second), timeout=5)
+
+        assert "rag" not in client._pools
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_updating_a_pool_to_never_expire_cancels_its_renewal(self) -> None:
+        client = SIEAsyncClient("http://localhost:8080")
+        client._post = AsyncMock(  # type: ignore
+            side_effect=[
+                _make_json_response({"name": "rag", "spec": {"ttl_seconds": None}, "status": {}}),
+                _make_json_response({"name": "rag", "spec": {"ttl_seconds": "never"}, "status": {}}),
+            ]
+        )
+
+        await client.create_pool("rag", gpus={"l4": 1})
+        renewal = client._pools["rag"]
+        assert isinstance(renewal, asyncio.Task)
+        await client.create_pool("rag", gpus={"l4": 1}, ttl_seconds="never")
+
+        assert renewal.cancelled()
+        assert "rag" not in client._pools
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_create_pool_invalid_ttl_raises_before_any_request(self) -> None:
+        client = SIEAsyncClient("http://localhost:8080")
+        client._post = AsyncMock()  # type: ignore
+
+        with pytest.raises(ValueError, match="ttl_seconds"):
+            await client.create_pool("rag", gpus={"l4": 1}, ttl_seconds=0)
+
+        client._post.assert_not_called()
+        assert "rag" not in client._pools
+        await client.close()
+
+    @pytest.mark.asyncio
     async def test_create_pool_connection_error_cleans_inflight_entry(self) -> None:
         client = SIEAsyncClient("http://localhost:8080")
         client._post = AsyncMock(  # type: ignore

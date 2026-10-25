@@ -1,6 +1,92 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use utoipa::ToSchema;
+
+/// The wire spelling of [`PoolTtl::Never`].
+pub const POOL_TTL_NEVER: &str = "never";
+
+/// How long a pool lives after its last renewal. On the wire it is a whole
+/// number of seconds or the string `"never"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolTtl {
+    /// The pool expires this many seconds after its last renewal.
+    Seconds(u64),
+    /// The pool has no lease: it lives until it is deleted.
+    Never,
+}
+
+impl Serialize for PoolTtl {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            PoolTtl::Seconds(seconds) => serializer.serialize_u64(*seconds),
+            PoolTtl::Never => serializer.serialize_str(POOL_TTL_NEVER),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PoolTtl {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct PoolTtlVisitor;
+
+        impl serde::de::Visitor<'_> for PoolTtlVisitor {
+            type Value = PoolTtl;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(r#"a whole number of seconds or "never""#)
+            }
+
+            fn visit_u64<E: serde::de::Error>(self, seconds: u64) -> Result<PoolTtl, E> {
+                Ok(PoolTtl::Seconds(seconds))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, seconds: i64) -> Result<PoolTtl, E> {
+                u64::try_from(seconds)
+                    .map(PoolTtl::Seconds)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Signed(seconds), &self))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<PoolTtl, E> {
+                if value == POOL_TTL_NEVER {
+                    Ok(PoolTtl::Never)
+                } else {
+                    Err(E::invalid_value(serde::de::Unexpected::Str(value), &self))
+                }
+            }
+        }
+
+        deserializer.deserialize_any(PoolTtlVisitor)
+    }
+}
+
+impl utoipa::PartialSchema for PoolTtl {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        use utoipa::openapi::schema::{
+            KnownFormat, ObjectBuilder, OneOfBuilder, SchemaFormat, SchemaType, Type,
+        };
+        OneOfBuilder::new()
+            .item(
+                ObjectBuilder::new()
+                    .schema_type(SchemaType::Type(Type::Integer))
+                    .format(Some(SchemaFormat::KnownFormat(KnownFormat::Int64)))
+                    .minimum(Some(1))
+                    .description(Some(
+                        "The pool expires this many seconds after its last renewal.",
+                    )),
+            )
+            .item(
+                ObjectBuilder::new()
+                    .schema_type(SchemaType::Type(Type::String))
+                    .enum_values(Some([POOL_TTL_NEVER]))
+                    .description(Some("The pool never expires; it lives until it is deleted.")),
+            )
+            .description(Some(
+                "How long a pool lives after its last renewal: a whole number of seconds, or \"never\".",
+            ))
+            .into()
+    }
+}
+
+impl ToSchema for PoolTtl {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -36,8 +122,12 @@ pub struct PoolSpec {
     pub gpus: HashMap<String, u32>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub gpu_caps: HashMap<String, u32>,
+    /// How long the pool lives after its last renewal: whole seconds, or
+    /// `"never"` for a pool that lives until it is deleted. `null` on an
+    /// API-created pool means the gateway's default lease. The `default` pool
+    /// and static Helm queue pools report `"never"`.
     #[serde(default)]
-    pub ttl_seconds: Option<u64>,
+    pub ttl_seconds: Option<PoolTtl>,
     /// Per-pool warm floor: the minimum number of machines the gateway keeps
     /// warm (via KEDA) so the first request to the pool never hits a cold VM.
     /// The gateway publishes it as `sie.gateway.pool.warm_floor`; the
@@ -188,6 +278,57 @@ mod tests {
             ],
         );
         assert_eq!(pool.worker_urls(), vec!["http://w1:8080", "http://w2:8080"]);
+    }
+
+    #[test]
+    fn test_pool_ttl_wire_format() {
+        assert_eq!(
+            serde_json::to_value(PoolTtl::Seconds(86_400)).unwrap(),
+            serde_json::json!(86_400)
+        );
+        assert_eq!(
+            serde_json::to_value(PoolTtl::Never).unwrap(),
+            serde_json::json!("never")
+        );
+        assert_eq!(
+            serde_json::from_value::<PoolTtl>(serde_json::json!(60)).unwrap(),
+            PoolTtl::Seconds(60)
+        );
+        assert_eq!(
+            serde_json::from_value::<PoolTtl>(serde_json::json!("never")).unwrap(),
+            PoolTtl::Never
+        );
+        for invalid in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("forever"),
+            serde_json::json!("Never"),
+            serde_json::json!(true),
+        ] {
+            let error = serde_json::from_value::<PoolTtl>(invalid.clone())
+                .expect_err("only whole seconds or \"never\" are a pool TTL");
+            assert!(
+                error
+                    .to_string()
+                    .contains(r#"a whole number of seconds or "never""#),
+                "{invalid}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pool_spec_ttl_round_trips_through_stored_json() {
+        let mut pool = make_pool(PoolState::Active, vec![]);
+        for ttl in [None, Some(PoolTtl::Seconds(3600)), Some(PoolTtl::Never)] {
+            pool.spec.ttl_seconds = ttl;
+            let stored = serde_json::to_string(&pool).unwrap();
+            let restored: Pool = serde_json::from_str(&stored).unwrap();
+            assert_eq!(restored.spec.ttl_seconds, ttl, "{stored}");
+        }
+        // Pools stored before `"never"` existed still parse.
+        let legacy = r#"{"spec":{"name":"legacy","gpus":{"l4":1},"ttl_seconds":600},"status":{"state":"active"}}"#;
+        let restored: Pool = serde_json::from_str(legacy).unwrap();
+        assert_eq!(restored.spec.ttl_seconds, Some(PoolTtl::Seconds(600)));
     }
 
     #[test]
