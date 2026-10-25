@@ -150,6 +150,17 @@ class TestBatchableProgress:
         assert batch.total_cost <= new_budget or batch.size == 1
         assert batcher._extract_batch().metadata == ["new-cheap"]
 
+    def test_progress_policy_does_not_apply_the_default_over_budget_lane(self) -> None:
+        config = BatchConfig(max_batch_cost=100)
+        batcher: ProgressBatchFormer[_Audio, str] = ProgressBatchFormer(config)
+        batcher._append_item(_Audio(200), "older-large")
+        batcher._append_item(_Audio(10), "newer-cheap")
+        config.max_batch_cost = 500
+
+        assert batcher._extract_batch().metadata == ["newer-cheap", "older-large"]
+        assert batcher._reserved_request is None
+        assert batcher._arrivals == {}
+
     @pytest.mark.asyncio
     async def test_flagged_and_zero_item_turns_do_not_consume_reservation(self) -> None:
         batcher: ProgressBatchFormer[_Audio, str] = ProgressBatchFormer(BatchConfig(max_batch_cost=10))
