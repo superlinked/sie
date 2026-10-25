@@ -1178,8 +1178,10 @@ SGLang generation, embedding and vision-extraction adapters size memory per
 model when `adapter_options.loadtime.mem_fraction_static` is omitted. SIE reads
 the pinned local safetensors headers at the serving precision and the model's
 attention geometry. It reserves the weights (with a 5% allowance), the KV pool,
-1 GiB for startup and 2 GiB for runtime work such as CUDA graphs. No weights are
-loaded onto a GPU to compute this estimate.
+any recurrent-state and LoRA pools, and 1 GiB for startup. On top of that it
+keeps 2 GiB for runtime work such as CUDA graphs, plus the engine's
+request-to-token table. No weights are loaded onto a GPU to compute this
+estimate.
 
 The KV pool uses the resolved profile's `kv_budget_tokens`; embedding and
 extraction profiles without that field use `max_seq_length`. Capacity rounds
@@ -1190,6 +1192,27 @@ does not reduce its requested capacity. The load-staging check uses the same
 reservation and evicts idle eligible models when it cannot fit. Resident-model
 accounting reports the reservation; the pressure monitor continues to use
 actual device usage, including every SGLang subprocess.
+
+Automatic sizing reads the profile's `extra_launch_args` and pins the pools it
+reserves:
+
+| Configuration | What SIE reserves |
+|--|--|
+| FP8 checkpoint (`quant_method: fp8`) | FP8 weights at their stored size, scales in float32. |
+| `--quantization fp8` on an unquantized checkpoint | Decoder linear weights at one byte; embeddings, head and vision or audio towers at the serving precision. Loading needs the unquantized weights free first, because the engine quantizes after it loads them. |
+| `--kv-cache-dtype fp8_e4m3`, `fp8_e5m2` or `bfloat16` | KV at that element size. `auto` follows the serving precision unless the checkpoint declares an FP8 KV scheme. |
+| Hybrid linear attention (Qwen3.5, Qwen3.6, Qwen3.8 Gated DeltaNet) | KV for the full-attention layers only, plus one recurrent-state slot per request the radix strategy needs (three, four or five per running request, or one without the radix cache) and a padding slot. Requires `--max-running-requests`; SIE passes `--max-mamba-cache-size`. `--mamba-ssm-dtype` sets the state precision. |
+| Sliding-window hybrids (Gemma 3 and 4) | Both the full and the sliding-window pools at the token budget, each with its own head geometry. SIE passes `--swa-full-tokens-ratio 1.0` unless the profile sets a ratio. |
+| Multi-head latent attention | One latent plus rotary key per layer and token. |
+| LoRA (`lora_paths`) | The engine's per-layer A and B buffers for `max_loras_per_batch` slots at `max_lora_rank`. Requires `max_lora_rank` and an explicit `lora_target_modules` list of attention and MLP projections. |
+
+Configurations whose allocations cannot be derived from checkpoint metadata
+keep an explicit fraction and fail to load without one: tensor-parallel
+engines, speculative decoding (one pinned engine allocates the draft inside
+the static fraction and the other after it), other quantization methods,
+block-scaled KV formats such as fp4 or mxfp8, sparse-attention indexers,
+Mamba-2 state layouts, and LoRA on embeddings, the output head or
+mixture-of-experts layers.
 
 To dedicate most of a GPU to one model, explicitly set a fraction:
 
@@ -1205,12 +1228,9 @@ profiles:
 
 An explicit fraction keeps the previous SGLang launch and admission behavior:
 SIE requires that fraction of total GPU memory plus 1 GiB of load headroom,
-and does not cap the engine's KV pool to `kv_budget_tokens`. Explicit fractions
-are required for tensor-parallel engines, speculative or LoRA weights,
-quantized checkpoints and nonstandard KV layouts such as MLA or linear
-attention. Calibrated profiles for these configurations retain their overrides.
-Automatic sizing is an estimate; unusually large runtime workspaces can still
-invoke the existing OOM recovery path.
+and does not cap the engine's KV pool to `kv_budget_tokens`. Calibrated
+profiles retain their overrides. Automatic sizing is an estimate; unusually
+large runtime workspaces can still invoke the existing OOM recovery path.
 
 | Env var | Default | Effect |
 |--|--|--|
@@ -1227,6 +1247,33 @@ invoke the existing OOM recovery path.
 When OOM recovery is exhausted on a request, the server returns
 `HTTP 503 RESOURCE_EXHAUSTED` with `Retry-After`. The Python SDK
 auto-retries; see `packages/sie_sdk/README.md` for client-side controls.
+
+#### Sharing one GPU between an LLM and other models
+
+The large generation models keep their fixed-fraction defaults, which give one
+model most of the card. Each also has a `shared` profile: the grammar-safe,
+non-speculative launch with automatic sizing, so it reserves only what it
+needs and leaves the rest of an 80 GB or 96 GB card to encoders or a second
+LLM. Constrained (JSON-schema or regex) requests to `:shared` stay on the
+shared engine.
+
+| Model | Profile | KV budget | Reserved | Free memory to load |
+|--|--|--|--|--|
+| `Qwen/Qwen3.8-27B-FP8` | `shared` | 16,384 tokens, 8 running requests | 39.6 GiB | 39.6 GiB |
+| `google/gemma-4-31B-it` | `shared` | 8,192 tokens | 42.9 GiB | 62.2 GiB (online FP8) |
+| `Qwen/Qwen3.6-27B` | `shared` | 16,384 tokens, 4 running requests | 60.0 GiB | 60.0 GiB |
+
+For example, on one 80 GB H100 or A100:
+
+```bash
+sie-server serve --models Qwen/Qwen3.8-27B-FP8:shared,Qwen/Qwen3-Embedding-4B,Qwen/Qwen3-4B-Instruct-2507
+```
+
+reserves 39.6 + 15.7 + 15.7 = 71 GiB. On one 96 GB RTX PRO 6000,
+`google/gemma-4-31B-it:shared` and `Qwen/Qwen3.8-27B-FP8:shared` reserve
+82.5 GiB. Load Gemma first: it briefly needs 62.2 GiB free while the engine
+quantizes its BF16 weights. Otherwise SIE evicts idle models to make that room
+and reloads them on their next request.
 
 ### Batching & request handling
 

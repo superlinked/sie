@@ -107,6 +107,60 @@ profiles:
   no-spec:
     extends: default
 
+  # Shares one GPU with other models: the bare route's launch shape and 8K
+  # window without a fixed memory fraction. SIE sizes the engine from the
+  # checkpoint instead: ~28.3 GiB of FP8 weights, a 16,384-token BF16 KV pool
+  # (1 GiB) and 41 FP32 recurrent-state slots (5.9 GiB) for eight running
+  # requests under the extra_buffer radix cache. About 39.6 GiB stays reserved,
+  # leaving the rest of an 80 GB or 96 GB card to encoders or a second LLM.
+  # Standalone because an extending profile replaces the whole loadtime block.
+  shared:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.cuda13:SGLangCuda13Adapter
+    kv_budget_tokens: 16384
+    adapter_options:
+      loadtime:
+        extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
+        served_model_name: Qwen/Qwen3.8-27B-FP8
+        attention_backend: flashinfer
+        grammar_backend: xgrammar
+        json_number_max_digits: 19
+        tool_call_parser: qwen3_coder
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
+          - "--kv-cache-dtype"
+          - "bfloat16"
+          - "--mamba-ssm-dtype"
+          - "float32"
+          - "--mamba-radix-cache-strategy"
+          - "extra_buffer"
+          - "--max-running-requests"
+          - "8"
+      runtime:
+        first_chunk_timeout_s: 90
+        inter_chunk_timeout_s: 15
+        overall_timeout_s: 600
+        default_sampling:
+          temperature: 0.7
+          top_p: 0.8
+          top_k: 20
+          presence_penalty: 1.5
+        stop_tokens:
+          - "<|im_end|>"
+  # Names ``shared`` as its own grammar-safe target, so a constrained request
+  # to ``:shared`` stays on the shared engine instead of moving to the
+  # fixed-fraction ``no-spec`` route. Serve ``:shared``; this alias is
+  # identical.
+  shared-no-spec:
+    extends: shared
+    grammar_profile: shared
+
   # H100-80GB: one native-window admission with in-checkpoint MTP. FA3 plus
   # BF16 GDN state is the measured SM90 batch-one winner. Profile-scoped
   # DeepGEMM fast warmup covers every decode M through 1024 and samples the
