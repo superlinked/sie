@@ -74,6 +74,27 @@ def test_ci_mandatory_graph_and_permissions():
         assert forbidden not in serialized
 
 
+def test_required_check_reports_on_merge_queue_groups():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    triggers = workflow.get("on", workflow.get(True))
+    assert triggers == {"pull_request": None, "merge_group": None, "push": {"branches": ["main"]}}
+    assert workflow["concurrency"] == {
+        "group": "ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}",
+        "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+    }
+    jobs = workflow["jobs"]
+    assert jobs["required"]["name"] == "CI / Required"
+    for name in required_ci.MANDATORY_JOBS:
+        documents = [jobs[name]]
+        if jobs[name].get("uses", "").startswith("./"):
+            assert jobs[name]["with"]["source_ref"] == "${{ github.sha }}"
+            called = yaml.safe_load((ROOT / jobs[name]["uses"]).read_text())
+            assert all("if" not in job for job in called["jobs"].values())
+            documents.append(called)
+        for context in ("github.event.pull_request", "github.head_ref", "github.base_ref", "HEAD_REF", "BASE_REF"):
+            assert all(context not in json.dumps(document) for document in documents), (name, context)
+
+
 def test_bootstrap_is_uncached_and_checks_all_locks():
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     bootstrap = workflow["jobs"]["bootstrap"]
