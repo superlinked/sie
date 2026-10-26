@@ -23,7 +23,7 @@
   ],
   "inputs": {
     "requirements_sha256": "4dead3d74b9a8041b14e230522c1f6d9db6a24d7455fe0d6e7e821524951483c",
-    "uv_lock_sha256": "536b7f46b5560f0dfbe5a503ecf4166514658f1340c4721d1ea263a43b3e5aa5"
+    "uv_lock_sha256": "75848a1dc0e423ddb313eda2d12208568628efcae6d0eea7b6d99be5edc45d8f"
   },
   "lock_sha256": "3e756b5dffc07c0527a9a3465dbab2c17a0873beefe37e39f7cbd8e68b43f6cc",
   "policy_sha256": "dbc9ef2b65ea54bebe46021a7813897c378207508e4d84caf45e93d31faf15d4",

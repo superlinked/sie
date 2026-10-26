@@ -11,10 +11,13 @@ wheels = [{ url = "https://files.pythonhosted.org/packages/0f/15/5bf3b99495fb160
 
 [[packages]]
 name = "aiohttp"
-version = "3.14.3"
+version = "3.14.4"
 marker = "sys_platform == 'linux'"
-sdist = { url = "https://files.pythonhosted.org/packages/58/d9/22ce5786ac0c1653ae8b6c23bded02c1686d11f0dbb45b31ce128e0df985/aiohttp-3.14.3.tar.gz", upload-time = 2026-07-23T01:57:27Z, size = 7971213, hashes = { sha256 = "9491196535a88924a60afd5b5f434b5b203b6cc616250878dbdb223a8f7844bc" } }
-wheels = [{ url = "https://files.pythonhosted.org/packages/54/b9/42e74c46b7b7c794b995bbc1f573fb48950c38b19d8600c62a6804ee2d67/aiohttp-3.14.3-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", upload-time = 2026-07-23T01:53:59Z, size = 1765282, hashes = { sha256 = "f631fe87a6f30df5fbe6d79640b25e4cffb38c31c7fb6f10871517b84b0f8c1a" } }]
+sdist = { url = "https://files.pythonhosted.org/packages/93/2f/6a91adaa2dc26877d6ed2f54c0370c8910f019db7d77c5c6a194611e93ea/aiohttp-3.14.4.tar.gz", upload-time = 2026-10-05T17:43:48Z, size = 8077839, hashes = { sha256 = "831fc5bd39ec2517851e348f613ddb5447a47cf4b71cb09845af7ad7ed45d8f9" } }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/40/80/8a1bc8036540fe7cb38219cc5c0aa67d32e9068165725e8199ea8200b08b/aiohttp-3.14.4-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", upload-time = 2026-10-05T17:38:56Z, size = 1898485, hashes = { sha256 = "322e3d741b3133bcbb981a41d4f9b8ac3545c18de49c662c2b1f4e1c770b98ad" } },
+    { url = "https://files.pythonhosted.org/packages/2b/27/5e1f8446545be98e9416af59c396b1ed1f9f3294afb0a40ee3a709889273/aiohttp-3.14.4-py3-none-any.whl", upload-time = 2026-10-05T17:43:44Z, size = 279487, hashes = { sha256 = "5c6758ba62aea282c537179cfc8474a90f2b5f7b089cc5ff66d8920d86a9bfdd" } },
+]
 
 [[packages]]
 name = "aiosignal"
@@ -1208,12 +1211,12 @@ wheels = [{ url = "https://files.pythonhosted.org/packages/87/ee/2f9f2ed993e7720
 
 [[packages]]
 name = "yarl"
-version = "1.23.0"
+version = "1.25.1"
 marker = "sys_platform == 'linux'"
-sdist = { url = "https://files.pythonhosted.org/packages/23/6e/beb1beec874a72f23815c1434518bfc4ed2175065173fb138c3705f658d4/yarl-1.23.0.tar.gz", upload-time = 2026-03-01T22:07:53Z, size = 194676, hashes = { sha256 = "53b1ea6ca88ebd4420379c330aea57e258408dd0df9af0992e5de2078dc9f5d5" } }
+sdist = { url = "https://files.pythonhosted.org/packages/75/16/e8be8e2fb175bbf41a0680381a319f1199fae256588241a2ac8677eafb49/yarl-1.25.1.tar.gz", upload-time = 2026-09-15T19:35:02Z, size = 246245, hashes = { sha256 = "03dd38de09bc213e9a8b29761eec33ee1d5318dac0e49d8af36e4d27830e23a7" } }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/99/30/58260ed98e6ff7f90ba84442c1ddd758c9170d70327394a6227b310cd60f/yarl-1.23.0-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", upload-time = 2026-03-01T22:05:17Z, size = 97587, hashes = { sha256 = "9cbf44c5cb4a7633d078788e1b56387e3d3cf2b8139a3be38040b22d6c3221c8" } },
-    { url = "https://files.pythonhosted.org/packages/69/68/c8739671f5699c7dc470580a4f821ef37c32c4cb0b047ce223a7f115757f/yarl-1.23.0-py3-none-any.whl", upload-time = 2026-03-01T22:07:51Z, size = 48288, hashes = { sha256 = "a2df6afe50dea8ae15fa34c9f824a3ee958d785fd5d089063d960bae1daa0a3f" } },
+    { url = "https://files.pythonhosted.org/packages/1e/b3/058dbfb1857b484c9cf9cc135659f50b85ce66e03c99e44dc2f7b6161f55/yarl-1.25.1-cp312-cp312-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", upload-time = 2026-09-15T19:31:08Z, size = 115358, hashes = { sha256 = "4d781294bb815ecb5ea57ff6bbf8038e0a31a95fdf3e1788f66e0dc100d64b58" } },
+    { url = "https://files.pythonhosted.org/packages/54/22/318c7980066769c6bcd9221ed2248294f5698811da099013098c670565ed/yarl-1.25.1-py3-none-any.whl", upload-time = 2026-09-15T19:34:59Z, size = 63617, hashes = { sha256 = "681c758b0490f9e96b78e5fa8e8dc6e648e9185bb6eaebe73183c33ea0c445f3" } },
 ]
 
 [[packages]]
