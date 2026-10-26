@@ -14,8 +14,8 @@ sie-sdk = { git = "https://github.com/superlinked/sie.git", rev = "975d5309ba3af
 [dependency-groups]
 outcomes = ["scipy==1.17.0", "scikit-learn==1.6.1"]
 collection = ["httpx==0.28.1"]
-encode = ["sie-sdk==0.10.1", "httpx==0.28.1", "transformers==4.57.6", "huggingface-hub==0.36.0"]
-training = ["laya==0.3.29", "peft==0.18.1", "torch==2.9.1", "transformers==4.57.6"]
+encode = ["sie-sdk==0.10.1", "httpx==0.28.1", "transformers==5.10.1", "huggingface-hub==0.36.0"]
+training = ["laya==0.3.29", "peft==0.18.1", "torch==2.14.1", "transformers==5.10.1"]
 dev = ["ruff>=0.14"]
 
 [tool.ruff]
