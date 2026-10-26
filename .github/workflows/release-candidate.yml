@@ -28,6 +28,7 @@ on:
       - packages/sie_audio_prep/**
       - packages/sie_server_rust/**
       - packages/sie_telemetry/**
+      - packages/sie_server/bundle-locks/**
       - packages/sie_server/bundles/**
       - packages/sie_server/models/**
       - packages/sie_server/src/sie_server/adapters/sglang/**

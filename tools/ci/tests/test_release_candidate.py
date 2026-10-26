@@ -51,6 +51,8 @@ def test_candidate_uses_every_pure_builder_at_one_source_without_publication():
         "tools/mise_tasks/docker_task.py",
         "tools/mise_tasks/helm.py",
         "packages/sie_server/Dockerfile.cuda13",
+        "packages/sie_server/bundle-locks/cuda13-sglang-cu130-amd64/pylock.toml",
+        "uv.lock",
         "packages/sie_audio_prep/build_wheel.py",
         "packages/sie_server_rust/Cargo.lock",
         "deploy/helm/sie-cluster/Chart.yaml",

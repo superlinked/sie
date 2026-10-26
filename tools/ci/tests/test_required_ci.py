@@ -257,12 +257,14 @@ def test_rust_audits_both_committed_dependency_graphs():
 
 CUDA13_SHARED_PATHS = {
     ".github/workflows/cuda13-bundle-image.yml",
+    "tools/ci/bundle_lock.py",
     "tools/ci/cuda13_image_smoke.py",
     "tools/ci/engine_launch_contract.py",
     "tools/ci/engine_launch_probe.py",
     "conformance/engine-flags/**",
     "Cargo.toml",
     "Cargo.lock",
+    "uv.lock",
     "packages/sie_audio_prep/**",
     "packages/sie_gateway/**",
     "packages/sie_server_sidecar/**",
@@ -271,6 +273,7 @@ CUDA13_SHARED_PATHS = {
     "packages/sie_sdk/src/**",
     "packages/sie_server/Dockerfile.cuda13",
     "packages/sie_server/src/**",
+    "packages/sie_server/bundle-locks/**",
     "packages/sie_server/bundles/**",
     "packages/sie_server/models/**",
     "packages/sie_server/pyproject.toml",
@@ -314,6 +317,48 @@ def test_cuda13_callers_have_exact_inputs_and_narrow_paths(filename, expected):
     job = workflow["jobs"]["compatibility"]
     assert job["uses"] == "./.github/workflows/cuda13-bundle-image.yml"
     assert job["with"] == {"bundle": expected["bundle"], "image-tag": expected["image-tag"]}
+
+
+def cuda13_image_sources() -> list[str]:
+    text = (ROOT / "packages/sie_server/Dockerfile.cuda13").read_text().replace("\\\n", " ")
+    sources = []
+    for line in text.splitlines():
+        words = line.split()
+        if words[:1] != ["COPY"] or any(word.startswith("--from=") for word in words):
+            continue
+        sources += [word for word in words[1:-1] if not word.startswith("--")]
+    return sources
+
+
+@pytest.mark.parametrize("filename", CUDA_CALLERS)
+def test_cuda13_caller_paths_cover_every_image_build_input(filename):
+    workflow = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text())
+    patterns = workflow.get("on", workflow.get(True))["pull_request"]["paths"]
+    sources = cuda13_image_sources()
+    assert {"uv.lock", "packages/sie_server/bundle-locks", "tools/ci/bundle_lock.py"} <= {
+        source.rstrip("/") for source in sources
+    }
+    for source in sources:
+        path = ROOT / source
+        for file in sorted(path.rglob("*")) if path.is_dir() else [path]:
+            if file.is_file():
+                relative = file.relative_to(ROOT).as_posix()
+                assert any(fnmatch.fnmatchcase(relative, pattern) for pattern in patterns), relative
+
+
+def test_root_lock_only_change_runs_bundle_resolution_and_the_binding_test():
+    ci = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    assert ci.get("on", ci.get(True))["pull_request"] is None
+    resolution = [step.get("run", "") for step in ci["jobs"]["bundle-resolution"]["steps"]]
+    assert any("tools/ci/bundle_lock.py check" in command for command in resolution)
+    tooling = next(
+        step["run"] for step in ci["jobs"]["python"]["steps"] if "pytest -q tools/ci/tests" in step.get("run", "")
+    )
+    assert "test_bundle_lock.py" not in tooling
+    for filename in CUDA_CALLERS:
+        workflow = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text())
+        patterns = workflow.get("on", workflow.get(True))["pull_request"]["paths"]
+        assert any(fnmatch.fnmatchcase("uv.lock", pattern) for pattern in patterns), filename
 
 
 def test_sglang_cuda13_model_configs_are_covered_by_caller_paths():
