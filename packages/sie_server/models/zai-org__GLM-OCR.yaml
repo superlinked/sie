@@ -27,6 +27,9 @@ profiles:
     adapter_path: sie_server.adapters.sglang_vision_extract.adapter:SGLangVisionExtractAdapter
     adapter_options:
       loadtime:
+        # 64 pages in flight, each up to 16384 tokens of page image and output,
+        # need far more KV than the automatic one-sequence pool of 16384.
+        mem_fraction_static: 0.85
         served_model_name: zai-org/GLM-OCR
         max_concurrent_requests: 64
         # SGLang's default fast (torch) image processor. The slow PIL processor runs

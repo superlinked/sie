@@ -1191,6 +1191,13 @@ reservation and evicts idle eligible models when it cannot fit. Resident-model
 accounting reports the reservation; the pressure monitor continues to use
 actual device usage, including every SGLang subprocess.
 
+The `max_seq_length` fallback holds one maximum-length sequence. Declare
+`kv_budget_tokens` when a profile keeps more tokens in flight than that. An
+automatically sized embedding profile must hold two full batches
+(`2 * max_batch_tokens`), which the model configuration tests enforce. A
+vision-extraction profile that runs many full pages at once can set an explicit
+fraction instead.
+
 To dedicate most of a GPU to one model, explicitly set a fraction:
 
 ```yaml

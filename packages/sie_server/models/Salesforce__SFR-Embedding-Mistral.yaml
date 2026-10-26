@@ -18,6 +18,14 @@ max_sequence_length: 4096
 profiles:
   default:
     max_batch_tokens: 16384
+    # Without a budget the automatic KV pool is max_sequence_length (4096
+    # tokens), a quarter of one 16384-token batch, and the first batches
+    # stall past the encode read timeout. 32768 holds two full batches and
+    # matches the pool SFR-Embedding-2_R and Linq-Embed-Mistral derive from
+    # their 32768-token context on the same Mistral-7B geometry.
+    # Reservation in bf16: 13.9 GiB weights + 4.1 GiB KV (128 KiB per token)
+    # + 3 GiB headroom, about 21 GiB.
+    kv_budget_tokens: 32768
     compute_precision: bfloat16
     adapter_path: sie_server.adapters.sglang.embedding:SGLangEmbeddingAdapter
     adapter_options:

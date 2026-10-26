@@ -23,6 +23,8 @@ L4_TOTAL_BYTES = 23034 * 1024**2
         "Qwen__Qwen3-Embedding-8B",
         "lightonai__LightOnOCR-2-1B",
         "tencent__Hy-MT2-1.8B",
+        "intfloat__e5-mistral-7b-instruct",
+        "Salesforce__SFR-Embedding-Mistral",
     ],
 )
 def test_default_profiles_use_model_sized_memory(name):
@@ -58,6 +60,53 @@ def test_hy_mt2_pool_fits_an_l4_with_room_for_translation_batches(tmp_path, monk
     assert budget.launch_args(0)[2:] == ["--max-total-tokens", "32768"]
 
 
+SGLANG_EMBEDDING_MODELS = sorted(
+    path.stem for path in MODELS.glob("*.yaml") if ":SGLangEmbeddingAdapter" in path.read_text()
+)
+
+
+@pytest.mark.parametrize("name", SGLANG_EMBEDDING_MODELS)
+def test_model_sized_embedding_pools_hold_two_full_batches(name):
+    config = load_model_config(MODELS / f"{name}.yaml")
+    for sie_id, variant in expand_profile_variants([config]).items():
+        profile = variant.resolve_profile("default")
+        if not profile.adapter_path.endswith(":SGLangEmbeddingAdapter") or "mem_fraction_static" in profile.loadtime:
+            continue
+        budget = load_adapter(variant, MODELS, device="cuda:0")._memory_budget
+        assert budget.token_capacity >= 2 * profile.max_batch_tokens, (
+            f"{sie_id}: KV pool of {budget.token_capacity} tokens is under two batches of "
+            f"{profile.max_batch_tokens}; declare kv_budget_tokens"
+        )
+
+
+@pytest.mark.parametrize("name", ["intfloat__e5-mistral-7b-instruct", "Salesforce__SFR-Embedding-Mistral"])
+def test_mistral_embedder_pool_fits_a_24gb_gpu(name, tmp_path, monkeypatch):
+    config = load_model_config(MODELS / f"{name}.yaml")
+    assert config.resolve_profile("default").kv_budget_tokens == 32768
+    (tmp_path / "config.json").write_text(
+        json.dumps({"num_hidden_layers": 32, "num_attention_heads": 32, "num_key_value_heads": 8, "hidden_size": 4096})
+    )
+    params = 7_110_660_096
+    header = json.dumps(
+        {"model.weight": {"dtype": "BF16", "shape": [params], "data_offsets": [0, params * 2]}}
+    ).encode()
+    (tmp_path / "model.safetensors").write_bytes(struct.pack("<Q", len(header)) + header)
+    budget = load_adapter(config, MODELS, device="cuda:0")._memory_budget
+    budget.model_name_or_path = str(tmp_path)
+
+    required = budget.required_bytes(device_type="cuda", device_total_bytes=L4_TOTAL_BYTES)
+    assert required == math.ceil(params * 2 * 1.05) + (32768 + 512) * 131072 + 3 * GIB
+    assert required < 21 * GIB
+    monkeypatch.setattr(_memory, "device_memory", lambda _: (L4_TOTAL_BYTES - GIB, L4_TOTAL_BYTES))
+    assert budget.launch_args(0)[2:] == ["--max-total-tokens", "32768"]
+
+
+def test_glm_ocr_launches_with_its_explicit_fraction():
+    config = load_model_config(MODELS / "zai-org__GLM-OCR.yaml")
+    budget = load_adapter(config, MODELS, device="cuda:0")._memory_budget
+    assert budget.launch_args(0) == ["--mem-fraction-static", "0.85"]
+
+
 def test_guard_calibrated_profile_retains_explicit_override():
     config = load_model_config(MODELS / "Qwen__Qwen3Guard-Gen-4B.yaml")
     assert config.resolve_profile("default").kv_budget_tokens == 32768
@@ -79,7 +128,9 @@ def test_extending_profile_forwards_its_resolved_kv_budget():
     assert adapter._memory_budget.kv_budget_tokens == 65536
 
 
-@pytest.mark.parametrize("name", ["Qwen__Qwen3.5-4B", "lightonai__LightOnOCR-3-4B", "Qwen__Qwen3-VL-8B-Instruct"])
+@pytest.mark.parametrize(
+    "name", ["Qwen__Qwen3.5-4B", "lightonai__LightOnOCR-3-4B", "Qwen__Qwen3-VL-8B-Instruct", "zai-org__GLM-OCR"]
+)
 def test_specialized_profiles_retain_calibrated_reservation(name):
     config = load_model_config(MODELS / f"{name}.yaml")
     assert config.resolve_profile("default").loadtime["mem_fraction_static"] == 0.85
