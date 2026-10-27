@@ -460,6 +460,11 @@ class ModelStateChecker:
         # configuration.
         self.check_not_failed()
 
+        # A model parked in host RAM wakes in seconds: wait for it rather than
+        # asking the client to come back.
+        if await self.registry.wake_parked(self.model, device):
+            return
+
         logger.info("Starting background load for model %s on device %s", self.model, device)
         await self.registry.start_load_async(self.model, device=device)
 

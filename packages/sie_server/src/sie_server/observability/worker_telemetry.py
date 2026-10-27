@@ -87,6 +87,9 @@ MODEL_LOAD_DURATION_METRIC_NAME: Final = "sie.worker.model.load.duration"
 MODEL_MEMORY_METRIC_NAME: Final = "sie.worker.model.memory"
 OOM_RECOVERIES_METRIC_NAME: Final = "sie.worker.oom.recoveries"
 MODEL_EVICTIONS_METRIC_NAME: Final = "sie.worker.model.evictions"
+HOST_CACHE_LOOKUPS_METRIC_NAME: Final = "sie.worker.model.host_cache.lookups"
+HOST_CACHE_WAKE_DURATION_METRIC_NAME: Final = "sie.worker.model.host_cache.wake.duration"
+HOST_CACHE_MEMORY_METRIC_NAME: Final = "sie.worker.model.host_cache.memory"
 ADAPTIVE_WAIT_METRIC_NAME: Final = "sie.worker.scheduler.adaptive.wait"
 ADAPTIVE_COST_METRIC_NAME: Final = "sie.worker.scheduler.adaptive.cost"
 ADAPTIVE_P50_METRIC_NAME: Final = "sie.worker.scheduler.adaptive.p50"
@@ -156,6 +159,21 @@ MODEL_LOAD_DURATION_BUCKETS_S: Final = (
     300.0,
     600.0,
     900.0,
+)
+HOST_CACHE_WAKE_BUCKETS_S: Final = (
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+    30.0,
+    60.0,
+    120.0,
 )
 TTFT_TPOT_BUCKETS_S: Final = (
     0.005,
@@ -343,6 +361,19 @@ class WorkerTelemetryFacade(Protocol):
         profile: object = "default",
     ) -> None: ...
 
+    def host_cache_lookup(self, *, model: object, hit: bool, profile: object = "default") -> None: ...
+
+    def host_cache_wake_completed(
+        self,
+        *,
+        model: object,
+        duration_s: object,
+        outcome: object,
+        profile: object = "default",
+    ) -> None: ...
+
+    def host_cache_memory_changed(self, *, model: object, host_bytes: object, profile: object = "default") -> None: ...
+
     def adaptive_snapshot(
         self,
         *,
@@ -441,6 +472,15 @@ class _NoopWorkerTelemetry:
         return
 
     def model_evicted(self, **_: Any) -> None:
+        return
+
+    def host_cache_lookup(self, **_: Any) -> None:
+        return
+
+    def host_cache_wake_completed(self, **_: Any) -> None:
+        return
+
+    def host_cache_memory_changed(self, **_: Any) -> None:
         return
 
     def adaptive_snapshot(self, **_: Any) -> None:
@@ -575,6 +615,21 @@ class WorkerTelemetry:
             MODEL_EVICTIONS_METRIC_NAME,
             unit="{model}",
             description="Resident models evicted from the engine by bounded cause",
+        )
+        self._host_cache_lookups = meter.create_counter(
+            HOST_CACHE_LOOKUPS_METRIC_NAME,
+            unit="{lookup}",
+            description="Model loads that found the model parked in host RAM (hit) or loaded it from disk (miss)",
+        )
+        self._host_cache_wake_duration = meter.create_histogram(
+            HOST_CACHE_WAKE_DURATION_METRIC_NAME,
+            unit="s",
+            description="Time to bring a model parked in host RAM back onto its device",
+        )
+        self._host_cache_memory = meter.create_gauge(
+            HOST_CACHE_MEMORY_METRIC_NAME,
+            unit="By",
+            description="Host RAM charged to the host tier for a model's weights",
         )
         self._adaptive_wait = meter.create_gauge(
             ADAPTIVE_WAIT_METRIC_NAME,
@@ -910,6 +965,32 @@ class WorkerTelemetry:
             {"reason": _enum(reason, _EVICTION_REASONS), **_model_attributes(model, profile)},
         )
 
+    def host_cache_lookup(self, *, model: object, hit: bool, profile: object = "default") -> None:
+        self._host_cache_lookups.add(
+            1,
+            {"result": "hit" if hit is True else "miss", **_model_attributes(model, profile)},
+        )
+
+    def host_cache_wake_completed(
+        self,
+        *,
+        model: object,
+        duration_s: object,
+        outcome: object,
+        profile: object = "default",
+    ) -> None:
+        duration = _nonnegative_float(duration_s)
+        if duration is None:
+            return
+        self._host_cache_wake_duration.record(
+            duration,
+            {"outcome": _enum(outcome, _LOAD_OUTCOMES), **_model_attributes(model, profile)},
+        )
+
+    def host_cache_memory_changed(self, *, model: object, host_bytes: object, profile: object = "default") -> None:
+        if (memory := _nonnegative_int(host_bytes)) is not None:
+            self._host_cache_memory.set(memory, _model_attributes(model, profile))
+
     def adaptive_snapshot(
         self,
         *,
@@ -1210,6 +1291,7 @@ def metric_views() -> list[View]:
         (REQUEST_DURATION_METRIC_NAME, REQUEST_DURATION_BUCKETS_S),
         (INFERENCE_DURATION_METRIC_NAME, INFERENCE_DURATION_BUCKETS_S),
         (MODEL_LOAD_DURATION_METRIC_NAME, MODEL_LOAD_DURATION_BUCKETS_S),
+        (HOST_CACHE_WAKE_DURATION_METRIC_NAME, HOST_CACHE_WAKE_BUCKETS_S),
         (GENERATION_TTFT_METRIC_NAME, TTFT_TPOT_BUCKETS_S),
         (GENERATION_WORKER_WAIT_METRIC_NAME, TTFT_TPOT_BUCKETS_S),
         (GENERATION_TPOT_METRIC_NAME, TTFT_TPOT_BUCKETS_S),
@@ -1246,6 +1328,9 @@ def metric_names() -> frozenset[str]:
             MODEL_MEMORY_METRIC_NAME,
             OOM_RECOVERIES_METRIC_NAME,
             MODEL_EVICTIONS_METRIC_NAME,
+            HOST_CACHE_LOOKUPS_METRIC_NAME,
+            HOST_CACHE_WAKE_DURATION_METRIC_NAME,
+            HOST_CACHE_MEMORY_METRIC_NAME,
             ADAPTIVE_WAIT_METRIC_NAME,
             ADAPTIVE_COST_METRIC_NAME,
             ADAPTIVE_P50_METRIC_NAME,
