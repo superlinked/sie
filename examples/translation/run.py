@@ -9,6 +9,10 @@ One native generate call, the call https://superlinked.com/translation shows:
     {"prompt": "<Hy-MT2 turn markers, instruction naming Japanese, source text>",
      "max_new_tokens": 256, "temperature": 0}
 
+max_new_tokens grows with the input the way the page sizes it: 256 for the
+recorded string, up to the model's 1024 for longer text. A translation that
+stops at that cap (finish reason "length") is cut off, so the run exits 1.
+
 The key comes from SIE_API_KEY and is never printed. Without SIE_BASE_URL the
 SDK sends the call to SIE Serverless, https://api.superlinked.com.
 """
@@ -17,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -31,7 +36,12 @@ MODEL = "tencent/Hy-MT2-1.8B"
 # Native generate takes the SIE-safe id; the SDK normalizes it.
 PATH = f"/v1/generate/{MODEL.replace('/', '__')}"
 SERVERLESS = "https://api.superlinked.com"
-MAX_NEW_TOKENS = 256
+# The output cap, as the page computes it: 5 output tokens per 3 input
+# characters plus 16, rounded up to the next bucket, never above the model's
+# declared 1024.
+OUTPUT_TOKEN_BUCKETS = (64, 128, 256, 512, 1024)
+OUTPUT_EXPANSION = 5
+MAX_OUTPUT_TOKENS = 1024
 # The model profile defaults to temperature 0.7, so the call asks for 0.
 TEMPERATURE = 0
 # The raw prompt for /v1/generate: Hy-MT2's chat turn markers around the
@@ -49,8 +59,15 @@ def build_prompt(text: str, language: str) -> str:
     return PROMPT.format(language=language, text=text.strip())
 
 
+def output_cap(text: str) -> int:
+    """max_new_tokens for one source text; len() counts code points, as the page does."""
+    raw = OUTPUT_EXPANSION * math.ceil(len(text.strip()) / 3) + 16
+    bucket = next((size for size in OUTPUT_TOKEN_BUCKETS if size >= raw), OUTPUT_TOKEN_BUCKETS[-1])
+    return min(bucket, MAX_OUTPUT_TOKENS)
+
+
 def request_body(text: str, language: str) -> dict[str, Any]:
-    return {"prompt": build_prompt(text, language), "max_new_tokens": MAX_NEW_TOKENS, "temperature": TEMPERATURE}
+    return {"prompt": build_prompt(text, language), "max_new_tokens": output_cap(text), "temperature": TEMPERATURE}
 
 
 def translate(client: SIEClient, text: str, language: str) -> dict[str, Any]:
@@ -58,7 +75,7 @@ def translate(client: SIEClient, text: str, language: str) -> dict[str, Any]:
     result = client.generate(
         MODEL,
         build_prompt(text, language),
-        max_new_tokens=MAX_NEW_TOKENS,
+        max_new_tokens=output_cap(text),
         temperature=TEMPERATURE,
         provision_timeout_s=300,
     )
@@ -114,6 +131,12 @@ def main(argv: list[str] | None = None) -> int:
         output["matches_recorded"] = output["text"] == recorded["response"]["text"]
         output["recorded_on"] = recorded["date"]
     print(json.dumps(output, ensure_ascii=False, indent=2))
+    if output["finish_reason"] == "length":
+        print(
+            f"The translation was cut off at the {output_cap(args.text)}-token output cap (finish reason length).",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

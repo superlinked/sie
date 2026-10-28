@@ -88,7 +88,13 @@ named in English:
 uv run --frozen python run.py --text "Your order has shipped." --into German
 ```
 
-The comparison with the recording is then left out.
+The comparison with the recording is then left out. `run.py` sizes
+`max_new_tokens` from the input the way the page does: 5 tokens per 3
+characters plus 16, rounded up to 64, 128, 256, 512 or 1024. The recorded
+string gets 256, and text over about 300 characters gets the model's maximum
+of 1024. If a translation still reaches its cap, the finish reason is `length`
+and the text is cut off: `run.py` prints the output, warns on stderr and exits
+with status 1. Split longer text into parts.
 
 The first call after the model has been idle can wait a few minutes while
 capacity starts. The SDK waits through the responses that come before
@@ -120,7 +126,7 @@ serves it with SGLang in bfloat16. SIE Serverless also serves
 
 ## How well it translates
 
-The page's quality and cost figures come from a WMT24++ study. Its sample,
+The page's figures come from a WMT24++ study. Its sample,
 every published output, both score files, the scorer and a script that
 recomputes the scores are public:
 [superlinked/sie-task-evidence @c4add1e0, translation/wmt24pp-study-2026-10](https://huggingface.co/datasets/superlinked/sie-task-evidence/tree/c4add1e09ebffc5f0d0909b88b9671597de0bebc/translation/wmt24pp-study-2026-10).
@@ -135,8 +141,9 @@ uv run --frozen ruff format --check .
 
 The tests run the real SDK against an HTTPX `MockTransport`. They check that it
 sends one POST to `/v1/generate/tencent__Hy-MT2-1.8B` whose JSON equals the
-recorded body, sends the key as a bearer token, prints no error detail and does
-not resend after a gateway timeout. They compare the parsed JSON, not the
+recorded body, sizes the output cap from the input as the page does, sends the
+key as a bearer token, prints no error detail, flags a cut-off translation and
+does not resend after a gateway timeout. They compare the parsed JSON, not the
 bytes: the SDK escapes non-ASCII characters, and the recorded call was sent as
 UTF-8. No model runs and nothing leaves the machine.
 

@@ -67,6 +67,20 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(run.request_body(SOURCE["text"], SOURCE["translate_into"]), RECORDED_REQUEST["body"])
         self.assertEqual(run.build_prompt(f"  {SOURCE['text']}\n", "Japanese"), RECORDED_REQUEST["body"]["prompt"])
 
+    def test_the_output_cap_grows_with_the_input_like_the_page(self) -> None:
+        self.assertEqual(run.output_cap(SOURCE["text"]), 256)
+        # The page's Hy-MT2 check: up to 27 characters get 64, up to 66 get 128,
+        # up to 144 get 256, up to 297 get 512, and longer text gets 1024.
+        limits = [27, 66, 144, 297]
+        for length in range(1, 1201):
+            index = next((i for i, limit in enumerate(limits) if length <= limit), len(limits))
+            self.assertEqual(run.output_cap("x" * length), run.OUTPUT_TOKEN_BUCKETS[index], length)
+        self.assertEqual(run.output_cap("x" * 5000), 1024)
+        self.assertEqual(run.output_cap(f"  {'x' * 10}  "), 64)
+        # Code points, not UTF-16 units or bytes.
+        self.assertEqual(run.output_cap("😀" * 144), 256)
+        self.assertEqual(run.output_cap("😀" * 145), 512)
+
     def test_sdk_sends_one_post_with_the_recorded_body(self) -> None:
         calls: list[httpx.Request] = []
         with mock_client(respond_with({**RECORDED_RESPONSE, **EXTRA_FIELDS}, calls)) as client:
@@ -140,7 +154,26 @@ class MainTests(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(calls[0].content)["prompt"], run.build_prompt("Hello.", "French"))
+        self.assertEqual(json.loads(calls[0].content)["max_new_tokens"], 64)
         self.assertNotIn("matches_recorded", json.loads(out))
+
+    def test_long_text_gets_a_larger_output_cap(self) -> None:
+        calls: list[httpx.Request] = []
+        long_text = " ".join([SOURCE["text"]] * 6)
+        code, _, _ = run_main(["--text", long_text], respond_with(RECORDED_RESPONSE, calls), {"SIE_BASE_URL": BASE})
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(calls[0].content)["max_new_tokens"], 1024)
+
+    def test_a_cut_off_translation_is_flagged(self) -> None:
+        reply = {
+            **RECORDED_RESPONSE,
+            "finish_reason": "length",
+            "usage": {"prompt_tokens": 50, "completion_tokens": 256},
+        }
+        code, out, err = run_main([], respond_with(reply, []), {"SIE_BASE_URL": BASE})
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(out)["finish_reason"], "length")
+        self.assertIn("cut off at the 256-token output cap", err)
 
     def test_a_failed_call_prints_its_kind_and_status_only(self) -> None:
         echoed = "offline-test-key echoed by a server"
