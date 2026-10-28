@@ -204,10 +204,14 @@ class GLiNERAdapter(BaseAdapter):
         if self._revision is not None:
             load_kwargs["revision"] = self._revision
         install_transformers_security_fixes()
-        self._model = GLiNER.from_pretrained(
-            self._model_name_or_path,
-            **load_kwargs,
-        )
+        # gliner initialises the encoder from its config before reading the
+        # checkpoint, so build it where the weights end up.
+        with torch.device(device):
+            self._model = GLiNER.from_pretrained(
+                self._model_name_or_path,
+                map_location=device,
+                **load_kwargs,
+            )
 
         # Move to device with precision
         if device == "cpu":

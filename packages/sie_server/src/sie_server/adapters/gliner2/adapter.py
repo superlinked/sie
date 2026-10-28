@@ -198,11 +198,14 @@ class GLiNER2Adapter(BaseAdapter):
 
         use_quantize = device != "cpu" and self._compute_precision == "float16"
         install_transformers_security_fixes()
-        model = GLiNER2.from_pretrained(
-            model_path,
-            map_location=device,
-            quantize=use_quantize,
-        )
+        # gliner2 initialises the encoder from its config before reading the
+        # checkpoint, so build it where the weights end up.
+        with torch.device(device):
+            model = GLiNER2.from_pretrained(
+                model_path,
+                map_location=device,
+                quantize=use_quantize,
+            )
         encoder = getattr(model, "encoder", None)
         self._use_linear_word_splitter(model.processor, getattr(encoder, "config", None))
         # Counts belong to this processor/tokenizer, not a previous load.
