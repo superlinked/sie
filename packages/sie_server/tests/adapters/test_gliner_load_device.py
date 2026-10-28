@@ -59,12 +59,37 @@ def test_gliner_passes_the_device_as_map_location(monkeypatch: pytest.MonkeyPatc
     assert from_pretrained.call_args.kwargs["revision"] == "0" * 40
 
 
-def test_gliner_falls_back_to_cpu_construction_when_the_device_is_full(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "error",
+    [torch.OutOfMemoryError("CUDA out of memory"), RuntimeError("MPS backend out of memory (MPS allocated: 7.9 GB)")],
+)
+def test_gliner_falls_back_to_cpu_construction_when_the_device_is_full(
+    monkeypatch: pytest.MonkeyPatch, error: RuntimeError
+) -> None:
     model = FakeGLiNER()
-    from_pretrained = MagicMock(side_effect=[torch.OutOfMemoryError("CUDA out of memory"), model])
+    seen: list[torch.device] = []
+
+    def from_pretrained_once_full(*_args: Any, **_kwargs: Any) -> FakeGLiNER:
+        if not seen:
+            seen.append(torch.get_default_device())
+            raise error
+        seen.append(torch.get_default_device())
+        return model
+
+    from_pretrained = MagicMock(side_effect=from_pretrained_once_full)
 
     adapter = load_with(monkeypatch, from_pretrained, "cpu")
 
     assert from_pretrained.call_count == 2
     assert "map_location" not in from_pretrained.call_args_list[1].kwargs
+    assert seen == [torch.device("cpu"), torch.device("cpu")]
     assert adapter._model is model
+
+
+def test_gliner_propagates_other_load_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    from_pretrained = MagicMock(side_effect=RuntimeError("size mismatch for token_rep_layer"))
+
+    with pytest.raises(RuntimeError, match="size mismatch"):
+        load_with(monkeypatch, from_pretrained, "cpu")
+
+    assert from_pretrained.call_count == 1

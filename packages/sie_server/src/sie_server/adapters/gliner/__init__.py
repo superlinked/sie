@@ -208,21 +208,27 @@ class GLiNERAdapter(BaseAdapter):
         # checkpoint, so build it where the weights end up. The fp32 model and
         # checkpoint are both resident there until the cast below; a device
         # without room for that peak still gets the CPU-built model.
+        # safetensors reads a bare "cuda" as cuda:0, whatever the current device.
+        build_device = f"cuda:{torch.cuda.current_device()}" if device == "cuda" else device
+        self._model = None
         try:
-            with torch.device(device):
+            with torch.device(build_device):
                 self._model = GLiNER.from_pretrained(
                     self._model_name_or_path,
-                    map_location=device,
+                    map_location=build_device,
                     **load_kwargs,
                 )
-        except torch.OutOfMemoryError:
-            self._model = None
+        except RuntimeError as exc:
+            if not _is_out_of_memory(exc):
+                raise
+        if self._model is None:
             if device.startswith("cuda"):
                 torch.cuda.empty_cache()
-            self._model = GLiNER.from_pretrained(
-                self._model_name_or_path,
-                **load_kwargs,
-            )
+            with torch.device("cpu"):
+                self._model = GLiNER.from_pretrained(
+                    self._model_name_or_path,
+                    **load_kwargs,
+                )
 
         # Move to device with precision
         if device == "cpu":
@@ -721,6 +727,11 @@ def _best_relations(relations: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if key not in best or relation["score"] > best[key]["score"]:
             best[key] = relation
     return list(best.values())
+
+
+def _is_out_of_memory(exc: RuntimeError) -> bool:
+    # MPS allocator exhaustion is a plain RuntimeError, not torch.OutOfMemoryError.
+    return isinstance(exc, torch.OutOfMemoryError) or "out of memory" in str(exc).lower()
 
 
 def _cap_relation_candidates(model: Any, limit: int) -> None:

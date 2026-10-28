@@ -66,7 +66,7 @@ def test_pii_cuda_load_uses_full_precision(mocked_gliner: tuple[Mock, Mock]) -> 
     factory, model = mocked_gliner
     adapter = load_adapter(load_model_config(_CONFIG), _MODELS, device="cuda:0")
     adapter.load("cuda:0")
-    factory.assert_called_once_with(_MODEL, revision=_REVISION)
+    factory.assert_called_once_with(_MODEL, map_location="cuda:0", revision=_REVISION)
     model.to.assert_called_once_with("cuda:0", dtype=torch.float32)
 
 
