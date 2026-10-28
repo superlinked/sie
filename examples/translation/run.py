@@ -77,7 +77,10 @@ def translate(client: SIEClient, text: str, language: str) -> dict[str, Any]:
         build_prompt(text, language),
         max_new_tokens=output_cap(text),
         temperature=TEMPERATURE,
+        # Wait up to 300 s for capacity. Hy-MT2's profile allows a request up to
+        # 600 s, and a per-call read timeout is not capped by the capacity wait.
         provision_timeout_s=300,
+        read_timeout_s=600,
     )
     if not isinstance(result.get("text"), str):
         raise ValueError("The response has no text")
@@ -118,8 +121,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("set SIE_API_KEY for SIE Serverless, or SIE_BASE_URL for your own server")
 
     try:
-        # Hy-MT2's profile allows a request up to 600 s; a read timeout is never retried.
-        with SIEClient(read_timeout_s=600) as client:
+        with SIEClient() as client:
             output = translate(client, args.text, args.into)
     except Exception as exc:  # noqa: BLE001 - SDK error text can carry request context; print only its kind.
         status = getattr(exc, "status_code", None)

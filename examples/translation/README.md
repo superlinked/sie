@@ -46,9 +46,14 @@ prompt = (
 )
 
 # SIE_API_KEY for Serverless, or SIE_BASE_URL for your own server
-with SIEClient(read_timeout_s=600) as client:
+with SIEClient() as client:
     result = client.generate(
-        "tencent/Hy-MT2-1.8B", prompt, max_new_tokens=256, temperature=0, provision_timeout_s=300
+        "tencent/Hy-MT2-1.8B",
+        prompt,
+        max_new_tokens=256,
+        temperature=0,
+        provision_timeout_s=300,  # wait for capacity
+        read_timeout_s=600,  # Hy-MT2's per-request limit
     )
 print(result["text"])
 ```

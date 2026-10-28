@@ -108,6 +108,12 @@ class RequestTests(unittest.TestCase):
                 run.translate(client, SOURCE["text"], SOURCE["translate_into"])
         self.assertEqual(len(calls), 1)
 
+    def test_the_read_timeout_covers_the_model_limit_not_the_capacity_wait(self) -> None:
+        calls: list[httpx.Request] = []
+        with mock_client(respond_with(RECORDED_RESPONSE, calls)) as client:
+            run.translate(client, SOURCE["text"], SOURCE["translate_into"])
+        self.assertEqual(calls[0].extensions["timeout"]["read"], 600)
+
 
 class MainTests(unittest.TestCase):
     def test_show_prints_the_request_and_sends_nothing(self) -> None:
