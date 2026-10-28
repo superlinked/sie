@@ -35,8 +35,21 @@ With the Python SDK, as `run.py` sends it:
 ```python
 from sie_sdk import SIEClient
 
-with SIEClient() as client:  # SIE_API_KEY for Serverless, or SIE_BASE_URL for your own server
-    result = client.generate("tencent/Hy-MT2-1.8B", prompt, max_new_tokens=256, temperature=0)
+text = (
+    "Starting in Android 13, apps that you install need your permission to send notifications. "
+    "Tap to change this permission for existing apps."
+)
+prompt = (
+    "<｜hy_begin▁of▁sentence｜><｜hy_User｜>Translate the following text into Japanese. "
+    "Note that you should only output the translated result without any additional explanation: "
+    f"{text}<｜hy_Assistant｜>"
+)
+
+# SIE_API_KEY for Serverless, or SIE_BASE_URL for your own server
+with SIEClient(read_timeout_s=600) as client:
+    result = client.generate(
+        "tencent/Hy-MT2-1.8B", prompt, max_new_tokens=256, temperature=0, provision_timeout_s=300
+    )
 print(result["text"])
 ```
 
