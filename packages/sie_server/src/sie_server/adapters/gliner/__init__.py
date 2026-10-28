@@ -205,11 +205,22 @@ class GLiNERAdapter(BaseAdapter):
             load_kwargs["revision"] = self._revision
         install_transformers_security_fixes()
         # gliner initialises the encoder from its config before reading the
-        # checkpoint, so build it where the weights end up.
-        with torch.device(device):
+        # checkpoint, so build it where the weights end up. The fp32 model and
+        # checkpoint are both resident there until the cast below; a device
+        # without room for that peak still gets the CPU-built model.
+        try:
+            with torch.device(device):
+                self._model = GLiNER.from_pretrained(
+                    self._model_name_or_path,
+                    map_location=device,
+                    **load_kwargs,
+                )
+        except torch.OutOfMemoryError:
+            self._model = None
+            if device.startswith("cuda"):
+                torch.cuda.empty_cache()
             self._model = GLiNER.from_pretrained(
                 self._model_name_or_path,
-                map_location=device,
                 **load_kwargs,
             )
 
