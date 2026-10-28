@@ -118,7 +118,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("set SIE_API_KEY for SIE Serverless, or SIE_BASE_URL for your own server")
 
     try:
-        with SIEClient(timeout_s=150) as client:
+        # Hy-MT2's profile allows a request up to 600 s; a read timeout is never retried.
+        with SIEClient(read_timeout_s=600) as client:
             output = translate(client, args.text, args.into)
     except Exception as exc:  # noqa: BLE001 - SDK error text can carry request context; print only its kind.
         status = getattr(exc, "status_code", None)
