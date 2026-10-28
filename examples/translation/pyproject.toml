@@ -1,0 +1,16 @@
+[project]
+name = "superlinked-sie-translation-example"
+version = "0.1.0"
+description = "Translate one product string into Japanese with Hy-MT2 1.8B on SIE"
+requires-python = ">=3.12,<3.13"
+dependencies = ["sie-sdk==0.10.1"]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = ["ruff==0.14.14"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"

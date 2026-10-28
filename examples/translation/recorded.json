@@ -1,0 +1,34 @@
+{
+  "source": {
+    "text": "Starting in Android 13, apps that you install need your permission to send notifications. Tap to change this permission for existing apps.",
+    "language": "English",
+    "translate_into": "Japanese",
+    "locale": "ja_JP",
+    "origin": "The Android Open Source Project, frameworks/base, core/res/res/values/strings.xml, string review_notification_settings_text, tag android-15.0.0_r1",
+    "url": "https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-15.0.0_r1/core/res/res/values/strings.xml",
+    "licence": "Apache-2.0"
+  },
+  "recorded": {
+    "date": "2026-10-25",
+    "endpoint": "https://api.superlinked.com",
+    "request": {
+      "method": "POST",
+      "path": "/v1/generate/tencent__Hy-MT2-1.8B",
+      "body": {
+        "prompt": "<｜hy_begin▁of▁sentence｜><｜hy_User｜>Translate the following text into Japanese. Note that you should only output the translated result without any additional explanation: Starting in Android 13, apps that you install need your permission to send notifications. Tap to change this permission for existing apps.<｜hy_Assistant｜>",
+        "max_new_tokens": 256,
+        "temperature": 0
+      }
+    },
+    "response": {
+      "model": "tencent/Hy-MT2-1.8B",
+      "text": "Android 13以降では、インストールしたアプリが通知を送信するにはあなたの許可が必要です。既存のアプリのこの許可を変更するにはタップしてください。",
+      "finish_reason": "stop",
+      "usage": {
+        "prompt_tokens": 50,
+        "completion_tokens": 51,
+        "total_tokens": 101
+      }
+    }
+  }
+}
