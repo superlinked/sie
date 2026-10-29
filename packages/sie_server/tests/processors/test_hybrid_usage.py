@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import time
 from collections.abc import AsyncIterator
@@ -136,10 +137,12 @@ class WordTokenizer:
     def __init__(self, *, fail: bool = False, words: int | None = None) -> None:
         self.fail = fail
         self.words = words
+        self.rendered_with: list[dict[str, Any]] = []
 
     def apply_chat_template(self, messages: list[dict], *, tokenize: bool, add_generation_prompt: bool, **kwargs: Any):
         assert tokenize is False
         assert add_generation_prompt is True
+        self.rendered_with.append(kwargs)
         if self.fail:
             raise ValueError("template rejects these messages")
         if self.words is not None:
@@ -443,3 +446,45 @@ async def test_keep_reasoning_counts_it_and_leaves_it_on_the_chunks() -> None:
     assert [chunk.reasoning_delta for chunk in out] == ["think one two ", "", ""]
     assert [chunk.text_delta for chunk in out] == ["", "answer here", ""]
     assert out[-1].completion_tokens == 5
+
+
+def _declare(proc: StreamingProcessor, **generate: Any) -> None:
+    data = proc._registry.get_config.return_value.model_dump()
+    data["inputs"]["image"] = True
+    data["tasks"]["generate"].update(generate)
+    proc._registry.get_config.return_value = ModelConfig.model_validate(data)
+
+
+async def test_queued_upstream_chat_renders_with_the_model_chat_template_kwargs(hybrid: tuple) -> None:
+    _declare(hybrid[1], chat_template_kwargs={"enable_thinking": False})
+    respond(hybrid)
+
+    chunks = await run(hybrid)
+
+    assert chunks[-1]["usage"]["prompt_tokens"] == 2
+    assert json.loads(hybrid[3][0].content)["chat_template_kwargs"] == {"enable_thinking": False}
+    assert hybrid[4].rendered_with == [{"enable_thinking": False}]
+
+
+async def test_request_chat_template_kwargs_are_refused_before_dispatch(hybrid: tuple) -> None:
+    _declare(hybrid[1], chat_template_kwargs={"enable_thinking": False})
+    respond(hybrid)
+
+    chunks = await run(hybrid, chat_template_kwargs={"enable_thinking": True})
+
+    assert chunks[-1]["error"]["code"] == "unsupported_field"
+    assert hybrid[3] == []
+
+
+@pytest.mark.parametrize("endpoints", [["chat"], ["chat", "completions"]])
+async def test_images_for_a_counted_upstream_are_refused_before_dispatch(endpoints: list[str]) -> None:
+    setup = _processor("openai", endpoints)
+    _declare(setup[1])
+    image = {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64.b64encode(b'png').decode()}"}}
+    try:
+        respond(setup)
+        chunks = await run(setup, messages=[{"role": "user", "content": [image, {"type": "text", "text": "what?"}]}])
+    finally:
+        await _close(setup[0])
+    assert chunks[-1]["error"]["code"] == "unsupported_field"
+    assert setup[3] == []

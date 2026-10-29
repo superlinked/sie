@@ -57,6 +57,7 @@ from sie_server.adapters._generation_base import (
     GenerationChunk,
     GenerationDrainingError,
     GenerationError,
+    GenerationInvalidRequestError,
     GenerationPreflightResult,
     GenerationUnsupportedFieldError,
     ReasoningFormat,
@@ -113,7 +114,7 @@ from sie_server.types.grammar import (
     GrammarValidationError,
     hash_grammar,
 )
-from sie_server.types.inputs import ImageInput, VideoInput
+from sie_server.types.inputs import ImageInput, InvalidMediaError, VideoInput, image_data_uri
 
 # Module-level shim around :func:`asyncio.wait_for`. Tests monkey-patch
 # this attribute (not the global ``asyncio.wait_for``) so the override
@@ -828,8 +829,40 @@ class _GenerateRequestParams:
     include_reasoning: bool = False
 
 
-def _remote_chat_parameters(params: _GenerateRequestParams) -> dict[str, Any]:
-    """Project validated queue parameters onto the upstream chat contract."""
+def _remote_chat_content(message: _ChatMessage) -> list[dict[str, Any]]:
+    """The OpenAI content parts of an image-bearing message, in the order the local template renders them."""
+    layout = (
+        message.content_parts
+        or image_first_chat_message(role=message.role, text=message.content, image_count=len(message.images or ()))[
+            "content"
+        ]
+    )
+    images = iter(message.images or ())
+    parts: list[dict[str, Any]] = []
+    for part in layout:
+        if part.get("type") == "image":
+            try:
+                url = image_data_uri(next(images))
+            except InvalidMediaError as exc:
+                raise GenerationInvalidRequestError("messages", str(exc)) from None
+            parts.append({"type": "image_url", "image_url": {"url": url}})
+        else:
+            parts.append({"type": "text", "text": part.get("text", "")})
+    return parts
+
+
+def _remote_chat_parameters(
+    params: _GenerateRequestParams,
+    *,
+    images: bool = False,
+    chat_template_kwargs: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Project validated queue parameters onto the upstream chat contract.
+
+    ``images`` admits message images, sent as base64 data-URI ``image_url``
+    parts. ``chat_template_kwargs`` are the model's own template kwargs, sent
+    for the upstream to render with.
+    """
     assert isinstance(params.input, _MessagesInput)
     for field in ("top_k", "repetition_penalty", "min_tokens", "chat_template_kwargs", "lora_adapter"):
         if getattr(params, field) is not None:
@@ -838,9 +871,16 @@ def _remote_chat_parameters(params: _GenerateRequestParams) -> dict[str, Any]:
         raise GenerationUnsupportedFieldError("best_of", "upstream chat does not support best_of")
     messages: list[dict[str, Any]] = []
     for message in params.input.messages:
-        if message.images or message.videos:
-            raise GenerationUnsupportedFieldError("messages", "remote chat currently accepts text messages only")
-        item: dict[str, Any] = {"role": message.role, "content": message.content}
+        if message.videos:
+            raise GenerationUnsupportedFieldError("messages", "remote chat does not accept video input")
+        if message.images and not images:
+            raise GenerationUnsupportedFieldError(
+                "messages", "remote chat accepts images only for a remote-backed model with image input"
+            )
+        item: dict[str, Any] = {
+            "role": message.role,
+            "content": _remote_chat_content(message) if message.images else message.content,
+        }
         if message.tool_calls is not None:
             item["tool_calls"] = list(message.tool_calls)
         if message.tool_call_id is not None:
@@ -854,6 +894,8 @@ def _remote_chat_parameters(params: _GenerateRequestParams) -> dict[str, Any]:
         "n": params.n or 1,
         "stream": params.stream,
     }
+    if chat_template_kwargs:
+        body["chat_template_kwargs"] = dict(chat_template_kwargs)
     for field in ("stop", "frequency_penalty", "presence_penalty", "seed", "logit_bias", "top_logprobs"):
         value = getattr(params, field)
         if value is not None:
@@ -1940,7 +1982,13 @@ class StreamingProcessor:
                 or tool_choice_mode in ("required", "named")
                 or any(tool.get("function", {}).get("strict") is True for tool in effective_tools or ())
                 or (params.n is not None and params.n > 1)
-                or (isinstance(adapter, OpenAIUpstreamAdapter) and not adapter.supports_raw_completions)
+                or (
+                    isinstance(adapter, OpenAIUpstreamAdapter)
+                    and (
+                        not adapter.supports_raw_completions
+                        or any(message.images or message.videos for message in params.input.messages)
+                    )
+                )
             )
         )
         # A model with local weights that an OpenAI-compatible upstream serves
@@ -1959,8 +2007,15 @@ class StreamingProcessor:
             remote_chat = remote_chat or not local_template
         remote_body: dict[str, Any] | None = None
         if remote_chat:
+            generate_task = config.tasks.generate if config is not None else None
             try:
-                remote_body = _remote_chat_parameters(params)
+                remote_body = _remote_chat_parameters(
+                    params,
+                    images=config is not None and config.remote_backed and config.inputs.image,
+                    chat_template_kwargs=(
+                        generate_task.chat_template_kwargs if counted_upstream and generate_task is not None else None
+                    ),
+                )
             except GenerationError as exc:
                 await self._terminal_error_then_settle(
                     reply_subject,
@@ -2006,7 +2061,18 @@ class StreamingProcessor:
         elif remote_body is not None:
             # Used only for the existing admission estimate. The upstream owns
             # chat templating; remote-backed models have no local tokenizer.
-            prompt_str = json.dumps(remote_body["messages"], ensure_ascii=False)
+            # Images are reserved per image below, not by their encoded size.
+            assert isinstance(params.input, _MessagesInput)
+            request_images = [image for message in params.input.messages for image in (message.images or ())] or None
+            prompt_str = json.dumps(
+                [
+                    {**message, "content": [part for part in message["content"] if part["type"] == "text"]}
+                    if isinstance(message["content"], list)
+                    else message
+                    for message in remote_body["messages"]
+                ],
+                ensure_ascii=False,
+            )
         elif isinstance(params.input, _MessagesInput):
             collected = [img for m in params.input.messages for img in (m.images or ())]
             request_images = collected or None

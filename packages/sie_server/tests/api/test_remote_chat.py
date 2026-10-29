@@ -1087,6 +1087,40 @@ def test_an_image_on_a_model_without_image_input_starts_no_load_or_bridge(remote
     registry.start_load_async.assert_not_awaited()
 
 
+@pytest.mark.parametrize("image_input", [True, False])
+def test_remote_backed_chat_forwards_images_as_data_uri_parts(remote_chat: tuple, image_input: bool) -> None:
+    client, _, config, requests = remote_chat
+    config.inputs.image = image_input
+    answer_with(remote_chat, json_response(200, completion()))
+    png = "data:image/png;base64,iVBORw0KGgo="
+    content = [
+        {"type": "text", "text": "compare"},
+        {"type": "image_url", "image_url": {"url": png, "detail": "high"}},
+        {"type": "text", "text": "with"},
+        {"type": "input_image", "image_url": png},
+    ]
+
+    response = client.post("/v1/chat/completions", json={**BODY, "messages": [{"role": "user", "content": content}]})
+
+    if not image_input:
+        assert response.status_code == 400, response.text
+        assert response.json()["error"]["message"] == f"Model '{MODEL}' does not support image input"
+        assert not requests
+        return
+    assert response.status_code == 200, response.text
+    assert json.loads(requests[0].content)["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "compare"},
+                {"type": "image_url", "image_url": {"url": png}},
+                {"type": "text", "text": "with"},
+                {"type": "image_url", "image_url": {"url": png}},
+            ],
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

@@ -8,6 +8,7 @@ Mapping-shaped media uses TypedDict where permissive compatibility is required;
 audio uses a strict msgspec struct because it crosses a bounded binary boundary.
 """
 
+import base64
 import io
 import os
 from typing import TYPE_CHECKING, Any, Final, Literal, TypedDict, TypeGuard, cast, overload
@@ -260,6 +261,28 @@ def media_bytes(media: object, *, kind: str = "media") -> bytes:
         f"{kind} data must be bytes, got {type(data).__name__} "
         "(base64 JSON strings must be decoded to bytes before inference)"
     )
+
+
+_DATA_URI_IMAGE_FORMATS: Final = frozenset({"png", "jpeg", "jpg", "webp", "gif"})
+
+
+def image_data_uri(image: object) -> str:
+    """Return an image input as a base64 ``data:image/<format>`` URI.
+
+    The bytes are validated by :func:`media_bytes`. The client-controlled
+    format hint is clamped to a known set and an unknown or absent hint falls
+    back to ``jpeg``, so the MIME type is always well-formed; image decoders
+    read the real format from the bytes.
+
+    Raises:
+        InvalidMediaError: If ``image`` does not carry ``data`` bytes.
+    """
+    raw = media_bytes(image, kind="image")
+    hint = cast("dict[str, Any]", image).get("format")
+    fmt = hint.strip().lower() if isinstance(hint, str) else ""
+    if fmt not in _DATA_URI_IMAGE_FORMATS or fmt == "jpg":
+        fmt = "jpeg"
+    return f"data:image/{fmt};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
 def decode_image(
