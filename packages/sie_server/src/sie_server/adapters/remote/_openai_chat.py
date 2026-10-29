@@ -64,11 +64,17 @@ def _usage(value: Any) -> dict[str, Any]:
     if details is not None:
         if not isinstance(details, dict):
             raise _invalid()
+        clean_details: dict[str, int] = {}
         if details.get("cached_tokens") is not None:
             cached = _count(details["cached_tokens"])
             if cached > prompt:
                 raise _invalid()
-            clean["prompt_tokens_details"] = {"cached_tokens": cached}
+            clean_details["cached_tokens"] = cached
+        image = details.get("image_tokens")
+        if isinstance(image, int) and not isinstance(image, bool) and 0 <= image <= prompt:
+            clean_details["image_tokens"] = image
+        if clean_details:
+            clean["prompt_tokens_details"] = clean_details
     return clean
 
 

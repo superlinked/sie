@@ -32,10 +32,11 @@ media, grammar and nonstandard sampling fields they cannot enforce; strict
 JSON Schema output is supported through chat and verified locally. Queued chat
 preserves tools, tool choice, choice indices and usage; unsupported media,
 request chat-template kwargs and nonstandard sampling fields fail before
-dispatch. A remote-backed model that declares `inputs.image` receives message
-images in upstream chat, on single-node and queued serving, as base64 data-URI
-`image_url` parts in their original order with the text. Video, and images for
-a model with local weights, fail before dispatch. Queued chat for a model with
+dispatch. A model that declares `inputs.image` receives message images in
+upstream chat as base64 data-URI `image_url` parts, in their original order
+with the text: on single-node and queued serving for a remote-backed model, and
+on queued serving for a model with local weights served by an `openai`
+upstream. Video, and other image requests, fail before dispatch. Queued chat for a model with
 local weights, served by an `openai` upstream, sends the model's configured
 `tasks.generate.chat_template_kwargs` as top-level `chat_template_kwargs`, so
 the upstream renders the template the worker counts with; a remote-backed
@@ -164,8 +165,13 @@ tokens, and carries the upstream's own counts in `usage.upstream_usage`. The
 gateway decodes that field for consumers of its stream outcome and never
 returns it to a caller. A request whose messages the local template cannot
 render, or whose counted prompt exceeds the context length, fails before it is
-sent. The worker has no count of the visual tokens an upstream makes of an
-image, so such a request with images fails before it is sent. When the local tokenizer does not load, or has no chat template for a
+sent. For a request with images, the image part of the count is the
+upstream's reported `usage.prompt_tokens_details.image_tokens`, because the
+image processing bounds are the upstream's. The worker's render count then
+leaves out the placeholder tokens of the model config's `image_token_id`, and
+keeps any wrapper tokens around them. A final usage without that figure fails
+the request, as missing usage does. A model whose config declares no image
+token fails before it is sent. When the local tokenizer does not load, or has no chat template for a
 chat request, the upstream's counts are reported instead. An `sie` upstream
 serves the same model and counts with its tokenizer, so its counts are reported
 as they are. Single-node serving reports the upstream's counts.

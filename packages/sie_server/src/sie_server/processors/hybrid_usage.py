@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from sie_server.adapters._generation_base import GenerationChunk, UpstreamTokenUsage, aclose_with_error_precedence
+from sie_server.adapters.remote._http import RemoteUpstreamError, generation_error
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,12 +23,15 @@ class HybridCount:
 
     ``count_tokens`` returns how many tokens the model's tokenizer makes of a
     text. ``completion_limit`` is the most completion tokens the request may
-    report, over all of its choices.
+    report, over all of its choices. With ``upstream_image_tokens`` the
+    prompt's image tokens are the upstream's reported count, added to
+    ``prompt_tokens``, which then excludes the images' placeholder tokens.
     """
 
     prompt_tokens: int
     completion_limit: int
     count_tokens: Callable[[str], Awaitable[int]]
+    upstream_image_tokens: bool = False
 
 
 def _candidate_texts(candidate: dict[str, Any]) -> list[str]:
@@ -64,6 +68,11 @@ async def count_hybrid_usage(
             if chunk.reasoning_delta and not keep_reasoning:
                 chunk = replace(chunk, reasoning_delta="")
             if chunk.done and chunk.prompt_tokens is not None and chunk.completion_tokens is not None:
+                prompt = count.prompt_tokens
+                if count.upstream_image_tokens:
+                    if chunk.image_tokens is None:
+                        raise generation_error(RemoteUpstreamError("upstream chat omitted exact image usage"))
+                    prompt += chunk.image_tokens
                 completion = 0
                 for parts in texts.values():
                     completion += await count.count_tokens("".join(parts))
@@ -71,9 +80,10 @@ async def count_hybrid_usage(
                     completion = max(completion, 1)
                 chunk = replace(
                     chunk,
-                    prompt_tokens=count.prompt_tokens,
+                    prompt_tokens=prompt,
                     completion_tokens=min(completion, count.completion_limit),
                     cached_tokens=None,
+                    image_tokens=None,
                     upstream_usage=UpstreamTokenUsage(
                         prompt_tokens=chunk.prompt_tokens,
                         completion_tokens=chunk.completion_tokens,

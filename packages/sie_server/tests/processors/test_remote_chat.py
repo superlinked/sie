@@ -930,7 +930,7 @@ async def test_images_without_declared_image_input_or_with_video_refuse_without_
     assert chunks[-1]["error"]["message"] == (
         "remote chat does not accept video input"
         if image
-        else "remote chat accepts images only for a remote-backed model with image input"
+        else "upstream chat does not accept image input for this model"
     )
     assert remote[3] == []
     msg.ack.assert_awaited_once()

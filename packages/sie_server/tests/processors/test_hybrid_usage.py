@@ -3,6 +3,7 @@ import base64
 import json
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -14,11 +15,13 @@ from sie_server.adapters.remote.openai import OpenAIUpstreamAdapter
 from sie_server.adapters.remote.sie import SieUpstreamAdapter
 from sie_server.config.model import ModelConfig
 from sie_server.config.upstreams import Upstream, install_upstreams
+from sie_server.core.tokenizer import load_image_token_id
 from sie_server.core.upstream_client import upstream_client
 from sie_server.processors.hybrid_usage import HybridCount, count_hybrid_usage
 from sie_server.processors.streaming import StreamingProcessor
 
 MODEL = "local/hybrid"
+IMAGE_TOKEN_ID = 151655
 UPSTREAM_USAGE = {
     "prompt_tokens": 37,
     "completion_tokens": 9,
@@ -147,11 +150,19 @@ class WordTokenizer:
             raise ValueError("template rejects these messages")
         if self.words is not None:
             return "w " * self.words
-        rendered = " ".join(message["content"] for message in messages)
+        rendered = " ".join(_render_content(message["content"]) for message in messages)
         return rendered + (" tools" if kwargs.get("tools") else "") + " reply:"
 
-    def encode(self, text: str, add_special_tokens: bool = False) -> list[str]:
-        return text.split()
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        return [IMAGE_TOKEN_ID if word == "<|image_pad|>" else 1 for word in text.split()]
+
+
+def _render_content(content: str | list[dict]) -> str:
+    if isinstance(content, str):
+        return content
+    return " ".join(
+        "<|vision_start|> <|image_pad|> <|vision_end|>" if part["type"] == "image" else part["text"] for part in content
+    )
 
 
 class ChatStream(httpx.AsyncByteStream):
@@ -476,15 +487,122 @@ async def test_request_chat_template_kwargs_are_refused_before_dispatch(hybrid: 
     assert hybrid[3] == []
 
 
-@pytest.mark.parametrize("endpoints", [["chat"], ["chat", "completions"]])
-async def test_images_for_a_counted_upstream_are_refused_before_dispatch(endpoints: list[str]) -> None:
-    setup = _processor("openai", endpoints)
-    _declare(setup[1])
-    image = {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64.b64encode(b'png').decode()}"}}
-    try:
-        respond(setup)
-        chunks = await run(setup, messages=[{"role": "user", "content": [image, {"type": "text", "text": "what?"}]}])
-    finally:
-        await _close(setup[0])
+@pytest.mark.parametrize(
+    ("declared", "expected"),
+    [({"image_token_id": 7}, 7), ({"image_token_index": 9}, 9), ({"image_token_id": True}, None), ({}, None)],
+)
+def test_the_image_token_is_read_from_the_model_config(tmp_path: Path, declared: dict, expected: int | None) -> None:
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen2", **declared}))
+    assert load_image_token_id(tmp_path) == expected
+
+
+def _weights(proc: StreamingProcessor, tmp_path: Path, *, image_token_id: int | None = IMAGE_TOKEN_ID) -> None:
+    declared = {} if image_token_id is None else {"image_token_id": image_token_id}
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen2", **declared}))
+    data = proc._registry.get_config.return_value.model_dump()
+    data.update(hf_id=None, hf_revision=None, weights_path=str(tmp_path))
+    data["inputs"]["image"] = True
+    proc._registry.get_config.return_value = ModelConfig.model_validate(data)
+
+
+PNG = base64.b64encode(b"png-bytes").decode()
+IMAGE_MESSAGE = {
+    "role": "user",
+    "content": [
+        {"type": "text", "text": "look"},
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{PNG}"}},
+        {"type": "text", "text": "here"},
+    ],
+}
+IMAGE_USAGE = {
+    "prompt_tokens": 160,
+    "completion_tokens": 9,
+    "total_tokens": 169,
+    "prompt_tokens_details": {"image_tokens": 120},
+}
+
+
+def _image_frames(usage: dict) -> list[dict | str]:
+    return [*_frames()[:3], {"choices": [], "usage": usage}, "[DONE]"]
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+async def test_an_image_prompt_counts_the_render_without_its_placeholder_plus_the_upstream_image_tokens(
+    hybrid: tuple, tmp_path: Path, streaming: bool
+) -> None:
+    """The local template renders ``<|vision_start|> <|image_pad|> <|vision_end|>`` for the image.
+
+    The upstream's ``image_tokens`` is the expanded ``image_token_id`` run, so
+    the rendered pad is left out of SIE's count and the vision wrappers stay
+    in it: ``look``, ``<|vision_start|>``, ``<|vision_end|>``, ``here`` and
+    ``reply:`` are 5 tokens, plus 120 image tokens.
+    """
+    _weights(hybrid[1], tmp_path)
+    if streaming:
+        respond(hybrid, frames=_image_frames(IMAGE_USAGE))
+    else:
+        respond(hybrid, payload={**_answer(), "usage": IMAGE_USAGE})
+
+    chunks = await run(hybrid, stream=streaming, messages=[IMAGE_MESSAGE])
+
+    assert chunks[-1]["usage"] == {
+        "prompt_tokens": 125,
+        "completion_tokens": 5,
+        "total_tokens": 130,
+        "images": 1,
+        "upstream_usage": {"prompt_tokens": 160, "completion_tokens": 9},
+    }
+    sent = json.loads(hybrid[3][0].content)
+    assert sent["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look"},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{PNG}"}},
+                {"type": "text", "text": "here"},
+            ],
+        }
+    ]
+
+
+@pytest.mark.parametrize("image_tokens", [None, -1, "120", True, 161])
+async def test_an_image_prompt_without_exact_upstream_image_tokens_fails_closed(
+    hybrid: tuple, tmp_path: Path, image_tokens: Any
+) -> None:
+    _weights(hybrid[1], tmp_path)
+    details = {} if image_tokens is None else {"prompt_tokens_details": {"image_tokens": image_tokens}}
+    respond(hybrid, frames=_image_frames({**IMAGE_USAGE, "prompt_tokens_details": None, **details}))
+    chunks = await run(hybrid, messages=[IMAGE_MESSAGE])
+
+    respond(hybrid, frames=[*_frames()[:3], "[DONE]"])
+    without_usage = await run(hybrid, messages=[IMAGE_MESSAGE])
+
+    assert "usage" not in chunks[-1]
+    assert chunks[-1]["error"] == without_usage[-1]["error"]
+    assert chunks[-1]["finish_reason"] == without_usage[-1]["finish_reason"]
+
+
+@pytest.mark.parametrize("image_token_id", [None, 42])
+async def test_an_image_the_worker_cannot_place_in_its_count_is_refused_before_dispatch(
+    hybrid: tuple, tmp_path: Path, image_token_id: int | None
+) -> None:
+    _weights(hybrid[1], tmp_path, image_token_id=image_token_id)
+    respond(hybrid, frames=_image_frames(IMAGE_USAGE))
+
+    chunks = await run(hybrid, messages=[IMAGE_MESSAGE])
+
     assert chunks[-1]["error"]["code"] == "unsupported_field"
-    assert setup[3] == []
+    assert hybrid[3] == []
+
+
+async def test_a_remote_backed_image_prompt_reports_the_upstream_figure(hybrid: tuple) -> None:
+    data = hybrid[1]._registry.get_config.return_value.model_dump()
+    data.update(remote_backed=True, hf_id=None, hf_revision=None)
+    data["inputs"]["image"] = True
+    hybrid[1]._registry.get_config.return_value = ModelConfig.model_validate(data)
+    hybrid[1]._get_tokenizer.side_effect = AssertionError("a remote-backed model has no local tokenizer")
+    respond(hybrid, frames=_image_frames(IMAGE_USAGE))
+
+    chunks = await run(hybrid, messages=[IMAGE_MESSAGE])
+
+    assert chunks[-1]["usage"] == {"prompt_tokens": 160, "completion_tokens": 9, "total_tokens": 169, "images": 1}

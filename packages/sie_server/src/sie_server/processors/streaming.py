@@ -80,7 +80,7 @@ from sie_server.config.model import validate_chat_template_kwargs
 from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.runtime_options import apply_generation_runtime_options
 from sie_server.core.text_tokens import estimate_tokens_from_chars
-from sie_server.core.tokenizer import image_first_chat_message, load_tokenizer
+from sie_server.core.tokenizer import image_first_chat_message, load_image_token_id, load_tokenizer
 from sie_server.core.video_frames import (
     VideoDecodeError,
     check_generation_video_bounds,
@@ -875,7 +875,7 @@ def _remote_chat_parameters(
             raise GenerationUnsupportedFieldError("messages", "remote chat does not accept video input")
         if message.images and not images:
             raise GenerationUnsupportedFieldError(
-                "messages", "remote chat accepts images only for a remote-backed model with image input"
+                "messages", "upstream chat does not accept image input for this model"
             )
         item: dict[str, Any] = {
             "role": message.role,
@@ -1015,6 +1015,7 @@ class StreamingProcessor:
         # plain dict lookups (no contention).
         self._tokenizers: dict[str, TokenizerLike] = {}
         self._tokenizer_lock = asyncio.Lock()
+        self._image_token_ids: dict[str, int | None] = {}
         # Per-model answer to "does the chat template render a system
         # message?", probed once when a response format has to be shown to
         # the model and the request has no system message of its own.
@@ -2011,7 +2012,7 @@ class StreamingProcessor:
             try:
                 remote_body = _remote_chat_parameters(
                     params,
-                    images=config is not None and config.remote_backed and config.inputs.image,
+                    images=config is not None and config.inputs.image and (config.remote_backed or counted_upstream),
                     chat_template_kwargs=(
                         generate_task.chat_template_kwargs if counted_upstream and generate_task is not None else None
                     ),
@@ -2058,6 +2059,7 @@ class StreamingProcessor:
                 )
                 return
             prompt_str = rendered_for_count
+            request_images = [image for message in params.input.messages for image in (message.images or ())] or None
         elif remote_body is not None:
             # Used only for the existing admission estimate. The upstream owns
             # chat templating; remote-backed models have no local tokenizer.
@@ -2199,6 +2201,7 @@ class StreamingProcessor:
                 max_new_tokens=params.max_new_tokens,
                 choices=params.n or 1,
                 context_length=config.tasks.generate.context_length,
+                images=len(request_images) if request_images else 0,
             )
             if isinstance(counted, _ValidationError):
                 await self._terminal_error_then_settle(
@@ -4151,6 +4154,7 @@ class StreamingProcessor:
         max_new_tokens: int,
         choices: int,
         context_length: int,
+        images: int = 0,
     ) -> HybridCount | _ValidationError | None:
         """Count ``prompt`` with the model's tokenizer for an upstream generation.
 
@@ -4158,6 +4162,12 @@ class StreamingProcessor:
         context-length guard. ``None`` when the tokenizer does not load: the
         generation then reports the upstream's own counts, as a model without
         local weights does. A prompt the tokenizer cannot count is refused.
+
+        With ``images``, the image placeholder tokens the template rendered
+        (the model config's ``image_token_id``) are left out of the count; the
+        upstream's reported image tokens take their place at the terminal. Any
+        wrapper tokens around a placeholder stay counted. A model whose image
+        token is unknown, or whose render carries none, is refused.
         """
         if len(prompt) > _MAX_PROMPT_CHARS:
             return _ValidationError(
@@ -4169,15 +4179,26 @@ class StreamingProcessor:
         except Exception:  # noqa: BLE001 - no local tokenizer leaves the upstream's counts
             logger.warning("No local tokenizer to count %s; reporting the upstream's counts", model_id, exc_info=True)
             return None
+        image_token_id = await self._image_token_id(model_id) if images else None
+        if images and image_token_id is None:
+            return _ValidationError(
+                code="unsupported_field", message=f"model '{model_id}' cannot count image input on this upstream"
+            )
         loop = asyncio.get_running_loop()
         try:
-            prompt_tokens = await loop.run_in_executor(
+            ids = await loop.run_in_executor(
                 _GRAMMAR_EXECUTOR,
-                lambda: len(tok.encode(prompt, add_special_tokens=adapter.prompt_tokenization_add_special_tokens)),
+                lambda: list(tok.encode(prompt, add_special_tokens=adapter.prompt_tokenization_add_special_tokens)),
             )
         except Exception:  # noqa: BLE001 - an uncountable prompt is refused, never estimated
             logger.warning("Prompt count failed for %s", model_id, exc_info=True)
             return _ValidationError(code="invalid_request", message=_INTERNAL_CHAT_TEMPLATE_MESSAGE)
+        placeholders = ids.count(image_token_id) if images else 0
+        if images and placeholders == 0:
+            return _ValidationError(
+                code="unsupported_field", message=f"model '{model_id}' cannot count image input on this upstream"
+            )
+        prompt_tokens = len(ids) - placeholders
 
         async def count_tokens(text: str) -> int:
             if not text:
@@ -4190,7 +4211,26 @@ class StreamingProcessor:
             prompt_tokens=prompt_tokens,
             completion_limit=max(0, min(max_new_tokens, context_length - prompt_tokens)) * choices,
             count_tokens=count_tokens,
+            upstream_image_tokens=bool(images),
         )
+
+    async def _image_token_id(self, model_id: str) -> int | None:
+        """The image placeholder token id the model's config declares, cached; ``None`` when unknown."""
+        if model_id in self._image_token_ids:
+            return self._image_token_ids[model_id]
+        config = self._registry.get_config(model_id)
+        source = config.hf_id or config.weights_path
+        if not isinstance(source, str | Path):
+            return None
+        try:
+            token_id = await asyncio.to_thread(
+                load_image_token_id, source, revision=config.hf_revision if config.hf_id else None
+            )
+        except Exception:  # noqa: BLE001 - an unreadable config leaves the image token unknown
+            logger.warning("Cannot read the image token of %s", model_id, exc_info=True)
+            return None
+        self._image_token_ids[model_id] = token_id
+        return token_id
 
     async def _ensure_grammar_ready(
         self,
