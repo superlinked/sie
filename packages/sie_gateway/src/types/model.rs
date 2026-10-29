@@ -624,7 +624,7 @@ pub struct ProfileConfig {
 }
 
 /// Module prefix of the adapters that forward a profile to an upstream.
-const REMOTE_ADAPTER_MODULE_PREFIX: &str = "sie_server.adapters.remote.";
+pub(crate) const REMOTE_ADAPTER_MODULE_PREFIX: &str = "sie_server.adapters.remote.";
 
 /// The upstream kind each remote adapter module calls. An adapter refuses an
 /// upstream of any other kind when it loads, so the module determines the kind.
