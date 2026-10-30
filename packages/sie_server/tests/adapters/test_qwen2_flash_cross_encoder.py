@@ -5,10 +5,13 @@ import pytest
 import torch
 from sie_server.adapters.qwen2_flash_cross_encoder.adapter import (
     QWEN3_CHAT_PREFIX,
+    QWEN3_CHAT_SUFFIX,
     Qwen2FlashCrossEncoderAdapter,
 )
 from sie_server.core.inference_output import ScoreOutput
 from sie_server.types.inputs import InvalidInputError, InvalidMediaError, Item
+from tokenizers import Regex, Tokenizer, models, normalizers, pre_tokenizers
+from transformers import PreTrainedTokenizerFast
 
 
 class _CharTokenizer:
@@ -269,3 +272,85 @@ def test_text_reranker_rejects_silently_ignored_media() -> None:
 
     with pytest.raises(InvalidMediaError, match="text-only"):
         adapter._extract_text_only(Item(text="query", images=[{"data": b"image"}]))
+
+
+# Qwen2's pre-tokenizer (tokenizer.json of Qwen/Qwen3-Reranker-4B). BPE merges never cross a
+# pre-token boundary, so two texts whose pre-tokens differ get different ids from the real tokenizer.
+_QWEN2_SPLIT = (
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
+)
+
+
+def _qwen2_pre_tokenizer() -> pre_tokenizers.PreTokenizer:
+    return pre_tokenizers.Sequence(
+        [
+            pre_tokenizers.Split(Regex(_QWEN2_SPLIT), behavior="isolated", invert=False),
+            pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False),
+        ]
+    )
+
+
+def _qwen2_word_tokenizer(texts: list[str]) -> PreTrainedTokenizerFast:
+    """One id per Qwen2 pre-token of ``texts``: ids match exactly when the real tokenizer's would."""
+    pre = _qwen2_pre_tokenizer()
+    pieces = sorted({piece for text in texts for piece, _ in pre.pre_tokenize_str(text)})
+    vocab = {token: index for index, token in enumerate(["<unk>", *pieces])}
+    backend = Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))  # noqa: S106 -- a vocabulary entry, not a secret
+    backend.normalizer = normalizers.NFC()
+    backend.pre_tokenizer = pre
+    return PreTrainedTokenizerFast(tokenizer_object=backend)
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "License Agreement: Spirit Airlines and Navitaire, dated February 28, 2007\n5.1 Term.",
+        "5.1 Term. Unless otherwise terminated earlier, this Agreement shall continue.",
+        "(g) Section 6.1 of the Marketing Agreement is hereby amended in its entirety.",
+        '"Initial Term" means ten (10) years.',
+        "\nSection 4B, Annual Payments, is hereby amended.",
+        " a document that starts with a space",
+    ],
+)
+def test_qwen3_rows_are_the_model_cards_token_ids(document: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    instruction = "Prefer the text that controls today: an amendment supersedes the clause it amends."
+    query = "What is the initial term of the hosted services agreement?"
+    # The model card: the whole user text tokenized as one string between the template's two ends.
+    user = f"<Instruct>: {instruction}\n<Query>: {query}\n<Document>: {document}"
+    # The vocabulary also holds the pieces of the text before the document and of the document alone, so a row
+    # that tokenizes them apart (a lone " " then "License") gets real ids that differ, not unknown ones.
+    split_user = f"<Instruct>: {instruction}\n<Query>: {query}\n<Document>: "
+    tokenizer = _qwen2_word_tokenizer([QWEN3_CHAT_PREFIX, QWEN3_CHAT_SUFFIX, user, split_user, document])
+
+    def encode(text: str) -> list[int]:
+        return tokenizer.encode(text, add_special_tokens=False)
+
+    card = encode(QWEN3_CHAT_PREFIX) + encode(user) + encode(QWEN3_CHAT_SUFFIX)
+    adapter = Qwen2FlashCrossEncoderAdapter(
+        "unused", max_seq_length=4096, input_format="qwen3", score_mode="log_softmax"
+    )
+    adapter._tokenizer = tokenizer
+    adapter._model = object()
+    adapter._device = "cpu"
+    adapter._pre_tokenize_templates()
+
+    assert adapter._build_input_ids(query, document, instruction=instruction) == card
+
+    # The batched path builds the same row and bills the caller's own text, not the template's space.
+    rows: list[list[int]] = []
+
+    def capture(batch: list[tuple[list[int], list[int]]], _lengths: list[int]) -> torch.Tensor:
+        rows.extend(prefix + tail for prefix, tail in batch)
+        return torch.zeros((len(batch), 2))
+
+    monkeypatch.setattr(adapter, "_forward_rows", capture)
+    output = adapter.score_pairs([Item(text=query)], [Item(text=document)], instruction=instruction)
+
+    assert rows == [card]
+    # The document's tokens as the row holds them, less the separating space where it is a token of its own.
+    # That is the document tokenized alone, except where its first character joins the space (" (" "g" for "(g").
+    in_row = encode(" " + document)
+    document_tokens = len(in_row) - int(in_row[:1] == encode(" "))
+    assert output.content_token_counts == [len(encode(query)) + len(encode(instruction)) + document_tokens]
+    if document[:1].isalnum():
+        assert document_tokens == len(encode(document))
