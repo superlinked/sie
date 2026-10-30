@@ -57,3 +57,22 @@ def load_tokenizer(
         getattr(tokenizer, "is_fast", False),
     )
     return tokenizer
+
+
+def load_image_token_id(model_path: str | Path, *, revision: str | None = None) -> int | None:
+    """Return the image placeholder token id the model's config declares.
+
+    A vision processor expands each occurrence of this token into the
+    image's visual tokens. Read from the top-level ``image_token_id`` or
+    ``image_token_index`` of the model's ``config.json``, resolved like
+    :func:`load_tokenizer` resolves the tokenizer. ``None`` when the config
+    declares neither as a non-negative integer.
+    """
+    from transformers import PretrainedConfig
+
+    config, _ = PretrainedConfig.get_config_dict(str(model_path), revision=revision)
+    for key in ("image_token_id", "image_token_index"):
+        value = config.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+    return None

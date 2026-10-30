@@ -66,7 +66,7 @@ from sie_server.types.grammar import (
     OUTLINES_JSON_SCHEMA_TYPE_MESSAGE,
     GrammarSpec,
 )
-from sie_server.types.inputs import ImageInput, VideoInput, media_bytes
+from sie_server.types.inputs import ImageInput, VideoInput, image_data_uri, media_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -258,21 +258,15 @@ def _mamba_strategy_value(extra_launch_args: list[str], flag: str) -> str | None
     return value
 
 
-# Format hints we re-embed into the SGLang ``image_data`` MIME type. Anything
-# else falls back to ``jpeg`` (the engine sniffs the real format from bytes).
-_ALLOWED_IMAGE_FORMATS = frozenset({"png", "jpeg", "jpg", "webp", "gif"})
-
-
 def _encode_image_data(images: list[ImageInput] | None) -> list[str] | None:
     """Translate wire ``ImageInput`` entries into SGLang ``image_data`` URIs.
 
     SGLang's ``/generate`` accepts a top-level ``image_data`` field — a list of
     images, each as a base64 string, an ``http(s)`` URL, or a local file path.
-    We emit ``data:image/<fmt>;base64,<...>`` data URIs so the format hint
-    travels with the bytes and SGLang's image loader can decode without
-    sniffing. Bytes are validated through :func:`media_bytes`, the single
-    enforcement point for the wire contract (raises :class:`InvalidMediaError`
-    on a non-bytes ``data``, e.g. an un-decoded base64 JSON string).
+    We emit ``data:image/<fmt>;base64,<...>`` data URIs (see
+    :func:`image_data_uri`) so the format hint travels with the bytes and
+    SGLang's image loader can decode without sniffing. A non-bytes ``data``
+    raises :class:`InvalidMediaError`.
 
     Returns ``None`` when there are no images so the request body stays
     byte-identical to the text-only path — vision plumbing is inert for the
@@ -280,23 +274,7 @@ def _encode_image_data(images: list[ImageInput] | None) -> list[str] | None:
     """
     if not images:
         return None
-    encoded: list[str] = []
-    for image in images:
-        raw = media_bytes(image, kind="image")
-        fmt = (image.get("format") or "jpeg").strip().lower() or "jpeg"
-        # Clamp the client-controlled format hint to a known set before
-        # re-embedding it in the data-URI MIME type — an arbitrary subtype
-        # would produce a malformed URI for SGLang's loader. The engine
-        # sniffs the real format from the bytes regardless, so an unknown
-        # hint safely falls back to jpeg.
-        if fmt not in _ALLOWED_IMAGE_FORMATS:
-            fmt = "jpeg"
-        elif fmt == "jpg":
-            # ``image/jpg`` is not a registered MIME type; normalise to jpeg.
-            fmt = "jpeg"
-        b64 = base64.b64encode(raw).decode("ascii")
-        encoded.append(f"data:image/{fmt};base64,{b64}")
-    return encoded
+    return [image_data_uri(image) for image in images]
 
 
 _ALLOWED_VIDEO_FORMATS = frozenset({"mp4", "mkv", "avi"})

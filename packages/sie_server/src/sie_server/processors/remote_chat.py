@@ -67,6 +67,7 @@ def _terminal(usage: dict[str, Any], reasons: list[str], **kwargs: Any) -> Gener
         prompt_tokens=usage["prompt_tokens"],
         completion_tokens=usage["completion_tokens"],
         cached_tokens=details.get("cached_tokens"),
+        image_tokens=details.get("image_tokens"),
         **kwargs,
     )
 

@@ -124,7 +124,7 @@ from sie_server.processors.strict_grammar import (
     unverifiable_schema_keyword,
 )
 from sie_server.types.grammar import GrammarSpec
-from sie_server.types.inputs import InvalidInputError, Item, item_size_error
+from sie_server.types.inputs import InvalidInputError, InvalidMediaError, Item, decode_image, item_size_error
 from sie_server.types.openapi import OpenAIGenerationErrorResponse
 from sie_server.types.responses import ErrorCode
 
@@ -1439,13 +1439,55 @@ async def _remote_chat_events(
         await aclose_with_error_precedence(iterator, outcome_selected=True, context="remote chat adapter")
 
 
-def _validate_remote_chat_media(messages: list[dict[str, Any]]) -> None:
+def _remote_chat_accepts_images(config: Any) -> bool:
+    """Whether remote chat forwards message images: a remote-backed model that declares image input."""
+    return bool(config.remote_backed and config.inputs.image)
+
+
+def _validate_remote_chat_media(messages: list[dict[str, Any]], *, images: bool) -> None:
+    accepted = {"text", "input_text", "image_url", "input_image"} if images else {"text", "input_text"}
     for message in messages:
         content = message.get("content")
-        if isinstance(content, list) and any(part.get("type") not in {"text", "input_text"} for part in content):
+        if isinstance(content, list) and any(part.get("type") not in accepted for part in content):
             raise _bad_request(
                 "remote chat does not support media messages", param="messages", code="unsupported_field"
             )
+
+
+async def _check_remote_chat_images(messages: list[Any]) -> None:
+    """Refuse an image part whose data URI does not decode as an image."""
+    for index, message in enumerate(messages):
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for position, part in enumerate(cast("list[dict[str, Any]]", content)):
+            if part["type"] not in {"image_url", "input_image"}:
+                continue
+            image = part["image_url"]
+            data, _ = _decode_data_uri_image(image.get("url") if isinstance(image, dict) else image)
+            try:
+                await asyncio.to_thread(decode_image, {"data": data})
+            except InvalidMediaError:
+                param = f"messages[{index}].content[{position}].image_url"
+                raise _bad_request(f"'{param}' is not a decodable image", param=param) from None
+
+
+def _remote_chat_messages(messages: list[Any]) -> list[Any]:
+    """``messages`` with each validated image part in the OpenAI ``image_url`` shape."""
+    normalized: list[Any] = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, list):
+            parts = []
+            for part in content:
+                if part["type"] in {"image_url", "input_image"}:
+                    image = part["image_url"]
+                    url = image.get("url") if isinstance(image, dict) else image
+                    part = {"type": "image_url", "image_url": {"url": url}}
+                parts.append(part)
+            message = {**message, "content": parts}
+        normalized.append(message)
+    return normalized
 
 
 async def _remote_chat_response(
@@ -1690,7 +1732,8 @@ async def _chat_completions(
             )
         adapter_chat = _adapter_answers_chat(config)
         if _has_image_parts(messages) and not (
-            config.inputs.image and str(device).startswith("cuda") and not adapter_chat
+            (config.inputs.image and str(device).startswith("cuda") and not adapter_chat)
+            or (adapter_chat and _remote_chat_accepts_images(config))
         ):
             raise _bad_request(
                 f"Model '{model}' does not support image input", param="messages", code="unsupported_field"
@@ -1716,7 +1759,9 @@ async def _chat_completions(
         ):
             raise _bad_request("'stream_options' must contain only boolean 'include_usage'", param="stream_options")
         if adapter_chat:
-            _validate_remote_chat_media(messages)
+            _validate_remote_chat_media(messages, images=_remote_chat_accepts_images(config))
+            if _remote_chat_accepts_images(config):
+                await _check_remote_chat_images(messages)
 
         # Normalize and reject client errors before the bridge owns a local
         # refusal; otherwise a caller error could be rewritten as that refusal.
@@ -1730,11 +1775,12 @@ async def _chat_completions(
         adapter = registry.get(route.key)
         registry.touch_lru(route.key)
         await ensure_generation_lora(registry, route.key, lora, n=body.get("n"))
-        if _adapter_answers_chat(registry.get_config(route.key)) and isinstance(adapter, GenerationAdapter):
-            _validate_remote_chat_media(messages)
+        route_config = registry.get_config(route.key)
+        if _adapter_answers_chat(route_config) and isinstance(adapter, GenerationAdapter):
+            _validate_remote_chat_media(messages, images=_remote_chat_accepts_images(route_config))
             return await _remote_chat_response(
                 adapter,
-                prepared_chat,
+                {**prepared_chat, "messages": _remote_chat_messages(prepared_chat["messages"])},
                 requested_model=model,
                 config=config,
                 stream=bool(stream_opt),

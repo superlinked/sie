@@ -1,5 +1,8 @@
 import asyncio
+import base64
+import io
 import json
+import os
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -9,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import msgpack
 import pytest
+from PIL import Image
 from sie_server.adapters.errors import UPSTREAM_FAILURE_MESSAGES
 from sie_server.adapters.remote._limits import upstream_limiter
 from sie_server.adapters.remote.openai import OpenAIUpstreamAdapter
@@ -825,4 +829,145 @@ async def test_include_reasoning_keeps_each_choice_reasoning_on_its_own_choice(r
     if not streaming:
         assert [item["text"] for item in chunks[-1]["candidates"]] == ["first", "second"]
     assert chunks[-1]["usage"] == USAGE
+    msg.ack.assert_awaited_once()
+
+
+def _reconfigure(proc: StreamingProcessor, *, image: bool = True, template_kwargs: dict | None = None) -> None:
+    config_data = proc._registry.get_config(MODEL).model_dump()
+    config_data["inputs"]["image"] = image
+    if template_kwargs is not None:
+        config_data["tasks"]["generate"]["chat_template_kwargs"] = template_kwargs
+    proc._registry.get_config.return_value = ModelConfig.model_validate(config_data)
+
+
+def _image(fmt: str, *, size: int = 4, noise: bool = False) -> bytes:
+    pixels = os.urandom(size * size * 3) if noise else bytes([200, 30, 30]) * (size * size)
+    buffer = io.BytesIO()
+    Image.frombytes("RGB", (size, size), pixels).save(buffer, format=fmt)
+    return buffer.getvalue()
+
+
+PNG, WEBP, JPEG, GIF = _image("PNG"), _image("WEBP"), _image("JPEG"), _image("GIF")
+
+
+def _data_uri(mime: str, data: bytes) -> str:
+    return f"data:{mime};base64,{base64.b64encode(data).decode()}"
+
+
+async def test_message_images_reach_upstream_chat_as_data_uris_in_order(remote: tuple) -> None:
+    _reconfigure(remote[1])
+    respond(remote)
+    inline = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "compare"},
+            {"type": "image_url", "image_url": {"url": _data_uri("image/png", PNG)}},
+            {"type": "text", "text": "with"},
+            {"type": "image_url", "image_url": {"url": _data_uri("image/webp", WEBP)}},
+        ],
+    }
+    forwarded = {
+        "role": "user",
+        "content": "describe",
+        "images": [{"data": JPEG, "format": "jpg"}],
+        "content_parts": [{"type": "text", "text": "describe"}, {"type": "image"}],
+    }
+    image_first = {"role": "user", "content": "and this", "images": [{"data": GIF, "format": None}]}
+
+    msg, chunks = await run(remote, messages=[inline, forwarded, image_first])
+
+    assert chunks[-1]["usage"] == {**USAGE, "images": 4}
+    assert json.loads(remote[3][0].content)["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "compare"},
+                {"type": "image_url", "image_url": {"url": _data_uri("image/png", PNG)}},
+                {"type": "text", "text": "with"},
+                {"type": "image_url", "image_url": {"url": _data_uri("image/webp", WEBP)}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "describe"},
+                {"type": "image_url", "image_url": {"url": _data_uri("image/jpeg", JPEG)}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": _data_uri("image/jpeg", GIF)}},
+                {"type": "text", "text": "and this"},
+            ],
+        },
+    ]
+    msg.ack.assert_awaited_once()
+
+
+async def test_admission_reserves_images_per_image_not_by_encoded_size(remote: tuple) -> None:
+    _reconfigure(remote[1])
+    respond(remote)
+    reserve = AsyncMock(return_value=True)
+    remote[1]._try_reserve = reserve  # type: ignore[method-assign]
+    image = {"type": "image_url", "image_url": {"url": _data_uri("image/png", _image("PNG", size=200, noise=True))}}
+
+    await run(remote, messages=[{"role": "user", "content": [image, {"type": "text", "text": "what is this?"}]}])
+
+    reserved = reserve.await_args.args[1]
+    assert 9 + 1280 <= reserved < 9 + 1280 + 100
+
+
+@pytest.mark.parametrize("image", [False, True])
+async def test_images_without_declared_image_input_or_with_video_refuse_without_dispatch(
+    remote: tuple, image: bool
+) -> None:
+    _reconfigure(remote[1], image=image)
+    respond(remote)
+    if image:
+        message = {
+            "role": "user",
+            "content": "what happens?",
+            "videos": [{"data": b"\x00\x00\x00\x18ftypisom" + b"\x00" * 16, "format": "mp4"}],
+            "content_parts": [{"type": "video"}, {"type": "text", "text": "what happens?"}],
+        }
+    else:
+        message = {
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": {"url": _data_uri("image/png", PNG)}}],
+        }
+
+    msg, chunks = await run(remote, messages=[message])
+
+    assert chunks[-1]["error"]["code"] == "unsupported_field"
+    assert chunks[-1]["error"]["message"] == (
+        "remote chat does not accept video input"
+        if image
+        else "upstream chat does not accept image input for this model"
+    )
+    assert remote[3] == []
+    msg.ack.assert_awaited_once()
+
+
+async def test_a_remote_backed_model_sends_no_chat_template_kwargs(remote: tuple) -> None:
+    _reconfigure(remote[1], template_kwargs={"enable_thinking": False})
+    respond(remote)
+
+    msg, chunks = await run(remote)
+
+    assert chunks[-1]["usage"] == USAGE
+    assert "chat_template_kwargs" not in json.loads(remote[3][0].content)
+    msg.ack.assert_awaited_once()
+
+
+async def test_an_image_that_does_not_decode_is_refused_without_dispatch(remote: tuple) -> None:
+    _reconfigure(remote[1])
+    respond(remote)
+    message = {"role": "user", "content": "what is this?", "images": [{"data": b"not an image", "format": "png"}]}
+
+    msg, chunks = await run(remote, messages=[message])
+
+    assert chunks[-1]["error"]["code"] == "invalid_request"
+    assert chunks[-1]["error"]["message"] == "messages[0].images[0] is not a decodable image"
+    assert remote[3] == []
     msg.ack.assert_awaited_once()

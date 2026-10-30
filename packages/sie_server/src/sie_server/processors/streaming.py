@@ -41,7 +41,8 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, Self, cast
 
@@ -57,6 +58,7 @@ from sie_server.adapters._generation_base import (
     GenerationChunk,
     GenerationDrainingError,
     GenerationError,
+    GenerationInvalidRequestError,
     GenerationPreflightResult,
     GenerationUnsupportedFieldError,
     ReasoningFormat,
@@ -79,7 +81,7 @@ from sie_server.config.model import validate_chat_template_kwargs
 from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.runtime_options import apply_generation_runtime_options
 from sie_server.core.text_tokens import estimate_tokens_from_chars
-from sie_server.core.tokenizer import image_first_chat_message, load_tokenizer
+from sie_server.core.tokenizer import image_first_chat_message, load_image_token_id, load_tokenizer
 from sie_server.core.video_frames import (
     VideoDecodeError,
     check_generation_video_bounds,
@@ -113,7 +115,7 @@ from sie_server.types.grammar import (
     GrammarValidationError,
     hash_grammar,
 )
-from sie_server.types.inputs import ImageInput, VideoInput
+from sie_server.types.inputs import ImageInput, InvalidMediaError, VideoInput, decode_image, image_data_uri
 
 # Module-level shim around :func:`asyncio.wait_for`. Tests monkey-patch
 # this attribute (not the global ``asyncio.wait_for``) so the override
@@ -828,19 +830,70 @@ class _GenerateRequestParams:
     include_reasoning: bool = False
 
 
-def _remote_chat_parameters(params: _GenerateRequestParams) -> dict[str, Any]:
-    """Project validated queue parameters onto the upstream chat contract."""
+def _remote_chat_content(message: _ChatMessage, index: int) -> list[dict[str, Any]]:
+    """The OpenAI content parts of an image-bearing message, in the order the local template renders them.
+
+    Each image is decoded before it is encoded, so one that is not an image is
+    refused rather than forwarded.
+    """
+    layout = (
+        message.content_parts
+        or image_first_chat_message(role=message.role, text=message.content, image_count=len(message.images or ()))[
+            "content"
+        ]
+    )
+    images = enumerate(message.images or ())
+    parts: list[dict[str, Any]] = []
+    for part in layout:
+        if part.get("type") == "image":
+            position, image = next(images)
+            try:
+                decode_image(image)
+                url = image_data_uri(image)
+            except InvalidMediaError:
+                raise GenerationInvalidRequestError(
+                    "messages", f"messages[{index}].images[{position}] is not a decodable image"
+                ) from None
+            parts.append({"type": "image_url", "image_url": {"url": url}})
+        else:
+            parts.append({"type": "text", "text": part.get("text", "")})
+    return parts
+
+
+def _remote_chat_parameters(
+    params: _GenerateRequestParams,
+    *,
+    images: bool = False,
+    chat_template_kwargs: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Project validated queue parameters onto the upstream chat contract.
+
+    ``images`` admits message images, sent as base64 data-URI ``image_url``
+    parts. ``chat_template_kwargs`` are the model's own template kwargs, sent
+    for the upstream to render with. Every refusal precedes image encoding,
+    which decodes each image and so runs off the event loop.
+    """
     assert isinstance(params.input, _MessagesInput)
     for field in ("top_k", "repetition_penalty", "min_tokens", "chat_template_kwargs", "lora_adapter"):
         if getattr(params, field) is not None:
             raise GenerationUnsupportedFieldError(field, "upstream chat cannot enforce this field")
     if params.best_of not in (None, 1):
         raise GenerationUnsupportedFieldError("best_of", "upstream chat does not support best_of")
-    messages: list[dict[str, Any]] = []
+    if params.grammar is not None and params.grammar.kind != "json_schema":
+        raise GenerationUnsupportedFieldError("grammar", "upstream chat requires a JSON Schema grammar")
     for message in params.input.messages:
-        if message.images or message.videos:
-            raise GenerationUnsupportedFieldError("messages", "remote chat currently accepts text messages only")
-        item: dict[str, Any] = {"role": message.role, "content": message.content}
+        if message.videos:
+            raise GenerationUnsupportedFieldError("messages", "remote chat does not accept video input")
+        if message.images and not images:
+            raise GenerationUnsupportedFieldError(
+                "messages", "upstream chat does not accept image input for this model"
+            )
+    messages: list[dict[str, Any]] = []
+    for index, message in enumerate(params.input.messages):
+        item: dict[str, Any] = {
+            "role": message.role,
+            "content": _remote_chat_content(message, index) if message.images else message.content,
+        }
         if message.tool_calls is not None:
             item["tool_calls"] = list(message.tool_calls)
         if message.tool_call_id is not None:
@@ -854,6 +907,8 @@ def _remote_chat_parameters(params: _GenerateRequestParams) -> dict[str, Any]:
         "n": params.n or 1,
         "stream": params.stream,
     }
+    if chat_template_kwargs:
+        body["chat_template_kwargs"] = dict(chat_template_kwargs)
     for field in ("stop", "frequency_penalty", "presence_penalty", "seed", "logit_bias", "top_logprobs"):
         value = getattr(params, field)
         if value is not None:
@@ -867,8 +922,6 @@ def _remote_chat_parameters(params: _GenerateRequestParams) -> dict[str, Any]:
         body["tool_choice"] = params.tool_choice
     if params.grammar is not None:
         grammar = params.grammar
-        if grammar.kind != "json_schema":
-            raise GenerationUnsupportedFieldError("grammar", "upstream chat requires a JSON Schema grammar")
         schema: dict[str, Any] = {"name": grammar.label or "response", "schema": grammar.value}
         if grammar.strict is not None:
             schema["strict"] = grammar.strict
@@ -973,6 +1026,7 @@ class StreamingProcessor:
         # plain dict lookups (no contention).
         self._tokenizers: dict[str, TokenizerLike] = {}
         self._tokenizer_lock = asyncio.Lock()
+        self._image_token_ids: dict[str, int | None] = {}
         # Per-model answer to "does the chat template render a system
         # message?", probed once when a response format has to be shown to
         # the model and the request has no system message of its own.
@@ -1940,7 +1994,13 @@ class StreamingProcessor:
                 or tool_choice_mode in ("required", "named")
                 or any(tool.get("function", {}).get("strict") is True for tool in effective_tools or ())
                 or (params.n is not None and params.n > 1)
-                or (isinstance(adapter, OpenAIUpstreamAdapter) and not adapter.supports_raw_completions)
+                or (
+                    isinstance(adapter, OpenAIUpstreamAdapter)
+                    and (
+                        not adapter.supports_raw_completions
+                        or any(message.images or message.videos for message in params.input.messages)
+                    )
+                )
             )
         )
         # A model with local weights that an OpenAI-compatible upstream serves
@@ -1959,8 +2019,22 @@ class StreamingProcessor:
             remote_chat = remote_chat or not local_template
         remote_body: dict[str, Any] | None = None
         if remote_chat:
+            generate_task = config.tasks.generate if config is not None else None
+            build_remote_body = partial(
+                _remote_chat_parameters,
+                params,
+                images=config is not None and config.inputs.image and (config.remote_backed or counted_upstream),
+                chat_template_kwargs=(
+                    generate_task.chat_template_kwargs if counted_upstream and generate_task is not None else None
+                ),
+            )
             try:
-                remote_body = _remote_chat_parameters(params)
+                assert isinstance(params.input, _MessagesInput)
+                remote_body = (
+                    await asyncio.get_running_loop().run_in_executor(_GRAMMAR_EXECUTOR, build_remote_body)
+                    if any(message.images for message in params.input.messages)
+                    else build_remote_body()
+                )
             except GenerationError as exc:
                 await self._terminal_error_then_settle(
                     reply_subject,
@@ -1983,6 +2057,7 @@ class StreamingProcessor:
         # shape and for text-only message lists.
         request_images: list[ImageInput] | None = None
         request_videos: list[VideoInput] | None = None
+        imageless_prompt: str | None = None
         if remote_body is not None and counted_upstream and local_template and isinstance(params.input, _MessagesInput):
             # Rendered only to count the prompt. The upstream owns chat templating.
             rendered_for_count = await self._render_chat_template(
@@ -2003,10 +2078,41 @@ class StreamingProcessor:
                 )
                 return
             prompt_str = rendered_for_count
+            request_images = [image for message in params.input.messages for image in (message.images or ())] or None
+            if request_images:
+                imageless = await self._render_chat_template(
+                    model_id,
+                    tuple(replace(message, images=None, content_parts=None) for message in params.input.messages),
+                    effective_tools,
+                    request_kwargs=params.chat_template_kwargs,
+                )
+                if isinstance(imageless, _ValidationError):
+                    await self._terminal_error_then_settle(
+                        reply_subject,
+                        request_id=request_id,
+                        attempt_id=attempt_id,
+                        seq=0,
+                        code=imageless.code,
+                        message=imageless.message,
+                        msg=msg,
+                    )
+                    return
+                imageless_prompt = imageless
         elif remote_body is not None:
             # Used only for the existing admission estimate. The upstream owns
             # chat templating; remote-backed models have no local tokenizer.
-            prompt_str = json.dumps(remote_body["messages"], ensure_ascii=False)
+            # Images are reserved per image below, not by their encoded size.
+            assert isinstance(params.input, _MessagesInput)
+            request_images = [image for message in params.input.messages for image in (message.images or ())] or None
+            prompt_str = json.dumps(
+                [
+                    {**message, "content": [part for part in message["content"] if part["type"] == "text"]}
+                    if isinstance(message["content"], list)
+                    else message
+                    for message in remote_body["messages"]
+                ],
+                ensure_ascii=False,
+            )
         elif isinstance(params.input, _MessagesInput):
             collected = [img for m in params.input.messages for img in (m.images or ())]
             request_images = collected or None
@@ -2133,6 +2239,8 @@ class StreamingProcessor:
                 max_new_tokens=params.max_new_tokens,
                 choices=params.n or 1,
                 context_length=config.tasks.generate.context_length,
+                images=len(request_images) if request_images else 0,
+                imageless_prompt=imageless_prompt,
             )
             if isinstance(counted, _ValidationError):
                 await self._terminal_error_then_settle(
@@ -4085,6 +4193,8 @@ class StreamingProcessor:
         max_new_tokens: int,
         choices: int,
         context_length: int,
+        images: int = 0,
+        imageless_prompt: str | None = None,
     ) -> HybridCount | _ValidationError | None:
         """Count ``prompt`` with the model's tokenizer for an upstream generation.
 
@@ -4092,6 +4202,14 @@ class StreamingProcessor:
         context-length guard. ``None`` when the tokenizer does not load: the
         generation then reports the upstream's own counts, as a model without
         local weights does. A prompt the tokenizer cannot count is refused.
+
+        With ``images``, the image placeholder tokens the template rendered
+        (the model config's ``image_token_id``) are left out of the count; the
+        upstream's reported image tokens take their place at the terminal. Any
+        wrapper tokens around a placeholder stay counted. A model whose image
+        token is unknown, or whose render carries none, is refused, as is a
+        request whose ``imageless_prompt`` (the same render without its
+        images) already carries the image token.
         """
         if len(prompt) > _MAX_PROMPT_CHARS:
             return _ValidationError(
@@ -4103,15 +4221,41 @@ class StreamingProcessor:
         except Exception:  # noqa: BLE001 - no local tokenizer leaves the upstream's counts
             logger.warning("No local tokenizer to count %s; reporting the upstream's counts", model_id, exc_info=True)
             return None
+        image_token_id = await self._image_token_id(model_id) if images else None
+        if images and image_token_id is None:
+            return _ValidationError(
+                code="unsupported_field", message=f"model '{model_id}' cannot count image input on this upstream"
+            )
         loop = asyncio.get_running_loop()
         try:
-            prompt_tokens = await loop.run_in_executor(
+            ids = await loop.run_in_executor(
                 _GRAMMAR_EXECUTOR,
-                lambda: len(tok.encode(prompt, add_special_tokens=adapter.prompt_tokenization_add_special_tokens)),
+                lambda: list(tok.encode(prompt, add_special_tokens=adapter.prompt_tokenization_add_special_tokens)),
             )
         except Exception:  # noqa: BLE001 - an uncountable prompt is refused, never estimated
             logger.warning("Prompt count failed for %s", model_id, exc_info=True)
             return _ValidationError(code="invalid_request", message=_INTERNAL_CHAT_TEMPLATE_MESSAGE)
+        if images and imageless_prompt is not None:
+            try:
+                imageless_ids = await loop.run_in_executor(
+                    _GRAMMAR_EXECUTOR,
+                    lambda: list(
+                        tok.encode(imageless_prompt, add_special_tokens=adapter.prompt_tokenization_add_special_tokens)
+                    ),
+                )
+            except Exception:  # noqa: BLE001 - an uncountable prompt is refused, never estimated
+                logger.warning("Prompt count failed for %s", model_id, exc_info=True)
+                return _ValidationError(code="invalid_request", message=_INTERNAL_CHAT_TEMPLATE_MESSAGE)
+            if image_token_id in imageless_ids:
+                return _ValidationError(
+                    code="invalid_request", message="request text must not contain the model's image placeholder token"
+                )
+        placeholders = ids.count(image_token_id) if images else 0
+        if images and placeholders == 0:
+            return _ValidationError(
+                code="unsupported_field", message=f"model '{model_id}' cannot count image input on this upstream"
+            )
+        prompt_tokens = len(ids) - placeholders
 
         async def count_tokens(text: str) -> int:
             if not text:
@@ -4124,7 +4268,26 @@ class StreamingProcessor:
             prompt_tokens=prompt_tokens,
             completion_limit=max(0, min(max_new_tokens, context_length - prompt_tokens)) * choices,
             count_tokens=count_tokens,
+            upstream_image_tokens=bool(images),
         )
+
+    async def _image_token_id(self, model_id: str) -> int | None:
+        """The image placeholder token id the model's config declares, cached; ``None`` when unknown."""
+        if model_id in self._image_token_ids:
+            return self._image_token_ids[model_id]
+        config = self._registry.get_config(model_id)
+        source = config.hf_id or config.weights_path
+        if not isinstance(source, str | Path):
+            return None
+        try:
+            token_id = await asyncio.to_thread(
+                load_image_token_id, source, revision=config.hf_revision if config.hf_id else None
+            )
+        except Exception:  # noqa: BLE001 - an unreadable config leaves the image token unknown
+            logger.warning("Cannot read the image token of %s", model_id, exc_info=True)
+            return None
+        self._image_token_ids[model_id] = token_id
+        return token_id
 
     async def _ensure_grammar_ready(
         self,

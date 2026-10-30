@@ -506,6 +506,9 @@ class GenerationChunk:
     # prefilling (terminal chunk only). ``None`` when the engine does not
     # report it; a reported ``0`` means no prefix was reused.
     cached_tokens: int | None = None
+    # Terminal chunk only: the image tokens an upstream reported within its
+    # ``prompt_tokens``. ``None`` when it reported none.
+    image_tokens: int | None = None
     tool_call_delta: ToolCallDelta | None = None
     error_code: str | None = None
     error_message: str | None = None
