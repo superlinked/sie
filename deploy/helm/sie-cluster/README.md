@@ -1508,6 +1508,13 @@ contain the generated tokens.
 
 ### Upgrade notes
 
+> **dcgm-exporter node selector:** the GKE accelerator label moved from the chart
+> default to `values-gke.yaml`. Non-GKE releases upgraded with `--reuse-values`
+> keep the old default selector; upgrade with `--reset-then-reuse-values` (Helm
+> 3.14 or later) or pass your values with `-f`.
+> GKE releases installed without `values-gke.yaml` must now pass it, or set
+> `dcgm-exporter.nodeSelector`, or the exporter also runs on CPU nodes.
+
 > **Installs without `config.auth.adminTokenSecretName`:** the upgrade creates
 > the admin-token Secret and adds `SIE_ADMIN_TOKEN` to sie-config, so it rolls.
 > sie-config then requires a token for every `/v1/configs` request, including
