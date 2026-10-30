@@ -14,7 +14,7 @@ use crate::state::threshold_runtime::ThresholdBinding;
 use crate::types::bundle::{engine_adapter_prefixes, BundleInfo, DEFAULT_ENGINE, KNOWN_ENGINES};
 use crate::types::model::{
     remote_adapter_upstream_kind, CanonicalProfile, FallbackTrigger, ModelConfig, ModelEntry,
-    ModelInfoExtras, ProfileConfig, RoutingPolicy, ServedBy,
+    ModelInfoExtras, ProfileConfig, RoutingPolicy, ServedBy, REMOTE_ADAPTER_MODULE_PREFIX,
 };
 
 #[derive(Debug)]
@@ -1365,6 +1365,7 @@ impl ModelRegistry {
     /// - inheriting variant (``…:h100-fp8``)      → ``Keep`` (already safe)
     /// - no ``grammar_profile`` declared          → ``Keep``
     /// - target variant missing from registry     → ``MissingVariant`` (degrade)
+    /// - remote variant (``…:relay``)             → ``Keep`` (upstream enforces it)
     ///
     /// Resolving off the base is what closes the explicit-variant bypass:
     /// variant entries clear their own ``grammar_profile`` hint (so they don't
@@ -1373,6 +1374,9 @@ impl ModelRegistry {
     /// grammar is actually present.
     pub fn grammar_route_variant(&self, model: &str) -> GrammarRoute {
         let snap = self.snapshot.load();
+        if Self::names_remote_profile(&snap, model) {
+            return GrammarRoute::Keep;
+        }
         let Some((base, profile)) = Self::base_grammar_profile(&snap, model) else {
             return GrammarRoute::Keep;
         };
@@ -1394,6 +1398,23 @@ impl ModelRegistry {
         } else {
             GrammarRoute::MissingVariant(profile)
         }
+    }
+
+    /// Whether ``model`` is an explicit ``{base}:{profile}`` variant whose
+    /// profile is served by a remote adapter. The server sends the grammar to
+    /// that upstream and verifies the output, so the named profile is honoured.
+    fn names_remote_profile(snap: &RegistrySnapshot, model: &str) -> bool {
+        let Some(canonical) = Self::canonical_model_name(snap, model) else {
+            return false;
+        };
+        let Some((base, profile)) = canonical.rsplit_once(':') else {
+            return false;
+        };
+        snap.models
+            .get(base)
+            .filter(|entry| entry.profile_configs.contains_key(profile))
+            .and_then(|entry| Self::effective_adapter_path_from_entry(entry, profile))
+            .is_some_and(|path| path.starts_with(REMOTE_ADAPTER_MODULE_PREFIX))
     }
 
     /// Resolve the *base* model id and grammar fallback for a possibly-variant
@@ -3807,6 +3828,80 @@ mod tests {
             registry.grammar_route_variant("org/scoped-only:safe"),
             GrammarRoute::Keep
         );
+    }
+
+    #[test]
+    fn grammar_route_keeps_a_named_remote_profile() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            "name: default\npriority: 10\nadapters:\n  - sie_server.adapters.sglang\n  - sie_server.adapters.remote.openai\n",
+        )
+        .unwrap();
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        let remote = serde_json::json!({
+            "adapter_path": "sie_server.adapters.remote.openai:OpenAIUpstreamAdapter",
+            "adapter_options": {"loadtime": {"upstream": "team-openai", "upstream_model": "org/g"}},
+        });
+        let mut scoped_remote = remote.clone();
+        scoped_remote["grammar_profile"] = serde_json::json!("relay-safe");
+        let mut remote_safe = remote.clone();
+        remote_safe["adapter_options"]["loadtime"]["speculative"] =
+            serde_json::json!({"enabled": false});
+        let config: ModelConfig = serde_json::from_value(serde_json::json!({
+            "sie_id": "org/g",
+            "tasks": {"generate": {"grammar_profile": "no-spec"}},
+            "profiles": {
+                "default": {
+                    "adapter_path": "sie_server.adapters.sglang:SGLangAdapter",
+                    "adapter_options": {"loadtime": {"speculative": {"enabled": true}}},
+                },
+                "a100-40gb": {"extends": "default"},
+                "no-spec": {
+                    "extends": "default",
+                    "adapter_options": {"loadtime": {"speculative": {"enabled": false}}},
+                },
+                "relay": remote.clone(),
+                "relay-scoped": scoped_remote,
+                "relay-safe": remote_safe,
+            },
+        }))
+        .unwrap();
+        registry.add_model_config(config).unwrap();
+        let remote_backed: ModelConfig = serde_json::from_value(serde_json::json!({
+            "sie_id": "org/remote-backed",
+            "tasks": {"generate": {}},
+            "profiles": {"default": remote.clone(), "alt": remote},
+        }))
+        .unwrap();
+        registry.add_model_config(remote_backed).unwrap();
+
+        for model in [
+            "org/g:relay",
+            "ORG/G:RELAY",
+            "org/g:relay-scoped",
+            "org/g:relay-safe",
+        ] {
+            assert_eq!(
+                registry.grammar_route_variant(model),
+                GrammarRoute::Keep,
+                "{model}"
+            );
+        }
+        for model in ["org/g", "org/g:a100-40gb"] {
+            assert_eq!(
+                registry.grammar_route_variant(model),
+                GrammarRoute::Rewrite("org/g:no-spec".to_string()),
+                "{model}"
+            );
+        }
+        for model in ["org/remote-backed", "org/remote-backed:alt"] {
+            assert_eq!(
+                registry.grammar_route_variant(model),
+                GrammarRoute::Keep,
+                "{model}"
+            );
+        }
     }
 
     #[test]
