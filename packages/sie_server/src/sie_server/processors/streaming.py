@@ -41,7 +41,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, Self, cast
 
@@ -114,7 +114,7 @@ from sie_server.types.grammar import (
     GrammarValidationError,
     hash_grammar,
 )
-from sie_server.types.inputs import ImageInput, InvalidMediaError, VideoInput, image_data_uri
+from sie_server.types.inputs import ImageInput, InvalidMediaError, VideoInput, decode_image, image_data_uri
 
 # Module-level shim around :func:`asyncio.wait_for`. Tests monkey-patch
 # this attribute (not the global ``asyncio.wait_for``) so the override
@@ -849,6 +849,19 @@ def _remote_chat_content(message: _ChatMessage) -> list[dict[str, Any]]:
         else:
             parts.append({"type": "text", "text": part.get("text", "")})
     return parts
+
+
+async def _check_forwarded_images(messages: tuple[_ChatMessage, ...]) -> _ValidationError | None:
+    """Refuse an image that does not decode before it is forwarded to an upstream."""
+    for index, message in enumerate(messages):
+        for position, image in enumerate(message.images or ()):
+            try:
+                await asyncio.to_thread(decode_image, image)
+            except InvalidMediaError:
+                return _ValidationError(
+                    code="invalid_request", message=f"messages[{index}].images[{position}] is not a decodable image"
+                )
+    return None
 
 
 def _remote_chat_parameters(
@@ -2029,6 +2042,20 @@ class StreamingProcessor:
                     msg=msg,
                 )
                 return
+            assert isinstance(params.input, _MessagesInput)
+            image_error = await _check_forwarded_images(params.input.messages)
+            if image_error is not None:
+                await self._terminal_error_then_settle(
+                    reply_subject,
+                    request_id=request_id,
+                    attempt_id=attempt_id,
+                    seq=0,
+                    code=image_error.code,
+                    message=image_error.message,
+                    param="messages",
+                    msg=msg,
+                )
+                return
 
         # Chat-template rendering. For ``Messages`` shape we
         # tokenize-via-template before handing the rendered string to
@@ -2039,6 +2066,7 @@ class StreamingProcessor:
         # shape and for text-only message lists.
         request_images: list[ImageInput] | None = None
         request_videos: list[VideoInput] | None = None
+        imageless_prompt: str | None = None
         if remote_body is not None and counted_upstream and local_template and isinstance(params.input, _MessagesInput):
             # Rendered only to count the prompt. The upstream owns chat templating.
             rendered_for_count = await self._render_chat_template(
@@ -2060,6 +2088,25 @@ class StreamingProcessor:
                 return
             prompt_str = rendered_for_count
             request_images = [image for message in params.input.messages for image in (message.images or ())] or None
+            if request_images:
+                imageless = await self._render_chat_template(
+                    model_id,
+                    tuple(replace(message, images=None, content_parts=None) for message in params.input.messages),
+                    effective_tools,
+                    request_kwargs=params.chat_template_kwargs,
+                )
+                if isinstance(imageless, _ValidationError):
+                    await self._terminal_error_then_settle(
+                        reply_subject,
+                        request_id=request_id,
+                        attempt_id=attempt_id,
+                        seq=0,
+                        code=imageless.code,
+                        message=imageless.message,
+                        msg=msg,
+                    )
+                    return
+                imageless_prompt = imageless
         elif remote_body is not None:
             # Used only for the existing admission estimate. The upstream owns
             # chat templating; remote-backed models have no local tokenizer.
@@ -2202,6 +2249,7 @@ class StreamingProcessor:
                 choices=params.n or 1,
                 context_length=config.tasks.generate.context_length,
                 images=len(request_images) if request_images else 0,
+                imageless_prompt=imageless_prompt,
             )
             if isinstance(counted, _ValidationError):
                 await self._terminal_error_then_settle(
@@ -4155,6 +4203,7 @@ class StreamingProcessor:
         choices: int,
         context_length: int,
         images: int = 0,
+        imageless_prompt: str | None = None,
     ) -> HybridCount | _ValidationError | None:
         """Count ``prompt`` with the model's tokenizer for an upstream generation.
 
@@ -4167,7 +4216,9 @@ class StreamingProcessor:
         (the model config's ``image_token_id``) are left out of the count; the
         upstream's reported image tokens take their place at the terminal. Any
         wrapper tokens around a placeholder stay counted. A model whose image
-        token is unknown, or whose render carries none, is refused.
+        token is unknown, or whose render carries none, is refused, as is a
+        request whose ``imageless_prompt`` (the same render without its
+        images) already carries the image token.
         """
         if len(prompt) > _MAX_PROMPT_CHARS:
             return _ValidationError(
@@ -4193,6 +4244,21 @@ class StreamingProcessor:
         except Exception:  # noqa: BLE001 - an uncountable prompt is refused, never estimated
             logger.warning("Prompt count failed for %s", model_id, exc_info=True)
             return _ValidationError(code="invalid_request", message=_INTERNAL_CHAT_TEMPLATE_MESSAGE)
+        if images and imageless_prompt is not None:
+            try:
+                imageless_ids = await loop.run_in_executor(
+                    _GRAMMAR_EXECUTOR,
+                    lambda: list(
+                        tok.encode(imageless_prompt, add_special_tokens=adapter.prompt_tokenization_add_special_tokens)
+                    ),
+                )
+            except Exception:  # noqa: BLE001 - an uncountable prompt is refused, never estimated
+                logger.warning("Prompt count failed for %s", model_id, exc_info=True)
+                return _ValidationError(code="invalid_request", message=_INTERNAL_CHAT_TEMPLATE_MESSAGE)
+            if image_token_id in imageless_ids:
+                return _ValidationError(
+                    code="invalid_request", message="request text must not contain the model's image placeholder token"
+                )
         placeholders = ids.count(image_token_id) if images else 0
         if images and placeholders == 0:
             return _ValidationError(

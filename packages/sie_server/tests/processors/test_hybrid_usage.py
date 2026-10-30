@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import io
 import json
 import time
 from collections.abc import AsyncIterator
@@ -10,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import msgpack
 import pytest
+from PIL import Image
 from sie_server.adapters._generation_base import GenerationChunk, ToolCallDelta, UpstreamTokenUsage
 from sie_server.adapters.remote.openai import OpenAIUpstreamAdapter
 from sie_server.adapters.remote.sie import SieUpstreamAdapter
@@ -505,7 +507,13 @@ def _weights(proc: StreamingProcessor, tmp_path: Path, *, image_token_id: int | 
     proc._registry.get_config.return_value = ModelConfig.model_validate(data)
 
 
-PNG = base64.b64encode(b"png-bytes").decode()
+def _png() -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", (4, 4), (200, 30, 30)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+PNG = base64.b64encode(_png()).decode()
 IMAGE_MESSAGE = {
     "role": "user",
     "content": [
@@ -606,3 +614,15 @@ async def test_a_remote_backed_image_prompt_reports_the_upstream_figure(hybrid: 
     chunks = await run(hybrid, messages=[IMAGE_MESSAGE])
 
     assert chunks[-1]["usage"] == {"prompt_tokens": 160, "completion_tokens": 9, "total_tokens": 169, "images": 1}
+
+
+async def test_request_text_carrying_the_image_token_is_refused_before_dispatch(hybrid: tuple, tmp_path: Path) -> None:
+    _weights(hybrid[1], tmp_path)
+    respond(hybrid, frames=_image_frames(IMAGE_USAGE))
+    message = {**IMAGE_MESSAGE, "content": [*IMAGE_MESSAGE["content"], {"type": "text", "text": " <|image_pad|>"}]}
+
+    chunks = await run(hybrid, messages=[message])
+
+    assert chunks[-1]["error"]["code"] == "invalid_request"
+    assert chunks[-1]["error"]["message"] == "request text must not contain the model's image placeholder token"
+    assert hybrid[3] == []

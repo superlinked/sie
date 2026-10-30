@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import io
 import json
 import logging
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -11,6 +13,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from PIL import Image
 from sie_server.adapters.errors import UPSTREAM_FAILURE_MESSAGES
 from sie_server.adapters.remote._limits import upstream_limiter
 from sie_server.adapters.remote.openai import OpenAIUpstreamAdapter
@@ -1092,7 +1095,9 @@ def test_remote_backed_chat_forwards_images_as_data_uri_parts(remote_chat: tuple
     client, _, config, requests = remote_chat
     config.inputs.image = image_input
     answer_with(remote_chat, json_response(200, completion()))
-    png = "data:image/png;base64,iVBORw0KGgo="
+    buffer = io.BytesIO()
+    Image.new("RGB", (4, 4), (200, 30, 30)).save(buffer, format="PNG")
+    png = f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode()}"
     content = [
         {"type": "text", "text": "compare"},
         {"type": "image_url", "image_url": {"url": png, "detail": "high"}},
@@ -1119,6 +1124,19 @@ def test_remote_backed_chat_forwards_images_as_data_uri_parts(remote_chat: tuple
             ],
         }
     ]
+
+
+def test_remote_backed_chat_refuses_an_image_that_does_not_decode(remote_chat: tuple) -> None:
+    client, _, config, requests = remote_chat
+    config.inputs.image = True
+    answer_with(remote_chat, json_response(200, completion()))
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+
+    response = client.post("/v1/chat/completions", json={**BODY, "messages": [{"role": "user", "content": [image]}]})
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["param"] == "messages[0].content[0].image_url"
+    assert not requests
 
 
 @pytest.mark.parametrize(

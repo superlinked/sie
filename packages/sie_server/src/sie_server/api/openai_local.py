@@ -124,7 +124,7 @@ from sie_server.processors.strict_grammar import (
     unverifiable_schema_keyword,
 )
 from sie_server.types.grammar import GrammarSpec
-from sie_server.types.inputs import InvalidInputError, Item, item_size_error
+from sie_server.types.inputs import InvalidInputError, InvalidMediaError, Item, decode_image, item_size_error
 from sie_server.types.openapi import OpenAIGenerationErrorResponse
 from sie_server.types.responses import ErrorCode
 
@@ -1454,6 +1454,24 @@ def _validate_remote_chat_media(messages: list[dict[str, Any]], *, images: bool)
             )
 
 
+async def _check_remote_chat_images(messages: list[Any]) -> None:
+    """Refuse an image part whose data URI does not decode as an image."""
+    for index, message in enumerate(messages):
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for position, part in enumerate(cast("list[dict[str, Any]]", content)):
+            if part["type"] not in {"image_url", "input_image"}:
+                continue
+            image = part["image_url"]
+            data, _ = _decode_data_uri_image(image.get("url") if isinstance(image, dict) else image)
+            try:
+                await asyncio.to_thread(decode_image, {"data": data})
+            except InvalidMediaError:
+                param = f"messages[{index}].content[{position}].image_url"
+                raise _bad_request(f"'{param}' is not a decodable image", param=param) from None
+
+
 def _remote_chat_messages(messages: list[Any]) -> list[Any]:
     """``messages`` with each validated image part in the OpenAI ``image_url`` shape."""
     normalized: list[Any] = []
@@ -1742,6 +1760,8 @@ async def _chat_completions(
             raise _bad_request("'stream_options' must contain only boolean 'include_usage'", param="stream_options")
         if adapter_chat:
             _validate_remote_chat_media(messages, images=_remote_chat_accepts_images(config))
+            if _remote_chat_accepts_images(config):
+                await _check_remote_chat_images(messages)
 
         # Normalize and reject client errors before the bridge owns a local
         # refusal; otherwise a caller error could be rewritten as that refusal.
