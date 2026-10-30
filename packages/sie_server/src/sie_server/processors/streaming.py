@@ -42,6 +42,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, Self, cast
 
@@ -829,39 +830,34 @@ class _GenerateRequestParams:
     include_reasoning: bool = False
 
 
-def _remote_chat_content(message: _ChatMessage) -> list[dict[str, Any]]:
-    """The OpenAI content parts of an image-bearing message, in the order the local template renders them."""
+def _remote_chat_content(message: _ChatMessage, index: int) -> list[dict[str, Any]]:
+    """The OpenAI content parts of an image-bearing message, in the order the local template renders them.
+
+    Each image is decoded before it is encoded, so one that is not an image is
+    refused rather than forwarded.
+    """
     layout = (
         message.content_parts
         or image_first_chat_message(role=message.role, text=message.content, image_count=len(message.images or ()))[
             "content"
         ]
     )
-    images = iter(message.images or ())
+    images = enumerate(message.images or ())
     parts: list[dict[str, Any]] = []
     for part in layout:
         if part.get("type") == "image":
+            position, image = next(images)
             try:
-                url = image_data_uri(next(images))
-            except InvalidMediaError as exc:
-                raise GenerationInvalidRequestError("messages", str(exc)) from None
+                decode_image(image)
+                url = image_data_uri(image)
+            except InvalidMediaError:
+                raise GenerationInvalidRequestError(
+                    "messages", f"messages[{index}].images[{position}] is not a decodable image"
+                ) from None
             parts.append({"type": "image_url", "image_url": {"url": url}})
         else:
             parts.append({"type": "text", "text": part.get("text", "")})
     return parts
-
-
-async def _check_forwarded_images(messages: tuple[_ChatMessage, ...]) -> _ValidationError | None:
-    """Refuse an image that does not decode before it is forwarded to an upstream."""
-    for index, message in enumerate(messages):
-        for position, image in enumerate(message.images or ()):
-            try:
-                await asyncio.to_thread(decode_image, image)
-            except InvalidMediaError:
-                return _ValidationError(
-                    code="invalid_request", message=f"messages[{index}].images[{position}] is not a decodable image"
-                )
-    return None
 
 
 def _remote_chat_parameters(
@@ -874,7 +870,8 @@ def _remote_chat_parameters(
 
     ``images`` admits message images, sent as base64 data-URI ``image_url``
     parts. ``chat_template_kwargs`` are the model's own template kwargs, sent
-    for the upstream to render with.
+    for the upstream to render with. Every refusal precedes image encoding,
+    which decodes each image and so runs off the event loop.
     """
     assert isinstance(params.input, _MessagesInput)
     for field in ("top_k", "repetition_penalty", "min_tokens", "chat_template_kwargs", "lora_adapter"):
@@ -882,7 +879,8 @@ def _remote_chat_parameters(
             raise GenerationUnsupportedFieldError(field, "upstream chat cannot enforce this field")
     if params.best_of not in (None, 1):
         raise GenerationUnsupportedFieldError("best_of", "upstream chat does not support best_of")
-    messages: list[dict[str, Any]] = []
+    if params.grammar is not None and params.grammar.kind != "json_schema":
+        raise GenerationUnsupportedFieldError("grammar", "upstream chat requires a JSON Schema grammar")
     for message in params.input.messages:
         if message.videos:
             raise GenerationUnsupportedFieldError("messages", "remote chat does not accept video input")
@@ -890,9 +888,11 @@ def _remote_chat_parameters(
             raise GenerationUnsupportedFieldError(
                 "messages", "upstream chat does not accept image input for this model"
             )
+    messages: list[dict[str, Any]] = []
+    for index, message in enumerate(params.input.messages):
         item: dict[str, Any] = {
             "role": message.role,
-            "content": _remote_chat_content(message) if message.images else message.content,
+            "content": _remote_chat_content(message, index) if message.images else message.content,
         }
         if message.tool_calls is not None:
             item["tool_calls"] = list(message.tool_calls)
@@ -922,8 +922,6 @@ def _remote_chat_parameters(
         body["tool_choice"] = params.tool_choice
     if params.grammar is not None:
         grammar = params.grammar
-        if grammar.kind != "json_schema":
-            raise GenerationUnsupportedFieldError("grammar", "upstream chat requires a JSON Schema grammar")
         schema: dict[str, Any] = {"name": grammar.label or "response", "schema": grammar.value}
         if grammar.strict is not None:
             schema["strict"] = grammar.strict
@@ -2022,13 +2020,20 @@ class StreamingProcessor:
         remote_body: dict[str, Any] | None = None
         if remote_chat:
             generate_task = config.tasks.generate if config is not None else None
+            build_remote_body = partial(
+                _remote_chat_parameters,
+                params,
+                images=config is not None and config.inputs.image and (config.remote_backed or counted_upstream),
+                chat_template_kwargs=(
+                    generate_task.chat_template_kwargs if counted_upstream and generate_task is not None else None
+                ),
+            )
             try:
-                remote_body = _remote_chat_parameters(
-                    params,
-                    images=config is not None and config.inputs.image and (config.remote_backed or counted_upstream),
-                    chat_template_kwargs=(
-                        generate_task.chat_template_kwargs if counted_upstream and generate_task is not None else None
-                    ),
+                assert isinstance(params.input, _MessagesInput)
+                remote_body = (
+                    await asyncio.get_running_loop().run_in_executor(_GRAMMAR_EXECUTOR, build_remote_body)
+                    if any(message.images for message in params.input.messages)
+                    else build_remote_body()
                 )
             except GenerationError as exc:
                 await self._terminal_error_then_settle(
@@ -2039,20 +2044,6 @@ class StreamingProcessor:
                     code=exc.code,
                     message=str(exc),
                     param=exc.param,
-                    msg=msg,
-                )
-                return
-            assert isinstance(params.input, _MessagesInput)
-            image_error = await _check_forwarded_images(params.input.messages)
-            if image_error is not None:
-                await self._terminal_error_then_settle(
-                    reply_subject,
-                    request_id=request_id,
-                    attempt_id=attempt_id,
-                    seq=0,
-                    code=image_error.code,
-                    message=image_error.message,
-                    param="messages",
                     msg=msg,
                 )
                 return
