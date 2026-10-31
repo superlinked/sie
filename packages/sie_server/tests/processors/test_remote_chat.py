@@ -303,6 +303,52 @@ async def test_regex_refuses_without_dispatch(remote: tuple) -> None:
     assert remote[3] == []
 
 
+@pytest.mark.parametrize("remote", ["openai"], indirect=True)
+@pytest.mark.parametrize(
+    ("grammar", "name"),
+    [
+        (None, None),
+        ({"kind": "json_schema", "value": {"type": "object"}, "label": "result-v1_2"}, "result-v1_2"),
+        ({"kind": "json_schema", "value": {"type": "object"}, "label": "customer result"}, "response"),
+        ({"kind": "json_schema", "value": {"type": "object"}, "label": "x" * 65}, "response"),
+    ],
+)
+async def test_native_prompt_on_a_chat_only_upstream_is_one_user_turn(
+    remote: tuple, grammar: dict | None, name: str | None
+) -> None:
+    answer = '{"answer": "yes"}'
+    respond(remote, frames=[choice(answer), choice("", finish="stop"), {"choices": [], "usage": USAGE}, "[DONE]"])
+    msg, chunks = await run(remote, prompt="question", native_prompt=True, **({"grammar": grammar} if grammar else {}))
+    assert "".join(chunk.get("text_delta", "") for chunk in chunks) == answer
+    assert chunks[-1]["finish_reason"] == "stop"
+    assert chunks[-1]["usage"] == USAGE
+    assert len(remote[3]) == 1
+    assert remote[3][0].url.path.endswith("/chat/completions")
+    body = json.loads(remote[3][0].content)
+    assert body["messages"] == [{"role": "user", "content": "question"}]
+    assert "prompt" not in body
+    if grammar:
+        assert body["response_format"] == {
+            "type": "json_schema",
+            "json_schema": {"name": name, "schema": {"type": "object"}},
+        }
+    else:
+        assert "response_format" not in body
+    msg.ack.assert_awaited_once()
+
+
+@pytest.mark.parametrize("remote", ["openai"], indirect=True)
+async def test_raw_prompt_on_a_chat_only_upstream_is_refused_without_dispatch(
+    remote: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(remote[1], "_check_context_length", AsyncMock(return_value=None))
+    respond(remote)
+    msg, chunks = await run(remote, prompt="Once upon a time")
+    assert chunks[-1]["error"]["code"] == "unsupported_field"
+    assert remote[3] == []
+    msg.ack.assert_awaited_once()
+
+
 async def test_tool_fragments_and_required_choice_preserved(remote: tuple) -> None:
     frames = [
         {
