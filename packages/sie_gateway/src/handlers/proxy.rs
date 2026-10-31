@@ -6562,6 +6562,7 @@ impl ChatRequestParams {
                 best_of: self.best_of,
                 stream: self.stream,
                 lora_adapter: self.lora_adapter.clone(),
+                native_prompt: None,
             }),
             routing_key: self.routing_key,
             prompt_cache_key: self.prompt_cache_key,
@@ -14252,6 +14253,7 @@ fn generate_params_from_json(
         stream,
         lora_adapter,
         include_reasoning: None,
+        native_prompt: Some(true),
     }))
 }
 
@@ -14684,6 +14686,7 @@ fn generate_params_from_rmpv(
         stream,
         lora_adapter,
         include_reasoning: None,
+        native_prompt: Some(true),
     }))
 }
 
@@ -21184,6 +21187,32 @@ mod tests {
             .expect("valid request")
             .expect("generate params");
         assert!(generate_params_have_images(&params));
+    }
+
+    #[test]
+    fn test_only_the_native_route_marks_its_prompt_native() {
+        let body = serde_json::json!({"prompt": "Read", "max_new_tokens": 8});
+        assert_eq!(_expect_generate_ok(&body).native_prompt, Some(true));
+        let rmpv::Value::Map(map) = json_to_rmpv(body) else {
+            panic!("object must map")
+        };
+        let params = generate_params_from_rmpv(&map)
+            .expect("valid request")
+            .expect("generate params");
+        assert_eq!(params.native_prompt, Some(true));
+        let Ok((_, completions)) = completions_dispatch_inputs(&_completions_body_min("m")) else {
+            panic!("valid completions body")
+        };
+        assert_eq!(
+            completions.generate.expect("generate params").native_prompt,
+            None
+        );
+        let chat =
+            serde_json::json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]});
+        let Ok((_, chat)) = chat_completions_dispatch_inputs(&chat) else {
+            panic!("valid chat body")
+        };
+        assert_eq!(chat.generate.expect("generate params").native_prompt, None);
     }
 
     #[test]
