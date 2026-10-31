@@ -303,6 +303,30 @@ async def test_regex_refuses_without_dispatch(remote: tuple) -> None:
     assert remote[3] == []
 
 
+@pytest.mark.parametrize("remote", ["openai"], indirect=True)
+@pytest.mark.parametrize("grammar", [None, {"kind": "json_schema", "value": {"type": "object"}, "label": "result"}])
+async def test_queued_prompt_on_a_chat_only_upstream_is_one_user_turn(remote: tuple, grammar: dict | None) -> None:
+    answer = '{"answer": "yes"}'
+    respond(remote, frames=[choice(answer), choice("", finish="stop"), {"choices": [], "usage": USAGE}, "[DONE]"])
+    msg, chunks = await run(remote, prompt="question", **({"grammar": grammar} if grammar else {}))
+    assert "".join(chunk.get("text_delta", "") for chunk in chunks) == answer
+    assert chunks[-1]["finish_reason"] == "stop"
+    assert chunks[-1]["usage"] == USAGE
+    assert len(remote[3]) == 1
+    assert remote[3][0].url.path.endswith("/chat/completions")
+    body = json.loads(remote[3][0].content)
+    assert body["messages"] == [{"role": "user", "content": "question"}]
+    assert "prompt" not in body
+    if grammar:
+        assert body["response_format"] == {
+            "type": "json_schema",
+            "json_schema": {"name": "result", "schema": {"type": "object"}},
+        }
+    else:
+        assert "response_format" not in body
+    msg.ack.assert_awaited_once()
+
+
 async def test_tool_fragments_and_required_choice_preserved(remote: tuple) -> None:
     frames = [
         {

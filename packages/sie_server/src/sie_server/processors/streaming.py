@@ -1922,6 +1922,19 @@ class StreamingProcessor:
             )
             return
         params = validation
+        # A remote-backed model has no local template and a chat-only upstream
+        # has no raw endpoint, so a native prompt is sent as one user turn, the
+        # shape the gateway already gives a native prompt that carries images.
+        if (
+            isinstance(params.input, _PromptInput)
+            and config is not None
+            and config.remote_backed
+            and isinstance(adapter, OpenAIUpstreamAdapter)
+            and not adapter.supports_raw_completions
+        ):
+            params = replace(
+                params, input=_MessagesInput(messages=(_ChatMessage(role="user", content=params.input.prompt),))
+            )
         if params.lora_adapter is not None and adapter.lora_capability() is not None:
             try:
                 ready, _ = await self._registry.ensure_lora_loaded_async(model_id, params.lora_adapter)
