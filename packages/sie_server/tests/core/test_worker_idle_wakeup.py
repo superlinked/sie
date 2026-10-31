@@ -158,43 +158,49 @@ async def test_stop_during_coalescing_fails_admitted_future(worker, monkeypatch)
         return await original_wait()
 
     monkeypatch.setattr(batcher._batch_ready, "wait", observed_wait)
-    future = await _submit(worker, "queued")
+    # Multiple pending requests use the idle coalescing window; a lone
+    # request deliberately bypasses that window after the ready checkpoint.
+    futures = [await _submit(worker, "queued-head"), await _submit(worker, "queued-tail")]
     await asyncio.wait_for(waiting.wait(), _TIMEOUT)
     await asyncio.wait_for(worker.stop(), _TIMEOUT)
-    with pytest.raises(WorkerDrainedError):
-        await future
+    for future in futures:
+        with pytest.raises(WorkerDrainedError):
+            await future
     assert worker.pending_count == 0
     assert worker._process_task is None
     worker.adapter.encode.assert_not_called()
 
 
 @pytest.mark.parametrize(
-    ("case", "steps", "expected_time", "expected_count"),
+    ("case", "initial_count", "steps", "expected_time", "expected_count"),
     [
-        ("lone", [(2.0, False), (3.1, False)], 3.1, 1),
-        ("burst", [(2.0, True), (4.0, False), (5.1, False)], 5.1, 2),
-        ("busy", [(3.1, False), (7.6, False)], 7.6, 1),
-        ("full", [(2.0, True)], 2.0, 2),
-        ("timeout", [(2.0 * i, True) for i in range(1, 8)] + [(15.1, False)], 15.1, 8),
-        ("zero", [], 0.0, 1),
+        ("lone", 1, [], 0.0, 1),
+        ("burst", 2, [(2.0, True), (4.0, False), (5.1, False)], 5.1, 3),
+        ("busy", 1, [(3.1, False), (7.6, False)], 7.6, 1),
+        ("full", 2, [(2.0, True)], 2.0, 3),
+        ("timeout", 2, [(2.0 * i, True) for i in range(1, 8)] + [(15.1, False)], 15.1, 9),
+        ("zero", 1, [], 0.0, 1),
     ],
 )
-async def test_original_coalescing_deadlines_and_membership(
-    worker, monkeypatch, case, steps, expected_time, expected_count
+async def test_coalescing_deadlines_and_lone_dispatch_membership(
+    worker, monkeypatch, case, initial_count, steps, expected_time, expected_count
 ):
     """Use a controlled batcher clock, not fragile wall-time upper bounds.
 
-    The real selector and BatchFormer must retain the default 3ms idle quiet
-    period, its reset on arrival, the 15ms first-item deadline, fullness and
-    the uncapped 7.5ms busy quiet period. No model or thread timing is measured.
+    The real selector bypasses the timer for a lone request. Multiple pending
+    requests retain the 3ms idle quiet period and its reset on arrival, the
+    15ms first-item deadline, fullness and the uncapped 7.5ms busy quiet period.
+    No model or thread timing is measured.
     """
     worker.config.idle_coalesce_ms = 0.0 if case == "zero" else 3.0
     if case == "full":
-        worker._batch_config.max_batch_requests = 2
+        worker._batch_config.max_batch_requests = 3
     now = 0.0
     monkeypatch.setattr(batcher_module, "time", SimpleNamespace(monotonic=lambda: now / 1000))
     monkeypatch.setattr(worker, "_ensure_process_loop_started", lambda: None)
     futures = [await _submit(worker, "first")]
+    for index in range(1, initial_count):
+        futures.append(await _submit(worker, f"item-{index}"))
     remaining = iter(steps)
     observed = []
 
