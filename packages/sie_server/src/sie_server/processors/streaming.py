@@ -36,6 +36,7 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 import time
 import uuid
@@ -140,6 +141,9 @@ _GRAMMAR_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="gramma
 # cancelled/wedged without resolving the future cannot hang every follower
 # until ack_wait (which would trigger a JetStream redelivery storm).
 _GRAMMAR_FOLLOWER_TIMEOUT_S = 30.0
+
+# OpenAI's ``response_format.json_schema.name`` contract.
+_UPSTREAM_SCHEMA_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 # SGLang owns request-time grammar compilation.
 #
@@ -828,6 +832,10 @@ class _GenerateRequestParams:
     # ``reasoning_delta`` chunks instead of dropping it. Honoured only for a
     # model whose config declares reasoning.
     include_reasoning: bool = False
+    # Set only by the native ``/v1/generate`` route: a remote-backed model on
+    # a chat-only upstream receives the prompt as one user message. Other
+    # routes' prompts are raw continuations.
+    native_prompt: bool = False
 
 
 def _remote_chat_content(message: _ChatMessage, index: int) -> list[dict[str, Any]]:
@@ -922,7 +930,8 @@ def _remote_chat_parameters(
         body["tool_choice"] = params.tool_choice
     if params.grammar is not None:
         grammar = params.grammar
-        schema: dict[str, Any] = {"name": grammar.label or "response", "schema": grammar.value}
+        name = grammar.label if grammar.label and _UPSTREAM_SCHEMA_NAME.fullmatch(grammar.label) else "response"
+        schema: dict[str, Any] = {"name": name, "schema": grammar.value}
         if grammar.strict is not None:
             schema["strict"] = grammar.strict
         body["response_format"] = {"type": "json_schema", "json_schema": schema}
@@ -1926,7 +1935,8 @@ class StreamingProcessor:
         # has no raw endpoint, so a native prompt is sent as one user turn, the
         # shape the gateway already gives a native prompt that carries images.
         if (
-            isinstance(params.input, _PromptInput)
+            params.native_prompt
+            and isinstance(params.input, _PromptInput)
             and config is not None
             and config.remote_backed
             and isinstance(adapter, OpenAIUpstreamAdapter)
@@ -3674,6 +3684,9 @@ class StreamingProcessor:
         if include_reasoning_raw is not None and not isinstance(include_reasoning_raw, bool):
             return _ValidationError(code="invalid_request", message="'include_reasoning' must be a boolean")
         include_reasoning = bool(include_reasoning_raw)
+        native_prompt_raw = params.get("native_prompt")
+        if native_prompt_raw is not None and not isinstance(native_prompt_raw, bool):
+            return _ValidationError(code="invalid_request", message="'native_prompt' must be a boolean")
 
         # OpenAI ``seed`` / ``logit_bias`` / ``logprobs`` / ``top_logprobs``
         # round-trips. Gateway is the authority for shape validation
@@ -3821,6 +3834,7 @@ class StreamingProcessor:
             stream=stream,
             lora_adapter=lora_adapter,
             include_reasoning=include_reasoning,
+            native_prompt=bool(native_prompt_raw),
         )
 
     async def _get_tokenizer(self, model_id: str) -> TokenizerLike:

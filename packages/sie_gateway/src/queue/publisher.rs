@@ -446,6 +446,12 @@ pub struct GenerateParams {
     /// private.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_reasoning: Option<bool>,
+    /// ``Some(true)`` only from the native ``/v1/generate`` route. A
+    /// remote-backed model whose upstream serves chat only then receives
+    /// the prompt as one user message. Every other route's prompt is a raw
+    /// continuation, which such an upstream refuses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_prompt: Option<bool>,
     /// Caller-supplied routing affinity hint. Highest-priority input
     /// to the HRW key resolution in `crate::routing::key`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
