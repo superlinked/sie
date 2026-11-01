@@ -112,6 +112,34 @@ class TestToJpegBytes:
         with pytest.raises(ValueError, match=r"Expected 2D .* or 3D"):
             to_jpeg_bytes(arr)
 
+    @pytest.mark.parametrize(
+        "arr",
+        [
+            # Each 2-D case used to encode silently: Pillow clips the pixels to
+            # 0-255, so a mid-gray float image became black and a mid-gray
+            # 16-bit one became white.
+            np.full((8, 8), 0.5, dtype=np.float32),
+            np.full((8, 8), 0.5, dtype=np.float64),
+            np.full((8, 8), 30000, dtype=np.uint16),
+            np.full((8, 8), 100, dtype=np.int32),
+            np.full((8, 8, 3), 0.5, dtype=np.float32),
+        ],
+        ids=["float32-gray", "float64-gray", "uint16-gray", "int32-gray", "float32-rgb"],
+    )
+    def test_non_uint8_array_fails_closed(self, arr: np.ndarray) -> None:
+        """Refuse pixel dtypes that cannot be encoded without clipping."""
+        with pytest.raises(ValueError, match=f"uint8 image array, got {arr.dtype}"):
+            to_jpeg_bytes(arr)
+
+    def test_boolean_mask_array(self) -> None:
+        """A boolean mask still encodes as black and white."""
+        arr = np.zeros((8, 8), dtype=bool)
+        arr[4:, :] = True
+        decoded = np.asarray(Image.open(io.BytesIO(to_jpeg_bytes(arr))).convert("L"))
+
+        assert decoded[0, 0] < 16
+        assert decoded[-1, -1] > 239
+
     def test_custom_quality(self) -> None:
         """Test custom JPEG quality setting."""
         img = Image.new("RGB", (100, 100), color="red")
