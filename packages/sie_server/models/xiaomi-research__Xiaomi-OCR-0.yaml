@@ -1,0 +1,53 @@
+sie_id: xiaomi-research/Xiaomi-OCR-0
+hf_id: xiaomi-research/Xiaomi-OCR-0
+hf_revision: bbd8cf8d21f256b3644b44cb860f3a7cecb93c30
+inputs:
+  text: false
+  image: true
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 16384
+profiles:
+  # Plain Hugging Face reference path (Qwen3_5ForConditionalGeneration, native
+  # in transformers 5; no remote code). The card decodes greedily with 4096 new
+  # tokens; the checkpoint's own dtype is bfloat16.
+  transformers:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.glm_ocr:GlmOcrAdapter
+    adapter_options:
+      loadtime:
+        # The model card's document-parsing prompt.
+        user_text: "Extract all information from the main body of the document image and represent it in markdown format, ignoring headers and footers. Tables should be expressed in OTSL format, formulas in the document should be represented using LATEX format, and the parsing should be organized according to the reading order."
+      runtime:
+        max_new_tokens: 4096
+        num_beams: 1
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang_vision_extract.adapter:SGLangVisionExtractAdapter
+    adapter_options:
+      loadtime:
+        # Native SGLang architecture (Qwen3_5ForConditionalGeneration); never
+        # execute repository code.
+        trust_remote_code: false
+        # 64 pages in flight, each up to 16384 tokens of page image and output,
+        # need far more KV than the automatic one-sequence pool of 16384.
+        mem_fraction_static: 0.85
+        served_model_name: xiaomi-research/Xiaomi-OCR-0
+        max_concurrent_requests: 64
+        # Model card prompts. The default is document parsing; callers pick
+        # another region type with the runtime ``task`` option.
+        default_task: document
+        task_prompts:
+          document: "Extract all information from the main body of the document image and represent it in markdown format, ignoring headers and footers. Tables should be expressed in OTSL format, formulas in the document should be represented using LATEX format, and the parsing should be organized according to the reading order."
+          text: "Extract the text in the image."
+          table: "Parse the table in the image into OTSL."
+          formula: "Identify the formula in the image and represent it using LATEX format."
+      runtime:
+        max_new_tokens: 4096
+        num_beams: 1
