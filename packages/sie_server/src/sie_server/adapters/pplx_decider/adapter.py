@@ -146,7 +146,7 @@ class PerplexityDecisionAdapter(BaseAdapter):
             self._marker = marker
             self._marker_id = processor.tokenizer.encode(marker, add_special_tokens=False)[0]
             specials = {str(token) for token in processor.tokenizer.all_special_tokens} | {str(marker)}
-            self._escapes = tuple(sorted(specials, key=lambda token: len(token), reverse=True))
+            self._escapes = tuple(sorted(specials, key=lambda token: (len(token), token), reverse=True))
 
     def _state(self, item: Item) -> str:
         if item.images or item.audio is not None or item.video is not None or item.document is not None:
