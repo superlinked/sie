@@ -1,7 +1,10 @@
 """Native Qwen3.5 backbone and the checkpoint's separate decision readout.
 
 Adapted from the Apache-2.0 reference distributed with
-perplexity-ai/pplx-decider-v1.1-27b at 14c9d90137962d300f3de95633f7b6535e80c5ce.
+perplexity-ai/pplx-decider-v1.1-27b at 14c9d90137962d300f3de95633f7b6535e80c5ce
+(format 1: one row per question, last-token readout) and
+perplexity-ai/pplx-decider-flash-v1.2 at 9ff7cf9838e59df461c276b7699d56b244d2af58
+(format 2: joint protocol v3, one readout per question at its marker).
 The upstream model derives from Qwen/Qwen3.8-27B, revision
 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0, under Apache-2.0. Its modifications
 are a trained 255-option readout, fine-tuned backbone/vision weights,
@@ -24,12 +27,37 @@ from safetensors.torch import load_file
 
 from sie_server.adapters.pplx_decider.questions import MAX_OPTIONS
 
+#: The only joint protocol served for format 2 checkpoints, compared exactly with ``joint_config.json``.
+JOINT_PROTOCOL: dict[str, Any] = {
+    "version": 3,
+    "template": "joint-question-inline-readout-v1",
+    "marker": "<|fim_suffix|>",
+    "readout_offset": 0,
+    "max_questions": None,
+    "max_length": None,
+    "usage": "nonpadding_joint_sequence_including_template_and_image_positions",
+}
+
 
 def checkpoint_config(directory: Path) -> dict[str, Any]:
-    """Validate saved semantics before acquiring the backbone's weights."""
+    """Validate saved semantics before acquiring the backbone's weights.
+
+    Format 1 answers one question per row at the last token. Format 2 must
+    declare the joint inline-readout protocol (version 3) in ``joint_config.json``;
+    the returned config then carries it under ``joint``.
+    """
     config = json.loads((directory / "decision_config.json").read_text())
-    if not isinstance(config, dict) or type(config.get("format_version")) is not int or config["format_version"] != 1:
+    version = config.get("format_version") if isinstance(config, dict) else None
+    if type(version) is not int or version not in {1, 2}:
         raise ValueError("Unsupported Perplexity decision checkpoint format")
+    if config["format_version"] == 2:
+        path = directory / "joint_config.json"
+        joint = json.loads(path.read_text()) if path.is_file() else None
+        if joint != JOINT_PROTOCOL:
+            raise ValueError("Format 2 checkpoints must declare the joint inline-readout protocol (version 3)")
+        if config.get("attention_mode") != "noncausal_full_attention" or config.get("pooling", "last") != "last":
+            raise ValueError("Joint checkpoints need noncausal full attention and per-marker readouts")
+        config = {**config, "joint": joint}
     revision = config.get("revision")
     if not isinstance(revision, str) or len(revision) != 40 or any(c not in string.hexdigits for c in revision):
         raise ValueError("The checkpoint must declare an immutable base revision")
@@ -69,6 +97,12 @@ def validate_tokenizer(tokenizer: Any, config: Mapping[str, Any]) -> None:
     ids = [tokenizer.encode(code, add_special_tokens=False)[0] for code in codes]
     if codes != config["codes"] or ids != config["token_ids"] or len(set(ids)) != MAX_OPTIONS:
         raise ValueError("Checkpoint answer vocabulary differs from its tokenizer")
+    if "joint" in config:
+        marker = config["joint"]["marker"]
+        ids = tokenizer.encode(marker, add_special_tokens=False)
+        if len(ids) != 1 or tokenizer.convert_ids_to_tokens(ids[0]) != marker:
+            raise ValueError("The joint readout marker must be a single existing token")
+        return
     prefix = tokenizer.apply_chat_template(
         [{"role": "user", "content": "Choose an option."}],
         tokenize=False,
@@ -131,9 +165,22 @@ class DecisionModel(torch.nn.Module):
         self.temperature = float(config["temperature"])
         self.pooling = config.get("pooling", "last")
 
-    def forward(self, inputs: dict[str, torch.Tensor], counts: list[int]) -> torch.Tensor:
+    def forward(
+        self,
+        inputs: dict[str, torch.Tensor],
+        counts: list[int],
+        positions: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        """Calibrated probabilities per readout.
+
+        Without ``positions`` there is one readout per row (last token or mean).
+        With ``positions`` (row and column index tensors, one entry per question)
+        the readout is applied at those hidden states: the joint protocol's markers.
+        """
         hidden = self.backbone(**inputs, use_cache=False).last_hidden_state
-        if self.pooling == "mean":
+        if positions is not None:
+            hidden = hidden[positions[0], positions[1]]
+        elif self.pooling == "mean":
             valid = inputs["attention_mask"].bool()
             lengths = valid.sum(dim=1, keepdim=True)
             if not lengths.gt(0).all():

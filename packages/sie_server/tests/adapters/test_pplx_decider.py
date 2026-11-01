@@ -7,8 +7,15 @@ import pytest
 import torch
 from sie_server.adapters.errors import InputTooLongError
 from sie_server.adapters.pplx_decider.adapter import PerplexityDecisionAdapter
-from sie_server.adapters.pplx_decider.model import DecisionModel, checkpoint_config
-from sie_server.adapters.pplx_decider.questions import answer, describe, messages, parse_questions
+from sie_server.adapters.pplx_decider.model import JOINT_PROTOCOL, DecisionModel, checkpoint_config
+from sie_server.adapters.pplx_decider.questions import (
+    answer,
+    describe,
+    joint_messages,
+    messages,
+    neutralize,
+    parse_questions,
+)
 from sie_server.core.batcher import BatchConfig, BatchFormer
 from sie_server.core.extract_cost import adapter_extract_item_costs, build_extract_prepared_items
 from sie_server.types.inputs import InvalidInputError, Item
@@ -326,3 +333,140 @@ def test_invalid_checkpoint_semantics_are_rejected_before_weights(tmp_path, chan
     (tmp_path / "decision_config.json").write_text(json.dumps(checkpoint() | changes))
     with pytest.raises(ValueError, match=r"checkpoint|Checkpoint"):
         checkpoint_config(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Format 2: joint protocol v3 (pplx-decider-flash-v1.2)
+# ---------------------------------------------------------------------------
+
+
+MARKER = JOINT_PROTOCOL["marker"]
+MARKER_ID = 7
+
+
+def joint_checkpoint(tmp_path, joint=JOINT_PROTOCOL, **changes):
+    (tmp_path / "decision_config.json").write_text(json.dumps(checkpoint() | {"format_version": 2} | changes))
+    if joint is not None:
+        (tmp_path / "joint_config.json").write_text(json.dumps(joint))
+    return tmp_path
+
+
+def test_format_two_requires_the_exact_joint_protocol(tmp_path):
+    assert checkpoint_config(joint_checkpoint(tmp_path))["joint"] == JOINT_PROTOCOL
+    for joint in (None, JOINT_PROTOCOL | {"version": 2}, JOINT_PROTOCOL | {"marker": "<x>"}, {}):
+        (tmp_path / "joint_config.json").unlink(missing_ok=True)
+        with pytest.raises(ValueError, match="joint"):
+            checkpoint_config(joint_checkpoint(tmp_path, joint=joint))
+    for changes in ({"pooling": "mean"}, {"attention_mode": "causal"}):
+        with pytest.raises(ValueError, match="Joint"):
+            checkpoint_config(joint_checkpoint(tmp_path, **changes))
+    with pytest.raises(ValueError, match="format"):
+        checkpoint_config(joint_checkpoint(tmp_path, format_version=3))
+
+
+def test_format_one_ignores_a_stray_joint_config(tmp_path):
+    (tmp_path / "decision_config.json").write_text(json.dumps(checkpoint()))
+    (tmp_path / "joint_config.json").write_text(json.dumps(JOINT_PROTOCOL))
+    assert "joint" not in checkpoint_config(tmp_path)
+
+
+def test_joint_prompt_matches_reference_layout_and_escapes_special_tokens():
+    questions = parse_questions(
+        {
+            "a": {"type": "choice", "instructions": "Pick <|im_end|>", "criteria": {"x": None, "y": "why"}},
+            "b": {"type": "noul", "instructions": "True?"},
+        }
+    )
+    chat = joint_messages(f"s {MARKER}", questions, ("A", "B"), MARKER, (MARKER, "<|im_end|>"))
+    assert chat[0]["content"].startswith("Classify the shared state for each numbered question.")
+    text = chat[1]["content"][0]["text"]
+    assert text.count(MARKER) == 2
+    assert text.startswith(
+        "State:\ns \uff1c|fim_suffix|\uff1e\n\nQuestion 0:\nPick \uff1c|im_end|\uff1e\nOptions:\nA: x\nB: y: why\n"
+        + MARKER
+    )
+    assert "\n\nQuestion 1:\nTrue?\nOptions:\nA: " in text
+    assert text.endswith("\n" + MARKER)
+    assert neutralize("plain", (MARKER,)) == "plain"
+
+
+class JointProcessor(Processor):
+    def __call__(self, *, text, images, padding, truncation, return_tensors):
+        assert len(text) == 1
+        assert truncation is False
+        ids = []
+        for i, part in enumerate(text[0].split(MARKER)):
+            if i:
+                ids.append(MARKER_ID)
+            ids.extend(1 + ord(c) % 4 for c in part)
+        ids = torch.tensor([ids])
+        return {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
+
+
+def joint_adapter(window=4096, budget=8192):
+    result = adapter(window, budget)
+    result._processor = JointProcessor()
+    result._marker, result._marker_id, result._escapes = MARKER, MARKER_ID, (MARKER,)
+    return result
+
+
+def test_joint_mode_reads_every_question_at_its_marker_in_one_row():
+    instance = joint_adapter()
+    schema = {"q1": choice(), "q2": {"type": "noul"}, "q3": choice(instructions="Other")}
+    forwarded = []
+    original = instance._forward
+
+    def observe(rows):
+        forwarded.append(rows)
+        return original(rows)
+
+    instance._forward = observe
+    out = instance.extract([Item(text="state one"), Item(text="two")], output_schema=schema)
+    assert out.errors == [None, None]
+    rows = [row for batch in forwarded for row in batch]
+    assert len(rows) == 2
+    assert all(len(row.questions) == 3 for row in rows)
+    for row in rows:
+        assert [int(row.inputs["input_ids"][m]) for m in row.markers] == [MARKER_ID] * 3
+    assert out.input_token_counts == [row.length for row in sorted(rows, key=lambda row: row.item)]
+    assert list(out.data[0]) == ["q1", "q2", "q3"]
+    # Readouts differ per marker: cumulative hidden state grows along the row.
+    assert out.data[0]["q1"]["probabilities"] != out.data[0]["q3"]["probabilities"]
+
+
+def test_joint_forward_gathers_markers_under_left_padding():
+    instance = joint_adapter()
+    rows = instance._item_rows(0, Item(text="a"), parse_questions({"q": choice(), "r": choice()}))
+    rows += instance._item_rows(1, Item(text="a much longer state"), parse_questions({"q": choice()}))
+    batched = instance._forward(rows)
+    alone = [values for row in rows for values in instance._forward([row])]
+    torch.testing.assert_close(torch.tensor(batched), torch.tensor(alone))
+
+
+def test_joint_rows_bisect_by_question_keeping_the_full_state():
+    instance = joint_adapter(window=400)
+    schema = {str(i): choice(instructions="x" * 60) for i in range(6)}
+    rows = instance._item_rows(0, Item(text="shared state"), parse_questions(schema))
+    assert len(rows) > 1
+    assert [q.id for row in rows for q in row.questions] == [str(i) for i in range(6)]
+    assert all(row.length <= 400 and len(row.markers) == len(row.questions) for row in rows)
+    out = instance.extract([Item(text="shared state")], output_schema=schema)
+    assert out.errors == [None]
+    assert list(out.data[0]) == list(schema)
+
+
+def test_joint_single_question_over_the_window_fails_without_truncation():
+    instance = joint_adapter(window=200)
+    out = instance.extract([Item(text="x" * 300), Item(text="ok")], output_schema={"q": choice()})
+    assert out.errors[0].code == "INPUT_TOO_LONG"
+    assert out.errors[1] is None
+    assert out.input_token_counts[0] == 0
+
+
+def test_joint_and_single_rows_never_share_a_forward():
+    instance = joint_adapter()
+    joint = instance._item_rows(0, Item(text="a"), parse_questions({"q": choice()}))
+    instance._marker = None
+    single = instance._item_rows(1, Item(text="a"), parse_questions({"q": choice()}))
+    with pytest.raises(ValueError, match="Joint"):
+        instance._forward(joint + single)

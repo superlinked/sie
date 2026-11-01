@@ -1,0 +1,28 @@
+sie_id: perplexity-ai/pplx-decider-flash-v1.2
+description: "Perplexity native typed decisions, small: Qwen3.5-4B distilled from the 27B deciders. Text-only choice, noul and score questions answered jointly per item (protocol v3), one calibrated readout per question."
+release_date: "2026-10-15"
+hf_id: perplexity-ai/pplx-decider-flash-v1.2
+hf_revision: 9ff7cf9838e59df461c276b7699d56b244d2af58
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+# Joint protocol v3: an item's questions share one row (state, questions,
+# options, one readout marker each). Rows over this window are bisected by
+# question, every chunk keeping the full state. Training used rows up to
+# about 32k tokens; 8,192 keeps the qualified serving window of the 27B entry.
+max_sequence_length: 8192
+profiles:
+  default:
+    max_batch_tokens: 8192
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.pplx_decider.adapter:PerplexityDecisionAdapter
+    adapter_options:
+      loadtime:
+        max_forward_tokens: 8192
+      runtime: {}
