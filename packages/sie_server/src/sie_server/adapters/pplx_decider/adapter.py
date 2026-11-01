@@ -169,7 +169,8 @@ class PerplexityDecisionAdapter(BaseAdapter):
 
     def _joint_rows(self, index: int, state: str, questions: tuple[Question, ...]) -> list[Row]:
         """One row for all questions, bisected (reference order) only when it exceeds the window."""
-        if self._marker is None:
+        marker_id = self._marker_id
+        if self._marker is None or marker_id is None:
             raise RuntimeError(ERR_NOT_LOADED)
         encoded = self._encode(joint_messages(state, questions, self._codes, self._marker, self._escapes))
         ids = self._checked(encoded)
@@ -180,7 +181,7 @@ class PerplexityDecisionAdapter(BaseAdapter):
             return self._joint_rows(index, state, questions[:middle]) + self._joint_rows(
                 index, state, questions[middle:]
             )
-        markers = tuple(int(position) for position in ids[0].eq(self._marker_id).nonzero().flatten().tolist())
+        markers = tuple(int(position) for position in ids[0].eq(marker_id).nonzero().flatten().tolist())
         if len(markers) != len(questions):
             raise ValueError("Readout markers do not match questions after tokenization")
         return [Row(index, questions, {name: tensor[0] for name, tensor in encoded.items()}, markers)]
