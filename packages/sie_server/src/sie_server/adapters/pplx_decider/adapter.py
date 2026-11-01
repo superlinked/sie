@@ -145,7 +145,7 @@ class PerplexityDecisionAdapter(BaseAdapter):
             marker = config["joint"]["marker"]
             self._marker = marker
             self._marker_id = processor.tokenizer.encode(marker, add_special_tokens=False)[0]
-            specials = {*processor.tokenizer.all_special_tokens, marker}
+            specials = {str(token) for token in processor.tokenizer.all_special_tokens} | {str(marker)}
             self._escapes = tuple(sorted(specials, key=len, reverse=True))
 
     def _state(self, item: Item) -> str:
@@ -180,7 +180,7 @@ class PerplexityDecisionAdapter(BaseAdapter):
             return self._joint_rows(index, state, questions[:middle]) + self._joint_rows(
                 index, state, questions[middle:]
             )
-        markers = tuple(int(position) for position in (ids[0] == self._marker_id).nonzero().flatten().tolist())
+        markers = tuple(int(position) for position in ids[0].eq(self._marker_id).nonzero().flatten().tolist())
         if len(markers) != len(questions):
             raise ValueError("Readout markers do not match questions after tokenization")
         return [Row(index, questions, {name: tensor[0] for name, tensor in encoded.items()}, markers)]
