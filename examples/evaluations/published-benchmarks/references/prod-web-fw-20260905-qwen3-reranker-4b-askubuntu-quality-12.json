@@ -1,0 +1,270 @@
+{
+  "accepted_at": "2026-09-05T05:18:35.998452Z",
+  "client": {
+    "processes_per_worker": 1,
+    "worker_count": 1
+  },
+  "dataset": {
+    "name": "mteb/AskUbuntuDupQuestions",
+    "parameters": [],
+    "revision": "c5691e3c48741d5f83b5cc8e630653d7a8cfc048",
+    "subset": "test"
+  },
+  "evaluation_mode": "quality",
+  "kind": "published-benchmark-reference",
+  "measurement_started_at": null,
+  "metrics": [
+    {
+      "aggregation": "task_native",
+      "name": "accuracy",
+      "unit": "ratio",
+      "value": 0.18006
+    },
+    {
+      "aggregation": "task_native",
+      "name": "main_score",
+      "unit": "ratio",
+      "value": 0.64484
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_1",
+      "unit": "ratio",
+      "value": 0.18006
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_10",
+      "unit": "ratio",
+      "value": 0.5503
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_100",
+      "unit": "ratio",
+      "value": 0.64484
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_1000",
+      "unit": "ratio",
+      "value": 0.64484
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_20",
+      "unit": "ratio",
+      "value": 0.64484
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_3",
+      "unit": "ratio",
+      "value": 0.34337
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_5",
+      "unit": "ratio",
+      "value": 0.43674
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_1",
+      "unit": "ratio",
+      "value": 0.667590027700831
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_10",
+      "unit": "ratio",
+      "value": 0.7752495273270896
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_100",
+      "unit": "ratio",
+      "value": 0.777242016338459
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_1000",
+      "unit": "ratio",
+      "value": 0.777242016338459
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_20",
+      "unit": "ratio",
+      "value": 0.777242016338459
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_3",
+      "unit": "ratio",
+      "value": 0.752539242843952
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_5",
+      "unit": "ratio",
+      "value": 0.7679132040627885
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_1",
+      "unit": "ratio",
+      "value": 0.63989
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_10",
+      "unit": "ratio",
+      "value": 0.69678
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_100",
+      "unit": "ratio",
+      "value": 0.78607
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_1000",
+      "unit": "ratio",
+      "value": 0.78607
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_20",
+      "unit": "ratio",
+      "value": 0.78607
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_3",
+      "unit": "ratio",
+      "value": 0.63673
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_5",
+      "unit": "ratio",
+      "value": 0.64787
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_1",
+      "unit": "ratio",
+      "value": 0.63989
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_10",
+      "unit": "ratio",
+      "value": 0.38615
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_100",
+      "unit": "ratio",
+      "value": 0.05471
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_1000",
+      "unit": "ratio",
+      "value": 0.00547
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_20",
+      "unit": "ratio",
+      "value": 0.27355
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_3",
+      "unit": "ratio",
+      "value": 0.56602
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_5",
+      "unit": "ratio",
+      "value": 0.50028
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_1",
+      "unit": "ratio",
+      "value": 0.18006
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_10",
+      "unit": "ratio",
+      "value": 0.76956
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_100",
+      "unit": "ratio",
+      "value": 1.0
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_1000",
+      "unit": "ratio",
+      "value": 1.0
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_20",
+      "unit": "ratio",
+      "value": 1.0
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_3",
+      "unit": "ratio",
+      "value": 0.39542
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_5",
+      "unit": "ratio",
+      "value": 0.54816
+    }
+  ],
+  "model": "Qwen/Qwen3-Reranker-4B",
+  "model_version": "22e683669bc0f0bd69640a1354a6d0aebcfeede5",
+  "operation": "score",
+  "payload": {
+    "items_per_request": 20,
+    "output_contract": "scores",
+    "parameters": []
+  },
+  "profile": "default",
+  "reference_id": "prod-web-fw-20260905-qwen3-reranker-4b-askubuntu-quality-12",
+  "schema_version": 1,
+  "scorer": {
+    "implementation_digest": "sha256:02dec8dff3dd4ad0e50f8676e378cc37696b7c6e18381b480b1acf0d69de1d05",
+    "version": "2.7.5"
+  },
+  "task_key": "mteb/AskUbuntuDupQuestions",
+  "timing": {
+    "drain_s": 0.0,
+    "max_in_flight_per_process": 1,
+    "request_timeout_s": 300.0,
+    "retry": {
+      "backoff": "none",
+      "max_attempts": 1,
+      "record_attempts": true
+    },
+    "scheduling_lag_tolerance_ms": 20.0,
+    "settle_s": 0.0,
+    "target_readiness_timeout_s": null,
+    "warmup_s": 0.0
+  }
+}

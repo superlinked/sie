@@ -1,0 +1,270 @@
+{
+  "accepted_at": "2026-09-05T05:18:34.088822Z",
+  "client": {
+    "processes_per_worker": 1,
+    "worker_count": 1
+  },
+  "dataset": {
+    "name": "mteb/SciFact",
+    "parameters": [],
+    "revision": "d56462d0e63a25450459c4f213e49ffdb866f7f9",
+    "subset": "test"
+  },
+  "evaluation_mode": "quality",
+  "kind": "published-benchmark-reference",
+  "measurement_started_at": null,
+  "metrics": [
+    {
+      "aggregation": "task_native",
+      "name": "accuracy",
+      "unit": "ratio",
+      "value": 0.56383
+    },
+    {
+      "aggregation": "task_native",
+      "name": "main_score",
+      "unit": "ratio",
+      "value": 0.69583
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_1",
+      "unit": "ratio",
+      "value": 0.56383
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_10",
+      "unit": "ratio",
+      "value": 0.65192
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_100",
+      "unit": "ratio",
+      "value": 0.65782
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_1000",
+      "unit": "ratio",
+      "value": 0.6581
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_20",
+      "unit": "ratio",
+      "value": 0.65497
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_3",
+      "unit": "ratio",
+      "value": 0.62476
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_5",
+      "unit": "ratio",
+      "value": 0.64007
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_1",
+      "unit": "ratio",
+      "value": 0.5966666666666667
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_10",
+      "unit": "ratio",
+      "value": 0.6694735449735449
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_100",
+      "unit": "ratio",
+      "value": 0.6742337309986727
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_1000",
+      "unit": "ratio",
+      "value": 0.674430176850186
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_20",
+      "unit": "ratio",
+      "value": 0.6718495809745809
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_3",
+      "unit": "ratio",
+      "value": 0.6494444444444445
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_5",
+      "unit": "ratio",
+      "value": 0.6619444444444444
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_1",
+      "unit": "ratio",
+      "value": 0.59667
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_10",
+      "unit": "ratio",
+      "value": 0.69583
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_100",
+      "unit": "ratio",
+      "value": 0.722
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_1000",
+      "unit": "ratio",
+      "value": 0.72913
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_20",
+      "unit": "ratio",
+      "value": 0.70575
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_3",
+      "unit": "ratio",
+      "value": 0.65056
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_5",
+      "unit": "ratio",
+      "value": 0.67341
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_1",
+      "unit": "ratio",
+      "value": 0.59667
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_10",
+      "unit": "ratio",
+      "value": 0.09167
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_100",
+      "unit": "ratio",
+      "value": 0.0105
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_1000",
+      "unit": "ratio",
+      "value": 0.00112
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_20",
+      "unit": "ratio",
+      "value": 0.048
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_3",
+      "unit": "ratio",
+      "value": 0.25111
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_5",
+      "unit": "ratio",
+      "value": 0.16533
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_1",
+      "unit": "ratio",
+      "value": 0.56383
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_10",
+      "unit": "ratio",
+      "value": 0.81222
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_100",
+      "unit": "ratio",
+      "value": 0.92967
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_1000",
+      "unit": "ratio",
+      "value": 0.98667
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_20",
+      "unit": "ratio",
+      "value": 0.85
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_3",
+      "unit": "ratio",
+      "value": 0.69356
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_5",
+      "unit": "ratio",
+      "value": 0.75017
+    }
+  ],
+  "model": "BAAI/bge-m3",
+  "model_version": "5617a9f61b028005a4858fdac845db406aefb181",
+  "operation": "encode",
+  "payload": {
+    "items_per_request": 2,
+    "output_contract": "multivector",
+    "parameters": []
+  },
+  "profile": "multivector",
+  "reference_id": "prod-web-fw-20260905-bge-m3-multivector-scifact-quality-08",
+  "schema_version": 1,
+  "scorer": {
+    "implementation_digest": "sha256:02dec8dff3dd4ad0e50f8676e378cc37696b7c6e18381b480b1acf0d69de1d05",
+    "version": "2.7.5"
+  },
+  "task_key": "mteb/SciFact",
+  "timing": {
+    "drain_s": 0.0,
+    "max_in_flight_per_process": 1,
+    "request_timeout_s": 600.0,
+    "retry": {
+      "backoff": "none",
+      "max_attempts": 1,
+      "record_attempts": true
+    },
+    "scheduling_lag_tolerance_ms": 20.0,
+    "settle_s": 0.0,
+    "target_readiness_timeout_s": null,
+    "warmup_s": 0.0
+  }
+}

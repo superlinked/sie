@@ -1,0 +1,270 @@
+{
+  "accepted_at": "2026-09-05T05:18:08.578524Z",
+  "client": {
+    "processes_per_worker": 1,
+    "worker_count": 1
+  },
+  "dataset": {
+    "name": "mteb/NFCorpus",
+    "parameters": [],
+    "revision": "ec0fa4fe99da2ff19ca1214b7966684033a58814",
+    "subset": "test"
+  },
+  "evaluation_mode": "quality",
+  "kind": "published-benchmark-reference",
+  "measurement_started_at": null,
+  "metrics": [
+    {
+      "aggregation": "task_native",
+      "name": "accuracy",
+      "unit": "ratio",
+      "value": 0.05531
+    },
+    {
+      "aggregation": "task_native",
+      "name": "main_score",
+      "unit": "ratio",
+      "value": 0.33056
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_1",
+      "unit": "ratio",
+      "value": 0.05531
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_10",
+      "unit": "ratio",
+      "value": 0.12606
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_100",
+      "unit": "ratio",
+      "value": 0.1529
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_1000",
+      "unit": "ratio",
+      "value": 0.16569
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_20",
+      "unit": "ratio",
+      "value": 0.13684
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_3",
+      "unit": "ratio",
+      "value": 0.09721
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_5",
+      "unit": "ratio",
+      "value": 0.10953
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_1",
+      "unit": "ratio",
+      "value": 0.47368421052631576
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_10",
+      "unit": "ratio",
+      "value": 0.5483942699886972
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_100",
+      "unit": "ratio",
+      "value": 0.5537805869957548
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_1000",
+      "unit": "ratio",
+      "value": 0.5543300091712396
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_20",
+      "unit": "ratio",
+      "value": 0.5512631966291782
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_3",
+      "unit": "ratio",
+      "value": 0.5366357069143447
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_5",
+      "unit": "ratio",
+      "value": 0.5423632610939113
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_1",
+      "unit": "ratio",
+      "value": 0.45046
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_10",
+      "unit": "ratio",
+      "value": 0.33056
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_100",
+      "unit": "ratio",
+      "value": 0.29223
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_1000",
+      "unit": "ratio",
+      "value": 0.37716
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_20",
+      "unit": "ratio",
+      "value": 0.3028
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_3",
+      "unit": "ratio",
+      "value": 0.39316
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_5",
+      "unit": "ratio",
+      "value": 0.36503
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_1",
+      "unit": "ratio",
+      "value": 0.46749
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_10",
+      "unit": "ratio",
+      "value": 0.23994
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_100",
+      "unit": "ratio",
+      "value": 0.07437
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_1000",
+      "unit": "ratio",
+      "value": 0.01957
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_20",
+      "unit": "ratio",
+      "value": 0.17183
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_3",
+      "unit": "ratio",
+      "value": 0.36739
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_5",
+      "unit": "ratio",
+      "value": 0.31146
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_1",
+      "unit": "ratio",
+      "value": 0.05531
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_10",
+      "unit": "ratio",
+      "value": 0.15743
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_100",
+      "unit": "ratio",
+      "value": 0.27037
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_1000",
+      "unit": "ratio",
+      "value": 0.58995
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_20",
+      "unit": "ratio",
+      "value": 0.1837
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_3",
+      "unit": "ratio",
+      "value": 0.10967
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_5",
+      "unit": "ratio",
+      "value": 0.12688
+    }
+  ],
+  "model": "prithivida/Splade_PP_en_v2",
+  "model_version": "f0d4aa214dcb60c274052a52c0497535e3aec64c",
+  "operation": "encode",
+  "payload": {
+    "items_per_request": 128,
+    "output_contract": "sparse",
+    "parameters": []
+  },
+  "profile": "default",
+  "reference_id": "prod-web-fw-20260905-splade-nfcorpus-quality-02",
+  "schema_version": 1,
+  "scorer": {
+    "implementation_digest": "sha256:02dec8dff3dd4ad0e50f8676e378cc37696b7c6e18381b480b1acf0d69de1d05",
+    "version": "2.7.5"
+  },
+  "task_key": "mteb/NFCorpus",
+  "timing": {
+    "drain_s": 0.0,
+    "max_in_flight_per_process": 1,
+    "request_timeout_s": 300.0,
+    "retry": {
+      "backoff": "none",
+      "max_attempts": 1,
+      "record_attempts": true
+    },
+    "scheduling_lag_tolerance_ms": 20.0,
+    "settle_s": 0.0,
+    "target_readiness_timeout_s": null,
+    "warmup_s": 0.0
+  }
+}
