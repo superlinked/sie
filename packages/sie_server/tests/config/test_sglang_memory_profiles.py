@@ -129,14 +129,7 @@ def test_extending_profile_forwards_its_resolved_kv_budget():
 
 
 @pytest.mark.parametrize(
-    "name",
-    [
-        "Qwen__Qwen3.5-4B",
-        "lightonai__LightOnOCR-3-4B",
-        "Qwen__Qwen3-VL-8B-Instruct",
-        "zai-org__GLM-OCR",
-        "xiaomi-research__Xiaomi-OCR-0",
-    ],
+    "name", ["Qwen__Qwen3.5-4B", "lightonai__LightOnOCR-3-4B", "Qwen__Qwen3-VL-8B-Instruct", "zai-org__GLM-OCR"]
 )
 def test_specialized_profiles_retain_calibrated_reservation(name):
     config = load_model_config(MODELS / f"{name}.yaml")

@@ -1,13 +1,11 @@
 """Xiaomi-OCR-0 serves native weights with the model card's prompts."""
 
-import json
-import math
 from pathlib import Path
 
 import yaml
 
 _CONFIG = Path(__file__).resolve().parents[2] / "models" / "xiaomi-research__Xiaomi-OCR-0.yaml"
-_MERGED_PATCH_PIXELS = 32 * 32
+_PROCESSOR_MAX_PAGE_TOKENS = 16_777_216 // (32 * 32)
 _PROMPT_TOKENS = 256
 
 
@@ -30,10 +28,16 @@ def test_both_profiles_default_to_the_same_card_prompt_and_decoding() -> None:
     assert sglang["runtime"] == reference["runtime"] == {"max_new_tokens": 4096, "num_beams": 1}
 
 
-def test_a_full_page_and_its_output_fit_the_sequence_window() -> None:
+def test_a_full_resolution_page_and_its_output_fit_the_sequence_window() -> None:
     config = yaml.safe_load(_CONFIG.read_text())
-    options = config["profiles"]["default"]["adapter_options"]
-    args = options["loadtime"]["extra_launch_args"]
-    max_pixels = json.loads(args[args.index("--mm-process-config") + 1])["image"]["max_pixels"]
-    page_tokens = math.ceil(max_pixels / _MERGED_PATCH_PIXELS)
-    assert page_tokens + options["runtime"]["max_new_tokens"] + _PROMPT_TOKENS <= config["max_sequence_length"]
+    for profile in config["profiles"].values():
+        loadtime = profile["adapter_options"]["loadtime"]
+        assert "--mm-process-config" not in loadtime.get("extra_launch_args", [])
+        budget = _PROCESSOR_MAX_PAGE_TOKENS + profile["adapter_options"]["runtime"]["max_new_tokens"] + _PROMPT_TOKENS
+        assert budget <= config["max_sequence_length"]
+
+
+def test_sglang_profile_keeps_its_l4_calibrated_reservation() -> None:
+    loadtime = _profiles()["default"]["adapter_options"]["loadtime"]
+    assert loadtime["mem_fraction_static"] == 0.70
+    assert loadtime["max_concurrent_requests"] == 32
