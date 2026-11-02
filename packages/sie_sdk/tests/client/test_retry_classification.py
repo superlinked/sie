@@ -26,6 +26,7 @@ import numpy as np
 import pytest
 from sie_sdk import (
     IncompleteBatchError,
+    LoraLoadingError,
     ModelLoadingError,
     ProvisioningError,
     SIEAsyncClient,
@@ -40,6 +41,7 @@ from sie_sdk.client._shared import (
     DEFAULT_CONNECT_TIMEOUT_S,
     DEFAULT_PROVISION_TIMEOUT_S,
     DEFAULT_READ_TIMEOUT_S,
+    LORA_LOADING_MAX_RETRIES,
     get_retry_after,
     resolve_timeouts,
 )
@@ -50,6 +52,8 @@ _FIXTURE: dict[str, Any] = json.loads(
 _RESPONSE_CASES: list[dict[str, Any]] = _FIXTURE["responses"]
 _RETRY_AFTER_CASES: list[dict[str, Any]] = _FIXTURE["retry_after"]
 _OPERATIONS = ("encode", "generate", "chat_completions")
+# The calls whose servers answer a cold LoRA with 503 LORA_LOADING.
+_LORA_OPERATIONS = ("encode", "score", "extract")
 _MSGPACK_HEADERS = {"Content-Type": "application/msgpack"}
 _JSON_HEADERS = {"Content-Type": "application/json"}
 
@@ -252,6 +256,59 @@ async def test_async_client_follows_shared_retry_table(stub: _StubServer, case: 
                 await _call_async(client, operation)
             assert len(stub.paths) == 1
             assert client.last_retry_count == 0
+
+
+def _lora_loading() -> _Reply:
+    body = {"detail": {"code": "LORA_LOADING", "message": "The selected LoRA is loading; retry the request"}}
+    return _Reply(503, json.dumps(body).encode(), {**_JSON_HEADERS, "Retry-After": "1"})
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("operation", _LORA_OPERATIONS)
+def test_sync_lora_loading_is_retried(stub: _StubServer, operation: str) -> None:
+    stub.replies = [_lora_loading(), _success(operation)]
+    client = SIEClient(stub.url)
+    try:
+        _call_sync(client, operation, options={"lora": "adapter-a"})
+        assert client.last_retry_count == 1
+    finally:
+        client.close()
+    assert len(stub.paths) == 2
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("operation", _LORA_OPERATIONS)
+async def test_async_lora_loading_is_retried(stub: _StubServer, operation: str) -> None:
+    stub.replies = [_lora_loading(), _success(operation)]
+    async with SIEAsyncClient(stub.url) as client:
+        await _call_async(client, operation, options={"lora": "adapter-a"})
+        assert client.last_retry_count == 1
+    assert len(stub.paths) == 2
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("operation", _LORA_OPERATIONS)
+def test_sync_lora_loading_budget_raises_lora_loading_error(stub: _StubServer, operation: str) -> None:
+    stub.replies = [_lora_loading()]
+    client = SIEClient(stub.url)
+    try:
+        with pytest.raises(LoraLoadingError) as excinfo:
+            _call_sync(client, operation, options={"lora": "adapter-a"})
+    finally:
+        client.close()
+    assert (excinfo.value.lora, excinfo.value.model) == ("adapter-a", "m")
+    assert len(stub.paths) == LORA_LOADING_MAX_RETRIES + 1
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("operation", _LORA_OPERATIONS)
+async def test_async_lora_loading_budget_raises_lora_loading_error(stub: _StubServer, operation: str) -> None:
+    stub.replies = [_lora_loading()]
+    async with SIEAsyncClient(stub.url) as client:
+        with pytest.raises(LoraLoadingError) as excinfo:
+            await _call_async(client, operation, options={"lora": "adapter-a"})
+    assert (excinfo.value.lora, excinfo.value.model) == ("adapter-a", "m")
+    assert len(stub.paths) == LORA_LOADING_MAX_RETRIES + 1
 
 
 @pytest.mark.parametrize("case", _RETRY_AFTER_CASES, ids=[repr(case["header"]) for case in _RETRY_AFTER_CASES])
