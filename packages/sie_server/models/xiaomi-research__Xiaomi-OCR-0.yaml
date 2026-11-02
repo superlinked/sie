@@ -40,6 +40,12 @@ profiles:
         mem_fraction_static: 0.85
         served_model_name: xiaomi-research/Xiaomi-OCR-0
         max_concurrent_requests: 64
+        # At the processor's own limit one page expands to 16384 visual tokens,
+        # the whole window. 12000 leaves room for the 4096 new tokens and the
+        # prompt.
+        extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"min_pixels":65536,"max_pixels":12288000}}'
         # Model card prompts. The default is document parsing; callers pick
         # another region type with the runtime ``task`` option.
         default_task: document
