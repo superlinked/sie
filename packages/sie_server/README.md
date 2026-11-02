@@ -69,7 +69,8 @@ pip install sie-server
   ```
 
 - **Transformers 5 bundle** (LightOnOCR, GLM-OCR, GLiGuard, GLiNER2.5 entity and Decide models, Privacy Filter, and the TopK-Embed-V1
-  multi-vector models, and Perplexity decisions) — requires `transformers` 5.x, and is served with `-b transformers5`. The GLiNER2.5-Decide
+  multi-vector models, Perplexity decisions, and EmbeddingGemma 2) — requires `transformers` 5.x, and is served with `-b transformers5`.
+  `google/embeddinggemma-2` needs `EmbeddingGemma2Model`, which first shipped in `transformers` 5.19.0. The GLiNER2.5-Decide
   and entity models also need `gliner2` 2.x. `sie-server` itself asks for `gliner2<2`, which the default bundle's GLiNER2
   models need, so pip reports that conflict when the second command below installs 2.x; the transformers5
   bundle's GLiNER2 models are pinned to 2.0.0:

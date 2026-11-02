@@ -1,0 +1,58 @@
+# google/embeddinggemma-2 — Apache-2.0, ungated, 744,371,512 parameters.
+# Released 2026-09-14. Native transformers class EmbeddingGemma2Model
+# (model_type embedding_gemma2); the repo has no custom modeling code.
+#
+# The class first shipped in transformers 5.19.0 (2026-10-06). 5.18.x does
+# not contain it. This profile is on the transformers5 bundle only, whose
+# floor is >=5.19,<6 and whose saved locks pin 5.19.0. The root pin stays
+# transformers 4.57.6. Do not serve this model from the default bundle.
+#
+# Sentence Transformers >=6.1.0 is the upstream wrapper. The bundle pins
+# sentence-transformers==5.7.0, so the adapter applies the text recipe itself:
+# mean pooling with the prompt included, then L2 normalization in float32.
+# Query prompt: "task: search result | query: "
+# Document prompt: "title: none | text: "
+# Matryoshka prefixes, re-normalized after the slice: 128, 256, 512, and the
+# native 768. Pass options.truncate_dim to request a shorter prefix. The
+# catalog width stays 768.
+#
+# Text only. Image, audio, and video need EmbeddingGemma2Processor's soft
+# tokens, video-token sampling, and Gemma 4 audio features. SIE's image, frame,
+# and speech-PCM plumbing does not produce those inputs, and this profile
+# drops both towers at load (vision_config=None, audio_config=None).
+#
+# Float16 overflows this model (NaN activations). The profile asks for
+# bfloat16; off CUDA the adapter uses float32.
+sie_id: google/embeddinggemma-2
+hf_id: google/embeddinggemma-2
+# Pinned to an immutable commit SHA. Resolved 2026-11-01 from the Hub
+# model API (ungated, sha of the default revision).
+hf_revision: f9972ac22e696a105c482202646979e33e4b5a1e
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense:
+      dim: 768
+    sparse: null
+    multivector: null
+  score: null
+  extract: null
+# Model card: one shared 8,192-token context. The tokenizer's
+# model_max_length is an unbounded sentinel, so the cap lives here.
+max_sequence_length: 8192
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.embedding_gemma2.adapter:EmbeddingGemma2Adapter
+    adapter_options:
+      loadtime: {}
+      runtime:
+        normalize: true
+        pooling: mean
+        query_template: 'task: search result | query: {text}'
+        doc_template: 'title: none | text: {text}'
