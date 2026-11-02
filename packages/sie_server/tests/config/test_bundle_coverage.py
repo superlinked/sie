@@ -148,6 +148,7 @@ def test_candle_bundle_only_exposes_profile_variants() -> None:
         ("lightonai/LightOnOCR-2-1B", "transformers5.yaml"),
         ("PaddlePaddle/PaddleOCR-VL-1.5", "default.yaml"),
         ("zai-org/GLM-OCR", "transformers5.yaml"),
+        ("xiaomi-research/Xiaomi-OCR-0", "transformers5.yaml"),
     ],
 )
 def test_generative_ocr_defaults_to_isolated_sglang_extract_and_keeps_transformers_fallback(
