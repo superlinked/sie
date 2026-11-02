@@ -1,0 +1,20 @@
+sie_id: ibm-granite/granite-speech-5.0-2b
+hf_id: ibm-granite/granite-speech-5.0-2b
+hf_revision: c684620bb54fc89d14ba27256b23bbc9e09ba764
+inputs:
+  text: false
+  image: false
+  audio: true
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+profiles:
+  default:
+    max_batch_tokens: 720000
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.granite_speech.adapter:GraniteSpeechAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}
