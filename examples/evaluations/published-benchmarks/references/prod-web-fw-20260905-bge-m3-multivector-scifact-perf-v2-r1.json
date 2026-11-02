@@ -1,0 +1,152 @@
+{
+  "accepted_at": "2026-09-05T05:18:13.478090Z",
+  "client": {
+    "processes_per_worker": 2,
+    "worker_count": 2
+  },
+  "dataset": {
+    "name": "mteb/SciFact",
+    "parameters": [
+      {
+        "name": "limit",
+        "value": 256
+      },
+      {
+        "name": "role",
+        "value": "corpus"
+      },
+      {
+        "name": "filter",
+        "value": "nonempty"
+      }
+    ],
+    "revision": "d56462d0e63a25450459c4f213e49ffdb866f7f9",
+    "subset": "test"
+  },
+  "evaluation_mode": "isolated_performance",
+  "kind": "published-benchmark-reference",
+  "load_level_name": "fixed-1-rps",
+  "measurement_started_at": "2026-09-05T05:00:33.700016Z",
+  "metrics": [
+    {
+      "aggregation": "campaign_global",
+      "name": "offered_requests_per_second",
+      "unit": "requests_per_second",
+      "value": 1.0
+    },
+    {
+      "aggregation": "common_window",
+      "name": "achieved_requests_per_second",
+      "unit": "requests_per_second",
+      "value": 1.0
+    },
+    {
+      "aggregation": "including_drain",
+      "name": "eventual_achieved_requests_per_second",
+      "unit": "requests_per_second",
+      "value": 1.0
+    },
+    {
+      "aggregation": "campaign_global",
+      "name": "in_window_success_rate",
+      "unit": "ratio",
+      "value": 1.0
+    },
+    {
+      "aggregation": "campaign_global",
+      "name": "in_window_retry_free_success_rate",
+      "unit": "ratio",
+      "value": 1.0
+    },
+    {
+      "aggregation": "campaign_global",
+      "name": "success_rate",
+      "unit": "ratio",
+      "value": 1.0
+    },
+    {
+      "aggregation": "campaign_global",
+      "name": "retry_free_success_rate",
+      "unit": "ratio",
+      "value": 1.0
+    },
+    {
+      "aggregation": "p99",
+      "name": "scheduling_lag_p99_ms",
+      "unit": "milliseconds",
+      "value": 5.869
+    },
+    {
+      "aggregation": "p50",
+      "name": "latency_p50_ms",
+      "unit": "milliseconds",
+      "value": 353.7
+    },
+    {
+      "aggregation": "p95",
+      "name": "latency_p95_ms",
+      "unit": "milliseconds",
+      "value": 1164.307
+    },
+    {
+      "aggregation": "p99",
+      "name": "latency_p99_ms",
+      "unit": "milliseconds",
+      "value": 1407.226
+    }
+  ],
+  "model": "BAAI/bge-m3",
+  "model_version": "5617a9f61b028005a4858fdac845db406aefb181",
+  "operation": "encode",
+  "payload": {
+    "items_per_request": 1,
+    "output_contract": "multivector",
+    "parameters": [
+      {
+        "name": "is_query",
+        "value": false
+      }
+    ]
+  },
+  "profile": "multivector",
+  "reference_id": "prod-web-fw-20260905-bge-m3-multivector-scifact-perf-v2-r1",
+  "schedule": {
+    "arrival": "deterministic",
+    "levels": [
+      {
+        "duration_s": 60.0,
+        "name": "fixed-1-rps",
+        "rate": 1.0
+      },
+      {
+        "duration_s": 60.0,
+        "name": "fixed-3-rps",
+        "rate": 3.0
+      },
+      {
+        "duration_s": 60.0,
+        "name": "fixed-5-rps",
+        "rate": 5.0
+      }
+    ],
+    "seed": 0,
+    "unit": "requests_per_second"
+  },
+  "schema_version": 1,
+  "scorer": null,
+  "task_key": "mteb/SciFact?split=test&role=corpus&limit=256&filter=nonempty",
+  "timing": {
+    "drain_s": 10.0,
+    "max_in_flight_per_process": 64,
+    "request_timeout_s": 30.0,
+    "retry": {
+      "backoff": "none",
+      "max_attempts": 1,
+      "record_attempts": true
+    },
+    "scheduling_lag_tolerance_ms": 20.0,
+    "settle_s": 10.0,
+    "target_readiness_timeout_s": 300.0,
+    "warmup_s": 30.0
+  }
+}

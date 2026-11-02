@@ -1,16 +1,23 @@
 """Repeat the method behind the published benchmark numbers from one client process."""
 
 import argparse
+import contextlib
 import json
+import math
 import os
 import platform
 import re
+import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
+import httpx
 import numpy as np
 import sie_sdk
 from scipy.sparse import csr_matrix
@@ -18,8 +25,12 @@ from sie_sdk import SIEClient
 
 from score import (
     HF_DATASETS,
+    NS_PER_MS,
+    NS_PER_S,
+    PERFORMANCE_MODE,
     SCORER_ID,
     Qrels,
+    Rows,
     compare,
     format_rows,
     load_corpus,
@@ -27,10 +38,14 @@ from score import (
     load_queries,
     load_top_ranked,
     metric_rows,
+    nanoseconds,
     parse_task_key,
+    performance_metric_rows,
+    performance_metrics,
     scorer_version,
     task_metrics,
     write_json,
+    write_jsonl,
 )
 
 DEFAULT_ENDPOINT = "https://api.superlinked.com"
@@ -43,11 +58,21 @@ SCORE_TASKS = frozenset({"mteb/AskUbuntuDupQuestions"})
 ENCODE_OUTPUTS = ("sparse", "multivector")
 REFERENCE_KIND = "published-benchmark-reference"
 RESULT_KIND = "published-benchmark-reproduction"
+PERFORMANCE_LIMITS = {"encode": (30.0, 64), "score": (300.0, 128)}
+DEFAULT_DURATION_S = 60.0
+DEFAULT_WARMUP_S = 30.0
+DEFAULT_SETTLE_S = 10.0
+DEFAULT_DRAIN_S = 10.0
+DEFAULT_READINESS_TIMEOUT_S = 300.0
+DEFAULT_LAG_TOLERANCE_MS = 20.0
+RETRY_POLICY = {"backoff": "none", "max_attempts": 1, "record_attempts": True}
+ROLES = ("queries", "corpus")
 
 Corpus = dict[str, dict[str, str]]
 Queries = dict[str, str]
 TopRanked = dict[str, list[str]]
 PredictionMap = dict[str, dict[str, float]]
+ScoreRequest = tuple[dict[str, str], list[dict[str, str]]]
 
 
 class RequestFailed(Exception):
@@ -78,6 +103,41 @@ class QualityPlan:
 
 
 @dataclass(frozen=True)
+class PerformancePlan:
+    reference_id: str | None
+    reference_metrics: list[dict[str, Any]]
+    model: str
+    profile: str
+    operation: str
+    task_key: str
+    task_name: str
+    task_params: dict[str, str]
+    revision: str
+    output_contract: str
+    items_per_request: int | None
+    rate: float
+    duration_s: float
+    warmup_s: float
+    settle_s: float
+    drain_s: float
+    request_timeout_s: float
+    target_readiness_timeout_s: float
+    max_in_flight: int
+    lag_tolerance_ms: float
+    endpoint: str
+    model_version: str | None
+    comparable_reasons: list[str]
+
+    @property
+    def route(self) -> str:
+        return self.model if self.profile == "default" else f"{self.model}:{self.profile}"
+
+    @property
+    def level_name(self) -> str:
+        return load_level_name(self.rate)
+
+
+@dataclass(frozen=True)
 class Loaders:
     corpus: Callable[[str, str], Corpus] = load_corpus
     queries: Callable[[str, str], Queries] = load_queries
@@ -91,6 +151,12 @@ class QualityData:
     queries: Queries
     qrels: Qrels
     top_ranked: TopRanked | None
+
+
+@dataclass(frozen=True)
+class PerformanceData:
+    selected_ids: list[str]
+    payloads: list[dict[str, str]] | list[ScoreRequest]
 
 
 @dataclass
@@ -115,16 +181,25 @@ class CallLog:
         self.failure = f"{type(exc).__name__}: {exc}"
 
 
+def _add_shared_arguments(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--reference", type=Path, help="A references/<id>.json file")
+    command.add_argument("--model", help="Model route, model[:profile]")
+    command.add_argument("--task", help="Task key, for example mteb/SciFact")
+    command.add_argument("--output", choices=ENCODE_OUTPUTS, help="Output contract of an encode task")
+    command.add_argument("--items-per-request", type=int, help="Items per encode request")
+    command.add_argument("--endpoint", default=DEFAULT_ENDPOINT, help="SIE endpoint URL")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     quality = commands.add_parser("quality", help="Repeat a published quality measurement")
-    quality.add_argument("--reference", type=Path, help="A references/<id>.json file")
-    quality.add_argument("--model", help="Model route, model[:profile]")
-    quality.add_argument("--task", help="Task key, for example mteb/SciFact")
-    quality.add_argument("--output", choices=ENCODE_OUTPUTS, help="Output contract of an encode task")
-    quality.add_argument("--items-per-request", type=int, help="Items per encode request")
-    quality.add_argument("--endpoint", default=DEFAULT_ENDPOINT, help="SIE endpoint URL")
+    _add_shared_arguments(quality)
+    performance = commands.add_parser("performance", help="Repeat a published fixed-rate performance measurement")
+    _add_shared_arguments(performance)
+    performance.add_argument("--rate", type=float, help="Requests per second; the reference's published level")
+    performance.add_argument("--duration", type=float, help="Seconds of scheduled arrivals (default 60)")
+    performance.add_argument("--warmup", type=float, help="Seconds of unrecorded warmup (default 30; 0 skips it)")
     return parser
 
 
@@ -144,9 +219,35 @@ def _check_limit(params: Mapping[str, str]) -> None:
         raise ValueError("limit must be a positive integer")
 
 
-def _plan_from_reference(args: argparse.Namespace, reference: Mapping[str, Any]) -> QualityPlan:
-    if reference.get("kind") != REFERENCE_KIND or reference.get("evaluation_mode") != "quality":
-        raise ValueError("--reference must name a quality published-benchmark-reference file")
+def _check_positive_integer(params: Mapping[str, str], name: str) -> None:
+    if name in params and (not params[name].isdigit() or int(params[name]) < 1):
+        raise ValueError(f"{name} must be a positive integer")
+
+
+def _check_performance_params(params: Mapping[str, str], operation: str) -> None:
+    _check_limit(params)
+    _check_positive_integer(params, "candidates-k")
+    if params.get("split", "test") != "test":
+        raise ValueError("only split=test is available")
+    if params.get("filter", "nonempty") != "nonempty":
+        raise ValueError("filter must be nonempty")
+    role = params.get("role", "queries")
+    if role not in ROLES:
+        raise ValueError("role must be queries or corpus")
+    if operation == "score" and role != "queries":
+        raise ValueError("the score task sends queries; role=corpus is not available")
+
+
+def _check_timing(rate: float, duration_s: float, warmup_s: float) -> None:
+    if rate <= 0:
+        raise ValueError("--rate must be positive")
+    if duration_s <= 0:
+        raise ValueError("--duration must be positive")
+    if warmup_s < 0:
+        raise ValueError("--warmup cannot be negative")
+
+
+def _refuse_fixed_flags(args: argparse.Namespace) -> None:
     for flag, value in (
         ("--model", args.model),
         ("--output", args.output),
@@ -154,9 +255,41 @@ def _plan_from_reference(args: argparse.Namespace, reference: Mapping[str, Any])
     ):
         if value is not None:
             raise ValueError(f"{flag} cannot be combined with --reference; the reference fixes it")
+
+
+def _plain_reference_id(reference: Mapping[str, Any]) -> str:
     reference_id = reference["reference_id"]
     if not reference_id or Path(reference_id).name != reference_id or reference_id in {".", ".."}:
         raise ValueError(f"reference_id {reference_id!r} is not a plain file name")
+    return reference_id
+
+
+def _client_processes_reasons(reference: Mapping[str, Any]) -> list[str]:
+    processes = reference["client"]["worker_count"] * reference["client"]["processes_per_worker"]
+    return [] if processes == 1 else [f"client processes 1 != {processes}"]
+
+
+def _check_output_flags(args: argparse.Namespace, operation: str) -> None:
+    if operation == "encode" and (args.output is None or args.items_per_request is None):
+        raise ValueError("--output and --items-per-request are required for encode tasks")
+    if operation == "score" and (args.output is not None or args.items_per_request is not None):
+        raise ValueError("--output and --items-per-request are not accepted for the score task")
+    if args.items_per_request is not None and args.items_per_request < 1:
+        raise ValueError("--items-per-request must be a positive integer")
+
+
+def _override(value: float | None, fixed: float, label: str, reasons: list[str]) -> float:
+    if value is None or value == fixed:
+        return fixed
+    reasons.append(f"{label} {value:g} != {fixed:g}")
+    return value
+
+
+def _plan_from_reference(args: argparse.Namespace, reference: Mapping[str, Any]) -> QualityPlan:
+    if reference.get("kind") != REFERENCE_KIND or reference.get("evaluation_mode") != "quality":
+        raise ValueError("--reference must name a quality published-benchmark-reference file")
+    _refuse_fixed_flags(args)
+    reference_id = _plain_reference_id(reference)
     task_key = reference["task_key"]
     task_name, params = parse_task_key(task_key)
     reasons: list[str] = []
@@ -168,9 +301,7 @@ def _plan_from_reference(args: argparse.Namespace, reference: Mapping[str, Any])
         reasons.append(f"smoke key {task_key}")
     _check_limit(params)
     reasons.extend(_endpoint_reasons(args.endpoint))
-    processes = reference["client"]["worker_count"] * reference["client"]["processes_per_worker"]
-    if processes != 1:
-        reasons.append(f"client processes 1 != {processes}")
+    reasons.extend(_client_processes_reasons(reference))
     return QualityPlan(
         reference_id=reference_id,
         reference_metrics=list(reference["metrics"]),
@@ -197,12 +328,7 @@ def _plan_from_flags(args: argparse.Namespace) -> QualityPlan:
     _check_limit(params)
     model, _, profile = args.model.partition(":")
     operation = "score" if task_name in SCORE_TASKS else "encode"
-    if operation == "encode" and (args.output is None or args.items_per_request is None):
-        raise ValueError("--output and --items-per-request are required for encode tasks")
-    if operation == "score" and (args.output is not None or args.items_per_request is not None):
-        raise ValueError("--output and --items-per-request are not accepted for the score task")
-    if args.items_per_request is not None and args.items_per_request < 1:
-        raise ValueError("--items-per-request must be a positive integer")
+    _check_output_flags(args, operation)
     reasons = ["no reference"]
     if "limit" in params:
         reasons.append(f"smoke key {args.task}")
@@ -223,6 +349,103 @@ def _plan_from_flags(args: argparse.Namespace) -> QualityPlan:
         endpoint=args.endpoint,
         model_version=None,
         comparable_reasons=reasons,
+    )
+
+
+def plan_performance(args: argparse.Namespace) -> PerformancePlan:
+    if args.reference is not None:
+        reference = json.loads(Path(args.reference).read_text(encoding="utf-8"))
+        return _performance_plan_from_reference(args, reference)
+    return _performance_plan_from_flags(args)
+
+
+def _performance_plan_from_reference(args: argparse.Namespace, reference: Mapping[str, Any]) -> PerformancePlan:
+    if reference.get("kind") != REFERENCE_KIND or reference.get("evaluation_mode") != PERFORMANCE_MODE:
+        raise ValueError("--reference must name a performance published-benchmark-reference file")
+    _refuse_fixed_flags(args)
+    reference_id = _plain_reference_id(reference)
+    task_key = reference["task_key"]
+    if args.task is not None and args.task != task_key:
+        raise ValueError(f"--task must equal the reference task_key {task_key!r}")
+    task_name, params = parse_task_key(task_key)
+    operation = reference["operation"]
+    _check_performance_params(params, operation)
+    level, timing = reference["schedule"]["levels"][0], reference["timing"]
+    reasons: list[str] = []
+    rate = _override(args.rate, float(level["rate"]), "rate", reasons)
+    duration_s = _override(args.duration, float(level["duration_s"]), "duration", reasons)
+    warmup_s = _override(args.warmup, float(timing["warmup_s"]), "warmup", reasons)
+    _check_timing(rate, duration_s, warmup_s)
+    reasons.extend(_endpoint_reasons(args.endpoint))
+    reasons.extend(_client_processes_reasons(reference))
+    readiness_timeout_s = timing["target_readiness_timeout_s"]
+    return PerformancePlan(
+        reference_id=reference_id,
+        reference_metrics=list(reference["metrics"]),
+        model=reference["model"],
+        profile=reference["profile"],
+        operation=operation,
+        task_key=task_key,
+        task_name=task_name,
+        task_params=params,
+        revision=reference["dataset"]["revision"],
+        output_contract=reference["payload"]["output_contract"],
+        items_per_request=reference["payload"]["items_per_request"],
+        rate=rate,
+        duration_s=duration_s,
+        warmup_s=warmup_s,
+        settle_s=float(timing["settle_s"]),
+        drain_s=float(timing["drain_s"]),
+        request_timeout_s=float(timing["request_timeout_s"]),
+        target_readiness_timeout_s=(
+            DEFAULT_READINESS_TIMEOUT_S if readiness_timeout_s is None else float(readiness_timeout_s)
+        ),
+        max_in_flight=int(timing["max_in_flight_per_process"]),
+        lag_tolerance_ms=float(timing["scheduling_lag_tolerance_ms"]),
+        endpoint=args.endpoint,
+        model_version=reference["model_version"],
+        comparable_reasons=reasons,
+    )
+
+
+def _performance_plan_from_flags(args: argparse.Namespace) -> PerformancePlan:
+    if args.model is None or args.task is None:
+        raise ValueError("--model and --task are required without --reference")
+    if args.rate is None:
+        raise ValueError("--rate is required without --reference")
+    task_name, params = parse_task_key(args.task)
+    model, _, profile = args.model.partition(":")
+    operation = "score" if task_name in SCORE_TASKS else "encode"
+    _check_performance_params(params, operation)
+    _check_output_flags(args, operation)
+    duration_s = DEFAULT_DURATION_S if args.duration is None else args.duration
+    warmup_s = DEFAULT_WARMUP_S if args.warmup is None else args.warmup
+    _check_timing(args.rate, duration_s, warmup_s)
+    request_timeout_s, max_in_flight = PERFORMANCE_LIMITS[operation]
+    return PerformancePlan(
+        reference_id=None,
+        reference_metrics=[],
+        model=model,
+        profile=profile or "default",
+        operation=operation,
+        task_key=args.task,
+        task_name=task_name,
+        task_params=params,
+        revision=HF_DATASETS[task_name][1],
+        output_contract=args.output if operation == "encode" else "scores",
+        items_per_request=args.items_per_request,
+        rate=args.rate,
+        duration_s=duration_s,
+        warmup_s=warmup_s,
+        settle_s=DEFAULT_SETTLE_S,
+        drain_s=DEFAULT_DRAIN_S,
+        request_timeout_s=request_timeout_s,
+        target_readiness_timeout_s=DEFAULT_READINESS_TIMEOUT_S,
+        max_in_flight=max_in_flight,
+        lag_tolerance_ms=DEFAULT_LAG_TOLERANCE_MS,
+        endpoint=args.endpoint,
+        model_version=None,
+        comparable_reasons=["no reference", *_endpoint_reasons(args.endpoint)],
     )
 
 
@@ -253,6 +476,179 @@ def load_quality_data(plan: QualityPlan, loaders: Loaders | None = None) -> Qual
 def document_text(document: Mapping[str, str]) -> str:
     title = document.get("title") or ""
     return f"{title} {document['text']}".strip() if title else document["text"].strip()
+
+
+def performance_text(document: Mapping[str, str]) -> str:
+    title = document.get("title") or ""
+    return f"{title}\n{document['text']}" if title else document["text"]
+
+
+def select_ids(texts: Mapping[str, str], params: Mapping[str, str]) -> list[str]:
+    nonempty = params.get("filter") == "nonempty"
+    selected = sorted(item_id for item_id, text in texts.items() if not nonempty or text.strip())
+    return selected[: int(params["limit"])] if "limit" in params else selected
+
+
+def load_performance_data(plan: PerformancePlan, loaders: Loaders | None = None) -> PerformanceData:
+    loaders = loaders or Loaders()
+    params = plan.task_params
+    if plan.operation == "score":
+        queries = loaders.queries(plan.task_name, plan.revision)
+        corpus = loaders.corpus(plan.task_name, plan.revision)
+        top_ranked = loaders.top_ranked(plan.task_name, plan.revision)
+        selected = select_ids(queries, params)
+        k = int(params["candidates-k"]) if "candidates-k" in params else None
+        requests: list[ScoreRequest] = [
+            (
+                {"text": queries[query_id]},
+                [{"id": doc_id, "text": performance_text(corpus[doc_id])} for doc_id in top_ranked[query_id][:k]],
+            )
+            for query_id in selected
+        ]
+        return PerformanceData(selected, requests)
+    if params.get("role", "queries") == "corpus":
+        corpus = loaders.corpus(plan.task_name, plan.revision)
+        selected = select_ids({doc_id: document["text"] for doc_id, document in corpus.items()}, params)
+        return PerformanceData(
+            selected, [{"id": doc_id, "text": performance_text(corpus[doc_id])} for doc_id in selected]
+        )
+    queries = loaders.queries(plan.task_name, plan.revision)
+    selected = select_ids(queries, params)
+    return PerformanceData(selected, [{"id": query_id, "text": queries[query_id]} for query_id in selected])
+
+
+def load_level_name(rate: float) -> str:
+    return f"fixed-{rate:g}-rps".replace(".", "-")
+
+
+def schedule_offsets(rate: float, duration_s: float) -> list[Fraction]:
+    exact_rate, exact_duration = Fraction(str(rate)), Fraction(str(duration_s))
+    return [Fraction(index) / exact_rate for index in range(math.ceil(exact_rate * exact_duration))]
+
+
+def request_rows(sequence: int, items_per_request: int, length: int) -> list[int]:
+    return [(sequence * items_per_request + position) % length for position in range(items_per_request)]
+
+
+def request_payload(plan: PerformancePlan, data: PerformanceData, sequence: int) -> Any:
+    if not data.payloads:
+        raise ValueError(f"the task key {plan.task_key!r} selects no rows")
+    if plan.operation == "score":
+        return data.payloads[sequence % len(data.payloads)]
+    return [data.payloads[row] for row in request_rows(sequence, plan.items_per_request or 1, len(data.payloads))]
+
+
+def performance_call(
+    client: Any, plan: PerformancePlan, payload: Any, *, wait_for_capacity: bool, provision_timeout_s: float
+) -> Any:
+    if plan.operation == "score":
+        query, items = payload
+        return client.score(
+            plan.route,
+            query,
+            items,
+            wait_for_capacity=wait_for_capacity,
+            provision_timeout_s=provision_timeout_s,
+            max_oom_retries=0,
+        )
+    return client.encode(
+        plan.route,
+        payload,
+        output_types=[plan.output_contract],
+        is_query=False,
+        wait_for_capacity=wait_for_capacity,
+        provision_timeout_s=provision_timeout_s,
+        max_oom_retries=0,
+    )
+
+
+def request_status(exc: BaseException) -> str:
+    cause: BaseException | None = exc
+    while cause is not None:
+        if isinstance(cause, httpx.TimeoutException):
+            return "timeout"
+        cause = cause.__cause__
+    return f"error:{type(exc).__name__}"
+
+
+@dataclass
+class Dispatcher:
+    plan: PerformancePlan
+    data: PerformanceData
+    client: Any
+    log: CallLog = field(default_factory=CallLog)
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    readiness_failure: str | None = None
+    in_flight_peak: int = 0
+    _in_flight: int = 0
+    _origin_ns: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def send(self, sequence: int, offset: Fraction) -> dict[str, Any]:
+        payload = request_payload(self.plan, self.data, sequence)
+        with self._lock:
+            in_flight_at_send = self._in_flight
+            self._in_flight += 1
+            self.in_flight_peak = max(self.in_flight_peak, self._in_flight)
+        failure: Exception | None = None
+        sent_ns = time.perf_counter_ns() - self._origin_ns
+        try:
+            performance_call(
+                self.client,
+                self.plan,
+                payload,
+                wait_for_capacity=False,
+                provision_timeout_s=self.plan.request_timeout_s,
+            )
+        except Exception as exc:  # noqa: BLE001
+            failure = exc
+        completed_ns = time.perf_counter_ns() - self._origin_ns
+        retry_count = int(self.client.last_retry_count)
+        with self._lock:
+            self._in_flight -= 1
+            if failure is None:
+                self.log.record(self.client)
+            else:
+                self.log.fail(self.client, failure)
+        return {
+            "sequence": sequence,
+            "level_name": self.plan.level_name,
+            "offset_s": float(offset),
+            "actual_send_offset_ns": sent_ns,
+            "completed_offset_ns": completed_ns,
+            "scheduling_lag_ms": max(0.0, (sent_ns - nanoseconds(offset)) / NS_PER_MS),
+            "status": "success" if failure is None else request_status(failure),
+            "attempt": 1,
+            "client_retry_count": retry_count,
+            "in_flight_at_send": in_flight_at_send,
+        }
+
+    def run(self) -> None:
+        offsets = schedule_offsets(self.plan.rate, self.plan.duration_s)
+        with ThreadPoolExecutor(max_workers=self.plan.max_in_flight) as pool:
+            self._origin_ns = time.perf_counter_ns()
+            futures = []
+            for sequence, offset in enumerate(offsets):
+                remaining_ns = self._origin_ns + nanoseconds(offset) - time.perf_counter_ns()
+                if remaining_ns > 0:
+                    time.sleep(remaining_ns / NS_PER_S)
+                futures.append(pool.submit(self.send, sequence, offset))
+            _, pending = wait(futures, timeout=self.plan.drain_s)
+            wait(pending)
+        self.rows = [future.result() for future in futures]
+
+
+def readiness_request(client: Any, plan: PerformancePlan, data: PerformanceData) -> None:
+    payload = request_payload(plan, data, 0)
+    performance_call(client, plan, payload, wait_for_capacity=True, provision_timeout_s=plan.target_readiness_timeout_s)
+
+
+def warmup(client: Any, plan: PerformancePlan, data: PerformanceData) -> None:
+    payload = request_payload(plan, data, 0)
+    deadline = time.monotonic() + plan.warmup_s
+    while time.monotonic() < deadline:
+        with contextlib.suppress(Exception):
+            performance_call(client, plan, payload, wait_for_capacity=False, provision_timeout_s=plan.request_timeout_s)
 
 
 def _call(log: CallLog, client: Any, method: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -415,12 +811,12 @@ def _timestamp(moment: datetime) -> str:
     return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _slug(plan: QualityPlan) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "-", f"{plan.route}-{plan.task_key}").strip("-")
+def _slug(route: str, task_key: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", f"{route}-{task_key}").strip("-")
 
 
-def comparison_basis(plan: QualityPlan, comparable: bool, reasons: Sequence[str]) -> str | None:
-    if plan.reference_id is None:
+def comparison_basis(reference_id: str | None, comparable: bool, reasons: Sequence[str]) -> str | None:
+    if reference_id is None:
         return None
     if comparable:
         return "same parameters"
@@ -482,7 +878,103 @@ def build_record(
         "validity": {"valid": not validity_reasons, "reasons": validity_reasons, "sdk_retries": log.sdk_retries},
         "metrics": rows,
         "comparison": compare(rows, plan.reference_metrics) if plan.reference_id is not None else [],
-        "comparison_basis": comparison_basis(plan, comparable, reasons),
+        "comparison_basis": comparison_basis(plan.reference_id, comparable, reasons),
+    }
+
+
+def performance_validity(plan: PerformancePlan, dispatcher: Dispatcher, metrics: Mapping[str, float]) -> dict[str, Any]:
+    log = dispatcher.log
+    reasons: list[str] = []
+    if dispatcher.readiness_failure is not None:
+        reasons.append(f"readiness request failed: {dispatcher.readiness_failure}")
+    if log.sdk_retries:
+        reasons.append(f"sdk retries {log.sdk_retries}")
+    lag_p99_ms = metrics.get("scheduling_lag_p99_ms")
+    if lag_p99_ms is not None and lag_p99_ms > plan.lag_tolerance_ms:
+        reasons.append(f"scheduling lag p99 {lag_p99_ms:.3f} ms > {plan.lag_tolerance_ms:g} ms")
+    if dispatcher.in_flight_peak > plan.max_in_flight:
+        reasons.append(f"in-flight peak {dispatcher.in_flight_peak} > {plan.max_in_flight}")
+    if len(log.execution_revisions) > 1:
+        reasons.append("execution revision changed")
+    return {
+        "valid": not reasons,
+        "reasons": reasons,
+        "lag_max_ms": max((row["scheduling_lag_ms"] for row in dispatcher.rows), default=0.0),
+        "in_flight_peak": dispatcher.in_flight_peak,
+        "timeouts": sum(row["status"] == "timeout" for row in dispatcher.rows),
+        "sdk_retries": log.sdk_retries,
+    }
+
+
+def build_performance_record(
+    plan: PerformancePlan,
+    data: PerformanceData,
+    dispatcher: Dispatcher,
+    started: datetime,
+    finished: datetime,
+    requests_path: Path | None,
+    rows: Rows,
+) -> dict[str, Any]:
+    log = dispatcher.log
+    reasons = list(plan.comparable_reasons)
+    if len(log.execution_revisions) > 1:
+        reasons.append("execution revision changed")
+    comparable = not reasons
+    candidate_counts = [len(items) for _, items in data.payloads] if plan.operation == "score" else []
+    return {
+        "kind": RESULT_KIND,
+        "schema_version": 1,
+        "reference_id": plan.reference_id,
+        "comparable": comparable,
+        "comparable_reasons": reasons,
+        "evaluation_mode": PERFORMANCE_MODE,
+        "model": plan.model,
+        "profile": plan.profile,
+        "operation": plan.operation,
+        "model_version": plan.model_version,
+        "execution_revisions": list(log.execution_revisions),
+        "ingress": {"url": plan.endpoint},
+        "task_key": plan.task_key,
+        "dataset": {
+            "name": plan.task_name,
+            "revision": plan.revision,
+            "subset": "test",
+            "parameters": [{"name": name, "value": value} for name, value in plan.task_params.items()],
+            "selected_ids": list(data.selected_ids),
+        },
+        "payload": {
+            "items_per_request": plan.items_per_request or max(candidate_counts, default=0),
+            "output_contract": plan.output_contract,
+            "parameters": [{"name": "is_query", "value": False}] if plan.operation == "encode" else [],
+        },
+        "client": {"description": client_description(), "worker_count": 1, "processes_per_worker": 1},
+        "load_level_name": plan.level_name,
+        "schedule": {
+            "arrival": "deterministic",
+            "levels": [{"name": plan.level_name, "rate": plan.rate, "duration_s": plan.duration_s}],
+        },
+        "timing": {
+            "warmup_s": plan.warmup_s,
+            "settle_s": plan.settle_s,
+            "drain_s": plan.drain_s,
+            "request_timeout_s": plan.request_timeout_s,
+            "target_readiness_timeout_s": plan.target_readiness_timeout_s,
+            "max_in_flight_per_process": plan.max_in_flight,
+            "scheduling_lag_tolerance_ms": plan.lag_tolerance_ms,
+            "retry": dict(RETRY_POLICY),
+        },
+        "run": {
+            "started_at": _timestamp(started),
+            "finished_at": _timestamp(finished),
+            "endpoint": plan.endpoint,
+            "request_count": log.request_count,
+            "failure_count": log.failure_count,
+            "requests_path": str(requests_path) if requests_path is not None else None,
+        },
+        "validity": performance_validity(plan, dispatcher, {row["name"]: row["value"] for row in rows}),
+        "metrics": rows,
+        "comparison": compare(rows, plan.reference_metrics) if plan.reference_id is not None else [],
+        "comparison_basis": comparison_basis(plan.reference_id, comparable, reasons),
     }
 
 
@@ -506,7 +998,7 @@ def run_quality(
     except RequestFailed:
         predictions = None
     finished = clock()
-    stem = f"{plan.reference_id or _slug(plan)}-{started.strftime('%Y%m%dT%H%M%SZ')}"
+    stem = f"{plan.reference_id or _slug(plan.route, plan.task_key)}-{started.strftime('%Y%m%dT%H%M%SZ')}"
     results_dir.mkdir(parents=True, exist_ok=True)
     result_path = results_dir / f"{stem}.json"
     predictions_path = None
@@ -516,6 +1008,40 @@ def run_quality(
         write_json(predictions_path, predictions, compact=True)
         rows = metric_rows(task_metrics(predictions, data.qrels, plan.task_name))
     record = build_record(plan, data, log, started, finished, predictions_path, rows)
+    write_json(result_path, record)
+    return record, result_path
+
+
+def run_performance(
+    plan: PerformancePlan,
+    data: PerformanceData,
+    client: Any,
+    *,
+    results_dir: Path = RESULTS_DIR,
+    now: Callable[[], datetime] | None = None,
+) -> tuple[dict[str, Any], Path]:
+    clock = now or (lambda: datetime.now(UTC))
+    started = clock()
+    dispatcher = Dispatcher(plan, data, client)
+    try:
+        readiness_request(client, plan, data)
+    except Exception as exc:  # noqa: BLE001
+        dispatcher.readiness_failure = f"{type(exc).__name__}: {exc}"
+    if dispatcher.readiness_failure is None:
+        warmup(client, plan, data)
+        time.sleep(plan.settle_s)
+        dispatcher.run()
+    finished = clock()
+    stem = f"{plan.reference_id or _slug(plan.route, plan.task_key)}-{started.strftime('%Y%m%dT%H%M%SZ')}"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    result_path = results_dir / f"{stem}.json"
+    requests_path = None
+    rows: Rows = []
+    if dispatcher.rows:
+        requests_path = results_dir / f"{stem}.requests.jsonl"
+        write_jsonl(requests_path, dispatcher.rows)
+        rows = performance_metric_rows(performance_metrics(dispatcher.rows, plan.rate, plan.duration_s))
+    record = build_performance_record(plan, data, dispatcher, started, finished, requests_path, rows)
     write_json(result_path, record)
     return record, result_path
 
@@ -538,11 +1064,33 @@ def quality_command(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         raise SystemExit(1)
 
 
+def performance_command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    try:
+        plan = plan_performance(args)
+    except (ValueError, KeyError, OSError) as exc:
+        parser.error(str(exc))
+    api_key = os.environ.get("SIE_API_KEY")
+    if not api_key:
+        parser.error("SIE_API_KEY must be set in the environment")
+    data = load_performance_data(plan)
+    with SIEClient(
+        plan.endpoint, api_key=api_key, timeout_s=plan.request_timeout_s, max_connections=2 * plan.max_in_flight
+    ) as client:
+        record, result_path = run_performance(plan, data, client)
+    print(result_path)
+    for line in format_rows(record["metrics"], record["comparison"]):
+        print(line)
+    if record["run"]["requests_path"] is None:
+        raise SystemExit(1)
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "quality":
         quality_command(parser, args)
+    elif args.command == "performance":
+        performance_command(parser, args)
 
 
 if __name__ == "__main__":

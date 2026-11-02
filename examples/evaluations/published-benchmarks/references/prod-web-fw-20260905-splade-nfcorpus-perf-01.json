@@ -1,0 +1,152 @@
+{
+  "accepted_at": "2026-09-05T05:17:30.631561Z",
+  "client": {
+    "processes_per_worker": 2,
+    "worker_count": 2
+  },
+  "dataset": {
+    "name": "mteb/NFCorpus",
+    "parameters": [
+      {
+        "name": "limit",
+        "value": 256
+      },
+      {
+        "name": "role",
+        "value": "corpus"
+      },
+      {
+        "name": "filter",
+        "value": "nonempty"
+      }
+    ],
+    "revision": "ec0fa4fe99da2ff19ca1214b7966684033a58814",
+    "subset": "test"
+  },
+  "evaluation_mode": "isolated_performance",
+  "kind": "published-benchmark-reference",
+  "load_level_name": "fixed-10-rps",
+  "measurement_started_at": "2026-09-05T01:29:44.032382Z",
+  "metrics": [
+    {
+      "aggregation": "campaign_global",
+      "name": "offered_requests_per_second",
+      "unit": "requests_per_second",
+      "value": 10.0
+    },
+    {
+      "aggregation": "common_window",
+      "name": "achieved_requests_per_second",
+      "unit": "requests_per_second",
+      "value": 9.983333333333333
+    },
+    {
+      "aggregation": "including_drain",
+      "name": "eventual_achieved_requests_per_second",
+      "unit": "requests_per_second",
+      "value": 10.0
+    },
+    {
+      "aggregation": "campaign_global",
+      "name": "in_window_success_rate",
+      "unit": "ratio",
+      "value": 0.9983333333333333
+    },
+    {
+      "aggregation": "campaign_global",
+      "name": "in_window_retry_free_success_rate",
+      "unit": "ratio",
+      "value": 0.9983333333333333
+    },
+    {
+      "aggregation": "campaign_global",
+      "name": "success_rate",
+      "unit": "ratio",
+      "value": 1.0
+    },
+    {
+      "aggregation": "campaign_global",
+      "name": "retry_free_success_rate",
+      "unit": "ratio",
+      "value": 1.0
+    },
+    {
+      "aggregation": "p99",
+      "name": "scheduling_lag_p99_ms",
+      "unit": "milliseconds",
+      "value": 2.297
+    },
+    {
+      "aggregation": "p50",
+      "name": "latency_p50_ms",
+      "unit": "milliseconds",
+      "value": 144.41799999999998
+    },
+    {
+      "aggregation": "p95",
+      "name": "latency_p95_ms",
+      "unit": "milliseconds",
+      "value": 241.596
+    },
+    {
+      "aggregation": "p99",
+      "name": "latency_p99_ms",
+      "unit": "milliseconds",
+      "value": 491.514
+    }
+  ],
+  "model": "prithivida/Splade_PP_en_v2",
+  "model_version": "f0d4aa214dcb60c274052a52c0497535e3aec64c",
+  "operation": "encode",
+  "payload": {
+    "items_per_request": 1,
+    "output_contract": "sparse",
+    "parameters": [
+      {
+        "name": "is_query",
+        "value": false
+      }
+    ]
+  },
+  "profile": "default",
+  "reference_id": "prod-web-fw-20260905-splade-nfcorpus-perf-01",
+  "schedule": {
+    "arrival": "deterministic",
+    "levels": [
+      {
+        "duration_s": 60.0,
+        "name": "fixed-10-rps",
+        "rate": 10.0
+      },
+      {
+        "duration_s": 60.0,
+        "name": "fixed-20-rps",
+        "rate": 20.0
+      },
+      {
+        "duration_s": 60.0,
+        "name": "fixed-25-rps",
+        "rate": 25.0
+      }
+    ],
+    "seed": 0,
+    "unit": "requests_per_second"
+  },
+  "schema_version": 1,
+  "scorer": null,
+  "task_key": "mteb/NFCorpus?split=test&role=corpus&limit=256&filter=nonempty",
+  "timing": {
+    "drain_s": 10.0,
+    "max_in_flight_per_process": 64,
+    "request_timeout_s": 30.0,
+    "retry": {
+      "backoff": "none",
+      "max_attempts": 1,
+      "record_attempts": true
+    },
+    "scheduling_lag_tolerance_ms": 20.0,
+    "settle_s": 10.0,
+    "target_readiness_timeout_s": 300.0,
+    "warmup_s": 30.0
+  }
+}

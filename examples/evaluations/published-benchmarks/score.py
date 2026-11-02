@@ -1,9 +1,11 @@
-"""Recompute the published quality metrics from a result's predictions file and print the deltas."""
+"""Recompute the published metrics from a result's predictions or requests file and print the deltas."""
 
 import argparse
 import importlib.metadata
 import json
+import math
 from collections.abc import Mapping, Sequence
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl
@@ -31,6 +33,23 @@ METRIC_UNIT = "ratio"
 AGGREGATION = "task_native"
 SCORER_ID = "pytrec-eval"
 SCORER_DISTRIBUTION = "pytrec-eval-terrier"
+PERFORMANCE_MODE = "isolated_performance"
+PERFORMANCE_METRICS = {
+    "offered_requests_per_second": ("requests_per_second", "campaign_global"),
+    "achieved_requests_per_second": ("requests_per_second", "common_window"),
+    "eventual_achieved_requests_per_second": ("requests_per_second", "including_drain"),
+    "in_window_success_rate": ("ratio", "campaign_global"),
+    "in_window_retry_free_success_rate": ("ratio", "campaign_global"),
+    "success_rate": ("ratio", "campaign_global"),
+    "retry_free_success_rate": ("ratio", "campaign_global"),
+    "scheduling_lag_p99_ms": ("milliseconds", "p99"),
+    "latency_p50_ms": ("milliseconds", "p50"),
+    "latency_p95_ms": ("milliseconds", "p95"),
+    "latency_p99_ms": ("milliseconds", "p99"),
+}
+LATENCY_PERCENTILES = (50, 95, 99)
+NS_PER_S = 1_000_000_000
+NS_PER_MS = 1_000_000
 
 Qrels = dict[str, dict[str, int]]
 Predictions = Mapping[str, Mapping[str, float]]
@@ -134,6 +153,53 @@ def metric_rows(metrics: Mapping[str, float]) -> Rows:
     ]
 
 
+def nanoseconds(seconds: float | Fraction) -> int:
+    return int(Fraction(str(seconds)) * NS_PER_S)
+
+
+def nearest_rank(values: Sequence[float], percent: int) -> float:
+    if not values:
+        raise ValueError("a percentile needs at least one value")
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(Fraction(percent * len(ordered), 100)) - 1)]
+
+
+def _retry_free(row: Mapping[str, Any]) -> bool:
+    return row["attempt"] == 1 and row["client_retry_count"] == 0
+
+
+def performance_metrics(rows: Sequence[Mapping[str, Any]], rate: float, duration_s: float) -> dict[str, float]:
+    count = len(rows)
+    if count == 0:
+        raise ValueError("performance metrics need at least one scheduled request")
+    window_ns = nanoseconds(duration_s)
+    successes = [row for row in rows if row["status"] == "success"]
+    in_window = [row for row in successes if row["completed_offset_ns"] < window_ns]
+    metrics = {
+        "offered_requests_per_second": float(rate),
+        "achieved_requests_per_second": len(in_window) / duration_s,
+        "eventual_achieved_requests_per_second": len(successes) / duration_s,
+        "in_window_success_rate": len(in_window) / count,
+        "in_window_retry_free_success_rate": sum(_retry_free(row) for row in in_window) / count,
+        "success_rate": len(successes) / count,
+        "retry_free_success_rate": sum(_retry_free(row) for row in successes) / count,
+        "scheduling_lag_p99_ms": nearest_rank([row["scheduling_lag_ms"] for row in rows], 99),
+    }
+    if successes:
+        latencies = [(row["completed_offset_ns"] - row["actual_send_offset_ns"]) / NS_PER_MS for row in successes]
+        for percent in LATENCY_PERCENTILES:
+            metrics[f"latency_p{percent}_ms"] = nearest_rank(latencies, percent)
+    return metrics
+
+
+def performance_metric_rows(metrics: Mapping[str, float]) -> Rows:
+    return [
+        {"name": name, "unit": unit, "aggregation": aggregation, "value": metrics[name]}
+        for name, (unit, aggregation) in PERFORMANCE_METRICS.items()
+        if name in metrics
+    ]
+
+
 def compare(rows: Sequence[Mapping[str, Any]], reference_rows: Sequence[Mapping[str, Any]]) -> Rows:
     reference = {(row["name"], row["aggregation"]): row["value"] for row in reference_rows}
     comparison: Rows = []
@@ -155,9 +221,10 @@ def compare(rows: Sequence[Mapping[str, Any]], reference_rows: Sequence[Mapping[
 
 def format_rows(rows: Sequence[Mapping[str, Any]], comparison: Sequence[Mapping[str, Any]]) -> list[str]:
     matched = {(row["name"], row["aggregation"]): row for row in comparison}
+    width = max([20, *(len(row["name"]) for row in rows)])
     lines = []
     for row in rows:
-        line = f"{row['name']:<20} {row['value']:.5f}"
+        line = f"{row['name']:<{width}} {row['value']:.5f}"
         entry = matched.get((row["name"], row["aggregation"]))
         if entry is not None:
             line += f"  reference {entry['reference_value']:.5f}  delta {entry['delta']:+.5f}"
@@ -176,17 +243,42 @@ def write_json(path: Path, payload: Any, *, compact: bool = False) -> None:
     path.write_text(text + "\n", encoding="utf-8")
 
 
-def rescore(result_path: Path) -> tuple[dict[str, Any], Rows, Rows]:
-    record = json.loads(result_path.read_text(encoding="utf-8"))
-    predictions_name = record["run"]["predictions_path"]
-    if predictions_name is None:
-        raise ValueError(f"{result_path} has no predictions file; its run did not complete")
-    predictions_path = result_path.parent / Path(predictions_name).name
+def write_jsonl(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
+    path.write_text("".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows), encoding="utf-8")
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _sibling(result_path: Path, record: Mapping[str, Any], key: str, label: str) -> Path:
+    name = record["run"][key]
+    if name is None:
+        raise ValueError(f"{result_path} has no {label} file; its run did not complete")
+    return result_path.parent / Path(name).name
+
+
+def _quality_rows(result_path: Path, record: Mapping[str, Any]) -> Rows:
+    predictions_path = _sibling(result_path, record, "predictions_path", "predictions")
     predictions = json.loads(predictions_path.read_text(encoding="utf-8"))
     task_name, params = parse_task_key(record["task_key"])
     dataset = record["dataset"]
     qrels = scoped_qrels(load_qrels(task_name, dataset["revision"], dataset["subset"]), predictions, params)
-    rows = metric_rows(task_metrics(predictions, qrels, task_name))
+    return metric_rows(task_metrics(predictions, qrels, task_name))
+
+
+def _performance_rows(result_path: Path, record: Mapping[str, Any]) -> Rows:
+    requests = read_jsonl(_sibling(result_path, record, "requests_path", "requests"))
+    level = record["schedule"]["levels"][0]
+    return performance_metric_rows(performance_metrics(requests, level["rate"], level["duration_s"]))
+
+
+def rescore(result_path: Path) -> tuple[dict[str, Any], Rows, Rows]:
+    record = json.loads(result_path.read_text(encoding="utf-8"))
+    if record.get("evaluation_mode") == PERFORMANCE_MODE:
+        rows = _performance_rows(result_path, record)
+    else:
+        rows = _quality_rows(result_path, record)
     reference_rows = [
         {"name": row["name"], "aggregation": row["aggregation"], "value": row["reference_value"]}
         for row in record.get("comparison", [])
