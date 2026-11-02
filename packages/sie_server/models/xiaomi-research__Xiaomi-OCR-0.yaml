@@ -38,9 +38,10 @@ profiles:
         # execute repository code.
         trust_remote_code: false
         # Pages in flight, each up to 24576 tokens of page image and output,
-        # need far more KV than the automatic one-sequence pool of 24576. The
-        # vision encoder needs about 3.6 GiB above the static pool for one
-        # 16 MP page; on an L4, 0.85 leaves too little and the engine OOMs.
+        # need far more KV than the automatic one-sequence pool of 24576.
+        # SGLang keeps (1 - fraction) of the memory free at launch as runtime
+        # headroom. One 16 MP page peaks about 3.5 GiB above the memory in use
+        # after load; on an L4, 0.85 leaves too little and the engine OOMs.
         mem_fraction_static: 0.70
         served_model_name: xiaomi-research/Xiaomi-OCR-0
         # 64 full-size uploads at once outrun the adapter's /generate write
