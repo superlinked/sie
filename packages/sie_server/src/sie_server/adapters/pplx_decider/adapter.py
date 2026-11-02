@@ -1,6 +1,10 @@
 """Text-only native Perplexity decisions through SIE extraction and decision APIs.
 
-Every (state, question) is a complete chat-template row. The checkpoint's
+Format 1 checkpoints: every (state, question) is a complete chat-template row,
+read out at its last token. Format 2 checkpoints (joint protocol v3): an item's
+questions share one row and each is read out at its own marker; a row over the
+window is bisected by questions, every chunk keeping the full state, exactly
+as the reference does. The checkpoint's
 readout, temperature, pooling and attention mode are preserved. Rows never
 truncate; oversized items fail independently before any of their rows run.
 Actual input usage sums the complete, unpadded rows the backbone processed.
@@ -26,6 +30,7 @@ from sie_server.adapters.pplx_decider.questions import (
     Question,
     answer,
     describe,
+    joint_messages,
     messages,
     parse_questions,
 )
@@ -39,6 +44,7 @@ MAX_FORWARD_ROWS = 8
 _CHECKPOINT_FILES = (
     "config.json",
     "decision_config.json",
+    "joint_config.json",
     "readout.safetensors",
     "model*.safetensors",
     "model*.safetensors.index.json",
@@ -56,11 +62,20 @@ _CHECKPOINT_FILES = (
 
 @dataclass
 class Row:
-    """One already-tokenized, unpadded question row and its original item index."""
+    """One already-tokenized, unpadded row, its original item index and its questions.
+
+    ``markers`` holds each question's readout position in the unpadded row;
+    ``None`` means the single question is read out by the checkpoint's pooling.
+    """
 
     item: int
-    question: Question
+    questions: tuple[Question, ...]
     inputs: dict[str, torch.Tensor]
+    markers: tuple[int, ...] | None = None
+
+    @property
+    def question(self) -> Question:
+        return self.questions[0]
 
     @property
     def length(self) -> int:
@@ -105,6 +120,9 @@ class PerplexityDecisionAdapter(BaseAdapter):
         self._tokenizer: Any = None
         self._device: str | None = None
         self._codes: tuple[str, ...] = ()
+        self._marker: str | None = None
+        self._marker_id: int | None = None
+        self._escapes: tuple[str, ...] = ()
 
     def load(self, device: str) -> None:
         """Load the locally resolved checkpoint with Transformers 5's native architecture."""
@@ -123,6 +141,12 @@ class PerplexityDecisionAdapter(BaseAdapter):
         self._model, self._processor = model, processor
         self._tokenizer, self._device = processor.tokenizer, device
         self._codes = tuple(config["codes"])
+        if "joint" in config:
+            marker = config["joint"]["marker"]
+            self._marker = marker
+            self._marker_id = processor.tokenizer.encode(marker, add_special_tokens=False)[0]
+            specials = {str(token) for token in processor.tokenizer.all_special_tokens} | {str(marker)}
+            self._escapes = tuple(sorted(specials, key=lambda token: (len(token), token), reverse=True))
 
     def _state(self, item: Item) -> str:
         if item.images or item.audio is not None or item.video is not None or item.document is not None:
@@ -133,41 +157,70 @@ class PerplexityDecisionAdapter(BaseAdapter):
             raise InvalidInputError("Supply either item.text or metadata.state")
         return describe(metadata["state"] if has_state else item.text, self._max_seq_length * 64)
 
+    def _encode(self, chat: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        with self._tokenizer_guard():
+            text = self._processor.apply_chat_template(
+                chat,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+            return dict(self._processor(text=[text], images=None, padding=True, truncation=False, return_tensors="pt"))
+
+    def _joint_rows(self, index: int, state: str, questions: tuple[Question, ...]) -> list[Row]:
+        """One row for all questions, bisected (reference order) only when it exceeds the window."""
+        marker_id = self._marker_id
+        if self._marker is None or marker_id is None:
+            raise RuntimeError(ERR_NOT_LOADED)
+        encoded = self._encode(joint_messages(state, questions, self._codes, self._marker, self._escapes))
+        ids = self._checked(encoded)
+        if ids.shape[1] > self._max_seq_length:
+            if len(questions) == 1:
+                raise InputTooLongError("A decision question with its state exceeds the window; no input was truncated")
+            middle = len(questions) // 2
+            return self._joint_rows(index, state, questions[:middle]) + self._joint_rows(
+                index, state, questions[middle:]
+            )
+        markers = tuple(int(position) for position in ids[0].eq(marker_id).nonzero().flatten().tolist())
+        if len(markers) != len(questions):
+            raise ValueError("Readout markers do not match questions after tokenization")
+        return [Row(index, questions, {name: tensor[0] for name, tensor in encoded.items()}, markers)]
+
+    @staticmethod
+    def _checked(encoded: dict[str, torch.Tensor]) -> torch.Tensor:
+        if set(encoded) - {"input_ids", "attention_mask", "token_type_ids", "mm_token_type_ids"}:
+            raise ValueError("Unexpected text processor inputs")
+        if any(
+            not isinstance(value, torch.Tensor) or value.ndim != 2 or value.shape[0] != 1 for value in encoded.values()
+        ):
+            raise ValueError("Expected one complete text processor row")
+        ids, mask = encoded["input_ids"], encoded["attention_mask"]
+        if ids.shape != mask.shape or not mask.bool().all() or ids.shape[1] == 0:
+            raise ValueError("Expected a nonempty unpadded text row")
+        return ids
+
     def _item_rows(self, index: int, item: Item, questions: tuple[Question, ...]) -> list[Row]:
         state = self._state(item)
-        rows: list[Row] = []
+        if self._marker is not None:
+            rows = self._joint_rows(index, state, questions)
+            if sum(row.length for row in rows) > MAX_ITEM_TOKENS:
+                raise InputTooLongError("Decision rows exceed the token budget; no input was truncated")
+            return rows
+        rows = []
         tokens = 0
         # Prepare one row at a time: a request with many oversized questions
         # cannot materialize an unbounded, heavily padded tokenizer batch.
         for question in questions:
-            with self._tokenizer_guard():
-                text = self._processor.apply_chat_template(
-                    messages(state, question, self._codes),
-                    tokenize=False,
-                    add_generation_prompt=True,
-                    enable_thinking=False,
-                )
-                encoded = dict(
-                    self._processor(text=[text], images=None, padding=True, truncation=False, return_tensors="pt")
-                )
-            if set(encoded) - {"input_ids", "attention_mask", "token_type_ids", "mm_token_type_ids"}:
-                raise ValueError("Unexpected text processor inputs")
-            if any(
-                not isinstance(value, torch.Tensor) or value.ndim != 2 or value.shape[0] != 1
-                for value in encoded.values()
-            ):
-                raise ValueError("Expected one complete text processor row")
-            ids, mask = encoded["input_ids"], encoded["attention_mask"]
-            if ids.shape != mask.shape or not mask.bool().all() or ids.shape[1] == 0:
-                raise ValueError("Expected a nonempty unpadded text row")
-            length = ids.shape[1]
+            encoded = self._encode(messages(state, question, self._codes))
+            length = self._checked(encoded).shape[1]
             tokens += length
             if length > self._max_seq_length or tokens > MAX_ITEM_TOKENS:
                 raise InputTooLongError("Decision rows exceed the token budget; no input was truncated")
-            rows.append(Row(index, question, {name: tensor[0] for name, tensor in encoded.items()}))
+            rows.append(Row(index, (question,), {name: tensor[0] for name, tensor in encoded.items()}))
         return rows
 
     def _forward(self, rows: list[Row]) -> list[list[float]]:
+        """Probabilities per question, in row then question order."""
         model = self._model
         if model is None:
             raise RuntimeError(ERR_NOT_LOADED)
@@ -178,9 +231,20 @@ class PerplexityDecisionAdapter(BaseAdapter):
             inputs[name] = torch.stack(
                 [torch.nn.functional.pad(row.inputs[name], (longest - row.length, 0), value=pad) for row in rows]
             ).to(self._device)
+        counts = [len(question.keys) for row in rows for question in row.questions]
+        positions = None
+        if any(row.markers is not None for row in rows):
+            if not all(row.markers is not None for row in rows):
+                raise ValueError("Joint and single-question rows cannot share a forward")
+            row_index = [i for i, row in enumerate(rows) for _ in row.questions]
+            col_index = [longest - row.length + m for row in rows for m in row.markers or ()]
+            positions = (
+                torch.tensor(row_index, device=self._device),
+                torch.tensor(col_index, device=self._device),
+            )
         with torch.inference_mode():
-            probabilities = model(inputs, [len(row.question.keys) for row in rows]).cpu().tolist()
-        return [values[: len(row.question.keys)] for row, values in zip(rows, probabilities, strict=True)]
+            probabilities = model(inputs, counts, positions).cpu().tolist()
+        return [values[:count] for values, count in zip(probabilities, counts, strict=True)]
 
     def extract(
         self,
@@ -230,8 +294,10 @@ class PerplexityDecisionAdapter(BaseAdapter):
             ):
                 end += 1
             batch = rows[start:end]
-            for row, values in zip(batch, self._forward(batch), strict=True):
-                data[row.item][row.question.id] = answer(row.question, values)
+            values = iter(self._forward(batch))
+            for row in batch:
+                for question in row.questions:
+                    data[row.item][question.id] = answer(question, next(values))
                 counts[row.item] += row.length
             start = end
         # Restore the caller's question order as well as the item order.
