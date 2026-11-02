@@ -116,6 +116,7 @@ class SGLangMemoryBudget:
     mem_fraction_static: float | None = None
     tensor_parallel_size: int = 1
     has_auxiliary_weights: bool = False
+    runtime_headroom_gib: float = 0
     reserved_bytes: int = 0
 
     def __post_init__(self) -> None:
@@ -126,6 +127,9 @@ class SGLangMemoryBudget:
             isinstance(fraction, bool) or not isinstance(fraction, int | float) or not 0 < fraction <= 1
         ):
             raise ValueError("mem_fraction_static must be a finite number in (0, 1]")
+        headroom = self.runtime_headroom_gib
+        if isinstance(headroom, bool) or not isinstance(headroom, int | float) or not 0 <= headroom < math.inf:
+            raise ValueError("runtime_headroom_gib must be a finite non-negative number")
 
     @property
     def token_capacity(self) -> int:
@@ -150,15 +154,18 @@ class SGLangMemoryBudget:
     def required_bytes(self, *, device_type: str, device_total_bytes: int) -> int | None:
         if device_type != "cuda" or device_total_bytes <= 0:
             return None
+        headroom = math.ceil(self.runtime_headroom_gib * GIB)
         if self.mem_fraction_static is not None:
             required = _server.estimate_load_required_memory_bytes(
                 device_type=device_type,
                 device_total_bytes=device_total_bytes,
                 mem_fraction_static=self.mem_fraction_static,
             )
+            if required is not None:
+                required = min(required + headroom, device_total_bytes)
             self.reserved_bytes = (required or 0) * self.tensor_parallel_size
             return required
-        required = self.static_bytes + RUNTIME_HEADROOM_BYTES
+        required = self.static_bytes + RUNTIME_HEADROOM_BYTES + headroom
         self.reserved_bytes = required
         return required
 

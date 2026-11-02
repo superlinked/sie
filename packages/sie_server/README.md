@@ -1220,6 +1220,16 @@ attention. Calibrated profiles for these configurations retain their overrides.
 Automatic sizing is an estimate; unusually large runtime workspaces can still
 invoke the existing OOM recovery path.
 
+A profile whose engine needs more memory outside its static pool than these
+allowances can declare the measured excess as
+`adapter_options.loadtime.runtime_headroom_gib`. An example is a vision encoder
+processing one full-size page. SIE adds the value to the reservation in both
+modes. Load staging then evicts idle eligible models until that much memory is
+free, and an automatically sized engine does not launch without it. The
+headroom stays outside the engine's static pool. A model loaded later is still
+admitted on actual device usage, so it can take headroom that the engine has not
+allocated yet.
+
 | Env var | Default | Effect |
 |--|--|--|
 | `SIE_MEMORY_PRESSURE_THRESHOLD_PERCENT` | `95` | VRAM utilisation that triggers reactive LRU eviction by the pressure monitor. |

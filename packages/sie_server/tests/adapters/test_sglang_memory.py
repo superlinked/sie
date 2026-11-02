@@ -93,6 +93,50 @@ def test_explicit_fraction_keeps_admission_and_unbounded_kv_behavior(monkeypatch
     assert budget.launch_args(0) == ["--mem-fraction-static", "0.85"]
 
 
+def test_runtime_headroom_is_reserved_in_both_admission_paths(model_dir):
+    automatic = _budget(model_dir).required_bytes(device_type="cuda", device_total_bytes=80 * GIB)
+    budget = _budget(model_dir, runtime_headroom_gib=4)
+    assert budget.required_bytes(device_type="cuda", device_total_bytes=80 * GIB) == automatic + 4 * GIB
+    assert budget.reserved_bytes == automatic + 4 * GIB
+
+    explicit = _budget(Path("missing-model"), mem_fraction_static=0.85, runtime_headroom_gib=4)
+    assert explicit.required_bytes(device_type="cuda", device_total_bytes=80 * GIB) == 73 * GIB
+    assert explicit.reserved_bytes == 73 * GIB
+    oversized = _budget(Path("missing-model"), mem_fraction_static=0.85, runtime_headroom_gib=20)
+    assert oversized.required_bytes(device_type="cuda", device_total_bytes=80 * GIB) == 80 * GIB
+
+
+def test_runtime_headroom_stays_outside_the_static_pool(model_dir, monkeypatch):
+    budget = _budget(model_dir, runtime_headroom_gib=4)
+    without_headroom = _budget(model_dir).required_bytes(device_type="cuda", device_total_bytes=80 * GIB)
+    monkeypatch.setattr(_memory, "device_memory", lambda _: (without_headroom, 80 * GIB))
+    with pytest.raises(RuntimeError, match="CUDA out of memory"):
+        budget.launch_args(0)
+    monkeypatch.setattr(_memory, "device_memory", lambda _: (60 * GIB, 80 * GIB))
+    assert float(budget.launch_args(0)[1]) * 60 * GIB == pytest.approx(budget.static_bytes)
+
+
+@pytest.mark.parametrize("headroom", [-1, True, float("nan"), float("inf"), "4"])
+def test_invalid_runtime_headroom_rejected(headroom):
+    with pytest.raises(ValueError, match="runtime_headroom_gib"):
+        _budget(Path("missing"), runtime_headroom_gib=headroom)
+
+
+def test_load_staging_evicts_until_the_runtime_headroom_is_free(model_dir):
+    plain = SGLangVisionExtractAdapter(str(model_dir), max_seq_length=32768, kv_budget_tokens=32768)
+    vision = SGLangVisionExtractAdapter(
+        str(model_dir), max_seq_length=32768, kv_budget_tokens=32768, runtime_headroom_gib=4
+    )
+    plain_required = plain.load_required_memory_bytes(device_type="cuda", device_total_bytes=80 * GIB)
+    assert plain_required is not None
+    manager = MemoryManager(device="cuda:0")
+    free = plain_required + GIB
+    with patch.object(manager, "get_stats", return_value=MemoryStats(80 * GIB - free, 80 * GIB, "cuda")):
+        assert not manager.should_evict_for_load(_adapter_load_required_bytes(plain, manager))
+        assert _adapter_load_required_bytes(vision, manager) == plain_required + 4 * GIB
+        assert manager.should_evict_for_load(_adapter_load_required_bytes(vision, manager))
+
+
 def test_sharded_weights_use_index_and_serving_precision(model_dir):
     (model_dir / "model.safetensors").unlink()
     _write_weights(model_dir / "model-1.safetensors", 1000, "F32", 4)

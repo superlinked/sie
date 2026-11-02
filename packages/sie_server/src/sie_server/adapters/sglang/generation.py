@@ -552,6 +552,10 @@ class SGLangGenerationAdapter(SGLangLoraMixin, GenerationAdapter):
         # it, then follows as usual. None leaves reasoning unbounded and the
         # launch unchanged. Needs a reasoning parser with known control tokens.
         thinking_budget: int | None = None,
+        # GiB the engine allocates outside its static pool beyond the default
+        # allowance at peak, such as a vision encoder's activations for one
+        # full-size image. Load staging requires it free before launch.
+        runtime_headroom_gib: float = 0,
         **kwargs: Any,  # accept extra args from loader for compatibility
     ) -> None:
         _ = kwargs
@@ -571,6 +575,7 @@ class SGLangGenerationAdapter(SGLangLoraMixin, GenerationAdapter):
             mem_fraction_static=mem_fraction_static,
             tensor_parallel_size=self._tensor_parallel_size,
             has_auxiliary_weights=bool(lora_paths or (speculative and speculative.get("enabled"))),
+            runtime_headroom_gib=runtime_headroom_gib,
         )
         self._watchdog_timeout_s = _server.validate_optional_positive(watchdog_timeout_s, field="watchdog_timeout_s")
         self._declared_nccl_port = _server.validate_optional_port(nccl_port)

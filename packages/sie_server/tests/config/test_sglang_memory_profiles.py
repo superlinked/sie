@@ -107,6 +107,19 @@ def test_glm_ocr_launches_with_its_explicit_fraction():
     assert budget.launch_args(0) == ["--mem-fraction-static", "0.85"]
 
 
+def test_profile_runtime_headroom_reaches_the_load_reservation():
+    config = load_model_config(MODELS / "zai-org__GLM-OCR.yaml")
+    baseline = load_adapter(config, MODELS, device="cuda:0")
+    assert baseline._memory_budget.runtime_headroom_gib == 0
+    values = config.model_dump()
+    values["profiles"]["default"]["adapter_options"]["loadtime"]["runtime_headroom_gib"] = 4
+    adapter = load_adapter(type(config).model_validate(values), MODELS, device="cuda:0")
+    assert adapter._memory_budget.runtime_headroom_gib == 4
+    required = adapter.load_required_memory_bytes(device_type="cuda", device_total_bytes=80 * GIB)
+    assert required == baseline.load_required_memory_bytes(device_type="cuda", device_total_bytes=80 * GIB) + 4 * GIB
+    assert required == 73 * GIB
+
+
 def test_guard_calibrated_profile_retains_explicit_override():
     config = load_model_config(MODELS / "Qwen__Qwen3Guard-Gen-4B.yaml")
     assert config.resolve_profile("default").kv_budget_tokens == 32768
