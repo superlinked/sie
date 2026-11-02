@@ -75,7 +75,7 @@ pip install sie-server
   bundle's GLiNER2 models are pinned to 2.0.0:
 
   ```bash
-  pip install sie-server "transformers>=5.17,<6"
+  pip install sie-server "transformers>=5.19,<6"
   pip install "gliner2==2.0.0"  # for the GLiNER2.5 and GLiNER2 PII models
   sie-server serve -b transformers5
   ```

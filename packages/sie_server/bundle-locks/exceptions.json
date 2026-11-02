@@ -170,10 +170,20 @@
       }
     },
     "cpu-transformers5-amd64": {
+      "click": {
+        "artifacts_sha256": "efbcc7f300aa5735118debacc8b786d0691135afa3793bb094a181227dccc433",
+        "reason": "huggingface-hub 1.33.0 requires click>=8.4.2,<9, excluding root8.1.8. 8.5.0 matches the released v0.10.x transformers5 images.",
+        "version": "8.5.0"
+      },
+      "hf-xet": {
+        "artifacts_sha256": "b819512206e595ed927ec88c9bb1e54733c8c107d8b654b749387f70402b0f54",
+        "reason": "huggingface-hub 1.33.0 requires hf-xet>=1.6.0,<2 on x86_64 and aarch64, excluding root1.4.3. 1.7.0 matches the released v0.10.x transformers5 images.",
+        "version": "1.7.0"
+      },
       "huggingface-hub": {
-        "artifacts_sha256": "56260e3b49b08c3efc9997034700913e0708522013d2e317b8098bf92208636e",
-        "reason": "The required Transformers5 version requires huggingface-hub>=1.3 or>=1.5,<2, excluding root0.36.2.",
-        "version": "1.16.1"
+        "artifacts_sha256": "4f55f2e300885f56ed1ab31200235433430e675d54e31b3f78240697b9106e9a",
+        "reason": "The required Transformers 5.19 version requires huggingface-hub>=1.31.0,<3, excluding root0.36.2. The lock stays on the 1.x line.",
+        "version": "1.33.0"
       },
       "jinja2": {
         "artifacts_sha256": "e96bf6559614ddf31a67929e5839cdc59a172438780be978dcf32c576c1dae0e",
@@ -192,7 +202,7 @@
       },
       "tokenizers": {
         "artifacts_sha256": "38395faa2b65845b5b92aba3072a24aec7c26e3a4fe9c080521bf6e099362850",
-        "reason": "The declared transformers>=5.17 bundle requires tokenizers>=0.23.1,<0.24, excluding root0.22.2.",
+        "reason": "The declared transformers>=5.19 bundle requires tokenizers>=0.23.1,<0.24, excluding root0.22.2.",
         "version": "0.23.3"
       },
       "torch": {
@@ -206,16 +216,26 @@
         "version": "0.24.1+cpu"
       },
       "transformers": {
-        "artifacts_sha256": "1d611f8c0040d83f78b8fcc191f5f7058ef9f3e6ef7144a6adc12f5a008b7306",
-        "reason": "Declared TF5 bundle requires transformers>=5.17,<6, or the pinned SGLang/TensorRT engine requires its own exact TF5 version; root4.57.6 is incompatible.",
-        "version": "5.17.0"
+        "artifacts_sha256": "c922c38695d32b5886466675d04741323dc3112c838be09f1ecf97f085334829",
+        "reason": "Declared TF5 bundle requires transformers>=5.19,<6, or the pinned SGLang/TensorRT engine requires its own exact TF5 version; root4.57.6 is incompatible.",
+        "version": "5.19.0"
       }
     },
     "cpu-transformers5-arm64": {
+      "click": {
+        "artifacts_sha256": "efbcc7f300aa5735118debacc8b786d0691135afa3793bb094a181227dccc433",
+        "reason": "huggingface-hub 1.33.0 requires click>=8.4.2,<9, excluding root8.1.8. 8.5.0 matches the released v0.10.x transformers5 images.",
+        "version": "8.5.0"
+      },
+      "hf-xet": {
+        "artifacts_sha256": "11d78357ad60f8c38274b09db6aef2211560b12e5e5e1bde85dd82e033dc6254",
+        "reason": "huggingface-hub 1.33.0 requires hf-xet>=1.6.0,<2 on x86_64 and aarch64, excluding root1.4.3. 1.7.0 matches the released v0.10.x transformers5 images.",
+        "version": "1.7.0"
+      },
       "huggingface-hub": {
-        "artifacts_sha256": "56260e3b49b08c3efc9997034700913e0708522013d2e317b8098bf92208636e",
-        "reason": "The required Transformers5 version requires huggingface-hub>=1.3 or>=1.5,<2, excluding root0.36.2.",
-        "version": "1.16.1"
+        "artifacts_sha256": "4f55f2e300885f56ed1ab31200235433430e675d54e31b3f78240697b9106e9a",
+        "reason": "The required Transformers 5.19 version requires huggingface-hub>=1.31.0,<3, excluding root0.36.2. The lock stays on the 1.x line.",
+        "version": "1.33.0"
       },
       "jinja2": {
         "artifacts_sha256": "e96bf6559614ddf31a67929e5839cdc59a172438780be978dcf32c576c1dae0e",
@@ -234,7 +254,7 @@
       },
       "tokenizers": {
         "artifacts_sha256": "d9691de410ad294639cdad634ab9ff1e08bd5f456c9375e25de0e350647510da",
-        "reason": "The declared transformers>=5.17 bundle requires tokenizers>=0.23.1,<0.24, excluding root0.22.2.",
+        "reason": "The declared transformers>=5.19 bundle requires tokenizers>=0.23.1,<0.24, excluding root0.22.2.",
         "version": "0.23.3"
       },
       "torch": {
@@ -248,9 +268,9 @@
         "version": "0.24.1"
       },
       "transformers": {
-        "artifacts_sha256": "1d611f8c0040d83f78b8fcc191f5f7058ef9f3e6ef7144a6adc12f5a008b7306",
-        "reason": "Declared TF5 bundle requires transformers>=5.17,<6, or the pinned SGLang/TensorRT engine requires its own exact TF5 version; root4.57.6 is incompatible.",
-        "version": "5.17.0"
+        "artifacts_sha256": "c922c38695d32b5886466675d04741323dc3112c838be09f1ecf97f085334829",
+        "reason": "Declared TF5 bundle requires transformers>=5.19,<6, or the pinned SGLang/TensorRT engine requires its own exact TF5 version; root4.57.6 is incompatible.",
+        "version": "5.19.0"
       }
     },
     "cuda12-ctranslate2-amd64": {},
@@ -588,10 +608,20 @@
       }
     },
     "cuda12-transformers5-amd64": {
+      "click": {
+        "artifacts_sha256": "efbcc7f300aa5735118debacc8b786d0691135afa3793bb094a181227dccc433",
+        "reason": "huggingface-hub 1.33.0 requires click>=8.4.2,<9, excluding root8.1.8. 8.5.0 matches the released v0.10.x transformers5 images.",
+        "version": "8.5.0"
+      },
+      "hf-xet": {
+        "artifacts_sha256": "b819512206e595ed927ec88c9bb1e54733c8c107d8b654b749387f70402b0f54",
+        "reason": "huggingface-hub 1.33.0 requires hf-xet>=1.6.0,<2 on x86_64 and aarch64, excluding root1.4.3. 1.7.0 matches the released v0.10.x transformers5 images.",
+        "version": "1.7.0"
+      },
       "huggingface-hub": {
-        "artifacts_sha256": "56260e3b49b08c3efc9997034700913e0708522013d2e317b8098bf92208636e",
-        "reason": "The required Transformers5 version requires huggingface-hub>=1.3 or>=1.5,<2, excluding root0.36.2.",
-        "version": "1.16.1"
+        "artifacts_sha256": "4f55f2e300885f56ed1ab31200235433430e675d54e31b3f78240697b9106e9a",
+        "reason": "The required Transformers 5.19 version requires huggingface-hub>=1.31.0,<3, excluding root0.36.2. The lock stays on the 1.x line.",
+        "version": "1.33.0"
       },
       "nvidia-cublas-cu12": {
         "artifacts_sha256": "193de7f3d05657a391920e601ea29c14c9d4996895e0afec29448a03cecba8d3",
@@ -655,7 +685,7 @@
       },
       "tokenizers": {
         "artifacts_sha256": "38395faa2b65845b5b92aba3072a24aec7c26e3a4fe9c080521bf6e099362850",
-        "reason": "The declared transformers>=5.17 bundle requires tokenizers>=0.23.1,<0.24, excluding root0.22.2.",
+        "reason": "The declared transformers>=5.19 bundle requires tokenizers>=0.23.1,<0.24, excluding root0.22.2.",
         "version": "0.23.3"
       },
       "torch": {
@@ -669,9 +699,9 @@
         "version": "0.24.1"
       },
       "transformers": {
-        "artifacts_sha256": "1d611f8c0040d83f78b8fcc191f5f7058ef9f3e6ef7144a6adc12f5a008b7306",
-        "reason": "Declared TF5 bundle requires transformers>=5.17,<6, or the pinned SGLang/TensorRT engine requires its own exact TF5 version; root4.57.6 is incompatible.",
-        "version": "5.17.0"
+        "artifacts_sha256": "c922c38695d32b5886466675d04741323dc3112c838be09f1ecf97f085334829",
+        "reason": "Declared TF5 bundle requires transformers>=5.19,<6, or the pinned SGLang/TensorRT engine requires its own exact TF5 version; root4.57.6 is incompatible.",
+        "version": "5.19.0"
       }
     },
     "cuda13-sglang-cu130-amd64": {

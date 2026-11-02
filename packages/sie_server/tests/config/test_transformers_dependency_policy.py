@@ -48,7 +48,7 @@ def test_server_keeps_fixed_tf5_overlays_and_documents_future_tf4_limit() -> Non
     assert "4.58.0" in requirement.specifier
     assert "any future unreviewed 4.x version" in text
     tf5 = yaml.safe_load((_SERVER / "bundles/transformers5.yaml").read_text())
-    assert tf5["deps"]["transformers"] == ">=5.17,<6"
+    assert tf5["deps"]["transformers"] == ">=5.19,<6"
 
 
 def test_lock_metadata_preserves_the_declared_base_and_local_requirements() -> None:

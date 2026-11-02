@@ -15,6 +15,7 @@ import pytest
 import torch
 import yaml
 from packaging.specifiers import SpecifierSet
+from packaging.version import Version
 from sie_sdk.bundle_utils import match_bundle_models
 from sie_server.adapters.parakeet import adapter as parakeet_adapter
 from sie_server.adapters.parakeet.adapter import (
@@ -1048,6 +1049,7 @@ def test_transformers5_bundle_carries_the_parakeet_runtime() -> None:
     requirements = resolve_bundle_requirements(bundle["deps"])
 
     assert "sie_server.adapters.parakeet.adapter" in bundle["adapters"]
-    # The bundle's range admits a transformers release the adapter loads on.
-    assert parakeet_adapter._MIN_TRANSFORMERS_VERSION in SpecifierSet(bundle["deps"]["transformers"])
+    # Every transformers release the bundle admits is one the adapter loads on.
+    (floor,) = [spec for spec in SpecifierSet(bundle["deps"]["transformers"]) if spec.operator == ">="]
+    assert Version(floor.version) >= parakeet_adapter._MIN_TRANSFORMERS_VERSION
     assert "librosa==1.0.0" in requirements

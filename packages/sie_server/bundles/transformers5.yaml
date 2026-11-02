@@ -26,10 +26,11 @@ deps:
   # (e.g., LightOnOCR-2-1B needs LightOnOcrForConditionalGeneration,
   # GLM-OCR needs GlmOcrForConditionalGeneration). Floor raised to 5.14
   # for the visual-SPLADE family (custom modeling code built on 5.13+),
-  # then 5.17 for Perplexity's pinned native Qwen decision checkpoint;
-  # installs already resolved to the latest 5.x, so the floor is the
-  # guarantee, not a version change in practice.
-  transformers: '>=5.17,<6'
+  # then 5.17 for Perplexity's pinned native Qwen decision checkpoint, then
+  # 5.19: Parakeet-TDT refuses to load below 5.18 (padded rows turn into NaN
+  # under eager attention), and 5.19.0 is the version the v0.10.x images
+  # already ship. The saved locks pin this floor exactly.
+  transformers: '>=5.19,<6'
   # Includes multimodal SparseEncoder (image documents), with the local-code
   # trust boundary validated against this exact release.
   sentence-transformers: '==5.7.0'
