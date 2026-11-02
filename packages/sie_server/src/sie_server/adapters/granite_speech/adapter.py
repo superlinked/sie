@@ -260,7 +260,11 @@ class GraniteSpeechAdapter(BaseAdapter):
         chat = [{"role": "user", "content": f"{_AUDIO_TOKEN}{prompt}"}]
         text = self._tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
         ids = [int(token) for token in self._tokenizer(text)["input_ids"]]
-        if ids.count(self._audio_token_id) != 1:
+        audio_token_id = self._audio_token_id
+        if audio_token_id is None:
+            msg = "GraniteSpeechAdapter is not loaded"
+            raise RuntimeError(msg)
+        if ids.count(audio_token_id) != 1:
             msg = "Granite Speech prompt must contain exactly one audio placeholder"
             raise ValueError(msg)
         return ids
@@ -292,7 +296,11 @@ class GraniteSpeechAdapter(BaseAdapter):
         model = self._model
         device = self._device
         embed_tokens = model.get_input_embeddings()
-        split = prompt_ids.index(self._audio_token_id)
+        audio_token_id = self._audio_token_id
+        if audio_token_id is None:
+            msg = "GraniteSpeechAdapter is not loaded"
+            raise RuntimeError(msg)
+        split = prompt_ids.index(audio_token_id)
         prefix = torch.tensor(prompt_ids[:split], device=device, dtype=torch.long)
         suffix = torch.tensor(prompt_ids[split + 1 :], device=device, dtype=torch.long)
         prefix_embeds = embed_tokens(prefix)
