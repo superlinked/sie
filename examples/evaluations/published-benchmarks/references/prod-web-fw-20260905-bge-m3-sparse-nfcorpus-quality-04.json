@@ -1,0 +1,270 @@
+{
+  "accepted_at": "2026-09-05T05:18:09.556744Z",
+  "client": {
+    "processes_per_worker": 1,
+    "worker_count": 1
+  },
+  "dataset": {
+    "name": "mteb/NFCorpus",
+    "parameters": [],
+    "revision": "ec0fa4fe99da2ff19ca1214b7966684033a58814",
+    "subset": "test"
+  },
+  "evaluation_mode": "quality",
+  "kind": "published-benchmark-reference",
+  "measurement_started_at": null,
+  "metrics": [
+    {
+      "aggregation": "task_native",
+      "name": "accuracy",
+      "unit": "ratio",
+      "value": 0.04855
+    },
+    {
+      "aggregation": "task_native",
+      "name": "main_score",
+      "unit": "ratio",
+      "value": 0.28374
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_1",
+      "unit": "ratio",
+      "value": 0.04855
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_10",
+      "unit": "ratio",
+      "value": 0.10714
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_100",
+      "unit": "ratio",
+      "value": 0.12815
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_1000",
+      "unit": "ratio",
+      "value": 0.13535
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_20",
+      "unit": "ratio",
+      "value": 0.11768
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_3",
+      "unit": "ratio",
+      "value": 0.08268
+    },
+    {
+      "aggregation": "task_native",
+      "name": "map_at_5",
+      "unit": "ratio",
+      "value": 0.09404
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_1",
+      "unit": "ratio",
+      "value": 0.42105263157894735
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_10",
+      "unit": "ratio",
+      "value": 0.4880092387832326
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_100",
+      "unit": "ratio",
+      "value": 0.4938392055561365
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_1000",
+      "unit": "ratio",
+      "value": 0.49452420650176765
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_20",
+      "unit": "ratio",
+      "value": 0.49240482567697436
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_3",
+      "unit": "ratio",
+      "value": 0.47316821465428277
+    },
+    {
+      "aggregation": "task_native",
+      "name": "mrr_at_5",
+      "unit": "ratio",
+      "value": 0.481062951496388
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_1",
+      "unit": "ratio",
+      "value": 0.39938
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_10",
+      "unit": "ratio",
+      "value": 0.28374
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_100",
+      "unit": "ratio",
+      "value": 0.24411
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_1000",
+      "unit": "ratio",
+      "value": 0.30825
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_20",
+      "unit": "ratio",
+      "value": 0.2627
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_3",
+      "unit": "ratio",
+      "value": 0.34221
+    },
+    {
+      "aggregation": "task_native",
+      "name": "ndcg_at_5",
+      "unit": "ratio",
+      "value": 0.31461
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_1",
+      "unit": "ratio",
+      "value": 0.42105
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_10",
+      "unit": "ratio",
+      "value": 0.20495
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_100",
+      "unit": "ratio",
+      "value": 0.05796
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_1000",
+      "unit": "ratio",
+      "value": 0.01586
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_20",
+      "unit": "ratio",
+      "value": 0.14938
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_3",
+      "unit": "ratio",
+      "value": 0.32095
+    },
+    {
+      "aggregation": "task_native",
+      "name": "precision_at_5",
+      "unit": "ratio",
+      "value": 0.26811
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_1",
+      "unit": "ratio",
+      "value": 0.04855
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_10",
+      "unit": "ratio",
+      "value": 0.13384
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_100",
+      "unit": "ratio",
+      "value": 0.23293
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_1000",
+      "unit": "ratio",
+      "value": 0.47527
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_20",
+      "unit": "ratio",
+      "value": 0.16935
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_3",
+      "unit": "ratio",
+      "value": 0.08983
+    },
+    {
+      "aggregation": "task_native",
+      "name": "recall_at_5",
+      "unit": "ratio",
+      "value": 0.11012
+    }
+  ],
+  "model": "BAAI/bge-m3",
+  "model_version": "5617a9f61b028005a4858fdac845db406aefb181",
+  "operation": "encode",
+  "payload": {
+    "items_per_request": 128,
+    "output_contract": "sparse",
+    "parameters": []
+  },
+  "profile": "sparse",
+  "reference_id": "prod-web-fw-20260905-bge-m3-sparse-nfcorpus-quality-04",
+  "schema_version": 1,
+  "scorer": {
+    "implementation_digest": "sha256:02dec8dff3dd4ad0e50f8676e378cc37696b7c6e18381b480b1acf0d69de1d05",
+    "version": "2.7.5"
+  },
+  "task_key": "mteb/NFCorpus",
+  "timing": {
+    "drain_s": 0.0,
+    "max_in_flight_per_process": 1,
+    "request_timeout_s": 300.0,
+    "retry": {
+      "backoff": "none",
+      "max_attempts": 1,
+      "record_attempts": true
+    },
+    "scheduling_lag_tolerance_ms": 20.0,
+    "settle_s": 0.0,
+    "target_readiness_timeout_s": null,
+    "warmup_s": 0.0
+  }
+}
