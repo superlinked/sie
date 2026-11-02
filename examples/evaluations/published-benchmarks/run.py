@@ -239,12 +239,12 @@ def _check_performance_params(params: Mapping[str, str], operation: str) -> None
 
 
 def _check_timing(rate: float, duration_s: float, warmup_s: float) -> None:
-    if rate <= 0:
-        raise ValueError("--rate must be positive")
-    if duration_s <= 0:
-        raise ValueError("--duration must be positive")
-    if warmup_s < 0:
-        raise ValueError("--warmup cannot be negative")
+    if not math.isfinite(rate) or rate <= 0:
+        raise ValueError("--rate must be a positive finite number")
+    if not math.isfinite(duration_s) or duration_s <= 0:
+        raise ValueError("--duration must be a positive finite number")
+    if not math.isfinite(warmup_s) or warmup_s < 0:
+        raise ValueError("--warmup must be a finite number that is not negative")
 
 
 def _refuse_fixed_flags(args: argparse.Namespace) -> None:

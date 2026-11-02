@@ -410,7 +410,17 @@ class PlanTest(unittest.TestCase):
             plan_performance(parse("--reference", str(escaped)))
 
     def test_timing_values_must_be_sane(self):
-        for flags in (["--rate", "0"], ["--rate", "-1"], ["--duration", "0"], ["--warmup", "-1"]):
+        for flags in (
+            ["--rate", "0"],
+            ["--rate", "-1"],
+            ["--rate", "nan"],
+            ["--rate", "inf"],
+            ["--duration", "0"],
+            ["--duration", "inf"],
+            ["--warmup", "-1"],
+            ["--warmup", "nan"],
+            ["--warmup", "inf"],
+        ):
             with self.subTest(flags=flags), self.assertRaises(ValueError):
                 plan_performance(parse("--reference", str(self.reference), *flags))
 
