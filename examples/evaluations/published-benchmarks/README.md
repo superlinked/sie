@@ -343,11 +343,10 @@ split three warm encode requests of a
 2041-character document into 268 to 284 ms to the first response header, of
 which one network round trip, the TLS handshake, took 163 ms, so the service
 answered in 105 to 121 ms, and 485 to 561 ms of response transfer for the
-document's multivector (323 ms on the cold connection). The p50 delta of 266
-to 286 ms is more than one round trip; the remainder is response transfer,
-which the probe measured only for that one document, whose 754 to 839 ms end
-to end exceed the runs' p95, so its transfer time bounds the median response's
-from above. The p99, one request in 60, moved by 231 ms between consecutive
+document's multivector (323 ms on the cold connection). The probe
+illustrates the transport share of one request; it does not decompose or
+bound the runs' percentiles, since time to the first header and transfer time
+vary from request to request. The p99, one request in 60, moved by 231 ms between consecutive
 runs; the lag p99 of 9.6 to 14.3 ms stayed under the 20 ms tolerance. Read
 `achieved_requests_per_second`, the four success rates and
 `scheduling_lag_p99_ms` first.
@@ -355,8 +354,10 @@ runs; the lag p99 of 9.6 to 14.3 ms stayed under the 20 ms tolerance. Read
 `SIEClient.get_model` exposes a model's `max_sequence_length` (8192 for
 GTE-ModernColBERT-v1, 512 for Splade_PP_en_v2), its weights `revision`, its
 profiles and capabilities, and not the serving truncation or a default
-instruction; the exact quality reproduction above is the evidence that the
-serving configuration matched the record.
+instruction. Those two settings stay unverified here: the agreement of the
+Splade NFCorpus main score and 1 to 20 cuts above is consistent with the
+record's serving configuration for that model, and this directory checks no
+quality metric of GTE-ModernColBERT.
 
 `uv run python score.py validation/<id>-<utc>.json` re-aggregates a committed
 performance result: `run.requests_path` names the `results/` file the run
