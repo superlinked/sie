@@ -132,6 +132,15 @@ def test_workspace_versions_and_lock_serialization_do_not_invalidate_the_closure
     check_lock(*locked, TARGET)
 
 
+def test_another_root_source_row_at_a_locked_version_does_not_invalidate_the_closure(locked):
+    _locks, _bundles, root_lock = locked
+    root_lock.write_text(
+        root_lock.read_text()
+        + '[[package]]\nname = "demo"\nversion = "1.0"\nsource = { registry = "https://download.pytorch.org/whl/cpu" }\n'
+    )
+    check_lock(*locked, TARGET)
+
+
 def test_root_artifact_substitution_at_the_same_version_still_fails(locked):
     _locks, _bundles, root_lock = locked
     root_lock.write_text(root_lock.read_text().replace(HASH, "b" * 64))

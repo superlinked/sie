@@ -137,7 +137,7 @@ def root_versions_digest(root_lock: Path) -> str:
     them against the current root lock through the exception policy.
     """
     return canonical_digest(
-        {name: sorted(row["version"] for row in rows) for name, rows in root_packages(root_lock).items()}
+        {name: sorted({row["version"] for row in rows}) for name, rows in root_packages(root_lock).items()}
     )
 
 
