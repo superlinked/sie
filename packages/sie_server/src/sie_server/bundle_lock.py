@@ -129,6 +129,18 @@ def root_packages(root_lock: Path) -> dict[str, list[dict[str, Any]]]:
     return result
 
 
+def root_versions_digest(root_lock: Path) -> str:
+    """Bind the exact third-party root versions that constrain compilation.
+
+    Workspace members and lock serialization never reach ``bundle-libs``.
+    Root artifact sources are excluded here because every check revalidates
+    them against the current root lock through the exception policy.
+    """
+    return canonical_digest(
+        {name: sorted({row["version"] for row in rows}) for name, rows in root_packages(root_lock).items()}
+    )
+
+
 def root_constraints(root_lock: Path, exceptions: Mapping[str, Mapping[str, str]]) -> list[str]:
     """Pin every root package, except an explicitly recorded exact alternative.
 
@@ -348,7 +360,10 @@ def check_lock(
         msg = "bundle compilation or verification policy changed; recompile and review"
         raise ValueError(msg)
     requirements = bundle_requirements(bundles, target)
-    expected_inputs = {"uv_lock_sha256": digest(root_lock), "requirements_sha256": canonical_digest(requirements)}
+    expected_inputs = {
+        "root_versions_sha256": root_versions_digest(root_lock),
+        "requirements_sha256": canonical_digest(requirements),
+    }
     exceptions = exception_file["targets"].get(target.name, {})
     source_pins = exception_file.get("source_pins", {}).get(target.name, {})
     if manifest.get("inputs") != expected_inputs or manifest.get("exceptions_sha256") != canonical_digest(exceptions):

@@ -32,6 +32,7 @@ from sie_server.bundle_lock import (
     policy_digest,
     read_packages,
     root_constraints,
+    root_versions_digest,
     source_constraints,
     validate_exceptions,
     validate_source_pins,
@@ -195,7 +196,7 @@ def compile_target(root: Path, target: Target, uv: str, cutoff: str, cache: Path
             "indexes": index_arguments(target),
             "completed_artifact_hashes": completed_hashes,
             "inputs": {
-                "uv_lock_sha256": digest(root / "uv.lock"),
+                "root_versions_sha256": root_versions_digest(root / "uv.lock"),
                 "requirements_sha256": canonical_digest(requirements),
             },
             "exceptions_sha256": canonical_digest(exceptions),

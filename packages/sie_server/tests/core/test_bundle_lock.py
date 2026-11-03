@@ -18,6 +18,7 @@ from sie_server.bundle_lock import (
     read_packages,
     required_exceptions,
     root_constraints,
+    root_versions_digest,
     source_constraints,
     validate_exceptions,
     validate_source_pins,
@@ -64,7 +65,10 @@ def locked(tmp_path):
         "uv_version": "0.9.28",
         "policy_sha256": policy_digest(),
         "target": TARGET.as_dict(),
-        "inputs": {"uv_lock_sha256": digest(root_lock), "requirements_sha256": canonical_digest(["demo>=1,<2"])},
+        "inputs": {
+            "root_versions_sha256": root_versions_digest(root_lock),
+            "requirements_sha256": canonical_digest(["demo>=1,<2"]),
+        },
         "lock_sha256": digest(lock),
         "exceptions_sha256": canonical_digest({}),
         "source_pins_sha256": canonical_digest({}),
@@ -90,7 +94,10 @@ def test_stale_inputs_and_wrong_target_fail_before_install(locked, mutation):
     manifest_path = locks / TARGET.name / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     if mutation == "root":
-        root_lock.write_text(root_lock.read_text() + "\n# different root lock\n")
+        root_lock.write_text(
+            root_lock.read_text()
+            + '[[package]]\nname = "other"\nversion = "2.0"\nsource = { registry = "https://pypi.org/simple" }\n'
+        )
     elif mutation == "requirements":
         (bundles / "default.yaml").write_text('deps:\n  demo: ">=1.1,<2"\n')
     elif mutation == "target":
@@ -111,6 +118,33 @@ def test_stale_inputs_and_wrong_target_fail_before_install(locked, mutation):
             json.dumps({"schema_version": 1, "targets": {TARGET.name: {"demo": {"version": "2.0"}}}})
         )
     with pytest.raises(ValueError, match=r"bundle .* (changed|differs)"):
+        check_lock(*locked, TARGET)
+
+
+def test_workspace_versions_and_lock_serialization_do_not_invalidate_the_closure(locked):
+    _locks, _bundles, root_lock = locked
+    root_lock.write_text(
+        root_lock.read_text()
+        .replace("version = 1\n", "version = 1\nrevision = 3\n", 1)
+        .replace(f'hash = "sha256:{HASH}"', f'hash = "sha256:{HASH}", upload-time = "2026-10-01T00:00:00Z"')
+        + '[[package]]\nname = "sie-server"\nversion = "0.11.0"\nsource = { editable = "packages/sie_server" }\n'
+    )
+    check_lock(*locked, TARGET)
+
+
+def test_another_root_source_row_at_a_locked_version_does_not_invalidate_the_closure(locked):
+    _locks, _bundles, root_lock = locked
+    root_lock.write_text(
+        root_lock.read_text()
+        + '[[package]]\nname = "demo"\nversion = "1.0"\nsource = { registry = "https://download.pytorch.org/whl/cpu" }\n'
+    )
+    check_lock(*locked, TARGET)
+
+
+def test_root_artifact_substitution_at_the_same_version_still_fails(locked):
+    _locks, _bundles, root_lock = locked
+    root_lock.write_text(root_lock.read_text().replace(HASH, "b" * 64))
+    with pytest.raises(ValueError, match="bundle exceptions differ"):
         check_lock(*locked, TARGET)
 
 

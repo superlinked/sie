@@ -24,9 +24,13 @@ A saved inventory or CPU import check does not establish GPU namespace
 isolation; a missing cu130 `nvidia` submodule may fall through to the base.
 Live GPU qualification remains separate from lock validation.
 
-Before installing, the verifier binds the lock to the root lock, resolved
-bundle declarations, target, uv version, exact exception manifest, and the
-compiler/verifier/declaration-resolver source hashes. After installation it
+Before installing, the verifier binds the lock to the exact third-party versions
+of the root lock, resolved bundle declarations, target, uv version, exact
+exception manifest, and the compiler/verifier/declaration-resolver source
+hashes. Workspace package versions and lock serialization are not part of that
+binding, so a release version bump does not require recompilation; every check
+still compares each locked artifact with the current root lock through the
+exception policy. After installation it
 checks the actual distribution set, versions, dependency metadata, requested
 extras, and recorded direct-source identities without importing package code.
 Missing, additional, duplicate, incompatible, or substituted distributions fail
