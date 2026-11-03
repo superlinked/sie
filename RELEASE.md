@@ -331,10 +331,11 @@ obsolete backlog. Verify the generated PR's source ancestry after refresh, too:
 the approved run's revision does not freeze release-please's reads of `main`.
 
 An authoring run left waiting for approval holds the release concurrency group,
-so every later push queues behind it. Once 100 runs are pending, GitHub rejects
-each new `Release` run at startup with zero jobs and reports that it likely
-failed because of a workflow file issue. Before debugging the workflow file,
-look for a `Release` run in the `waiting` state and apply the cleanup above.
+so every later push queues behind it. Once 100 runs are pending, the queue is
+full and GitHub does not admit further `Release` runs. Each one appears as a
+failed run with zero jobs, and GitHub reports that it likely failed because of a
+workflow file issue. Before debugging the workflow file, look for a `Release`
+run in the `waiting` state and apply the cleanup above.
 
 ### Artifact publication
 
