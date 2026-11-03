@@ -102,7 +102,8 @@ the example applies them to every run:
   scored at k in 1, 3, 5, 10, 20, 100 and 1000 with pytrec_eval's `ndcg_cut`,
   `map_cut`, `recall` and `P`, rounded to five decimals; the published method
   leaves the order of equal scores at rank 1000 unspecified, so an `_at_1000`
-  value can differ in the fifth decimal when scores tie there;
+  value can differ when scores tie there (by about 0.001 in `recall_at_1000`
+  and 0.0002 in `ndcg_at_1000` in the validation below);
 - one attempt per request, `wait_for_capacity=False`, `max_oom_retries=0`,
   and the reference's request timeout (300 s; 600 s for the bge-m3 multivector
   record). After every call the SDK's retry count is read and recorded; any
@@ -254,6 +255,114 @@ invocation, the record's first level unless `--rate` is given, and
 with the decimal point written as a hyphen. A change of execution revision
 mid-run sets `comparable: false` and `valid: false`.
 
+## Validation
+
+`validation/` holds the example's own output from 2026-11-03: three
+consecutive runs of the Splade NFCorpus quality reference and three of the
+GTE-ModernColBERT SciFact performance reference at `fixed-1-rps`, made from
+one client outside the endpoint's region, as the result records the runs
+wrote plus the performance runs' `requests.jsonl`. They are observed values,
+not evidence of record, and no value in the tables below is a pass threshold
+or quality floor. The delta range is the smallest to the largest `delta` the
+three result files carry (observed minus published); the spread is the
+largest minus the smallest of the three observed values, computed before
+rounding. Quality keeps the tool's five decimals; milliseconds and rates are
+rounded to three here.
+
+### `prod-web-fw-20260905-splade-nfcorpus-quality-02`
+
+Each run was `comparable: true` and `valid: true`, 32 requests, one execution
+revision. The table lists `main_score`, `accuracy` and the 1, 10, 100 and
+1000 cuts of the five families; the 15 cuts left out, `_at_3`, `_at_5` and
+`_at_20` of each family, behave like their neighbours: zero delta and zero
+spread for ndcg, map, recall and precision, the same -0.00052 in the third
+run for mrr.
+
+| Metric | Published | Run 1 | Run 2 | Run 3 | Delta range | Spread |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `main_score` | 0.33056 | 0.33056 | 0.33056 | 0.33056 | 0.00000 | 0.00000 |
+| `accuracy` | 0.05531 | 0.05531 | 0.05531 | 0.05531 | 0.00000 | 0.00000 |
+| `ndcg_at_1` | 0.45046 | 0.45046 | 0.45046 | 0.45046 | 0.00000 | 0.00000 |
+| `ndcg_at_10` | 0.33056 | 0.33056 | 0.33056 | 0.33056 | 0.00000 | 0.00000 |
+| `ndcg_at_100` | 0.29223 | 0.29208 | 0.29223 | 0.29223 | -0.00015 to 0.00000 | 0.00015 |
+| `ndcg_at_1000` | 0.37716 | 0.37697 | 0.37698 | 0.37698 | -0.00019 to -0.00018 | 0.00001 |
+| `map_at_1` | 0.05531 | 0.05531 | 0.05531 | 0.05531 | 0.00000 | 0.00000 |
+| `map_at_10` | 0.12606 | 0.12606 | 0.12606 | 0.12606 | 0.00000 | 0.00000 |
+| `map_at_100` | 0.15290 | 0.15289 | 0.15290 | 0.15290 | -0.00001 to 0.00000 | 0.00001 |
+| `map_at_1000` | 0.16569 | 0.16569 | 0.16569 | 0.16568 | -0.00001 to 0.00000 | 0.00001 |
+| `recall_at_1` | 0.05531 | 0.05531 | 0.05531 | 0.05531 | 0.00000 | 0.00000 |
+| `recall_at_10` | 0.15743 | 0.15743 | 0.15743 | 0.15743 | 0.00000 | 0.00000 |
+| `recall_at_100` | 0.27037 | 0.26975 | 0.27037 | 0.27037 | -0.00062 to 0.00000 | 0.00062 |
+| `recall_at_1000` | 0.58995 | 0.58880 | 0.58883 | 0.58883 | -0.00115 to -0.00112 | 0.00003 |
+| `precision_at_1` | 0.46749 | 0.46749 | 0.46749 | 0.46749 | 0.00000 | 0.00000 |
+| `precision_at_10` | 0.23994 | 0.23994 | 0.23994 | 0.23994 | 0.00000 | 0.00000 |
+| `precision_at_100` | 0.07437 | 0.07433 | 0.07437 | 0.07437 | -0.00004 to 0.00000 | 0.00004 |
+| `precision_at_1000` | 0.01957 | 0.01956 | 0.01956 | 0.01956 | -0.00001 | 0.00000 |
+| `mrr_at_1` | 0.47368 | 0.47368 | 0.47368 | 0.47368 | 0.00000 | 0.00000 |
+| `mrr_at_10` | 0.54839 | 0.54839 | 0.54839 | 0.54788 | -0.00052 to 0.00000 | 0.00052 |
+| `mrr_at_100` | 0.55378 | 0.55378 | 0.55378 | 0.55326 | -0.00052 to 0.00000 | 0.00052 |
+| `mrr_at_1000` | 0.55433 | 0.55433 | 0.55433 | 0.55381 | -0.00052 to 0.00000 | 0.00052 |
+
+The main score and every ndcg, map, recall and precision cut at 1 to 20 equal
+the published value in all three runs. The sparse weights the service returns
+differ slightly from run to run: three quarters to four fifths of the document
+scores are identical between runs and the rest differ by about 0.001, at most
+0.03, on scores that run from 0 to about 31 (each query's top score lies
+between 3 and 31), so neighbours up to about 0.02 apart swap places; that
+moves the 100 and 1000 cuts and `mrr_at_3` to `mrr_at_1000` by up to 0.00062
+between runs. `ndcg_at_1000` and `recall_at_1000` sit about 0.0002 and 0.0011
+below the published value in every run, at the cut where the order of equal
+scores is unspecified.
+
+### `prod-web-fw-20260905-gte-moderncolbert-scifact-perf-v2-r1`, `fixed-1-rps`
+
+Each run was `valid: true`: 60 requests, no failure, timeout or SDK retry, an
+in-flight peak of 1 or 2, one execution revision, and `comparable: false` for
+`client processes 1 != 4`, as for every performance run of this tool.
+
+| Metric | Published | Run 1 | Run 2 | Run 3 | Delta range | Spread |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `offered_requests_per_second` | 1.000 | 1.000 | 1.000 | 1.000 | 0.000 | 0.000 |
+| `achieved_requests_per_second` | 1.000 | 1.000 | 1.000 | 1.000 | 0.000 | 0.000 |
+| `eventual_achieved_requests_per_second` | 1.000 | 1.000 | 1.000 | 1.000 | 0.000 | 0.000 |
+| `in_window_success_rate` | 1.000 | 1.000 | 1.000 | 1.000 | 0.000 | 0.000 |
+| `in_window_retry_free_success_rate` | 1.000 | 1.000 | 1.000 | 1.000 | 0.000 | 0.000 |
+| `success_rate` | 1.000 | 1.000 | 1.000 | 1.000 | 0.000 | 0.000 |
+| `retry_free_success_rate` | 1.000 | 1.000 | 1.000 | 1.000 | 0.000 | 0.000 |
+| `scheduling_lag_p99_ms` | 5.886 | 10.294 | 9.626 | 14.316 | 3.740 to 8.430 | 4.690 |
+| `latency_p50_ms` | 178.819 | 444.978 | 460.266 | 464.829 | 266.159 to 286.010 | 19.850 |
+| `latency_p95_ms` | 198.758 | 642.293 | 654.308 | 637.308 | 438.550 to 455.550 | 17.000 |
+| `latency_p99_ms` | 285.029 | 948.867 | 1121.944 | 890.516 | 605.487 to 836.915 | 231.428 |
+
+The rate and success metrics equal the published values in every run; the
+latency deltas are a property of the client's location, as noted above. A
+probe from the same machine split three warm encode requests of a
+2041-character document into 268 to 284 ms to the first response header, of
+which one network round trip, the TLS handshake, took 163 ms, so the service
+answered in 105 to 121 ms, and 485 to 561 ms of response transfer for the
+document's multivector (323 ms on the cold connection). The p50 delta of 266
+to 286 ms is more than one round trip; the remainder is response transfer,
+which the probe measured only for that one document, whose 754 to 839 ms end
+to end exceed the runs' p95, so its transfer time bounds the median response's
+from above. The p99, one request in 60, moved by 231 ms between consecutive
+runs; the lag p99 of 9.6 to 14.3 ms stayed under the 20 ms tolerance. Read
+`achieved_requests_per_second`, the four success rates and
+`scheduling_lag_p99_ms` first.
+
+`SIEClient.get_model` exposes a model's `max_sequence_length` (8192 for
+GTE-ModernColBERT-v1, 512 for Splade_PP_en_v2), its weights `revision`, its
+profiles and capabilities, and not the serving truncation or a default
+instruction; the exact quality reproduction above is the evidence that the
+serving configuration matched the record.
+
+`uv run python score.py validation/<id>-<utc>.json` re-aggregates a committed
+performance result: `run.requests_path` names the `results/` file the run
+wrote, and when that path does not exist `score.py` takes the file of the
+same name beside the result. The quality results cannot be re-derived from
+this directory: their predictions files, about 9.5 MB each, are not
+committed, and `score.py` names the missing one; only repeating the quality
+run re-derives them.
+
 ## Verify
 
 ```sh
@@ -262,8 +371,8 @@ uv run --frozen ruff check .
 uv run --frozen ruff format --check .
 ```
 
-The tests use a fake client and in-memory datasets; they need no key and no
-network.
+The tests use a fake client, in-memory datasets and the committed
+`validation/` files; they need no key and no network.
 
 ## Not in this example
 

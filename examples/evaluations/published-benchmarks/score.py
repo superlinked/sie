@@ -255,7 +255,14 @@ def _sibling(result_path: Path, record: Mapping[str, Any], key: str, label: str)
     name = record["run"][key]
     if name is None:
         raise ValueError(f"{result_path} has no {label} file; its run did not complete")
-    return result_path.parent / Path(name).name
+    recorded = Path(name)
+    for candidate in (recorded, result_path.parent / recorded.name):
+        if candidate.is_file():
+            return candidate
+    message = f"{result_path} names the {label} file {recorded.name}, found neither at {recorded} nor beside the result"
+    if key == "predictions_path":
+        message += "; the quality run has to be repeated to re-derive its metrics"
+    raise ValueError(message)
 
 
 def _quality_rows(result_path: Path, record: Mapping[str, Any]) -> Rows:
