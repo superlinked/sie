@@ -249,7 +249,7 @@ records and here; `run.request_count` shows it. The records' client ran in
 the same cloud region as the endpoint; from anywhere else the latencies
 include the network path and the response size (a multivector response is
 hundreds of kilobytes), so read the rate and success metrics first and the
-latency deltas as a property of where the run was made. One level runs per
+latency deltas in the light of where the run was made. One level runs per
 invocation, the record's first level unless `--rate` is given, and
 `load_level_name` is derived from the effective rate as `fixed-<rate>-rps`
 with the decimal point written as a hyphen. A change of execution revision
@@ -334,9 +334,12 @@ in-flight peak of 1 or 2, one execution revision, and `comparable: false` for
 | `latency_p95_ms` | 198.758 | 642.293 | 654.308 | 637.308 | 438.550 to 455.550 | 17.000 |
 | `latency_p99_ms` | 285.029 | 948.867 | 1121.944 | 890.516 | 605.487 to 836.915 | 231.428 |
 
-The rate and success metrics equal the published values in every run; the
-latency deltas are a property of the client's location, as noted above. A
-probe from the same machine split three warm encode requests of a
+The rate and success metrics equal the published values in every run. The
+latency deltas are consistent with the client's location: one process instead
+of four does not change a request's own latency at this rate (the in-flight
+peak was 1 or 2), and the probe below measures the network share for one
+document, not for the 60-request runs. The probe, from the same machine,
+split three warm encode requests of a
 2041-character document into 268 to 284 ms to the first response header, of
 which one network round trip, the TLS handshake, took 163 ms, so the service
 answered in 105 to 121 ms, and 485 to 561 ms of response transfer for the
