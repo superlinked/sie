@@ -1,0 +1,148 @@
+{
+  "accepted_at": "2026-09-05T05:18:08.949342Z",
+  "client": {
+    "processes_per_worker": 2,
+    "worker_count": 1
+  },
+  "dataset": {
+    "name": "mteb/AskUbuntuDupQuestions",
+    "parameters": [
+      {
+        "name": "limit",
+        "value": 64
+      },
+      {
+        "name": "candidate_count",
+        "value": 20
+      }
+    ],
+    "revision": "c5691e3c48741d5f83b5cc8e630653d7a8cfc048",
+    "subset": "test"
+  },
+  "evaluation_mode": "isolated_performance",
+  "kind": "published-benchmark-reference",
+  "load_level_name": "fixed-0-25-rps",
+  "measurement_started_at": "2026-09-05T04:24:10.417651Z",
+  "metrics": [
+    {
+      "aggregation": "campaign_global",
+      "name": "offered_requests_per_second",
+      "unit": "requests_per_second",
+      "value": 0.25
+    },
+    {
+      "aggregation": "common_window",
+      "name": "achieved_requests_per_second",
+      "unit": "requests_per_second",
+      "value": 0.25
+    },
+    {
+      "aggregation": "including_drain",
+      "name": "eventual_achieved_requests_per_second",
+      "unit": "requests_per_second",
+      "value": 0.25
+    },
+    {
+      "aggregation": "campaign_global",
+      "name": "in_window_success_rate",
+      "unit": "ratio",
+      "value": 1.0
+    },
+    {
+      "aggregation": "campaign_global",
+      "name": "in_window_retry_free_success_rate",
+      "unit": "ratio",
+      "value": 1.0
+    },
+    {
+      "aggregation": "campaign_global",
+      "name": "success_rate",
+      "unit": "ratio",
+      "value": 1.0
+    },
+    {
+      "aggregation": "campaign_global",
+      "name": "retry_free_success_rate",
+      "unit": "ratio",
+      "value": 1.0
+    },
+    {
+      "aggregation": "p99",
+      "name": "scheduling_lag_p99_ms",
+      "unit": "milliseconds",
+      "value": 9.841000000000001
+    },
+    {
+      "aggregation": "p50",
+      "name": "latency_p50_ms",
+      "unit": "milliseconds",
+      "value": 489.513
+    },
+    {
+      "aggregation": "p95",
+      "name": "latency_p95_ms",
+      "unit": "milliseconds",
+      "value": 579.444
+    },
+    {
+      "aggregation": "p99",
+      "name": "latency_p99_ms",
+      "unit": "milliseconds",
+      "value": 579.444
+    }
+  ],
+  "model": "Qwen/Qwen3-Reranker-4B",
+  "model_version": "22e683669bc0f0bd69640a1354a6d0aebcfeede5",
+  "operation": "score",
+  "payload": {
+    "items_per_request": 20,
+    "output_contract": "scores",
+    "parameters": [
+      {
+        "name": "max_tokens_per_doc",
+        "value": 1000
+      }
+    ]
+  },
+  "profile": "default",
+  "reference_id": "prod-web-fw-20260905-qwen3-reranker-4b-askubuntu-perf-11",
+  "schedule": {
+    "arrival": "deterministic",
+    "levels": [
+      {
+        "duration_s": 60.0,
+        "name": "fixed-0-25-rps",
+        "rate": 0.25
+      },
+      {
+        "duration_s": 60.0,
+        "name": "fixed-0-5-rps",
+        "rate": 0.5
+      },
+      {
+        "duration_s": 60.0,
+        "name": "fixed-1-rps",
+        "rate": 1.0
+      }
+    ],
+    "seed": 0,
+    "unit": "requests_per_second"
+  },
+  "schema_version": 1,
+  "scorer": null,
+  "task_key": "mteb/AskUbuntuDupQuestions?split=test&limit=64&candidates-k=20",
+  "timing": {
+    "drain_s": 10.0,
+    "max_in_flight_per_process": 128,
+    "request_timeout_s": 300.0,
+    "retry": {
+      "backoff": "none",
+      "max_attempts": 1,
+      "record_attempts": true
+    },
+    "scheduling_lag_tolerance_ms": 20.0,
+    "settle_s": 10.0,
+    "target_readiness_timeout_s": 300.0,
+    "warmup_s": 30.0
+  }
+}
