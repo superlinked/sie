@@ -346,8 +346,9 @@ answered in 105 to 121 ms, and 485 to 561 ms of response transfer for the
 document's multivector (323 ms on the cold connection). The probe
 illustrates the transport share of one request; it does not decompose or
 bound the runs' percentiles, since time to the first header and transfer time
-vary from request to request. The p99, one request in 60, moved by 231 ms between consecutive
-runs; the lag p99 of 9.6 to 14.3 ms stayed under the 20 ms tolerance. Read
+vary from request to request. The p99, one request in 60, moved by 231 ms
+between consecutive runs; the lag p99 of 9.6 to 14.3 ms stayed under the
+20 ms tolerance. Read
 `achieved_requests_per_second`, the four success rates and
 `scheduling_lag_p99_ms` first.
 
