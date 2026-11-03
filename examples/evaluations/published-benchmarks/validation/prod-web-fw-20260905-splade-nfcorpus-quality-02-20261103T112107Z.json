@@ -1,0 +1,539 @@
+{
+  "kind": "published-benchmark-reproduction",
+  "schema_version": 1,
+  "reference_id": "prod-web-fw-20260905-splade-nfcorpus-quality-02",
+  "comparable": true,
+  "comparable_reasons": [],
+  "evaluation_mode": "quality",
+  "model": "prithivida/Splade_PP_en_v2",
+  "profile": "default",
+  "operation": "encode",
+  "model_version": "f0d4aa214dcb60c274052a52c0497535e3aec64c",
+  "execution_revisions": [
+    "f135961b4fb5c71b2d6e61c11ebeded116439483bd2e5b951c598061d2fb2a9b"
+  ],
+  "ingress": {
+    "url": "https://api.superlinked.com"
+  },
+  "task_key": "mteb/NFCorpus",
+  "dataset": {
+    "name": "mteb/NFCorpus",
+    "revision": "ec0fa4fe99da2ff19ca1214b7966684033a58814",
+    "subset": "test",
+    "parameters": []
+  },
+  "payload": {
+    "items_per_request": 128,
+    "output_contract": "sparse",
+    "parameters": []
+  },
+  "client": {
+    "description": "single process, macOS-26.5.2-arm64-arm-64bit, python 3.12.12, sie-sdk 0.10.1",
+    "worker_count": 1,
+    "processes_per_worker": 1
+  },
+  "scorer": {
+    "id": "pytrec-eval",
+    "version": "0.5.11",
+    "reference_scorer_matched": false
+  },
+  "run": {
+    "started_at": "2026-11-03T11:21:07Z",
+    "finished_at": "2026-11-03T11:21:27Z",
+    "endpoint": "https://api.superlinked.com",
+    "request_count": 32,
+    "failure_count": 0,
+    "predictions_path": "results/prod-web-fw-20260905-splade-nfcorpus-quality-02-20261103T112107Z.predictions.json"
+  },
+  "validity": {
+    "valid": true,
+    "reasons": [],
+    "sdk_retries": 0
+  },
+  "metrics": [
+    {
+      "name": "accuracy",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.05531
+    },
+    {
+      "name": "main_score",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.33056
+    },
+    {
+      "name": "map_at_1",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.05531
+    },
+    {
+      "name": "map_at_10",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.12606
+    },
+    {
+      "name": "map_at_100",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.1529
+    },
+    {
+      "name": "map_at_1000",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.16569
+    },
+    {
+      "name": "map_at_20",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.13684
+    },
+    {
+      "name": "map_at_3",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.09721
+    },
+    {
+      "name": "map_at_5",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.10953
+    },
+    {
+      "name": "mrr_at_1",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.47368421052631576
+    },
+    {
+      "name": "mrr_at_10",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.5483942699886972
+    },
+    {
+      "name": "mrr_at_100",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.5537805869957548
+    },
+    {
+      "name": "mrr_at_1000",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.5543302200264721
+    },
+    {
+      "name": "mrr_at_20",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.5512631966291782
+    },
+    {
+      "name": "mrr_at_3",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.5366357069143447
+    },
+    {
+      "name": "mrr_at_5",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.5423632610939113
+    },
+    {
+      "name": "ndcg_at_1",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.45046
+    },
+    {
+      "name": "ndcg_at_10",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.33056
+    },
+    {
+      "name": "ndcg_at_100",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.29223
+    },
+    {
+      "name": "ndcg_at_1000",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.37698
+    },
+    {
+      "name": "ndcg_at_20",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.3028
+    },
+    {
+      "name": "ndcg_at_3",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.39316
+    },
+    {
+      "name": "ndcg_at_5",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.36503
+    },
+    {
+      "name": "precision_at_1",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.46749
+    },
+    {
+      "name": "precision_at_10",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.23994
+    },
+    {
+      "name": "precision_at_100",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.07437
+    },
+    {
+      "name": "precision_at_1000",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.01956
+    },
+    {
+      "name": "precision_at_20",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.17183
+    },
+    {
+      "name": "precision_at_3",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.36739
+    },
+    {
+      "name": "precision_at_5",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.31146
+    },
+    {
+      "name": "recall_at_1",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.05531
+    },
+    {
+      "name": "recall_at_10",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.15743
+    },
+    {
+      "name": "recall_at_100",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.27037
+    },
+    {
+      "name": "recall_at_1000",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.58883
+    },
+    {
+      "name": "recall_at_20",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.1837
+    },
+    {
+      "name": "recall_at_3",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.10967
+    },
+    {
+      "name": "recall_at_5",
+      "unit": "ratio",
+      "aggregation": "task_native",
+      "value": 0.12688
+    }
+  ],
+  "comparison": [
+    {
+      "name": "accuracy",
+      "aggregation": "task_native",
+      "reference_value": 0.05531,
+      "value": 0.05531,
+      "delta": 0.0
+    },
+    {
+      "name": "main_score",
+      "aggregation": "task_native",
+      "reference_value": 0.33056,
+      "value": 0.33056,
+      "delta": 0.0
+    },
+    {
+      "name": "map_at_1",
+      "aggregation": "task_native",
+      "reference_value": 0.05531,
+      "value": 0.05531,
+      "delta": 0.0
+    },
+    {
+      "name": "map_at_10",
+      "aggregation": "task_native",
+      "reference_value": 0.12606,
+      "value": 0.12606,
+      "delta": 0.0
+    },
+    {
+      "name": "map_at_100",
+      "aggregation": "task_native",
+      "reference_value": 0.1529,
+      "value": 0.1529,
+      "delta": 0.0
+    },
+    {
+      "name": "map_at_1000",
+      "aggregation": "task_native",
+      "reference_value": 0.16569,
+      "value": 0.16569,
+      "delta": 0.0
+    },
+    {
+      "name": "map_at_20",
+      "aggregation": "task_native",
+      "reference_value": 0.13684,
+      "value": 0.13684,
+      "delta": 0.0
+    },
+    {
+      "name": "map_at_3",
+      "aggregation": "task_native",
+      "reference_value": 0.09721,
+      "value": 0.09721,
+      "delta": 0.0
+    },
+    {
+      "name": "map_at_5",
+      "aggregation": "task_native",
+      "reference_value": 0.10953,
+      "value": 0.10953,
+      "delta": 0.0
+    },
+    {
+      "name": "mrr_at_1",
+      "aggregation": "task_native",
+      "reference_value": 0.47368421052631576,
+      "value": 0.47368421052631576,
+      "delta": 0.0
+    },
+    {
+      "name": "mrr_at_10",
+      "aggregation": "task_native",
+      "reference_value": 0.5483942699886972,
+      "value": 0.5483942699886972,
+      "delta": 0.0
+    },
+    {
+      "name": "mrr_at_100",
+      "aggregation": "task_native",
+      "reference_value": 0.5537805869957548,
+      "value": 0.5537805869957548,
+      "delta": 0.0
+    },
+    {
+      "name": "mrr_at_1000",
+      "aggregation": "task_native",
+      "reference_value": 0.5543300091712396,
+      "value": 0.5543302200264721,
+      "delta": 0.0
+    },
+    {
+      "name": "mrr_at_20",
+      "aggregation": "task_native",
+      "reference_value": 0.5512631966291782,
+      "value": 0.5512631966291782,
+      "delta": 0.0
+    },
+    {
+      "name": "mrr_at_3",
+      "aggregation": "task_native",
+      "reference_value": 0.5366357069143447,
+      "value": 0.5366357069143447,
+      "delta": 0.0
+    },
+    {
+      "name": "mrr_at_5",
+      "aggregation": "task_native",
+      "reference_value": 0.5423632610939113,
+      "value": 0.5423632610939113,
+      "delta": 0.0
+    },
+    {
+      "name": "ndcg_at_1",
+      "aggregation": "task_native",
+      "reference_value": 0.45046,
+      "value": 0.45046,
+      "delta": 0.0
+    },
+    {
+      "name": "ndcg_at_10",
+      "aggregation": "task_native",
+      "reference_value": 0.33056,
+      "value": 0.33056,
+      "delta": 0.0
+    },
+    {
+      "name": "ndcg_at_100",
+      "aggregation": "task_native",
+      "reference_value": 0.29223,
+      "value": 0.29223,
+      "delta": 0.0
+    },
+    {
+      "name": "ndcg_at_1000",
+      "aggregation": "task_native",
+      "reference_value": 0.37716,
+      "value": 0.37698,
+      "delta": -0.00018
+    },
+    {
+      "name": "ndcg_at_20",
+      "aggregation": "task_native",
+      "reference_value": 0.3028,
+      "value": 0.3028,
+      "delta": 0.0
+    },
+    {
+      "name": "ndcg_at_3",
+      "aggregation": "task_native",
+      "reference_value": 0.39316,
+      "value": 0.39316,
+      "delta": 0.0
+    },
+    {
+      "name": "ndcg_at_5",
+      "aggregation": "task_native",
+      "reference_value": 0.36503,
+      "value": 0.36503,
+      "delta": 0.0
+    },
+    {
+      "name": "precision_at_1",
+      "aggregation": "task_native",
+      "reference_value": 0.46749,
+      "value": 0.46749,
+      "delta": 0.0
+    },
+    {
+      "name": "precision_at_10",
+      "aggregation": "task_native",
+      "reference_value": 0.23994,
+      "value": 0.23994,
+      "delta": 0.0
+    },
+    {
+      "name": "precision_at_100",
+      "aggregation": "task_native",
+      "reference_value": 0.07437,
+      "value": 0.07437,
+      "delta": 0.0
+    },
+    {
+      "name": "precision_at_1000",
+      "aggregation": "task_native",
+      "reference_value": 0.01957,
+      "value": 0.01956,
+      "delta": -1e-05
+    },
+    {
+      "name": "precision_at_20",
+      "aggregation": "task_native",
+      "reference_value": 0.17183,
+      "value": 0.17183,
+      "delta": 0.0
+    },
+    {
+      "name": "precision_at_3",
+      "aggregation": "task_native",
+      "reference_value": 0.36739,
+      "value": 0.36739,
+      "delta": 0.0
+    },
+    {
+      "name": "precision_at_5",
+      "aggregation": "task_native",
+      "reference_value": 0.31146,
+      "value": 0.31146,
+      "delta": 0.0
+    },
+    {
+      "name": "recall_at_1",
+      "aggregation": "task_native",
+      "reference_value": 0.05531,
+      "value": 0.05531,
+      "delta": 0.0
+    },
+    {
+      "name": "recall_at_10",
+      "aggregation": "task_native",
+      "reference_value": 0.15743,
+      "value": 0.15743,
+      "delta": 0.0
+    },
+    {
+      "name": "recall_at_100",
+      "aggregation": "task_native",
+      "reference_value": 0.27037,
+      "value": 0.27037,
+      "delta": 0.0
+    },
+    {
+      "name": "recall_at_1000",
+      "aggregation": "task_native",
+      "reference_value": 0.58995,
+      "value": 0.58883,
+      "delta": -0.00112
+    },
+    {
+      "name": "recall_at_20",
+      "aggregation": "task_native",
+      "reference_value": 0.1837,
+      "value": 0.1837,
+      "delta": 0.0
+    },
+    {
+      "name": "recall_at_3",
+      "aggregation": "task_native",
+      "reference_value": 0.10967,
+      "value": 0.10967,
+      "delta": 0.0
+    },
+    {
+      "name": "recall_at_5",
+      "aggregation": "task_native",
+      "reference_value": 0.12688,
+      "value": 0.12688,
+      "delta": 0.0
+    }
+  ],
+  "comparison_basis": "same parameters"
+}
