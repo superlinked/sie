@@ -7,6 +7,7 @@ import math
 import os
 import platform
 import re
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -16,6 +17,7 @@ from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import numpy as np
@@ -166,6 +168,7 @@ class CallLog:
     sdk_retries: int = 0
     execution_revisions: list[str] = field(default_factory=list)
     failure: str | None = None
+    readiness_failure: str | None = None
 
     def record(self, client: Any) -> None:
         self.request_count += 1
@@ -210,8 +213,64 @@ def plan_quality(args: argparse.Namespace) -> QualityPlan:
     return _plan_from_flags(args)
 
 
+def _endpoint_key(url: str) -> tuple[str, str | None, int, str]:
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    try:
+        port = parts.port
+    except ValueError:
+        raise ValueError("endpoint must be an http(s) URL") from None
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    elif port == 0:
+        raise ValueError("endpoint must be an http(s) URL")
+    return scheme, parts.hostname, port, parts.path.rstrip("/")
+
+
+def normalize_endpoint(url: str) -> str:
+    scheme, hostname, port, path = _endpoint_key(url)
+    if scheme not in {"http", "https"} or hostname is None:
+        raise ValueError("endpoint must be an http(s) URL")
+    default_port = 443 if scheme == "https" else 80
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    suffix = "" if port == default_port else f":{port}"
+    return f"{scheme}://{host}{suffix}{path}"
+
+
+def _key_scope() -> tuple[str, str]:
+    key = os.environ.get("SIE_API_KEY", "").strip()
+    scope = os.environ.get("SIE_BASE_URL", "").strip() or DEFAULT_ENDPOINT
+    return key, scope
+
+
+def api_key_for(endpoint: str) -> str:
+    """Return SIE_API_KEY only for the origin it is scoped to, as the SDK does; the path plays no part."""
+    key, scope = _key_scope()
+    try:
+        scope = normalize_endpoint(scope)
+    except ValueError:
+        return ""
+    return key if key and _endpoint_key(scope)[:3] == _endpoint_key(endpoint)[:3] else ""
+
+
+def _resolve_api_key(parser: argparse.ArgumentParser, endpoint: str) -> str:
+    api_key = api_key_for(endpoint)
+    if not api_key and endpoint == DEFAULT_ENDPOINT:
+        parser.error(f"SIE_API_KEY must be set in the environment for {DEFAULT_ENDPOINT}")
+    key, scope = _key_scope()
+    if key and not api_key:
+        print(
+            f"note: SIE_API_KEY is scoped to {scope} and was not sent to {endpoint}; "
+            "set SIE_BASE_URL to the endpoint to send it",
+            file=sys.stderr,
+        )
+    return api_key
+
+
 def _endpoint_reasons(endpoint: str) -> list[str]:
-    return [] if endpoint == DEFAULT_ENDPOINT else [f"endpoint {endpoint} != {DEFAULT_ENDPOINT}"]
+    if _endpoint_key(endpoint) == _endpoint_key(DEFAULT_ENDPOINT):
+        return []
+    return [f"endpoint {endpoint} != {DEFAULT_ENDPOINT}"]
 
 
 def _check_limit(params: Mapping[str, str]) -> None:
@@ -315,7 +374,7 @@ def _plan_from_reference(args: argparse.Namespace, reference: Mapping[str, Any])
         output_contract=reference["payload"]["output_contract"],
         items_per_request=reference["payload"]["items_per_request"],
         request_timeout_s=float(reference["timing"]["request_timeout_s"]),
-        endpoint=args.endpoint,
+        endpoint=normalize_endpoint(args.endpoint),
         model_version=reference["model_version"],
         comparable_reasons=reasons,
     )
@@ -346,7 +405,7 @@ def _plan_from_flags(args: argparse.Namespace) -> QualityPlan:
         output_contract=args.output if operation == "encode" else "scores",
         items_per_request=args.items_per_request,
         request_timeout_s=DEFAULT_TIMEOUT_S,
-        endpoint=args.endpoint,
+        endpoint=normalize_endpoint(args.endpoint),
         model_version=None,
         comparable_reasons=reasons,
     )
@@ -402,7 +461,7 @@ def _performance_plan_from_reference(args: argparse.Namespace, reference: Mappin
         ),
         max_in_flight=int(timing["max_in_flight_per_process"]),
         lag_tolerance_ms=float(timing["scheduling_lag_tolerance_ms"]),
-        endpoint=args.endpoint,
+        endpoint=normalize_endpoint(args.endpoint),
         model_version=reference["model_version"],
         comparable_reasons=reasons,
     )
@@ -443,7 +502,7 @@ def _performance_plan_from_flags(args: argparse.Namespace) -> PerformancePlan:
         target_readiness_timeout_s=DEFAULT_READINESS_TIMEOUT_S,
         max_in_flight=max_in_flight,
         lag_tolerance_ms=DEFAULT_LAG_TOLERANCE_MS,
-        endpoint=args.endpoint,
+        endpoint=normalize_endpoint(args.endpoint),
         model_version=None,
         comparable_reasons=["no reference", *_endpoint_reasons(args.endpoint)],
     )
@@ -651,6 +710,33 @@ def warmup(client: Any, plan: PerformancePlan, data: PerformanceData) -> None:
             performance_call(client, plan, payload, wait_for_capacity=False, provision_timeout_s=plan.request_timeout_s)
 
 
+def quality_readiness_request(client: Any, plan: QualityPlan, data: QualityData) -> None:
+    if plan.operation == "score":
+        query_id, text = next(iter(data.queries.items()))
+        items = [
+            {"id": doc_id, "text": document_text(data.corpus[doc_id])} for doc_id in (data.top_ranked or {})[query_id]
+        ]
+        client.score(
+            plan.route,
+            {"text": text},
+            items,
+            wait_for_capacity=True,
+            provision_timeout_s=DEFAULT_READINESS_TIMEOUT_S,
+            max_oom_retries=0,
+        )
+        return
+    document_ids = list(data.corpus)[: plan.items_per_request]
+    client.encode(
+        plan.route,
+        [{"id": doc_id, "text": document_text(data.corpus[doc_id])} for doc_id in document_ids],
+        output_types=[plan.output_contract],
+        is_query=False,
+        wait_for_capacity=True,
+        provision_timeout_s=DEFAULT_READINESS_TIMEOUT_S,
+        max_oom_retries=0,
+    )
+
+
 def _call(log: CallLog, client: Any, method: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     try:
         result = method(*args, **kwargs)
@@ -836,7 +922,11 @@ def build_record(
     if len(log.execution_revisions) > 1:
         reasons.append("execution revision changed")
     comparable = not reasons
-    validity_reasons = [f"sdk retries {log.sdk_retries}"] if log.sdk_retries else []
+    validity_reasons: list[str] = []
+    if log.readiness_failure is not None:
+        validity_reasons.append(f"readiness request failed: {log.readiness_failure}")
+    if log.sdk_retries:
+        validity_reasons.append(f"sdk retries {log.sdk_retries}")
     if log.failure is not None:
         validity_reasons.append(f"request failed: {log.failure}")
     candidate_counts = [len(candidates) for candidates in (data.top_ranked or {}).values()]
@@ -991,11 +1081,18 @@ def run_quality(
     log = CallLog()
     predictions: PredictionMap | None = None
     try:
-        if plan.operation == "score":
-            predictions = rerank_predictions(client, plan, data, log)
-        else:
-            predictions = encode_predictions(client, plan, data, log)
-    except RequestFailed:
+        try:
+            quality_readiness_request(client, plan, data)
+        except Exception as exc:  # noqa: BLE001
+            log.readiness_failure = f"{type(exc).__name__}: {exc}"
+        if log.readiness_failure is None:
+            if plan.operation == "score":
+                predictions = rerank_predictions(client, plan, data, log)
+            else:
+                predictions = encode_predictions(client, plan, data, log)
+    except (RequestFailed, ValueError, KeyError, TypeError) as exc:
+        if not isinstance(exc, RequestFailed):
+            log.failure = f"{type(exc).__name__}: {exc}"
         predictions = None
     finished = clock()
     stem = f"{plan.reference_id or _slug(plan.route, plan.task_key)}-{started.strftime('%Y%m%dT%H%M%SZ')}"
@@ -1046,32 +1143,39 @@ def run_performance(
     return record, result_path
 
 
+def report_invalid(record: Mapping[str, Any]) -> None:
+    if not record["validity"]["valid"]:
+        for reason in record["validity"]["reasons"]:
+            print(f"invalid: {reason}", file=sys.stderr)
+
+
 def quality_command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     try:
         plan = plan_quality(args)
-    except (ValueError, KeyError, OSError) as exc:
+    except KeyError as exc:
+        parser.error(f"reference {args.reference} is missing key {exc}")
+    except (ValueError, OSError) as exc:
         parser.error(str(exc))
-    api_key = os.environ.get("SIE_API_KEY")
-    if not api_key:
-        parser.error("SIE_API_KEY must be set in the environment")
+    api_key = _resolve_api_key(parser, plan.endpoint)
     data = load_quality_data(plan)
     with SIEClient(plan.endpoint, api_key=api_key, timeout_s=plan.request_timeout_s) as client:
         record, result_path = run_quality(plan, data, client)
     print(result_path)
     for line in format_rows(record["metrics"], record["comparison"]):
         print(line)
-    if record["run"]["failure_count"]:
+    report_invalid(record)
+    if record["run"]["predictions_path"] is None:
         raise SystemExit(1)
 
 
 def performance_command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     try:
         plan = plan_performance(args)
-    except (ValueError, KeyError, OSError) as exc:
+    except KeyError as exc:
+        parser.error(f"reference {args.reference} is missing key {exc}")
+    except (ValueError, OSError) as exc:
         parser.error(str(exc))
-    api_key = os.environ.get("SIE_API_KEY")
-    if not api_key:
-        parser.error("SIE_API_KEY must be set in the environment")
+    api_key = _resolve_api_key(parser, plan.endpoint)
     data = load_performance_data(plan)
     with SIEClient(
         plan.endpoint, api_key=api_key, timeout_s=plan.request_timeout_s, max_connections=2 * plan.max_in_flight
@@ -1080,6 +1184,7 @@ def performance_command(parser: argparse.ArgumentParser, args: argparse.Namespac
     print(result_path)
     for line in format_rows(record["metrics"], record["comparison"]):
         print(line)
+    report_invalid(record)
     if record["run"]["requests_path"] is None:
         raise SystemExit(1)
 

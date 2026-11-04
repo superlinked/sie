@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+import run
 import score
 from run import (
     DEFAULT_ENDPOINT,
@@ -120,6 +121,19 @@ class FakeClient:
         return {"model": model, "query_id": "", "scores": entries}
 
 
+class ShortClient(FakeClient):
+    def encode(self, model, items, **kwargs):
+        return super().encode(model, items, **kwargs)[:-1]
+
+
+class NoneScoreClient(FakeClient):
+    def score(self, model, query, items, **kwargs):
+        result = super().score(model, query, items, **kwargs)
+        if len(self.calls) > 1:
+            result["scores"] = [{"item_id": items[0]["id"], "score": None, "rank": 0}]
+        return result
+
+
 def tiny_loaders():
     return Loaders(
         corpus=lambda name, revision: {doc_id: dict(doc) for doc_id, doc in CORPUS.items()},
@@ -229,6 +243,35 @@ class PlanTest(unittest.TestCase):
     def test_endpoint_override_is_a_comparable_reason(self):
         plan = plan_quality(parse("--reference", str(self.reference), "--endpoint", "http://localhost:8080"))
         self.assertEqual(plan.comparable_reasons, [f"endpoint http://localhost:8080 != {DEFAULT_ENDPOINT}"])
+
+    def test_endpoint_is_normalised_before_it_is_compared(self):
+        for endpoint in ("https://api.superlinked.com/", "HTTPS://API.superlinked.com"):
+            with self.subTest(endpoint=endpoint):
+                plan = plan_quality(parse("--reference", str(self.reference), "--endpoint", endpoint))
+                self.assertEqual(plan.comparable_reasons, [])
+                self.assertEqual(plan.endpoint, DEFAULT_ENDPOINT)
+        local = plan_quality(parse("--reference", str(self.reference), "--endpoint", "http://localhost:8080/"))
+        self.assertEqual(local.comparable_reasons, [f"endpoint http://localhost:8080/ != {DEFAULT_ENDPOINT}"])
+        self.assertEqual(local.endpoint, "http://localhost:8080")
+        flags = plan_quality(
+            parse("--model", "m", "--task", "mteb/AskUbuntuDupQuestions", "--endpoint", "HTTP://LocalHost:8080/sie/")
+        )
+        self.assertEqual(flags.endpoint, "http://localhost:8080/sie")
+        with self.assertRaises(ValueError):
+            plan_quality(parse("--reference", str(self.reference), "--endpoint", "localhost:8080"))
+
+    def test_default_ports_are_normalised_away(self):
+        same = plan_quality(parse("--reference", str(self.reference), "--endpoint", "https://api.superlinked.com:443/"))
+        self.assertEqual((same.endpoint, same.comparable_reasons), (DEFAULT_ENDPOINT, []))
+        plain = plan_quality(parse("--reference", str(self.reference), "--endpoint", "http://localhost:80/"))
+        self.assertEqual(plain.endpoint, "http://localhost")
+        local = plan_quality(parse("--reference", str(self.reference), "--endpoint", "http://localhost:8080"))
+        self.assertEqual(local.endpoint, "http://localhost:8080")
+
+    def test_an_endpoint_without_a_host_or_with_a_bad_port_is_rejected(self):
+        for endpoint in ("http://:8080", "http://localhost:99999", "http://localhost:0"):
+            with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
+                plan_quality(parse("--reference", str(self.reference), "--endpoint", endpoint))
 
     def test_reference_kind_and_mode_are_checked(self):
         other = reference_file(self.temporary.name, evaluation_mode="isolated_performance")
@@ -367,16 +410,17 @@ class EncodeRunTest(unittest.TestCase):
     def test_documents_then_queries_in_reference_batches(self):
         client = FakeClient()
         record, result_path = self.run_reference(client)
-        self.assertEqual([len(items) for _, _, items, _ in client.calls], [2, 2, 1, 2, 1])
-        self.assertEqual([kwargs["is_query"] for _, _, _, kwargs in client.calls], [False, False, False, True, True])
-        for _, model, _, kwargs in client.calls:
+        measured = client.calls[1:]
+        self.assertEqual([len(items) for _, _, items, _ in measured], [2, 2, 1, 2, 1])
+        self.assertEqual([kwargs["is_query"] for _, _, _, kwargs in measured], [False, False, False, True, True])
+        for _, model, _, kwargs in measured:
             self.assertEqual(model, "example/sparse-encoder")
             self.assertEqual(kwargs["output_types"], ["sparse"])
             self.assertFalse(kwargs["wait_for_capacity"])
             self.assertEqual(kwargs["provision_timeout_s"], 300.0)
             self.assertEqual(kwargs["max_oom_retries"], 0)
             self.assertNotIn("instruction", kwargs)
-        sent = [item for _, _, items, _ in client.calls[:3] for item in items]
+        sent = [item for _, _, items, _ in measured[:3] for item in items]
         self.assertEqual([item["id"] for item in sent], ["d1", "d2", "d3", "d4", "d5"])
         self.assertEqual(sent[0]["text"], "Alpha alpha body")
         self.assertEqual(sent[2]["text"], "gamma body")
@@ -447,19 +491,19 @@ class EncodeRunTest(unittest.TestCase):
         self.assertEqual(record["run"]["request_count"], 4)
 
     def test_sdk_retry_makes_the_run_invalid(self):
-        record, _ = self.run_reference(FakeClient(retries=(0, 1, 0, 2)))
+        record, _ = self.run_reference(FakeClient(retries=(0, 0, 1, 0, 2)))
         self.assertEqual(record["validity"], {"valid": False, "reasons": ["sdk retries 3"], "sdk_retries": 3})
         self.assertTrue(record["comparable"])
 
     def test_execution_revision_change_is_collected_and_not_comparable(self):
-        record, _ = self.run_reference(FakeClient(revisions=("rev-a", "rev-b", "rev-a")))
+        record, _ = self.run_reference(FakeClient(revisions=("rev-b", "rev-a", "rev-b")))
         self.assertEqual(record["execution_revisions"], ["rev-a", "rev-b"])
         self.assertFalse(record["comparable"])
         self.assertEqual(record["comparable_reasons"], ["execution revision changed"])
         self.assertTrue(record["validity"]["valid"])
 
     def test_failed_request_stops_the_run_and_is_recorded(self):
-        record, result_path = self.run_reference(FakeClient(fail_at=2))
+        record, result_path = self.run_reference(FakeClient(fail_at=3))
         self.assertTrue(result_path.exists())
         self.assertEqual((record["run"]["request_count"], record["run"]["failure_count"]), (3, 0 + 1))
         self.assertIsNone(record["run"]["predictions_path"])
@@ -469,12 +513,51 @@ class EncodeRunTest(unittest.TestCase):
         self.assertEqual(record["validity"]["reasons"], ["request failed: RuntimeError: boom"])
 
     def test_retries_before_a_failed_request_are_recorded(self):
-        record, _ = self.run_reference(FakeClient(retries=(0, 1, 2), fail_at=2))
+        record, _ = self.run_reference(FakeClient(retries=(0, 0, 1, 2), fail_at=3))
         self.assertEqual(record["validity"]["sdk_retries"], 3)
         self.assertEqual(record["validity"]["reasons"], ["sdk retries 3", "request failed: RuntimeError: boom"])
 
+    def test_readiness_request_is_the_first_call_and_is_not_counted(self):
+        client = FakeClient()
+        record, _ = self.run_reference(client)
+        kind, model, items, kwargs = client.calls[0]
+        self.assertEqual((kind, model), ("encode", "example/sparse-encoder"))
+        self.assertEqual([item["id"] for item in items], ["d1", "d2"])
+        self.assertEqual(items, client.calls[1][2])
+        self.assertTrue(kwargs["wait_for_capacity"])
+        self.assertEqual(kwargs["provision_timeout_s"], 300.0)
+        self.assertEqual(
+            (kwargs["max_oom_retries"], kwargs["is_query"], kwargs["output_types"]), (0, False, ["sparse"])
+        )
+        self.assertEqual(len(client.calls), 6)
+        self.assertEqual(record["run"]["request_count"], 5)
+
+    def test_readiness_failure_skips_the_measured_phase(self):
+        client = FakeClient(fail_at=0)
+        record, result_path = self.run_reference(client)
+        self.assertTrue(result_path.exists())
+        self.assertEqual(len(client.calls), 1)
+        self.assertFalse(record["validity"]["valid"])
+        self.assertEqual(record["validity"]["reasons"], ["readiness request failed: RuntimeError: boom"])
+        self.assertEqual((record["run"]["request_count"], record["run"]["failure_count"]), (0, 0))
+        self.assertIsNone(record["run"]["predictions_path"])
+        self.assertEqual((record["metrics"], record["comparison"]), ([], []))
+
+    def test_retries_on_the_readiness_request_are_not_counted(self):
+        record, _ = self.run_reference(FakeClient(retries=(4,)))
+        self.assertEqual(record["validity"], {"valid": True, "reasons": [], "sdk_retries": 0})
+
+    def test_a_malformed_response_is_recorded_as_a_failed_run(self):
+        record, result_path = self.run_reference(ShortClient())
+        self.assertTrue(result_path.exists())
+        self.assertIsNone(record["run"]["predictions_path"])
+        self.assertEqual((record["run"]["request_count"], record["run"]["failure_count"]), (1, 0))
+        self.assertFalse(record["validity"]["valid"])
+        (reason,) = record["validity"]["reasons"]
+        self.assertTrue(reason.startswith("request failed: ValueError: "), reason)
+
     def test_multivector_run_without_reference(self):
-        client = FakeClient(revisions=("r1", "r2"))
+        client = FakeClient(revisions=("r2", "r1"))
         plan = plan_quality(
             parse(
                 "--model", "m/colbert", "--task", "mteb/SciFact", "--output", "multivector", "--items-per-request", "3"
@@ -483,7 +566,7 @@ class EncodeRunTest(unittest.TestCase):
         record, _ = run_quality(
             plan, load_quality_data(plan, tiny_loaders()), client, results_dir=self.results, now=clock
         )
-        self.assertEqual([len(items) for _, _, items, _ in client.calls], [3, 2, 3])
+        self.assertEqual([len(items) for _, _, items, _ in client.calls[1:]], [3, 2, 3])
         self.assertEqual({kwargs["output_types"][0] for _, _, _, kwargs in client.calls}, {"multivector"})
         predictions = json.loads(Path(record["run"]["predictions_path"]).read_text(encoding="utf-8"))
         self.assertEqual(list(predictions["q1"]), ["d2", "d3", "d1", "d4", "d5"])
@@ -504,15 +587,19 @@ class RerankRunTest(unittest.TestCase):
             data = load_quality_data(plan, tiny_loaders())
             record, _ = run_quality(plan, data, client, results_dir=Path(temporary) / "results", now=clock)
             predictions = json.loads(Path(record["run"]["predictions_path"]).read_text(encoding="utf-8"))
-        self.assertEqual([kind for kind, _, _, _ in client.calls], ["score", "score", "score"])
-        queries = [query for _, _, (query, _), _ in client.calls]
+        self.assertEqual([kind for kind, _, _, _ in client.calls], ["score", "score", "score", "score"])
+        self.assertEqual(client.calls[0][2], client.calls[1][2])
+        self.assertTrue(client.calls[0][3]["wait_for_capacity"])
+        measured = client.calls[1:]
+        queries = [query for _, _, (query, _), _ in measured]
         self.assertEqual(queries, [{"text": "first query"}, {"text": "second query"}, {"text": "third query"}])
-        items = [items for _, _, (_, items), _ in client.calls]
+        items = [items for _, _, (_, items), _ in measured]
         self.assertEqual(
             [[item["id"] for item in batch] for batch in items], [["d2", "d1"], ["d3", "d5"], ["d4", "d2"]]
         )
         self.assertEqual(items[0][1]["text"], "Alpha alpha body")
-        for _, _, _, kwargs in client.calls:
+        self.assertEqual(record["run"]["request_count"], 3)
+        for _, _, _, kwargs in measured:
             self.assertFalse(kwargs["wait_for_capacity"])
             self.assertEqual(kwargs["provision_timeout_s"], 300.0)
             self.assertEqual(kwargs["max_oom_retries"], 0)
@@ -524,6 +611,144 @@ class RerankRunTest(unittest.TestCase):
         main = next(row for row in record["metrics"] if row["name"] == "main_score")
         map_1000 = next(row for row in record["metrics"] if row["name"] == "map_at_1000")
         self.assertEqual(main["value"], map_1000["value"])
+
+
+class CommandTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.reference = reference_file(self.temporary.name)
+
+    def command(self, fake, *flags, environ=None):
+        def measured(plan, data, client):
+            return run_quality(plan, data, fake, results_dir=Path(self.temporary.name) / "results", now=clock)
+
+        def loader(plan):
+            return load_quality_data(plan, tiny_loaders())
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        code = None
+        with (
+            patch.dict("os.environ", environ or {}, clear=True),
+            patch.object(run, "load_quality_data", side_effect=loader) as self.loader,
+            patch.object(run, "run_quality", side_effect=measured),
+            patch.object(run, "SIEClient") as client,
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            try:
+                run.main(["quality", "--reference", str(self.reference), *flags])
+            except SystemExit as caught:
+                code = caught.code
+        return code, client, stderr.getvalue()
+
+    def test_a_reference_run_without_a_key_fails_before_any_call(self):
+        code, client, stderr = self.command(FakeClient())
+        self.assertEqual(code, 2)
+        client.assert_not_called()
+        self.assertIn(f"SIE_API_KEY must be set in the environment for {DEFAULT_ENDPOINT}", stderr)
+
+    def test_a_local_endpoint_runs_without_a_key(self):
+        code, client, stderr = self.command(FakeClient(), "--endpoint", "http://localhost:8080")
+        self.assertIsNone(code)
+        client.assert_called_once_with("http://localhost:8080", api_key="", timeout_s=300.0)
+        self.assertEqual(stderr, "")
+
+    def test_a_key_is_passed_as_is(self):
+        code, client, _ = self.command(FakeClient(), environ={"SIE_API_KEY": "test-key"})
+        self.assertIsNone(code)
+        client.assert_called_once_with(DEFAULT_ENDPOINT, api_key="test-key", timeout_s=300.0)
+
+    def test_a_cloud_key_is_not_sent_to_another_endpoint(self):
+        code, client, stderr = self.command(
+            FakeClient(), "--endpoint", "http://localhost:8080", environ={"SIE_API_KEY": "cloud-key"}
+        )
+        self.assertIsNone(code)
+        client.assert_called_once_with("http://localhost:8080", api_key="", timeout_s=300.0)
+        self.assertIn(
+            "note: SIE_API_KEY is scoped to https://api.superlinked.com and was not sent to http://localhost:8080",
+            stderr,
+        )
+
+    def test_a_key_scoped_by_base_url_is_sent_to_that_endpoint(self):
+        environ = {"SIE_BASE_URL": "http://localhost:8080/", "SIE_API_KEY": "local-token"}
+        code, client, stderr = self.command(FakeClient(), "--endpoint", "http://localhost:8080", environ=environ)
+        self.assertIsNone(code)
+        client.assert_called_once_with("http://localhost:8080", api_key="local-token", timeout_s=300.0)
+        self.assertEqual(stderr, "")
+
+    def test_a_key_scope_is_an_origin_so_a_path_on_the_endpoint_still_matches(self):
+        environ = {"SIE_BASE_URL": "http://localhost:8080", "SIE_API_KEY": "local-token"}
+        code, client, stderr = self.command(FakeClient(), "--endpoint", "http://localhost:8080/sie/", environ=environ)
+        self.assertIsNone(code)
+        client.assert_called_once_with("http://localhost:8080/sie", api_key="local-token", timeout_s=300.0)
+        self.assertEqual(stderr, "")
+
+    def test_a_key_scoped_elsewhere_fails_on_the_default_endpoint(self):
+        environ = {"SIE_BASE_URL": "http://localhost:8080", "SIE_API_KEY": "local-token"}
+        code, client, stderr = self.command(FakeClient(), environ=environ)
+        self.assertEqual(code, 2)
+        client.assert_not_called()
+        self.assertIn(f"SIE_API_KEY must be set in the environment for {DEFAULT_ENDPOINT}", stderr)
+
+    def test_a_failed_run_prints_its_reasons_and_exits_1(self):
+        for fake, reason in (
+            (FakeClient(fail_at=0), "readiness request failed: RuntimeError: boom"),
+            (FakeClient(fail_at=1), "request failed: RuntimeError: boom"),
+            (ShortClient(), "request failed: ValueError: encode returned a different number of results"),
+        ):
+            with self.subTest(reason=reason):
+                code, _, stderr = self.command(fake, "--endpoint", "http://localhost:8080")
+                self.assertEqual(code, 1)
+                self.assertTrue(stderr.startswith(f"invalid: {reason}"), stderr)
+                self.assertNotIn("Traceback", stderr)
+
+    def test_an_invalid_run_with_retries_prints_the_reason_and_exits_0(self):
+        code, _, stderr = self.command(FakeClient(retries=(0, 2)), "--endpoint", "http://localhost:8080")
+        self.assertIsNone(code)
+        self.assertEqual(stderr, "invalid: sdk retries 2\n")
+
+    def test_a_missing_reference_key_is_named(self):
+        broken = json.loads(self.reference.read_text(encoding="utf-8"))
+        del broken["task_key"]
+        self.reference.write_text(json.dumps(broken), encoding="utf-8")
+        code, client, stderr = self.command(FakeClient(), "--endpoint", "http://localhost:8080")
+        self.assertEqual(code, 2)
+        client.assert_not_called()
+        self.assertIn(f"reference {self.reference} is missing key 'task_key'", stderr)
+
+    def test_an_endpoint_without_a_scheme_is_a_usage_error(self):
+        code, client, stderr = self.command(FakeClient(), "--endpoint", "localhost:8080")
+        self.assertEqual(code, 2)
+        client.assert_not_called()
+        self.assertIn("endpoint must be an http(s) URL", stderr)
+
+    def test_an_endpoint_without_a_host_or_with_a_bad_port_is_a_usage_error(self):
+        for endpoint in ("http://:8080", "http://localhost:99999", "http://localhost:0"):
+            with self.subTest(endpoint=endpoint):
+                code, client, stderr = self.command(FakeClient(), "--endpoint", endpoint)
+                self.assertEqual(code, 2)
+                self.loader.assert_not_called()
+                client.assert_not_called()
+                self.assertIn("endpoint must be an http(s) URL", stderr)
+
+    def test_a_score_without_a_value_is_recorded_as_a_failed_run(self):
+        self.reference = reference_file(
+            self.temporary.name,
+            model="Qwen/Qwen3-Reranker-0.6B",
+            operation="score",
+            task_key="mteb/AskUbuntuDupQuestions",
+            dataset={"name": "mteb/AskUbuntuDupQuestions", "revision": REVISION, "subset": "test", "parameters": []},
+            payload={"items_per_request": 2, "output_contract": "scores", "parameters": []},
+        )
+        code, _, stderr = self.command(NoneScoreClient(), "--endpoint", "http://localhost:8080")
+        self.assertEqual(code, 1)
+        (result_path,) = (Path(self.temporary.name) / "results").glob("*-????????T??????Z.json")
+        record = json.loads(result_path.read_text(encoding="utf-8"))
+        self.assertIsNone(record["run"]["predictions_path"])
+        (reason,) = record["validity"]["reasons"]
+        self.assertTrue(reason.startswith("request failed: TypeError"), reason)
+        self.assertTrue(stderr.startswith("invalid: request failed: TypeError"), stderr)
 
 
 class ScoringTest(unittest.TestCase):

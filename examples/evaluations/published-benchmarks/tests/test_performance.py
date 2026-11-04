@@ -375,6 +375,33 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(plan.comparable_reasons, ["client processes 1 != 4"])
         self.assertEqual(plan.level_name, "fixed-50-rps")
 
+    def test_endpoint_is_normalised_before_it_is_compared(self):
+        same = plan_performance(parse("--reference", str(self.reference), "--endpoint", "HTTPS://API.superlinked.com/"))
+        self.assertEqual((same.endpoint, same.comparable_reasons), (DEFAULT_ENDPOINT, ["client processes 1 != 4"]))
+        local = plan_performance(parse("--reference", str(self.reference), "--endpoint", "http://localhost:8080/"))
+        self.assertEqual(local.endpoint, "http://localhost:8080")
+        self.assertEqual(
+            local.comparable_reasons,
+            [f"endpoint http://localhost:8080/ != {DEFAULT_ENDPOINT}", "client processes 1 != 4"],
+        )
+        with self.assertRaises(ValueError):
+            plan_performance(parse("--reference", str(self.reference), "--endpoint", "localhost:8080"))
+
+    def test_default_ports_are_normalised_away(self):
+        same = plan_performance(
+            parse("--reference", str(self.reference), "--endpoint", "https://api.superlinked.com:443/")
+        )
+        self.assertEqual((same.endpoint, same.comparable_reasons), (DEFAULT_ENDPOINT, ["client processes 1 != 4"]))
+        plain = plan_performance(parse("--reference", str(self.reference), "--endpoint", "http://localhost:80/"))
+        self.assertEqual(plain.endpoint, "http://localhost")
+        local = plan_performance(parse("--reference", str(self.reference), "--endpoint", "http://localhost:8080"))
+        self.assertEqual(local.endpoint, "http://localhost:8080")
+
+    def test_an_endpoint_without_a_host_or_with_a_bad_port_is_rejected(self):
+        for endpoint in ("http://:8080", "http://localhost:99999", "http://localhost:0"):
+            with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
+                plan_performance(parse("--reference", str(self.reference), "--endpoint", endpoint))
+
     def test_overrides_are_comparable_reasons(self):
         plan = plan_performance(parse("--reference", str(self.reference), "--rate", "100"))
         self.assertEqual(plan.comparable_reasons, ["rate 100 != 50", "client processes 1 != 4"])
@@ -843,6 +870,86 @@ class RunTest(unittest.TestCase):
 
 
 class CommandTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.reference = reference_file(self.temporary.name)
+
+    def command(self, fake, *flags, environ=None):
+        def measured(plan, data, client):
+            return run_performance(plan, data, fake, results_dir=Path(self.temporary.name) / "results", now=clock)
+
+        def loader(plan):
+            return load_performance_data(plan, tiny_loaders())
+
+        stderr = io.StringIO()
+        code = None
+        with (
+            patch.dict("os.environ", environ or {}, clear=True),
+            patch.object(run, "load_performance_data", side_effect=loader) as self.loader,
+            patch.object(run, "run_performance", side_effect=measured),
+            patch.object(run, "SIEClient") as client,
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(stderr),
+        ):
+            try:
+                run.main(["performance", "--reference", str(self.reference), *flags])
+            except SystemExit as caught:
+                code = caught.code
+        return code, client, stderr.getvalue()
+
+    def test_an_endpoint_without_a_host_or_with_a_bad_port_is_a_usage_error(self):
+        for endpoint in ("localhost:8080", "http://:8080", "http://localhost:99999", "http://localhost:0"):
+            with self.subTest(endpoint=endpoint):
+                code, client, stderr = self.command(FakeClient(), "--endpoint", endpoint)
+                self.assertEqual(code, 2)
+                self.loader.assert_not_called()
+                client.assert_not_called()
+                self.assertIn("endpoint must be an http(s) URL", stderr)
+
+    def test_a_local_endpoint_runs_without_a_key(self):
+        code, client, stderr = self.command(FakeClient(), "--endpoint", "http://localhost:8080")
+        self.assertIsNone(code)
+        client.assert_called_once_with("http://localhost:8080", api_key="", timeout_s=5.0, max_connections=8)
+        self.assertEqual(stderr, "")
+
+    def test_a_cloud_key_is_not_sent_to_another_endpoint(self):
+        code, client, stderr = self.command(
+            FakeClient(), "--endpoint", "http://localhost:8080", environ={"SIE_API_KEY": "cloud-key"}
+        )
+        self.assertIsNone(code)
+        client.assert_called_once_with("http://localhost:8080", api_key="", timeout_s=5.0, max_connections=8)
+        self.assertIn(
+            "note: SIE_API_KEY is scoped to https://api.superlinked.com and was not sent to http://localhost:8080",
+            stderr,
+        )
+
+    def test_a_key_scoped_by_base_url_is_sent_to_that_endpoint(self):
+        environ = {"SIE_BASE_URL": "http://localhost:8080/", "SIE_API_KEY": "local-token"}
+        code, client, stderr = self.command(FakeClient(), "--endpoint", "http://localhost:8080", environ=environ)
+        self.assertIsNone(code)
+        client.assert_called_once_with("http://localhost:8080", api_key="local-token", timeout_s=5.0, max_connections=8)
+        self.assertEqual(stderr, "")
+
+    def test_a_failed_run_prints_its_reasons_and_exits_1(self):
+        code, _, stderr = self.command(FakeClient(ready=False), "--endpoint", "http://localhost:8080")
+        self.assertEqual(code, 1)
+        self.assertEqual(stderr, "invalid: readiness request failed: ProvisioningError: no capacity\n")
+
+    def test_an_invalid_run_with_retries_prints_the_reason_and_exits_0(self):
+        code, _, stderr = self.command(FakeClient(retries={"2": 1}), "--endpoint", "http://localhost:8080")
+        self.assertIsNone(code)
+        self.assertEqual(stderr, "invalid: sdk retries 5\n")
+
+    def test_a_missing_reference_key_is_named(self):
+        broken = json.loads(self.reference.read_text(encoding="utf-8"))
+        del broken["task_key"]
+        self.reference.write_text(json.dumps(broken), encoding="utf-8")
+        code, client, stderr = self.command(FakeClient(), "--endpoint", "http://localhost:8080")
+        self.assertEqual(code, 2)
+        client.assert_not_called()
+        self.assertIn(f"reference {self.reference} is missing key 'task_key'", stderr)
+
     def test_a_reference_run_without_a_key_fails_before_any_call(self):
         with tempfile.TemporaryDirectory() as temporary:
             reference = reference_file(temporary)
