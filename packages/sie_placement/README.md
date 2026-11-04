@@ -82,9 +82,9 @@ Helm chart: `queuePool`, the `machineProfile` of its `cell`, and `bundle`.
 `queuePool` is the physical queue pool the lane's workers consume:
 `workers.common.queuePool` (`default`), or a worker group's `queuePool`
 override. It is neither the `workers.pools` map key, which names a worker
-group, nor an SDK logical pool. `bundle` is a key of that worker group's `bundles` map. `name`
-is the lane's handle inside the plan, and each identity refers to its lane by
-that name.
+group, nor an SDK logical pool. `bundle` is a key of that worker group's
+`bundles` map. `name` is the lane's handle inside the plan, and each identity
+refers to its lane by that name.
 
 ## Envelope
 
