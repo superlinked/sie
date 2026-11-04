@@ -37,6 +37,7 @@ from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, Comput
 from sie_server.adapters.sglang import _server
 from sie_server.adapters.sglang._lora import SGLangLoraManager, SGLangLoraMixin, leased_encode
 from sie_server.adapters.sglang._memory import SGLangMemoryBudget
+from sie_server.adapters.sglang._parking import SGLangParkingMixin
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.tokenizer import load_tokenizer
 
@@ -84,7 +85,7 @@ def _resolve_embed_concurrency(configured: int | None) -> int:
     return _DEFAULT_EMBED_CONCURRENCY
 
 
-class SGLangEmbeddingAdapter(SGLangLoraMixin, BaseAdapter):
+class SGLangEmbeddingAdapter(SGLangParkingMixin, SGLangLoraMixin, BaseAdapter):
     """Adapter for LLM embedding models using SGLang HTTP server backend.
 
     SGLang pre-allocates GPU memory for the KV cache, providing stable memory
@@ -117,7 +118,7 @@ class SGLangEmbeddingAdapter(SGLangLoraMixin, BaseAdapter):
     manages_own_load_timeout: bool = True
 
     def _check_loaded(self) -> None:
-        if self._server_url is None:
+        if self._server_url is None or self._parked:
             raise RuntimeError(ERR_NOT_LOADED)
         # Without this the adapter never notices its engine exiting, and every
         # later request opens a connection to a port nobody is listening on,
@@ -161,6 +162,7 @@ class SGLangEmbeddingAdapter(SGLangLoraMixin, BaseAdapter):
         request_read_timeout_s: float | None = None,
         watchdog_timeout_s: float | None = None,
         nccl_port: int | None = None,
+        host_offload: bool = True,
         **kwargs: Any,  # Accept extra args from loader (e.g., pooling)
     ) -> None:
         r"""Initialize the adapter.
@@ -202,9 +204,15 @@ class SGLangEmbeddingAdapter(SGLangLoraMixin, BaseAdapter):
             max_concurrent_dispatch: Batches the worker may have in flight to
                 SGLang at once (see ``max_concurrent_dispatch()``). 1 keeps the
                 worker's one-batch-at-a-time dispatch.
+            host_offload: Launch the engine able to park its weights in host
+                RAM when the registry evicts it (see ``_parking``). False keeps
+                the previous launch.
             **kwargs: Additional arguments (ignored, for compatibility).
         """
         _ = kwargs  # Unused, but accepted for loader compatibility
+        if not isinstance(host_offload, bool):
+            raise ValueError(f"host_offload must be true or false, got {host_offload!r}")
+        self._host_offload_requested = host_offload
         self._model_name_or_path = str(model_name_or_path)
         self._normalize = normalize
         self._max_seq_length = max_seq_length
@@ -384,6 +392,7 @@ class SGLangEmbeddingAdapter(SGLangLoraMixin, BaseAdapter):
         # /tmp in open_output_log, a failed exec, or a cancelled load included.
         try:
             cmd.extend(self._lora.launch_args())
+            cmd.extend(self._memory_saver_launch_args())
             cmd.extend(self._memory_budget.launch_args(device_indices[0]))
             # Only a group rendezvouses, so width one reserves nothing and its
             # launch argv is unchanged. Left to the engine it picks a random

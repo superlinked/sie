@@ -2,6 +2,7 @@
 
 import logging
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -24,6 +25,20 @@ def released_bytes(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return 0
     return value
+
+
+@dataclass(frozen=True, slots=True)
+class HostOffload:
+    """What ``ModelAdapter.offload_to_host`` left behind.
+
+    Attributes:
+        host_bytes: Host RAM now holding the model's weights.
+        retains_device_memory: Whether the parked model still holds some device
+            memory, such as an engine process's CUDA context and workspaces.
+    """
+
+    host_bytes: int
+    retains_device_memory: bool = False
 
 
 class ModelCapabilities(BaseModel):
@@ -78,6 +93,23 @@ class ModelAdapter(ABC):
         caches without unloading the model. The default returns 0.
         ``has_releasable_memory()`` is the cheap check callers use first, so
         an adapter with nothing cached is never locked just to free 0 bytes.
+
+    Host-RAM Parking:
+        When the registry evicts a model to free device memory and the host
+        tier has room, it parks the model instead of unloading it:
+        ``offload_to_host()`` moves the weights to host RAM and frees their
+        device memory, and ``restore_from_host()`` later moves them back to
+        the device the adapter was loaded on. ``host_offload_bytes()`` is the
+        cheap check the registry asks first; ``None`` (the default) means the
+        adapter cannot park and is unloaded as before.
+
+        The registry calls ``offload_to_host()`` only after the model's worker
+        has drained and stopped, so no forward pass is in flight, and runs it
+        off the event loop. It calls ``restore_from_host()`` before creating a
+        new worker. If either raises, the registry calls ``unload()``, which
+        must then release whatever the adapter still holds, on the device and
+        in host RAM. A parked adapter may also be unloaded at any time to make
+        room in the host tier.
 
     Main Thread Requirement:
         Some adapters may use parent-process signal handlers that only work in
@@ -273,6 +305,40 @@ class ModelAdapter(ABC):
             Best-effort count of bytes released. Zero means nothing was released.
         """
         return 0
+
+    def host_offload_bytes(self) -> int | None:
+        """Host bytes ``offload_to_host`` would hold, or ``None`` if this adapter cannot park.
+
+        Cheap and side-effect free: the registry asks before it chooses between
+        parking the model in host RAM and unloading it, and checks the answer
+        against the host tier's budget. The default is ``None``.
+        """
+        return None
+
+    def offload_to_host(self) -> HostOffload:
+        """Move the loaded weights to host RAM and free their device memory.
+
+        Only called when ``host_offload_bytes()`` returned a size. On success
+        the adapter serves nothing until ``restore_from_host()``.
+
+        Raises:
+            NotImplementedError: If the adapter cannot park.
+        """
+        msg = f"{self.__class__.__name__} cannot park its weights in host RAM"
+        raise NotImplementedError(msg)
+
+    def restore_from_host(self) -> int:
+        """Move parked weights back to the device the adapter was loaded on.
+
+        Returns:
+            Host bytes the adapter still holds after restoring (for example an
+            engine that keeps its host copy for the next park), or 0.
+
+        Raises:
+            NotImplementedError: If the adapter cannot park.
+        """
+        msg = f"{self.__class__.__name__} cannot park its weights in host RAM"
+        raise NotImplementedError(msg)
 
     def engine_exit_code(self) -> int | None:
         """Return the exit code of this adapter's engine process once it has exited.

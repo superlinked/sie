@@ -78,6 +78,18 @@ The current GKE/EKS scale-from-zero guidance is:
 | **Model loading** | 10-120s | Download weights (if not cached), load to GPU |
 | **Total cold start** | 3-7 min | First request to a scaled-to-zero pool |
 
+Model loading also applies when a running worker reloads a model it evicted
+to make room for another. Workers keep evicted models in host RAM and wake them
+back onto the GPU instead, which is estimated to take well under a second for
+a typical encoder and a few seconds for a single-GPU SGLang model. The figures
+are estimates, not measurements. A model loads the ordinary way when it was
+never loaded on that worker, or when it was dropped from host RAM to stay
+within the budget. Under the default `SIE_HOST_CACHE_BYTES=auto` each GPU
+worker container uses a quarter of its memory limit, 8 GiB on the default L4
+pool. Override it with `workers.common.extraEnv` or a bundle's `extraEnv`, or
+set it to `0` to turn the host tier off. See the server README section "Host-RAM tier for evicted
+models" for what parks and how it is charged.
+
 These figures are not an ACK performance claim; this repository has no ACK
 cold-start baseline. The Alibaba Terraform module defaults its shared NAT EIP
 to 100 Mbit/s, and observed ACK cold start depends on current GPU inventory and
@@ -86,9 +98,10 @@ quota, effective bandwidth, image and model size, and cache state.
 ### Reducing Cold Start Time
 
 1. **Use cluster cache**: Pre-populate object storage with model weights (`--cluster-cache`)
-2. **Set minReplicas=1**: Keep one warm replica per critical GPU type
-3. **Use reserved capacity**: Avoid spot for latency-sensitive workloads
-4. **Pre-warm models**: Call `/v1/encode/{model}` on startup to load weights
+2. **Size the host-RAM tier**: Raise `SIE_HOST_CACHE_BYTES` (with the pool's memory limit) so models that take turns on a GPU wake from host RAM instead of reloading
+3. **Set minReplicas=1**: Keep one warm replica per critical GPU type
+4. **Use reserved capacity**: Avoid spot for latency-sensitive workloads
+5. **Pre-warm models**: Call `/v1/encode/{model}` on startup to load weights
 
 ### Client Handling
 

@@ -36,6 +36,7 @@ from sie_server.config.model import ModelConfig
 from sie_server.config.routing import validate_model_routing
 from sie_server.config.upstreams import validate_profile_upstreams
 from sie_server.core.disk_cache import DiskCacheConfig, ModelDiskCacheManager
+from sie_server.core.host_cache import HostCache, ParkedModel, resolve_host_cache_budget
 from sie_server.core.hot_reload import HotReloader
 from sie_server.core.load_errors import (
     DevicePlacementError,
@@ -83,6 +84,17 @@ _OPTIONAL_MEMORY_RELEASE_TIMEOUT_S = 5.0
 # to 5 minutes.
 _LORA_RETRY_BASE_S = 5.0
 _LORA_RETRY_MAX_S = 300.0
+
+# Evictions that free device memory for other work park the model in the host
+# tier when it has room. A manual unload, shutdown, a config change or an
+# engine that exited unloads the model outright.
+_PARKABLE_EVICTIONS = frozenset(
+    {"memory_pressure", "preload_pressure", "load_oom", "oom_recovery", "idle", "group_placement"}
+)
+# How long a request waits for a parked model to wake before it is told to
+# retry. A wake normally takes seconds; this bounds the wait when the wake
+# queues behind another model's cold load.
+HOST_WAKE_WAIT_S = 15.0
 
 
 class _ConfigChangedDuringLoadError(RuntimeError):
@@ -319,6 +331,19 @@ class ModelRegistry:
         # with the loaded model's concrete device.
         self._memory_manager = self._memory_managers[self._devices[0]]
         self._drain_timeout_s = drain_timeout_s
+
+        # Host-RAM tier: evicted models park their weights here and wake back
+        # onto their device instead of loading from disk. Off (budget 0)
+        # without an engine config, on CPU-only workers under ``auto``, and
+        # with ``SIE_HOST_CACHE_BYTES=0``.
+        host_cache_setting = engine_config.host_cache_bytes if engine_config is not None else 0
+        self._host_cache = HostCache(resolve_host_cache_budget(host_cache_setting, self._devices))
+        # Models whose parked copy has been taken for a wake still in progress.
+        self._waking: set[str] = set()
+        # Background load tasks by model, so a request can wait for a wake.
+        self._load_tasks: dict[str, asyncio.Task[None]] = {}
+        if self._host_cache.enabled:
+            logger.info("Host-RAM tier enabled: budget %.2f GiB", self._host_cache.budget_bytes / 1024**3)
 
         # Disk cache management
         self._disk_cache_manager: ModelDiskCacheManager | None = None
@@ -1166,6 +1191,20 @@ class ModelRegistry:
         """Check if a model is currently being unloaded."""
         return name in self._unloading
 
+    def is_parked(self, name: str) -> bool:
+        """Whether ``name`` is parked in the host tier or waking from it."""
+        return name in self._host_cache or name in self._waking
+
+    @property
+    def parked_model_names(self) -> list[str]:
+        """Models parked in host RAM, least recently parked first."""
+        return self._host_cache.names
+
+    @property
+    def host_cache(self) -> HostCache:
+        """The host-RAM tier's bookkeeping (read-only use)."""
+        return self._host_cache
+
     def is_failed(self, name: str) -> bool:
         """Check whether a model has a recorded load failure still in cooldown.
 
@@ -1651,8 +1690,17 @@ class ModelRegistry:
             load_start = time.monotonic()
             load_outcome = "error"
             load_stage = "total"
+            woke = False
 
             try:
+                if self._host_cache.enabled and not serves_remotely(config):
+                    woken = await self._wake_parked(name) if name in self._host_cache else None
+                    worker_telemetry().host_cache_lookup(model=name, hit=woken is not None)
+                    if woken is not None:
+                        woke = True
+                        load_outcome = "success"
+                        return woken
+
                 if serves_remotely(config):
                     # No weights and no device memory: no placement, admission or
                     # eviction, and never registered with a memory manager.
@@ -1724,41 +1772,7 @@ class ModelRegistry:
 
                     # Pre-load eviction: evict LRU non-pinned models until current pressure
                     # and any adapter-provided load headroom requirement are satisfied.
-                    while True:
-                        await self._wait_for_unloads()
-                        async with lock:
-                            if not memory_manager.should_evict_for_load(required_load_bytes):
-                                break
-                            lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
-                            if lru_model is None:
-                                break  # No non-pinned models to evict, proceed with load attempt
-
-                            if lru_model not in self._loaded:
-                                # Belt-and-braces: a MemoryManager entry with no matching
-                                # ``_loaded`` model is a ghost (see #1600). ``_do_unload``
-                                # would no-op on it, so drop the stale accounting entry and
-                                # re-evaluate rather than spin. The ``_do_unload`` finally
-                                # normally prevents ghosts; this guards any other source.
-                                logger.warning(
-                                    "Evictor found ghost '%s' (in memory manager, not loaded); dropping stale entry",
-                                    lru_model,
-                                )
-                                memory_manager.unregister_model(lru_model)
-                                continue
-
-                            stats = memory_manager.get_stats()
-                            logger.info(
-                                "Pre-load eviction: %s %.2f GB free, %.2f GB required, %.1f%% used "
-                                "(threshold %.1f%%); evicting '%s' before loading '%s'",
-                                load_device,
-                                stats.available_gb,
-                                (required_load_bytes or 0) / (1024**3),
-                                stats.usage_ratio * 100,
-                                memory_manager.pressure_threshold_pct,
-                                lru_model,
-                                name,
-                            )
-                        await self._do_unload(lru_model, reason="preload_pressure")
+                    await self._evict_for_load(name, memory_manager, required_load_bytes)
 
                     try:
                         # Load onto device (loader handles main thread vs executor)
@@ -1768,19 +1782,9 @@ class ModelRegistry:
                             raise
 
                         # OOM despite pre-load eviction: evict LRU non-pinned model and retry once
-                        await self._wait_for_unloads()
-                        async with lock:
-                            lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
-                        if lru_model is None:
+                        if not await self._evict_one_for_oom(name, memory_manager):
                             logger.error("OOM loading '%s' but no non-pinned models to evict", name)
                             raise
-
-                        logger.warning(
-                            "OOM loading '%s' despite pre-eviction, evicting '%s' and retrying",
-                            name,
-                            lru_model,
-                        )
-                        await self._do_unload(lru_model, reason="load_oom")
 
                         # Retry once after eviction. Weights are still cached
                         # on disk so we skip ``ensure_weights_cached_async``.
@@ -1817,14 +1821,306 @@ class ModelRegistry:
                     self._release_device_claims(name)
                 else:
                     self.clear_failure(name)
-                worker_telemetry().model_load_completed(
-                    model=name,
-                    duration_s=time.monotonic() - load_start,
-                    outcome=load_outcome,
-                    stage=load_stage,
-                )
+                # A wake is not a load; it reports its own duration.
+                if not woke:
+                    worker_telemetry().model_load_completed(
+                        model=name,
+                        duration_s=time.monotonic() - load_start,
+                        outcome=load_outcome,
+                        stage=load_stage,
+                    )
                 # Always clear loading state when done (success or failure)
                 self._loading.discard(name)
+
+    async def _evict_for_load(self, name: str, memory_manager: MemoryManager, required_bytes: int | None) -> None:
+        """Evict until the device fits a load of ``required_bytes`` (and pressure clears).
+
+        Resident unpinned models go first, least recently used first; they
+        park in the host tier when it has room, so this is cheap to undo. Once
+        none is left, parked models that still hold memory on this device (an
+        engine process's context and workspaces) are dropped, oldest first.
+        Stops when the load fits or nothing else can be freed; the load then
+        proceeds and its own OOM handling takes over.
+        """
+        lock = self._get_load_lock()
+        while True:
+            await self._wait_for_unloads()
+            parked_victim: str | None = None
+            async with lock:
+                if not memory_manager.should_evict_for_load(required_bytes):
+                    return
+                lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
+                if lru_model is None:
+                    holders = self._host_cache.holding_device_memory(memory_manager.device)
+                    if not holders:
+                        return  # Nothing left to free, proceed with the load attempt
+                    parked_victim = holders[0]
+                elif lru_model not in self._loaded:
+                    # Belt-and-braces: a MemoryManager entry with no matching
+                    # ``_loaded`` model is a ghost (see #1600). ``_do_unload``
+                    # would no-op on it, so drop the stale accounting entry and
+                    # re-evaluate rather than spin. The ``_do_unload`` finally
+                    # normally prevents ghosts; this guards any other source.
+                    logger.warning(
+                        "Evictor found ghost '%s' (in memory manager, not loaded); dropping stale entry",
+                        lru_model,
+                    )
+                    memory_manager.unregister_model(lru_model)
+                    continue
+                stats = memory_manager.get_stats()
+                logger.info(
+                    "Pre-load eviction: %s %.2f GB free, %.2f GB required, %.1f%% used "
+                    "(threshold %.1f%%); %s '%s' before loading '%s'",
+                    memory_manager.device,
+                    stats.available_gb,
+                    (required_bytes or 0) / (1024**3),
+                    stats.usage_ratio * 100,
+                    memory_manager.pressure_threshold_pct,
+                    "dropping parked" if parked_victim is not None else "evicting",
+                    parked_victim or lru_model,
+                    name,
+                )
+            if parked_victim is not None:
+                await self._drop_parked(parked_victim, reason="device memory")
+            elif lru_model is not None:
+                await self._do_unload(lru_model, reason="preload_pressure")
+
+    async def _evict_one_for_oom(self, name: str, memory_manager: MemoryManager) -> bool:
+        """Free memory once after a load ran out of it; False when nothing could be freed."""
+        await self._wait_for_unloads()
+        parked_victim: str | None = None
+        async with self._get_load_lock():
+            lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
+            if lru_model is None:
+                holders = self._host_cache.holding_device_memory(memory_manager.device)
+                parked_victim = holders[0] if holders else None
+        if lru_model is not None:
+            logger.warning("OOM loading '%s' despite pre-eviction, evicting '%s' and retrying", name, lru_model)
+            await self._do_unload(lru_model, reason="load_oom")
+            return True
+        if parked_victim is not None:
+            logger.warning("OOM loading '%s', dropping parked '%s' and retrying", name, parked_victim)
+            await self._drop_parked(parked_victim, reason="device memory")
+            return True
+        return False
+
+    async def _run_adapter_call[T](self, func: Callable[[], T], name: str, what: str) -> T:
+        """Run a blocking adapter call on a worker thread, waiting it out if cancelled.
+
+        A weight move or teardown that has started must finish before the
+        caller acts on the adapter again, or a cancelled caller could free or
+        reuse memory the thread is still copying.
+        """
+        loop = asyncio.get_running_loop()
+        future = loop.run_in_executor(None, func)
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            logger.warning("%s of '%s' was cancelled midway; waiting for it to finish", what, name)
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(future)
+            raise
+
+    async def _park(self, name: str, loaded: LoadedModel, reason: str) -> bool:
+        """Park an evicted model's weights in host RAM; False to unload it instead.
+
+        Called by the unload path after the model's worker has drained, with
+        the load lock held. Parks only evictions that free memory for other
+        work, single-device models, and adapters that report a size the
+        budget can hold, after dropping older parked models to make room.
+        """
+        if reason not in _PARKABLE_EVICTIONS or not self._host_cache.enabled or serves_remotely(loaded.config):
+            return False
+        if len(self._claimed_members(name)) > 1:
+            # A multi-device engine would have to wake on the very same group.
+            return False
+        adapter = loaded.adapter
+        try:
+            host_bytes = adapter.host_offload_bytes()
+        except Exception:
+            logger.exception("host_offload_bytes() failed for '%s'; unloading it", name)
+            return False
+        if isinstance(host_bytes, bool) or not isinstance(host_bytes, int) or host_bytes <= 0:
+            return False
+        # A resident model is never parked as well; never leave an older copy behind.
+        await self._drop_parked(name, reason="superseded")
+        victims = self._host_cache.admission_victims(name, host_bytes)
+        if victims is None:
+            logger.info(
+                "Host tier: '%s' needs %.2f GiB, more than the %.2f GiB budget can hold; unloading it",
+                name,
+                host_bytes / 1024**3,
+                self._host_cache.budget_bytes / 1024**3,
+            )
+            return False
+        for victim in victims:
+            await self._drop_parked(victim, reason="host budget")
+        started = time.monotonic()
+        try:
+            offload = await self._run_adapter_call(adapter.offload_to_host, name, "Parking")
+        except Exception:  # noqa: BLE001 - any failure unloads the model as before
+            logger.warning("Host tier: parking '%s' failed; unloading it instead", name, exc_info=True)
+            return False
+        parked_bytes = offload.host_bytes if offload.host_bytes > 0 else host_bytes
+        self._host_cache.put(
+            ParkedModel(
+                name=name,
+                loaded=loaded,
+                host_bytes=parked_bytes,
+                retains_device_memory=offload.retains_device_memory,
+            )
+        )
+        worker_telemetry().host_cache_memory_changed(model=name, host_bytes=parked_bytes)
+        logger.info(
+            "Host tier: parked '%s' from %s in %.2fs (%.2f GiB; tier %.2f of %.2f GiB)",
+            name,
+            loaded.device,
+            time.monotonic() - started,
+            parked_bytes / 1024**3,
+            self._host_cache.used_bytes / 1024**3,
+            self._host_cache.budget_bytes / 1024**3,
+        )
+        return True
+
+    async def _drop_parked(self, name: str, *, reason: str) -> bool:
+        """Unload a parked model and free its host RAM; False when it was not parked."""
+        entry = self._host_cache.take(name)
+        if entry is None:
+            return False
+        await self._discard_parked(entry, reason=reason)
+        return True
+
+    async def _discard_parked(self, entry: ParkedModel, *, reason: str) -> None:
+        """Unload an adapter taken out of the host tier and drop its charges."""
+        name = entry.name
+        self._host_cache.release(name)
+        worker_telemetry().host_cache_memory_changed(model=name, host_bytes=0)
+        logger.info("Host tier: dropping parked '%s' (%s)", name, reason)
+        try:
+            await self._close_and_unload(entry.loaded.adapter, name)
+        except Exception:
+            logger.exception("Unloading parked '%s' failed", name)
+        try:
+            # A failed wake may have registered it again before giving up.
+            self._loader.unregister(name, entry.device)
+        except Exception:  # noqa: BLE001 - best-effort cleanup
+            logger.warning("loader.unregister failed while dropping parked '%s'", name, exc_info=True)
+        if entry.retains_device_memory:
+            # Device memory came back, so an earlier OOM may no longer apply.
+            self._clear_transient_failures((LoadErrorClass.OOM, LoadErrorClass.PLACEMENT))
+
+    async def _wake_parked(self, name: str) -> ModelAdapter | None:
+        """Bring a parked model back onto its device; None to load it from disk instead.
+
+        Runs under the load admission lock like any load. A parked copy whose
+        config changed, or a wake that fails, is dropped and the caller loads
+        the model the ordinary way.
+        """
+        lock = self._get_load_lock()
+        async with self._get_load_admission_lock():
+            await self._wait_for_unloads()
+            async with lock:
+                if name in self._loaded:
+                    self._memory_manager_for_model(name).touch(name)
+                    return self._loaded[name].adapter
+                if name in self._unloading:
+                    msg = f"Model '{name}' is currently being unloaded"
+                    raise RuntimeError(msg)
+                entry = self._host_cache.take(name)
+                if entry is None:
+                    return None
+                # The host copy exists until the restore finishes, so it stays
+                # charged while models evicted to make room for it are parked.
+                self._host_cache.retain(name, entry.host_bytes)
+                self._waking.add(name)
+                stale = not _model_configs_semantically_equal(self._configs.get(name), entry.loaded.config)
+            started = time.monotonic()
+            restoring = False
+            try:
+                if stale:
+                    await self._discard_parked(entry, reason="config changed while parked")
+                    return None
+                memory_manager = await self._make_room_to_wake(name, entry)
+                restoring = True
+                retained = await self._restore_parked(name, entry, memory_manager)
+                loaded = self._loader.register_woken(name, entry.loaded)
+                async with lock:
+                    self._loaded[name] = loaded
+                    self._register_across_group(name, loaded)
+            except asyncio.CancelledError:
+                if not restoring:
+                    # Nothing about the parked copy changed; keep it.
+                    self._host_cache.put(entry)
+                else:
+                    # The restore ran to completion or failed, but nobody will
+                    # register it: drop it rather than guess its state.
+                    await asyncio.shield(self._discard_parked(entry, reason="wake cancelled"))
+                raise
+            except Exception as exc:  # noqa: BLE001 - any failure falls back to an ordinary load
+                timed_out = isinstance(exc, (TimeoutError, ModelLoadTimeoutError))
+                worker_telemetry().host_cache_wake_completed(
+                    model=name, duration_s=time.monotonic() - started, outcome="timeout" if timed_out else "error"
+                )
+                logger.warning(
+                    "Host tier: waking '%s' failed (%s: %s); loading it from disk instead",
+                    name,
+                    type(exc).__name__,
+                    exc,
+                )
+                await self._discard_parked(entry, reason="wake failed")
+                return None
+            finally:
+                self._waking.discard(name)
+            self._host_cache.retain(name, retained)
+            duration = time.monotonic() - started
+            worker_telemetry().host_cache_memory_changed(model=name, host_bytes=retained)
+            worker_telemetry().host_cache_wake_completed(model=name, duration_s=duration, outcome="success")
+            logger.info("Host tier: woke '%s' onto %s in %.2fs", name, loaded.device, duration)
+            return loaded.adapter
+
+    async def _make_room_to_wake(self, name: str, entry: ParkedModel) -> MemoryManager:
+        """Place a parked model back on its own device and evict until it fits.
+
+        A parked model wakes on the device it was loaded on: its tensors are
+        copied back to that device, and an engine process stays bound to it.
+        """
+        device = entry.device
+        load_device = await self._resolve_single_device_evicting(name, device)
+        if load_device != device:
+            msg = f"Parked model '{name}' must wake on {device}, but placement resolved {load_device}"
+            raise DevicePlacementError(msg)
+        memory_manager = self._memory_manager_for_device(device)
+        await self._evict_for_load(name, memory_manager, entry.loaded.memory_bytes or None)
+        return memory_manager
+
+    async def _restore_parked(self, name: str, entry: ParkedModel, memory_manager: MemoryManager) -> int:
+        """Copy the parked weights back, retrying once after an OOM; returns host bytes still held."""
+        adapter = entry.loaded.adapter
+        try:
+            retained = await self._run_adapter_call(adapter.restore_from_host, name, "Wake")
+        except RuntimeError as exc:
+            if not self._is_oom_error(exc) or not await self._evict_one_for_oom(name, memory_manager):
+                raise
+            retained = await self._run_adapter_call(adapter.restore_from_host, name, "Wake")
+        return released_bytes(retained)
+
+    async def wake_parked(self, name: str, device: str, *, timeout_s: float = HOST_WAKE_WAIT_S) -> bool:
+        """Start waking a parked model and wait up to ``timeout_s`` for it.
+
+        For request paths that would otherwise answer "loading, retry": a
+        wake usually takes seconds, so waiting for it serves the request now.
+        Returns whether the model is loaded; False also when it is not parked.
+        """
+        if name in self._loaded and name not in self._unloading:
+            return True
+        if not self.is_parked(name):
+            return False
+        await self.start_load_async(name, device)
+        task = self._load_tasks.get(name)
+        if task is not None:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(task), timeout_s)
+        return name in self._loaded and name not in self._unloading
 
     async def start_load_async(self, name: str, device: str) -> bool:
         """Start loading a model in the background (non-blocking).
@@ -1878,7 +2174,13 @@ class ModelRegistry:
         )
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
+        self._load_tasks[name] = task
+        task.add_done_callback(lambda done: self._forget_load_task(name, done))
         return True
+
+    def _forget_load_task(self, name: str, task: asyncio.Task[None]) -> None:
+        if self._load_tasks.get(name) is task:
+            del self._load_tasks[name]
 
     async def _load_model_background(self, name: str, device: str) -> None:
         """Load a model in the background (called via asyncio.create_task).
@@ -2056,6 +2358,7 @@ class ModelRegistry:
             # the process.
             self._unregister_across_group(name, device)
             self._release_device_claims(name)
+            self._host_cache.release(name)
 
         logger.info("Model '%s' unloaded", name)
 
@@ -2093,18 +2396,43 @@ class ModelRegistry:
         completion above; ``unload()`` itself is a synchronous contract on
         every adapter and is safe off the loop.
         """
-        loop = asyncio.get_running_loop()
-        unload_future = loop.run_in_executor(None, adapter.unload)
-        try:
-            await asyncio.shield(unload_future)
-        except asyncio.CancelledError:
-            logger.warning(
-                "Unload of '%s' was cancelled mid-teardown; waiting for it to finish before releasing the load lock",
-                name,
-            )
-            with contextlib.suppress(BaseException):
-                await asyncio.shield(unload_future)
-            raise
+        await self._run_adapter_call(adapter.unload, name, "Unload")
+
+    async def _close_and_unload(self, adapter: ModelAdapter, name: str) -> None:
+        """Close an adapter's async client, then run its blocking ``unload()`` off the loop."""
+        # Some adapters (e.g. the SGLang generation adapter) hold an
+        # async HTTP client to a subprocess. ``unload()`` is sync and
+        # can only fire-and-forget the client close, which races the
+        # subprocess termination on the next line — the close could be
+        # cut off before its connections drain, leaking fds / wedging
+        # on a half-open socket. When the adapter exposes an awaitable
+        # ``aclose_client``, drive it to completion HERE (we're on the
+        # event loop) so the client is fully closed against the still-
+        # live subprocess before ``unload()`` terminates it.
+        aclose_client = getattr(adapter, "aclose_client", None)
+        if aclose_client is not None:
+            try:
+                await aclose_client()
+            except Exception:  # noqa: BLE001 - close is best-effort
+                logger.warning("aclose_client() failed during unload of '%s'", name, exc_info=True)
+
+        # Adapter.unload() handles gc.collect + empty_cache, and for
+        # subprocess-backed adapters a SIGTERM/SIGKILL wait of up to
+        # 15s. All of it is blocking, and running it inline froze the
+        # event loop for the duration: every other coroutine —
+        # health probes, in-flight responses on models that are not
+        # being evicted, the metrics endpoint — stopped, not merely
+        # the load path the lock already serialises (design proposal
+        # ``settlement-and-queue-scalability.md``, B6 part one; same
+        # class as the #1600 scar above).
+        #
+        # The load lock stays held across this on purpose. The
+        # ``finally`` below drops this model's MemoryManager entry,
+        # and until ``unload()`` returns the VRAM is not actually
+        # free, so a load admitted against the freed accounting
+        # would size itself against memory the dying adapter still
+        # holds. A slow unload beats an OOM.
+        await self._run_adapter_unload(adapter, name)
 
     async def _drain_generation_before_deadline(
         self,
@@ -2228,40 +2556,14 @@ class ModelRegistry:
                 # counted in ``_models`` — that ``get_lru_model`` keeps
                 # re-selecting while ``_do_unload`` no-ops on it: a no-yield spin
                 # under ``_load_lock`` that starves the whole event loop. See #1600.
+                parked = False
                 try:
-                    # Some adapters (e.g. the SGLang generation adapter) hold an
-                    # async HTTP client to a subprocess. ``unload()`` is sync and
-                    # can only fire-and-forget the client close, which races the
-                    # subprocess termination on the next line — the close could be
-                    # cut off before its connections drain, leaking fds / wedging
-                    # on a half-open socket. When the adapter exposes an awaitable
-                    # ``aclose_client``, drive it to completion HERE (we're on the
-                    # event loop) so the client is fully closed against the still-
-                    # live subprocess before ``unload()`` terminates it.
-                    aclose_client = getattr(loaded.adapter, "aclose_client", None)
-                    if aclose_client is not None:
-                        try:
-                            await aclose_client()
-                        except Exception:  # noqa: BLE001 - close is best-effort
-                            logger.warning("aclose_client() failed during unload of '%s'", name, exc_info=True)
-
-                    # Adapter.unload() handles gc.collect + empty_cache, and for
-                    # subprocess-backed adapters a SIGTERM/SIGKILL wait of up to
-                    # 15s. All of it is blocking, and running it inline froze the
-                    # event loop for the duration: every other coroutine —
-                    # health probes, in-flight responses on models that are not
-                    # being evicted, the metrics endpoint — stopped, not merely
-                    # the load path the lock already serialises (design proposal
-                    # ``settlement-and-queue-scalability.md``, B6 part one; same
-                    # class as the #1600 scar above).
-                    #
-                    # The load lock stays held across this on purpose. The
-                    # ``finally`` below drops this model's MemoryManager entry,
-                    # and until ``unload()`` returns the VRAM is not actually
-                    # free, so a load admitted against the freed accounting
-                    # would size itself against memory the dying adapter still
-                    # holds. A slow unload beats an OOM.
-                    await self._run_adapter_unload(loaded.adapter, name)
+                    # An eviction that frees memory for other work parks the
+                    # weights in host RAM when the tier has room; the next
+                    # request wakes them instead of loading from disk.
+                    parked = await self._park(name, loaded, reason)
+                    if not parked:
+                        await self._close_and_unload(loaded.adapter, name)
                 finally:
                     # Always run, even if adapter teardown above raised, so a
                     # failed unload can never leave a ghost behind (#1600).
@@ -2277,6 +2579,9 @@ class ModelRegistry:
                     # Hand back any exclusively held devices. A no-op for the
                     # single-device models that are every profile today.
                     self._release_device_claims(name)
+                    # A fully unloaded adapter no longer holds a host copy.
+                    if not parked:
+                        self._host_cache.release(name)
 
                 # Freeing memory makes any prior OOM-class load failure on a
                 # *sibling* model retryable; clear those records so the next
@@ -2289,7 +2594,7 @@ class ModelRegistry:
                         name,
                     )
 
-            logger.info("Model '%s' unloaded", name)
+            logger.info("Model '%s' %s", name, "parked in host RAM" if parked else "unloaded")
         finally:
             self._unloading.discard(name)
             if self._unload_done.get(name) is done:
@@ -2313,7 +2618,7 @@ class ModelRegistry:
         # that model still holds its memory and its whole device group. Gating
         # on the config alone would make it unloadable for the life of the
         # process.
-        if name not in self._configs and name not in self._loaded:
+        if name not in self._configs and name not in self._loaded and name not in self._host_cache:
             msg = _ERR_MODEL_NOT_FOUND.format(name=name)
             raise KeyError(msg)
 
@@ -2322,6 +2627,9 @@ class ModelRegistry:
             if pending_unload is not None:
                 await pending_unload.wait()
             if name not in self._loaded:
+                # An explicit unload of a parked model frees its host copy.
+                if await self._drop_parked(name, reason=reason):
+                    return
                 msg = _ERR_MODEL_NOT_LOADED.format(name=name)
                 raise KeyError(msg)
 
@@ -2349,10 +2657,12 @@ class ModelRegistry:
             self._unload_sync(name, reason="shutdown")
 
     async def unload_all_async(self) -> None:
-        """Unload all loaded models (async, concurrency-safe)."""
+        """Unload all loaded and parked models (async, concurrency-safe)."""
         async with self._get_load_admission_lock():
             for name in list(self._loaded.keys()):
                 await self._do_unload(name, reason="shutdown")
+            for name in self._host_cache.names:
+                await self._drop_parked(name, reason="shutdown")
 
     def get_configs_snapshot(self, bundle_id: str | None = None) -> dict[str, ModelConfig]:
         """Return a shallow copy of the current model configs.
@@ -2465,6 +2775,7 @@ class ModelRegistry:
                     for model_id in sorted(invalidated_ids):
                         if model_id in self._loaded:
                             await self._do_unload(model_id, reason="config_change")
+                        await self._drop_parked(model_id, reason="config_change")
                     for model_id in sorted(removed_ids):
                         self._drop_config_entry(model_id)
             self._apply_config_entry(config, model_dir)
@@ -2489,6 +2800,7 @@ class ModelRegistry:
                 for removed_id in sorted(removed_ids):
                     if removed_id in self._loaded:
                         await self._do_unload(removed_id, reason="config_change")
+                    await self._drop_parked(removed_id, reason="config_change")
                     self._drop_config_entry(removed_id)
                 self._loader.update_configs(self._configs)
 
@@ -2682,6 +2994,7 @@ class ModelRegistry:
                 for name in sorted(invalidated):
                     if name in self._loaded:
                         await self._do_unload(name, reason="config_change")
+                    await self._drop_parked(name, reason="config_change")
 
                 self._configs = dict(new_configs)
                 self._loader.update_configs(self._configs)
@@ -2884,6 +3197,7 @@ class ModelRegistry:
             conflated failure modes.
         """
         lock = self._get_load_lock()
+        parked_victim: str | None = None
         try:
             await asyncio.wait_for(lock.acquire(), timeout=timeout_s)
         except TimeoutError:
@@ -2909,15 +3223,32 @@ class ModelRegistry:
                 releasing=self._optional_release_inflight(),
             )
             if candidate is None:
-                return EvictionResult.NO_CANDIDATE
-            logger.info(
-                "OOM recovery: evicting LRU sibling '%s' on %s (caller='%s')",
-                candidate,
-                manager.device,
-                exclude_name,
-            )
+                # Nothing resident can go; a parked engine may still hold
+                # memory on this device.
+                holders = self._host_cache.holding_device_memory(manager.device)
+                if not holders:
+                    return EvictionResult.NO_CANDIDATE
+                parked_victim = holders[0]
+                logger.info(
+                    "OOM recovery: dropping parked '%s' on %s (caller='%s')",
+                    parked_victim,
+                    manager.device,
+                    exclude_name,
+                )
+            else:
+                logger.info(
+                    "OOM recovery: evicting LRU sibling '%s' on %s (caller='%s')",
+                    candidate,
+                    manager.device,
+                    exclude_name,
+                )
         finally:
             lock.release()
+        if parked_victim is not None:
+            await self._drop_parked(parked_victim, reason="device memory")
+            return EvictionResult.EVICTED
+        if candidate is None:
+            return EvictionResult.NO_CANDIDATE
         try:
             await self._do_unload(candidate, reason="oom_recovery")
         except Exception:
@@ -3224,6 +3555,15 @@ class ModelRegistry:
         await self._hot_reloader.stop()
         self._hot_reloader = None
 
+    async def _reap_exited_parked_engines(self) -> None:
+        """Drop parked models whose engine process exited while they were parked."""
+        for name in self._host_cache.names:
+            entry = self._host_cache.get(name)
+            if entry is None or _engine_exit_code(entry.loaded.adapter) is None:
+                continue
+            logger.warning("Parked model '%s' engine process exited; dropping its parked copy", name)
+            await self._drop_parked(name, reason="engine exited")
+
     async def _reap_exited_engines(self) -> None:
         """Unload every loaded model whose engine process has exited.
 
@@ -3274,6 +3614,7 @@ class ModelRegistry:
             try:
                 await asyncio.sleep(self._memory_config.memory_check_interval_s)
                 await self._reap_exited_engines()
+                await self._reap_exited_parked_engines()
 
                 # Quick check without lock
                 pressured_managers = [manager for manager in self._memory_managers.values() if manager.check_pressure()]
@@ -3293,10 +3634,13 @@ class ModelRegistry:
                         # Adapters with nothing cached are not locked. A busy model is
                         # skipped instead of draining its in-flight batches.
                         await self._release_optional_memory_on(manager, exclude_name=None)
+                        victim: str | None = None
+                        drop_parked = False
                         async with lock:
                             # Re-check under lock (may have resolved)
                             if not manager.check_pressure():
                                 break
+                            lru_model: str | None = None
                             # Don't evict if only 1 model loaded - would cause immediate reload
                             if manager.loaded_model_count <= 1:
                                 logger.debug(
@@ -3304,18 +3648,28 @@ class ModelRegistry:
                                     manager.device,
                                     manager.loaded_model_count,
                                 )
-                                break
+                            else:
+                                # A timed-out release still holds the inference thread.
+                                # Joining it from unload would pin the monitor, and
+                                # the timeout itself is not a reason to unload.
+                                lru_model = manager.get_lru_model(
+                                    exclude=self._pinned_models | self._optional_release_inflight()
+                                )
 
-                            # A timed-out release still holds the inference thread.
-                            # Joining it from unload would pin the monitor, and
-                            # the timeout itself is not a reason to unload.
-                            lru_model = manager.get_lru_model(
-                                exclude=self._pinned_models | self._optional_release_inflight()
-                            )
                             if lru_model is None:
-                                break
-
-                            if lru_model not in self._loaded:
+                                # A parked engine can still hold memory on this
+                                # device; dropping it never forces a resident
+                                # model to reload.
+                                holders = self._host_cache.holding_device_memory(manager.device)
+                                if not holders:
+                                    break
+                                victim, drop_parked = holders[0], True
+                                logger.info(
+                                    "Memory monitor: %s under pressure, dropping parked '%s'",
+                                    manager.device,
+                                    victim,
+                                )
+                            elif lru_model not in self._loaded:
                                 # Belt-and-braces ghost guard (see #1600): drop a
                                 # stale MemoryManager entry with no ``_loaded``
                                 # model instead of spinning on a no-op _do_unload.
@@ -3325,16 +3679,21 @@ class ModelRegistry:
                                 )
                                 manager.unregister_model(lru_model)
                                 continue
-
-                            stats = manager.get_stats()
-                            logger.info(
-                                "Memory monitor: %s pressure %.1f%% > %.1f%% threshold, evicting LRU model '%s'",
-                                manager.device,
-                                stats.usage_ratio * 100,
-                                manager.pressure_threshold_pct,
-                                lru_model,
-                            )
-                        await self._do_unload(lru_model, reason="memory_pressure")
+                            else:
+                                victim = lru_model
+                                stats = manager.get_stats()
+                                logger.info(
+                                    "Memory monitor: %s pressure %.1f%% > %.1f%% threshold, evicting LRU model '%s'",
+                                    manager.device,
+                                    stats.usage_ratio * 100,
+                                    manager.pressure_threshold_pct,
+                                    lru_model,
+                                )
+                        assert victim is not None
+                        if drop_parked:
+                            await self._drop_parked(victim, reason="device memory")
+                        else:
+                            await self._do_unload(victim, reason="memory_pressure")
 
             except asyncio.CancelledError:
                 break

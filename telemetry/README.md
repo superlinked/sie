@@ -12,7 +12,7 @@ conditionally owned queue/adaptive-scheduler surfaces. Only authoritative lane
 lifecycle signals remain excluded until a deployed producer owns them;
 undeclared new instruments are not permitted.
 
-The current inventory is 122 application families: 120 may reach the remote
+The current inventory is 125 application families: 123 may reach the remote
 OTLP branch and two remain Prometheus-only controls. Ten additional,
 exact collector-self families form a separate operational allowlist without
 turning collector self-telemetry into a version-dependent wildcard.
@@ -358,6 +358,17 @@ facade admits the first 16 upstream names it sees for the lifetime of the
 process and collapses the rest to `other`, so `sie.worker.upstream.refusals`
 retains at most `17 × 4 = 68` series (three refusal reasons and `other`) and
 `sie.worker.upstream.breaker.open` at most 17.
+
+The Python worker's host-RAM tier instruments use the catalog pair like the
+other model lifecycle instruments. `sie.worker.model.host_cache.lookups`
+counts one lookup per model load, `hit` when the load woke a copy parked in
+host RAM and `miss` when it loaded from the disk cache, cluster cache or Hub,
+so it retains at most `257 × 3 = 771` series.
+`sie.worker.model.host_cache.wake.duration` times each wake by load outcome
+(`257 × 4` series), and `sie.worker.model.host_cache.memory` reports the host
+bytes the tier charges each model (257 series). It returns to 0 when the copy
+is dropped or woken, except for an SGLang engine, which keeps its host copy
+after a wake and stays charged until the model is fully unloaded.
 
 Every Rust-engine instrument has an explicit SDK view derived from its
 checked-in admission tier and finite domains, so contract-valid series do not

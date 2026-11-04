@@ -97,6 +97,8 @@ cardinality_budgets:
         - worker_oom
         - worker_runtime
         - worker_eviction
+        - worker_host_cache_lookup
+        - worker_host_cache_wake
         - worker_scheduler
         - worker_adaptive_p50
         - generation_stream
@@ -1015,6 +1017,7 @@ enums:
   grammar_phase: [request, prewarm, other]
   grammar_outcome: [success, error, timeout, other]
   grammar_cache_result: [hit, miss, other]
+  host_cache_result: [hit, miss, other]
   generation_admission_outcome: [admitted, rejected, error, other]
   generation_admission_reason: [none, kv_budget, resolver_error, missing_budget, other]
   generation_duplicate_path: [first_chunk_fallback, other]
@@ -1285,6 +1288,18 @@ attribute_sets:
     lane: lane
     model: model
     profile: profile
+  worker_host_cache_lookup:
+    result: host_cache_result
+    backend: worker_backend
+    lane: lane
+    model: model
+    profile: profile
+  worker_host_cache_wake:
+    outcome: model_load_outcome
+    backend: worker_backend
+    lane: lane
+    model: model
+    profile: profile
   worker_scheduler:
     lane: lane
     model: model
@@ -1450,6 +1465,9 @@ histogram_buckets:
   worker_work_item_age_seconds: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0]
   worker_request_seconds: [0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0]
   worker_model_load_seconds: [0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 900.0]
+  # A wake copies weights already in host RAM back to the device: tens of
+  # milliseconds for a small encoder, seconds for an LLM.
+  worker_model_wake_seconds: [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0]
   worker_ipc_seconds: [0.0001, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0, 900.0]
   worker_batch_items: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
   worker_batch_cost: [128, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144]
@@ -2482,6 +2500,35 @@ metrics:
     attributes: worker_eviction
     prometheus_name: sie_worker_model_evictions_total
     export: [prometheus, otlp]
+  # Host-RAM tier: an evicted model parks its weights in host RAM and the next
+  # load wakes it back onto its device. A lookup is one load: a hit woke a
+  # parked copy, a miss loaded from the disk cache, cluster cache or Hub.
+  - name: sie.worker.model.host_cache.lookups
+    owner: worker_python_engine
+    facade_event: worker.model_host_cache_lookup
+    type: counter
+    unit: "{lookup}"
+    attributes: worker_host_cache_lookup
+    prometheus_name: sie_worker_model_host_cache_lookups_total
+    export: [prometheus, otlp]
+  - name: sie.worker.model.host_cache.wake.duration
+    owner: worker_python_engine
+    facade_event: worker.model_host_cache_wake_completed
+    type: histogram
+    unit: s
+    attributes: worker_host_cache_wake
+    buckets: worker_model_wake_seconds
+    prometheus_name: sie_worker_model_host_cache_wake_duration_seconds
+    export: [prometheus, otlp]
+  - name: sie.worker.model.host_cache.memory
+    owner: worker_python_engine
+    facade_event: worker.model_host_cache_memory_changed
+    type: gauge
+    unit: By
+    attributes: worker_model
+    prometheus_name: sie_worker_model_host_cache_memory_bytes
+    export: [prometheus, otlp]
+    measurement: authoritative_only
 
   # Generation is currently implemented by the Python engine. It remains in
   # the same sie-worker service stream and uses the same bounded catalog

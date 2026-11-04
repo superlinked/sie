@@ -82,6 +82,8 @@ def mock_registry(mock_adapter: MagicMock) -> MagicMock:
     from sie_server.core.postprocessor_registry import PostprocessorRegistry
 
     registry = MagicMock(spec=ModelRegistry)
+    # Nothing is parked in the host-RAM tier.
+    registry.wake_parked.return_value = False
     registry.has_model.return_value = True
     registry.is_loaded.return_value = True
     registry.is_loading.return_value = False
@@ -306,6 +308,23 @@ class TestEncodeEndpoint:
         # Non-blocking loading returns 503 + MODEL_LOADING immediately
         assert response.status_code == 503
         mock_registry.start_load_async.assert_called_once_with("test-model", device="cpu")
+
+    def test_encode_waits_for_a_parked_model_to_wake(
+        self, client: TestClient, mock_registry: MagicMock, mock_adapter: MagicMock
+    ) -> None:
+        """A model parked in host RAM is woken inline instead of answering MODEL_LOADING."""
+        mock_registry.is_loaded.return_value = False
+        mock_registry.is_loading.return_value = False
+        mock_registry.wake_parked.return_value = True
+        mock_registry.start_load_async = MagicMock()
+        response = client.post(
+            "/v1/encode/test-model",
+            json={"items": [{"text": "Hello"}]},
+            headers=JSON_HEADERS,
+        )
+        assert response.status_code == 200
+        mock_registry.wake_parked.assert_awaited_once_with("test-model", "cpu")
+        mock_registry.start_load_async.assert_not_called()
 
     def test_encode_unsupported_output_type(self, client: TestClient, mock_registry: MagicMock) -> None:
         """Returns 400 for unsupported output type."""

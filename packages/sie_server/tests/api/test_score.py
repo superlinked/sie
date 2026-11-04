@@ -119,6 +119,8 @@ def mock_encoder_adapter() -> MagicMock:
 def mock_registry(mock_adapter: MagicMock) -> MagicMock:
     """Create a mock registry with a scoring model."""
     registry = MagicMock(spec=ModelRegistry)
+    # Nothing is parked in the host-RAM tier.
+    registry.wake_parked.return_value = False
     registry.has_model.return_value = True
     registry.is_loaded.return_value = True
     registry.is_loading.return_value = False

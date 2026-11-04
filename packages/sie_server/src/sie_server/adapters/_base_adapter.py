@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED
 from sie_server.adapters._utils import grouped_score_pairs
-from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
+from sie_server.adapters.base import HostOffload, ModelAdapter, ModelCapabilities, ModelDims, released_bytes
 
 if TYPE_CHECKING:
     import torch
@@ -35,6 +35,12 @@ class BaseAdapter(ModelAdapter):
     """
 
     spec: ClassVar[AdapterSpec]
+
+    # Host-RAM parking (``ModelAdapter.offload_to_host``) for in-process
+    # weights. The generic implementation below moves every tensor reachable
+    # from the adapter's attributes (see ``_host_offload``). An adapter that
+    # keeps device state that walk cannot see sets this to False.
+    host_offload: ClassVar[bool] = True
 
     # Guards the lazy creation of each instance's ``_tokenizer_lock`` (below).
     # A HuggingFace *fast* tokenizer wraps a Rust object behind a ``RefCell``:
@@ -127,6 +133,7 @@ class BaseAdapter(ModelAdapter):
                 setattr(self, attr, None)
 
         self._device = None
+        self._parked_tensors = None
 
         gc.collect()
 
@@ -137,6 +144,99 @@ class BaseAdapter(ModelAdapter):
                 _torch.cuda.empty_cache()
             elif str(device) == "mps":
                 _torch.mps.empty_cache()
+
+    # -- Host-RAM parking ------------------------------------------------------
+
+    def _host_offload_device(self) -> torch.device | None:
+        """The CUDA device this adapter's weights live on, or None if parking would free nothing.
+
+        On CPU the weights already are in host RAM, and on Apple silicon the
+        accelerator shares it.
+        """
+        device = getattr(self, "_device", None)
+        if device is None:
+            return None
+        import torch as _torch
+
+        try:
+            resolved = _torch.device(device)
+        except (RuntimeError, TypeError, ValueError):
+            return None
+        return resolved if resolved.type == "cuda" else None
+
+    def host_offload_bytes(self) -> int | None:
+        """Bytes of device tensors the generic walk would park, or None when it cannot park."""
+        if not self.host_offload or getattr(self, "_parked_tensors", None) is not None:
+            return None
+        device = self._host_offload_device()
+        if device is None:
+            return None
+        if any(not callable(getattr(holder, "clear", None)) for holder in self._graph_holders()):
+            # A graph holder that cannot be cleared would replay against
+            # addresses the park frees.
+            return None
+        from sie_server.adapters import _host_offload
+
+        parkable = _host_offload.parkable_bytes(self, device)
+        # The model ``memory_footprint`` measures must be among what the walk
+        # reached; a shortfall means weights sit where parking cannot see them
+        # and would stay on the device. The slack covers parameters that share
+        # storage, which the footprint counts once each.
+        if parkable is None or parkable < 0.9 * released_bytes(self.memory_footprint()):
+            return None
+        return parkable
+
+    def offload_to_host(self) -> HostOffload:
+        """Copy the weights to host RAM and free their device memory."""
+        device = self._host_offload_device()
+        if device is None or getattr(self, "_parked_tensors", None) is not None:
+            msg = f"{type(self).__name__} has nothing on a CUDA device to park"
+            raise RuntimeError(msg)
+        from sie_server.adapters import _host_offload
+
+        self._drop_device_caches()
+        parked = _host_offload.park(self, device)
+        self._parked_tensors = parked
+        gc.collect()
+        _host_offload.release_cached_device_memory(device)
+        return HostOffload(host_bytes=parked.nbytes)
+
+    def restore_from_host(self) -> int:
+        """Copy parked weights back to the device they came from."""
+        parked = getattr(self, "_parked_tensors", None)
+        if parked is None:
+            msg = f"{type(self).__name__} is not parked"
+            raise RuntimeError(msg)
+        from sie_server.adapters import _host_offload
+
+        _host_offload.unpark(parked)
+        self._parked_tensors = None
+        return 0
+
+    def _drop_device_caches(self) -> None:
+        """Drop device state recorded against the current weight addresses.
+
+        A CUDA graph replays kernels against the exact addresses it recorded,
+        and parking moves every weight. Graph runners (``self._graphs``) are
+        cleared, and anything else the adapter releases as optional memory
+        goes with them; graphs record again on demand after the model wakes.
+        """
+        for holder in self._graph_holders():
+            holder.clear()
+        if self.has_releasable_memory():
+            self.release_optional_memory()
+
+    def _graph_holders(self) -> list[Any]:
+        """Attributes holding recorded CUDA graphs: runners (``_graphs``) and dicts of them.
+
+        Found by name, as every graph runner in this package is held. Scalars
+        that merely describe graphs (``_cuda_graphs = "off"``) are skipped.
+        """
+        return [
+            value
+            for name, value in vars(self).items()
+            if "graph" in name.lower() and value is not None and not isinstance(value, (bool, int, float, str))
+        ]
 
     def get_preprocessor(self) -> Any:
         """Return ``CharCountPreprocessor`` for cost estimation."""

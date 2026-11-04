@@ -56,6 +56,7 @@ from sie_server.adapters._generation_base import (
 )
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._types import ERR_NOT_LOADED
+from sie_server.adapters.base import HostOffload
 from sie_server.core.inference_output import (
     EncodeOutput,
     ExtractItemError,
@@ -487,6 +488,7 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
         synthetic_usage: bool = False,
         faults: dict[str, Any] | None = None,
         fault_key: str | None = None,
+        host_offload: bool = True,
         **kwargs: Any,
     ) -> None:
         _ = (model_name_or_path, compute_precision, kwargs)
@@ -502,6 +504,8 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
         self._fault_runtime = _FaultRuntime(_resolve_faults(faults, fault_key))
         self._loaded = False
         self._device: str | None = None
+        self._host_offload_enabled = host_offload
+        self._parked = False
 
     # -- Lifecycle -----------------------------------------------------------
 
@@ -521,6 +525,28 @@ class FakeAdapter(BaseAdapter, GenerationAdapter):
     def load_required_memory_bytes(self, *, device_type: str, device_total_bytes: int) -> int | None:
         _ = (device_type, device_total_bytes)
         return self._memory_footprint_bytes
+
+    # -- Host-RAM parking (simulated: the declared footprint moves) ----------
+
+    def host_offload_bytes(self) -> int | None:
+        if not self._host_offload_enabled or not self._loaded:
+            return None
+        return self._memory_footprint_bytes
+
+    def offload_to_host(self) -> HostOffload:
+        if not self._loaded:
+            raise RuntimeError(ERR_NOT_LOADED)
+        self._loaded = False
+        self._parked = True
+        return HostOffload(host_bytes=self._memory_footprint_bytes)
+
+    def restore_from_host(self) -> int:
+        if not self._parked:
+            msg = "sie-fake model is not parked"
+            raise RuntimeError(msg)
+        self._parked = False
+        self._loaded = True
+        return 0
 
     # -- Surfaces --------------------------------------------------------------
 

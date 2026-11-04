@@ -315,6 +315,41 @@ def test_lifecycle_native_topology_and_oom_attributes_match_contract(
     provider.shutdown()
 
 
+def test_host_cache_instruments_match_contract(
+    active_telemetry: tuple[wt.WorkerTelemetry, InMemoryMetricReader, MeterProvider],
+) -> None:
+    telemetry, reader, provider = active_telemetry
+    telemetry.host_cache_lookup(model="catalog/model", hit=True)
+    telemetry.host_cache_lookup(model="catalog/model", hit=False)
+    telemetry.host_cache_lookup(model="catalog/model", hit=False)
+    telemetry.host_cache_wake_completed(model="catalog/model", duration_s=0.4, outcome="success")
+    telemetry.host_cache_wake_completed(model="catalog/model", duration_s="not a number", outcome="success")
+    telemetry.host_cache_wake_completed(model="catalog/model", duration_s=2.0, outcome="exploded")
+    telemetry.host_cache_memory_changed(model="catalog/model", host_bytes=8192)
+
+    by_name = _metric_map(reader.get_metrics_data())
+    model_attributes = {
+        "backend": "python",
+        "lane": "realtime|l4|default",
+        "model": "catalog/model",
+        "profile": "default",
+    }
+    lookups = {point.attributes["result"]: point.value for point in _points(by_name[wt.HOST_CACHE_LOOKUPS_METRIC_NAME])}
+    assert lookups == {"hit": 1, "miss": 2}
+    assert dict(_points(by_name[wt.HOST_CACHE_LOOKUPS_METRIC_NAME])[0].attributes).keys() == {
+        "result",
+        *model_attributes,
+    }
+    wakes = {point.attributes["outcome"]: point for point in _points(by_name[wt.HOST_CACHE_WAKE_DURATION_METRIC_NAME])}
+    assert set(wakes) == {"success", "other"}
+    assert wakes["success"].count == 1
+    assert tuple(wakes["success"].explicit_bounds) == wt.HOST_CACHE_WAKE_BUCKETS_S
+    memory = _points(by_name[wt.HOST_CACHE_MEMORY_METRIC_NAME])[0]
+    assert memory.value == 8192
+    assert dict(memory.attributes) == model_attributes
+    provider.shutdown()
+
+
 def test_unknown_values_collapse_and_never_become_attributes(
     active_telemetry: tuple[wt.WorkerTelemetry, InMemoryMetricReader, MeterProvider],
 ) -> None:
@@ -551,6 +586,9 @@ def test_metric_inventory_is_exact() -> None:
         "sie.worker.model.load.duration",
         "sie.worker.model.memory",
         "sie.worker.model.evictions",
+        "sie.worker.model.host_cache.lookups",
+        "sie.worker.model.host_cache.wake.duration",
+        "sie.worker.model.host_cache.memory",
         "sie.worker.oom.recoveries",
         "sie.worker.scheduler.adaptive.wait",
         "sie.worker.scheduler.adaptive.cost",
