@@ -240,13 +240,13 @@ def _key_scope() -> tuple[str, str]:
 
 
 def api_key_for(endpoint: str) -> str:
-    """Return SIE_API_KEY only for the origin it is scoped to, as the SDK does."""
+    """Return SIE_API_KEY only for the origin it is scoped to, as the SDK does; the path plays no part."""
     key, scope = _key_scope()
     try:
         scope = normalize_endpoint(scope)
     except ValueError:
         return ""
-    return key if key and _endpoint_key(scope) == _endpoint_key(endpoint) else ""
+    return key if key and _endpoint_key(scope)[:3] == _endpoint_key(endpoint)[:3] else ""
 
 
 def _resolve_api_key(parser: argparse.ArgumentParser, endpoint: str) -> str:

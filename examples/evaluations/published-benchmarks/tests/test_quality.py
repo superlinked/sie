@@ -677,6 +677,13 @@ class CommandTest(unittest.TestCase):
         client.assert_called_once_with("http://localhost:8080", api_key="local-token", timeout_s=300.0)
         self.assertEqual(stderr, "")
 
+    def test_a_key_scope_is_an_origin_so_a_path_on_the_endpoint_still_matches(self):
+        environ = {"SIE_BASE_URL": "http://localhost:8080", "SIE_API_KEY": "local-token"}
+        code, client, stderr = self.command(FakeClient(), "--endpoint", "http://localhost:8080/sie/", environ=environ)
+        self.assertIsNone(code)
+        client.assert_called_once_with("http://localhost:8080/sie", api_key="local-token", timeout_s=300.0)
+        self.assertEqual(stderr, "")
+
     def test_a_key_scoped_elsewhere_fails_on_the_default_endpoint(self):
         environ = {"SIE_BASE_URL": "http://localhost:8080", "SIE_API_KEY": "local-token"}
         code, client, stderr = self.command(FakeClient(), environ=environ)
