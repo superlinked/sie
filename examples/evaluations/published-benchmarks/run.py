@@ -217,9 +217,13 @@ def _endpoint_key(url: str) -> tuple[str, str | None, int, str]:
     parts = urlsplit(url)
     scheme = parts.scheme.lower()
     try:
-        port = parts.port or (443 if scheme == "https" else 80)
+        port = parts.port
     except ValueError:
         raise ValueError("endpoint must be an http(s) URL") from None
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    elif port == 0:
+        raise ValueError("endpoint must be an http(s) URL")
     return scheme, parts.hostname, port, parts.path.rstrip("/")
 
 

@@ -269,7 +269,7 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(local.endpoint, "http://localhost:8080")
 
     def test_an_endpoint_without_a_host_or_with_a_bad_port_is_rejected(self):
-        for endpoint in ("http://:8080", "http://localhost:99999"):
+        for endpoint in ("http://:8080", "http://localhost:99999", "http://localhost:0"):
             with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
                 plan_quality(parse("--reference", str(self.reference), "--endpoint", endpoint))
 
@@ -724,7 +724,7 @@ class CommandTest(unittest.TestCase):
         self.assertIn("endpoint must be an http(s) URL", stderr)
 
     def test_an_endpoint_without_a_host_or_with_a_bad_port_is_a_usage_error(self):
-        for endpoint in ("http://:8080", "http://localhost:99999"):
+        for endpoint in ("http://:8080", "http://localhost:99999", "http://localhost:0"):
             with self.subTest(endpoint=endpoint):
                 code, client, stderr = self.command(FakeClient(), "--endpoint", endpoint)
                 self.assertEqual(code, 2)
