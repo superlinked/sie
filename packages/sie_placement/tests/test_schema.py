@@ -128,7 +128,11 @@ def test_integers_are_strict(value, described):
     assert str(schema_error(Receipt.from_dict, data)) == f"$.concurrency: expected an integer, got {described}"
 
 
-@pytest.mark.parametrize("value", [math.nan, math.inf])
+@pytest.mark.parametrize(
+    "value",
+    [math.nan, math.inf, json.loads("1" + "0" * 400), -(10**400)],
+    ids=["nan", "infinity", "integer-above-float-range", "integer-below-float-range"],
+)
 def test_numbers_must_be_finite(value):
     data = load("receipt-encode.json")
     data["throughput"]["requestsPerSecond"] = value
@@ -355,7 +359,14 @@ def test_price_lists_validate_currency_rates_and_names():
 
 
 @pytest.mark.parametrize(
-    "value", ["2026-11-02T09:30:00Z", "2026-11-02T09:00:00+00:00", "2026-11-02 09:00:00Z", "2026-02-30T09:00:00Z"]
+    "value",
+    [
+        "2026-11-02T09:30:00Z",
+        "2026-11-02T09:00:00+00:00",
+        "2026-11-02 09:00:00Z",
+        "2026-02-30T09:00:00Z",
+        "٢٠٢٦-11-02T09:00:00Z",
+    ],
 )
 def test_demand_hours_are_utc_hour_boundaries(value):
     data = load("demand.json")
@@ -399,6 +410,12 @@ def test_demand_hours_built_in_code_must_be_utc_boundaries():
     series = DemandSeries(identity="BAAI/bge-m3", operation=Operation.ENCODE, hours=(hour,))
     demand = Demand(start=hour.start, end=hour.start + timedelta(hours=1), series=(series,))
     assert Demand.from_dict(demand.to_dict()) == demand
+
+
+def test_demand_hours_serialize_four_digit_years():
+    hour = DemandHour(start=datetime(999, 1, 1, 7, tzinfo=UTC), requests=1)
+    assert hour.to_dict()["start"] == "0999-01-01T07:00:00Z"
+    assert DemandHour.from_dict(hour.to_dict()) == hour
 
 
 @pytest.mark.parametrize(

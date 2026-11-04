@@ -23,8 +23,7 @@ ROOT_PATH = "$"
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _CURRENCY = re.compile(r"[A-Z]{3}")
-_HOUR = re.compile(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):00:00Z")
-_HOUR_FORMAT = "%Y-%m-%dT%H:00:00Z"
+_HOUR = re.compile(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):00:00Z", re.ASCII)
 
 
 class SchemaError(ValueError):
@@ -91,7 +90,7 @@ def _describe(value: object) -> str:
 
 
 def _format_hour(value: datetime) -> str:
-    return value.strftime(_HOUR_FORMAT)
+    return f"{value.year:04d}-{value.month:02d}-{value.day:02d}T{value.hour:02d}:00:00Z"
 
 
 def _compact(fields: dict[str, object | None]) -> dict[str, object]:
@@ -144,7 +143,11 @@ class _Reader:
     def _number(self, key: str, value: object) -> float:
         if isinstance(value, bool) or not isinstance(value, int | float):
             raise SchemaError(self._at(key), f"expected a number, got {_describe(value)}")
-        if not math.isfinite(value):
+        try:
+            finite = math.isfinite(value)
+        except OverflowError:
+            raise SchemaError(self._at(key), "expected a finite number, got an integer beyond the float range") from None
+        if not finite:
             raise SchemaError(self._at(key), f"expected a finite number, got {value!r}")
         return value
 
