@@ -146,7 +146,9 @@ class _Reader:
         try:
             finite = math.isfinite(value)
         except OverflowError:
-            raise SchemaError(self._at(key), "expected a finite number, got an integer beyond the float range") from None
+            raise SchemaError(
+                self._at(key), "expected a finite number, got an integer beyond the float range"
+            ) from None
         if not finite:
             raise SchemaError(self._at(key), f"expected a finite number, got {value!r}")
         return value
