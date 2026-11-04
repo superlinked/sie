@@ -25,7 +25,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: public-release-main
+  # Publication and recovery share one queue and are never cancelled. Each push run
+  # gets its own group, so a job waiting for approval cannot hold or overflow it.
+  group: ${{ github.event_name == 'push' && format('public-release-push-{0}', github.run_id) || 'public-release-main' }}
   queue: max
   cancel-in-progress: false
 
@@ -40,6 +42,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: release-automation
+    # The newest push replaces an older authoring job, including one waiting for
+    # approval. Other events skip this job and must never cancel it: the release
+    # event that starts publication arrives while this job is still running.
+    concurrency:
+      group: public-release-authoring
+      cancel-in-progress: ${{ github.event_name == 'push' }}
     permissions:
       contents: read
     outputs:

@@ -109,12 +109,27 @@ be published with the later run's provenance. The App credential is required
 because its events trigger workflows; a release created with `GITHUB_TOKEN`
 does not provide that handoff. Publication does not depend on a tag-push event.
 
-Release work is serialized with GitHub's `queue: max` concurrency mode and no
-in-progress cancellation, so newer events do not replace pending releases. The
-queue has GitHub's documented bound of 100 pending runs. The current actionlint
-schema does not recognize `queue`; CI exempts only that diagnostic and separately
-checks the required queue setting. See [workflow
+Publication and manual recovery runs are serialized in the `public-release-main`
+group with GitHub's `queue: max` concurrency mode and no in-progress cancellation,
+so newer events do not replace pending releases. The queue has GitHub's documented
+bound of 100 pending runs. The current actionlint schema does not recognize
+`queue`; CI exempts only that diagnostic and separately checks the required queue
+setting. See [workflow
 concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
+
+Push runs stay out of that queue, because each one needs `release-automation`
+approval and would hold the queue while it waits. A push run has a group of its
+own, and its `release-please` job joins the separate `public-release-authoring`
+group, where a newer push cancels the older job. GitHub does not allow `queue: max`
+with in-progress cancellation, so that group uses the default single queue. No
+release is lost when a job is replaced: the next approved job reads the repository
+state, finds any merged release PR still awaiting its release, and rebuilds the open
+release PR.
+
+Authoring is therefore not serialized against publication. A release PR merged while
+an earlier release is publishing can create the newer release before that run ends.
+The newer release's run waits in the queue, and the earlier run leaves the floating
+image aliases for it to move.
 
 PR and candidate builds produce archives without publishing. They use the
 actual package versions in that source tree. Release builds additionally
@@ -318,24 +333,36 @@ any automation repair through normal review and CI, then approve that commit's
 `release-automation` job. The manual entrypoint below only recovers failed
 publication; it does not refresh release PRs.
 
-Before resuming a waiting authoring run, inspect its source revision and workflow:
-release-please can read current `main`, but the run still executes the workflow
-from its original push. An old run can therefore generate current release files
-using outdated refresh steps. Cancel obsolete queued **push** runs before
-cancelling the old waiting run, then retain the authoring run from the intended
-current source. Do not cancel publication or recovery runs as part of this
-cleanup. Keep the environment protections and approve the retained run normally.
-If the intended push run was cancelled, rerun that exact push run after checking
-its source and workflow, while GitHub still permits the rerun; do not replay the
-obsolete backlog. Verify the generated PR's source ancestry after refresh, too:
-the approved run's revision does not freeze release-please's reads of `main`.
+Each push replaces the previous authoring job, so earlier push runs show as
+cancelled and normally only the newest push is waiting for approval. Approve that
+one. If another push lands while the approved job is running, that job is cancelled
+too; approve the newer run. A job cancelled between creating a release and updating
+the release PR's label can leave the next run failing once on the duplicate release.
+That run corrects the label, and the run after it proceeds normally.
 
-An authoring run left waiting for approval holds the release concurrency group,
-so every later push queues behind it. Once 100 runs are pending, the queue is
-full and GitHub does not admit further `Release` runs. Each one appears as a
+GitHub's documentation does not say how in-progress cancellation treats a job
+waiting on an environment. If an older authoring job ever remains `waiting` while
+a newer push's job is pending, cancel the older run rather than approving it. Do
+not cancel publication or recovery runs as part of this cleanup. Keep the
+environment protections and approve the retained run normally.
+
+Before approving or rerunning an authoring run, inspect its source revision and
+workflow: release-please can read current `main`, but the run still executes the
+workflow from its original push. An old run can therefore generate current release
+files using outdated refresh steps. If the newest push run was cancelled, rerun
+that exact push run after checking its source and workflow, while GitHub still
+permits the rerun; do not replay older runs. Verify the generated PR's source
+ancestry after refresh, too: the approved run's revision does not freeze
+release-please's reads of `main`.
+
+An unapproved push run does not delay publication. A publication or recovery run
+waiting on an environment approval does hold `public-release-main`, including a
+dispatched recovery run nobody has approved, so resolve those first if publication
+appears stuck. If 100 runs were ever pending there, the queue would be full and
+GitHub would not admit further publication or recovery runs. Each one appears as a
 failed run with zero jobs, and GitHub reports that it likely failed because of a
-workflow file issue. Before debugging the workflow file, look for a `Release`
-run in the `waiting` state and apply the cleanup above.
+workflow file issue. Before debugging the workflow file, look for a `Release` run
+in the `waiting` state.
 
 ### Artifact publication
 
