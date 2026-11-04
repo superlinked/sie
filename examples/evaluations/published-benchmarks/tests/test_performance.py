@@ -387,6 +387,21 @@ class PlanTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             plan_performance(parse("--reference", str(self.reference), "--endpoint", "localhost:8080"))
 
+    def test_default_ports_are_normalised_away(self):
+        same = plan_performance(
+            parse("--reference", str(self.reference), "--endpoint", "https://api.superlinked.com:443/")
+        )
+        self.assertEqual((same.endpoint, same.comparable_reasons), (DEFAULT_ENDPOINT, ["client processes 1 != 4"]))
+        plain = plan_performance(parse("--reference", str(self.reference), "--endpoint", "http://localhost:80/"))
+        self.assertEqual(plain.endpoint, "http://localhost")
+        local = plan_performance(parse("--reference", str(self.reference), "--endpoint", "http://localhost:8080"))
+        self.assertEqual(local.endpoint, "http://localhost:8080")
+
+    def test_an_endpoint_without_a_host_or_with_a_bad_port_is_rejected(self):
+        for endpoint in ("http://:8080", "http://localhost:99999"):
+            with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
+                plan_performance(parse("--reference", str(self.reference), "--endpoint", endpoint))
+
     def test_overrides_are_comparable_reasons(self):
         plan = plan_performance(parse("--reference", str(self.reference), "--rate", "100"))
         self.assertEqual(plan.comparable_reasons, ["rate 100 != 50", "client processes 1 != 4"])
@@ -871,7 +886,7 @@ class CommandTest(unittest.TestCase):
         code = None
         with (
             patch.dict("os.environ", environ or {}, clear=True),
-            patch.object(run, "load_performance_data", side_effect=loader),
+            patch.object(run, "load_performance_data", side_effect=loader) as self.loader,
             patch.object(run, "run_performance", side_effect=measured),
             patch.object(run, "SIEClient") as client,
             contextlib.redirect_stdout(io.StringIO()),
@@ -882,6 +897,15 @@ class CommandTest(unittest.TestCase):
             except SystemExit as caught:
                 code = caught.code
         return code, client, stderr.getvalue()
+
+    def test_an_endpoint_without_a_host_or_with_a_bad_port_is_a_usage_error(self):
+        for endpoint in ("localhost:8080", "http://:8080", "http://localhost:99999"):
+            with self.subTest(endpoint=endpoint):
+                code, client, stderr = self.command(FakeClient(), "--endpoint", endpoint)
+                self.assertEqual(code, 2)
+                self.loader.assert_not_called()
+                client.assert_not_called()
+                self.assertIn("endpoint must be an http(s) URL", stderr)
 
     def test_a_local_endpoint_runs_without_a_key(self):
         code, client, stderr = self.command(FakeClient(), "--endpoint", "http://localhost:8080")

@@ -213,16 +213,24 @@ def plan_quality(args: argparse.Namespace) -> QualityPlan:
     return _plan_from_flags(args)
 
 
-def _endpoint_key(url: str) -> tuple[str, str, str]:
+def _endpoint_key(url: str) -> tuple[str, str | None, int, str]:
     parts = urlsplit(url)
-    return parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/")
+    scheme = parts.scheme.lower()
+    try:
+        port = parts.port or (443 if scheme == "https" else 80)
+    except ValueError:
+        raise ValueError("endpoint must be an http(s) URL") from None
+    return scheme, parts.hostname, port, parts.path.rstrip("/")
 
 
 def normalize_endpoint(url: str) -> str:
-    scheme, netloc, path = _endpoint_key(url)
-    if scheme not in {"http", "https"} or not netloc:
+    scheme, hostname, port, path = _endpoint_key(url)
+    if scheme not in {"http", "https"} or hostname is None:
         raise ValueError("endpoint must be an http(s) URL")
-    return f"{scheme}://{netloc}{path}"
+    default_port = 443 if scheme == "https" else 80
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    suffix = "" if port == default_port else f":{port}"
+    return f"{scheme}://{host}{suffix}{path}"
 
 
 def _key_scope() -> tuple[str, str]:
@@ -1078,7 +1086,7 @@ def run_quality(
                 predictions = rerank_predictions(client, plan, data, log)
             else:
                 predictions = encode_predictions(client, plan, data, log)
-    except (RequestFailed, ValueError, KeyError) as exc:
+    except (RequestFailed, ValueError, KeyError, TypeError) as exc:
         if not isinstance(exc, RequestFailed):
             log.failure = f"{type(exc).__name__}: {exc}"
         predictions = None

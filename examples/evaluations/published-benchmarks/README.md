@@ -311,12 +311,17 @@ uv run python run.py performance \
 What to expect:
 
 - the first request loads the model; the readiness request waits for it up
-  to 300 s, so a cold run is valid;
+  to 300 s, so a cold run is valid. A first download and load that takes
+  longer than that fails the readiness request, the run says so and exits 1;
+  send one request by hand, or run again once the server has loaded the model;
 - every result is `comparable: false` with the reason
   `endpoint http://localhost:8080 != https://api.superlinked.com`, listed
   beside any other reason;
-- quality numbers from the same pinned model revision should land in the
-  same band as the published ones, within numeric precision;
+- a full quality run (the reference's task key, no `?limit`) against the
+  same pinned model revision should land in the same band as the published
+  numbers, within numeric precision;
+- the smoke run above scores 20 queries, so its metrics are a check that the
+  path works, not a comparison with the record;
 - performance numbers describe your hardware and your network path and are
   not comparable with the record;
 - `execution_revisions` stays empty, because a sie-server reached directly

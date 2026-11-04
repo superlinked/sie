@@ -126,6 +126,14 @@ class ShortClient(FakeClient):
         return super().encode(model, items, **kwargs)[:-1]
 
 
+class NoneScoreClient(FakeClient):
+    def score(self, model, query, items, **kwargs):
+        result = super().score(model, query, items, **kwargs)
+        if len(self.calls) > 1:
+            result["scores"] = [{"item_id": items[0]["id"], "score": None, "rank": 0}]
+        return result
+
+
 def tiny_loaders():
     return Loaders(
         corpus=lambda name, revision: {doc_id: dict(doc) for doc_id, doc in CORPUS.items()},
@@ -251,6 +259,19 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(flags.endpoint, "http://localhost:8080/sie")
         with self.assertRaises(ValueError):
             plan_quality(parse("--reference", str(self.reference), "--endpoint", "localhost:8080"))
+
+    def test_default_ports_are_normalised_away(self):
+        same = plan_quality(parse("--reference", str(self.reference), "--endpoint", "https://api.superlinked.com:443/"))
+        self.assertEqual((same.endpoint, same.comparable_reasons), (DEFAULT_ENDPOINT, []))
+        plain = plan_quality(parse("--reference", str(self.reference), "--endpoint", "http://localhost:80/"))
+        self.assertEqual(plain.endpoint, "http://localhost")
+        local = plan_quality(parse("--reference", str(self.reference), "--endpoint", "http://localhost:8080"))
+        self.assertEqual(local.endpoint, "http://localhost:8080")
+
+    def test_an_endpoint_without_a_host_or_with_a_bad_port_is_rejected(self):
+        for endpoint in ("http://:8080", "http://localhost:99999"):
+            with self.subTest(endpoint=endpoint), self.assertRaises(ValueError):
+                plan_quality(parse("--reference", str(self.reference), "--endpoint", endpoint))
 
     def test_reference_kind_and_mode_are_checked(self):
         other = reference_file(self.temporary.name, evaluation_mode="isolated_performance")
@@ -609,7 +630,7 @@ class CommandTest(unittest.TestCase):
         code = None
         with (
             patch.dict("os.environ", environ or {}, clear=True),
-            patch.object(run, "load_quality_data", side_effect=loader),
+            patch.object(run, "load_quality_data", side_effect=loader) as self.loader,
             patch.object(run, "run_quality", side_effect=measured),
             patch.object(run, "SIEClient") as client,
             contextlib.redirect_stdout(stdout),
@@ -694,6 +715,33 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(code, 2)
         client.assert_not_called()
         self.assertIn("endpoint must be an http(s) URL", stderr)
+
+    def test_an_endpoint_without_a_host_or_with_a_bad_port_is_a_usage_error(self):
+        for endpoint in ("http://:8080", "http://localhost:99999"):
+            with self.subTest(endpoint=endpoint):
+                code, client, stderr = self.command(FakeClient(), "--endpoint", endpoint)
+                self.assertEqual(code, 2)
+                self.loader.assert_not_called()
+                client.assert_not_called()
+                self.assertIn("endpoint must be an http(s) URL", stderr)
+
+    def test_a_score_without_a_value_is_recorded_as_a_failed_run(self):
+        self.reference = reference_file(
+            self.temporary.name,
+            model="Qwen/Qwen3-Reranker-0.6B",
+            operation="score",
+            task_key="mteb/AskUbuntuDupQuestions",
+            dataset={"name": "mteb/AskUbuntuDupQuestions", "revision": REVISION, "subset": "test", "parameters": []},
+            payload={"items_per_request": 2, "output_contract": "scores", "parameters": []},
+        )
+        code, _, stderr = self.command(NoneScoreClient(), "--endpoint", "http://localhost:8080")
+        self.assertEqual(code, 1)
+        (result_path,) = (Path(self.temporary.name) / "results").glob("*-????????T??????Z.json")
+        record = json.loads(result_path.read_text(encoding="utf-8"))
+        self.assertIsNone(record["run"]["predictions_path"])
+        (reason,) = record["validity"]["reasons"]
+        self.assertTrue(reason.startswith("request failed: TypeError"), reason)
+        self.assertTrue(stderr.startswith("invalid: request failed: TypeError"), stderr)
 
 
 class ScoringTest(unittest.TestCase):
