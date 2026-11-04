@@ -341,9 +341,10 @@ peak was 1 or 2), and the probe below measures the network share for one
 document, not for the 60-request runs. The probe, from the same machine,
 split three warm encode requests of a
 2041-character document into 268 to 284 ms to the first response header, of
-which one network round trip, the TLS handshake, took 163 ms, so the service
-answered in 105 to 121 ms, and 485 to 561 ms of response transfer for the
-document's multivector (323 ms on the cold connection). The probe
+which one network round trip, the TLS handshake, took 163 ms, which leaves
+an estimated 105 to 121 ms for the service's own answer, and 485 to 561 ms
+of response transfer for the document's multivector (323 ms on the cold
+connection). The probe
 illustrates the transport share of one request; it does not decompose or
 bound the runs' percentiles, since time to the first header and transfer time
 vary from request to request. The p99, one request in 60, moved by 231 ms
