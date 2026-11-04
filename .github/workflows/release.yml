@@ -53,6 +53,15 @@ jobs:
     outputs:
       release_pr_head: ${{ steps.release-pr-head.outputs.sha }}
     steps:
+      - name: Refuse a run whose push is no longer the newest on main
+        run: |
+          set -euo pipefail
+          main_sha="$(git ls-remote "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)"
+          [[ "$main_sha" =~ ^[0-9a-f]{40}$ ]]
+          if [ "$main_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::$GITHUB_SHA is behind main ($main_sha); approve or rerun the newest push run."
+            exit 1
+          fi
       - name: Require activated public release GitHub App credentials
         env:
           APP_ID: ${{ vars.PUBLIC_RELEASE_APP_ID }}

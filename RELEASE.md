@@ -340,20 +340,21 @@ too; approve the newer run. A job cancelled between creating a release and updat
 the release PR's label can leave the next run failing once on the duplicate release.
 That run corrects the label, and the run after it proceeds normally.
 
-GitHub's documentation does not say how in-progress cancellation treats a job
-waiting on an environment. If an older authoring job ever remains `waiting` while
-a newer push's job is pending, cancel the older run rather than approving it. Do
-not cancel publication or recovery runs as part of this cleanup. Keep the
-environment protections and approve the retained run normally.
+release-please reads current `main`, but a run executes the workflow from its
+original push, so an old run could generate current release files using outdated
+refresh steps. GitHub does not guarantee that jobs enter the group in push order,
+and its documentation does not say how in-progress cancellation treats a job
+waiting on an environment. An older job can therefore occasionally replace a newer
+one or stay `waiting` ahead of it. To keep that harmless, the job's first step fails
+before it uses any credentials unless its commit is the newest on `main`.
 
-Before approving or rerunning an authoring run, inspect its source revision and
-workflow: release-please can read current `main`, but the run still executes the
-workflow from its original push. An old run can therefore generate current release
-files using outdated refresh steps. If the newest push run was cancelled, rerun
-that exact push run after checking its source and workflow, while GitHub still
-permits the rerun; do not replay older runs. Verify the generated PR's source
-ancestry after refresh, too: the approved run's revision does not freeze
-release-please's reads of `main`.
+If an older job is waiting, cancel it rather than approving it. If the newest push
+run was cancelled, rerun that exact push run while GitHub still permits the rerun;
+do not replay older runs. If `main` moved without starting a run, the next push
+starts a current one. Do not cancel publication or recovery runs as part of this
+cleanup. Keep the environment protections and approve the retained run normally.
+Verify the generated PR's source ancestry after refresh, too: the approved run's
+revision does not freeze release-please's reads of `main`.
 
 An unapproved push run does not delay publication. A publication or recovery run
 waiting on an environment approval does hold `public-release-main`, including a

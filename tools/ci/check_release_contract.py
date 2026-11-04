@@ -535,6 +535,17 @@ RELEASE_AUTHORING_CONCURRENCY = (
     "      group: public-release-authoring\n"
     "      cancel-in-progress: ${{ github.event_name == 'push' }}\n"
 )
+RELEASE_AUTHORING_FRESHNESS_STEP = """\
+      - name: Refuse a run whose push is no longer the newest on main
+        run: |
+          set -euo pipefail
+          main_sha="$(git ls-remote "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)"
+          [[ "$main_sha" =~ ^[0-9a-f]{40}$ ]]
+          if [ "$main_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::$GITHUB_SHA is behind main ($main_sha); approve or rerun the newest push run."
+            exit 1
+          fi
+"""
 
 
 def release_queue_errors(top: str, ci: str) -> list[str]:
@@ -554,8 +565,11 @@ def release_queue_errors(top: str, ci: str) -> list[str]:
 def release_authoring_concurrency_errors(blocks: dict[str, str]) -> list[str]:
     errors = []
     authoring = blocks.get("release-please", "")
-    if authoring.count("concurrency:") != 1 or RELEASE_AUTHORING_CONCURRENCY not in authoring:
+    mappings = re.findall(r"^    concurrency:\n(?:      .*(?:\n|\Z))*", authoring, re.MULTILINE)
+    if mappings != [RELEASE_AUTHORING_CONCURRENCY]:
         errors.append("a newer push must replace an older release-please job through its own concurrency group")
+    if not authoring.partition("    steps:\n")[2].startswith(RELEASE_AUTHORING_FRESHNESS_STEP):
+        errors.append("release-please must refuse a push that is behind main before using any credentials")
     others = [name for name, block in blocks.items() if name != "release-please" and "concurrency:" in block]
     if others:
         errors.append(f"job-level concurrency could cancel or displace release work: {others}")
