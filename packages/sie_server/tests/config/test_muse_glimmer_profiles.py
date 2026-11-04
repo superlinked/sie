@@ -11,13 +11,14 @@ import yaml
 from fastapi import HTTPException
 from sie_server.adapters._generation_base import resolve_reasoning_format, thinking_blocks_must_be_hidden
 from sie_server.adapters.sglang.cuda13 import SGLangMuseAdapter
+from sie_server.adapters.sglang.muse_channels import translate_muse_text
 from sie_server.api.openai_local import _prepare_sglang_body
 from sie_server.config.model import ModelConfig
 from sie_server.core.loader import _build_adapter_kwargs
 from sie_server.processors.remote_chat_prompt import _tool_format
 from sie_server.processors.streaming import StreamingProcessor
 from sie_server.processors.tool_call_grammar import build_tool_choice_grammar
-from sie_server.processors.tool_call_parser import _parse_xml_tool_call
+from sie_server.processors.tool_call_parser import _parse_xml_tool_call, tool_parameter_schemas
 
 MODEL_FILE = Path(__file__).resolve().parents[2] / "models" / "meta-models__Muse-Glimmer-30B.yaml"
 PROMPT = "<|start|>user<|message|>Hi<|eot|><|start|>assistant"
@@ -168,11 +169,28 @@ def test_named_tool_choice_regex_pins_the_function() -> None:
     assert not pattern.fullmatch(_channel("get_weather"))
 
 
-def test_every_block_the_regex_accepts_parses_after_translation() -> None:
-    assert _parse_xml_tool_call(
-        "<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>",
-        {"get_weather": {"properties": {"city": {"type": "string"}}}},
-    ) == ("get_weather", {"city": "Paris"})
+def test_channels_the_regex_accepts_parse_after_translation() -> None:
+    spec = build_tool_choice_grammar(TOOLS, "required", "muse_atem")
+    assert spec is not None
+    pattern = re.compile(spec.value)
+    schemas = tool_parameter_schemas(TOOLS)
+    with_argument = (
+        " to=get_weather<|message|><atem:function_calls>\n"
+        '<atem:invoke name="get_weather">\n'
+        '<atem:parameter name="city">Paris</atem:parameter>\n'
+        "</atem:invoke>\n"
+        "</atem:function_calls>"
+    )
+    expected_calls = {
+        with_argument: [("get_weather", {"city": "Paris"})],
+        _channel("get_time"): [("get_time", {})],
+        _channel("get_time", "get_weather"): [("get_time", {}), ("get_weather", {})],
+    }
+
+    for channel, calls in expected_calls.items():
+        assert pattern.fullmatch(channel)
+        bodies = re.findall(r"<tool_call>\n(.*?)\n</tool_call>", translate_muse_text(channel), re.DOTALL)
+        assert [_parse_xml_tool_call(body, schemas) for body in bodies] == calls
 
 
 def test_direct_route_refuses_a_tool_choice_the_engine_cannot_force() -> None:
