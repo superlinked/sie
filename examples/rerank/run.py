@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 
@@ -28,18 +29,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, default=Path(__file__).parent / "data")
     parser.add_argument("--check", action="store_true", help="validate every recorded model offline")
-    parser.add_argument("--show", help="print both request envelopes for this case ID")
+    parser.add_argument("--show", help="print the selected request envelopes for this case ID")
+    parser.add_argument("--arm", choices=["both", *RULES], default="both", help="instruction arm (default: both)")
     parser.add_argument("--record", action="store_true", help="run inference; may incur API charges")
     parser.add_argument("--limit", type=int, default=1, help="case limit for an explicit trial (default: one)")
-    parser.add_argument("--base-url", default=os.environ.get("SIE_BASE_URL", "https://api.superlinked.com"))
+    parser.add_argument(
+        "--base-url",
+        default=os.environ.get("SIE_URL") or os.environ.get("SIE_BASE_URL") or "https://api.superlinked.com",
+    )
     parser.add_argument("--out", type=Path, default=Path("trial.json"))
     args = parser.parse_args()
+    rules = RULES if args.arm == "both" else {args.arm: RULES[args.arm]}
     cases = load(args.data / "inputs/cases_test.json")["cases"]
     if args.show:
         found = next((case for case in cases if case["id"] == args.show), None)
         if found is None:
             raise SystemExit("Unknown case ID")
-        print(json.dumps({arm: envelope(found, arm) for arm in RULES}, indent=2))
+        print(json.dumps({arm: envelope(found, arm) for arm in rules}, indent=2))
         return
     if not args.record:
         result = score(args.data)
@@ -53,32 +59,50 @@ def main() -> None:
         raise SystemExit("--out already exists; choose a new file to preserve previous trials")
     from sie_sdk import Item, SIEClient
 
-    client = SIEClient(args.base_url, api_key=os.environ.get("SIE_API_KEY", ""), timeout_s=300)
-    models = client.list_models()
-    listed = models if isinstance(models, list) else models.get("models", [])
-    served = next(
-        (model.get("revision") for model in listed if isinstance(model, dict) and model.get("name") == MODEL), None
-    )
-    if served != MODEL_REVISION:
-        raise SystemExit("Endpoint does not report the recorded model revision; no inference sent")
     results = []
-    for case in cases[: args.limit]:
-        for arm, instruction in RULES.items():
-            response = client.score(
-                MODEL,
-                Item(text=case["query"]),
-                [Item(id=item["id"], text=item["text"]) for item in case["candidates"]],
-                instruction=instruction,
-                wait_for_capacity=True,
-                provision_timeout_s=900,
-            )
-            ids = {item["id"] for item in case["candidates"]}
-            returned = response["scores"]
-            if len(returned) != len(ids) or {item["item_id"] for item in returned} != ids:
-                raise SystemExit("Response candidate set differs; trial not written")
-            results.append(
-                {"case": case["id"], "arm": arm, "model_revision": client.last_model_revision, "response": response}
-            )
+    with SIEClient(args.base_url, api_key=os.environ.get("SIE_API_KEY", ""), timeout_s=300) as client:
+        models = client.list_models()
+        listed = models if isinstance(models, list) else models.get("models", [])
+        served = next(
+            (model.get("revision") for model in listed if isinstance(model, dict) and model.get("name") == MODEL), None
+        )
+        if served != MODEL_REVISION:
+            raise SystemExit("Endpoint does not report the recorded model revision; no inference sent")
+        for case in cases[: args.limit]:
+            for arm, instruction in rules.items():
+                try:
+                    response = client.score(
+                        MODEL,
+                        Item(text=case["query"]),
+                        [Item(id=item["id"], text=item["text"]) for item in case["candidates"]],
+                        instruction=instruction,
+                        wait_for_capacity=True,
+                        provision_timeout_s=900,
+                    )
+                except (KeyError, TypeError) as error:
+                    raise SystemExit("Response scores are invalid; trial not written") from error
+                execution_revision = client.last_model_revision
+                if results and execution_revision != results[0]["execution_revision"]:
+                    raise SystemExit("Endpoint execution revision changed; trial not written")
+                ids = {item["id"] for item in case["candidates"]}
+                returned = response["scores"]
+                valid_scores = all(
+                    isinstance(value := item.get("score"), (int, float))
+                    and not isinstance(value, bool)
+                    and math.isfinite(value)
+                    for item in returned
+                )
+                if len(returned) != len(ids) or {item["item_id"] for item in returned} != ids or not valid_scores:
+                    raise SystemExit("Response candidate set differs or scores are invalid; trial not written")
+                results.append(
+                    {
+                        "case": case["id"],
+                        "arm": arm,
+                        "model_revision": served,
+                        "execution_revision": execution_revision,
+                        "response": response,
+                    }
+                )
     with args.out.open("x", encoding="utf-8") as output:
         json.dump(results, output, indent=2)
         output.write("\n")
