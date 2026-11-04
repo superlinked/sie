@@ -225,6 +225,36 @@ def normalize_endpoint(url: str) -> str:
     return f"{scheme}://{netloc}{path}"
 
 
+def _key_scope() -> tuple[str, str]:
+    key = os.environ.get("SIE_API_KEY", "").strip()
+    scope = os.environ.get("SIE_BASE_URL", "").strip() or DEFAULT_ENDPOINT
+    return key, scope
+
+
+def api_key_for(endpoint: str) -> str:
+    """Return SIE_API_KEY only for the origin it is scoped to, as the SDK does."""
+    key, scope = _key_scope()
+    try:
+        scope = normalize_endpoint(scope)
+    except ValueError:
+        return ""
+    return key if key and _endpoint_key(scope) == _endpoint_key(endpoint) else ""
+
+
+def _resolve_api_key(parser: argparse.ArgumentParser, endpoint: str) -> str:
+    api_key = api_key_for(endpoint)
+    if not api_key and endpoint == DEFAULT_ENDPOINT:
+        parser.error(f"SIE_API_KEY must be set in the environment for {DEFAULT_ENDPOINT}")
+    key, scope = _key_scope()
+    if key and not api_key:
+        print(
+            f"note: SIE_API_KEY is scoped to {scope} and was not sent to {endpoint}; "
+            "set SIE_BASE_URL to the endpoint to send it",
+            file=sys.stderr,
+        )
+    return api_key
+
+
 def _endpoint_reasons(endpoint: str) -> list[str]:
     if _endpoint_key(endpoint) == _endpoint_key(DEFAULT_ENDPOINT):
         return []
@@ -1114,9 +1144,7 @@ def quality_command(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         parser.error(f"reference {args.reference} is missing key {exc}")
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
-    api_key = os.environ.get("SIE_API_KEY", "")
-    if not api_key and plan.endpoint == DEFAULT_ENDPOINT:
-        parser.error(f"SIE_API_KEY must be set in the environment for {DEFAULT_ENDPOINT}")
+    api_key = _resolve_api_key(parser, plan.endpoint)
     data = load_quality_data(plan)
     with SIEClient(plan.endpoint, api_key=api_key, timeout_s=plan.request_timeout_s) as client:
         record, result_path = run_quality(plan, data, client)
@@ -1135,9 +1163,7 @@ def performance_command(parser: argparse.ArgumentParser, args: argparse.Namespac
         parser.error(f"reference {args.reference} is missing key {exc}")
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
-    api_key = os.environ.get("SIE_API_KEY", "")
-    if not api_key and plan.endpoint == DEFAULT_ENDPOINT:
-        parser.error(f"SIE_API_KEY must be set in the environment for {DEFAULT_ENDPOINT}")
+    api_key = _resolve_api_key(parser, plan.endpoint)
     data = load_performance_data(plan)
     with SIEClient(
         plan.endpoint, api_key=api_key, timeout_s=plan.request_timeout_s, max_connections=2 * plan.max_in_flight

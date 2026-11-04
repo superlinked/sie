@@ -638,6 +638,31 @@ class CommandTest(unittest.TestCase):
         self.assertIsNone(code)
         client.assert_called_once_with(DEFAULT_ENDPOINT, api_key="test-key", timeout_s=300.0)
 
+    def test_a_cloud_key_is_not_sent_to_another_endpoint(self):
+        code, client, stderr = self.command(
+            FakeClient(), "--endpoint", "http://localhost:8080", environ={"SIE_API_KEY": "cloud-key"}
+        )
+        self.assertIsNone(code)
+        client.assert_called_once_with("http://localhost:8080", api_key="", timeout_s=300.0)
+        self.assertIn(
+            "note: SIE_API_KEY is scoped to https://api.superlinked.com and was not sent to http://localhost:8080",
+            stderr,
+        )
+
+    def test_a_key_scoped_by_base_url_is_sent_to_that_endpoint(self):
+        environ = {"SIE_BASE_URL": "http://localhost:8080/", "SIE_API_KEY": "local-token"}
+        code, client, stderr = self.command(FakeClient(), "--endpoint", "http://localhost:8080", environ=environ)
+        self.assertIsNone(code)
+        client.assert_called_once_with("http://localhost:8080", api_key="local-token", timeout_s=300.0)
+        self.assertEqual(stderr, "")
+
+    def test_a_key_scoped_elsewhere_fails_on_the_default_endpoint(self):
+        environ = {"SIE_BASE_URL": "http://localhost:8080", "SIE_API_KEY": "local-token"}
+        code, client, stderr = self.command(FakeClient(), environ=environ)
+        self.assertEqual(code, 2)
+        client.assert_not_called()
+        self.assertIn(f"SIE_API_KEY must be set in the environment for {DEFAULT_ENDPOINT}", stderr)
+
     def test_a_failed_run_prints_its_reasons_and_exits_1(self):
         for fake, reason in (
             (FakeClient(fail_at=0), "readiness request failed: RuntimeError: boom"),

@@ -860,7 +860,7 @@ class CommandTest(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.reference = reference_file(self.temporary.name)
 
-    def command(self, fake, *flags):
+    def command(self, fake, *flags, environ=None):
         def measured(plan, data, client):
             return run_performance(plan, data, fake, results_dir=Path(self.temporary.name) / "results", now=clock)
 
@@ -870,7 +870,7 @@ class CommandTest(unittest.TestCase):
         stderr = io.StringIO()
         code = None
         with (
-            patch.dict("os.environ", {}, clear=True),
+            patch.dict("os.environ", environ or {}, clear=True),
             patch.object(run, "load_performance_data", side_effect=loader),
             patch.object(run, "run_performance", side_effect=measured),
             patch.object(run, "SIEClient") as client,
@@ -887,6 +887,24 @@ class CommandTest(unittest.TestCase):
         code, client, stderr = self.command(FakeClient(), "--endpoint", "http://localhost:8080")
         self.assertIsNone(code)
         client.assert_called_once_with("http://localhost:8080", api_key="", timeout_s=5.0, max_connections=8)
+        self.assertEqual(stderr, "")
+
+    def test_a_cloud_key_is_not_sent_to_another_endpoint(self):
+        code, client, stderr = self.command(
+            FakeClient(), "--endpoint", "http://localhost:8080", environ={"SIE_API_KEY": "cloud-key"}
+        )
+        self.assertIsNone(code)
+        client.assert_called_once_with("http://localhost:8080", api_key="", timeout_s=5.0, max_connections=8)
+        self.assertIn(
+            "note: SIE_API_KEY is scoped to https://api.superlinked.com and was not sent to http://localhost:8080",
+            stderr,
+        )
+
+    def test_a_key_scoped_by_base_url_is_sent_to_that_endpoint(self):
+        environ = {"SIE_BASE_URL": "http://localhost:8080/", "SIE_API_KEY": "local-token"}
+        code, client, stderr = self.command(FakeClient(), "--endpoint", "http://localhost:8080", environ=environ)
+        self.assertIsNone(code)
+        client.assert_called_once_with("http://localhost:8080", api_key="local-token", timeout_s=5.0, max_connections=8)
         self.assertEqual(stderr, "")
 
     def test_a_failed_run_prints_its_reasons_and_exits_1(self):

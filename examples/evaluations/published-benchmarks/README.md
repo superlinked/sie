@@ -28,8 +28,9 @@ never a verdict: no threshold, no pass, no fail.
 ### Run it
 
 Install the locked dependencies, then set the key. The default endpoint
-requires it; against your own server, set it only if that server asks for
-one (see [Run it against your own server](#run-it-against-your-own-server)):
+requires it; the key is sent only to the endpoint it is scoped to, so against
+your own server see
+[Run it against your own server](#run-it-against-your-own-server):
 
 ```sh
 uv sync --frozen
@@ -166,9 +167,9 @@ uv run python run.py performance \
 ```
 
 A run against the default endpoint needs `SIE_API_KEY` and spends credits;
-against your own server, set the key only if that server asks for one (see
-[Run it against your own server](#run-it-against-your-own-server)). A run
-takes about two minutes: one readiness request, 30 s of warmup, 10 s of
+against your own server the key is sent only when `SIE_BASE_URL` names that
+server (see [Run it against your own server](#run-it-against-your-own-server)).
+A run takes about two minutes: one readiness request, 30 s of warmup, 10 s of
 settle, 60 s of scheduled requests and up to 10 s of drain. When a result is
 not valid, the command prints each reason to stderr. With `--reference`,
 model, profile, task, output contract, items per request, timeout, in-flight
@@ -281,9 +282,13 @@ sie-server serve --host 127.0.0.1 -m prithivida/Splade_PP_en_v2
 ```
 
 By default the server runs without a token, and `--host 127.0.0.1` keeps it
-on this machine: leave `SIE_API_KEY` unset. With `SIE_AUTH_MODE=token` the
-server generates a token, saves it to a file and prints where; put that value
-in `SIE_API_KEY`.
+on this machine: leave `SIE_API_KEY` unset. A key in your shell is scoped to
+the endpoint `SIE_BASE_URL` names, or to the default endpoint when it is
+unset, which is the SDK's rule, so a key for the default endpoint is never
+sent to your own server; the command says so on stderr when it holds one
+back. With `SIE_AUTH_MODE=token` the server generates a token, saves it to a
+file and prints where; export that value in `SIE_API_KEY` together with
+`SIE_BASE_URL=http://localhost:8080`.
 
 Then pass `--endpoint http://localhost:8080`. A quality smoke run:
 
