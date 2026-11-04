@@ -178,11 +178,12 @@ def test_channels_the_regex_accepts_parse_after_translation() -> None:
         " to=get_weather<|message|><atem:function_calls>\n"
         '<atem:invoke name="get_weather">\n'
         '<atem:parameter name="city">Paris</atem:parameter>\n'
+        '<atem:parameter name="first name">Ada</atem:parameter>\n'
         "</atem:invoke>\n"
         "</atem:function_calls>"
     )
     expected_calls = {
-        with_argument: [("get_weather", {"city": "Paris"})],
+        with_argument: [("get_weather", {"city": "Paris", "first name": "Ada"})],
         _channel("get_time"): [("get_time", {})],
         _channel("get_time", "get_weather"): [("get_time", {}), ("get_weather", {})],
     }

@@ -859,12 +859,13 @@ def _parse_hermes_tool_call(raw: str) -> tuple[object, object]:
 
 
 _XML_FUNC_RE = re.compile(r"<function=([^>\s]+)\s*>")
-# Matches only a parameter *opener* — ``<parameter=name>`` — with a bounded
-# character class, so it cannot backtrack. The value and closing
-# ``</parameter>`` are located with a linear ``str.find`` below rather than a
-# ``(.*?)...</parameter>`` group, which on a 256 KiB buffer of garbled output
-# (many openers, no closers) is O(n²) and runs INLINE on the event loop.
-_XML_PARAM_OPEN_RE = re.compile(r"<parameter=([^>\s]+)\s*>")
+# Matches only a parameter *opener* — ``<parameter=name>``. A name may contain
+# spaces, as JSON Schema allows. Its character classes stop at the next ``<`` or
+# ``>``, so an opener that never closes cannot rescan the rest of the buffer. The
+# value and closing ``</parameter>`` are located with a linear ``str.find`` below
+# rather than a ``(.*?)...</parameter>`` group, which on a 256 KiB buffer of garbled
+# output (many openers, no closers) is O(n²) and runs INLINE on the event loop.
+_XML_PARAM_OPEN_RE = re.compile(r"<parameter=([^<>]*[^<>\s])\s*>")
 _XML_PARAM_CLOSE = "</parameter>"
 # Hard cap on parameters parsed from one XML tool call. Defends against an
 # adversarial buffer packed with openers; well-formed calls have a handful.
