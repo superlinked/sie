@@ -480,7 +480,7 @@ def test_push_runs_cannot_hold_the_publication_queue(group):
     "replacement",
     [
         "",
-        "    concurrency:\n      group: public-release-main\n      cancel-in-progress: ${{ github.event_name == 'push' }}\n",
+        contract.RELEASE_AUTHORING_CONCURRENCY.replace("public-release-authoring", "public-release-main"),
         "    concurrency:\n      group: public-release-authoring\n      cancel-in-progress: false\n",
         "    concurrency:\n      group: public-release-authoring\n      cancel-in-progress: true\n",
         "    concurrency:\n      group: public-release-authoring\n      queue: max\n",
