@@ -43,9 +43,20 @@ with open("plan.json", encoding="utf-8") as handle:
 assert Plan.from_dict(plan.to_dict()) == plan
 ```
 
+## Operations
+
+Receipts and demand name the primitive a lane runs: `encode`, `score`,
+`extract` or `generate`. Gateway telemetry labels requests by route and
+already reports the generation and transcription routes as `generate` and
+`extract`. An adapter folds the remaining route labels the same way:
+`embeddings`, the OpenAI-compatible route that the gateway rewrites into an
+encode request, counts as `encode`; `moderations` answers 501 without serving
+a model, so it carries no demand to place; `other` names no primitive and is
+not assigned to one.
+
 ## Service levels
 
-An identity declares up to three numbers, or inherits them from the tier it
+An identity declares the fields below, or inherits them from the tier it
 names. Fields it declares override the tier's.
 
 | Field | Meaning |
