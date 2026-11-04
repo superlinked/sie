@@ -1,0 +1,68 @@
+{
+  "kind": "placement-plan",
+  "schemaVersion": 1,
+  "placement": "us-central1",
+  "lanes": [
+    {
+      "name": "default-l4-default",
+      "pool": "default",
+      "bundle": "default",
+      "cell": {
+        "machineProfile": "l4",
+        "gpuProduct": "NVIDIA-L4"
+      },
+      "containerShape": {
+        "gpuCount": 1,
+        "cpuCores": 7.5,
+        "memoryMiB": 30720
+      },
+      "concurrency": 16,
+      "maxContainers": 6,
+      "envelope": {
+        "floorMin": 1,
+        "floorMax": 3,
+        "bufferMin": 0,
+        "bufferMax": 1,
+        "scaledownWindowMinS": 60,
+        "scaledownWindowMaxS": 900
+      }
+    },
+    {
+      "name": "default-a100-80gb-generation",
+      "pool": "default",
+      "bundle": "generation",
+      "cell": {
+        "machineProfile": "a100-80gb",
+        "gpuProduct": "NVIDIA-A100-SXM4-80GB"
+      },
+      "containerShape": {
+        "gpuCount": 1,
+        "cpuCores": 12,
+        "memoryMiB": 87040
+      },
+      "concurrency": 32,
+      "maxContainers": 2,
+      "envelope": {
+        "floorMin": 0,
+        "floorMax": 1
+      }
+    }
+  ],
+  "identities": [
+    {
+      "identity": "BAAI/bge-m3",
+      "lane": "default-l4-default",
+      "warmth": "pinned"
+    },
+    {
+      "identity": "BAAI/bge-m3:sparse",
+      "lane": "default-l4-default",
+      "warmth": "lazy-resident"
+    },
+    {
+      "identity": "Qwen/Qwen3-8B",
+      "lane": "default-a100-80gb-generation",
+      "warmth": "cold-with-bound"
+    }
+  ]
+}

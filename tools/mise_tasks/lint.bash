@@ -8,6 +8,7 @@ PUBLIC_PATHS=(
     packages/sie_audio_prep
     packages/sie_config
     packages/sie_mcp
+    packages/sie_placement
     packages/sie_sdk
     packages/sie_server
     integrations

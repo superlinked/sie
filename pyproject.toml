@@ -53,6 +53,7 @@ torchvision = [
 sie-audio-prep = { workspace = true }
 sie-config = { workspace = true }
 sie-mcp = { workspace = true }
+sie-placement = { workspace = true }
 sie-sdk = { workspace = true }
 sie-server = { workspace = true }
 
@@ -63,6 +64,7 @@ members = [
     "packages/sie_audio_prep",
     "packages/sie_config",
     "packages/sie_mcp",
+    "packages/sie_placement",
     "packages/sie_sdk",
     "packages/sie_server",
     "integrations/sie_chroma",
@@ -83,6 +85,7 @@ testpaths = [
     "packages/sie_audio_prep/tests",
     "packages/sie_config/tests",
     "packages/sie_mcp/tests",
+    "packages/sie_placement/tests",
     "packages/sie_sdk/tests",
     "packages/sie_server/tests",
 ]
