@@ -13,6 +13,7 @@ use crate::http_error::{code as err_code, json_detail};
 use crate::server::AppState;
 use crate::state::model_registry::ModelRegistry;
 use crate::state::pool_manager::{PoolLimitError, DEFAULT_POOL_NAME};
+use crate::types::pool::PoolTtl;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreatePoolRequest {
@@ -32,10 +33,16 @@ pub struct CreatePoolRequest {
     pub gpu_caps: HashMap<String, u32>,
     #[serde(default)]
     pub bundle: Option<String>,
-    /// Lease TTL in seconds; omit for the gateway default. Values above the
-    /// gateway limit (`SIE_GATEWAY_POOL_MAX_TTL_S`, default 3600) are rejected.
+    /// How long the pool lives after its last renewal. Omit for the gateway
+    /// default lease (1200 s), which SDK clients renew while they run. A
+    /// number of seconds sets the lease; values above the gateway limit
+    /// (`SIE_GATEWAY_POOL_MAX_TTL_S`; by default 2592000, 30 days, with
+    /// gateway auth on and 3600 without) and `0` are rejected with `400`. `"never"` creates a pool that lives until it is
+    /// deleted and needs no renewal; it requires gateway auth
+    /// (`SIE_AUTH_MODE=token`, so the request carries the admin token) and is
+    /// refused with `403` otherwise.
     #[serde(default)]
-    pub ttl_seconds: Option<u64>,
+    pub ttl_seconds: Option<PoolTtl>,
     /// Per-pool warm floor (minimum machines kept warm via KEDA). Default 0
     /// keeps scale-from-zero. It applies to each of the pool's machine
     /// profiles; a floor whose total across profiles exceeds the gateway limit
@@ -104,8 +111,8 @@ fn canonicalize_pinned_models(
     request_body = CreatePoolRequest,
     responses(
         (status = 201, description = "Pool created, renewed, or updated", body = crate::types::pool::Pool),
-        (status = 400, description = "Invalid pool request, including a TTL or warm floor above the gateway limit", body = crate::openapi::StandardApiError),
-        (status = 403, description = "Admin token required for this mutation (or admin token not configured), the pool is named `default`, or the gateway's limit on API-created pools is reached", body = crate::openapi::StandardApiError)
+        (status = 400, description = "Invalid pool request, including a zero TTL or a TTL or warm floor above the gateway limit", body = crate::openapi::StandardApiError),
+        (status = 403, description = "Admin token required for this mutation (or admin token not configured), the pool is named `default`, the gateway's limit on API-created pools is reached, or `ttl_seconds: \"never\"` was sent to a gateway without auth", body = crate::openapi::StandardApiError)
     )
 )]
 pub async fn create_pool(
@@ -186,7 +193,7 @@ fn create_pool_error_response(
     error: &(dyn std::error::Error + Send + Sync + 'static),
 ) -> axum::response::Response {
     let (status, code) = match error.downcast_ref::<PoolLimitError>() {
-        Some(PoolLimitError::TooManyPools { .. }) => {
+        Some(PoolLimitError::TooManyPools { .. } | PoolLimitError::NoExpiryRequiresAuth { .. }) => {
             (StatusCode::FORBIDDEN, err_code::POOL_OPERATION_FORBIDDEN)
         }
         _ => (StatusCode::BAD_REQUEST, err_code::INVALID_REQUEST),
@@ -287,6 +294,7 @@ pub async fn delete_pool(
     path = "/v1/pools/{name}/renew",
     tag = "pools",
     params(("name" = String, Path, description = "Pool name")),
+    description = "Restart the pool's lease. A pool created with `ttl_seconds: \"never\"` has no lease and needs no renewal; renewing it succeeds and changes nothing.",
     responses(
         (status = 200, description = "Pool renewed", body = crate::openapi::MessageResponse),
         (status = 404, description = "Pool not found", body = crate::openapi::StandardApiError)

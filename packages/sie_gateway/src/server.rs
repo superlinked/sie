@@ -1243,7 +1243,7 @@ mod flat_404_tests {
     use crate::server::{create_router, AppState};
     use crate::state::demand_tracker::DemandTracker;
     use crate::state::model_registry::ModelRegistry;
-    use crate::state::pool_manager::PoolManager;
+    use crate::state::pool_manager::{PoolLimits, PoolManager, DEFAULT_POOL_MAX_TTL_SECONDS};
     use crate::state::worker_registry::WorkerRegistry;
 
     fn test_config(bundles_dir: &str, models_dir: &str) -> Config {
@@ -1300,6 +1300,12 @@ mod flat_404_tests {
 
     // Returned tempdirs must outlive the router so they drop after the test.
     fn build_router() -> (Router, tempfile::TempDir, tempfile::TempDir) {
+        build_router_with_pool_limits(PoolLimits::default())
+    }
+
+    fn build_router_with_pool_limits(
+        limits: PoolLimits,
+    ) -> (Router, tempfile::TempDir, tempfile::TempDir) {
         let bundles_dir = tempfile::TempDir::new().unwrap();
         let models_dir = tempfile::TempDir::new().unwrap();
         let config = Arc::new(test_config(
@@ -1314,7 +1320,7 @@ mod flat_404_tests {
                 models_dir.path(),
                 false,
             )),
-            pool_manager: Arc::new(PoolManager::new(Vec::new())),
+            pool_manager: Arc::new(PoolManager::new(Vec::new()).with_limits(limits)),
             work_publisher: None,
             lane_backlog_source: None,
             demand_tracker: Arc::new(DemandTracker::new(Default::default())),
@@ -1397,11 +1403,12 @@ mod flat_404_tests {
         let (app, _bundles_dir, _models_dir) = build_router();
         for body in [
             serde_json::json!({"name": "bench", "gpus": {"l4": 1}, "minimum_worker_count": 99}),
-            serde_json::json!({"name": "bench", "gpus": {"l4": 1}, "ttl_seconds": 86_400}),
+            serde_json::json!({"name": "bench", "gpus": {"l4": 1}, "ttl_seconds": 3601}),
+            serde_json::json!({"name": "bench", "gpus": {"l4": 1}, "ttl_seconds": 0}),
             serde_json::json!({"name": "bench", "gpus": {"l4": 6}}),
         ] {
-            let (status, detail) = post_pool(&app, body).await;
-            assert_eq!(status, StatusCode::BAD_REQUEST);
+            let (status, detail) = post_pool(&app, body.clone()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
             assert_eq!(detail["detail"]["code"], "INVALID_REQUEST");
         }
         let (status, _) = post_pool(
@@ -1410,6 +1417,67 @@ mod flat_404_tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn test_create_pool_accepts_ttls_up_to_thirty_days_with_gateway_auth() {
+        let (app, _bundles_dir, _models_dir) =
+            build_router_with_pool_limits(PoolLimits::for_pool_writes(true));
+        for ttl in [7 * 24 * 3600, DEFAULT_POOL_MAX_TTL_SECONDS] {
+            let (status, pool) = post_pool(
+                &app,
+                serde_json::json!({"name": "eval", "gpus": {"l4": 1}, "ttl_seconds": ttl}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{ttl}");
+            assert_eq!(pool["spec"]["ttl_seconds"], ttl);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_pool_that_never_expires_requires_gateway_auth() {
+        let never = serde_json::json!({"name": "rag", "gpus": {"l4": 1}, "ttl_seconds": "never"});
+
+        // `build_router` serves with auth off, where pool writes carry no
+        // admin token: a pool that never expires is refused.
+        let (app, _bundles_dir, _models_dir) = build_router();
+        let (status, body) = post_pool(&app, never.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["detail"]["code"], "POOL_OPERATION_FORBIDDEN");
+        assert!(body["detail"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("SIE_AUTH_MODE=token"));
+
+        let (app, _bundles_dir, _models_dir) =
+            build_router_with_pool_limits(PoolLimits::for_pool_writes(true));
+        let (status, pool) = post_pool(&app, never).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(pool["spec"]["ttl_seconds"], "never");
+    }
+
+    #[tokio::test]
+    async fn test_create_pool_rejects_a_ttl_that_is_neither_seconds_nor_never() {
+        let (app, _bundles_dir, _models_dir) =
+            build_router_with_pool_limits(PoolLimits::for_pool_writes(true));
+        for ttl in [serde_json::json!("forever"), serde_json::json!(-1)] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/pools")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({"name": "rag", "gpus": {"l4": 1}, "ttl_seconds": ttl})
+                                .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(response.status().is_client_error(), "{ttl}");
+        }
     }
 
     #[tokio::test]

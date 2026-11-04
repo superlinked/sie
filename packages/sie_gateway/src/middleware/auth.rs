@@ -201,10 +201,14 @@ where
                 return inner.call(req).await;
             }
 
+            // The admin token grants everything a client token does, so one
+            // credential can both manage pools and use them.
             let valid = config
                 .auth_tokens
                 .iter()
-                .any(|valid_token| constant_time_eq_str(&token, valid_token));
+                .any(|valid_token| constant_time_eq_str(&token, valid_token))
+                || (!config.admin_token.is_empty()
+                    && constant_time_eq_str(&token, &config.admin_token));
 
             if !valid {
                 record_admission_rejection(&req, AdmissionOutcome::Unauthenticated);
@@ -248,7 +252,8 @@ pub fn is_auth_enabled(mode: &str) -> bool {
 }
 
 /// Returns true for mutations that require the admin token. Reads on
-/// these paths (including `GET`) are checked with the regular token.
+/// these paths (including `GET`) are checked with the regular token, which
+/// the admin token also satisfies.
 ///
 /// Admin-gated prefixes:
 /// - `/v1/config*` — reserved; config writes are currently 405.
@@ -809,6 +814,43 @@ mod tests {
             send(r, Method::GET, "/v1/pools/gpu-l4", Some("user")).await,
             StatusCode::OK
         );
+    }
+
+    #[tokio::test]
+    async fn middleware_admin_token_also_serves_client_routes() {
+        // One credential can create a pool and then send it traffic.
+        let cfg = cfg_for_middleware("token", vec!["user"], "admin", false);
+        for (method, path) in [
+            (Method::POST, "/v1/encode/any"),
+            (Method::GET, "/v1/pools"),
+            (Method::GET, "/v1/pools/gpu-l4"),
+        ] {
+            let r = test_router(Arc::clone(&cfg));
+            assert_eq!(
+                send(r, method.clone(), path, Some("admin")).await,
+                StatusCode::OK,
+                "{method} {path}"
+            );
+            let r = test_router(Arc::clone(&cfg));
+            assert_eq!(
+                send_headers(r, method.clone(), path, &[("x-api-key", "admin")]).await,
+                StatusCode::OK,
+                "{method} {path} via x-api-key"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn middleware_unset_admin_token_adds_no_client_credential() {
+        let cfg = cfg_for_middleware("token", vec!["user"], "", false);
+        for bearer in [None, Some("admin"), Some("bogus")] {
+            let r = test_router(Arc::clone(&cfg));
+            assert_eq!(
+                send(r, Method::POST, "/v1/encode/any", bearer).await,
+                StatusCode::UNAUTHORIZED,
+                "{bearer:?}"
+            );
+        }
     }
 
     #[tokio::test]

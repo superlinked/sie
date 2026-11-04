@@ -1122,6 +1122,11 @@ class CapacityInfo(TypedDict, total=False):
     workers: list[WorkerInfo]
 
 
+#: How long a pool lives after its last renewal: whole seconds, or ``"never"``
+#: for a pool that lives until it is deleted.
+PoolTtl = int | Literal["never"]
+
+
 class PoolSpec(TypedDict, total=False):
     """Resource pool specification for creating pools.
 
@@ -1147,6 +1152,12 @@ class PoolSpec(TypedDict, total=False):
             tracks (see ``GET /v1/configs/models``) and may be profile-qualified
             (``model-name:profile_name``); unknown ids are rejected. Defaults to an
             empty list (lazy-loading unchanged).
+        ttl_seconds: How long the pool lives after the client stops renewing it:
+            whole seconds (up to the gateway's ``SIE_GATEWAY_POOL_MAX_TTL_S``, by
+            default 30 days with gateway auth on and 1 hour without), or
+            ``"never"`` for a pool that lives until it is deleted and is not
+            renewed. ``"never"`` needs gateway auth. Defaults to the gateway's
+            1200 s lease.
     """
 
     name: str
@@ -1156,6 +1167,7 @@ class PoolSpec(TypedDict, total=False):
     bundle: str
     minimum_worker_count: int
     pinned_models: list[str]
+    ttl_seconds: PoolTtl
 
 
 # --- Pool Response Types (nested structure matching gateway API) ---
@@ -1204,6 +1216,9 @@ class PoolSpecResponse(TypedDict, total=False):
         bundle: Optional bundle filter for worker assignment.
         minimum_worker_count: Per-pool warm floor (minimum machines kept warm via KEDA).
         pinned_models: Per-pool set of model ids kept loaded (no cold model-load).
+        ttl_seconds: Lease in seconds, ``"never"`` for a pool that never expires (the
+            ``default`` pool and static Helm queue pools report it too), or ``None``
+            for the gateway's default lease.
     """
 
     name: str
@@ -1213,6 +1228,7 @@ class PoolSpecResponse(TypedDict, total=False):
     bundle: str | None
     minimum_worker_count: int
     pinned_models: list[str]
+    ttl_seconds: PoolTtl | None
 
 
 class PoolResponse(TypedDict, total=False):

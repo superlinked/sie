@@ -1512,6 +1512,92 @@ describe("SIEClient.createPool() - bundle / warm-floor / pinned-model args", () 
 
     await client.close();
   });
+
+  it("sends ttl_seconds on the wire", async () => {
+    const client = new SIEClient("http://localhost:8080");
+    mockFetch.mockResolvedValueOnce(poolCreatedResponse());
+
+    await client.createPool("eval", { l4: 2 }, undefined, undefined, { ttlSeconds: 604_800 });
+
+    const [, init] = mockFetch.mock.calls[0];
+    expect(JSON.parse(init.body)).toEqual({ name: "eval", gpus: { l4: 2 }, ttl_seconds: 604_800 });
+
+    await client.close();
+  });
+
+  it("rejects a TTL that is neither positive whole seconds nor never", async () => {
+    const client = new SIEClient("http://localhost:8080");
+
+    for (const ttlSeconds of [0, -1, 1.5, Number.NaN]) {
+      await expect(
+        client.createPool("eval", { l4: 1 }, undefined, undefined, { ttlSeconds }),
+      ).rejects.toThrow(RangeError);
+    }
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    await client.close();
+  });
+});
+
+describe("SIEClient.createPool() - pool lifetime and lease renewal", () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function poolResponse(ttlSeconds: number | "never" | null): Response {
+    return createMockResponse({
+      name: "rag",
+      spec: { name: "rag", ttl_seconds: ttlSeconds },
+      status: { state: "active" },
+    });
+  }
+
+  function renewCalls(): number {
+    return mockFetch.mock.calls.filter(([url]) => String(url).endsWith("/renew")).length;
+  }
+
+  it("renews a pool that has a lease", async () => {
+    const client = new SIEClient("http://localhost:8080");
+    mockFetch.mockResolvedValueOnce(poolResponse(null));
+    await client.createPool("rag", { l4: 1 });
+
+    mockFetch.mockResolvedValue(createMockResponse({ message: "Pool renewed" }));
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(renewCalls()).toBe(1);
+    await client.close();
+  });
+
+  it("does not renew a pool that never expires", async () => {
+    const client = new SIEClient("http://localhost:8080");
+    mockFetch.mockResolvedValueOnce(poolResponse("never"));
+
+    await client.createPool("rag", { l4: 1 }, undefined, undefined, { ttlSeconds: "never" });
+    expect(JSON.parse(mockFetch.mock.calls[0][1].body).ttl_seconds).toBe("never");
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(renewCalls()).toBe(0);
+    await client.close();
+  });
+
+  it("stops renewing a pool once it is updated to never expire", async () => {
+    const client = new SIEClient("http://localhost:8080");
+    mockFetch.mockResolvedValueOnce(poolResponse(null));
+    await client.createPool("rag", { l4: 1 });
+
+    mockFetch.mockResolvedValueOnce(poolResponse("never"));
+    await client.createPool("rag", { l4: 1 }, undefined, undefined, { ttlSeconds: "never" });
+
+    mockFetch.mockResolvedValue(createMockResponse({ message: "Pool renewed" }));
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(renewCalls()).toBe(0);
+    await client.close();
+  });
 });
 
 describe("Real-world usage patterns", () => {

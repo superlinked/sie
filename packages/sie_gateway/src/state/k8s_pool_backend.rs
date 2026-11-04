@@ -503,7 +503,7 @@ mod tests {
                     m
                 },
                 gpu_caps: HashMap::new(),
-                ttl_seconds: Some(600),
+                ttl_seconds: Some(crate::types::pool::PoolTtl::Seconds(600)),
                 minimum_worker_count: 2,
                 pinned_models: Vec::new(),
             },
@@ -596,7 +596,7 @@ mod tests {
                     m
                 },
                 gpu_caps: HashMap::new(),
-                ttl_seconds: Some(300),
+                ttl_seconds: Some(crate::types::pool::PoolTtl::Seconds(300)),
                 minimum_worker_count: 1,
                 pinned_models: Vec::new(),
             },

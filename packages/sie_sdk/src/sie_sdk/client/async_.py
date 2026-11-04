@@ -94,6 +94,7 @@ from sie_sdk.types import (
     OutputType,
     PoolInfo,
     PoolSpec,
+    PoolTtl,
     Recommendation,
     RequestMetadata,
     ResponseInputMessage,
@@ -163,6 +164,7 @@ from ._shared import (
     parse_score_result,
     parse_terminal_json_object,
     parse_terminal_msgpack_object,
+    pool_never_expires,
     provisioning_retry_delay,
     raise_if_estimate_unroutable,
     raise_if_input_too_long,
@@ -182,6 +184,7 @@ from ._shared import (
     validate_encode_traceparent,
     validate_generate_grammar,
     validate_generate_request_body,
+    validate_pool_ttl,
     websocket_matches_base_url_origin,
 )
 from ._sse import SSECompletion, aiter_sse_payloads
@@ -866,6 +869,8 @@ class SIEAsyncClient:
                 request_body["minimum_worker_count"] = self._pool_spec["minimum_worker_count"]
             if self._pool_spec.get("pinned_models") is not None:
                 request_body["pinned_models"] = self._pool_spec["pinned_models"]
+            if self._pool_spec.get("ttl_seconds") is not None:
+                request_body["ttl_seconds"] = self._pool_spec["ttl_seconds"]
 
             try:
                 response = await self._post(
@@ -893,8 +898,9 @@ class SIEAsyncClient:
 
             self._pool_created = True
 
-            # Start lease renewal task
-            await self._start_lease_renewal()
+            # A pool that never expires has no lease to renew.
+            if not pool_never_expires(data):
+                await self._start_lease_renewal()
 
     async def _start_lease_renewal(self) -> None:
         """Start the async lease renewal task."""
@@ -1002,6 +1008,7 @@ class SIEAsyncClient:
         pinned_models: list[str] | None = None,
         *,
         queue_pool: str | None = None,
+        ttl_seconds: PoolTtl | None = None,
     ) -> None:
         """Create or update a resource pool for isolated capacity.
 
@@ -1014,24 +1021,38 @@ class SIEAsyncClient:
                 {"l4": 4}. If omitted, all matching workers can be assigned.
             bundle: Optional bundle filter. When set, only workers running this
                 bundle will be assigned to the pool.
-            minimum_worker_count: Per-pool warm floor (minimum machines kept warm).
-                The gateway emits canonical ``sie.gateway.pool.warm_floor``
-                telemetry; the collector exposes ``sie_gateway_pool_warm_floor``
-                to KEDA. Defaults to 0 (scale to zero).
+            minimum_worker_count: Per-pool warm floor: machines kept warm even with
+                no traffic. It is only the always-on floor: the lane autoscales
+                above it on demand, up to its KEDA maximum. The gateway emits
+                canonical ``sie.gateway.pool.warm_floor`` telemetry; the collector
+                exposes ``sie_gateway_pool_warm_floor`` to KEDA. Defaults to 0
+                (scale to zero).
             pinned_models: Optional set of model ids to keep loaded so the first
                 request to them pays no cold model-load. Each id must be a model the
                 gateway already tracks and may be profile-qualified
                 (``model-name:profile_name``); unknown ids are rejected. Defaults to none.
             queue_pool: Optional Helm/NATS queue namespace backing this logical
                 pool. Defaults to "default", drawing from base capacity.
+            ttl_seconds: How long the pool lives after this client stops renewing
+                it. Omit for the gateway default (1200 s) on a new pool, or to keep
+                an existing pool's lifetime. While the client runs it renews the
+                pool every 60 s, so the pool lasts as long as the client plus this
+                grace period. Whole seconds, up to the gateway limit
+                (``SIE_GATEWAY_POOL_MAX_TTL_S``: by default 30 days with gateway
+                auth on, 1 hour without). ``"never"`` creates a pool that lives
+                until it is deleted, so it outlives this process and the client
+                does not renew it; it needs gateway auth (an admin ``api_key``).
 
         Raises:
             PoolError: If pool creation fails (e.g., invalid machine profile).
             SIEConnectionError: If unable to connect to the server.
+            ValueError: If ``minimum_worker_count`` is negative or ``ttl_seconds``
+                is neither a positive whole number nor ``"never"``.
         """
         if minimum_worker_count is not None and minimum_worker_count < 0:
             msg = "minimum_worker_count must be >= 0"
             raise ValueError(msg)
+        validate_pool_ttl(ttl_seconds)
 
         creation: _PoolCreationInFlight | None = None
         wait_for_creation: asyncio.Future[None] | None = None
@@ -1076,6 +1097,8 @@ class SIEAsyncClient:
             request_body["minimum_worker_count"] = minimum_worker_count
         if pinned_models is not None:
             request_body["pinned_models"] = pinned_models
+        if ttl_seconds is not None:
+            request_body["ttl_seconds"] = ttl_seconds
 
         try:
             response = await self._post(
@@ -1119,9 +1142,16 @@ class SIEAsyncClient:
         state = data.get("status", {}).get("state", "unknown")
         logger.info("Pool '%s' created/updated with state '%s'", name, state)
 
+        # A pool that never expires has no lease: release this call's
+        # creation slot, or stop the renewal task of a pool this client was
+        # renewing, instead of starting one.
+        if pool_never_expires(data):
+            await self._stop_pool_lease_renewal(name, creation)
+            return
+
         # Start lease renewal task for this pool if this client is not
         # already tracking it. Repeated create_pool calls intentionally still
-        # POST so callers can update gpus/gpu_caps on the gateway.
+        # POST so callers can update the pool on the gateway.
         if reserved_slot and creation is not None:
             try:
                 await self._start_pool_lease_renewal(name, creation)
@@ -1132,6 +1162,25 @@ class SIEAsyncClient:
                 _fail_pool_creation(creation.future, e)
                 raise
             _complete_pool_creation(creation.future)
+
+    async def _stop_pool_lease_renewal(self, pool_name: str, creation: _PoolCreationInFlight | None) -> None:
+        """Stop tracking a pool that never expires.
+
+        Drops this call's in-flight creation slot (settling concurrent callers
+        waiting on it) or a renewal task started when the pool still had a lease.
+        """
+        async with self._pools_lock:
+            entry = self._pools.get(pool_name)
+            if entry is creation or isinstance(entry, asyncio.Task):
+                self._pools.pop(pool_name, None)
+            else:
+                entry = None
+        if creation is not None:
+            _complete_pool_creation(creation.future)
+        if isinstance(entry, asyncio.Task):
+            entry.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await entry
 
     async def _start_pool_lease_renewal(self, pool_name: str, creation: _PoolCreationInFlight) -> None:
         """Start lease renewal task for a pool."""
