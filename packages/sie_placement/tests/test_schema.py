@@ -529,7 +529,7 @@ def test_plans_built_in_code_round_trip():
     shape = ContainerShape(gpu_count=1, cpu_cores=4, memory_mib=16384)
     lane = PlanLane(
         name="default-l4-default",
-        pool="default",
+        queue_pool="default",
         bundle="default",
         cell=cell,
         container_shape=shape,

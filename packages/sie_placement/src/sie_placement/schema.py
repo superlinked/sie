@@ -936,7 +936,7 @@ class Envelope:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PlanLane:
     name: str
-    pool: str
+    queue_pool: str
     bundle: str
     cell: Cell
     container_shape: ContainerShape
@@ -946,7 +946,7 @@ class PlanLane:
 
     def __post_init__(self) -> None:
         _require_identifier("name", self.name)
-        _require_identifier("pool", self.pool)
+        _require_identifier("queuePool", self.queue_pool)
         _require_identifier("bundle", self.bundle)
         _require_at_least("concurrency", self.concurrency, 1)
         _require_at_least("maxContainers", self.max_containers, 1)
@@ -962,7 +962,7 @@ class PlanLane:
         return reader.build(
             cls,
             name=reader.string("name"),
-            pool=reader.string("pool"),
+            queue_pool=reader.string("queuePool"),
             bundle=reader.string("bundle"),
             cell=reader.child("cell", Cell.from_dict),
             container_shape=reader.child("containerShape", ContainerShape.from_dict),
@@ -974,7 +974,7 @@ class PlanLane:
     def to_dict(self) -> dict[str, object]:
         return {
             "name": self.name,
-            "pool": self.pool,
+            "queuePool": self.queue_pool,
             "bundle": self.bundle,
             "cell": self.cell.to_dict(),
             "containerShape": self.container_shape.to_dict(),

@@ -64,6 +64,17 @@ or more; every other warmth sits on a lane whose `floorMin` is 0. Boot
 evidence records `cold-with-bound` boots, `snapshot-cold` restores and
 `lazy-resident` loads, with outcome `succeeded`, `failed` or `timed-out`.
 
+## Lanes
+
+A plan lane carries the three tokens that name a lane of the `sie-cluster`
+Helm chart: `queuePool`, the `machineProfile` of its `cell`, and `bundle`.
+`queuePool` is the physical queue pool the lane's workers consume:
+`workers.common.queuePool` (`default`), or a worker group's `queuePool`
+override. It is neither the `workers.pools` map key, which names a worker
+group, nor an SDK logical pool. `bundle` is a key of that worker group's `bundles` map. `name`
+is the lane's handle inside the plan, and each identity refers to its lane by
+that name.
+
 ## Envelope
 
 A plan lane's envelope bounds what an online tuner may change without a new
