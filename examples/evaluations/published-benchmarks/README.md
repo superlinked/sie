@@ -27,7 +27,9 @@ never a verdict: no threshold, no pass, no fail.
 
 ### Run it
 
-Install the locked dependencies, then set the key the endpoint requires:
+Install the locked dependencies, then set the key. The default endpoint
+requires it; against your own server, set it only if that server asks for
+one (see [Run it against your own server](#run-it-against-your-own-server)):
 
 ```sh
 uv sync --frozen
@@ -58,6 +60,8 @@ smoke key. Without a reference, `--model <id[:profile]>` and `--task` are
 required; `--output sparse|multivector` and `--items-per-request` are required
 for the encode tasks and refused for `mteb/AskUbuntuDupQuestions`, which scores
 each query against its 20 task-native candidates.
+
+When a result is not valid, the command prints each reason to stderr.
 
 A completed run writes two files under `results/`, which git ignores; a run
 with a failed request writes the result record alone and names the failure
@@ -92,7 +96,11 @@ the example applies them to every run:
 
 - the whole `test` split of the pinned dataset revision; queries with no
   relevance judgement are dropped, as MTEB does;
-- requests are sequential, one in flight, with no warmup;
+- one readiness request on the first batch, not recorded, waits up to 300 s
+  for the model to load; a failure writes `valid: false` with the reason and
+  exits 1;
+- requests are sequential, one in flight, with no warmup beyond that
+  readiness request;
 - documents are encoded with `is_query=False` in batches of the reference's
   items per request, queries with `is_query=True`, and no instruction is sent;
 - sparse vectors are scored by the raw dot product, multivector outputs by
@@ -121,11 +129,13 @@ sets `comparable: false` with the reason listed, and `comparison_basis` reads
 A run without a reference is also `comparable: false` and has no comparison:
 `comparison` is empty and `comparison_basis` is null.
 
-Every response names the revision of the executed model bundle and
-configuration. The run collects every distinct value into
+Every response from the default endpoint names the revision of the executed
+model bundle and configuration. The run collects every distinct value into
 `execution_revisions`; it is recorded, never compared with the reference's
 checkpoint revision, and a change mid-run sets `comparable: false` with the
-reason `execution revision changed`.
+reason `execution revision changed`. A self-hosted sie-server reached
+directly sends no revision, so `execution_revisions` stays empty and that
+check cannot fire there.
 
 A delta is a number, not a result. The maintainers read a quality delta
 against a 2% band when they decide whether a published number still holds;
@@ -155,25 +165,30 @@ uv run python run.py performance \
   --reference references/prod-web-fw-20260905-gte-moderncolbert-scifact-perf-v2-r1.json
 ```
 
-A run needs `SIE_API_KEY`, spends credits and takes about two minutes: one
-readiness request, 30 s of warmup, 10 s of settle, 60 s of scheduled requests
-and up to 10 s of drain. With `--reference`, model, profile, task, output
-contract, items per request, timeout, in-flight cap, settle, drain and lag
-tolerance come from the file; `--rate` defaults to the record's published
-level, `--duration` to 60 and `--warmup` to 30, `--endpoint` is accepted as
-for quality, and any value that differs from the reference adds a
-`comparable_reasons` entry. Without a reference, `--model`, `--task` and
-`--rate` are required, `--output` and `--items-per-request` are required for
-the encode tasks and refused for the score task, and the timeout and cap are
-30 s and 64 for encode, 300 s and 128 for score. No other flags exist.
+A run against the default endpoint needs `SIE_API_KEY` and spends credits;
+against your own server, set the key only if that server asks for one (see
+[Run it against your own server](#run-it-against-your-own-server)). A run
+takes about two minutes: one readiness request, 30 s of warmup, 10 s of
+settle, 60 s of scheduled requests and up to 10 s of drain. When a result is
+not valid, the command prints each reason to stderr. With `--reference`,
+model, profile, task, output contract, items per request, timeout, in-flight
+cap, settle, drain and lag tolerance come from the file; `--rate` defaults to
+the record's published level, `--duration` to 60 and `--warmup` to 30,
+`--endpoint` is accepted as for quality, and any value that differs from the
+reference adds a `comparable_reasons` entry. Without a reference, `--model`,
+`--task` and `--rate` are required, `--output` and `--items-per-request` are
+required for the encode tasks and refused for the score task, and the timeout
+and cap are 30 s and 64 for encode, 300 s and 128 for score. No other flags
+exist.
 
 ### What is fixed by the method
 
 - a readiness request on the first row, `wait_for_capacity=True` with a 300 s
   provisioning timeout, before the measurement; a failure writes
   `valid: false` with the reason and exits 1; then 30 s of unrecorded
-  closed-loop warmup on that row (`--warmup 0` measures cold) and 10 s of
-  idle settle;
+  closed-loop warmup on that row (`--warmup 0` skips the closed-loop warmup;
+  the readiness request and the 10 s settle still run, so it is not a cold
+  start) and 10 s of idle settle;
 - deterministic arrivals: request `i` is due at `i / rate` seconds while that
   is below the duration; a scheduler thread sleeps until each offset and hands
   the request to a pool of `max_in_flight_per_process` threads, and when all
@@ -255,6 +270,58 @@ invocation, the record's first level unless `--rate` is given, and
 with the decimal point written as a hyphen. A change of execution revision
 mid-run sets `comparable: false` and `valid: false`.
 
+## Run it against your own server
+
+Both commands run against the open-source sie-server as well. Start it with
+the reference's model, here the Splade NFCorpus references:
+
+```sh
+pip install "sie-server[local]"
+sie-server serve --host 127.0.0.1 -m prithivida/Splade_PP_en_v2
+```
+
+By default the server runs without a token, and `--host 127.0.0.1` keeps it
+on this machine: leave `SIE_API_KEY` unset. With `SIE_AUTH_MODE=token` the
+server generates a token, saves it to a file and prints where; put that value
+in `SIE_API_KEY`.
+
+Then pass `--endpoint http://localhost:8080`. A quality smoke run:
+
+```sh
+uv run python run.py quality \
+  --reference references/prod-web-fw-20260905-splade-nfcorpus-quality-02.json \
+  --task "mteb/NFCorpus?limit=20" \
+  --endpoint http://localhost:8080
+```
+
+A short performance run:
+
+```sh
+uv run python run.py performance \
+  --reference references/prod-web-fw-20260905-splade-nfcorpus-perf-01.json \
+  --rate 1 --duration 20 \
+  --endpoint http://localhost:8080
+```
+
+What to expect:
+
+- the first request loads the model; the readiness request waits for it up
+  to 300 s, so a cold run is valid;
+- every result is `comparable: false` with the reason
+  `endpoint http://localhost:8080 != https://api.superlinked.com`, listed
+  beside any other reason;
+- quality numbers from the same pinned model revision should land in the
+  same band as the published ones, within numeric precision;
+- performance numbers describe your hardware and your network path and are
+  not comparable with the record;
+- `execution_revisions` stays empty, because a sie-server reached directly
+  sends no revision header;
+- `score.py` works the same on these results.
+
+On an Apple Silicon laptop with the Splade NFCorpus quality smoke, the server
+was ready in about half a minute, the cold model load took about 80 s, and a
+20-query smoke took about 30 s once warm.
+
 ## Validation
 
 `validation/` holds the example's own output from 2026-11-03: three
@@ -266,8 +333,9 @@ not evidence of record, and no value in the tables below is a pass threshold
 or quality floor. The delta range is the smallest to the largest `delta` the
 three result files carry (observed minus published); the spread is the
 largest minus the smallest of the three observed values, computed before
-rounding. Quality keeps the tool's five decimals; milliseconds and rates are
-rounded to three here.
+rounding. Quality keeps the tool's five decimals for ndcg, map, recall and
+precision; mrr, which the tool and the record keep at full precision, is
+rounded to five here. Milliseconds and rates are rounded to three here.
 
 ### `prod-web-fw-20260905-splade-nfcorpus-quality-02`
 
