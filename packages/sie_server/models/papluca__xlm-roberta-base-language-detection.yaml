@@ -1,0 +1,22 @@
+# Language identification across 20 languages, XLM-RoBERTa-base. MIT.
+sie_id: papluca/xlm-roberta-base-language-detection
+hf_id: papluca/xlm-roberta-base-language-detection
+hf_revision: 9865598389ca9d95637462f743f683b51d75b87b
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 512
+profiles:
+  default:
+    max_batch_tokens: 65536
+    compute_precision: null
+    adapter_path: sie_server.adapters.sequence_classification.adapter:SequenceClassificationAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}

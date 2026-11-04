@@ -1,0 +1,22 @@
+# Toxicity, six independent Jigsaw labels (multi-label sigmoid), BERT-base. Apache-2.0.
+sie_id: unitary/toxic-bert
+hf_id: unitary/toxic-bert
+hf_revision: 4d6c22e74ba2fdd26bc4f7238f50766b045a0d94
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 512
+profiles:
+  default:
+    max_batch_tokens: 65536
+    compute_precision: null
+    adapter_path: sie_server.adapters.sequence_classification.adapter:SequenceClassificationAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}

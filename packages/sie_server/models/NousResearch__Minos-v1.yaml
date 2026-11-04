@@ -1,0 +1,22 @@
+# Refusal detection (Non-refusal, Refusal) for "<|user|> ... <|assistant|> ..." exchanges, ModernBERT-large. Apache-2.0.
+sie_id: NousResearch/Minos-v1
+hf_id: NousResearch/Minos-v1
+hf_revision: edb1e8b7cc80a86cc356534948cca0ef4c46f8e2
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 8192
+profiles:
+  default:
+    max_batch_tokens: 65536
+    compute_precision: null
+    adapter_path: sie_server.adapters.sequence_classification.adapter:SequenceClassificationAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}
