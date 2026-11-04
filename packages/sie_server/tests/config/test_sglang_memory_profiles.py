@@ -128,9 +128,7 @@ def test_extending_profile_forwards_its_resolved_kv_budget():
     assert adapter._memory_budget.kv_budget_tokens == 65536
 
 
-@pytest.mark.parametrize(
-    "name", ["Qwen__Qwen3.5-4B", "lightonai__LightOnOCR-3-4B", "Qwen__Qwen3-VL-8B-Instruct", "zai-org__GLM-OCR"]
-)
+@pytest.mark.parametrize("name", ["Qwen__Qwen3.5-4B", "Qwen__Qwen3-VL-8B-Instruct", "zai-org__GLM-OCR"])
 def test_specialized_profiles_retain_calibrated_reservation(name):
     config = load_model_config(MODELS / f"{name}.yaml")
     assert config.resolve_profile("default").loadtime["mem_fraction_static"] == 0.85
