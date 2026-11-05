@@ -63,6 +63,7 @@ QUERY_TOKEN_ROWS = 256
 RESULTS_DIR = Path("results")
 SCORE_TASKS = frozenset({"mteb/AskUbuntuDupQuestions"})
 ENCODE_OUTPUTS = ("sparse", "dense", "multivector")
+MUVERA_PROFILE = "muvera"
 REFERENCE_KIND = "published-benchmark-reference"
 RESULT_KIND = "published-benchmark-reproduction"
 PERFORMANCE_LIMITS = {"encode": (30.0, 64), "score": (300.0, 128)}
@@ -460,6 +461,11 @@ def _plan_from_flags(args: argparse.Namespace) -> QualityPlan:
     model, _, profile = args.model.partition(":")
     operation = "score" if task_name in SCORE_TASKS else "encode"
     _check_output_flags(args, operation)
+    if args.output == "dense" and profile == MUVERA_PROFILE:
+        raise ValueError(
+            "--output dense is refused for a muvera profile: the published method scores these vectors by the "
+            "similarity the profile declares, usually the raw dot product, and this example scores dense only by cosine"
+        )
     baseline = _supplied_baseline(args)
     instruction = _checked_instruction(args, operation)
     reasons = ["no reference"]

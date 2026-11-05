@@ -120,7 +120,10 @@ the example applies them to every run:
   unless `--instruction` gives one, which goes with queries only;
 - sparse vectors are scored by the raw dot product, dense vectors by cosine
   over L2-normalised vectors, multivector outputs by MaxSim over L2-normalised
-  token rows, and the reranker's own scores rank its candidates;
+  token rows, and the reranker's own scores rank its candidates. A `muvera`
+  profile is refused with `--output dense` on a quality run, whatever
+  `output_similarity` its config declares, because the published method does
+  not score those vectors by this example's cosine;
 - the top 1000 documents per query are kept, ties broken by corpus order, and
   scored at k in 1, 3, 5, 10, 20, 100 and 1000 with pytrec_eval's `ndcg_cut`,
   `map_cut`, `recall` and `P`, rounded to five decimals; the published method

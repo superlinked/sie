@@ -531,6 +531,45 @@ class DenseTest(TemporaryCase):
         self.assertEqual(dot_order, ["d1", "d4", "d2", "d3", "d5"])
         self.assertNotEqual(dot_order, cosine_order)
 
+    def test_a_quality_run_refuses_a_muvera_profile(self):
+        stderr = self.refused(
+            "quality",
+            "--model",
+            "lightonai/GTE-ModernColBERT-v1:muvera",
+            "--task",
+            "mteb/SciFact",
+            "--output",
+            "dense",
+            "--items-per-request",
+            "2",
+            "--endpoint",
+            LOCAL,
+        )
+        self.assertIn("muvera", stderr)
+        self.assertIn("cosine", stderr)
+
+    def test_the_muvera_refusal_is_for_a_dense_quality_run_with_that_profile_only(self):
+        task = ("--task", "mteb/SciFact", "--items-per-request", "2")
+        other_profile = plan_quality(parse("--model", "m:other", "--output", "dense", *task))
+        self.assertEqual((other_profile.profile, other_profile.output_contract), ("other", "dense"))
+        other_output = plan_quality(parse("--model", "m:muvera", "--output", "sparse", *task))
+        self.assertEqual((other_output.profile, other_output.output_contract), ("muvera", "sparse"))
+        performance = plan_performance(
+            test_performance.parse(
+                "--model",
+                "m:muvera",
+                "--task",
+                "mteb/SciFact?split=test&role=corpus&limit=4&filter=nonempty",
+                "--output",
+                "dense",
+                "--items-per-request",
+                "1",
+                "--rate",
+                "1",
+            )
+        )
+        self.assertEqual((performance.profile, performance.output_contract), ("muvera", "dense"))
+
     def test_a_result_carries_the_dense_contract_and_every_request_asks_for_it(self):
         client = DenseClient()
         record, _ = self.run_flags(client, *DENSE_FLAGS)
