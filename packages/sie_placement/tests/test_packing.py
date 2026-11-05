@@ -5,11 +5,12 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sie_placement.planner import PlannerParameters, plan
+from sie_placement.planner import CapacityExceededError, PlannerParameters, plan
 from sie_placement.report import IdentityStatus, Measurement, RequestReason, UnplacedReason, render
 from sie_placement.schema import (
     BootEvidence,
     BootOutcome,
+    Capacity,
     Cell,
     ContainerShape,
     Demand,
@@ -29,8 +30,10 @@ from sie_placement.schema import (
     RequestShape,
     ServiceLevel,
     ServiceLevels,
+    SharedQuota,
     SourceRef,
     Throughput,
+    TypeCeiling,
     Warmth,
 )
 
@@ -169,11 +172,15 @@ def demand(hourly=None) -> Demand:
     )
 
 
-def run(service_levels, receipts=(), boots=(), *, current=None, hourly=None, price_list=None, **overrides):
+def run(
+    service_levels, receipts=(), boots=(), *, current=None, hourly=None, price_list=None, capacity=None, **overrides
+):
     parameters = PlannerParameters(
         **({"placement": "test", "max_containers": 4, "fallback_floor": 2, "cooldown_s": 900} | overrides)
     )
-    return plan(service_levels, receipts, boots, price_list or prices(), demand(hourly), current, parameters)
+    return plan(
+        service_levels, receipts, boots, price_list or prices(), demand(hourly), current, parameters, capacity=capacity
+    )
 
 
 def lane(name, cell=L4, *, floor=1, shape=SHAPE) -> PlanLane:
@@ -642,6 +649,41 @@ def test_an_unshared_identity_is_never_packed_and_its_lane_hosts_no_one_else(uns
     assert all(request.lane != "host" for request in kept.report.measurement_requests)
     shared = run(service_levels, host_and_guest(), [load(GUEST)], current=current)
     assert placements(shared)[GUEST] == ("host", Warmth.LAZY_RESIDENT)
+
+
+def test_a_shared_lane_holds_its_container_ceiling_once_against_every_ceiling():
+    capacity = Capacity(
+        total=4,
+        types=(TypeCeiling(gpu_product=L4.gpu_product, accelerators=4),),
+        shared_quota=SharedQuota(accelerators=6, held_elsewhere=2),
+    )
+    service_levels = levels(**{HOST: 0, GUEST: 60})
+    result = run(service_levels, host_and_guest(), [load(GUEST)], capacity=capacity)
+    assert placements(result) == {HOST: ("org-host-l4", Warmth.PINNED), GUEST: ("org-host-l4", Warmth.LAZY_RESIDENT)}
+    assert [(use.accelerators, use.peak_accelerators, use.lanes) for use in result.report.capacity] == [
+        (1, 4, ("org-host-l4",)),
+        (1, 4, ("org-host-l4",)),
+        (3, 6, ("org-host-l4",)),
+    ]
+    with pytest.raises(CapacityExceededError) as caught:
+        run(service_levels, host_and_guest(guest_footprint=8000), [load(GUEST)], capacity=capacity)
+    assert [use.describe() for use in caught.value.exceeded] == [
+        "the container ceilings of org-guest-l4, org-host-l4 hold 8 accelerators, above the total ceiling of 4",
+        "the container ceilings of org-guest-l4, org-host-l4 hold 8 NVIDIA-L4 accelerators, above the type ceiling of 4",
+        "the container ceilings of org-guest-l4, org-host-l4 hold 8 accelerators, "
+        "which with 2 held elsewhere exceed the shared quota of 6",
+    ]
+
+
+def test_a_shared_lane_over_a_ceiling_is_refused_with_its_container_ceiling_intact():
+    with pytest.raises(CapacityExceededError) as caught:
+        run(levels(**{HOST: 0, GUEST: 60}), host_and_guest(), [load(GUEST)], capacity=Capacity(total=3))
+    assert (
+        str(caught.value) == "the container ceilings of org-host-l4 hold 4 accelerators, above the total ceiling of 3"
+    )
+    (refused,) = caught.value.result.plan.lanes
+    assert (refused.name, refused.max_containers) == ("org-host-l4", 4)
+    assert caught.value.result.plan == run(levels(**{HOST: 0, GUEST: 60}), host_and_guest(), [load(GUEST)]).plan
 
 
 def test_an_unshared_identity_keeps_a_current_shared_lane_it_already_holds():
