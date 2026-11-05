@@ -3,8 +3,9 @@
 Versioned documents for a measured-only placement planner: the service level
 each served identity must meet, the measurements a placement may be chosen
 from, the prices those placements cost, the demand they serve, and the plan
-that results. The package uses only the Python standard library. It is a
-workspace package and is not published to PyPI.
+that results. The package uses only the Python standard library, except the
+KEDA applier, whose `keda` extra adds the SIE Python SDK. It is a workspace
+package and is not published to PyPI.
 
 A served identity is a model id or a `model:profile` pair, the routing key a
 request resolves to. A measurement cell is a machine profile together with the
@@ -132,6 +133,112 @@ A deploy that resets the applied settings to the envelope minimum is a fresh
 start: read back as `current`, the settings climb one step per tick under
 steady demand until the lane serves the demand or reaches the top of its
 envelope.
+
+## KEDA applier
+
+`sie-placement tune` keeps each plan lane's warm floor inside its envelope on a
+`sie-cluster` deployment that autoscales workers with KEDA. It needs the `keda`
+extra.
+
+```bash
+sie-placement tune --plan plan.json \
+  --prometheus-url http://prometheus:9090 \
+  --gateway-url http://sie-gateway:8080 \
+  --api-key-file /run/secrets/gateway-client-token
+```
+
+Every tick, 60 seconds apart by default or once with `--once`, it reads the
+four lane series below from Prometheus, reads each lane's floor-carrier pool
+from the gateway with `SIEClient.get_pool`, and calls `step` with the carrier's
+floor as `current`. It prints one JSON audit row per lane to standard output. Without
+`--apply` it runs in shadow mode: it decides and records and writes nothing.
+With `--apply` it upserts every lane's carrier on every tick through
+`SIEClient.create_pool`, which renews the carrier's lease and sets its floor to
+the step's floor. A lane that has no carrier and whose floor stays at 0 gets
+none.
+
+Under KEDA only the floor moves per lane. The scale-down window and the queue
+threshold are chart-wide settings, and there is no buffer to tune, so the
+applier passes `Settings(floor=n)` and ignores the envelope's buffer and window
+ranges.
+
+### Floor carriers
+
+A floor carrier is an API logical pool named
+`placement-floor-<queuePool>-<machineProfile>-<bundle>`, with `queue_pool` and
+`bundle` set to the lane's, `gpus` set to `{<machineProfile>: 0}`, the
+gateway's default lease, no GPU caps, no pinned models, and
+`minimum_worker_count` set to the step's floor. The gateway keeps each lane at
+the largest floor among the logical pools on it, so the carrier can raise the
+lane above its chart floor and never lowers another pool's floor. The applier
+writes only its carriers: a pool that has a carrier's name and any other spec is
+reported and left unchanged. A carrier carries no pins, because every floor
+change is a spec change, which resets the pool's worker assignment; pinned
+models stay in the chart values.
+
+When the applier stops renewing, each carrier's lease lapses, 1200 seconds by
+default, the gateway removes it, and the lane returns to its chart floor. On a
+lane whose chart `minReplicas` is 0, a floor of 1 or more activates the lane,
+which then holds at least the chart's fallback floor.
+
+### Series
+
+| Series | Query | Step input |
+| --- | --- | --- |
+| Queue depth | `max by (pool, machine_profile, bundle) (sie_gateway_lane_queue_depth{})` | `running` |
+| Pending demand | `max by (pool, machine_profile, bundle) (sie_gateway_pending_demand{})` | `backlog` |
+| Warm floor | `max by (pool, machine_profile, bundle) (sie_gateway_pool_warm_floor{})` | Reported only |
+| Running workers | `count by (lane) (max by (lane, producer_instance) (sie_worker_gpu_slots{state="ready"}) > 0)` | `runners` |
+
+`--series-selector` adds label matchers to every selector, for example
+`namespace="sie"` when one Prometheus scrapes several releases. Lane labels
+match the plan's lane tokens after trimming and lowering them, as the chart
+names lanes. The attainment is `unmeasured`, so a lane is under pressure while
+the gateway reports pending demand for it, which it does when a request found no
+ready capacity, and idle when it reports neither pending demand nor queued or
+in-flight work. A lane with no ready worker has 0 runners. A lane whose queue
+depth, pending demand or worker series is missing is held: the step is given a
+busy lane with nothing waiting, so it only brings the carrier's floor inside the
+envelope.
+
+### Audit rows
+
+Each row carries `at`, `mode` (`shadow` or `apply`), the lane's `lane`,
+`queuePool`, `machineProfile` and `bundle`, the `carrier` pool name, the
+`telemetry` read for the lane, `currentFloor`, the step's `action` and `floor`,
+whether the write was `applied`, `laneFloorAboveEnvelope` and `error`.
+`laneFloorAboveEnvelope` is true when the lane's warm floor exceeds `floorMax`.
+The applier does not lower another pool's floor, so a lane held above its
+envelope by another pool stays reported until that pool changes.
+
+### Refusals
+
+The command exits with status 2 before it calls Prometheus or the gateway when:
+
+- a lane's `floorMax` exceeds `--max-pool-floor`, which must match the gateway's
+  `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT` (default 4);
+- the plan has more lanes than `--max-pools`, which must match the gateway's
+  `SIE_GATEWAY_MAX_POOLS` (default 64);
+- a lane's `queuePool`, machine profile or bundle is not 1 to 63 letters,
+  digits, `_` or `-`, two lanes need the same carrier, or a carrier name is
+  longer than the gateway's 128 characters.
+
+With `--once`, a tick whose query, pool read or pool write failed exits with
+status 1.
+
+### Credentials
+
+| Call | Permission | Source |
+| --- | --- | --- |
+| Prometheus `/api/v1/query` | Read access to the query API | None sent |
+| `GET /v1/pools/{name}` | A gateway client token, when gateway token auth is on | `--api-key-file`, or `SIE_API_KEY` when `SIE_BASE_URL` names the same origin, as the SDK resolves it |
+| `POST /v1/pools` and its lease renewal | The gateway admin token | `--admin-token-file`, or `SIE_ADMIN_TOKEN`, read only with `--apply` |
+
+The gateway admin token authorizes every gateway admin route, not only pools.
+The applier reads it only with `--apply`, sends it only on pool writes to
+`--gateway-url`, never takes it as a command-line value and never prints or
+logs it. Without it, `--apply` sends its writes with no credential, which a
+gateway with token auth refuses. The client token is never sent on writes.
 
 ## Tests
 

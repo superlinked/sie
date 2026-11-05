@@ -4766,12 +4766,22 @@ name = "sie-placement"
 version = "0.0.0"
 source = { editable = "packages/sie_placement" }
 
+[package.optional-dependencies]
+keda = [
+    { name = "httpx" },
+    { name = "sie-sdk" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
 ]
 
 [package.metadata]
+requires-dist = [
+    { name = "httpx", marker = "extra == 'keda'", specifier = ">=0.28,<1" },
+    { name = "sie-sdk", marker = "extra == 'keda'", editable = "packages/sie_sdk" },
+]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=9.0.3" }]
