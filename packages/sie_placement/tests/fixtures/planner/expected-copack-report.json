@@ -55,34 +55,6 @@
         }
       },
       "peakContainers": 1,
-      "nextCheaper": {
-        "cell": {
-          "machineProfile": "l4",
-          "gpuProduct": "NVIDIA-L4"
-        },
-        "containerShape": {
-          "gpuCount": 1,
-          "cpuCores": 4,
-          "memoryMiB": 16384
-        },
-        "concurrency": 16,
-        "warmth": "snapshot-cold",
-        "monthlyCost": 569.4,
-        "saving": 189.8,
-        "comeAliveS": 8.5,
-        "comeAliveBasis": "boot-evidence",
-        "blockedBy": [
-          {
-            "field": "comeAliveP95S",
-            "bound": 0,
-            "measured": 8.5
-          }
-        ],
-        "receipt": {
-          "uri": "receipts/baai-bge-m3/l4-c16-16384.json",
-          "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
-        }
-      },
       "current": {
         "identity": "BAAI/bge-m3",
         "lane": "default-l4-default",
@@ -218,6 +190,25 @@
           "sha256": "0000000000000000000000000000000000000000000000000000000000000007"
         }
       },
+      "joined": {
+        "cell": {
+          "machineProfile": "l4",
+          "gpuProduct": "NVIDIA-L4"
+        },
+        "containerShape": {
+          "gpuCount": 1,
+          "cpuCores": 4,
+          "memoryMiB": 16384
+        },
+        "concurrency": 16,
+        "warmth": "pinned",
+        "monthlyCost": 759.2,
+        "comeAliveS": 0.0,
+        "comeAliveBasis": "warm-floor",
+        "receipt": {
+          "uri": "co-residency/l4/bge-m3+e5-base-v2+qwen3-embedding-4b-c16.json"
+        }
+      },
       "peakContainers": 1
     },
     {
@@ -314,6 +305,7 @@
       "saving": 759.2
     }
   ],
+  "blockedCoPackingMoves": [],
   "measurementRequests": [
     {
       "identity": "Qwen/Qwen3-Reranker-0.6B",
@@ -449,6 +441,7 @@
         "cpuCores": 4,
         "memoryMiB": 16384
       },
+      "concurrency": 16,
       "lane": "default-l4-default",
       "coResidents": [
         "BAAI/bge-m3",
@@ -464,48 +457,7 @@
       "savingBound": 47.45
     }
   ],
-  "comeAliveLevers": [
-    {
-      "identity": "BAAI/bge-m3",
-      "cell": {
-        "machineProfile": "l4",
-        "gpuProduct": "NVIDIA-L4"
-      },
-      "containerShape": {
-        "gpuCount": 1,
-        "cpuCores": 4,
-        "memoryMiB": 16384
-      },
-      "warmth": "cold-with-bound",
-      "comeAliveS": 95.0,
-      "comeAliveBasis": "borrowed-boot-evidence",
-      "comeAliveBoundS": 0,
-      "monthlyCost": 569.4,
-      "savingUnderBound": 0.0,
-      "permittedBoundS": 95,
-      "savingAtPermittedBound": 189.8
-    },
-    {
-      "identity": "BAAI/bge-m3",
-      "cell": {
-        "machineProfile": "l4",
-        "gpuProduct": "NVIDIA-L4"
-      },
-      "containerShape": {
-        "gpuCount": 1,
-        "cpuCores": 4,
-        "memoryMiB": 16384
-      },
-      "warmth": "snapshot-cold",
-      "comeAliveS": 8.5,
-      "comeAliveBasis": "boot-evidence",
-      "comeAliveBoundS": 0,
-      "monthlyCost": 569.4,
-      "savingUnderBound": 0.0,
-      "permittedBoundS": 9,
-      "savingAtPermittedBound": 189.8
-    }
-  ],
+  "comeAliveLevers": [],
   "queueWaitUnattained": [
     "BAAI/bge-m3",
     "BAAI/bge-m3:sparse",

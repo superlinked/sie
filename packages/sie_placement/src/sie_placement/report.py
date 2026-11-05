@@ -74,9 +74,12 @@ class Blocker:
     field: str
     bound: int
     measured: float | None
+    identity: str | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return _compact({"field": self.field, "bound": self.bound, "measured": self.measured})
+        return _compact(
+            {"identity": self.identity, "field": self.field, "bound": self.bound, "measured": self.measured}
+        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -118,6 +121,7 @@ class IdentityReport:
     lane: str | None = None
     monthly_cost: float | None = None
     chosen: Option | None = None
+    joined: Option | None = None
     peak_containers: int | None = None
     next_cheaper: Option | None = None
     current: PlanIdentity | None = None
@@ -135,6 +139,7 @@ class IdentityReport:
                 "monthlyCost": None if self.monthly_cost is None else _money(self.monthly_cost),
                 "blockedBy": [blocker.to_dict() for blocker in self.blocked_by] or None,
                 "chosen": None if self.chosen is None else self.chosen.to_dict(),
+                "joined": None if self.joined is None else self.joined.to_dict(),
                 "peakContainers": self.peak_containers,
                 "nextCheaper": None if self.next_cheaper is None else self.next_cheaper.to_dict(),
                 "unplacedReason": None if self.unplaced_reason is None else self.unplaced_reason.value,
@@ -205,6 +210,7 @@ class MeasurementRequest:
     cost_bound: float
     saving_bound: float | None
     container_shape: ContainerShape | None = None
+    concurrency: int | None = None
     lane: str | None = None
     co_residents: tuple[str, ...] = ()
 
@@ -214,6 +220,7 @@ class MeasurementRequest:
                 "identity": self.identity,
                 "cell": self.cell.to_dict(),
                 "containerShape": None if self.container_shape is None else self.container_shape.to_dict(),
+                "concurrency": self.concurrency,
                 "lane": self.lane,
                 "coResidents": list(self.co_residents) or None,
                 "measure": [measurement.value for measurement in self.measure],
@@ -287,18 +294,22 @@ class CoPackingMove:
     receipt: SourceRef
     gpu_memory_headroom_mib: int
     saving: float
+    blocked_by: tuple[Blocker, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
-        return {
-            "identity": self.identity,
-            "fromLane": self.from_lane,
-            "fromWarmth": self.from_warmth.value,
-            "toLane": self.to_lane,
-            "coResidents": list(self.co_residents),
-            "receipt": self.receipt.to_dict(),
-            "gpuMemoryHeadroomMiB": self.gpu_memory_headroom_mib,
-            "saving": _money(self.saving),
-        }
+        return _compact(
+            {
+                "identity": self.identity,
+                "fromLane": self.from_lane,
+                "fromWarmth": self.from_warmth.value,
+                "toLane": self.to_lane,
+                "coResidents": list(self.co_residents),
+                "receipt": self.receipt.to_dict(),
+                "gpuMemoryHeadroomMiB": self.gpu_memory_headroom_mib,
+                "saving": _money(self.saving),
+                "blockedBy": [blocker.to_dict() for blocker in self.blocked_by] or None,
+            }
+        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -348,6 +359,7 @@ class Report:
     identity_changes: tuple[IdentityChange, ...]
     lane_changes: tuple[LaneChange, ...]
     co_packing_moves: tuple[CoPackingMove, ...] = ()
+    blocked_co_packing_moves: tuple[CoPackingMove, ...] = ()
 
     @property
     def monthly_cost(self) -> float:
@@ -387,6 +399,7 @@ class Report:
             "lanes": [lane.to_dict() for lane in self.lanes],
             "sharedChartLanes": [shared.to_dict() for shared in self.shared_chart_lanes],
             "coPackingMoves": [move.to_dict() for move in self.co_packing_moves],
+            "blockedCoPackingMoves": [move.to_dict() for move in self.blocked_co_packing_moves],
             "measurementRequests": [request.to_dict() for request in self.measurement_requests],
             "comeAliveLevers": [lever.to_dict() for lever in self.come_alive_levers],
             "queueWaitUnattained": list(self.queue_wait_unattained),

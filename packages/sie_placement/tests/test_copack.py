@@ -7,7 +7,16 @@ from pathlib import Path
 
 import pytest
 from sie_placement.planner import PlannerParameters, plan
-from sie_placement.report import IdentityStatus, Measurement, RefusedRecord, RequestReason, render
+from sie_placement.report import (
+    Blocker,
+    ComeAliveBasis,
+    IdentityStatus,
+    Measurement,
+    Option,
+    RefusedRecord,
+    RequestReason,
+    render,
+)
 from sie_placement.schema import (
     BootEvidence,
     BootOutcome,
@@ -30,6 +39,7 @@ from sie_placement.schema import (
     PriceList,
     Receipt,
     RequestShape,
+    SchemaError,
     ServiceLevel,
     ServiceLevels,
     SourceRef,
@@ -239,7 +249,18 @@ def test_a_pinned_identity_joins_a_pinned_lane_that_a_co_residency_receipt_cover
     moved = result.report.identity("org/a")
     assert (moved.status, moved.lane, moved.monthly_cost) == (IdentityStatus.CO_PACKED, "org-b-l4", MONTH)
     assert (moved.chosen.cell, moved.chosen.monthly_cost) == (A100, 3 * MONTH)
+    assert moved.joined == Option(
+        cell=L4,
+        container_shape=SHAPE,
+        concurrency=8,
+        warmth=Warmth.PINNED,
+        monthly_cost=MONTH,
+        come_alive_s=0.0,
+        come_alive_basis=ComeAliveBasis.WARM_FLOOR,
+        receipt=measured.source,
+    )
     assert result.report.identity("org/b").status is IdentityStatus.PLACED
+    assert result.report.identity("org/b").joined is None
     (lane_report,) = result.report.lanes
     assert lane_report.co_residency_receipt == measured.source
     assert lane_report.to_dict()["coResidencyReceipt"] == {"uri": "co-residency/l4/8/org/a+org/b"}
@@ -284,6 +305,22 @@ def test_a_move_is_kept_only_when_every_resident_meets_its_bound_under_the_recei
     assert bool(result.report.co_packing_moves) is moved
     reverse = [] if moved else [("org/b", "org-a-a100-80gb")]
     assert [(request.identity, request.lane) for request in co_requests(result.report)] == reverse
+    expected = [
+        Blocker(identity=identity, field="warmP99Ms", bound=250, measured=p99)
+        for identity, p99 in (("org/a", mover_p99), ("org/b", host_p99))
+        if p99 > 250
+    ]
+    assert [move.blocked_by for move in result.report.blocked_co_packing_moves] == ([] if moved else [tuple(expected)])
+    if not moved:
+        (blocked,) = result.report.blocked_co_packing_moves
+        assert (blocked.identity, blocked.to_lane, blocked.co_residents) == ("org/a", "org-b-l4", ("org/b",))
+        assert blocked.saving == pytest.approx(3 * MONTH)
+        assert blocked.to_dict()["blockedBy"][0] == {
+            "identity": expected[0].identity,
+            "field": "warmP99Ms",
+            "bound": 250,
+            "measured": expected[0].measured,
+        }
 
 
 @pytest.mark.parametrize(("itl", "moved"), [(90.0, False), (80.0, True)])
@@ -302,6 +339,13 @@ def test_a_move_keeps_the_reviewed_gpu_memory_headroom_free(peak, moved):
     result = run(*PAIR, [co_receipt("org/a", "org/b", peak=peak)], gpu_memory_headroom_mib=4096)
     assert [move.gpu_memory_headroom_mib for move in result.report.co_packing_moves] == ([4096] if moved else [])
     assert [request.identity for request in co_requests(result.report)] == ([] if moved else ["org/b"])
+    blocked = [(move.identity, move.blocked_by) for move in result.report.blocked_co_packing_moves]
+    shortfall = Blocker(field="gpuMemoryHeadroomMiB", bound=4096, measured=GPU_MEMORY - peak)
+    assert blocked == ([] if moved else [("org/a", (shortfall,))])
+    if not moved:
+        assert result.report.to_dict()["blockedCoPackingMoves"][0]["blockedBy"] == [
+            {"field": "gpuMemoryHeadroomMiB", "bound": 4096, "measured": 4095}
+        ]
 
 
 def test_a_move_without_a_co_residency_receipt_is_a_measurement_request():
@@ -312,6 +356,7 @@ def test_a_move_without_a_co_residency_receipt_is_a_measurement_request():
         "identity": "org/a",
         "cell": L4.to_dict(),
         "containerShape": SHAPE.to_dict(),
+        "concurrency": 8,
         "lane": "org-b-l4",
         "coResidents": ["org/b"],
         "measure": ["co-residency-receipt"],
@@ -342,7 +387,7 @@ def test_a_receipt_for_another_lane_shape_does_not_cover_the_move(mismatch):
 
 
 def test_a_receipt_for_a_subset_or_a_superset_does_not_cover_the_move():
-    service_levels = levels("org/a", "org/b", "org/c")
+    service_levels = levels("org/a", "org/b", "org/c", "org/d")
     current = Plan(
         placement="test",
         lanes=(lane("shared"),),
@@ -354,7 +399,10 @@ def test_a_receipt_for_a_subset_or_a_superset_does_not_cover_the_move():
     receipts = [receipt("org/a", A100), receipt("org/b"), receipt("org/c")]
     co = [co_receipt("org/a", "org/b"), co_receipt("org/a", "org/b", "org/c", "org/d")]
     result = run(service_levels, receipts, co, current=current)
+    assert result.report.refusals == ()
+    assert result.report.identity("org/d").status is IdentityStatus.UNPLACED
     assert result.report.co_packing_moves == ()
+    assert result.report.blocked_co_packing_moves == ()
     (request,) = co_requests(result.report)
     assert (request.identity, request.lane, request.co_residents) == ("org/a", "shared", ("org/b", "org/c"))
 
@@ -642,6 +690,214 @@ def test_a_kept_co_packed_identity_left_alone_on_its_lane_loses_the_mark():
     )
     kept_together = run(levels("org/a", "org/b"), [receipt("org/b")], current=current)
     assert kept_together.plan == current
+
+
+def test_a_host_is_measured_net_of_the_moves_its_lane_carries():
+    receipts = [receipt("org/a", A100), receipt("org/b")]
+    boots = [boot("org/b", seconds=120.0)]
+    co = [co_receipt("org/a", "org/b")]
+    tight = levels("org/a", overrides={"org/b": ServiceLevel(come_alive_p95_s=60, warm_p99_ms=250)})
+    result = run(tight, receipts, co, boots=boots)
+    assert lanes_of(result) == {"org-b-l4": ("org/a", "org/b")}
+    host = result.report.identity("org/b")
+    assert host.chosen.warmth is Warmth.PINNED
+    assert host.next_cheaper is None
+    assert result.report.come_alive_levers == ()
+    assert result.report.measurement_requests == ()
+    loose = levels("org/a", overrides={"org/b": ServiceLevel(come_alive_p95_s=120, warm_p99_ms=250)})
+    loosened = run(loose, receipts, co, boots=boots, current=result.plan)
+    assert loosened.report.monthly_cost > result.report.monthly_cost
+
+
+def test_a_host_lever_claims_what_loosening_its_bound_saves_the_plan():
+    receipts = [receipt("org/h", A100), receipt("org/m")]
+    boots = [boot("org/h", seconds=120.0, cell=A100)]
+    co = [co_receipt("org/h", "org/m", cell=A100)]
+    tight = levels("org/m", overrides={"org/h": ServiceLevel(come_alive_p95_s=60, warm_p99_ms=250)})
+    result = run(tight, receipts, co, boots=boots)
+    assert lanes_of(result) == {"org-h-a100-80gb": ("org/h", "org/m")}
+    (lever,) = result.report.come_alive_levers
+    assert (lever.identity, lever.warmth, lever.permitted_bound_s) == ("org/h", Warmth.COLD_WITH_BOUND, 120)
+    assert lever.saving_at_permitted_bound == pytest.approx(2 * MONTH)
+    assert result.report.identity("org/h").next_cheaper.saving == pytest.approx(2 * MONTH)
+    (request,) = co_requests(result.report)
+    assert (request.identity, request.lane, request.saving_bound) == ("org/h", "org-m-l4", pytest.approx(2 * MONTH))
+    loose = levels("org/m", overrides={"org/h": ServiceLevel(come_alive_p95_s=120, warm_p99_ms=250)})
+    loosened = run(loose, receipts, co, boots=boots, current=result.plan)
+    assert result.report.monthly_cost - loosened.report.monthly_cost == pytest.approx(lever.saving_at_permitted_bound)
+    measured = run(tight, receipts, [*co, co_receipt("org/h", "org/m")], boots=boots, current=result.plan)
+    assert result.report.monthly_cost - measured.report.monthly_cost == pytest.approx(request.saving_bound)
+
+
+def test_a_co_residency_request_names_the_lane_as_the_pass_found_it():
+    service_levels = levels("org/x", "org/y", "org/z")
+    receipts = [receipt("org/x", A100), receipt("org/y"), receipt("org/z")]
+    co = [co_receipt("org/y", "org/z")]
+    result = run(service_levels, receipts, co)
+    assert lanes_of(result) == {"org-x-a100-80gb": ("org/x",), "org-z-l4": ("org/y", "org/z")}
+    requests = {request.lane: request for request in co_requests(result.report)}
+    assert sorted(requests) == ["org-y-l4", "org-z-l4"]
+    assert requests["org-y-l4"].to_dict() == {
+        "identity": "org/x",
+        "cell": L4.to_dict(),
+        "containerShape": SHAPE.to_dict(),
+        "concurrency": 8,
+        "lane": "org-y-l4",
+        "coResidents": ["org/y"],
+        "measure": ["co-residency-receipt"],
+        "warmth": "pinned",
+        "reason": "unmeasured",
+        "costBound": 0.0,
+        "savingBound": 3 * MONTH,
+    }
+    assert requests["org-z-l4"].co_residents == ("org/z",)
+    joined_y = run(service_levels, receipts, [*co, co_receipt("org/x", "org/y")], current=result.plan)
+    assert lanes_of(joined_y) == {"org-y-l4": ("org/x", "org/y"), "org-z-l4": ("org/z",)}
+    joined_z = run(service_levels, receipts, [*co, co_receipt("org/x", "org/z")], current=result.plan)
+    assert lanes_of(joined_z) == {"org-y-l4": ("org/y",), "org-z-l4": ("org/x", "org/z")}
+
+
+def test_two_lanes_that_need_one_receipt_ask_for_it_once():
+    hourly = {"org/b": {3: 54000}}
+    result = run(levels("org/a", "org/b"), [receipt("org/a"), receipt("org/b")], hourly=hourly)
+    (request,) = co_requests(result.report)
+    assert (request.identity, request.lane, request.co_residents) == ("org/b", "org-a-l4", ("org/a",))
+    assert request.saving_bound == pytest.approx(MONTH + SCALE)
+    service_levels = levels("org/a", "org/b", "org/c")
+    three = run(service_levels, [receipt("org/a"), receipt("org/b"), receipt("org/c")])
+    sets = [frozenset((request.identity, *request.co_residents)) for request in co_requests(three.report)]
+    assert sorted(sorted(members) for members in sets) == [["org/a", "org/b"], ["org/a", "org/c"], ["org/b", "org/c"]]
+
+
+@pytest.mark.parametrize(("rps", "requests"), [(0.3, 1080), (1.13, 4068), (2.01, 14472)])
+def test_joint_and_solo_pricing_count_containers_at_the_stated_rate(rps, requests):
+    service_levels = levels("org/a", "org/b")
+    receipts = [receipt("org/a", A100), receipt("org/b", rps=rps)]
+    hourly = {"org/b": {3: requests}}
+    alone = run(service_levels, receipts, hourly=hourly)
+    needed = requests // round(rps * 3600)
+    assert alone.report.identity("org/b").peak_containers == needed
+    solo = {lane.name: lane for lane in alone.report.lanes}["org-b-l4"].monthly_cost
+    assert solo == pytest.approx(MONTH + (needed - 1) * SCALE)
+    packed = run(service_levels, receipts, [co_receipt("org/a", resident("org/b", rps=rps))], hourly=hourly)
+    (lane_report,) = packed.report.lanes
+    assert lane_report.monthly_cost == pytest.approx(solo)
+    assert packed.report.identity("org/b").monthly_cost == pytest.approx(solo)
+    assert packed.report.co_packing_moves[0].saving == pytest.approx(3 * MONTH)
+
+
+def test_a_co_packed_identity_counts_its_peak_at_its_co_resident_throughput():
+    hourly = {"org/a": {3: 144000}}
+    result = run(*PAIR, [co_receipt(resident("org/a", rps=5.0), "org/b")], hourly=hourly)
+    moved = result.report.identity("org/a")
+    assert moved.status is IdentityStatus.CO_PACKED
+    assert moved.peak_containers == 8
+    assert moved.chosen.cell == A100
+    assert (moved.joined.cell, moved.joined.warmth, moved.joined.come_alive_basis) == (
+        L4,
+        Warmth.PINNED,
+        ComeAliveBasis.WARM_FLOOR,
+    )
+    assert run(*PAIR, hourly=hourly).report.identity("org/a").peak_containers == 4
+
+
+def test_ties_between_hosts_go_to_the_lane_whose_residents_sort_first():
+    current = Plan(
+        placement="test",
+        lanes=(lane("aaa"),),
+        identities=(PlanIdentity(identity="org/z", lane="aaa", warmth=Warmth.PINNED),),
+    )
+    service_levels = levels("org/a", "org/b", "org/z")
+    co = [co_receipt("org/a", "org/z"), co_receipt("org/a", "org/b")]
+    result = run(service_levels, [receipt("org/a", A100), receipt("org/b")], co, current=current)
+    assert result.report.identity("org/z").status is IdentityStatus.KEPT
+    (move,) = result.report.co_packing_moves
+    assert (move.to_lane, move.co_residents) == ("org-b-l4", ("org/b",))
+    assert move.saving == pytest.approx(3 * MONTH)
+
+
+@pytest.mark.parametrize("measured", [False, True])
+def test_a_lane_on_an_unpriced_cell_hosts_no_move_and_no_request(measured):
+    t4 = Cell(machine_profile="t4", gpu_product="NVIDIA-T4")
+    current = Plan(
+        placement="test",
+        lanes=(lane("legacy", cell=t4),),
+        identities=(PlanIdentity(identity="org/kept", lane="legacy", warmth=Warmth.PINNED),),
+    )
+    co = [co_receipt("org/a", "org/kept", cell=t4)] if measured else []
+    result = run(levels("org/a", "org/kept"), [receipt("org/a", A100)], co, current=current)
+    assert result.report.unpriced_lanes == ("legacy",)
+    assert result.report.co_packing_moves == ()
+    assert result.report.blocked_co_packing_moves == ()
+    assert co_requests(result.report) == []
+    assert [refusal.residents for refusal in result.report.refusals] == ([("org/a", "org/kept")] if measured else [])
+
+
+@pytest.mark.parametrize(("rate", "asked"), [(0.000001, False), (0.00001, True)])
+def test_a_co_residency_request_that_cannot_save_a_cent_is_dropped(rate, asked):
+    prices = PriceList(
+        currency="USD",
+        machine_profiles=(price(L4, rate), price(A100, 3.0)),
+        placements=(Placement(name="test", region_multiplier=1),),
+    )
+    result = run(levels("org/a", "org/b"), [receipt("org/a"), receipt("org/b")], prices=prices)
+    assert [(request.identity, request.lane) for request in co_requests(result.report)] == (
+        [("org/a", "org-b-l4")] if asked else []
+    )
+
+
+def test_identities_kept_apart_are_never_co_packed_or_asked_about():
+    apart = frozenset({frozenset({"org/a", "org/b"})})
+    measured = run(*PAIR, [co_receipt("org/a", "org/b")], apart=apart)
+    assert measured.report.co_packing_moves == ()
+    assert measured.report.blocked_co_packing_moves == ()
+    assert co_requests(measured.report) == []
+    assert measured.report.parameters["apart"] == [["org/a", "org/b"]]
+    assert co_requests(run(*PAIR, apart=apart).report) == []
+    service_levels = levels("org/a", "org/b", "org/c")
+    receipts = [receipt("org/a", A100), receipt("org/b"), receipt("org/c")]
+    co = [co_receipt("org/a", "org/b"), co_receipt("org/a", "org/c")]
+    result = run(service_levels, receipts, co, apart=apart)
+    assert lanes_of(result) == {"org-b-l4": ("org/b",), "org-c-l4": ("org/a", "org/c")}
+    assert not any(
+        {"org/a", "org/b"} <= {request.identity, *request.co_residents} for request in co_requests(result.report)
+    )
+
+
+@pytest.mark.parametrize(
+    "apart",
+    [
+        frozenset({frozenset({"org/a"})}),
+        frozenset({("org/a", "org/b")}),
+        frozenset({frozenset({"org/a", "two words"})}),
+    ],
+)
+def test_apart_holds_pairs_of_identities(apart):
+    with pytest.raises(SchemaError, match="apart"):
+        parameters(apart=apart)
+
+
+def test_a_blocked_move_is_listed_by_what_it_would_save_beyond_the_plan():
+    service_levels = levels("org/a", "org/b", "org/c")
+    receipts = [receipt("org/a", A100), receipt("org/b"), receipt("org/c")]
+    hourly = {"org/a": {3: 72000}}
+    admitted = co_receipt(resident("org/a", rps=10.0), "org/b")
+    faster = co_receipt(resident("org/a", rps=20.0, p99=300.0), "org/c")
+    result = run(service_levels, receipts, [admitted, faster], hourly=hourly)
+    (move,) = result.report.co_packing_moves
+    assert move.to_lane == "org-b-l4"
+    (blocked,) = result.report.blocked_co_packing_moves
+    assert (blocked.identity, blocked.from_lane, blocked.to_lane, blocked.co_residents) == (
+        "org/a",
+        "org-a-a100-80gb",
+        "org-c-l4",
+        ("org/c",),
+    )
+    assert blocked.receipt == faster.source
+    assert blocked.blocked_by == (Blocker(identity="org/a", field="warmP99Ms", bound=250, measured=300.0),)
+    assert blocked.saving == pytest.approx(SCALE)
+    slower = co_receipt(resident("org/a", rps=5.0, p99=300.0), "org/c")
+    assert run(service_levels, receipts, [admitted, slower], hourly=hourly).report.blocked_co_packing_moves == ()
 
 
 def load(name: str):

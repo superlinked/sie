@@ -139,7 +139,8 @@ print(render(result.plan.to_dict()), render(result.report.to_dict()))
 same bytes in whatever order the receipts, boot evidence, identities and demand
 series arrive. An identity whose choice is its current placement keeps its
 current lane and that lane's name, so a run whose `current_plan` already holds
-every choice, such as its own previous plan, reports no change.
+every choice, such as its own previous plan with its `coPacked` markers,
+reports no change.
 
 | Parameter | Meaning |
 | --- | --- |
@@ -151,6 +152,7 @@ every choice, such as its own previous plan, reports no change.
 | `gpu_memory_headroom_mib` | The GPU memory a co-residency receipt must leave free on each GPU for a co-packing move, `0` by default |
 | `hours_per_month` | The hours a monthly figure covers, `730` by default |
 | `queue_pool`, `bundle`, `bundles` | Every lane's queue pool, and each identity's bundle: its `bundles` entry, otherwise `bundle` |
+| `apart` | Pairs of identities that co-packing never puts on one lane, for rules the documents cannot carry, such as an operator's isolation decision. Empty by default |
 
 ### Selection
 
@@ -189,9 +191,10 @@ stays out of the plan when it has none.
 After selection, one pass visits the placed identities in decreasing floor
 cost, the monthly cost of the floor of the lane selection gave them, with ties
 broken by identity. A visited identity that is the only resident of its lane
-may move onto another lane of the plan whose residents are all `pinned`,
-whose `queuePool` is the identity's and whose `bundle` is the identity's
-bundle. The move is kept only when:
+may move onto another lane of the plan, on a cell the price list prices,
+whose residents are all `pinned` and include none that `apart` pairs with the
+identity, whose `queuePool` is the identity's and whose `bundle` is the
+identity's bundle. The move is kept only when:
 
 1. a co-residency receipt measured exactly that lane's residents and the
    identity, on the lane's cell, container shape and concurrency;
@@ -206,10 +209,16 @@ to the lane whose residents sort first. The identity joins the lane as
 `pinned` with `coPacked: true`, and its own lane leaves the plan. A lane that
 received an identity hosts later moves only when a receipt covers the larger
 set. A move onto a lane that no co-residency receipt covers is a measurement
-request instead. The pass is order dependent by design, and the visiting order
-pins it. A `coPacked` placement never counts as an identity's current
-placement, so the next run makes the same move from the identity's own lane
-and an unchanged input still yields an empty diff. The planner refuses a
+request instead, and a move that a receipt measured but that fails 2 or 3 is
+reported with the numbers that block it. The pass is order dependent by design,
+and the visiting order pins it. A `coPacked` placement never counts as an
+identity's current placement, so the next run makes the same move from the
+identity's own lane and a `current_plan` that is the planner's previous plan
+yields an empty diff. The marker is how the pass tells a co-packed identity
+from a lane's own residents, so a `current_plan` rebuilt from the deployed
+lanes, such as chart values, must restore it: without it, a co-packed identity
+whose own choice matches its lane stays there as a resident from the start, and
+the pass may then make moves the previous run did not. The planner refuses a
 co-residency receipt whose machine profile has no price or whose realized GPU
 product differs from the profile's, or one with a resident whose latencies
 cannot answer its service level, and ignores one that names an identity
@@ -220,9 +229,10 @@ without a service level.
 A container costs `(acceleratorPerHour * gpuCount + corePerHour * cpuCores +
 memoryGiBPerHour * memoryMiB / 1024) * regionMultiplier` an hour. An identity's
 demand is its hourly requests summed over operations. A container serves
-`requestsPerSecond * 3600` requests an hour at the receipt's concurrency, and
-no hour runs more containers than the ceiling. Monthly figures scale the
-demand window to `hours_per_month`.
+`requestsPerSecond * 3600` requests an hour at the receipt's concurrency,
+counted exactly at the decimal rate the receipt states, and no hour runs more
+containers than the ceiling. Monthly figures scale the demand window to
+`hours_per_month`.
 
 - `pinned` pays one container all month, plus each container an hour needs
   above it, for that hour.
@@ -261,20 +271,22 @@ The report renders as a `placement-report` document:
   their `floorMax`, and `unpricedLanes`, the lanes whose cost the totals leave
   out in whole or in part.
 - `identities`: each identity's status (`placed`, `co-packed`, `kept` or
-  `unplaced`),
-  effective service level and demand, its lane and `monthlyCost`, what its
-  demand costs there with the lane's floor, the chosen cell, warmth, monthly
-  cost and come-alive with its basis (`warm-floor`, `boot-evidence` or
+  `unplaced`), effective service level and demand, its lane and `monthlyCost`,
+  what its demand costs there with the lane's floor, the chosen cell, warmth,
+  monthly cost and come-alive with its basis (`warm-floor`, `boot-evidence` or
   `borrowed-boot-evidence`), the peak containers its demand needs, and
   `nextCheaper`: the nearest cheaper option a service level blocks, its saving
-  and the bounds that block it. A co-packed identity's lane is the lane it
-  joined, its `chosen` option the one selection gave it, and its
-  `nextCheaper`, measurement requests and levers are measured against what it
-  adds to the lane it joined: its chosen cost less the move's saving. A kept
-  identity's `blockedBy` names the bounds
-  its kept placement is known to miss: its receipt's warm latencies, a measured
-  come-alive over the bound, or a cold warmth under a bound of `0`, which needs
-  no measurement.
+  and the bounds that block it. The peak is counted at the throughput its lane
+  prices it at. A co-packed identity's lane is the lane it joined, its
+  `chosen` option the one selection gave it, and `joined` the placement it
+  runs in: that lane's cell, container shape and concurrency, `pinned` with a
+  `warm-floor` come-alive, at the lane's co-residency receipt. An identity's
+  `nextCheaper`, measurement requests and levers are measured against what the
+  plan pays for it: its chosen cost less the savings of the co-packing moves
+  whose co-residency receipt names it, since those moves need it on its lane.
+  A kept identity's `blockedBy` names the bounds its kept placement is known
+  to miss: its receipt's warm latencies, a measured come-alive over the bound,
+  or a cold warmth under a bound of `0`, which needs no measurement.
 - `lanes`: each lane's hourly cost, its monthly cost, its floor's monthly cost
   and the monthly cost of its `floorMax`, which a floor budget prices. A lane
   on a cell the price list cannot price carries `unpricedReason` and no cost,
@@ -287,21 +299,31 @@ The report renders as a `placement-report` document:
   them, each with the lane it left and its warmth there, the lane it joined and
   that lane's residents, the co-residency receipt, the GPU memory headroom the
   receipt leaves and the monthly saving.
+- `blockedCoPackingMoves`: moves onto a lane that co-residency receipts
+  measured but none admits, ranked by saving. Each names the receipt that would
+  price the lane lowest, `blockedBy` with the resident `identity` and the warm
+  bound its latency misses, or `gpuMemoryHeadroomMiB` with the required and the
+  measured headroom, and `saving`, what the move would save beyond the plan.
+  A move that would save nothing more is left out.
 - `measurementRequests`: options that lack evidence, ranked by the saving they
   could unlock. A profile without a receipt is bounded by price alone: one
   accelerator at its rate, kept warm or, where the come-alive bound allows,
   paying burst tails only. A cell whose receipt has no successful boot asks for
   boot evidence and is bounded by its cold cost. A co-packing move that no
-  co-residency receipt covers asks for one, naming the `lane` and its
-  `coResidents`, and is bounded by the monthly cost of the lane the move would
-  free, less what a move the identity made already saved. A request that
-  cannot save is dropped, and the requests of an identity without a placement
-  carry no bound and rank first.
+  co-residency receipt covers asks for one on the lane's cell, container shape
+  and `concurrency`, naming the `lane` and its `coResidents` as the pass found
+  them when it visited the identity. A later move may vacate that lane or add
+  residents to it, but that set is the one the pass looks for at the visit, so
+  it is the one a receipt must measure. The request is bounded by what the plan
+  pays for the identity, and requests that need the same receipt are one
+  request, bounded by the larger saving. A request that cannot save a cent is
+  dropped, and the requests of an identity without a placement carry no bound
+  and rank first.
 - `comeAliveLevers`: cold warmths whose measured come-alive misses the bound
-  on a cell that meets the warm bounds for less than the choice. Each is priced
-  under the identity's bound, where a bound of 0 admits no lever, and at
-  `permittedBoundS`, the bound its measured come-alive would permit. Levers rank
-  by the first saving, then by the second.
+  on a cell that meets the warm bounds for less than what the plan pays for
+  the identity. Each is priced under the identity's bound, where a bound of 0
+  admits no lever, and at `permittedBoundS`, the bound its measured come-alive
+  would permit. Levers rank by the first saving, then by the second.
 - `queueWaitUnattained`: every identity that declares `queueWaitP99Ms`. No
   plan claims that bound as met.
 - `refusals`, where a refused co-residency receipt names its `residents`, and
