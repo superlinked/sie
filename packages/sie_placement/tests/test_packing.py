@@ -276,15 +276,85 @@ def test_a_packing_without_footprints_is_a_measurement_request_with_its_saving_b
     assert requests[1].to_dict()["measure"] == ["footprint"]
 
 
-def test_a_packing_without_a_load_asks_for_the_load_and_the_footprints_it_lacks():
+def test_a_packing_asks_the_joiner_for_its_load_and_each_resident_for_the_memory_evidence_it_lacks():
     receipts = [receipt(HOST), receipt(GUEST, footprint=4000, working=1500)]
     result = run(levels(**{HOST: 0, GUEST: 60}), receipts)
-    lazy = [
-        request
-        for request in result.report.measurement_requests
-        if request.lane == "org-host-l4" and request.warmth is Warmth.LAZY_RESIDENT
+    on_host = [request for request in result.report.measurement_requests if request.lane == "org-host-l4"]
+    assert [(request.identity, request.warmth, request.measure) for request in on_host] == [
+        (GUEST, Warmth.LAZY_RESIDENT, (Measurement.BOOT_EVIDENCE,)),
+        (GUEST, Warmth.PINNED, (Measurement.CO_RESIDENCY_RECEIPT,)),
+        (HOST, Warmth.PINNED, (Measurement.FOOTPRINT,)),
     ]
-    assert [request.measure for request in lazy] == [(Measurement.BOOT_EVIDENCE, Measurement.FOOTPRINT)]
+    assert all(request.saving_bound == pytest.approx(MONTH) for request in on_host)
+
+
+def test_a_host_resident_without_memory_evidence_is_asked_for_it_under_its_own_identity():
+    current = plan_of([lane("host"), lane("own")], {HOST: ("host", Warmth.PINNED), GUEST: ("own", Warmth.PINNED)})
+    receipts = [receipt(HOST), receipt(GUEST, footprint=1000, working=500)]
+    result = run(levels(**{HOST: 0, GUEST: 60}), receipts, [load(GUEST)], current=current)
+    assert placements(result)[GUEST] == ("own", Warmth.PINNED)
+    on_host = [request for request in result.report.measurement_requests if request.lane == "host"]
+    assert [(request.identity, request.warmth, request.measure) for request in on_host] == [
+        (GUEST, Warmth.PINNED, (Measurement.CO_RESIDENCY_RECEIPT,)),
+        (HOST, Warmth.PINNED, (Measurement.FOOTPRINT,)),
+    ]
+    assert on_host[1].saving_bound == pytest.approx(MONTH)
+
+
+def test_a_resident_several_joiners_need_measured_is_asked_once():
+    current = plan_of(
+        [lane("host"), lane("own-a"), lane("own-b")],
+        {HOST: ("host", Warmth.PINNED), "org/a": ("own-a", Warmth.PINNED), "org/b": ("own-b", Warmth.PINNED)},
+    )
+    receipts = [
+        receipt(HOST),
+        receipt("org/a", footprint=1000, working=500),
+        receipt("org/b", footprint=1000, working=500),
+    ]
+    result = run(
+        levels(**{HOST: 0, "org/a": 60, "org/b": 60}), receipts, [load("org/a"), load("org/b")], current=current
+    )
+    assert placements(result) == {
+        HOST: ("host", Warmth.PINNED),
+        "org/a": ("own-a", Warmth.PINNED),
+        "org/b": ("own-b", Warmth.PINNED),
+    }
+    asked = [request for request in result.report.measurement_requests if request.lane == "host"]
+    assert [(request.identity, request.measure, request.warmth) for request in asked] == [
+        ("org/a", (Measurement.CO_RESIDENCY_RECEIPT,), Warmth.PINNED),
+        ("org/b", (Measurement.CO_RESIDENCY_RECEIPT,), Warmth.PINNED),
+        (HOST, (Measurement.FOOTPRINT,), Warmth.PINNED),
+    ]
+    assert asked[2].saving_bound == pytest.approx(MONTH)
+
+
+@pytest.mark.parametrize("price_list", [prices(), prices(cards=False)], ids=["no-footprints", "no-card-memory"])
+def test_a_current_lazy_resident_whose_lane_lacks_memory_evidence_is_kept_and_says_what_is_missing(price_list):
+    current = plan_of([lane("host")], {HOST: ("host", Warmth.PINNED), GUEST: ("host", Warmth.LAZY_RESIDENT)})
+    result = run(
+        levels(**{HOST: 0, GUEST: 60}),
+        [receipt(HOST), receipt(GUEST)],
+        [load(GUEST)],
+        current=current,
+        price_list=price_list,
+    )
+    assert result.plan == current
+    report = result.report.identity(GUEST)
+    assert (report.status, report.unplaced_reason) == (IdentityStatus.KEPT, UnplacedReason.CURRENT_UNMEASURED)
+    requests = [
+        (request.identity, request.warmth, request.measure, request.saving_bound)
+        for request in result.report.measurement_requests
+    ]
+    if price_list.machine_profiles[0].gpu_memory_mib is None:
+        assert requests == []
+        assert result.report.gpu_memory_undeclared == ("l4",)
+        assert result.report.to_dict()["gpuMemoryUndeclared"] == ["l4"]
+        return
+    assert requests == [
+        (GUEST, Warmth.LAZY_RESIDENT, (Measurement.FOOTPRINT,), None),
+        (HOST, Warmth.PINNED, (Measurement.FOOTPRINT,), None),
+    ]
+    assert result.report.gpu_memory_undeclared == ()
 
 
 @pytest.mark.parametrize(
@@ -444,6 +514,32 @@ def test_packing_fills_the_lane_with_the_most_footprint_in_use_first():
     assert ("org/h2", "org-h1-l4", Warmth.PINNED) in requests
 
 
+@pytest.mark.parametrize(("bound", "joined"), [(0, True), (60, False)])
+def test_packing_makes_a_lazy_resident_only_beside_a_never_cold_pinned_identity(bound, joined):
+    receipts = [receipt("org/warm", footprint=9000, working=1000), receipt(GUEST, footprint=2000, working=1000)]
+    result = run(levels(**{"org/warm": bound, GUEST: 60}), receipts, [load(GUEST)])
+    if joined:
+        assert placements(result)[GUEST] == ("org-warm-l4", Warmth.LAZY_RESIDENT)
+        return
+    assert placements(result) == {
+        "org/warm": ("org-warm-l4", Warmth.PINNED),
+        GUEST: ("org-guest-l4", Warmth.PINNED),
+    }
+    assert all(request.warmth is not Warmth.LAZY_RESIDENT for request in result.report.measurement_requests)
+
+
+def test_a_lazy_resident_alone_on_its_own_lane_is_packed_beside_a_never_cold_identity_in_the_same_run():
+    current = plan_of([lane("own")], {GUEST: ("own", Warmth.LAZY_RESIDENT)})
+    receipts = [receipt(HOST, footprint=5000, working=500), receipt(GUEST, footprint=5000, working=500)]
+    service_levels = levels(**{HOST: 0, GUEST: 600})
+    result = run(service_levels, receipts, [load(GUEST)], current=current)
+    assert placements(result) == {HOST: ("org-host-l4", Warmth.PINNED), GUEST: ("org-host-l4", Warmth.LAZY_RESIDENT)}
+    assert result.report.monthly_cost == pytest.approx(MONTH)
+    again = run(service_levels, receipts, [load(GUEST)], current=result.plan)
+    assert again.plan == result.plan
+    assert again.report.unchanged
+
+
 def test_packing_tries_lanes_a_never_cold_identity_pins_before_the_others():
     receipts = [
         receipt("org/a-warm", footprint=9000, working=1000),
@@ -492,6 +588,67 @@ def test_the_lazy_resident_selection_on_a_current_lane_requires_the_memory_check
     else:
         assert placements(result)[GUEST] == ("own", Warmth.PINNED)
         assert requests == ([measure] if measure else [])
+
+
+def joining(residents):
+    current = plan_of(
+        [lane("host"), *(lane(f"own-{identity[-1]}") for identity in residents)],
+        {HOST: ("host", Warmth.PINNED), **{identity: (f"own-{identity[-1]}", Warmth.PINNED) for identity in residents}},
+    )
+    receipts = [receipt(HOST, footprint=6000, working=1000)]
+    receipts.extend(receipt(identity, footprint=size, working=work) for identity, (size, work) in residents.items())
+    boots = [load(identity) for identity in residents]
+    return levels(**{HOST: 0, **dict.fromkeys(residents, 60)}), receipts, boots, current
+
+
+@pytest.mark.parametrize(
+    ("residents", "joined", "memory"),
+    [
+        ({"org/a": (8000, 1000), "org/b": (1000, 8000)}, {"org/a"}, 6000 + 8000 + 1000),
+        ({"org/a": (7000, 1000), "org/b": (2000, 6000), "org/c": (3000, 1000)}, {"org/a", "org/c"}, 6000 + 7000 + 1000),
+    ],
+    ids=["two", "three"],
+)
+def test_lazy_residents_that_each_fit_a_lane_alone_join_it_only_as_far_as_they_fit_together(residents, joined, memory):
+    for identity, sizes in residents.items():
+        alone = run(*joining({identity: sizes})[:3], current=joining({identity: sizes})[3])
+        assert placements(alone)[identity] == ("host", Warmth.LAZY_RESIDENT)
+    service_levels, receipts, boots, current = joining(residents)
+    result = run(service_levels, receipts, boots, current=current)
+    assert placements(result) == {
+        HOST: ("host", Warmth.PINNED),
+        **{
+            identity: ("host", Warmth.LAZY_RESIDENT) if identity in joined else (f"own-{identity[-1]}", Warmth.PINNED)
+            for identity in residents
+        },
+    }
+    host = {lane_report.name: lane_report for lane_report in result.report.lanes}["host"]
+    assert (host.memory_mib, host.memory_limit_mib) == (memory, pytest.approx(LIMIT))
+    again = run(service_levels, receipts, boots, current=result.plan)
+    assert again.plan == result.plan
+    assert again.report.unchanged
+
+
+@pytest.mark.parametrize("unshared", [GUEST, HOST])
+def test_an_unshared_identity_is_never_packed_and_its_lane_hosts_no_one_else(unshared):
+    service_levels = levels(**{HOST: 0, GUEST: 60})
+    result = run(service_levels, host_and_guest(), [load(GUEST)], unshared=frozenset({unshared}))
+    assert placements(result) == {HOST: ("org-host-l4", Warmth.PINNED), GUEST: ("org-guest-l4", Warmth.PINNED)}
+    assert [request for request in result.report.measurement_requests if request.lane is not None] == []
+    assert result.report.parameters["unshared"] == [unshared]
+    current = plan_of([lane("host"), lane("own")], {HOST: ("host", Warmth.PINNED), GUEST: ("own", Warmth.PINNED)})
+    kept = run(service_levels, host_and_guest(), [load(GUEST)], current=current, unshared=frozenset({unshared}))
+    assert kept.plan == current
+    assert all(request.lane != "host" for request in kept.report.measurement_requests)
+    shared = run(service_levels, host_and_guest(), [load(GUEST)], current=current)
+    assert placements(shared)[GUEST] == ("host", Warmth.LAZY_RESIDENT)
+
+
+def test_an_unshared_identity_keeps_a_current_shared_lane_it_already_holds():
+    current = plan_of([lane("shared")], {"org/a": ("shared", Warmth.PINNED), "org/b": ("shared", Warmth.PINNED)})
+    result = run(levels(**{"org/a": 0, "org/b": 0}), pair_receipts(), current=current, unshared=frozenset({"org/a"}))
+    assert result.plan == current
+    assert result.report.unchanged
 
 
 def test_an_identity_whose_neighbours_departure_strips_its_co_residency_evidence_is_decided_again_in_the_run():
@@ -577,9 +734,23 @@ def test_identities_that_leave_a_lane_together_return_when_sharing_it_costs_less
 IDENTITIES = ("org/m0", "org/m1", "org/m2", "org/m3", "org/m4")
 
 
-@pytest.mark.parametrize("seed", range(150))
-def test_random_estates_pack_only_what_fits_and_holds_every_service_level(seed):
-    rng = random.Random(seed)  # noqa: S311 -- reproducible test data
+def scattered(rng, identities, generation) -> Plan | None:
+    names = [f"current-{index}" for index in range(rng.randint(1, 3))]
+    residents = {
+        identity: (rng.choice(names), rng.choice([Warmth.PINNED, Warmth.PINNED, Warmth.LAZY_RESIDENT]))
+        for identity in identities
+        if identity not in generation and rng.random() < 0.8
+    }
+    residents.update(
+        (identity, (f"alone-{identity[-1]}", Warmth.PINNED)) for identity in sorted(generation) if rng.random() < 0.8
+    )
+    used = sorted({name for name, _ in residents.values()})
+    if not used:
+        return None
+    return plan_of([lane(name, rng.choice([L4, L4, A100])) for name in used], residents)
+
+
+def random_estate(rng):
     identities = list(IDENTITIES[: rng.randint(2, 5)])
     generation = {identity for identity in identities if rng.random() < 0.15}
     entries = []
@@ -594,8 +765,8 @@ def test_random_estates_pack_only_what_fits_and_holds_every_service_level(seed):
                 )
             )
     service_levels = ServiceLevels(identities=tuple(entries))
-    footprints = {identity: rng.choice([None, 2000, 5000, 9000]) for identity in identities}
-    working = {identity: rng.choice([None, 500, 2500]) for identity in identities}
+    footprints = {identity: rng.choice([None, 2000, 5000, 9000, 12000]) for identity in identities}
+    working = {identity: rng.choice([None, 500, 2500, 8000]) for identity in identities}
     receipts = []
     for identity in identities:
         for cell in (L4, A100):
@@ -633,31 +804,39 @@ def test_random_estates_pack_only_what_fits_and_holds_every_service_level(seed):
         identity: {hour: rng.choice([1, 500]) for hour in rng.sample(range(24), rng.randint(0, 3))}
         for identity in identities
     }
+    unshared = frozenset(identity for identity in plain if rng.random() < 0.15)
+    draw = rng.random()
     current = None
-    if rng.random() < 0.5:
-        first = run(service_levels, receipts, boots, hourly=hourly)
-        current = first.plan
-    result = run(service_levels, receipts, boots, hourly=hourly, current=current)
+    if draw < 0.35:
+        current = run(service_levels, receipts, boots, hourly=hourly, unshared=unshared).plan
+    elif draw < 0.7:
+        current = scattered(rng, identities, generation)
+    return service_levels, receipts, boots, hourly, current, unshared, generation, not 0.35 <= draw < 0.7
+
+
+@pytest.mark.parametrize("seed", range(200))
+def test_random_estates_pack_only_what_fits_and_holds_every_service_level(seed):
+    rng = random.Random(seed)  # noqa: S311 -- reproducible test data
+    service_levels, receipts, boots, hourly, current, unshared, generation, settled = random_estate(rng)
+    result = run(service_levels, receipts, boots, hourly=hourly, current=current, unshared=unshared)
     assert Plan.from_dict(result.plan.to_dict()) == result.plan
     levels_by_identity = {entry.identity: entry.level for entry in service_levels.identities}
     residents: dict[str, list[PlanIdentity]] = {}
     for entry in result.plan.identities:
         residents.setdefault(entry.lane, []).append(entry)
-    before = {} if current is None else {planned.name: planned for planned in current.lanes}
+    before: dict[str, set[str]] = {}
+    for entry in () if current is None else current.identities:
+        before.setdefault(entry.lane, set()).add(entry.identity)
     reports = {lane_report.name: lane_report for lane_report in result.report.lanes}
     for planned in result.plan.lanes:
         hosted = residents[planned.name]
-        if any(entry.identity in generation for entry in hosted):
-            assert len(hosted) == 1
         if len(hosted) < 2:
             continue
         pinned = {entry.identity for entry in hosted if entry.warmth is Warmth.PINNED}
-        formed = planned.name not in before or {
-            entry.identity for entry in current.identities if entry.lane == planned.name
-        } != {entry.identity for entry in hosted}
-        if formed:
+        if {entry.identity for entry in hosted} - before.get(planned.name, set()):
             assert reports[planned.name].memory_mib is not None
             assert reports[planned.name].memory_mib <= reports[planned.name].memory_limit_mib
+            assert not any(entry.identity in generation | unshared for entry in hosted)
         for entry in hosted:
             report = result.report.identity(entry.identity)
             if report.chosen is None:
@@ -672,13 +851,14 @@ def test_random_estates_pack_only_what_fits_and_holds_every_service_level(seed):
                 assert level.come_alive_p95_s is None or report.chosen.come_alive_s <= level.come_alive_p95_s
     for request in result.report.measurement_requests:
         assert request.saving_bound is None or request.saving_bound > 0
-    again = run(service_levels, receipts, boots, hourly=hourly, current=result.plan)
-    assert again.plan == result.plan
-    assert again.report.unchanged
-    assert again.report.monthly_cost == pytest.approx(result.report.monthly_cost)
+    if settled:
+        again = run(service_levels, receipts, boots, hourly=hourly, current=result.plan, unshared=unshared)
+        assert again.plan == result.plan
+        assert again.report.unchanged
+        assert again.report.monthly_cost == pytest.approx(result.report.monthly_cost)
     shuffled = list(receipts)
     rng.shuffle(shuffled)
-    reordered = run(service_levels, shuffled, list(reversed(boots)), hourly=hourly, current=current)
+    reordered = run(service_levels, shuffled, list(reversed(boots)), hourly=hourly, current=current, unshared=unshared)
     assert rendered(reordered) == rendered(result)
     for entry in service_levels.identities:
         bound = entry.level.come_alive_p95_s
@@ -690,5 +870,44 @@ def test_random_estates_pack_only_what_fits_and_holds_every_service_level(seed):
                 for other in service_levels.identities
             )
         )
-        loosened = run(looser, receipts, boots, hourly=hourly, current=result.plan)
+        loosened = run(looser, receipts, boots, hourly=hourly, current=result.plan, unshared=unshared)
         assert loosened.report.monthly_cost <= result.report.monthly_cost + 0.01
+
+
+def need(host, guests, sizes):
+    return (
+        host[0]
+        + max((sizes[guest][0] for guest in guests), default=0)
+        + max((host[1], *(sizes[guest][1] for guest in guests)))
+    )
+
+
+@pytest.mark.parametrize("seed", range(150))
+def test_random_guests_join_a_host_lane_only_as_far_as_they_fit_together(seed):
+    rng = random.Random(seed)  # noqa: S311 -- reproducible test data
+    host = (rng.choice([4000, 6000, 8000]), rng.choice([500, 1000, 2000]))
+    sizes = {
+        f"org/g{index}": (rng.choice([1000, 3000, 6000, 9000]), rng.choice([500, 2000, 6000, 9000]))
+        for index in range(rng.randint(2, 4))
+    }
+    current = plan_of(
+        [lane("host"), *(lane(f"own-{guest[-1]}") for guest in sizes)],
+        {HOST: ("host", Warmth.PINNED), **{guest: (f"own-{guest[-1]}", Warmth.PINNED) for guest in sizes}},
+    )
+    receipts = [receipt(HOST, footprint=host[0], working=host[1])]
+    receipts.extend(receipt(guest, footprint=size, working=work) for guest, (size, work) in sizes.items())
+    boots = [load(guest) for guest in sizes]
+    service_levels = levels(**{HOST: 0, **dict.fromkeys(sizes, 60)})
+    result = run(service_levels, receipts, boots, current=current)
+    joined = {guest for guest, (name, _) in placements(result).items() if name == "host" and guest != HOST}
+    assert all(placements(result)[guest] == ("host", Warmth.LAZY_RESIDENT) for guest in joined)
+    assert need(host, joined, sizes) <= LIMIT
+    for guest in sizes.keys() - joined:
+        assert placements(result)[guest] == (f"own-{guest[-1]}", Warmth.PINNED)
+        assert need(host, joined | {guest}, sizes) > LIMIT
+    if joined:
+        (report,) = [lane_report for lane_report in result.report.lanes if lane_report.name == "host"]
+        assert report.memory_mib == need(host, joined, sizes)
+    again = run(service_levels, receipts, boots, current=result.plan)
+    assert again.plan == result.plan
+    assert again.report.unchanged

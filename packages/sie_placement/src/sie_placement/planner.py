@@ -103,6 +103,7 @@ class PlannerParameters:
     queue_pool: str = "default"
     bundle: str = "default"
     bundles: Mapping[str, str] = field(default_factory=dict)
+    unshared: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         _require_name("placement", self.placement)
@@ -118,6 +119,8 @@ class PlannerParameters:
         for identity, bundle in self.bundles.items():
             _require_name("bundles", identity)
             _require_name(f"bundles[{identity!r}]", bundle)
+        for identity in self.unshared:
+            _require_name("unshared", identity)
 
     @property
     def active_floor(self) -> int:
@@ -140,6 +143,8 @@ class PlannerParameters:
         }
         if self.bundles:
             document["bundles"] = dict(sorted(self.bundles.items()))
+        if self.unshared:
+            document["unshared"] = sorted(self.unshared)
         return document
 
 
@@ -331,6 +336,7 @@ class _Layout:
 
 
 type _CoKey = tuple[str, Cell, ContainerShape, int]
+type _Packing = tuple[dict[str, _Option], tuple[Measurement, ...], tuple[str, ...], tuple[tuple[str, Warmth], ...]]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -581,6 +587,8 @@ class _Planner:
         self.refused_profiles: set[tuple[str, str]] = set()
         self.savings: dict[tuple[str, tuple[tuple[str, int], ...]], float] = {}
         self.co_receipts: defaultdict[_CoKey, list[tuple[str, Receipt]]] = defaultdict(list)
+        self.excluded: set[tuple[str, str]] = set()
+        self.gpu_memory_undeclared: set[str] = set()
         self.receipts = self._accept_receipts(receipts)
         self.placements = _placement_index(
             record for record in boot_evidence if _refusal_reason(record.cell, self.prices) is None
@@ -597,10 +605,11 @@ class _Planner:
                 self.working[key] = max(receipt.working_memory_mib, self.working.get(key, 0))
         for record in accepted:
             self._footprint(record.identity, record.cell, record.footprint_mib)
-        self.generation = {identity for identity, level in self.levels.items() if level.is_generation}
-        self.generation.update(
+        self.solitary = {identity for identity, level in self.levels.items() if level.is_generation}
+        self.solitary.update(
             receipt.identity for receipt in measured if receipt.request_shape.operation is Operation.GENERATE
         )
+        self.solitary.update(parameters.unshared)
 
     def _footprint(self, identity: str, cell: Cell, footprint: int | None) -> None:
         if footprint is not None:
@@ -687,20 +696,17 @@ class _Planner:
             default=None,
         )
 
-    def hosts_generation(self, identities: Iterable[str]) -> bool:
-        return any(identity in self.generation for identity in identities)
+    def hosts_solitary(self, identities: Iterable[str]) -> bool:
+        return any(identity in self.solitary for identity in identities)
 
     def memory(self, lane: PlanLane, pinned: Iterable[str], lazy: Iterable[str]) -> _Memory:
         pinned, lazy = tuple(sorted(pinned)), tuple(sorted(lazy))
         price = self.prices.get(lane.cell.machine_profile)
         residents = (*pinned, *lazy)
-        if (
-            not residents
-            or price is None
-            or price.gpu_memory_mib is None
-            or lane.container_shape.gpu_count != 1
-            or lane.fallback_cells
-        ):
+        if not residents or price is None or lane.container_shape.gpu_count != 1 or lane.fallback_cells:
+            return _UNPACKABLE
+        if price.gpu_memory_mib is None:
+            self.gpu_memory_undeclared.add(price.name)
             return _UNPACKABLE
         limit = price.gpu_memory_mib * MEMORY_HEADROOM_FRACTION
         config = (lane.cell, lane.container_shape, lane.concurrency)
@@ -715,6 +721,38 @@ class _Planner:
             + max(self.working[(identity, *config)] for identity in residents)
         )
         return _Memory(fits=need <= limit, need=need, limit=limit)
+
+    def lane_memory(self, lane: PlanLane, residents: Mapping[str, Warmth]) -> _Memory:
+        return self.memory(
+            lane,
+            pinned=(identity for identity, warmth in residents.items() if warmth is Warmth.PINNED),
+            lazy=(identity for identity, warmth in residents.items() if warmth is Warmth.LAZY_RESIDENT),
+        )
+
+    def memory_gaps(self, lane: PlanLane, residents: Iterable[str]) -> tuple[str, ...]:
+        config = (lane.cell, lane.container_shape, lane.concurrency)
+        return tuple(
+            identity
+            for identity in sorted(set(residents))
+            if (identity, lane.cell) not in self.footprints or (identity, *config) not in self.working
+        )
+
+    @staticmethod
+    def footprint_request(
+        identity: str, lane: PlanLane, warmth: Warmth, cost: float, saving: float | None = None
+    ) -> MeasurementRequest:
+        return MeasurementRequest(
+            identity=identity,
+            cell=lane.cell,
+            container_shape=lane.container_shape,
+            concurrency=lane.concurrency,
+            lane=lane.name,
+            measure=(Measurement.FOOTPRINT,),
+            warmth=warmth,
+            reason=RequestReason.UNMEASURED,
+            cost_bound=cost,
+            saving_bound=saving,
+        )
 
     def hourly(self, receipt: Receipt) -> float:
         return container_hourly_cost(
@@ -786,9 +824,10 @@ class _Planner:
             lane
             for name, lane in sorted(self.current_lanes.items())
             if (lazy if name == home else self.floor_paid(name, identity))
+            and (identity, name) not in self.excluded
             and lane.envelope.floor_min >= PINNED_FLOOR
             and not lane.fallback_cells
-            and not self.hosts_generation((*self.current_pinned[name], *self.current_lazy[name]))
+            and not self.hosts_solitary((*self.current_pinned[name], *self.current_lazy[name]))
             and lane.queue_pool == self.parameters.queue_pool
             and lane.bundle == bundle
         )
@@ -848,7 +887,7 @@ class _Planner:
             missing.append((Measurement.RECEIPT, RequestReason.REFUSED if refused else RequestReason.UNMEASURED))
         if entry.warmth in BOOT_WARMTHS and (identity, lane.cell, lane.container_shape, entry.warmth) not in self.boots:
             missing.append((Measurement.BOOT_EVIDENCE, RequestReason.UNMEASURED))
-        return tuple(
+        requests = [
             MeasurementRequest(
                 identity=identity,
                 cell=lane.cell,
@@ -863,7 +902,18 @@ class _Planner:
                 co_residents=tuple(sorted(beside)) if measurement is Measurement.CO_RESIDENCY_RECEIPT else (),
             )
             for measurement, reason in missing
-        )
+        ]
+        if entry.warmth is Warmth.LAZY_RESIDENT:
+            pinned = self.current_pinned[lane.name] - {identity}
+            lazy = self.current_lazy[lane.name] | {identity}
+            if self.memory(lane, pinned=pinned, lazy=lazy).fits is None:
+                requests.extend(
+                    self.footprint_request(
+                        resident, lane, Warmth.PINNED if resident in pinned else Warmth.LAZY_RESIDENT, cost
+                    )
+                    for resident in self.memory_gaps(lane, (*pinned, *lazy))
+                )
+        return tuple(requests)
 
     def choose(self, identity: str, beside: frozenset[str] | None = None) -> _Choice:
         beside = self.pinned_beside(identity) if beside is None else beside
@@ -872,10 +922,10 @@ class _Planner:
         options: list[_Option] = []
         withdrawn: list[_Option] = []
         boot_requests: dict[tuple[Cell, ContainerShape], MeasurementRequest] = {}
-        load_requests: dict[str, MeasurementRequest] = {}
+        load_requests: dict[tuple[str, str], MeasurementRequest] = {}
         receipts = self.receipts.get(identity, [])
         current_class = self.current_class(identity)
-        hosts = () if identity in self.generation else self.lazy_hosts(identity)
+        hosts = () if identity in self.solitary else self.lazy_hosts(identity)
         for order, receipt in receipts:
             hourly = self.hourly(receipt)
             rate = receipt.throughput.requests_per_second
@@ -948,36 +998,49 @@ class _Planner:
                     continue
                 lazy_cost = hourly * self.resident_hours(host, identity, requests, rate)
                 load = self.boots.get((identity, host.cell, host.container_shape, Warmth.LAZY_RESIDENT))
-                memory = self.memory(
-                    host,
-                    pinned=self.current_pinned[host.name] - {identity},
-                    lazy=self.current_lazy[host.name] | {identity},
-                )
+                pinned = self.current_pinned[host.name] - {identity}
+                lazy = self.current_lazy[host.name] | {identity}
+                memory = self.memory(host, pinned=pinned, lazy=lazy)
                 if memory.fits is False:
                     continue
+                lacking = () if memory.fits else self.memory_gaps(host, (*pinned, *lazy))
                 missing = (
                     *(() if load is not None and load.seconds is not None else (Measurement.BOOT_EVIDENCE,)),
-                    *(() if memory.fits else (Measurement.FOOTPRINT,)),
+                    *((Measurement.FOOTPRINT,) if identity in lacking else ()),
                 )
-                if missing:
-                    known = load_requests.get(host.name)
-                    if not blocked and level.come_alive_p95_s != 0 and (known is None or lazy_cost < known.cost_bound):
-                        load_requests[host.name] = MeasurementRequest(
-                            identity=identity,
-                            cell=host.cell,
-                            container_shape=host.container_shape,
-                            concurrency=host.concurrency,
-                            lane=host.name,
-                            measure=missing,
-                            warmth=Warmth.LAZY_RESIDENT,
-                            reason=(
-                                RequestReason.FAILED
-                                if load is not None and load.seconds is None
-                                else RequestReason.UNMEASURED
-                            ),
-                            cost_bound=lazy_cost,
-                            saving_bound=None,
+                if missing or lacking:
+                    if blocked or level.come_alive_p95_s == 0:
+                        continue
+                    found = [
+                        self.footprint_request(
+                            resident, host, Warmth.PINNED if resident in pinned else Warmth.LAZY_RESIDENT, lazy_cost
                         )
+                        for resident in lacking
+                        if resident != identity
+                    ]
+                    if missing:
+                        found.append(
+                            MeasurementRequest(
+                                identity=identity,
+                                cell=host.cell,
+                                container_shape=host.container_shape,
+                                concurrency=host.concurrency,
+                                lane=host.name,
+                                measure=missing,
+                                warmth=Warmth.LAZY_RESIDENT,
+                                reason=(
+                                    RequestReason.FAILED
+                                    if load is not None and load.seconds is None
+                                    else RequestReason.UNMEASURED
+                                ),
+                                cost_bound=lazy_cost,
+                                saving_bound=None,
+                            )
+                        )
+                    for request in found:
+                        known = load_requests.get((host.name, request.identity))
+                        if known is None or lazy_cost < known.cost_bound:
+                            load_requests[(host.name, request.identity)] = request
                     continue
                 if load is None or load.seconds is None:
                     continue
@@ -1016,22 +1079,13 @@ class _Planner:
                     held = cost
                     unpriced = cost is None
                     gaps = self.current_gaps(identity, entry, lane, cost, beside)
-        gapped = {
-            (request.cell, request.container_shape, request.warmth)
-            for request in gaps
-            if Measurement.BOOT_EVIDENCE in request.measure
-        }
         return _Choice(
             identity=identity,
             level=level,
             requests=requests,
             options=tuple(options),
             chosen=chosen,
-            boot_requests=tuple(
-                request
-                for request in (*boot_requests.values(), *load_requests.values())
-                if (request.cell, request.container_shape, request.warmth) not in gapped
-            ),
+            boot_requests=_ungapped(identity, (*boot_requests.values(), *load_requests.values()), gaps),
             has_valid_receipt=bool(receipts),
             held=held,
             gaps=gaps,
@@ -1523,22 +1577,13 @@ class _Planner:
             return None
         cost = self.current_cost(identity, entry, lane)
         gaps = self.current_gaps(identity, entry, lane, cost, choice.beside)
-        gapped = {
-            (request.cell, request.container_shape, request.warmth)
-            for request in gaps
-            if Measurement.BOOT_EVIDENCE in request.measure
-        }
         return replace(
             choice,
             chosen=None,
             held=cost,
             unpriced=cost is None,
             gaps=gaps,
-            boot_requests=tuple(
-                request
-                for request in choice.boot_requests
-                if (request.cell, request.container_shape, request.warmth) not in gapped
-            ),
+            boot_requests=_ungapped(identity, choice.boot_requests, gaps),
         )
 
     @staticmethod
@@ -1589,13 +1634,14 @@ class _Planner:
             (lane, frozenset(pinned[lane.name]), frozenset(lazy[lane.name]))
             for lane in layout.plan.lanes
             if lane.name != layout.names[identity]
+            and (identity, lane.name) not in self.excluded
             and lane.envelope.floor_min >= PINNED_FLOOR
             and not lane.fallback_cells
             and lane.container_shape.gpu_count == 1
             and lane.queue_pool == self.parameters.queue_pool
             and lane.bundle == self.parameters.bundle_of(identity)
             and pinned[lane.name]
-            and not self.hosts_generation((*pinned[lane.name], *lazy[lane.name]))
+            and not self.hosts_solitary((*pinned[lane.name], *lazy[lane.name]))
             and self.slowest_receipt(identity, lane) is not None
         ]
         return sorted(
@@ -1613,7 +1659,7 @@ class _Planner:
         target: tuple[PlanLane, frozenset[str], frozenset[str]],
         layout: _Layout,
         choices: Mapping[str, _Choice],
-    ) -> list[tuple[dict[str, _Option], tuple[Measurement, ...], tuple[str, ...]]]:
+    ) -> list[_Packing]:
         lane, pinned, lazy = target
         level = self.levels[identity]
         order, receipt = min(
@@ -1625,7 +1671,7 @@ class _Planner:
         offered = choices[identity]
         hosts = {option.host for option in offered.options if option.warmth is Warmth.LAZY_RESIDENT}
         hosts.update(request.lane for request in offered.boot_requests if request.warmth is Warmth.LAZY_RESIDENT)
-        packings: list[tuple[dict[str, _Option], tuple[Measurement, ...], tuple[str, ...]]] = []
+        packings: list[_Packing] = []
         current_class = self.current_class(identity)
         blocked = (*self.warm_blockers(level, receipt, current_class), *self.reliability_blockers(level, lane.cells))
         load = self.boots.get((identity, lane.cell, lane.container_shape, Warmth.LAZY_RESIDENT))
@@ -1633,14 +1679,16 @@ class _Planner:
             level.come_alive_p95_s != 0
             and not blocked
             and lane.name not in hosts
+            and any(self.levels[resident].come_alive_p95_s == 0 for resident in pinned)
             and (load is None or load.seconds is not None)
             and (load is None or load.seconds is None or _come_alive_blocker(level, load.seconds) is None)
         ):
             memory = self.memory(lane, pinned=pinned, lazy=lazy | {identity})
             if memory.fits is not False:
+                lacking = () if memory.fits else self.memory_gaps(lane, (*pinned, *lazy, identity))
                 missing = (
                     *(() if load is not None else (Measurement.BOOT_EVIDENCE,)),
-                    *(() if memory.fits else (Measurement.FOOTPRINT,)),
+                    *((Measurement.FOOTPRINT,) if identity in lacking else ()),
                 )
                 option = _Option(
                     receipt=receipt,
@@ -1655,7 +1703,12 @@ class _Planner:
                     host=host,
                     host_owner=owner,
                 )
-                packings.append(({identity: option}, missing, ()))
+                others = tuple(
+                    (resident, Warmth.PINNED if resident in pinned else Warmth.LAZY_RESIDENT)
+                    for resident in lacking
+                    if resident != identity
+                )
+                packings.append(({identity: option}, missing, (), others))
         members = pinned | {identity}
         if all(choices[member].chosen is not None for member in pinned):
             together = {member: self.co_receipt(member, lane, members - {member}) for member in members}
@@ -1669,9 +1722,15 @@ class _Planner:
             ):
                 memory = self.memory(lane, pinned=members, lazy=lazy)
                 if memory.fits is not False:
+                    lacking = () if memory.fits else self.memory_gaps(lane, (*members, *lazy))
                     missing = (
                         *(() if len(measured) == len(members) else (Measurement.CO_RESIDENCY_RECEIPT,)),
-                        *(() if memory.fits else (Measurement.FOOTPRINT,)),
+                        *((Measurement.FOOTPRINT,) if identity in lacking else ()),
+                    )
+                    others = tuple(
+                        (resident, Warmth.PINNED if resident in members else Warmth.LAZY_RESIDENT)
+                        for resident in lacking
+                        if resident != identity
                     )
                     own_order, own = measured.get(identity, (order, receipt))
                     updates = {
@@ -1688,7 +1747,7 @@ class _Planner:
                             host_owner=owner,
                         )
                     }
-                    if not missing:
+                    if not missing and not others:
                         for member in sorted(pinned):
                             chosen = choices[member].chosen
                             member_order, member_receipt = measured[member]
@@ -1701,7 +1760,7 @@ class _Planner:
                                     cost=self.hourly(member_receipt)
                                     * self.window.warm_container_hours(choices[member].requests, rate),
                                 )
-                    packings.append((updates, missing, tuple(sorted(pinned))))
+                    packings.append((updates, missing, tuple(sorted(pinned)), others))
         return packings
 
     def pack(self, choices: dict[str, _Choice]) -> tuple[dict[str, _Choice], list[MeasurementRequest]]:
@@ -1721,19 +1780,18 @@ class _Planner:
             identity
             for identity, choice in choices.items()
             if (chosen := choice.chosen) is not None
-            and chosen.host is None
+            and chosen.host in (None, layout.names[identity])
             and chosen.host_owner is None
-            and chosen.warmth is not Warmth.LAZY_RESIDENT
-            and identity not in self.generation
+            and identity not in self.solitary
             and hosted[layout.names[identity]] == 1
         ]
-        requests: dict[tuple[str, str, Warmth], MeasurementRequest] = {}
+        requests: dict[tuple[str, str | None, Warmth, tuple[Measurement, ...]], MeasurementRequest] = {}
         for identity in sorted(candidates, key=lambda identity: (-floor_cost(identity), identity)):
             if hosted.get(layout.names.get(identity, ""), 0) != 1:
                 continue
             moved = False
             for target in self.pack_targets(identity, layout):
-                for updates, missing, beside in self.packings(identity, target, layout, choices):
+                for updates, missing, beside, lacking in self.packings(identity, target, layout, choices):
                     members = frozenset(beside) | {identity}
                     trial = {
                         **choices,
@@ -1750,23 +1808,32 @@ class _Planner:
                     if round(saving, 2) <= 0:
                         continue
                     option = updates[identity]
-                    if missing:
-                        key = (identity, target[0].name, option.warmth)
-                        known = requests.get(key)
-                        if known is None or saving > (known.saving_bound or 0.0):
-                            requests[key] = MeasurementRequest(
-                                identity=identity,
-                                cell=target[0].cell,
-                                container_shape=target[0].container_shape,
-                                concurrency=target[0].concurrency,
-                                lane=target[0].name,
-                                measure=missing,
-                                warmth=option.warmth,
-                                reason=RequestReason.UNMEASURED,
-                                cost_bound=option.cost,
-                                saving_bound=saving,
-                                co_residents=beside,
+                    if missing or lacking:
+                        found = [
+                            self.footprint_request(resident, target[0], warmth, option.cost, saving)
+                            for resident, warmth in lacking
+                        ]
+                        if missing:
+                            found.append(
+                                MeasurementRequest(
+                                    identity=identity,
+                                    cell=target[0].cell,
+                                    container_shape=target[0].container_shape,
+                                    concurrency=target[0].concurrency,
+                                    lane=target[0].name,
+                                    measure=missing,
+                                    warmth=option.warmth,
+                                    reason=RequestReason.UNMEASURED,
+                                    cost_bound=option.cost,
+                                    saving_bound=saving,
+                                    co_residents=beside,
+                                )
                             )
+                        for request in found:
+                            key = (request.identity, request.lane, request.warmth, request.measure)
+                            known = requests.get(key)
+                            if known is None or saving > (known.saving_bound or 0.0):
+                                requests[key] = request
                         continue
                     choices, layout, total = trial, trial_layout, trial_total
                     hosted = Counter(entry.lane for entry in layout.plan.identities)
@@ -1801,13 +1868,56 @@ class _Planner:
             choices = {**choices, **{identity: self.choose(identity, beside) for identity, beside in stale.items()}}
         return choices
 
+    def overflowing(self, choices: Mapping[str, _Choice]) -> list[tuple[str, str]]:
+        layout = self.assemble(choices)
+        before: defaultdict[str, set[str]] = defaultdict(set)
+        if self.current_plan is not None:
+            for entry in self.current_plan.identities:
+                before[entry.lane].add(entry.identity)
+        residents: defaultdict[str, dict[str, Warmth]] = defaultdict(dict)
+        for entry in layout.plan.identities:
+            residents[entry.lane][entry.identity] = entry.warmth
+        rejected: list[tuple[str, str]] = []
+        for lane in layout.plan.lanes:
+            hosted = residents[lane.name]
+            joiners = sorted(
+                (
+                    identity
+                    for identity in hosted
+                    if identity not in before[lane.name]
+                    and (chosen := choices[identity].chosen) is not None
+                    and (chosen.host is not None or chosen.host_owner is not None)
+                ),
+                key=lambda identity: (-self.footprints.get((identity, lane.cell), 0), identity),
+            )
+            if not joiners or self.lane_memory(lane, hosted).fits:
+                continue
+            admitted = {identity: warmth for identity, warmth in hosted.items() if identity not in joiners}
+            for identity in joiners:
+                trial = {**admitted, identity: hosted[identity]}
+                if self.lane_memory(lane, trial).fits:
+                    admitted = trial
+                else:
+                    rejected.append((identity, lane.name))
+        return rejected
+
+    def fit(self, choices: dict[str, _Choice]) -> dict[str, _Choice]:
+        for _ in range(len(self.levels) * (len(self.current_lanes) + len(self.levels)) + 1):
+            choices = self.settle(choices)
+            rejected = self.overflowing(choices)
+            if not rejected:
+                return choices
+            self.excluded.update(rejected)
+            choices = {**choices, **{identity: self.choose(identity) for identity, _ in rejected}}
+        return self.settle(choices)
+
     def decide(self) -> tuple[dict[str, _Choice], list[MeasurementRequest]]:
         never_cold = [identity for identity in sorted(self.levels) if self.levels[identity].come_alive_p95_s == 0]
         self.anchors = self.staying_anchors(self.choose(identity) for identity in never_cold)
         originals = {identity: self.choose(identity) for identity in sorted(self.levels)}
-        decided = self.stay_beside(self.settle(dict(originals)), originals)
+        decided = self.fit(self.stay_beside(self.settle(dict(originals)), originals))
         decided, requests = self.pack(decided)
-        return self.settle(decided), requests
+        return self.fit(decided), requests
 
     def run(self, *, price_savings: bool = True) -> PlannerResult:
         decided, packing_requests = self.decide()
@@ -1843,7 +1953,7 @@ class _Planner:
             identities=tuple(reports),
             lanes=lane_reports,
             shared_chart_lanes=_shared_chart_lanes(new_plan),
-            measurement_requests=tuple(sorted(requests, key=_request_rank)),
+            measurement_requests=_distinct(requests),
             come_alive_levers=tuple(sorted(levers, key=_lever_rank)),
             queue_wait_unattained=tuple(
                 identity for identity in sorted(self.levels) if self.levels[identity].queue_wait_p99_ms is not None
@@ -1858,6 +1968,7 @@ class _Planner:
             ),
             capacity=self.capacity_use(new_plan),
             scarcity=tuple(sorted(scarcity, key=_scarcity_rank)),
+            gpu_memory_undeclared=tuple(sorted(self.gpu_memory_undeclared)),
         )
         return PlannerResult(plan=new_plan, report=report)
 
@@ -1949,6 +2060,38 @@ class _Planner:
                 )
             )
         return tuple(reports), costs
+
+
+def _ungapped(
+    identity: str, requests: Iterable[MeasurementRequest], gaps: Iterable[MeasurementRequest]
+) -> tuple[MeasurementRequest, ...]:
+    gapped = {
+        (request.cell, request.container_shape, request.warmth)
+        for request in gaps
+        if request.identity == identity and Measurement.BOOT_EVIDENCE in request.measure
+    }
+    return tuple(
+        request
+        for request in requests
+        if request.identity != identity or (request.cell, request.container_shape, request.warmth) not in gapped
+    )
+
+
+def _distinct(requests: Iterable[MeasurementRequest]) -> tuple[MeasurementRequest, ...]:
+    kept: dict[tuple[object, ...], MeasurementRequest] = {}
+    for request in sorted(requests, key=_request_rank):
+        key = (
+            request.identity,
+            request.cell,
+            request.container_shape,
+            request.concurrency,
+            request.lane,
+            request.measure,
+            request.warmth,
+            request.co_residents,
+        )
+        kept.setdefault(key, request)
+    return tuple(kept.values())
 
 
 def _scarcity_reason(option: _Option, bound: int | None) -> ScarcityReason | None:

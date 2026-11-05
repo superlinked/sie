@@ -1199,8 +1199,16 @@ def test_a_lazy_resident_without_evidence_keeps_its_place_and_asks_for_it():
     ]
     assert requests == [
         ((Measurement.BOOT_EVIDENCE,), Warmth.LAZY_RESIDENT, "shared", 8, None),
+        ((Measurement.FOOTPRINT,), Warmth.LAZY_RESIDENT, "shared", 8, None),
         ((Measurement.RECEIPT,), Warmth.LAZY_RESIDENT, "shared", 8, None),
     ]
+    (anchor,) = [request for request in result.report.measurement_requests if request.identity == ANCHOR]
+    assert (anchor.measure, anchor.warmth, anchor.lane, anchor.saving_bound) == (
+        (Measurement.FOOTPRINT,),
+        Warmth.PINNED,
+        "shared",
+        None,
+    )
 
 
 def test_a_measured_load_onto_a_lane_a_never_cold_neighbour_pins_makes_a_lazy_resident():
@@ -1335,17 +1343,22 @@ def test_a_lazy_resident_needs_a_lane_of_its_pool_and_bundle(shared):
     assert all(request.lane != "shared" for request in result.report.measurement_requests)
 
 
-def test_a_current_lane_hosts_lazy_residents_beside_a_never_cold_neighbour_and_a_plan_lane_beside_any_pinned_one():
+def test_a_lazy_resident_needs_a_never_cold_neighbour_on_a_current_lane_and_on_a_packed_one():
     current = plan_of(
         [plan_lane("own"), plan_lane("shared")], {ANCHOR: ("shared", Warmth.PINNED), IDENTITY: ("own", Warmth.PINNED)}
     )
     result = run(resident_levels(anchor_bound=30), RESIDENT_RECEIPTS, LOADS, prices=L4_ONLY, current=current)
     report = result.report.identity(IDENTITY)
-    assert (report.lane, report.chosen.warmth, report.chosen.lane) == ("shared", Warmth.LAZY_RESIDENT, "shared")
-    assert result.report.monthly_cost == pytest.approx(MONTH)
+    assert (report.lane, report.chosen.warmth) == ("own", Warmth.PINNED)
+    assert result.report.monthly_cost == pytest.approx(2 * MONTH)
     assert all(lever.warmth is not Warmth.LAZY_RESIDENT for lever in result.report.come_alive_levers)
-    again = run(resident_levels(anchor_bound=30), RESIDENT_RECEIPTS, LOADS, prices=L4_ONLY, current=result.plan)
-    assert again.report.unchanged
+    assert all(request.warmth is not Warmth.LAZY_RESIDENT for request in result.report.measurement_requests)
+    fresh = run(resident_levels(anchor_bound=30), RESIDENT_RECEIPTS, LOADS, prices=L4_ONLY)
+    assert {entry.identity: entry.warmth for entry in fresh.plan.identities} == {
+        ANCHOR: Warmth.PINNED,
+        IDENTITY: Warmth.PINNED,
+    }
+    assert len(fresh.plan.lanes) == 2
 
 
 @pytest.mark.parametrize(
@@ -1546,6 +1559,9 @@ def test_parameters_echo_into_the_report():
         "bundles": {"org/a": "default", "org/b": "sglang"},
     }
     assert list(echoed["bundles"]) == ["org/a", "org/b"]
+    assert parameters(unshared=frozenset({"org/b", "org/a"})).to_dict()["unshared"] == ["org/a", "org/b"]
+    with pytest.raises(SchemaError, match="unshared"):
+        parameters(unshared=frozenset({"org/a b"}))
 
 
 def test_the_placement_must_be_in_the_price_list():
@@ -1646,8 +1662,15 @@ def test_the_estate_report_states_its_findings():
         ("intfloat/e5-base-v2", (Measurement.CO_RESIDENCY_RECEIPT,), Warmth.PINNED, "default-l4-default", None),
         (
             "BAAI/bge-m3:sparse",
-            (Measurement.BOOT_EVIDENCE, Measurement.FOOTPRINT),
+            (Measurement.BOOT_EVIDENCE,),
             Warmth.LAZY_RESIDENT,
+            "default-l4-default",
+            pytest.approx(sparse.chosen.monthly_cost),
+        ),
+        (
+            "intfloat/e5-base-v2",
+            (Measurement.FOOTPRINT,),
+            Warmth.PINNED,
             "default-l4-default",
             pytest.approx(sparse.chosen.monthly_cost),
         ),

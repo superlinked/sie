@@ -428,6 +428,7 @@ class Report:
     warm_bound_undeclared: tuple[str, ...] = ()
     capacity: tuple[CapacityUse, ...] = ()
     scarcity: tuple[Scarcity, ...] = ()
+    gpu_memory_undeclared: tuple[str, ...] = ()
 
     @property
     def monthly_cost(self) -> float:
@@ -472,6 +473,7 @@ class Report:
             "scarcity": [entry.to_dict() for entry in self.scarcity],
             "queueWaitUnattained": list(self.queue_wait_unattained),
             "warmBoundUndeclared": list(self.warm_bound_undeclared),
+            "gpuMemoryUndeclared": list(self.gpu_memory_undeclared),
             "refusals": [refusal.to_dict() for refusal in self.refusals],
             "changes": {
                 "identities": [change.to_dict() for change in self.identity_changes],
