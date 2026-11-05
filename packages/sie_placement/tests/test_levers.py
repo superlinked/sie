@@ -59,7 +59,7 @@ PARAMETERS = PlannerParameters(placement="test", max_containers=4, fallback_floo
 L4_HOURLY = 1.0 + 4 * 0.1
 
 
-def receipt(identity, cell=L4, *, shape=SHAPE, p99=100.0, concurrency=8, rps=10.0):
+def receipt(identity, cell=L4, *, shape=SHAPE, p99=100.0, concurrency=8, rps=10.0, beside=()):
     return Receipt(
         identity=identity,
         cell=cell,
@@ -68,7 +68,10 @@ def receipt(identity, cell=L4, *, shape=SHAPE, p99=100.0, concurrency=8, rps=10.
         request_shape=RequestShape(operation=Operation.ENCODE, items_per_request=1),
         throughput=Throughput(requests_per_second=rps),
         latency=Percentiles(p99_ms=p99),
-        source=SourceRef(uri=f"receipts/{identity}/{cell.machine_profile}/{shape.memory_mib}/{concurrency}"),
+        co_residents=tuple(beside),
+        source=SourceRef(
+            uri=f"receipts/{identity}/{cell.machine_profile}/{shape.memory_mib}/{concurrency}/{'+'.join(beside)}"
+        ),
     )
 
 
@@ -265,15 +268,22 @@ def test_an_identity_staying_beside_a_neighbour_offers_no_lever_that_loosening_i
     bound, seconds, permitted
 ):
     bounds = {"org/a": bound, "org/b": 0}
-    receipts = [receipt("org/a"), receipt("org/b")]
+    receipts = [
+        receipt("org/a"),
+        receipt("org/b"),
+        receipt("org/a", beside=["org/b"]),
+        receipt("org/b", beside=["org/a"]),
+    ]
     boots = [boot("org/a", seconds)]
     result = planned(bounds, receipts, boots, current=shared_lane("org/a", "org/b"))
     assert result.plan == shared_lane("org/a", "org/b")
     assert result.report.identity("org/a").chosen.monthly_cost == pytest.approx(L4_HOURLY * MONTH)
+    assert result.report.identity("org/a").chosen.co_residents == ("org/b",)
     assert result.report.come_alive_levers == ()
     loosened = planned({**bounds, "org/a": permitted}, receipts, boots, current=result.plan)
-    assert loosened.report.identity("org/a").chosen.warmth is Warmth.COLD_WITH_BOUND
-    assert loosened.report.monthly_cost - result.report.monthly_cost == pytest.approx(cold_cost())
+    assert loosened.plan == result.plan
+    assert loosened.report.identity("org/a").chosen.warmth is Warmth.PINNED
+    assert loosened.report.monthly_cost == pytest.approx(result.report.monthly_cost)
 
 
 @pytest.mark.parametrize(("bound", "seconds", "permitted"), [(0, 95.2, 96), (60, 240.0, 240)])

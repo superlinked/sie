@@ -26,6 +26,12 @@ CHART_POOL_BUNDLES = (
     ("sglang-cu130", ("sglang-cu130",)),
 )
 
+UNREALIZED_WARMTHS = {
+    Warmth.BRIDGED: "the overlay configures no remote bridge to serve it while the lane boots",
+    Warmth.SNAPSHOT_COLD: "the chart restores no snapshot, so the lane would boot cold",
+    Warmth.SCHEDULED_WARM: "the chart keeps no warm window, so the lane would stay cold inside it",
+}
+
 _LANE_TOKEN = re.compile(r"[A-Za-z0-9_-]+")
 _IDENTITY_TOKEN = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?")
 _GO_SPACE = (
@@ -162,6 +168,29 @@ def _pins_by_lane(plan: Plan) -> dict[str, dict[str, int]]:
     return pins
 
 
+def _require_one_cell(path: str, lane: PlanLane) -> None:
+    if not lane.fallback_cells:
+        return
+    listed = ", ".join(f"{cell.machine_profile!r} with {cell.gpu_product!r}" for cell in lane.fallback_cells)
+    raise UnrealizablePlanError(
+        f"{path}.fallbackCells",
+        f"lists {listed} after the lane's cell, {lane.cell.machine_profile!r} with {lane.cell.gpu_product!r}, but a "
+        "worker group of the sie-cluster chart runs on one machine profile and GPU product and has no ordered "
+        "candidate list, so the chart would place the lane on its cell only; plan the lane on one cell",
+    )
+
+
+def _require_realizable_warmths(plan: Plan) -> None:
+    for index, entry in enumerate(plan.identities):
+        reason = UNREALIZED_WARMTHS.get(entry.warmth)
+        if reason is not None:
+            raise UnrealizablePlanError(
+                f"$.identities[{index}].warmth",
+                f"is {entry.warmth.value!r} for {entry.identity!r} on lane {entry.lane!r}, which the sie-cluster "
+                f"chart does not realize: {reason}; plan the identity pinned, lazy-resident or cold-with-bound",
+            )
+
+
 def _require_realizable_floor(path: str, lane: PlanLane, parameters: ChartParameters) -> None:
     envelope = lane.envelope
     if envelope.floor_min or not envelope.floor_max:
@@ -180,6 +209,7 @@ def _chart_lanes(plan: Plan, parameters: ChartParameters) -> list[_ChartLane]:
     lanes: dict[tuple[str, str, str], _ChartLane] = {}
     for index, lane in enumerate(plan.lanes):
         path = f"$.lanes[{index}]"
+        _require_one_cell(path, lane)
         key = (
             lane_token(f"{path}.queuePool", lane.queue_pool),
             lane_token(f"{path}.cell.machineProfile", lane.cell.machine_profile),
@@ -337,6 +367,7 @@ def _require_no_default_pool_pins(lanes: Iterable[_ChartLane]) -> None:
 def helm_values(plan: Plan, parameters: ChartParameters | None = None) -> dict[str, object]:
     parameters = ChartParameters() if parameters is None else parameters
     lanes = _chart_lanes(plan, parameters)
+    _require_realizable_warmths(plan)
     base = _enabled_base_bundles(parameters.base_pools)
     _require_lane_limit(lanes, base, parameters)
     by_profile: dict[str, list[_ChartLane]] = defaultdict(list)

@@ -1391,8 +1391,8 @@ class StreamingProcessor:
         ``--tool-call-parser`` launch flag) — instead of guessing per
         block from the model output. ``qwen25`` (Qwen2.5-style Hermes JSON)
         and ``hermes`` → ``hermes_json``; ``qwen3_coder`` (and any other
-        ``qwen*`` parser) → ``qwen_xml``; ``glm*`` → ``glm_xml``; anything
-        unknown / missing → ``auto`` (keep the runtime heuristic so
+        ``qwen*`` parser) → ``qwen_xml``; ``glm*`` → ``glm_xml``; ``muse`` →
+        ``muse_atem``; anything unknown / missing → ``auto`` (keep the runtime heuristic so
         out-of-tree models still work).
         """
         try:
@@ -1413,6 +1413,8 @@ class StreamingProcessor:
             return "qwen_xml"
         if parser_l.startswith("glm"):
             return "glm_xml"
+        if parser_l == "muse":
+            return "muse_atem"
         return "auto"
 
     @staticmethod

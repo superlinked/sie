@@ -12,6 +12,7 @@
     "memoryMiB": 87040
   },
   "warmth": "cold-with-bound",
+  "placementWaitS": 41.2,
   "bootSeconds": 187.4,
   "outcome": "succeeded",
   "source": {

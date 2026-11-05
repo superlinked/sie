@@ -6,6 +6,7 @@
     {
       "name": "l4",
       "gpuProduct": "NVIDIA-L4",
+      "gpuMemoryMiB": 23034,
       "acceleratorPerHour": 0.8,
       "corePerHour": 0.04,
       "memoryGiBPerHour": 0.005
@@ -13,6 +14,7 @@
     {
       "name": "l40s",
       "gpuProduct": "NVIDIA-L40S",
+      "gpuMemoryMiB": 46068,
       "acceleratorPerHour": 1.2,
       "corePerHour": 0.04,
       "memoryGiBPerHour": 0.005
@@ -20,6 +22,7 @@
     {
       "name": "a100-80gb",
       "gpuProduct": "NVIDIA-A100-SXM4-80GB",
+      "gpuMemoryMiB": 81920,
       "acceleratorPerHour": 2.5,
       "corePerHour": 0.04,
       "memoryGiBPerHour": 0.005
@@ -27,6 +30,7 @@
     {
       "name": "h100",
       "gpuProduct": "NVIDIA-H100-80GB-HBM3",
+      "gpuMemoryMiB": 81559,
       "acceleratorPerHour": 4.0,
       "corePerHour": 0.04,
       "memoryGiBPerHour": 0.005

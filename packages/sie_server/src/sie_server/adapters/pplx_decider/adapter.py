@@ -12,35 +12,29 @@ Actual input usage sums the complete, unpadded rows the backbone processed.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
 
 import torch
 
-from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._checkpoint import resolve_checkpoint
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
+from sie_server.adapters.decision.base import MAX_ITEM_TOKENS, DecisionBatchAdapter, Row, check_token_budget
 from sie_server.adapters.errors import InputTooLongError
 from sie_server.adapters.pplx_decider.model import DecisionModel, checkpoint_config, load_model, validate_tokenizer
 from sie_server.adapters.pplx_decider.questions import (
     SYSTEM_PROMPT,
     Question,
-    answer,
     describe,
     joint_messages,
     messages,
     parse_questions,
 )
-from sie_server.core.inference_output import ExtractItemError, ExtractOutput
 from sie_server.types.inputs import InvalidInputError, Item
-from sie_server.types.responses import ErrorCode
 
 MAX_WINDOW = 8192
-MAX_ITEM_TOKENS = 32_768
-MAX_FORWARD_ROWS = 8
 _CHECKPOINT_FILES = (
     "config.json",
     "decision_config.json",
@@ -60,29 +54,7 @@ _CHECKPOINT_FILES = (
 )
 
 
-@dataclass
-class Row:
-    """One already-tokenized, unpadded row, its original item index and its questions.
-
-    ``markers`` holds each question's readout position in the unpadded row;
-    ``None`` means the single question is read out by the checkpoint's pooling.
-    """
-
-    item: int
-    questions: tuple[Question, ...]
-    inputs: dict[str, torch.Tensor]
-    markers: tuple[int, ...] | None = None
-
-    @property
-    def question(self) -> Question:
-        return self.questions[0]
-
-    @property
-    def length(self) -> int:
-        return self.inputs["input_ids"].shape[0]
-
-
-class PerplexityDecisionAdapter(BaseAdapter):
+class PerplexityDecisionAdapter(DecisionBatchAdapter):
     """Serve the checkpoint's native decision head, with no generation or remote code."""
 
     spec: ClassVar[AdapterSpec] = AdapterSpec(
@@ -141,21 +113,16 @@ class PerplexityDecisionAdapter(BaseAdapter):
         self._model, self._processor = model, processor
         self._tokenizer, self._device = processor.tokenizer, device
         self._codes = tuple(config["codes"])
+        specials = {str(token) for token in processor.tokenizer.all_special_tokens}
         if "joint" in config:
             marker = config["joint"]["marker"]
             self._marker = marker
             self._marker_id = processor.tokenizer.encode(marker, add_special_tokens=False)[0]
-            specials = {str(token) for token in processor.tokenizer.all_special_tokens} | {str(marker)}
-            self._escapes = tuple(sorted(specials, key=lambda token: (len(token), token), reverse=True))
+            specials.add(str(marker))
+        self._escapes = tuple(sorted(specials, key=lambda token: (len(token), token), reverse=True))
 
     def _state(self, item: Item) -> str:
-        if item.images or item.audio is not None or item.video is not None or item.document is not None:
-            raise InvalidInputError("Perplexity decisions currently accept text only")
-        metadata = item.metadata or {}
-        has_state = "state" in metadata
-        if has_state == (item.text is not None):
-            raise InvalidInputError("Supply either item.text or metadata.state")
-        return describe(metadata["state"] if has_state else item.text, self._max_seq_length * 64)
+        return describe(self._raw_state(item), self._max_seq_length * 64)
 
     def _encode(self, chat: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
         with self._tokenizer_guard():
@@ -186,36 +153,18 @@ class PerplexityDecisionAdapter(BaseAdapter):
             raise ValueError("Readout markers do not match questions after tokenization")
         return [Row(index, questions, {name: tensor[0] for name, tensor in encoded.items()}, markers)]
 
-    @staticmethod
-    def _checked(encoded: dict[str, torch.Tensor]) -> torch.Tensor:
-        if set(encoded) - {"input_ids", "attention_mask", "token_type_ids", "mm_token_type_ids"}:
-            raise ValueError("Unexpected text processor inputs")
-        if any(
-            not isinstance(value, torch.Tensor) or value.ndim != 2 or value.shape[0] != 1 for value in encoded.values()
-        ):
-            raise ValueError("Expected one complete text processor row")
-        ids, mask = encoded["input_ids"], encoded["attention_mask"]
-        if ids.shape != mask.shape or not mask.bool().all() or ids.shape[1] == 0:
-            raise ValueError("Expected a nonempty unpadded text row")
-        return ids
-
     def _item_rows(self, index: int, item: Item, questions: tuple[Question, ...]) -> list[Row]:
         state = self._state(item)
         if self._marker is not None:
-            rows = self._joint_rows(index, state, questions)
-            if sum(row.length for row in rows) > MAX_ITEM_TOKENS:
-                raise InputTooLongError("Decision rows exceed the token budget; no input was truncated")
-            return rows
+            return self._joint_rows(index, state, questions)
         rows = []
         tokens = 0
         # Prepare one row at a time: a request with many oversized questions
         # cannot materialize an unbounded, heavily padded tokenizer batch.
         for question in questions:
-            encoded = self._encode(messages(state, question, self._codes))
+            encoded = self._encode(messages(state, question, self._codes, self._escapes))
             length = self._checked(encoded).shape[1]
-            tokens += length
-            if length > self._max_seq_length or tokens > MAX_ITEM_TOKENS:
-                raise InputTooLongError("Decision rows exceed the token budget; no input was truncated")
+            tokens = check_token_budget(length, tokens, self._max_seq_length)
             rows.append(Row(index, (question,), {name: tensor[0] for name, tensor in encoded.items()}))
         return rows
 
@@ -246,63 +195,9 @@ class PerplexityDecisionAdapter(BaseAdapter):
             probabilities = model(inputs, counts, positions).cpu().tolist()
         return [values[:count] for values, count in zip(probabilities, counts, strict=True)]
 
-    def extract(
-        self,
-        items: list[Item],
-        *,
-        labels: list[str] | None = None,
-        output_schema: dict[str, Any] | None = None,
-        instruction: str | None = None,
-        options: dict[str, Any] | None = None,
-        prepared_items: list[Any] | None = None,
-    ) -> ExtractOutput:
-        """Answer each item's typed questions, preserving per-item errors and order."""
-        _ = prepared_items
+    def _check_decision_loaded(self) -> None:
         if self._model is None or self._processor is None:
             raise RuntimeError(ERR_NOT_LOADED)
-        if labels is not None or instruction is not None:
-            raise InvalidInputError("Use typed output_schema questions with their own instructions and criteria")
-        if options is not None and not isinstance(options, dict):
-            raise InvalidInputError("Decision options must be an object")
-        opts = options or {}
-        if set(opts) - {"overflow_policy"} or opts.get("overflow_policy", "error") != "error":
-            raise InvalidInputError(
-                "Perplexity decisions accept only overflow_policy='error'; checkpoint calibration is fixed"
-            )
-        questions = parse_questions(output_schema)
-        rows: list[Row] = []
-        errors: list[ExtractItemError | None] = [None] * len(items)
-        counts = [0] * len(items)
-        data: list[dict[str, Any]] = [{} for _ in items]
-        for index, item in enumerate(items):
-            try:
-                rows.extend(self._item_rows(index, item, questions))
-            except InputTooLongError as exc:
-                errors[index] = ExtractItemError(code=ErrorCode.INPUT_TOO_LONG.value, message=str(exc))
-            except InvalidInputError as exc:
-                errors[index] = ExtractItemError(code=ErrorCode.INVALID_INPUT.value, message=str(exc))
-        # Stable length sort reduces padding while the Row keeps its original
-        # item/question mapping. A single item may span several bounded forwards.
-        rows.sort(key=lambda row: row.length, reverse=True)
-        start = 0
-        while start < len(rows):
-            end = start + 1
-            while (
-                end < len(rows)
-                and end - start < MAX_FORWARD_ROWS
-                and rows[start].length * (end - start + 1) <= self._max_forward_tokens
-            ):
-                end += 1
-            batch = rows[start:end]
-            values = iter(self._forward(batch))
-            for row in batch:
-                for question in row.questions:
-                    data[row.item][question.id] = answer(question, next(values))
-                counts[row.item] += row.length
-            start = end
-        # Restore the caller's question order as well as the item order.
-        data = [{question.id: item[question.id] for question in questions if question.id in item} for item in data]
-        return ExtractOutput(entities=[[] for _ in items], data=data, errors=errors, input_token_counts=counts)
 
     def extract_item_costs(
         self,

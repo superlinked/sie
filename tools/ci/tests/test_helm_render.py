@@ -4143,6 +4143,16 @@ def test_placement_values_render_the_planned_lanes(tmp_path: Path) -> None:
     gateway = container_env(docs, "sie-sie-cluster-gateway", "gateway")
     static_queue_pools = overlay["queueRouting"]["staticQueuePools"]
     assert json.loads(gateway["SIE_GATEWAY_STATIC_QUEUE_POOLS"]["value"]) == static_queue_pools
+    pinned = {name: pool for name, pool in static_queue_pools.items() if pool["pinnedModels"]}
+    assert any(len(pool["pinnedModels"]) > 1 for pool in pinned.values())
+    products = []
+    for name, pool in pinned.items():
+        (profile,) = pool["gpus"]
+        group = overlay["workers"]["pools"][profile]
+        assert group["queuePool"] == name
+        assert [lane for lane in lanes if lane[0] == name] == [(name, profile, pool["bundle"])]
+        products.append(group["gpu"]["product"])
+    assert len(set(products)) < len(products)
 
     scaled_objects = {
         tuple(scaled_object["metadata"]["labels"][f"sie.superlinked.com/{label}"] for label in LANE_LABELS): (

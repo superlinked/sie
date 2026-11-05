@@ -19,6 +19,7 @@ from unittest import mock
 
 import yaml
 from sie_server.adapters.sglang import _memory, _server, generation
+from sie_server.adapters.sglang.decision import SGLangDecisionAdapter
 from sie_server.adapters.sglang.embedding import SGLangEmbeddingAdapter
 from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
 from sie_server.config.model import ModelConfig
@@ -67,6 +68,8 @@ def is_sglang_route(config: ModelConfig) -> bool:
 def render_sglang_argv(config: ModelConfig, models_dir: Path) -> list[str]:
     """The arguments the adapter passes after ``python -m sglang.launch_server``."""
     adapter = load_adapter(config, models_dir, device=RENDER_DEVICE)
+    if isinstance(adapter, SGLangDecisionAdapter):
+        adapter = adapter._engine
 
     def capture(command: list[str], **_: object) -> None:
         raise _Rendered([str(part) for part in command])

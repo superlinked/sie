@@ -527,15 +527,52 @@ QUEUE_SCHEMA_DIAGNOSTIC = (
 )
 
 
+RELEASE_QUEUE_GROUP = (
+    "${{ github.event_name == 'push' && format('public-release-push-{0}', github.run_id) || 'public-release-main' }}"
+)
+RELEASE_AUTHORING_CONCURRENCY = (
+    "    concurrency:\n"
+    "      group: public-release-authoring\n"
+    "      cancel-in-progress: ${{ github.event_name == 'push' }}\n"
+)
+RELEASE_AUTHORING_FRESHNESS_STEP = """\
+      - name: Refuse a run whose push is no longer the newest on main
+        run: |
+          set -euo pipefail
+          main_sha="$(git ls-remote "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)"
+          [[ "$main_sha" =~ ^[0-9a-f]{40}$ ]]
+          if [ "$main_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::$GITHUB_SHA is behind main ($main_sha); approve or rerun the newest push run."
+            exit 1
+          fi
+"""
+
+
 def release_queue_errors(top: str, ci: str) -> list[str]:
     errors = []
     concurrency = top.partition("concurrency:\n")[2].partition("\njobs:")[0]
+    if re.findall(r"^  group: (.+)$", concurrency, re.MULTILINE) != [RELEASE_QUEUE_GROUP]:
+        errors.append("each push run needs its own group so an approval wait cannot hold the publication queue")
     if re.findall(r"^  queue: (.+)$", concurrency, re.MULTILINE) != ["max"]:
         errors.append("release concurrency must preserve all pending runs with queue: max")
     if re.findall(r"^  cancel-in-progress: (.+)$", concurrency, re.MULTILINE) != ["false"]:
         errors.append("release concurrency must not cancel original publication runs")
     if re.findall(r"-ignore '([^']*)'", ci) != [QUEUE_SCHEMA_DIAGNOSTIC]:
         errors.append("actionlint may ignore only the exact unsupported concurrency.queue diagnostic")
+    return errors
+
+
+def release_authoring_concurrency_errors(blocks: dict[str, str]) -> list[str]:
+    errors = []
+    authoring = blocks.get("release-please", "")
+    mappings = re.findall(r"^    concurrency:\n(?:      .*(?:\n|\Z))*", authoring, re.MULTILINE)
+    if mappings != [RELEASE_AUTHORING_CONCURRENCY]:
+        errors.append("a newer push must replace an older release-please job through its own concurrency group")
+    if not authoring.partition("    steps:\n")[2].startswith(RELEASE_AUTHORING_FRESHNESS_STEP):
+        errors.append("release-please must refuse a push that is behind main before using any credentials")
+    others = [name for name, block in blocks.items() if name != "release-please" and "concurrency:" in block]
+    if others:
+        errors.append(f"job-level concurrency could cancel or displace release work: {others}")
     return errors
 
 
@@ -623,6 +660,7 @@ def release_workflow_errors() -> list[str]:
     ):
         errors.append("release candidate rehearsal must be read-only and unable to publish")
     errors.extend(release_queue_errors(top, (ROOT / ".github/workflows/ci.yml").read_text()))
+    errors.extend(release_authoring_concurrency_errors(blocks))
     recover = blocks.get("recover", "")
     if "release_recovery" not in recover or "id-token:" in recover or "publish-" in recover:
         errors.append("manual recovery must only rerun the original jobs")
