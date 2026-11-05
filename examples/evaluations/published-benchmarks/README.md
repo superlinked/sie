@@ -1,16 +1,21 @@
-# Repeat the published benchmark numbers
+# Repeat the published benchmarks or test a new model
 
-This example repeats the method behind the benchmark numbers published on the
-SIE website, six quality records and six fixed-rate performance records, from
-one client process on your machine. Each `references/<id>.json` is a
-projection of one published benchmark record: the model and profile, the task
-key, the pinned dataset revision, the request shape, the timing constants and
-the published metrics. `run.py quality` sends the same requests through
-`sie_sdk.SIEClient`, ranks in the client, scores the ranking with `pytrec_eval`
-and writes one record-shaped result with the delta against every published
-metric. `run.py performance` sends a record's requests at its published rate
-and aggregates their timing the way the record did. Both print deltas and
-never a verdict: no threshold, no pass, no fail.
+This example does two things from one client process on your machine. It
+repeats the method behind the benchmark numbers published on the SIE website,
+six quality records and six fixed-rate performance records. And it measures a
+model you are adding the same way, against an official number you supply,
+before you open a pull request: see [Test a new model](#test-a-new-model).
+
+Each `references/<id>.json` is a projection of one published benchmark record:
+the model and profile, the task key, the pinned dataset revision, the request
+shape, the timing constants and the published metrics. `run.py quality` sends
+the same requests through `sie_sdk.SIEClient`, ranks in the client, scores the
+ranking with `pytrec_eval` and writes one record-shaped result with the delta
+against every published metric. `run.py performance` sends a record's requests
+at its published rate and aggregates their timing the way the record did. Both
+print deltas. A quality run also prints a [verdict](#the-verdict) against a
+baseline; a performance run has none. The verdict never changes the exit
+status, and the example has no floor, target or gate.
 
 ## Quality
 
@@ -58,9 +63,11 @@ With `--reference`, model, profile, task, output contract, items per request
 and request timeout come from the file. The only flags accepted beside it are
 `--endpoint` (default `https://api.superlinked.com`) and `--task` with the
 smoke key. Without a reference, `--model <id[:profile]>` and `--task` are
-required; `--output sparse|multivector` and `--items-per-request` are required
-for the encode tasks and refused for `mteb/AskUbuntuDupQuestions`, which scores
-each query against its 20 task-native candidates.
+required; `--output sparse|dense|multivector` and `--items-per-request` are
+required for the encode tasks and refused for `mteb/AskUbuntuDupQuestions`,
+which scores each query against its 20 task-native candidates. `--baseline`,
+`--baseline-source` and `--instruction` belong to a run without a reference:
+see [Test a new model](#test-a-new-model).
 
 When a result is not valid, the command prints each reason to stderr.
 
@@ -72,7 +79,10 @@ in `validity.reasons`:
   `comparable` with its reasons, the model, profile and task, the dataset name
   and revision, the request shape, the observed `execution_revisions`, the
   run's request and failure counts, `validity` with the SDK retry count, every
-  recomputed metric and a `comparison` row per published metric with the delta.
+  recomputed metric, a `comparison` row per published metric with the delta,
+  the `baseline` and `verdict`, and `run.command`, the command that repeats the
+  run. It is rebuilt from the plan, so credentials in a URL never reach the
+  result.
 - `results/<id>-<utc>.predictions.json`: the ranked list per query, the top
   1000 documents with their scores, or the reranker's 20 candidates per query.
   Every metric is recomputed from this file.
@@ -87,8 +97,11 @@ uv run python score.py results/<id>-<utc>.json
 predictions file, loads the relevance judgements from the pinned dataset
 revision named in the result with `datasets` (network or the local Hugging
 Face cache), recomputes every metric and prints each one beside the published
-value and the delta. It rewrites nothing unless you pass `--write`, which
-updates `metrics` and `comparison` in the result in place.
+value and the delta, then recomputes the verdict from the result's `baseline`
+and those metrics. A result with no `baseline` field, written before the
+verdict existed, prints no verdict. It rewrites nothing unless you pass
+`--write`, which updates `metrics`, `comparison` and `verdict` in the result in
+place.
 
 ### What is fixed by the method
 
@@ -103,10 +116,11 @@ the example applies them to every run:
 - requests are sequential, one in flight, with no warmup beyond that
   readiness request;
 - documents are encoded with `is_query=False` in batches of the reference's
-  items per request, queries with `is_query=True`, and no instruction is sent;
-- sparse vectors are scored by the raw dot product, multivector outputs by
-  MaxSim over L2-normalised token rows, and the reranker's own scores rank its
-  candidates;
+  items per request, queries with `is_query=True`, and no instruction is sent
+  unless `--instruction` gives one, which goes with queries only;
+- sparse vectors are scored by the raw dot product, dense vectors by cosine
+  over L2-normalised vectors, multivector outputs by MaxSim over L2-normalised
+  token rows, and the reranker's own scores rank its candidates;
 - the top 1000 documents per query are kept, ties broken by corpus order, and
   scored at k in 1, 3, 5, 10, 20, 100 and 1000 with pytrec_eval's `ndcg_cut`,
   `map_cut`, `recall` and `P`, rounded to five decimals; the published method
@@ -138,10 +152,44 @@ reason `execution revision changed`. A self-hosted sie-server reached
 directly sends no revision, so `execution_revisions` stays empty and that
 check cannot fire there.
 
-A delta is a number, not a result. The maintainers read a quality delta
-against a 2% band when they decide whether a published number still holds;
-that band is their reading policy, and this tool never prints it, nor any pass
-threshold or quality floor.
+A delta is a number. The [verdict](#the-verdict) reads one number,
+`main_score`, against the 2% band the maintainers use when they decide whether
+a published number still holds. It does not need `comparable: true`: a run
+against another endpoint keeps `comparable: false` with its reason and still
+gets a verdict.
+
+### The verdict
+
+After the metrics, a quality run prints one `verdict:` line. It compares one
+metric with a baseline: the record's `main_score` for a `--reference` run, or
+the number you supply with `--baseline`. With a margin of 0.98, the low bound
+is the baseline × 0.98 and the high bound is the baseline ÷ 0.98. The first
+row that matches decides:
+
+| Case | Verdict | Reason |
+| --- | --- | --- |
+| The run wrote no predictions | `FAIL (no-output)` | `no_predictions` |
+| The metric is exactly 0 | `FAIL (no-output)` | `current_zero` |
+| No baseline | `MEASUREMENT` | `no_baseline` |
+| A task key with `limit` | `MEASUREMENT` | `limited_run` |
+| Below the low bound | `FAIL (regression)` | `below_margin` |
+| Above the high bound | `WARN (suspicious-improvement)` | `above_margin` |
+| Otherwise | `PASS` | `within_margin` |
+
+The line names the metric, its value, the baseline and where it comes from, the
+difference in percent and the band. A `FAIL` also prints `expected:`, `got:`
+and `reproduce:` lines on stdout. A `WARN` means the run scored above the band:
+a real improvement, or a run that does not measure what the baseline measured.
+
+The verdict is a report. The exit status does not follow it: the command exits
+0 on a `FAIL (regression)` and 1 only when the run wrote no predictions. Nothing
+it writes reaches the website or a published record, and it is no floor, target
+or gate.
+
+The result stores `baseline`, null when there is none, with `kind` (`published`
+or `supplied`), `metric`, `value` and `source`, and `verdict` with `verdict`,
+`reason`, `metric`, `current`, `baseline`, `delta_pct`, `threshold_low`,
+`threshold_high` and `margin`.
 
 ## Performance
 
@@ -179,8 +227,8 @@ the record's published level, `--duration` to 60 and `--warmup` to 30,
 reference adds a `comparable_reasons` entry. Without a reference, `--model`,
 `--task` and `--rate` are required, `--output` and `--items-per-request` are
 required for the encode tasks and refused for the score task, and the timeout
-and cap are 30 s and 64 for encode, 300 s and 128 for score. No other flags
-exist.
+and cap are 30 s and 64 for encode, 300 s and 128 for score. `--output` takes
+`sparse`, `dense` or `multivector`. No other flags exist.
 
 ### What is fixed by the method
 
@@ -222,7 +270,8 @@ exist.
 
 Beside the quality envelope, the result carries `load_level_name`, `schedule`
 with the one level that ran, `timing` as in the reference, `run.requests_path`
-and `validity`. The metrics use the record's names and aggregations:
+and `validity`, and it has no `baseline` or `verdict`. The metrics use the
+record's names and aggregations:
 `offered_requests_per_second` is the level rate; `achieved_requests_per_second`
 counts successes completed inside the duration window (60 s in the records)
 and `eventual_achieved_requests_per_second` all successes, each divided by
@@ -321,7 +370,8 @@ What to expect:
   same pinned model revision should land in the same band as the published
   numbers, within numeric precision;
 - the smoke run above scores 20 queries, so its metrics are a check that the
-  path works, not a comparison with the record;
+  path works, not a comparison with the record, and its verdict is
+  `MEASUREMENT`;
 - performance numbers describe your hardware and your network path and are
   not comparable with the record;
 - `execution_revisions` stays empty, because a sie-server reached directly
@@ -331,6 +381,111 @@ What to expect:
 On an Apple Silicon laptop with the Splade NFCorpus quality smoke, the server
 was ready in about half a minute, the cold model load took about 80 s, and a
 20-query smoke took about 30 s once warm.
+
+## Test a new model
+
+Before you open a pull request that adds a model, measure it against an
+official number.
+
+1. **Add the model config.** Add a YAML file to `packages/sie_server/models/`
+   in your checkout, modelled on a neighbour. Its `sie_id` is the name you pass
+   to `--model`.
+2. **Serve it** with sie-server, from the root of the checkout:
+
+   ```sh
+   mise run serve -- --host 127.0.0.1 -m your-org/your-model
+   ```
+
+   The same rules as in
+   [Run it against your own server](#run-it-against-your-own-server) apply: no
+   key unless the server runs in token mode, and the first request loads the
+   model.
+3. **Find the official number** on the model card, in the paper or on a
+   leaderboard. It must be for the same benchmark and the same metric: the same
+   dataset and split, and the same metric at the same cut. A number for another
+   dataset, or `ndcg_at_100` where you compare `ndcg_at_10`, is not a baseline.
+   This example ships no official numbers.
+4. **Run it** from this directory:
+
+   ```sh
+   uv run python run.py quality \
+     --model your-org/your-model \
+     --task mteb/NFCorpus \
+     --output dense \
+     --items-per-request 32 \
+     --baseline ndcg_at_10=<official value> \
+     --baseline-source "<link to the model card, paper or leaderboard>" \
+     --endpoint http://localhost:8080
+   ```
+
+5. **Read the verdict**, the `verdict:` line after the metrics, in the table
+   under [The verdict](#the-verdict). On a `FAIL`, `reproduce:` is the command
+   that repeats the run.
+6. **Attach the result**, `results/<id>-<utc>.json`, to the pull request. It
+   holds the baseline with its source, the verdict and `run.command`. Keep the
+   `.predictions.json` beside it: `score.py` needs that file to recompute the
+   verdict.
+
+### The baseline
+
+`--baseline <metric>=<value>` and `--baseline-source <text>` go together. The
+metric is one a quality run writes: `main_score`, `accuracy`, or
+`<family>_at_<k>` with family `ndcg`, `map`, `recall`, `precision` or `mrr` and
+k one of 1, 3, 5, 10, 20, 100, 1000; a bare family name is refused. The value is
+a ratio, finite, above 0 and at most 1, so a leaderboard that prints percent
+needs dividing by 100. A bad form exits 2 before any request, and both flags are
+refused beside `--reference`, which brings its own baseline.
+
+Without a baseline the run still writes every metric, and the verdict is
+`MEASUREMENT`.
+
+### The instruction trap
+
+Some models expect a task instruction in the query, and their official number
+was measured with it. The tool cannot detect this, because the models endpoint
+does not expose a query template. Read `query_template` in the model's config:
+
+- when it has an `{instruction}` placeholder, pass the instruction the official
+  number used with `--instruction "<text>"`. Without the flag the query carries
+  only what the config supplies by default, so a low score can be this mismatch
+  and not the model;
+- otherwise leave the flag off. A model with no query template gets the text
+  prepended to every query, which pollutes the query.
+
+`--instruction` is sent with queries only, never with documents, and is recorded
+in `payload.parameters`. It is refused beside `--reference` and on the score
+task. `run.py performance` has no such flag, because its encode requests carry
+documents only.
+
+### The limited-run rule
+
+A task key with `limit`, such as `mteb/NFCorpus?limit=50`, scores part of the
+queries, so its number cannot be compared with a full-dataset number. The
+verdict is `MEASUREMENT` whatever the baseline says:
+`limited run, not compared with a full-dataset number`. Use it to check that the
+path works, then run the key without `limit` to get a verdict. It still encodes
+every document.
+
+### Task keys
+
+Each key is pinned to the dataset revision mteb 2.7.5 names; the revisions are
+in `score.py`. All of them load anonymously from Hugging Face.
+
+| Task key | Dataset | Operation | `main_score` |
+| --- | --- | --- | --- |
+| `mteb/SciFact` | `mteb/scifact` | encode | `ndcg_at_10` |
+| `mteb/NFCorpus` | `mteb/nfcorpus` | encode | `ndcg_at_10` |
+| `mteb/AskUbuntuDupQuestions` | `mteb/AskUbuntuDupQuestions` | score | `map_at_1000` |
+| `mteb/FiQA2018` | `mteb/fiqa` | encode | `ndcg_at_10` |
+| `mteb/SCIDOCS` | `mteb/scidocs` | encode | `ndcg_at_10` |
+| `mteb/CQADupstackPhysicsRetrieval` | `mteb/cqadupstack-physics` | encode | `ndcg_at_10` |
+| `mteb/CosQA` | `CoIR-Retrieval/cosqa` | encode | `ndcg_at_10` |
+| `mteb/StackOverflowQA` | `CoIR-Retrieval/stackoverflow-qa` | encode | `ndcg_at_10` |
+| `mteb/LegalBenchConsumerContractsQA` | `mteb/legalbench_consumer_contracts_qa` | encode | `ndcg_at_10` |
+
+`run.py performance` takes the same names with the parameters its selection
+rule reads, for example
+`mteb/FiQA2018?split=test&role=corpus&limit=256&filter=nonempty`.
 
 ## Validation
 
@@ -461,7 +616,7 @@ The tests use a fake client, in-memory datasets and the committed
 ## Not in this example
 
 - no publication path: nothing here writes to the website or to the published
-  records, and no floor, target, threshold or gate;
+  records, and no floor, target or gate;
 - no `mteb` dependency, no nAUC or cv_recall metrics, and no match of the
   scorer's implementation digest;
 - no multi-process client, load ladder, Poisson arrivals, clock calibration

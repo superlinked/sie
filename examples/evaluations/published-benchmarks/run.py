@@ -1,4 +1,4 @@
-"""Repeat the method behind the published benchmark numbers from one client process."""
+"""Repeat the published benchmark numbers, or test a new model the same way, from one client process."""
 
 import argparse
 import contextlib
@@ -7,6 +7,7 @@ import math
 import os
 import platform
 import re
+import shlex
 import sys
 import threading
 import time
@@ -17,7 +18,7 @@ from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import numpy as np
@@ -26,15 +27,19 @@ from scipy.sparse import csr_matrix
 from sie_sdk import SIEClient
 
 from score import (
+    BASELINE_METRICS,
     HF_DATASETS,
     NS_PER_MS,
     NS_PER_S,
     PERFORMANCE_MODE,
+    PRIMARY_METRIC,
     SCORER_ID,
     Qrels,
     Rows,
     compare,
+    compute_verdict,
     format_rows,
+    format_verdict,
     load_corpus,
     load_qrels,
     load_queries,
@@ -57,7 +62,7 @@ DOCUMENT_CHUNK = 500
 QUERY_TOKEN_ROWS = 256
 RESULTS_DIR = Path("results")
 SCORE_TASKS = frozenset({"mteb/AskUbuntuDupQuestions"})
-ENCODE_OUTPUTS = ("sparse", "multivector")
+ENCODE_OUTPUTS = ("sparse", "dense", "multivector")
 REFERENCE_KIND = "published-benchmark-reference"
 RESULT_KIND = "published-benchmark-reproduction"
 PERFORMANCE_LIMITS = {"encode": (30.0, 64), "score": (300.0, 128)}
@@ -69,6 +74,7 @@ DEFAULT_READINESS_TIMEOUT_S = 300.0
 DEFAULT_LAG_TOLERANCE_MS = 20.0
 RETRY_POLICY = {"backoff": "none", "max_attempts": 1, "record_attempts": True}
 ROLES = ("queries", "corpus")
+COMMAND_PREFIX = ("uv", "run", "python", "run.py")
 
 Corpus = dict[str, dict[str, str]]
 Queries = dict[str, str]
@@ -98,6 +104,8 @@ class QualityPlan:
     endpoint: str
     model_version: str | None
     comparable_reasons: list[str]
+    baseline: dict[str, Any] | None = None
+    instruction: str | None = None
 
     @property
     def route(self) -> str:
@@ -196,8 +204,11 @@ def _add_shared_arguments(command: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    quality = commands.add_parser("quality", help="Repeat a published quality measurement")
+    quality = commands.add_parser("quality", help="Measure quality against a published record or a supplied baseline")
     _add_shared_arguments(quality)
+    quality.add_argument("--baseline", help="The number to compare with, <metric>=<value>, for example ndcg_at_10=0.32")
+    quality.add_argument("--baseline-source", help="Where the baseline comes from: model card, paper or leaderboard")
+    quality.add_argument("--instruction", help="Instruction sent with queries only, on encode tasks")
     performance = commands.add_parser("performance", help="Repeat a published fixed-rate performance measurement")
     _add_shared_arguments(performance)
     performance.add_argument("--rate", type=float, help="Requests per second; the reference's published level")
@@ -267,10 +278,15 @@ def _resolve_api_key(parser: argparse.ArgumentParser, endpoint: str) -> str:
     return api_key
 
 
+def _without_credentials(url: str) -> str:
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc.rpartition("@")[2], parts.path, "", ""))
+
+
 def _endpoint_reasons(endpoint: str) -> list[str]:
     if _endpoint_key(endpoint) == _endpoint_key(DEFAULT_ENDPOINT):
         return []
-    return [f"endpoint {endpoint} != {DEFAULT_ENDPOINT}"]
+    return [f"endpoint {_without_credentials(endpoint)} != {DEFAULT_ENDPOINT}"]
 
 
 def _check_limit(params: Mapping[str, str]) -> None:
@@ -337,6 +353,54 @@ def _check_output_flags(args: argparse.Namespace, operation: str) -> None:
         raise ValueError("--items-per-request must be a positive integer")
 
 
+def _checked_baseline_value(value: float) -> float:
+    if not math.isfinite(value) or value <= 0 or value > 1:
+        raise ValueError("a baseline value must be finite, above 0 and at most 1")
+    return value
+
+
+def _supplied_baseline(args: argparse.Namespace) -> dict[str, Any] | None:
+    if args.baseline is None and args.baseline_source is None:
+        return None
+    if args.baseline is None or args.baseline_source is None or not args.baseline_source.strip():
+        raise ValueError("--baseline and --baseline-source go together")
+    metric, _, value = args.baseline.partition("=")
+    if metric not in BASELINE_METRICS:
+        raise ValueError(f"--baseline names {metric!r}; known metrics: {', '.join(sorted(BASELINE_METRICS))}")
+    try:
+        parsed = float(value)
+    except ValueError:
+        raise ValueError(f"--baseline must be <metric>=<value>, got {args.baseline!r}") from None
+    return {
+        "kind": "supplied",
+        "metric": metric,
+        "value": _checked_baseline_value(parsed),
+        "source": args.baseline_source,
+    }
+
+
+def _published_baseline(reference: Mapping[str, Any]) -> dict[str, Any]:
+    for row in reference["metrics"]:
+        if row["name"] == PRIMARY_METRIC:
+            return {
+                "kind": "published",
+                "metric": PRIMARY_METRIC,
+                "value": _checked_baseline_value(float(row["value"])),
+                "source": reference["reference_id"],
+            }
+    raise ValueError(f"the reference has no {PRIMARY_METRIC} metric")
+
+
+def _checked_instruction(args: argparse.Namespace, operation: str) -> str | None:
+    if args.instruction is None:
+        return None
+    if operation == "score":
+        raise ValueError("--instruction is not accepted for the score task")
+    if not args.instruction.strip():
+        raise ValueError("--instruction must not be empty")
+    return args.instruction
+
+
 def _override(value: float | None, fixed: float, label: str, reasons: list[str]) -> float:
     if value is None or value == fixed:
         return fixed
@@ -348,6 +412,13 @@ def _plan_from_reference(args: argparse.Namespace, reference: Mapping[str, Any])
     if reference.get("kind") != REFERENCE_KIND or reference.get("evaluation_mode") != "quality":
         raise ValueError("--reference must name a quality published-benchmark-reference file")
     _refuse_fixed_flags(args)
+    for flag, value in (
+        ("--baseline", args.baseline),
+        ("--baseline-source", args.baseline_source),
+        ("--instruction", args.instruction),
+    ):
+        if value is not None:
+            raise ValueError(f"{flag} cannot be combined with --reference")
     reference_id = _plain_reference_id(reference)
     task_key = reference["task_key"]
     task_name, params = parse_task_key(task_key)
@@ -377,6 +448,7 @@ def _plan_from_reference(args: argparse.Namespace, reference: Mapping[str, Any])
         endpoint=normalize_endpoint(args.endpoint),
         model_version=reference["model_version"],
         comparable_reasons=reasons,
+        baseline=_published_baseline(reference),
     )
 
 
@@ -388,6 +460,8 @@ def _plan_from_flags(args: argparse.Namespace) -> QualityPlan:
     model, _, profile = args.model.partition(":")
     operation = "score" if task_name in SCORE_TASKS else "encode"
     _check_output_flags(args, operation)
+    baseline = _supplied_baseline(args)
+    instruction = _checked_instruction(args, operation)
     reasons = ["no reference"]
     if "limit" in params:
         reasons.append(f"smoke key {args.task}")
@@ -408,6 +482,8 @@ def _plan_from_flags(args: argparse.Namespace) -> QualityPlan:
         endpoint=normalize_endpoint(args.endpoint),
         model_version=None,
         comparable_reasons=reasons,
+        baseline=baseline,
+        instruction=instruction,
     )
 
 
@@ -753,6 +829,7 @@ def encode_texts(
     size = plan.items_per_request or 0
     if size < 1:
         raise ValueError("encode tasks need a positive items_per_request")
+    instruction = {"instruction": plan.instruction} if is_query and plan.instruction is not None else {}
     results: list[Any] = []
     for start in range(0, len(texts), size):
         batch_ids, batch_texts = ids[start : start + size], texts[start : start + size]
@@ -768,6 +845,7 @@ def encode_texts(
             wait_for_capacity=False,
             provision_timeout_s=plan.request_timeout_s,
             max_oom_retries=0,
+            **instruction,
         )
         if len(batch) != len(items):
             raise ValueError("encode returned a different number of results than items sent")
@@ -803,9 +881,13 @@ def sparse_scores(queries: Sequence[Mapping[str, Any]], documents: Sequence[Mapp
 def normalized_rows(vectors: Any) -> np.ndarray:
     rows = np.asarray(vectors, dtype=np.float32)
     if rows.ndim != 2 or rows.shape[0] == 0:
-        raise ValueError("a multivector needs at least one token row")
+        raise ValueError("expected a non-empty two-dimensional array of vectors")
     norms = np.linalg.norm(rows, axis=1, keepdims=True)
     return rows / np.where(norms > 0, norms, 1.0)
+
+
+def dense_scores(queries: Sequence[Any], documents: Sequence[Any]) -> np.ndarray:
+    return normalized_rows(queries) @ normalized_rows(documents).T
 
 
 def _query_groups(query_rows: Sequence[np.ndarray]) -> list[tuple[int, int]]:
@@ -860,6 +942,8 @@ def encode_predictions(client: Any, plan: QualityPlan, data: QualityData, log: C
     queries = encode_texts(client, plan, query_ids, [data.queries[q] for q in query_ids], log, is_query=True)
     if plan.output_contract == "sparse":
         scores = sparse_scores(queries, documents)
+    elif plan.output_contract == "dense":
+        scores = dense_scores([q["dense"] for q in queries], [d["dense"] for d in documents])
     else:
         scores = maxsim_scores([q["multivector"] for q in queries], [d["multivector"] for d in documents])
     return top_k_predictions(scores, query_ids, document_ids)
@@ -899,6 +983,41 @@ def _timestamp(moment: datetime) -> str:
 
 def _slug(route: str, task_key: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", f"{route}-{task_key}").strip("-")
+
+
+def _common_flags(plan: QualityPlan | PerformancePlan) -> list[str]:
+    flags = ["--model", plan.route, "--task", plan.task_key]
+    if plan.operation == "encode":
+        flags += ["--output", plan.output_contract, "--items-per-request", str(plan.items_per_request)]
+    return flags
+
+
+def _endpoint_flags(endpoint: str) -> list[str]:
+    return [] if endpoint == DEFAULT_ENDPOINT else ["--endpoint", endpoint]
+
+
+def quality_command_line(plan: QualityPlan) -> str:
+    if plan.reference_id is not None:
+        flags = ["--reference", f"references/{plan.reference_id}.json"]
+        if "limit" in plan.task_params:
+            flags += ["--task", plan.task_key]
+    else:
+        flags = _common_flags(plan)
+        if plan.baseline is not None:
+            metric, value, source = plan.baseline["metric"], plan.baseline["value"], plan.baseline["source"]
+            flags += ["--baseline", f"{metric}={value!r}", "--baseline-source", source]
+        if plan.instruction is not None:
+            flags += ["--instruction", plan.instruction]
+    return shlex.join([*COMMAND_PREFIX, "quality", *flags, *_endpoint_flags(plan.endpoint)])
+
+
+def performance_command_line(plan: PerformancePlan) -> str:
+    if plan.reference_id is not None:
+        flags = ["--reference", f"references/{plan.reference_id}.json"]
+    else:
+        flags = _common_flags(plan)
+    flags += ["--rate", str(plan.rate), "--duration", str(plan.duration_s), "--warmup", str(plan.warmup_s)]
+    return shlex.join([*COMMAND_PREFIX, "performance", *flags, *_endpoint_flags(plan.endpoint)])
 
 
 def comparison_basis(reference_id: str | None, comparable: bool, reasons: Sequence[str]) -> str | None:
@@ -953,7 +1072,7 @@ def build_record(
         "payload": {
             "items_per_request": plan.items_per_request or max(candidate_counts, default=0),
             "output_contract": plan.output_contract,
-            "parameters": [],
+            "parameters": [{"name": "instruction", "value": plan.instruction}] if plan.instruction is not None else [],
         },
         "client": {"description": client_description(), "worker_count": 1, "processes_per_worker": 1},
         "scorer": {"id": SCORER_ID, "version": scorer_version(), "reference_scorer_matched": False},
@@ -964,11 +1083,16 @@ def build_record(
             "request_count": log.request_count,
             "failure_count": log.failure_count,
             "predictions_path": str(predictions_path) if predictions_path is not None else None,
+            "command": quality_command_line(plan),
         },
         "validity": {"valid": not validity_reasons, "reasons": validity_reasons, "sdk_retries": log.sdk_retries},
         "metrics": rows,
         "comparison": compare(rows, plan.reference_metrics) if plan.reference_id is not None else [],
         "comparison_basis": comparison_basis(plan.reference_id, comparable, reasons),
+        "baseline": plan.baseline,
+        "verdict": compute_verdict(
+            {row["name"]: row["value"] for row in rows}, plan.baseline, limited="limit" in plan.task_params
+        ),
     }
 
 
@@ -1060,6 +1184,7 @@ def build_performance_record(
             "request_count": log.request_count,
             "failure_count": log.failure_count,
             "requests_path": str(requests_path) if requests_path is not None else None,
+            "command": performance_command_line(plan),
         },
         "validity": performance_validity(plan, dispatcher, {row["name"]: row["value"] for row in rows}),
         "metrics": rows,
@@ -1162,6 +1287,8 @@ def quality_command(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         record, result_path = run_quality(plan, data, client)
     print(result_path)
     for line in format_rows(record["metrics"], record["comparison"]):
+        print(line)
+    for line in format_verdict(record["verdict"], record["baseline"], record["run"]["command"]):
         print(line)
     report_invalid(record)
     if record["run"]["predictions_path"] is None:

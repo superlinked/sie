@@ -1,4 +1,4 @@
-"""Recompute the published metrics from a result's predictions or requests file and print the deltas."""
+"""Recompute a result's metrics from its predictions or requests file; print the deltas and any verdict."""
 
 import argparse
 import importlib.metadata
@@ -18,16 +18,37 @@ HF_DATASETS = {
     "mteb/SciFact": ("mteb/scifact", "d56462d0e63a25450459c4f213e49ffdb866f7f9"),
     "mteb/NFCorpus": ("mteb/nfcorpus", "ec0fa4fe99da2ff19ca1214b7966684033a58814"),
     "mteb/AskUbuntuDupQuestions": ("mteb/AskUbuntuDupQuestions", "c5691e3c48741d5f83b5cc8e630653d7a8cfc048"),
+    "mteb/FiQA2018": ("mteb/fiqa", "27a168819829fe9bcd655c2df245fb19452e8e06"),
+    "mteb/SCIDOCS": ("mteb/scidocs", "f8c2fcf00f625baaa80f62ec5bd9e1fff3b8ae88"),
+    "mteb/CQADupstackPhysicsRetrieval": ("mteb/cqadupstack-physics", "79531abbd1fb92d06c6d6315a0cbbbf5bb247ea4"),
+    "mteb/CosQA": ("CoIR-Retrieval/cosqa", "bc5efb7e9d437246ce393ed19d772e08e4a79535"),
+    "mteb/StackOverflowQA": ("CoIR-Retrieval/stackoverflow-qa", "db8f169f3894c14a00251061f957b2063eef2bd5"),
+    "mteb/LegalBenchConsumerContractsQA": (
+        "mteb/legalbench_consumer_contracts_qa",
+        "b23590301ec94e8087e2850b21d43d4956b1cca9",
+    ),
 }
 MAIN_SCORE = {
     "mteb/SciFact": "ndcg_at_10",
     "mteb/NFCorpus": "ndcg_at_10",
     "mteb/AskUbuntuDupQuestions": "map_at_1000",
+    "mteb/FiQA2018": "ndcg_at_10",
+    "mteb/SCIDOCS": "ndcg_at_10",
+    "mteb/CQADupstackPhysicsRetrieval": "ndcg_at_10",
+    "mteb/CosQA": "ndcg_at_10",
+    "mteb/StackOverflowQA": "ndcg_at_10",
+    "mteb/LegalBenchConsumerContractsQA": "ndcg_at_10",
 }
 ROLE_SPLITS = {
     "mteb/SciFact": {"corpus": "corpus", "queries": "queries"},
     "mteb/NFCorpus": {"corpus": "corpus", "queries": "queries"},
     "mteb/AskUbuntuDupQuestions": {"corpus": "test", "queries": "test"},
+    "mteb/FiQA2018": {"corpus": "corpus", "queries": "queries"},
+    "mteb/SCIDOCS": {"corpus": "corpus", "queries": "queries"},
+    "mteb/CQADupstackPhysicsRetrieval": {"corpus": "corpus", "queries": "queries"},
+    "mteb/CosQA": {"corpus": "corpus", "queries": "queries"},
+    "mteb/StackOverflowQA": {"corpus": "corpus", "queries": "queries"},
+    "mteb/LegalBenchConsumerContractsQA": {"corpus": "corpus", "queries": "queries"},
 }
 METRIC_UNIT = "ratio"
 AGGREGATION = "task_native"
@@ -50,6 +71,20 @@ PERFORMANCE_METRICS = {
 LATENCY_PERCENTILES = (50, 95, 99)
 NS_PER_S = 1_000_000_000
 NS_PER_MS = 1_000_000
+PRIMARY_METRIC = "main_score"
+BASELINE_METRICS = frozenset(
+    {
+        PRIMARY_METRIC,
+        "accuracy",
+        *(f"{family}_at_{k}" for family in ("ndcg", "map", "recall", "precision", "mrr") for k in K_VALUES),
+    }
+)
+DEFAULT_MARGIN = 0.98
+VERDICT_PASS = "PASS"
+VERDICT_FAIL_REGRESSION = "FAIL (regression)"
+VERDICT_FAIL_NO_OUTPUT = "FAIL (no-output)"
+VERDICT_WARN_IMPROVEMENT = "WARN (suspicious-improvement)"
+VERDICT_MEASUREMENT = "MEASUREMENT"
 
 Qrels = dict[str, dict[str, int]]
 Predictions = Mapping[str, Mapping[str, float]]
@@ -232,6 +267,75 @@ def format_rows(rows: Sequence[Mapping[str, Any]], comparison: Sequence[Mapping[
     return lines
 
 
+def compute_verdict(
+    metrics: Mapping[str, float],
+    baseline: Mapping[str, Any] | None,
+    *,
+    limited: bool,
+    margin: float = DEFAULT_MARGIN,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "metric": PRIMARY_METRIC if baseline is None else baseline["metric"],
+        "current": None,
+        "baseline": None,
+        "delta_pct": None,
+        "threshold_low": None,
+        "threshold_high": None,
+        "margin": margin,
+    }
+    compared = None if limited else baseline
+    if compared is not None:
+        out["baseline"] = compared["value"]
+        out["threshold_low"] = compared["value"] * margin
+        out["threshold_high"] = compared["value"] / margin
+    if not metrics:
+        return {"verdict": VERDICT_FAIL_NO_OUTPUT, "reason": "no_predictions", **out}
+    current = out["current"] = metrics[out["metric"]]
+    if compared is not None:
+        out["delta_pct"] = (current - compared["value"]) / compared["value"] * 100.0
+    if current == 0.0:
+        return {"verdict": VERDICT_FAIL_NO_OUTPUT, "reason": "current_zero", **out}
+    if baseline is None:
+        return {"verdict": VERDICT_MEASUREMENT, "reason": "no_baseline", **out}
+    if limited:
+        return {"verdict": VERDICT_MEASUREMENT, "reason": "limited_run", **out}
+    if current < out["threshold_low"]:
+        return {"verdict": VERDICT_FAIL_REGRESSION, "reason": "below_margin", **out}
+    if current > out["threshold_high"]:
+        return {"verdict": VERDICT_WARN_IMPROVEMENT, "reason": "above_margin", **out}
+    return {"verdict": VERDICT_PASS, "reason": "within_margin", **out}
+
+
+def format_verdict(verdict: Mapping[str, Any], baseline: Mapping[str, Any] | None, command: str) -> list[str]:
+    label, reason, metric = verdict["verdict"], verdict["reason"], verdict["metric"]
+    if reason == "no_baseline":
+        return [f"verdict: {label} no baseline"]
+    if reason == "limited_run":
+        return [f"verdict: {label} limited run, not compared with a full-dataset number"]
+    current, value = verdict["current"], verdict["baseline"]
+    band = f"{verdict['threshold_low']:.5f} to {verdict['threshold_high']:.5f}" if value is not None else ""
+    source = baseline["source"] if baseline is not None else ""
+    if reason == "no_predictions":
+        lines = [f"verdict: {label} no predictions"]
+    elif reason == "current_zero":
+        lines = [f"verdict: {label} {metric} is exactly 0"]
+    else:
+        delta = f"{verdict['delta_pct']:+.2f}%"
+        lines = [f"verdict: {label} {metric} {current:.5f} against {value:.5f} from {source} ({delta}, band {band})"]
+    if label in {VERDICT_FAIL_REGRESSION, VERDICT_FAIL_NO_OUTPUT}:
+        expected = f"{metric} above 0" if value is None else f"{metric} from {band}, {value:.5f} from {source}"
+        got = "no predictions" if current is None else f"{metric} {current:.5f}"
+        lines += [f"expected: {expected}", f"got: {got}", f"reproduce: {command}"]
+    return lines
+
+
+def recompute_verdict(record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    if "baseline" not in record:
+        return None
+    _, params = parse_task_key(record["task_key"])
+    return compute_verdict({row["name"]: row["value"] for row in rows}, record["baseline"], limited="limit" in params)
+
+
 def scoped_qrels(qrels: Qrels, predictions: Predictions, params: Mapping[str, str]) -> Qrels:
     if "limit" not in params:
         return qrels
@@ -296,7 +400,9 @@ def rescore(result_path: Path) -> tuple[dict[str, Any], Rows, Rows]:
 def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("result", type=Path, help="A results/<id>-<utc>.json file written by run.py")
-    parser.add_argument("--write", action="store_true", help="Update metrics and comparison in the result file")
+    parser.add_argument(
+        "--write", action="store_true", help="Update metrics, comparison and verdict in the result file"
+    )
     args = parser.parse_args(argv)
     try:
         record, rows, comparison = rescore(args.result)
@@ -304,9 +410,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.error(str(exc))
     for line in format_rows(rows, comparison):
         print(line)
+    verdict = recompute_verdict(record, rows)
+    if verdict is not None:
+        for line in format_verdict(verdict, record["baseline"], record["run"]["command"]):
+            print(line)
     if args.write:
         record["metrics"] = rows
         record["comparison"] = comparison
+        if verdict is not None:
+            record["verdict"] = verdict
         write_json(args.result, record)
 
 
