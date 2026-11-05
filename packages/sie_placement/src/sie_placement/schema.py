@@ -18,8 +18,10 @@ BOOT_EVIDENCE_KIND = "placement-boot-evidence"
 PRICE_LIST_KIND = "placement-price-list"
 DEMAND_KIND = "placement-demand"
 PLAN_KIND = "placement-plan"
+CO_RESIDENCY_RECEIPT_KIND = "placement-co-residency-receipt"
 
 ROOT_PATH = "$"
+MIN_CO_RESIDENTS = 2
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _CURRENCY = re.compile(r"[A-Z]{3}")
@@ -591,6 +593,31 @@ class SourceRef:
         return _compact({"uri": self.uri, "sha256": self.sha256})
 
 
+def _require_latencies(
+    operation: Operation,
+    throughput: Throughput,
+    latency: Percentiles | None,
+    ttft: Percentiles | None,
+    itl: Percentiles | None,
+) -> None:
+    if operation is Operation.GENERATE:
+        _require_absent("latency", latency, "for the generate operation, which reports ttft and itl")
+        if ttft is None:
+            raise SchemaError("ttft", "is required for the generate operation")
+        if itl is None:
+            raise SchemaError("itl", "is required for the generate operation")
+        return
+    if latency is None:
+        raise SchemaError("latency", "is required for an operation other than generate")
+    _require_absent("ttft", ttft, "for an operation other than generate")
+    _require_absent("itl", itl, "for an operation other than generate")
+    _require_absent(
+        "throughput.outputTokensPerSecond",
+        throughput.output_tokens_per_second,
+        "for an operation other than generate",
+    )
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Receipt:
     identity: str
@@ -607,22 +634,7 @@ class Receipt:
     def __post_init__(self) -> None:
         _require_identifier("identity", self.identity)
         _require_at_least("concurrency", self.concurrency, 1)
-        if self.request_shape.operation is Operation.GENERATE:
-            _require_absent("latency", self.latency, "for the generate operation, which reports ttft and itl")
-            if self.ttft is None:
-                raise SchemaError("ttft", "is required for the generate operation")
-            if self.itl is None:
-                raise SchemaError("itl", "is required for the generate operation")
-        else:
-            if self.latency is None:
-                raise SchemaError("latency", "is required for an operation other than generate")
-            _require_absent("ttft", self.ttft, "for an operation other than generate")
-            _require_absent("itl", self.itl, "for an operation other than generate")
-            _require_absent(
-                "throughput.outputTokensPerSecond",
-                self.throughput.output_tokens_per_second,
-                "for an operation other than generate",
-            )
+        _require_latencies(self.request_shape.operation, self.throughput, self.latency, self.ttft, self.itl)
 
     @classmethod
     def from_dict(cls, data: object, path: str = ROOT_PATH) -> Self:
@@ -710,6 +722,107 @@ class BootEvidence:
                 "source": self.source.to_dict(),
             }
         )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CoResident:
+    identity: str
+    request_shape: RequestShape
+    throughput: Throughput
+    latency: Percentiles | None = None
+    ttft: Percentiles | None = None
+    itl: Percentiles | None = None
+
+    def __post_init__(self) -> None:
+        _require_identifier("identity", self.identity)
+        _require_latencies(self.request_shape.operation, self.throughput, self.latency, self.ttft, self.itl)
+
+    @classmethod
+    def from_dict(cls, data: object, path: str = ROOT_PATH) -> Self:
+        reader = _Reader(data, path)
+        return reader.build(
+            cls,
+            identity=reader.string("identity"),
+            request_shape=reader.child("requestShape", RequestShape.from_dict),
+            throughput=reader.child("throughput", Throughput.from_dict),
+            latency=reader.optional_child("latency", Percentiles.from_dict),
+            ttft=reader.optional_child("ttft", Percentiles.from_dict),
+            itl=reader.optional_child("itl", Percentiles.from_dict),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return _compact(
+            {
+                "identity": self.identity,
+                "requestShape": self.request_shape.to_dict(),
+                "throughput": self.throughput.to_dict(),
+                "latency": None if self.latency is None else self.latency.to_dict(),
+                "ttft": None if self.ttft is None else self.ttft.to_dict(),
+                "itl": None if self.itl is None else self.itl.to_dict(),
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CoResidencyReceipt:
+    cell: Cell
+    container_shape: ContainerShape
+    concurrency: int
+    gpu_memory_mib: int
+    peak_gpu_memory_mib: int
+    residents: tuple[CoResident, ...]
+    source: SourceRef
+
+    def __post_init__(self) -> None:
+        _require_at_least("concurrency", self.concurrency, 1)
+        _require_at_least("gpuMemoryMiB", self.gpu_memory_mib, 1)
+        _require_at_least("peakGpuMemoryMiB", self.peak_gpu_memory_mib, 0)
+        if self.peak_gpu_memory_mib > self.gpu_memory_mib:
+            raise SchemaError(
+                "peakGpuMemoryMiB",
+                f"must not exceed gpuMemoryMiB ({self.gpu_memory_mib}), got {self.peak_gpu_memory_mib}",
+            )
+        if len(self.residents) < MIN_CO_RESIDENTS:
+            raise SchemaError(
+                "residents", f"must list at least {MIN_CO_RESIDENTS} identities, got {len(self.residents)}"
+            )
+        _require_unique("residents", "identity", (resident.identity for resident in self.residents))
+
+    @property
+    def identities(self) -> frozenset[str]:
+        return frozenset(resident.identity for resident in self.residents)
+
+    @property
+    def gpu_memory_headroom_mib(self) -> int:
+        return self.gpu_memory_mib - self.peak_gpu_memory_mib
+
+    @classmethod
+    def from_dict(cls, data: object, path: str = ROOT_PATH) -> Self:
+        reader = _Reader(data, path)
+        reader.header(CO_RESIDENCY_RECEIPT_KIND)
+        return reader.build(
+            cls,
+            cell=reader.child("cell", Cell.from_dict),
+            container_shape=reader.child("containerShape", ContainerShape.from_dict),
+            concurrency=reader.integer("concurrency"),
+            gpu_memory_mib=reader.integer("gpuMemoryMiB"),
+            peak_gpu_memory_mib=reader.integer("peakGpuMemoryMiB"),
+            residents=reader.children("residents", CoResident.from_dict),
+            source=reader.child("source", SourceRef.from_dict),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "kind": CO_RESIDENCY_RECEIPT_KIND,
+            "schemaVersion": SCHEMA_VERSION,
+            "cell": self.cell.to_dict(),
+            "containerShape": self.container_shape.to_dict(),
+            "concurrency": self.concurrency,
+            "gpuMemoryMiB": self.gpu_memory_mib,
+            "peakGpuMemoryMiB": self.peak_gpu_memory_mib,
+            "residents": [resident.to_dict() for resident in self.residents],
+            "source": self.source.to_dict(),
+        }
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1005,10 +1118,13 @@ class PlanIdentity:
     identity: str
     lane: str
     warmth: Warmth
+    co_packed: bool = False
 
     def __post_init__(self) -> None:
         _require_identifier("identity", self.identity)
         _require_identifier("lane", self.lane)
+        if self.co_packed and self.warmth is not Warmth.PINNED:
+            raise SchemaError("coPacked", f"marks a pinned identity only, got warmth {self.warmth.value!r}")
 
     @classmethod
     def from_dict(cls, data: object, path: str = ROOT_PATH) -> Self:
@@ -1018,10 +1134,18 @@ class PlanIdentity:
             identity=reader.string("identity"),
             lane=reader.string("lane"),
             warmth=reader.enum("warmth", Warmth),
+            co_packed=reader.optional_boolean("coPacked") is True,
         )
 
     def to_dict(self) -> dict[str, object]:
-        return {"identity": self.identity, "lane": self.lane, "warmth": self.warmth.value}
+        return _compact(
+            {
+                "identity": self.identity,
+                "lane": self.lane,
+                "warmth": self.warmth.value,
+                "coPacked": True if self.co_packed else None,
+            }
+        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

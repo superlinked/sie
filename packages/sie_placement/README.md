@@ -29,6 +29,7 @@ name the offending field by its JSON path, for example
 | `placement-boot-evidence` | `BootEvidence` | One measured boot, snapshot restore or resident load of one identity on one cell and container shape |
 | `placement-price-list` | `PriceList` | Accelerator, core and memory rates per machine profile, and the region multiplier per placement |
 | `placement-demand` | `Demand` | Hourly request counts per identity and operation over a UTC window |
+| `placement-co-residency-receipt` | `CoResidencyReceipt` | One measurement of two or more identities served from the same container on one cell, container shape and concurrency |
 | `placement-plan` | `Plan` | Lanes with their cell, container shape, concurrency, ceiling and envelope, and the lane and warmth of every identity |
 
 Each type parses with `from_dict(data)` and serializes with `to_dict()`.
@@ -80,6 +81,20 @@ boot-shaping inputs match: the identity and its model revision, the image, the
 realized GPU product and count, the container shape, the warmth and the
 placement class. Whoever supplies the evidence decides the match.
 
+## Co-residency
+
+A co-residency receipt measures a set of identities loaded together on one
+container. `residents` lists two or more identities, each with the request
+shape, throughput and latencies it reached while the others were loaded
+beside it, in the same form a receipt records them. `gpuMemoryMiB` is the
+memory of each of the container's GPUs and `peakGpuMemoryMiB` the most any
+one of them held while the set ran, so their difference is the set's GPU
+memory headroom. The receipt stands for that exact set only: it says nothing
+about a subset or a larger set.
+
+A plan identity carries `coPacked: true` when the planner placed it on
+another identity's lane by co-packing. Only a `pinned` identity is co-packed.
+
 ## Lanes
 
 A plan lane carries the three tokens that name a lane of the `sie-cluster`
@@ -115,6 +130,7 @@ result = plan(
     demand,
     current_plan,
     PlannerParameters(placement="us-central1", max_containers=4, fallback_floor=2, cooldown_s=900),
+    co_residency_receipts=co_residency_receipts,
 )
 print(render(result.plan.to_dict()), render(result.report.to_dict()))
 ```
@@ -132,6 +148,7 @@ every choice, such as its own previous plan, reports no change.
 | `fallback_floor` | The least containers an active zero-floor lane holds, the `sie-cluster` chart's `autoscaling.fallbackReplicas` |
 | `cooldown_s` | How long an active lane keeps its containers after its last request, the chart's `autoscaling.cooldownPeriod` |
 | `buffer_containers` | The declared warm buffer above a lane's floor, `0` by default |
+| `gpu_memory_headroom_mib` | The GPU memory a co-residency receipt must leave free on each GPU for a co-packing move, `0` by default |
 | `hours_per_month` | The hours a monthly figure covers, `730` by default |
 | `queue_pool`, `bundle`, `bundles` | Every lane's queue pool, and each identity's bundle: its `bundles` entry, otherwise `bundle` |
 
@@ -162,10 +179,41 @@ that lane under its name, beside whoever else the lane hosts, and the lane
 takes the ceiling and envelope of the choice. Every other placed identity gets
 a new lane of its own, named from the identity and its machine profile, with a
 digest of the identity added when that name is taken. The planner does not
-select `lazy-resident`, `bridged` or `scheduled-warm`, and does not move an
-identity onto another identity's lane. An identity with no unblocked option
-keeps its current lane, capped by the reviewed ceiling, or stays out of the
-plan when it has none.
+select `lazy-resident`, `bridged` or `scheduled-warm`, and moves an identity
+onto another identity's lane only by co-packing. An identity with no
+unblocked option keeps its current lane, capped by the reviewed ceiling, or
+stays out of the plan when it has none.
+
+### Co-packing
+
+After selection, one pass visits the placed identities in decreasing floor
+cost, the monthly cost of the floor of the lane selection gave them, with ties
+broken by identity. A visited identity that is the only resident of its lane
+may move onto another lane of the plan whose residents are all `pinned`,
+whose `queuePool` is the identity's and whose `bundle` is the identity's
+bundle. The move is kept only when:
+
+1. a co-residency receipt measured exactly that lane's residents and the
+   identity, on the lane's cell, container shape and concurrency;
+2. the receipt leaves at least `gpu_memory_headroom_mib` free on each GPU;
+3. every resident, the identity included, meets its warm bounds at the
+   latencies the receipt records for it. The lane keeps a warm floor, so every
+   come-alive bound holds;
+4. the plan's monthly cost falls by at least a cent.
+
+Of the moves an identity can make, the one that saves most wins, and ties go
+to the lane whose residents sort first. The identity joins the lane as
+`pinned` with `coPacked: true`, and its own lane leaves the plan. A lane that
+received an identity hosts later moves only when a receipt covers the larger
+set. A move onto a lane that no co-residency receipt covers is a measurement
+request instead. The pass is order dependent by design, and the visiting order
+pins it. A `coPacked` placement never counts as an identity's current
+placement, so the next run makes the same move from the identity's own lane
+and an unchanged input still yields an empty diff. The planner refuses a
+co-residency receipt whose machine profile has no price or whose realized GPU
+product differs from the profile's, or one with a resident whose latencies
+cannot answer its service level, and ignores one that names an identity
+without a service level.
 
 ### Pricing
 
@@ -189,6 +237,13 @@ tails a cold warmth pays. A placed identity's demand is priced at its chosen
 receipt, and a kept identity's at the slowest receipt it has for its lane's
 cell, container shape and concurrency, under that lane's own ceiling.
 
+A lane whose residents are all `pinned` and that a co-residency receipt
+covers is priced at that receipt, the one that prices it lowest when several
+admit the set: each resident's demand at its co-resident throughput, and the
+lane's containers above the floor from the residents' combined load in each
+hour. A resident's own monthly cost there is the floor plus what its demand
+alone needs above it.
+
 ### Envelope
 
 `floorMin` is 1 for `pinned` and 0 otherwise. No source measures queue wait
@@ -205,13 +260,18 @@ The report renders as a `placement-report` document:
 - `totals`: the monthly cost of every lane of the plan, the monthly cost of
   their `floorMax`, and `unpricedLanes`, the lanes whose cost the totals leave
   out in whole or in part.
-- `identities`: each identity's status (`placed`, `kept` or `unplaced`),
+- `identities`: each identity's status (`placed`, `co-packed`, `kept` or
+  `unplaced`),
   effective service level and demand, its lane and `monthlyCost`, what its
   demand costs there with the lane's floor, the chosen cell, warmth, monthly
   cost and come-alive with its basis (`warm-floor`, `boot-evidence` or
   `borrowed-boot-evidence`), the peak containers its demand needs, and
   `nextCheaper`: the nearest cheaper option a service level blocks, its saving
-  and the bounds that block it. A kept identity's `blockedBy` names the bounds
+  and the bounds that block it. A co-packed identity's lane is the lane it
+  joined, its `chosen` option the one selection gave it, and its
+  `nextCheaper`, measurement requests and levers are measured against what it
+  adds to the lane it joined: its chosen cost less the move's saving. A kept
+  identity's `blockedBy` names the bounds
   its kept placement is known to miss: its receipt's warm latencies, a measured
   come-alive over the bound, or a cold warmth under a bound of `0`, which needs
   no measurement.
@@ -219,16 +279,24 @@ The report renders as a `placement-report` document:
   and the monthly cost of its `floorMax`, which a floor budget prices. A lane
   on a cell the price list cannot price carries `unpricedReason` and no cost,
   and `unpricedIdentities` lists residents whose demand has no receipt to price
-  it on the lane.
+  it on the lane. `coResidencyReceipt` names the receipt a co-packed lane is
+  priced at.
 - `sharedChartLanes`: every chart lane, by `queuePool`, `machineProfile` and
   `bundle`, that more than one plan lane names.
+- `coPackingMoves`: the moves the co-packing pass kept, in the order it made
+  them, each with the lane it left and its warmth there, the lane it joined and
+  that lane's residents, the co-residency receipt, the GPU memory headroom the
+  receipt leaves and the monthly saving.
 - `measurementRequests`: options that lack evidence, ranked by the saving they
   could unlock. A profile without a receipt is bounded by price alone: one
   accelerator at its rate, kept warm or, where the come-alive bound allows,
   paying burst tails only. A cell whose receipt has no successful boot asks for
-  boot evidence and is bounded by its cold cost. A request that cannot save is
-  dropped, and the requests of an identity without a placement carry no bound
-  and rank first.
+  boot evidence and is bounded by its cold cost. A co-packing move that no
+  co-residency receipt covers asks for one, naming the `lane` and its
+  `coResidents`, and is bounded by the monthly cost of the lane the move would
+  free, less what a move the identity made already saved. A request that
+  cannot save is dropped, and the requests of an identity without a placement
+  carry no bound and rank first.
 - `comeAliveLevers`: cold warmths whose measured come-alive misses the bound
   on a cell that meets the warm bounds for less than the choice. Each is priced
   under the identity's bound, where a bound of 0 admits no lever, and at
@@ -236,8 +304,8 @@ The report renders as a `placement-report` document:
   by the first saving, then by the second.
 - `queueWaitUnattained`: every identity that declares `queueWaitP99Ms`. No
   plan claims that bound as met.
-- `refusals`, and `changes`: the identities and lanes that differ from
-  `current_plan`.
+- `refusals`, where a refused co-residency receipt names its `residents`, and
+  `changes`: the identities and lanes that differ from `current_plan`.
 
 ## Tests
 

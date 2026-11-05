@@ -23,6 +23,7 @@ REPORT_KIND = "placement-report"
 
 class IdentityStatus(StrEnum):
     PLACED = "placed"
+    CO_PACKED = "co-packed"
     KEPT = "kept"
     UNPLACED = "unplaced"
 
@@ -41,6 +42,7 @@ class ComeAliveBasis(StrEnum):
 class Measurement(StrEnum):
     RECEIPT = "receipt"
     BOOT_EVIDENCE = "boot-evidence"
+    CO_RESIDENCY_RECEIPT = "co-residency-receipt"
 
 
 class RequestReason(StrEnum):
@@ -52,6 +54,7 @@ class RequestReason(StrEnum):
 class RefusedRecord(StrEnum):
     RECEIPT = "receipt"
     BOOT_EVIDENCE = "boot-evidence"
+    CO_RESIDENCY_RECEIPT = "co-residency-receipt"
 
 
 def _money(value: float) -> float:
@@ -150,6 +153,7 @@ class LaneReport:
     envelope_max_monthly_cost: float | None = None
     unpriced_reason: str | None = None
     unpriced_identities: tuple[str, ...] = ()
+    co_residency_receipt: SourceRef | None = None
 
     @property
     def unpriced(self) -> bool:
@@ -168,6 +172,9 @@ class LaneReport:
                 ),
                 "unpricedReason": self.unpriced_reason,
                 "unpricedIdentities": list(self.unpriced_identities) or None,
+                "coResidencyReceipt": None
+                if self.co_residency_receipt is None
+                else self.co_residency_receipt.to_dict(),
             }
         )
 
@@ -198,6 +205,8 @@ class MeasurementRequest:
     cost_bound: float
     saving_bound: float | None
     container_shape: ContainerShape | None = None
+    lane: str | None = None
+    co_residents: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return _compact(
@@ -205,6 +214,8 @@ class MeasurementRequest:
                 "identity": self.identity,
                 "cell": self.cell.to_dict(),
                 "containerShape": None if self.container_shape is None else self.container_shape.to_dict(),
+                "lane": self.lane,
+                "coResidents": list(self.co_residents) or None,
                 "measure": [measurement.value for measurement in self.measure],
                 "warmth": self.warmth.value,
                 "reason": self.reason.value,
@@ -247,18 +258,46 @@ class Lever:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Refusal:
     record: RefusedRecord
-    identity: str
+    identity: str | None
     cell: Cell
     source: SourceRef
     reason: str
+    residents: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, object]:
+        return _compact(
+            {
+                "record": self.record.value,
+                "identity": self.identity,
+                "residents": list(self.residents) or None,
+                "cell": self.cell.to_dict(),
+                "source": self.source.to_dict(),
+                "reason": self.reason,
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CoPackingMove:
+    identity: str
+    from_lane: str
+    from_warmth: Warmth
+    to_lane: str
+    co_residents: tuple[str, ...]
+    receipt: SourceRef
+    gpu_memory_headroom_mib: int
+    saving: float
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "record": self.record.value,
             "identity": self.identity,
-            "cell": self.cell.to_dict(),
-            "source": self.source.to_dict(),
-            "reason": self.reason,
+            "fromLane": self.from_lane,
+            "fromWarmth": self.from_warmth.value,
+            "toLane": self.to_lane,
+            "coResidents": list(self.co_residents),
+            "receipt": self.receipt.to_dict(),
+            "gpuMemoryHeadroomMiB": self.gpu_memory_headroom_mib,
+            "saving": _money(self.saving),
         }
 
 
@@ -308,6 +347,7 @@ class Report:
     refusals: tuple[Refusal, ...]
     identity_changes: tuple[IdentityChange, ...]
     lane_changes: tuple[LaneChange, ...]
+    co_packing_moves: tuple[CoPackingMove, ...] = ()
 
     @property
     def monthly_cost(self) -> float:
@@ -346,6 +386,7 @@ class Report:
             "identities": [entry.to_dict() for entry in self.identities],
             "lanes": [lane.to_dict() for lane in self.lanes],
             "sharedChartLanes": [shared.to_dict() for shared in self.shared_chart_lanes],
+            "coPackingMoves": [move.to_dict() for move in self.co_packing_moves],
             "measurementRequests": [request.to_dict() for request in self.measurement_requests],
             "comeAliveLevers": [lever.to_dict() for lever in self.come_alive_levers],
             "queueWaitUnattained": list(self.queue_wait_unattained),

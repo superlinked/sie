@@ -599,8 +599,10 @@ def test_measurement_requests_rank_unplaced_identities_first_then_by_saving():
     assert ranked == [
         ("org/unplaced", "a100-80gb", (Measurement.RECEIPT,), None),
         ("org/unplaced", "l4", (Measurement.RECEIPT,), None),
+        ("org/big", "l4", (Measurement.CO_RESIDENCY_RECEIPT,), pytest.approx(3 * MONTH)),
         ("org/big", "l4", (Measurement.RECEIPT,), pytest.approx(2 * MONTH)),
         ("org/small", "a100-80gb", (Measurement.RECEIPT, Measurement.BOOT_EVIDENCE), pytest.approx(MONTH)),
+        ("org/small", "a100-80gb", (Measurement.CO_RESIDENCY_RECEIPT,), pytest.approx(MONTH)),
         ("org/small", "l4", (Measurement.BOOT_EVIDENCE,), pytest.approx(MONTH)),
     ]
 
@@ -998,6 +1000,7 @@ def test_the_region_multiplier_scales_every_price():
         ({"fallback_floor": -1}, "fallbackFloor"),
         ({"cooldown_s": -1}, "cooldownS"),
         ({"buffer_containers": -1}, "bufferContainers"),
+        ({"gpu_memory_headroom_mib": -1}, "gpuMemoryHeadroomMiB"),
         ({"hours_per_month": 0}, "hoursPerMonth"),
         ({"hours_per_month": math.inf}, "hoursPerMonth"),
         ({"queue_pool": "two words"}, "queuePool"),
@@ -1020,6 +1023,7 @@ def test_parameters_echo_into_the_report():
         "fallbackFloor": 2,
         "cooldownS": 900,
         "bufferContainers": 0,
+        "gpuMemoryHeadroomMiB": 0,
         "hoursPerMonth": 730.0,
         "queuePool": "default",
         "bundle": "default",

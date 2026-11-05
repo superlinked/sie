@@ -1,0 +1,52 @@
+{
+  "kind": "placement-co-residency-receipt",
+  "schemaVersion": 1,
+  "cell": {
+    "machineProfile": "l4",
+    "gpuProduct": "NVIDIA-L4"
+  },
+  "containerShape": {
+    "gpuCount": 1,
+    "cpuCores": 7.5,
+    "memoryMiB": 30720
+  },
+  "concurrency": 16,
+  "gpuMemoryMiB": 23034,
+  "peakGpuMemoryMiB": 14336,
+  "residents": [
+    {
+      "identity": "BAAI/bge-m3",
+      "requestShape": {
+        "operation": "encode",
+        "itemsPerRequest": 8,
+        "inputTokensPerItem": 256
+      },
+      "throughput": {
+        "requestsPerSecond": 31.5
+      },
+      "latency": {
+        "p50Ms": 131.4,
+        "p95Ms": 196.2,
+        "p99Ms": 238
+      }
+    },
+    {
+      "identity": "intfloat/e5-base-v2",
+      "requestShape": {
+        "operation": "encode",
+        "itemsPerRequest": 8,
+        "inputTokensPerItem": 128
+      },
+      "throughput": {
+        "requestsPerSecond": 58
+      },
+      "latency": {
+        "p99Ms": 121.5
+      }
+    }
+  ],
+  "source": {
+    "uri": "benchmarks/co-residency/l4/bge-m3+e5-base-v2.json",
+    "sha256": "9b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c"
+  }
+}

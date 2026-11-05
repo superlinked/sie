@@ -12,6 +12,8 @@ from sie_placement.schema import (
     BootEvidence,
     Cell,
     ContainerShape,
+    CoResidencyReceipt,
+    CoResident,
     Demand,
     DemandHour,
     DemandSeries,
@@ -40,6 +42,7 @@ DOCUMENTS: list[tuple[str, Callable[..., object]]] = [
     ("price-list.json", PriceList.from_dict),
     ("demand.json", Demand.from_dict),
     ("plan.json", Plan.from_dict),
+    ("co-residency-receipt.json", CoResidencyReceipt.from_dict),
 ]
 
 
@@ -563,3 +566,99 @@ def test_plans_built_in_code_round_trip():
         identities=(PlanIdentity(identity="BAAI/bge-m3", lane=lane.name, warmth=Warmth.PINNED),),
     )
     assert Plan.from_dict(json.loads(json.dumps(plan.to_dict()))) == plan
+
+
+def test_co_residency_receipts_measure_a_set_of_identities():
+    receipt = CoResidencyReceipt.from_dict(load("co-residency-receipt.json"))
+    assert receipt.identities == frozenset({"BAAI/bge-m3", "intfloat/e5-base-v2"})
+    assert receipt.gpu_memory_headroom_mib == 23034 - 14336
+    (dense, small) = receipt.residents
+    assert (dense.identity, dense.latency.p99_ms, dense.throughput.requests_per_second) == ("BAAI/bge-m3", 238, 31.5)
+    assert small.to_dict() == load("co-residency-receipt.json")["residents"][1]
+
+
+@pytest.mark.parametrize("count", [0, 1])
+def test_co_residency_receipts_list_at_least_two_residents(count):
+    data = load("co-residency-receipt.json")
+    data["residents"] = data["residents"][:count]
+    assert str(schema_error(CoResidencyReceipt.from_dict, data)) == (
+        f"$.residents: must list at least 2 identities, got {count}"
+    )
+
+
+def test_co_residency_residents_are_unique():
+    data = load("co-residency-receipt.json")
+    data["residents"][1]["identity"] = "BAAI/bge-m3"
+    assert str(schema_error(CoResidencyReceipt.from_dict, data)) == "$.residents[1].identity: duplicates 'BAAI/bge-m3'"
+
+
+def test_co_residency_peak_memory_fits_the_gpu():
+    data = load("co-residency-receipt.json")
+    data["peakGpuMemoryMiB"] = 23035
+    assert str(schema_error(CoResidencyReceipt.from_dict, data)) == (
+        "$.peakGpuMemoryMiB: must not exceed gpuMemoryMiB (23034), got 23035"
+    )
+    data["peakGpuMemoryMiB"] = 23034
+    assert CoResidencyReceipt.from_dict(data).gpu_memory_headroom_mib == 0
+    data["gpuMemoryMiB"] = 0
+    assert str(schema_error(CoResidencyReceipt.from_dict, data)) == "$.gpuMemoryMiB: must be at least 1, got 0"
+    data = load("co-residency-receipt.json")
+    data["peakGpuMemoryMiB"] = -1
+    assert str(schema_error(CoResidencyReceipt.from_dict, data)) == "$.peakGpuMemoryMiB: must be at least 0, got -1"
+    data = load("co-residency-receipt.json")
+    data["concurrency"] = 0
+    assert str(schema_error(CoResidencyReceipt.from_dict, data)) == "$.concurrency: must be at least 1, got 0"
+
+
+def test_co_residents_report_the_latencies_of_their_operation():
+    data = load("co-residency-receipt.json")
+    data["residents"][1]["ttft"] = data["residents"][1].pop("latency")
+    assert str(schema_error(CoResidencyReceipt.from_dict, data)) == (
+        "$.residents[1].latency: is required for an operation other than generate"
+    )
+    data = load("co-residency-receipt.json")
+    data["residents"][0]["throughput"]["outputTokensPerSecond"] = 10
+    assert schema_error(CoResidencyReceipt.from_dict, data).path == "$.residents[0].throughput.outputTokensPerSecond"
+    generate = load("receipt-generate.json")
+    resident = {key: generate[key] for key in ("identity", "requestShape", "throughput", "ttft", "itl")}
+    assert CoResident.from_dict(resident).to_dict() == resident
+    del resident["itl"]
+    assert str(schema_error(CoResident.from_dict, resident)) == "$.itl: is required for the generate operation"
+    resident["latency"] = generate["ttft"]
+    assert schema_error(CoResident.from_dict, resident).path == "$.latency"
+
+
+def test_co_residents_reject_unknown_fields():
+    data = load("co-residency-receipt.json")
+    data["residents"][0]["concurrency"] = 8
+    assert str(schema_error(CoResidencyReceipt.from_dict, data)) == (
+        "$.residents[0].concurrency: is not a field of this object"
+    )
+
+
+def test_plan_identities_mark_co_packed_pinned_residents():
+    data = load("plan.json")
+    assert Plan.from_dict(data).identities[0].co_packed is False
+    data["identities"][0]["coPacked"] = True
+    plan = Plan.from_dict(data)
+    assert plan.identities[0].co_packed is True
+    assert plan.to_dict() == data
+    data["identities"][0]["coPacked"] = False
+    plan = Plan.from_dict(data)
+    assert plan.identities[0].co_packed is False
+    assert "coPacked" not in plan.to_dict()["identities"][0]
+
+
+@pytest.mark.parametrize(("value", "described"), [(1, "number 1"), ("true", "string 'true'")])
+def test_plan_co_packed_is_a_strict_boolean(value, described):
+    data = load("plan.json")
+    data["identities"][0]["coPacked"] = value
+    assert str(schema_error(Plan.from_dict, data)) == f"$.identities[0].coPacked: expected a boolean, got {described}"
+
+
+def test_only_a_pinned_identity_is_co_packed():
+    data = load("plan.json")
+    data["identities"][1]["coPacked"] = True
+    assert str(schema_error(Plan.from_dict, data)) == (
+        "$.identities[1].coPacked: marks a pinned identity only, got warmth 'lazy-resident'"
+    )

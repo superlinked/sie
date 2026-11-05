@@ -1,0 +1,603 @@
+{
+  "kind": "placement-report",
+  "schemaVersion": 1,
+  "placement": "us-central1",
+  "currency": "USD",
+  "parameters": {
+    "placement": "us-central1",
+    "maxContainers": 4,
+    "fallbackFloor": 2,
+    "cooldownS": 900,
+    "bufferContainers": 1,
+    "gpuMemoryHeadroomMiB": 0,
+    "hoursPerMonth": 730.0,
+    "queuePool": "default",
+    "bundle": "default",
+    "bundles": {
+      "Qwen/Qwen3-8B": "sglang"
+    }
+  },
+  "totals": {
+    "monthlyCost": 1188.68,
+    "envelopeMaxMonthlyCost": 7621.2,
+    "unpricedLanes": []
+  },
+  "identities": [
+    {
+      "identity": "BAAI/bge-m3",
+      "status": "placed",
+      "serviceLevel": {
+        "comeAliveP95S": 0,
+        "warmP99Ms": 250,
+        "queueWaitP99Ms": 500
+      },
+      "demandRequests": 180000,
+      "lane": "default-l4-default",
+      "monthlyCost": 759.2,
+      "chosen": {
+        "cell": {
+          "machineProfile": "l4",
+          "gpuProduct": "NVIDIA-L4"
+        },
+        "containerShape": {
+          "gpuCount": 1,
+          "cpuCores": 4,
+          "memoryMiB": 16384
+        },
+        "concurrency": 16,
+        "warmth": "pinned",
+        "monthlyCost": 759.2,
+        "comeAliveS": 0.0,
+        "comeAliveBasis": "warm-floor",
+        "receipt": {
+          "uri": "receipts/baai-bge-m3/l4-c16-16384.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      },
+      "peakContainers": 1,
+      "nextCheaper": {
+        "cell": {
+          "machineProfile": "l4",
+          "gpuProduct": "NVIDIA-L4"
+        },
+        "containerShape": {
+          "gpuCount": 1,
+          "cpuCores": 4,
+          "memoryMiB": 16384
+        },
+        "concurrency": 16,
+        "warmth": "snapshot-cold",
+        "monthlyCost": 569.4,
+        "saving": 189.8,
+        "comeAliveS": 8.5,
+        "comeAliveBasis": "boot-evidence",
+        "blockedBy": [
+          {
+            "field": "comeAliveP95S",
+            "bound": 0,
+            "measured": 8.5
+          }
+        ],
+        "receipt": {
+          "uri": "receipts/baai-bge-m3/l4-c16-16384.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+        }
+      },
+      "current": {
+        "identity": "BAAI/bge-m3",
+        "lane": "default-l4-default",
+        "warmth": "pinned"
+      }
+    },
+    {
+      "identity": "BAAI/bge-m3:sparse",
+      "status": "placed",
+      "serviceLevel": {
+        "comeAliveP95S": 120,
+        "warmP99Ms": 250,
+        "queueWaitP99Ms": 500
+      },
+      "demandRequests": 3,
+      "lane": "baai-bge-m3-sparse-l4",
+      "monthlyCost": 47.45,
+      "chosen": {
+        "cell": {
+          "machineProfile": "l4",
+          "gpuProduct": "NVIDIA-L4"
+        },
+        "containerShape": {
+          "gpuCount": 1,
+          "cpuCores": 4,
+          "memoryMiB": 16384
+        },
+        "concurrency": 16,
+        "warmth": "cold-with-bound",
+        "monthlyCost": 47.45,
+        "comeAliveS": 95.0,
+        "comeAliveBasis": "boot-evidence",
+        "receipt": {
+          "uri": "receipts/baai-bge-m3-sparse/l4-c16-16384.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000003"
+        }
+      },
+      "peakContainers": 1
+    },
+    {
+      "identity": "Qwen/Qwen3-8B",
+      "status": "placed",
+      "serviceLevel": {
+        "comeAliveP95S": 600,
+        "ttftP99Ms": 4000,
+        "itlP99Ms": 80
+      },
+      "demandRequests": 42,
+      "lane": "qwen-qwen3-8b-a100-80gb",
+      "monthlyCost": 382.03,
+      "chosen": {
+        "cell": {
+          "machineProfile": "a100-80gb",
+          "gpuProduct": "NVIDIA-A100-SXM4-80GB"
+        },
+        "containerShape": {
+          "gpuCount": 1,
+          "cpuCores": 8,
+          "memoryMiB": 65536
+        },
+        "concurrency": 32,
+        "warmth": "cold-with-bound",
+        "monthlyCost": 382.03,
+        "comeAliveS": 187.4,
+        "comeAliveBasis": "boot-evidence",
+        "receipt": {
+          "uri": "receipts/qwen-qwen3-8b/a100-80gb-c32-65536.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000004"
+        }
+      },
+      "peakContainers": 1,
+      "nextCheaper": {
+        "cell": {
+          "machineProfile": "l4",
+          "gpuProduct": "NVIDIA-L4"
+        },
+        "containerShape": {
+          "gpuCount": 1,
+          "cpuCores": 4,
+          "memoryMiB": 16384
+        },
+        "concurrency": 8,
+        "warmth": "cold-with-bound",
+        "monthlyCost": 126.53,
+        "saving": 255.5,
+        "comeAliveS": 240.0,
+        "comeAliveBasis": "boot-evidence",
+        "blockedBy": [
+          {
+            "field": "itlP99Ms",
+            "bound": 80,
+            "measured": 118
+          }
+        ],
+        "receipt": {
+          "uri": "receipts/qwen-qwen3-8b/l4-c8-16384.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000005"
+        }
+      },
+      "current": {
+        "identity": "Qwen/Qwen3-8B",
+        "lane": "qwen-qwen3-8b-a100-80gb",
+        "warmth": "cold-with-bound"
+      }
+    },
+    {
+      "identity": "Qwen/Qwen3-Embedding-4B",
+      "status": "co-packed",
+      "serviceLevel": {
+        "comeAliveP95S": 30,
+        "warmP99Ms": 300
+      },
+      "demandRequests": 3600,
+      "lane": "default-l4-default",
+      "monthlyCost": 759.2,
+      "chosen": {
+        "cell": {
+          "machineProfile": "l4",
+          "gpuProduct": "NVIDIA-L4"
+        },
+        "containerShape": {
+          "gpuCount": 1,
+          "cpuCores": 4,
+          "memoryMiB": 16384
+        },
+        "concurrency": 8,
+        "warmth": "pinned",
+        "monthlyCost": 759.2,
+        "comeAliveS": 0.0,
+        "comeAliveBasis": "warm-floor",
+        "receipt": {
+          "uri": "receipts/qwen-qwen3-embedding-4b/l4-c8-16384.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000007"
+        }
+      },
+      "peakContainers": 1
+    },
+    {
+      "identity": "Qwen/Qwen3-Reranker-0.6B",
+      "status": "unplaced",
+      "serviceLevel": {
+        "comeAliveP95S": 90,
+        "warmP99Ms": 400
+      },
+      "demandRequests": 0,
+      "unplacedReason": "no-receipt"
+    },
+    {
+      "identity": "intfloat/e5-base-v2",
+      "status": "kept",
+      "serviceLevel": {
+        "comeAliveP95S": 0,
+        "warmP99Ms": 250,
+        "queueWaitP99Ms": 500
+      },
+      "demandRequests": 40,
+      "lane": "default-l4-default",
+      "monthlyCost": 759.2,
+      "unplacedReason": "no-receipt",
+      "current": {
+        "identity": "intfloat/e5-base-v2",
+        "lane": "default-l4-default",
+        "warmth": "pinned"
+      }
+    }
+  ],
+  "lanes": [
+    {
+      "name": "baai-bge-m3-sparse-l4",
+      "identities": [
+        "BAAI/bge-m3:sparse"
+      ],
+      "hourlyCost": 1.04,
+      "monthlyCost": 47.45,
+      "floorMonthlyCost": 0.0,
+      "envelopeMaxMonthlyCost": 1518.4
+    },
+    {
+      "name": "default-l4-default",
+      "identities": [
+        "BAAI/bge-m3",
+        "Qwen/Qwen3-Embedding-4B",
+        "intfloat/e5-base-v2"
+      ],
+      "hourlyCost": 1.04,
+      "monthlyCost": 759.2,
+      "floorMonthlyCost": 759.2,
+      "envelopeMaxMonthlyCost": 1518.4,
+      "coResidencyReceipt": {
+        "uri": "co-residency/l4/bge-m3+e5-base-v2+qwen3-embedding-4b-c16.json"
+      }
+    },
+    {
+      "name": "qwen-qwen3-8b-a100-80gb",
+      "identities": [
+        "Qwen/Qwen3-8B"
+      ],
+      "hourlyCost": 3.14,
+      "monthlyCost": 382.03,
+      "floorMonthlyCost": 0.0,
+      "envelopeMaxMonthlyCost": 4584.4
+    }
+  ],
+  "sharedChartLanes": [
+    {
+      "queuePool": "default",
+      "machineProfile": "l4",
+      "bundle": "default",
+      "lanes": [
+        "baai-bge-m3-sparse-l4",
+        "default-l4-default"
+      ]
+    }
+  ],
+  "coPackingMoves": [
+    {
+      "identity": "Qwen/Qwen3-Embedding-4B",
+      "fromLane": "qwen-qwen3-embedding-4b-l4",
+      "fromWarmth": "pinned",
+      "toLane": "default-l4-default",
+      "coResidents": [
+        "BAAI/bge-m3",
+        "intfloat/e5-base-v2"
+      ],
+      "receipt": {
+        "uri": "co-residency/l4/bge-m3+e5-base-v2+qwen3-embedding-4b-c16.json"
+      },
+      "gpuMemoryHeadroomMiB": 3578,
+      "saving": 759.2
+    }
+  ],
+  "measurementRequests": [
+    {
+      "identity": "Qwen/Qwen3-Reranker-0.6B",
+      "cell": {
+        "machineProfile": "a100-80gb",
+        "gpuProduct": "NVIDIA-A100-SXM4-80GB"
+      },
+      "measure": [
+        "receipt",
+        "boot-evidence"
+      ],
+      "warmth": "cold-with-bound",
+      "reason": "unmeasured",
+      "costBound": 0.0
+    },
+    {
+      "identity": "Qwen/Qwen3-Reranker-0.6B",
+      "cell": {
+        "machineProfile": "h100",
+        "gpuProduct": "NVIDIA-H100-80GB-HBM3"
+      },
+      "measure": [
+        "receipt",
+        "boot-evidence"
+      ],
+      "warmth": "cold-with-bound",
+      "reason": "unmeasured",
+      "costBound": 0.0
+    },
+    {
+      "identity": "Qwen/Qwen3-Reranker-0.6B",
+      "cell": {
+        "machineProfile": "l4",
+        "gpuProduct": "NVIDIA-L4"
+      },
+      "measure": [
+        "receipt",
+        "boot-evidence"
+      ],
+      "warmth": "cold-with-bound",
+      "reason": "refused",
+      "costBound": 0.0
+    },
+    {
+      "identity": "Qwen/Qwen3-Reranker-0.6B",
+      "cell": {
+        "machineProfile": "l40s",
+        "gpuProduct": "NVIDIA-L40S"
+      },
+      "measure": [
+        "receipt",
+        "boot-evidence"
+      ],
+      "warmth": "cold-with-bound",
+      "reason": "unmeasured",
+      "costBound": 0.0
+    },
+    {
+      "identity": "intfloat/e5-base-v2",
+      "cell": {
+        "machineProfile": "a100-80gb",
+        "gpuProduct": "NVIDIA-A100-SXM4-80GB"
+      },
+      "measure": [
+        "receipt"
+      ],
+      "warmth": "pinned",
+      "reason": "unmeasured",
+      "costBound": 1825.0
+    },
+    {
+      "identity": "intfloat/e5-base-v2",
+      "cell": {
+        "machineProfile": "h100",
+        "gpuProduct": "NVIDIA-H100-80GB-HBM3"
+      },
+      "measure": [
+        "receipt"
+      ],
+      "warmth": "pinned",
+      "reason": "unmeasured",
+      "costBound": 2920.0
+    },
+    {
+      "identity": "intfloat/e5-base-v2",
+      "cell": {
+        "machineProfile": "l4",
+        "gpuProduct": "NVIDIA-L4"
+      },
+      "measure": [
+        "receipt"
+      ],
+      "warmth": "pinned",
+      "reason": "unmeasured",
+      "costBound": 584.0
+    },
+    {
+      "identity": "intfloat/e5-base-v2",
+      "cell": {
+        "machineProfile": "l40s",
+        "gpuProduct": "NVIDIA-L40S"
+      },
+      "measure": [
+        "receipt"
+      ],
+      "warmth": "pinned",
+      "reason": "unmeasured",
+      "costBound": 876.0
+    },
+    {
+      "identity": "Qwen/Qwen3-8B",
+      "cell": {
+        "machineProfile": "l40s",
+        "gpuProduct": "NVIDIA-L40S"
+      },
+      "measure": [
+        "receipt",
+        "boot-evidence"
+      ],
+      "warmth": "cold-with-bound",
+      "reason": "unmeasured",
+      "costBound": 146.0,
+      "savingBound": 236.03
+    },
+    {
+      "identity": "BAAI/bge-m3:sparse",
+      "cell": {
+        "machineProfile": "l4",
+        "gpuProduct": "NVIDIA-L4"
+      },
+      "containerShape": {
+        "gpuCount": 1,
+        "cpuCores": 4,
+        "memoryMiB": 16384
+      },
+      "lane": "default-l4-default",
+      "coResidents": [
+        "BAAI/bge-m3",
+        "Qwen/Qwen3-Embedding-4B",
+        "intfloat/e5-base-v2"
+      ],
+      "measure": [
+        "co-residency-receipt"
+      ],
+      "warmth": "pinned",
+      "reason": "unmeasured",
+      "costBound": 0.0,
+      "savingBound": 47.45
+    }
+  ],
+  "comeAliveLevers": [
+    {
+      "identity": "BAAI/bge-m3",
+      "cell": {
+        "machineProfile": "l4",
+        "gpuProduct": "NVIDIA-L4"
+      },
+      "containerShape": {
+        "gpuCount": 1,
+        "cpuCores": 4,
+        "memoryMiB": 16384
+      },
+      "warmth": "cold-with-bound",
+      "comeAliveS": 95.0,
+      "comeAliveBasis": "borrowed-boot-evidence",
+      "comeAliveBoundS": 0,
+      "monthlyCost": 569.4,
+      "savingUnderBound": 0.0,
+      "permittedBoundS": 95,
+      "savingAtPermittedBound": 189.8
+    },
+    {
+      "identity": "BAAI/bge-m3",
+      "cell": {
+        "machineProfile": "l4",
+        "gpuProduct": "NVIDIA-L4"
+      },
+      "containerShape": {
+        "gpuCount": 1,
+        "cpuCores": 4,
+        "memoryMiB": 16384
+      },
+      "warmth": "snapshot-cold",
+      "comeAliveS": 8.5,
+      "comeAliveBasis": "boot-evidence",
+      "comeAliveBoundS": 0,
+      "monthlyCost": 569.4,
+      "savingUnderBound": 0.0,
+      "permittedBoundS": 9,
+      "savingAtPermittedBound": 189.8
+    }
+  ],
+  "queueWaitUnattained": [
+    "BAAI/bge-m3",
+    "BAAI/bge-m3:sparse",
+    "intfloat/e5-base-v2"
+  ],
+  "refusals": [
+    {
+      "record": "boot-evidence",
+      "identity": "Qwen/Qwen3-Reranker-0.6B",
+      "cell": {
+        "machineProfile": "a100-80gb",
+        "gpuProduct": "NVIDIA-A100-SXM4-40GB"
+      },
+      "source": {
+        "uri": "boots/qwen-qwen3-reranker-0.6b/a100-80gb-cold-with-bound-10.json",
+        "sha256": "000000000000000000000000000000000000000000000000000000000000006e"
+      },
+      "reason": "realized GPU product 'NVIDIA-A100-SXM4-40GB' differs from 'NVIDIA-A100-SXM4-80GB', the product machine profile 'a100-80gb' requests"
+    },
+    {
+      "record": "co-residency-receipt",
+      "residents": [
+        "BAAI/bge-m3",
+        "Qwen/Qwen3-Embedding-4B"
+      ],
+      "cell": {
+        "machineProfile": "a100-80gb",
+        "gpuProduct": "NVIDIA-A100-SXM4-40GB"
+      },
+      "source": {
+        "uri": "co-residency/a100/bge-m3+qwen3-embedding-4b-c16.json"
+      },
+      "reason": "realized GPU product 'NVIDIA-A100-SXM4-40GB' differs from 'NVIDIA-A100-SXM4-80GB', the product machine profile 'a100-80gb' requests"
+    },
+    {
+      "record": "receipt",
+      "identity": "Qwen/Qwen3-Reranker-0.6B",
+      "cell": {
+        "machineProfile": "l4",
+        "gpuProduct": "NVIDIA-A10G"
+      },
+      "source": {
+        "uri": "receipts/qwen-qwen3-reranker-0.6b/l4-c16-16384.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000006"
+      },
+      "reason": "realized GPU product 'NVIDIA-A10G' differs from 'NVIDIA-L4', the product machine profile 'l4' requests"
+    }
+  ],
+  "changes": {
+    "identities": [
+      {
+        "identity": "BAAI/bge-m3:sparse",
+        "after": {
+          "identity": "BAAI/bge-m3:sparse",
+          "lane": "baai-bge-m3-sparse-l4",
+          "warmth": "cold-with-bound"
+        }
+      },
+      {
+        "identity": "Qwen/Qwen3-Embedding-4B",
+        "after": {
+          "identity": "Qwen/Qwen3-Embedding-4B",
+          "lane": "default-l4-default",
+          "warmth": "pinned",
+          "coPacked": true
+        }
+      }
+    ],
+    "lanes": [
+      {
+        "name": "baai-bge-m3-sparse-l4",
+        "after": {
+          "name": "baai-bge-m3-sparse-l4",
+          "queuePool": "default",
+          "bundle": "default",
+          "cell": {
+            "machineProfile": "l4",
+            "gpuProduct": "NVIDIA-L4"
+          },
+          "containerShape": {
+            "gpuCount": 1,
+            "cpuCores": 4,
+            "memoryMiB": 16384
+          },
+          "concurrency": 16,
+          "maxContainers": 4,
+          "envelope": {
+            "floorMin": 0,
+            "floorMax": 2
+          }
+        }
+      }
+    ]
+  }
+}
