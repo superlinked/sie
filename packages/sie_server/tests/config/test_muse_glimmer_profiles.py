@@ -241,3 +241,5 @@ def test_native_window_profile_keeps_the_default_launch_shape() -> None:
     assert native.runtime["default_sampling"] == default.runtime["default_sampling"]
     assert default.kv_budget_tokens == 65536
     assert config.tasks.generate.max_output_tokens == 16384
+    # Reasoning stays private, so the first chunk can take the whole output budget.
+    assert default.runtime["first_chunk_timeout_s"] == default.runtime["overall_timeout_s"]
