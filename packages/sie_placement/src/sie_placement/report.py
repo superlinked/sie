@@ -32,6 +32,7 @@ class UnplacedReason(StrEnum):
     WARM_BOUND_MISSED = "warm-bound-missed"
     WARM_BOUND_UNDECLARED = "warm-bound-undeclared"
     CURRENT_UNMEASURED = "current-unmeasured"
+    CURRENT_UNPRICED = "current-unpriced"
 
 
 class ComeAliveBasis(StrEnum):
