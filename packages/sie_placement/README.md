@@ -230,10 +230,16 @@ The report renders as a `placement-report` document:
   dropped, and the requests of an identity without a placement carry no bound
   and rank first.
 - `comeAliveLevers`: cold warmths whose measured come-alive misses the bound
-  on a cell that meets the warm bounds for less than the choice. Each is priced
-  under the identity's bound, where a bound of 0 admits no lever, and at
-  `permittedBoundS`, the bound its measured come-alive would permit. Levers rank
-  by the first saving, then by the second.
+  on a cell that meets the warm bounds for less than the choice, listed only
+  when loosening the identity's bound to `permittedBoundS`, the bound the
+  measured come-alive would permit, lowers the plan total. Both savings are
+  found by planning again from this plan and taking the fall in its total:
+  `savingAtPermittedBound` with the bound loosened, and `savingUnderBound` with
+  the warmth's boot measured at the identity's bound, which is 0 under a bound
+  of 0, since no boot comes under it, and when the total would not fall. An
+  identity that shares its lane saves nothing of the lane's floor by leaving,
+  since the other residents keep it. Levers rank by the saving under the bound,
+  then by the saving at the permitted bound.
 - `queueWaitUnattained`: every identity that declares `queueWaitP99Ms`. No
   plan claims that bound as met.
 - `refusals`, and `changes`: the identities and lanes that differ from

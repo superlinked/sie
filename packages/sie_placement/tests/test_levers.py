@@ -13,11 +13,15 @@ from sie_placement.schema import (
     Demand,
     DemandHour,
     DemandSeries,
+    Envelope,
     IdentityServiceLevel,
     MachineProfilePrice,
     Operation,
     Percentiles,
     Placement,
+    Plan,
+    PlanIdentity,
+    PlanLane,
     PriceList,
     Receipt,
     RequestShape,
@@ -98,14 +102,39 @@ def busy(*identities, hours=6, requests=10):
     )
 
 
-def run(bounds, receipts, boots, demand=None):
+def planned(bounds, receipts, boots, demand=None, current=None):
     service_levels = ServiceLevels(
         identities=tuple(
             IdentityServiceLevel(identity=identity, level=ServiceLevel(come_alive_p95_s=bound, warm_p99_ms=250))
             for identity, bound in bounds.items()
         )
     )
-    return plan(service_levels, receipts, boots, PRICES, demand or busy(*bounds), None, PARAMETERS).report
+    return plan(service_levels, receipts, boots, PRICES, demand or busy(*bounds), current, PARAMETERS)
+
+
+def run(bounds, receipts, boots, demand=None):
+    return planned(bounds, receipts, boots, demand).report
+
+
+def shared_lane(*identities):
+    return Plan(
+        placement="test",
+        lanes=(
+            PlanLane(
+                name="shared",
+                queue_pool="default",
+                bundle="default",
+                cell=L4,
+                container_shape=SHAPE,
+                concurrency=8,
+                max_containers=4,
+                envelope=Envelope(floor_min=1, floor_max=1),
+            ),
+        ),
+        identities=tuple(
+            PlanIdentity(identity=identity, lane="shared", warmth=Warmth.PINNED) for identity in identities
+        ),
+    )
 
 
 def cold_cost(hours=6):
@@ -229,3 +258,49 @@ def test_a_lever_is_priced_at_the_cheapest_receipt_of_its_cell_and_shape(reverse
     (lever,) = report.come_alive_levers
     assert lever.monthly_cost == pytest.approx(L4_HOURLY * 6 * (1 / 0.02 + 1 * 2 * 900) / 3600 * SCALE)
     assert lever.saving_under_bound == pytest.approx(L4_HOURLY * MONTH - lever.monthly_cost)
+
+
+@pytest.mark.parametrize(("bound", "seconds", "permitted"), [(0, 95.2, 96), (60, 240.0, 240)])
+def test_an_identity_staying_beside_a_neighbour_offers_no_lever_that_loosening_its_bound_would_not_pay(
+    bound, seconds, permitted
+):
+    bounds = {"org/a": bound, "org/b": 0}
+    receipts = [receipt("org/a"), receipt("org/b")]
+    boots = [boot("org/a", seconds)]
+    result = planned(bounds, receipts, boots, current=shared_lane("org/a", "org/b"))
+    assert result.plan == shared_lane("org/a", "org/b")
+    assert result.report.identity("org/a").chosen.monthly_cost == pytest.approx(L4_HOURLY * MONTH)
+    assert result.report.come_alive_levers == ()
+    loosened = planned({**bounds, "org/a": permitted}, receipts, boots, current=result.plan)
+    assert loosened.report.identity("org/a").chosen.warmth is Warmth.COLD_WITH_BOUND
+    assert loosened.report.monthly_cost - result.report.monthly_cost == pytest.approx(cold_cost())
+
+
+@pytest.mark.parametrize(("bound", "seconds", "permitted"), [(0, 95.2, 96), (60, 240.0, 240)])
+def test_an_identity_alone_on_its_current_lane_offers_the_lever_that_loosening_its_bound_pays(
+    bound, seconds, permitted
+):
+    bounds = {"org/a": bound, "org/b": 0}
+    receipts = [receipt("org/a"), receipt("org/b")]
+    boots = [boot("org/a", seconds)]
+    result = planned(bounds, receipts, boots, current=shared_lane("org/a"))
+    assert result.report.identity("org/a").lane == "shared"
+    (lever,) = result.report.come_alive_levers
+    assert (lever.identity, lever.permitted_bound_s) == ("org/a", permitted)
+    loosened = planned({**bounds, "org/a": permitted}, receipts, boots, current=result.plan)
+    saving = result.report.monthly_cost - loosened.report.monthly_cost
+    assert saving == pytest.approx(L4_HOURLY * MONTH - cold_cost())
+    assert lever.saving_at_permitted_bound == pytest.approx(saving)
+    assert lever.saving_under_bound == (0 if bound == 0 else pytest.approx(saving))
+
+
+def test_a_lever_saves_under_its_bound_what_its_own_boot_unlocks_and_at_its_permitted_bound_all_that_bound_unlocks():
+    receipts = [receipt("org/model"), receipt("org/model", shape=WIDE)]
+    boots = [boot("org/model", 240.0), boot("org/model", 300.0, shape=WIDE)]
+    report = run({"org/model": 60}, receipts, boots)
+    by_shape = {lever.container_shape: lever for lever in report.come_alive_levers}
+    assert by_shape[WIDE].monthly_cost == pytest.approx((1.0 + 8 * 0.1) * 6 * 2 * SCALE)
+    assert by_shape[WIDE].saving_under_bound == pytest.approx(L4_HOURLY * MONTH - by_shape[WIDE].monthly_cost)
+    assert by_shape[WIDE].saving_at_permitted_bound == pytest.approx(L4_HOURLY * MONTH - cold_cost())
+    assert by_shape[SHAPE].saving_under_bound == pytest.approx(L4_HOURLY * MONTH - cold_cost())
+    assert [lever.container_shape for lever in report.come_alive_levers] == [SHAPE, WIDE]
