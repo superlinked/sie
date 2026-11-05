@@ -366,8 +366,8 @@ def _supplied_baseline(args: argparse.Namespace) -> dict[str, Any] | None:
         return None
     if args.baseline is None or args.baseline_source is None or not args.baseline_source.strip():
         raise ValueError("--baseline and --baseline-source go together")
-    if any(ord(character) < 32 for character in args.baseline_source):
-        raise ValueError("--baseline-source must be one line of text")
+    if not args.baseline_source.isprintable():
+        raise ValueError("--baseline-source must be one line of printable text")
     metric, _, value = args.baseline.partition("=")
     if metric not in BASELINE_METRICS:
         raise ValueError(f"--baseline names {metric!r}; known metrics: {', '.join(sorted(BASELINE_METRICS))}")
@@ -402,6 +402,8 @@ def _checked_instruction(args: argparse.Namespace, operation: str) -> str | None
         raise ValueError("--instruction is not accepted for the score task")
     if not args.instruction.strip():
         raise ValueError("--instruction must not be empty")
+    if not args.instruction.isprintable():
+        raise ValueError("--instruction must be one line of printable text")
     return args.instruction
 
 
@@ -467,7 +469,7 @@ def _plan_from_flags(args: argparse.Namespace) -> QualityPlan:
     model, _, profile = args.model.partition(":")
     operation = "score" if task_name in SCORE_TASKS else "encode"
     _check_output_flags(args, operation)
-    if args.output == "dense" and profile == MUVERA_PROFILE:
+    if args.output == "dense" and profile.casefold() == MUVERA_PROFILE:
         raise ValueError(
             "--output dense is refused for a muvera profile: the published method scores these vectors by the "
             "similarity the profile declares, usually the raw dot product, and this example scores dense only by cosine"

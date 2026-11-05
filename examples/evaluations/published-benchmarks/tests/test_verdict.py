@@ -297,6 +297,9 @@ class BaselineFlagsTest(TemporaryCase):
             (("--baseline", "ndcg_at_10=inf", "--baseline-source", "s"), "above 0 and at most 1"),
             (("--baseline", "ndcg_at_10=-inf", "--baseline-source", "s"), "above 0 and at most 1"),
             (("--baseline", "ndcg_at_10=0.3", "--baseline-source", "a\nverdict: PASS"), "one line"),
+            (("--baseline", "ndcg_at_10=0.3", "--baseline-source", "a\x85verdict: PASS"), "one line"),
+            (("--baseline", "ndcg_at_10=0.3", "--baseline-source", "a\u2028verdict: PASS"), "one line"),
+            (("--baseline", "ndcg_at_10=0.3", "--baseline-source", "caf\udcff"), "one line"),
         ):
             with self.subTest(baseline=baseline):
                 stderr = self.refused("quality", *FLAGS, "--endpoint", LOCAL, *baseline)
@@ -480,6 +483,12 @@ class InstructionTest(TemporaryCase):
                 stderr = self.refused("quality", *FLAGS, "--endpoint", LOCAL, "--instruction", text)
                 self.assertIn("--instruction must not be empty", stderr)
 
+    def test_refused_when_not_one_printable_line(self):
+        for text in ("a\nverdict: PASS", "a\u2029b", "caf\udcff"):
+            with self.subTest(text=text):
+                stderr = self.refused("quality", *FLAGS, "--endpoint", LOCAL, "--instruction", text)
+                self.assertIn("--instruction must be one line", stderr)
+
     def test_performance_has_no_such_flag(self):
         self.refused("performance", "--model", "m", "--task", "mteb/SciFact", "--rate", "1", "--instruction", "x")
 
@@ -559,6 +568,12 @@ class DenseTest(TemporaryCase):
         )
         self.assertIn("muvera", stderr)
         self.assertIn("cosine", stderr)
+
+    def test_the_muvera_refusal_ignores_case_as_the_gateway_does(self):
+        task = ("--task", "mteb/SciFact", "--output", "dense", "--items-per-request", "2", "--endpoint", LOCAL)
+        for model in ("m:MUVERA", "m:Muvera"):
+            with self.subTest(model=model):
+                self.assertIn("muvera", self.refused("quality", "--model", model, *task))
 
     def test_the_muvera_refusal_is_for_a_dense_quality_run_with_that_profile_only(self):
         task = ("--task", "mteb/SciFact", "--items-per-request", "2")

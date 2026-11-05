@@ -121,9 +121,9 @@ the example applies them to every run:
 - sparse vectors are scored by the raw dot product, dense vectors by cosine
   over L2-normalised vectors, multivector outputs by MaxSim over L2-normalised
   token rows, and the reranker's own scores rank its candidates. A `muvera`
-  profile is refused with `--output dense` on a quality run, whatever
-  `output_similarity` its config declares, because the published method does
-  not score those vectors by this example's cosine;
+  profile is refused with `--output dense` on a quality run, because the
+  published method scores those vectors by the similarity the profile declares,
+  usually the raw dot product, and this example scores dense only by cosine;
 - the top 1000 documents per query are kept, ties broken by corpus order, and
   scored at k in 1, 3, 5, 10, 20, 100 and 1000 with pytrec_eval's `ndcg_cut`,
   `map_cut`, `recall` and `P`, rounded to five decimals; the published method
@@ -252,8 +252,8 @@ and cap are 30 s and 64 for encode, 300 s and 128 for score. `--output` takes
   a connection pool twice the cap; after every call the SDK's retry count is
   read and written on the request's row;
 - selection by the task key: `filter=nonempty` drops rows whose text is empty
-  after stripping whitespace; `role=corpus` takes the documents, queries
-  otherwise; the remaining rows are ordered by source id compared as strings
+  after stripping whitespace; `role=corpus` takes the documents, otherwise
+  the queries with relevance judgments in the test split; the remaining rows are ordered by source id compared as strings
   and `limit=N` keeps the first N; for AskUbuntu, `limit=64` keeps the first
   64 queries in that order and `candidates-k=20` each query's 20 task-native
   candidates in source order; the chosen ids go to `dataset.selected_ids` in
@@ -440,7 +440,7 @@ needs dividing by 100. A bad form exits 2 before any request, and both flags are
 refused beside `--reference`, which brings its own baseline.
 
 Without a baseline the run still writes every metric, and the verdict is
-`MEASUREMENT`.
+`MEASUREMENT`, unless the run produced nothing to compare.
 
 ### The instruction trap
 
