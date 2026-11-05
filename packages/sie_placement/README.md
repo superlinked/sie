@@ -281,9 +281,9 @@ The report renders as a `placement-report` document:
   `chosen` option the one selection gave it, and `joined` the placement it
   runs in: that lane's cell, container shape and concurrency, `pinned` with a
   `warm-floor` come-alive, at the lane's co-residency receipt. An identity's
-  `nextCheaper`, measurement requests and levers are measured against what the
-  plan pays for it: its chosen cost less the savings of the co-packing moves
-  whose co-residency receipt names it, since those moves need it on its lane.
+  `nextCheaper` and measurement requests are measured against what the plan
+  pays for it: its chosen cost less the savings of the co-packing moves whose
+  co-residency receipt names it, since those moves need it on its lane.
   A kept identity's `blockedBy` names the bounds its kept placement is known
   to miss: its receipt's warm latencies, a measured come-alive over the bound,
   or a cold warmth under a bound of `0`, which needs no measurement.
@@ -320,10 +320,18 @@ The report renders as a `placement-report` document:
   dropped, and the requests of an identity without a placement carry no bound
   and rank first.
 - `comeAliveLevers`: cold warmths whose measured come-alive misses the bound
-  on a cell that meets the warm bounds for less than what the plan pays for
-  the identity. Each is priced under the identity's bound, where a bound of 0
-  admits no lever, and at `permittedBoundS`, the bound its measured come-alive
-  would permit. Levers rank by the first saving, then by the second.
+  on a cell that meets the warm bounds for less than the choice, listed only
+  when loosening the identity's bound to `permittedBoundS`, the bound the
+  measured come-alive would permit, lowers the plan total. Both savings are
+  found by planning again from this plan and taking the fall in its total:
+  `savingAtPermittedBound` with the bound loosened, and `savingUnderBound` with
+  the warmth's boot measured at the identity's bound, which is 0 under a bound
+  of 0, since no boot comes under it, and when the total would not fall.
+  Planning again counts what the change costs elsewhere: an identity that
+  shares its lane saves nothing of the lane's floor by leaving, since the other
+  residents keep it, and a host that turns cold no longer hosts the residents
+  co-packed onto its lane. Levers rank by the saving under the bound, then by
+  the saving at the permitted bound.
 - `queueWaitUnattained`: every identity that declares `queueWaitP99Ms`. No
   plan claims that bound as met.
 - `refusals`, where a refused co-residency receipt names its `residents`, and

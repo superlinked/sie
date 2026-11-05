@@ -611,46 +611,6 @@
       "savingUnderBound": 379.6,
       "permittedBoundS": 45,
       "savingAtPermittedBound": 379.6
-    },
-    {
-      "identity": "BAAI/bge-m3",
-      "cell": {
-        "machineProfile": "l4",
-        "gpuProduct": "NVIDIA-L4"
-      },
-      "containerShape": {
-        "gpuCount": 1,
-        "cpuCores": 4,
-        "memoryMiB": 16384
-      },
-      "warmth": "cold-with-bound",
-      "comeAliveS": 95.0,
-      "comeAliveBasis": "borrowed-boot-evidence",
-      "comeAliveBoundS": 0,
-      "monthlyCost": 569.4,
-      "savingUnderBound": 0.0,
-      "permittedBoundS": 95,
-      "savingAtPermittedBound": 189.8
-    },
-    {
-      "identity": "BAAI/bge-m3",
-      "cell": {
-        "machineProfile": "l4",
-        "gpuProduct": "NVIDIA-L4"
-      },
-      "containerShape": {
-        "gpuCount": 1,
-        "cpuCores": 4,
-        "memoryMiB": 16384
-      },
-      "warmth": "snapshot-cold",
-      "comeAliveS": 8.5,
-      "comeAliveBasis": "boot-evidence",
-      "comeAliveBoundS": 0,
-      "monthlyCost": 569.4,
-      "savingUnderBound": 0.0,
-      "permittedBoundS": 9,
-      "savingAtPermittedBound": 189.8
     }
   ],
   "queueWaitUnattained": [

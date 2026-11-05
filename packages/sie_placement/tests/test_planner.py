@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import random
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -241,6 +242,16 @@ def estate() -> dict:
 
 def rendered(result) -> tuple[str, str]:
     return render(result.plan.to_dict()), render(result.report.to_dict())
+
+
+def loosened(service_levels: ServiceLevels, identity: str, bound: int) -> ServiceLevels:
+    return replace(
+        service_levels,
+        identities=tuple(
+            replace(entry, level=replace(entry.level, come_alive_p95_s=bound)) if entry.identity == identity else entry
+            for entry in service_levels.identities
+        ),
+    )
 
 
 def test_container_hourly_cost_prices_accelerators_cores_and_memory():
@@ -1135,6 +1146,35 @@ def test_the_estate_report_states_its_findings():
     )
 
 
+def test_an_estate_lever_saves_what_planning_again_at_its_permitted_bound_saves():
+    inputs = estate()
+    result = plan(**inputs)
+    report = result.report
+    assert [(lever.identity, lever.warmth) for lever in report.come_alive_levers] == [
+        ("Qwen/Qwen3-Embedding-4B", Warmth.COLD_WITH_BOUND),
+        ("Qwen/Qwen3-Embedding-4B", Warmth.SNAPSHOT_COLD),
+    ]
+    for lever in report.come_alive_levers:
+        service_levels = loosened(inputs["service_levels"], lever.identity, lever.permitted_bound_s)
+        again = plan(**{**inputs, "service_levels": service_levels, "current_plan": result.plan})
+        assert report.monthly_cost - again.report.monthly_cost == pytest.approx(lever.saving_at_permitted_bound)
+        assert lever.saving_at_permitted_bound > 0
+
+
+def test_an_estate_identity_beside_a_kept_neighbour_offers_no_lever():
+    inputs = estate()
+    result = plan(**inputs)
+    dense = result.report.identity("BAAI/bge-m3")
+    assert (dense.lane, dense.chosen.warmth) == ("default-l4-default", Warmth.PINNED)
+    assert dense.next_cheaper.come_alive_s == 8.5
+    assert not [lever for lever in result.report.come_alive_levers if lever.identity == "BAAI/bge-m3"]
+    for bound in (9, 95):
+        service_levels = loosened(inputs["service_levels"], "BAAI/bge-m3", bound)
+        again = plan(**{**inputs, "service_levels": service_levels, "current_plan": result.plan})
+        assert again.report.identity("BAAI/bge-m3").chosen.warmth in (Warmth.COLD_WITH_BOUND, Warmth.SNAPSHOT_COLD)
+        assert again.report.monthly_cost > result.report.monthly_cost
+
+
 @pytest.mark.parametrize("seed", range(25))
 def test_random_estates_choose_only_feasible_cells_and_replan_to_themselves(seed):
     rng = random.Random(seed)  # noqa: S311 -- reproducible test data
@@ -1211,6 +1251,23 @@ def test_random_estates_choose_only_feasible_cells_and_replan_to_themselves(seed
     for lever in result.report.come_alive_levers:
         assert lever.monthly_cost < costs[lever.identity]
         assert lever.saving_at_permitted_bound >= lever.saving_under_bound >= 0
+        assert lever.saving_at_permitted_bound > 0
+        looser = loosened(service_levels, lever.identity, lever.permitted_bound_s)
+        again = run(looser, receipts, boots, prices=prices, hourly=hourly, current=result.plan, **overrides)
+        assert result.report.monthly_cost - again.report.monthly_cost == pytest.approx(lever.saving_at_permitted_bound)
+        if lever.bound_s == 0:
+            assert lever.saving_under_bound == 0
+            continue
+        key = (lever.identity, lever.cell, lever.container_shape, lever.warmth)
+        within = [
+            replace(record, boot_seconds=min(record.boot_seconds, lever.bound_s))
+            if (record.identity, record.cell, record.container_shape, record.warmth) == key
+            else record
+            for record in boots
+        ]
+        booted = run(service_levels, receipts, within, prices=prices, hourly=hourly, current=result.plan, **overrides)
+        fall = result.report.monthly_cost - booted.report.monthly_cost
+        assert lever.saving_under_bound == pytest.approx(max(0.0, fall), abs=0.01)
     for request in result.report.measurement_requests:
         assert request.saving_bound is None or request.saving_bound > 0
     again = run(service_levels, receipts, boots, prices=prices, hourly=hourly, current=result.plan, **overrides)
