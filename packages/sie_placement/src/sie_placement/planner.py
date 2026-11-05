@@ -273,6 +273,7 @@ class _Choice:
     has_valid_receipt: bool
     held: float | None = None
     gaps: tuple[MeasurementRequest, ...] = ()
+    unpriced: bool = False
 
     @property
     def baseline(self) -> float | None:
@@ -281,7 +282,7 @@ class _Choice:
     @property
     def unplaced_reason(self) -> UnplacedReason:
         if any(option.feasible for option in self.options):
-            return UnplacedReason.CURRENT_UNMEASURED
+            return UnplacedReason.CURRENT_UNPRICED if self.unpriced else UnplacedReason.CURRENT_UNMEASURED
         if not self.has_valid_receipt:
             return UnplacedReason.NO_RECEIPT
         if not _declares_warm_bound(self.level):
@@ -464,6 +465,7 @@ class _Planner:
         self.current: dict[str, tuple[PlanIdentity, PlanLane]] = {}
         self.current_lanes: dict[str, PlanLane] = {}
         self.residents: defaultdict[str, list[PlanIdentity]] = defaultdict(list)
+        self.anchors: dict[str, frozenset[str]] = {}
         if current_plan is not None:
             self.current_lanes = {lane.name: lane for lane in current_plan.lanes}
             self.current = {
@@ -563,9 +565,18 @@ class _Planner:
             return None
         return current
 
-    def anchors(self, entry: PlanIdentity) -> bool:
-        level = self.levels.get(entry.identity)
-        return entry.warmth is Warmth.PINNED and level is not None and level.come_alive_p95_s == 0
+    def staying_anchors(self, choices: Iterable[_Choice]) -> dict[str, frozenset[str]]:
+        anchors: defaultdict[str, set[str]] = defaultdict(set)
+        for choice in choices:
+            current = self.current.get(choice.identity)
+            if current is None or current[0].warmth is not Warmth.PINNED:
+                continue
+            if choice.chosen is None or choice.chosen.current:
+                anchors[current[1].name].add(choice.identity)
+        return {lane: frozenset(identities) for lane, identities in anchors.items()}
+
+    def floor_paid(self, lane: str, identity: str) -> bool:
+        return bool(self.anchors.get(lane, frozenset()) - {identity})
 
     def lazy_hosts(self, identity: str) -> tuple[PlanLane, ...]:
         current = self.current.get(identity)
@@ -575,21 +586,22 @@ class _Planner:
         return tuple(
             lane
             for name, lane in sorted(self.current_lanes.items())
-            if lane.envelope.floor_min >= PINNED_FLOOR
+            if (lazy if name == home else self.floor_paid(name, identity))
+            and lane.envelope.floor_min >= PINNED_FLOOR
             and lane.queue_pool == self.parameters.queue_pool
             and lane.bundle == bundle
             and not any(entry.co_packed for entry in self.residents[name])
-            and (
-                lazy
-                if name == home
-                else any(self.anchors(entry) for entry in self.residents[name] if entry.identity != identity)
-            )
         )
 
-    def resident_hours(self, lane: PlanLane, requests: Sequence[int], rate: float) -> float:
+    def resident_hours(self, lane: PlanLane, identity: str, requests: Sequence[int], rate: float | None) -> float:
         capped = self.within_ceiling(lane)
+        floor = (
+            0.0 if self.floor_paid(lane.name, identity) else capped.envelope.floor_min * self.parameters.hours_per_month
+        )
+        if rate is None:
+            return floor
         window = replace(self.window, ceiling=capped.max_containers)
-        return window.above_floor_hours(requests, rate, capped.envelope.floor_min)
+        return floor + window.above_floor_hours(requests, rate, capped.envelope.floor_min)
 
     def current_cost(self, identity: str, entry: PlanIdentity, lane: PlanLane) -> float | None:
         if _refusal_reason(lane.cell, self.prices) is not None:
@@ -611,7 +623,7 @@ class _Planner:
                 else self.window.warm_container_hours(requests, rate)
             )
         elif entry.warmth is Warmth.LAZY_RESIDENT:
-            hours = 0.0 if rate is None else self.resident_hours(lane, requests, rate)
+            hours = self.resident_hours(lane, identity, requests, rate)
         else:
             hours = self.window.cold_container_hours(requests, rate)
         return hourly * hours
@@ -625,11 +637,8 @@ class _Planner:
         if self.slowest_receipt(identity, lane) is None:
             refused = (identity, lane.cell.machine_profile) in self.refused_profiles
             missing.append((Measurement.RECEIPT, RequestReason.REFUSED if refused else RequestReason.UNMEASURED))
-        if entry.warmth in BOOT_WARMTHS:
-            boot = self.boots.get((identity, lane.cell, lane.container_shape, entry.warmth))
-            if boot is None or boot.seconds is None:
-                reason = RequestReason.UNMEASURED if boot is None else RequestReason.FAILED
-                missing.append((Measurement.BOOT_EVIDENCE, reason))
+        if entry.warmth in BOOT_WARMTHS and (identity, lane.cell, lane.container_shape, entry.warmth) not in self.boots:
+            missing.append((Measurement.BOOT_EVIDENCE, RequestReason.UNMEASURED))
         return tuple(
             MeasurementRequest(
                 identity=identity,
@@ -710,7 +719,7 @@ class _Planner:
             for host in hosts:
                 if not _runs_on(receipt, host):
                     continue
-                lazy_cost = hourly * self.resident_hours(host, requests, rate)
+                lazy_cost = hourly * self.resident_hours(host, identity, requests, rate)
                 load = self.boots.get((identity, host.cell, host.container_shape, Warmth.LAZY_RESIDENT))
                 if load is None or load.seconds is None:
                     known = load_requests.get(host.name)
@@ -746,6 +755,7 @@ class _Planner:
         feasible = [option for option in options if option.feasible]
         chosen = min(feasible, key=lambda option: option.rank) if feasible else None
         held = None
+        unpriced = False
         gaps: tuple[MeasurementRequest, ...] = ()
         current = self.keepable(identity)
         if current is not None and not any(option.current for option in options):
@@ -756,6 +766,7 @@ class _Planner:
                 chosen = min(cheaper, key=lambda option: option.rank) if cheaper else None
                 if chosen is None:
                     held = cost
+                    unpriced = cost is None
                     gaps = self.current_gaps(identity, entry, lane, cost)
         gapped = {
             (request.cell, request.container_shape, request.warmth)
@@ -776,6 +787,7 @@ class _Planner:
             has_valid_receipt=bool(receipts),
             held=held,
             gaps=gaps,
+            unpriced=unpriced,
         )
 
     def receipt_requests(self, choice: _Choice, baseline: float | None) -> list[MeasurementRequest]:
@@ -984,13 +996,13 @@ class _Planner:
     ) -> tuple[Blocker, ...]:
         level = self.levels[identity]
         blockers = [] if receipt is None else list(_warm_blockers(level, receipt))
-        if entry.warmth in BOOT_WARMTHS and level.come_alive_p95_s is not None:
+        if entry.warmth in BOOT_WARMTHS:
             boot = self.boots.get((identity, lane.cell, lane.container_shape, entry.warmth))
             if boot is not None and boot.seconds is not None:
                 blocker = _come_alive_blocker(level, boot.seconds)
                 blockers.extend(() if blocker is None else (blocker,))
-            elif level.come_alive_p95_s == 0:
-                blockers.append(Blocker(field="comeAliveP95S", bound=0, measured=None))
+            elif boot is not None or level.come_alive_p95_s == 0:
+                blockers.append(Blocker(field="comeAliveP95S", bound=level.come_alive_p95_s, measured=None))
         return tuple(blockers)
 
     def demand_hours(self, lane: PlanLane, identity: str, rate: float | None) -> float | None:
@@ -1168,6 +1180,8 @@ class _Planner:
         return moves, blocked, requests
 
     def run(self, *, price_savings: bool = True) -> PlannerResult:
+        never_cold = [identity for identity in sorted(self.levels) if self.levels[identity].come_alive_p95_s == 0]
+        self.anchors = self.staying_anchors(self.choose(identity) for identity in never_cold)
         choices = [self.choose(identity) for identity in sorted(self.levels)]
         placed = {choice.identity: choice.chosen for choice in choices if choice.chosen is not None}
         kept = {

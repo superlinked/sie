@@ -140,9 +140,11 @@ same bytes in whatever order the receipts, boot evidence, identities and demand
 series arrive. An identity that stays on its current placement keeps its
 current lane as it is, so a run whose `current_plan` already holds every
 choice, such as its own previous plan with its `coPacked` markers, reports no
-change. The one exception is a lane that the previous run created for an
-identity whose `comeAliveP95S` is `0`: it hosts lazy residents only from the
-run after it.
+change. The exceptions are lazy residents that join a host lane one run later:
+a lane the previous run created for an identity whose `comeAliveP95S` is `0`
+hosts lazy residents only from the run after it, and an identity that left a
+host lane it was pinned on may rejoin that lane as a lazy resident on the next
+run.
 
 | Parameter | Meaning |
 | --- | --- |
@@ -180,12 +182,16 @@ document:
 4. A cell also offers `lazy-resident` on each host lane with its cell,
    container shape and concurrency. A host lane is a lane of the current plan
    with a `floorMin` of at least 1, on the parameters' queue pool and the
-   identity's bundle, on which another identity whose `comeAliveP95S` is `0` is
-   pinned. The identity's own current lane is a host only when it is a lazy
-   resident there, since its floor is paid either way. The come-alive is the
+   identity's bundle, on which another identity whose `comeAliveP95S` is `0`
+   stays pinned in this run, on its current placement or kept there. Those
+   identities are placed first: a bound of `0` admits no cold or lazy option,
+   so no other choice moves them. The identity's own current lane is also a
+   host when it is a lazy resident there already. The come-alive is the
    identity's `lazy-resident` boot evidence, its measured load onto that cell
    and container shape, under the same statistic. The option costs what the
-   identity's demand needs above the host lane's floor.
+   identity's demand needs above the host lane's floor, plus the floor itself
+   on a lane where no such identity stays pinned, since no other identity pays
+   it.
 5. The cheapest unblocked option wins. Ties go to the current placement,
    then to the faster come-alive.
 
@@ -194,16 +200,19 @@ option's cell, container shape and concurrency, the identity's warmth is the
 option's, and the lane's `queuePool` and `bundle` are the ones the parameters
 give the identity; a `lazy-resident` option must also be hosted by that lane.
 A current placement that no option matches lacks evidence: a receipt at its
-lane's cell, container shape and concurrency, a successful boot for a cold
-warmth, or a load for a lazy resident. Unless it is known to miss a bound,
-through a receipt at the lane that misses a warm bound, a measured come-alive
-over the bound, or a cold or `lazy-resident` warmth under a bound of `0`, the
-identity keeps that placement and leaves it only for an unblocked option at
-least a cent cheaper than the placement. The placement is priced as an option
-of its warmth at the lane's fastest receipt, or without one at its floor alone:
-one container all month for `pinned`, nothing beyond the host lane's floor for
-`lazy-resident`, and the burst tails for a cold warmth. What the placement
-lacks becomes a measurement request. A `coPacked` placement is never held this
+lane's cell, container shape and concurrency, a boot for a cold warmth, or a
+load for a lazy resident. Unless it is known to miss a bound, through a receipt
+at the lane that misses a warm bound, a measured come-alive over the bound, a
+boot or load at the lane that did not succeed, or a cold or `lazy-resident`
+warmth under a bound of `0`, the identity keeps that placement and leaves it
+only for an unblocked option at least a cent cheaper than the placement. The
+placement is priced as an option of its warmth at the lane's fastest receipt,
+or without one at its floor alone: one container all month for `pinned`, for
+`lazy-resident` nothing beyond the lane's floor, or the floor itself where no
+identity whose `comeAliveP95S` is `0` stays pinned on the lane, and the burst
+tails for a cold warmth. What the placement lacks becomes a measurement
+request. Such a placement on a lane the price list cannot price has no cost to
+compare, so the identity keeps it. A `coPacked` placement is never held this
 way: the co-packing pass decides it again.
 
 An identity that stays on its current placement keeps that lane exactly as it
@@ -327,11 +336,14 @@ The report renders as a `placement-report` document:
   co-packing moves whose co-residency receipt names it, since those moves need
   it on its lane. An identity without a placement names its `unplacedReason`:
   `no-receipt`, `warm-bound-missed`, `warm-bound-undeclared` when no cell is on
-  its current class, or `current-unmeasured` when it keeps a current placement
-  that lacks evidence and no unblocked option is cheaper. A kept identity's
-  `blockedBy` names the bounds its kept placement is known to miss: its
-  receipt's warm latencies, a measured come-alive over the bound, or a cold or
-  `lazy-resident` warmth under a bound of `0`, which needs no measurement.
+  its current class, `current-unmeasured` when it keeps a current placement
+  that lacks evidence and no unblocked option is cheaper, or
+  `current-unpriced` when it keeps a current placement on a lane the price
+  list cannot price. A kept identity's `blockedBy` names the bounds its kept
+  placement is known to miss: its receipt's warm latencies, a measured
+  come-alive over the bound, and with no `measured` value a boot or load at its
+  lane that did not succeed, or a cold or `lazy-resident` warmth under a bound
+  of `0`, which needs no measurement.
 - `lanes`: each lane's hourly cost, its monthly cost, its floor's monthly cost
   and the monthly cost of its `floorMax`, which a floor budget prices. A lane
   on a cell the price list cannot price carries `unpricedReason` and no cost,
@@ -355,8 +367,8 @@ The report renders as a `placement-report` document:
   accelerator at its rate, kept warm or, where the come-alive bound allows,
   paying burst tails only. A cell whose receipt has no successful boot asks for
   boot evidence and is bounded by its cold cost, and a host lane without the
-  identity's load asks for `lazy-resident` boot evidence on it, bounded by the
-  demand above the host's floor. A co-packing move that no co-residency receipt
+  identity's load asks for `lazy-resident` boot evidence on it, bounded by
+  what that option would cost. A co-packing move that no co-residency receipt
   covers asks for one on the lane's cell, container shape and `concurrency`,
   naming the `lane` and its `coResidents` as the pass found them when it
   visited the identity. A later move may vacate that lane or add residents to
