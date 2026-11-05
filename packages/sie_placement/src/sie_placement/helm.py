@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 from sie_placement.schema import ContainerShape, Plan, PlanLane, SchemaError, Warmth
@@ -17,6 +17,14 @@ EXTERNAL_DEPENDENCIES_LANE_LIMIT = 192
 BUNDLED_DEPENDENCIES_LANE_LIMIT = 96
 DEFAULT_FALLBACK_REPLICAS = 2
 MILLICORES_PER_CORE = 1000
+CHART_POOL_BUNDLES = (
+    ("a100-40gb", ("default",)),
+    ("a100-80gb", ("default",)),
+    ("cpu", ("default",)),
+    ("l4", ("default",)),
+    ("remote", ("remote",)),
+    ("sglang-cu130", ("sglang-cu130",)),
+)
 
 _LANE_TOKEN = re.compile(r"[A-Za-z0-9_-]+")
 _IDENTITY_TOKEN = re.compile(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?")
@@ -33,14 +41,57 @@ class UnrealizablePlanError(ValueError):
         self.message = message
 
 
+def chart_pools() -> dict[str, object]:
+    return {
+        group: {"enabled": False, "bundles": {bundle: {"enabled": True} for bundle in bundles}}
+        for group, bundles in CHART_POOL_BUNDLES
+    }
+
+
+def _fields(path: str, value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise SchemaError(path, f"must be a mapping, got {type(value).__name__}")
+    fields: dict[str, object] = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise SchemaError(f"{path}[{key!r}]", "must be keyed by a string")
+        fields[key] = item
+    return fields
+
+
+def _enabled_base_bundles(base_pools: object) -> dict[str, tuple[bool, tuple[str, ...]]]:
+    groups: dict[str, tuple[bool, tuple[str, ...]]] = {}
+    for group, value in _fields("basePools", base_pools).items():
+        path = f"basePools[{group!r}]"
+        values = _fields(path, value)
+        bundles = values.get("bundles")
+        enabled = [
+            bundle
+            for bundle, settings in _fields(f"{path}.bundles", {} if bundles is None else bundles).items()
+            if _fields(f"{path}.bundles[{bundle!r}]", {} if settings is None else settings).get("enabled", True)
+        ]
+        groups[group] = (bool(values.get("enabled")), tuple(sorted(enabled)))
+    return groups
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ChartParameters:
     fallback_replicas: int = DEFAULT_FALLBACK_REPLICAS
     bundled_dependencies: bool = False
+    base_pools: Mapping[str, object] = field(default_factory=chart_pools)
+    device_groups: Mapping[str, bool] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if isinstance(self.fallback_replicas, bool) or self.fallback_replicas < 1:
             raise SchemaError("fallbackReplicas", f"must be at least 1, got {self.fallback_replicas!r}")
+        _enabled_base_bundles(self.base_pools)
+        if not isinstance(self.device_groups, Mapping):
+            raise SchemaError("deviceGroups", f"must map machine profiles to true or false, got {self.device_groups!r}")
+        for profile, device_group in self.device_groups.items():
+            if not isinstance(profile, str) or not isinstance(device_group, bool):
+                raise SchemaError(
+                    "deviceGroups", f"must map a machine profile to true or false, got {profile!r}: {device_group!r}"
+                )
 
     @property
     def lane_limit(self) -> int:
@@ -124,23 +175,6 @@ def _require_realizable_floor(path: str, lane: PlanLane, parameters: ChartParame
         )
 
 
-def _require_same_chart_lane(path: str, lane: PlanLane, first: _ChartLane) -> None:
-    other = first.lane
-    differences = (
-        ("cell.gpuProduct", lane.cell.gpu_product, other.cell.gpu_product),
-        ("containerShape", lane.container_shape.to_dict(), other.container_shape.to_dict()),
-        ("maxContainers", lane.max_containers, other.max_containers),
-        ("envelope.floorMin", lane.envelope.floor_min, other.envelope.floor_min),
-    )
-    for key, value, expected in differences:
-        if value != expected:
-            raise UnrealizablePlanError(
-                f"{path}.{key}",
-                f"names chart lane {first.name!r} with {first.path}, which has {expected!r}, got {value!r}; "
-                "one chart lane carries one value",
-            )
-
-
 def _chart_lanes(plan: Plan, parameters: ChartParameters) -> list[_ChartLane]:
     pins = _pins_by_lane(plan)
     lanes: dict[tuple[str, str, str], _ChartLane] = {}
@@ -154,23 +188,59 @@ def _chart_lanes(plan: Plan, parameters: ChartParameters) -> list[_ChartLane]:
         _require_identity_token(f"{path}.cell.machineProfile", "worker group key", key[1])
         _require_identity_token(f"{path}.bundle", "bundle key", key[2])
         _require_realizable_floor(path, lane, parameters)
-        chart_lane = lanes.get(key)
-        if chart_lane is None:
-            chart_lane = _ChartLane(index=index, lane=lane, queue_pool=key[0], machine_profile=key[1], bundle=key[2])
-            lanes[key] = chart_lane
-        else:
-            _require_same_chart_lane(path, lane, chart_lane)
-        chart_lane.pins.update(pins.get(lane.name, {}))
-    if len(lanes) > parameters.lane_limit:
-        raise UnrealizablePlanError(
-            "$.lanes",
-            f"names {len(lanes)} chart lanes, above the {parameters.lane_limit} the sie-cluster chart admits "
-            f"with {parameters.dependency_topology}",
+        chart_lane = _ChartLane(
+            index=index,
+            lane=lane,
+            queue_pool=key[0],
+            machine_profile=key[1],
+            bundle=key[2],
+            pins=pins.get(lane.name, {}),
         )
+        first = lanes.setdefault(key, chart_lane)
+        if first is not chart_lane:
+            raise UnrealizablePlanError(
+                path,
+                f"names chart lane {chart_lane.name!r}, which {first.path} also names; a chart lane realizes one "
+                "floor, one ceiling and one pinned set, so each plan lane needs its own queuePool, machineProfile "
+                "and bundle",
+            )
     return list(lanes.values())
 
 
-def _worker_group(lanes: list[_ChartLane]) -> dict[str, object]:
+def _require_lane_limit(
+    lanes: list[_ChartLane], base: Mapping[str, tuple[bool, tuple[str, ...]]], parameters: ChartParameters
+) -> None:
+    emitted = {lane.machine_profile for lane in lanes}
+    base_lanes = sum(len(bundles) for group, (enabled, bundles) in base.items() if enabled and group not in emitted)
+    total = len(lanes) + base_lanes
+    if total <= parameters.lane_limit:
+        return
+    counted = f"names {len(lanes)} chart lanes"
+    if base_lanes:
+        counted += f" and the base values enable {base_lanes} more, {total} in all"
+    raise UnrealizablePlanError(
+        "$.lanes",
+        f"{counted}, above the {parameters.lane_limit} the sie-cluster chart admits with "
+        f"{parameters.dependency_topology}",
+    )
+
+
+def _device_group(lane: _ChartLane, parameters: ChartParameters) -> bool:
+    count = lane.lane.container_shape.gpu_count
+    if count == 1:
+        return False
+    device_group = parameters.device_groups.get(lane.machine_profile)
+    if device_group is None:
+        raise UnrealizablePlanError(
+            f"{lane.path}.containerShape.gpuCount",
+            f"is {count}: the chart runs a container of {count} GPUs as one device group or as {count} "
+            f"single-GPU workers, and the plan does not say which; name machine profile {lane.machine_profile!r} "
+            "in device_groups",
+        )
+    return device_group
+
+
+def _worker_group(lanes: list[_ChartLane], base_bundles: tuple[str, ...], parameters: ChartParameters) -> dict:
     first = lanes[0]
     for other in lanes[1:]:
         differences = (
@@ -186,23 +256,30 @@ def _worker_group(lanes: list[_ChartLane]) -> dict[str, object]:
                     f"got {value!r}; one worker group per machine profile carries one value",
                 )
     shape = first.lane.container_shape
+    bundles: dict[str, dict[str, object]] = {
+        lane.bundle: {
+            "enabled": True,
+            "minReplicas": lane.lane.envelope.floor_min,
+            "maxReplicas": lane.lane.max_containers,
+        }
+        for lane in lanes
+    }
+    for bundle in base_bundles:
+        bundles.setdefault(bundle, {"enabled": False})
     return {
         "enabled": True,
         "machineProfile": first.machine_profile,
         "queuePool": first.queue_pool,
-        "gpu": {"count": shape.gpu_count, "product": first.lane.cell.gpu_product},
+        "gpu": {
+            "count": shape.gpu_count,
+            "deviceGroup": _device_group(first, parameters),
+            "product": first.lane.cell.gpu_product,
+        },
         "resources": {
             "requests": _resources(f"{first.path}.containerShape", shape),
             "limits": _resources(f"{first.path}.containerShape", shape),
         },
-        "bundles": {
-            lane.bundle: {
-                "enabled": True,
-                "minReplicas": lane.lane.envelope.floor_min,
-                "maxReplicas": lane.lane.max_containers,
-            }
-            for lane in sorted(lanes, key=lambda lane: lane.bundle)
-        },
+        "bundles": dict(sorted(bundles.items())),
     }
 
 
@@ -260,12 +337,17 @@ def _require_no_default_pool_pins(lanes: Iterable[_ChartLane]) -> None:
 def helm_values(plan: Plan, parameters: ChartParameters | None = None) -> dict[str, object]:
     parameters = ChartParameters() if parameters is None else parameters
     lanes = _chart_lanes(plan, parameters)
+    base = _enabled_base_bundles(parameters.base_pools)
+    _require_lane_limit(lanes, base, parameters)
     by_profile: dict[str, list[_ChartLane]] = defaultdict(list)
     by_queue_pool: dict[str, list[_ChartLane]] = defaultdict(list)
     for lane in lanes:
         by_profile[lane.machine_profile].append(lane)
         by_queue_pool[lane.queue_pool].append(lane)
-    pools = {profile: _worker_group(by_profile[profile]) for profile in sorted(by_profile)}
+    pools = {
+        profile: _worker_group(by_profile[profile], base.get(profile, (False, ()))[1], parameters)
+        for profile in sorted(by_profile)
+    }
     static_queue_pools: dict[str, object] = {}
     for queue_pool in sorted(by_queue_pool):
         if queue_pool == DEFAULT_QUEUE_POOL:

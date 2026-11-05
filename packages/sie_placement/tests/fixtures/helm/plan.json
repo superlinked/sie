@@ -44,11 +44,11 @@
       }
     },
     {
-      "name": "rerank-l4",
-      "queuePool": "Placement",
+      "name": "rerank-l4-spot",
+      "queuePool": "Rerank",
       "bundle": "Default",
       "cell": {
-        "machineProfile": "L4",
+        "machineProfile": "L4-Spot",
         "gpuProduct": "NVIDIA-L4"
       },
       "containerShape": {
@@ -57,10 +57,70 @@
         "memoryMiB": 16384
       },
       "concurrency": 8,
-      "maxContainers": 4,
+      "maxContainers": 2,
       "envelope": {
         "floorMin": 1,
         "floorMax": 1
+      }
+    },
+    {
+      "name": "embed-a100-80gb",
+      "queuePool": "Default",
+      "bundle": "default",
+      "cell": {
+        "machineProfile": "a100-80gb",
+        "gpuProduct": "NVIDIA-A100-SXM4-80GB"
+      },
+      "containerShape": {
+        "gpuCount": 1,
+        "cpuCores": 7.5,
+        "memoryMiB": 87040
+      },
+      "concurrency": 16,
+      "maxContainers": 2,
+      "envelope": {
+        "floorMin": 0,
+        "floorMax": 0
+      }
+    },
+    {
+      "name": "batch-h100",
+      "queuePool": "Batch",
+      "bundle": "default",
+      "cell": {
+        "machineProfile": "H100",
+        "gpuProduct": "NVIDIA-H100-80GB-HBM3"
+      },
+      "containerShape": {
+        "gpuCount": 2,
+        "cpuCores": 16,
+        "memoryMiB": 196608
+      },
+      "concurrency": 32,
+      "maxContainers": 2,
+      "envelope": {
+        "floorMin": 0,
+        "floorMax": 2
+      }
+    },
+    {
+      "name": "batch-a100-40gb",
+      "queuePool": "batch",
+      "bundle": "sglang",
+      "cell": {
+        "machineProfile": "a100-40gb",
+        "gpuProduct": "NVIDIA-A100-SXM4-40GB"
+      },
+      "containerShape": {
+        "gpuCount": 1,
+        "cpuCores": 8,
+        "memoryMiB": 65536
+      },
+      "concurrency": 16,
+      "maxContainers": 2,
+      "envelope": {
+        "floorMin": 0,
+        "floorMax": 0
       }
     }
   ],
@@ -77,12 +137,27 @@
     },
     {
       "identity": "BAAI/bge-reranker-v2-m3",
-      "lane": "rerank-l4",
+      "lane": "rerank-l4-spot",
       "warmth": "pinned"
+    },
+    {
+      "identity": "Qwen/Qwen3-32B",
+      "lane": "batch-h100",
+      "warmth": "cold-with-bound"
+    },
+    {
+      "identity": "Qwen/Qwen3-4B",
+      "lane": "batch-a100-40gb",
+      "warmth": "cold-with-bound"
     },
     {
       "identity": "Qwen/Qwen3-8B",
       "lane": "generate-a100-80gb",
+      "warmth": "cold-with-bound"
+    },
+    {
+      "identity": "Qwen/Qwen3-Embedding-4B",
+      "lane": "embed-a100-80gb",
       "warmth": "cold-with-bound"
     },
     {

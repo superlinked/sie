@@ -4053,7 +4053,8 @@ def test_extra_volumes_cannot_reuse_a_chart_worker_volume_name(tmp_path: Path, n
     assert f'workers.common.extraVolumes: "{name}" is a chart-owned worker volume name' in result.stderr
 
 
-PLACEMENT_VALUES = ROOT / "packages/sie_placement/tests/fixtures/helm/values.json"
+PLACEMENT_FIXTURES = ROOT / "packages/sie_placement/tests/fixtures/helm"
+PLACEMENT_VALUES = PLACEMENT_FIXTURES / "values.json"
 PLACEMENT_TRIGGERS = (
     "sie_gateway_pending_demand",
     "sie_gateway_queue_depth",
@@ -4094,21 +4095,50 @@ def worker_scaled_objects(docs: list[dict]) -> list[dict]:
     ]
 
 
-def test_placement_values_render_the_planned_lanes(tmp_path: Path) -> None:
-    overlay = json.loads(PLACEMENT_VALUES.read_text(encoding="utf-8"))
-    base = {**AUTOSCALING_VALUES, "workers": {"pools": {"a100-80gb": {"bundles": {"default": {"enabled": False}}}}}}
-    result = render_placement(tmp_path, base, overlay)
-    assert result.returncode == 0, result.stderr
-    docs = [doc for doc in yaml.safe_load_all(result.stdout) if doc]
-    lanes = {
+def placement_lanes(overlay: dict) -> dict[tuple[str, str, str], tuple[str, str, dict]]:
+    return {
         (group["queuePool"], group["machineProfile"], bundle): (name, bundle, settings)
         for name, group in overlay["workers"]["pools"].items()
         for bundle, settings in group["bundles"].items()
+        if settings["enabled"]
     }
 
+
+def configured_lanes(docs: list[dict]) -> list[tuple[str, str, str]]:
     (gpu_config,) = [doc for doc in docs if doc["metadata"]["name"] == "sie-sie-cluster-gpu-config"]
     catalog = json.loads(gpu_config["data"]["configured-physical-lanes"])
-    assert {(lane["pool"], lane["machineProfile"], lane["bundle"]) for lane in catalog} == set(lanes)
+    return [(lane["pool"], lane["machineProfile"], lane["bundle"]) for lane in catalog]
+
+
+def test_the_placement_chart_pools_are_the_charts_worker_groups() -> None:
+    values = yaml.safe_load((helm.CHART_DIR / "values.yaml").read_text(encoding="utf-8"))
+    pools = {
+        name: {
+            "enabled": bool(group.get("enabled")),
+            "bundles": {
+                bundle: {"enabled": bool((settings or {}).get("enabled", True))}
+                for bundle, settings in group["bundles"].items()
+            },
+        }
+        for name, group in values["workers"]["pools"].items()
+    }
+    assert pools == json.loads((PLACEMENT_FIXTURES / "chart-pools.json").read_text(encoding="utf-8"))
+
+
+def test_placement_values_render_the_planned_lanes(tmp_path: Path) -> None:
+    overlay = json.loads(PLACEMENT_VALUES.read_text(encoding="utf-8"))
+    result = render_placement(tmp_path, AUTOSCALING_VALUES, overlay)
+    assert result.returncode == 0, result.stderr
+    docs = [doc for doc in yaml.safe_load_all(result.stdout) if doc]
+    lanes = placement_lanes(overlay)
+    assert any(
+        not settings["enabled"]
+        for group in overlay["workers"]["pools"].values()
+        for settings in group["bundles"].values()
+    )
+    assert any(group["gpu"]["deviceGroup"] for group in overlay["workers"]["pools"].values())
+
+    assert sorted(configured_lanes(docs)) == sorted(lanes)
     gateway = container_env(docs, "sie-sie-cluster-gateway", "gateway")
     static_queue_pools = overlay["queueRouting"]["staticQueuePools"]
     assert json.loads(gateway["SIE_GATEWAY_STATIC_QUEUE_POOLS"]["value"]) == static_queue_pools
@@ -4143,6 +4173,10 @@ def test_placement_values_render_the_planned_lanes(tmp_path: Path) -> None:
         ]
         gpus = {"nvidia.com/gpu": str(pool["gpu"]["count"])}
         assert worker["resources"] == {kind: pool["resources"][kind] | gpus for kind in ("requests", "limits")}
+        assert [container["name"] for container in statefulset["spec"]["template"]["spec"]["containers"]] == [
+            "worker",
+            "worker-sidecar",
+        ]
         env = container_env(docs, workload, "worker")
         assert (env["SIE_POOL"]["value"], env["SIE_MACHINE_PROFILE"]["value"], env["SIE_BUNDLE"]["value"]) == lane
 
@@ -4166,10 +4200,15 @@ def placement_lane_values(count: int) -> dict:
     ("dependencies", "limit", "topology"),
     [({}, 192, "external KEDA and Prometheus"), ({"keda": {"install": True}}, 96, "bundled KEDA or Prometheus")],
 )
-def test_placement_lane_limits_match_the_chart(tmp_path: Path, dependencies: dict, limit: int, topology: str) -> None:
+def test_placement_values_at_the_lane_limit_render(
+    tmp_path: Path, dependencies: dict, limit: int, topology: str
+) -> None:
+    overlay = json.loads(PLACEMENT_VALUES.read_text(encoding="utf-8"))
+    planned = len(placement_lanes(overlay))
     base = {**AUTOSCALING_VALUES, **dependencies}
-    accepted = render_placement(tmp_path, base, placement_lane_values(limit))
+    accepted = render_placement(tmp_path, base, placement_lane_values(limit - planned), overlay)
     assert accepted.returncode == 0, accepted.stderr
-    refused = render_placement(tmp_path, base, placement_lane_values(limit + 1))
+    assert len(configured_lanes([doc for doc in yaml.safe_load_all(accepted.stdout) if doc])) == limit
+    refused = render_placement(tmp_path, base, placement_lane_values(limit - planned + 1), overlay)
     assert refused.returncode != 0
     assert f"configured physical lane count exceeds Helm release limit {limit} with {topology}" in refused.stderr

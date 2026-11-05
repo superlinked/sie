@@ -4,26 +4,34 @@ import json
 import random
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
+from sie_placement import planner
 from sie_placement.helm import (
     BUNDLED_DEPENDENCIES_LANE_LIMIT,
     EXTERNAL_DEPENDENCIES_LANE_LIMIT,
     ChartParameters,
     UnrealizablePlanError,
+    chart_pools,
     helm_values,
     lane_token,
 )
 from sie_placement.report import render
 from sie_placement.schema import (
     WARM_FLOOR_WARMTHS,
+    BootEvidence,
     Cell,
     ContainerShape,
+    Demand,
     Envelope,
     Plan,
     PlanIdentity,
     PlanLane,
+    PriceList,
+    Receipt,
     SchemaError,
+    ServiceLevels,
     Warmth,
 )
 
@@ -33,6 +41,16 @@ L4 = Cell(machine_profile="l4", gpu_product="NVIDIA-L4")
 A100 = Cell(machine_profile="a100-80gb", gpu_product="NVIDIA-A100-SXM4-80GB")
 SHAPE = ContainerShape(gpu_count=1, cpu_cores=4, memory_mib=16384)
 WIDE = ContainerShape(gpu_count=1, cpu_cores=8, memory_mib=32768)
+PAIR = ContainerShape(gpu_count=2, cpu_cores=16, memory_mib=65536)
+GOLDEN_PARAMETERS = ChartParameters(device_groups={"h100": True})
+PLANNER_PARAMETERS = planner.PlannerParameters(
+    placement="us-central1",
+    max_containers=4,
+    fallback_floor=2,
+    cooldown_s=900,
+    buffer_containers=1,
+    bundles={"Qwen/Qwen3-8B": "sglang"},
+)
 
 
 def load(path: Path) -> dict:
@@ -81,31 +99,79 @@ def refusal(plan: Plan, parameters: ChartParameters | None = None) -> Unrealizab
     return caught.value
 
 
+def golden_plan() -> Plan:
+    return Plan.from_dict(load(HELM_FIXTURES / "plan.json"))
+
+
+def golden_values() -> dict:
+    return load(HELM_FIXTURES / "values.json")
+
+
 def test_golden_plan_emits_the_golden_values() -> None:
-    plan = Plan.from_dict(load(HELM_FIXTURES / "plan.json"))
-    assert render(helm_values(plan)) == (HELM_FIXTURES / "values.json").read_text(encoding="utf-8")
+    assert render(helm_values(golden_plan(), GOLDEN_PARAMETERS)) == (HELM_FIXTURES / "values.json").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_values_do_not_depend_on_document_order() -> None:
-    plan = Plan.from_dict(load(HELM_FIXTURES / "plan.json"))
-    expected = helm_values(plan)
+    plan = golden_plan()
+    expected = (HELM_FIXTURES / "values.json").read_text(encoding="utf-8")
     shuffle = random.Random(5)  # noqa: S311 -- reproducible test data
     for _ in range(20):
         lanes = list(plan.lanes)
         identities = list(plan.identities)
         shuffle.shuffle(lanes)
         shuffle.shuffle(identities)
-        assert helm_values(replace(plan, lanes=tuple(lanes), identities=tuple(identities))) == expected
+        shuffled = replace(plan, lanes=tuple(lanes), identities=tuple(identities))
+        assert render(helm_values(shuffled, GOLDEN_PARAMETERS)) == expected
 
 
-def test_lanes_naming_one_chart_lane_union_their_pins() -> None:
-    values = helm_values(Plan.from_dict(load(HELM_FIXTURES / "plan.json")))
-    assert list(values["workers"]["pools"]["l4"]["bundles"]) == ["default"]
-    assert values["queueRouting"]["staticQueuePools"]["placement"]["pinnedModels"] == [
-        "BAAI/bge-m3",
-        "BAAI/bge-reranker-v2-m3",
-        "intfloat/e5-base-v2",
-    ]
+def test_the_default_base_is_the_charts_own_worker_groups() -> None:
+    assert ChartParameters().base_pools == chart_pools() == load(HELM_FIXTURES / "chart-pools.json")
+    assert chart_pools() is not chart_pools()
+
+
+def test_an_emitted_worker_group_disables_the_base_bundles_the_plan_does_not_place() -> None:
+    bundles = golden_values()["workers"]["pools"]["a100-40gb"]["bundles"]
+    assert bundles == {"default": {"enabled": False}, "sglang": {"enabled": True, "minReplicas": 0, "maxReplicas": 2}}
+    base = chart_pools() | {
+        "l4": {"enabled": False, "bundles": {"default": {}, "sglang": None, "old": {"enabled": False}}},
+    }
+    values = helm_values(plan_of(lane("a", bundle="candle")), ChartParameters(base_pools=base))
+    assert values["workers"]["pools"]["l4"]["bundles"] == {
+        "candle": {"enabled": True, "minReplicas": 1, "maxReplicas": 4},
+        "default": {"enabled": False},
+        "sglang": {"enabled": False},
+    }
+
+
+@pytest.mark.parametrize(
+    ("candidate", "path", "message"),
+    [
+        (
+            plan_of(
+                lane("a"), lane("b", queue_pool="PLACEMENT", bundle="Default", cell=replace(L4, machine_profile="L4"))
+            ),
+            "$.lanes[1]",
+            "names chart lane 'placement/l4/default', which $.lanes[0] also names;",
+        ),
+        (
+            plan_of(lane("a", queue_pool="default", floor_min=0), lane("b", queue_pool="default", floor_min=0)),
+            "$.lanes[1]",
+            "names chart lane 'default/l4/default', which $.lanes[0] also names;",
+        ),
+        (
+            plan_of(lane("a", bundle="sglang"), lane("b"), lane("c", bundle="SGLang")),
+            "$.lanes[2]",
+            "names chart lane 'placement/l4/sglang', which $.lanes[0] also names;",
+        ),
+    ],
+)
+def test_two_plan_lanes_on_one_chart_lane_are_refused(candidate: Plan, path: str, message: str) -> None:
+    error = refusal(candidate)
+    assert error.path == path
+    assert error.message.startswith(message)
+    assert error.message.endswith("so each plan lane needs its own queuePool, machineProfile and bundle")
 
 
 @pytest.mark.parametrize(
@@ -188,17 +254,69 @@ def test_schema_fixture_plan_has_an_unrealizable_zero_floor() -> None:
     assert error.message.startswith("must be 0 or at least 2:")
 
 
-def test_planner_estate_plan_names_one_chart_lane_with_two_floors() -> None:
+def test_planner_estate_plan_names_one_chart_lane_twice() -> None:
     error = refusal(Plan.from_dict(load(FIXTURES / "planner" / "expected-plan.json")))
-    assert error.path == "$.lanes[1].envelope.floorMin"
-    assert error.message.startswith("names chart lane 'default/l4/default' with $.lanes[0], which has 0, got 1")
+    assert error.path == "$.lanes[1]"
+    assert error.message.startswith("names chart lane 'default/l4/default', which $.lanes[0] also names;")
 
 
-def bundle_lanes(count: int, *, duplicate: bool = False) -> Plan:
-    lanes = [lane(f"lane-{index}", queue_pool="default", bundle=f"b{index}", floor_min=0) for index in range(count)]
-    if duplicate:
-        lanes.append(lane("lane-again", queue_pool="default", bundle="B0", floor_min=0))
-    return plan_of(*lanes)
+def planner_estate(identities: set[str], parameters: planner.PlannerParameters) -> planner.PlannerResult:
+    service_levels = ServiceLevels.from_dict(load(FIXTURES / "planner" / "service-levels.json"))
+    receipts = [Receipt.from_dict(document) for document in load(FIXTURES / "planner" / "receipts.json")]
+    boots = [BootEvidence.from_dict(document) for document in load(FIXTURES / "planner" / "boot-evidence.json")]
+    return planner.plan(
+        replace(service_levels, identities=tuple(e for e in service_levels.identities if e.identity in identities)),
+        [entry for entry in receipts if entry.identity in identities],
+        [entry for entry in boots if entry.identity in identities],
+        PriceList.from_dict(load(FIXTURES / "planner" / "price-list.json")),
+        Demand.from_dict(load(FIXTURES / "planner" / "demand.json")),
+        None,
+        parameters,
+    )
+
+
+def test_a_planner_plan_with_one_lane_per_chart_lane_emits_its_lanes() -> None:
+    result = planner_estate({"BAAI/bge-m3:sparse", "Qwen/Qwen3-8B"}, PLANNER_PARAMETERS)
+    assert {entry.warmth for entry in result.plan.identities} == {Warmth.COLD_WITH_BOUND}
+    values = helm_values(result.plan, ChartParameters(fallback_replicas=PLANNER_PARAMETERS.fallback_floor))
+    emitted = {
+        (group["queuePool"], profile, bundle): (settings["minReplicas"], settings["maxReplicas"])
+        for profile, group in values["workers"]["pools"].items()
+        for bundle, settings in group["bundles"].items()
+        if settings["enabled"]
+    }
+    assert emitted == {
+        (entry.queue_pool, entry.cell.machine_profile, entry.bundle): (entry.envelope.floor_min, entry.max_containers)
+        for entry in result.plan.lanes
+    }
+    assert len(emitted) == 2
+    assert "queueRouting" not in values
+
+
+@pytest.mark.parametrize(
+    ("queue_pool", "path", "message"),
+    [
+        ("default", "$.identities[0].warmth", "pins 'BAAI/bge-m3' on chart lane 'default/l4/default', but the"),
+        ("placement", "$.lanes[1].envelope.floorMin", "shares static queue pool 'placement' with $.lanes[0], whose"),
+    ],
+)
+def test_a_planner_plan_that_pins_beside_another_lane_is_refused(queue_pool: str, path: str, message: str) -> None:
+    result = planner_estate({"BAAI/bge-m3", "Qwen/Qwen3-8B"}, replace(PLANNER_PARAMETERS, queue_pool=queue_pool))
+    assert [entry.warmth for entry in result.plan.identities] == [Warmth.PINNED, Warmth.COLD_WITH_BOUND]
+    error = refusal(result.plan)
+    assert error.path == path
+    assert error.message.startswith(message)
+
+
+def bundle_lanes(count: int) -> Plan:
+    return plan_of(
+        *(lane(f"lane-{index}", queue_pool="default", bundle=f"b{index}", floor_min=0) for index in range(count))
+    )
+
+
+def base_lanes(count: int, *, enabled: bool = True, more: dict | None = None) -> dict[str, object]:
+    bundles: dict[str, dict] = {f"b{index}": {} for index in range(count)}
+    return chart_pools() | {"lanes": {"enabled": enabled, "bundles": bundles | (more or {})}}
 
 
 @pytest.mark.parametrize(
@@ -211,15 +329,77 @@ def bundle_lanes(count: int, *, duplicate: bool = False) -> Plan:
 def test_chart_lane_count_is_bounded_by_the_chart_limit(parameters: ChartParameters, limit: int, topology: str) -> None:
     assert (EXTERNAL_DEPENDENCIES_LANE_LIMIT, BUNDLED_DEPENDENCIES_LANE_LIMIT) == (192, 96)
     assert parameters.lane_limit == limit
-    assert len(helm_values(bundle_lanes(limit), parameters)["workers"]["pools"]["l4"]["bundles"]) == limit
-    assert (
-        len(helm_values(bundle_lanes(limit, duplicate=True), parameters)["workers"]["pools"]["l4"]["bundles"]) == limit
-    )
+    bundles = helm_values(bundle_lanes(limit), parameters)["workers"]["pools"]["l4"]["bundles"]
+    assert bundles.pop("default") == {"enabled": False}
+    assert len(bundles) == limit
+    assert all(settings["enabled"] for settings in bundles.values())
     error = refusal(bundle_lanes(limit + 1), parameters)
     assert error.path == "$.lanes"
     assert error.message == (
         f"names {limit + 1} chart lanes, above the {limit} the sie-cluster chart admits with {topology}"
     )
+
+
+@pytest.mark.parametrize(
+    ("bundled_dependencies", "limit", "topology"),
+    [
+        (False, EXTERNAL_DEPENDENCIES_LANE_LIMIT, "external KEDA and Prometheus"),
+        (True, BUNDLED_DEPENDENCIES_LANE_LIMIT, "bundled KEDA or Prometheus"),
+    ],
+)
+def test_lanes_the_base_values_enable_count_toward_the_chart_limit(
+    bundled_dependencies: bool, limit: int, topology: str
+) -> None:
+    planned = sum(
+        settings["enabled"]
+        for group in golden_values()["workers"]["pools"].values()
+        for settings in group["bundles"].values()
+    )
+    assert planned == len(golden_plan().lanes)
+    accepted = replace(
+        GOLDEN_PARAMETERS, bundled_dependencies=bundled_dependencies, base_pools=base_lanes(limit - planned)
+    )
+    assert helm_values(golden_plan(), accepted) == golden_values()
+    refused = replace(accepted, base_pools=base_lanes(limit - planned + 1))
+    error = refusal(golden_plan(), refused)
+    assert error.path == "$.lanes"
+    assert error.message == (
+        f"names {planned} chart lanes and the base values enable {limit - planned + 1} more, {limit + 1} in all, "
+        f"above the {limit} the sie-cluster chart admits with {topology}"
+    )
+
+
+def test_only_enabled_lanes_of_worker_groups_the_overlay_leaves_out_count_toward_the_chart_limit() -> None:
+    limit = EXTERNAL_DEPENDENCIES_LANE_LIMIT
+    disabled = replace(GOLDEN_PARAMETERS, base_pools=base_lanes(limit, enabled=False))
+    assert helm_values(golden_plan(), disabled) == golden_values()
+    l4 = {"l4": {"enabled": True, "bundles": {"default": {}, "extra": {}}}}
+    one = plan_of(lane("a", queue_pool="default", floor_min=0))
+    base = base_lanes(limit - 1, more={"off": {"enabled": False}}) | l4
+    assert helm_values(one, ChartParameters(base_pools=base))["workers"]["pools"]["l4"]["bundles"] == {
+        "default": {"enabled": True, "minReplicas": 0, "maxReplicas": 4},
+        "extra": {"enabled": False},
+    }
+    base = base_lanes(limit - 1, more={"off": {"enabled": False}, "on": {"enabled": True}}) | l4
+    assert refusal(one, ChartParameters(base_pools=base)).message.startswith(
+        f"names 1 chart lanes and the base values enable {limit} more, {limit + 1} in all"
+    )
+
+
+@pytest.mark.parametrize(
+    ("base_pools", "path"),
+    [
+        ([], "basePools"),
+        ({"l4": []}, "basePools['l4']"),
+        ({1: {}}, "basePools[1]"),
+        ({"l4": {"bundles": []}}, "basePools['l4'].bundles"),
+        ({"l4": {"bundles": {"default": []}}}, "basePools['l4'].bundles['default']"),
+    ],
+)
+def test_base_pools_must_be_worker_group_values(base_pools: Any, path: str) -> None:
+    with pytest.raises(SchemaError) as caught:
+        ChartParameters(base_pools=base_pools)
+    assert caught.value.path == path
 
 
 def test_pins_on_the_default_queue_pool_are_refused() -> None:
@@ -240,7 +420,7 @@ def test_a_warm_lane_without_pins_on_the_default_queue_pool_keeps_its_floor() ->
                     "enabled": True,
                     "machineProfile": "l4",
                     "queuePool": "default",
-                    "gpu": {"count": 1, "product": "NVIDIA-L4"},
+                    "gpu": {"count": 1, "deviceGroup": False, "product": "NVIDIA-L4"},
                     "resources": {
                         "requests": {"cpu": "4", "memory": "16384Mi"},
                         "limits": {"cpu": "4", "memory": "16384Mi"},
@@ -296,19 +476,10 @@ def test_lanes_on_one_static_queue_pool_must_agree(
     assert message in error.message
 
 
-@pytest.mark.parametrize(
-    ("changed", "path", "expected"),
-    [
-        ({"cell": Cell(machine_profile="L4", gpu_product="NVIDIA-L4-24GB")}, "cell.gpuProduct", "'NVIDIA-L4'"),
-        ({"container_shape": WIDE}, "containerShape", "{'gpuCount': 1, 'cpuCores': 4, 'memoryMiB': 16384}"),
-        ({"max_containers": 5}, "maxContainers", "4"),
-        ({"envelope": Envelope(floor_min=2, floor_max=2)}, "envelope.floorMin", "1"),
-    ],
-)
-def test_lanes_naming_one_chart_lane_must_agree(changed: dict, path: str, expected: str) -> None:
-    error = refusal(plan_of(lane("a"), replace(lane("b", queue_pool="PLACEMENT", bundle="Default"), **changed)))
-    assert error.path == f"$.lanes[1].{path}"
-    assert error.message.startswith(f"names chart lane 'placement/l4/default' with $.lanes[0], which has {expected}")
+def test_two_pinned_lanes_need_two_named_queue_pools() -> None:
+    error = refusal(plan_of(lane("a"), lane("b", cell=A100, shape=WIDE)))
+    assert error.path == "$.lanes[1].name"
+    assert "which pins ['org/a'], but pins ['org/b']" in error.message
 
 
 @pytest.mark.parametrize(
@@ -330,10 +501,40 @@ def test_lanes_on_one_machine_profile_share_one_worker_group(changed: dict, path
     [(4, "4"), (0.5, "500m"), (7.5, "7500m"), (2.3, "2300m"), (0.001, "1m"), (12.25, "12250m")],
 )
 def test_cpu_cores_render_as_kubernetes_quantities(cores: float, quantity: str) -> None:
-    shape = ContainerShape(gpu_count=2, cpu_cores=cores, memory_mib=1536)
+    shape = ContainerShape(gpu_count=1, cpu_cores=cores, memory_mib=1536)
     group = helm_values(plan_of(lane("a", queue_pool="default", floor_min=0, shape=shape)))["workers"]["pools"]["l4"]
-    assert group["gpu"] == {"count": 2, "product": "NVIDIA-L4"}
+    assert group["gpu"] == {"count": 1, "deviceGroup": False, "product": "NVIDIA-L4"}
     assert group["resources"]["requests"] == group["resources"]["limits"] == {"cpu": quantity, "memory": "1536Mi"}
+
+
+@pytest.mark.parametrize("device_group", [True, False])
+def test_a_multi_gpu_container_is_the_device_group_the_parameters_name(device_group: bool) -> None:
+    plan = plan_of(lane("a", queue_pool="default", floor_min=0, shape=PAIR), lane("b", cell=A100, shape=PAIR))
+    values = helm_values(plan, ChartParameters(device_groups={"l4": device_group, "a100-80gb": not device_group}))
+    pools = values["workers"]["pools"]
+    assert pools["l4"]["gpu"] == {"count": 2, "deviceGroup": device_group, "product": "NVIDIA-L4"}
+    assert pools["a100-80gb"]["gpu"] == {"count": 2, "deviceGroup": not device_group, "product": A100.gpu_product}
+
+
+def test_a_multi_gpu_container_needs_its_device_group_named() -> None:
+    plan = plan_of(lane("a", queue_pool="default", floor_min=0), lane("b", cell=A100, shape=PAIR))
+    error = refusal(plan, ChartParameters(device_groups={"l4": True, "A100-80GB": True}))
+    assert error.path == "$.lanes[1].containerShape.gpuCount"
+    assert error.message == (
+        "is 2: the chart runs a container of 2 GPUs as one device group or as 2 single-GPU workers, and the plan "
+        "does not say which; name machine profile 'a100-80gb' in device_groups"
+    )
+
+
+def test_a_single_gpu_container_is_never_a_device_group() -> None:
+    values = helm_values(plan_of(lane("a")), ChartParameters(device_groups={"l4": True}))
+    assert values["workers"]["pools"]["l4"]["gpu"]["deviceGroup"] is False
+
+
+@pytest.mark.parametrize("device_groups", [{"l4": 1}, {1: True}, [("l4", True)]])
+def test_device_groups_map_machine_profiles_to_booleans(device_groups: Any) -> None:
+    with pytest.raises(SchemaError, match="deviceGroups"):
+        ChartParameters(device_groups=device_groups)
 
 
 @pytest.mark.parametrize("cores", [0.0005, 1.0001])

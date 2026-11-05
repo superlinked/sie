@@ -257,18 +257,24 @@ with open("placement-values.json", "w", encoding="utf-8") as handle:
 | --- | --- |
 | `fallback_replicas` | The chart's `autoscaling.fallbackReplicas`, `2` by default |
 | `bundled_dependencies` | Whether the release installs KEDA or Prometheus itself (`keda.install` or `kube-prometheus-stack.install`), which lowers the chart's lane limit from 192 to 96 |
+| `base_pools` | The `workers.pools` of the values beneath the overlay: the chart's values merged with the release's own values files. Only each worker group's `enabled` and its bundles' `enabled` are read. By default the chart's own worker groups, `chart_pools()` |
+| `device_groups` | Lowercase machine profile to `true` when a container of more than one GPU on it is one device group, a single worker that owns every GPU as a model too large for one accelerator needs, or `false` when it is one single-GPU worker per GPU |
 
 A plan lane names the chart lane of its `queuePool`, `machineProfile` and
 `bundle`, canonicalized as the chart does: trimmed, at most 63 characters of
-`[A-Za-z0-9_-]`, and lowercased. Plan lanes that canonicalize to the same three
-tokens are one chart lane. The overlay sets:
+`[A-Za-z0-9_-]`, and lowercased. Each plan lane is a chart lane of its own. The
+overlay sets:
 
 - `workers.pools.<machineProfile>`: one enabled worker group per machine
   profile, with its `machineProfile` and `queuePool`, `gpu.count` and
-  `gpu.product` from the cell and container shape, and `resources` requests and
-  limits equal to the container shape. Each chart lane is an enabled
-  `bundles.<bundle>` entry whose `minReplicas` is the envelope's `floorMin` and
-  whose `maxReplicas` is `maxContainers`.
+  `gpu.product` from the cell and container shape, `gpu.deviceGroup`, and
+  `resources` requests and limits equal to the container shape. Each chart
+  lane is an enabled `bundles.<bundle>` entry whose `minReplicas` is the
+  envelope's `floorMin` and whose `maxReplicas` is `maxContainers`. Every other
+  bundle that `base_pools` enables under the group is set to
+  `enabled: false`, so the release runs no lane the plan does not place.
+  `gpu.deviceGroup` is `false` for a single GPU and the `device_groups` entry
+  of the machine profile for more.
 - `queueRouting.staticQueuePools.<queuePool>`: one static queue pool for every
   queue pool other than `default`, which the gateway needs before it admits
   that queue's workers. `gpus` lists every machine profile on the queue,
@@ -285,11 +291,16 @@ the chart and the gateway would not realize as planned:
 - A lane with `floorMin` 0 whose `floorMax` is above 0 and below the chart's
   fallback floor, `min(maxContainers, fallbackReplicas)`, which is the least
   KEDA keeps on an active zero-floor lane.
-- Plan lanes on one chart lane that differ in GPU product, container shape,
-  `maxContainers` or `floorMin`, and lanes on one machine profile that differ
-  in queue pool, GPU product or container shape.
-- More chart lanes than the chart admits: 192 with external KEDA and
-  Prometheus, 96 when the release installs either.
+- Two plan lanes on one chart lane. The chart refuses two entries on one
+  canonical lane, and a chart lane realizes one floor, one ceiling and one
+  pinned set, so the two lanes would share what the plan prices separately.
+- Lanes on one machine profile that differ in queue pool, GPU product or
+  container shape.
+- A container of more than one GPU on a machine profile that
+  `device_groups` does not name.
+- More chart lanes than the chart admits, counting the lanes of the worker
+  groups `base_pools` enables and the overlay leaves out: 192 with external
+  KEDA and Prometheus, 96 when the release installs either.
 - A `pinned` identity on the `default` queue pool, for which the gateway keeps
   no static queue pool.
 - Lanes on one named queue pool that differ in `floorMin` or in their pinned
@@ -301,12 +312,23 @@ the chart and the gateway would not realize as planned:
 The chart's queue-depth threshold, cooldown and scale-down stabilization are
 chart-wide, so a lane's `concurrency`, `floorMax` and buffer or scale-down
 window ranges are not part of the overlay. Helm merges the overlay into the
-values beneath it: a worker group or bundle that those values enable and the
-plan does not place stays enabled and counts toward the lane limit, and the
-worker group keys the overlay leaves out, such as `gpuType`, `nodeSelector`,
-`tolerations`, `platform` and `gpu.deviceGroup`, keep their values there.
-Requests reach a lane on a named queue pool through that pool, for example
+values beneath it: a worker group that those values enable and the plan does
+not use stays enabled, and the worker group keys the overlay leaves out, such
+as `gpuType`, `nodeSelector`, `tolerations` and `platform`, keep their values
+there. No chart template reads `gpu.product`, so the overlay does not
+constrain where a worker group schedules. The values beneath it must select
+nodes with the cell's GPU for every machine profile the plan places, as the
+cloud values files do with each worker group's `nodeSelector`. Requests reach
+a lane on a named queue pool through that pool, for example
 `gpu="<queuePool>/<machineProfile>"`.
+
+These rules bound which plans emit. A worker group carries one queue pool, a
+named queue pool carries one floor and one pinned set, and the `default` queue
+pool carries no pins, so a pinned lane needs a named queue pool and a machine
+profile of its own. The planner places each identity on a lane of its own, all
+on the queue pool its parameters name, `default` unless set. Its plan
+therefore emits only when no two identities share a machine profile and
+bundle, and it pins nothing, or its queue pool is named and it has one lane.
 
 ## Tests
 
