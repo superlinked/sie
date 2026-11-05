@@ -197,9 +197,13 @@ def lane(name, cell=L4, *, floor=1, shape=SHAPE) -> PlanLane:
 
 
 def plan_of(lanes, residents) -> Plan:
+    pinning = {name for name, warmth in residents.values() if warmth is Warmth.PINNED}
     return Plan(
         placement="test",
-        lanes=tuple(lanes),
+        lanes=tuple(
+            replace(lane, queue_pool=lane.name) if lane.name in pinning and lane.queue_pool == "default" else lane
+            for lane in lanes
+        ),
         identities=tuple(
             PlanIdentity(identity=identity, lane=name, warmth=warmth)
             for identity, (name, warmth) in sorted(residents.items())

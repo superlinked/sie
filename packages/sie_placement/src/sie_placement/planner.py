@@ -67,6 +67,8 @@ PLACEMENT_FAILURE_RATE_LIMIT = 0.05
 PLACEMENT_FAILURE_FIELD = "placementFailureRate"
 MEMORY_HEADROOM_FRACTION = 0.8
 COLD_WARMTHS = (Warmth.COLD_WITH_BOUND, Warmth.SNAPSHOT_COLD)
+DEFAULT_QUEUE_POOL = "default"
+QUEUE_POOL_MAX_LENGTH = 63
 
 _SLUG = re.compile(r"[^a-z0-9]+")
 _LEVEL_FIELDS = {
@@ -100,7 +102,7 @@ class PlannerParameters:
     buffer_containers: int = 0
     hold_budget_s: int = 0
     hours_per_month: float = HOURS_PER_MONTH
-    queue_pool: str = "default"
+    queue_pool: str = DEFAULT_QUEUE_POOL
     bundle: str = "default"
     bundles: Mapping[str, str] = field(default_factory=dict)
     unshared: frozenset[str] = frozenset()
@@ -381,6 +383,18 @@ def _slug(value: str) -> str:
 
 def _digest(value: str, width: int = 8) -> str:
     return hashlib.sha256(value.encode()).hexdigest()[:width]
+
+
+def _named_queue_pool(lane: str, taken: set[str]) -> str:
+    base = _slug(lane) or "lane"
+    candidates = [base] if len(base) <= QUEUE_POOL_MAX_LENGTH else []
+    candidates.extend(
+        f"{base[: QUEUE_POOL_MAX_LENGTH - width - 1].rstrip('-')}-{_digest(lane, width)}" for width in (8, 16)
+    )
+    name = next((candidate for candidate in candidates if candidate not in taken), None)
+    if name is None:
+        raise PlannerInputError(f"queue pool name for lane {lane!r} is already taken")
+    return name
 
 
 def _refusal_reason(cell: Cell, prices: Mapping[str, MachineProfilePrice]) -> str | None:
@@ -667,7 +681,6 @@ class _Planner:
             return False
         return (
             entry.warmth is warmth
-            and lane.queue_pool == self.parameters.queue_pool
             and lane.bundle == self.parameters.bundle_of(identity)
             and lane.cells == (receipt.cell, *fallbacks)
             and _runs_on(receipt, lane)
@@ -798,7 +811,7 @@ class _Planner:
         if current is None:
             return None
         lane = current[1]
-        if lane.queue_pool != self.parameters.queue_pool or lane.bundle != self.parameters.bundle_of(identity):
+        if lane.bundle != self.parameters.bundle_of(identity):
             return None
         return current
 
@@ -828,7 +841,6 @@ class _Planner:
             and lane.envelope.floor_min >= PINNED_FLOOR
             and not lane.fallback_cells
             and not self.hosts_solitary((*self.current_pinned[name], *self.current_lazy[name]))
-            and lane.queue_pool == self.parameters.queue_pool
             and lane.bundle == bundle
         )
 
@@ -1461,6 +1473,21 @@ class _Planner:
             envelope=envelope_for(option.warmth, self.parameters),
         )
 
+    def queue_pools(self, lanes: Iterable[str], identities: Iterable[PlanIdentity]) -> dict[str, str]:
+        pools = dict.fromkeys(lanes, self.parameters.queue_pool)
+        pinning = sorted({entry.lane for entry in identities if entry.warmth is Warmth.PINNED})
+        taken = {DEFAULT_QUEUE_POOL, self.parameters.queue_pool}
+        for name in pinning:
+            current = self.current_lanes.get(name)
+            if current is not None and current.queue_pool not in taken:
+                pools[name] = current.queue_pool
+                taken.add(current.queue_pool)
+        for name in pinning:
+            if pools[name] == self.parameters.queue_pool:
+                pools[name] = _named_queue_pool(name, taken)
+                taken.add(pools[name])
+        return pools
+
     def within_ceiling(self, lane: PlanLane) -> PlanLane:
         ceiling = self.parameters.max_containers
         if lane.max_containers <= ceiling:
@@ -1545,9 +1572,10 @@ class _Planner:
             PlanIdentity(identity=identity, lane=names[identity], warmth=option.warmth)
             for identity, option in placed.items()
         )
+        pools = self.queue_pools(lanes, identities)
         plan = Plan(
             placement=self.parameters.placement,
-            lanes=tuple(lanes[name] for name in sorted(lanes)),
+            lanes=tuple(replace(lanes[name], queue_pool=pools[name]) for name in sorted(lanes)),
             identities=tuple(sorted(identities, key=lambda entry: entry.identity)),
         )
         receipts: dict[str, Receipt | None] = {identity: option.pricing_receipt for identity, option in placed.items()}
@@ -1639,7 +1667,6 @@ class _Planner:
             and lane.envelope.floor_min >= PINNED_FLOOR
             and not lane.fallback_cells
             and lane.container_shape.gpu_count == 1
-            and lane.queue_pool == self.parameters.queue_pool
             and lane.bundle == self.parameters.bundle_of(identity)
             and pinned[lane.name]
             and not self.hosts_solitary((*pinned[lane.name], *lazy[lane.name]))
