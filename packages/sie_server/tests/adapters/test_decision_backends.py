@@ -158,7 +158,9 @@ def test_decision_admission_is_atomic_per_item_and_preserves_order():
     assert output.input_token_counts == [1, 0, 3]
 
 
-@pytest.mark.parametrize("failure", ["nesting", "key_collision"])
+@pytest.mark.parametrize(
+    "failure", ["nesting", "key_collision", "mapping_content", "integer_content", "boolean_content"]
+)
 def test_knowline_invalid_state_is_an_item_error_without_losing_healthy_neighbors(failure):
     adapter = scoring_adapter()
     adapter._codes = ("A", "B")
@@ -173,7 +175,7 @@ def test_knowline_invalid_state_is_an_item_error_without_losing_healthy_neighbor
         for _ in range(200):
             invalid = [invalid]
         expected_error = "INPUT_TOO_LONG"
-    else:
+    elif failure == "key_collision":
         invalid = [
             {
                 "role": "assistant",
@@ -183,6 +185,10 @@ def test_knowline_invalid_state_is_an_item_error_without_losing_healthy_neighbor
                 ],
             }
         ]
+        expected_error = "INVALID_INPUT"
+    else:
+        content = {"mapping_content": {"value": "x"}, "integer_content": 42, "boolean_content": True}[failure]
+        invalid = [{"role": "user", "content": content}]
         expected_error = "INVALID_INPUT"
     output = adapter.extract(
         [Item(text="first"), Item(metadata={"state": invalid}), Item(text="last")],

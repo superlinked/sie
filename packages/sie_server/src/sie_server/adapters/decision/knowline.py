@@ -80,6 +80,8 @@ def state_messages(state: Any, max_chars: int = MAX_QUESTION_CHARS) -> list[dict
     result = []
     for message in messages:
         content = message.get("content")
+        if content is not None and not isinstance(content, (str, list)):
+            raise InvalidInputError("KnowLine message content must be text, a list of text parts, or null")
         if isinstance(content, list):
             if any(
                 not isinstance(p, dict) or p.get("type") != "text" or not isinstance(p.get("text"), str)

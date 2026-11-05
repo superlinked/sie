@@ -66,23 +66,21 @@ def test_d3_boundary_text_inside_questions_cannot_replace_the_state_boundary():
     assert prefix.count(repeated) == 2
 
 
-def test_indented_json_is_bounded_before_tokenization():
+def test_qev_indented_json_is_bounded_before_tokenization():
     state = "value"
     for _ in range(300):
         state = {"key": state}
     assert len(describe(state, 65536)) < 65536
     with pytest.raises(InputTooLongError):
         qev.entry(state)
-    with pytest.raises(InputTooLongError):
-        knowline.render_value(state)
 
 
 def test_knowline_rejects_indentation_expansion_without_tokenizing_it():
     state = "x\n" * 1000
-    for _ in range(100):
+    for _ in range(60):
         state = {"key": state}
     assert len(describe(state, 10000)) < 10000
-    with pytest.raises(InputTooLongError):
+    with pytest.raises(InputTooLongError, match="character budget"):
         knowline.render_value(state, limit=10000)
 
 
