@@ -340,6 +340,10 @@ The command exits with status 2 before it calls Prometheus or the gateway when:
 - a lane's `queuePool`, machine profile or bundle is not 1 to 63 letters,
   digits, `_` or `-`, two lanes need the same carrier, or a carrier name is
   longer than the gateway's 128 characters;
+- the `sie-cluster` chart cannot run the plan: a lane on the `default` queue
+  pool pins an identity, whose pins no static queue pool carries, or an
+  identity is `bridged`, `snapshot-cold` or `scheduled-warm`, warmths the chart
+  does not realize;
 - a token file or `SIE_ADMIN_TOKEN` holds anything but one run of printable
   ASCII characters without spaces after trimming, or the Prometheus URL has an
   invalid port.

@@ -14,10 +14,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 
-from sie_placement.schema import Plan, PlanLane
+from sie_placement.schema import Plan, PlanLane, Warmth
 from sie_placement.tuner import Observation, Settings, Step, step
 
 CARRIER_PREFIX = "placement-floor"
+DEFAULT_QUEUE_POOL = "default"
 DEFAULT_MAX_POOL_FLOOR = 4
 DEFAULT_MAX_POOLS = 64
 MAX_POOL_NAME_LENGTH = 128
@@ -28,6 +29,12 @@ QUEUE_DEPTH = "queueDepth"
 PENDING_DEMAND = "pendingDemand"
 WARM_FLOOR = "warmFloor"
 RUNNERS = "runners"
+
+UNREALIZED_WARMTHS = {
+    Warmth.BRIDGED: "the overlay configures no remote bridge to serve it while the lane boots",
+    Warmth.SNAPSHOT_COLD: "the chart restores no snapshot, so the lane would boot cold",
+    Warmth.SCHEDULED_WARM: "the chart keeps no warm window, so the lane would stay cold inside it",
+}
 
 _LANE_TOKEN = re.compile(r"[a-z0-9_-]{1,63}")
 _SELECTOR_FORBIDDEN = re.compile(r"[{}\r\n]")
@@ -72,6 +79,10 @@ class LaneKey:
     def otel_lane(self) -> str:
         return f"{self.queue_pool}|{self.machine_profile}|{self.bundle}"
 
+    @property
+    def chart_lane(self) -> str:
+        return f"{self.queue_pool}/{self.machine_profile}/{self.bundle}"
+
 
 @dataclass(frozen=True, slots=True)
 class Carrier:
@@ -98,6 +109,10 @@ def carriers(
         )
     result: list[Carrier] = []
     first_index: dict[str, int] = {}
+    pins: dict[str, dict[str, int]] = {}
+    for index, entry in enumerate(plan.identities):
+        if entry.warmth is Warmth.PINNED:
+            pins.setdefault(entry.lane, {})[entry.identity] = index
     for index, lane in enumerate(plan.lanes):
         path = f"$.lanes[{index}]"
         key = LaneKey.canonical(lane.queue_pool, lane.cell.machine_profile, lane.bundle)
@@ -106,6 +121,14 @@ def carriers(
                 f"{path}: queuePool, cell.machineProfile and bundle must each be 1 to 63 letters, digits, '_' or '-'"
             )
             continue
+        pinned = pins.get(lane.name)
+        if key.queue_pool == DEFAULT_QUEUE_POOL and pinned:
+            identity, pin = min(pinned.items(), key=lambda item: item[1])
+            problems.append(
+                f"$.identities[{pin}].warmth: pins {identity!r} on chart lane {key.chart_lane!r}, but the gateway "
+                f"keeps no static queue pool for the {DEFAULT_QUEUE_POOL!r} queue pool, so its pinnedModels have no "
+                "carrier; place pinned identities on a named queuePool"
+            )
         if lane.envelope.floor_max > max_pool_floor:
             problems.append(
                 f"{path}.envelope.floorMax: {lane.envelope.floor_max} exceeds the gateway's "
@@ -120,6 +143,14 @@ def carriers(
         if earlier != index:
             problems.append(f"{path}: needs the same floor-carrier pool {carrier.name!r} as $.lanes[{earlier}]")
         result.append(carrier)
+    for index, entry in enumerate(plan.identities):
+        reason = UNREALIZED_WARMTHS.get(entry.warmth)
+        if reason is not None:
+            problems.append(
+                f"$.identities[{index}].warmth: is {entry.warmth.value!r} for {entry.identity!r} on lane "
+                f"{entry.lane!r}, which the sie-cluster chart does not realize: {reason}; plan the identity pinned, "
+                "lazy-resident or cold-with-bound"
+            )
     if problems:
         raise PlanRefusedError(problems)
     return tuple(result)

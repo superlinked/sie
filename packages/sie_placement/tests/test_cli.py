@@ -188,13 +188,15 @@ def read_token_file(tmp_path) -> Path:
     return path
 
 
-def run(gateway: FakeGateway, prometheus: FakePrometheus, *extra: str, plan: Path = FIXTURES / "plan.json") -> int:
+def run(gateway: FakeGateway, prometheus: FakePrometheus, *extra: str, plan: Path = FIXTURES / "tune-plan.json") -> int:
     return cli.main(
         ["tune", "--plan", str(plan), "--prometheus-url", prometheus.url, "--gateway-url", gateway.url, *extra]
     )
 
 
-def tune(gateway: FakeGateway, prometheus: FakePrometheus, *extra: str, plan: Path = FIXTURES / "plan.json") -> int:
+def tune(
+    gateway: FakeGateway, prometheus: FakePrometheus, *extra: str, plan: Path = FIXTURES / "tune-plan.json"
+) -> int:
     return run(gateway, prometheus, "--once", *extra, plan=plan)
 
 
@@ -311,7 +313,7 @@ def test_a_rejected_write_fails_the_tick_and_names_the_pool(gateway, prometheus,
 def test_an_envelope_above_the_pool_floor_limit_is_refused_before_any_call(
     gateway, prometheus, read_token_file, tmp_path, capsys
 ):
-    document = json.loads((FIXTURES / "plan.json").read_text(encoding="utf-8"))
+    document = json.loads((FIXTURES / "tune-plan.json").read_text(encoding="utf-8"))
     document["lanes"][0]["envelope"]["floorMax"] = 5
     plan = tmp_path / "plan.json"
     plan.write_text(json.dumps(document), encoding="utf-8")
@@ -321,6 +323,17 @@ def test_an_envelope_above_the_pool_floor_limit_is_refused_before_any_call(
     assert prometheus.requests == []
     assert tune(gateway, prometheus, "--api-key-file", str(read_token_file), "--max-pool-floor", "5", plan=plan) == 0
     capsys.readouterr()
+
+
+def test_a_plan_the_chart_cannot_run_is_refused_before_any_call(gateway, prometheus, tmp_path, capsys):
+    document = json.loads((FIXTURES / "tune-plan.json").read_text(encoding="utf-8"))
+    document["identities"][0]["warmth"] = "pinned"
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(document), encoding="utf-8")
+    assert tune(gateway, prometheus, plan=plan) == cli.EXIT_REFUSED
+    assert "pins 'BAAI/bge-m3' on chart lane 'default/l4/default'" in capsys.readouterr().err
+    assert gateway.requests == []
+    assert prometheus.requests == []
 
 
 def test_more_lanes_than_the_pool_limit_are_refused_before_any_call(gateway, prometheus, capsys):
