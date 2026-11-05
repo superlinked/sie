@@ -25,7 +25,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: public-release-main
+  # Publication and recovery share one queue and are never cancelled. Each push run
+  # gets its own group, so a job waiting for approval cannot hold or overflow it.
+  group: ${{ github.event_name == 'push' && format('public-release-push-{0}', github.run_id) || 'public-release-main' }}
   queue: max
   cancel-in-progress: false
 
@@ -40,11 +42,26 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment: release-automation
+    # The newest push replaces an older authoring job, including one waiting for
+    # approval. Other events skip this job and must never cancel it: the release
+    # event that starts publication arrives while this job is still running.
+    concurrency:
+      group: public-release-authoring
+      cancel-in-progress: ${{ github.event_name == 'push' }}
     permissions:
       contents: read
     outputs:
       release_pr_head: ${{ steps.release-pr-head.outputs.sha }}
     steps:
+      - name: Refuse a run whose push is no longer the newest on main
+        run: |
+          set -euo pipefail
+          main_sha="$(git ls-remote "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" refs/heads/main | cut -f1)"
+          [[ "$main_sha" =~ ^[0-9a-f]{40}$ ]]
+          if [ "$main_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::$GITHUB_SHA is behind main ($main_sha); approve or rerun the newest push run."
+            exit 1
+          fi
       - name: Require activated public release GitHub App credentials
         env:
           APP_ID: ${{ vars.PUBLIC_RELEASE_APP_ID }}

@@ -119,6 +119,8 @@ def build_tool_choice_grammar(
         pattern = _hermes_json_force_regex(allowed)
     elif tool_call_format == "glm_xml":
         pattern = _glm_xml_force_regex(allowed)
+    elif tool_call_format == "muse_atem":
+        pattern = _muse_atem_force_regex(allowed)
     elif tool_call_format == "auto":
         # ``auto`` means the model's on-wire tool-call format could not be
         # confidently resolved from config. Guessing Qwen XML here would
@@ -207,3 +209,26 @@ def _glm_xml_force_regex(names: list[str]) -> str:
     pair = r"<arg_key>[^<>]*</arg_key>\s*<arg_value>" + _INNER + r"</arg_value>\s*"
     block = r"<tool_call>\s*" + _name_alternation(names) + r"\s*(?:" + pair + r")*</tool_call>"
     return r"\s*(?:" + block + r"\s*)+"
+
+
+def _muse_atem_force_regex(names: list[str]) -> str:
+    """Force one Muse Glimmer tool channel holding one-or-more calls.
+
+    A channel looks like::
+
+         to=NAME<|message|><atem:function_calls>
+        <atem:invoke name="NAME">
+        <atem:parameter name="KEY">VALUE</atem:parameter>
+        </atem:invoke>
+        </atem:function_calls>
+
+    The generation prompt ends at ``<|start|>assistant``, so the output starts at
+    the recipient and constraining it skips the reasoning channel. Nothing optional
+    surrounds the channel: greedy decoding fills optional leading whitespace up to
+    the token limit. Parameters are complete so every accepted block parses;
+    values stay free, as in the other formats.
+    """
+    name = _name_alternation(names)
+    parameter = r'<atem:parameter name="[^"<>]+">' + _INNER + r"</atem:parameter>\s*"
+    invoke = r'<atem:invoke name="' + name + r'">\s*(?:' + parameter + r")*</atem:invoke>"
+    return r" to=" + name + r"<\|message\|><atem:function_calls>\s*(?:" + invoke + r"\s*)+</atem:function_calls>"

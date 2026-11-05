@@ -1,0 +1,96 @@
+sie_id: meta-models/Muse-Glimmer-30B
+hf_id: meta-models/Muse-Glimmer-30B
+hf_revision: cec94fcfd6512f2cfe708138c32533b346ea4f69
+# MuseGlimmerForConditionalGeneration: 29.8B parameters in 55.5 GiB of BF16
+# weights, with a native window of 131,072 tokens. The sglang-cu130 engine
+# registers the architecture and its reasoning and tool parsers, both named
+# ``muse``. No remote code. SGLangMuseAdapter rewrites the model's channel framing
+# into <think> and <tool_call> blocks for the native /generate surfaces.
+inputs:
+  text: true
+  image: true
+  audio: false
+  video: false
+tasks:
+  generate:
+    context_length: 8192
+    max_output_tokens: 4096
+    # The chat template has no switch that turns reasoning off and never reads
+    # enable_thinking. Declaring it true marks that reasoning private.
+    chat_template_kwargs:
+      enable_thinking: true
+    capabilities:
+      grammar: ["json_schema", "regex"]
+      streaming: true
+      tools: true
+max_sequence_length: 8192
+profiles:
+  default:
+    max_batch_tokens: 16384
+    kv_budget_tokens: 8192
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.cuda13:SGLangMuseAdapter
+    adapter_options:
+      loadtime:
+        mem_fraction_static: 0.85
+        served_model_name: meta-models/Muse-Glimmer-30B
+        trust_remote_code: false
+        grammar_backend: xgrammar
+        reasoning_parser: muse
+        tool_call_parser: muse
+        # The vendor's draft doubles decode throughput on H100: 47 to 97 tokens/s
+        # at one request and 369 to 671 at eight when greedy, and 82 to 87 at one
+        # request under the sampling below. JSON schema, regex, tool and image
+        # requests all passed on this shape.
+        speculative_needs_extra_buffer: false
+        speculative:
+          enabled: true
+          algorithm: dflash
+          draft_model: meta-models/Muse-Glimmer-30B-assistant
+          draft_model_revision: c676cce91658f9568aaf264a416211e2782735b7
+      runtime:
+        first_chunk_timeout_s: 90
+        inter_chunk_timeout_s: 15
+        overall_timeout_s: 600
+        # The model card's recommended sampling.
+        default_sampling:
+          temperature: 1.0
+          top_p: 0.95
+          top_k: 64
+        stop_tokens:
+          - "<|eot|>"
+
+  # H100-80GB: the native window, without FP8. The draft and its cache need the
+  # extra 5%: 0.85 caps the KV cache at 92,938 tokens and 0.90 raises it to 157,094.
+  # A 130,010-token prompt answered correctly with 78.9 GiB of the GPU in use.
+  h100-128k:
+    max_output_tokens: 32768
+    max_batch_tokens: 131072
+    kv_budget_tokens: 131072
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.cuda13:SGLangMuseAdapter
+    adapter_options:
+      loadtime:
+        max_seq_length: 131072
+        mem_fraction_static: 0.9
+        served_model_name: meta-models/Muse-Glimmer-30B
+        trust_remote_code: false
+        grammar_backend: xgrammar
+        reasoning_parser: muse
+        tool_call_parser: muse
+        speculative_needs_extra_buffer: false
+        speculative:
+          enabled: true
+          algorithm: dflash
+          draft_model: meta-models/Muse-Glimmer-30B-assistant
+          draft_model_revision: c676cce91658f9568aaf264a416211e2782735b7
+      runtime:
+        first_chunk_timeout_s: 900
+        inter_chunk_timeout_s: 30
+        overall_timeout_s: 1800
+        default_sampling:
+          temperature: 1.0
+          top_p: 0.95
+          top_k: 64
+        stop_tokens:
+          - "<|eot|>"
