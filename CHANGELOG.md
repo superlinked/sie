@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.1](https://github.com/superlinked/sie/compare/v0.11.0...v0.11.1) (2026-11-05)
+
+
+### Features
+
+* **examples:** run the published-benchmarks example against your own server ([#889](https://github.com/superlinked/sie/issues/889)) ([991540b](https://github.com/superlinked/sie/commit/991540b0bfc75d19b1270cd03532032cd7d1cf72))
+
 ## [0.11.0](https://github.com/superlinked/sie/compare/v0.10.1...v0.11.0) (2026-11-03)
 
 
