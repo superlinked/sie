@@ -101,7 +101,7 @@ def test_muse_glimmer_launches_the_engine_with_its_parsers_and_no_remote_code(
     assert cmd[cmd.index("--reasoning-parser") + 1] == "muse"
     assert cmd[cmd.index("--grammar-backend") + 1] == "xgrammar"
     assert "--trust-remote-code" not in cmd
-    assert cmd[cmd.index("--context-length") + 1] == "8192"
+    assert cmd[cmd.index("--context-length") + 1] == "32768"
     assert cmd[cmd.index("--speculative-algorithm") + 1] == "DFLASH"
     assert cmd[cmd.index("--speculative-draft-model-path") + 1] == "meta-models/Muse-Glimmer-30B-assistant"
     assert len(cmd[cmd.index("--speculative-draft-model-revision") + 1]) == 40
@@ -239,4 +239,5 @@ def test_native_window_profile_keeps_the_default_launch_shape() -> None:
     assert native.loadtime["reasoning_parser"] == "muse"
     assert native.runtime["stop_tokens"] == ["<|eot|>"]
     assert native.runtime["default_sampling"] == default.runtime["default_sampling"]
-    assert default.kv_budget_tokens == 8192
+    assert default.kv_budget_tokens == 65536
+    assert config.tasks.generate.max_output_tokens == 16384
