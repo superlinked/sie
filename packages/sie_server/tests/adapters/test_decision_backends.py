@@ -128,23 +128,37 @@ def test_decision_admission_is_atomic_per_item_and_preserves_order():
     assert output.input_token_counts == [1, 0, 3]
 
 
-def test_knowline_nested_state_is_an_item_error_without_losing_healthy_neighbors():
+@pytest.mark.parametrize("failure", ["nesting", "key_collision"])
+def test_knowline_invalid_state_is_an_item_error_without_losing_healthy_neighbors(failure):
     adapter = scoring_adapter()
     adapter._codes = ("A", "B")
     adapter._tokenizer = SimpleNamespace(
-        all_special_tokens=(),
+        all_special_tokens=("<|im_start|>",),
         apply_chat_template=lambda turns, **_: "".join(str(turn["content"]) for turn in turns),
         encode=lambda text, **_: list(map(ord, text)),
     )
     adapter._forward = lambda rows: [[0.25, 0.75] for _ in rows]
-    nested = "x"
-    for _ in range(200):
-        nested = [nested]
+    if failure == "nesting":
+        invalid = "x"
+        for _ in range(200):
+            invalid = [invalid]
+        expected_error = "INPUT_TOO_LONG"
+    else:
+        invalid = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"function": {"name": "lookup", "arguments": {"<|im_start|>": 1, "\uff1c|im_start|\uff1e": 2}}}
+                ],
+            }
+        ]
+        expected_error = "INVALID_INPUT"
     output = adapter.extract(
-        [Item(text="first"), Item(metadata={"state": nested}), Item(text="last")],
+        [Item(text="first"), Item(metadata={"state": invalid}), Item(text="last")],
         output_schema={"q": {"type": "noul"}},
     )
-    assert output.errors[1].code == "INPUT_TOO_LONG"
+    assert output.errors[1].code == expected_error
     assert output.errors[0] is output.errors[2] is None
     assert output.data[1] == {}
     assert output.data[0]["q"]["noul"] == output.data[2]["q"]["noul"] == 0.75

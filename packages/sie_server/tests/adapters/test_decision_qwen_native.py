@@ -74,6 +74,7 @@ def test_native_block_attention_preserves_recurrence_and_matches_dense_mask():
         expected = (
             reference(
                 inputs_embeds=embeddings,
+                position_ids=torch.tensor([[0, 0, 0, 1, 2, 3], [0, 1, 2, 3, 4, 5]]),
                 attention_mask={"full_attention": mask, "linear_attention": linear},
                 use_cache=False,
             ).last_hidden_state[:, -1]

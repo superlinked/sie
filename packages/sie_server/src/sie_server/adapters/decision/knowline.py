@@ -97,10 +97,13 @@ def _safe_message_value(tokenizer: Any, value: Any, depth: int = 0) -> Any:
     if isinstance(value, str):
         return content_text(tokenizer, value)
     if isinstance(value, dict):
-        return {
-            _safe_message_value(tokenizer, key, depth + 1): _safe_message_value(tokenizer, item, depth + 1)
-            for key, item in value.items()
-        }
+        result = {}
+        for key, item in value.items():
+            safe_key = _safe_message_value(tokenizer, key, depth + 1)
+            if safe_key in result:
+                raise InvalidInputError("KnowLine state keys collide after special-token neutralization")
+            result[safe_key] = _safe_message_value(tokenizer, item, depth + 1)
+        return result
     if isinstance(value, list):
         return [_safe_message_value(tokenizer, item, depth + 1) for item in value]
     return value
@@ -149,7 +152,7 @@ def _scaffold(
     turns = conversation(messages)
     try:
         text = render(turns)
-    except InputTooLongError:
+    except (InputTooLongError, InvalidInputError):
         raise
     except Exception:  # noqa: BLE001
         merged: list[dict[str, Any]] = []
@@ -162,7 +165,7 @@ def _scaffold(
             merged = [*turns[:-2], {**turns[-2], "content": _join(turns[-2]["content"], turns[-1]["content"])}]
         try:
             text = render(merged)
-        except InputTooLongError:
+        except (InputTooLongError, InvalidInputError):
             raise
         except Exception:  # noqa: BLE001
             text = render(conversation([{"role": "user", "content": render_value(state, limit=max_chars)}]))

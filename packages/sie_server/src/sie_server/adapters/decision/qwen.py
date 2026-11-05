@@ -100,6 +100,7 @@ class QwenReadout(torch.nn.Module):
         )
         hidden = self.backbone(
             inputs_embeds=embeddings,
+            position_ids=(present.long().cumsum(-1) - 1).clamp_min(0),
             attention_mask={"full_attention": bounds, "linear_attention": scan},
             use_cache=False,
         ).last_hidden_state[:, -1]
