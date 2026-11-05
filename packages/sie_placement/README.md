@@ -543,12 +543,22 @@ overlay sets:
   queue pool other than `default`, which the gateway needs before it admits
   that queue's workers. `gpus` lists every machine profile on the queue,
   `minimumWorkerCount` is the lanes' `floorMin`, `pinnedModels` are their
-  `pinned` identities, and `bundle` names the lanes' bundle when they share
-  one.
+  `pinned` identities, however many share a lane, and `bundle` names the
+  lanes' bundle when they share one. A `lazy-resident` identity is not pinned:
+  the workers of its lane load it on demand.
 
 It refuses, with an `UnrealizablePlanError` that names the plan field, a plan
 the chart and the gateway would not realize as planned:
 
+- A lane with `fallbackCells`. A worker group runs on one machine profile and
+  GPU product and has no ordered candidate list, so the chart would place the
+  lane on its `cell` only.
+- An identity whose warmth is `bridged`, `snapshot-cold` or `scheduled-warm`.
+  The overlay realizes `pinned` through a static queue pool's `pinnedModels`
+  and the lane's floor, `lazy-resident` through a warm lane whose workers load
+  the identity on demand, and `cold-with-bound` through a zero-floor lane that
+  scales from zero. It configures no remote bridge, and the chart restores no
+  snapshot and keeps no warm window.
 - A lane token the chart rejects, or a machine profile or bundle that is not
   a lowercase DNS-1123 label, which the chart requires of worker group and
   bundle keys.
@@ -589,10 +599,13 @@ a lane on a named queue pool through that pool, for example
 These rules bound which plans emit. A worker group carries one queue pool, a
 named queue pool carries one floor and one pinned set, and the `default` queue
 pool carries no pins, so a pinned lane needs a named queue pool and a machine
-profile of its own. The planner places each identity on a lane of its own, all
-on the queue pool its parameters name, `default` unless set. Its plan
-therefore emits only when no two identities share a machine profile and
-bundle, and it pins nothing, or its queue pool is named and it has one lane.
+profile of its own, and two pinned lanes on one GPU product need two machine
+profiles. Such a lane may pin several identities and host lazy residents
+beside them. The planner places every lane on the queue pool its parameters
+name, `default` unless set, and may place several identities on one lane. Its
+plan therefore emits only when no two lanes share a machine profile and bundle,
+no lane has fallback cells and no identity is `snapshot-cold`, and it pins
+nothing, or its queue pool is named and it has one lane.
 
 ## Tests
 

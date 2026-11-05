@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import random
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from sie_placement import planner
 from sie_placement.helm import (
     BUNDLED_DEPENDENCIES_LANE_LIMIT,
     EXTERNAL_DEPENDENCIES_LANE_LIMIT,
+    UNREALIZED_WARMTHS,
     ChartParameters,
     UnrealizablePlanError,
     chart_pools,
@@ -21,17 +23,27 @@ from sie_placement.report import render
 from sie_placement.schema import (
     WARM_FLOOR_WARMTHS,
     BootEvidence,
+    BootOutcome,
     Cell,
     ContainerShape,
     Demand,
     Envelope,
+    IdentityServiceLevel,
+    MachineProfilePrice,
+    Operation,
+    Percentiles,
+    Placement,
     Plan,
     PlanIdentity,
     PlanLane,
     PriceList,
     Receipt,
+    RequestShape,
     SchemaError,
+    ServiceLevel,
     ServiceLevels,
+    SourceRef,
+    Throughput,
     Warmth,
 )
 
@@ -248,8 +260,10 @@ def test_zero_floor_lane_accepts_a_realizable_floor(
     }
 
 
-def test_schema_fixture_plan_has_an_unrealizable_zero_floor() -> None:
-    error = refusal(Plan.from_dict(load(FIXTURES / "plan.json")))
+def test_schema_fixture_plan_has_fallback_cells_and_an_unrealizable_zero_floor() -> None:
+    plan = Plan.from_dict(load(FIXTURES / "plan.json"))
+    assert refusal(plan).path == "$.lanes[1].fallbackCells"
+    error = refusal(replace(plan, lanes=tuple(replace(entry, fallback_cells=()) for entry in plan.lanes)))
     assert error.path == "$.lanes[1].envelope.floorMax"
     assert error.message.startswith("must be 0 or at least 2:")
 
@@ -565,3 +579,245 @@ def test_every_warm_floor_warmth_is_carried_by_bundle_min_replicas() -> None:
         assert values["queueRouting"]["staticQueuePools"]["placement"]["minimumWorkerCount"] == 3
         pinned = ["org/a"] if warmth is Warmth.PINNED else []
         assert values["queueRouting"]["staticQueuePools"]["placement"]["pinnedModels"] == pinned
+
+
+def residents(*lanes: PlanLane, placed: dict[str, tuple[str, Warmth]]) -> Plan:
+    identities = tuple(
+        PlanIdentity(identity=identity, lane=name, warmth=warmth) for identity, (name, warmth) in placed.items()
+    )
+    return Plan(placement="us-central1", lanes=lanes, identities=identities)
+
+
+def static_pools(values: dict) -> dict:
+    return values["queueRouting"]["staticQueuePools"]
+
+
+START = datetime(2026, 11, 2, tzinfo=UTC)
+NO_DEMAND = Demand(start=START, end=START + timedelta(hours=24), series=())
+PACKING_PRICES = PriceList(
+    currency="USD",
+    machine_profiles=(
+        MachineProfilePrice(
+            name="l4",
+            gpu_product="NVIDIA-L4",
+            gpu_memory_mib=23034,
+            accelerator_per_hour=1.0,
+            core_per_hour=0.0,
+            memory_gib_per_hour=0.0,
+        ),
+        MachineProfilePrice(
+            name="a100-80gb",
+            gpu_product="NVIDIA-A100-SXM4-80GB",
+            gpu_memory_mib=81920,
+            accelerator_per_hour=3.0,
+            core_per_hour=0.0,
+            memory_gib_per_hour=0.0,
+        ),
+    ),
+    placements=(Placement(name="us-central1", region_multiplier=1),),
+)
+PACKING_PARAMETERS = planner.PlannerParameters(
+    placement="us-central1", max_containers=4, fallback_floor=2, cooldown_s=900, queue_pool="placement"
+)
+
+
+def packing_receipt(
+    identity: str, cell: Cell = L4, *, beside: tuple[str, ...] = (), footprint: int = 5000, working: int = 1000
+) -> Receipt:
+    return Receipt(
+        identity=identity,
+        cell=cell,
+        container_shape=SHAPE,
+        concurrency=8,
+        request_shape=RequestShape(operation=Operation.ENCODE, items_per_request=1),
+        throughput=Throughput(requests_per_second=8.0),
+        latency=Percentiles(p99_ms=150.0),
+        co_residents=beside,
+        footprint_mib=footprint,
+        working_memory_mib=working,
+        source=SourceRef(uri=f"receipts/{identity}/{cell.machine_profile}/{'+'.join(beside)}"),
+    )
+
+
+def never_cold(identity: str, bound: int = 0) -> IdentityServiceLevel:
+    return IdentityServiceLevel(identity=identity, level=ServiceLevel(come_alive_p95_s=bound, warm_p99_ms=250))
+
+
+def packed_estate(queue_pool: str) -> planner.PlannerResult:
+    receipts = [
+        packing_receipt("org/a", footprint=6000),
+        packing_receipt("org/b"),
+        packing_receipt("org/a", beside=("org/b",), footprint=6000, working=1500),
+        packing_receipt("org/b", beside=("org/a",), working=1500),
+        packing_receipt("org/c", footprint=4000, working=1500),
+    ]
+    load = BootEvidence(
+        identity="org/c",
+        cell=L4,
+        container_shape=SHAPE,
+        warmth=Warmth.LAZY_RESIDENT,
+        outcome=BootOutcome.SUCCEEDED,
+        boot_seconds=20.0,
+        source=SourceRef(uri="loads/org/c/l4"),
+    )
+    return planner.plan(
+        ServiceLevels(identities=(never_cold("org/a"), never_cold("org/b"), never_cold("org/c", 60))),
+        receipts,
+        [load],
+        PACKING_PRICES,
+        NO_DEMAND,
+        None,
+        replace(PACKING_PARAMETERS, queue_pool=queue_pool),
+    )
+
+
+def scarce_type_attempts(cell: Cell) -> list[BootEvidence]:
+    return [
+        BootEvidence(
+            identity="org/other",
+            cell=cell,
+            container_shape=SHAPE,
+            warmth=Warmth.COLD_WITH_BOUND,
+            outcome=BootOutcome.SUCCEEDED if index < 2 else BootOutcome.UNPLACED,
+            boot_seconds=30.0 if index < 2 else None,
+            source=SourceRef(uri=f"boots/org/other/{cell.machine_profile}/{index}"),
+        )
+        for index in range(3)
+    ]
+
+
+def test_a_lane_with_fallback_cells_is_refused() -> None:
+    error = refusal(plan_of(replace(lane("a"), fallback_cells=(A100,))))
+    assert error.path == "$.lanes[0].fallbackCells"
+    assert error.message.startswith(
+        "lists 'a100-80gb' with 'NVIDIA-A100-SXM4-80GB' after the lane's cell, 'l4' with 'NVIDIA-L4', but a worker "
+        "group of the sie-cluster chart runs on one machine profile and GPU product and has no ordered candidate list"
+    )
+    assert error.message.endswith("so the chart would place the lane on its cell only; plan the lane on one cell")
+    later = plan_of(
+        lane("a", floor_min=0), replace(lane("b", queue_pool="default", floor_min=0), fallback_cells=(A100,))
+    )
+    assert refusal(later).path == "$.lanes[1].fallbackCells"
+
+
+def test_a_planner_candidate_list_is_refused_rather_than_emitted_on_its_first_cell() -> None:
+    receipts = [packing_receipt("org/model"), packing_receipt("org/model", A100)]
+    boots = [*scarce_type_attempts(L4), *scarce_type_attempts(A100)]
+    result = planner.plan(
+        ServiceLevels(identities=(never_cold("org/model"),)),
+        receipts,
+        boots,
+        PACKING_PRICES,
+        NO_DEMAND,
+        None,
+        replace(PACKING_PARAMETERS, hold_budget_s=20),
+    )
+    (planned,) = result.plan.lanes
+    assert (planned.cell, planned.fallback_cells) == (L4, (A100,))
+    error = refusal(result.plan)
+    assert error.path == "$.lanes[0].fallbackCells"
+
+
+@pytest.mark.parametrize("warmth", sorted(UNREALIZED_WARMTHS))
+def test_a_warmth_the_chart_does_not_realize_is_refused(warmth: Warmth) -> None:
+    plan = plan_of(lane("a", floor_min=0), lane("b", queue_pool="default", floor_min=0), warmths={"b": warmth})
+    error = refusal(plan)
+    assert error.path == "$.identities[1].warmth"
+    assert error.message.startswith(
+        f"is {warmth.value!r} for 'org/b' on lane 'b', which the sie-cluster chart does not realize: "
+        f"{UNREALIZED_WARMTHS[warmth]};"
+    )
+    assert set(UNREALIZED_WARMTHS) == {Warmth.BRIDGED, Warmth.SNAPSHOT_COLD, Warmth.SCHEDULED_WARM}
+
+
+def test_a_lane_pinning_several_identities_carries_them_all_on_its_own_static_queue_pool() -> None:
+    plan = residents(
+        lane("shared", floor_max=2),
+        lane("cold", queue_pool="default", cell=A100, floor_min=0),
+        placed={
+            "org/b": ("shared", Warmth.PINNED),
+            "org/a": ("shared", Warmth.PINNED),
+            "org/c": ("shared", Warmth.LAZY_RESIDENT),
+            "org/d": ("cold", Warmth.COLD_WITH_BOUND),
+        },
+    )
+    values = helm_values(plan)
+    assert static_pools(values) == {
+        "placement": {
+            "bundle": "default",
+            "gpus": {"l4": 0},
+            "minimumWorkerCount": 1,
+            "pinnedModels": ["org/a", "org/b"],
+        }
+    }
+    assert values["workers"]["pools"]["l4"]["bundles"] == {
+        "default": {"enabled": True, "minReplicas": 1, "maxReplicas": 4}
+    }
+    assert values["workers"]["pools"]["a100-80gb"]["queuePool"] == "default"
+
+
+def co_pinned(name: str, profile: str, queue_pool: str) -> PlanLane:
+    return lane(name, queue_pool=queue_pool, cell=Cell(machine_profile=profile, gpu_product="NVIDIA-L4"))
+
+
+def test_two_co_pinned_lanes_on_one_gpu_type_emit_through_their_own_machine_profiles_and_queue_pools() -> None:
+    placed = {
+        "org/a": ("first", Warmth.PINNED),
+        "org/b": ("first", Warmth.PINNED),
+        "org/c": ("second", Warmth.PINNED),
+        "org/d": ("second", Warmth.PINNED),
+        "org/e": ("second", Warmth.LAZY_RESIDENT),
+    }
+    values = helm_values(
+        residents(co_pinned("first", "l4", "first"), co_pinned("second", "l4-b", "second"), placed=placed)
+    )
+    assert {profile: group["queuePool"] for profile, group in values["workers"]["pools"].items()} == {
+        "l4": "first",
+        "l4-b": "second",
+    }
+    assert {name: pool["pinnedModels"] for name, pool in static_pools(values).items()} == {
+        "first": ["org/a", "org/b"],
+        "second": ["org/c", "org/d"],
+    }
+    error = refusal(residents(co_pinned("first", "l4", "first"), co_pinned("second", "l4", "second"), placed=placed))
+    assert error.path == "$.lanes[1].queuePool"
+    assert error.message.startswith("shares worker group 'l4' with $.lanes[0], which has 'first', got 'second';")
+    shared_pool = refusal(
+        residents(co_pinned("first", "l4", "shared"), co_pinned("second", "l4-b", "shared"), placed=placed)
+    )
+    assert shared_pool.path == "$.lanes[1].name"
+    assert "which pins ['org/a', 'org/b'], but pins ['org/c', 'org/d']" in shared_pool.message
+
+
+def test_a_lane_pinning_several_identities_on_the_default_queue_pool_is_refused() -> None:
+    placed = {"org/a": ("shared", Warmth.PINNED), "org/b": ("shared", Warmth.PINNED)}
+    error = refusal(residents(lane("shared", queue_pool="default"), placed=placed))
+    assert error.path == "$.identities[0].warmth"
+    assert "pins 'org/a' on chart lane 'default/l4/default'" in error.message
+
+
+def test_a_planner_lane_pinning_several_identities_emits_on_a_named_queue_pool() -> None:
+    result = packed_estate("placement")
+    (planned,) = result.plan.lanes
+    assert {entry.identity: (entry.lane, entry.warmth) for entry in result.plan.identities} == {
+        "org/a": (planned.name, Warmth.PINNED),
+        "org/b": (planned.name, Warmth.PINNED),
+        "org/c": (planned.name, Warmth.LAZY_RESIDENT),
+    }
+    values = helm_values(result.plan)
+    assert static_pools(values) == {
+        "placement": {
+            "bundle": "default",
+            "gpus": {"l4": 0},
+            "minimumWorkerCount": planned.envelope.floor_min,
+            "pinnedModels": ["org/a", "org/b"],
+        }
+    }
+    assert values["workers"]["pools"]["l4"]["bundles"]["default"] == {
+        "enabled": True,
+        "minReplicas": planned.envelope.floor_min,
+        "maxReplicas": planned.max_containers,
+    }
+    error = refusal(packed_estate("default").plan)
+    assert error.path.endswith(".warmth")
+    assert "place pinned identities on a named queuePool" in error.message
