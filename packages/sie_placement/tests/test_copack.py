@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -221,6 +222,16 @@ def lane(name, cell=L4, *, queue_pool="default", floor=1, concurrency=8) -> Plan
 
 def rendered(result) -> tuple[str, str]:
     return render(result.plan.to_dict()), render(result.report.to_dict())
+
+
+def loosened(service_levels: ServiceLevels, identity: str, bound: int) -> ServiceLevels:
+    return replace(
+        service_levels,
+        identities=tuple(
+            replace(entry, level=replace(entry.level, come_alive_p95_s=bound)) if entry.identity == identity else entry
+            for entry in service_levels.identities
+        ),
+    )
 
 
 PAIR = (levels("org/a", "org/b"), [receipt("org/a", A100), receipt("org/b")])
@@ -969,6 +980,33 @@ def test_the_co_packed_estate_states_its_moves():
     assert again.report.unchanged
 
 
+@pytest.mark.parametrize(
+    ("co_residency", "levered"),
+    [
+        (
+            False,
+            [("Qwen/Qwen3-Embedding-4B", Warmth.COLD_WITH_BOUND), ("Qwen/Qwen3-Embedding-4B", Warmth.SNAPSHOT_COLD)],
+        ),
+        (True, []),
+    ],
+)
+def test_an_estate_lever_is_listed_only_when_loosening_its_bound_lowers_the_plan_total(co_residency, levered):
+    inputs = estate(co_residency)
+    result = plan(**inputs)
+    report = result.report
+    assert [(lever.identity, lever.warmth) for lever in report.come_alive_levers] == levered
+    for lever in report.come_alive_levers:
+        service_levels = loosened(inputs["service_levels"], lever.identity, lever.permitted_bound_s)
+        again = plan(**{**inputs, "service_levels": service_levels, "current_plan": result.plan})
+        assert report.monthly_cost - again.report.monthly_cost == pytest.approx(lever.saving_at_permitted_bound)
+    assert report.identity("BAAI/bge-m3").lane == "default-l4-default"
+    for bound in (9, 95):
+        service_levels = loosened(inputs["service_levels"], "BAAI/bge-m3", bound)
+        again = plan(**{**inputs, "service_levels": service_levels, "current_plan": result.plan})
+        assert again.report.identity("BAAI/bge-m3").chosen.warmth in (Warmth.COLD_WITH_BOUND, Warmth.SNAPSHOT_COLD)
+        assert again.report.monthly_cost > report.monthly_cost
+
+
 def random_estate(seed: int) -> dict:
     rng = random.Random(seed)  # noqa: S311 -- reproducible test data
     identities = [f"org/model-{index}" for index in range(rng.randint(2, 6))]
@@ -1098,6 +1136,15 @@ def test_random_estates_co_pack_only_measured_sets_and_replan_to_themselves(seed
     for request in co_requests(result.report):
         assert request.saving_bound is not None
         assert request.saving_bound > 0
+    for lever in result.report.come_alive_levers:
+        assert lever.saving_at_permitted_bound > 0
+        looser = loosened(service_levels, lever.identity, lever.permitted_bound_s)
+        replanned = run(
+            looser, receipts, co, boots=boots, hourly=hourly, gpu_memory_headroom_mib=headroom, current=result.plan
+        )
+        assert result.report.monthly_cost - replanned.report.monthly_cost == pytest.approx(
+            lever.saving_at_permitted_bound
+        )
     again = run(
         service_levels, receipts, co, boots=boots, hourly=hourly, gpu_memory_headroom_mib=headroom, current=result.plan
     )
