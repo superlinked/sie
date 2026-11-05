@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from sie_placement.schema import Envelope
@@ -405,6 +406,24 @@ def test_a_slow_boot_raises_the_floor_once_per_realized_step():
 def test_negative_counts_are_rejected(make):
     with pytest.raises(ValueError, match="must be at least 0"):
         make()
+
+
+@pytest.mark.parametrize("attainment", list(Attainment))
+def test_an_attainment_given_as_its_wire_string_reads_as_its_value(attainment):
+    wire: Any = attainment.value
+    envelope = make_envelope((0, 4))
+    for runners, backlog, running in itertools.product(range(2), range(2), range(2)):
+        from_wire = Observation(runners=runners, backlog=backlog, running=running, attainment=wire)
+        typed = Observation(runners=runners, backlog=backlog, running=running, attainment=attainment)
+        assert from_wire.attainment is attainment
+        assert from_wire == typed
+        assert step(envelope, from_wire, Settings(floor=1)) == step(envelope, typed, Settings(floor=1))
+
+
+def test_an_unknown_attainment_is_rejected():
+    wire: Any = "late"
+    with pytest.raises(ValueError, match="not a valid Attainment"):
+        Observation(runners=0, backlog=0, running=0, attainment=wire)
 
 
 def test_actions_carry_their_wire_names():

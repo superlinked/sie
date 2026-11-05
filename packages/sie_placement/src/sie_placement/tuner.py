@@ -39,6 +39,7 @@ class Observation:
         _require_non_negative("runners", self.runners)
         _require_non_negative("backlog", self.backlog)
         _require_non_negative("running", self.running)
+        object.__setattr__(self, "attainment", Attainment(self.attainment))
 
     @property
     def pressured(self) -> bool:
