@@ -1,0 +1,33 @@
+sie_id: PelaAI/KnowLine-4B-Gen5.5
+hf_id: PelaAI/KnowLine-4B-Gen5.5
+hf_revision: 779944d2cc8ffa19cef386aee83c83bcb967ade2
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 8192
+profiles:
+  default:
+    max_batch_tokens: 8192
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.decision:SGLangDecisionAdapter
+    adapter_options:
+      loadtime:
+        max_forward_tokens: 8192
+        structured_noul: false
+        mem_fraction_static: 0.72
+        extra_launch_args:
+        - --quantization
+        - fp8
+        - --enable-fp32-lm-head
+        - --mamba-radix-cache-strategy
+        - extra_buffer
+        - --disable-radix-cache
+      runtime: {}
+description: KnowLine-4B typed text decisions over Qwen3.5. Preserves the release read-twice prompt, online FP8
+  backbone and FP32 option-token readout through SGLang.
