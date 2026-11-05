@@ -461,6 +461,91 @@ def test_release_queue_cancellation_and_linter_exception_are_exact():
     assert not re.fullmatch(contract.QUEUE_SCHEMA_DIAGNOSTIC, diagnostic.replace('"queue"', '"bogus"'))
 
 
+@pytest.mark.parametrize(
+    "group",
+    [
+        "public-release-main",
+        "${{ github.event_name == 'push' && 'public-release-push' || 'public-release-main' }}",
+        "${{ github.event_name == 'release' && format('run-{0}', github.run_id) || 'public-release-main' }}",
+    ],
+)
+def test_push_runs_cannot_hold_the_publication_queue(group):
+    top = (contract.ROOT / ".github/workflows/release.yml").read_text()
+    ci = (contract.ROOT / ".github/workflows/ci.yml").read_text()
+    assert contract.RELEASE_QUEUE_GROUP in top
+    assert contract.release_queue_errors(top.replace(contract.RELEASE_QUEUE_GROUP, group), ci)
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        "",
+        contract.RELEASE_AUTHORING_CONCURRENCY.replace("public-release-authoring", "public-release-main"),
+        "    concurrency:\n      group: public-release-authoring\n      cancel-in-progress: false\n",
+        "    concurrency:\n      group: public-release-authoring\n      cancel-in-progress: true\n",
+        "    concurrency:\n      group: public-release-authoring\n      queue: max\n",
+        contract.RELEASE_AUTHORING_CONCURRENCY + "      queue: max\n",
+    ],
+)
+def test_newest_push_must_replace_the_authoring_job(replacement):
+    blocks = contract.workflow_job_blocks(".github/workflows/release.yml")
+    assert contract.release_authoring_concurrency_errors(blocks) == []
+    assert contract.RELEASE_AUTHORING_CONCURRENCY in blocks["release-please"]
+    authoring = blocks["release-please"].replace(contract.RELEASE_AUTHORING_CONCURRENCY, replacement)
+    assert contract.release_authoring_concurrency_errors({**blocks, "release-please": authoring})
+
+
+@pytest.mark.parametrize("job", ["prepare", "python-publish", "docker", "complete", "recover"])
+def test_only_authoring_may_use_job_level_concurrency(job):
+    blocks = contract.workflow_job_blocks(".github/workflows/release.yml")
+    changed = blocks[job] + "\n    concurrency:\n      group: public-release-authoring\n"
+    assert contract.release_authoring_concurrency_errors({**blocks, job: changed})
+
+
+def test_authoring_must_check_freshness_before_any_other_step():
+    blocks = contract.workflow_job_blocks(".github/workflows/release.yml")
+    authoring = blocks["release-please"]
+    step = contract.RELEASE_AUTHORING_FRESHNESS_STEP
+    assert step in authoring
+    removed = authoring.replace(step, "")
+    moved = removed + "\n" + step
+    assert contract.release_authoring_concurrency_errors({**blocks, "release-please": removed})
+    assert contract.release_authoring_concurrency_errors({**blocks, "release-please": moved})
+
+
+def test_authoring_freshness_step_refuses_a_push_behind_main(tmp_path):
+    work = tmp_path / "work"
+    remote = tmp_path / "owner" / "repo.git"
+    git_env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+
+    def git(*args, cwd=work):
+        command = ["git", *args]
+        result = subprocess.run(command, cwd=cwd, env=git_env, check=True, capture_output=True, text=True)  # noqa: S603
+        return result.stdout.strip()
+
+    work.mkdir()
+    git("init", "-q", "-b", "main")
+    identity = ("-c", "user.name=test", "-c", "user.email=test@example.invalid")
+    git(*identity, "commit", "-q", "--allow-empty", "-m", "older")
+    older = git("rev-parse", "HEAD")
+    git(*identity, "commit", "-q", "--allow-empty", "-m", "newer")
+    newer = git("rev-parse", "HEAD")
+    git("clone", "-q", "--bare", str(work), str(remote))
+    script = textwrap.dedent(contract.RELEASE_AUTHORING_FRESHNESS_STEP.partition("run: |\n")[2])
+
+    def run_step(sha):
+        env = {**git_env, "GITHUB_SERVER_URL": tmp_path.as_uri(), "GITHUB_REPOSITORY": "owner/repo", "GITHUB_SHA": sha}
+        command = ["bash", "-c", script]
+        return subprocess.run(command, cwd=tmp_path, env=env, check=False, capture_output=True, text=True)  # noqa: S603
+
+    assert run_step(newer).returncode == 0
+    stale = run_step(older)
+    assert stale.returncode == 1
+    assert f"::error::{older} is behind main ({newer})" in stale.stdout
+    git("update-ref", "-d", "refs/heads/main", cwd=remote)
+    assert run_step(newer).returncode != 0
+
+
 def test_authoring_no_longer_assumes_release_sha_is_push_sha():
     jobs = contract.workflow_job_blocks(".github/workflows/release.yml")
     assert 'test "$RELEASE_SHA" = "$EXPECTED_SHA"' not in jobs["release-please"]
