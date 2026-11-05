@@ -1,0 +1,74 @@
+{
+  "workers": {
+    "pools": {
+      "a100-80gb": {
+        "enabled": true,
+        "machineProfile": "a100-80gb",
+        "queuePool": "default",
+        "gpu": {
+          "count": 1,
+          "product": "NVIDIA-A100-SXM4-80GB"
+        },
+        "resources": {
+          "requests": {
+            "cpu": "7500m",
+            "memory": "87040Mi"
+          },
+          "limits": {
+            "cpu": "7500m",
+            "memory": "87040Mi"
+          }
+        },
+        "bundles": {
+          "sglang": {
+            "enabled": true,
+            "minReplicas": 0,
+            "maxReplicas": 3
+          }
+        }
+      },
+      "l4": {
+        "enabled": true,
+        "machineProfile": "l4",
+        "queuePool": "placement",
+        "gpu": {
+          "count": 1,
+          "product": "NVIDIA-L4"
+        },
+        "resources": {
+          "requests": {
+            "cpu": "4",
+            "memory": "16384Mi"
+          },
+          "limits": {
+            "cpu": "4",
+            "memory": "16384Mi"
+          }
+        },
+        "bundles": {
+          "default": {
+            "enabled": true,
+            "minReplicas": 1,
+            "maxReplicas": 4
+          }
+        }
+      }
+    }
+  },
+  "queueRouting": {
+    "staticQueuePools": {
+      "placement": {
+        "bundle": "default",
+        "gpus": {
+          "l4": 0
+        },
+        "minimumWorkerCount": 1,
+        "pinnedModels": [
+          "BAAI/bge-m3",
+          "BAAI/bge-reranker-v2-m3",
+          "intfloat/e5-base-v2"
+        ]
+      }
+    }
+  }
+}

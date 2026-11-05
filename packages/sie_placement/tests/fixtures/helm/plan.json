@@ -1,0 +1,94 @@
+{
+  "kind": "placement-plan",
+  "schemaVersion": 1,
+  "placement": "us-central1",
+  "lanes": [
+    {
+      "name": "embed-l4",
+      "queuePool": "placement",
+      "bundle": "default",
+      "cell": {
+        "machineProfile": "l4",
+        "gpuProduct": "NVIDIA-L4"
+      },
+      "containerShape": {
+        "gpuCount": 1,
+        "cpuCores": 4,
+        "memoryMiB": 16384
+      },
+      "concurrency": 16,
+      "maxContainers": 4,
+      "envelope": {
+        "floorMin": 1,
+        "floorMax": 2
+      }
+    },
+    {
+      "name": "generate-a100-80gb",
+      "queuePool": "default",
+      "bundle": "sglang",
+      "cell": {
+        "machineProfile": "a100-80gb",
+        "gpuProduct": "NVIDIA-A100-SXM4-80GB"
+      },
+      "containerShape": {
+        "gpuCount": 1,
+        "cpuCores": 7.5,
+        "memoryMiB": 87040
+      },
+      "concurrency": 32,
+      "maxContainers": 3,
+      "envelope": {
+        "floorMin": 0,
+        "floorMax": 2
+      }
+    },
+    {
+      "name": "rerank-l4",
+      "queuePool": "Placement",
+      "bundle": "Default",
+      "cell": {
+        "machineProfile": "L4",
+        "gpuProduct": "NVIDIA-L4"
+      },
+      "containerShape": {
+        "gpuCount": 1,
+        "cpuCores": 4,
+        "memoryMiB": 16384
+      },
+      "concurrency": 8,
+      "maxContainers": 4,
+      "envelope": {
+        "floorMin": 1,
+        "floorMax": 1
+      }
+    }
+  ],
+  "identities": [
+    {
+      "identity": "BAAI/bge-m3",
+      "lane": "embed-l4",
+      "warmth": "pinned"
+    },
+    {
+      "identity": "BAAI/bge-m3:sparse",
+      "lane": "embed-l4",
+      "warmth": "lazy-resident"
+    },
+    {
+      "identity": "BAAI/bge-reranker-v2-m3",
+      "lane": "rerank-l4",
+      "warmth": "pinned"
+    },
+    {
+      "identity": "Qwen/Qwen3-8B",
+      "lane": "generate-a100-80gb",
+      "warmth": "cold-with-bound"
+    },
+    {
+      "identity": "intfloat/e5-base-v2",
+      "lane": "embed-l4",
+      "warmth": "pinned"
+    }
+  ]
+}
