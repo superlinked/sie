@@ -27,6 +27,7 @@ from sie_placement.report import (
     RefusedRecord,
     Report,
     RequestReason,
+    SharedChartLane,
     UnplacedReason,
 )
 from sie_placement.schema import (
@@ -160,11 +161,12 @@ class _Window:
     def needed(requests: int, requests_per_second: float) -> int:
         return math.ceil(requests / (requests_per_second * SECONDS_PER_HOUR))
 
+    def above_floor_hours(self, requests: Sequence[int], requests_per_second: float, floor: int) -> float:
+        above = sum(max(0, min(self.ceiling, self.needed(count, requests_per_second)) - floor) for count in requests)
+        return above * self.scale
+
     def warm_container_hours(self, requests: Sequence[int], requests_per_second: float) -> float:
-        above = sum(
-            max(0, min(self.ceiling, self.needed(count, requests_per_second)) - PINNED_FLOOR) for count in requests
-        )
-        return PINNED_FLOOR * self.hours_per_month + above * self.scale
+        return PINNED_FLOOR * self.hours_per_month + self.above_floor_hours(requests, requests_per_second, PINNED_FLOOR)
 
     def cold_container_hours(self, requests: Sequence[int], requests_per_second: float | None) -> float:
         seconds = 0.0
@@ -244,8 +246,8 @@ def _slug(value: str) -> str:
     return _SLUG.sub("-", value.lower()).strip("-")
 
 
-def _digest(value: str) -> str:
-    return hashlib.sha256(value.encode()).hexdigest()[:8]
+def _digest(value: str, width: int = 8) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()[:width]
 
 
 def _refusal_reason(cell: Cell, prices: Mapping[str, MachineProfilePrice]) -> str | None:
@@ -302,7 +304,7 @@ def _boot_index(records: Iterable[BootEvidence]) -> dict[_BootKey, _Boot]:
         if any(record.outcome is not BootOutcome.SUCCEEDED for record in used):
             index[key] = _Boot(seconds=None, borrowed=not own)
         else:
-            index[key] = _Boot(seconds=max(record.boot_seconds for record in used), borrowed=not own)
+            index[key] = _Boot(seconds=float(max(record.boot_seconds for record in used)), borrowed=not own)
     return index
 
 
@@ -316,13 +318,9 @@ def _hourly_requests(demand: Demand) -> dict[str, tuple[int, ...]]:
     }
 
 
-def _matches_current(receipt: Receipt, warmth: Warmth, current: tuple[PlanIdentity, PlanLane] | None) -> bool:
-    if current is None:
-        return False
-    entry, lane = current
+def _runs_on(receipt: Receipt, lane: PlanLane) -> bool:
     return (
-        entry.warmth is warmth
-        and lane.cell == receipt.cell
+        lane.cell == receipt.cell
         and lane.container_shape == receipt.container_shape
         and lane.concurrency == receipt.concurrency
     )
@@ -399,15 +397,21 @@ class _Planner:
     def _refuse(self, record: RefusedRecord, identity: str, cell: Cell, source: SourceRef, reason: str) -> None:
         self.refusals.append(Refusal(record=record, identity=identity, cell=cell, source=source, reason=reason))
 
-    def hourly_cost(self, cell: Cell, shape: ContainerShape) -> float | None:
-        if _refusal_reason(cell, self.prices) is not None:
-            return None
-        return container_hourly_cost(self.prices[cell.machine_profile], shape, self.multiplier)
+    def is_current(self, identity: str, receipt: Receipt, warmth: Warmth) -> bool:
+        current = self.current.get(identity)
+        if current is None:
+            return False
+        entry, lane = current
+        return (
+            entry.warmth is warmth
+            and lane.queue_pool == self.parameters.queue_pool
+            and lane.bundle == self.parameters.bundle_of(identity)
+            and _runs_on(receipt, lane)
+        )
 
     def choose(self, identity: str) -> _Choice:
         level = self.levels[identity]
         requests = self.requests.get(identity, ())
-        current = self.current.get(identity)
         options: list[_Option] = []
         boot_requests: dict[tuple[Cell, ContainerShape], MeasurementRequest] = {}
         receipts = self.receipts.get(identity, [])
@@ -426,7 +430,7 @@ class _Planner:
                     come_alive_s=0.0,
                     basis=ComeAliveBasis.WARM_FLOOR,
                     blockers=warm,
-                    current=_matches_current(receipt, Warmth.PINNED, current),
+                    current=self.is_current(identity, receipt, Warmth.PINNED),
                 )
             )
             cold_cost = hourly * self.window.cold_container_hours(requests, rate)
@@ -458,7 +462,7 @@ class _Planner:
                         come_alive_s=boot.seconds,
                         basis=boot.basis,
                         blockers=warm if blocker is None else (*warm, blocker),
-                        current=_matches_current(receipt, warmth, current),
+                        current=self.is_current(identity, receipt, warmth),
                     )
                 )
         feasible = [option for option in options if option.feasible]
@@ -567,71 +571,131 @@ class _Planner:
         nearest = max(option.cost for option in cheaper)
         return min((option for option in cheaper if option.cost == nearest), key=lambda option: option.rank)
 
-    def lane_names(self, choices: Sequence[_Choice], reserved: set[str]) -> dict[str, str]:
-        bases: dict[str, str] = {}
-        for choice in choices:
-            if choice.chosen is not None:
-                profile = choice.chosen.receipt.cell.machine_profile
-                bases[choice.identity] = _slug(f"{choice.identity}-{profile}") or "lane"
-        counts = Counter(bases.values())
-        return {
-            identity: base if counts[base] == 1 and base not in reserved else f"{base}-{_digest(identity)}"
-            for identity, base in bases.items()
+    @staticmethod
+    def lane_names(placed: Mapping[str, _Option], reserved: set[str]) -> dict[str, str]:
+        bases = {
+            identity: _slug(f"{identity}-{option.receipt.cell.machine_profile}") or "lane"
+            for identity, option in placed.items()
         }
+        counts = Counter(bases.values())
+        taken = set(reserved)
+        names: dict[str, str] = {}
+        for identity, base in bases.items():
+            name = base if counts[base] == 1 and base not in reserved else f"{base}-{_digest(identity)}"
+            if name in taken:
+                name = f"{base}-{_digest(identity, width=64)}"
+            if name in taken:
+                raise PlannerInputError(f"lane name {name!r} for {identity!r} is already taken")
+            taken.add(name)
+            names[identity] = name
+        return names
+
+    def placed_lane(self, name: str, identity: str, option: _Option) -> PlanLane:
+        receipt = option.receipt
+        return PlanLane(
+            name=name,
+            queue_pool=self.parameters.queue_pool,
+            bundle=self.parameters.bundle_of(identity),
+            cell=receipt.cell,
+            container_shape=receipt.container_shape,
+            concurrency=receipt.concurrency,
+            max_containers=self.parameters.max_containers,
+            envelope=envelope_for(option.warmth, self.parameters),
+        )
+
+    def within_ceiling(self, lane: PlanLane) -> PlanLane:
+        ceiling = self.parameters.max_containers
+        if lane.max_containers <= ceiling:
+            return lane
+        envelope = replace(
+            lane.envelope,
+            floor_min=min(lane.envelope.floor_min, ceiling),
+            floor_max=min(lane.envelope.floor_max, ceiling),
+        )
+        return replace(lane, max_containers=ceiling, envelope=envelope)
+
+    def slowest_receipt(self, identity: str, lane: PlanLane) -> Receipt | None:
+        matching = [(order, receipt) for order, receipt in self.receipts.get(identity, []) if _runs_on(receipt, lane)]
+        if not matching:
+            return None
+        return min(matching, key=lambda pair: (pair[1].throughput.requests_per_second, pair[0]))[1]
+
+    def kept_blockers(
+        self, identity: str, entry: PlanIdentity, lane: PlanLane, receipt: Receipt | None
+    ) -> tuple[Blocker, ...]:
+        level = self.levels[identity]
+        blockers = [] if receipt is None else list(_warm_blockers(level, receipt))
+        if entry.warmth in COLD_WARMTHS and level.come_alive_p95_s is not None:
+            boot = self.boots.get((identity, lane.cell, lane.container_shape, entry.warmth))
+            if boot is not None and boot.seconds is not None:
+                blocker = _come_alive_blocker(level, boot.seconds)
+                blockers.extend(() if blocker is None else (blocker,))
+            elif level.come_alive_p95_s == 0:
+                blockers.append(Blocker(field="comeAliveP95S", bound=0, measured=None))
+        return tuple(blockers)
+
+    def demand_hours(self, lane: PlanLane, identity: str, receipt: Receipt | None) -> float | None:
+        requests = self.requests.get(identity, ())
+        if not requests:
+            return 0.0
+        if receipt is None:
+            return None
+        window = replace(
+            self.window,
+            ceiling=lane.max_containers,
+            active_floor=max(1, min(self.parameters.fallback_floor, lane.max_containers)),
+        )
+        rate = receipt.throughput.requests_per_second
+        if lane.envelope.floor_min:
+            return window.above_floor_hours(requests, rate, lane.envelope.floor_min)
+        return window.cold_container_hours(requests, rate)
 
     def run(self) -> PlannerResult:
         choices = [self.choose(identity) for identity in sorted(self.levels)]
+        placed = {choice.identity: choice.chosen for choice in choices if choice.chosen is not None}
         kept = {
             choice.identity: self.current[choice.identity]
             for choice in choices
             if choice.chosen is None and choice.identity in self.current
         }
-        kept_lanes = {lane.name: lane for _, lane in kept.values()}
-        names = self.lane_names(choices, set(kept_lanes))
-        lanes: dict[str, PlanLane] = dict(kept_lanes)
-        identities: list[PlanIdentity] = [entry for entry, _ in kept.values()]
-        reports: list[IdentityReport] = []
-        requests: list[MeasurementRequest] = []
-        levers: list[Lever] = []
-        monthly_cost = 0.0
-        for choice in choices:
-            requests.extend(self.receipt_requests(choice))
-            requests.extend(self.boot_requests(choice))
-            levers.extend(self.levers(choice))
-            reports.append(self._identity_report(choice, names, kept))
-            if choice.chosen is None:
-                continue
-            monthly_cost += choice.chosen.cost
-            receipt = choice.chosen.receipt
-            name = names[choice.identity]
-            lanes[name] = PlanLane(
-                name=name,
-                queue_pool=self.parameters.queue_pool,
-                bundle=self.parameters.bundle_of(choice.identity),
-                cell=receipt.cell,
-                container_shape=receipt.container_shape,
-                concurrency=receipt.concurrency,
-                max_containers=self.parameters.max_containers,
-                envelope=envelope_for(choice.chosen.warmth, self.parameters),
-            )
-            identities.append(PlanIdentity(identity=choice.identity, lane=name, warmth=choice.chosen.warmth))
+        staying = {identity: self.current[identity][1].name for identity, option in placed.items() if option.current}
+        reserved = {lane.name for _, lane in kept.values()} | set(staying.values())
+        moving = {identity: option for identity, option in placed.items() if identity not in staying}
+        names = staying | self.lane_names(moving, reserved)
+        lanes = {lane.name: self.within_ceiling(lane) for _, lane in kept.values()}
+        for identity, option in placed.items():
+            lanes[names[identity]] = self.placed_lane(names[identity], identity, option)
+        identities = [entry for entry, _ in kept.values()]
+        identities.extend(
+            PlanIdentity(identity=identity, lane=names[identity], warmth=option.warmth)
+            for identity, option in placed.items()
+        )
         new_plan = Plan(
             placement=self.parameters.placement,
             lanes=tuple(lanes[name] for name in sorted(lanes)),
             identities=tuple(sorted(identities, key=lambda entry: entry.identity)),
         )
-        lane_reports = self._lane_reports(new_plan)
+        receipts: dict[str, Receipt | None] = {identity: option.receipt for identity, option in placed.items()}
+        receipts.update({identity: self.slowest_receipt(identity, lane) for identity, (_, lane) in kept.items()})
+        lane_reports, costs = self._pricing(new_plan, receipts)
+        reports: list[IdentityReport] = []
+        requests: list[MeasurementRequest] = []
+        levers: list[Lever] = []
+        for choice in choices:
+            requests.extend(self.receipt_requests(choice))
+            requests.extend(self.boot_requests(choice))
+            levers.extend(self.levers(choice))
+            reports.append(
+                self._identity_report(choice, names, kept, costs.get(choice.identity), receipts.get(choice.identity))
+            )
         identity_changes, lane_changes = _changes(self.current_plan, new_plan)
         report = Report(
             placement=self.parameters.placement,
             currency=self.price_list.currency,
             parameters=self.parameters.to_dict(),
-            monthly_cost=monthly_cost,
-            envelope_max_monthly_cost=sum(
-                lane.envelope_max_monthly_cost for lane in lane_reports if lane.envelope_max_monthly_cost is not None
-            ),
             identities=tuple(reports),
             lanes=lane_reports,
+            shared_chart_lanes=_shared_chart_lanes(new_plan),
             measurement_requests=tuple(sorted(requests, key=_request_rank)),
             come_alive_levers=tuple(sorted(levers, key=_lever_rank)),
             queue_wait_unattained=tuple(
@@ -644,7 +708,12 @@ class _Planner:
         return PlannerResult(plan=new_plan, report=report)
 
     def _identity_report(
-        self, choice: _Choice, names: Mapping[str, str], kept: Mapping[str, tuple[PlanIdentity, PlanLane]]
+        self,
+        choice: _Choice,
+        names: Mapping[str, str],
+        kept: Mapping[str, tuple[PlanIdentity, PlanLane]],
+        cost: float | None,
+        receipt: Receipt | None,
     ) -> IdentityReport:
         current = self.current.get(choice.identity)
         report = IdentityReport(
@@ -658,8 +727,14 @@ class _Planner:
         if chosen is None:
             reason = UnplacedReason.WARM_BOUND_MISSED if choice.has_valid_receipt else UnplacedReason.NO_RECEIPT
             if choice.identity in kept:
+                entry, lane = kept[choice.identity]
                 return replace(
-                    report, status=IdentityStatus.KEPT, lane=kept[choice.identity][0].lane, unplaced_reason=reason
+                    report,
+                    status=IdentityStatus.KEPT,
+                    lane=entry.lane,
+                    monthly_cost=cost,
+                    unplaced_reason=reason,
+                    blocked_by=self.kept_blockers(choice.identity, entry, lane, receipt),
                 )
             return replace(report, unplaced_reason=reason)
         nearest = self.next_cheaper(choice)
@@ -668,29 +743,57 @@ class _Planner:
             report,
             status=IdentityStatus.PLACED,
             lane=names[choice.identity],
+            monthly_cost=cost,
             chosen=chosen.summary(),
             peak_containers=max((_Window.needed(count, rate) for count in choice.requests), default=0),
             next_cheaper=None if nearest is None else nearest.summary(saving=chosen.cost - nearest.cost),
         )
 
-    def _lane_reports(self, plan: Plan) -> tuple[LaneReport, ...]:
+    def _pricing(
+        self, plan: Plan, receipts: Mapping[str, Receipt | None]
+    ) -> tuple[tuple[LaneReport, ...], dict[str, float]]:
         residents: defaultdict[str, list[str]] = defaultdict(list)
         for entry in plan.identities:
             residents[entry.lane].append(entry.identity)
-        reports = []
+        hours = self.parameters.hours_per_month
+        reports: list[LaneReport] = []
+        costs: dict[str, float] = {}
         for lane in plan.lanes:
-            hourly = self.hourly_cost(lane.cell, lane.container_shape)
-            hours = self.parameters.hours_per_month
+            hosted = tuple(sorted(residents[lane.name]))
+            reason = _refusal_reason(lane.cell, self.prices)
+            if reason is not None:
+                reports.append(LaneReport(name=lane.name, identities=hosted, unpriced_reason=reason))
+                continue
+            hourly = container_hourly_cost(
+                self.prices[lane.cell.machine_profile], lane.container_shape, self.multiplier
+            )
+            floor = lane.envelope.floor_min * hours
+            demand = {identity: self.demand_hours(lane, identity, receipts.get(identity)) for identity in hosted}
+            priced = {identity: value for identity, value in demand.items() if value is not None}
+            costs.update((identity, hourly * (floor + value)) for identity, value in priced.items())
             reports.append(
                 LaneReport(
                     name=lane.name,
-                    identities=tuple(sorted(residents[lane.name])),
+                    identities=hosted,
                     hourly_cost=hourly,
-                    floor_monthly_cost=None if hourly is None else hourly * lane.envelope.floor_min * hours,
-                    envelope_max_monthly_cost=None if hourly is None else hourly * lane.envelope.floor_max * hours,
+                    monthly_cost=hourly * (floor + sum(priced.values())),
+                    floor_monthly_cost=hourly * lane.envelope.floor_min * hours,
+                    envelope_max_monthly_cost=hourly * lane.envelope.floor_max * hours,
+                    unpriced_identities=tuple(identity for identity in hosted if identity not in priced),
                 )
             )
-        return tuple(reports)
+        return tuple(reports), costs
+
+
+def _shared_chart_lanes(plan: Plan) -> tuple[SharedChartLane, ...]:
+    grouped: defaultdict[tuple[str, str, str], list[str]] = defaultdict(list)
+    for lane in plan.lanes:
+        grouped[(lane.queue_pool, lane.cell.machine_profile, lane.bundle)].append(lane.name)
+    return tuple(
+        SharedChartLane(queue_pool=pool, machine_profile=profile, bundle=bundle, lanes=tuple(sorted(names)))
+        for (pool, profile, bundle), names in sorted(grouped.items())
+        if len(names) > 1
+    )
 
 
 def _changes(current: Plan | None, new: Plan) -> tuple[tuple[IdentityChange, ...], tuple[LaneChange, ...]]:

@@ -4,26 +4,6 @@
   "placement": "us-central1",
   "lanes": [
     {
-      "name": "baai-bge-m3-l4",
-      "queuePool": "default",
-      "bundle": "default",
-      "cell": {
-        "machineProfile": "l4",
-        "gpuProduct": "NVIDIA-L4"
-      },
-      "containerShape": {
-        "gpuCount": 1,
-        "cpuCores": 4,
-        "memoryMiB": 16384
-      },
-      "concurrency": 16,
-      "maxContainers": 4,
-      "envelope": {
-        "floorMin": 1,
-        "floorMax": 2
-      }
-    },
-    {
       "name": "baai-bge-m3-sparse-l4",
       "queuePool": "default",
       "bundle": "default",
@@ -107,7 +87,7 @@
   "identities": [
     {
       "identity": "BAAI/bge-m3",
-      "lane": "baai-bge-m3-l4",
+      "lane": "default-l4-default",
       "warmth": "pinned"
     },
     {

@@ -70,10 +70,10 @@ def _compact(fields: dict[str, object | None]) -> dict[str, object]:
 class Blocker:
     field: str
     bound: int
-    measured: float
+    measured: float | None
 
     def to_dict(self) -> dict[str, object]:
-        return {"field": self.field, "bound": self.bound, "measured": self.measured}
+        return _compact({"field": self.field, "bound": self.bound, "measured": self.measured})
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -113,11 +113,13 @@ class IdentityReport:
     service_level: ServiceLevel
     demand_requests: int
     lane: str | None = None
+    monthly_cost: float | None = None
     chosen: Option | None = None
     peak_containers: int | None = None
     next_cheaper: Option | None = None
     current: PlanIdentity | None = None
     unplaced_reason: UnplacedReason | None = None
+    blocked_by: tuple[Blocker, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return _compact(
@@ -127,6 +129,8 @@ class IdentityReport:
                 "serviceLevel": self.service_level.to_dict(),
                 "demandRequests": self.demand_requests,
                 "lane": self.lane,
+                "monthlyCost": None if self.monthly_cost is None else _money(self.monthly_cost),
+                "blockedBy": [blocker.to_dict() for blocker in self.blocked_by] or None,
                 "chosen": None if self.chosen is None else self.chosen.to_dict(),
                 "peakContainers": self.peak_containers,
                 "nextCheaper": None if self.next_cheaper is None else self.next_cheaper.to_dict(),
@@ -140,9 +144,16 @@ class IdentityReport:
 class LaneReport:
     name: str
     identities: tuple[str, ...]
-    hourly_cost: float | None
-    floor_monthly_cost: float | None
-    envelope_max_monthly_cost: float | None
+    hourly_cost: float | None = None
+    monthly_cost: float | None = None
+    floor_monthly_cost: float | None = None
+    envelope_max_monthly_cost: float | None = None
+    unpriced_reason: str | None = None
+    unpriced_identities: tuple[str, ...] = ()
+
+    @property
+    def unpriced(self) -> bool:
+        return self.unpriced_reason is not None or bool(self.unpriced_identities)
 
     def to_dict(self) -> dict[str, object]:
         return _compact(
@@ -150,12 +161,31 @@ class LaneReport:
                 "name": self.name,
                 "identities": list(self.identities),
                 "hourlyCost": None if self.hourly_cost is None else _rate(self.hourly_cost),
+                "monthlyCost": None if self.monthly_cost is None else _money(self.monthly_cost),
                 "floorMonthlyCost": None if self.floor_monthly_cost is None else _money(self.floor_monthly_cost),
                 "envelopeMaxMonthlyCost": (
                     None if self.envelope_max_monthly_cost is None else _money(self.envelope_max_monthly_cost)
                 ),
+                "unpricedReason": self.unpriced_reason,
+                "unpricedIdentities": list(self.unpriced_identities) or None,
             }
         )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SharedChartLane:
+    queue_pool: str
+    machine_profile: str
+    bundle: str
+    lanes: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "queuePool": self.queue_pool,
+            "machineProfile": self.machine_profile,
+            "bundle": self.bundle,
+            "lanes": list(self.lanes),
+        }
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -269,16 +299,27 @@ class Report:
     placement: str
     currency: str
     parameters: Mapping[str, object]
-    monthly_cost: float
-    envelope_max_monthly_cost: float
     identities: tuple[IdentityReport, ...]
     lanes: tuple[LaneReport, ...]
+    shared_chart_lanes: tuple[SharedChartLane, ...]
     measurement_requests: tuple[MeasurementRequest, ...]
     come_alive_levers: tuple[Lever, ...]
     queue_wait_unattained: tuple[str, ...]
     refusals: tuple[Refusal, ...]
     identity_changes: tuple[IdentityChange, ...]
     lane_changes: tuple[LaneChange, ...]
+
+    @property
+    def monthly_cost(self) -> float:
+        return sum(lane.monthly_cost for lane in self.lanes if lane.monthly_cost is not None)
+
+    @property
+    def envelope_max_monthly_cost(self) -> float:
+        return sum(lane.envelope_max_monthly_cost for lane in self.lanes if lane.envelope_max_monthly_cost is not None)
+
+    @property
+    def unpriced_lanes(self) -> tuple[str, ...]:
+        return tuple(lane.name for lane in self.lanes if lane.unpriced)
 
     @property
     def unchanged(self) -> bool:
@@ -300,9 +341,11 @@ class Report:
             "totals": {
                 "monthlyCost": _money(self.monthly_cost),
                 "envelopeMaxMonthlyCost": _money(self.envelope_max_monthly_cost),
+                "unpricedLanes": list(self.unpriced_lanes),
             },
             "identities": [entry.to_dict() for entry in self.identities],
             "lanes": [lane.to_dict() for lane in self.lanes],
+            "sharedChartLanes": [shared.to_dict() for shared in self.shared_chart_lanes],
             "measurementRequests": [request.to_dict() for request in self.measurement_requests],
             "comeAliveLevers": [lever.to_dict() for lever in self.come_alive_levers],
             "queueWaitUnattained": list(self.queue_wait_unattained),

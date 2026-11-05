@@ -55,14 +55,14 @@ PARAMETERS = PlannerParameters(placement="test", max_containers=4, fallback_floo
 L4_HOURLY = 1.0 + 4 * 0.1
 
 
-def receipt(identity, cell=L4, *, shape=SHAPE, p99=100.0, concurrency=8):
+def receipt(identity, cell=L4, *, shape=SHAPE, p99=100.0, concurrency=8, rps=10.0):
     return Receipt(
         identity=identity,
         cell=cell,
         container_shape=shape,
         concurrency=concurrency,
         request_shape=RequestShape(operation=Operation.ENCODE, items_per_request=1),
-        throughput=Throughput(requests_per_second=10.0),
+        throughput=Throughput(requests_per_second=rps),
         latency=Percentiles(p99_ms=p99),
         source=SourceRef(uri=f"receipts/{identity}/{cell.machine_profile}/{shape.memory_mib}/{concurrency}"),
     )
@@ -81,7 +81,7 @@ def boot(identity, seconds, warmth=Warmth.COLD_WITH_BOUND, cell=L4, *, shape=SHA
     )
 
 
-def busy(*identities, hours=6):
+def busy(*identities, hours=6, requests=10):
     return Demand(
         start=START,
         end=START + timedelta(hours=24),
@@ -89,7 +89,9 @@ def busy(*identities, hours=6):
             DemandSeries(
                 identity=identity,
                 operation=Operation.ENCODE,
-                hours=tuple(DemandHour(start=START + timedelta(hours=hour), requests=10) for hour in range(hours)),
+                hours=tuple(
+                    DemandHour(start=START + timedelta(hours=hour), requests=requests) for hour in range(hours)
+                ),
             )
             for identity in identities
         ),
@@ -213,3 +215,17 @@ def test_each_cell_shape_and_warmth_is_one_lever_at_its_cheapest_receipt():
     assert by_key[(SHAPE, Warmth.COLD_WITH_BOUND)].monthly_cost == pytest.approx(cold_cost())
     assert by_key[(WIDE, Warmth.COLD_WITH_BOUND)].monthly_cost == pytest.approx((1.0 + 8 * 0.1) * 6 * 2 * SCALE)
     assert by_key[(SHAPE, Warmth.SNAPSHOT_COLD)].permitted_bound_s == 90
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_a_lever_is_priced_at_the_cheapest_receipt_of_its_cell_and_shape(reverse):
+    receipts = [receipt("org/model", rps=0.01), receipt("org/model", concurrency=16, rps=0.02)]
+    report = run(
+        {"org/model": 60},
+        receipts[::-1] if reverse else receipts,
+        [boot("org/model", 240.0)],
+        busy("org/model", requests=1),
+    )
+    (lever,) = report.come_alive_levers
+    assert lever.monthly_cost == pytest.approx(L4_HOURLY * 6 * (1 / 0.02 + 1 * 2 * 900) / 3600 * SCALE)
+    assert lever.saving_under_bound == pytest.approx(L4_HOURLY * MONTH - lever.monthly_cost)

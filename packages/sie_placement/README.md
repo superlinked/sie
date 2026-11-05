@@ -89,7 +89,9 @@ Helm chart: `queuePool`, the `machineProfile` of its `cell`, and `bundle`.
 override. It is neither the `workers.pools` map key, which names a worker
 group, nor an SDK logical pool. `bundle` is a key of that worker group's
 `bundles` map. `name` is the lane's handle inside the plan, and each identity
-refers to its lane by that name.
+refers to its lane by that name. Two plan lanes may carry the same three
+tokens, and so name one chart lane, which cannot give them separate envelopes
+or concurrency; the planner's report lists every such chart lane.
 
 ## Envelope
 
@@ -119,8 +121,9 @@ print(render(result.plan.to_dict()), render(result.report.to_dict()))
 
 `plan` is a pure function of its documents. The same inputs render to the
 same bytes in whatever order the receipts, boot evidence, identities and demand
-series arrive, and a run whose `current_plan` is its own previous plan reports
-no change.
+series arrive. An identity whose choice is its current placement keeps its
+current lane and that lane's name, so a run whose `current_plan` already holds
+every choice, such as its own previous plan, reports no change.
 
 | Parameter | Meaning |
 | --- | --- |
@@ -134,8 +137,8 @@ no change.
 
 ### Selection
 
-The planner places each identity of the service-level document on its own
-lane:
+The planner chooses a cell and warmth for each identity of the service-level
+document:
 
 1. It refuses a receipt or boot record whose machine profile has no price, or
    whose realized GPU product differs from the product the price list gives
@@ -148,12 +151,21 @@ lane:
    successful boot stands for the come-alive percentile, a boot that did not
    succeed withdraws the warmth, and the environment's own evidence replaces
    borrowed evidence. A `comeAliveP95S` of `0` admits `pinned` only.
-4. The cheapest unblocked option wins. Ties go to the current plan's
-   placement, then to the faster come-alive.
+4. The cheapest unblocked option wins. Ties go to the current placement,
+   then to the faster come-alive.
 
-The planner does not select `lazy-resident`, `bridged` or `scheduled-warm`,
-and does not put two identities on one lane. An identity with no unblocked
-option keeps its current lane, or stays out of the plan when it has none.
+The current placement is the identity's current lane when that lane has the
+option's cell, container shape and concurrency, the identity's warmth is the
+option's, and the lane's `queuePool` and `bundle` are the ones the parameters
+give the identity. An identity whose choice is its current placement stays on
+that lane under its name, beside whoever else the lane hosts, and the lane
+takes the ceiling and envelope of the choice. Every other placed identity gets
+a new lane of its own, named from the identity and its machine profile, with a
+digest of the identity added when that name is taken. The planner does not
+select `lazy-resident`, `bridged` or `scheduled-warm`, and does not move an
+identity onto another identity's lane. An identity with no unblocked option
+keeps its current lane, capped by the reviewed ceiling, or stays out of the
+plan when it has none.
 
 ### Pricing
 
@@ -170,6 +182,13 @@ demand window to `hours_per_month`.
   every request: the active floor for `cooldown_s`, at most the whole hour.
   The active floor is `fallback_floor` capped by the ceiling, and at least one.
 
+A lane costs its floor all month once, whoever it hosts, plus what each
+resident's demand needs beyond the floor: on a lane with a floor, the
+containers an hour needs above it, and on a zero-floor lane, the work and the
+tails a cold warmth pays. A placed identity's demand is priced at its chosen
+receipt, and a kept identity's at the slowest receipt it has for its lane's
+cell, container shape and concurrency, under that lane's own ceiling.
+
 ### Envelope
 
 `floorMin` is 1 for `pinned` and 0 otherwise. No source measures queue wait
@@ -183,14 +202,26 @@ only.
 
 The report renders as a `placement-report` document:
 
+- `totals`: the monthly cost of every lane of the plan, the monthly cost of
+  their `floorMax`, and `unpricedLanes`, the lanes whose cost the totals leave
+  out in whole or in part.
 - `identities`: each identity's status (`placed`, `kept` or `unplaced`),
-  effective service level and demand, the chosen cell, warmth, monthly cost and
-  come-alive with its basis (`warm-floor`, `boot-evidence` or
+  effective service level and demand, its lane and `monthlyCost`, what its
+  demand costs there with the lane's floor, the chosen cell, warmth, monthly
+  cost and come-alive with its basis (`warm-floor`, `boot-evidence` or
   `borrowed-boot-evidence`), the peak containers its demand needs, and
   `nextCheaper`: the nearest cheaper option a service level blocks, its saving
-  and the bounds that block it.
-- `lanes`: each lane's hourly cost, its floor's monthly cost and the monthly
-  cost of its `floorMax`, which a floor budget prices.
+  and the bounds that block it. A kept identity's `blockedBy` names the bounds
+  its kept placement is known to miss: its receipt's warm latencies, a measured
+  come-alive over the bound, or a cold warmth under a bound of `0`, which needs
+  no measurement.
+- `lanes`: each lane's hourly cost, its monthly cost, its floor's monthly cost
+  and the monthly cost of its `floorMax`, which a floor budget prices. A lane
+  on a cell the price list cannot price carries `unpricedReason` and no cost,
+  and `unpricedIdentities` lists residents whose demand has no receipt to price
+  it on the lane.
+- `sharedChartLanes`: every chart lane, by `queuePool`, `machineProfile` and
+  `bundle`, that more than one plan lane names.
 - `measurementRequests`: options that lack evidence, ranked by the saving they
   could unlock. A profile without a receipt is bounded by price alone: one
   accelerator at its rate, kept warm or, where the come-alive bound allows,

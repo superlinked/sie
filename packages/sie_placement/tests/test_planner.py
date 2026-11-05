@@ -191,7 +191,17 @@ def run(service_levels, receipts=(), boots=(), *, prices=None, hourly=None, curr
     )
 
 
-def single_lane_plan(name="shared", warmth=Warmth.PINNED, cell=L4, identity=IDENTITY) -> Plan:
+def single_lane_plan(
+    name="shared",
+    warmth=Warmth.PINNED,
+    cell=L4,
+    identity=IDENTITY,
+    *,
+    others=(),
+    concurrency=8,
+    max_containers=2,
+    envelope=None,
+) -> Plan:
     floor = 1 if warmth is Warmth.PINNED else 0
     return Plan(
         placement="test",
@@ -202,12 +212,14 @@ def single_lane_plan(name="shared", warmth=Warmth.PINNED, cell=L4, identity=IDEN
                 bundle="default",
                 cell=cell,
                 container_shape=SHAPE,
-                concurrency=8,
-                max_containers=2,
-                envelope=Envelope(floor_min=floor, floor_max=max(floor, 1)),
+                concurrency=concurrency,
+                max_containers=max_containers,
+                envelope=envelope or Envelope(floor_min=floor, floor_max=max(floor, 1)),
             ),
         ),
-        identities=(PlanIdentity(identity=identity, lane=name, warmth=warmth),),
+        identities=tuple(
+            PlanIdentity(identity=resident, lane=name, warmth=warmth) for resident in sorted((identity, *others))
+        ),
     )
 
 
@@ -250,6 +262,23 @@ def test_a_pinned_cell_costs_its_floor_plus_the_hours_demand_needs_above_it():
     assert report.demand_requests == 9100
 
 
+def test_demand_sums_its_operations_in_each_hour():
+    hour = START + timedelta(hours=3)
+    mixed = Demand(
+        start=START,
+        end=START + timedelta(hours=WINDOW_HOURS),
+        series=tuple(
+            DemandSeries(identity=IDENTITY, operation=operation, hours=(DemandHour(start=hour, requests=requests),))
+            for operation, requests in ((Operation.ENCODE, 5000), (Operation.SCORE, 4000))
+        ),
+    )
+    result = plan(level(come_alive_p95_s=0), [receipt(rps=1.0)], (), L4_ONLY, mixed, None, parameters())
+    report = result.report.identity(IDENTITY)
+    assert report.demand_requests == 9000
+    assert report.peak_containers == 3
+    assert report.chosen.monthly_cost == pytest.approx(MONTH + (3 - 1) * SCALE)
+
+
 def test_needed_containers_stop_at_the_reviewed_ceiling():
     result = run(
         level(come_alive_p95_s=0), [receipt(rps=1.0)], prices=L4_ONLY, hourly={IDENTITY: {0: 36000}}, max_containers=2
@@ -269,6 +298,20 @@ def test_a_cold_cell_costs_its_work_and_the_tail_each_burst_holds():
     one_burst = 1 / 10.0 + 1 * 2 * 900
     capped_hour = 2 * 3600
     assert chosen.monthly_cost == pytest.approx((one_burst + capped_hour) / 3600 * SCALE)
+
+
+def test_a_saturated_cold_hour_runs_at_most_the_ceiling():
+    result = run(
+        level(come_alive_p95_s=120),
+        [receipt(rps=1.0)],
+        [boot()],
+        prices=L4_ONLY,
+        hourly={IDENTITY: {0: 36000}},
+        max_containers=2,
+    )
+    chosen = result.report.identity(IDENTITY).chosen
+    assert chosen.warmth is Warmth.COLD_WITH_BOUND
+    assert chosen.monthly_cost == pytest.approx(2 * SCALE)
 
 
 def test_an_active_lane_without_a_fallback_floor_holds_one_container():
@@ -321,6 +364,28 @@ def test_a_cold_posture_without_boot_evidence_is_a_measurement_request():
     assert request.saving_bound == pytest.approx(MONTH)
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_a_cell_without_boot_evidence_asks_once_at_its_cheapest_receipt(reverse):
+    receipts = [receipt(rps=0.01), receipt(concurrency=16, rps=0.02)]
+    result = run(
+        level(come_alive_p95_s=120),
+        receipts[::-1] if reverse else receipts,
+        prices=L4_ONLY,
+        hourly={IDENTITY: {0: 1}},
+    )
+    (request,) = result.report.measurement_requests
+    assert request.measure == (Measurement.BOOT_EVIDENCE,)
+    assert request.cost_bound == pytest.approx((1 / 0.02 + 1 * 2 * 900) / 3600 * SCALE)
+
+
+def test_snapshot_restores_are_never_requested():
+    result = run(level(come_alive_p95_s=120), [receipt()], [boot(seconds=300.0)], prices=L4_ONLY)
+    report = result.report
+    assert report.identity(IDENTITY).chosen.warmth is Warmth.PINNED
+    assert report.measurement_requests == ()
+    assert [lever.warmth for lever in report.come_alive_levers] == [Warmth.COLD_WITH_BOUND]
+
+
 def test_a_failed_boot_is_not_selectable_and_asks_for_a_new_measurement():
     boots = [boot(seconds=900.0, outcome=BootOutcome.TIMED_OUT)]
     result = run(level(come_alive_p95_s=600), [receipt()], boots, prices=L4_ONLY)
@@ -342,6 +407,14 @@ def test_the_slowest_successful_boot_stands_for_the_percentile():
     report = result.report.identity(IDENTITY)
     assert report.chosen.warmth is Warmth.PINNED
     assert report.next_cheaper.blocked_by == (Blocker(field="comeAliveP95S", bound=120, measured=130.0),)
+
+
+def test_boot_seconds_render_the_same_whatever_their_number_type():
+    boots = [boot(seconds=60, uri="boots/1.json"), boot(seconds=60.0, uri="boots/2.json")]
+    first = run(level(come_alive_p95_s=120), [receipt()], boots, prices=L4_ONLY)
+    second = run(level(come_alive_p95_s=120), [receipt()], boots[::-1], prices=L4_ONLY)
+    assert rendered(first) == rendered(second)
+    assert first.report.to_dict()["identities"][0]["chosen"]["comeAliveS"] == 60.0
 
 
 def test_own_boot_evidence_replaces_borrowed_evidence():
@@ -581,6 +654,9 @@ def test_the_plan_carries_the_envelope_and_the_report_prices_its_maximum():
     assert lane_report.envelope_max_monthly_cost == pytest.approx(3 * MONTH)
     assert result.report.envelope_max_monthly_cost == pytest.approx(3 * MONTH)
     assert result.report.monthly_cost == pytest.approx(MONTH)
+    assert lane_report.monthly_cost == pytest.approx(MONTH)
+    assert result.report.identity(IDENTITY).monthly_cost == pytest.approx(MONTH)
+    assert result.report.unpriced_lanes == ()
 
 
 def test_every_declared_queue_wait_bound_is_reported_unattained():
@@ -604,6 +680,114 @@ def test_an_identity_without_a_feasible_cell_keeps_its_current_lane():
     assert report.current == current.identities[0]
     assert result.report.unchanged
     assert result.report.lanes[0].floor_monthly_cost == pytest.approx(MONTH)
+    assert report.monthly_cost == pytest.approx(MONTH)
+    assert report.blocked_by == (Blocker(field="warmP99Ms", bound=50, measured=100.0),)
+    assert result.report.monthly_cost == pytest.approx(MONTH)
+    assert result.report.to_dict()["totals"] == {
+        "monthlyCost": MONTH,
+        "envelopeMaxMonthlyCost": MONTH,
+        "unpricedLanes": [],
+    }
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_a_kept_lane_prices_its_demand_at_the_slowest_receipt_for_its_cell(reverse):
+    current = single_lane_plan(max_containers=4, envelope=Envelope(floor_min=1, floor_max=2))
+    receipts = [receipt(rps=1.0, p99=100.0, uri="receipts/slow"), receipt(rps=2.0, p99=100.0, uri="receipts/fast")]
+    result = run(
+        level(come_alive_p95_s=0, warm_p99_ms=50),
+        receipts[::-1] if reverse else receipts,
+        prices=L4_ONLY,
+        hourly={IDENTITY: {3: 9000}},
+        current=current,
+    )
+    assert result.plan == current
+    report = result.report.identity(IDENTITY)
+    assert report.status is IdentityStatus.KEPT
+    assert report.monthly_cost == pytest.approx(MONTH + (3 - 1) * SCALE)
+    (lane,) = result.report.lanes
+    assert lane.monthly_cost == pytest.approx(MONTH + (3 - 1) * SCALE)
+    assert result.report.monthly_cost == pytest.approx(MONTH + (3 - 1) * SCALE)
+    assert result.report.envelope_max_monthly_cost == pytest.approx(2 * MONTH)
+
+
+@pytest.mark.parametrize(
+    ("warmth", "ceiling", "hourly", "hours"),
+    [
+        (Warmth.PINNED, 2, {3: 9000}, MONTH + (2 - 1) * SCALE),
+        (Warmth.COLD_WITH_BOUND, 1, {0: 1}, (1 / 1.0 + 1 * 1 * 900) / 3600 * SCALE),
+    ],
+)
+def test_a_kept_lane_prices_its_demand_under_its_own_ceiling(warmth, ceiling, hourly, hours):
+    current = single_lane_plan(warmth=warmth, max_containers=ceiling)
+    result = run(
+        level(come_alive_p95_s=600, warm_p99_ms=50),
+        [receipt(rps=1.0, p99=100.0)],
+        prices=L4_ONLY,
+        hourly={IDENTITY: hourly},
+        current=current,
+    )
+    assert result.plan == current
+    assert result.report.identity(IDENTITY).monthly_cost == pytest.approx(hours)
+
+
+def test_a_kept_lane_without_a_receipt_for_its_demand_lists_it_unpriced():
+    current = single_lane_plan()
+    result = run(level(come_alive_p95_s=0), [], prices=L4_ONLY, hourly={IDENTITY: {0: 10}}, current=current)
+    report = result.report.identity(IDENTITY)
+    assert (report.status, report.monthly_cost) == (IdentityStatus.KEPT, None)
+    (lane,) = result.report.lanes
+    assert lane.unpriced_identities == (IDENTITY,)
+    assert lane.monthly_cost == pytest.approx(MONTH)
+    assert result.report.unpriced_lanes == ("shared",)
+    assert result.report.monthly_cost == pytest.approx(MONTH)
+
+
+def test_a_kept_lane_on_a_refused_cell_is_kept_and_reported_unpriced():
+    other = Cell(machine_profile="l4", gpu_product="NVIDIA-A10G")
+    current = single_lane_plan(cell=other)
+    result = run(level(come_alive_p95_s=0), [], prices=L4_ONLY, current=current)
+    assert result.plan == current
+    (lane,) = result.report.lanes
+    assert lane.unpriced_reason == (
+        "realized GPU product 'NVIDIA-A10G' differs from 'NVIDIA-L4', the product machine profile 'l4' requests"
+    )
+    assert (lane.hourly_cost, lane.monthly_cost, lane.envelope_max_monthly_cost) == (None, None, None)
+    assert result.report.identity(IDENTITY).monthly_cost is None
+    assert result.report.to_dict()["totals"] == {
+        "monthlyCost": 0.0,
+        "envelopeMaxMonthlyCost": 0.0,
+        "unpricedLanes": ["shared"],
+    }
+
+
+def test_a_kept_lane_never_exceeds_the_reviewed_ceiling():
+    current = single_lane_plan(max_containers=4, envelope=Envelope(floor_min=2, floor_max=3))
+    result = run(level(come_alive_p95_s=0), [], prices=L4_ONLY, current=current, max_containers=1)
+    (lane,) = result.plan.lanes
+    assert (lane.max_containers, lane.envelope) == (1, Envelope(floor_min=1, floor_max=1))
+    (change,) = result.report.lane_changes
+    assert (change.name, change.before, change.after) == ("shared", current.lanes[0], lane)
+
+
+@pytest.mark.parametrize(
+    ("bound", "boots", "expected"),
+    [
+        (0, (), (Blocker(field="comeAliveP95S", bound=0, measured=None),)),
+        (120, (), ()),
+        (120, (boot(seconds=200.0),), (Blocker(field="comeAliveP95S", bound=120, measured=200.0),)),
+        (300, (boot(seconds=200.0),), ()),
+    ],
+)
+def test_a_kept_cold_placement_names_the_come_alive_bound_it_is_known_to_miss(bound, boots, expected):
+    current = single_lane_plan(warmth=Warmth.COLD_WITH_BOUND)
+    result = run(level(come_alive_p95_s=bound), [], boots, prices=L4_ONLY, current=current)
+    report = result.report.identity(IDENTITY)
+    assert report.status is IdentityStatus.KEPT
+    assert report.blocked_by == expected
+    assert report.monthly_cost == 0
+    if expected and expected[0].measured is None:
+        assert report.to_dict()["blockedBy"] == [{"field": "comeAliveP95S", "bound": 0}]
 
 
 def test_an_identity_without_a_feasible_cell_or_a_current_lane_is_left_out():
@@ -637,6 +821,141 @@ def test_a_derived_lane_name_never_takes_a_kept_lane_name():
     names = {entry.identity: entry.lane for entry in result.plan.identities}
     assert names["org/kept"] == "org-model-l4"
     assert names[IDENTITY] == f"org-model-l4-{hashlib.sha256(IDENTITY.encode()).hexdigest()[:8]}"
+
+
+def test_a_current_placement_keeps_its_lane_name():
+    current = single_lane_plan(name="legacy")
+    result = run(level(come_alive_p95_s=0), [receipt()], prices=L4_ONLY, current=current, max_containers=2)
+    assert result.plan == current
+    assert result.report.identity(IDENTITY).lane == "legacy"
+    assert result.report.unchanged
+
+
+def test_a_current_placement_that_differs_only_in_its_envelope_keeps_its_lane_name():
+    current = single_lane_plan(name="legacy", max_containers=8, envelope=Envelope(floor_min=2, floor_max=5))
+    result = run(level(come_alive_p95_s=0), [receipt()], prices=L4_ONLY, current=current)
+    (lane,) = result.plan.lanes
+    assert (lane.name, lane.max_containers, lane.envelope) == ("legacy", 4, Envelope(floor_min=1, floor_max=1))
+    assert result.report.identity_changes == ()
+    assert [change.name for change in result.report.lane_changes] == ["legacy"]
+
+
+def test_a_current_lane_that_differs_in_concurrency_is_not_the_current_placement():
+    current = single_lane_plan(name="legacy", max_containers=4)
+    receipts = [receipt(concurrency=16), receipt(concurrency=8)]
+    result = run(level(come_alive_p95_s=0), receipts, prices=L4_ONLY, current=current)
+    (lane,) = result.plan.lanes
+    assert (lane.name, lane.concurrency) == ("legacy", 8)
+    assert result.report.unchanged
+    moved = run(level(come_alive_p95_s=0), [receipts[0]], prices=L4_ONLY, current=current)
+    (lane,) = moved.plan.lanes
+    assert (lane.name, lane.concurrency) == ("org-model-l4", 16)
+    assert [(change.name, change.before is None) for change in moved.report.lane_changes] == [
+        ("legacy", False),
+        ("org-model-l4", True),
+    ]
+
+
+def test_a_current_placement_on_a_shared_lane_stays_beside_its_kept_neighbour():
+    current = single_lane_plan(others=("org/kept",), max_containers=4)
+    service_levels = levels(
+        (IDENTITY, ServiceLevel(come_alive_p95_s=0)), ("org/kept", ServiceLevel(come_alive_p95_s=0))
+    )
+    result = run(service_levels, [receipt()], prices=L4_ONLY, current=current, hourly={IDENTITY: {3: 300000}})
+    assert result.plan == current
+    assert result.report.unchanged
+    (lane,) = result.report.lanes
+    assert lane.identities == ("org/kept", IDENTITY)
+    above = (min(4, math.ceil(300000 / 36000)) - 1) * SCALE
+    assert lane.monthly_cost == pytest.approx(MONTH + above)
+    assert result.report.identity(IDENTITY).monthly_cost == pytest.approx(MONTH + above)
+    assert result.report.identity("org/kept").monthly_cost == pytest.approx(MONTH)
+    assert result.report.monthly_cost == pytest.approx(MONTH + above)
+
+
+def test_current_placements_that_share_a_lane_keep_sharing_it():
+    current = single_lane_plan(others=("org/other",), max_containers=4)
+    service_levels = levels((IDENTITY, ServiceLevel()), ("org/other", ServiceLevel()))
+    result = run(service_levels, [receipt(), receipt(identity="org/other")], prices=L4_ONLY, current=current)
+    assert result.plan == current
+    assert result.report.unchanged
+    assert result.report.monthly_cost == pytest.approx(MONTH)
+    assert result.report.shared_chart_lanes == ()
+
+
+def test_a_placement_that_moves_leaves_its_shared_lane_to_the_kept_neighbour():
+    current = single_lane_plan(others=("org/kept",), max_containers=4)
+    service_levels = levels(
+        (IDENTITY, ServiceLevel(come_alive_p95_s=0, warm_p99_ms=250)), ("org/kept", ServiceLevel(come_alive_p95_s=0))
+    )
+    receipts = [receipt(p99=300.0), receipt(cell=A100)]
+    result = run(service_levels, receipts, current=current)
+    names = {entry.identity: entry.lane for entry in result.plan.identities}
+    assert names == {IDENTITY: "org-model-a100-80gb", "org/kept": "shared"}
+    assert result.report.identity(IDENTITY).current == current.identities[1]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "moved"),
+    [({"bundles": {IDENTITY: "sglang"}}, ("default", "sglang")), ({"queue_pool": "batch"}, ("batch", "default"))],
+)
+def test_a_new_queue_pool_or_bundle_moves_the_identity_off_its_current_lane(overrides, moved):
+    current = single_lane_plan(others=("org/kept",), max_containers=4)
+    service_levels = levels(
+        (IDENTITY, ServiceLevel(come_alive_p95_s=0)), ("org/kept", ServiceLevel(come_alive_p95_s=0))
+    )
+    result = run(service_levels, [receipt()], prices=L4_ONLY, current=current, **overrides)
+    lanes = {lane.name: (lane.queue_pool, lane.bundle) for lane in result.plan.lanes}
+    assert lanes == {"org-model-l4": moved, "shared": ("default", "default")}
+
+
+def test_removing_one_of_two_colliding_identities_keeps_the_other_lane_name():
+    service_levels = levels(("org/model", ServiceLevel()), ("org-model", ServiceLevel()))
+    receipts = [receipt(identity="org/model"), receipt(identity="org-model")]
+    first = run(service_levels, receipts, prices=L4_ONLY)
+    second = run(levels(("org/model", ServiceLevel())), receipts, prices=L4_ONLY, current=first.plan)
+    digest = hashlib.sha256(b"org-model").hexdigest()[:8]
+    kept_name = f"org-model-l4-{hashlib.sha256(b'org/model').hexdigest()[:8]}"
+    assert [entry.lane for entry in second.plan.identities] == [kept_name]
+    assert [(change.identity, change.after) for change in second.report.identity_changes] == [("org-model", None)]
+    assert [(change.name, change.after) for change in second.report.lane_changes] == [(f"org-model-l4-{digest}", None)]
+
+
+def test_plan_lanes_that_name_one_chart_lane_are_reported():
+    service_levels = levels(("org/a", ServiceLevel()), ("org/b", ServiceLevel()), ("org/c", ServiceLevel()))
+    receipts = [receipt(identity=identity) for identity in ("org/a", "org/b", "org/c")]
+    result = run(service_levels, receipts, prices=L4_ONLY, bundles={"org/c": "sglang"})
+    (shared,) = result.report.shared_chart_lanes
+    assert shared.to_dict() == {
+        "queuePool": "default",
+        "machineProfile": "l4",
+        "bundle": "default",
+        "lanes": ["org-a-l4", "org-b-l4"],
+    }
+    apart = run(service_levels, receipts, prices=L4_ONLY, bundles={"org/a": "a", "org/b": "b"})
+    assert apart.report.shared_chart_lanes == ()
+
+
+def test_a_derived_lane_name_never_takes_a_kept_lane_named_with_its_digest():
+    digest = hashlib.sha256(IDENTITY.encode()).hexdigest()
+    first = single_lane_plan(name="org-model-l4", identity="org/kept")
+    second = single_lane_plan(name=f"org-model-l4-{digest[:8]}", identity="org/kept-too")
+    current = Plan(
+        placement="test", lanes=(*first.lanes, *second.lanes), identities=(*first.identities, *second.identities)
+    )
+    service_levels = levels(
+        (IDENTITY, ServiceLevel()),
+        ("org/kept", ServiceLevel(come_alive_p95_s=0)),
+        ("org/kept-too", ServiceLevel(come_alive_p95_s=0)),
+    )
+    result = run(service_levels, [receipt()], prices=L4_ONLY, current=current)
+    names = {entry.identity: entry.lane for entry in result.plan.identities}
+    assert names == {
+        IDENTITY: f"org-model-l4-{digest}",
+        "org/kept": "org-model-l4",
+        "org/kept-too": f"org-model-l4-{digest[:8]}",
+    }
+    assert {lane.name: lane for lane in result.plan.lanes}[f"org-model-l4-{digest[:8]}"] == second.lanes[0]
 
 
 def test_bundles_and_the_queue_pool_come_from_the_parameters():
@@ -781,7 +1100,7 @@ def test_the_estate_places_every_identity_on_a_measured_feasible_cell():
 def test_the_estate_report_states_its_findings():
     report = plan(**estate()).report
     dense = report.identity("BAAI/bge-m3")
-    assert (dense.chosen.cell, dense.chosen.warmth) == (L4, Warmth.PINNED)
+    assert (dense.chosen.cell, dense.chosen.warmth, dense.lane) == (L4, Warmth.PINNED, "default-l4-default")
     assert dense.chosen.monthly_cost == pytest.approx(1.04 * MONTH)
     assert dense.next_cheaper.warmth is Warmth.SNAPSHOT_COLD
     assert dense.next_cheaper.blocked_by == (Blocker(field="comeAliveP95S", bound=0, measured=8.5),)
@@ -793,16 +1112,22 @@ def test_the_estate_report_states_its_findings():
     assert generation.chosen.monthly_cost == pytest.approx(3.14 * 2 * 2 * SCALE)
     assert generation.next_cheaper.blocked_by == (Blocker(field="itlP99Ms", bound=80, measured=118.0),)
     assert report.identity("Qwen/Qwen3-Reranker-0.6B").status is IdentityStatus.UNPLACED
-    assert report.identity("intfloat/e5-base-v2").status is IdentityStatus.KEPT
+    kept = report.identity("intfloat/e5-base-v2")
+    assert (kept.status, kept.lane, kept.monthly_cost) == (IdentityStatus.KEPT, "default-l4-default", None)
     assert [refusal.record for refusal in report.refusals] == [RefusedRecord.BOOT_EVIDENCE, RefusedRecord.RECEIPT]
     assert report.queue_wait_unattained == ("BAAI/bge-m3", "BAAI/bge-m3:sparse", "intfloat/e5-base-v2")
-    assert [change.identity for change in report.identity_changes] == [
-        "BAAI/bge-m3",
-        "BAAI/bge-m3:sparse",
-        "Qwen/Qwen3-Embedding-4B",
-    ]
-    assert report.monthly_cost == pytest.approx(
-        sum(entry.chosen.monthly_cost for entry in report.identities if entry.chosen is not None)
+    assert [change.identity for change in report.identity_changes] == ["BAAI/bge-m3:sparse", "Qwen/Qwen3-Embedding-4B"]
+    assert report.monthly_cost == pytest.approx(sum(lane.monthly_cost for lane in report.lanes))
+    shared = {lane.name: lane for lane in report.lanes}["default-l4-default"]
+    assert shared.identities == ("BAAI/bge-m3", "intfloat/e5-base-v2")
+    assert shared.monthly_cost == pytest.approx(dense.monthly_cost)
+    assert shared.unpriced_identities == ("intfloat/e5-base-v2",)
+    assert report.unpriced_lanes == ("default-l4-default",)
+    (chart_lane,) = report.shared_chart_lanes
+    assert chart_lane.lanes == ("baai-bge-m3-sparse-l4", "default-l4-default", "qwen-qwen3-embedding-4b-l4")
+    current = estate()["current_plan"]
+    assert sum(lane.envelope.floor_min for lane in plan(**estate()).plan.lanes) == 1 + sum(
+        lane.envelope.floor_min for lane in current.lanes
     )
 
 
