@@ -30,6 +30,8 @@ class IdentityStatus(StrEnum):
 class UnplacedReason(StrEnum):
     NO_RECEIPT = "no-receipt"
     WARM_BOUND_MISSED = "warm-bound-missed"
+    WARM_BOUND_UNDECLARED = "warm-bound-undeclared"
+    CURRENT_UNMEASURED = "current-unmeasured"
 
 
 class ComeAliveBasis(StrEnum):
@@ -69,7 +71,7 @@ def _compact(fields: dict[str, object | None]) -> dict[str, object]:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Blocker:
     field: str
-    bound: int
+    bound: int | None
     measured: float | None
 
     def to_dict(self) -> dict[str, object]:
@@ -88,6 +90,7 @@ class Option:
     receipt: SourceRef
     blocked_by: tuple[Blocker, ...] = ()
     saving: float | None = None
+    lane: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return _compact(
@@ -95,6 +98,7 @@ class Option:
                 "cell": self.cell.to_dict(),
                 "containerShape": self.container_shape.to_dict(),
                 "concurrency": self.concurrency,
+                "lane": self.lane,
                 "warmth": self.warmth.value,
                 "monthlyCost": _money(self.monthly_cost),
                 "saving": None if self.saving is None else _money(self.saving),
@@ -198,6 +202,8 @@ class MeasurementRequest:
     cost_bound: float
     saving_bound: float | None
     container_shape: ContainerShape | None = None
+    concurrency: int | None = None
+    lane: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return _compact(
@@ -205,6 +211,8 @@ class MeasurementRequest:
                 "identity": self.identity,
                 "cell": self.cell.to_dict(),
                 "containerShape": None if self.container_shape is None else self.container_shape.to_dict(),
+                "concurrency": self.concurrency,
+                "lane": self.lane,
                 "measure": [measurement.value for measurement in self.measure],
                 "warmth": self.warmth.value,
                 "reason": self.reason.value,
@@ -308,6 +316,7 @@ class Report:
     refusals: tuple[Refusal, ...]
     identity_changes: tuple[IdentityChange, ...]
     lane_changes: tuple[LaneChange, ...]
+    warm_bound_undeclared: tuple[str, ...] = ()
 
     @property
     def monthly_cost(self) -> float:
@@ -349,6 +358,7 @@ class Report:
             "measurementRequests": [request.to_dict() for request in self.measurement_requests],
             "comeAliveLevers": [lever.to_dict() for lever in self.come_alive_levers],
             "queueWaitUnattained": list(self.queue_wait_unattained),
+            "warmBoundUndeclared": list(self.warm_bound_undeclared),
             "refusals": [refusal.to_dict() for refusal in self.refusals],
             "changes": {
                 "identities": [change.to_dict() for change in self.identity_changes],
