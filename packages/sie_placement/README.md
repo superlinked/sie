@@ -94,6 +94,35 @@ lane's `maxContainers`. `bufferMin` with `bufferMax`, and
 `scaledownWindowMinS` with `scaledownWindowMaxS`, are optional pairs for
 platforms that can move a warm buffer or a scale-down window per lane.
 
+## Tuner
+
+`sie_placement.tuner.step(envelope, observation, current)` decides one tick of
+an online tuner for one lane. It is a pure function, so every applier calls the
+same decision. The `Observation` gives the containers running on the lane, the
+requests waiting for capacity, the requests in flight and an `attainment` of
+`met`, `breached` or `unmeasured`. `current` is the `Settings` applied now: the
+floor, and optionally the buffer and the scale-down window. The result is a
+`Step`, one action and the settings to apply.
+
+| Action | When | Settings |
+| --- | --- | --- |
+| `raise_to_floor` | The current floor is below `floorMin` | Floor `floorMin` |
+| `hold_at_cap` | The current floor is above `floorMax`, or the lane is under pressure and every tuned setting is at its maximum | Floor `floorMax` if it was above it, otherwise unchanged |
+| `scale_up` | Requests wait or the service level is breached, and the lane runs at least its current floor | Floor and buffer one container higher, window halfway to its maximum |
+| `scale_down` | Nothing waits, nothing is in flight and the service level is not breached | Floor and buffer one container lower, window halfway to its minimum |
+| `hold` | Otherwise, including a lane under pressure that has not yet started its current floor | Unchanged |
+
+Every returned setting lies inside the envelope. A buffer or window outside its
+range is brought inside it on the same tick. The buffer and the window are
+tuned only when the envelope declares their range and `current` carries a
+value, and otherwise pass through unchanged, so an applier that moves only the
+floor passes `Settings(floor=n)`. The floor never depends on the buffer or the
+window. An `unmeasured` attainment steers on the queue alone, as `met` does.
+
+A deploy that resets the applied settings to the envelope minimum is a fresh
+start: under steady demand the settings climb back one step per tick until
+the lane serves the demand or reaches the top of its envelope.
+
 ## Tests
 
 ```bash
