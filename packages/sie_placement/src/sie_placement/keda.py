@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import math
 import re
@@ -21,6 +22,7 @@ DEFAULT_MAX_POOL_FLOOR = 4
 DEFAULT_MAX_POOLS = 64
 MAX_POOL_NAME_LENGTH = 128
 PROMETHEUS_TIMEOUT_S = 10.0
+SNAPSHOT_FRESHNESS_S = 20
 
 QUEUE_DEPTH = "queueDepth"
 PENDING_DEMAND = "pendingDemand"
@@ -30,6 +32,7 @@ RUNNERS = "runners"
 _LANE_TOKEN = re.compile(r"[a-z0-9_-]{1,63}")
 _SELECTOR_FORBIDDEN = re.compile(r"[{}\r\n]")
 _LANE_LABELS = "pool, machine_profile, bundle"
+_PRODUCER_LABELS = "producer_instance, collector_generation"
 _LANE_TOKEN_COUNT = 3
 _VALUE_PAIR = 2
 
@@ -180,6 +183,10 @@ class PrometheusHttp:
             raise ValueError("the Prometheus URL must not embed credentials")
         if parts.query or parts.fragment:
             raise ValueError("the Prometheus URL must not carry a query or a fragment")
+        try:
+            parts.port  # noqa: B018
+        except ValueError:
+            raise ValueError("the Prometheus URL has an invalid port") from None
         self._endpoint = f"{base_url.rstrip('/')}/api/v1/query"
         self._timeout_s = timeout_s
 
@@ -192,6 +199,8 @@ class PrometheusHttp:
             raise PrometheusError(f"the query failed with HTTP {error.code}") from None
         except (OSError, ValueError) as error:
             raise PrometheusError(f"the query failed: {error}") from None
+        except (http.client.HTTPException, RecursionError) as error:
+            raise PrometheusError(f"the query failed: {type(error).__name__}") from None
         return parse_vector(document)
 
 
@@ -202,10 +211,21 @@ def series_queries(selector: str = "") -> dict[str, str]:
     def matchers(*extra: str) -> str:
         return ",".join(part for part in (selector.strip(), *extra) if part)
 
+    def fresh(metric: str, timestamp: str, join_labels: str) -> str:
+        return (
+            f"max by ({_LANE_LABELS}) ({metric}{{{matchers()}}} and on({join_labels}) "
+            f"(abs(time() - {timestamp}{{{matchers()}}}) < {SNAPSHOT_FRESHNESS_S}))"
+        )
+
+    capacity = "sie_gateway_capacity_snapshot_timestamp_seconds"
     return {
-        QUEUE_DEPTH: f"max by ({_LANE_LABELS}) (sie_gateway_lane_queue_depth{{{matchers()}}})",
-        PENDING_DEMAND: f"max by ({_LANE_LABELS}) (sie_gateway_pending_demand{{{matchers()}}})",
-        WARM_FLOOR: f"max by ({_LANE_LABELS}) (sie_gateway_pool_warm_floor{{{matchers()}}})",
+        QUEUE_DEPTH: fresh(
+            "sie_gateway_lane_queue_depth",
+            "sie_gateway_lane_queue_snapshot_timestamp_seconds",
+            f"{_PRODUCER_LABELS}, {_LANE_LABELS}",
+        ),
+        PENDING_DEMAND: fresh("sie_gateway_pending_demand", capacity, _PRODUCER_LABELS),
+        WARM_FLOOR: fresh("sie_gateway_pool_warm_floor", capacity, _PRODUCER_LABELS),
         RUNNERS: (
             "count by (lane) (max by (lane, producer_instance) "
             f"(sie_worker_gpu_slots{{{matchers('state="ready"')}}}) > 0)"

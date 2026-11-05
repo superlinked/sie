@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import itertools
 import json
+import socketserver
 import threading
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
@@ -205,16 +206,47 @@ def test_a_carrier_name_longer_than_the_gateway_accepts_is_refused():
         keda.carriers(plan)
 
 
-def test_the_series_queries_read_each_lane_from_the_gateway_and_worker_series():
+def test_the_series_queries_read_each_lane_from_fresh_gateway_producers_and_the_worker_series():
+    capacity_fresh = (
+        "and on(producer_instance, collector_generation) "
+        "(abs(time() - sie_gateway_capacity_snapshot_timestamp_seconds{}) < 20))"
+    )
     assert keda.series_queries() == {
-        "queueDepth": "max by (pool, machine_profile, bundle) (sie_gateway_lane_queue_depth{})",
-        "pendingDemand": "max by (pool, machine_profile, bundle) (sie_gateway_pending_demand{})",
-        "warmFloor": "max by (pool, machine_profile, bundle) (sie_gateway_pool_warm_floor{})",
+        "queueDepth": (
+            "max by (pool, machine_profile, bundle) (sie_gateway_lane_queue_depth{} "
+            "and on(producer_instance, collector_generation, pool, machine_profile, bundle) "
+            "(abs(time() - sie_gateway_lane_queue_snapshot_timestamp_seconds{}) < 20))"
+        ),
+        "pendingDemand": f"max by (pool, machine_profile, bundle) (sie_gateway_pending_demand{{}} {capacity_fresh}",
+        "warmFloor": f"max by (pool, machine_profile, bundle) (sie_gateway_pool_warm_floor{{}} {capacity_fresh}",
         "runners": ('count by (lane) (max by (lane, producer_instance) (sie_worker_gpu_slots{state="ready"}) > 0)'),
     }
     scoped = keda.series_queries('namespace="sie"')
-    assert scoped["queueDepth"].endswith('(sie_gateway_lane_queue_depth{namespace="sie"})')
+    assert scoped["queueDepth"] == (
+        'max by (pool, machine_profile, bundle) (sie_gateway_lane_queue_depth{namespace="sie"} '
+        "and on(producer_instance, collector_generation, pool, machine_profile, bundle) "
+        '(abs(time() - sie_gateway_lane_queue_snapshot_timestamp_seconds{namespace="sie"}) < 20))'
+    )
+    for name in ("pendingDemand", "warmFloor"):
+        assert scoped[name].endswith(
+            '{namespace="sie"} and on(producer_instance, collector_generation) '
+            '(abs(time() - sie_gateway_capacity_snapshot_timestamp_seconds{namespace="sie"}) < 20))'
+        )
     assert scoped["runners"].endswith('(sie_worker_gpu_slots{namespace="sie",state="ready"}) > 0)')
+
+
+def test_a_lane_whose_gateway_producers_are_all_stale_is_held():
+    stale = lane_labels(bundle="stale")
+    prometheus = FakePrometheus.lane(queue_depth=4, pending=1, runners=2)
+    prometheus.series[QUEUE_METRIC] = [(lane_labels(), 4)]
+    prometheus.series[PENDING_METRIC] = [(lane_labels(), 1)]
+    lanes = keda.carriers(make_plan({"bundle": "default"}, {"bundle": "stale"}))
+    pools = FakePools({carrier.name: carrier_spec(1, bundle=carrier.key.bundle) for carrier in lanes})
+    fresh, held = run_tick(lanes, prometheus, pools, pools).records
+    assert held.carrier.key.bundle == stale["bundle"]
+    assert (fresh.step.action, fresh.step.settings.floor) == (Action.SCALE_UP, 2)
+    assert (held.telemetry.queue_depth, held.telemetry.pending_demand) == (None, None)
+    assert (held.step.action, held.step.settings.floor) == (Action.HOLD, 1)
 
 
 @pytest.mark.parametrize("selector", ['namespace="sie"}', '{namespace="sie"', 'a="b"\nc="d"'])
@@ -309,9 +341,57 @@ def test_the_http_reader_reports_an_unreachable_prometheus():
         keda.PrometheusHttp("http://127.0.0.1:9", timeout_s=2).query("up")
 
 
+class _RawHandler(socketserver.StreamRequestHandler):
+    server: _RawServer
+
+    def handle(self) -> None:
+        self.rfile.readline()
+        self.wfile.write(self.server.reply)
+
+
+class _RawServer(socketserver.ThreadingTCPServer):
+    daemon_threads = True
+
+    def __init__(self, reply: bytes) -> None:
+        super().__init__(("127.0.0.1", 0), _RawHandler)
+        self.reply = reply
+
+
+@pytest.mark.parametrize(
+    ("reply", "error"),
+    [
+        (b"garbage\r\n\r\n", "BadStatusLine"),
+        (
+            b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 500\r\n\r\n{"status": "s',
+            "IncompleteRead",
+        ),
+    ],
+)
+def test_the_http_reader_reports_a_malformed_reply(monkeypatch, reply, error):
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    server = _RawServer(reply)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(keda.PrometheusError, match=f"the query failed: {error}"):
+            keda.PrometheusHttp(f"http://127.0.0.1:{server.server_address[1]}", timeout_s=2).query("up")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 @pytest.mark.parametrize(
     "url",
-    ["file:///etc/passwd", "ftp://prometheus", "prometheus:9090", "http://user:secret@prometheus", "http://p/?x=1"],
+    [
+        "file:///etc/passwd",
+        "ftp://prometheus",
+        "prometheus:9090",
+        "http://user:secret@prometheus",
+        "http://p/?x=1",
+        "http://prometheus:notaport",
+        "http://prometheus:99999",
+    ],
 )
 def test_the_http_reader_accepts_only_a_plain_http_base_url(url):
     with pytest.raises(ValueError, match="Prometheus URL"):

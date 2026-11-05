@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -15,9 +16,12 @@ from sie_placement import keda
 from sie_placement.schema import Plan
 
 ADMIN_TOKEN_ENV = "SIE_ADMIN_TOKEN"  # noqa: S105 - an environment variable name
+SDK_API_KEY_ENV = "SIE_API_KEY"
 DEFAULT_INTERVAL_S = 60.0
 EXIT_FAILED = 1
 EXIT_REFUSED = 2
+
+_TOKEN = re.compile(r"[\x21-\x7e]+")
 
 
 class _UsageError(ValueError):
@@ -86,18 +90,26 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _token(value: str, source: str, label: str) -> str:
+    if _TOKEN.fullmatch(value) is None:
+        raise _UsageError(f"the {label} in {source} must be one run of printable ASCII characters without spaces")
+    return value
+
+
 def _secret(path: Path | None, env_name: str | None, label: str) -> str | None:
     if path is not None:
         try:
             value = path.read_text(encoding="utf-8").strip()
-        except OSError as error:
-            raise _UsageError(f"cannot read the {label} file {str(path)!r}: {error.strerror}") from None
+        except (OSError, UnicodeError) as error:
+            reason = error.strerror if isinstance(error, OSError) else "it is not UTF-8 text"
+            raise _UsageError(f"cannot read the {label} file {str(path)!r}: {reason}") from None
         if not value:
             raise _UsageError(f"the {label} file {str(path)!r} is empty")
-        return value
+        return _token(value, f"the file {str(path)!r}", label)
     if env_name is None:
         return None
-    return os.environ.get(env_name, "").strip() or None
+    value = os.environ.get(env_name, "").strip()
+    return _token(value, f"${env_name}", label) if value else None
 
 
 def _load_plan(path: Path) -> Plan:
@@ -124,6 +136,8 @@ def _tune(args: argparse.Namespace) -> int:
         keda.series_queries(args.series_selector)
         prometheus = keda.PrometheusHttp(args.prometheus_url)
         read_token = _secret(args.api_key_file, None, "gateway client token")
+        if read_token is None:
+            _secret(None, SDK_API_KEY_ENV, "gateway client token")
         admin_token = _secret(args.admin_token_file, ADMIN_TOKEN_ENV, "gateway admin token") if args.apply else None
     except ValueError as error:
         print(f"sie-placement tune: {error}", file=sys.stderr)

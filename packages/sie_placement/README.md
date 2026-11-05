@@ -154,8 +154,10 @@ floor as `current`. It prints one JSON audit row per lane to standard output. Wi
 `--apply` it runs in shadow mode: it decides and records and writes nothing.
 With `--apply` it upserts every lane's carrier on every tick through
 `SIEClient.create_pool`, which renews the carrier's lease and sets its floor to
-the step's floor. A lane that has no carrier and whose floor stays at 0 gets
-none.
+the step's floor. Each write uses its own SDK client and closes it after the
+write, so the SDK's background lease renewal never runs: a carrier's lease is
+renewed only by a tick that writes it. A lane that has no carrier and whose
+floor stays at 0 gets none.
 
 Under KEDA only the floor moves per lane. The scale-down window and the queue
 threshold are chart-wide settings, and there is no buffer to tune, so the
@@ -176,37 +178,57 @@ reported and left unchanged. A carrier carries no pins, because every floor
 change is a spec change, which resets the pool's worker assignment; pinned
 models stay in the chart values.
 
-When the applier stops renewing, each carrier's lease lapses, 1200 seconds by
-default, the gateway removes it, and the lane returns to its chart floor. On a
-lane whose chart `minReplicas` is 0, a floor of 1 or more activates the lane,
-which then holds at least the chart's fallback floor.
+A tick that cannot read a lane's carrier, or finds a pool with its name that is
+not its carrier, does not write it. A carrier that no tick writes, because those
+reads keep failing or the applier has stopped, lapses 1200 seconds after its
+last write by default, the gateway removes it, and the lane returns to its
+chart floor. On a lane whose chart `minReplicas` is 0, a floor of 1 or more
+activates the lane, which then holds at least the chart's fallback floor.
 
 ### Series
 
 | Series | Query | Step input |
 | --- | --- | --- |
-| Queue depth | `max by (pool, machine_profile, bundle) (sie_gateway_lane_queue_depth{})` | `running` |
-| Pending demand | `max by (pool, machine_profile, bundle) (sie_gateway_pending_demand{})` | `backlog` |
-| Warm floor | `max by (pool, machine_profile, bundle) (sie_gateway_pool_warm_floor{})` | Reported only |
+| Queue depth | `max by (pool, machine_profile, bundle) (sie_gateway_lane_queue_depth{} and on(producer_instance, collector_generation, pool, machine_profile, bundle) (abs(time() - sie_gateway_lane_queue_snapshot_timestamp_seconds{}) < 20))` | `running` |
+| Pending demand | `max by (pool, machine_profile, bundle) (sie_gateway_pending_demand{} and on(producer_instance, collector_generation) (abs(time() - sie_gateway_capacity_snapshot_timestamp_seconds{}) < 20))` | `backlog` |
+| Warm floor | `max by (pool, machine_profile, bundle) (sie_gateway_pool_warm_floor{} and on(producer_instance, collector_generation) (abs(time() - sie_gateway_capacity_snapshot_timestamp_seconds{}) < 20))` | Reported only |
 | Running workers | `count by (lane) (max by (lane, producer_instance) (sie_worker_gpu_slots{state="ready"}) > 0)` | `runners` |
 
-`--series-selector` adds label matchers to every selector, for example
-`namespace="sie"` when one Prometheus scrapes several releases. Lane labels
-match the plan's lane tokens after trimming and lowering them, as the chart
-names lanes. The attainment is `unmeasured`, so a lane is under pressure while
-the gateway reports pending demand for it, which it does when a request found no
-ready capacity, and idle when it reports neither pending demand nor queued or
-in-flight work. A lane with no ready worker has 0 runners. A lane whose queue
-depth, pending demand or worker series is missing is held: the step is given a
-busy lane with nothing waiting, so it only brings the carrier's floor inside the
-envelope.
+`--series-selector` adds label matchers to every selector, timestamps included,
+for example `namespace="sie"` when one Prometheus scrapes several releases.
+Lane labels match the plan's lane tokens after trimming and lowering them, as
+the chart names lanes.
+
+The collector keeps a producer's last point for minutes after the producer
+stops reporting, so each gateway series keeps only the producers whose snapshot
+is at most 20 seconds old, as the chart's KEDA triggers do: the lane's own
+queue snapshot for queue depth, and the producer's capacity snapshot for
+pending demand and warm floor. A lane whose gateway values are all stale reads
+as missing. The worker series has no snapshot timestamp, so a worker that
+stopped reporting still counts among the runners until the collector drops it.
+
+Pending demand is a 0 or 1 flag per lane, not a count. The gateway sets it
+while a request that found no ready capacity is recent, while any request's
+durable publish to the lane awaits its acknowledgement, and for 120 seconds
+after a failed dispatch. The attainment is `unmeasured`, so a lane is under
+pressure whenever the flag is set, and idle when neither the flag nor queued or
+in-flight work is reported. Because a publish in flight sets the flag, any
+traffic can read as pressure even when the lane has capacity to spare, and a
+lane that serves steady traffic seldom reads idle, so its floor can climb
+towards `floorMax` while traffic lasts and falls one step per idle tick
+afterwards. Run the applier in shadow mode first to see how often each lane
+reads as under pressure. A lane with no
+ready worker has 0 runners. A lane whose queue depth, pending demand or worker
+series is missing is held: the step is given a busy lane with nothing waiting,
+so it only brings the carrier's floor inside the envelope.
 
 ### Audit rows
 
 Each row carries `at`, `mode` (`shadow` or `apply`), the lane's `lane`,
 `queuePool`, `machineProfile` and `bundle`, the `carrier` pool name, the
-`telemetry` read for the lane, `currentFloor`, the step's `action` and `floor`,
-whether the write was `applied`, `laneFloorAboveEnvelope` and `error`.
+`telemetry` read for the lane (`pendingDemand` is the 0 or 1 flag),
+`currentFloor`, the step's `action` and `floor`, whether the write was
+`applied`, `laneFloorAboveEnvelope` and `error`.
 `laneFloorAboveEnvelope` is true when the lane's warm floor exceeds `floorMax`.
 The applier does not lower another pool's floor, so a lane held above its
 envelope by another pool stays reported until that pool changes.
@@ -221,7 +243,13 @@ The command exits with status 2 before it calls Prometheus or the gateway when:
   `SIE_GATEWAY_MAX_POOLS` (default 64);
 - a lane's `queuePool`, machine profile or bundle is not 1 to 63 letters,
   digits, `_` or `-`, two lanes need the same carrier, or a carrier name is
-  longer than the gateway's 128 characters.
+  longer than the gateway's 128 characters;
+- a token file or `SIE_ADMIN_TOKEN` holds anything but one run of printable
+  ASCII characters without spaces after trimming, or the Prometheus URL has an
+  invalid port.
+
+A failed query, pool read or pool write fails only its tick, which is recorded,
+and the next tick runs as usual.
 
 With `--once`, a tick whose query, pool read or pool write failed exits with
 status 1.
@@ -232,13 +260,16 @@ status 1.
 | --- | --- | --- |
 | Prometheus `/api/v1/query` | Read access to the query API | None sent |
 | `GET /v1/pools/{name}` | A gateway client token, when gateway token auth is on | `--api-key-file`, or `SIE_API_KEY` when `SIE_BASE_URL` names the same origin, as the SDK resolves it |
-| `POST /v1/pools` and its lease renewal | The gateway admin token | `--admin-token-file`, or `SIE_ADMIN_TOKEN`, read only with `--apply` |
+| `POST /v1/pools`, which also renews the lease | The gateway admin token | `--admin-token-file`, or `SIE_ADMIN_TOKEN`, read only with `--apply` |
 
 The gateway admin token authorizes every gateway admin route, not only pools.
 The applier reads it only with `--apply`, sends it only on pool writes to
 `--gateway-url`, never takes it as a command-line value and never prints or
 logs it. Without it, `--apply` sends its writes with no credential, which a
-gateway with token auth refuses. The client token is never sent on writes.
+gateway with token auth refuses. The client token is never sent on writes. A
+refused token is named by its source, never by its value, and a failed gateway
+call is reported by the server's error message or, for a transport failure, by
+the exception type alone, so no reported error carries a header value.
 
 ## Tests
 

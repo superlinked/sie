@@ -4,16 +4,18 @@ import json
 import logging
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 pytest.importorskip("sie_sdk")
 
-from sie_placement import cli
+from sie_placement import cli, keda, pools
 
 FIXTURES = Path(__file__).parent / "fixtures"
 READ_TOKEN = "read-token-for-tests"  # noqa: S105 - a test value
@@ -75,13 +77,18 @@ class FakeGateway(_Server):
         super().__init__()
         self.auth = auth
         self.pools: dict[str, dict] = {}
+        self.fail_reads = False
+        self.read_reply: object | None = None
 
     def respond(self, handler: _Handler, method: str, body: object) -> None:
         path = urlsplit(handler.path).path
         authorization = handler.headers.get("Authorization")
         self.requests.append({"method": method, "path": path, "authorization": authorization, "body": body})
         if method == "GET" and path.startswith("/v1/pools/"):
-            if self.auth and authorization != f"Bearer {READ_TOKEN}":
+            if self.read_reply is not None:
+                handler._reply(200, self.read_reply)
+                return
+            if self.fail_reads or (self.auth and authorization != f"Bearer {READ_TOKEN}"):
                 handler._reply(401, {"detail": {"code": "UNAUTHORIZED", "message": "Invalid token"}})
                 return
             spec = self.pools.get(path.removeprefix("/v1/pools/"))
@@ -120,11 +127,19 @@ class FakePrometheus(_Server):
             "sie_gateway_pool_warm_floor": vector((L4, 1), (A100, 0)),
             "sie_worker_gpu_slots": vector(({"lane": "default|l4|default"}, 1)),
         }
+        self.truncate = False
 
     def respond(self, handler: _Handler, method: str, body: object) -> None:
         url = urlsplit(handler.path)
         query = parse_qs(url.query).get("query", [""])[0]
         self.requests.append({"path": url.path, "query": query, "authorization": handler.headers.get("Authorization")})
+        if self.truncate:
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", "500")
+            handler.end_headers()
+            handler.wfile.write(b'{"status": "succ')
+            return
         for metric, document in self.series.items():
             if metric in query:
                 handler._reply(200, document)
@@ -173,20 +188,14 @@ def read_token_file(tmp_path) -> Path:
     return path
 
 
-def tune(gateway: FakeGateway, prometheus: FakePrometheus, *extra: str, plan: Path = FIXTURES / "plan.json") -> int:
+def run(gateway: FakeGateway, prometheus: FakePrometheus, *extra: str, plan: Path = FIXTURES / "plan.json") -> int:
     return cli.main(
-        [
-            "tune",
-            "--plan",
-            str(plan),
-            "--prometheus-url",
-            prometheus.url,
-            "--gateway-url",
-            gateway.url,
-            "--once",
-            *extra,
-        ]
+        ["tune", "--plan", str(plan), "--prometheus-url", prometheus.url, "--gateway-url", gateway.url, *extra]
     )
+
+
+def tune(gateway: FakeGateway, prometheus: FakePrometheus, *extra: str, plan: Path = FIXTURES / "plan.json") -> int:
+    return run(gateway, prometheus, "--once", *extra, plan=plan)
 
 
 def rows(captured: str) -> list[dict]:
@@ -368,3 +377,148 @@ def test_the_core_imports_without_the_sdk_and_tune_names_the_missing_extra(gatew
     assert tune(gateway, prometheus) == cli.EXIT_REFUSED
     assert "needs the sie-placement keda extra" in capsys.readouterr().err
     assert gateway.requests == []
+
+
+TWO_LINE_SECRET = "first-line-of-a-secret\nsecond-line-of-a-secret"  # noqa: S105 - a test value
+
+
+def assert_secret_absent(secret: str, captured, caplog) -> None:
+    for part in (secret, *secret.split("\n")):
+        assert part not in captured.out
+        assert part not in captured.err
+        assert part not in caplog.text
+
+
+@pytest.mark.parametrize("secret", [TWO_LINE_SECRET, "secret\x00value"])
+@pytest.mark.parametrize("flag", ["--api-key-file", "--admin-token-file"])
+def test_a_token_file_with_a_control_character_is_refused_without_echoing_it(
+    gateway, prometheus, tmp_path, flag, secret, capsys, caplog
+):
+    caplog.set_level(logging.DEBUG)
+    token = tmp_path / "token"
+    token.write_text(secret + "\n", encoding="utf-8")
+    assert tune(gateway, prometheus, "--apply", flag, str(token)) == cli.EXIT_REFUSED
+    captured = capsys.readouterr()
+    assert "must be one run of printable ASCII characters without spaces" in captured.err
+    assert_secret_absent(secret, captured, caplog)
+    assert gateway.requests == []
+    assert prometheus.requests == []
+
+
+@pytest.mark.parametrize("value", [TWO_LINE_SECRET, "secret with spaces", "caf\u00e9-secret"])
+def test_an_admin_token_variable_that_a_header_cannot_carry_is_refused(
+    gateway, prometheus, read_token_file, monkeypatch, value, capsys, caplog
+):
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setenv("SIE_ADMIN_TOKEN", value)
+    assert tune(gateway, prometheus, "--api-key-file", str(read_token_file), "--apply") == cli.EXIT_REFUSED
+    captured = capsys.readouterr()
+    assert "the gateway admin token in $SIE_ADMIN_TOKEN must be one run of printable ASCII" in captured.err
+    assert_secret_absent(value, captured, caplog)
+    assert gateway.requests == []
+
+
+def test_a_token_file_that_is_not_utf8_is_refused_without_echoing_it(gateway, prometheus, tmp_path, capsys):
+    token = tmp_path / "token"
+    token.write_bytes(b"secret\xff\xfevalue")
+    assert tune(gateway, prometheus, "--api-key-file", str(token)) == cli.EXIT_REFUSED
+    err = capsys.readouterr().err
+    assert "it is not UTF-8 text" in err
+    assert "secret" not in err
+    assert "0xff" not in err
+
+
+@pytest.mark.parametrize("value", [TWO_LINE_SECRET, "caf\u00e9-secret"])
+def test_an_sdk_client_token_that_a_header_cannot_carry_is_refused(
+    gateway, prometheus, monkeypatch, value, capsys, caplog
+):
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setenv("SIE_BASE_URL", gateway.url)
+    monkeypatch.setenv("SIE_API_KEY", value)
+    assert tune(gateway, prometheus) == cli.EXIT_REFUSED
+    captured = capsys.readouterr()
+    assert "the gateway client token in $SIE_API_KEY must be one run of printable ASCII" in captured.err
+    assert_secret_absent(value, captured, caplog)
+    assert gateway.requests == []
+
+
+def test_a_transport_failure_is_reported_without_the_header_it_carried(gateway):
+    reader = pools.connect(gateway.url, TWO_LINE_SECRET)
+    try:
+        with pytest.raises(keda.GatewayError) as raised:
+            reader.get_pool("placement-floor-default-l4-default")
+    finally:
+        reader.close()
+    assert str(raised.value) == "the request failed (LocalProtocolError)"
+    writer = pools.connect(gateway.url, TWO_LINE_SECRET)
+    try:
+        with pytest.raises(keda.GatewayError) as raised:
+            writer.create_pool(
+                "placement-floor-default-l4-default",
+                {"l4": 0},
+                bundle="default",
+                minimum_worker_count=1,
+                queue_pool="default",
+            )
+    finally:
+        writer.close()
+    assert str(raised.value) == "the request failed (LocalProtocolError)"
+    assert gateway.pools == {}
+
+
+def test_a_token_an_http_header_cannot_encode_is_refused_without_echoing_it(gateway):
+    with pytest.raises(ValueError, match=r"^a gateway token holds a character that an HTTP header cannot carry$"):
+        pools.connect(gateway.url, "caf\u00e9-secret")
+
+
+def test_a_malformed_pool_reply_fails_only_the_tick(gateway, prometheus, read_token_file, capsys):
+    gateway.read_reply = ["not", "a", "pool"]
+    assert tune(gateway, prometheus, "--api-key-file", str(read_token_file)) == cli.EXIT_FAILED
+    errors = [row["error"] for row in rows(capsys.readouterr().out)]
+    assert errors == [
+        "reading pool 'placement-floor-default-l4-default' failed: the gateway returned an unexpected response",
+        "reading pool 'placement-floor-default-a100-80gb-generation' failed: "
+        "the gateway returned an unexpected response",
+    ]
+
+
+def test_the_loop_survives_failed_ticks_and_never_renews_a_lease_in_the_background(
+    gateway, prometheus, read_token_file, monkeypatch, capsys
+):
+    monkeypatch.setenv("SIE_ADMIN_TOKEN", ADMIN_TOKEN)
+    leases: list[list[str]] = []
+    closed: list[pools.SdkPools] = []
+    close = pools.SdkPools.close
+
+    def record_close(self: pools.SdkPools) -> None:
+        closed.append(self)
+        close(self)
+
+    def between_ticks(_seconds: float) -> None:
+        leases.append([thread.name for thread in threading.enumerate() if thread.name.startswith("pool-lease-")])
+        if len(leases) == 1:
+            prometheus.truncate = True
+        elif len(leases) == 2:
+            prometheus.truncate = False
+            gateway.fail_reads = True
+        else:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(pools.SdkPools, "close", record_close)
+    monkeypatch.setattr(cli, "time", SimpleNamespace(monotonic=time.monotonic, sleep=between_ticks))
+    assert run(gateway, prometheus, "--api-key-file", str(read_token_file), "--apply", "--interval-s", "1") == 0
+    captured = capsys.readouterr()
+    lines = rows(captured.out)
+    assert [(row["action"], row["applied"], row["error"] is None) for row in lines] == [
+        ("raise_to_floor", True, True),
+        ("hold", False, True),
+        ("hold", True, True),
+        ("hold", False, True),
+        (None, False, False),
+        (None, False, False),
+    ]
+    assert "Prometheus series queueDepth: the query failed: IncompleteRead" in captured.err
+    assert leases == [[], [], []]
+    posts = [request["path"] for request in gateway.requests if request["method"] == "POST"]
+    assert posts == ["/v1/pools", "/v1/pools"]
+    assert len(closed) == 2
