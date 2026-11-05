@@ -254,6 +254,25 @@ def loosened(service_levels: ServiceLevels, identity: str, bound: int) -> Servic
     )
 
 
+LEVEL_FIELDS = {
+    "comeAliveP95S": "come_alive_p95_s",
+    "warmP99Ms": "warm_p99_ms",
+    "ttftP99Ms": "ttft_p99_ms",
+    "itlP99Ms": "itl_p99_ms",
+}
+
+
+def relaxed(service_levels: ServiceLevels, identity: str, blockers) -> ServiceLevels:
+    fields = {LEVEL_FIELDS[blocker.field]: max(1, math.ceil(blocker.measured)) for blocker in blockers}
+    return replace(
+        service_levels,
+        identities=tuple(
+            replace(entry, level=replace(entry.level, **fields)) if entry.identity == identity else entry
+            for entry in service_levels.identities
+        ),
+    )
+
+
 def test_container_hourly_cost_prices_accelerators_cores_and_memory():
     price = MachineProfilePrice(
         name="l4", gpu_product="NVIDIA-L4", accelerator_per_hour=2.0, core_per_hour=0.05, memory_gib_per_hour=0.01
@@ -496,6 +515,7 @@ def test_generation_cells_meet_both_the_first_token_and_the_per_token_bound():
         Blocker(field="ttftP99Ms", bound=1500, measured=2000.0),
         Blocker(field="itlP99Ms", bound=80, measured=95.0),
     )
+    assert report.next_cheaper.saving == pytest.approx(2 * MONTH)
 
 
 def test_a_receipt_whose_realized_product_differs_from_its_profile_is_refused():
@@ -625,6 +645,23 @@ def test_the_next_cheaper_option_is_the_nearest_cheaper_one_and_names_its_bound(
     assert report.next_cheaper.cell == L40S
     assert report.next_cheaper.saving == pytest.approx(MONTH)
     assert report.next_cheaper.blocked_by == (Blocker(field="warmP99Ms", bound=250, measured=300.0),)
+
+
+@pytest.mark.parametrize(("others", "saving"), [((), MONTH), (("org/kept",), 0.0)])
+def test_a_next_cheaper_saving_is_what_loosening_its_bounds_saves_the_plan(others, saving):
+    service_levels = levels(*((name, ServiceLevel(come_alive_p95_s=0)) for name in (IDENTITY, *others)))
+    current = single_lane_plan(others=others)
+    result = run(service_levels, [receipt()], [boot(seconds=30.0)], prices=L4_ONLY, current=current)
+    report = result.report.identity(IDENTITY)
+    assert (report.lane, report.chosen.warmth) == ("shared", Warmth.PINNED)
+    assert (report.next_cheaper.warmth, report.next_cheaper.monthly_cost) == (Warmth.COLD_WITH_BOUND, 0.0)
+    assert report.chosen.monthly_cost - report.next_cheaper.monthly_cost == pytest.approx(MONTH)
+    assert report.next_cheaper.saving == pytest.approx(saving)
+    again = run(
+        loosened(service_levels, IDENTITY, 30), [receipt()], [boot(seconds=30.0)], prices=L4_ONLY, current=result.plan
+    )
+    assert again.report.identity(IDENTITY).chosen.warmth is Warmth.COLD_WITH_BOUND
+    assert result.report.monthly_cost - again.report.monthly_cost == pytest.approx(saving)
 
 
 def test_a_placement_with_nothing_cheaper_names_no_next_option():
@@ -1157,18 +1194,32 @@ def test_an_estate_lever_saves_what_planning_again_at_its_permitted_bound_saves(
         assert lever.saving_at_permitted_bound > 0
 
 
-def test_an_estate_identity_beside_a_kept_neighbour_offers_no_lever():
+def test_an_estate_identity_beside_a_kept_neighbour_offers_no_lever_and_no_saving():
     inputs = estate()
     result = plan(**inputs)
     dense = result.report.identity("BAAI/bge-m3")
     assert (dense.lane, dense.chosen.warmth) == ("default-l4-default", Warmth.PINNED)
     assert dense.next_cheaper.come_alive_s == 8.5
+    assert dense.chosen.monthly_cost > dense.next_cheaper.monthly_cost
+    assert dense.next_cheaper.saving == 0
     assert not [lever for lever in result.report.come_alive_levers if lever.identity == "BAAI/bge-m3"]
     for bound in (9, 95):
         service_levels = loosened(inputs["service_levels"], "BAAI/bge-m3", bound)
         again = plan(**{**inputs, "service_levels": service_levels, "current_plan": result.plan})
         assert again.report.identity("BAAI/bge-m3").chosen.warmth in (Warmth.COLD_WITH_BOUND, Warmth.SNAPSHOT_COLD)
         assert again.report.monthly_cost > result.report.monthly_cost
+
+
+def test_an_estate_next_cheaper_saving_is_what_planning_again_with_its_bounds_loosened_saves():
+    inputs = estate()
+    result = plan(**inputs)
+    offered = [entry for entry in result.report.identities if entry.next_cheaper is not None]
+    assert [entry.identity for entry in offered] == ["BAAI/bge-m3", "Qwen/Qwen3-8B", "Qwen/Qwen3-Embedding-4B"]
+    for entry in offered:
+        service_levels = relaxed(inputs["service_levels"], entry.identity, entry.next_cheaper.blocked_by)
+        again = plan(**{**inputs, "service_levels": service_levels, "current_plan": result.plan})
+        fall = result.report.monthly_cost - again.report.monthly_cost
+        assert entry.next_cheaper.saving == pytest.approx(max(0.0, fall), abs=0.01)
 
 
 @pytest.mark.parametrize("seed", range(25))
@@ -1243,6 +1294,10 @@ def test_random_estates_choose_only_feasible_cells_and_replan_to_themselves(seed
         if entry.next_cheaper is not None:
             assert entry.next_cheaper.blocked_by
             assert entry.next_cheaper.monthly_cost < chosen.monthly_cost
+            looser = relaxed(service_levels, entry.identity, entry.next_cheaper.blocked_by)
+            again = run(looser, receipts, boots, prices=prices, hourly=hourly, current=result.plan, **overrides)
+            fall = result.report.monthly_cost - again.report.monthly_cost
+            assert entry.next_cheaper.saving == pytest.approx(max(0.0, fall), abs=0.01)
     costs = {entry.identity: entry.chosen.monthly_cost for entry in result.report.identities if entry.chosen}
     for lever in result.report.come_alive_levers:
         assert lever.monthly_cost < costs[lever.identity]
