@@ -26,7 +26,7 @@ SLOTS_METRIC = "sie_worker_gpu_slots"
 
 
 def plan_document() -> dict:
-    return json.loads((FIXTURES / "plan.json").read_text(encoding="utf-8"))
+    return json.loads((FIXTURES / "tune-plan.json").read_text(encoding="utf-8"))
 
 
 def make_plan(*lanes: dict) -> Plan:
@@ -44,7 +44,7 @@ def make_plan(*lanes: dict) -> Plan:
         if machine_profile is not None:
             lane["cell"]["machineProfile"] = machine_profile
         document["lanes"].append(lane)
-        warmth = "pinned" if lane["envelope"]["floorMin"] >= 1 else "cold-with-bound"
+        warmth = "lazy-resident" if lane["envelope"]["floorMin"] >= 1 else "cold-with-bound"
         document["identities"].append({"identity": f"model-{index}", "lane": lane["name"], "warmth": warmth})
     return Plan.from_dict(document)
 
@@ -204,6 +204,51 @@ def test_a_carrier_name_longer_than_the_gateway_accepts_is_refused():
     plan = make_plan({"queuePool": "q" * 40, "machineProfile": "m" * 40, "bundle": "b" * 40})
     with pytest.raises(keda.PlanRefusedError, match="longer than 128 characters"):
         keda.carriers(plan)
+
+
+def test_a_pin_on_the_default_queue_pool_is_refused_as_the_helm_emitter_refuses_it():
+    document = plan_document()
+    document["lanes"][0]["queuePool"] = "Default"
+    document["identities"][1]["warmth"] = "pinned"
+    document["identities"][0]["warmth"] = "pinned"
+    with pytest.raises(keda.PlanRefusedError) as raised:
+        keda.carriers(Plan.from_dict(document))
+    assert raised.value.problems == (
+        "$.identities[0].warmth: pins 'BAAI/bge-m3' on chart lane 'default/l4/default', but the gateway keeps no "
+        "static queue pool for the 'default' queue pool, so its pinnedModels have no carrier; place pinned "
+        "identities on a named queuePool",
+    )
+    document["lanes"][0]["queuePool"] = "embed"
+    (pinned, _) = keda.carriers(Plan.from_dict(document))
+    assert pinned.name == "placement-floor-embed-l4-default"
+
+
+@pytest.mark.parametrize("warmth", sorted(keda.UNREALIZED_WARMTHS))
+def test_a_warmth_the_chart_does_not_realize_is_refused_as_the_helm_emitter_refuses_it(warmth):
+    document = plan_document()
+    document["identities"][2]["warmth"] = warmth.value
+    with pytest.raises(keda.PlanRefusedError) as raised:
+        keda.carriers(Plan.from_dict(document))
+    assert raised.value.problems == (
+        f"$.identities[2].warmth: is {warmth.value!r} for 'Qwen/Qwen3-8B' on lane 'default-a100-80gb-generation', "
+        f"which the sie-cluster chart does not realize: {keda.UNREALIZED_WARMTHS[warmth]}; plan the identity "
+        "pinned, lazy-resident or cold-with-bound",
+    )
+
+
+def test_every_problem_of_a_refused_plan_is_reported():
+    document = plan_document()
+    document["identities"][0]["warmth"] = "pinned"
+    document["identities"][2]["warmth"] = "snapshot-cold"
+    document["lanes"][1]["envelope"]["floorMax"] = 5
+    document["lanes"][1]["maxContainers"] = 6
+    with pytest.raises(keda.PlanRefusedError) as raised:
+        keda.carriers(Plan.from_dict(document))
+    assert [problem.split(":", 1)[0] for problem in raised.value.problems] == [
+        "$.identities[0].warmth",
+        "$.lanes[1].envelope.floorMax",
+        "$.identities[2].warmth",
+    ]
 
 
 def test_the_series_queries_read_each_lane_from_fresh_gateway_producers_and_the_worker_series():
