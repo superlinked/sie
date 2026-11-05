@@ -268,10 +268,12 @@ def test_schema_fixture_plan_has_fallback_cells_and_an_unrealizable_zero_floor()
     assert error.message.startswith("must be 0 or at least 2:")
 
 
-def test_planner_estate_plan_names_one_chart_lane_twice() -> None:
+def test_planner_estate_plan_puts_two_queue_pools_on_one_worker_group() -> None:
     error = refusal(Plan.from_dict(load(FIXTURES / "planner" / "expected-plan.json")))
-    assert error.path == "$.lanes[1]"
-    assert error.message.startswith("names chart lane 'default/l4/default', which $.lanes[0] also names;")
+    assert error.path == "$.lanes[1].queuePool"
+    assert error.message.startswith(
+        "shares worker group 'l4' with $.lanes[0], which has 'default', got 'default-l4-default';"
+    )
 
 
 def planner_estate(identities: set[str], parameters: planner.PlannerParameters) -> planner.PlannerResult:
@@ -307,19 +309,17 @@ def test_a_planner_plan_with_one_lane_per_chart_lane_emits_its_lanes() -> None:
     assert "queueRouting" not in values
 
 
-@pytest.mark.parametrize(
-    ("queue_pool", "path", "message"),
-    [
-        ("default", "$.identities[0].warmth", "pins 'BAAI/bge-m3' on chart lane 'default/l4/default', but the"),
-        ("placement", "$.lanes[1].envelope.floorMin", "shares static queue pool 'placement' with $.lanes[0], whose"),
-    ],
-)
-def test_a_planner_plan_that_pins_beside_another_lane_is_refused(queue_pool: str, path: str, message: str) -> None:
+@pytest.mark.parametrize("queue_pool", ["default", "placement"])
+def test_a_planner_plan_that_pins_beside_another_lane_emits_the_pinned_lane_on_its_own_queue_pool(
+    queue_pool: str,
+) -> None:
     result = planner_estate({"BAAI/bge-m3", "Qwen/Qwen3-8B"}, replace(PLANNER_PARAMETERS, queue_pool=queue_pool))
     assert [entry.warmth for entry in result.plan.identities] == [Warmth.PINNED, Warmth.COLD_WITH_BOUND]
-    error = refusal(result.plan)
-    assert error.path == path
-    assert error.message.startswith(message)
+    pinned, cold = (entry.lane for entry in result.plan.identities)
+    assert {entry.name: entry.queue_pool for entry in result.plan.lanes} == {pinned: pinned, cold: queue_pool}
+    values = helm_values(result.plan, ChartParameters(fallback_replicas=PLANNER_PARAMETERS.fallback_floor))
+    assert static_pools(values)[pinned]["pinnedModels"] == ["BAAI/bge-m3"]
+    assert set(static_pools(values)) == {pinned} | ({queue_pool} - {"default"})
 
 
 def bundle_lanes(count: int) -> Plan:
@@ -805,8 +805,9 @@ def test_a_planner_lane_pinning_several_identities_emits_on_a_named_queue_pool()
         "org/c": (planned.name, Warmth.LAZY_RESIDENT),
     }
     values = helm_values(result.plan)
+    assert planned.queue_pool == planned.name
     assert static_pools(values) == {
-        "placement": {
+        planned.name: {
             "bundle": "default",
             "gpus": {"l4": 0},
             "minimumWorkerCount": planned.envelope.floor_min,
@@ -818,6 +819,54 @@ def test_a_planner_lane_pinning_several_identities_emits_on_a_named_queue_pool()
         "minReplicas": planned.envelope.floor_min,
         "maxReplicas": planned.max_containers,
     }
-    error = refusal(packed_estate("default").plan)
-    assert error.path.endswith(".warmth")
-    assert "place pinned identities on a named queuePool" in error.message
+    assert helm_values(packed_estate("default").plan) == values
+
+
+def test_a_planner_estate_with_several_pinned_lanes_emits_a_named_queue_pool_for_each() -> None:
+    l4_b = Cell(machine_profile="l4-b", gpu_product="NVIDIA-L4")
+    second_l4 = replace(PACKING_PRICES.machine_profiles[0], name="l4-b")
+    prices = replace(PACKING_PRICES, machine_profiles=(*PACKING_PRICES.machine_profiles, second_l4))
+    boot = BootEvidence(
+        identity="org/d",
+        cell=A100,
+        container_shape=SHAPE,
+        warmth=Warmth.COLD_WITH_BOUND,
+        outcome=BootOutcome.SUCCEEDED,
+        boot_seconds=60.0,
+        source=SourceRef(uri="boots/org/d/a100-80gb"),
+    )
+    result = planner.plan(
+        ServiceLevels(identities=(never_cold("org/a"), never_cold("org/b"), never_cold("org/d", 600))),
+        [packing_receipt("org/a"), packing_receipt("org/b", l4_b), packing_receipt("org/d", A100)],
+        [boot],
+        prices,
+        NO_DEMAND,
+        None,
+        replace(PACKING_PARAMETERS, queue_pool="default"),
+    )
+    assert {entry.identity: (entry.lane, entry.warmth) for entry in result.plan.identities} == {
+        "org/a": ("org-a-l4", Warmth.PINNED),
+        "org/b": ("org-b-l4-b", Warmth.PINNED),
+        "org/d": ("org-d-a100-80gb", Warmth.COLD_WITH_BOUND),
+    }
+    values = helm_values(result.plan, ChartParameters(fallback_replicas=PACKING_PARAMETERS.fallback_floor))
+    assert {profile: group["queuePool"] for profile, group in values["workers"]["pools"].items()} == {
+        "a100-80gb": "default",
+        "l4": "org-a-l4",
+        "l4-b": "org-b-l4-b",
+    }
+    assert static_pools(values) == {
+        "org-a-l4": {"bundle": "default", "gpus": {"l4": 0}, "minimumWorkerCount": 1, "pinnedModels": ["org/a"]},
+        "org-b-l4-b": {"bundle": "default", "gpus": {"l4-b": 0}, "minimumWorkerCount": 1, "pinnedModels": ["org/b"]},
+    }
+    replanned = planner.plan(
+        ServiceLevels(identities=(never_cold("org/a"), never_cold("org/b"), never_cold("org/d", 600))),
+        [packing_receipt("org/a"), packing_receipt("org/b", l4_b), packing_receipt("org/d", A100)],
+        [boot],
+        prices,
+        NO_DEMAND,
+        result.plan,
+        replace(PACKING_PARAMETERS, queue_pool="default"),
+    )
+    assert replanned.plan == result.plan
+    assert helm_values(replanned.plan, ChartParameters(fallback_replicas=PACKING_PARAMETERS.fallback_floor)) == values

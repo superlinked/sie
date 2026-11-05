@@ -239,7 +239,7 @@ def single_lane_plan(
         lanes=(
             PlanLane(
                 name=name,
-                queue_pool="default",
+                queue_pool=name if warmth is Warmth.PINNED else "default",
                 bundle="default",
                 cell=cell,
                 container_shape=SHAPE,
@@ -271,9 +271,13 @@ def plan_lane(name, *, cell=L4, floor=1, bundle="default", queue_pool="default")
 
 
 def plan_of(lanes, residents) -> Plan:
+    pinning = {name for name, warmth in residents.values() if warmth is Warmth.PINNED}
     return Plan(
         placement="test",
-        lanes=tuple(lanes),
+        lanes=tuple(
+            replace(lane, queue_pool=lane.name) if lane.name in pinning and lane.queue_pool == "default" else lane
+            for lane in lanes
+        ),
         identities=tuple(
             PlanIdentity(identity=identity, lane=name, warmth=warmth)
             for identity, (name, warmth) in sorted(residents.items())
@@ -1331,9 +1335,11 @@ def test_a_lazy_resident_left_alone_on_its_lane_stays_when_nothing_is_cheaper_th
     assert result.report.monthly_cost == pytest.approx(MONTH)
 
 
-@pytest.mark.parametrize("shared", [plan_lane("shared", bundle="sglang"), plan_lane("shared", queue_pool="batch")])
-def test_a_lazy_resident_needs_a_lane_of_its_pool_and_bundle(shared):
-    current = plan_of([plan_lane("own"), shared], {ANCHOR: ("shared", Warmth.PINNED), IDENTITY: ("own", Warmth.PINNED)})
+def test_a_lazy_resident_needs_a_lane_of_its_bundle():
+    current = plan_of(
+        [plan_lane("own"), plan_lane("shared", bundle="sglang")],
+        {ANCHOR: ("shared", Warmth.PINNED), IDENTITY: ("own", Warmth.PINNED)},
+    )
     result = run(resident_levels(), RESIDENT_RECEIPTS, LOADS, prices=L4_ONLY, current=current)
     assert {entry.identity: entry.lane for entry in result.plan.identities} == {
         ANCHOR: "org-anchor-l4",
@@ -1341,6 +1347,20 @@ def test_a_lazy_resident_needs_a_lane_of_its_pool_and_bundle(shared):
     }
     assert all(entry.lane != "shared" for entry in result.plan.identities)
     assert all(request.lane != "shared" for request in result.report.measurement_requests)
+
+
+def test_a_lazy_resident_joins_a_pinned_lane_on_its_named_queue_pool():
+    current = plan_of(
+        [plan_lane("own"), plan_lane("shared", queue_pool="batch")],
+        {ANCHOR: ("shared", Warmth.PINNED), IDENTITY: ("own", Warmth.PINNED)},
+    )
+    hourly = {IDENTITY: {3: 90000}}
+    result = run(resident_levels(), RESIDENT_RECEIPTS, LOADS, prices=L4_ONLY, hourly=hourly, current=current)
+    assert [(entry.identity, entry.lane, entry.warmth) for entry in result.plan.identities] == [
+        (ANCHOR, "shared", Warmth.PINNED),
+        (IDENTITY, "shared", Warmth.LAZY_RESIDENT),
+    ]
+    assert result.plan.lanes == (current.lanes[1],)
 
 
 def test_a_lazy_resident_needs_a_never_cold_neighbour_on_a_current_lane_and_on_a_packed_one():
@@ -1427,17 +1447,25 @@ def test_a_placement_that_moves_leaves_its_shared_lane_to_the_kept_neighbour():
 
 
 @pytest.mark.parametrize(
-    ("overrides", "moved"),
-    [({"bundles": {IDENTITY: "sglang"}}, ("default", "sglang")), ({"queue_pool": "batch"}, ("batch", "default"))],
+    ("overrides", "expected"),
+    [
+        (
+            {"bundles": {IDENTITY: "sglang"}},
+            {"org-model-l4": ("org-model-l4", "sglang"), "shared": ("shared", "default")},
+        ),
+        ({"queue_pool": "batch"}, {"shared": ("shared", "default")}),
+    ],
 )
-def test_a_new_queue_pool_or_bundle_moves_the_identity_off_its_current_lane(overrides, moved):
+def test_a_new_bundle_moves_the_identity_off_its_current_lane_and_a_new_default_queue_pool_does_not(
+    overrides, expected
+):
     current = single_lane_plan(others=("org/kept",), max_containers=4)
     service_levels = levels(
         (IDENTITY, ServiceLevel(come_alive_p95_s=0)), ("org/kept", ServiceLevel(come_alive_p95_s=0))
     )
     result = run(service_levels, [receipt()], prices=L4_ONLY, current=current, **overrides)
     lanes = {lane.name: (lane.queue_pool, lane.bundle) for lane in result.plan.lanes}
-    assert lanes == {"org-model-l4": moved, "shared": ("default", "default")}
+    assert lanes == expected
 
 
 def test_removing_one_of_two_colliding_identities_keeps_the_other_lane_name():
@@ -1455,7 +1483,9 @@ def test_removing_one_of_two_colliding_identities_keeps_the_other_lane_name():
 def test_plan_lanes_that_name_one_chart_lane_are_reported():
     service_levels = levels(("org/a", WARM), ("org/b", WARM), ("org/c", WARM))
     receipts = [receipt(identity=identity) for identity in ("org/a", "org/b", "org/c")]
-    result = run(service_levels, receipts, prices=L4_ONLY, bundles={"org/c": "sglang"})
+    boots = [boot(identity=identity) for identity in ("org/a", "org/b", "org/c")]
+    result = run(service_levels, receipts, boots, prices=L4_ONLY, bundles={"org/c": "sglang"})
+    assert {entry.warmth for entry in result.plan.identities} == {Warmth.COLD_WITH_BOUND}
     (shared,) = result.report.shared_chart_lanes
     assert shared.to_dict() == {
         "queuePool": "default",
@@ -1463,8 +1493,77 @@ def test_plan_lanes_that_name_one_chart_lane_are_reported():
         "bundle": "default",
         "lanes": ["org-a-l4", "org-b-l4"],
     }
-    apart = run(service_levels, receipts, prices=L4_ONLY, bundles={"org/a": "a", "org/b": "b"})
+    apart = run(service_levels, receipts, boots, prices=L4_ONLY, bundles={"org/a": "a", "org/b": "b"})
     assert apart.report.shared_chart_lanes == ()
+    pinned = run(service_levels, receipts, prices=L4_ONLY)
+    assert {entry.warmth for entry in pinned.plan.identities} == {Warmth.PINNED}
+    assert pinned.report.shared_chart_lanes == ()
+
+
+def test_each_lane_that_pins_an_identity_gets_its_own_named_queue_pool():
+    long = "org/" + "x" * 70
+    never_cold = ServiceLevel(come_alive_p95_s=0, warm_p99_ms=ANY_P99_MS)
+    service_levels = levels(("org/a", never_cold), ("org/b", never_cold), (long, never_cold), ("org/c", WARM))
+    receipts = [
+        receipt(identity="org/a"),
+        receipt(identity="org/b", cell=A100),
+        receipt(identity=long, cell=A100),
+        receipt(identity="org/c"),
+    ]
+    result = run(service_levels, receipts, [boot(identity="org/c")])
+    warmths = {entry.identity: (entry.lane, entry.warmth) for entry in result.plan.identities}
+    long_lane = warmths[long][0]
+    assert warmths == {
+        "org/a": ("org-a-l4", Warmth.PINNED),
+        "org/b": ("org-b-a100-80gb", Warmth.PINNED),
+        long: (long_lane, Warmth.PINNED),
+        "org/c": ("org-c-l4", Warmth.COLD_WITH_BOUND),
+    }
+    pools = {lane.name: lane.queue_pool for lane in result.plan.lanes}
+    long_pool = f"{long_lane[:54]}-{hashlib.sha256(long_lane.encode()).hexdigest()[:8]}"
+    assert pools == {
+        "org-a-l4": "org-a-l4",
+        "org-b-a100-80gb": "org-b-a100-80gb",
+        long_lane: long_pool,
+        "org-c-l4": "default",
+    }
+    assert len(long_pool) == 63
+    again = run(service_levels, receipts, [boot(identity="org/c")], current=result.plan)
+    assert again.plan == result.plan
+    assert again.report.unchanged
+
+
+def test_a_replan_keeps_a_named_queue_pool_and_derives_one_for_a_pinned_lane_on_the_default_pool():
+    named = single_lane_plan(name="kept", identity="org/kept")
+    named_lane = replace(named.lanes[0], queue_pool="org-model-l4")
+    unnamed = single_lane_plan(name="org-model-l4")
+    unnamed_lane = replace(unnamed.lanes[0], queue_pool="default")
+    current = Plan(
+        placement="test",
+        lanes=(unnamed_lane, named_lane),
+        identities=(*unnamed.identities, *named.identities),
+    )
+    service_levels = levels(
+        (IDENTITY, ServiceLevel(come_alive_p95_s=0)), ("org/kept", ServiceLevel(come_alive_p95_s=0))
+    )
+    result = run(service_levels, [receipt()], prices=L4_ONLY, current=current)
+    assert {entry.identity: entry.lane for entry in result.plan.identities} == {
+        IDENTITY: "org-model-l4",
+        "org/kept": "kept",
+    }
+    digest = hashlib.sha256(b"org-model-l4").hexdigest()[:8]
+    assert {lane.name: lane.queue_pool for lane in result.plan.lanes} == {
+        "kept": "org-model-l4",
+        "org-model-l4": f"org-model-l4-{digest}",
+    }
+    assert [(change.name, change.after.queue_pool) for change in result.report.lane_changes] == [
+        ("org-model-l4", f"org-model-l4-{digest}")
+    ]
+    moved = run(service_levels, [receipt()], prices=L4_ONLY, current=current, queue_pool="org-model-l4")
+    assert {lane.name: lane.queue_pool for lane in moved.plan.lanes} == {
+        "kept": "kept",
+        "org-model-l4": f"org-model-l4-{digest}",
+    }
 
 
 def test_a_derived_lane_name_never_takes_a_kept_lane_named_with_its_digest():
@@ -1489,18 +1588,19 @@ def test_a_derived_lane_name_never_takes_a_kept_lane_named_with_its_digest():
     assert {lane.name: lane for lane in result.plan.lanes}[f"org-model-l4-{digest[:8]}"] == second.lanes[0]
 
 
-def test_bundles_and_the_queue_pool_come_from_the_parameters():
+def test_bundles_and_the_default_queue_pool_come_from_the_parameters():
     service_levels = levels(("org/embed", WARM), ("org/generate", WARM))
     result = run(
         service_levels,
         [receipt(identity="org/embed"), receipt(identity="org/generate")],
+        [boot(identity="org/embed")],
         prices=L4_ONLY,
         queue_pool="batch",
         bundle="default",
         bundles={"org/generate": "sglang"},
     )
     lanes = {lane.name: (lane.queue_pool, lane.bundle) for lane in result.plan.lanes}
-    assert lanes == {"org-embed-l4": ("batch", "default"), "org-generate-l4": ("batch", "sglang")}
+    assert lanes == {"org-embed-l4": ("batch", "default"), "org-generate-l4": ("org-generate-l4", "sglang")}
 
 
 def test_equal_costs_prefer_the_current_placement():
@@ -1684,8 +1784,13 @@ def test_the_estate_report_states_its_findings():
     assert shared.monthly_cost == pytest.approx(dense.monthly_cost)
     assert shared.unpriced_identities == ("intfloat/e5-base-v2",)
     assert report.unpriced_lanes == ("default-l4-default",)
-    (chart_lane,) = report.shared_chart_lanes
-    assert chart_lane.lanes == ("baai-bge-m3-sparse-l4", "default-l4-default", "qwen-qwen3-embedding-4b-l4")
+    assert report.shared_chart_lanes == ()
+    assert {lane.name: lane.queue_pool for lane in plan(**estate()).plan.lanes} == {
+        "baai-bge-m3-sparse-l4": "default",
+        "default-l4-default": "default-l4-default",
+        "qwen-qwen3-8b-a100-80gb": "default",
+        "qwen-qwen3-embedding-4b-l4": "qwen-qwen3-embedding-4b-l4",
+    }
     current = estate()["current_plan"]
     assert sum(lane.envelope.floor_min for lane in plan(**estate()).plan.lanes) == 1 + sum(
         lane.envelope.floor_min for lane in current.lanes
@@ -1942,9 +2047,11 @@ def test_random_current_estates_keep_what_no_measured_option_beats(seed):
     assert Plan.from_dict(result.plan.to_dict()) == result.plan
     before = {lane.name: lane for lane in current.lanes}
     after = {lane.name: lane for lane in result.plan.lanes}
+    pinning = {entry.lane for entry in result.plan.identities if entry.warmth is Warmth.PINNED}
     for name, lane in after.items():
         if name in before:
-            assert lane == capped(before[name], 4)
+            assert replace(lane, queue_pool=before[name].queue_pool) == capped(before[name], 4)
+        assert lane.queue_pool == (name if name in pinning else "default")
     placements = {entry.identity: entry for entry in result.plan.identities}
     never_cold = {entry.identity for entry in service_levels.identities if entry.level.come_alive_p95_s == 0}
     anchored = {
