@@ -25,7 +25,7 @@ from typing import Any
 import torch
 from safetensors.torch import load_file
 
-from sie_server.adapters.pplx_decider.questions import MAX_OPTIONS
+from sie_server.adapters.decision.questions import MAX_OPTIONS
 
 #: The only joint protocol served for format 2 checkpoints, compared exactly with ``joint_config.json``.
 JOINT_PROTOCOL: dict[str, Any] = {

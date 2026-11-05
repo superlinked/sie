@@ -1,0 +1,25 @@
+sie_id: baselabs/mammoth-1
+hf_id: baselabs/mammoth-1
+hf_revision: 9d1962f193e48a68cf0f3598dc7fb4462fd23ad9
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 8192
+profiles:
+  default:
+    max_batch_tokens: 8192
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.decision.qwen:QwenDecisionAdapter
+    adapter_options:
+      loadtime:
+        decision_format: qev
+        max_forward_tokens: 8192
+      runtime: {}
+description: Mammoth-1 typed text decisions over Qwen3.5-27B, preserving qev-labels-v2 prompts, block-bidirectional
+  full attention and FP32 slot logits.

@@ -1,0 +1,25 @@
+sie_id: vllm-sr/d3-ultra
+hf_id: vllm-sr/d3-ultra
+hf_revision: 37fee01926f3de396620e794201b074fb427ac2d
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 8192
+profiles:
+  default:
+    max_batch_tokens: 8192
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.decision.qwen:QwenDecisionAdapter
+    adapter_options:
+      loadtime:
+        decision_format: d3
+        max_forward_tokens: 8192
+      runtime: {}
+description: d3-ultra typed text decisions over the native Qwen3.5 architecture. Preserves header-v1 prompts, block-bidirectional
+  full attention, FP32 readout and question-count calibration.

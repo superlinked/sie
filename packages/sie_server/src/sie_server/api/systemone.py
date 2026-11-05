@@ -69,6 +69,8 @@ DECISION_ADAPTERS = frozenset(
         "sie_server.adapters.laya.runtime_lora:LayaLoraAdapter",
         "sie_server.adapters.pplx_decider.adapter:PerplexityDecisionAdapter",
         "sie_server.adapters.pplx_decider.runtime_lora:PerplexityDecisionLoraAdapter",
+        "sie_server.adapters.decision.qwen:QwenDecisionAdapter",
+        "sie_server.adapters.sglang.decision:SGLangDecisionAdapter",
     }
 )
 

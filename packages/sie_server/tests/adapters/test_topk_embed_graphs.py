@@ -15,8 +15,9 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 import torch
+from sie_server.adapters import _qwen3_5_packed as packed
 from sie_server.adapters._cuda_graphs import RECORDING_LOCK
-from sie_server.adapters.topk_embed import graphs, packed
+from sie_server.adapters.topk_embed import graphs
 from sie_server.adapters.topk_embed.adapter import TopkEmbedAdapter
 from sie_server.types.inputs import Item
 
