@@ -483,6 +483,11 @@ in `score.py`. All of them load anonymously from Hugging Face.
 | `mteb/StackOverflowQA` | `CoIR-Retrieval/stackoverflow-qa` | encode | `ndcg_at_10` |
 | `mteb/LegalBenchConsumerContractsQA` | `mteb/legalbench_consumer_contracts_qa` | encode | `ndcg_at_10` |
 
+`mteb/FiQA2018` sets mteb's `ignore_identical_ids`: a document whose id equals
+the query's id is removed from that query's ranking after the top-1000 cut and
+before scoring, as mteb does. The predictions file keeps it, and `score.py`
+applies the same rule.
+
 `run.py performance` takes the same names with the parameters its selection
 rule reads, for example
 `mteb/FiQA2018?split=test&role=corpus&limit=256&filter=nonempty`.

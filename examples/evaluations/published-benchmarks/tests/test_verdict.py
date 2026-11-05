@@ -18,6 +18,7 @@ import run
 import score
 from run import (
     DEFAULT_ENDPOINT,
+    Loaders,
     load_performance_data,
     load_quality_data,
     plan_performance,
@@ -925,6 +926,46 @@ class AddedDatasetsTest(TemporaryCase):
                         ((dataset, "default"), {"split": "test", "revision": revision}),
                     ],
                 )
+
+
+class IdenticalIdsTest(TemporaryCase):
+    def test_only_fiqa_drops_a_document_with_the_query_id(self):
+        predictions = {"7": {"7": 9.0, "a": 1.0}}
+        qrels = {"7": {"a": 1}}
+        self.assertEqual(score.IGNORE_IDENTICAL_IDS, {"mteb/FiQA2018"})
+        fiqa = task_metrics(predictions, qrels, "mteb/FiQA2018")
+        self.assertEqual((fiqa["recall_at_1"], fiqa["mrr_at_1"], fiqa["main_score"]), (1.0, 1.0, 1.0))
+        for task_name in set(score.HF_DATASETS) - {"mteb/FiQA2018"}:
+            with self.subTest(task_name):
+                other = task_metrics(predictions, qrels, task_name)
+                self.assertEqual((other["recall_at_1"], other["mrr_at_1"]), (0.0, 0.0))
+                self.assertLess(other["ndcg_at_10"], 1.0)
+
+    def test_the_input_is_left_as_it_was(self):
+        predictions = {"7": {"7": 9.0, "a": 1.0}}
+        task_metrics(predictions, {"7": {"a": 1}}, "mteb/FiQA2018")
+        self.assertEqual(predictions, {"7": {"7": 9.0, "a": 1.0}})
+
+    def test_the_run_and_score_py_agree_and_the_predictions_file_keeps_the_document(self):
+        corpus = {"q1": {"title": "", "text": "beta body"}, "d4": {"title": "", "text": "delta body"}}
+        loaders = Loaders(
+            corpus=lambda name, revision: corpus,
+            queries=lambda name, revision: {"q1": "first query"},
+            qrels=lambda name, revision: {"q1": {"d4": 1}},
+            top_ranked=lambda name, revision: {},
+        )
+        plan = plan_quality(
+            parse("--model", "m", "--task", "mteb/FiQA2018", "--output", "sparse", "--items-per-request", "2")
+        )
+        data = load_quality_data(plan, loaders)
+        record, result_path = run_quality(plan, data, FakeClient(), results_dir=self.directory / "results", now=clock)
+        predictions = json.loads(Path(record["run"]["predictions_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(list(predictions["q1"]), ["q1", "d4"])
+        metrics = {row["name"]: row["value"] for row in record["metrics"]}
+        self.assertEqual(metrics["recall_at_1"], 1.0)
+        with patch("score.load_qrels", return_value={"q1": {"d4": 1}}):
+            _, rows, _ = score.rescore(result_path)
+        self.assertEqual(rows, record["metrics"])
 
 
 if __name__ == "__main__":

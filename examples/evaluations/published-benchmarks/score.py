@@ -50,6 +50,7 @@ ROLE_SPLITS = {
     "mteb/StackOverflowQA": {"corpus": "corpus", "queries": "queries"},
     "mteb/LegalBenchConsumerContractsQA": {"corpus": "corpus", "queries": "queries"},
 }
+IGNORE_IDENTICAL_IDS = frozenset({"mteb/FiQA2018"})
 METRIC_UNIT = "ratio"
 AGGREGATION = "task_native"
 SCORER_ID = "pytrec-eval"
@@ -176,6 +177,11 @@ def retrieval_metrics(predictions: Predictions, qrels: Qrels) -> dict[str, float
 
 
 def task_metrics(predictions: Predictions, qrels: Qrels, task_name: str) -> dict[str, float]:
+    if task_name in IGNORE_IDENTICAL_IDS:
+        predictions = {
+            query_id: {doc_id: value for doc_id, value in doc_scores.items() if doc_id != query_id}
+            for query_id, doc_scores in predictions.items()
+        }
     metrics = retrieval_metrics(predictions, qrels)
     metrics["main_score"] = metrics[MAIN_SCORE[task_name]]
     return metrics
