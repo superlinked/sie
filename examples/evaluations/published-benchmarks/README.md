@@ -184,6 +184,11 @@ difference in percent and the band. A `FAIL` also prints `expected:`, `got:`
 and `reproduce:` lines on stdout. A `WARN` means the run scored above the band:
 a real improvement, or a run that does not measure what the baseline measured.
 
+One published reference reads `WARN` today. A full run of the Qwen3-Reranker-0.6B
+quality record scores about 3% above its 0.59526, because that record predates the
+server change that scores this reranker in float32 so its top candidates stop
+tying. The 4B record stays inside the band.
+
 The verdict is a report. The exit status does not follow it: the command exits
 0 on a `FAIL (regression)` and 1 only when the run wrote no predictions. Nothing
 it writes reaches the website or a published record, and it is no floor, target
