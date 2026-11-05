@@ -80,6 +80,8 @@ RESULT_KEYS = {
     "metrics",
     "comparison",
     "comparison_basis",
+    "baseline",
+    "verdict",
 }
 
 
@@ -848,7 +850,13 @@ class ScoreCliTest(unittest.TestCase):
             self.assertEqual(again, record)
             self.assertEqual(rows, record["metrics"])
             self.assertEqual(comparison, record["comparison"])
-            self.assertEqual(output.getvalue().splitlines(), score.format_rows(rows, comparison))
+            self.assertEqual(
+                output.getvalue().splitlines(),
+                [
+                    *score.format_rows(rows, comparison),
+                    "verdict: MEASUREMENT limited run, not compared with a full-dataset number",
+                ],
+            )
             self.assertEqual(json.loads(result_path.read_text(encoding="utf-8")), record)
 
     def test_rescore_refuses_a_result_whose_run_failed(self):

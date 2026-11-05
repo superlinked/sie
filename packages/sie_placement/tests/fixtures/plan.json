@@ -35,6 +35,12 @@
         "machineProfile": "a100-80gb",
         "gpuProduct": "NVIDIA-A100-SXM4-80GB"
       },
+      "fallbackCells": [
+        {
+          "machineProfile": "h100",
+          "gpuProduct": "NVIDIA-H100-80GB-HBM3"
+        }
+      ],
       "containerShape": {
         "gpuCount": 1,
         "cpuCores": 12,

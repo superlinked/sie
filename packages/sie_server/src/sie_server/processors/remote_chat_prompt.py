@@ -51,6 +51,8 @@ def _tool_format(config: ModelConfig) -> ToolCallFormat:
         return "qwen_xml"
     if parser.startswith("glm"):
         return "glm_xml"
+    if parser == "muse":
+        return "muse_atem"
     return "auto"
 
 

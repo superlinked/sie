@@ -52,7 +52,7 @@ from typing import Any, Literal
 import torch
 
 from sie_server.adapters._cuda_graphs import MEMORY_BUDGET_SHARE, RECORDING_HEADROOM, RECORDING_LOCK
-from sie_server.adapters.topk_embed.packed import PackedTextModel, Padded
+from sie_server.adapters._qwen3_5_packed import PackedTextModel, Padded
 from sie_server.core.oom import is_oom_error
 
 logger = logging.getLogger(__name__)

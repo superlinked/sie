@@ -79,18 +79,26 @@ ESTATE_PARAMETERS = PlannerParameters(
 )
 
 
-def profile(cell: Cell, accelerator: float, core: float = 0.0) -> MachineProfilePrice:
+CARD_MIB = {L4: 23034, A100: 81920}
+
+
+def profile(cell: Cell, accelerator: float, core: float = 0.0, memory: int | None = None) -> MachineProfilePrice:
     return MachineProfilePrice(
         name=cell.machine_profile,
         gpu_product=cell.gpu_product,
         accelerator_per_hour=accelerator,
         core_per_hour=core,
         memory_gib_per_hour=0.0,
+        gpu_memory_mib=memory,
     )
 
 
-def price_list(*, l4=1.0, a100=3.0, core=0.0, multiplier=1.0, extra=()) -> PriceList:
-    profiles = [profile(cell, rate, core) for cell, rate in ((L4, l4), (A100, a100)) if rate is not None]
+def price_list(*, l4=1.0, a100=3.0, core=0.0, multiplier=1.0, extra=(), cards=True) -> PriceList:
+    profiles = [
+        profile(cell, rate, core, CARD_MIB[cell] if cards else None)
+        for cell, rate in ((L4, l4), (A100, a100))
+        if rate is not None
+    ]
     return PriceList(
         currency="USD",
         machine_profiles=(*profiles, *extra),
@@ -101,7 +109,20 @@ def price_list(*, l4=1.0, a100=3.0, core=0.0, multiplier=1.0, extra=()) -> Price
 L4_ONLY = price_list(a100=None)
 
 
-def receipt(identity=IDENTITY, cell=L4, *, shape=SHAPE, concurrency=8, rps=10.0, p99=100.0, uri=None) -> Receipt:
+def receipt(
+    identity=IDENTITY,
+    cell=L4,
+    *,
+    shape=SHAPE,
+    concurrency=8,
+    rps=10.0,
+    p99=100.0,
+    uri=None,
+    co_residents=(),
+    footprint=None,
+    working=None,
+) -> Receipt:
+    beside = "".join(f"+{name}" for name in co_residents)
     return Receipt(
         identity=identity,
         cell=cell,
@@ -110,7 +131,12 @@ def receipt(identity=IDENTITY, cell=L4, *, shape=SHAPE, concurrency=8, rps=10.0,
         request_shape=RequestShape(operation=Operation.ENCODE, items_per_request=1),
         throughput=Throughput(requests_per_second=rps),
         latency=Percentiles(p99_ms=p99),
-        source=SourceRef(uri=uri or f"receipts/{identity}/{cell.machine_profile}-{concurrency}-{shape.memory_mib}"),
+        co_residents=tuple(co_residents),
+        footprint_mib=footprint,
+        working_memory_mib=working,
+        source=SourceRef(
+            uri=uri or f"receipts/{identity}/{cell.machine_profile}-{concurrency}-{shape.memory_mib}{beside}"
+        ),
     )
 
 
@@ -269,7 +295,7 @@ def resident_estate() -> Plan:
     )
 
 
-RESIDENT_RECEIPTS = [receipt(identity=ANCHOR), receipt()]
+RESIDENT_RECEIPTS = [receipt(identity=ANCHOR, footprint=6000, working=2000), receipt(footprint=3000, working=1000)]
 LOADS = [boot(warmth=Warmth.LAZY_RESIDENT, seconds=20.0, uri="loads/example.json")]
 
 
@@ -505,11 +531,23 @@ def test_twenty_or_more_boots_stand_for_the_come_alive_at_their_95th_percentile(
     assert rendered(run(level(come_alive_p95_s=600), [receipt()], boots[::-1], prices=L4_ONLY)) == rendered(result)
 
 
-def test_a_failed_boot_withdraws_the_warmth_however_many_boots_succeeded():
-    boots = [boot(seconds=50.0, uri=f"boots/{index}.json") for index in range(30)]
-    boots.append(boot(seconds=0.0, outcome=BootOutcome.FAILED, uri="boots/failed.json"))
+@pytest.mark.parametrize(
+    ("succeeded", "failed", "come_alive"),
+    [(18, 1, None), (19, 1, 50.0), (30, 1, 50.0), (29, 2, None), (38, 2, 50.0), (37, 3, None)],
+)
+def test_a_failed_boot_ranks_above_every_success_at_the_95th_percentile(succeeded, failed, come_alive):
+    boots = [boot(seconds=50.0, uri=f"boots/{index}.json") for index in range(succeeded)]
+    boots.extend(
+        boot(seconds=0.0, outcome=BootOutcome.FAILED, uri=f"boots/failed-{index}.json") for index in range(failed)
+    )
     result = run(level(come_alive_p95_s=600), [receipt()], boots, prices=L4_ONLY)
-    assert result.report.identity(IDENTITY).chosen.warmth is Warmth.PINNED
+    chosen = result.report.identity(IDENTITY).chosen
+    if come_alive is None:
+        assert chosen.warmth is Warmth.PINNED
+        (request,) = result.report.measurement_requests
+        assert request.reason is RequestReason.FAILED
+    else:
+        assert (chosen.warmth, chosen.come_alive_s) == (Warmth.COLD_WITH_BOUND, come_alive)
 
 
 def test_boot_seconds_render_the_same_whatever_their_number_type():
@@ -724,16 +762,17 @@ def test_the_next_cheaper_option_is_the_nearest_cheaper_one_and_names_its_bound(
 def test_a_next_cheaper_saving_is_what_loosening_its_bounds_saves_the_plan(others, saving):
     service_levels = levels(*((name, ServiceLevel(come_alive_p95_s=0)) for name in (IDENTITY, *others)))
     current = single_lane_plan(others=others)
-    result = run(service_levels, [receipt()], [boot(seconds=30.0)], prices=L4_ONLY, current=current)
+    receipts = [receipt(), *([receipt(co_residents=others)] if others else [])]
+    result = run(service_levels, receipts, [boot(seconds=30.0)], prices=L4_ONLY, current=current)
     report = result.report.identity(IDENTITY)
     assert (report.lane, report.chosen.warmth) == ("shared", Warmth.PINNED)
     assert (report.next_cheaper.warmth, report.next_cheaper.monthly_cost) == (Warmth.COLD_WITH_BOUND, 0.0)
     assert report.chosen.monthly_cost - report.next_cheaper.monthly_cost == pytest.approx(MONTH)
     assert report.next_cheaper.saving == pytest.approx(saving)
     again = run(
-        loosened(service_levels, IDENTITY, 30), [receipt()], [boot(seconds=30.0)], prices=L4_ONLY, current=result.plan
+        loosened(service_levels, IDENTITY, 30), receipts, [boot(seconds=30.0)], prices=L4_ONLY, current=result.plan
     )
-    assert again.report.identity(IDENTITY).chosen.warmth is Warmth.COLD_WITH_BOUND
+    assert again.report.identity(IDENTITY).chosen.warmth is (Warmth.PINNED if others else Warmth.COLD_WITH_BOUND)
     assert result.report.monthly_cost - again.report.monthly_cost == pytest.approx(saving)
 
 
@@ -1160,8 +1199,16 @@ def test_a_lazy_resident_without_evidence_keeps_its_place_and_asks_for_it():
     ]
     assert requests == [
         ((Measurement.BOOT_EVIDENCE,), Warmth.LAZY_RESIDENT, "shared", 8, None),
+        ((Measurement.FOOTPRINT,), Warmth.LAZY_RESIDENT, "shared", 8, None),
         ((Measurement.RECEIPT,), Warmth.LAZY_RESIDENT, "shared", 8, None),
     ]
+    (anchor,) = [request for request in result.report.measurement_requests if request.identity == ANCHOR]
+    assert (anchor.measure, anchor.warmth, anchor.lane, anchor.saving_bound) == (
+        (Measurement.FOOTPRINT,),
+        Warmth.PINNED,
+        "shared",
+        None,
+    )
 
 
 def test_a_measured_load_onto_a_lane_a_never_cold_neighbour_pins_makes_a_lazy_resident():
@@ -1208,21 +1255,19 @@ def test_a_load_over_the_bound_is_a_come_alive_lever():
     assert lever.saving_under_bound == pytest.approx(MONTH)
 
 
-def test_a_lane_a_run_creates_for_a_never_cold_identity_hosts_lazy_residents_from_the_next_run():
+def test_a_lane_a_run_creates_for_a_never_cold_identity_hosts_lazy_residents_in_the_same_run():
     current = plan_of([plan_lane("own")], {IDENTITY: ("own", Warmth.PINNED)})
     first = run(resident_levels(), RESIDENT_RECEIPTS, LOADS, prices=L4_ONLY, current=current)
     assert [(entry.identity, entry.lane, entry.warmth) for entry in first.plan.identities] == [
         (ANCHOR, "org-anchor-l4", Warmth.PINNED),
-        (IDENTITY, "own", Warmth.PINNED),
-    ]
-    second = run(resident_levels(), RESIDENT_RECEIPTS, LOADS, prices=L4_ONLY, current=first.plan)
-    assert [(entry.identity, entry.lane, entry.warmth) for entry in second.plan.identities] == [
-        (ANCHOR, "org-anchor-l4", Warmth.PINNED),
         (IDENTITY, "org-anchor-l4", Warmth.LAZY_RESIDENT),
     ]
-    assert first.report.monthly_cost - second.report.monthly_cost == pytest.approx(MONTH)
-    third = run(resident_levels(), RESIDENT_RECEIPTS, LOADS, prices=L4_ONLY, current=second.plan)
-    assert third.report.unchanged
+    assert first.report.monthly_cost == pytest.approx(MONTH)
+    chosen = first.report.identity(IDENTITY).chosen
+    assert (chosen.lane, chosen.come_alive_s, chosen.monthly_cost) == ("org-anchor-l4", 20.0, 0)
+    second = run(resident_levels(), RESIDENT_RECEIPTS, LOADS, prices=L4_ONLY, current=first.plan)
+    assert second.plan == first.plan
+    assert second.report.unchanged
 
 
 def test_a_lazy_resident_never_joins_a_lane_its_never_cold_neighbour_leaves():
@@ -1238,7 +1283,11 @@ def test_a_lazy_resident_never_joins_a_lane_its_never_cold_neighbour_leaves():
         (IDENTITY, "own", Warmth.PINNED),
     ]
     assert result.report.monthly_cost == pytest.approx(2 * MONTH)
-    assert all(request.warmth is not Warmth.LAZY_RESIDENT for request in result.report.measurement_requests)
+    assert all(request.lane != "shared" for request in result.report.measurement_requests)
+    lazy = [request for request in result.report.measurement_requests if request.warmth is Warmth.LAZY_RESIDENT]
+    assert [(request.lane, request.measure) for request in lazy] == [
+        ("org-anchor-l4", (Measurement.BOOT_EVIDENCE, Measurement.FOOTPRINT))
+    ]
     again = run(resident_levels(), receipts, loads, current=result.plan)
     assert again.report.unchanged
 
@@ -1251,7 +1300,7 @@ def test_a_lazy_resident_whose_lane_keeps_no_never_cold_neighbour_pays_the_lane_
         ("org/warm", ServiceLevel(come_alive_p95_s=120, warm_p99_ms=ANY_P99_MS)),
         (IDENTITY, ServiceLevel(come_alive_p95_s=60, warm_p99_ms=ANY_P99_MS)),
     )
-    receipts = [receipt(identity="org/warm"), receipt()]
+    receipts = [receipt(identity="org/warm", footprint=6000, working=2000), receipt(footprint=3000, working=1000)]
     boots = [boot(identity="org/warm"), *LOADS, boot(seconds=30.0)]
     hourly = {"org/warm": {0: 1}, IDENTITY: {0: 1}}
     result = run(service_levels, receipts, boots, prices=L4_ONLY, hourly=hourly, current=current)
@@ -1268,7 +1317,8 @@ def test_a_lazy_resident_whose_lane_keeps_no_never_cold_neighbour_pays_the_lane_
 
 def test_a_lazy_resident_left_alone_on_its_lane_stays_when_nothing_is_cheaper_than_the_lane_floor():
     current = plan_of([plan_lane("shared")], {IDENTITY: ("shared", Warmth.LAZY_RESIDENT)})
-    result = run(level(come_alive_p95_s=60), [receipt()], LOADS, prices=L4_ONLY, current=current)
+    receipts = [receipt(footprint=3000, working=1000)]
+    result = run(level(come_alive_p95_s=60), receipts, LOADS, prices=L4_ONLY, current=current)
     assert result.plan == current
     assert result.report.unchanged
     report = result.report.identity(IDENTITY)
@@ -1281,37 +1331,60 @@ def test_a_lazy_resident_left_alone_on_its_lane_stays_when_nothing_is_cheaper_th
     assert result.report.monthly_cost == pytest.approx(MONTH)
 
 
-@pytest.mark.parametrize(
-    ("shared", "anchor_bound"),
-    [
-        (plan_lane("shared"), 30),
-        (plan_lane("shared", bundle="sglang"), 0),
-        (plan_lane("shared", queue_pool="batch"), 0),
-    ],
-)
-def test_a_lazy_resident_needs_a_never_cold_neighbour_on_a_lane_of_its_pool_and_bundle(shared, anchor_bound):
+@pytest.mark.parametrize("shared", [plan_lane("shared", bundle="sglang"), plan_lane("shared", queue_pool="batch")])
+def test_a_lazy_resident_needs_a_lane_of_its_pool_and_bundle(shared):
     current = plan_of([plan_lane("own"), shared], {ANCHOR: ("shared", Warmth.PINNED), IDENTITY: ("own", Warmth.PINNED)})
-    result = run(resident_levels(anchor_bound=anchor_bound), RESIDENT_RECEIPTS, LOADS, prices=L4_ONLY, current=current)
+    result = run(resident_levels(), RESIDENT_RECEIPTS, LOADS, prices=L4_ONLY, current=current)
+    assert {entry.identity: entry.lane for entry in result.plan.identities} == {
+        ANCHOR: "org-anchor-l4",
+        IDENTITY: "org-anchor-l4",
+    }
+    assert all(entry.lane != "shared" for entry in result.plan.identities)
+    assert all(request.lane != "shared" for request in result.report.measurement_requests)
+
+
+def test_a_lazy_resident_needs_a_never_cold_neighbour_on_a_current_lane_and_on_a_packed_one():
+    current = plan_of(
+        [plan_lane("own"), plan_lane("shared")], {ANCHOR: ("shared", Warmth.PINNED), IDENTITY: ("own", Warmth.PINNED)}
+    )
+    result = run(resident_levels(anchor_bound=30), RESIDENT_RECEIPTS, LOADS, prices=L4_ONLY, current=current)
     report = result.report.identity(IDENTITY)
     assert (report.lane, report.chosen.warmth) == ("own", Warmth.PINNED)
+    assert result.report.monthly_cost == pytest.approx(2 * MONTH)
     assert all(lever.warmth is not Warmth.LAZY_RESIDENT for lever in result.report.come_alive_levers)
     assert all(request.warmth is not Warmth.LAZY_RESIDENT for request in result.report.measurement_requests)
+    fresh = run(resident_levels(anchor_bound=30), RESIDENT_RECEIPTS, LOADS, prices=L4_ONLY)
+    assert {entry.identity: entry.warmth for entry in fresh.plan.identities} == {
+        ANCHOR: Warmth.PINNED,
+        IDENTITY: Warmth.PINNED,
+    }
+    assert len(fresh.plan.lanes) == 2
 
 
 @pytest.mark.parametrize(
-    ("bound", "expected"), [(60, [(Warmth.COLD_WITH_BOUND, None), (Warmth.LAZY_RESIDENT, "shared")]), (0, [])]
+    ("bound", "expected"),
+    [
+        (
+            60,
+            [
+                (Warmth.COLD_WITH_BOUND, None, (Measurement.BOOT_EVIDENCE,)),
+                (Warmth.LAZY_RESIDENT, "shared", (Measurement.BOOT_EVIDENCE,)),
+                (Warmth.PINNED, "shared", (Measurement.CO_RESIDENCY_RECEIPT,)),
+            ],
+        ),
+        (0, [(Warmth.PINNED, "shared", (Measurement.CO_RESIDENCY_RECEIPT,))]),
+    ],
 )
 def test_a_warm_lane_without_a_load_row_asks_for_one_at_the_saving_it_unlocks(bound, expected):
     result = run(resident_levels(bound=bound), RESIDENT_RECEIPTS, prices=L4_ONLY, current=resident_estate())
     requests = [request for request in result.report.measurement_requests if request.identity == IDENTITY]
-    assert [(request.warmth, request.lane) for request in requests] == expected
+    assert [(request.warmth, request.lane, request.measure) for request in requests] == expected
     for request in requests:
-        assert (request.measure, request.reason, request.cost_bound) == (
-            (Measurement.BOOT_EVIDENCE,),
-            RequestReason.UNMEASURED,
-            0,
-        )
+        assert (request.reason, request.cost_bound) == (RequestReason.UNMEASURED, 0)
         assert request.saving_bound == pytest.approx(MONTH)
+    (copin,) = [request for request in requests if request.warmth is Warmth.PINNED]
+    assert copin.co_residents == (ANCHOR,)
+    assert copin.to_dict()["coResidents"] == [ANCHOR]
 
 
 def test_a_current_placement_on_a_shared_lane_stays_beside_its_kept_neighbour():
@@ -1456,6 +1529,7 @@ def test_the_region_multiplier_scales_every_price():
         ({"fallback_floor": -1}, "fallbackFloor"),
         ({"cooldown_s": -1}, "cooldownS"),
         ({"buffer_containers": -1}, "bufferContainers"),
+        ({"hold_budget_s": -1}, "holdBudgetS"),
         ({"hours_per_month": 0}, "hoursPerMonth"),
         ({"hours_per_month": math.inf}, "hoursPerMonth"),
         ({"queue_pool": "two words"}, "queuePool"),
@@ -1478,12 +1552,16 @@ def test_parameters_echo_into_the_report():
         "fallbackFloor": 2,
         "cooldownS": 900,
         "bufferContainers": 0,
+        "holdBudgetS": 0,
         "hoursPerMonth": 730.0,
         "queuePool": "default",
         "bundle": "default",
         "bundles": {"org/a": "default", "org/b": "sglang"},
     }
     assert list(echoed["bundles"]) == ["org/a", "org/b"]
+    assert parameters(unshared=frozenset({"org/b", "org/a"})).to_dict()["unshared"] == ["org/a", "org/b"]
+    with pytest.raises(SchemaError, match="unshared"):
+        parameters(unshared=frozenset({"org/a b"}))
 
 
 def test_the_placement_must_be_in_the_price_list():
@@ -1581,7 +1659,7 @@ def test_the_estate_report_states_its_findings():
         if request.lane is not None
     ]
     assert on_lanes == [
-        ("intfloat/e5-base-v2", (Measurement.RECEIPT,), Warmth.PINNED, "default-l4-default", None),
+        ("intfloat/e5-base-v2", (Measurement.CO_RESIDENCY_RECEIPT,), Warmth.PINNED, "default-l4-default", None),
         (
             "BAAI/bge-m3:sparse",
             (Measurement.BOOT_EVIDENCE,),
@@ -1589,7 +1667,16 @@ def test_the_estate_report_states_its_findings():
             "default-l4-default",
             pytest.approx(sparse.chosen.monthly_cost),
         ),
+        (
+            "intfloat/e5-base-v2",
+            (Measurement.FOOTPRINT,),
+            Warmth.PINNED,
+            "default-l4-default",
+            pytest.approx(sparse.chosen.monthly_cost),
+        ),
     ]
+    assert dense.chosen.co_residents == ("intfloat/e5-base-v2",)
+    assert dense.chosen.receipt.uri == "receipts/baai-bge-m3/l4-c16-16384-beside-e5-base-v2.json"
     assert [change.identity for change in report.identity_changes] == ["BAAI/bge-m3:sparse", "Qwen/Qwen3-Embedding-4B"]
     assert report.monthly_cost == pytest.approx(sum(lane.monthly_cost for lane in report.lanes))
     shared = {lane.name: lane for lane in report.lanes}["default-l4-default"]
@@ -1632,8 +1719,9 @@ def test_an_estate_identity_beside_a_kept_neighbour_offers_no_lever_and_no_savin
     for bound in (9, 95):
         service_levels = loosened(inputs["service_levels"], "BAAI/bge-m3", bound)
         again = plan(**{**inputs, "service_levels": service_levels, "current_plan": result.plan})
-        assert again.report.identity("BAAI/bge-m3").chosen.warmth in (Warmth.COLD_WITH_BOUND, Warmth.SNAPSHOT_COLD)
-        assert again.report.monthly_cost > result.report.monthly_cost
+        assert again.report.identity("BAAI/bge-m3").chosen.warmth is Warmth.PINNED
+        assert again.plan == result.plan
+        assert again.report.monthly_cost == pytest.approx(result.report.monthly_cost)
 
 
 def test_an_estate_next_cheaper_saving_is_what_planning_again_with_its_bounds_loosened_saves():
