@@ -1,0 +1,50 @@
+{
+  "a100-40gb": {
+    "enabled": false,
+    "bundles": {
+      "default": {
+        "enabled": true
+      }
+    }
+  },
+  "a100-80gb": {
+    "enabled": false,
+    "bundles": {
+      "default": {
+        "enabled": true
+      }
+    }
+  },
+  "cpu": {
+    "enabled": false,
+    "bundles": {
+      "default": {
+        "enabled": true
+      }
+    }
+  },
+  "l4": {
+    "enabled": false,
+    "bundles": {
+      "default": {
+        "enabled": true
+      }
+    }
+  },
+  "remote": {
+    "enabled": false,
+    "bundles": {
+      "remote": {
+        "enabled": true
+      }
+    }
+  },
+  "sglang-cu130": {
+    "enabled": false,
+    "bundles": {
+      "sglang-cu130": {
+        "enabled": true
+      }
+    }
+  }
+}

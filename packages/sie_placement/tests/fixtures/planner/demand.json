@@ -1,0 +1,114 @@
+{
+  "kind": "placement-demand",
+  "schemaVersion": 1,
+  "start": "2026-11-02T00:00:00Z",
+  "end": "2026-11-03T00:00:00Z",
+  "series": [
+    {
+      "identity": "BAAI/bge-m3",
+      "operation": "encode",
+      "hours": [
+        {
+          "start": "2026-11-02T09:00:00Z",
+          "requests": 20000
+        },
+        {
+          "start": "2026-11-02T10:00:00Z",
+          "requests": 20000
+        },
+        {
+          "start": "2026-11-02T11:00:00Z",
+          "requests": 20000
+        },
+        {
+          "start": "2026-11-02T12:00:00Z",
+          "requests": 20000
+        },
+        {
+          "start": "2026-11-02T13:00:00Z",
+          "requests": 20000
+        },
+        {
+          "start": "2026-11-02T14:00:00Z",
+          "requests": 20000
+        },
+        {
+          "start": "2026-11-02T15:00:00Z",
+          "requests": 20000
+        },
+        {
+          "start": "2026-11-02T16:00:00Z",
+          "requests": 20000
+        },
+        {
+          "start": "2026-11-02T17:00:00Z",
+          "requests": 20000
+        }
+      ]
+    },
+    {
+      "identity": "BAAI/bge-m3:sparse",
+      "operation": "encode",
+      "hours": [
+        {
+          "start": "2026-11-02T11:00:00Z",
+          "requests": 3
+        }
+      ]
+    },
+    {
+      "identity": "Qwen/Qwen3-8B",
+      "operation": "generate",
+      "hours": [
+        {
+          "start": "2026-11-02T14:00:00Z",
+          "requests": 12
+        },
+        {
+          "start": "2026-11-02T15:00:00Z",
+          "requests": 30
+        }
+      ]
+    },
+    {
+      "identity": "Qwen/Qwen3-Embedding-4B",
+      "operation": "encode",
+      "hours": [
+        {
+          "start": "2026-11-02T08:00:00Z",
+          "requests": 600
+        },
+        {
+          "start": "2026-11-02T09:00:00Z",
+          "requests": 600
+        },
+        {
+          "start": "2026-11-02T10:00:00Z",
+          "requests": 600
+        },
+        {
+          "start": "2026-11-02T11:00:00Z",
+          "requests": 600
+        },
+        {
+          "start": "2026-11-02T12:00:00Z",
+          "requests": 600
+        },
+        {
+          "start": "2026-11-02T13:00:00Z",
+          "requests": 600
+        }
+      ]
+    },
+    {
+      "identity": "intfloat/e5-base-v2",
+      "operation": "encode",
+      "hours": [
+        {
+          "start": "2026-11-02T10:00:00Z",
+          "requests": 40
+        }
+      ]
+    }
+  ]
+}
