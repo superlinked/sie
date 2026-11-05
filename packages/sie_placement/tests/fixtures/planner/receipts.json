@@ -26,9 +26,47 @@
       "p95Ms": 171.9,
       "p99Ms": 214
     },
+    "footprintMiB": 2310,
+    "workingMemoryMiB": 1480,
     "source": {
       "uri": "receipts/baai-bge-m3/l4-c16-16384.json",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+    }
+  },
+  {
+    "kind": "placement-receipt",
+    "schemaVersion": 1,
+    "identity": "BAAI/bge-m3",
+    "cell": {
+      "machineProfile": "l4",
+      "gpuProduct": "NVIDIA-L4"
+    },
+    "containerShape": {
+      "gpuCount": 1,
+      "cpuCores": 4,
+      "memoryMiB": 16384
+    },
+    "concurrency": 16,
+    "coResidents": [
+      "intfloat/e5-base-v2"
+    ],
+    "requestShape": {
+      "operation": "encode",
+      "itemsPerRequest": 8,
+      "inputTokensPerItem": 256
+    },
+    "throughput": {
+      "requestsPerSecond": 36
+    },
+    "latency": {
+      "p50Ms": 110.2,
+      "p95Ms": 171.9,
+      "p99Ms": 236
+    },
+    "footprintMiB": 2310,
+    "workingMemoryMiB": 1720,
+    "source": {
+      "uri": "receipts/baai-bge-m3/l4-c16-16384-beside-e5-base-v2.json"
     }
   },
   {
@@ -89,6 +127,8 @@
       "p50Ms": 101,
       "p99Ms": 190
     },
+    "footprintMiB": 2290,
+    "workingMemoryMiB": 1210,
     "source": {
       "uri": "receipts/baai-bge-m3-sparse/l4-c16-16384.json",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000003"
@@ -194,6 +234,8 @@
     "latency": {
       "p99Ms": 180
     },
+    "footprintMiB": 1650,
+    "workingMemoryMiB": 980,
     "source": {
       "uri": "receipts/qwen-qwen3-reranker-0.6b/l4-c16-16384.json",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000006"
@@ -225,6 +267,8 @@
       "p50Ms": 140,
       "p99Ms": 280
     },
+    "footprintMiB": 8420,
+    "workingMemoryMiB": 2650,
     "source": {
       "uri": "receipts/qwen-qwen3-embedding-4b/l4-c8-16384.json",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000007"

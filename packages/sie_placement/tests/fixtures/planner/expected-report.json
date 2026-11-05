@@ -47,13 +47,15 @@
           "memoryMiB": 16384
         },
         "concurrency": 16,
+        "coResidents": [
+          "intfloat/e5-base-v2"
+        ],
         "warmth": "pinned",
         "monthlyCost": 759.2,
         "comeAliveS": 0.0,
         "comeAliveBasis": "warm-floor",
         "receipt": {
-          "uri": "receipts/baai-bge-m3/l4-c16-16384.json",
-          "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+          "uri": "receipts/baai-bge-m3/l4-c16-16384-beside-e5-base-v2.json"
         }
       },
       "peakContainers": 1,
@@ -407,8 +409,11 @@
       },
       "concurrency": 16,
       "lane": "default-l4-default",
+      "coResidents": [
+        "BAAI/bge-m3"
+      ],
       "measure": [
-        "receipt"
+        "co-residency-receipt"
       ],
       "warmth": "pinned",
       "reason": "unmeasured",
@@ -477,7 +482,8 @@
       "concurrency": 16,
       "lane": "default-l4-default",
       "measure": [
-        "boot-evidence"
+        "boot-evidence",
+        "footprint"
       ],
       "warmth": "lazy-resident",
       "reason": "unmeasured",

@@ -452,6 +452,79 @@ def test_capacity_built_in_code_names_type_ceilings_by_gpu_product():
     assert caught.value.path == "gpuProduct"
 
 
+def test_receipts_record_the_memory_a_model_holds_and_its_co_residents():
+    data = load("receipt-encode.json")
+    data["coResidents"] = ["intfloat/e5-base-v2", "BAAI/bge-m3:sparse"]
+    data["footprintMiB"] = 2310
+    data["workingMemoryMiB"] = 0
+    receipt = Receipt.from_dict(data)
+    assert (receipt.co_residents, receipt.footprint_mib, receipt.working_memory_mib) == (
+        ("intfloat/e5-base-v2", "BAAI/bge-m3:sparse"),
+        2310,
+        0,
+    )
+    assert receipt.to_dict() == data
+    assert list(receipt.to_dict())[:7] == [
+        "kind",
+        "schemaVersion",
+        "identity",
+        "cell",
+        "containerShape",
+        "concurrency",
+        "coResidents",
+    ]
+    plain = Receipt.from_dict(load("receipt-encode.json"))
+    assert (plain.co_residents, plain.footprint_mib, plain.working_memory_mib) == ((), None, None)
+    assert "coResidents" not in plain.to_dict()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("coResidents", ["BAAI/bge-m3"], "$.coResidents[0]: names the receipt's own identity 'BAAI/bge-m3'"),
+        ("coResidents", ["org/a", "org/a"], "$.coResidents[1]: duplicates 'org/a'"),
+        ("coResidents", ["org/a", ""], "$.coResidents[1]: must be a non-empty string without whitespace, got ''"),
+        ("coResidents", [7], "$.coResidents[0]: expected a string, got number 7"),
+        ("coResidents", "org/a", "$.coResidents: expected an array, got string 'org/a'"),
+        ("footprintMiB", 0, "$.footprintMiB: must be at least 1, got 0"),
+        ("footprintMiB", 1.5, "$.footprintMiB: expected an integer, got number 1.5"),
+        ("workingMemoryMiB", -1, "$.workingMemoryMiB: must be at least 0, got -1"),
+    ],
+)
+def test_receipt_memory_and_co_residents_are_validated(field, value, message):
+    data = load("receipt-encode.json")
+    data[field] = value
+    assert str(schema_error(Receipt.from_dict, data)) == message
+
+
+def test_boot_evidence_records_the_footprint_of_a_load_that_succeeded():
+    data = load("boot-evidence.json")
+    data["footprintMiB"] = 2290
+    evidence = BootEvidence.from_dict(data)
+    assert evidence.footprint_mib == 2290
+    assert evidence.to_dict() == data
+    data["footprintMiB"] = 0
+    assert str(schema_error(BootEvidence.from_dict, data)) == "$.footprintMiB: must be at least 1, got 0"
+    data["footprintMiB"] = 2290
+    data["outcome"] = "failed"
+    assert str(schema_error(BootEvidence.from_dict, data)) == (
+        "$.footprintMiB: must be omitted for an attempt that did not succeed"
+    )
+
+
+def test_machine_profiles_may_state_the_memory_of_their_card():
+    data = load("price-list.json")
+    data["machineProfiles"][0]["gpuMemoryMiB"] = 23034
+    prices = PriceList.from_dict(data)
+    assert prices.machine_profiles[0].gpu_memory_mib == 23034
+    assert prices.machine_profiles[1].gpu_memory_mib is None
+    assert prices.to_dict() == data
+    data["machineProfiles"][0]["gpuMemoryMiB"] = 0
+    assert str(schema_error(PriceList.from_dict, data)) == (
+        "$.machineProfiles[0].gpuMemoryMiB: must be at least 1, got 0"
+    )
+
+
 def test_price_lists_validate_currency_rates_and_names():
     data = load("price-list.json")
     data["currency"] = "usd"
