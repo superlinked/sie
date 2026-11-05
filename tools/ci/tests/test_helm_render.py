@@ -4239,6 +4239,10 @@ APPLIER_AUTH = {
     }
 }
 APPLIER_CLIENT_TOKEN = {"existingSecretName": "applier-client", "secretKey": "token"}
+RUNTIME_AUTH_MODE = [
+    {"name": "SIE_AUTH_MODE", "valueFrom": {"configMapKeyRef": {"name": "gateway-auth", "key": "mode"}}}
+]
+APPLIER_RUNTIME_AUTH = {"gateway": {**APPLIER_AUTH["gateway"], "extraEnv": RUNTIME_AUTH_MODE}}
 SECRET_FILE_MODE = 0o440
 
 
@@ -4355,8 +4359,9 @@ def test_the_placement_applier_runs_in_shadow_mode_without_credentials(tmp_path:
 
 
 @pytest.mark.parametrize("apply", [False, True])
-def test_the_placement_applier_mounts_the_admin_token_only_to_write(tmp_path: Path, apply: bool) -> None:
-    docs = placement_documents(tmp_path, applier_layers(APPLIER_AUTH, apply=apply, clientToken=APPLIER_CLIENT_TOKEN))
+@pytest.mark.parametrize("auth", [APPLIER_AUTH, APPLIER_RUNTIME_AUTH], ids=["token", "run-time"])
+def test_the_placement_applier_mounts_the_admin_token_only_to_write(tmp_path: Path, auth: dict, apply: bool) -> None:
+    docs = placement_documents(tmp_path, applier_layers(auth, apply=apply, clientToken=APPLIER_CLIENT_TOKEN))
     spec = applier_pod(docs)["spec"]
     (container,) = spec["containers"]
     client = ["--api-key-file", "/etc/sie-placement/client-token/token"]
@@ -4387,14 +4392,66 @@ def test_the_placement_applier_mounts_the_admin_token_only_to_write(tmp_path: Pa
     }
 
 
-def test_the_placement_applier_uses_the_gateways_literal_pool_limits(tmp_path: Path) -> None:
-    extra_env = [
-        {"name": "SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT", "value": " 6 "},
-        {"name": "SIE_GATEWAY_MAX_POOLS", "value": "many"},
-    ]
+def test_the_placement_applier_writes_without_a_token_when_the_gateway_authenticates_nothing(
+    tmp_path: Path,
+) -> None:
+    spec = applier_pod(placement_documents(tmp_path, applier_layers(apply=True)))["spec"]
+    (container,) = spec["containers"]
+    assert container["args"] == [*APPLIER_ARGS, "--apply"]
+    assert [mount["name"] for mount in container["volumeMounts"]] == ["plan"]
+    assert [volume["name"] for volume in spec["volumes"]] == ["plan"]
+
+
+@pytest.mark.parametrize(
+    ("dependencies", "address"),
+    [
+        ({}, "http://prometheus-operated.monitoring.svc.cluster.local:9090"),
+        (
+            {"kube-prometheus-stack": {"install": True}},
+            "http://sie-kube-prometheus-stack-prometheus.sie.svc.cluster.local:9090",
+        ),
+    ],
+)
+def test_the_placement_applier_queries_the_prometheus_that_keda_queries(
+    tmp_path: Path, dependencies: dict, address: str
+) -> None:
+    docs = placement_documents(tmp_path, applier_layers(dependencies))
+    (container,) = applier_pod(docs)["spec"]["containers"]
+    args = container["args"]
+    assert args[args.index("--prometheus-url") + 1] == address
+    assert {
+        trigger["metadata"]["serverAddress"]
+        for scaled_object in worker_scaled_objects(docs)
+        for trigger in scaled_object["spec"]["triggers"]
+    } == {address}
+
+
+@pytest.mark.parametrize(
+    ("extra_env", "limits"),
+    [
+        (
+            [
+                {"name": "SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT", "value": " 6 "},
+                {"name": "SIE_GATEWAY_MAX_POOLS", "value": "many"},
+            ],
+            ["--max-pool-floor", "6"],
+        ),
+        ([{"name": "SIE_GATEWAY_MAX_POOLS", "value": "32"}], ["--max-pools", "32"]),
+        (
+            [
+                {"name": "SIE_GATEWAY_MAX_POOLS", "value": "32"},
+                {"name": "SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT", "value": "3"},
+            ],
+            ["--max-pool-floor", "3", "--max-pools", "32"],
+        ),
+    ],
+)
+def test_the_placement_applier_uses_the_gateways_literal_pool_limits(
+    tmp_path: Path, extra_env: list[dict], limits: list[str]
+) -> None:
     docs = placement_documents(tmp_path, applier_layers({"gateway": {"extraEnv": extra_env}}))
     (container,) = applier_pod(docs)["spec"]["containers"]
-    assert container["args"] == [*APPLIER_ARGS, "--max-pool-floor", "6"]
+    assert container["args"] == [*APPLIER_ARGS, *limits]
 
 
 def drop_l4_envelope(layers: list[dict]) -> None:
@@ -4459,6 +4516,20 @@ def plan_without_lanes(layers: list[dict]) -> None:
             "gateway.auth.adminTokenSecretName",
         ),
         (
+            lambda layers: layers.insert(3, APPLIER_RUNTIME_AUTH),
+            {},
+            "placementApplier.enabled with gateway token auth (or a gateway auth mode known only at run time) needs "
+            "placementApplier.clientToken.existingSecretName",
+        ),
+        (
+            lambda layers: layers.insert(
+                3, {"gateway": {"auth": {"tokenSecretName": "gateway-tokens"}, "extraEnv": RUNTIME_AUTH_MODE}}
+            ),
+            {"apply": True, "clientToken": APPLIER_CLIENT_TOKEN},
+            "placementApplier.apply=true with gateway token auth (or a gateway auth mode known only at run time) needs "
+            "gateway.auth.adminTokenSecretName",
+        ),
+        (
             lambda layers: layers.insert(3, APPLIER_AUTH),
             {"clientToken": {"existingSecretName": "applier-client", "secretKey": " "}},
             "placementApplier.clientToken.secretKey is empty",
@@ -4491,6 +4562,27 @@ def test_an_unrealizable_placement_applier_fails_the_render(
     result = render_placement(tmp_path, *layers)
     assert result.returncode != 0
     assert error in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("auth", "example"),
+    [({"mode": "token", "generateToken": True}, True), ({"mode": "token", "tokenSecretName": "gateway-tokens"}, False)],
+    ids=["generated", "operator-managed"],
+)
+def test_the_applier_client_token_error_suggests_only_a_single_token_secret(
+    tmp_path: Path, auth: dict, example: bool
+) -> None:
+    result = render_placement(tmp_path, *applier_layers({"gateway": {"auth": auth}}))
+    assert result.returncode != 0
+    generated = (
+        "for example placementApplier.clientToken.existingSecretName=sie-sie-cluster-gateway-token and "
+        "placementApplier.clientToken.secretKey=SIE_AUTH_TOKEN"
+    )
+    assert (generated in result.stderr) is example
+    assert ("for example" in result.stderr) is example
+    assert "The applier presents the whole value, so the key must not list several comma-separated tokens" in (
+        result.stderr
+    )
 
 
 def test_the_applier_client_token_is_kept_apart_from_the_admin_token(tmp_path: Path) -> None:

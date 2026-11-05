@@ -1092,10 +1092,12 @@ lanes and their envelopes.
 {{- $mayAuthenticate := or (include "sie-cluster.gateway.authenticates" $root) (not $auth.known) -}}
 {{- if and $mayAuthenticate (not $clientToken.existingSecretName) -}}
 {{- $example := "" -}}
+{{- if not (dig "auth" "tokenSecretName" "" ($root.Values.gateway | default dict)) -}}
 {{- with include "sie-cluster.gateway.tokenSecretName" $root -}}
 {{- $example = printf ", for example placementApplier.clientToken.existingSecretName=%s and placementApplier.clientToken.secretKey=%s" . (include "sie-cluster.gateway.tokenSecretKey" $root) -}}
 {{- end -}}
-{{- fail (printf "placementApplier.enabled with gateway token auth (or a gateway auth mode known only at run time) needs placementApplier.clientToken.existingSecretName: the applier reads pools from the gateway, which refuses requests without a token. Point it at a Secret key that holds one gateway client token%s." $example) -}}
+{{- end -}}
+{{- fail (printf "placementApplier.enabled with gateway token auth (or a gateway auth mode known only at run time) needs placementApplier.clientToken.existingSecretName: the applier reads pools from the gateway, which refuses requests without a token. Point it at a Secret key that holds one gateway client token%s. The applier presents the whole value, so the key must not list several comma-separated tokens." $example) -}}
 {{- end -}}
 {{- if and (include "sie-cluster.placementApplier.apply" $root) $mayAuthenticate (not (dig "auth" "adminTokenSecretName" "" ($root.Values.gateway | default dict))) -}}
 {{- fail "placementApplier.apply=true with gateway token auth (or a gateway auth mode known only at run time) needs gateway.auth.adminTokenSecretName: the gateway refuses pool writes without its admin token, which the applier reads from that Secret." -}}

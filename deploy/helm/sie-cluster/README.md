@@ -561,10 +561,16 @@ The render fails unless:
   an enabled worker lane by its `queuePool`, `cell.machineProfile` and
   `bundle`, compared as the chart canonicalizes lane tokens, and that worker
   lane declares an `envelope` equal to the plan lane's. A plan therefore cannot
-  move a floor outside a range that the chart values bound.
+  move a floor outside a range that the chart values bound. The values overlay
+  that `helm_values` in `sie-placement` emits from a plan sets each lane's
+  `minReplicas` and `maxReplicas` but no `envelope`, so copy each plan lane's
+  `envelope.floorMin` and `envelope.floorMax` into the worker lane it names.
 - With gateway token auth, or a gateway auth mode known only at run time,
   `placementApplier.clientToken.existingSecretName` names a Secret key that
   holds one gateway client token, which the applier presents on pool reads.
+  The applier presents the whole value, so the key must not list several
+  comma-separated tokens, as an operator-managed `gateway.auth.tokenSecretName`
+  does during a [rotation](#gateway-token).
 - With `placementApplier.apply: true` and gateway token auth, or a mode known
   only at run time, `gateway.auth.adminTokenSecretName` is set.
 - `gateway.extraEnv` sets `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT` and
@@ -598,6 +604,18 @@ exception type. Anyone who can read the applier's log sees lane telemetry and
 floors, not credentials. Anyone who can create pods in the namespace with that
 Secret can still read it, so the Secret read limits under
 [Who holds which token](#who-holds-which-token) apply.
+
+The applier reads both token files once, when it starts. After you rotate the
+gateway client token or the gateway admin token, restart it:
+
+```bash
+kubectl rollout restart deployment/<FULLNAME>-placement-applier -n <NAMESPACE>
+```
+
+Until it restarts, the gateway refuses its pool reads or writes and the pod
+keeps running: each tick's audit rows record the failures, and in apply mode
+each carrier lapses 1200 seconds after its last write and the lane returns to
+its chart floor.
 
 The Deployment runs one replica with the `Recreate` strategy, so at most one
 applier writes carriers, also during a rollout. Its pod runs as user and group
@@ -1848,7 +1866,9 @@ without a cutover, use an operator-managed Secret:
    `helm upgrade` (with the Secret's name in `gateway.auth.tokenSecretName`)
    and restart the gateway and the worker StatefulSets. The gateway accepts
    both tokens, and the worker sidecars present the first one.
-2. Move every client, including the MCP edge's key, to the new token.
+2. Move every client, including the MCP edge's key and the placement
+   applier's `placementApplier.clientToken` key, to the new token, and restart
+   the placement applier, which reads its token at start.
 3. Remove the old token from the Secret and restart the gateway.
 
 To leave a generated token, copy it into your own Secret as the old token in
