@@ -163,10 +163,10 @@ document:
    with a `floorMin` of at least 1, on the parameters' queue pool and the
    identity's bundle, on which another identity whose `comeAliveP95S` is `0` is
    pinned. The identity's own current lane is a host only when it is a lazy
-   resident there, since its floor is paid either way.
-   The come-alive is the identity's `lazy-resident` boot evidence, its measured
-   load onto that cell and container shape, under the same statistic. The
-   option costs what the identity's demand needs above the host lane's floor.
+   resident there, since its floor is paid either way. The come-alive is the
+   identity's `lazy-resident` boot evidence, its measured load onto that cell
+   and container shape, under the same statistic. The option costs what the
+   identity's demand needs above the host lane's floor.
 5. The cheapest unblocked option wins. Ties go to the current placement,
    then to the faster come-alive.
 
