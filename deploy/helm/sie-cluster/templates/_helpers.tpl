@@ -1051,6 +1051,118 @@ every tool call may be refused.
 {{- end -}}
 {{- end }}
 
+{{- define "sie-cluster.placementApplier.enabled" -}}
+{{- include "sie-cluster.optIn" (dict "value" (dig "enabled" nil (.Values.placementApplier | default dict)) "path" "placementApplier.enabled") -}}
+{{- end }}
+
+{{- define "sie-cluster.placementApplier.apply" -}}
+{{- include "sie-cluster.optIn" (dict "value" (dig "apply" nil (.Values.placementApplier | default dict)) "path" "placementApplier.apply") -}}
+{{- end }}
+
+{{- define "sie-cluster.placementApplier.name" -}}
+{{- printf "%s-placement-applier" (include "sie-cluster.fullname" .) -}}
+{{- end }}
+
+{{- define "sie-cluster.placementApplier.selectorLabels" -}}
+{{ include "sie-cluster.selectorLabels" . }}
+app.kubernetes.io/component: placement-applier
+{{- end }}
+
+{{/*
+Validation: the placement applier needs KEDA autoscaling, an image, a gateway
+client token when the gateway may authenticate, the gateway admin token Secret
+when it writes, and a placement plan whose lanes all match enabled worker
+lanes and their envelopes.
+*/}}
+{{- define "sie-cluster.placementApplier.validate" -}}
+{{- $root := . -}}
+{{- $applier := $root.Values.placementApplier | default dict -}}
+{{- if not $root.Values.autoscaling.enabled -}}
+{{- fail "placementApplier.enabled needs autoscaling.enabled: the applier raises a lane's floor through the warm-floor trigger of the lane's KEDA ScaledObject and reads the lane series that autoscaling exports" -}}
+{{- end -}}
+{{- $image := $applier.image | default dict -}}
+{{- if not (and (trim (toString (default "" $image.repository))) (trim (toString (default "" $image.tag)))) -}}
+{{- fail "placementApplier.image.repository and placementApplier.image.tag are required: the chart publishes no image that runs sie-placement. Use an image that installs sie-placement with its keda extra." -}}
+{{- end -}}
+{{- $clientToken := $applier.clientToken | default dict -}}
+{{- if and $clientToken.existingSecretName (not (trim (toString (default "" $clientToken.secretKey)))) -}}
+{{- fail "placementApplier.clientToken.secretKey is empty. Set it to the key of placementApplier.clientToken.existingSecretName that holds the gateway client token." -}}
+{{- end -}}
+{{- $auth := include "sie-cluster.gateway.effectiveAuthMode" $root | fromJson -}}
+{{- $mayAuthenticate := or (include "sie-cluster.gateway.authenticates" $root) (not $auth.known) -}}
+{{- if and $mayAuthenticate (not $clientToken.existingSecretName) -}}
+{{- $example := "" -}}
+{{- with include "sie-cluster.gateway.tokenSecretName" $root -}}
+{{- $example = printf ", for example placementApplier.clientToken.existingSecretName=%s and placementApplier.clientToken.secretKey=%s" . (include "sie-cluster.gateway.tokenSecretKey" $root) -}}
+{{- end -}}
+{{- fail (printf "placementApplier.enabled with gateway token auth (or a gateway auth mode known only at run time) needs placementApplier.clientToken.existingSecretName: the applier reads pools from the gateway, which refuses requests without a token. Point it at a Secret key that holds one gateway client token%s." $example) -}}
+{{- end -}}
+{{- if and (include "sie-cluster.placementApplier.apply" $root) $mayAuthenticate (not (dig "auth" "adminTokenSecretName" "" ($root.Values.gateway | default dict))) -}}
+{{- fail "placementApplier.apply=true with gateway token auth (or a gateway auth mode known only at run time) needs gateway.auth.adminTokenSecretName: the gateway refuses pool writes without its admin token, which the applier reads from that Secret." -}}
+{{- end -}}
+{{- if hasKey ($applier.podAnnotations | default dict) "checksum/plan" -}}
+{{- fail "placementApplier.podAnnotations must not override chart-owned annotation checksum/plan" -}}
+{{- end -}}
+{{- include "sie-cluster.placementApplier.validatePlan" $root -}}
+{{- end }}
+
+{{/*
+Validation: every lane of placementApplier.plan names an enabled worker lane by
+its canonical queuePool, cell.machineProfile and bundle, and that worker lane
+declares an envelope equal to the plan lane's, so the plan cannot move a floor
+outside the range the chart values bound.
+*/}}
+{{- define "sie-cluster.placementApplier.validatePlan" -}}
+{{- $root := . -}}
+{{- $plan := dig "plan" nil ($root.Values.placementApplier | default dict) -}}
+{{- if not (and (kindIs "map" $plan) (eq (toString (index $plan "kind")) "placement-plan")) -}}
+{{- fail "placementApplier.plan must be a placement-plan document, for example --set-json \"placementApplier.plan=$(cat plan.json)\"" -}}
+{{- end -}}
+{{- $lanes := index $plan "lanes" -}}
+{{- if not (and (kindIs "slice" $lanes) $lanes) -}}
+{{- fail "placementApplier.plan.lanes must list at least one lane" -}}
+{{- end -}}
+{{- $chartLanes := dict -}}
+{{- range $poolName, $pool := $root.Values.workers.pools -}}
+{{- if $pool.enabled -}}
+{{- range $bundleName, $bundleCfg := $pool.bundles -}}
+{{- if dig "enabled" true $bundleCfg -}}
+{{- $lane := include "sie-cluster.worker.lane" (dict "root" $root "poolName" $poolName "pool" $pool "bundleName" $bundleName) | fromJson -}}
+{{- $_ := set $chartLanes (printf "%s|%s|%s" $lane.queuePool $lane.machineProfile $lane.bundle) (dict "ownerPath" $lane.ownerPath "envelope" $bundleCfg.envelope) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- range $index, $planLane := $lanes -}}
+{{- $path := printf "placementApplier.plan.lanes[%d]" $index -}}
+{{- if not (and (kindIs "map" $planLane) (kindIs "map" (index $planLane "cell")) (kindIs "map" (index $planLane "envelope"))) -}}
+{{- fail (printf "%s must be a plan lane with a cell and an envelope" $path) -}}
+{{- end -}}
+{{- $tokens := list (index $planLane "queuePool") (index $planLane "cell" "machineProfile") (index $planLane "bundle") -}}
+{{- $key := list -}}
+{{- range $token := $tokens -}}
+{{- $key = append $key (default "" $token | toString | trim | lower) -}}
+{{- end -}}
+{{- $key = join "|" $key -}}
+{{- $chart := index $chartLanes $key -}}
+{{- if not $chart -}}
+{{- fail (printf "%s names the lane %q (queuePool|machineProfile|bundle), which is not an enabled worker lane" $path $key) -}}
+{{- end -}}
+{{- if not $chart.envelope -}}
+{{- fail (printf "%s names %s, which declares no envelope: set %s.envelope to the plan lane's floorMin and floorMax" $path $chart.ownerPath $chart.ownerPath) -}}
+{{- end -}}
+{{- $planEnvelope := index $planLane "envelope" -}}
+{{- $bounds := dict -}}
+{{- range $field := list "floorMin" "floorMax" -}}
+{{- $_ := set $bounds (printf "plan%s" $field) (include "sie-cluster.worker.envelopeBound" (dict "path" (printf "%s.envelope.%s" $path $field) "value" (index $planEnvelope $field))) -}}
+{{- $_ = set $bounds (printf "chart%s" $field) (include "sie-cluster.worker.envelopeBound" (dict "path" (printf "%s.envelope.%s" $chart.ownerPath $field) "value" (index $chart.envelope $field))) -}}
+{{- end -}}
+{{- if or (ne $bounds.planfloorMin $bounds.chartfloorMin) (ne $bounds.planfloorMax $bounds.chartfloorMax) -}}
+{{- fail (printf "%s.envelope (floorMin %s, floorMax %s) differs from %s.envelope (floorMin %s, floorMax %s): the worker lane's envelope bounds the floor the applier may write" $path $bounds.planfloorMin $bounds.planfloorMax $chart.ownerPath $bounds.chartfloorMin $bounds.chartfloorMax) -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
 {{/*
 Validation: workers.auth.allowUnauthenticated is the first step of the
 two-step upgrade and needs workers.auth.enabled.
@@ -1242,6 +1354,12 @@ token-separation check and the upstream-key collision check read this list.
 {{- end -}}
 {{- with $mcp.clusterApiKey.existingSecretName -}}
 {{- $keys = append $keys (dict "owner" "mcpEdge.clusterApiKey.existingSecretName" "name" "MCP edge cluster API key" "ref" (printf "%s/%s" . $mcp.clusterApiKey.secretKey) "role" "gateway-client") -}}
+{{- end -}}
+{{- if include "sie-cluster.placementApplier.enabled" $root -}}
+{{- $applierToken := dig "clientToken" dict ($root.Values.placementApplier | default dict) -}}
+{{- with $applierToken.existingSecretName -}}
+{{- $keys = append $keys (dict "owner" "placementApplier.clientToken.existingSecretName" "name" "placement applier client token" "ref" (printf "%s/%s" . $applierToken.secretKey) "role" "gateway-client") -}}
+{{- end -}}
 {{- end -}}
 {{- $tls := include "sie-cluster.ingressTlsConfig" $root | fromYaml -}}
 {{- $tlsSecrets := list (dict "owner" "the ingress TLS certificate" "name" $tls.secretName) (dict "owner" "the MCP ingress TLS certificate" "name" (printf "%s-tls" (include "sie-cluster.mcpEdge.serviceName" $root))) -}}
@@ -1682,8 +1800,63 @@ consume the same queuePool/machineProfile/bundle tuple.
 {{- fail (printf "%s: canonical physical lane %q duplicates %s after trim/lower normalization" $lane.ownerPath $key (index $seen $key)) -}}
 {{- end -}}
 {{- $_ := set $seen $key $lane.ownerPath -}}
+{{- if $bundleCfg.envelope -}}
+{{- $_ = include "sie-cluster.worker.validateEnvelope" (dict "root" $root "lane" $lane "bundle" $bundleCfg) -}}
 {{- end -}}
 {{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+A non-negative integer bound read from values or from a placement plan,
+returned in canonical decimal form. Args (dict): path, value.
+*/}}
+{{- define "sie-cluster.worker.envelopeBound" -}}
+{{- $value := .value -}}
+{{- $text := toString $value -}}
+{{- if not (and (or (kindIs "float64" $value) (kindIs "int" $value) (kindIs "int64" $value)) (regexMatch "^(0|[1-9][0-9]*)$" $text)) -}}
+{{- fail (printf "%s must be a non-negative integer, got %s" .path (ternary "nothing" $text (kindIs "invalid" $value))) -}}
+{{- end -}}
+{{- $text -}}
+{{- end }}
+
+{{/*
+Validate a worker lane's envelope: the warm-floor range a floor carrier may
+hold the lane at. A lane returns to minReplicas when no carrier holds it, KEDA
+runs at most maxReplicas, and an autoscaled lane with minReplicas 0 runs at
+least its fallback floor once a carrier activates it.
+Args (dict): root, lane (sie-cluster.worker.lane), bundle.
+*/}}
+{{- define "sie-cluster.worker.validateEnvelope" -}}
+{{- $path := printf "%s.envelope" .lane.ownerPath -}}
+{{- $envelope := .bundle.envelope -}}
+{{- if not (kindIs "map" $envelope) -}}
+{{- fail (printf "%s must be a map with floorMin and floorMax" $path) -}}
+{{- end -}}
+{{- range $field := keys $envelope | sortAlpha -}}
+{{- if not (has $field (list "floorMin" "floorMax")) -}}
+{{- fail (printf "%s.%s is not an envelope field: a worker lane's envelope holds floorMin and floorMax only" $path $field) -}}
+{{- end -}}
+{{- end -}}
+{{- $floorMin := int (include "sie-cluster.worker.envelopeBound" (dict "path" (printf "%s.floorMin" $path) "value" (index $envelope "floorMin"))) -}}
+{{- $floorMax := int (include "sie-cluster.worker.envelopeBound" (dict "path" (printf "%s.floorMax" $path) "value" (index $envelope "floorMax"))) -}}
+{{- $minReplicas := int .bundle.minReplicas -}}
+{{- $maxReplicas := int .bundle.maxReplicas -}}
+{{- if ne $floorMin $minReplicas -}}
+{{- fail (printf "%s.floorMin must equal minReplicas (%d), got %d: the lane returns to minReplicas whenever no floor carrier holds it" $path $minReplicas $floorMin) -}}
+{{- end -}}
+{{- if lt $floorMax $floorMin -}}
+{{- fail (printf "%s.floorMax must be at least floorMin (%d), got %d" $path $floorMin $floorMax) -}}
+{{- end -}}
+{{- if gt $floorMax $maxReplicas -}}
+{{- fail (printf "%s.floorMax must not exceed maxReplicas (%d), got %d: KEDA runs at most maxReplicas" $path $maxReplicas $floorMax) -}}
+{{- end -}}
+{{- if and .root.Values.autoscaling.enabled (eq $floorMin 0) (gt $floorMax 0) -}}
+{{- $fallbackFloor := min $maxReplicas (max $minReplicas (int .root.Values.autoscaling.fallbackReplicas)) -}}
+{{- if lt $floorMax $fallbackFloor -}}
+{{- fail (printf "%s.floorMax must be 0 or at least the lane's fallback floor (%d), got %d: a raised floor on a lane with minReplicas 0 runs min(maxReplicas, autoscaling.fallbackReplicas) workers or more" $path $fallbackFloor $floorMax) -}}
 {{- end -}}
 {{- end -}}
 {{- end }}

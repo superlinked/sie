@@ -1,0 +1,182 @@
+{{- if include "sie-cluster.placementApplier.enabled" . }}
+{{- $_ := include "sie-cluster.worker.validateLanes" . -}}
+{{- include "sie-cluster.placementApplier.validate" . -}}
+{{- $applier := .Values.placementApplier -}}
+{{- $apply := include "sie-cluster.placementApplier.apply" . -}}
+{{- $name := include "sie-cluster.placementApplier.name" . -}}
+{{- $planJson := toPrettyJson $applier.plan -}}
+{{- $promAddr := .Values.autoscaling.prometheusAddress -}}
+{{- if index .Values "kube-prometheus-stack" "install" -}}
+{{- $promAddr = include "sie-cluster.kubePrometheusStack.prometheusAddress" . -}}
+{{- end -}}
+{{- $seriesSelector := printf `namespace="%s",service="%s-otel-collector",endpoint="prometheus"` (include "sie-cluster.namespace" .) (include "sie-cluster.fullname" .) -}}
+{{- $poolLimitArgs := list -}}
+{{- range $setting := list (dict "env" "SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT" "flag" "--max-pool-floor") (dict "env" "SIE_GATEWAY_MAX_POOLS" "flag" "--max-pools") -}}
+{{- $value := "" -}}
+{{- range $entry := (default (list) $.Values.gateway.extraEnv) -}}
+{{- if and (kindIs "map" $entry) (eq (toString (index $entry "name")) $setting.env) -}}
+{{- if not (hasKey $entry "value") -}}
+{{- fail (printf "placementApplier.enabled needs gateway.extraEnv %s as a literal value, so the applier refuses the plans the gateway would refuse" $setting.env) -}}
+{{- end -}}
+{{- $value = index $entry "value" | toString | trim -}}
+{{- end -}}
+{{- end -}}
+{{- if regexMatch "^[0-9]+$" $value -}}
+{{- $poolLimitArgs = append $poolLimitArgs (dict "flag" $setting.flag "value" $value) -}}
+{{- end -}}
+{{- end -}}
+{{- $clientToken := $applier.clientToken | default dict -}}
+{{- $adminTokenSecret := "" -}}
+{{- if $apply -}}
+{{- $adminTokenSecret = dig "auth" "adminTokenSecretName" "" (.Values.gateway | default dict) -}}
+{{- end -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: placement-applier
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-plan" $name }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: placement-applier
+data:
+  plan.json: |
+    {{- $planJson | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ include "sie-cluster.namespace" . }}
+  labels:
+    {{- include "sie-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: placement-applier
+spec:
+  {{- /* One writer of the floor carriers at a time, also during a rollout. */}}
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "sie-cluster.placementApplier.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- include "sie-cluster.placementApplier.selectorLabels" . | nindent 8 }}
+      annotations:
+        {{- with $applier.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        checksum/plan: {{ $planJson | sha256sum | quote }}
+    spec:
+      {{- include "sie-cluster.imagePullSecrets" . | nindent 6 }}
+      serviceAccountName: {{ $name }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: applier
+          image: {{ printf "%s:%s" (trim (toString $applier.image.repository)) (trim (toString $applier.image.tag)) | quote }}
+          imagePullPolicy: {{ $applier.image.pullPolicy | default "IfNotPresent" }}
+          command: ["sie-placement"]
+          args:
+            - tune
+            - --plan
+            - /etc/sie-placement/plan/plan.json
+            - --prometheus-url
+            - {{ $promAddr | quote }}
+            - --gateway-url
+            - {{ include "sie-cluster.gateway.internalUrl" . | quote }}
+            - --series-selector
+            - {{ $seriesSelector | quote }}
+            {{- range $poolLimitArgs }}
+            - {{ .flag }}
+            - {{ .value | quote }}
+            {{- end }}
+            {{- if $clientToken.existingSecretName }}
+            - --api-key-file
+            - /etc/sie-placement/client-token/token
+            {{- end }}
+            {{- if $apply }}
+            - --apply
+            {{- if $adminTokenSecret }}
+            - --admin-token-file
+            - /etc/sie-placement/admin-token/token
+            {{- end }}
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml $applier.resources | nindent 12 }}
+          volumeMounts:
+            - name: plan
+              mountPath: /etc/sie-placement/plan
+              readOnly: true
+            {{- if $clientToken.existingSecretName }}
+            - name: client-token
+              mountPath: /etc/sie-placement/client-token
+              readOnly: true
+            {{- end }}
+            {{- if $adminTokenSecret }}
+            - name: admin-token
+              mountPath: /etc/sie-placement/admin-token
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: plan
+          configMap:
+            name: {{ printf "%s-plan" $name }}
+            items:
+              - key: plan.json
+                path: plan.json
+        {{- with $clientToken.existingSecretName }}
+        - name: client-token
+          secret:
+            secretName: {{ . }}
+            defaultMode: 0440
+            items:
+              - key: {{ $clientToken.secretKey }}
+                path: token
+        {{- end }}
+        {{- with $adminTokenSecret }}
+        - name: admin-token
+          secret:
+            secretName: {{ . }}
+            defaultMode: 0440
+            items:
+              - key: {{ include "sie-cluster.gateway.adminTokenSecretKey" $ }}
+                path: token
+        {{- end }}
+      {{- with $applier.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $applier.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $applier.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -1143,6 +1143,14 @@ workers:
   #                    bundle-level entry wins on duplicate names.
   #     maxReplicas:   KEDA upper bound.
   #     minReplicas:   baseline replicas (0 = scale-to-zero).
+  #     envelope:      Optional `{floorMin, floorMax}`, the warm-floor range
+  #                    that placementApplier may hold this lane at. floorMin
+  #                    must equal minReplicas, and floorMax must lie between
+  #                    floorMin and maxReplicas. With autoscaling enabled and
+  #                    minReplicas 0, a floorMax above 0 must be at least the
+  #                    lane's fallback floor, min(maxReplicas,
+  #                    autoscaling.fallbackReplicas). See "Lane envelopes and
+  #                    the placement applier" in the chart README.
   #
   # Each queuePool/machineProfile/bundle lane renders one StatefulSet +
   # KEDA ScaledObject + PDB + image-prepull DaemonSet, named worker-{pool}-{bundle}.
@@ -1389,6 +1397,49 @@ autoscaling:
   # idleReplicaCount=0, preserving healthy scale-to-zero without allowing a
   # broken metrics path to race the fallback floor back to zero.
   fallbackReplicas: 2
+
+# -- Placement applier: one Deployment that runs `sie-placement tune` from the
+# sie-placement package to hold each lane of a placement plan at a warm floor
+# inside its envelope, through one gateway floor-carrier pool per lane.
+# Requires autoscaling.enabled. See "Lane envelopes and the placement applier"
+# in the chart README.
+placementApplier:
+  # -- Render the applier (a boolean).
+  enabled: false
+  # -- Write the floor-carrier pools (a boolean). false runs in shadow mode:
+  # the applier decides and prints one audit row per lane and writes nothing.
+  # true also mounts the gateway admin token from the Secret named by
+  # gateway.auth.adminTokenSecretName, which authorizes every gateway admin
+  # route, and passes --apply.
+  apply: false
+  # -- An image that runs `sie-placement` with the sie-placement keda extra
+  # installed, as a non-root user. The chart publishes none, so repository and
+  # tag are required.
+  image:
+    repository: ""
+    tag: ""
+    pullPolicy: IfNotPresent
+  # -- The placement-plan document, as a map, for example
+  # `--set-json "placementApplier.plan=$(cat plan.json)"`. Every plan lane must
+  # name an enabled worker lane whose envelope equals the plan lane's.
+  plan: {}
+  # -- Gateway client token for pool reads, from an existing Secret. Required
+  # when the gateway enforces token auth or its auth mode is known only at run
+  # time. The key must hold one token.
+  clientToken:
+    existingSecretName: ""
+    secretKey: api-key
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
 
 # -- Ingress configuration
 ingress:
