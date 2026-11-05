@@ -1147,6 +1147,8 @@ class SGLangGenerationAdapter(SGLangLoraMixin, GenerationAdapter):
         - ``NGRAM`` (model-independent; the documented fallback that
           works for any base model — the speculative-decoding investigation
           chose this for the Qwen3-4B-Instruct-2507 side-cell).
+        - ``DFLASH`` (requires the external draft model a vendor publishes
+          for it; Muse Glimmer's serves as published).
 
         Recognised keys:
 
@@ -1154,7 +1156,7 @@ class SGLangGenerationAdapter(SGLangLoraMixin, GenerationAdapter):
             Top-level gate. When False (or block missing), returns
             ``[]`` — caller still gets the unchanged baseline command.
         ``algorithm`` (str, required when enabled)
-            One of ``nextn``, ``eagle``, ``eagle3``, ``ngram`` (case-insensitive).
+            One of ``nextn``, ``eagle``, ``eagle3``, ``ngram``, ``dflash`` (case-insensitive).
             Surfaced verbatim to SGLang's ``--speculative-algorithm``.
         ``num_steps`` (int, optional)
             ``--speculative-num-steps``. Qwen3.5-4B's documented
@@ -1193,10 +1195,10 @@ class SGLangGenerationAdapter(SGLangLoraMixin, GenerationAdapter):
             )
             return []
         algorithm = algorithm_raw.strip().upper()
-        if algorithm not in {"NEXTN", "EAGLE", "EAGLE3", "NGRAM"}:
+        if algorithm not in {"NEXTN", "EAGLE", "EAGLE3", "NGRAM", "DFLASH"}:
             logger.warning(
                 "speculative.algorithm=%r is not in the recognised set "
-                "{NEXTN, EAGLE, EAGLE3, NGRAM}; forwarding to SGLang anyway "
+                "{NEXTN, EAGLE, EAGLE3, NGRAM, DFLASH}; forwarding to SGLang anyway "
                 "(it will reject if unsupported).",
                 algorithm_raw,
             )
@@ -1579,15 +1581,15 @@ class SGLangGenerationAdapter(SGLangLoraMixin, GenerationAdapter):
             "temperature": temperature,
             "top_p": top_p,
         }
-        if self._reasoning_parser == "gemma4":
-            # Gemma 4's private reasoning boundary uses special channel
-            # tokens. SGLang's default detokenization drops those tokens from
-            # the native /generate text while leaving the ordinary
-            # ``thought\n`` label and reasoning body visible, so SIE's
-            # family-aware privacy filter can no longer identify the block.
-            # Preserve the markers at this internal boundary; every public
-            # generation surface removes the complete reasoning block before
-            # returning content to the caller.
+        if self._reasoning_parser in ("gemma4", "muse"):
+            # Gemma 4's and Muse Glimmer's private reasoning boundaries use
+            # special channel tokens. SGLang's default detokenization drops
+            # those tokens from the native /generate text while leaving the
+            # ordinary labels and reasoning body visible, so SIE's family-aware
+            # privacy filter can no longer identify the block. Preserve the
+            # markers at this internal boundary; every public generation
+            # surface removes the complete reasoning block before returning
+            # content to the caller.
             sampling_params["skip_special_tokens"] = False
         # SGLang accepts ``top_k`` (int) and ``repetition_penalty`` (float)
         # natively under ``sampling_params``. Forward only when the gateway

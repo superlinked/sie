@@ -15,7 +15,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 import torch
-from sie_server.adapters.topk_embed import packed
+from sie_server.adapters import _qwen3_5_packed as packed
 from sie_server.adapters.topk_embed.adapter import TopkEmbedAdapter
 from sie_server.types.inputs import Item
 from torch.nn import functional as F
