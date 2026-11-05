@@ -58,6 +58,12 @@ PINNED_FLOOR = 1
 COLD_WARMTHS = (Warmth.COLD_WITH_BOUND, Warmth.SNAPSHOT_COLD)
 
 _SLUG = re.compile(r"[^a-z0-9]+")
+_LEVEL_FIELDS = {
+    "comeAliveP95S": "come_alive_p95_s",
+    "warmP99Ms": "warm_p99_ms",
+    "ttftP99Ms": "ttft_p99_ms",
+    "itlP99Ms": "itl_p99_ms",
+}
 
 
 class PlannerInputError(ValueError):
@@ -337,6 +343,8 @@ class _Planner:
         current_plan: Plan | None,
         parameters: PlannerParameters,
     ) -> None:
+        receipts = tuple(receipts)
+        boot_evidence = tuple(boot_evidence)
         placements = {placement.name: placement for placement in price_list.placements}
         placement = placements.get(parameters.placement)
         if placement is None:
@@ -346,6 +354,10 @@ class _Planner:
                 f"the current plan is for placement {current_plan.placement!r}, not {parameters.placement!r}"
             )
         self.parameters = parameters
+        self.service_levels = service_levels
+        self.receipt_records = receipts
+        self.boot_records = boot_evidence
+        self.demand = demand
         self.price_list = price_list
         self.multiplier = placement.region_multiplier
         self.prices = {profile.name: profile for profile in price_list.machine_profiles}
@@ -365,6 +377,7 @@ class _Planner:
             self.current = {entry.identity: (entry, lanes[entry.lane]) for entry in current_plan.identities}
         self.refusals: list[Refusal] = []
         self.refused_profiles: set[tuple[str, str]] = set()
+        self.savings: dict[tuple[str, tuple[tuple[str, int], ...]], float] = {}
         self.receipts = self._accept_receipts(receipts)
         self.boots = _boot_index(self._accept_boot_evidence(boot_evidence))
 
@@ -524,8 +537,51 @@ class _Planner:
             if chosen.cost - request.cost_bound > 0
         ]
 
-    @staticmethod
-    def levers(choice: _Choice) -> list[Lever]:
+    def replanned_total(
+        self,
+        current: Plan,
+        *,
+        service_levels: ServiceLevels | None = None,
+        boot_evidence: Iterable[BootEvidence] | None = None,
+    ) -> float:
+        planner = _Planner(
+            self.service_levels if service_levels is None else service_levels,
+            self.receipt_records,
+            self.boot_records if boot_evidence is None else boot_evidence,
+            self.price_list,
+            self.demand,
+            current,
+            self.parameters,
+        )
+        return planner.run(price_savings=False).report.monthly_cost
+
+    def loosened(self, identity: str, bounds: Mapping[str, int]) -> ServiceLevels:
+        fields = {_LEVEL_FIELDS[name]: bound for name, bound in bounds.items()}
+        return replace(
+            self.service_levels,
+            identities=tuple(
+                replace(entry, level=replace(entry.level, **fields)) if entry.identity == identity else entry
+                for entry in self.service_levels.identities
+            ),
+        )
+
+    def saving_when_loosened(self, identity: str, bounds: Mapping[str, int], written: Plan, total: float) -> float:
+        key = (identity, tuple(sorted(bounds.items())))
+        if key not in self.savings:
+            replanned = self.replanned_total(written, service_levels=self.loosened(identity, bounds))
+            self.savings[key] = _saving(total, replanned)
+        return self.savings[key]
+
+    def booted_within(self, identity: str, option: _Option, bound: int) -> tuple[BootEvidence, ...]:
+        key = (identity, option.receipt.cell, option.receipt.container_shape, option.warmth)
+        return tuple(
+            replace(record, boot_seconds=min(record.boot_seconds, bound))
+            if (record.identity, record.cell, record.container_shape, record.warmth) == key
+            else record
+            for record in self.boot_records
+        )
+
+    def levers(self, choice: _Choice, written: Plan, total: float) -> list[Lever]:
         chosen = choice.chosen
         bound = choice.level.come_alive_p95_s
         if chosen is None or bound is None:
@@ -542,7 +598,16 @@ class _Planner:
                 best[key] = option
         levers = []
         for option in best.values():
-            saving = chosen.cost - option.cost
+            permitted = _permitted(option.come_alive_s)
+            saving = self.saving_when_loosened(choice.identity, {"comeAliveP95S": permitted}, written, total)
+            if not saving:
+                continue
+            under = 0.0
+            if bound > 0:
+                replanned = self.replanned_total(
+                    written, boot_evidence=self.booted_within(choice.identity, option, bound)
+                )
+                under = _saving(total, replanned)
             levers.append(
                 Lever(
                     identity=choice.identity,
@@ -553,23 +618,26 @@ class _Planner:
                     come_alive_basis=option.basis,
                     bound_s=bound,
                     monthly_cost=option.cost,
-                    saving_under_bound=saving if bound > 0 else 0.0,
-                    permitted_bound_s=max(1, math.ceil(option.come_alive_s)),
+                    saving_under_bound=under,
+                    permitted_bound_s=permitted,
                     saving_at_permitted_bound=saving,
                 )
             )
         return levers
 
-    @staticmethod
-    def next_cheaper(choice: _Choice) -> _Option | None:
+    def next_cheaper(self, choice: _Choice, written: Plan, total: float) -> Option | None:
         chosen = choice.chosen
         if chosen is None:
             return None
         cheaper = [option for option in choice.options if not option.feasible and option.cost < chosen.cost]
         if not cheaper:
             return None
-        nearest = max(option.cost for option in cheaper)
-        return min((option for option in cheaper if option.cost == nearest), key=lambda option: option.rank)
+        cost = max(option.cost for option in cheaper)
+        nearest = min((option for option in cheaper if option.cost == cost), key=lambda option: option.rank)
+        bounds = {
+            blocker.field: _permitted(blocker.measured) for blocker in nearest.blockers if blocker.measured is not None
+        }
+        return nearest.summary(saving=self.saving_when_loosened(choice.identity, bounds, written, total))
 
     @staticmethod
     def lane_names(placed: Mapping[str, _Option], reserved: set[str]) -> dict[str, str]:
@@ -650,7 +718,7 @@ class _Planner:
             return window.above_floor_hours(requests, rate, lane.envelope.floor_min)
         return window.cold_container_hours(requests, rate)
 
-    def run(self) -> PlannerResult:
+    def run(self, *, price_savings: bool = True) -> PlannerResult:
         choices = [self.choose(identity) for identity in sorted(self.levels)]
         placed = {choice.identity: choice.chosen for choice in choices if choice.chosen is not None}
         kept = {
@@ -678,15 +746,21 @@ class _Planner:
         receipts: dict[str, Receipt | None] = {identity: option.receipt for identity, option in placed.items()}
         receipts.update({identity: self.slowest_receipt(identity, lane) for identity, (_, lane) in kept.items()})
         lane_reports, costs = self._pricing(new_plan, receipts)
+        total = sum(lane.monthly_cost for lane in lane_reports if lane.monthly_cost is not None)
         reports: list[IdentityReport] = []
         requests: list[MeasurementRequest] = []
         levers: list[Lever] = []
         for choice in choices:
             requests.extend(self.receipt_requests(choice))
             requests.extend(self.boot_requests(choice))
-            levers.extend(self.levers(choice))
+            nearest = None
+            if price_savings:
+                levers.extend(self.levers(choice, new_plan, total))
+                nearest = self.next_cheaper(choice, new_plan, total)
             reports.append(
-                self._identity_report(choice, names, kept, costs.get(choice.identity), receipts.get(choice.identity))
+                self._identity_report(
+                    choice, names, kept, costs.get(choice.identity), receipts.get(choice.identity), nearest
+                )
             )
         identity_changes, lane_changes = _changes(self.current_plan, new_plan)
         report = Report(
@@ -714,6 +788,7 @@ class _Planner:
         kept: Mapping[str, tuple[PlanIdentity, PlanLane]],
         cost: float | None,
         receipt: Receipt | None,
+        next_cheaper: Option | None,
     ) -> IdentityReport:
         current = self.current.get(choice.identity)
         report = IdentityReport(
@@ -737,7 +812,6 @@ class _Planner:
                     blocked_by=self.kept_blockers(choice.identity, entry, lane, receipt),
                 )
             return replace(report, unplaced_reason=reason)
-        nearest = self.next_cheaper(choice)
         rate = chosen.receipt.throughput.requests_per_second
         return replace(
             report,
@@ -746,7 +820,7 @@ class _Planner:
             monthly_cost=cost,
             chosen=chosen.summary(),
             peak_containers=max((_Window.needed(count, rate) for count in choice.requests), default=0),
-            next_cheaper=None if nearest is None else nearest.summary(saving=chosen.cost - nearest.cost),
+            next_cheaper=next_cheaper,
         )
 
     def _pricing(
@@ -783,6 +857,15 @@ class _Planner:
                 )
             )
         return tuple(reports), costs
+
+
+def _saving(total: float, replanned: float) -> float:
+    saving = total - replanned
+    return saving if round(saving, 2) > 0 else 0.0
+
+
+def _permitted(measured: float) -> int:
+    return max(1, math.ceil(measured))
 
 
 def _shared_chart_lanes(plan: Plan) -> tuple[SharedChartLane, ...]:
