@@ -74,7 +74,8 @@ class SGLangDecisionAdapter(DecisionBatchAdapter):
         self._temperatures = dict(temperatures or {})
         self._engine = SGLangCuda13Adapter(
             str(model_name_or_path),
-            max_seq_length=max_seq_length + 1,
+            # SGLang 0.5.20 rejects input_len >= context_len - 6.
+            max_seq_length=max_seq_length + 7,
             compute_precision=compute_precision,
             revision=revision,
             trust_remote_code=False,
