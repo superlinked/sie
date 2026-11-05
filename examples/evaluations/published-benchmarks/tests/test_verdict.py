@@ -531,6 +531,17 @@ class DenseTest(TemporaryCase):
         self.assertEqual(dot_order, ["d1", "d4", "d2", "d3", "d5"])
         self.assertNotEqual(dot_order, cosine_order)
 
+    def test_a_row_below_the_norm_floor_is_divided_by_the_floor(self):
+        self.assertAlmostEqual(float(run.dense_scores([[1.0, 0.0]], [[1e-13, 0.0]])[0, 0]), 0.1, places=5)
+        self.assertAlmostEqual(float(run.dense_scores([[1e-13, 0.0]], [[1.0, 0.0]])[0, 0]), 0.1, places=5)
+
+    def test_a_row_at_or_above_the_norm_floor_scores_its_cosine_and_a_zero_row_scores_zero(self):
+        self.assertAlmostEqual(float(run.dense_scores([[1.0, 0.0]], [[3e-12, 4e-12]])[0, 0]), 0.6, places=5)
+        self.assertEqual(float(run.dense_scores([[1.0, 0.0]], [[0.0, 0.0]])[0, 0]), 0.0)
+
+    def test_the_norm_floor_is_on_the_dense_path_only(self):
+        self.assertAlmostEqual(float(run.maxsim_scores([[[1.0, 0.0]]], [[[1e-13, 0.0]]])[0, 0]), 1.0, places=5)
+
     def test_a_quality_run_refuses_a_muvera_profile(self):
         stderr = self.refused(
             "quality",

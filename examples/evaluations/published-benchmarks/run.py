@@ -60,6 +60,7 @@ DEFAULT_TIMEOUT_S = 300.0
 TOP_K = 1000
 DOCUMENT_CHUNK = 500
 QUERY_TOKEN_ROWS = 256
+COSINE_NORM_FLOOR = 1e-12
 RESULTS_DIR = Path("results")
 SCORE_TASKS = frozenset({"mteb/AskUbuntuDupQuestions"})
 ENCODE_OUTPUTS = ("sparse", "dense", "multivector")
@@ -884,16 +885,25 @@ def sparse_scores(queries: Sequence[Mapping[str, Any]], documents: Sequence[Mapp
     return (sparse_matrix(queries, columns) @ sparse_matrix(documents, columns).T).toarray().astype(np.float32)
 
 
-def normalized_rows(vectors: Any) -> np.ndarray:
+def _rows_and_norms(vectors: Any) -> tuple[np.ndarray, np.ndarray]:
     rows = np.asarray(vectors, dtype=np.float32)
     if rows.ndim != 2 or rows.shape[0] == 0:
         raise ValueError("expected a non-empty two-dimensional array of vectors")
-    norms = np.linalg.norm(rows, axis=1, keepdims=True)
+    return rows, np.linalg.norm(rows, axis=1, keepdims=True)
+
+
+def normalized_rows(vectors: Any) -> np.ndarray:
+    rows, norms = _rows_and_norms(vectors)
     return rows / np.where(norms > 0, norms, 1.0)
 
 
+def _cosine_rows(vectors: Any) -> np.ndarray:
+    rows, norms = _rows_and_norms(vectors)
+    return rows / np.maximum(norms, COSINE_NORM_FLOOR)
+
+
 def dense_scores(queries: Sequence[Any], documents: Sequence[Any]) -> np.ndarray:
-    return normalized_rows(queries) @ normalized_rows(documents).T
+    return _cosine_rows(queries) @ _cosine_rows(documents).T
 
 
 def _query_groups(query_rows: Sequence[np.ndarray]) -> list[tuple[int, int]]:
