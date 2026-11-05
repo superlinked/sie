@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 
 from sie_placement.schema import ContainerShape, Plan, PlanLane, SchemaError, Warmth
@@ -168,11 +168,11 @@ def _pins_by_lane(plan: Plan) -> dict[str, dict[str, int]]:
     return pins
 
 
-def _require_one_cell(path: str, lane: PlanLane) -> None:
+def _one_cell_error(path: str, lane: PlanLane) -> UnrealizablePlanError | None:
     if not lane.fallback_cells:
-        return
+        return None
     listed = ", ".join(f"{cell.machine_profile!r} with {cell.gpu_product!r}" for cell in lane.fallback_cells)
-    raise UnrealizablePlanError(
+    return UnrealizablePlanError(
         f"{path}.fallbackCells",
         f"lists {listed} after the lane's cell, {lane.cell.machine_profile!r} with {lane.cell.gpu_product!r}, but a "
         "worker group of the sie-cluster chart runs on one machine profile and GPU product and has no ordered "
@@ -180,11 +180,11 @@ def _require_one_cell(path: str, lane: PlanLane) -> None:
     )
 
 
-def _require_realizable_warmths(plan: Plan) -> None:
+def _warmth_errors(plan: Plan) -> Iterator[UnrealizablePlanError]:
     for index, entry in enumerate(plan.identities):
         reason = UNREALIZED_WARMTHS.get(entry.warmth)
         if reason is not None:
-            raise UnrealizablePlanError(
+            yield UnrealizablePlanError(
                 f"$.identities[{index}].warmth",
                 f"is {entry.warmth.value!r} for {entry.identity!r} on lane {entry.lane!r}, which the sie-cluster "
                 f"chart does not realize: {reason}; plan the identity pinned, lazy-resident or cold-with-bound",
@@ -209,7 +209,9 @@ def _chart_lanes(plan: Plan, parameters: ChartParameters) -> list[_ChartLane]:
     lanes: dict[tuple[str, str, str], _ChartLane] = {}
     for index, lane in enumerate(plan.lanes):
         path = f"$.lanes[{index}]"
-        _require_one_cell(path, lane)
+        one_cell = _one_cell_error(path, lane)
+        if one_cell is not None:
+            raise one_cell
         key = (
             lane_token(f"{path}.queuePool", lane.queue_pool),
             lane_token(f"{path}.cell.machineProfile", lane.cell.machine_profile),
@@ -352,22 +354,42 @@ def _static_queue_pool(lanes: list[_ChartLane]) -> dict[str, object]:
     return pool
 
 
+def _default_pool_pins_error(chart_lane: str, pins: Mapping[str, int]) -> UnrealizablePlanError:
+    identity, index = min(pins.items(), key=lambda item: item[1])
+    return UnrealizablePlanError(
+        f"$.identities[{index}].warmth",
+        f"pins {identity!r} on chart lane {chart_lane!r}, but the gateway keeps no static queue pool for "
+        f"the {DEFAULT_QUEUE_POOL!r} queue pool, so its pinnedModels have no carrier; place pinned "
+        "identities on a named queuePool",
+    )
+
+
 def _require_no_default_pool_pins(lanes: Iterable[_ChartLane]) -> None:
     for lane in lanes:
         if lane.pins:
-            identity, index = min(lane.pins.items(), key=lambda item: item[1])
-            raise UnrealizablePlanError(
-                f"$.identities[{index}].warmth",
-                f"pins {identity!r} on chart lane {lane.name!r}, but the gateway keeps no static queue pool for "
-                f"the {DEFAULT_QUEUE_POOL!r} queue pool, so its pinnedModels have no carrier; place pinned "
-                "identities on a named queuePool",
-            )
+            raise _default_pool_pins_error(lane.name, lane.pins)
+
+
+def plan_refusals(plan: Plan) -> tuple[UnrealizablePlanError, ...]:
+    pins = _pins_by_lane(plan)
+    refusals: list[UnrealizablePlanError] = []
+    for index, lane in enumerate(plan.lanes):
+        one_cell = _one_cell_error(f"$.lanes[{index}]", lane)
+        if one_cell is not None:
+            refusals.append(one_cell)
+        tokens = [value.strip(_GO_SPACE).lower() for value in (lane.queue_pool, lane.cell.machine_profile, lane.bundle)]
+        if tokens[0] == DEFAULT_QUEUE_POOL and pins.get(lane.name):
+            refusals.append(_default_pool_pins_error("/".join(tokens), pins[lane.name]))
+    refusals.extend(_warmth_errors(plan))
+    return tuple(refusals)
 
 
 def helm_values(plan: Plan, parameters: ChartParameters | None = None) -> dict[str, object]:
     parameters = ChartParameters() if parameters is None else parameters
     lanes = _chart_lanes(plan, parameters)
-    _require_realizable_warmths(plan)
+    warmth = next(_warmth_errors(plan), None)
+    if warmth is not None:
+        raise warmth
     base = _enabled_base_bundles(parameters.base_pools)
     _require_lane_limit(lanes, base, parameters)
     by_profile: dict[str, list[_ChartLane]] = defaultdict(list)

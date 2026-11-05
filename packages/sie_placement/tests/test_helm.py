@@ -18,6 +18,7 @@ from sie_placement.helm import (
     chart_pools,
     helm_values,
     lane_token,
+    plan_refusals,
 )
 from sie_placement.report import render
 from sie_placement.schema import (
@@ -870,3 +871,26 @@ def test_a_planner_estate_with_several_pinned_lanes_emits_a_named_queue_pool_for
     )
     assert replanned.plan == result.plan
     assert helm_values(replanned.plan, ChartParameters(fallback_replicas=PACKING_PARAMETERS.fallback_floor)) == values
+
+
+def test_plan_refusals_list_every_refusal_helm_values_makes_whatever_the_chart_parameters() -> None:
+    candidates = (
+        plan_of(replace(lane("a", floor_min=0), fallback_cells=(A100,))),
+        plan_of(lane("a", queue_pool="Default")),
+        plan_of(lane("a", floor_min=0), warmths={"a": Warmth.SNAPSHOT_COLD}),
+    )
+    for candidate in candidates:
+        (only,) = plan_refusals(candidate)
+        assert str(only) == str(refusal(candidate))
+    combined = plan_of(
+        replace(lane("a", floor_min=0), fallback_cells=(A100,)),
+        lane("b", queue_pool="default", cell=A100),
+        lane("c", floor_min=0, bundle="c"),
+        warmths={"c": Warmth.BRIDGED},
+    )
+    assert [error.path for error in plan_refusals(combined)] == [
+        "$.lanes[0].fallbackCells",
+        "$.identities[1].warmth",
+        "$.identities[2].warmth",
+    ]
+    assert plan_refusals(golden_plan()) == ()
