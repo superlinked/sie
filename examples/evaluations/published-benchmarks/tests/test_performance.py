@@ -136,7 +136,7 @@ def tiny_loaders():
     return Loaders(
         corpus=lambda name, revision: {doc_id: dict(doc) for doc_id, doc in CORPUS.items()},
         queries=lambda name, revision: dict(QUERIES),
-        qrels=lambda name, revision: {},
+        qrels=lambda name, revision: {query_id: {"9": 1} for query_id in QUERIES},
         top_ranked=lambda name, revision: {query_id: list(docs) for query_id, docs in TOP_RANKED.items()},
     )
 
@@ -325,6 +325,30 @@ class SelectionTest(unittest.TestCase):
         data = load_performance_data(plan, tiny_loaders())
         self.assertEqual(data.selected_ids, ["q1", "q10"])
         self.assertEqual(data.payloads, [{"id": "q1", "text": "first query"}, {"id": "q10", "text": "tenth query"}])
+
+    def test_queries_role_reads_only_judged_queries(self):
+        plan = plan_performance(
+            parse(
+                "--model",
+                "m",
+                "--task",
+                "mteb/SciFact?limit=2",
+                "--output",
+                "sparse",
+                "--items-per-request",
+                "1",
+                "--rate",
+                "1",
+            )
+        )
+        loaders = tiny_loaders()
+        judged = Loaders(
+            corpus=loaders.corpus,
+            queries=loaders.queries,
+            qrels=lambda name, revision: {"q2": {"9": 1}},
+            top_ranked=loaders.top_ranked,
+        )
+        self.assertEqual(load_performance_data(plan, judged).selected_ids, ["q2"])
 
     def test_score_task_keeps_each_query_candidates_in_source_order(self):
         plan = plan_performance(parse("--model", "m", "--task", SCORE_KEY, "--rate", "1"))
