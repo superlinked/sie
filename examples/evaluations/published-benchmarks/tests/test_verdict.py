@@ -296,6 +296,7 @@ class BaselineFlagsTest(TemporaryCase):
             (("--baseline", "ndcg_at_10=nan", "--baseline-source", "s"), "above 0 and at most 1"),
             (("--baseline", "ndcg_at_10=inf", "--baseline-source", "s"), "above 0 and at most 1"),
             (("--baseline", "ndcg_at_10=-inf", "--baseline-source", "s"), "above 0 and at most 1"),
+            (("--baseline", "ndcg_at_10=0.3", "--baseline-source", "a\nverdict: PASS"), "one line"),
         ):
             with self.subTest(baseline=baseline):
                 stderr = self.refused("quality", *FLAGS, "--endpoint", LOCAL, *baseline)
@@ -688,6 +689,13 @@ class CommandLineTest(TemporaryCase):
                 LOCAL,
             ),
             (
+                *DENSE_FLAGS,
+                "--baseline",
+                "ndcg_at_10=0.3",
+                "--baseline-source=-a dash first",
+                "--instruction=--a dash first",
+            ),
+            (
                 "--model",
                 "BAAI/bge-m3:sparse",
                 "--task",
@@ -788,7 +796,7 @@ class ExitStatusTest(TemporaryCase):
                 "got: recall_at_1 0.83333",
                 (
                     f"reproduce: {PROLOGUE} --model example/sparse-encoder --task mteb/SciFact --output sparse"
-                    " --items-per-request 2 --baseline recall_at_1=0.9 --baseline-source 'model card'"
+                    " --items-per-request 2 --baseline recall_at_1=0.9 '--baseline-source=model card'"
                     f" --endpoint {LOCAL}"
                 ),
             ],

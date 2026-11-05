@@ -366,6 +366,8 @@ def _supplied_baseline(args: argparse.Namespace) -> dict[str, Any] | None:
         return None
     if args.baseline is None or args.baseline_source is None or not args.baseline_source.strip():
         raise ValueError("--baseline and --baseline-source go together")
+    if any(ord(character) < 32 for character in args.baseline_source):
+        raise ValueError("--baseline-source must be one line of text")
     metric, _, value = args.baseline.partition("=")
     if metric not in BASELINE_METRICS:
         raise ValueError(f"--baseline names {metric!r}; known metrics: {', '.join(sorted(BASELINE_METRICS))}")
@@ -658,7 +660,8 @@ def load_performance_data(plan: PerformancePlan, loaders: Loaders | None = None)
             selected, [{"id": doc_id, "text": performance_text(corpus[doc_id])} for doc_id in selected]
         )
     queries = loaders.queries(plan.task_name, plan.revision)
-    selected = select_ids(queries, params)
+    judged = loaders.qrels(plan.task_name, plan.revision)
+    selected = select_ids({query_id: text for query_id, text in queries.items() if query_id in judged}, params)
     return PerformanceData(selected, [{"id": query_id, "text": queries[query_id]} for query_id in selected])
 
 
@@ -1024,9 +1027,9 @@ def quality_command_line(plan: QualityPlan) -> str:
         flags = _common_flags(plan)
         if plan.baseline is not None:
             metric, value, source = plan.baseline["metric"], plan.baseline["value"], plan.baseline["source"]
-            flags += ["--baseline", f"{metric}={value!r}", "--baseline-source", source]
+            flags += ["--baseline", f"{metric}={value!r}", f"--baseline-source={source}"]
         if plan.instruction is not None:
-            flags += ["--instruction", plan.instruction]
+            flags.append(f"--instruction={plan.instruction}")
     return shlex.join([*COMMAND_PREFIX, "quality", *flags, *_endpoint_flags(plan.endpoint)])
 
 

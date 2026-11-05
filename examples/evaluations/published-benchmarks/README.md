@@ -155,8 +155,8 @@ reason `execution revision changed`. A self-hosted sie-server reached
 directly sends no revision, so `execution_revisions` stays empty and that
 check cannot fire there.
 
-A delta is a number. The [verdict](#the-verdict) reads one number,
-`main_score`, against the 2% band the maintainers use when they decide whether
+A delta is a number. On a `--reference` run the [verdict](#the-verdict) reads
+one number, `main_score`, against the 2% band the maintainers use when they decide whether
 a published number still holds. It does not need `comparable: true`: a run
 against another endpoint keeps `comparable: false` with its reason and still
 gets a verdict.
@@ -452,20 +452,20 @@ does not expose a query template. Read `query_template` in the model's config:
   number used with `--instruction "<text>"`. Without the flag the query carries
   only what the config supplies by default, so a low score can be this mismatch
   and not the model;
-- otherwise leave the flag off. A model with no query template gets the text
+- otherwise leave the flag off. A model with no query template can get the text
   prepended to every query, which pollutes the query.
 
 `--instruction` is sent with queries only, never with documents, and is recorded
 in `payload.parameters`. It is refused beside `--reference` and on the score
-task. `run.py performance` has no such flag, because its encode requests carry
-documents only.
+task. `run.py performance` has no such flag, because its encode requests set
+`is_query` to false.
 
 ### The limited-run rule
 
 A task key with `limit`, such as `mteb/NFCorpus?limit=50`, scores part of the
 queries, so its number cannot be compared with a full-dataset number. The
-verdict is `MEASUREMENT` whatever the baseline says:
-`limited run, not compared with a full-dataset number`. Use it to check that the
+verdict is `MEASUREMENT` whatever the baseline says, unless the run produced
+nothing to compare: `limited run, not compared with a full-dataset number`. Use it to check that the
 path works, then run the key without `limit` to get a verdict. It still encodes
 every document.
 
