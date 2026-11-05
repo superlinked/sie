@@ -21,7 +21,7 @@ from sie_server.adapters._checkpoint import resolve_checkpoint
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
-from sie_server.adapters.decision.base import MAX_ITEM_TOKENS, DecisionBatchAdapter, Row
+from sie_server.adapters.decision.base import MAX_ITEM_TOKENS, DecisionBatchAdapter, Row, check_token_budget
 from sie_server.adapters.errors import InputTooLongError
 from sie_server.adapters.pplx_decider.model import DecisionModel, checkpoint_config, load_model, validate_tokenizer
 from sie_server.adapters.pplx_decider.questions import (
@@ -122,13 +122,7 @@ class PerplexityDecisionAdapter(DecisionBatchAdapter):
         self._escapes = tuple(sorted(specials, key=lambda token: (len(token), token), reverse=True))
 
     def _state(self, item: Item) -> str:
-        if item.images or item.audio is not None or item.video is not None or item.document is not None:
-            raise InvalidInputError("Perplexity decisions currently accept text only")
-        metadata = item.metadata or {}
-        has_state = "state" in metadata
-        if has_state == (item.text is not None):
-            raise InvalidInputError("Supply either item.text or metadata.state")
-        return describe(metadata["state"] if has_state else item.text, self._max_seq_length * 64)
+        return describe(self._raw_state(item), self._max_seq_length * 64)
 
     def _encode(self, chat: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
         with self._tokenizer_guard():
@@ -162,10 +156,7 @@ class PerplexityDecisionAdapter(DecisionBatchAdapter):
     def _item_rows(self, index: int, item: Item, questions: tuple[Question, ...]) -> list[Row]:
         state = self._state(item)
         if self._marker is not None:
-            rows = self._joint_rows(index, state, questions)
-            if sum(row.length for row in rows) > MAX_ITEM_TOKENS:
-                raise InputTooLongError("Decision rows exceed the token budget; no input was truncated")
-            return rows
+            return self._joint_rows(index, state, questions)
         rows = []
         tokens = 0
         # Prepare one row at a time: a request with many oversized questions
@@ -173,9 +164,7 @@ class PerplexityDecisionAdapter(DecisionBatchAdapter):
         for question in questions:
             encoded = self._encode(messages(state, question, self._codes, self._escapes))
             length = self._checked(encoded).shape[1]
-            tokens += length
-            if length > self._max_seq_length or tokens > MAX_ITEM_TOKENS:
-                raise InputTooLongError("Decision rows exceed the token budget; no input was truncated")
+            tokens = check_token_budget(length, tokens, self._max_seq_length)
             rows.append(Row(index, (question,), {name: tensor[0] for name, tensor in encoded.items()}))
         return rows
 

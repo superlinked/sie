@@ -21,10 +21,12 @@ profiles:
       loadtime:
         max_forward_tokens: 8192
         structured_noul: true
+        temperatures:
+          score: 0.6944
         mem_fraction_static: 0.9
         extra_launch_args:
         - --enable-fp32-lm-head
         - --disable-radix-cache
       runtime: {}
-description: KnowLine-31B typed text decisions over Gemma 4. Preserves the release read-twice prompt, BF16 backbone
-  and FP32 option-token readout through SGLang.
+description: KnowLine-31B typed text decisions over Gemma 4. Preserves the release read-twice prompt, BF16 backbone,
+  FP32 option-token readout and score calibration through SGLang.

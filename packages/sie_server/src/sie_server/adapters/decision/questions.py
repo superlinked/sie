@@ -124,6 +124,13 @@ def parse_questions(schema: Mapping[str, Any] | None) -> tuple[Question, ...]:
     return tuple(questions)
 
 
+def entropy_confidence(probabilities: Sequence[float]) -> float:
+    if len(probabilities) == 1:
+        return 1.0
+    entropy = -math.fsum(value * math.log(value) for value in probabilities if value > 0)
+    return min(1.0, max(0.0, 1.0 - entropy / math.log(len(probabilities))))
+
+
 def answer(question: Question, probabilities: Sequence[float]) -> dict[str, Any]:
     """Decode a calibrated distribution using the reference's confidence formulas."""
     values = [float(value) for value in probabilities]

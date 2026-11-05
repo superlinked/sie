@@ -18,8 +18,7 @@ from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters.decision import d3, qev
 from sie_server.adapters.decision.base import MAX_ITEM_TOKENS, DecisionBatchAdapter, Row
 from sie_server.adapters.decision.packed import PackedDecisionReadout
-from sie_server.adapters.decision.questions import Question
-from sie_server.adapters.errors import InputTooLongError
+from sie_server.adapters.decision.questions import Question, entropy_confidence
 from sie_server.adapters.pplx_decider.model import validate_tokenizer
 from sie_server.types.inputs import InvalidInputError, Item
 
@@ -284,11 +283,6 @@ class QwenDecisionAdapter(DecisionBatchAdapter):
                 if self._decision_format == "d3"
                 else qev.prompts(self._tokenizer, state, questions, max_seq_length=self._max_seq_length)
             )
-        if (
-            any(len(ids) > self._max_seq_length for ids, _ in rendered)
-            or sum(len(ids) for ids, _ in rendered) > MAX_ITEM_TOKENS
-        ):
-            raise InputTooLongError("Decision rows exceed the token budget; no input was truncated")
         bucket = next(
             (i for i, bound in enumerate(self._temperature_bounds) if len(questions) <= bound),
             len(self._temperature_bounds),
@@ -334,10 +328,7 @@ class QwenDecisionAdapter(DecisionBatchAdapter):
     def _answer(self, question: Question, probabilities: list[float]) -> dict[str, Any]:
         result = super()._answer(question, probabilities)
         if self._decision_format == "d3" and question.kind != "noul":
-            entropy = -math.fsum(value * math.log(value) for value in probabilities if value > 0)
-            result["confidence"] = (
-                min(1.0, max(0.0, 1.0 - entropy / math.log(len(probabilities)))) if len(probabilities) > 1 else 1.0
-            )
+            result["confidence"] = entropy_confidence(probabilities)
             if question.kind == "score":
                 result["legend"] = {
                     key: value

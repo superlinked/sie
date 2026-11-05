@@ -7,6 +7,7 @@ import pytest
 import requests
 import torch
 from sie_server.adapters._generation_base import GenerationAdapter
+from sie_server.adapters.decision import knowline
 from sie_server.adapters.decision.base import Row
 from sie_server.adapters.decision.questions import parse_questions
 from sie_server.adapters.decision.qwen import QwenDecisionAdapter, prefix_attention
@@ -101,6 +102,35 @@ def test_sglang_timeout_aborts_only_its_own_decision_requests():
     assert len(identifiers) == len(set(identifiers)) == 2
     assert abort.args == ("http://localhost:30000/abort_request",)
     assert abort.kwargs["json"] == {"rid": identifiers}
+
+
+def test_sglang_calibration_applies_only_to_the_declared_question_type(monkeypatch):
+    adapter = scoring_adapter()
+    adapter._temperatures = {"score": 0.6944}
+    monkeypatch.setattr(knowline, "prompts", lambda _, state, questions, *args, **kwargs: [[4] for _ in questions])
+    questions = parse_questions(
+        {
+            "choose": {"type": "choice", "criteria": {"left": None, "right": None}},
+            "rank": {"type": "score", "criteria": ["low", "high"]},
+        }
+    )
+    rows = adapter._item_rows(0, Item(text="state"), questions)
+    adapter._session.post.return_value.json.return_value = [
+        {"meta_info": {"prompt_tokens": 1, "output_token_ids_logprobs": [[[0.0, 10], [-1.0, 20]]]}} for _ in rows
+    ]
+    choice, score = adapter._forward(rows)
+    assert choice == pytest.approx(torch.tensor([0.0, -1.0]).softmax(0).tolist())
+    assert score == pytest.approx((torch.tensor([0.0, -1.0]) / 0.6944).softmax(0).tolist())
+    assert adapter._session.post.call_args.kwargs["json"]["sampling_params"]["temperature"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "temperatures",
+    [[], {"unknown": 1.0}, {"score": 0}, {"score": True}, {"noul": float("nan")}, {"choice": float("inf")}],
+)
+def test_sglang_rejects_invalid_checkpoint_calibration(temperatures):
+    with pytest.raises(ValueError, match="temperatures"):
+        SGLangDecisionAdapter("unused", temperatures=temperatures)
 
 
 def test_decision_admission_is_atomic_per_item_and_preserves_order():

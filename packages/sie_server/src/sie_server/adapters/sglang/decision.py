@@ -16,8 +16,7 @@ from sie_server.adapters._transformers_compat import install_transformers_securi
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters.decision import knowline
 from sie_server.adapters.decision.base import MAX_ITEM_TOKENS, DecisionBatchAdapter, Row
-from sie_server.adapters.decision.questions import Question
-from sie_server.adapters.errors import InputTooLongError
+from sie_server.adapters.decision.questions import Question, entropy_confidence
 from sie_server.adapters.sglang.cuda13 import SGLangCuda13Adapter
 from sie_server.types.inputs import InvalidInputError, Item
 
@@ -36,6 +35,7 @@ class SGLangDecisionAdapter(DecisionBatchAdapter):
         max_seq_length: int = 8192,
         max_forward_tokens: int = 16384,
         structured_noul: bool = True,
+        temperatures: dict[str, float] | None = None,
         compute_precision: ComputePrecision = "bfloat16",
         revision: str | None = None,
         request_timeout_s: float = 120.0,
@@ -49,6 +49,15 @@ class SGLangDecisionAdapter(DecisionBatchAdapter):
             raise ValueError("max_forward_tokens must cover one full row and be at most 32768")
         if type(structured_noul) is not bool:
             raise ValueError("structured_noul must be a boolean")
+        if temperatures is not None and (
+            not isinstance(temperatures, dict)
+            or set(temperatures) - {"choice", "noul", "score"}
+            or any(
+                type(value) not in (int, float) or not math.isfinite(value) or value <= 0
+                for value in temperatures.values()
+            )
+        ):
+            raise ValueError("Decision temperatures must map question types to positive finite numbers")
         if (
             type(request_timeout_s) not in (int, float)
             or not math.isfinite(request_timeout_s)
@@ -62,6 +71,7 @@ class SGLangDecisionAdapter(DecisionBatchAdapter):
         self._compute_precision = compute_precision
         self._max_seq_length, self._max_forward_tokens = max_seq_length, max_forward_tokens
         self._structured_noul, self._request_timeout_s = structured_noul, request_timeout_s
+        self._temperatures = dict(temperatures or {})
         self._engine = SGLangCuda13Adapter(
             str(model_name_or_path),
             max_seq_length=max_seq_length + 1,
@@ -149,10 +159,13 @@ class SGLangDecisionAdapter(DecisionBatchAdapter):
                 structured_noul=self._structured_noul,
                 max_seq_length=self._max_seq_length,
             )
-        if any(len(ids) > self._max_seq_length for ids in inputs) or sum(map(len, inputs)) > MAX_ITEM_TOKENS:
-            raise InputTooLongError("Decision rows exceed the token budget; no input was truncated")
         return [
-            Row(index, (question,), {"input_ids": torch.tensor(ids, dtype=torch.long)})
+            Row(
+                index,
+                (question,),
+                {"input_ids": torch.tensor(ids, dtype=torch.long)},
+                temperature=self._temperatures.get(question.kind, 1.0),
+            )
             for question, ids in zip(questions, inputs, strict=True)
         ]
 
@@ -216,7 +229,7 @@ class SGLangDecisionAdapter(DecisionBatchAdapter):
             if any(type(value) not in (int, float) or not math.isfinite(value) for value in values):
                 raise ValueError("SGLang returned nonfinite decision label probabilities")
             peak = max(values)
-            weights = [math.exp(value - peak) for value in values]
+            weights = [math.exp((value - peak) / row.temperature) for value in values]
             total = math.fsum(weights)
             probabilities = [weight / total for weight in weights]
             if row.question.kind == "noul":
@@ -227,6 +240,5 @@ class SGLangDecisionAdapter(DecisionBatchAdapter):
     def _answer(self, question: Question, probabilities: list[float]) -> dict[str, Any]:
         result = super()._answer(question, probabilities)
         if question.kind != "noul":
-            entropy = -math.fsum(value * math.log(value) for value in probabilities if value > 0)
-            result["confidence"] = min(1.0, max(0.0, 1.0 - entropy / math.log(len(probabilities))))
+            result["confidence"] = entropy_confidence(probabilities)
         return result
