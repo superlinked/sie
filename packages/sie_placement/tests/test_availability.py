@@ -225,7 +225,7 @@ def test_placement_waits_pool_over_every_attempt_on_a_gpu_type():
     assert entry.to_dict()["reason"] == "placement-wait"
 
 
-@pytest.mark.parametrize(("fast", "come_alive"), [(18, None), (19, 60.0), (37, None), (38, 60.0)])
+@pytest.mark.parametrize(("fast", "come_alive"), [(17, None), (18, 60.0), (36, None), (37, 60.0)])
 def test_the_placement_wait_takes_the_95th_percentile_from_twenty_attempts(fast, come_alive):
     boots = [attempt(boot=50.0)]
     boots.extend(attempt(OTHER, boot=1.0, wait=10.0, index=index) for index in range(fast))
@@ -259,6 +259,35 @@ def test_an_unplaced_attempt_ranks_above_every_placed_one(placed, selected):
     (entry,) = result.report.scarcity
     assert (entry.reason, entry.boot_s, entry.placement_wait_s) == (ScarcityReason.UNPLACED, 50.0, None)
     assert entry.placement_failure_rate == pytest.approx(1 / (placed + 2))
+
+
+@pytest.mark.parametrize(("placed", "selected"), [(17, False), (18, True), (100, True)])
+def test_a_placed_attempt_without_a_placement_wait_ranks_as_one_that_waited_none(placed, selected):
+    boots = [attempt(boot=50.0)]
+    boots.extend(attempt(OTHER, boot=1.0, wait=0.0 if index % 2 else None, index=index) for index in range(placed))
+    boots.append(unplaced(index=999))
+    result = run(one(120), [receipt()], boots)
+    chosen = result.report.identity(IDENTITY).chosen
+    if not selected:
+        assert chosen.warmth is Warmth.PINNED
+        (entry,) = result.report.scarcity
+        assert entry.reason is ScarcityReason.UNPLACED
+        return
+    assert (chosen.warmth, chosen.come_alive_s, chosen.placement_wait_s) == (Warmth.COLD_WITH_BOUND, 50.0, 0.0)
+    assert result.report.scarcity == ()
+    assert not [request for request in result.report.measurement_requests if request.cell == L4]
+
+
+def test_placed_attempts_without_a_placement_wait_count_toward_the_failure_rate_and_the_percentile_alike():
+    boots = [attempt(boot=50.0), *(attempt(OTHER, boot=1.0, index=index) for index in range(99))]
+    boots.append(unplaced(index=999))
+    result = run(one(120), [receipt()], boots)
+    assert result.report.identity(IDENTITY).chosen.come_alive_s == 50.0
+    boots = [*boots, *(unplaced(index=1000 + index) for index in range(5))]
+    result = run(one(0), [receipt(), receipt(cell=A100)], boots)
+    assert result.report.identity(IDENTITY).chosen.cell == A100
+    (entry,) = result.report.scarcity
+    assert (entry.reason, entry.placement_failure_rate) == (ScarcityReason.UNRELIABLE_TYPE, pytest.approx(6 / 106))
 
 
 def test_an_attempt_without_a_placement_wait_leaves_its_boot_to_stand_for_the_come_alive():
@@ -488,7 +517,7 @@ def two_lanes(**overrides):
     return run(levels(**{"org/a": 0, "org/b": 0}), receipts, buffer_containers=1, **overrides)
 
 
-def test_capacity_reports_what_the_envelope_maxima_hold_against_each_ceiling():
+def test_capacity_reports_what_the_envelope_maxima_and_container_ceilings_hold_against_each_ceiling():
     capacity = Capacity(
         total=4,
         types=(
@@ -497,14 +526,25 @@ def test_capacity_reports_what_the_envelope_maxima_hold_against_each_ceiling():
         ),
         shared_quota=SharedQuota(accelerators=6, held_elsewhere=2),
     )
-    report = two_lanes(capacity=capacity).report
-    assert [(use.scope, use.gpu_product, use.ceiling, use.accelerators, use.lanes) for use in report.capacity] == [
-        (CapacityScope.TOTAL, None, 4, 4, ("org-a-l4", "org-b-a100-80gb")),
-        (CapacityScope.TYPE, A100.gpu_product, 2, 2, ("org-b-a100-80gb",)),
-        (CapacityScope.TYPE, "NVIDIA-L4", 2, 2, ("org-a-l4",)),
-        (CapacityScope.SHARED_QUOTA, None, 6, 6, ("org-a-l4", "org-b-a100-80gb")),
+    report = two_lanes(capacity=capacity, max_containers=2).report
+    assert [
+        (use.scope, use.gpu_product, use.ceiling, use.accelerators, use.peak_accelerators, use.lanes)
+        for use in report.capacity
+    ] == [
+        (CapacityScope.TOTAL, None, 4, 4, 4, ("org-a-l4", "org-b-a100-80gb")),
+        (CapacityScope.TYPE, A100.gpu_product, 2, 2, 2, ("org-b-a100-80gb",)),
+        (CapacityScope.TYPE, "NVIDIA-L4", 2, 2, 2, ("org-a-l4",)),
+        (CapacityScope.SHARED_QUOTA, None, 6, 6, None, ("org-a-l4", "org-b-a100-80gb")),
     ]
     assert not any(use.exceeded for use in report.capacity)
+    assert report.to_dict()["capacity"][0] == {
+        "scope": "total",
+        "ceiling": 4,
+        "accelerators": 4,
+        "peakAccelerators": 4,
+        "lanes": ["org-a-l4", "org-b-a100-80gb"],
+        "exceeded": False,
+    }
     assert report.to_dict()["capacity"][3] == {
         "scope": "shared-quota",
         "ceiling": 6,
@@ -520,11 +560,15 @@ def test_capacity_reports_what_the_envelope_maxima_hold_against_each_ceiling():
     [
         (
             Capacity(types=(TypeCeiling(gpu_product="NVIDIA-L4", accelerators=1),)),
-            "the envelope maxima of org-a-l4 hold 2 NVIDIA-L4 accelerators, above the type ceiling of 1",
+            "the container ceilings of org-a-l4 hold 4 NVIDIA-L4 accelerators, above the type ceiling of 1",
         ),
         (
             Capacity(total=3),
-            "the envelope maxima of org-a-l4, org-b-a100-80gb hold 4 accelerators, above the total ceiling of 3",
+            "the container ceilings of org-a-l4, org-b-a100-80gb hold 8 accelerators, above the total ceiling of 3",
+        ),
+        (
+            Capacity(total=4),
+            "the container ceilings of org-a-l4, org-b-a100-80gb hold 8 accelerators, above the total ceiling of 4",
         ),
         (
             Capacity(shared_quota=SharedQuota(accelerators=6, held_elsewhere=3)),
@@ -533,7 +577,7 @@ def test_capacity_reports_what_the_envelope_maxima_hold_against_each_ceiling():
         ),
     ],
 )
-def test_a_plan_whose_envelope_maxima_exceed_a_ceiling_is_refused_and_says_why(capacity, message):
+def test_a_plan_whose_lanes_exceed_a_ceiling_is_refused_and_says_why(capacity, message):
     with pytest.raises(CapacityExceededError) as caught:
         two_lanes(capacity=capacity)
     assert isinstance(caught.value, PlannerInputError)
@@ -550,7 +594,19 @@ def test_every_exceeded_ceiling_is_named():
     with pytest.raises(CapacityExceededError) as caught:
         two_lanes(capacity=capacity)
     assert [use.scope for use in caught.value.exceeded] == [CapacityScope.TOTAL, CapacityScope.TYPE]
-    assert str(caught.value).count("the envelope maxima") == 2
+    assert str(caught.value).count("the container ceilings") == 2
+
+
+def test_the_container_ceilings_bind_where_the_envelope_maxima_fit():
+    capacity = Capacity(total=4, types=(TypeCeiling(gpu_product="NVIDIA-L4", accelerators=2),))
+    with pytest.raises(CapacityExceededError) as caught:
+        two_lanes(capacity=capacity)
+    assert [(use.scope, use.accelerators, use.peak_accelerators) for use in caught.value.exceeded] == [
+        (CapacityScope.TOTAL, 4, 8),
+        (CapacityScope.TYPE, 2, 4),
+    ]
+    result = two_lanes(capacity=capacity, max_containers=2)
+    assert [planned.max_containers for planned in result.plan.lanes] == [2, 2]
 
 
 def test_a_candidate_list_lane_counts_against_every_member_type():
@@ -560,31 +616,36 @@ def test_a_candidate_list_lane_counts_against_every_member_type():
             TypeCeiling(gpu_product=A100.gpu_product, accelerators=1),
         )
     )
-    result = run(one(0), [receipt(), receipt(cell=A100)], [*scarce(L4), *scarce(A100)], capacity=capacity)
-    assert [use.accelerators for use in result.report.capacity] == [1, 1]
+    boots = [*scarce(L4), *scarce(A100)]
+    result = run(one(0), [receipt(), receipt(cell=A100)], boots, capacity=capacity, max_containers=1)
+    assert [(use.accelerators, use.peak_accelerators) for use in result.report.capacity] == [(1, 1), (1, 1)]
     capacity = Capacity(types=(TypeCeiling(gpu_product=A100.gpu_product, accelerators=0),))
     with pytest.raises(CapacityExceededError, match="hold 1 NVIDIA-A100-SXM4-80GB accelerators"):
-        run(one(0), [receipt(), receipt(cell=A100)], [*scarce(L4), *scarce(A100)], capacity=capacity)
+        run(one(0), [receipt(), receipt(cell=A100)], boots, capacity=capacity, max_containers=1)
 
 
 def test_each_container_holds_its_gpu_count():
-    result = run(one(0), [receipt(shape=PAIR)], capacity=Capacity(total=2), buffer_containers=0)
-    assert [use.accelerators for use in result.report.capacity] == [2]
+    result = run(one(0), [receipt(shape=PAIR)], capacity=Capacity(total=2), buffer_containers=0, max_containers=1)
+    assert [(use.accelerators, use.peak_accelerators) for use in result.report.capacity] == [(2, 2)]
     with pytest.raises(CapacityExceededError, match="hold 2 accelerators"):
-        run(one(0), [receipt(shape=PAIR)], capacity=Capacity(total=1))
+        run(one(0), [receipt(shape=PAIR)], capacity=Capacity(total=1), max_containers=1)
 
 
-def test_a_zero_floor_lane_holds_nothing_until_its_envelope_may_raise_it():
-    result = run(one(600), [receipt()], [attempt(boot=60.0)], capacity=Capacity(total=0))
+def test_a_zero_floor_lane_holds_no_envelope_maximum_but_holds_its_container_ceiling():
+    result = run(one(600), [receipt()], [attempt(boot=60.0)], capacity=Capacity(total=4))
     assert result.report.identity(IDENTITY).chosen.warmth is Warmth.COLD_WITH_BOUND
-    assert [(use.accelerators, use.lanes) for use in result.report.capacity] == [(0, ())]
+    assert [(use.accelerators, use.peak_accelerators, use.lanes) for use in result.report.capacity] == [
+        (0, 4, ("org-model-l4",))
+    ]
+    with pytest.raises(CapacityExceededError, match="the container ceilings of org-model-l4 hold 4 accelerators"):
+        run(one(600), [receipt()], [attempt(boot=60.0)], capacity=Capacity(total=3))
 
 
 def test_a_loosening_whose_plan_the_ceilings_would_refuse_saves_nothing():
     receipts, boots = [receipt()], [attempt(boot=240.0)]
     free = run(one(60), receipts, boots, buffer_containers=1, fallback_floor=3)
     assert [lever.permitted_bound_s for lever in free.report.come_alive_levers] == [240]
-    capacity = Capacity(types=(TypeCeiling(gpu_product="NVIDIA-L4", accelerators=2),))
+    capacity = Capacity(shared_quota=SharedQuota(accelerators=2))
     bounded = run(one(60), receipts, boots, buffer_containers=1, fallback_floor=3, capacity=capacity)
     assert bounded.plan == free.plan
     assert bounded.report.come_alive_levers == ()
@@ -761,6 +822,13 @@ def test_random_estates_respect_placement_evidence_and_capacity(seed):
         held = sum(planned.envelope.floor_max * planned.container_shape.gpu_count for planned in lanes)
         elsewhere = use.held_elsewhere or 0
         assert use.accelerators == held + elsewhere
+        if use.scope is CapacityScope.SHARED_QUOTA:
+            assert use.peak_accelerators is None
+            assert use.exceeded is (use.accelerators > use.ceiling)
+        else:
+            peak = sum(planned.max_containers * planned.container_shape.gpu_count for planned in lanes)
+            assert use.peak_accelerators == peak
+            assert use.exceeded is (peak > use.ceiling)
     assert (error is not None) is any(use.exceeded for use in result.report.capacity)
     if error is not None:
         assert error.exceeded == tuple(use for use in result.report.capacity if use.exceeded)

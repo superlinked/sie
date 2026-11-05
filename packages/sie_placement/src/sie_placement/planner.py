@@ -439,14 +439,13 @@ def _placement_index(records: Iterable[BootEvidence]) -> dict[str, _Placement]:
         own = [record for record in group if not record.borrowed]
         used = own or group
         samples = [
-            None if record.outcome is BootOutcome.UNPLACED else float(record.placement_wait_s or 0.0)
-            for record in used
-            if record.outcome is BootOutcome.UNPLACED or record.placement_wait_s is not None
+            None if record.outcome is BootOutcome.UNPLACED else float(record.placement_wait_s or 0.0) for record in used
         ]
+        measured = any(record.outcome is BootOutcome.UNPLACED or record.placement_wait_s is not None for record in used)
         unplaced = sum(record.outcome is BootOutcome.UNPLACED for record in used)
         index[product] = _Placement(
-            wait_s=_percentile(samples) if samples else 0.0,
-            measured=bool(samples),
+            wait_s=_percentile(samples) if measured else 0.0,
+            measured=measured,
             failure_rate=unplaced / len(used),
             borrowed=not own,
         )
@@ -1138,17 +1137,26 @@ class _Planner:
         if capacity is None:
             return ()
 
-        def held(lanes: Iterable[PlanLane]) -> tuple[int, tuple[str, ...]]:
-            counted = [lane for lane in lanes if lane.envelope.floor_max]
-            accelerators = sum(lane.envelope.floor_max * lane.container_shape.gpu_count for lane in counted)
-            return accelerators, tuple(lane.name for lane in counted)
+        def held(lanes: Iterable[PlanLane]) -> tuple[int, int, tuple[str, ...]]:
+            lanes = tuple(lanes)
+            envelope = sum(lane.envelope.floor_max * lane.container_shape.gpu_count for lane in lanes)
+            peak = sum(lane.max_containers * lane.container_shape.gpu_count for lane in lanes)
+            return envelope, peak, tuple(lane.name for lane in lanes)
 
-        total, names = held(plan.lanes)
+        total, peak, names = held(plan.lanes)
         uses = []
         if capacity.total is not None:
-            uses.append(CapacityUse(scope=CapacityScope.TOTAL, ceiling=capacity.total, accelerators=total, lanes=names))
+            uses.append(
+                CapacityUse(
+                    scope=CapacityScope.TOTAL,
+                    ceiling=capacity.total,
+                    accelerators=total,
+                    peak_accelerators=peak,
+                    lanes=names,
+                )
+            )
         for ceiling in sorted(capacity.types, key=lambda entry: entry.gpu_product):
-            accelerators, lanes = held(
+            accelerators, peak_accelerators, lanes = held(
                 lane for lane in plan.lanes if any(cell.gpu_product == ceiling.gpu_product for cell in lane.cells)
             )
             uses.append(
@@ -1157,6 +1165,7 @@ class _Planner:
                     gpu_product=ceiling.gpu_product,
                     ceiling=ceiling.accelerators,
                     accelerators=accelerators,
+                    peak_accelerators=peak_accelerators,
                     lanes=lanes,
                 )
             )
@@ -1168,7 +1177,7 @@ class _Planner:
                     ceiling=quota.accelerators,
                     accelerators=total + quota.held_elsewhere,
                     held_elsewhere=quota.held_elsewhere,
-                    lanes=names,
+                    lanes=tuple(lane.name for lane in plan.lanes if lane.envelope.floor_max),
                 )
             )
         return tuple(uses)

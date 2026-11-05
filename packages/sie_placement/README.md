@@ -116,9 +116,13 @@ obtain. Each field is optional, and at least one is declared:
 | `types` | Per `gpuProduct`, the `accelerators` the lanes that may be placed on that product may hold together |
 | `sharedQuota` | A quota of `accelerators` that this environment shares with others, which hold `heldElsewhere` of it |
 
-A lane holds `floorMax` containers of its `gpuCount` accelerators each. A lane
-with fallback cells counts against the ceiling of every product it names, and
-once against `total`.
+Every container holds the `gpuCount` accelerators of its lane's container
+shape. `total` and each of `types` must hold every lane they cover at its
+container ceiling, `maxContainers` containers, at once, and so at its envelope
+maximum, `floorMax` containers, too. `sharedQuota` bounds the envelope maxima,
+the most a tuner may hold warm, together with `heldElsewhere`. A lane with
+fallback cells counts against the ceiling of every product it names, and once
+against `total`.
 
 ## Envelope
 
@@ -147,8 +151,8 @@ result = plan(
 print(render(result.plan.to_dict()), render(result.report.to_dict()))
 ```
 
-`capacity` is optional. A plan whose envelope maxima exceed a capacity ceiling
-is not returned: `plan` raises `CapacityExceededError`, a `PlannerInputError`
+`capacity` is optional. A plan whose lanes exceed a capacity ceiling, as
+[Capacity](#capacity) states, is not returned: `plan` raises `CapacityExceededError`, a `PlannerInputError`
 whose message names each exceeded ceiling and the lanes that hold it, whose
 `exceeded` lists those ceilings, and whose `result` carries the refused plan
 and its report.
@@ -194,12 +198,14 @@ document:
    same percentile. The boot is taken over the identity's attempts at that
    cell, container shape and warmth that got a container. The placement wait
    is taken over every cold attempt on the cell's GPU product, whatever the
-   identity, that records `placementWaitS` or was `unplaced`; a product
-   without such an attempt adds no wait. Below 20 attempts the slowest stands
-   for the percentile; from 20, their 95th percentile by nearest rank does, so
-   one slow attempt stops deciding once enough exist. An attempt that did not
-   succeed, a failed or timed-out boot or an unplaced placement, ranks above
-   every success, so the warmth is withdrawn when the percentile falls on one.
+   identity. An attempt that got a container without recording
+   `placementWaitS` waited none, and a product none of whose cold attempts
+   records `placementWaitS` or was `unplaced` adds no wait. Below 20 attempts
+   the slowest stands for the percentile; from 20, their 95th percentile by
+   nearest rank does, so one slow attempt stops deciding once enough exist. An
+   attempt that did not succeed, a failed or timed-out boot or an unplaced
+   placement, ranks above every success, so the warmth is withdrawn when the
+   percentile falls on one.
    The environment's own attempts replace borrowed ones, per cell, container
    shape and warmth for the boot and per GPU product for the placement wait. A
    `comeAliveP95S` of `0` admits `pinned` only.
@@ -292,8 +298,9 @@ the ceiling. A floor raised on a zero-floor lane realizes as at least
 `fallback_floor`, so a zero-floor lane's nonzero `floorMax` is at least
 `fallback_floor` capped by the ceiling. The envelope carries the floor range
 only. A lane carried from the current plan keeps its envelope, capped by the
-ceiling. Given a `capacity` document, the envelope maxima of every lane must
-fit each of its ceilings, or the plan is refused as described above. A
+ceiling. Given a `capacity` document, the lanes must fit each of its ceilings,
+at their container ceilings and envelope maxima as [Capacity](#capacity)
+states, or the plan is refused as described above. A
 loosened service level whose plan the ceilings would refuse saves nothing in
 the report.
 
@@ -336,7 +343,8 @@ The report renders as a `placement-report` document:
 - `capacity`: for each ceiling of the `capacity` document, its `scope`
   (`total`, `type` with its `gpuProduct`, or `shared-quota` with
   `heldElsewhere`), the `ceiling`, the `accelerators` the plan's envelope
-  maxima hold against it, the `lanes` that hold them, and whether it is
+  maxima hold against it, for `total` and `type` the `peakAccelerators` its
+  lanes hold at `maxContainers`, the `lanes` that hold them, and whether it is
   `exceeded`.
 - `lanes`: each lane's hourly cost, its monthly cost, its floor's monthly cost
   and the monthly cost of its `floorMax`, which a floor budget prices. A lane
