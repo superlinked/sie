@@ -337,6 +337,8 @@ class _Planner:
         current_plan: Plan | None,
         parameters: PlannerParameters,
     ) -> None:
+        receipts = tuple(receipts)
+        boot_evidence = tuple(boot_evidence)
         placements = {placement.name: placement for placement in price_list.placements}
         placement = placements.get(parameters.placement)
         if placement is None:
@@ -346,6 +348,10 @@ class _Planner:
                 f"the current plan is for placement {current_plan.placement!r}, not {parameters.placement!r}"
             )
         self.parameters = parameters
+        self.service_levels = service_levels
+        self.receipt_records = receipts
+        self.boot_records = boot_evidence
+        self.demand = demand
         self.price_list = price_list
         self.multiplier = placement.region_multiplier
         self.prices = {profile.name: profile for profile in price_list.machine_profiles}
@@ -524,8 +530,45 @@ class _Planner:
             if chosen.cost - request.cost_bound > 0
         ]
 
-    @staticmethod
-    def levers(choice: _Choice) -> list[Lever]:
+    def replanned_total(
+        self,
+        current: Plan,
+        *,
+        service_levels: ServiceLevels | None = None,
+        boot_evidence: Iterable[BootEvidence] | None = None,
+    ) -> float:
+        planner = _Planner(
+            self.service_levels if service_levels is None else service_levels,
+            self.receipt_records,
+            self.boot_records if boot_evidence is None else boot_evidence,
+            self.price_list,
+            self.demand,
+            current,
+            self.parameters,
+        )
+        return planner.run(price_levers=False).report.monthly_cost
+
+    def loosened(self, identity: str, bound: int) -> ServiceLevels:
+        return replace(
+            self.service_levels,
+            identities=tuple(
+                replace(entry, level=replace(entry.level, come_alive_p95_s=bound))
+                if entry.identity == identity
+                else entry
+                for entry in self.service_levels.identities
+            ),
+        )
+
+    def booted_within(self, identity: str, option: _Option, bound: int) -> tuple[BootEvidence, ...]:
+        key = (identity, option.receipt.cell, option.receipt.container_shape, option.warmth)
+        return tuple(
+            replace(record, boot_seconds=min(record.boot_seconds, bound))
+            if (record.identity, record.cell, record.container_shape, record.warmth) == key
+            else record
+            for record in self.boot_records
+        )
+
+    def levers(self, choice: _Choice, written: Plan, total: float) -> list[Lever]:
         chosen = choice.chosen
         bound = choice.level.come_alive_p95_s
         if chosen is None or bound is None:
@@ -540,9 +583,22 @@ class _Planner:
             known = best.get(key)
             if known is None or option.rank < known.rank:
                 best[key] = option
+        savings: dict[int, float] = {}
         levers = []
         for option in best.values():
-            saving = chosen.cost - option.cost
+            permitted = max(1, math.ceil(option.come_alive_s))
+            if permitted not in savings:
+                replanned = self.replanned_total(written, service_levels=self.loosened(choice.identity, permitted))
+                savings[permitted] = _saving(total, replanned)
+            saving = savings[permitted]
+            if not saving:
+                continue
+            under = 0.0
+            if bound > 0:
+                replanned = self.replanned_total(
+                    written, boot_evidence=self.booted_within(choice.identity, option, bound)
+                )
+                under = _saving(total, replanned)
             levers.append(
                 Lever(
                     identity=choice.identity,
@@ -553,8 +609,8 @@ class _Planner:
                     come_alive_basis=option.basis,
                     bound_s=bound,
                     monthly_cost=option.cost,
-                    saving_under_bound=saving if bound > 0 else 0.0,
-                    permitted_bound_s=max(1, math.ceil(option.come_alive_s)),
+                    saving_under_bound=under,
+                    permitted_bound_s=permitted,
                     saving_at_permitted_bound=saving,
                 )
             )
@@ -650,7 +706,7 @@ class _Planner:
             return window.above_floor_hours(requests, rate, lane.envelope.floor_min)
         return window.cold_container_hours(requests, rate)
 
-    def run(self) -> PlannerResult:
+    def run(self, *, price_levers: bool = True) -> PlannerResult:
         choices = [self.choose(identity) for identity in sorted(self.levels)]
         placed = {choice.identity: choice.chosen for choice in choices if choice.chosen is not None}
         kept = {
@@ -678,13 +734,15 @@ class _Planner:
         receipts: dict[str, Receipt | None] = {identity: option.receipt for identity, option in placed.items()}
         receipts.update({identity: self.slowest_receipt(identity, lane) for identity, (_, lane) in kept.items()})
         lane_reports, costs = self._pricing(new_plan, receipts)
+        total = sum(lane.monthly_cost for lane in lane_reports if lane.monthly_cost is not None)
         reports: list[IdentityReport] = []
         requests: list[MeasurementRequest] = []
         levers: list[Lever] = []
         for choice in choices:
             requests.extend(self.receipt_requests(choice))
             requests.extend(self.boot_requests(choice))
-            levers.extend(self.levers(choice))
+            if price_levers:
+                levers.extend(self.levers(choice, new_plan, total))
             reports.append(
                 self._identity_report(choice, names, kept, costs.get(choice.identity), receipts.get(choice.identity))
             )
@@ -783,6 +841,11 @@ class _Planner:
                 )
             )
         return tuple(reports), costs
+
+
+def _saving(total: float, replanned: float) -> float:
+    saving = total - replanned
+    return saving if round(saving, 2) > 0 else 0.0
 
 
 def _shared_chart_lanes(plan: Plan) -> tuple[SharedChartLane, ...]:
