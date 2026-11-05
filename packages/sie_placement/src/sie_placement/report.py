@@ -33,6 +33,7 @@ class UnplacedReason(StrEnum):
     WARM_BOUND_UNDECLARED = "warm-bound-undeclared"
     CURRENT_UNMEASURED = "current-unmeasured"
     CURRENT_UNPRICED = "current-unpriced"
+    PLACEMENT_UNRELIABLE = "placement-unreliable"
 
 
 class ComeAliveBasis(StrEnum):
@@ -50,11 +51,24 @@ class RequestReason(StrEnum):
     UNMEASURED = "unmeasured"
     REFUSED = "refused"
     FAILED = "failed"
+    UNPLACED = "unplaced"
 
 
 class RefusedRecord(StrEnum):
     RECEIPT = "receipt"
     BOOT_EVIDENCE = "boot-evidence"
+
+
+class ScarcityReason(StrEnum):
+    PLACEMENT_WAIT = "placement-wait"
+    UNPLACED = "unplaced"
+    UNRELIABLE_TYPE = "unreliable-type"
+
+
+class CapacityScope(StrEnum):
+    TOTAL = "total"
+    TYPE = "type"
+    SHARED_QUOTA = "shared-quota"
 
 
 def _money(value: float) -> float:
@@ -72,7 +86,7 @@ def _compact(fields: dict[str, object | None]) -> dict[str, object]:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Blocker:
     field: str
-    bound: int | None
+    bound: float | None
     measured: float | None
 
     def to_dict(self) -> dict[str, object]:
@@ -92,11 +106,14 @@ class Option:
     blocked_by: tuple[Blocker, ...] = ()
     saving: float | None = None
     lane: str | None = None
+    fallback_cells: tuple[Cell, ...] = ()
+    placement_wait_s: float | None = None
 
     def to_dict(self) -> dict[str, object]:
         return _compact(
             {
                 "cell": self.cell.to_dict(),
+                "fallbackCells": [cell.to_dict() for cell in self.fallback_cells] or None,
                 "containerShape": self.container_shape.to_dict(),
                 "concurrency": self.concurrency,
                 "lane": self.lane,
@@ -104,6 +121,7 @@ class Option:
                 "monthlyCost": _money(self.monthly_cost),
                 "saving": None if self.saving is None else _money(self.saving),
                 "comeAliveS": self.come_alive_s,
+                "placementWaitS": self.placement_wait_s,
                 "comeAliveBasis": self.come_alive_basis.value,
                 "blockedBy": [blocker.to_dict() for blocker in self.blocked_by] or None,
                 "receipt": self.receipt.to_dict(),
@@ -236,21 +254,102 @@ class Lever:
     saving_under_bound: float
     permitted_bound_s: int
     saving_at_permitted_bound: float
+    placement_wait_s: float | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
-            "identity": self.identity,
-            "cell": self.cell.to_dict(),
-            "containerShape": self.container_shape.to_dict(),
-            "warmth": self.warmth.value,
-            "comeAliveS": self.come_alive_s,
-            "comeAliveBasis": self.come_alive_basis.value,
-            "comeAliveBoundS": self.bound_s,
-            "monthlyCost": _money(self.monthly_cost),
-            "savingUnderBound": _money(self.saving_under_bound),
-            "permittedBoundS": self.permitted_bound_s,
-            "savingAtPermittedBound": _money(self.saving_at_permitted_bound),
-        }
+        return _compact(
+            {
+                "identity": self.identity,
+                "cell": self.cell.to_dict(),
+                "containerShape": self.container_shape.to_dict(),
+                "warmth": self.warmth.value,
+                "comeAliveS": self.come_alive_s,
+                "placementWaitS": self.placement_wait_s,
+                "comeAliveBasis": self.come_alive_basis.value,
+                "comeAliveBoundS": self.bound_s,
+                "monthlyCost": _money(self.monthly_cost),
+                "savingUnderBound": _money(self.saving_under_bound),
+                "permittedBoundS": self.permitted_bound_s,
+                "savingAtPermittedBound": _money(self.saving_at_permitted_bound),
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Scarcity:
+    identity: str
+    reason: ScarcityReason
+    cell: Cell
+    container_shape: ContainerShape
+    warmth: Warmth
+    monthly_cost: float
+    placement_failure_rate: float
+    come_alive_bound_s: int | None = None
+    boot_s: float | None = None
+    placement_wait_s: float | None = None
+    lane: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return _compact(
+            {
+                "identity": self.identity,
+                "reason": self.reason.value,
+                "cell": self.cell.to_dict(),
+                "containerShape": self.container_shape.to_dict(),
+                "lane": self.lane,
+                "warmth": self.warmth.value,
+                "monthlyCost": _money(self.monthly_cost),
+                "comeAliveBoundS": self.come_alive_bound_s,
+                "bootS": self.boot_s,
+                "placementWaitS": self.placement_wait_s,
+                "placementFailureRate": _rate(self.placement_failure_rate),
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CapacityUse:
+    scope: CapacityScope
+    ceiling: int
+    accelerators: int
+    lanes: tuple[str, ...]
+    gpu_product: str | None = None
+    held_elsewhere: int | None = None
+
+    @property
+    def exceeded(self) -> bool:
+        return self.accelerators > self.ceiling
+
+    def describe(self) -> str:
+        lanes = ", ".join(self.lanes) or "no lane"
+        if self.scope is CapacityScope.TYPE:
+            return (
+                f"the envelope maxima of {lanes} hold {self.accelerators} {self.gpu_product} accelerators, "
+                f"above the type ceiling of {self.ceiling}"
+            )
+        if self.scope is CapacityScope.SHARED_QUOTA:
+            elsewhere = self.held_elsewhere or 0
+            return (
+                f"the envelope maxima of {lanes} hold {self.accelerators - elsewhere} accelerators, "
+                f"which with {elsewhere} held elsewhere exceed the shared quota of {self.ceiling}"
+            )
+        return (
+            f"the envelope maxima of {lanes} hold {self.accelerators} accelerators, "
+            f"above the total ceiling of {self.ceiling}"
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return _compact(
+            {
+                "scope": self.scope.value,
+                "gpuProduct": self.gpu_product,
+                "ceiling": self.ceiling,
+                "accelerators": self.accelerators,
+                "heldElsewhere": self.held_elsewhere,
+                "lanes": list(self.lanes),
+                "exceeded": self.exceeded,
+            }
+        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -318,6 +417,8 @@ class Report:
     identity_changes: tuple[IdentityChange, ...]
     lane_changes: tuple[LaneChange, ...]
     warm_bound_undeclared: tuple[str, ...] = ()
+    capacity: tuple[CapacityUse, ...] = ()
+    scarcity: tuple[Scarcity, ...] = ()
 
     @property
     def monthly_cost(self) -> float:
@@ -355,9 +456,11 @@ class Report:
             },
             "identities": [entry.to_dict() for entry in self.identities],
             "lanes": [lane.to_dict() for lane in self.lanes],
+            "capacity": [use.to_dict() for use in self.capacity],
             "sharedChartLanes": [shared.to_dict() for shared in self.shared_chart_lanes],
             "measurementRequests": [request.to_dict() for request in self.measurement_requests],
             "comeAliveLevers": [lever.to_dict() for lever in self.come_alive_levers],
+            "scarcity": [entry.to_dict() for entry in self.scarcity],
             "queueWaitUnattained": list(self.queue_wait_unattained),
             "warmBoundUndeclared": list(self.warm_bound_undeclared),
             "refusals": [refusal.to_dict() for refusal in self.refusals],

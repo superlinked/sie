@@ -1,0 +1,19 @@
+{
+  "kind": "placement-capacity",
+  "schemaVersion": 1,
+  "total": 12,
+  "types": [
+    {
+      "gpuProduct": "NVIDIA-L4",
+      "accelerators": 8
+    },
+    {
+      "gpuProduct": "NVIDIA-A100-SXM4-80GB",
+      "accelerators": 4
+    }
+  ],
+  "sharedQuota": {
+    "accelerators": 16,
+    "heldElsewhere": 6
+  }
+}

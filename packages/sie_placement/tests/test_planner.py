@@ -505,11 +505,23 @@ def test_twenty_or_more_boots_stand_for_the_come_alive_at_their_95th_percentile(
     assert rendered(run(level(come_alive_p95_s=600), [receipt()], boots[::-1], prices=L4_ONLY)) == rendered(result)
 
 
-def test_a_failed_boot_withdraws_the_warmth_however_many_boots_succeeded():
-    boots = [boot(seconds=50.0, uri=f"boots/{index}.json") for index in range(30)]
-    boots.append(boot(seconds=0.0, outcome=BootOutcome.FAILED, uri="boots/failed.json"))
+@pytest.mark.parametrize(
+    ("succeeded", "failed", "come_alive"),
+    [(18, 1, None), (19, 1, 50.0), (30, 1, 50.0), (29, 2, None), (38, 2, 50.0), (37, 3, None)],
+)
+def test_a_failed_boot_ranks_above_every_success_at_the_95th_percentile(succeeded, failed, come_alive):
+    boots = [boot(seconds=50.0, uri=f"boots/{index}.json") for index in range(succeeded)]
+    boots.extend(
+        boot(seconds=0.0, outcome=BootOutcome.FAILED, uri=f"boots/failed-{index}.json") for index in range(failed)
+    )
     result = run(level(come_alive_p95_s=600), [receipt()], boots, prices=L4_ONLY)
-    assert result.report.identity(IDENTITY).chosen.warmth is Warmth.PINNED
+    chosen = result.report.identity(IDENTITY).chosen
+    if come_alive is None:
+        assert chosen.warmth is Warmth.PINNED
+        (request,) = result.report.measurement_requests
+        assert request.reason is RequestReason.FAILED
+    else:
+        assert (chosen.warmth, chosen.come_alive_s) == (Warmth.COLD_WITH_BOUND, come_alive)
 
 
 def test_boot_seconds_render_the_same_whatever_their_number_type():
@@ -1456,6 +1468,7 @@ def test_the_region_multiplier_scales_every_price():
         ({"fallback_floor": -1}, "fallbackFloor"),
         ({"cooldown_s": -1}, "cooldownS"),
         ({"buffer_containers": -1}, "bufferContainers"),
+        ({"hold_budget_s": -1}, "holdBudgetS"),
         ({"hours_per_month": 0}, "hoursPerMonth"),
         ({"hours_per_month": math.inf}, "hoursPerMonth"),
         ({"queue_pool": "two words"}, "queuePool"),
@@ -1478,6 +1491,7 @@ def test_parameters_echo_into_the_report():
         "fallbackFloor": 2,
         "cooldownS": 900,
         "bufferContainers": 0,
+        "holdBudgetS": 0,
         "hoursPerMonth": 730.0,
         "queuePool": "default",
         "bundle": "default",
