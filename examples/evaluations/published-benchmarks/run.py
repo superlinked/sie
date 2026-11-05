@@ -458,6 +458,9 @@ def _plan_from_flags(args: argparse.Namespace) -> QualityPlan:
     if args.model is None or args.task is None:
         raise ValueError("--model and --task are required without --reference")
     task_name, params = parse_task_key(args.task)
+    other_params = sorted(set(params) - {"limit"})
+    if other_params:
+        raise ValueError(f"a quality task key takes only limit, got {', '.join(other_params)}")
     _check_limit(params)
     model, _, profile = args.model.partition(":")
     operation = "score" if task_name in SCORE_TASKS else "encode"

@@ -978,6 +978,30 @@ class AddedDatasetsTest(TemporaryCase):
                 )
 
 
+class QualityTaskKeyTest(TemporaryCase):
+    ENCODE = ("--output", "sparse", "--items-per-request", "2")
+
+    def test_a_parameter_other_than_limit_is_refused_before_any_request(self):
+        baseline = ("--baseline", "ndcg_at_10=0.3", "--baseline-source", "model card")
+        for key, shape, parameter in (
+            ("mteb/SciFact?split=train", self.ENCODE, "split"),
+            ("mteb/SciFact?split=test", self.ENCODE, "split"),
+            ("mteb/SciFact?role=corpus", self.ENCODE, "role"),
+            ("mteb/SciFact?Limit=5", self.ENCODE, "Limit"),
+            ("mteb/SciFact?limit=5&filter=nonempty", self.ENCODE, "filter"),
+            ("mteb/AskUbuntuDupQuestions?candidates-k=5", (), "candidates-k"),
+        ):
+            with self.subTest(key):
+                stderr = self.refused("quality", "--model", "m", "--task", key, *shape, *baseline)
+                self.assertIn(f"takes only limit, got {parameter}", stderr)
+
+    def test_a_plain_key_and_a_limit_key_are_accepted(self):
+        for key, params in (("mteb/SciFact", {}), ("mteb/SciFact?limit=5", {"limit": "5"})):
+            with self.subTest(key):
+                plan = plan_quality(parse("--model", "m", "--task", key, *self.ENCODE))
+                self.assertEqual(plan.task_params, params)
+
+
 class IdenticalIdsTest(TemporaryCase):
     def test_only_fiqa_drops_a_document_with_the_query_id(self):
         predictions = {"7": {"7": 9.0, "a": 1.0}}

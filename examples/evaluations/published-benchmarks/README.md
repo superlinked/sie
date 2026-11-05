@@ -491,8 +491,9 @@ the query's id is removed from that query's ranking after the top-1000 cut and
 before scoring, as mteb does. The predictions file keeps it, and `score.py`
 applies the same rule.
 
-`run.py performance` takes the same names with the parameters its selection
-rule reads, for example
+`run.py quality` takes a name alone or with `limit`; any other parameter exits 2
+before any request. `run.py performance` takes the same names with the
+parameters its selection rule reads, for example
 `mteb/FiQA2018?split=test&role=corpus&limit=256&filter=nonempty`.
 
 ## Validation
