@@ -366,54 +366,22 @@
     {
       "identity": "intfloat/e5-base-v2",
       "cell": {
-        "machineProfile": "a100-80gb",
-        "gpuProduct": "NVIDIA-A100-SXM4-80GB"
-      },
-      "measure": [
-        "receipt"
-      ],
-      "warmth": "pinned",
-      "reason": "unmeasured",
-      "costBound": 1825.0
-    },
-    {
-      "identity": "intfloat/e5-base-v2",
-      "cell": {
-        "machineProfile": "h100",
-        "gpuProduct": "NVIDIA-H100-80GB-HBM3"
-      },
-      "measure": [
-        "receipt"
-      ],
-      "warmth": "pinned",
-      "reason": "unmeasured",
-      "costBound": 2920.0
-    },
-    {
-      "identity": "intfloat/e5-base-v2",
-      "cell": {
         "machineProfile": "l4",
         "gpuProduct": "NVIDIA-L4"
       },
-      "measure": [
-        "receipt"
-      ],
-      "warmth": "pinned",
-      "reason": "unmeasured",
-      "costBound": 584.0
-    },
-    {
-      "identity": "intfloat/e5-base-v2",
-      "cell": {
-        "machineProfile": "l40s",
-        "gpuProduct": "NVIDIA-L40S"
+      "containerShape": {
+        "gpuCount": 1,
+        "cpuCores": 4,
+        "memoryMiB": 16384
       },
+      "concurrency": 16,
+      "lane": "default-l4-default",
       "measure": [
         "receipt"
       ],
       "warmth": "pinned",
       "reason": "unmeasured",
-      "costBound": 876.0
+      "costBound": 759.2
     },
     {
       "identity": "Qwen/Qwen3-8B",
@@ -429,6 +397,27 @@
       "reason": "unmeasured",
       "costBound": 146.0,
       "savingBound": 236.03
+    },
+    {
+      "identity": "BAAI/bge-m3:sparse",
+      "cell": {
+        "machineProfile": "l4",
+        "gpuProduct": "NVIDIA-L4"
+      },
+      "containerShape": {
+        "gpuCount": 1,
+        "cpuCores": 4,
+        "memoryMiB": 16384
+      },
+      "concurrency": 16,
+      "lane": "default-l4-default",
+      "measure": [
+        "boot-evidence"
+      ],
+      "warmth": "lazy-resident",
+      "reason": "unmeasured",
+      "costBound": 0.0,
+      "savingBound": 47.45
     },
     {
       "identity": "BAAI/bge-m3:sparse",
@@ -463,6 +452,7 @@
     "BAAI/bge-m3:sparse",
     "intfloat/e5-base-v2"
   ],
+  "warmBoundUndeclared": [],
   "refusals": [
     {
       "record": "boot-evidence",

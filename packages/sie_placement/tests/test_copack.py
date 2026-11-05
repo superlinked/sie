@@ -704,6 +704,38 @@ def test_a_co_packed_identity_whose_receipt_is_withdrawn_returns_to_a_lane_of_it
     assert change.after == PlanIdentity(identity="org/a", lane="org-a-a100-80gb", warmth=Warmth.PINNED)
 
 
+def test_a_lane_that_hosts_a_co_packed_identity_hosts_no_lazy_resident():
+    current = Plan(
+        placement="test",
+        lanes=(lane("own"), lane("shared")),
+        identities=(
+            PlanIdentity(identity="org/a", lane="shared", warmth=Warmth.PINNED, co_packed=True),
+            PlanIdentity(identity="org/b", lane="shared", warmth=Warmth.PINNED),
+            PlanIdentity(identity="org/c", lane="own", warmth=Warmth.PINNED),
+        ),
+    )
+    load = BootEvidence(
+        identity="org/c",
+        cell=L4,
+        container_shape=SHAPE,
+        warmth=Warmth.LAZY_RESIDENT,
+        boot_seconds=20.0,
+        outcome=BootOutcome.SUCCEEDED,
+        source=SourceRef(uri="loads/org-c"),
+    )
+    service_levels = levels("org/a", "org/b", overrides={"org/c": ServiceLevel(come_alive_p95_s=60, warm_p99_ms=250)})
+    receipts = [receipt("org/a"), receipt("org/b"), receipt("org/c")]
+    co = [co_receipt("org/a", "org/b")]
+    result = run(service_levels, receipts, co, boots=[load], current=current)
+    assert lanes_of(result) == {"own": ("org/c",), "shared": ("org/a", "org/b")}
+    assert result.report.identity("org/a").status is IdentityStatus.CO_PACKED
+    assert result.report.identity("org/c").chosen.warmth is Warmth.PINNED
+    unmarked = replace(current, identities=tuple(replace(entry, co_packed=False) for entry in current.identities))
+    joined = run(service_levels, receipts, co, boots=[load], current=unmarked)
+    placements = {entry.identity: (entry.lane, entry.warmth) for entry in joined.plan.identities}
+    assert placements["org/c"] == ("shared", Warmth.LAZY_RESIDENT)
+
+
 def test_a_kept_co_packed_identity_left_alone_on_its_lane_loses_the_mark():
     current = Plan(
         placement="test",
@@ -713,7 +745,7 @@ def test_a_kept_co_packed_identity_left_alone_on_its_lane_loses_the_mark():
             PlanIdentity(identity="org/b", lane="shared", warmth=Warmth.PINNED),
         ),
     )
-    result = run(levels("org/a", "org/b"), [receipt("org/b", A100)], current=current)
+    result = run(levels("org/a", "org/b"), [receipt("org/b", p99=400.0), receipt("org/b", A100)], current=current)
     assert result.report.identity("org/a").status is IdentityStatus.KEPT
     assert lanes_of(result) == {"org-b-a100-80gb": ("org/b",), "shared": ("org/a",)}
     assert {entry.identity: entry for entry in result.plan.identities}["org/a"] == PlanIdentity(
@@ -1054,7 +1086,7 @@ def random_estate(seed: int) -> dict:
     service_levels = levels(
         overrides={
             identity: ServiceLevel(
-                come_alive_p95_s=rng.choice([0, 0, 120]), warm_p99_ms=rng.choice([None, 150, 250, 400])
+                come_alive_p95_s=rng.choice([0, 0, 120]), warm_p99_ms=rng.choice([1000, 150, 250, 400])
             )
             for identity in identities
         },
