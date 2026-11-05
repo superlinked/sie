@@ -323,18 +323,18 @@ class CapacityUse:
 
     def describe(self) -> str:
         lanes = ", ".join(self.lanes) or "no lane"
+        held, count = "envelope maxima", self.accelerators
+        if self.peak_accelerators is not None and self.peak_accelerators > self.ceiling:
+            held, count = "container ceilings", self.peak_accelerators
         if self.scope is CapacityScope.SHARED_QUOTA:
             elsewhere = self.held_elsewhere or 0
             return (
-                f"the envelope maxima of {lanes} hold {self.accelerators - elsewhere} accelerators, "
+                f"the {held} of {lanes} hold {count - elsewhere} accelerators, "
                 f"which with {elsewhere} held elsewhere exceed the shared quota of {self.ceiling}"
             )
         accelerators = "accelerators" if self.gpu_product is None else f"{self.gpu_product} accelerators"
-        held = f"the envelope maxima of {lanes} hold {self.accelerators}"
-        if self.peak_accelerators is not None and self.peak_accelerators > self.ceiling:
-            held = f"the container ceilings of {lanes} hold {self.peak_accelerators}"
         scope = "type" if self.scope is CapacityScope.TYPE else "total"
-        return f"{held} {accelerators}, above the {scope} ceiling of {self.ceiling}"
+        return f"the {held} of {lanes} hold {count} {accelerators}, above the {scope} ceiling of {self.ceiling}"
 
     def to_dict(self) -> dict[str, object]:
         return _compact(
