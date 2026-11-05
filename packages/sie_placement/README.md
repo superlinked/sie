@@ -210,11 +210,16 @@ The report renders as a `placement-report` document:
   demand costs there with the lane's floor, the chosen cell, warmth, monthly
   cost and come-alive with its basis (`warm-floor`, `boot-evidence` or
   `borrowed-boot-evidence`), the peak containers its demand needs, and
-  `nextCheaper`: the nearest cheaper option a service level blocks, its saving
-  and the bounds that block it. A kept identity's `blockedBy` names the bounds
-  its kept placement is known to miss: its receipt's warm latencies, a measured
-  come-alive over the bound, or a cold warmth under a bound of `0`, which needs
-  no measurement.
+  `nextCheaper`: the nearest cheaper option a service level blocks, the bounds
+  that block it, and `saving`, the fall in the plan total found by planning
+  again from this plan with each of those bounds loosened to what the option
+  measured, rounded up to a whole second or millisecond and never below 1. The
+  loosened bounds may admit a cheaper option still, and the saving counts it.
+  The saving is 0 when the total would not fall, as for an identity whose lane
+  keeps its floor for its other residents. A kept identity's `blockedBy` names
+  the bounds its kept placement is known to miss: its receipt's warm
+  latencies, a measured come-alive over the bound, or a cold warmth under a
+  bound of `0`, which needs no measurement.
 - `lanes`: each lane's hourly cost, its monthly cost, its floor's monthly cost
   and the monthly cost of its `floorMax`, which a floor budget prices. A lane
   on a cell the price list cannot price carries `unpricedReason` and no cost,
