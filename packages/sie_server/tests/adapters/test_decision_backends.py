@@ -126,3 +126,25 @@ def test_decision_admission_is_atomic_per_item_and_preserves_order():
     assert output.data[1] == {}
     assert output.data[0]["q"]["noul"] == output.data[2]["q"]["noul"] == 0.75
     assert output.input_token_counts == [1, 0, 3]
+
+
+def test_knowline_nested_state_is_an_item_error_without_losing_healthy_neighbors():
+    adapter = scoring_adapter()
+    adapter._codes = ("A", "B")
+    adapter._tokenizer = SimpleNamespace(
+        all_special_tokens=(),
+        apply_chat_template=lambda turns, **_: "".join(str(turn["content"]) for turn in turns),
+        encode=lambda text, **_: list(map(ord, text)),
+    )
+    adapter._forward = lambda rows: [[0.25, 0.75] for _ in rows]
+    nested = "x"
+    for _ in range(200):
+        nested = [nested]
+    output = adapter.extract(
+        [Item(text="first"), Item(metadata={"state": nested}), Item(text="last")],
+        output_schema={"q": {"type": "noul"}},
+    )
+    assert output.errors[1].code == "INPUT_TOO_LONG"
+    assert output.errors[0] is output.errors[2] is None
+    assert output.data[1] == {}
+    assert output.data[0]["q"]["noul"] == output.data[2]["q"]["noul"] == 0.75
