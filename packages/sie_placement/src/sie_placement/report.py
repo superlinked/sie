@@ -325,28 +325,26 @@ class CapacityUse:
     lanes: tuple[str, ...]
     gpu_product: str | None = None
     held_elsewhere: int | None = None
+    peak_accelerators: int | None = None
 
     @property
     def exceeded(self) -> bool:
-        return self.accelerators > self.ceiling
+        return max(self.accelerators, self.peak_accelerators or 0) > self.ceiling
 
     def describe(self) -> str:
         lanes = ", ".join(self.lanes) or "no lane"
-        if self.scope is CapacityScope.TYPE:
-            return (
-                f"the envelope maxima of {lanes} hold {self.accelerators} {self.gpu_product} accelerators, "
-                f"above the type ceiling of {self.ceiling}"
-            )
         if self.scope is CapacityScope.SHARED_QUOTA:
             elsewhere = self.held_elsewhere or 0
             return (
                 f"the envelope maxima of {lanes} hold {self.accelerators - elsewhere} accelerators, "
                 f"which with {elsewhere} held elsewhere exceed the shared quota of {self.ceiling}"
             )
-        return (
-            f"the envelope maxima of {lanes} hold {self.accelerators} accelerators, "
-            f"above the total ceiling of {self.ceiling}"
-        )
+        accelerators = "accelerators" if self.gpu_product is None else f"{self.gpu_product} accelerators"
+        held = f"the envelope maxima of {lanes} hold {self.accelerators}"
+        if self.peak_accelerators is not None and self.peak_accelerators > self.ceiling:
+            held = f"the container ceilings of {lanes} hold {self.peak_accelerators}"
+        scope = "type" if self.scope is CapacityScope.TYPE else "total"
+        return f"{held} {accelerators}, above the {scope} ceiling of {self.ceiling}"
 
     def to_dict(self) -> dict[str, object]:
         return _compact(
@@ -355,6 +353,7 @@ class CapacityUse:
                 "gpuProduct": self.gpu_product,
                 "ceiling": self.ceiling,
                 "accelerators": self.accelerators,
+                "peakAccelerators": self.peak_accelerators,
                 "heldElsewhere": self.held_elsewhere,
                 "lanes": list(self.lanes),
                 "exceeded": self.exceeded,
