@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 from pathlib import Path
 from typing import Any, ClassVar
@@ -10,17 +11,20 @@ from typing import Any, ClassVar
 import torch
 
 from sie_server.adapters._checkpoint import resolve_checkpoint
+from sie_server.adapters._qwen3_5_packed import resolve_kernels
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ERR_NOT_LOADED, ComputePrecision
 from sie_server.adapters.decision import d3, qev
 from sie_server.adapters.decision.base import MAX_ITEM_TOKENS, DecisionBatchAdapter, Row
+from sie_server.adapters.decision.packed import PackedDecisionReadout
 from sie_server.adapters.decision.questions import Question
 from sie_server.adapters.errors import InputTooLongError
 from sie_server.adapters.pplx_decider.model import validate_tokenizer
 from sie_server.types.inputs import InvalidInputError, Item
 
 _ATTENTION = "sie_decision_prefix_bidir"
+logger = logging.getLogger(__name__)
 _FILES = (
     "config.json",
     "decision_config.json",
@@ -81,11 +85,15 @@ class QwenReadout(torch.nn.Module):
             weight.shape[1], weight.shape[0], bias=False, device=weight.device, dtype=weight.dtype
         )
         self.readout.weight = torch.nn.Parameter(weight, requires_grad=False)
+        self.packed: PackedDecisionReadout | None = None
+        self.pack_single = False
         self.requires_grad_(False).eval()
 
     def forward(self, ids: torch.Tensor, present: torch.Tensor, bounds: tuple[tuple[int, int], ...]) -> torch.Tensor:
         from transformers.masking_utils import create_recurrent_attention_mask  # ty: ignore[unresolved-import]
 
+        if self.packed is not None and (len(bounds) > 1 or self.pack_single):
+            return self.packed(ids, present, bounds)
         embeddings = self.backbone.embed_tokens(ids)
         scan = create_recurrent_attention_mask(
             config=self.backbone.config, inputs_embeds=embeddings, attention_mask=present
@@ -134,6 +142,7 @@ class QwenDecisionAdapter(DecisionBatchAdapter):
         max_seq_length: int = 8192,
         max_forward_tokens: int = 16384,
         compute_precision: ComputePrecision = "bfloat16",
+        packed: bool | None = None,
         revision: str | None = None,
         **kwargs: Any,
     ) -> None:
@@ -142,6 +151,8 @@ class QwenDecisionAdapter(DecisionBatchAdapter):
             raise ValueError("decision_format must be d3 or qev")
         if compute_precision not in {"bfloat16", "float32"}:
             raise ValueError("Qwen decisions require bfloat16 or float32")
+        if packed is not None and type(packed) is not bool:
+            raise ValueError("packed must be a boolean or None")
         if type(max_seq_length) is not int or not 1 <= max_seq_length <= 16384:
             raise ValueError("Qwen decision max_seq_length must be between 1 and 16384")
         if type(max_forward_tokens) is not int or not max_seq_length <= max_forward_tokens <= MAX_ITEM_TOKENS:
@@ -151,6 +162,7 @@ class QwenDecisionAdapter(DecisionBatchAdapter):
         self._decision_format = decision_format
         self._max_seq_length, self._max_forward_tokens = max_seq_length, max_forward_tokens
         self._model: QwenReadout | None = None
+        self._packed = packed
         self._tokenizer: Any = None
         self._device: str | None = None
         self._codes: tuple[str, ...] = ()
@@ -224,7 +236,25 @@ class QwenDecisionAdapter(DecisionBatchAdapter):
             bounds, temperatures = (), (1.0,)
         if weight.shape[1] != backbone.config.hidden_size or not torch.isfinite(weight).all():
             raise ValueError("Invalid decision readout shape or values")
-        self._model = QwenReadout(backbone, weight)
+        native = QwenReadout(backbone, weight)
+        self._model = native
+        kernels = (
+            resolve_kernels(device, mode=False if self._packed is False else None)
+            if device.startswith("cuda") and dtype == torch.bfloat16
+            else None
+        )
+        if kernels is not None:
+            try:
+                from flash_attn import flash_attn_varlen_func  # ty: ignore[unresolved-import]
+            except ImportError:
+                if self._packed:
+                    raise RuntimeError("Packed Qwen decisions require FlashAttention") from None
+                logger.info("FlashAttention unavailable; keeping native decision execution")
+            else:
+                native.packed = PackedDecisionReadout(backbone, native.readout, kernels, flash_attn_varlen_func)
+                native.pack_single = self._packed is True
+        elif self._packed:
+            raise ValueError("Packed Qwen decisions require CUDA bfloat16 and fused Qwen kernels")
         self._tokenizer, self._device, self._codes = tokenizer, device, codes
         self._temperature_bounds, self._temperatures = bounds, temperatures
 

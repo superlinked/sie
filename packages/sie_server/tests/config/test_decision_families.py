@@ -32,3 +32,10 @@ def test_decision_family_contract_and_bundle_routing(name, revision, bundle_name
     assert _is_decision_model(config)
     for bundle in (SERVER / "bundles").glob("*.yaml"):
         assert (name in match_bundle_models(bundle, SERVER / "models")) == (bundle.stem == bundle_name)
+
+
+def test_cuda13_decisions_reuse_the_bundle_in_a_separate_worker_pool():
+    bundle = SERVER / "bundles/sglang-cu130.yaml"
+    decisions = {name for name, _, runtime in MODELS if runtime == "sglang-cu130"}
+    assert set(match_bundle_models(bundle, SERVER / "models", pool_name="decision")) == decisions
+    assert not decisions.intersection(match_bundle_models(bundle, SERVER / "models", pool_name="default"))

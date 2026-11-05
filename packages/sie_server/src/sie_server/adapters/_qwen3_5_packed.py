@@ -1,4 +1,4 @@
-"""Packed (variable-length) execution for TopK-Embed-V1.
+"""Packed (variable-length) Qwen3.5 execution shared by embeddings and decisions.
 
 A batch runs as one sequence: the inputs are concatenated with no padding, and
 cumulative sequence lengths (``cu_seqlens``) keep them apart in every layer. This
@@ -158,7 +158,7 @@ def _fast_kernels() -> PackedKernels | None:
         from fla.modules.layernorm import rms_norm  # ty: ignore[unresolved-import]
         from fla.ops.gated_delta_rule import chunk_gated_delta_rule  # ty: ignore[unresolved-import]
     except Exception:  # noqa: BLE001 - fla missing or unusable (no Triton): not packing
-        logger.info("flash-linear-attention unavailable; TopK-Embed keeps the row-per-input path")
+        logger.info("flash-linear-attention unavailable; keeping the native Qwen row-per-input path")
         return None
 
     def delta_rule(
@@ -220,7 +220,7 @@ def _fast_kernels() -> PackedKernels | None:
 
         attention_name = "flash_attn varlen"
     except ImportError:
-        logger.info("flash_attn unavailable; TopK-Embed packs attention with per-sequence sdpa")
+        logger.info("flash_attn unavailable; packed Qwen attention uses per-sequence sdpa")
     return PackedKernels(
         delta_rule=delta_rule,
         causal_conv=causal_conv,

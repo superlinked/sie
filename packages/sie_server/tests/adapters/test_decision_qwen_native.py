@@ -5,10 +5,26 @@ import copy
 import pytest
 import torch
 from safetensors.torch import load_file, save_file
+from sie_server.adapters._qwen3_5_packed import reference_kernels
+from sie_server.adapters.decision.packed import PackedDecisionReadout
 from sie_server.adapters.decision.qwen import QwenReadout, _strict_load
 
 qwen = pytest.importorskip("transformers.models.qwen3_5.modeling_qwen3_5", reason="requires transformers5")
 configs = pytest.importorskip("transformers.models.qwen3_5.configuration_qwen3_5")
+
+
+def reference_varlen(query, key, value, cu_query, cu_key, max_query, max_key, *, softmax_scale, causal):
+    assert not causal
+    outputs = []
+    for i in range(len(cu_query) - 1):
+        q = query[cu_query[i] : cu_query[i + 1]].transpose(0, 1)[None]
+        k = key[cu_key[i] : cu_key[i + 1]].transpose(0, 1)[None]
+        v = value[cu_key[i] : cu_key[i + 1]].transpose(0, 1)[None]
+        assert q.shape[2] <= max_query
+        assert k.shape[2] <= max_key
+        out = torch.nn.functional.scaled_dot_product_attention(q, k, v, scale=softmax_scale, enable_gqa=True)
+        outputs.append(out[0].transpose(0, 1))
+    return torch.cat(outputs)
 
 
 def tiny():
@@ -63,6 +79,8 @@ def test_native_block_attention_preserves_recurrence_and_matches_dense_mask():
             ).last_hidden_state[:, -1]
             @ weight.T
         )
+        packed = PackedDecisionReadout(copy.deepcopy(reference), model.readout, reference_kernels(), reference_varlen)
+        torch.testing.assert_close(packed(ids, present, bounds), expected, atol=1e-5, rtol=1e-5)
         actual = model(ids, present, bounds)
         single = model(ids[:1, 2:], present[:1, 2:], ((0, 2),))
     torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)

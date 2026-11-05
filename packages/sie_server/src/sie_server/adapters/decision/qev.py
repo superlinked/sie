@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import string
 from typing import Any
 
 from sie_server.adapters.decision.base import check_token_budget
-from sie_server.adapters.decision.questions import Question
+from sie_server.adapters.decision.questions import MAX_QUESTION_CHARS, Question, content_text, describe
 
 SYSTEM = (
     "Apply the question to the state. Choose exactly one of the listed options. "
@@ -51,7 +50,7 @@ SLOTS = (
 def entry(value: Any) -> str:
     if value is None:
         return ""
-    return value.strip() if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
+    return value.strip() if isinstance(value, str) else describe(value, MAX_QUESTION_CHARS, indent=2)
 
 
 def suffix(question: Question) -> str:
@@ -92,12 +91,14 @@ def suffix(question: Question) -> str:
 def prompts(
     tokenizer: Any, state: Any, questions: tuple[Question, ...], *, max_seq_length: int = 16384
 ) -> list[tuple[list[int], int]]:
-    body = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False, indent=2)
+    body = content_text(tokenizer, describe(state, max_seq_length * 64, indent=2))
     prefix = f"<state>\n{body}\n</state>\n\n"
 
     def render(ending: str) -> str:
+        content = prefix + content_text(tokenizer, ending)
+        describe(content, max_seq_length * 64)
         return tokenizer.apply_chat_template(
-            [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prefix + ending}],
+            [{"role": "system", "content": SYSTEM}, {"role": "user", "content": content}],
             tokenize=False,
             add_generation_prompt=True,
             enable_thinking=False,
@@ -110,7 +111,7 @@ def prompts(
         total = check_token_budget(len(ids), total, max_seq_length)
         full.append(ids)
     text = render("QEV_PREFIX_MARK")
-    prefix_ids = tokenizer.encode(text[: text.index("QEV_PREFIX_MARK")], add_special_tokens=False)
+    prefix_ids = tokenizer.encode(text[: text.rindex("QEV_PREFIX_MARK")], add_special_tokens=False)
     size = len(prefix_ids)
     while size and any(ids[:size] != prefix_ids[:size] for ids in full):
         size -= 1

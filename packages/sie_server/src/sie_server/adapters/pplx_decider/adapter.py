@@ -113,12 +113,13 @@ class PerplexityDecisionAdapter(DecisionBatchAdapter):
         self._model, self._processor = model, processor
         self._tokenizer, self._device = processor.tokenizer, device
         self._codes = tuple(config["codes"])
+        specials = {str(token) for token in processor.tokenizer.all_special_tokens}
         if "joint" in config:
             marker = config["joint"]["marker"]
             self._marker = marker
             self._marker_id = processor.tokenizer.encode(marker, add_special_tokens=False)[0]
-            specials = {str(token) for token in processor.tokenizer.all_special_tokens} | {str(marker)}
-            self._escapes = tuple(sorted(specials, key=lambda token: (len(token), token), reverse=True))
+            specials.add(str(marker))
+        self._escapes = tuple(sorted(specials, key=lambda token: (len(token), token), reverse=True))
 
     def _state(self, item: Item) -> str:
         if item.images or item.audio is not None or item.video is not None or item.document is not None:
@@ -170,7 +171,7 @@ class PerplexityDecisionAdapter(DecisionBatchAdapter):
         # Prepare one row at a time: a request with many oversized questions
         # cannot materialize an unbounded, heavily padded tokenizer batch.
         for question in questions:
-            encoded = self._encode(messages(state, question, self._codes))
+            encoded = self._encode(messages(state, question, self._codes, self._escapes))
             length = self._checked(encoded).shape[1]
             tokens += length
             if length > self._max_seq_length or tokens > MAX_ITEM_TOKENS:

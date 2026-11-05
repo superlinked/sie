@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import string
 import uuid
+from collections.abc import Iterable
 from typing import Any
 
 from sie_server.adapters.decision.base import check_token_budget
-from sie_server.adapters.decision.questions import Question, parse_questions
+from sie_server.adapters.decision.questions import MAX_QUESTION_CHARS, Question, content_text, describe, parse_questions
+from sie_server.adapters.errors import InputTooLongError
 from sie_server.types.inputs import InvalidInputError
 
 INSTRUCTION = (
@@ -17,27 +19,45 @@ INSTRUCTION = (
 READ_AGAIN = "Read the same input again before answering:\n"
 
 
-def render_value(value: Any, indent: int = 0) -> str:
+def _join_lines(parts: Iterable[str], limit: int) -> str:
+    result = []
+    size = 0
+    for part in parts:
+        size += len(part) + bool(result)
+        if size > limit:
+            raise InputTooLongError("KnowLine rendered content exceeds the character budget")
+        result.append(part)
+    return "\n".join(result)
+
+
+def render_value(value: Any, indent: int = 0, *, limit: int = MAX_QUESTION_CHARS) -> str:
     pad = "  " * indent
     if isinstance(value, str):
-        return value if not indent else "\n".join(pad + line for line in (value.splitlines() or [""]))
+        return (
+            describe(value, limit)
+            if not indent
+            else _join_lines((pad + line for line in (value.splitlines() or [""])), limit)
+        )
     if isinstance(value, dict):
-        return "\n".join(
-            f"{pad}{key}:\n{render_value(item, indent + 1)}"
-            if isinstance(item, (dict, list)) or (isinstance(item, str) and "\n" in item)
-            else f"{pad}{key}: {item}"
-            for key, item in value.items()
+        return _join_lines(
+            (
+                f"{pad}{key}:\n{render_value(item, indent + 1, limit=limit)}"
+                if isinstance(item, (dict, list)) or (isinstance(item, str) and "\n" in item)
+                else f"{pad}{key}: {item}"
+                for key, item in value.items()
+            ),
+            limit,
         )
     if isinstance(value, list):
-        parts = [render_value(item, indent + 1) for item in value]
-        return "\n".join(f"{pad}-\n{body}" if "\n" in body else f"{pad}- {body.strip()}" for body in parts)
-    return f"{pad}{value}"
+        parts = (render_value(item, indent + 1, limit=limit) for item in value)
+        return _join_lines((f"{pad}-\n{body}" if "\n" in body else f"{pad}- {body.strip()}" for body in parts), limit)
+    return describe(f"{pad}{value}", limit)
 
 
-def state_messages(state: Any) -> list[dict[str, Any]]:
+def state_messages(state: Any, max_chars: int = MAX_QUESTION_CHARS) -> list[dict[str, Any]]:
     messages = state["messages"] if isinstance(state, dict) and set(state) == {"messages"} else state
     if not (isinstance(messages, list) and messages and all(isinstance(m, dict) and "role" in m for m in messages)):
-        return [{"role": "user", "content": render_value(state)}]
+        return [{"role": "user", "content": render_value(state, limit=max_chars)}]
     result = []
     for message in messages:
         content = message.get("content")
@@ -64,9 +84,11 @@ def _join(left: Any, right: Any) -> Any:
     return f"{left}\n\n{right}"
 
 
-def _scaffold(tokenizer: Any, state: Any, twice: bool) -> tuple[str, str | None, str]:
+def _scaffold(
+    tokenizer: Any, state: Any, twice: bool, max_chars: int = MAX_QUESTION_CHARS
+) -> tuple[str, str | None, str]:
     first, second = uuid.uuid4().hex, uuid.uuid4().hex
-    messages = state_messages(state)
+    messages = state_messages(state, max_chars)
 
     def conversation(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
         initial = [*turns, {"role": "user", "content": INSTRUCTION + "\n\n" + first}]
@@ -86,11 +108,22 @@ def _scaffold(tokenizer: Any, state: Any, twice: bool) -> tuple[str, str | None,
         return initial + again
 
     def render(turns: list[dict[str, Any]]) -> str:
-        return tokenizer.apply_chat_template(turns, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+        safe = []
+        for turn in turns:
+            content = turn.get("content")
+            if isinstance(content, str):
+                content = content_text(tokenizer, content)
+            elif isinstance(content, list):
+                content = [{**part, "text": content_text(tokenizer, part["text"])} for part in content]
+            safe.append({**turn, "content": content})
+        text = tokenizer.apply_chat_template(safe, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+        return describe(text, max_chars)
 
     turns = conversation(messages)
     try:
         text = render(turns)
+    except InputTooLongError:
+        raise
     except Exception:  # noqa: BLE001
         merged: list[dict[str, Any]] = []
         for turn in turns:
@@ -102,8 +135,10 @@ def _scaffold(tokenizer: Any, state: Any, twice: bool) -> tuple[str, str | None,
             merged = [*turns[:-2], {**turns[-2], "content": _join(turns[-2]["content"], turns[-1]["content"])}]
         try:
             text = render(merged)
+        except InputTooLongError:
+            raise
         except Exception:  # noqa: BLE001
-            text = render(conversation([{"role": "user", "content": render_value(state)}]))
+            text = render(conversation([{"role": "user", "content": render_value(state, limit=max_chars)}]))
     if text.count(first) != 1 or (twice and text.count(second) != 1):
         raise ValueError("KnowLine template lost or duplicated the question slot")
     prefix, remaining = text.split(first)
@@ -164,14 +199,16 @@ def prompts(
     structured_noul: bool,
     max_seq_length: int = 16384,
 ) -> list[list[int]]:
-    prefix, _, ending = _scaffold(tokenizer, state, False)
-    blocks = [question_block(question, codes, structured_noul) for question in questions]
+    max_chars = max_seq_length * 64
+    prefix, _, ending = _scaffold(tokenizer, state, False, max_chars)
+    blocks = [content_text(tokenizer, question_block(question, codes, structured_noul)) for question in questions]
 
     def encode(prefix: str, middle: str | None, ending: str) -> list[list[int]]:
         rows = []
         total = 0
         for block in blocks:
             text = prefix + block + ((middle + block) if middle is not None else "") + ending + "Answer:"
+            describe(text, max_chars)
             ids = tokenizer.encode(text, add_special_tokens=False)
             total = check_token_budget(len(ids), total, max_seq_length)
             rows.append(ids)
@@ -182,5 +219,5 @@ def prompts(
     once_tokens = prefix_size + sum(len(row) - prefix_size for row in rows)
     if once_tokens > 3000:
         return rows
-    prefix, middle, ending = _scaffold(tokenizer, state, True)
+    prefix, middle, ending = _scaffold(tokenizer, state, True, max_chars)
     return encode(prefix, middle, ending)

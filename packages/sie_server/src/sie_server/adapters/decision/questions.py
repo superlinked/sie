@@ -17,7 +17,7 @@ MAX_TOTAL_OPTIONS = 1024
 MAX_QUESTION_CHARS = 65_536
 
 
-def describe(value: Any, limit: int) -> str:
+def describe(value: Any, limit: int, *, indent: int | None = None) -> str:
     """Render the reference's JSON representation, rejecting oversized/invalid input."""
     if isinstance(value, str):
         if len(value) > limit:
@@ -28,7 +28,7 @@ def describe(value: Any, limit: int) -> str:
     pieces: list[str] = []
     length = 0
     try:
-        for piece in json.JSONEncoder(ensure_ascii=False, allow_nan=False).iterencode(value):
+        for piece in json.JSONEncoder(ensure_ascii=False, allow_nan=False, indent=indent).iterencode(value):
             length += len(piece)
             if length > limit:
                 raise InputTooLongError("Decision input exceeds the character budget; no input was truncated")
@@ -38,6 +38,19 @@ def describe(value: Any, limit: int) -> str:
     except (TypeError, ValueError, RecursionError) as exc:
         raise InvalidInputError("Decision content must be finite, acyclic JSON") from exc
     return "".join(pieces)
+
+
+def neutralize(text: str, escapes: Sequence[str]) -> str:
+    """Render literal special tokens without creating marker or template token IDs."""
+    for token in escapes:
+        text = text.replace(token, token.replace("<", "\uff1c").replace(">", "\uff1e"))
+    return text
+
+
+def content_text(tokenizer: Any, text: str) -> str:
+    escapes: list[str] = [str(token) for token in tokenizer.all_special_tokens]
+    escapes.sort(key=len, reverse=True)
+    return neutralize(text, escapes)
 
 
 @dataclass(frozen=True)

@@ -39,6 +39,8 @@ class SGLangDecisionAdapter(DecisionBatchAdapter):
         compute_precision: ComputePrecision = "bfloat16",
         revision: str | None = None,
         request_timeout_s: float = 120.0,
+        mem_fraction_static: float | None = None,
+        extra_launch_args: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
         if type(max_seq_length) is not int or not 1 <= max_seq_length <= 16384:
@@ -67,6 +69,8 @@ class SGLangDecisionAdapter(DecisionBatchAdapter):
             revision=revision,
             trust_remote_code=False,
             grammar_backend=None,
+            mem_fraction_static=mem_fraction_static,
+            extra_launch_args=extra_launch_args,
             **kwargs,
         )
         self._tokenizer: Any = None
