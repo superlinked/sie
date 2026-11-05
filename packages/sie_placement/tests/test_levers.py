@@ -125,7 +125,7 @@ def shared_lane(*identities):
         lanes=(
             PlanLane(
                 name="shared",
-                queue_pool="default",
+                queue_pool="shared",
                 bundle="default",
                 cell=L4,
                 container_shape=SHAPE,

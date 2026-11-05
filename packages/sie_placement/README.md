@@ -99,6 +99,16 @@ refers to its lane by that name. Two plan lanes may carry the same three
 tokens, and so name one chart lane, which cannot give them separate envelopes
 or concurrency; the planner's report lists every such chart lane.
 
+The planner gives each lane that pins at least one identity a named queue pool
+of its own, since the chart carries a lane's pinned set on a static queue pool
+and the default queue pool carries no pins. A lane the current plan already
+puts on a named queue pool keeps it, so planning again leaves the pool as it
+is. Otherwise the pool is derived from the lane's `name`: the name itself, cut
+to 63 characters with a digest of the name appended when it is longer or when
+another lane of the plan, `default`, or the parameters' `queue_pool` already
+has it. A lane on which every identity is lazy-resident or cold is on the
+parameters' `queue_pool`. Identities that share a lane share its queue pool.
+
 `fallbackCells` is an optional ordered candidate list: cells, after `cell`,
 that the lane's containers may be placed on when `cell` cannot be placed. No
 fallback cell repeats `cell` or another fallback cell. A realized card is
@@ -220,7 +230,7 @@ choice, such as its own previous plan, reports no change.
 | `buffer_containers` | The declared warm buffer above a lane's floor, `0` by default |
 | `hold_budget_s` | The longest a request for a cold lane is held for it before it is refused, `0` by default. An identity whose `comeAliveP95S` is at most this is served by holding its requests, and avoids unreliable GPU products |
 | `hours_per_month` | The hours a monthly figure covers, `730` by default |
-| `queue_pool`, `bundle`, `bundles` | Every lane's queue pool, and each identity's bundle: its `bundles` entry, otherwise `bundle` |
+| `queue_pool`, `bundle`, `bundles` | The queue pool of every lane that pins no identity, and each identity's bundle: its `bundles` entry, otherwise `bundle` |
 | `unshared` | Identities that never share a lane: none is packed or made a lazy resident beside another identity, and no other identity joins a lane one of them is on. Empty by default |
 
 ### Selection
@@ -256,8 +266,7 @@ document:
    `comeAliveP95S` of `0` admits `pinned` only.
 4. A cell also offers `lazy-resident` on each host lane with its cell,
    container shape and concurrency. A host lane is a lane of the current plan
-   with a `floorMin` of at least 1, on the parameters' queue pool and the
-   identity's bundle, on which another identity whose `comeAliveP95S` is `0`
+   with a `floorMin` of at least 1, on the identity's bundle, on which another identity whose `comeAliveP95S` is `0`
    stays pinned in this run, on its current placement or kept there. Those
    identities are placed first: a bound of `0` admits no cold or lazy option,
    so no other choice moves them. The identity's own current lane is also a
@@ -288,8 +297,8 @@ document:
 
 The current placement is the identity's current lane when that lane has the
 option's cell and fallback cells, container shape and concurrency, the
-identity's warmth is the option's, and the lane's `queuePool` and `bundle` are
-the ones the parameters give the identity; a `lazy-resident` option must also be
+identity's warmth is the option's, and the lane's `bundle` is the one the
+parameters give the identity; a `lazy-resident` option must also be
 hosted by that lane, and a `pinned` option on a lane where other identities are
 pinned must stand on a co-residency receipt beside them. A current placement
 that no option matches lacks evidence: a receipt at its lane's cell, container
@@ -337,7 +346,7 @@ plan total does not fall.
 4. Packing. The planner visits every placed identity that is alone on its lane
    and is neither a generation nor an `unshared` identity, in decreasing order
    of its lane's floor cost, ties broken by identity. For each it tries the
-   other lanes of the plan on its queue pool and bundle that keep a floor and
+   other lanes of the plan on its bundle that keep a floor and
    host a pinned identity, where it has a receipt at the lane's cell, container
    shape and concurrency: first the lanes on which an identity whose
    `comeAliveP95S` is `0` is pinned, since nothing moves that identity, then in
