@@ -70,7 +70,7 @@
         "concurrency": 16,
         "warmth": "snapshot-cold",
         "monthlyCost": 569.4,
-        "saving": 189.8,
+        "saving": 0.0,
         "comeAliveS": 8.5,
         "comeAliveBasis": "boot-evidence",
         "blockedBy": [

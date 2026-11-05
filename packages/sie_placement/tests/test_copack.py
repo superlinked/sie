@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -229,6 +230,25 @@ def loosened(service_levels: ServiceLevels, identity: str, bound: int) -> Servic
         service_levels,
         identities=tuple(
             replace(entry, level=replace(entry.level, come_alive_p95_s=bound)) if entry.identity == identity else entry
+            for entry in service_levels.identities
+        ),
+    )
+
+
+LEVEL_FIELDS = {
+    "comeAliveP95S": "come_alive_p95_s",
+    "warmP99Ms": "warm_p99_ms",
+    "ttftP99Ms": "ttft_p99_ms",
+    "itlP99Ms": "itl_p99_ms",
+}
+
+
+def relaxed(service_levels: ServiceLevels, identity: str, blockers) -> ServiceLevels:
+    fields = {LEVEL_FIELDS[blocker.field]: max(1, math.ceil(blocker.measured)) for blocker in blockers}
+    return replace(
+        service_levels,
+        identities=tuple(
+            replace(entry, level=replace(entry.level, **fields)) if entry.identity == identity else entry
             for entry in service_levels.identities
         ),
     )
@@ -1005,6 +1025,27 @@ def test_an_estate_lever_is_listed_only_when_loosening_its_bound_lowers_the_plan
         again = plan(**{**inputs, "service_levels": service_levels, "current_plan": result.plan})
         assert again.report.identity("BAAI/bge-m3").chosen.warmth in (Warmth.COLD_WITH_BOUND, Warmth.SNAPSHOT_COLD)
         assert again.report.monthly_cost > report.monthly_cost
+    dense = report.identity("BAAI/bge-m3").next_cheaper
+    assert dense is None if co_residency else dense.saving == 0
+
+
+@pytest.mark.parametrize(
+    ("co_residency", "offered"),
+    [
+        (False, ["BAAI/bge-m3", "Qwen/Qwen3-8B", "Qwen/Qwen3-Embedding-4B"]),
+        (True, ["Qwen/Qwen3-8B"]),
+    ],
+)
+def test_an_estate_next_cheaper_saving_is_what_planning_again_with_its_bounds_loosened_saves(co_residency, offered):
+    inputs = estate(co_residency)
+    result = plan(**inputs)
+    entries = [entry for entry in result.report.identities if entry.next_cheaper is not None]
+    assert [entry.identity for entry in entries] == offered
+    for entry in entries:
+        service_levels = relaxed(inputs["service_levels"], entry.identity, entry.next_cheaper.blocked_by)
+        again = plan(**{**inputs, "service_levels": service_levels, "current_plan": result.plan})
+        fall = result.report.monthly_cost - again.report.monthly_cost
+        assert entry.next_cheaper.saving == pytest.approx(max(0.0, fall), abs=0.01)
 
 
 def random_estate(seed: int) -> dict:
@@ -1145,6 +1186,15 @@ def test_random_estates_co_pack_only_measured_sets_and_replan_to_themselves(seed
         assert result.report.monthly_cost - replanned.report.monthly_cost == pytest.approx(
             lever.saving_at_permitted_bound
         )
+    for entry in result.report.identities:
+        if entry.next_cheaper is None:
+            continue
+        looser = relaxed(service_levels, entry.identity, entry.next_cheaper.blocked_by)
+        replanned = run(
+            looser, receipts, co, boots=boots, hourly=hourly, gpu_memory_headroom_mib=headroom, current=result.plan
+        )
+        fall = result.report.monthly_cost - replanned.report.monthly_cost
+        assert entry.next_cheaper.saving == pytest.approx(max(0.0, fall), abs=0.01)
     again = run(
         service_levels, receipts, co, boots=boots, hourly=hourly, gpu_memory_headroom_mib=headroom, current=result.plan
     )

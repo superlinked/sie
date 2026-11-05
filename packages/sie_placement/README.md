@@ -275,18 +275,24 @@ The report renders as a `placement-report` document:
   what its demand costs there with the lane's floor, the chosen cell, warmth,
   monthly cost and come-alive with its basis (`warm-floor`, `boot-evidence` or
   `borrowed-boot-evidence`), the peak containers its demand needs, and
-  `nextCheaper`: the nearest cheaper option a service level blocks, its saving
-  and the bounds that block it. The peak is counted at the throughput its lane
-  prices it at. A co-packed identity's lane is the lane it joined, its
-  `chosen` option the one selection gave it, and `joined` the placement it
-  runs in: that lane's cell, container shape and concurrency, `pinned` with a
-  `warm-floor` come-alive, at the lane's co-residency receipt. An identity's
-  `nextCheaper` and measurement requests are measured against what the plan
-  pays for it: its chosen cost less the savings of the co-packing moves whose
-  co-residency receipt names it, since those moves need it on its lane.
-  A kept identity's `blockedBy` names the bounds its kept placement is known
-  to miss: its receipt's warm latencies, a measured come-alive over the bound,
-  or a cold warmth under a bound of `0`, which needs no measurement.
+  `nextCheaper`: the nearest cheaper option a service level blocks, the bounds
+  that block it, and `saving`, the fall in the plan total found by planning
+  again from this plan with each of those bounds loosened to what the option
+  measured, rounded up to a whole second or millisecond and never below 1. The
+  loosened bounds may admit a cheaper option still, and the saving counts it.
+  The saving is 0 when the total would not fall, as for an identity whose lane
+  keeps its floor for its other residents. The peak is counted at the
+  throughput its lane prices it at. A co-packed identity's lane is the lane it
+  joined, its `chosen` option the one selection gave it, and `joined` the
+  placement it runs in: that lane's cell, container shape and concurrency,
+  `pinned` with a `warm-floor` come-alive, at the lane's co-residency receipt.
+  An identity's `nextCheaper` is the nearest blocked option that costs less
+  than what the plan pays for the identity, and its measurement requests are
+  bounded by that amount: its chosen cost less the savings of the co-packing
+  moves whose co-residency receipt names it, since those moves need it on its
+  lane. A kept identity's `blockedBy` names the bounds its kept placement is
+  known to miss: its receipt's warm latencies, a measured come-alive over the
+  bound, or a cold warmth under a bound of `0`, which needs no measurement.
 - `lanes`: each lane's hourly cost, its monthly cost, its floor's monthly cost
   and the monthly cost of its `floorMax`, which a floor budget prices. A lane
   on a cell the price list cannot price carries `unpricedReason` and no cost,
