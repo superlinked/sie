@@ -57,6 +57,8 @@ _PARALLEL_TOOL_CALLS_VIOLATED = "parallel_tool_calls_violated"
 #   - ``qwen_xml``    — Qwen3(-Coder): ``<function=NAME><parameter=K>V</parameter>…</function>``
 #   - ``hermes_json`` — Hermes: ``{"name": "...", "arguments": {...}}``
 #   - ``glm_xml``     — GLM: ``NAME<arg_key>K</arg_key><arg_value>V</arg_value>…``
+#   - ``muse_atem``   — Muse Glimmer: its adapter rewrites ``atem:invoke`` blocks
+#                       into the ``qwen_xml`` form; only forcing sees the original.
 #   - ``auto``        — runtime heuristic (XML if the block starts with
 #                       ``<function=``, else JSON). Kept as a fallback for
 #                       callers that cannot resolve the model's configured
@@ -64,7 +66,7 @@ _PARALLEL_TOOL_CALLS_VIOLATED = "parallel_tool_calls_violated"
 #                       model config (``tasks.generate`` → adapter
 #                       ``tool_call_parser``) so production traffic uses an
 #                       explicit format rather than guessing per block.
-ToolCallFormat = Literal["auto", "qwen_xml", "hermes_json", "glm_xml"]
+ToolCallFormat = Literal["auto", "qwen_xml", "hermes_json", "glm_xml", "muse_atem"]
 
 # A model that emits ``<tool_call>`` and never closes it would let
 # ``tool_buffer`` grow without bound (same for free-form prose with no
@@ -813,7 +815,7 @@ def _tool_call_deltas(
     # Qwen3.5's chat template emits format (2); other models emit (1).
     # ``tool_call_format`` makes the choice explicit (config-driven);
     # ``"auto"`` falls back to the original "starts-with-<function=" heuristic.
-    if tool_call_format == "qwen_xml":
+    if tool_call_format in ("qwen_xml", "muse_atem"):
         name, arguments = _parse_xml_tool_call(raw, schemas)
     elif tool_call_format == "hermes_json":
         name, arguments = _parse_hermes_tool_call(raw)
@@ -857,12 +859,13 @@ def _parse_hermes_tool_call(raw: str) -> tuple[object, object]:
 
 
 _XML_FUNC_RE = re.compile(r"<function=([^>\s]+)\s*>")
-# Matches only a parameter *opener* — ``<parameter=name>`` — with a bounded
-# character class, so it cannot backtrack. The value and closing
-# ``</parameter>`` are located with a linear ``str.find`` below rather than a
-# ``(.*?)...</parameter>`` group, which on a 256 KiB buffer of garbled output
-# (many openers, no closers) is O(n²) and runs INLINE on the event loop.
-_XML_PARAM_OPEN_RE = re.compile(r"<parameter=([^>\s]+)\s*>")
+# Matches only a parameter *opener* — ``<parameter=name>``. A name may contain
+# spaces, as JSON Schema allows. Its character classes stop at the next ``<`` or
+# ``>``, so an opener that never closes cannot rescan the rest of the buffer. The
+# value and closing ``</parameter>`` are located with a linear ``str.find`` below
+# rather than a ``(.*?)...</parameter>`` group, which on a 256 KiB buffer of garbled
+# output (many openers, no closers) is O(n²) and runs INLINE on the event loop.
+_XML_PARAM_OPEN_RE = re.compile(r"<parameter=([^<>]*[^<>\s])\s*>")
 _XML_PARAM_CLOSE = "</parameter>"
 # Hard cap on parameters parsed from one XML tool call. Defends against an
 # adversarial buffer packed with openers; well-formed calls have a handful.
