@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import io
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock
 
 import pytest
 import torch
+from PIL import Image
 from sie_server.core.prepared import LightOnOCRPayload, PreparedItem
 from sie_server.types.inputs import InvalidMediaError, Item
 
@@ -128,26 +131,64 @@ class TestLightOnOCRAdapter:
         with pytest.raises(InvalidMediaError, match="exactly one image"):
             adapter.extract([Item(images=images)])
 
-    def test_build_messages_default(self, adapter: LightOnOCRAdapter) -> None:
-        """Default messages have system and user roles with image."""
-        messages = adapter._build_messages(instruction=None)
+    @pytest.mark.parametrize("system_prompt", [None, "", "Custom OCR policy"])
+    @pytest.mark.parametrize("instruction", [None, "", "Extract tables only"])
+    def test_prompt_builders_and_preparation(self, system_prompt: str | None, instruction: str | None) -> None:
+        """Direct and prepared extraction preserve only explicitly supplied prompts."""
+        from sie_server.adapters.lighton_ocr.adapter import LightOnOCRAdapter
+        from sie_server.core.preprocessor.vision import LightOnOCRPreprocessor
 
-        assert len(messages) == 2
-        assert messages[0]["role"] == "system"
-        assert messages[0]["content"] == "You are an OCR engine. Return the markdown representation of the document."
-        assert messages[1]["role"] == "user"
-        assert messages[1]["content"] == [{"type": "image"}]
+        adapter = LightOnOCRAdapter("lightonai/LightOnOCR-2-1B", system_prompt=system_prompt)
+        processor = MagicMock()
+        processor.apply_chat_template.return_value = "rendered prompt"
+        processor.return_value = {
+            "pixel_values": torch.ones(1, 3, 2, 2),
+            "input_ids": torch.ones(1, 2, dtype=torch.long),
+            "attention_mask": torch.ones(1, 2, dtype=torch.long),
+            "image_sizes": torch.tensor([[2, 2]]),
+        }
+        adapter._processor = processor
+        adapter._create_preprocessor()
+        standalone = LightOnOCRPreprocessor(processor, "lightonai/LightOnOCR-2-1B", system_prompt=system_prompt)
 
-    def test_build_messages_with_instruction(self, adapter: LightOnOCRAdapter) -> None:
-        """Instruction appends text content to user message."""
-        messages = adapter._build_messages(instruction="Extract tables only")
+        content = [{"type": "image"}]
+        if instruction:
+            content.append({"type": "text", "text": instruction})
+        expected = []
+        if system_prompt:
+            expected.append({"role": "system", "content": system_prompt})
+        expected.append({"role": "user", "content": content})
+        assert adapter._build_messages(instruction) == expected
+        assert standalone._build_messages(instruction) == expected
+        assert adapter._preprocessor._build_messages(instruction) == expected
 
-        assert len(messages) == 2
-        assert messages[1]["role"] == "user"
-        content = messages[1]["content"]
-        assert len(content) == 2
-        assert content[0] == {"type": "image"}
-        assert content[1] == {"type": "text", "text": "Extract tables only"}
+        image = io.BytesIO()
+        Image.new("RGB", (2, 2), "white").save(image, format="PNG")
+        items = [Item(images=[{"data": image.getvalue(), "format": "png"}])]
+        prepared = adapter._preprocessor.prepare(
+            items,
+            config=MagicMock(),
+            instruction=instruction,
+        )
+        assert len(prepared.items) == 1
+        processor.apply_chat_template.assert_called_once_with(expected, add_generation_prompt=True, tokenize=False)
+        assert processor.call_args.kwargs["text"] == "rendered prompt"
+
+        processor.reset_mock()
+        processor.decode.return_value = "Document text"
+        adapter._model = _FakeModel()
+        adapter._device = "cpu"
+        adapter.extract(items, instruction=instruction)
+        processor.apply_chat_template.assert_called_once_with(expected, add_generation_prompt=True, tokenize=False)
+        assert processor.call_args.kwargs["text"] == "rendered prompt"
+
+    def test_default_builders_are_image_only(self, adapter: LightOnOCRAdapter) -> None:
+        from sie_server.core.preprocessor.vision import LightOnOCRPreprocessor
+
+        preprocessor = LightOnOCRPreprocessor(MagicMock(), "lightonai/LightOnOCR-2-1B")
+        expected = [{"role": "user", "content": [{"type": "image"}]}]
+        assert adapter._build_messages() == expected
+        assert preprocessor._build_messages() == expected
 
     def test_convert_output(self, adapter: LightOnOCRAdapter) -> None:
         """Markdown text is wrapped in Entity with label 'markdown'."""
