@@ -4,12 +4,16 @@ import asyncio
 import importlib.util
 import json
 import sys
+from contextlib import nullcontext
+from copy import deepcopy
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from PIL import Image
+from sie_cognee.decision import Decision
+from sie_cognee.retrieval import RankedChunk, SourceChunk
 
 from common import ROOT, Demo, endpoint_for, load_demo
 
@@ -100,6 +104,21 @@ def test_distillation_requires_actual_documents() -> None:
     assert result["documents"] == [document]
     with pytest.raises(ValueError, match="lesson texts"):
         learn.distillation_summary({"status": "completed", "documents": [123]})
+    with pytest.raises(ValueError, match="lesson texts"):
+        learn.distillation_summary({"status": "completed", "documents": [""]})
+
+
+def test_lesson_matching_requires_complete_text() -> None:
+    learn = script("04_learn.py")
+    lesson = "# Session learning\n\nA workshop requires confirmed access."
+    chunks = [
+        SourceChunk("heading-only", "# Session learning"),
+        SourceChunk("different-lesson", "# Session learning\n\nCheck the microphone."),
+        SourceChunk("matching-lesson", "# Session learning\nA workshop requires confirmed access."),
+    ]
+    assert learn.exact_lesson_matches([lesson], chunks) == [
+        {"accepted_document_index": 0, "chunk_id": "matching-lesson"}
+    ]
 
 
 @pytest.mark.parametrize("status", ["completed", "no_gated_entries"])
@@ -118,11 +137,11 @@ def test_learning_invokes_distillation_and_queries_fresh_session(
     search.SearchType = SimpleNamespace(HYBRID_COMPLETION="hybrid")  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "cognee.api.v1.search", search)
     monkeypatch.setattr(learn, "initialize", lambda *args, **kwargs: cognee)
-    decisions = AsyncMock(return_value={"choice": "review", "probabilities": {"review": 1.0}})
-    monkeypatch.setattr(learn, "run_decision", decisions)
+    retrieval = AsyncMock(return_value=[SourceChunk("lesson-chunk", document) for document in documents])
+    monkeypatch.setattr(learn, "retrieve_chunks", retrieval)
     monkeypatch.setattr(sys, "argv", ["04_learn.py"])
     demo = Demo(
-        {}, {"distill_batches": 1}, {"query": "old input", "new_query": "new input"}, {}, "test", tmp_path, tmp_path
+        {}, {"distill_batches": 1, "retrieve_top_k": 5}, {}, {}, "test", tmp_path, tmp_path, {"query": "new input"}
     )
     asyncio.run(learn.main(demo))
     session_ids = json.loads((tmp_path / "session-ids.json").read_text())
@@ -130,5 +149,56 @@ def test_learning_invokes_distillation_and_queries_fresh_session(
     cognee.session.distill_session.assert_awaited_once_with(session_ids["teaching"], demo.dataset, max_batches=1)
     assert cognee.recall.await_args_list[-1].kwargs["session_id"] == session_ids["fresh"]
     assert cognee.recall.await_args_list[-1].args[0] == "new input"
-    assert [call.args[1] for call in decisions.await_args_list] == ["old input", "new input"]
+    retrieval.assert_awaited_once_with("new input", dataset=demo.dataset, top_k=5)
     assert json.loads((tmp_path / "actual-distillation.json").read_text())["documents"] == documents
+    assert bool(json.loads((tmp_path / "learning-evidence.json").read_text())["exact_text_matches"]) == bool(documents)
+
+
+@pytest.mark.parametrize("evidence", ["present", "missing", "oversized"])
+def test_focused_decision_config_is_independent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, evidence: str) -> None:
+    import common
+
+    async def direct(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(common.asyncio, "to_thread", direct)
+    chunk = SourceChunk("test-source", "An authored stand-in policy requires an access check.")
+    monkeypatch.setattr(common, "retrieve_chunks", AsyncMock(return_value=[] if evidence == "missing" else [chunk]))
+    rerank = Mock(return_value=[RankedChunk(chunk, 0.8)])
+    decision = Mock(return_value=Decision("confirmed", {"confirmed": 0.8, "not_required": 0.1, "unknown": 0.1}))
+    monkeypatch.setattr(common, "rerank_chunks", rerank)
+    monkeypatch.setattr(common, "decide", decision)
+    monkeypatch.setattr(Demo, "native", lambda *args: nullcontext(object()))
+    default = {"choices": {"confirmed": "passed", "failed": "failed", "unknown": "no result"}}
+    original = deepcopy(default)
+    learning = {
+        "instructions": "Does the policy require access confirmation?",
+        "choices": {"confirmed": "required", "not_required": "explicitly unnecessary", "unknown": "unstated"},
+        "rerank_top_k": 1,
+    }
+    demo = Demo(
+        {"rerank": "test-reranker", "decision": "test-decision"},
+        {
+            "retrieve_top_k": 5,
+            "rerank_top_k": 3,
+            "evidence_chars": 1 if evidence == "oversized" else 500,
+            "provision_timeout_seconds": 1,
+        },
+        default,
+        {},
+        "test",
+        tmp_path,
+        tmp_path,
+    )
+    outcome = asyncio.run(common.run_decision(demo, "policy question", decision_config=learning))
+    assert demo.decision == original
+    if evidence == "present":
+        assert outcome["choice"] == "confirmed"
+        assert decision.call_args.kwargs["choices"] == learning["choices"]
+        assert decision.call_args.kwargs["instructions"] == learning["instructions"]
+    else:
+        assert outcome["choice"] == "unknown"
+        assert outcome["probabilities"] is None
+        decision.assert_not_called()
+    if evidence != "missing":
+        assert rerank.call_args.kwargs["top_k"] == 1

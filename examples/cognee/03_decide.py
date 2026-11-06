@@ -1,4 +1,4 @@
-"""Retrieve source chunks, rerank, show the bounded packet and typed recommendation."""
+"""Retrieve source chunks, rerank, and answer a focused question with typed probabilities."""
 
 import argparse
 

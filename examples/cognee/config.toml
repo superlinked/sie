@@ -8,7 +8,7 @@ decision = "fastino/GLiNER2.5-Decide"
 
 [limits]
 retrieve_top_k = 5
-rerank_top_k = 3
+rerank_top_k = 1
 # Character budget is a conservative client guard, not an exact token count.
 # The server still enforces overflow_policy=error for its combined context.
 evidence_chars = 1000
@@ -22,10 +22,14 @@ pdf_scale = 1.5
 distill_batches = 1
 
 [decision]
-instructions = "Recommend an illustrative workshop action from the supplied evidence and applicable readiness policy. Use review if a required check is absent or contradictory. A model score is not proof."
-query = "May the workshop on 2026-11-14 proceed under the readiness policy?"
-new_query = "May a new workshop on 2026-11-21 proceed? Its projector and microphone passed, but step-free access is unconfirmed. Apply the readiness policy."
+instructions = "Has the projector passed its image check?"
+query = "Has the projector passed its image check?"
+rerank_top_k = 1
 
 [decision.choices]
-proceed = "All checks required by the applicable policy are explicitly confirmed."
-review = "At least one required check is missing, uncertain or contradictory."
+confirmed = "The projector passed its image check."
+failed = "The projector failed its image check."
+unknown = "No projector test result is given."
+
+[learning]
+query = "For a new workshop whose projector and microphone work, must I still confirm step-free access?"

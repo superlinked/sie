@@ -4,7 +4,9 @@ import argparse
 from typing import Any
 from uuid import uuid4
 
-from common import ROOT, Demo, initialize, json_value, launch, run_decision, seed_memory
+from sie_cognee.retrieval import SourceChunk, retrieve_chunks
+
+from common import ROOT, Demo, initialize, json_value, launch, seed_memory
 
 
 def distillation_summary(result: Any) -> dict[str, Any]:
@@ -12,13 +14,25 @@ def distillation_summary(result: Any) -> dict[str, Any]:
     if not isinstance(payload, dict) or not isinstance(payload.get("status"), str):
         raise ValueError("Unexpected Cognee distillation response.")
     documents = payload.get("documents")
-    if not isinstance(documents, list) or any(not isinstance(document, str) for document in documents):
+    if not isinstance(documents, list) or any(
+        not isinstance(document, str) or not document.strip() for document in documents
+    ):
         raise ValueError("Distillation documents must be actual lesson texts.")
     return {
         **payload,
         "accepted_document_count": len(documents),
         "persisted_lessons": payload["status"] == "completed" and bool(documents),
     }
+
+
+def exact_lesson_matches(documents: list[str], chunks: list[SourceChunk]) -> list[dict[str, Any]]:
+    """Match complete accepted texts, ignoring whitespace; headings alone prove nothing."""
+    return [
+        {"accepted_document_index": index, "chunk_id": chunk.chunk_id}
+        for index, document in enumerate(documents)
+        for chunk in chunks
+        if " ".join(document.split()) == " ".join(chunk.text.split())
+    ]
 
 
 async def main(demo: Demo) -> None:
@@ -30,7 +44,6 @@ async def main(demo: Demo) -> None:
 
     if args.seed:
         await seed_memory(demo, cognee)
-    baseline = await run_decision(demo, demo.decision["query"], prefix="before")
     teaching_session = f"{demo.namespace}-teaching-{uuid4().hex[:10]}"
     fresh_session = f"{demo.namespace}-new-{uuid4().hex[:10]}"
     correction = (ROOT / "data/correction.txt").read_text()
@@ -64,9 +77,9 @@ async def main(demo: Demo) -> None:
     demo.show("actual-distillation", summary)
     if not summary["persisted_lessons"]:
         print("No accepted lesson documents were persisted. The fresh-session check will still run.", flush=True)
-    new_query = demo.decision["new_query"]
-    # Fresh session has never seen the correction. This generated answer is shown,
-    # but only the separately retrieved document chunks enter the decision model.
+    new_query = demo.learning["query"]
+    # This session has never received the correction. Show its generated answer
+    # separately from source chunks, then match accepted lesson text against them.
     fresh_response = await cognee.recall(
         new_query,
         query_type=SearchType.HYBRID_COMPLETION,
@@ -76,17 +89,22 @@ async def main(demo: Demo) -> None:
     )
     demo.show("fresh-session-answer-MODEL-GENERATED", fresh_response)
     demo.show("fresh-session", await cognee.session.get_session(session_id=fresh_session))
-    after = await run_decision(demo, new_query, prefix="after")
+    chunks = await retrieve_chunks(new_query, dataset=demo.dataset, top_k=demo.limits["retrieve_top_k"])
+    demo.show("fresh-session-retrieved-documents", chunks)
+    matches = exact_lesson_matches(summary["documents"], chunks)
     demo.show(
-        "comparison",
+        "learning-evidence",
         {
-            "before": baseline,
-            "after": after,
-            "choice_changed": baseline["choice"] != after["choice"],
+            "distillation_status": summary["status"],
             "accepted_document_count": summary["accepted_document_count"],
-            "note": "Different input and session; this is an inspectable transfer experiment, not a causal evaluation.",
+            "exact_text_matches": matches,
+            "note": "Matches identify complete model-generated lesson texts, not independently verified policy facts.",
         },
     )
+    if summary["persisted_lessons"] and not matches:
+        print(
+            "No complete accepted lesson matched the retrieved chunks; inspect the documents before claiming transfer."
+        )
 
 
 if __name__ == "__main__":

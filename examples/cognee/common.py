@@ -6,8 +6,8 @@ import json
 import os
 import re
 import tomllib
-from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass, is_dataclass
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
@@ -70,6 +70,7 @@ class Demo:
     namespace: str
     storage: Path
     run: Path
+    learning: dict[str, Any] = field(default_factory=dict)
 
     @property
     def dataset(self) -> str:
@@ -104,8 +105,8 @@ def load_demo(experiment: str) -> Demo:
     for name, value in config["limits"].items():
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
             raise ValueError(f"limits.{name} must be positive.")
-    if config["decision"]["query"] == config["decision"]["new_query"]:
-        raise ValueError("The learning demonstration requires a distinct new_query.")
+    if not config["learning"]["query"].strip():
+        raise ValueError("The learning demonstration requires a nonempty query for the new session.")
     storage = ROOT / ".state" / namespace
     storage.mkdir(parents=True, exist_ok=True)
     identity = {key: config["models"][key] for key in ("embedding", "embedding_dimensions")}
@@ -119,7 +120,9 @@ def load_demo(experiment: str) -> Demo:
     endpoints = {
         role: endpoint_for(role, dict(os.environ)) for role in ("llm", "embedding", "ocr", "rerank", "decision")
     }
-    demo = Demo(config["models"], config["limits"], config["decision"], endpoints, namespace, storage, run)
+    demo = Demo(
+        config["models"], config["limits"], config["decision"], endpoints, namespace, storage, run, config["learning"]
+    )
     demo.show(
         "configuration",
         {
@@ -160,18 +163,26 @@ def decision_chunks(chunks: list[SourceChunk]) -> list[SourceChunk]:
     return [
         SourceChunk(
             chunk_id=f"E{index}",
-            text=("[model-generated lesson] " if "# Session learning (session " in chunk.text else "") + chunk.text,
+            text=chunk.text,
             metadata={**chunk.metadata, "original_chunk_id": chunk.chunk_id},
         )
         for index, chunk in enumerate(chunks, start=1)
     ]
 
 
-async def run_decision(demo: Demo, query: str, *, prefix: str = "decision") -> dict[str, Any]:
+async def run_decision(
+    demo: Demo,
+    query: str,
+    *,
+    prefix: str = "decision",
+    decision_config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    question = demo.decision if decision_config is None else decision_config
+    abstention = "unknown" if "unknown" in question["choices"] else "review"
     chunks = await retrieve_chunks(query, dataset=demo.dataset, top_k=demo.limits["retrieve_top_k"])
     demo.show(f"{prefix}-source-candidates", chunks)
     if not chunks:
-        outcome = {"status": "no_evidence", "choice": "review", "probabilities": None}
+        outcome = {"status": "no_evidence", "choice": abstention, "probabilities": None}
         demo.show(f"{prefix}-outcome", outcome)
         return outcome
     with demo.native("rerank") as client:
@@ -181,7 +192,7 @@ async def run_decision(demo: Demo, query: str, *, prefix: str = "decision") -> d
             query,
             chunks,
             model=demo.models["rerank"],
-            top_k=demo.limits["rerank_top_k"],
+            top_k=question.get("rerank_top_k", demo.limits["rerank_top_k"]),
             provision_timeout_s=demo.limits["provision_timeout_seconds"],
         )
     demo.show(f"{prefix}-reranked", ranked)
@@ -190,7 +201,7 @@ async def run_decision(demo: Demo, query: str, *, prefix: str = "decision") -> d
     try:
         packet = evidence_packet(query, selected, max_chars=demo.limits["evidence_chars"])
     except EvidenceOverflowError:
-        outcome = {"status": "evidence_overflow", "choice": "review", "probabilities": None}
+        outcome = {"status": "evidence_overflow", "choice": abstention, "probabilities": None}
         demo.show(f"{prefix}-outcome", outcome)
         print("Evidence exceeds the budget. Reduce top-k or choose a larger-context model; nothing was truncated.")
         return outcome
@@ -201,8 +212,8 @@ async def run_decision(demo: Demo, query: str, *, prefix: str = "decision") -> d
             client,
             packet,
             model=demo.models["decision"],
-            choices=demo.decision["choices"],
-            instructions=demo.decision["instructions"],
+            choices=question["choices"],
+            instructions=question["instructions"],
             max_chars=demo.limits["evidence_chars"],
             provision_timeout_s=demo.limits["provision_timeout_seconds"],
         )

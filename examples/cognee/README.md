@@ -1,42 +1,44 @@
-# Memory that you can inspect: four SIE + Cognee experiments
+# Build with memory: SIE + Cognee
 
-A workshop organizer has three small records: a readiness policy, a projector
-check and a microphone check. A scanned note adds an unresolved access check.
-Can we remember the records, read the note, make a bounded recommendation and
-carry an explicit policy correction into a new conversation?
+Four small Python experiments to remember facts, read a document, make a typed
+decision and carry learned guidance into a new conversation. Each exposes its
+inputs and intermediate results so you can adapt one building block at a time.
 
-These are four technical experiments for a ten-minute presentation. They are
-composable Python scripts, not an autonomous organizer. All records are
-[synthetic, CC0 1.0](data/README.md); recommendations never trigger actions.
+The shared example is a workshop notebook: a readiness policy, equipment
+checks, a scanned access note and an authored policy correction. All fixtures
+are [synthetic and CC0](data/README.md). Recommendations never trigger actions.
 
-**SIE** runs specialized models through one API using SIE Local, SIE Cluster
-or SIE Serverless: LLMs, embeddings, OCR, rerankers and decision models.
-**Cognee** turns documents and interactions into persistent, retrievable memory.
-Here Cognee 1.6.7 stores its databases on your machine and calls SIE for inference.
+**SIE** provides specialized models through one API using SIE Local, SIE Cluster
+or SIE Serverless. **Cognee** organizes documents and interactions into
+persistent memory. Cognee stores this example's memory on your machine; SIE
+supplies its LLM, embeddings, OCR, reranking and decision inference.
 
 ```mermaid
 flowchart LR
   subgraph Machine[Your machine]
-    P[Four Python experiments] --> C[Cognee: source chunks, graph and sessions]
-    C --> D[(Isolated local storage)]
+    P[Python experiments] --> C[Cognee]
+    C --> D[(Documents, graph and sessions)]
   end
-  C -->|LLM and embeddings| S[SIE inference endpoint]
-  P -->|OCR, reranking and decisions| S
-  S --> L[SIE Local or SIE Cluster]
+  C -->|LLM + embeddings| S[SIE API]
+  P -->|OCR + reranking + decisions| S
+  S --> L[SIE Local / SIE Cluster]
   S --> H[SIE Serverless]
 ```
 
-Storage location and inference location are separate choices. With Serverless,
-document text, images, queries and retrieved evidence are sent to the configured
-remote inference endpoints. A local database alone does not provide local
-inference or confidential cloud execution. For local-only inference, every role
-below needs a locally served model.
+Storage and inference location are separate choices. Serverless receives the
+text, images and evidence used for inference. To keep inference local, serve
+every role locally; a local memory database alone does not do that.
 
-## Run from the source checkout
+Cognee owns the memory calls: its supported LiteLLM backend sends structured
+generation requests to SIE's OpenAI-compatible endpoint, and its compatible
+embedding adapter handles embeddings. LiteLLM is the transport Cognee already
+uses, so the integration configures that backend instead of inventing a new
+Cognee provider. OCR, reranking and typed decisions call SIE directly through
+the native `SIEClient`.
 
-This starter uses the checked-out integration and SDK; it does not assume that
-`sie-cognee` is already published. Clone this repository at a revision containing
-`integrations/sie_cognee`, then, with Python 3.12 and `uv` installed:
+## Run it
+
+Use Python 3.12 and `uv`, from a checkout of this repository:
 
 ```sh
 cd examples/cognee
@@ -44,10 +46,12 @@ uv sync --locked
 cp .env.example .env
 ```
 
-Create an API key in the [Superlinked console](https://console.superlinked.com).
-Check the console for available starter credits and request access/approval if
-required; this example does not promise a credit amount or automatic approval.
-Set these values in the ignored `.env` file:
+The lock installs Cognee 1.6.7 and the integration/SDK from their relative paths
+in this checkout. It works before the integration is published to PyPI.
+
+Get an API key from the [Superlinked console](https://console.superlinked.com).
+Check starter-credit availability and any required access approval before your
+workshop. Put the key in the ignored `.env` file:
 
 ```dotenv
 SIE_BASE_URL=https://api.superlinked.com
@@ -55,280 +59,202 @@ SIE_API_KEY=<your-key>
 WORKSHOP_NAMESPACE=workshop-v1
 ```
 
-`config.toml` holds models, dimensions, top-k, input budgets, timeouts and decision
-criteria. Environment variables hold endpoint addresses and keys. Each role can
-have its own endpoint and key, as shown in `.env.example`. A role inherits the
-general key only when its endpoint has the same origin. The compatible LLM and
-embedding routes append `/v1` once; native OCR, rerank and decision endpoints use
-the SIE base URL. Keys are never included in example artifacts.
-
-Optional `SIE_LLM_MODEL`, `SIE_EMBEDDING_MODEL`, `SIE_OCR_MODEL`,
-`SIE_RERANK_MODEL` and `SIE_DECISION_MODEL` override the model table.
-`SIE_EMBEDDING_DIMENSIONS` overrides dimensions. For example, to test a stronger
-hosted LLM in a fresh learning experiment:
-
 ```sh
-SIE_LLM_MODEL=Qwen/Qwen3.8-27B-FP8 WORKSHOP_NAMESPACE=learning-27b uv run 04_learn.py --seed
-```
-
-This is a model comparison to run, not a claim that its lessons will pass.
-
-| Role | Default | Purpose |
-| --- | --- | --- |
-| Structured LLM | `Qwen/Qwen3.5-4B` | Cognee extraction, answers and session distillation |
-| Embeddings | `BAAI/bge-m3`, 1024 dimensions | Store and retrieve text chunks |
-| OCR | `lightonai/LightOnOCR-2-1B` | Turn a page image into literal text |
-| Reranking | `Qwen/Qwen3-Reranker-0.6B` | Reorder retrieved chunks for the question |
-| Decision | `fastino/GLiNER2.5-Decide` | Choose `proceed` or `review` with probabilities |
-
-Cold models can take minutes to provision. Rehearse each command before a talk.
-The native calls have a 180-second provisioning budget, requests have a
-90-second per-attempt budget, and each experiment has a 600-second asynchronous
-budget. Cognee can perform several LLM calls; cancellation and in-flight native
-threads can take additional time to unwind. A timeout records a failure, never
-a guessed result. Adjust budgets deliberately in `config.toml`.
-
-## 1. Remember facts, then inspect what was remembered
-
-```sh
-uv run 01_memory.py
 uv run 01_memory.py --graph
+uv run 02_read_documents.py
+uv run 03_decide.py
+WORKSHOP_NAMESPACE=learning-v1 uv run 04_learn.py --seed
 ```
 
-The first script uses `cognee.remember(..., self_improvement=False)` for three
-short, authored sources: `POLICY-01`, `CHECK-01` and `CHECK-02`. It uses explicit
-`SearchType.CHUNKS` retrieval to show actual document text, chunk IDs and
-metadata. `--graph` additionally prints the assembled, model-derived context
-under a separate label. It is not used as decision evidence.
+Each command prints its configuration and saves JSON under
+`runs/<namespace>/<timestamp>-<experiment>/`. Rehearse before presenting: cold
+provisioning and distillation can take minutes. Configurable budgets are 180
+seconds for native provisioning, 90 seconds per native request attempt and 600
+seconds per experiment. In-flight work may take longer to unwind on cancellation.
 
-**Look at:** `source-chunks.json`, then the separately labeled graph artifact.
-Source text and graph assertions need not agree. An exploratory remote run with
-the smaller LLM turned a source saying only “Saturday” into a graph assertion
-with an invented June 2024 date. The supplied fixtures use explicit dates, but
-that does not establish extraction correctness. Inspect every generated claim.
+## 1. Remember and retrieve
 
-**Extend it:** add a second dated policy and make policy version selection
-explicit before retrieving evidence.
+[`01_memory.py`](01_memory.py) ingests three explicit sources through
+`cognee.remember(..., self_improvement=False)`, then retrieves their text with
+`SearchType.CHUNKS`.
 
-## 2. Read a document without losing its page
+```python
+document = SourceDocument(text=text, source_id="CHECK-01", filename="projector-check.txt")
+await cognee.remember(document.to_data_item(), dataset_name=dataset, self_improvement=False)
+chunks = await retrieve_chunks(question, dataset=dataset, top_k=5)
+```
+
+Inspect `source-chunks.json` for text, chunk IDs and metadata. `--graph` adds
+separately labeled, model-derived graph context. Retrieved document text is the
+evidence used by the decision step.
+
+**Build on it:** replace the records with versioned policies and checks, then
+filter sources by the applicable date.
+
+## 2. Read a document
+
+[`02_read_documents.py`](02_read_documents.py) sends the synthetic access note
+through SIE OCR and ingests the returned text with page provenance.
 
 ```sh
 uv run 02_read_documents.py
-# Or provide a small image/PDF that you are authorized to send to your endpoint:
 uv run 02_read_documents.py path/to/note.pdf
 ```
 
 ```mermaid
 flowchart LR
-  A[Image or PDF] --> B[Bounded page rendering]
-  B --> C[SIE OCR]
-  C --> D[Actual text + filename + page + hash]
-  D --> E[Cognee literal-text ingestion]
+  A[Image / PDF pages] --> B[SIE OCR]
+  B --> C[Text + source ID + page + hash]
+  C --> D[Cognee literal-text ingestion]
 ```
 
-The committed PNG renders `data/access-note.txt`: step-free access is **not yet
-confirmed**. The text file is authored input, not an OCR recording. You can
-regenerate the image with `uv run make_document.py`; rendering does not use a
-model. PDF pages are rasterized locally and sent separately. Size, page count
-and pixel limits fail explicitly rather than silently dropping pages.
+Inspect `page-1-actual-ocr.json` beside [the image](data/access-note.png), then
+`page-1-provenance.json`. The note says step-free access is not yet confirmed.
+Its [text fixture](data/access-note.txt) is authored input, not a recorded OCR
+reply. Regenerate the image with `uv run make_document.py`.
 
-**Look at:** each `page-N-actual-ocr.json` and `page-N-provenance.json`. OCR text
-is ingested as literal text, so a filename or URL in the result cannot trigger
-file reads or URL ingestion. Provenance contains the basename, page, stable
-source ID and content hash. OCR text is model output and still needs checking
-against its page. This script can run independently in an empty namespace.
+PDF pages are rendered locally and sent separately, with file, page and pixel
+limits. Literal ingestion means filenames or URLs in OCR output cannot trigger
+new file reads or URL ingestion. This script also runs in an empty namespace.
 
-**Extend it:** keep a review queue for uncertain OCR lines and retain page crops
-alongside reviewed transcriptions.
+**Build on it:** add transcription review and retain page crops with reviewed text.
 
-## 3. Retrieve, rerank, then recommend
+## 3. Retrieve, rerank and decide
 
-```sh
-uv run 03_decide.py
-# Independent rehearsal: ingest the initial records first.
-WORKSHOP_NAMESPACE=decision-rehearsal uv run 03_decide.py --seed
-```
+[`03_decide.py`](03_decide.py) retrieves document chunks, reranks them through
+SIE and sends its top source to a typed decision model. Its focused question is
+“Has the projector passed its image check?” with `confirmed`, `failed` and
+`unknown` choices.
 
 ```mermaid
 flowchart LR
-  Q[Workshop question] --> R[Cognee source chunks]
+  Q[Focused question] --> R[Cognee source chunks]
   R --> K[SIE reranker]
-  K --> P[Print bounded evidence packet]
-  P --> D[SIE typed decision]
-  D --> A[proceed or review + probabilities]
-  P -->|Too large or empty| H[review with no model probabilities]
+  K --> P[Bounded evidence packet]
+  P --> D[SIE typed choice + probabilities]
 ```
 
-Run experiment 01 first, or use `--seed`. Experiment 02 adds another candidate
-document but is optional. The script shows every retrieved candidate, reranking
-score and selected chunk. Short `E1`, `E2` aliases map back to the original IDs
-in `decision-evidence-map.json`. `decision-exact-packet.json` is exactly the
-text sent to the decision model; criteria remain visible in `config.toml`.
-
-The initial policy requires projector and microphone checks. This is deliberately
-incomplete: equipment readiness does not establish that everyone can attend.
-The next experiment supplies an authored correction. Inspect which policy and
-checks actually reach the model; top-k retrieval can omit required evidence.
-
-The default decision model has a **512-token combined context**. The character
-guard is not an exact tokenizer estimate and excludes schema overhead. The
-request uses `overflow_policy=error`; server overflow remains an error. Oversized
-client evidence returns an explicit `review` without model probabilities.
-Nothing truncates source text. Reduce top-k or use a model with a suitable
-context window if the packet does not fit.
-
-**Look at:** candidates → ranks → packet → probabilities. Probabilities express
-model preference, not correctness or calibrated confidence. `review` is an
-explicit choice; no output authorizes a real workshop to proceed.
-
-**Extend it:** require coverage of each policy requirement before allowing a
-recommendation to reach a human reviewer.
-
-## 4. Correct, distill, and ask in a new session
+Run experiment 01 first, or seed this building block independently:
 
 ```sh
-# Fresh namespace avoids lessons from an earlier rehearsal.
-WORKSHOP_NAMESPACE=learning-rehearsal uv run 04_learn.py --seed
+WORKSHOP_NAMESPACE=decision-demo uv run 03_decide.py --seed
+```
+
+Inspect candidates → reranking scores → `decision-exact-packet.json` → outcome.
+The evidence map connects short `E1`, `E2` aliases to original chunk IDs.
+Questions and criteria live in `config.toml`.
+
+With the supplied records, look for `CHECK-01` as the selected source and
+`confirmed` as the projector-check outcome. Probability values can vary.
+
+The default decision model has a 512-token combined context. A character guard
+bounds the packet; `overflow_policy=error` preserves the server's exact token
+limit. Oversized or absent evidence returns `unknown` without invented
+probabilities. Text is never silently truncated. Probabilities describe model
+preference and do not establish correctness.
+
+**Build on it:** ask focused questions about each check, then compose their
+typed results with a plain Python rule, such as continuing only when every
+required check is `confirmed`.
+
+## 4. Learn guidance for a new conversation
+
+[`04_learn.py`](04_learn.py) records an authored correction in a teaching
+session, invokes Cognee's public session distillation and queries a fresh
+session about a different workshop. To rehearse independently:
+
+```sh
+WORKSHOP_NAMESPACE=learning-v1 uv run 04_learn.py --seed
 ```
 
 ```mermaid
 flowchart LR
-  A[Initial decision] --> B[Authored correction in teaching session]
-  B --> C[Inspect session and usable context]
-  C --> D[Cognee public distill_session]
-  D --> E[Actual status and accepted lesson documents]
-  E --> F[Fresh session + new workshop input]
-  F --> G[Retrieve documents and rerun decision]
+  A[Authored correction] --> B[Teaching session]
+  B --> C[Cognee distill_session]
+  C --> D[Accepted lesson documents]
+  D --> E[New input in a fresh session]
+  E --> F[Retrieve persisted lesson text]
 ```
 
-The authored correction says every workshop also requires confirmed step-free
-access. It enters a named teaching session through `recall`, with
-`AUTO_FEEDBACK=true`, `CACHING=true` and sequential session processing configured
-before Cognee imports. The script inspects that session and its usable context,
-then calls the public `cognee.session.distill_session`. It does not equate a
-friendly generated acknowledgment or an `add_feedback` call with learning.
+The correction adds confirmed step-free access to the readiness policy.
+Inspect `authored-correction.json`, the teaching session,
+`actual-distillation.json` and the fresh-session artifacts. Distillation returns
+its actual status and accepted lesson texts; only `completed` with documents
+counts as persisted learning.
 
-`actual-distillation.json` contains the returned status and the actual accepted
-lesson texts. `no_gated_entries`, `no_new_entries`, `no_proposed_lessons` and
-`no_accepted_lessons` are meaningful outcomes. Only `completed` with documents
-is counted as persisted learning. The public session-context view shows usable
-entries; the distillation status is authoritative about its own gating and
-acceptance. An exception stops the experiment with a failure artifact.
+The fresh session asks whether a new workshop with working equipment still
+needs access confirmation. Set this question in `[learning]` in `config.toml`.
+Use fresh memory so an earlier OCR note or lesson does not supply the answer
+before teaching. The new session ID has never received the correction.
 
-The next question concerns a different workshop on **2026-11-21**, with working
-equipment and unconfirmed access. It uses a new session ID that never received
-the correction. The generated fresh-session answer is displayed separately;
-the decision still retrieves document chunks. A persisted session lesson is
-model-generated policy text, visibly headed `Session learning`, and must be
-checked against `authored-correction.json`. It is not independent evidence that
-an access check passed. No lesson, an omitted lesson, or an unchanged decision
-is reported as such. Because the input changes, this is a transfer experiment,
-not a causal evaluation of improvement.
+Inspect `fresh-session-retrieved-documents.json` and `learning-evidence.json`:
+the latter matches complete accepted lesson text to retrieved chunks, ignoring
+whitespace. A heading alone does not establish that a document is the accepted
+lesson. Generated answers remain separate, and retrieved model-generated lessons
+still need checking against the authored correction. Empty results stay visible.
 
-**Look at:** teaching session → usable context → actual distillation documents
-→ fresh session → after-decision evidence → comparison. Distillation can make
-many remote calls and can exceed the demo time budget; an accepted answer is
-not a saved lesson.
+With these inputs, the verified run stored one lesson, retrieved its complete
+text and answered in the fresh session: “Yes, you must still confirm step-free
+access.”
 
-**Extend it:** require human approval of a proposed lesson and test it on new
-authored cases before treating it as policy.
+**Build on it:** require human approval of learned guidance, then feed selected
+guidance into the typed decision building block from experiment 03.
 
-## A ten-minute presentation
+## Change models or inference location
 
-| Time | Show | Point to make |
-| --- | --- | --- |
-| 0–1 min | Deployment diagram and config | Memory location and inference location are independent |
-| 1–3 min | Experiment 01 source and graph artifacts | Persistent memory can contain both evidence and generated claims |
-| 3–5 min | Experiment 02 image, OCR and page metadata | Inspect the transformation before trusting the result |
-| 5–7 min | Experiment 03 candidates, ranks, packet and probabilities | Specialized models compose; budgets and review are explicit |
-| 7–9 min | Experiment 04 session, returned status and lesson documents | Learning must survive a new session, and can fail |
-| 9–10 min | Extensions and endpoint table | Participants can change one role or one policy at a time |
+| Role | Default model |
+| --- | --- |
+| Structured LLM | `Qwen/Qwen3.5-4B` |
+| Embeddings | `BAAI/bge-m3`, 1024 dimensions |
+| OCR | `lightonai/LightOnOCR-2-1B` |
+| Reranking | `Qwen/Qwen3-Reranker-0.6B` |
+| Decision | `fastino/GLiNER2.5-Decide` |
 
-Run the experiments in advance and keep their locally generated artifacts open.
-Rehearsal output is not committed, and a presentation should identify it as a
-prior live run. Cold provisioning or distillation can exceed a ten-minute slot.
-
-## SIE Local and SIE Cluster
-
-These commands follow the repository's [server setup](../../README.md#quickstart)
-and [model catalog](../../packages/sie_server/models). They have **not** been
-executed for this starter. Development used a CPU-only machine with about
-30 GiB RAM, while inference ran remotely using SIE Serverless. Do not assume
-every role fits or runs acceptably on that machine or an arbitrary laptop.
-
-On Linux CPU, start the default bundle for supported embedding/reranking models:
+`config.toml` holds models, criteria, retrieval sizes and budgets. Optional
+`SIE_<ROLE>_MODEL` variables override `LLM`, `EMBEDDING`, `OCR`, `RERANK` or
+`DECISION`; `SIE_EMBEDDING_DIMENSIONS` overrides dimensions. For example:
 
 ```sh
-docker run -p 127.0.0.1:8080:8080 \
-  -v sie-hf-cache:/app/.cache/huggingface \
-  ghcr.io/superlinked/sie-server:latest-cpu-default
+SIE_LLM_MODEL=Qwen/Qwen3.8-27B-FP8 WORKSHOP_NAMESPACE=another-llm uv run 01_memory.py
 ```
 
-On Apple Silicon, embedding/reranking and MLX generation use separate Python
-environments and ports because their dependencies differ:
+[`.env.example`](.env.example) shows separate URLs and keys for each role.
+Compatible LLM/embedding endpoints append `/v1` once. A role inherits the
+general API key only when its endpoint shares the general endpoint's origin.
+
+For **SIE Local or SIE Cluster**, follow [LOCAL.md](LOCAL.md): Linux CPU
+embedding/reranking, Apple Silicon MLX generation, GPU bundles and endpoint
+settings. Check model support and memory capacity on your presenting hardware.
+
+## Present it in ten minutes
+
+| Minutes | Show |
+| --- | --- |
+| 0–1 | Deployment diagram: memory and inference boundaries |
+| 1–3 | Source chunks and optional graph context |
+| 3–5 | Page image, OCR text and provenance |
+| 5–7 | Candidates, ranks, exact packet and typed result |
+| 7–9 | Teaching session, accepted documents and fresh-session retrieval |
+| 9–10 | Change one model, source or rule and discuss an extension |
+
+Keep rehearsal artifacts open if cold starts would exceed the slot. Label them
+as a prior live run; model responses are not bundled with this starter.
+
+## State and offline checks
+
+Each namespace owns `.state/<namespace>/cognee` and dataset `sie-<namespace>`.
+Use a new namespace when changing embeddings or starting a clean learning
+exercise. Do not run two scripts against one namespace simultaneously.
+
+Inspect or remove only this example's rehearsal data from this folder, after
+stopping scripts that use it:
 
 ```sh
-uvx --from 'sie-server[local]' sie-server serve -p 8080
-# Separate terminal/environment; the catalog supplies the MLX model mapping.
-uvx --with 'mlx-lm>=0.30.7' --from sie-server sie-server serve -b sglang -p 8081
+find .state/learning-v1 runs/learning-v1 -maxdepth 2 -type f
+rm -rf -- .state/learning-v1 runs/learning-v1
 ```
 
-MLX generation requires Apple Silicon and sufficient unified memory. Verify the
-selected model's structured JSON support before attempting Cognee ingestion.
-This path covers memory LLM/embeddings; it does not establish local OCR or
-decision-model availability. On Linux NVIDIA GPU, use a separate bundle for each
-incompatible runtime, following the root README's Docker commands:
-
-| Role | GPU bundle/image suffix | Example port |
-| --- | --- | --- |
-| Embeddings and reranking | `latest-cuda12-default` | 8080 |
-| Structured generation | `latest-cuda12-sglang` | 8081 |
-| Default OCR profile | `latest-cuda12-sglang-vision-extract` | 8082 |
-| GLiNER2.5-Decide | `latest-cuda12-transformers5` | 8083 |
-
-Expose the corresponding container port with, for example,
-`-p 127.0.0.1:8082:8080`. Several models on one GPU may not fit at once. Rehearse
-with the actual hardware, or use SIE Cluster to route to suitable workers.
-Do not substitute the default CPU bundle for the generation or OCR bundle.
-
-After serving the chosen roles locally, use this endpoint mapping and remove
-the Serverless key from that shell/`.env`:
-
-```dotenv
-SIE_BASE_URL=http://localhost:8080
-SIE_API_KEY=
-SIE_EMBEDDING_BASE_URL=http://localhost:8080
-SIE_RERANK_BASE_URL=http://localhost:8080
-SIE_LLM_BASE_URL=http://localhost:8081
-SIE_OCR_BASE_URL=http://localhost:8082
-SIE_DECISION_BASE_URL=http://localhost:8083
-WORKSHOP_NAMESPACE=local-workshop-v1
-```
-
-Unauthenticated loopback compatible clients receive a harmless placeholder key;
-authenticated endpoints need their actual role-specific keys. For SIE Cluster,
-set the base URL to its gateway and explicitly supply keys as appropriate.
-Mixing local and remote roles is supported and must be described as mixed
-inference, not fully local execution.
-
-## State, inspection and checks
-
-Each namespace owns `.state/<namespace>/cognee` and a `sie-<namespace>` dataset.
-Run artifacts live in `runs/<namespace>/<timestamp>-<experiment>/`. The helper
-configures isolated SQLite, Ladybug and LanceDB paths. It never clears a user's
-global Cognee state. Do not run two scripts against the same namespace at once.
-Change namespace before changing embedding model/dimensions; a mismatch is
-rejected. Repeated learning runs in one namespace can change future results.
-
-Inspect or delete only the example-owned rehearsal state, from this folder:
-
-```sh
-find .state/learning-rehearsal runs/learning-rehearsal -maxdepth 2 -type f
-# Stop all scripts using this namespace before deleting it.
-rm -rf -- .state/learning-rehearsal runs/learning-rehearsal
-```
-
-The offline checks use small hand-authored stand-ins, not recorded model replies:
+Offline checks use hand-authored stand-ins and make no inference calls:
 
 ```sh
 uv run pytest -q
@@ -336,15 +262,3 @@ uv run ruff check . --select E,F,I,UP,B
 uv run ruff format --check .
 uv run ty check common.py 01_memory.py 02_read_documents.py 03_decide.py 04_learn.py make_document.py
 ```
-
-Remote exploratory checks on 2026-11-06 confirmed compatible Cognee memory with
-Qwen3.5-4B and BGE-M3, native Qwen3 reranking, LightOnOCR page text, and a native
-GLiNER2.5-Decide choice response. The decision model initially exceeded a
-320-second provisioning wait before a later call succeeded. These isolated
-checks do not claim that every numbered experiment or learning outcome passed;
-inspect the actual artifacts from your own run. In an exploratory learning run,
-Qwen3.5-4B recognized the correction but returned an invalid distillation field
-(`member_entry_ids: null`), so no lesson was persisted. A subsequent
-Qwen3.8-27B-FP8 distillation attempt on that session returned
-`no_proposed_lessons`. Neither result proves successful learning. No local model
-inference was used in development.

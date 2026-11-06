@@ -35,7 +35,7 @@ dependencies = [
     { name = "frozenlist" },
     { name = "multidict" },
     { name = "propcache" },
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version == '3.12.*' or sys_platform != 'darwin'" },
     { name = "yarl" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/6c/4c/bdccd81e9ee225b69c60e7766c9a5b05364f118f4d383713b89a682d772d/aiohttp-3.14.5.tar.gz", hash = "sha256:5558a7f5a05af9ecf744af91e5baefc436f93c9333e656c27ec253f9a6bbe178", size = 8078052 }
@@ -76,7 +76,7 @@ version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "frozenlist" },
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version == '3.12.*' or sys_platform != 'darwin'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/61/62/06741b579156360248d1ec624842ad0edf697050bbaf7c3e46394e106ad1/aiosignal-1.4.0.tar.gz", hash = "sha256:f47eecd9468083c2029cc99945502cb7708b082c232f9aca65da147157b251c7", size = 25007 }
 wheels = [
@@ -130,7 +130,7 @@ version = "4.16.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "idna" },
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version == '3.12.*' or sys_platform != 'darwin'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a1/98/7e457a3b014976887a050561955c0b76e1e7e2d6e27b78ecef2ef80518f2/anyio-4.16.0.tar.gz", hash = "sha256:59bb03251907983d1603d27c3087ddb1e93299ea2163adcdba37899a4fb12ffb", size = 310971 }
 wheels = [
@@ -163,7 +163,7 @@ name = "argon2-cffi-bindings"
 version = "26.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi" },
+    { name = "cffi", marker = "python_full_version == '3.12.*' or sys_platform != 'darwin'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/0b/43/bb8b6e8708d49a5ab36781333af092d9f483b198a2710d01281204640055/argon2_cffi_bindings-26.1.0.tar.gz", hash = "sha256:63505c71542a44b68b1e38060450fb006404170da375feb31af153e7f9c6205d", size = 1790807 }
 wheels = [
@@ -515,12 +515,12 @@ version = "0.90.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "argcomplete" },
-    { name = "black", marker = "sys_platform != 'emscripten'" },
+    { name = "black", marker = "(python_full_version == '3.12.*' and sys_platform == 'darwin') or (sys_platform != 'darwin' and sys_platform != 'emscripten')" },
     { name = "genson" },
     { name = "inflect" },
     { name = "isort", marker = "sys_platform != 'emscripten'" },
     { name = "jinja2" },
-    { name = "pydantic" },
+    { name = "pydantic", marker = "python_full_version == '3.12.*' or sys_platform != 'darwin'" },
     { name = "pyyaml" },
     { name = "typing-extensions" },
 ]
@@ -598,7 +598,7 @@ dependencies = [
     { name = "tomlkit" },
     { name = "typing-extensions" },
     { name = "tzdata" },
-    { name = "win-precise-time", marker = "(os_name == 'nt' and 'Darwin Kernel Version 22.' not in platform_version and 'Darwin Kernel Version 23.' not in platform_version) or (os_name == 'nt' and sys_platform != 'darwin')" },
+    { name = "win-precise-time", marker = "(python_full_version == '3.12.*' and os_name == 'nt' and 'Darwin Kernel Version 22.' not in platform_version and 'Darwin Kernel Version 23.' not in platform_version) or (os_name == 'nt' and sys_platform != 'darwin')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/93/a8/fab4e86b8c9a6f7c04c5ecdb9a7d18297b6ecf6c92e13115eed033714ee7/dlt-1.30.0.tar.gz", hash = "sha256:46157b4c75aabde40c8b12af005e27d51ddde693ebbc2d338682ee0b19527d5b", size = 1155778 }
 wheels = [
@@ -725,10 +725,10 @@ dependencies = [
     { name = "huggingface-hub" },
     { name = "loguru" },
     { name = "mmh3" },
-    { name = "numpy" },
-    { name = "onnxruntime", version = "1.23.2", source = { registry = "https://pypi.org/simple" }, marker = "'Darwin Kernel Version 22.' in platform_version and sys_platform == 'darwin'" },
-    { name = "onnxruntime", version = "1.31.1", source = { registry = "https://pypi.org/simple" }, marker = "'Darwin Kernel Version 22.' not in platform_version or sys_platform != 'darwin'" },
-    { name = "pillow" },
+    { name = "numpy", marker = "python_full_version == '3.12.*' or sys_platform != 'darwin'" },
+    { name = "onnxruntime", version = "1.23.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.12.*' and 'Darwin Kernel Version 22.' in platform_version and sys_platform == 'darwin'" },
+    { name = "onnxruntime", version = "1.31.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version == '3.12.*' and 'Darwin Kernel Version 22.' not in platform_version) or sys_platform != 'darwin'" },
+    { name = "pillow", marker = "python_full_version == '3.12.*' or sys_platform != 'darwin'" },
     { name = "py-rust-stemmers" },
     { name = "requests" },
     { name = "tokenizers" },
@@ -1002,7 +1002,7 @@ dependencies = [
     { name = "httpx2-jsfetch", marker = "sys_platform == 'emscripten'" },
     { name = "idna" },
     { name = "truststore", marker = "sys_platform != 'emscripten'" },
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version == '3.12.*' or sys_platform != 'darwin'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/43/73/5ca2cedf5e4e50423d1c258877865a6b62793633b561c58499f8aeb33b7e/httpx2-2.16.0.tar.gz", hash = "sha256:0d54c98128e8f2ff7fbbde0fca8c359e5f032edeaaaac443cdb7f31f685bcd7f", size = 103116 }
 wheels = [
@@ -1342,11 +1342,11 @@ dependencies = [
     { name = "jsonschema" },
     { name = "openai" },
     { name = "packaging" },
-    { name = "pydantic" },
+    { name = "pydantic", marker = "python_full_version == '3.12.*' or sys_platform != 'darwin'" },
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
-    { name = "tiktoken" },
+    { name = "tiktoken", marker = "python_full_version == '3.12.*' or sys_platform != 'darwin'" },
     { name = "tokenizers" },
     { name = "typing-extensions" },
 ]
@@ -1737,7 +1737,7 @@ name = "pandas"
 version = "2.3.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy" },
+    { name = "numpy", marker = "python_full_version == '3.12.*' or sys_platform != 'darwin'" },
     { name = "python-dateutil" },
     { name = "pytz" },
     { name = "tzdata" },
@@ -2211,7 +2211,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
     { name = "rpds-py" },
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version == '3.12.*' or sys_platform != 'darwin'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/22/f5/df4e9027acead3ecc63e50fe1e36aca1523e1719559c499951bb4b53188f/referencing-0.37.0.tar.gz", hash = "sha256:44aefc3142c5b842538163acb373e24cce6632bd54bdb01b21ad5863489f50d8", size = 78036 }
 wheels = [
@@ -2390,12 +2390,14 @@ version = "0.11.0"
 source = { editable = "../../integrations/sie_cognee" }
 dependencies = [
     { name = "cognee" },
+    { name = "litellm" },
     { name = "sie-sdk" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "cognee", specifier = "==1.6.7" },
+    { name = "litellm", specifier = ">=1.108.1,<2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "sie-sdk", editable = "../../packages/sie_sdk" },
@@ -2573,7 +2575,7 @@ version = "1.10.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version == '3.12.*' or sys_platform != 'darwin'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/48/bb/3d8757f21e9a53d9035c9eb039a777047139a16bfdbedfc7a58241c3d914/starlette-1.10.0.tar.gz", hash = "sha256:b8399098d4c1e3522734f7235dc79b1fc967f96cf139c81e0fa30479e0685f9b", size = 2734356 }
 wheels = [
