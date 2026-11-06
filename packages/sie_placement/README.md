@@ -802,13 +802,17 @@ These rules bound which plans emit. A worker group carries one queue pool, a
 named queue pool carries one floor and one pinned set, and the `default` queue
 pool carries no pins, so a pinned lane needs a named queue pool and a machine
 profile of its own, and two pinned lanes on one GPU product need two machine
-profiles. Such a lane may pin several identities and host lazy residents
-beside them. The planner gives every lane that pins an identity a named queue
-pool of its own, places every other lane on the queue pool its parameters name,
+profiles. Such a lane may pin several identities and host lazy residents beside
+them. The planner gives every lane that pins an identity a named queue pool of
+its own, places every other lane on the queue pool its parameters name,
 `default` unless set, and may place several identities on one lane. Its plan
 therefore emits only when no two lanes share a machine profile and bundle, no
-lane that pins an identity shares its machine profile with another lane, no lane
-has fallback cells and no identity is `snapshot-cold`.
+lane that pins an identity shares its machine profile with another lane, no
+lane has fallback cells, no identity is `snapshot-cold`, no zero-floor lane's
+nonzero `floorMax` is below the chart's fallback floor, which holds when the
+chart's `fallback_replicas` is at most the planner's `fallback_floor`, and,
+when the planner's `queue_pool` is not `default`, the lanes on it share one
+`floorMin` and, with a nonzero `floorMin`, one bundle.
 
 ## Tests
 
