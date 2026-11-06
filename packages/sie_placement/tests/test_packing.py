@@ -655,11 +655,11 @@ def test_an_unshared_identity_is_never_packed_and_its_lane_hosts_no_one_else(uns
     assert placements(shared)[GUEST] == ("host", Warmth.LAZY_RESIDENT)
 
 
-def test_a_shared_lane_holds_its_container_ceiling_once_against_every_ceiling():
+def test_a_shared_lane_holds_its_container_ceiling_and_envelope_maximum_once_against_every_ceiling():
     capacity = Capacity(
         total=4,
         types=(TypeCeiling(gpu_product=L4.gpu_product, accelerators=4),),
-        shared_quota=SharedQuota(accelerators=6, held_elsewhere=2),
+        shared_quota=SharedQuota(accelerators=3, held_elsewhere=2),
     )
     service_levels = levels(**{HOST: 0, GUEST: 60})
     result = run(service_levels, host_and_guest(), [load(GUEST)], capacity=capacity)
@@ -667,15 +667,15 @@ def test_a_shared_lane_holds_its_container_ceiling_once_against_every_ceiling():
     assert [(use.accelerators, use.peak_accelerators, use.lanes) for use in result.report.capacity] == [
         (1, 4, ("org-host-l4",)),
         (1, 4, ("org-host-l4",)),
-        (3, 6, ("org-host-l4",)),
+        (3, None, ("org-host-l4",)),
     ]
     with pytest.raises(CapacityExceededError) as caught:
         run(service_levels, host_and_guest(guest_footprint=8000), [load(GUEST)], capacity=capacity)
     assert [use.describe() for use in caught.value.exceeded] == [
         "the container ceilings of org-guest-l4, org-host-l4 hold 8 accelerators, above the total ceiling of 4",
         "the container ceilings of org-guest-l4, org-host-l4 hold 8 NVIDIA-L4 accelerators, above the type ceiling of 4",
-        "the container ceilings of org-guest-l4, org-host-l4 hold 8 accelerators, "
-        "which with 2 held elsewhere exceed the shared quota of 6",
+        "the envelope maxima of org-guest-l4, org-host-l4 hold 2 accelerators, "
+        "which with 2 held elsewhere exceed the shared quota of 3",
     ]
 
 
