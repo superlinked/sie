@@ -273,9 +273,13 @@ The applier reads it only with `--apply`, sends it only on pool writes to
 `--gateway-url`, never takes it as a command-line value and never prints or
 logs it. Without it, `--apply` sends its writes with no credential, which a
 gateway with token auth refuses. The client token is never sent on writes. A
-refused token is named by its source, never by its value, and a failed gateway
-call is reported by the server's error message or, for a transport failure, by
-the exception type alone, so no reported error carries a header value.
+refused token is named by its source, never by its value. A failed gateway call
+is reported by the server's error message, a failed connection by the SDK's
+connection error message, and any other transport failure by its exception type
+alone, so no reported error carries a header value: a connection fails before
+any header is sent. A reply that is neither a success nor an error, such as a
+redirect, fails the call with its status code, and a reply the SDK cannot parse
+fails it as an unexpected response.
 
 ## Tests
 
