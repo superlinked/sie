@@ -33,6 +33,7 @@ class UnplacedReason(StrEnum):
     WARM_BOUND_UNDECLARED = "warm-bound-undeclared"
     CURRENT_UNMEASURED = "current-unmeasured"
     CURRENT_UNPRICED = "current-unpriced"
+    PLACEMENT_UNRELIABLE = "placement-unreliable"
 
 
 class ComeAliveBasis(StrEnum):
@@ -44,17 +45,32 @@ class ComeAliveBasis(StrEnum):
 class Measurement(StrEnum):
     RECEIPT = "receipt"
     BOOT_EVIDENCE = "boot-evidence"
+    FOOTPRINT = "footprint"
+    CO_RESIDENCY_RECEIPT = "co-residency-receipt"
 
 
 class RequestReason(StrEnum):
     UNMEASURED = "unmeasured"
     REFUSED = "refused"
     FAILED = "failed"
+    UNPLACED = "unplaced"
 
 
 class RefusedRecord(StrEnum):
     RECEIPT = "receipt"
     BOOT_EVIDENCE = "boot-evidence"
+
+
+class ScarcityReason(StrEnum):
+    PLACEMENT_WAIT = "placement-wait"
+    UNPLACED = "unplaced"
+    UNRELIABLE_TYPE = "unreliable-type"
+
+
+class CapacityScope(StrEnum):
+    TOTAL = "total"
+    TYPE = "type"
+    SHARED_QUOTA = "shared-quota"
 
 
 def _money(value: float) -> float:
@@ -72,7 +88,7 @@ def _compact(fields: dict[str, object | None]) -> dict[str, object]:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Blocker:
     field: str
-    bound: int | None
+    bound: float | None
     measured: float | None
 
     def to_dict(self) -> dict[str, object]:
@@ -92,18 +108,24 @@ class Option:
     blocked_by: tuple[Blocker, ...] = ()
     saving: float | None = None
     lane: str | None = None
+    fallback_cells: tuple[Cell, ...] = ()
+    placement_wait_s: float | None = None
+    co_residents: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return _compact(
             {
                 "cell": self.cell.to_dict(),
+                "fallbackCells": [cell.to_dict() for cell in self.fallback_cells] or None,
                 "containerShape": self.container_shape.to_dict(),
                 "concurrency": self.concurrency,
                 "lane": self.lane,
+                "coResidents": list(self.co_residents) or None,
                 "warmth": self.warmth.value,
                 "monthlyCost": _money(self.monthly_cost),
                 "saving": None if self.saving is None else _money(self.saving),
                 "comeAliveS": self.come_alive_s,
+                "placementWaitS": self.placement_wait_s,
                 "comeAliveBasis": self.come_alive_basis.value,
                 "blockedBy": [blocker.to_dict() for blocker in self.blocked_by] or None,
                 "receipt": self.receipt.to_dict(),
@@ -155,6 +177,8 @@ class LaneReport:
     envelope_max_monthly_cost: float | None = None
     unpriced_reason: str | None = None
     unpriced_identities: tuple[str, ...] = ()
+    memory_mib: int | None = None
+    memory_limit_mib: float | None = None
 
     @property
     def unpriced(self) -> bool:
@@ -173,6 +197,8 @@ class LaneReport:
                 ),
                 "unpricedReason": self.unpriced_reason,
                 "unpricedIdentities": list(self.unpriced_identities) or None,
+                "memoryMiB": self.memory_mib,
+                "memoryLimitMiB": self.memory_limit_mib,
             }
         )
 
@@ -205,6 +231,7 @@ class MeasurementRequest:
     container_shape: ContainerShape | None = None
     concurrency: int | None = None
     lane: str | None = None
+    co_residents: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return _compact(
@@ -214,6 +241,7 @@ class MeasurementRequest:
                 "containerShape": None if self.container_shape is None else self.container_shape.to_dict(),
                 "concurrency": self.concurrency,
                 "lane": self.lane,
+                "coResidents": list(self.co_residents) or None,
                 "measure": [measurement.value for measurement in self.measure],
                 "warmth": self.warmth.value,
                 "reason": self.reason.value,
@@ -236,21 +264,101 @@ class Lever:
     saving_under_bound: float
     permitted_bound_s: int
     saving_at_permitted_bound: float
+    placement_wait_s: float | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
-            "identity": self.identity,
-            "cell": self.cell.to_dict(),
-            "containerShape": self.container_shape.to_dict(),
-            "warmth": self.warmth.value,
-            "comeAliveS": self.come_alive_s,
-            "comeAliveBasis": self.come_alive_basis.value,
-            "comeAliveBoundS": self.bound_s,
-            "monthlyCost": _money(self.monthly_cost),
-            "savingUnderBound": _money(self.saving_under_bound),
-            "permittedBoundS": self.permitted_bound_s,
-            "savingAtPermittedBound": _money(self.saving_at_permitted_bound),
-        }
+        return _compact(
+            {
+                "identity": self.identity,
+                "cell": self.cell.to_dict(),
+                "containerShape": self.container_shape.to_dict(),
+                "warmth": self.warmth.value,
+                "comeAliveS": self.come_alive_s,
+                "placementWaitS": self.placement_wait_s,
+                "comeAliveBasis": self.come_alive_basis.value,
+                "comeAliveBoundS": self.bound_s,
+                "monthlyCost": _money(self.monthly_cost),
+                "savingUnderBound": _money(self.saving_under_bound),
+                "permittedBoundS": self.permitted_bound_s,
+                "savingAtPermittedBound": _money(self.saving_at_permitted_bound),
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Scarcity:
+    identity: str
+    reason: ScarcityReason
+    cell: Cell
+    container_shape: ContainerShape
+    warmth: Warmth
+    monthly_cost: float
+    placement_failure_rate: float
+    come_alive_bound_s: int | None = None
+    boot_s: float | None = None
+    placement_wait_s: float | None = None
+    lane: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return _compact(
+            {
+                "identity": self.identity,
+                "reason": self.reason.value,
+                "cell": self.cell.to_dict(),
+                "containerShape": self.container_shape.to_dict(),
+                "lane": self.lane,
+                "warmth": self.warmth.value,
+                "monthlyCost": _money(self.monthly_cost),
+                "comeAliveBoundS": self.come_alive_bound_s,
+                "bootS": self.boot_s,
+                "placementWaitS": self.placement_wait_s,
+                "placementFailureRate": _rate(self.placement_failure_rate),
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CapacityUse:
+    scope: CapacityScope
+    ceiling: int
+    accelerators: int
+    lanes: tuple[str, ...]
+    gpu_product: str | None = None
+    held_elsewhere: int | None = None
+    peak_accelerators: int | None = None
+
+    @property
+    def exceeded(self) -> bool:
+        return max(self.accelerators, self.peak_accelerators or 0) > self.ceiling
+
+    def describe(self) -> str:
+        lanes = ", ".join(self.lanes) or "no lane"
+        held, count = "envelope maxima", self.accelerators
+        if self.peak_accelerators is not None and self.peak_accelerators > self.ceiling:
+            held, count = "container ceilings", self.peak_accelerators
+        if self.scope is CapacityScope.SHARED_QUOTA:
+            elsewhere = self.held_elsewhere or 0
+            return (
+                f"the {held} of {lanes} hold {count - elsewhere} accelerators, "
+                f"which with {elsewhere} held elsewhere exceed the shared quota of {self.ceiling}"
+            )
+        accelerators = "accelerators" if self.gpu_product is None else f"{self.gpu_product} accelerators"
+        scope = "type" if self.scope is CapacityScope.TYPE else "total"
+        return f"the {held} of {lanes} hold {count} {accelerators}, above the {scope} ceiling of {self.ceiling}"
+
+    def to_dict(self) -> dict[str, object]:
+        return _compact(
+            {
+                "scope": self.scope.value,
+                "gpuProduct": self.gpu_product,
+                "ceiling": self.ceiling,
+                "accelerators": self.accelerators,
+                "peakAccelerators": self.peak_accelerators,
+                "heldElsewhere": self.held_elsewhere,
+                "lanes": list(self.lanes),
+                "exceeded": self.exceeded,
+            }
+        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -318,6 +426,9 @@ class Report:
     identity_changes: tuple[IdentityChange, ...]
     lane_changes: tuple[LaneChange, ...]
     warm_bound_undeclared: tuple[str, ...] = ()
+    capacity: tuple[CapacityUse, ...] = ()
+    scarcity: tuple[Scarcity, ...] = ()
+    gpu_memory_undeclared: tuple[str, ...] = ()
 
     @property
     def monthly_cost(self) -> float:
@@ -355,11 +466,14 @@ class Report:
             },
             "identities": [entry.to_dict() for entry in self.identities],
             "lanes": [lane.to_dict() for lane in self.lanes],
+            "capacity": [use.to_dict() for use in self.capacity],
             "sharedChartLanes": [shared.to_dict() for shared in self.shared_chart_lanes],
             "measurementRequests": [request.to_dict() for request in self.measurement_requests],
             "comeAliveLevers": [lever.to_dict() for lever in self.come_alive_levers],
+            "scarcity": [entry.to_dict() for entry in self.scarcity],
             "queueWaitUnattained": list(self.queue_wait_unattained),
             "warmBoundUndeclared": list(self.warm_bound_undeclared),
+            "gpuMemoryUndeclared": list(self.gpu_memory_undeclared),
             "refusals": [refusal.to_dict() for refusal in self.refusals],
             "changes": {
                 "identities": [change.to_dict() for change in self.identity_changes],

@@ -25,7 +25,7 @@
     },
     {
       "name": "default-l4-default",
-      "queuePool": "default",
+      "queuePool": "default-l4-default",
       "bundle": "default",
       "cell": {
         "machineProfile": "l4",
@@ -65,7 +65,7 @@
     },
     {
       "name": "qwen-qwen3-embedding-4b-l4",
-      "queuePool": "default",
+      "queuePool": "qwen-qwen3-embedding-4b-l4",
       "bundle": "default",
       "cell": {
         "machineProfile": "l4",
