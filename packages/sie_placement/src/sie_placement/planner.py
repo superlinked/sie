@@ -1450,7 +1450,7 @@ def _permitted(measured: float) -> int:
 def _shared_chart_lanes(plan: Plan) -> tuple[SharedChartLane, ...]:
     grouped: defaultdict[tuple[str, str, str], list[str]] = defaultdict(list)
     for lane in plan.lanes:
-        grouped[(lane.queue_pool, lane.cell.machine_profile, lane.bundle)].append(lane.name)
+        grouped[(lane.queue_pool.lower(), lane.cell.machine_profile.lower(), lane.bundle.lower())].append(lane.name)
     return tuple(
         SharedChartLane(queue_pool=pool, machine_profile=profile, bundle=bundle, lanes=tuple(sorted(names)))
         for (pool, profile, bundle), names in sorted(grouped.items())

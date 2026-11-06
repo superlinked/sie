@@ -95,9 +95,10 @@ Helm chart: `queuePool`, the `machineProfile` of its `cell`, and `bundle`.
 override. It is neither the `workers.pools` map key, which names a worker
 group, nor an SDK logical pool. `bundle` is a key of that worker group's
 `bundles` map. `name` is the lane's handle inside the plan, and each identity
-refers to its lane by that name. Two plan lanes may carry the same three
-tokens, and so name one chart lane, which cannot give them separate envelopes
-or concurrency; the planner's report lists every such chart lane.
+refers to its lane by that name. The chart compares the three tokens without
+regard to case. Two plan lanes may carry the same three tokens, and so name one
+chart lane, which cannot give them separate envelopes or concurrency; the
+planner's report lists every such chart lane.
 
 `fallbackCells` is an optional ordered candidate list: cells, after `cell`,
 that the lane's containers may be placed on when `cell` cannot be placed. No
@@ -361,7 +362,7 @@ The report renders as a `placement-report` document:
   and `unpricedIdentities` lists residents whose demand has no receipt to price
   it on the lane.
 - `sharedChartLanes`: every chart lane, by `queuePool`, `machineProfile` and
-  `bundle`, that more than one plan lane names.
+  `bundle` in lowercase, that more than one plan lane names.
 - `measurementRequests`: options that lack evidence, ranked by the saving they
   could unlock. A profile without a receipt is bounded by price alone: one
   accelerator at its rate, kept warm or, where the come-alive bound allows,
