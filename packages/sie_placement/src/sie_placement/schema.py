@@ -135,6 +135,11 @@ class _Reader:
             raise SchemaError(self._at(key), f"expected a string, got {_describe(value)}")
         return value
 
+    def _boolean(self, key: str, value: object) -> bool:
+        if not isinstance(value, bool):
+            raise SchemaError(self._at(key), f"expected a boolean, got {_describe(value)}")
+        return value
+
     def _integer(self, key: str, value: object) -> int:
         if isinstance(value, bool) or not isinstance(value, int):
             raise SchemaError(self._at(key), f"expected an integer, got {_describe(value)}")
@@ -170,6 +175,10 @@ class _Reader:
     def optional_string(self, key: str) -> str | None:
         value = self._optional(key)
         return None if value is None else self._string(key, value)
+
+    def optional_boolean(self, key: str) -> bool | None:
+        value = self._optional(key)
+        return None if value is None else self._boolean(key, value)
 
     def integer(self, key: str) -> int:
         return self._integer(key, self._required(key))
@@ -687,6 +696,7 @@ class BootEvidence:
     boot_seconds: float
     outcome: BootOutcome
     source: SourceRef
+    borrowed: bool = False
 
     def __post_init__(self) -> None:
         _require_identifier("identity", self.identity)
@@ -707,21 +717,25 @@ class BootEvidence:
             warmth=reader.enum("warmth", Warmth),
             boot_seconds=reader.number("bootSeconds"),
             outcome=reader.enum("outcome", BootOutcome),
+            borrowed=reader.optional_boolean("borrowed") is True,
             source=reader.child("source", SourceRef.from_dict),
         )
 
     def to_dict(self) -> dict[str, object]:
-        return {
-            "kind": BOOT_EVIDENCE_KIND,
-            "schemaVersion": SCHEMA_VERSION,
-            "identity": self.identity,
-            "cell": self.cell.to_dict(),
-            "containerShape": self.container_shape.to_dict(),
-            "warmth": self.warmth.value,
-            "bootSeconds": self.boot_seconds,
-            "outcome": self.outcome.value,
-            "source": self.source.to_dict(),
-        }
+        return _compact(
+            {
+                "kind": BOOT_EVIDENCE_KIND,
+                "schemaVersion": SCHEMA_VERSION,
+                "identity": self.identity,
+                "cell": self.cell.to_dict(),
+                "containerShape": self.container_shape.to_dict(),
+                "warmth": self.warmth.value,
+                "bootSeconds": self.boot_seconds,
+                "outcome": self.outcome.value,
+                "borrowed": True if self.borrowed else None,
+                "source": self.source.to_dict(),
+            }
+        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

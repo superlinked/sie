@@ -385,6 +385,26 @@ def test_boot_evidence_keeps_failed_outcomes():
     assert str(schema_error(BootEvidence.from_dict, data)) == "$.bootSeconds: must be at least 0, got -0.5"
 
 
+def test_boot_evidence_marks_evidence_borrowed_from_another_environment():
+    data = load("boot-evidence.json")
+    assert BootEvidence.from_dict(data).borrowed is False
+    data["borrowed"] = True
+    evidence = BootEvidence.from_dict(data)
+    assert evidence.borrowed is True
+    assert evidence.to_dict() == data
+    data["borrowed"] = False
+    evidence = BootEvidence.from_dict(data)
+    assert evidence.borrowed is False
+    assert "borrowed" not in evidence.to_dict()
+
+
+@pytest.mark.parametrize(("value", "described"), [(1, "number 1"), ("true", "string 'true'")])
+def test_boot_evidence_borrowed_is_a_strict_boolean(value, described):
+    data = load("boot-evidence.json")
+    data["borrowed"] = value
+    assert str(schema_error(BootEvidence.from_dict, data)) == f"$.borrowed: expected a boolean, got {described}"
+
+
 def test_price_lists_validate_currency_rates_and_names():
     data = load("price-list.json")
     data["currency"] = "usd"

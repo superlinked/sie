@@ -1,0 +1,295 @@
+[
+  {
+    "kind": "placement-receipt",
+    "schemaVersion": 1,
+    "identity": "BAAI/bge-m3",
+    "cell": {
+      "machineProfile": "l4",
+      "gpuProduct": "NVIDIA-L4"
+    },
+    "containerShape": {
+      "gpuCount": 1,
+      "cpuCores": 4,
+      "memoryMiB": 16384
+    },
+    "concurrency": 16,
+    "requestShape": {
+      "operation": "encode",
+      "itemsPerRequest": 8,
+      "inputTokensPerItem": 256
+    },
+    "throughput": {
+      "requestsPerSecond": 40
+    },
+    "latency": {
+      "p50Ms": 110.2,
+      "p95Ms": 171.9,
+      "p99Ms": 214
+    },
+    "source": {
+      "uri": "receipts/baai-bge-m3/l4-c16-16384.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000001"
+    }
+  },
+  {
+    "kind": "placement-receipt",
+    "schemaVersion": 1,
+    "identity": "BAAI/bge-m3",
+    "cell": {
+      "machineProfile": "a100-80gb",
+      "gpuProduct": "NVIDIA-A100-SXM4-80GB"
+    },
+    "containerShape": {
+      "gpuCount": 1,
+      "cpuCores": 8,
+      "memoryMiB": 65536
+    },
+    "concurrency": 32,
+    "requestShape": {
+      "operation": "encode",
+      "itemsPerRequest": 8,
+      "inputTokensPerItem": 256
+    },
+    "throughput": {
+      "requestsPerSecond": 120
+    },
+    "latency": {
+      "p50Ms": 61,
+      "p95Ms": 98,
+      "p99Ms": 120
+    },
+    "source": {
+      "uri": "receipts/baai-bge-m3/a100-80gb-c32-65536.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000002"
+    }
+  },
+  {
+    "kind": "placement-receipt",
+    "schemaVersion": 1,
+    "identity": "BAAI/bge-m3:sparse",
+    "cell": {
+      "machineProfile": "l4",
+      "gpuProduct": "NVIDIA-L4"
+    },
+    "containerShape": {
+      "gpuCount": 1,
+      "cpuCores": 4,
+      "memoryMiB": 16384
+    },
+    "concurrency": 16,
+    "requestShape": {
+      "operation": "encode",
+      "itemsPerRequest": 8,
+      "inputTokensPerItem": 256
+    },
+    "throughput": {
+      "requestsPerSecond": 40
+    },
+    "latency": {
+      "p50Ms": 101,
+      "p99Ms": 190
+    },
+    "source": {
+      "uri": "receipts/baai-bge-m3-sparse/l4-c16-16384.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000003"
+    }
+  },
+  {
+    "kind": "placement-receipt",
+    "schemaVersion": 1,
+    "identity": "Qwen/Qwen3-8B",
+    "cell": {
+      "machineProfile": "a100-80gb",
+      "gpuProduct": "NVIDIA-A100-SXM4-80GB"
+    },
+    "containerShape": {
+      "gpuCount": 1,
+      "cpuCores": 8,
+      "memoryMiB": 65536
+    },
+    "concurrency": 32,
+    "requestShape": {
+      "operation": "generate",
+      "itemsPerRequest": 1,
+      "inputTokensPerItem": 1024,
+      "outputTokens": 256
+    },
+    "throughput": {
+      "requestsPerSecond": 3.1,
+      "outputTokensPerSecond": 793.6
+    },
+    "ttft": {
+      "p50Ms": 310,
+      "p99Ms": 1480
+    },
+    "itl": {
+      "p50Ms": 24.5,
+      "p95Ms": 31,
+      "p99Ms": 44.8
+    },
+    "source": {
+      "uri": "receipts/qwen-qwen3-8b/a100-80gb-c32-65536.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000004"
+    }
+  },
+  {
+    "kind": "placement-receipt",
+    "schemaVersion": 1,
+    "identity": "Qwen/Qwen3-8B",
+    "cell": {
+      "machineProfile": "l4",
+      "gpuProduct": "NVIDIA-L4"
+    },
+    "containerShape": {
+      "gpuCount": 1,
+      "cpuCores": 4,
+      "memoryMiB": 16384
+    },
+    "concurrency": 8,
+    "requestShape": {
+      "operation": "generate",
+      "itemsPerRequest": 1,
+      "inputTokensPerItem": 1024,
+      "outputTokens": 256
+    },
+    "throughput": {
+      "requestsPerSecond": 0.9,
+      "outputTokensPerSecond": 230.4
+    },
+    "ttft": {
+      "p50Ms": 820,
+      "p99Ms": 3900
+    },
+    "itl": {
+      "p50Ms": 61,
+      "p99Ms": 118
+    },
+    "source": {
+      "uri": "receipts/qwen-qwen3-8b/l4-c8-16384.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000005"
+    }
+  },
+  {
+    "kind": "placement-receipt",
+    "schemaVersion": 1,
+    "identity": "Qwen/Qwen3-Reranker-0.6B",
+    "cell": {
+      "machineProfile": "l4",
+      "gpuProduct": "NVIDIA-A10G"
+    },
+    "containerShape": {
+      "gpuCount": 1,
+      "cpuCores": 4,
+      "memoryMiB": 16384
+    },
+    "concurrency": 16,
+    "requestShape": {
+      "operation": "score",
+      "itemsPerRequest": 8,
+      "inputTokensPerItem": 256
+    },
+    "throughput": {
+      "requestsPerSecond": 55
+    },
+    "latency": {
+      "p99Ms": 180
+    },
+    "source": {
+      "uri": "receipts/qwen-qwen3-reranker-0.6b/l4-c16-16384.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000006"
+    }
+  },
+  {
+    "kind": "placement-receipt",
+    "schemaVersion": 1,
+    "identity": "Qwen/Qwen3-Embedding-4B",
+    "cell": {
+      "machineProfile": "l4",
+      "gpuProduct": "NVIDIA-L4"
+    },
+    "containerShape": {
+      "gpuCount": 1,
+      "cpuCores": 4,
+      "memoryMiB": 16384
+    },
+    "concurrency": 8,
+    "requestShape": {
+      "operation": "encode",
+      "itemsPerRequest": 8,
+      "inputTokensPerItem": 256
+    },
+    "throughput": {
+      "requestsPerSecond": 12
+    },
+    "latency": {
+      "p50Ms": 140,
+      "p99Ms": 280
+    },
+    "source": {
+      "uri": "receipts/qwen-qwen3-embedding-4b/l4-c8-16384.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000007"
+    }
+  },
+  {
+    "kind": "placement-receipt",
+    "schemaVersion": 1,
+    "identity": "Qwen/Qwen3-Embedding-4B",
+    "cell": {
+      "machineProfile": "l4",
+      "gpuProduct": "NVIDIA-L4"
+    },
+    "containerShape": {
+      "gpuCount": 1,
+      "cpuCores": 8,
+      "memoryMiB": 32768
+    },
+    "concurrency": 8,
+    "requestShape": {
+      "operation": "encode",
+      "itemsPerRequest": 8,
+      "inputTokensPerItem": 256
+    },
+    "throughput": {
+      "requestsPerSecond": 14
+    },
+    "latency": {
+      "p50Ms": 131,
+      "p99Ms": 262
+    },
+    "source": {
+      "uri": "receipts/qwen-qwen3-embedding-4b/l4-c8-32768.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000008"
+    }
+  },
+  {
+    "kind": "placement-receipt",
+    "schemaVersion": 1,
+    "identity": "Qwen/Qwen3-Embedding-4B",
+    "cell": {
+      "machineProfile": "a100-80gb",
+      "gpuProduct": "NVIDIA-A100-SXM4-80GB"
+    },
+    "containerShape": {
+      "gpuCount": 1,
+      "cpuCores": 8,
+      "memoryMiB": 65536
+    },
+    "concurrency": 16,
+    "requestShape": {
+      "operation": "encode",
+      "itemsPerRequest": 8,
+      "inputTokensPerItem": 256
+    },
+    "throughput": {
+      "requestsPerSecond": 40
+    },
+    "latency": {
+      "p50Ms": 70,
+      "p99Ms": 150
+    },
+    "source": {
+      "uri": "receipts/qwen-qwen3-embedding-4b/a100-80gb-c16-65536.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000009"
+    }
+  }
+]
