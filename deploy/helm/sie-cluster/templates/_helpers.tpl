@@ -1288,6 +1288,9 @@ token-separation check and the upstream-key collision check read this list.
 {{- with index $root.Subcharts "kube-prometheus-stack" -}}
 {{- with index .Subcharts "grafana" -}}
 {{- if eq (include "grafana.namespace" .) (include "sie-cluster.namespace" $root) -}}
+{{- if regexMatch "\\.Template\\b" (toString .Values.admin.existingSecret) -}}
+{{- fail "kube-prometheus-stack.grafana.admin.existingSecret must not reference .Template: the Grafana chart evaluates it in its own templates, so the chart cannot check the Secret that Grafana reads against the other credentials" -}}
+{{- end -}}
 {{- $context := merge (dict "Template" $root.Template) . -}}
 {{- $secretName := tpl .Values.admin.existingSecret $context | default (include "grafana.fullname" .) -}}
 {{- if and (not .Values.env.GF_SECURITY_ADMIN_USER) (not .Values.env.GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION) -}}

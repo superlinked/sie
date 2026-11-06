@@ -4731,6 +4731,27 @@ def test_the_applier_client_token_is_kept_apart_from_the_grafana_admin_secret_wh
 
 
 @pytest.mark.parametrize(
+    ("existing", "refused"),
+    [
+        ('{{ .Template.Name | base | trimSuffix ".yaml" }}', True),
+        ("{{ $.Template.BasePath | base }}-graf", True),
+        ("{{ .Release.Name }}-graf", False),
+    ],
+    ids=["template-name", "template-base-path", "release-name"],
+)
+def test_a_grafana_admin_secret_that_reads_the_template_is_refused(
+    tmp_path: Path, existing: str, refused: bool
+) -> None:
+    values = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": existing}}}}
+    result = render_chart(tmp_path, values)
+    if refused:
+        assert result.returncode != 0
+        assert "kube-prometheus-stack.grafana.admin.existingSecret must not reference .Template" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
     ("keda", "error"),
     [
         (
