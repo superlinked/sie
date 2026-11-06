@@ -58,9 +58,7 @@ def test_sync_system_one_sends_one_strict_extract_item_and_reshapes_the_answers(
     assert body["params"]["options"]["overflow_policy"] == "error"
     assert body["params"]["output_schema"] == {qid: {"type": "noul", "instructions": ""} for qid in QUESTIONS}
     expected = dict(RESPONSE_CASE["response"])
-    # Usage is the metered count the response reports in its X-SIE-Units-*
-    # headers; this response carries none.
-    expected["usage"] = {"input_tokens": 0, "output_tokens": 0}
+    expected["usage"] = {"input_tokens": RESPONSE_CASE["input_tokens"], "output_tokens": 0}
     _assert_close(result, expected)
 
 
@@ -88,6 +86,7 @@ async def test_async_system_one_matches_sync() -> None:
     assert body["items"] == [{"metadata": {"state": {"subject": "refund"}}}]
     assert result["answers"]["intent"]["confidence"] == pytest.approx(0.7)
     assert result["answers"]["urgency"]["confidence"] == pytest.approx(0.55)
+    assert result["usage"] == {"input_tokens": RESPONSE_CASE["input_tokens"], "output_tokens": 0}
 
 
 def test_state_that_does_not_fit_raises() -> None:

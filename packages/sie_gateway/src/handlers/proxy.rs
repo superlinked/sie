@@ -12351,7 +12351,7 @@ fn result_decode_error_value(r: &publisher::WorkResult, message: String) -> serd
 /// The `usage` block for an items-shaped queue response, summed from the
 /// workers' own authoritative [`publisher::UnitCounts`].
 ///
-/// Serves `score` and `encode` alike: the two envelopes report the same shape
+/// Serves `score`, `encode` and `extract`: their envelopes report the same shape
 /// from the same numbers, so a caller reading `usage` on either endpoint reads
 /// the post-tokenization count the worker measured — never a character
 /// estimate. `None` when ANY successful result lacks the dimension: a partial
@@ -12413,11 +12413,7 @@ fn build_queue_success_body(
         "items"
     };
 
-    // `encode` joins `score` here so the queue ingress reports the same
-    // authoritative counts the direct ingress puts on `EncodeResponse.usage`,
-    // and so the `/v1/embeddings` compatibility layer has a real number to
-    // render on both paths instead of a character estimate.
-    let usage = if endpoint == "score" || endpoint == "encode" {
+    let usage = if matches!(endpoint, "score" | "encode" | "extract") {
         aggregate_result_usage(successful)
     } else {
         None
@@ -30049,6 +30045,40 @@ profiles:
             assert_eq!(response["usage"]["input_tokens"], 19);
             assert_eq!(response["usage"]["images"], 2);
             assert_eq!(response["scores"][0]["item_id"], "0");
+        }
+    }
+
+    #[test]
+    fn test_extract_success_body_counts_only_complete_worker_usage() {
+        let result = |tokens: Option<u64>| {
+            successful_item_result(
+                json!({"id": "0", "data": {"decision": {"type": "noul", "noul": 0.8}}}),
+                tokens.map(|input_tokens| publisher::UnitCounts {
+                    input_tokens: Some(input_tokens),
+                    ..Default::default()
+                }),
+            )
+        };
+        for use_msgpack in [false, true] {
+            for (counts, expected) in [
+                (vec![Some(19), Some(23)], Some(42)),
+                (vec![Some(0)], Some(0)),
+                (vec![Some(19), None], None),
+                (vec![None], None),
+                (vec![Some(u64::MAX), Some(1)], None),
+            ] {
+                let results: Vec<_> = counts.into_iter().map(result).collect();
+                let refs: Vec<_> = results.iter().collect();
+                let body = build_queue_success_body("extract", "decision", &refs, use_msgpack);
+                let response: Value = if use_msgpack {
+                    rmp_serde::from_slice(&body).unwrap()
+                } else {
+                    serde_json::from_slice(&body).unwrap()
+                };
+                assert_eq!(response["usage"]["input_tokens"].as_u64(), expected);
+                assert_eq!(response["items"].as_array().unwrap().len(), results.len());
+                assert_eq!(response["items"][0]["data"]["decision"]["noul"], 0.8);
+            }
         }
     }
 

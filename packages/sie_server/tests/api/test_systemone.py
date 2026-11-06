@@ -14,6 +14,7 @@ from sie_server.adapters.errors import InputTooLongError
 from sie_server.adapters.pplx_decider.questions import answer as pplx_answer
 from sie_server.adapters.pplx_decider.questions import parse_questions as pplx_questions
 from sie_server.api.systemone import (
+    DECISION_ADAPTERS,
     MAX_RETRY_AFTER_S,
     choice_confidence,
     error_response,
@@ -422,6 +423,10 @@ def test_normalize_questions_keeps_other_fields() -> None:
 FIXTURE = json.loads(
     (Path(__file__).resolve().parents[3] / "wire-fixtures" / "systemone.json").read_text(encoding="utf-8")
 )
+
+
+def test_decision_adapters_match_the_gateway_contract() -> None:
+    assert frozenset(FIXTURE["decision_adapters"]) == DECISION_ADAPTERS
 
 
 @pytest.mark.parametrize("case", FIXTURE["requests"], ids=lambda case: case["name"])
