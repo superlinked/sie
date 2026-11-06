@@ -8,6 +8,7 @@ from typing import Any
 import torch
 
 from sie_server.adapters._base_adapter import BaseAdapter
+from sie_server.adapters.decision.classification import classification_schema, classifications
 from sie_server.adapters.decision.questions import Question, answer, describe, parse_questions
 from sie_server.adapters.errors import InputTooLongError
 from sie_server.core.inference_output import ExtractItemError, ExtractOutput
@@ -66,6 +67,31 @@ class DecisionBatchAdapter(BaseAdapter):
     def _answer(self, question: Question, probabilities: list[float]) -> dict[str, Any]:
         return answer(question, probabilities)
 
+    def _extract_questions(
+        self,
+        labels: list[str] | None,
+        output_schema: dict[str, Any] | None,
+        instruction: str | None,
+        options: dict[str, Any] | None,
+    ) -> tuple[Question, ...]:
+        if instruction is not None:
+            raise InvalidInputError("Use classification labels or typed questions with their own instructions")
+        if options is not None and not isinstance(options, dict):
+            raise InvalidInputError("Decision options must be an object")
+        opts = options or {}
+        allowed = {"overflow_policy"}
+        if labels is not None:
+            allowed.update({"hypothesis_template", "multi_label"})
+        if set(opts) - allowed or opts.get("overflow_policy", "error") != "error":
+            raise InvalidInputError(
+                "Unsupported decision options; overflow_policy must be 'error' and calibration is fixed"
+            )
+        if labels is not None:
+            if output_schema is not None:
+                raise InvalidInputError("Supply either classification labels or typed output_schema questions")
+            output_schema = classification_schema(labels, opts)
+        return self._parse_questions(output_schema)
+
     def _raw_state(self, item: Item) -> Any:
         if item.images or item.audio is not None or item.video is not None or item.document is not None:
             raise InvalidInputError("Decisions currently accept text only")
@@ -102,14 +128,7 @@ class DecisionBatchAdapter(BaseAdapter):
     ) -> ExtractOutput:
         _ = prepared_items
         self._check_decision_loaded()
-        if labels is not None or instruction is not None:
-            raise InvalidInputError("Use typed output_schema questions with their own instructions and criteria")
-        if options is not None and not isinstance(options, dict):
-            raise InvalidInputError("Decision options must be an object")
-        opts = options or {}
-        if set(opts) - {"overflow_policy"} or opts.get("overflow_policy", "error") != "error":
-            raise InvalidInputError("Decisions accept only overflow_policy='error'; checkpoint calibration is fixed")
-        questions = self._parse_questions(output_schema)
+        questions = self._extract_questions(labels, output_schema, instruction, options)
         rows: list[Row] = []
         errors: list[ExtractItemError | None] = [None] * len(items)
         counts = [0] * len(items)
@@ -145,18 +164,27 @@ class DecisionBatchAdapter(BaseAdapter):
                 counts[row.item] += row.length
             start = end
         data = [{question.id: item[question.id] for question in questions if question.id in item} for item in data]
-        return ExtractOutput(entities=[[] for _ in items], data=data, errors=errors, input_token_counts=counts)
+        return ExtractOutput(
+            entities=[[] for _ in items],
+            classifications=classifications(data, labels, questions) if labels is not None else None,
+            data=data if labels is None else None,
+            errors=errors,
+            input_token_counts=counts,
+        )
 
     def extract_item_costs(
         self,
         items: list[Item],
         *,
+        labels: list[str] | None = None,
         output_schema: dict[str, Any] | None = None,
+        instruction: str | None = None,
+        options: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[int] | None:
         _ = kwargs
         try:
-            questions = self._parse_questions(output_schema)
+            questions = self._extract_questions(labels, output_schema, instruction, options)
         except (InvalidInputError, InputTooLongError):
             return None
         prompt_chars = sum(

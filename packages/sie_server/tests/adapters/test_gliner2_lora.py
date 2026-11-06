@@ -1296,7 +1296,11 @@ def test_real_sdk_cold_load_and_concurrent_named_base_isolation(raw_model, tmp_p
                 assert record["forwards"] == oracle["record"]["forwards"]
                 for item_id, result in zip(ids, oracle["result"], strict=True):
                     assert item_id not in expected_by_id
-                    expected_by_id[item_id] = {**result, "id": item_id}
+                    expected_by_id[item_id] = {
+                        **result,
+                        "id": item_id,
+                        "request": oracles[selected, 2]["result"][0]["request"],
+                    }
             assert len(expected_by_id) == 2 * len(choices)
             assert actual == [
                 [expected_by_id[f"request-{index}-{row}"] for row in range(2)] for index in range(len(choices))
