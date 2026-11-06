@@ -365,8 +365,8 @@ The command exits with status 2 before it calls Prometheus or the gateway when:
   lie beneath the overlay, reported in its words;
 - a token file or `SIE_ADMIN_TOKEN` holds anything but one run of printable
   ASCII characters without spaces after trimming;
-- `--prometheus-url` or `--gateway-url` is not an absolute http or https URL
-  with a host, embeds credentials, carries a query or a fragment, or has an
+- `--prometheus-url` or `--gateway-url` is not a valid absolute http or https
+  URL with a host, embeds credentials, carries a query or a fragment, or has an
   invalid port. The refusal does not repeat the URL.
 
 A failed query, pool read or pool write fails only its tick, which is recorded,
@@ -391,10 +391,13 @@ gateway with token auth refuses. The client token is never sent on writes. A
 refused token is named by its source, never by its value. A failed gateway call
 is reported by the server's error message, a failed connection by the SDK's
 connection error message, and any other transport failure by its exception type
-alone, so no reported error carries a header value: a connection fails before
-any header is sent. A reply that is neither a success nor an error, such as a
-redirect, fails the call with its status code, and a reply the SDK cannot parse
-fails it as an unexpected response.
+alone; a connection fails before any header is sent. A reply that is neither a
+success nor an error, such as a redirect, fails the call with its status code,
+and a reply the SDK cannot parse fails it as an unexpected response. The
+applier cuts a reported error to 512 characters and replaces the token its
+client sent with `[redacted]`, so an intermediary that quotes the request's
+`Authorization` header in its error body does not put the token in an audit
+row. Other text a server returns is reported as it is.
 
 ## Planner
 

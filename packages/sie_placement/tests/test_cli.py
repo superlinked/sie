@@ -80,13 +80,15 @@ class FakeGateway(_Server):
         self.fail_reads = False
         self.read_reply: object | None = None
         self.raw_reply: tuple[int, bytes] | None = None
+        self.raw_replies: dict[str, tuple[int, bytes]] = {}
 
     def respond(self, handler: _Handler, method: str, body: object) -> None:
         path = urlsplit(handler.path).path
         authorization = handler.headers.get("Authorization")
         self.requests.append({"method": method, "path": path, "authorization": authorization, "body": body})
-        if self.raw_reply is not None:
-            status, payload = self.raw_reply
+        raw = self.raw_replies.get(method, self.raw_reply)
+        if raw is not None:
+            status, payload = raw
             handler.send_response(status)
             handler.send_header("Content-Type", "application/json")
             handler.send_header("Content-Length", str(len(payload)))
@@ -503,6 +505,8 @@ PASSWORD = "s3cret-password"  # noqa: S105 - a test value
         (f"http://sie-gateway:8080/?token={PASSWORD}", "must not carry a query or a fragment"),
         (f"http://sie-gateway:8080/#{PASSWORD}", "must not carry a query or a fragment"),
         ("http://sie-gateway:notaport", "has an invalid port"),
+        (f"http://user:{PASSWORD}@gw\uff0fx:8080", "is not a valid URL"),
+        (f"http://user:{PASSWORD}\uff20gw:8080", "is not a valid URL"),
     ],
 )
 def test_a_gateway_url_that_is_not_a_plain_base_url_is_refused_without_echoing_it(
@@ -515,6 +519,20 @@ def test_a_gateway_url_that_is_not_a_plain_base_url_is_refused_without_echoing_i
     assert cli.main(argv) == cli.EXIT_REFUSED
     captured = capsys.readouterr()
     assert f"the gateway URL {message}" in captured.err
+    for text in (captured.out, captured.err, caplog.text):
+        assert url not in text
+        assert PASSWORD not in text
+    assert gateway.requests == []
+    assert prometheus.requests == []
+
+
+def test_a_prometheus_url_that_is_not_a_valid_url_is_refused_without_echoing_it(gateway, prometheus, capsys, caplog):
+    caplog.set_level(logging.DEBUG)
+    url = f"http://user:{PASSWORD}@prometheus\uff0fx:9090"
+    argv = ["tune", "--plan", str(FIXTURES / "tune-plan.json"), "--prometheus-url", url]
+    assert cli.main([*argv, "--gateway-url", gateway.url, "--once"]) == cli.EXIT_REFUSED
+    captured = capsys.readouterr()
+    assert "the Prometheus URL is not a valid URL" in captured.err
     for text in (captured.out, captured.err, caplog.text):
         assert url not in text
         assert PASSWORD not in text
@@ -591,6 +609,43 @@ def test_a_redirected_write_is_not_recorded_as_applied(gateway, prometheus, read
         assert row["applied"] is False
         assert "the gateway answered HTTP 307" in row["error"]
     assert gateway.pools == {}
+
+
+ECHOES = {
+    "403-json": lambda token: (
+        403,
+        json.dumps({"detail": {"code": "FORBIDDEN", "message": f"token not allowed: Bearer {token}"}}).encode(),
+    ),
+    "502-text": lambda token: (502, f"upstream echoed Authorization: Bearer {token}".encode()),
+}
+
+
+@pytest.mark.parametrize("echo", sorted(ECHOES))
+@pytest.mark.parametrize(("method", "token"), [("GET", READ_TOKEN), ("POST", ADMIN_TOKEN)])
+def test_a_reply_that_echoes_the_clients_token_is_redacted_in_the_audit_row(
+    gateway, prometheus, read_token_file, monkeypatch, method, token, echo, capsys
+):
+    monkeypatch.setenv("SIE_ADMIN_TOKEN", ADMIN_TOKEN)
+    gateway.raw_replies[method] = ECHOES[echo](token)
+    assert tune(gateway, prometheus, "--api-key-file", str(read_token_file), "--apply") == cli.EXIT_FAILED
+    captured = capsys.readouterr()
+    errors = [row["error"] for row in rows(captured.out) if row["error"]]
+    assert errors
+    assert all("Bearer [redacted]" in error for error in errors)
+    for secret in (READ_TOKEN, ADMIN_TOKEN):
+        assert secret not in captured.out
+        assert secret not in captured.err
+
+
+def test_a_long_gateway_error_is_cut_to_512_characters(gateway, prometheus, read_token_file, capsys):
+    gateway.raw_replies["GET"] = (502, b"x" * 5000)
+    assert tune(gateway, prometheus, "--api-key-file", str(read_token_file)) == cli.EXIT_FAILED
+    errors = [row["error"] for row in rows(capsys.readouterr().out)]
+    assert errors
+    for error in errors:
+        prefix, message = error.split(" failed: ", 1)
+        assert prefix.startswith("reading pool ")
+        assert len(message) == pools.MAX_ERROR_LENGTH
 
 
 def test_a_malformed_pool_reply_fails_only_the_tick(gateway, prometheus, read_token_file, capsys):
