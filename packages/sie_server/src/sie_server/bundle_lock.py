@@ -130,20 +130,37 @@ def root_packages(root_lock: Path) -> dict[str, list[dict[str, Any]]]:
 
 
 def root_versions_digest(root_lock: Path) -> str:
-    """Bind the exact third-party root versions that constrain compilation.
+    """Bind the exact third-party root versions and effective platform constraints.
 
     Workspace members and lock serialization never reach ``bundle-libs``.
     Root artifact sources are excluded here because every check revalidates
     them against the current root lock through the exception policy.
     """
+    packages = root_packages(root_lock)
     return canonical_digest(
-        {name: sorted({row["version"] for row in rows}) for name, rows in root_packages(root_lock).items()}
+        {
+            "versions": {name: sorted({row["version"] for row in rows}) for name, rows in packages.items()},
+            "resolution_markers": {
+                name: sorted(
+                    {
+                        (
+                            row["version"],
+                            tuple(sorted({str(Marker(marker)) for marker in row.get("resolution-markers", [])})),
+                        )
+                        for row in rows
+                    }
+                )
+                for name, rows in packages.items()
+                if len({Version(row["version"]).public for row in rows}) > 1
+            },
+        }
     )
 
 
 def root_constraints(root_lock: Path, exceptions: Mapping[str, Mapping[str, str]]) -> list[str]:
     """Pin every root package, except an explicitly recorded exact alternative.
 
+    Platform-specific versions retain the root lock's resolution markers.
     ``==2.9.1`` admits a local build such as ``+cpu`` but excludes ``.post1``.
     The artifact and exact local version are checked separately against the
     exception manifest. This never drops an entire untrusted transitive graph.
@@ -155,12 +172,42 @@ def root_constraints(root_lock: Path, exceptions: Mapping[str, Mapping[str, str]
         else:
             versions = {Version(row["version"]).public for row in rows}
             if len(versions) != 1:
-                msg = f"root has multiple public versions of {name}; record an exact target exception"
-                raise ValueError(msg)
+                for row in rows:
+                    markers = row.get("resolution-markers")
+                    if not isinstance(markers, list) or not markers or not all(isinstance(m, str) for m in markers):
+                        msg = f"root has unmarked multiple public versions of {name}; record an exact target exception"
+                        raise ValueError(msg)
+                    condition = " or ".join(sorted({f"({Marker(marker)})" for marker in markers}))
+                    result.append(f"{name}=={Version(row['version']).public}; {condition}")
+                continue
             version = versions.pop()
         Version(version)
         result.append(f"{name}=={version}")
     return result
+
+
+def _validate_root_constraints(
+    packages: Mapping[str, Mapping[str, Any]],
+    root_lock: Path,
+    exceptions: Mapping[str, Mapping[str, str]],
+    target: Target,
+) -> None:
+    """A source-valid root version must also be the target's active exact pin."""
+    constraints: dict[str, list[Requirement]] = {}
+    for line in root_constraints(root_lock, exceptions):
+        requirement = Requirement(line)
+        constraints.setdefault(canonicalize_name(requirement.name), []).append(requirement)
+    for name in packages.keys() & constraints.keys():
+        active = [
+            requirement
+            for requirement in constraints[name]
+            if requirement.marker is None or requirement.marker.evaluate(target.marker_environment())
+        ]
+        if not active or any(
+            not requirement.specifier.contains(packages[name]["version"], prereleases=True) for requirement in active
+        ):
+            msg = f"bundle root constraint is not satisfied for target {target.name}: {name}"
+            raise ValueError(msg)
 
 
 def _public_url(value: object) -> str:
@@ -378,6 +425,7 @@ def check_lock(
         raise ValueError(msg)
     packages = read_packages(lock, target)
     validate_exceptions(packages, root_lock, exceptions)
+    _validate_root_constraints(packages, root_lock, exceptions, target)
     validate_source_pins(packages, source_pins)
     for line in requirements:
         requirement = Requirement(line)

@@ -153,7 +153,10 @@ def test_default_bundle_constraints_pin_transitive_deps_and_name_the_downgrade()
     assert "older" in constraints[0]
     assert "release than an unconstrained build" in constraints[1]
     assert any(line.startswith("# For example, gliner follows ") for line in constraints)
-    assert f"onnxruntime=={parsed.versions['onnxruntime']}" in constraints
+    # Platform-split root versions are intentionally skipped by this legacy
+    # marker-free helper; saved bundle closures validate target-specific pins.
+    assert "onnxruntime" in parsed.ambiguous
+    assert not any(line.startswith("onnxruntime==") for line in constraints)
     assert f"docling-core=={parsed.versions['docling-core']}" in constraints
     assert f"gliner=={parsed.versions['gliner']}" in constraints
     # Exact bundle pins stay requirements, not constraints.
