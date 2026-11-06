@@ -17,8 +17,10 @@ from sie_placement.schema import (
     DemandSeries,
     Envelope,
     IdentityServiceLevel,
+    MachineProfilePrice,
     Operation,
     Percentiles,
+    Placement,
     Plan,
     PlanIdentity,
     PlanLane,
@@ -27,6 +29,7 @@ from sie_placement.schema import (
     SchemaError,
     ServiceLevel,
     ServiceLevels,
+    Throughput,
     Warmth,
 )
 
@@ -139,6 +142,31 @@ def test_numbers_must_be_finite(value):
     error = schema_error(Receipt.from_dict, data)
     assert error.path == "$.throughput.requestsPerSecond"
     assert error.message.startswith("expected a finite number")
+
+
+@pytest.mark.parametrize(
+    ("build", "field"),
+    [
+        (lambda value: Throughput(requests_per_second=value), "requestsPerSecond"),
+        (lambda value: Percentiles(p99_ms=value), "p99Ms"),
+        (lambda value: ContainerShape(gpu_count=1, cpu_cores=value, memory_mib=1024), "cpuCores"),
+        (lambda value: Placement(name="default", region_multiplier=value), "regionMultiplier"),
+        (
+            lambda value: MachineProfilePrice(
+                name="l4", gpu_product="NVIDIA-L4", accelerator_per_hour=value, core_per_hour=0, memory_gib_per_hour=0
+            ),
+            "acceleratorPerHour",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "value", [math.nan, math.inf, -math.inf, 10**400], ids=["nan", "infinity", "negative-infinity", "integer"]
+)
+def test_numbers_built_in_code_must_be_finite(build, field, value):
+    with pytest.raises(SchemaError) as caught:
+        build(value)
+    assert caught.value.path == field
+    assert caught.value.message.startswith("must be a finite number")
 
 
 def test_numbers_reject_booleans():
