@@ -96,7 +96,7 @@ spec:
       containers:
         - name: applier
           image: {{ printf "%s:%s" (trim (toString $applier.image.repository)) (trim (toString $applier.image.tag)) | quote }}
-          imagePullPolicy: {{ $applier.image.pullPolicy | default "IfNotPresent" }}
+          imagePullPolicy: {{ $applier.image.pullPolicy | default "IfNotPresent" | quote }}
           command: ["sie-placement"]
           args:
             - tune

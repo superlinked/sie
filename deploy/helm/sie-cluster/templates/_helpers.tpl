@@ -1084,6 +1084,10 @@ lanes and their envelopes.
 {{- if not (and (trim (toString (default "" $image.repository))) (trim (toString (default "" $image.tag)))) -}}
 {{- fail "placementApplier.image.repository and placementApplier.image.tag are required: the chart publishes no image that runs sie-placement. Use an image that installs sie-placement with its keda extra." -}}
 {{- end -}}
+{{- $pullPolicy := toString (default "IfNotPresent" $image.pullPolicy) -}}
+{{- if not (has $pullPolicy (list "Always" "IfNotPresent" "Never")) -}}
+{{- fail (printf "placementApplier.image.pullPolicy must be Always, IfNotPresent or Never, got %q" $pullPolicy) -}}
+{{- end -}}
 {{- $clientToken := $applier.clientToken | default dict -}}
 {{- $clientSecret := trim (toString (default "" $clientToken.existingSecretName)) -}}
 {{- if and $clientSecret (not (trim (toString (default "" $clientToken.secretKey)))) -}}

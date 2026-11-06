@@ -558,6 +558,7 @@ The render fails unless:
 - `placementApplier.image.repository` and `placementApplier.image.tag` name an
   image that installs `sie-placement` with its `keda` extra and can run as user
   and group 65532. The chart publishes no such image.
+  `placementApplier.image.pullPolicy` is `Always`, `IfNotPresent` or `Never`.
 - `placementApplier.plan` is a placement-plan document. Each of its lanes names
   an enabled worker lane by its `queuePool`, `cell.machineProfile` and
   `bundle`, compared as the chart canonicalizes lane tokens, and that worker

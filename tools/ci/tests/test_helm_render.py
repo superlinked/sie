@@ -4696,6 +4696,25 @@ def test_the_applier_mounts_the_trimmed_client_token_secret_key(tmp_path: Path) 
     }
 
 
+INJECTED_PULL_POLICY = "IfNotPresent\n          env:\n            - name: INJECTED\n              value: x"
+
+
+@pytest.mark.parametrize("policy", ["Always", "IfNotPresent", "Never"])
+def test_the_applier_takes_a_kubernetes_pull_policy(tmp_path: Path, policy: str) -> None:
+    image = {**APPLIER_IMAGE, "pullPolicy": policy}
+    (container,) = applier_pod(placement_documents(tmp_path, applier_layers(image=image)))["spec"]["containers"]
+    assert container["imagePullPolicy"] == policy
+    assert "env" not in container
+
+
+@pytest.mark.parametrize("policy", [INJECTED_PULL_POLICY, "ifnotpresent", "Sometimes"])
+def test_an_applier_pull_policy_kubernetes_does_not_know_fails_the_render(tmp_path: Path, policy: str) -> None:
+    result = render_placement(tmp_path, *applier_layers(image={**APPLIER_IMAGE, "pullPolicy": policy}))
+    assert result.returncode != 0
+    assert "placementApplier.image.pullPolicy must be Always, IfNotPresent or Never" in result.stderr
+    assert "INJECTED" not in result.stdout
+
+
 def envelope_values(settings: dict, *, autoscaling: bool = False) -> dict:
     values = {"workers": {"pools": {"l4": {"enabled": True, "bundles": {"default": settings}}}}}
     return {**values, **AUTOSCALING_VALUES} if autoscaling else values
