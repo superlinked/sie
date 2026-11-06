@@ -4724,7 +4724,7 @@ def test_the_applier_mounts_the_trimmed_client_token_secret_key(tmp_path: Path) 
             "graf #x",
             "graf",
             "kube-prometheus-stack.grafana.admin.existingSecret must name a Kubernetes Secret (lowercase letters, "
-            'digits, \'-\' and \'.\'), got "graf #x"',
+            "digits, '-' and '.'), got \"graf #x\"",
         ),
     ],
     ids=["both-spaced", "grafana-spaced", "grafana-comment"],
@@ -4752,11 +4752,19 @@ def test_the_applier_client_token_is_kept_apart_from_the_grafana_admin_secret_wh
         "{{ .Capabilities.KubeVersion.Major }}-graf",
         "Graf-{{ .Release.Name }}",
     ],
-    ids=["index-template", "template", "template-dollar", "index-values", "bare-values", "include", "pipeline", "capabilities", "uppercase"],
+    ids=[
+        "index-template",
+        "template",
+        "template-dollar",
+        "index-values",
+        "bare-values",
+        "include",
+        "pipeline",
+        "capabilities",
+        "uppercase",
+    ],
 )
-def test_a_grafana_admin_secret_that_depends_on_more_than_the_release_is_refused(
-    tmp_path: Path, existing: str
-) -> None:
+def test_a_grafana_admin_secret_that_depends_on_more_than_the_release_is_refused(tmp_path: Path, existing: str) -> None:
     values = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": existing}}}}
     result = render_chart(tmp_path, values)
     assert result.returncode != 0
@@ -4775,11 +4783,12 @@ def test_a_grafana_admin_secret_that_depends_on_more_than_the_release_is_refused
         "graf",
     ],
 )
-def test_a_grafana_admin_secret_that_names_release_values_or_chart_fields_renders(tmp_path: Path, existing: str) -> None:
+def test_a_grafana_admin_secret_that_names_release_values_or_chart_fields_renders(
+    tmp_path: Path, existing: str
+) -> None:
     values = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": existing}}}}
     result = render_chart(tmp_path, values)
     assert result.returncode == 0, result.stderr
-
 
 
 @pytest.mark.parametrize("value", ["null", "true", "no", "123", "1e3", "0x1f", "12.5"])
@@ -4813,6 +4822,7 @@ def test_an_unquoted_subchart_secret_name_that_yaml_reads_as_a_string_renders(tm
     values = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": value}}}}
     result = render_chart(tmp_path, values)
     assert result.returncode == 0, result.stderr
+
 
 @pytest.mark.parametrize(
     ("keda", "error"),
