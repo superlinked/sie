@@ -388,16 +388,16 @@ The applier reads it only with `--apply`, sends it only on pool writes to
 `--gateway-url`, never takes it as a command-line value and never prints or
 logs it. Without it, `--apply` sends its writes with no credential, which a
 gateway with token auth refuses. The client token is never sent on writes. A
-refused token is named by its source, never by its value. A failed gateway call
-is reported by the server's error message, a failed connection by the SDK's
-connection error message, and any other transport failure by its exception type
-alone; a connection fails before any header is sent. A reply that is neither a
-success nor an error, such as a redirect, fails the call with its status code,
-and a reply the SDK cannot parse fails it as an unexpected response. The
-applier cuts a reported error to 512 characters and replaces the token its
-client sent with `[redacted]`, so an intermediary that quotes the request's
-`Authorization` header in its error body does not put the token in an audit
-row. Other text a server returns is reported as it is.
+refused token is named by its source, never by its value. A gateway call that
+gets an error reply is reported by its HTTP status alone, and so is a reply
+that is neither a success nor an error, such as a redirect; a success reply the
+SDK cannot parse is reported as an unexpected response. No text a server
+returns reaches an audit row, so an intermediary that quotes the request's
+`Authorization` header in its error body cannot put the token there. A failed
+connection is reported by the SDK's connection error message, sent before any
+header, and any other transport failure by its exception type alone. A message
+the SDK raises before any reply is cut to 512 characters, with the token the
+client holds replaced by `[redacted]`.
 
 ## Planner
 
