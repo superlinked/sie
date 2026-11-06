@@ -594,7 +594,7 @@ not read as `null`. The audit row's `error` records a failed pool call.
 
 | Credential | Held | Authorizes |
 | --- | --- | --- |
-| Gateway admin token | Only with `placementApplier.apply: true`, from the Secret `gateway.auth.adminTokenSecretName` (key `gateway.auth.adminTokenSecretKey`) | `POST`, `PUT` and `DELETE` under `/v1/pools`, `/v1/admin` and `/v1/configs`: every gateway admin route, not only floor carriers |
+| Gateway admin token | Only with `placementApplier.apply: true` and a gateway that may authenticate, with token auth or a mode known only at run time, from the Secret `gateway.auth.adminTokenSecretName` (key `gateway.auth.adminTokenSecretKey`) | `POST`, `PUT` and `DELETE` under `/v1/pools`, `/v1/admin` and `/v1/configs`: every gateway admin route, not only floor carriers |
 | Gateway client token | When `placementApplier.clientToken.existingSecretName` is set | Every gateway route that is not an admin route, inference included; the applier uses it for `GET /v1/pools/{name}` |
 | Kubernetes API | Never | Nothing: the applier has its own ServiceAccount, mounts no ServiceAccount token, and has no Role or RoleBinding |
 

@@ -4715,6 +4715,15 @@ def test_an_applier_pull_policy_kubernetes_does_not_know_fails_the_render(tmp_pa
     assert "INJECTED" not in result.stdout
 
 
+def test_the_applier_holds_no_admin_token_when_the_gateway_authenticates_nothing(tmp_path: Path) -> None:
+    auth = {"gateway": {"auth": {"mode": "none", "adminTokenSecretName": "gateway-admin", "adminTokenSecretKey": "admin"}}}
+    spec = applier_pod(placement_documents(tmp_path, applier_layers(auth, apply=True)))["spec"]
+    (container,) = spec["containers"]
+    assert container["args"] == [*APPLIER_ARGS, "--apply"]
+    assert [mount["name"] for mount in container["volumeMounts"]] == ["plan"]
+    assert [volume["name"] for volume in spec["volumes"]] == ["plan"]
+
+
 def envelope_values(settings: dict, *, autoscaling: bool = False) -> dict:
     values = {"workers": {"pools": {"l4": {"enabled": True, "bundles": {"default": settings}}}}}
     return {**values, **AUTOSCALING_VALUES} if autoscaling else values

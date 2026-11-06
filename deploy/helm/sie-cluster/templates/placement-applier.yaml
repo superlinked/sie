@@ -28,8 +28,10 @@
 {{- $clientToken := $applier.clientToken | default dict -}}
 {{- $clientSecret := trim (toString (default "" $clientToken.existingSecretName)) -}}
 {{- $clientKey := trim (toString (default "" $clientToken.secretKey)) -}}
+{{- $auth := include "sie-cluster.gateway.effectiveAuthMode" . | fromJson -}}
+{{- $mayAuthenticate := or (include "sie-cluster.gateway.authenticates" .) (not $auth.known) -}}
 {{- $adminTokenSecret := "" -}}
-{{- if $apply -}}
+{{- if and $apply $mayAuthenticate -}}
 {{- $adminTokenSecret = dig "auth" "adminTokenSecretName" "" (.Values.gateway | default dict) | toString | trim -}}
 {{- end -}}
 apiVersion: v1
