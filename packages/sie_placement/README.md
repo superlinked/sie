@@ -190,10 +190,15 @@ it had before. Where the identities that join a lane do not fit it together,
 they are admitted first fit in decreasing order of footprint, ties broken by
 identity, and the others are decided again without that lane.
 
-Where a resident's footprint or working memory is not on file, the planner
-asks that resident for it, under its own identity and warmth at the lane, in a
-`footprint` measurement request. A lane on a profile without `gpuMemoryMiB`
-hosts no identity beside another, and the report names that profile.
+Where an identity would join a lane and a resident's footprint or working
+memory is not on file, the planner asks that resident for it, under its own
+identity and warmth at the lane, in a `footprint` measurement request. For a
+lane the plan keeps, it asks only when a lazy resident is placed there. A kept
+lane whose pinned residents have no footprint on file gets no `footprint`
+request, so the report does not name every unmeasured shared lane. A profile
+without `gpuMemoryMiB` takes no new identity beside another, and the report
+names that profile. A lane the plan already shares on such a profile stays
+shared.
 
 ## Envelope
 
