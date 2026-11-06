@@ -330,6 +330,98 @@ def test_verify_cli_still_redacts_upstream_errors(
     assert "upstream-private-detail" not in str(error.value) + output.out + output.err
 
 
+def bootstrap_verification_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Demo:
+    import common
+
+    (tmp_path / "config.toml").write_text((ROOT / "config.toml").read_text())
+    monkeypatch.setattr(common, "ROOT", tmp_path)
+    monkeypatch.setattr(common, "load_dotenv", lambda *args, **kwargs: None)
+    for name in tuple(common.os.environ):
+        if name.startswith("SIE_"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("SIE_BASE_URL", "http://localhost:8080")
+    monkeypatch.setenv("WORKSHOP_NAMESPACE", "test")
+    demo = load_demo("04-learn")
+    demo.show("actual-distillation", {"status": "no_proposed_lessons", "documents": []})
+    marker = demo.storage / "cognee/sie-cognee.json"
+    marker.parent.mkdir()
+    marker.write_text(
+        json.dumps(
+            {"embedding_model": demo.models["embedding"], "embedding_dimensions": demo.models["embedding_dimensions"]}
+        )
+    )
+    return demo
+
+
+@pytest.mark.parametrize("missing_outer", [False, True])
+def test_real_bootstrap_missing_owned_marker_displays_safe_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], missing_outer: bool
+) -> None:
+    learn = script("04_learn.py")
+    teaching = bootstrap_verification_fixture(tmp_path, monkeypatch)
+    marker = teaching.storage / "cognee/sie-cognee.json"
+    marker.unlink()
+    outer = teaching.storage / "embedding.json"
+    if missing_outer:
+        outer.unlink()
+    initialization = Mock()
+    monkeypatch.setattr(learn, "initialize", initialization)
+    monkeypatch.setattr(sys, "argv", ["04_learn.py", "--verify-run", str(teaching.run)])
+    with pytest.raises(SystemExit) as error:
+        learn.launch("04-learn", learn.main)
+    assert error.value.code == 2
+    stderr = capsys.readouterr().err
+    assert learn.MISSING_STATE_RECOVERY in stderr
+    assert "FileNotFoundError" not in stderr
+    assert str(tmp_path) not in stderr
+    assert outer.is_file()
+    assert not marker.exists()
+    initialization.assert_not_called()
+
+
+@pytest.mark.parametrize("owned_identity", ["matching", "different-model", "different-dimensions"])
+def test_real_bootstrap_reconstructs_outer_metadata_but_checks_owned_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owned_identity: str
+) -> None:
+    learn = script("04_learn.py")
+    teaching = bootstrap_verification_fixture(tmp_path, monkeypatch)
+    marker = teaching.storage / "cognee/sie-cognee.json"
+    identity = json.loads(marker.read_text())
+    if owned_identity == "different-model":
+        identity["embedding_model"] = "other-model"
+    elif owned_identity == "different-dimensions":
+        identity["embedding_dimensions"] = 768
+    marker.write_text(json.dumps(identity))
+    marker_before = marker.read_bytes()
+    outer = teaching.storage / "embedding.json"
+    outer.unlink()
+    cognee = SimpleNamespace(
+        recall=AsyncMock(return_value=[]), session=SimpleNamespace(get_session=AsyncMock(return_value=[]))
+    )
+    initialization = Mock(return_value=cognee)
+    monkeypatch.setattr(learn, "initialize", initialization)
+    search = ModuleType("cognee.api.v1.search")
+    search.SearchType = SimpleNamespace(HYBRID_COMPLETION="hybrid")  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "cognee.api.v1.search", search)
+    retrieval = AsyncMock(return_value=[])
+    monkeypatch.setattr(learn, "retrieve_chunks", retrieval)
+    monkeypatch.setattr(sys, "argv", ["04_learn.py", "--verify-run", str(teaching.run)])
+    if owned_identity == "matching":
+        learn.launch("04-learn", learn.main)
+        initialization.assert_called_once()
+        assert initialization.call_args.kwargs == {"learning": False}
+        cognee.recall.assert_awaited_once()
+        retrieval.assert_awaited_once()
+    else:
+        with pytest.raises(SystemExit, match="ValueError"):
+            learn.launch("04-learn", learn.main)
+        initialization.assert_not_called()
+        cognee.recall.assert_not_awaited()
+        retrieval.assert_not_awaited()
+    assert json.loads(outer.read_text()) == {key: teaching.models[key] for key in ("embedding", "embedding_dimensions")}
+    assert marker.read_bytes() == marker_before
+
+
 @pytest.mark.parametrize("evidence", ["present", "missing", "oversized"])
 def test_focused_decision_config_is_independent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, evidence: str) -> None:
     import common
