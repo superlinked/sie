@@ -408,6 +408,33 @@ def test_two_never_cold_identities_share_a_card_on_their_co_residency_receipt():
     assert again.report.identity("org/a").chosen.co_residents == ("org/b",)
 
 
+BUSY = {"org/a": {0: 20000}, "org/b": {0: 20000}}
+
+
+def test_a_shared_lane_prices_its_residents_demand_together():
+    result = run(levels(**{"org/a": 0, "org/b": 0}), pair_receipts(), hourly=BUSY)
+    assert placements(result) == {"org/a": ("org-b-l4", Warmth.PINNED), "org/b": ("org-b-l4", Warmth.PINNED)}
+    (lane,) = result.report.lanes
+    assert lane.monthly_cost == pytest.approx(MONTH + MONTH / 24)
+    assert result.report.monthly_cost == pytest.approx(MONTH + MONTH / 24)
+
+
+def test_a_packing_whose_residents_together_need_more_containers_than_the_ceiling_is_not_made():
+    result = run(levels(**{"org/a": 0, "org/b": 0}), pair_receipts(), hourly=BUSY, max_containers=1)
+    assert placements(result) == {"org/a": ("org-a-l4", Warmth.PINNED), "org/b": ("org-b-l4", Warmth.PINNED)}
+    assert result.report.monthly_cost == pytest.approx(2 * MONTH)
+    assert not any(
+        Measurement.CO_RESIDENCY_RECEIPT in request.measure for request in result.report.measurement_requests
+    )
+    quiet = run(
+        levels(**{"org/a": 0, "org/b": 0}),
+        pair_receipts(),
+        hourly={"org/a": {0: 10000}, "org/b": {0: 10000}},
+        max_containers=1,
+    )
+    assert placements(quiet) == {"org/a": ("org-b-l4", Warmth.PINNED), "org/b": ("org-b-l4", Warmth.PINNED)}
+
+
 def test_a_co_residency_receipt_over_a_warm_bound_keeps_the_identities_apart():
     result = run(levels(**{"org/a": 0, "org/b": 0}), pair_receipts(b_p99=300.0))
     assert placements(result) == {"org/a": ("org-a-l4", Warmth.PINNED), "org/b": ("org-b-l4", Warmth.PINNED)}

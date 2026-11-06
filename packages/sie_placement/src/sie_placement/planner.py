@@ -522,13 +522,14 @@ def _boot_index(records: Iterable[BootEvidence], placements: Mapping[str, _Place
     return index
 
 
-def _hourly_requests(demand: Demand) -> dict[str, tuple[int, ...]]:
+def _hourly_requests(demand: Demand) -> dict[str, dict[datetime, int]]:
     hours: defaultdict[str, Counter[datetime]] = defaultdict(Counter)
     for series in demand.series:
         for hour in series.hours:
             hours[series.identity][hour.start] += hour.requests
     return {
-        identity: tuple(count for _, count in sorted(counts.items()) if count) for identity, counts in hours.items()
+        identity: {start: count for start, count in sorted(counts.items()) if count}
+        for identity, counts in hours.items()
     }
 
 
@@ -579,7 +580,8 @@ class _Planner:
             active_floor=parameters.active_floor,
             cooldown_s=parameters.cooldown_s,
         )
-        self.requests = _hourly_requests(demand)
+        self.requests_by_hour = _hourly_requests(demand)
+        self.requests = {identity: tuple(counts.values()) for identity, counts in self.requests_by_hour.items()}
         self.current_plan = current_plan
         self.current: dict[str, tuple[PlanIdentity, PlanLane]] = {}
         self.current_lanes: dict[str, PlanLane] = {}
@@ -1643,6 +1645,20 @@ class _Planner:
                     choices, layout, total = trial, trial_layout, trial_total
         return choices
 
+    def lane_needs(self, rates: Mapping[str, float]) -> list[int]:
+        load: Counter[datetime] = Counter()
+        for identity, rate in rates.items():
+            for start, count in self.requests_by_hour.get(identity, {}).items():
+                load[start] += count / (rate * SECONDS_PER_HOUR)
+        return [math.ceil(round(containers, 9)) for containers in load.values()]
+
+    def lane_rates(self, layout: _Layout, name: str) -> dict[str, float]:
+        return {
+            entry.identity: receipt.throughput.requests_per_second
+            for entry in layout.plan.identities
+            if entry.lane == name and (receipt := layout.receipts.get(entry.identity)) is not None
+        }
+
     def riding_cost(self, lane: PlanLane, identity: str, receipt: Receipt) -> float:
         window = replace(self.window, ceiling=lane.max_containers)
         requests = self.requests.get(identity, ())
@@ -1830,6 +1846,10 @@ class _Planner:
                         },
                     }
                     trial_layout = self.assemble(trial)
+                    name = trial_layout.names[identity]
+                    ceiling = next(lane.max_containers for lane in trial_layout.plan.lanes if lane.name == name)
+                    if any(need > ceiling for need in self.lane_needs(self.lane_rates(trial_layout, name))):
+                        continue
                     trial_total = self.total(trial_layout)
                     saving = total - trial_total
                     if round(saving, 2) <= 0:
@@ -2066,6 +2086,16 @@ class _Planner:
             demand = {identity: self.demand_hours(lane, identity, receipts.get(identity)) for identity in hosted}
             priced = {identity: value for identity, value in demand.items() if value is not None}
             costs.update((identity, hourly * (floor + value)) for identity, value in priced.items())
+            above = sum(priced.values())
+            rates = {
+                identity: receipt.throughput.requests_per_second
+                for identity in priced
+                if (receipt := receipts.get(identity)) is not None
+            }
+            if lane.envelope.floor_min and len(rates) > 1:
+                above = self.window.scale * sum(
+                    max(0, min(lane.max_containers, need) - lane.envelope.floor_min) for need in self.lane_needs(rates)
+                )
             memory = _UNPACKABLE
             if len(hosted) > 1:
                 memory = self.memory(
@@ -2078,7 +2108,7 @@ class _Planner:
                     name=lane.name,
                     identities=hosted,
                     hourly_cost=hourly,
-                    monthly_cost=hourly * (floor + sum(priced.values())),
+                    monthly_cost=hourly * (floor + above),
                     floor_monthly_cost=hourly * lane.envelope.floor_min * hours,
                     envelope_max_monthly_cost=hourly * lane.envelope.floor_max * hours,
                     unpriced_identities=tuple(identity for identity in hosted if identity not in priced),
