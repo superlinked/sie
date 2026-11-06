@@ -788,6 +788,20 @@ def test_a_ca_directory_the_applier_cannot_list_is_left_to_openssl(monkeypatch, 
     assert calls == [{"cafile": None, "capath": str(certs)}]
 
 
+@pytest.mark.parametrize("location", ["unsearchable", "below-unsearchable-parent"])
+def test_a_ca_location_the_applier_may_not_search_is_refused_before_any_call(monkeypatch, tmp_path, location):
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    certs = locked if location == "unsearchable" else locked / "certs"
+    locked.chmod(0o000 if location == "unsearchable" else 0o600)
+    try:
+        monkeypatch.setenv("SSL_CERT_DIR", str(certs))
+        with pytest.raises(ValueError, match="the CA certificates that SSL_CERT_DIR names cannot be loaded"):
+            pools.connect(HTTPS_GATEWAY, READ_TOKEN)
+    finally:
+        locked.chmod(0o755)
+
+
 def test_a_ca_directory_list_with_one_usable_entry_is_passed_through_unchanged(monkeypatch, tmp_path):
     good = certificate_directory(tmp_path / "certs")
     listing = os.pathsep.join([str(tmp_path / "missing"), str(good), ""])
