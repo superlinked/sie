@@ -408,6 +408,28 @@ def test_negative_counts_are_rejected(make):
         make()
 
 
+@pytest.mark.parametrize("value", [True, 1.0])
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda value: Observation(runners=value, backlog=0, running=0),
+        lambda value: Observation(runners=0, backlog=value, running=0),
+        lambda value: Observation(runners=0, backlog=0, running=value),
+        lambda value: Settings(floor=value),
+        lambda value: Settings(floor=0, buffer=value),
+        lambda value: Settings(floor=0, scaledown_window_s=value),
+    ],
+)
+def test_counts_that_are_not_integers_are_rejected(make, value):
+    with pytest.raises(ValueError, match="must be an integer"):
+        make(value)
+
+
+def test_zero_counts_are_accepted():
+    assert Observation(runners=0, backlog=0, running=0).idle
+    assert Settings(floor=0, buffer=0, scaledown_window_s=0).floor == 0
+
+
 @pytest.mark.parametrize("attainment", list(Attainment))
 def test_an_attainment_given_as_its_wire_string_reads_as_its_value(attainment):
     wire: Any = attainment.value
