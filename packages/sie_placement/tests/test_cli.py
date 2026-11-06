@@ -17,6 +17,7 @@ import pytest
 
 pytest.importorskip("sie_sdk")
 
+import certifi
 from sie_placement import cli, keda, pools
 from sie_sdk import SIEError
 
@@ -737,11 +738,12 @@ def test_an_https_gateway_is_verified_against_the_ca_certificates_the_environmen
     if also_set_directory:
         monkeypatch.setenv("SSL_CERT_DIR", str(certificate_directory(tmp_path / "other-certs")))
     calls = recorded_contexts(monkeypatch)
-    pools._verification(HTTPS_GATEWAY)
+    context = pools._verification(HTTPS_GATEWAY)
     expected = {"cafile": str(location), "capath": None}
     if variable == "SSL_CERT_DIR":
         expected = {"cafile": None, "capath": str(location)}
     assert calls == [expected]
+    assert context.keylog_filename is None
 
 
 def test_a_ca_directory_list_with_one_usable_entry_is_passed_through_unchanged(monkeypatch, tmp_path):
@@ -754,8 +756,10 @@ def test_a_ca_directory_list_with_one_usable_entry_is_passed_through_unchanged(m
 
 
 @pytest.mark.parametrize("url", [HTTPS_GATEWAY, "http://gateway.example:8080"])
-def test_the_gateway_client_uses_the_default_ca_bundle_without_those_variables(url):
-    assert pools._verification(url) is True
+def test_the_gateway_client_uses_the_default_ca_bundle_without_those_variables(monkeypatch, url):
+    calls = recorded_contexts(monkeypatch)
+    pools._verification(url)
+    assert calls == [{"cafile": certifi.where()}]
 
 
 def test_an_http_gateway_reads_no_ca_variables(gateway, monkeypatch, tmp_path):
@@ -766,6 +770,14 @@ def test_an_http_gateway_reads_no_ca_variables(gateway, monkeypatch, tmp_path):
         assert reader.get_pool(CARRIER) is None
     finally:
         reader.close()
+
+
+@pytest.mark.parametrize("url", [HTTPS_GATEWAY, "http://gateway.example:8080"])
+def test_the_gateway_client_never_writes_tls_secrets_to_a_key_log(monkeypatch, tmp_path, url):
+    key_log = tmp_path / "keys.log"
+    monkeypatch.setenv("SSLKEYLOGFILE", str(key_log))
+    assert ssl.create_default_context().keylog_filename == str(key_log)
+    assert pools._verification(url).keylog_filename is None
 
 
 def test_a_ca_bundle_that_cannot_be_loaded_is_refused_before_any_call(monkeypatch, tmp_path):

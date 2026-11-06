@@ -7,6 +7,7 @@ import ssl
 import urllib.parse
 from collections.abc import Mapping
 
+import certifi
 import httpx
 from sie_sdk import SIEClient, SIEError
 
@@ -41,20 +42,23 @@ def _holds_entries(path: str) -> bool:
         return False
 
 
-def _verification(base_url: str) -> ssl.SSLContext | bool:
+def _verification(base_url: str) -> ssl.SSLContext:
     cafile = capath = None
     if urllib.parse.urlsplit(base_url).scheme == "https":
         cafile = os.environ.get("SSL_CERT_FILE") or None
         capath = None if cafile else os.environ.get("SSL_CERT_DIR") or None
     if capath is not None and not any(_holds_entries(entry) for entry in capath.split(os.pathsep) if entry):
         raise ValueError("the CA certificates that SSL_CERT_DIR names cannot be loaded")
-    if cafile is None and capath is None:
-        return True
     try:
-        return ssl.create_default_context(cafile=cafile, capath=capath)
+        if cafile is None and capath is None:
+            context = ssl.create_default_context(cafile=certifi.where())
+        else:
+            context = ssl.create_default_context(cafile=cafile, capath=capath)
     except (OSError, ssl.SSLError):
         variable = "SSL_CERT_FILE" if cafile else "SSL_CERT_DIR"
         raise ValueError(f"the CA certificates that {variable} names cannot be loaded") from None
+    context.keylog_filename = None  # ty: ignore[invalid-assignment]
+    return context
 
 
 def _client(base_url: str, api_key: str | None) -> tuple[SIEClient, _Replies, str | None]:
