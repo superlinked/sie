@@ -16,6 +16,7 @@ from test_quality import FakeClient, clock, parse, reference_file, tiny_loaders
 
 import run
 import score
+from official import NotFound
 from run import (
     DEFAULT_ENDPOINT,
     Loaders,
@@ -103,8 +104,8 @@ class TemporaryCase(unittest.TestCase):
         return run_quality(plan, data, client, results_dir=self.directory / "results", now=clock)
 
     def command(self, fake, *argv):
-        def measured(plan, data, client):
-            return run_quality(plan, data, fake, results_dir=self.directory / "results", now=clock)
+        def measured(plan, data, client, **kwargs):
+            return run_quality(plan, data, fake, results_dir=self.directory / "results", now=clock, **kwargs)
 
         def loader(plan):
             return load_quality_data(plan, tiny_loaders())
@@ -116,6 +117,7 @@ class TemporaryCase(unittest.TestCase):
             patch.object(run, "load_quality_data", side_effect=loader),
             patch.object(run, "run_quality", side_effect=measured),
             patch.object(run, "SIEClient"),
+            patch.object(run, "http_fetch", side_effect=NotFound),
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):
