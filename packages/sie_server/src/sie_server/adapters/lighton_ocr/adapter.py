@@ -31,8 +31,6 @@ _ERR_NOT_LOADED = "Model not loaded. Call load() first."
 _ERR_NO_IMAGES = "LightOnOCRAdapter requires image input for extraction"
 _ERR_ENCODE_NOT_SUPPORTED = "LightOnOCRAdapter does not support encode(). Use extract() instead."
 
-DEFAULT_SYSTEM_PROMPT = "You are an OCR engine. Return the markdown representation of the document."
-
 
 class LightOnOCRAdapter(ModelAdapter):
     """Adapter for lightonai/LightOnOCR-2-1B document OCR model.
@@ -55,7 +53,7 @@ class LightOnOCRAdapter(ModelAdapter):
         num_beams: int = 1,
         attn_implementation: str = "sdpa",
         revision: str | None = None,
-        system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+        system_prompt: str | None = None,
         max_batch_images: int = 4,
         **kwargs: Any,
     ) -> None:
@@ -69,7 +67,7 @@ class LightOnOCRAdapter(ModelAdapter):
             attn_implementation: Attention implementation - "eager", "sdpa", or "flash_attention_2".
             revision: Optional HuggingFace revision/branch/commit SHA to pin when loading model artifacts.
                 Forwarded to ``from_pretrained(..., revision=...)``.
-            system_prompt: System prompt for the chat template.
+            system_prompt: Optional explicit system prompt for the chat template.
             max_batch_images: Max images per batched ``generate()`` call. Bounds KV-cache /
                 vision-activation memory so a large incoming batch cannot OOM (issue #33,
                 decoder-batching KV-OOM). The
@@ -501,16 +499,17 @@ class LightOnOCRAdapter(ModelAdapter):
             instruction: Optional instruction to append to user content.
 
         Returns:
-            List of message dicts with system and user roles.
+            User message with an optional explicit system message.
         """
         user_content: list[dict[str, str]] = [{"type": "image"}]
         if instruction:
             user_content.append({"type": "text", "text": instruction})
 
-        return [
-            {"role": "system", "content": self._system_prompt},
-            {"role": "user", "content": user_content},
-        ]
+        messages: list[dict[str, Any]] = []
+        if self._system_prompt:
+            messages.append({"role": "system", "content": self._system_prompt})
+        messages.append({"role": "user", "content": user_content})
+        return messages
 
     @staticmethod
     def _convert_output(text: str) -> list[Entity]:
