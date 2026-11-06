@@ -10,7 +10,7 @@ import pypdfium2 as pdfium
 from PIL import Image
 from sie_cognee.documents import ocr_page
 
-from common import ROOT, Demo, initialize, launch
+from common import ROOT, Demo, initialize, launch, require_input
 
 
 def pages(path: Path, *, max_bytes: int, max_pages: int, max_pixels: int, scale: float) -> Iterator[tuple[int, bytes]]:
@@ -50,6 +50,8 @@ async def main(demo: Demo) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", type=Path, nargs="?", default=ROOT / "data/access-note.png")
     path = parser.parse_args().path
+    if path == ROOT / "data/access-note.png":
+        require_input(path)
     cognee = initialize(demo)
     with demo.native("ocr") as client:
         for page_number, image in pages(

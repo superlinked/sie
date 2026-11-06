@@ -5,8 +5,9 @@ decision and carry learned guidance into a new conversation. Each exposes its
 inputs and intermediate results so you can adapt one building block at a time.
 
 The shared example is a workshop notebook: a readiness policy, equipment
-checks, a scanned access note and an authored policy correction. All fixtures
-are [synthetic and CC0](data/README.md). Recommendations never trigger actions.
+checks, a scanned access note and an authored policy correction. The inputs
+are [synthetic and CC0](data/README.md), downloaded from a pinned public dataset.
+Recommendations never trigger actions.
 
 **SIE** provides specialized models through one API using SIE Local, SIE Cluster
 or SIE Serverless. **Cognee** organizes documents and interactions into
@@ -43,11 +44,19 @@ Use Python 3.12 and `uv`, from a checkout of this repository:
 ```sh
 cd examples/cognee
 uv sync
+uv run fetch.py
 cp .env.example .env
 ```
 
 The lock installs Cognee 1.6.7 and the integration/SDK from their relative paths
 in this checkout. It works before the integration is published to PyPI.
+
+`fetch.py` anonymously downloads six inputs from
+[the pinned workshop dataset](https://huggingface.co/datasets/superlinked/sie-task-evidence/tree/487cdc3bd0480659afd7ee88329449e6a6c8655d/cognee/workshop-starter/2026-11-06/v1).
+It checks the manifest and every file's size and SHA-256 before using the local,
+ignored `data/` copies. No Hugging Face account or API key is needed. Re-running
+the fetch verifies cached files; move edited copies elsewhere before restoring
+the pinned inputs. The Python standard library is sufficient to run the fetch.
 
 Get an API key from the [Superlinked console](https://console.superlinked.com).
 Check starter-credit availability and any required access approval before your
@@ -108,10 +117,19 @@ flowchart LR
   C --> D[Cognee literal-text ingestion]
 ```
 
-Inspect `page-1-actual-ocr.json` beside [the image](data/access-note.png), then
+Inspect `page-1-actual-ocr.json` beside [the published image](https://huggingface.co/datasets/superlinked/sie-task-evidence/resolve/487cdc3bd0480659afd7ee88329449e6a6c8655d/cognee/workshop-starter/2026-11-06/v1/access-note.png), then
 `page-1-provenance.json`. The note says step-free access is not yet confirmed.
-Its [text fixture](data/access-note.txt) is authored input, not a recorded OCR
-reply. Regenerate the image with `uv run make_document.py`.
+Its [authored text](https://huggingface.co/datasets/superlinked/sie-task-evidence/blob/487cdc3bd0480659afd7ee88329449e6a6c8655d/cognee/workshop-starter/2026-11-06/v1/access-note.txt)
+is input, not a recorded OCR reply. To render a local variant without replacing
+the downloaded PNG:
+
+```sh
+uv run make_document.py
+uv run 02_read_documents.py runs/access-note-rendered.png
+```
+
+Rendering can differ across Pillow versions; use the downloaded image for the
+pinned example.
 
 PDF pages are rendered locally and sent separately, with file, page and pixel
 limits. Literal ingestion means filenames or URLs in OCR output cannot trigger
@@ -262,11 +280,12 @@ find .state/learning-v1 runs/learning-v1 -maxdepth 2 -type f
 rm -rf -- .state/learning-v1 runs/learning-v1
 ```
 
-Offline checks use hand-authored stand-ins and make no inference calls:
+Offline checks use hand-authored stand-ins, need no downloaded inputs and make
+no network or inference calls:
 
 ```sh
 uv run pytest -q
 uv run ruff check . --select E,F,I,UP,B
 uv run ruff format --check .
-uv run ty check common.py 01_memory.py 02_read_documents.py 03_decide.py 04_learn.py make_document.py
+uv run ty check common.py fetch.py 01_memory.py 02_read_documents.py 03_decide.py 04_learn.py make_document.py
 ```

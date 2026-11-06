@@ -18,6 +18,7 @@ from common import (
     launch,
     read_state_object,
     record_failure,
+    require_input,
     seed_memory,
 )
 
@@ -118,13 +119,13 @@ async def verify(demo: Demo, prior_run: Path) -> None:
 
 
 async def teach(demo: Demo, *, seed: bool) -> None:
+    correction = require_input(ROOT / "data/correction.txt").read_text(encoding="utf-8")
     cognee = initialize(demo, learning=True)
     from cognee.api.v1.search import SearchType
 
     if seed:
         await seed_memory(demo, cognee)
     teaching_session = f"{demo.namespace}-teaching-{uuid4().hex[:10]}"
-    correction = (ROOT / "data/correction.txt").read_text()
     demo.show("authored-correction", {"source_id": "CORRECTION-01", "text": correction})
     demo.show("session-ids", {"teaching": teaching_session})
     response = await cognee.recall(

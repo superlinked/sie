@@ -33,6 +33,22 @@ MEMORY_STATE_RECOVERY = (
     "directory and teaching-run artifacts with matching namespace and embedding settings, or use a fresh "
     "WORKSHOP_NAMESPACE and rebuild memory before verification."
 )
+CONFIGURATION_MESSAGES = {
+    "endpoint_url": "Endpoint must be an HTTP(S) URL without credentials, query or fragment, and with a valid port.",
+    "tutorial_inputs": "Download the tutorial inputs first with uv run fetch.py, then rerun the experiment.",
+    **{
+        f"{role}_key": f"Set SIE_{role.upper()}_API_KEY or SIE_API_KEY for the Serverless {role} endpoint."
+        for role in ("llm", "embedding", "ocr", "rerank", "decision")
+    },
+}
+
+
+class ConfigurationError(ValueError):
+    """An authored setup diagnostic selected by a fixed code, never upstream text."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(CONFIGURATION_MESSAGES.get(code, "Check the endpoint configuration."))
 
 
 class MemoryStateError(ValueError):
@@ -41,7 +57,7 @@ class MemoryStateError(ValueError):
 
 def read_state_object(path: Path) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text())
+        value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         raise MemoryStateError(MEMORY_STATE_RECOVERY) from None
     if not isinstance(value, dict):
@@ -52,7 +68,9 @@ def read_state_object(path: Path) -> dict[str, Any]:
 def record_failure(run: Path, error: Exception) -> bool:
     """Record only the error type, without replacing recovery if the disk is unwritable."""
     try:
-        (run / "failure.json").write_text(json.dumps({"type": type(error).__name__, "completed": False}) + "\n")
+        (run / "failure.json").write_text(
+            json.dumps({"type": type(error).__name__, "completed": False}) + "\n", encoding="utf-8"
+        )
     except (OSError, UnicodeError):
         return False
     return True
@@ -65,6 +83,8 @@ def stop_run(run: Path, error: Exception) -> NoReturn:
         if isinstance(error, MemoryStateError)
         else "Check endpoint availability, cold-start budget and context limits. No success was recorded."
     )
+    if isinstance(error, ConfigurationError):
+        recovery = CONFIGURATION_MESSAGES.get(error.code, "Check the endpoint configuration.")
     artifact = f" Inspect {run / 'failure.json'}." if saved else " Could not write failure.json."
     raise SystemExit(f"{type(error).__name__}: {recovery}{artifact}") from None
 
@@ -91,13 +111,23 @@ def origin(url: str) -> tuple[str, str | None, int | None]:
 def endpoint_for(role: str, env: dict[str, str]) -> Endpoint:
     base = env.get("SIE_BASE_URL", "https://api.superlinked.com")
     url = env.get(f"SIE_{role.upper()}_BASE_URL", base)
+    try:
+        Endpoint(base_url=base).compatible_url()
+        Endpoint(base_url=url).compatible_url()
+        base_origin, url_origin = origin(base), origin(url)
+    except ValueError:
+        raise ConfigurationError("endpoint_url") from None
     key_name = f"SIE_{role.upper()}_API_KEY"
-    key = env.get(key_name) if key_name in env else env.get("SIE_API_KEY") if origin(base) == origin(url) else None
-    if origin(url) == origin("https://api.superlinked.com") and not key:
-        raise ValueError(f"Set {key_name} or SIE_API_KEY for the Serverless {role} endpoint.")
-    endpoint = Endpoint(base_url=url, api_key=key or None)
-    endpoint.compatible_url()  # Validate before an endpoint can appear in a printed artifact.
-    return endpoint
+    key = env.get(key_name) if key_name in env else env.get("SIE_API_KEY") if base_origin == url_origin else None
+    if url_origin == origin("https://api.superlinked.com") and not key:
+        raise ConfigurationError(f"{role}_key")
+    return Endpoint(base_url=url, api_key=key or None)
+
+
+def require_input(path: Path) -> Path:
+    if not path.is_file():
+        raise ConfigurationError("tutorial_inputs")
+    return path
 
 
 @dataclass
@@ -125,14 +155,14 @@ class Demo:
 
     def show(self, name: str, value: Any) -> None:
         payload = json_value(value)
-        rendered = json.dumps(payload, indent=2, ensure_ascii=False, allow_nan=False)
-        (self.run / f"{name}.json").write_text(rendered + "\n")
+        rendered = json.dumps(payload, indent=2, ensure_ascii=True, allow_nan=False)
+        (self.run / f"{name}.json").write_text(rendered + "\n", encoding="utf-8")
         print(f"\n--- {name} ---\n{rendered}", flush=True)
 
 
 def load_demo(experiment: str) -> Demo:
     load_dotenv(ROOT / ".env", override=False)
-    config = tomllib.loads((ROOT / "config.toml").read_text())
+    config = tomllib.loads((ROOT / "config.toml").read_text(encoding="utf-8"))
     for role in ("llm", "embedding", "ocr", "rerank", "decision"):
         if model := os.environ.get(f"SIE_{role.upper()}_MODEL"):
             config["models"][role] = model
@@ -159,7 +189,7 @@ def load_demo(experiment: str) -> Demo:
                 if read_state_object(manifest) != identity:
                     raise MemoryStateError(MEMORY_STATE_RECOVERY)
             else:
-                manifest.write_text(json.dumps(identity, indent=2) + "\n")
+                manifest.write_text(json.dumps(identity, indent=2) + "\n", encoding="utf-8")
         except (OSError, UnicodeError):
             raise MemoryStateError(MEMORY_STATE_RECOVERY) from None
         endpoints = {
@@ -206,8 +236,9 @@ def initialize(demo: Demo, *, learning: bool = False) -> ModuleType:
 
 
 async def seed_memory(demo: Demo, cognee: ModuleType) -> None:
-    for source_id, filename in SEEDS:
-        document = SourceDocument(text=(ROOT / "data" / filename).read_text(), source_id=source_id, filename=filename)
+    inputs = [(source_id, require_input(ROOT / "data" / filename)) for source_id, filename in SEEDS]
+    for source_id, path in inputs:
+        document = SourceDocument(text=path.read_text(encoding="utf-8"), source_id=source_id, filename=path.name)
         demo.show(f"input-{source_id}", document)
         await cognee.remember(document.to_data_item(), dataset_name=demo.dataset, self_improvement=False)
 

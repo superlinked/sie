@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib.util
+import io
 import json
 import sys
 from contextlib import nullcontext
@@ -143,6 +144,9 @@ def test_teaching_distills_without_verifying_in_same_process(
     retrieval = AsyncMock()
     monkeypatch.setattr(learn, "retrieve_chunks", retrieval)
     monkeypatch.setattr(sys, "argv", ["04_learn.py", "--seed"])
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data/correction.txt").write_text("Hand-authored test correction.", encoding="utf-8")
+    monkeypatch.setattr(learn, "ROOT", tmp_path)
     demo = Demo(
         {}, {"distill_batches": 1, "retrieve_top_k": 5}, {}, {}, "test", tmp_path, tmp_path, {"query": "new input"}
     )
@@ -352,6 +356,121 @@ def bootstrap_verification_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         )
     )
     return demo
+
+
+@pytest.mark.parametrize("role", ["llm", "embedding", "ocr", "rerank", "decision"])
+def test_real_bootstrap_missing_key_displays_only_authored_configuration_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], role: str
+) -> None:
+    learn = script("04_learn.py")
+    teaching = bootstrap_verification_fixture(tmp_path, monkeypatch)
+    monkeypatch.setenv("SIE_API_KEY", "private-key-value")
+    monkeypatch.setenv(f"SIE_{role.upper()}_BASE_URL", "https://api.superlinked.com")
+    initialization = Mock()
+    monkeypatch.setattr(learn, "initialize", initialization)
+    with pytest.raises(SystemExit) as error:
+        learn.launch("04-learn", learn.main)
+    displayed = str(error.value) + capsys.readouterr().out
+    assert f"Set SIE_{role.upper()}_API_KEY or SIE_API_KEY for the Serverless {role} endpoint." in displayed
+    assert "private-key-value" not in displayed
+    failures = list(teaching.run.parent.glob("*/failure.json"))
+    assert len(failures) == 1
+    assert json.loads(failures[0].read_text()) == {"type": "ConfigurationError", "completed": False}
+    initialization.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://user:private-url-value@localhost:8080",
+        "http://localhost:8080?key=private-url-value",
+        "http://localhost:private-url-value",
+        "http://[private-url-value",
+    ],
+)
+def test_real_bootstrap_invalid_url_displays_safe_configuration_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], url: str
+) -> None:
+    import common
+
+    learn = script("04_learn.py")
+    teaching = bootstrap_verification_fixture(tmp_path, monkeypatch)
+    monkeypatch.setenv("SIE_LLM_BASE_URL", url)
+    initialization = Mock()
+    monkeypatch.setattr(learn, "initialize", initialization)
+    with pytest.raises(SystemExit) as error:
+        learn.launch("04-learn", learn.main)
+    output = capsys.readouterr()
+    displayed = str(error.value) + output.out + output.err
+    assert common.CONFIGURATION_MESSAGES["endpoint_url"] in displayed
+    assert "private-url-value" not in displayed
+    failures = list(teaching.run.parent.glob("*/failure.json"))
+    assert len(failures) == 1
+    assert json.loads(failures[0].read_text()) == {"type": "ConfigurationError", "completed": False}
+    initialization.assert_not_called()
+
+
+def test_safe_configuration_diagnostics_never_use_exception_text(tmp_path: Path) -> None:
+    import common
+
+    error = common.ConfigurationError("private-error-code")
+    error.args = ("private-error-message",)
+    with pytest.raises(SystemExit) as stopped:
+        common.stop_run(tmp_path, error)
+    assert "Check the endpoint configuration." in str(stopped.value)
+    assert "private-error" not in str(stopped.value)
+    assert json.loads((tmp_path / "failure.json").read_text()) == {"type": "ConfigurationError", "completed": False}
+
+
+def test_json_artifacts_round_trip_with_ascii_console_and_explicit_utf8(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    demo = Demo({}, {}, {}, {}, "test", tmp_path, tmp_path)
+    payload = {"text": "Caf\u00e9 \u2014 \u65e5\u672c\u8a9e \U0001f680", "metadata": {"\u00e9": "\u00f1"}}
+    original_write = Path.write_text
+
+    def utf8_write(path, text, *args, **kwargs):
+        assert kwargs.get("encoding") == "utf-8"
+        return original_write(path, text, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", utf8_write)
+    console = io.BytesIO()
+    stdout = io.TextIOWrapper(console, encoding="ascii", errors="strict")
+    monkeypatch.setattr(sys, "stdout", stdout)
+    demo.show("unicode", payload)
+    stdout.flush()
+    encoded = (tmp_path / "unicode.json").read_bytes()
+    assert encoded.isascii()
+    assert json.loads(encoded.decode("utf-8")) == payload
+    assert console.getvalue().isascii()
+
+
+@pytest.mark.parametrize("filename", ["02_read_documents.py", "04_learn.py"])
+def test_missing_default_input_has_fetch_guidance_before_initialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, filename: str
+) -> None:
+    module = script(filename)
+    bootstrap_verification_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(module, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", [filename])
+    initialization = Mock()
+    monkeypatch.setattr(module, "initialize", initialization)
+    with pytest.raises(SystemExit, match="uv run fetch.py"):
+        module.launch("missing-input", module.main)
+    initialization.assert_not_called()
+
+
+def test_missing_seed_input_is_checked_before_any_ingestion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import common
+
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data/readiness-policy.txt").write_text("Minimal stand-in seed.", encoding="utf-8")
+    monkeypatch.setattr(common, "ROOT", tmp_path)
+    cognee = SimpleNamespace(remember=AsyncMock())
+    demo = Demo({}, {}, {}, {}, "test", tmp_path, tmp_path)
+    with pytest.raises(common.ConfigurationError, match="uv run fetch.py"):
+        asyncio.run(common.seed_memory(demo, cognee))
+    cognee.remember.assert_not_awaited()
 
 
 @pytest.mark.parametrize("missing_outer", [False, True])
