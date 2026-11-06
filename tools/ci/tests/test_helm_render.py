@@ -3586,6 +3586,42 @@ def test_the_mcp_edge_renders_when_it_has_what_its_gateway_needs(tmp_path: Path,
     rendered_documents(tmp_path, {**L4_POOL, **values})
 
 
+MCP_ADMIN_AUTH = {
+    "gateway": {
+        "auth": {
+            "mode": "token",
+            "generateToken": True,
+            "adminTokenSecretName": "gateway-admin",
+            "adminTokenSecretKey": "admin",
+        }
+    }
+}
+
+
+@pytest.mark.parametrize(
+    "api_key",
+    [
+        {"existingSecretName": "gateway-admin", "secretKey": "admin "},
+        {"existingSecretName": "gateway-admin ", "secretKey": "admin"},
+    ],
+    ids=["key-space", "name-space"],
+)
+def test_the_mcp_edge_api_key_is_kept_apart_from_the_admin_token_whatever_its_spacing(
+    tmp_path: Path, api_key: dict
+) -> None:
+    values = {**L4_POOL, **MCP_ADMIN_AUTH, "mcpEdge": {"enabled": True, "clusterApiKey": api_key}}
+    assert (
+        "The MCP edge cluster API key and the gateway admin token are the same Secret key (gateway-admin/admin)"
+        in render_error(tmp_path, values)
+    )
+
+
+def test_the_mcp_edge_reads_the_trimmed_api_key_secret_key(tmp_path: Path) -> None:
+    api_key = {"existingSecretName": " mcp-key ", "secretKey": " token "}
+    docs = rendered_documents(tmp_path, {**L4_POOL, **MCP_TOKEN_AUTH, "mcpEdge": {"enabled": True, "clusterApiKey": api_key}})
+    assert env_entries(docs, "SIE_API_KEY") == {"sie-sie-cluster-mcp/mcp-edge": {"name": "mcp-key", "key": "token"}}
+
+
 def test_a_gateway_mode_from_value_from_gets_the_generated_token(tmp_path: Path) -> None:
     mode = {"name": "SIE_AUTH_MODE", "valueFrom": {"configMapKeyRef": {"name": "gateway-auth", "key": "mode"}}}
     docs = rendered_documents(tmp_path, {**L4_POOL, "gateway": {"auth": {"generateToken": True}, "extraEnv": [mode]}})
@@ -4603,6 +4639,61 @@ def test_the_applier_client_token_is_kept_apart_from_the_admin_token(tmp_path: P
         "The placement applier client token and the gateway admin token are the same Secret key (gateway-admin/admin)"
         in result.stderr
     )
+
+
+@pytest.mark.parametrize(
+    "client",
+    [
+        {"existingSecretName": "gateway-admin", "secretKey": "admin "},
+        {"existingSecretName": "gateway-admin ", "secretKey": "admin"},
+        {"existingSecretName": " gateway-admin", "secretKey": "\tadmin"},
+    ],
+    ids=["key-space", "name-space", "leading-space"],
+)
+@pytest.mark.parametrize("apply", [False, True])
+def test_the_applier_client_token_is_kept_apart_from_the_admin_token_whatever_its_spacing(
+    tmp_path: Path, client: dict, apply: bool
+) -> None:
+    result = render_placement(tmp_path, *applier_layers(APPLIER_AUTH, apply=apply, clientToken=client))
+    assert result.returncode != 0
+    assert (
+        "The placement applier client token and the gateway admin token are the same Secret key (gateway-admin/admin)"
+        in result.stderr
+    )
+
+
+@pytest.mark.parametrize(
+    ("client", "error"),
+    [
+        (
+            {"existingSecretName": "gateway-admin #x", "secretKey": "admin"},
+            'placementApplier.clientToken.existingSecretName must name a Kubernetes Secret (lowercase letters, digits, '
+            "'-' and '.'), got \"gateway-admin #x\"",
+        ),
+        (
+            {"existingSecretName": "applier-client", "secretKey": "admin #x"},
+            "placementApplier.clientToken.secretKey must be a Kubernetes Secret data key (letters, digits, '-', '_' "
+            "and '.'), got \"admin #x\"",
+        ),
+    ],
+)
+def test_an_applier_client_token_that_is_not_a_secret_key_fails_the_render(
+    tmp_path: Path, client: dict, error: str
+) -> None:
+    result = render_placement(tmp_path, *applier_layers(APPLIER_AUTH, clientToken=client))
+    assert result.returncode != 0
+    assert error in result.stderr
+
+
+def test_the_applier_mounts_the_trimmed_client_token_secret_key(tmp_path: Path) -> None:
+    client = {"existingSecretName": " applier-client ", "secretKey": " token "}
+    spec = applier_pod(placement_documents(tmp_path, applier_layers(APPLIER_AUTH, clientToken=client)))["spec"]
+    volumes = {volume["name"]: volume for volume in spec["volumes"]}
+    assert volumes["client-token"]["secret"] == {
+        "secretName": "applier-client",
+        "defaultMode": SECRET_FILE_MODE,
+        "items": [{"key": "token", "path": "token"}],
+    }
 
 
 def envelope_values(settings: dict, *, autoscaling: bool = False) -> dict:

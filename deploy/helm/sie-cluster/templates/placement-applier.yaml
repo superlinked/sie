@@ -26,9 +26,11 @@
 {{- end -}}
 {{- end -}}
 {{- $clientToken := $applier.clientToken | default dict -}}
+{{- $clientSecret := trim (toString (default "" $clientToken.existingSecretName)) -}}
+{{- $clientKey := trim (toString (default "" $clientToken.secretKey)) -}}
 {{- $adminTokenSecret := "" -}}
 {{- if $apply -}}
-{{- $adminTokenSecret = dig "auth" "adminTokenSecretName" "" (.Values.gateway | default dict) -}}
+{{- $adminTokenSecret = dig "auth" "adminTokenSecretName" "" (.Values.gateway | default dict) | toString | trim -}}
 {{- end -}}
 apiVersion: v1
 kind: ServiceAccount
@@ -110,7 +112,7 @@ spec:
             - {{ .flag }}
             - {{ .value | quote }}
             {{- end }}
-            {{- if $clientToken.existingSecretName }}
+            {{- if $clientSecret }}
             - --api-key-file
             - /etc/sie-placement/client-token/token
             {{- end }}
@@ -132,7 +134,7 @@ spec:
             - name: plan
               mountPath: /etc/sie-placement/plan
               readOnly: true
-            {{- if $clientToken.existingSecretName }}
+            {{- if $clientSecret }}
             - name: client-token
               mountPath: /etc/sie-placement/client-token
               readOnly: true
@@ -149,22 +151,22 @@ spec:
             items:
               - key: plan.json
                 path: plan.json
-        {{- with $clientToken.existingSecretName }}
+        {{- with $clientSecret }}
         - name: client-token
           secret:
-            secretName: {{ . }}
+            secretName: {{ . | quote }}
             defaultMode: 0440
             items:
-              - key: {{ $clientToken.secretKey }}
+              - key: {{ $clientKey | quote }}
                 path: token
         {{- end }}
         {{- with $adminTokenSecret }}
         - name: admin-token
           secret:
-            secretName: {{ . }}
+            secretName: {{ . | quote }}
             defaultMode: 0440
             items:
-              - key: {{ include "sie-cluster.gateway.adminTokenSecretKey" $ }}
+              - key: {{ include "sie-cluster.gateway.adminTokenSecretKey" $ | quote }}
                 path: token
         {{- end }}
       {{- with $applier.nodeSelector }}

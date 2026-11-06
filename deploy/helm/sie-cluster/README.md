@@ -571,7 +571,9 @@ The render fails unless:
   holds one gateway client token, which the applier presents on pool reads.
   The applier presents the whole value, so the key must not list several
   comma-separated tokens, as an operator-managed `gateway.auth.tokenSecretName`
-  does during a [rotation](#gateway-token).
+  does during a [rotation](#gateway-token). The Secret name and key, after
+  trimming surrounding whitespace, are a Kubernetes Secret name and data key
+  that hold no other credential the chart wires.
 - With `placementApplier.apply: true` and gateway token auth, or a mode known
   only at run time, `gateway.auth.adminTokenSecretName` is set.
 - `gateway.extraEnv` sets `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT` and
