@@ -375,7 +375,9 @@ plan total does not fall.
    otherwise pinned, which needs every pinned identity's co-residency receipt
    beside the others to meet its warm bounds. A move that would lower the total
    but lacks a footprint, a working memory, a load or a co-residency receipt is
-   not made: it is a measurement request whose `savingBound` is that fall.
+   not made: it is a measurement request whose `savingBound` is that fall. A
+   move after which the lane's residents together need more containers than
+   its `maxContainers` in some hour is not made either.
 5. Steps 1 and 3 run again for the lanes packing changed.
 
 ### Pricing
@@ -393,14 +395,17 @@ demand window to `hours_per_month`.
   every request: the active floor for `cooldown_s`, at most the whole hour.
   The active floor is `fallback_floor` capped by the ceiling, and at least one.
 
-A lane costs its floor all month once, whoever it hosts, plus what each
-resident's demand needs beyond the floor: on a lane with a floor, the
-containers an hour needs above it, and on a zero-floor lane, the work and the
-tails a cold warmth pays. A placed identity's demand is priced at its chosen
-receipt, and a kept identity's at the slowest receipt it has for its lane's
-cells, container shape and concurrency, under that lane's own ceiling. A lane
-with fallback cells costs the hourly rate of its dearest cell, and a candidate
-list's demand is priced at the slower of its two receipts.
+A lane costs its floor all month once, whoever it hosts, plus what its
+residents' demand needs beyond the floor. On a lane with a floor, that is the
+containers an hour needs above it for the residents together: each resident's
+requests in the hour take the share of a container that its priced receipt's
+rate gives them, and the shares are summed, since residents scale together and
+share the card under load. On a zero-floor lane, it is the work and the tails a
+cold warmth pays for each resident. A placed identity's demand is priced at its
+chosen receipt, and a kept identity's at the slowest receipt it has for its
+lane's cells, container shape and concurrency, under that lane's own ceiling. A
+lane with fallback cells costs the hourly rate of its dearest cell, and a
+candidate list's demand is priced at the slower of its two receipts.
 
 ### Envelope
 
