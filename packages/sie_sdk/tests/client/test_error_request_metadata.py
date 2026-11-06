@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
-from sie_sdk.client._shared import get_retry_after, handle_error
+from sie_sdk.client._shared import REQUEST_USAGE_HEADERS, get_retry_after, handle_error, parse_request_metadata
 from sie_sdk.client.errors import (
     AccountStateUnavailableError,
     LoraLoadingError,
@@ -15,6 +15,29 @@ from sie_sdk.client.errors import (
     RequestError,
     ServerError,
 )
+
+
+@pytest.mark.parametrize("unit", REQUEST_USAGE_HEADERS)
+@pytest.mark.parametrize("value", [0, 42, 2**64 - 1])
+def test_native_body_meters_survive_without_headers(unit: str, value: int) -> None:
+    assert parse_request_metadata({}, {"items": [{}], "usage": {unit: value}}) == {"usage": {unit: value}}
+
+
+@pytest.mark.parametrize("value", [-1, 2**64, True, False, "42", 1.5, None, {}, []])
+def test_invalid_native_body_meter_is_not_an_observation(value: object) -> None:
+    assert parse_request_metadata({}, {"items": [{}], "usage": {"input_tokens": value}}) is None
+
+
+@pytest.mark.parametrize("header", ["7", "0", "-1", "07", "", "nan"])
+def test_existing_meter_header_is_never_replaced_by_native_body(header: str) -> None:
+    metadata = parse_request_metadata(
+        {"x-sie-units-input-tokens": header}, {"items": [{}], "usage": {"input_tokens": 42}}
+    )
+    assert metadata == ({"usage": {"input_tokens": int(header)}} if header in {"7", "0"} else None)
+
+
+def test_native_fallback_does_not_reinterpret_compatibility_usage() -> None:
+    assert parse_request_metadata({}, {"object": "response", "usage": {"input_tokens": 42}}) is None
 
 
 def _error_response(status_code: int, headers: dict[str, str]) -> MagicMock:
