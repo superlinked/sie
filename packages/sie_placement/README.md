@@ -96,15 +96,18 @@ Helm chart: `queuePool`, the `machineProfile` of its `cell`, and `bundle`.
 override. It is neither the `workers.pools` map key, which names a worker
 group, nor an SDK logical pool. `bundle` is a key of that worker group's
 `bundles` map. `name` is the lane's handle inside the plan, and each identity
-refers to its lane by that name. Two plan lanes may carry the same three
-tokens, and so name one chart lane, which cannot give them separate envelopes
-or concurrency; the planner's report lists every such chart lane.
+refers to its lane by that name. The chart compares the three tokens without
+regard to case. Two plan lanes may carry the same three tokens, and so name one
+chart lane, which cannot give them separate envelopes or concurrency; the
+planner's report lists every such chart lane.
 
 The planner gives each lane that pins at least one identity a named queue pool
 of its own, since the chart carries a lane's pinned set on a static queue pool
 and the default queue pool carries no pins. A lane the current plan already
 puts on a named queue pool keeps it, so planning again leaves the pool as it
-is. Otherwise the pool is derived from the lane's `name`: its slug, which
+is, unless the pool is `default`, the parameters' `queue_pool` or a pool
+another lane keeps, compared without regard to case as the chart compares them.
+Otherwise the pool is derived from the lane's `name`: its slug, which
 lowercases the name, replaces each run of characters outside `a-z` and `0-9`
 with a hyphen and drops leading and trailing hyphens, or `lane` when nothing
 remains. The slug is cut to 63 characters with a digest of the name appended
@@ -644,7 +647,7 @@ The report renders as a `placement-report` document:
   its residents need, `memoryMiB`, and the 80% of its card's memory they may
   use, `memoryLimitMiB`, where both are known.
 - `sharedChartLanes`: every chart lane, by `queuePool`, `machineProfile` and
-  `bundle`, that more than one plan lane names.
+  `bundle` in lowercase, that more than one plan lane names.
 - `measurementRequests`: options that lack evidence, ranked by the saving they
   could unlock. A profile without a receipt is bounded by price alone: one
   accelerator at its rate, kept warm or, where the come-alive bound allows,
