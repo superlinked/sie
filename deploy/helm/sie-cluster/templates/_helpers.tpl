@@ -160,7 +160,7 @@ Mirrors kube-prometheus-stack's fullname helper truncation and service suffix.
 {{- default .Release.Namespace $grafana.namespaceOverride -}}
 {{- end }}
 
-{{/* Mirror the vendored Grafana subchart's fullname and admin Secret rules. */}}
+{{/* Mirror the vendored Grafana subchart's fullname rules. */}}
 {{- define "sie-cluster.kubePrometheusStack.grafanaFullname" -}}
 {{- $values := (index .Values "kube-prometheus-stack") | default dict -}}
 {{- $grafana := $values.grafana | default dict -}}
@@ -176,14 +176,16 @@ Mirrors kube-prometheus-stack's fullname helper truncation and service suffix.
 {{- end -}}
 {{- end }}
 
+{{/* Empty when Grafana does not read its admin password from the admin Secret. */}}
 {{- define "sie-cluster.kubePrometheusStack.grafanaAdminSecretName" -}}
-{{- $values := (index .Values "kube-prometheus-stack") | default dict -}}
-{{- $grafana := $values.grafana | default dict -}}
-{{- $admin := $grafana.admin | default dict -}}
-{{- if $admin.existingSecret -}}
-{{- tpl ($admin.existingSecret | toString) . -}}
-{{- else -}}
-{{- include "sie-cluster.kubePrometheusStack.grafanaFullname" . -}}
+{{- $root := . -}}
+{{- with index .Subcharts "kube-prometheus-stack" -}}
+{{- with index .Subcharts "grafana" -}}
+{{- if and (not .Values.env.GF_SECURITY_ADMIN_PASSWORD) (not .Values.env.GF_SECURITY_ADMIN_PASSWORD__FILE) (not .Values.env.GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION) -}}
+{{- $context := merge (dict "Template" $root.Template) . -}}
+{{- tpl .Values.admin.existingSecret $context | default (include "grafana.fullname" .) | trim -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- end }}
 
@@ -1216,24 +1218,32 @@ model code. Gateway client credentials may share a key with each other.
 A credential reference "name/key" for sie-cluster.wiredSecretKeys. The name
 and key are trimmed, as YAML reads an unquoted manifest field, and must then be
 a Kubernetes Secret name and data key, so no spelling of either value in a
-manifest names another Secret key than the reference does.
+manifest names another Secret key than the reference does. With unquoted, for
+fields a subchart writes unquoted, Helm's YAML reader must also read each of
+them back as the same string. With template, the template the name was
+evaluated from, errors show the template instead of the name.
 */}}
 {{- define "sie-cluster.secretKeyRef" -}}
 {{- $name := trim (toString (default "" .name)) -}}
 {{- $key := trim (toString (default "" .key)) -}}
+{{- $shownName := printf "%q" $name -}}
+{{- with .template -}}
+{{- $shownName = printf "the value of %q (not shown, as it may hold chart values)" . -}}
+{{- end -}}
 {{- if not (and (le (len $name) 253) (regexMatch "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" $name)) -}}
-{{- fail (printf "%s must name a Kubernetes Secret (lowercase letters, digits, '-' and '.'), got %q" .nameField $name) -}}
+{{- fail (printf "%s must name a Kubernetes Secret (lowercase letters, digits, '-' and '.'), got %s" .nameField $shownName) -}}
 {{- end -}}
 {{- if not (and (le (len $key) 253) (regexMatch "^[-._a-zA-Z0-9]+$" $key)) -}}
 {{- fail (printf "%s must be a Kubernetes Secret data key (letters, digits, '-', '_' and '.'), got %q" .keyField $key) -}}
 {{- end -}}
 {{- if .unquoted -}}
-{{- $scalar := `^((?i)~|null|true|false|yes|no|on|off|y|n|[-+]?\.(inf|nan)|[-+]?0[xob][0-9a-f_]+)$|^[-+]?[0-9][0-9_]*([.:][0-9_:]*)?([eE][-+]?[0-9]+)?$|^[-+]?\.[0-9][0-9_]*([eE][-+]?[0-9]+)?$` -}}
-{{- if regexMatch $scalar $name -}}
-{{- fail (printf "%s is written unquoted by its chart, so %q would be read as a YAML null, boolean or number rather than a Secret name" .nameField $name) -}}
+{{- $readName := fromYaml (printf "k: %s" $name) -}}
+{{- if or (hasKey $readName "Error") (not (kindIs "string" $readName.k)) (ne $readName.k $name) -}}
+{{- fail (printf "%s is written unquoted by its chart, and YAML does not read %s as that string, so it would not name the Secret" .nameField $shownName) -}}
 {{- end -}}
-{{- if regexMatch $scalar $key -}}
-{{- fail (printf "%s is written unquoted by its chart, so %q would be read as a YAML null, boolean or number rather than a Secret data key" .keyField $key) -}}
+{{- $readKey := fromYaml (printf "k: %s" $key) -}}
+{{- if or (hasKey $readKey "Error") (not (kindIs "string" $readKey.k)) (ne $readKey.k $key) -}}
+{{- fail (printf "%s is written unquoted by its chart, and YAML does not read %q as that string, so it would not name the Secret data key" .keyField $key) -}}
 {{- end -}}
 {{- end -}}
 {{- printf "%s/%s" $name $key -}}
@@ -1298,16 +1308,17 @@ token-separation check and the upstream-key collision check read this list.
 {{- with index .Subcharts "grafana" -}}
 {{- if eq (include "grafana.namespace" .) (include "sie-cluster.namespace" $root) -}}
 {{- $existingSecret := toString (default "" .Values.admin.existingSecret) -}}
-{{- if and (contains "{{" $existingSecret) (not (regexMatch `^([a-z0-9.-]|\{\{-? *\$?\.(Release|Values|Chart)(\.[A-Za-z0-9_]+)+ *-?\}\})+$` $existingSecret)) -}}
-{{- fail (printf "kube-prometheus-stack.grafana.admin.existingSecret may hold only lowercase letters, digits, '-', '.' and actions that name a field of .Release, .Values or .Chart, such as {{ .Release.Name }}, optionally with {{- -}} trim markers or a leading $: the Grafana chart evaluates it in its own templates, so the chart can check the Secret Grafana reads only when it depends on nothing but those fields, got %q" $existingSecret) -}}
+{{- if and (contains "{{" $existingSecret) (not (regexMatch `^([a-z0-9. \t\r\n-]|\{\{-?[ \t\r\n]*\$?\.(Release|Values|Chart)(\.[A-Za-z0-9_]+)+[ \t\r\n]*-?\}\})+$` $existingSecret)) -}}
+{{- fail (printf "kube-prometheus-stack.grafana.admin.existingSecret may hold only lowercase letters, digits, '-', '.', whitespace and actions that hold one chain of names on .Release, .Values or .Chart, such as {{ .Release.Name }}, optionally with {{- -}} trim markers or a leading $: the Grafana chart evaluates it in its own templates, so the chart can check the Secret Grafana reads only when it depends on nothing but those objects, got %q" $existingSecret) -}}
 {{- end -}}
+{{- $template := ternary $existingSecret "" (contains "{{" $existingSecret) -}}
 {{- $context := merge (dict "Template" $root.Template) . -}}
 {{- $secretName := tpl .Values.admin.existingSecret $context | default (include "grafana.fullname" .) -}}
 {{- if and (not .Values.env.GF_SECURITY_ADMIN_USER) (not .Values.env.GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION) -}}
-{{- $keys = append $keys (dict "owner" "the Grafana admin username" "name" "Grafana admin username" "ref" (include "sie-cluster.secretKeyRef" (dict "unquoted" true "name" $secretName "key" (default "admin-user" .Values.admin.userKey) "nameField" "kube-prometheus-stack.grafana.admin.existingSecret" "keyField" "kube-prometheus-stack.grafana.admin.userKey"))) -}}
+{{- $keys = append $keys (dict "owner" "the Grafana admin username" "name" "Grafana admin username" "ref" (include "sie-cluster.secretKeyRef" (dict "unquoted" true "name" $secretName "template" $template "key" (default "admin-user" .Values.admin.userKey) "nameField" "kube-prometheus-stack.grafana.admin.existingSecret" "keyField" "kube-prometheus-stack.grafana.admin.userKey"))) -}}
 {{- end -}}
 {{- if and (not .Values.env.GF_SECURITY_ADMIN_PASSWORD) (not .Values.env.GF_SECURITY_ADMIN_PASSWORD__FILE) (not .Values.env.GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION) -}}
-{{- $keys = append $keys (dict "owner" "the Grafana admin password" "name" "Grafana admin password" "ref" (include "sie-cluster.secretKeyRef" (dict "unquoted" true "name" $secretName "key" (default "admin-password" .Values.admin.passwordKey) "nameField" "kube-prometheus-stack.grafana.admin.existingSecret" "keyField" "kube-prometheus-stack.grafana.admin.passwordKey"))) -}}
+{{- $keys = append $keys (dict "owner" "the Grafana admin password" "name" "Grafana admin password" "ref" (include "sie-cluster.secretKeyRef" (dict "unquoted" true "name" $secretName "template" $template "key" (default "admin-password" .Values.admin.passwordKey) "nameField" "kube-prometheus-stack.grafana.admin.existingSecret" "keyField" "kube-prometheus-stack.grafana.admin.passwordKey"))) -}}
 {{- end -}}
 {{- if .Values.smtp.existingSecret -}}
 {{- $smtpSecret := .Values.smtp.existingSecret -}}

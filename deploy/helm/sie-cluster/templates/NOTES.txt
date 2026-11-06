@@ -58,7 +58,9 @@ Prometheus: enabled - kubectl port-forward -n {{ include "sie-cluster.kubePromet
 {{- end }}
 {{- if and $kubePrometheusStack.install $kubePrometheusStack.grafana.enabled }}
 Grafana:    enabled - kubectl port-forward -n {{ include "sie-cluster.kubePrometheusStack.grafanaNamespace" . }} svc/{{ include "sie-cluster.kubePrometheusStack.grafanaFullname" . }} 3000:80
-Grafana password: kubectl get secret -n {{ include "sie-cluster.kubePrometheusStack.grafanaNamespace" . }} {{ include "sie-cluster.kubePrometheusStack.grafanaAdminSecretName" . }} -o jsonpath="{.data.{{ include "sie-cluster.kubePrometheusStack.grafanaAdminPasswordKey" . }}}" | base64 -d
+{{- with include "sie-cluster.kubePrometheusStack.grafanaAdminSecretName" . }}
+Grafana password: kubectl get secret -n {{ include "sie-cluster.kubePrometheusStack.grafanaNamespace" $ }} {{ . }} -o jsonpath="{.data.{{ include "sie-cluster.kubePrometheusStack.grafanaAdminPasswordKey" $ }}}" | base64 -d
+{{- end }}
 {{- end }}
 {{- if .Values.keda.install }}
 KEDA:       enabled
