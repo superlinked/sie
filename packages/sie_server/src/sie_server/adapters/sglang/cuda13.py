@@ -1,6 +1,9 @@
+from collections.abc import AsyncIterator
 from typing import Any
 
+from sie_server.adapters._generation_base import GenerationChunk
 from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
+from sie_server.adapters.sglang.muse_channels import translate_muse_channels
 
 
 class SGLangCuda13Adapter(SGLangGenerationAdapter):
@@ -38,3 +41,10 @@ class SGLangStrictThinkingAdapter(SGLangCuda13Adapter):
             extra_launch_args=launch_args,
             **kwargs,
         )
+
+
+class SGLangMuseAdapter(SGLangCuda13Adapter):
+    """CUDA 13 SGLang lane for Muse Glimmer's channel-framed native output."""
+
+    def generate(self, prompt: str, **kwargs: Any) -> AsyncIterator[GenerationChunk]:
+        return translate_muse_channels(super().generate(prompt, **kwargs))

@@ -1,0 +1,25 @@
+sie_id: baselabs/elephant-1
+hf_id: baselabs/elephant-1
+hf_revision: 14537f08b0374edf9867ed0a4d2bd8df59e0400c
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 8192
+profiles:
+  default:
+    max_batch_tokens: 8192
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.decision.qwen:QwenDecisionAdapter
+    adapter_options:
+      loadtime:
+        decision_format: qev
+        max_forward_tokens: 8192
+      runtime: {}
+description: Elephant-1 typed text decisions over Qwen3.5-9B, preserving qev-labels-v2 prompts, block-bidirectional
+  full attention and FP32 slot logits.

@@ -8,9 +8,9 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 import torch
+from sie_server.adapters._qwen3_5_packed import to_device
 from sie_server.adapters.topk_embed import adapter as adapter_module
 from sie_server.adapters.topk_embed.adapter import TopkEmbedAdapter, _Launched
-from sie_server.adapters.topk_embed.packed import to_device
 from sie_server.types.inputs import Item
 
 from .test_topk_embed import _fake_vision, _png, make_adapter

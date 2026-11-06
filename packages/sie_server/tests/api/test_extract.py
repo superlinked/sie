@@ -1,9 +1,11 @@
 """Tests for extract endpoint."""
 
 import asyncio
+import json
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import msgpack
 import msgpack_numpy as m
 import msgspec
@@ -13,6 +15,7 @@ from fastapi.testclient import TestClient
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters.base import ModelCapabilities, ModelDims
+from sie_server.adapters.sglang_vision_extract.adapter import SGLangVisionExtractAdapter
 from sie_server.api.extract import _extract_via_worker
 from sie_server.api.extract import router as extract_router
 from sie_server.config.model import (
@@ -39,7 +42,7 @@ from sie_server.core.registry import ModelRegistry
 from sie_server.core.timing import RequestTiming
 from sie_server.core.worker import WorkerResult
 from sie_server.core.worker.handlers.extract import ExtractHandler
-from sie_server.types.inputs import MAX_ITEM_TEXT_BYTES, Item
+from sie_server.types.inputs import MAX_ITEM_TEXT_BYTES, ImageInput, Item
 from sie_server.types.responses import Classification, Entity
 
 # Patch msgpack for numpy support
@@ -872,6 +875,33 @@ class TestExtractErrorHandling:
         data = response.json()
         assert data["detail"]["code"] == "INVALID_INPUT"
         assert "nonexistent_profile" in data["detail"]["message"]
+
+    def test_extract_engine_window_refusal_is_input_too_long(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        """A request too long for the SGLang engine is the caller's to change, so it is not a 500."""
+        ocr = SGLangVisionExtractAdapter("org/ocr")
+        ocr._processor = MagicMock()
+        ocr._processor.apply_chat_template.return_value = "prompt"
+        ocr._server_url = "http://sglang.test"
+        ocr._start_request_loop()
+        event = json.dumps(
+            {"error": {"message": "The input (30042 tokens) is longer than the model's context length (24576 tokens)."}}
+        )
+        ocr._http_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, content=f"data: {event}\n\n".encode()))
+        )
+        page = Item(images=[ImageInput(data=b"page", format="png")])
+        mock_adapter.extract.side_effect = lambda *_args, **_kwargs: ocr.extract([page])
+        try:
+            response = client.post(
+                "/v1/extract/test-extractor",
+                json={"items": [{"text": "Text"}], "params": {"labels": ["entity"]}},
+                headers=JSON_HEADERS,
+            )
+        finally:
+            ocr.unload()
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "INPUT_TOO_LONG"
 
     def test_extract_adapter_runtime_error(self, client: TestClient, mock_adapter: MagicMock) -> None:
         """RuntimeError from adapter returns 500."""

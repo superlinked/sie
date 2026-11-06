@@ -60,6 +60,7 @@ platform: cuda13
 adapters:
 - sie_server.adapters.sglang.gemma
 - sie_server.adapters.sglang.cuda13
+- sie_server.adapters.sglang.decision
 deps:
   # sglang 0.5.20 (see the VERSION NOTE above). Verified transitive resolution
   # on the Modal cu130 image:

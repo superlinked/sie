@@ -549,6 +549,42 @@ def test_xml_param_scan_garbled_openers_no_close_is_fast() -> None:
     assert elapsed < 2.0
 
 
+@pytest.mark.parametrize(
+    "garbage",
+    [
+        "<parameter=" * (256 * 1024 // len("<parameter=")),
+        "<parameter=a b " * (256 * 1024 // len("<parameter=a b ")),
+        "<parameter=" + " " * (256 * 1024),
+    ],
+    ids=["openers-only", "openers-with-spaces", "one-opener-then-spaces"],
+)
+def test_xml_param_scan_openers_that_never_end_are_fast(garbage: str) -> None:
+    """An opener with no ``>`` must not rescan the buffer for every opener."""
+    import time
+
+    from sie_server.processors.tool_call_parser import _parse_xml_tool_call
+
+    t0 = time.monotonic()
+    parsed = _parse_xml_tool_call("<function=f>" + garbage)
+    elapsed = time.monotonic() - t0
+    assert parsed == ("f", {})
+    assert elapsed < 2.0
+
+
+def test_xml_param_name_may_contain_spaces() -> None:
+    """JSON Schema allows such a name, and failing to read it loses the argument silently."""
+    from sie_server.processors.tool_call_parser import _parse_xml_tool_call
+
+    raw = "<function=f><parameter=first name>\nAda\n</parameter><parameter=city >\nParis\n</parameter></function>"
+    assert _parse_xml_tool_call(raw) == ("f", {"first name": "Ada", "city": "Paris"})
+
+
+def test_xml_param_opener_needs_a_visible_name() -> None:
+    from sie_server.processors.tool_call_parser import _parse_xml_tool_call
+
+    assert _parse_xml_tool_call("<function=f><parameter= >\nv\n</parameter></function>") == ("f", {})
+
+
 # ── GLM argument tags ──────────────────────────────────────────────────
 
 
