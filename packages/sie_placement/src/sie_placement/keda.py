@@ -206,10 +206,14 @@ def parse_vector(document: object) -> tuple[Sample, ...]:
 
 
 def require_base_url(label: str, base_url: str) -> None:
-    parts = urllib.parse.urlsplit(base_url)
-    if parts.scheme not in {"http", "https"} or not parts.hostname:
+    try:
+        parts = urllib.parse.urlsplit(base_url)
+        scheme, hostname, username, password = parts.scheme, parts.hostname, parts.username, parts.password
+    except ValueError:
+        raise ValueError(f"the {label} URL is not a valid URL") from None
+    if scheme not in {"http", "https"} or not hostname:
         raise ValueError(f"the {label} URL must be an absolute http or https URL")
-    if parts.username is not None or parts.password is not None:
+    if username is not None or password is not None:
         raise ValueError(f"the {label} URL must not embed credentials")
     if parts.query or parts.fragment:
         raise ValueError(f"the {label} URL must not carry a query or a fragment")

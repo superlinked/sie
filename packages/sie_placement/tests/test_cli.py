@@ -503,6 +503,8 @@ PASSWORD = "s3cret-password"  # noqa: S105 - a test value
         (f"http://sie-gateway:8080/?token={PASSWORD}", "must not carry a query or a fragment"),
         (f"http://sie-gateway:8080/#{PASSWORD}", "must not carry a query or a fragment"),
         ("http://sie-gateway:notaport", "has an invalid port"),
+        (f"http://user:{PASSWORD}@gw\uff0fx:8080", "is not a valid URL"),
+        (f"http://user:{PASSWORD}\uff20gw:8080", "is not a valid URL"),
     ],
 )
 def test_a_gateway_url_that_is_not_a_plain_base_url_is_refused_without_echoing_it(
@@ -515,6 +517,20 @@ def test_a_gateway_url_that_is_not_a_plain_base_url_is_refused_without_echoing_i
     assert cli.main(argv) == cli.EXIT_REFUSED
     captured = capsys.readouterr()
     assert f"the gateway URL {message}" in captured.err
+    for text in (captured.out, captured.err, caplog.text):
+        assert url not in text
+        assert PASSWORD not in text
+    assert gateway.requests == []
+    assert prometheus.requests == []
+
+
+def test_a_prometheus_url_that_is_not_a_valid_url_is_refused_without_echoing_it(gateway, prometheus, capsys, caplog):
+    caplog.set_level(logging.DEBUG)
+    url = f"http://user:{PASSWORD}@prometheus\uff0fx:9090"
+    argv = ["tune", "--plan", str(FIXTURES / "tune-plan.json"), "--prometheus-url", url]
+    assert cli.main([*argv, "--gateway-url", gateway.url, "--once"]) == cli.EXIT_REFUSED
+    captured = capsys.readouterr()
+    assert "the Prometheus URL is not a valid URL" in captured.err
     for text in (captured.out, captured.err, caplog.text):
         assert url not in text
         assert PASSWORD not in text
