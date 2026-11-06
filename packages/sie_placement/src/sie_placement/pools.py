@@ -23,7 +23,7 @@ def _client(base_url: str, api_key: str | None) -> SIEClient:
 def _gateway_error(error: Exception) -> GatewayError:
     if isinstance(error, httpx.HTTPError):
         return GatewayError(f"the request failed ({type(error).__name__})")
-    if isinstance(error, AttributeError):
+    if isinstance(error, AttributeError | RecursionError):
         return GatewayError(_UNEXPECTED_REPLY)
     return GatewayError(str(error))
 
@@ -37,7 +37,7 @@ class SdkPools:
     def get_pool(self, name: str) -> Mapping[str, object] | None:
         try:
             pool = self._client.get_pool(name)
-        except (SIEError, httpx.HTTPError, ValueError, AttributeError) as error:
+        except (SIEError, httpx.HTTPError, ValueError, AttributeError, RecursionError) as error:
             raise _gateway_error(error) from None
         return pool
 
@@ -49,7 +49,7 @@ class SdkPools:
                 client.create_pool(
                     name, gpus, bundle=bundle, minimum_worker_count=minimum_worker_count, queue_pool=queue_pool
                 )
-        except (SIEError, httpx.HTTPError, ValueError, AttributeError) as error:
+        except (SIEError, httpx.HTTPError, ValueError, AttributeError, RecursionError) as error:
             raise _gateway_error(error) from None
 
     def close(self) -> None:
