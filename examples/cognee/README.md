@@ -42,7 +42,7 @@ Use Python 3.12 and `uv`, from a checkout of this repository:
 
 ```sh
 cd examples/cognee
-uv sync --locked
+uv sync
 cp .env.example .env
 ```
 
@@ -160,32 +160,40 @@ required check is `confirmed`.
 ## 4. Learn guidance for a new conversation
 
 [`04_learn.py`](04_learn.py) records an authored correction in a teaching
-session, invokes Cognee's public session distillation and queries a fresh
-session about a different workshop. To rehearse independently:
+session and invokes Cognee's public session distillation. After that command
+exits, a second invocation verifies the stored lessons in a fresh process:
 
 ```sh
 WORKSHOP_NAMESPACE=learning-v1 uv run 04_learn.py --seed
+# Replace TEACHING_RUN with the output directory printed by the first command.
+WORKSHOP_NAMESPACE=learning-v1 uv run 04_learn.py --verify-run runs/learning-v1/TEACHING_RUN
 ```
+
+The teaching command prints the exact verification command, including its run
+path. Copy that command after teaching finishes. Keep the same namespace and
+embedding configuration; verification checks them against the recorded run and
+stored memory. `--verify-run` cannot be combined with `--seed`.
 
 ```mermaid
 flowchart LR
   A[Authored correction] --> B[Teaching session]
   B --> C[Cognee distill_session]
   C --> D[Accepted lesson documents]
-  D --> E[New input in a fresh session]
+  D --> E[New process + new session]
   E --> F[Retrieve persisted lesson text]
 ```
 
 The correction adds confirmed step-free access to the readiness policy.
 Inspect `authored-correction.json`, the teaching session,
-`actual-distillation.json` and the fresh-session artifacts. Distillation returns
-its actual status and accepted lesson texts; only `completed` with documents
-counts as persisted learning.
+`actual-distillation.json` in the teaching run, then the fresh-session artifacts
+in the verification run. Distillation returns its actual status and accepted
+lesson texts; only `completed` with documents counts as persisted learning.
 
 The fresh session asks whether a new workshop with working equipment still
 needs access confirmation. Set this question in `[learning]` in `config.toml`.
 Use fresh memory so an earlier OCR note or lesson does not supply the answer
-before teaching. The new session ID has never received the correction.
+before teaching. Verification disables automatic feedback and does not ingest,
+teach or distill. Its new process and session have not received the correction.
 
 Inspect `fresh-session-retrieved-documents.json` and `learning-evidence.json`:
 the latter matches complete accepted lesson text to retrieved chunks, ignoring
@@ -193,9 +201,9 @@ whitespace. A heading alone does not establish that a document is the accepted
 lesson. Generated answers remain separate, and retrieved model-generated lessons
 still need checking against the authored correction. Empty results stay visible.
 
-With these inputs, the verified run stored one lesson, retrieved its complete
-text and answered in the fresh session: “Yes, you must still confirm step-free
-access.”
+Fresh-process retrieval verifies persisted text, not the truth or completeness
+of the learned policy. Generated answers remain model output and require their
+own review.
 
 **Build on it:** require human approval of learned guidance, then feed selected
 guidance into the typed decision building block from experiment 03.
@@ -234,7 +242,7 @@ settings. Check model support and memory capacity on your presenting hardware.
 | 1–3 | Source chunks and optional graph context |
 | 3–5 | Page image, OCR text and provenance |
 | 5–7 | Candidates, ranks, exact packet and typed result |
-| 7–9 | Teaching session, accepted documents and fresh-session retrieval |
+| 7–9 | Teaching session, accepted documents and fresh-process verification |
 | 9–10 | Change one model, source or rule and discuss an extension |
 
 Keep rehearsal artifacts open if cold starts would exceed the slot. Label them

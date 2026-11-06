@@ -5,8 +5,8 @@ description = "Four experiments in persistent memory, document reading, decision
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "cognee==1.6.7",
-    "sie-cognee==0.11.0",
-    "sie-sdk==0.11.0",
+    "sie-cognee>=0.11,<1",
+    "sie-sdk>=0.11,<1",
     "pillow>=11,<13",
     "pypdfium2>=4.30,<6",
     "python-dotenv>=1,<2",

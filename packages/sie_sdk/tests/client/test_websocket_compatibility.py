@@ -3,6 +3,7 @@
 import asyncio
 import json
 import threading
+import urllib.request
 from http import HTTPStatus
 
 import pytest
@@ -17,12 +18,13 @@ from websockets.http11 import Response
 @pytest.mark.parametrize("synchronous", [False, True])
 async def test_watch_direct_connection_auth_and_no_proxy(monkeypatch, synchronous):
     # Invalid ambient proxies make any accidental use fail without contacting
-    # a third party. NO_PROXY is removed so websockets15 cannot bypass the test.
+    # a third party. Disable environment and platform bypass rules.
     for name in ("http_proxy", "https_proxy", "all_proxy", "ws_proxy", "wss_proxy"):
         monkeypatch.setenv(name, "http://127.0.0.1:1")
         monkeypatch.setenv(name.upper(), "http://127.0.0.1:1")
     monkeypatch.delenv("no_proxy", raising=False)
     monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda _host: False)
     seen = []
 
     async def handler(connection):

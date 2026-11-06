@@ -122,8 +122,8 @@ def test_lesson_matching_requires_complete_text() -> None:
 
 
 @pytest.mark.parametrize("status", ["completed", "no_gated_entries"])
-def test_learning_invokes_distillation_and_queries_fresh_session(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str
+def test_teaching_distills_without_verifying_in_same_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], status: str
 ) -> None:
     learn = script("04_learn.py")
     cognee = ModuleType("cognee")
@@ -136,22 +136,126 @@ def test_learning_invokes_distillation_and_queries_fresh_session(
     search = ModuleType("cognee.api.v1.search")
     search.SearchType = SimpleNamespace(HYBRID_COMPLETION="hybrid")  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "cognee.api.v1.search", search)
-    monkeypatch.setattr(learn, "initialize", lambda *args, **kwargs: cognee)
-    retrieval = AsyncMock(return_value=[SourceChunk("lesson-chunk", document) for document in documents])
+    initialization = Mock(return_value=cognee)
+    monkeypatch.setattr(learn, "initialize", initialization)
+    seed = AsyncMock()
+    monkeypatch.setattr(learn, "seed_memory", seed)
+    retrieval = AsyncMock()
     monkeypatch.setattr(learn, "retrieve_chunks", retrieval)
-    monkeypatch.setattr(sys, "argv", ["04_learn.py"])
+    monkeypatch.setattr(sys, "argv", ["04_learn.py", "--seed"])
     demo = Demo(
         {}, {"distill_batches": 1, "retrieve_top_k": 5}, {}, {}, "test", tmp_path, tmp_path, {"query": "new input"}
     )
     asyncio.run(learn.main(demo))
     session_ids = json.loads((tmp_path / "session-ids.json").read_text())
-    assert session_ids["teaching"] != session_ids["fresh"]
+    assert set(session_ids) == {"teaching"}
+    initialization.assert_called_once_with(demo, learning=True)
+    seed.assert_awaited_once_with(demo, cognee)
     cognee.session.distill_session.assert_awaited_once_with(session_ids["teaching"], demo.dataset, max_batches=1)
-    assert cognee.recall.await_args_list[-1].kwargs["session_id"] == session_ids["fresh"]
-    assert cognee.recall.await_args_list[-1].args[0] == "new input"
-    retrieval.assert_awaited_once_with("new input", dataset=demo.dataset, top_k=5)
+    assert all(call.kwargs["session_id"] == session_ids["teaching"] for call in cognee.recall.await_args_list)
+    retrieval.assert_not_awaited()
     assert json.loads((tmp_path / "actual-distillation.json").read_text())["documents"] == documents
-    assert bool(json.loads((tmp_path / "learning-evidence.json").read_text())["exact_text_matches"]) == bool(documents)
+    assert not (tmp_path / "fresh-session.json").exists()
+    assert f"WORKSHOP_NAMESPACE=test uv run 04_learn.py --verify-run {tmp_path}" in capsys.readouterr().out
+
+
+def verification_fixture(tmp_path: Path, *, status: str = "completed") -> tuple[Demo, Path, list[str]]:
+    prior = tmp_path / "teaching"
+    prior.mkdir()
+    storage = tmp_path / "state"
+    (storage / "cognee").mkdir(parents=True)
+    run = tmp_path / "verification"
+    run.mkdir()
+    models = {"embedding": "test-embedding", "embedding_dimensions": 1024}
+    demo = Demo(models, {"retrieve_top_k": 5}, {}, {}, "test", storage, run, {"query": "new input"})
+    documents = ["A complete, hand-authored stand-in lesson."] if status == "completed" else []
+    (prior / "configuration.json").write_text(json.dumps({"dataset": demo.dataset, "models": models}))
+    (prior / "actual-distillation.json").write_text(json.dumps({"status": status, "documents": documents}))
+    (storage / "embedding.json").write_text(json.dumps(models))
+    (storage / "cognee/sie-cognee.json").write_text(
+        json.dumps({"embedding_model": "test-embedding", "embedding_dimensions": 1024})
+    )
+    return demo, prior, documents
+
+
+@pytest.mark.parametrize("status", ["completed", "no_proposed_lessons"])
+def test_verify_reads_prior_lessons_without_teaching(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    learn = script("04_learn.py")
+    demo, prior, documents = verification_fixture(tmp_path, status=status)
+    original = (prior / "actual-distillation.json").read_bytes()
+    cognee = SimpleNamespace(
+        recall=AsyncMock(return_value=[]),
+        remember=AsyncMock(),
+        session=SimpleNamespace(get_session=AsyncMock(return_value=[]), distill_session=AsyncMock()),
+    )
+    search = ModuleType("cognee.api.v1.search")
+    search.SearchType = SimpleNamespace(HYBRID_COMPLETION="hybrid")  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "cognee.api.v1.search", search)
+    initialization = Mock(return_value=cognee)
+    monkeypatch.setattr(learn, "initialize", initialization)
+    seed = AsyncMock()
+    monkeypatch.setattr(learn, "seed_memory", seed)
+    retrieval = AsyncMock(return_value=[SourceChunk("stored-lesson", document) for document in documents])
+    monkeypatch.setattr(learn, "retrieve_chunks", retrieval)
+    monkeypatch.setattr(sys, "argv", ["04_learn.py", "--verify-run", str(prior)])
+    asyncio.run(learn.main(demo))
+    initialization.assert_called_once_with(demo, learning=False)
+    seed.assert_not_awaited()
+    cognee.remember.assert_not_awaited()
+    cognee.session.distill_session.assert_not_awaited()
+    assert cognee.recall.await_count == 1
+    assert cognee.recall.await_args.args[0] == "new input"
+    assert cognee.recall.await_args.kwargs["session_id"].startswith("test-verify-")
+    retrieval.assert_awaited_once_with("new input", dataset=demo.dataset, top_k=5)
+    evidence = json.loads((demo.run / "learning-evidence.json").read_text())
+    assert evidence["distillation_status"] == status
+    assert bool(evidence["exact_text_matches"]) == bool(documents)
+    assert (prior / "actual-distillation.json").read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "mismatch", ["dataset", "recorded-model", "recorded-dimensions", "stored-model", "owned-model"]
+)
+def test_verify_rejects_identity_mismatch_before_cognee_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str
+) -> None:
+    learn = script("04_learn.py")
+    demo, prior, _ = verification_fixture(tmp_path)
+    if mismatch.startswith("stored"):
+        path = demo.storage / "embedding.json"
+        data = {"embedding": "other-model", "embedding_dimensions": 1024}
+    elif mismatch.startswith("owned"):
+        path = demo.storage / "cognee/sie-cognee.json"
+        data = {"embedding_model": "other-model", "embedding_dimensions": 1024}
+    else:
+        path = prior / "configuration.json"
+        data = json.loads(path.read_text())
+        if mismatch == "dataset":
+            data["dataset"] = "sie-other"
+        else:
+            key = "embedding" if mismatch == "recorded-model" else "embedding_dimensions"
+            data["models"][key] = "other-model" if key == "embedding" else 768
+    path.write_text(json.dumps(data))
+    initialization = Mock(side_effect=AssertionError("Must validate before Cognee import"))
+    monkeypatch.setattr(learn, "initialize", initialization)
+    monkeypatch.setattr(sys, "argv", ["04_learn.py", "--verify-run", str(prior)])
+    with pytest.raises(ValueError):
+        asyncio.run(learn.main(demo))
+    initialization.assert_not_called()
+
+
+def test_verify_cannot_seed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    learn = script("04_learn.py")
+    demo, prior, _ = verification_fixture(tmp_path)
+    initialization = Mock()
+    monkeypatch.setattr(learn, "initialize", initialization)
+    monkeypatch.setattr(sys, "argv", ["04_learn.py", "--seed", "--verify-run", str(prior)])
+    with pytest.raises(SystemExit) as error:
+        asyncio.run(learn.main(demo))
+    assert error.value.code == 2
+    initialization.assert_not_called()
 
 
 @pytest.mark.parametrize("evidence", ["present", "missing", "oversized"])
