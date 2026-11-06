@@ -342,9 +342,12 @@ nothing about a model.
 `./run_gate.sh cloud` with Claude Code 2.1.318 against SIE Serverless and
 GLM-5.3-Flash via SIE Relay, 2026-11-05: 2 failed and 1 passed before the run,
 3 passed after it with the tests unchanged, in 7 turns and 17 seconds, with no
-API retries. A second run without `--bare` or the key helper, so the key came
-from `ANTHROPIC_AUTH_TOKEN` as `recipes/cloud.sh` sets it, gave the same verdict
-in 7 turns and 16 seconds, with one retry after a 503.
+API retries.
+
+A second run used a copy of `run_gate.sh`, not checked in, with `--bare` and the
+`--settings` line removed from the `claude` command, so the key came from
+`ANTHROPIC_AUTH_TOKEN` as `recipes/cloud.sh` sets it. It gave the same verdict in
+7 turns and 16 seconds, with one retry after a 503.
 
 ### Checked in this repository
 
