@@ -104,7 +104,9 @@ The planner gives each lane that pins at least one identity a named queue pool
 of its own, since the chart carries a lane's pinned set on a static queue pool
 and the default queue pool carries no pins. A lane the current plan already
 puts on a named queue pool keeps it, so planning again leaves the pool as it
-is. Otherwise the pool is derived from the lane's `name`: its slug, which
+is, unless the pool is `default`, the parameters' `queue_pool` or a pool
+another lane keeps, compared without regard to case as the chart compares them.
+Otherwise the pool is derived from the lane's `name`: its slug, which
 lowercases the name, replaces each run of characters outside `a-z` and `0-9`
 with a hyphen and drops leading and trailing hyphens, or `lane` when nothing
 remains. The slug is cut to 63 characters with a digest of the name appended

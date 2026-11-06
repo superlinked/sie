@@ -1475,12 +1475,12 @@ class _Planner:
     def queue_pools(self, lanes: Iterable[str], identities: Iterable[PlanIdentity]) -> dict[str, str]:
         pools = dict.fromkeys(lanes, self.parameters.queue_pool)
         pinning = sorted({entry.lane for entry in identities if entry.warmth is Warmth.PINNED})
-        taken = {DEFAULT_QUEUE_POOL, self.parameters.queue_pool}
+        taken = {DEFAULT_QUEUE_POOL, self.parameters.queue_pool.lower()}
         for name in pinning:
             current = self.current_lanes.get(name)
-            if current is not None and current.queue_pool not in taken:
+            if current is not None and current.queue_pool.lower() not in taken:
                 pools[name] = current.queue_pool
-                taken.add(current.queue_pool)
+                taken.add(current.queue_pool.lower())
         for name in pinning:
             if pools[name] == self.parameters.queue_pool:
                 pools[name] = _named_queue_pool(name, taken)

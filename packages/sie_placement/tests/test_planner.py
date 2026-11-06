@@ -1566,6 +1566,24 @@ def test_a_replan_keeps_a_named_queue_pool_and_derives_one_for_a_pinned_lane_on_
     }
 
 
+def test_a_kept_queue_pool_is_compared_without_regard_to_case():
+    kept = [single_lane_plan(name=name, identity=f"org/{name}") for name in ("first", "second", "third")]
+    pools = ("Batch", "batch", "Default")
+    current = Plan(
+        placement="test",
+        lanes=tuple(replace(entry.lanes[0], queue_pool=pool) for entry, pool in zip(kept, pools, strict=True)),
+        identities=tuple(identity for entry in kept for identity in entry.identities),
+    )
+    pinned = ServiceLevel(come_alive_p95_s=0)
+    service_levels = levels(*((f"org/{name}", pinned) for name in ("first", "second", "third")))
+    result = run(service_levels, [], prices=L4_ONLY, current=current)
+    assert {lane.name: lane.queue_pool for lane in result.plan.lanes} == {
+        "first": "Batch",
+        "second": "second",
+        "third": "third",
+    }
+
+
 def test_a_derived_queue_pool_is_the_slug_of_the_lane_name():
     current = single_lane_plan(name="Shared_Lane")
     current = replace(current, lanes=(replace(current.lanes[0], queue_pool="default"),))
@@ -1576,7 +1594,8 @@ def test_a_derived_queue_pool_is_the_slug_of_the_lane_name():
 def test_plan_lanes_whose_tokens_differ_only_in_case_name_one_chart_lane():
     service_levels = levels(("org/a", WARM), ("org/b", WARM))
     receipts = [receipt(identity=identity) for identity in ("org/a", "org/b")]
-    result = run(service_levels, receipts, prices=L4_ONLY, bundles={"org/a": "Default"})
+    boots = [boot(identity=identity) for identity in ("org/a", "org/b")]
+    result = run(service_levels, receipts, boots, prices=L4_ONLY, bundles={"org/a": "Default"})
     assert {lane.name: lane.bundle for lane in result.plan.lanes} == {"org-a-l4": "Default", "org-b-l4": "default"}
     (shared,) = result.report.shared_chart_lanes
     assert shared.to_dict() == {
