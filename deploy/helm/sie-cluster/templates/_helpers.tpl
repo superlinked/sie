@@ -1216,7 +1216,9 @@ model code. Gateway client credentials may share a key with each other.
 A credential reference "name/key" for sie-cluster.wiredSecretKeys. The name
 and key are trimmed, as YAML reads an unquoted manifest field, and must then be
 a Kubernetes Secret name and data key, so no spelling of either value in a
-manifest names another Secret key than the reference does.
+manifest names another Secret key than the reference does. With unquoted, for
+fields a subchart writes unquoted, Helm's YAML reader must also read each of
+them back as the same string.
 */}}
 {{- define "sie-cluster.secretKeyRef" -}}
 {{- $name := trim (toString (default "" .name)) -}}
@@ -1228,12 +1230,13 @@ manifest names another Secret key than the reference does.
 {{- fail (printf "%s must be a Kubernetes Secret data key (letters, digits, '-', '_' and '.'), got %q" .keyField $key) -}}
 {{- end -}}
 {{- if .unquoted -}}
-{{- $scalar := `^((?i)~|null|true|false|yes|no|on|off|y|n|[-+]?\.(inf|nan)|[-+]?0[xob][0-9a-f_]+)$|^[-+]?[0-9][0-9_]*([.:][0-9_:]*)?([eE][-+]?[0-9]+)?$|^[-+]?\.[0-9][0-9_]*([eE][-+]?[0-9]+)?$` -}}
-{{- if regexMatch $scalar $name -}}
-{{- fail (printf "%s is written unquoted by its chart, so %q would be read as a YAML null, boolean or number rather than a Secret name" .nameField $name) -}}
+{{- $readName := fromYaml (printf "k: %s" $name) -}}
+{{- if or (hasKey $readName "Error") (not (kindIs "string" $readName.k)) (ne $readName.k $name) -}}
+{{- fail (printf "%s is written unquoted by its chart, and YAML does not read %q as that string, so it would not name the Secret" .nameField $name) -}}
 {{- end -}}
-{{- if regexMatch $scalar $key -}}
-{{- fail (printf "%s is written unquoted by its chart, so %q would be read as a YAML null, boolean or number rather than a Secret data key" .keyField $key) -}}
+{{- $readKey := fromYaml (printf "k: %s" $key) -}}
+{{- if or (hasKey $readKey "Error") (not (kindIs "string" $readKey.k)) (ne $readKey.k $key) -}}
+{{- fail (printf "%s is written unquoted by its chart, and YAML does not read %q as that string, so it would not name the Secret data key" .keyField $key) -}}
 {{- end -}}
 {{- end -}}
 {{- printf "%s/%s" $name $key -}}
