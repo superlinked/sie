@@ -1,13 +1,16 @@
+import json
 import time
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import msgpack
 import msgpack_numpy as m
 import numpy as np
 import pytest
+import requests
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sie_server.adapters.sglang.embedding import SGLangEmbeddingAdapter
 from sie_server.api.encode import router as encode_router
 from sie_server.config.model import (
     AdapterOptions,
@@ -125,6 +128,35 @@ def client(mock_registry: MagicMock) -> TestClient:
 
 class TestEncodeEndpoint:
     """Tests for POST /v1/encode/{model}."""
+
+    def test_encode_engine_window_refusal_is_input_too_long(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        """A text the SGLang engine refuses for its length is the caller's to change, so it is not a 500."""
+        engine = SGLangEmbeddingAdapter("org/embedding", normalize=False, embed_concurrency=1)
+        engine._server_url = "http://localhost:30000"
+        mock_adapter.encode.side_effect = lambda items, output_types, **_kwargs: engine.encode(
+            items, output_types=output_types
+        )
+        refused = requests.Response()
+        refused.status_code = 400
+        refused._content = json.dumps(
+            {
+                "object": "error",
+                "message": "The input (40000 tokens) is longer than the model's context length (32768 tokens).",
+                "type": "BadRequestError",
+                "param": None,
+                "code": 400,
+            }
+        ).encode()
+
+        with patch("sie_server.adapters.sglang.embedding.requests.post", return_value=refused):
+            response = client.post(
+                "/v1/encode/test-model",
+                json={"items": [{"text": "Hello world"}]},
+                headers=JSON_HEADERS,
+            )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "INPUT_TOO_LONG"
 
     def test_encode_basic_json(self, client: TestClient) -> None:
         """Basic encode request returns JSON when Accept header set."""

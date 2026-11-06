@@ -45,6 +45,7 @@ from sie_server.adapters._generation_base import (
     GenerationAdapter,
     GenerationChunk,
     GenerationError,
+    GenerationInputTooLongError,
     GenerationInvalidRequestError,
     GenerationResult,
     ReasoningFormat,
@@ -60,6 +61,7 @@ from sie_server.adapters.sglang._compat.sie_thinking_budget import PARAM as THIN
 from sie_server.adapters.sglang._compat.sie_thinking_budget import PROCESSOR_REFERENCE as THINKING_BUDGET_PROCESSOR
 from sie_server.adapters.sglang._lora import SGLangLoraManager, SGLangLoraMixin, leased_generation
 from sie_server.adapters.sglang._memory import SGLangMemoryBudget
+from sie_server.adapters.sglang._window import window_refusal_message
 from sie_server.observability.generation_diagnostics import GenerationStreamTimer
 from sie_server.types.grammar import (
     OUTLINES_JSON_SCHEMA_TYPE_DIAGNOSTIC,
@@ -314,6 +316,12 @@ def _raise_for_media_load_error(message: object) -> None:
         )
 
 
+def _raise_for_window_refusal(message: object) -> None:
+    refusal = window_refusal_message(message)
+    if refusal is not None:
+        raise GenerationInputTooLongError(refusal)
+
+
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -352,6 +360,7 @@ async def _raise_for_sglang_http_error(
             ):
                 raise GenerationInvalidRequestError("grammar", OUTLINES_JSON_SCHEMA_TYPE_MESSAGE)
             _raise_for_media_load_error(message)
+            _raise_for_window_refusal(message)
     response.raise_for_status()
 
 
@@ -363,7 +372,9 @@ def _raise_for_sglang_event_error(
         raise GenerationError("SGLang /generate returned an invalid event")
     if "error" in event:
         error = event["error"]
-        _raise_for_media_load_error(error.get("message") if isinstance(error, dict) else None)
+        message = error.get("message") if isinstance(error, dict) else None
+        _raise_for_media_load_error(message)
+        _raise_for_window_refusal(message)
         raise GenerationError("SGLang /generate returned an in-band error")
     meta = event.get("meta_info")
     finish = meta.get("finish_reason") if isinstance(meta, dict) else None
@@ -372,6 +383,7 @@ def _raise_for_sglang_event_error(
         raise GenerationError("SGLang /generate returned a malformed finish reason")
     if kind == "abort":
         if isinstance(finish, dict) and type(finish.get("status_code")) is int and finish["status_code"] == 400:
+            _raise_for_window_refusal(finish.get("message"))
             if grammar is not None:
                 if (
                     grammar_backend == "outlines"
