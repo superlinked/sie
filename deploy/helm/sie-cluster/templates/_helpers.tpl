@@ -1289,8 +1289,8 @@ token-separation check and the upstream-key collision check read this list.
 {{- with index .Subcharts "grafana" -}}
 {{- if eq (include "grafana.namespace" .) (include "sie-cluster.namespace" $root) -}}
 {{- $existingSecret := toString (default "" .Values.admin.existingSecret) -}}
-{{- if and (contains "{{" $existingSecret) (not (regexMatch `^([a-z0-9.-]|\{\{-? *\$?\.Release\.(Name|Namespace) *-?\}\})+$` $existingSecret)) -}}
-{{- fail (printf "kube-prometheus-stack.grafana.admin.existingSecret may hold only lowercase letters, digits, '-', '.' and the actions {{ .Release.Name }} and {{ .Release.Namespace }}, optionally with {{- -}} trim markers or as $.Release: the Grafana chart evaluates it in its own templates, so the chart can check the Secret Grafana reads only when it depends on nothing but the release, got %q" $existingSecret) -}}
+{{- if and (contains "{{" $existingSecret) (not (regexMatch `^([a-z0-9.-]|\{\{-? *\$?\.(Release|Values|Chart)(\.[A-Za-z0-9_]+)+ *-?\}\})+$` $existingSecret)) -}}
+{{- fail (printf "kube-prometheus-stack.grafana.admin.existingSecret may hold only lowercase letters, digits, '-', '.' and actions that name a field of .Release, .Values or .Chart, such as {{ .Release.Name }}, optionally with {{- -}} trim markers or a leading $: the Grafana chart evaluates it in its own templates, so the chart can check the Secret Grafana reads only when it depends on nothing but those fields, got %q" $existingSecret) -}}
 {{- end -}}
 {{- $context := merge (dict "Template" $root.Template) . -}}
 {{- $secretName := tpl .Values.admin.existingSecret $context | default (include "grafana.fullname" .) -}}

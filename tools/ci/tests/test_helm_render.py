@@ -3363,6 +3363,16 @@ def test_client_and_worker_tokens_are_kept_apart_from_every_wired_secret_key(
         ),
         ({"fullnameOverride": "dashboard"}, "dashboard", "admin-password"),
         (
+            {"fullnameOverride": "dashboard", "admin": {"existingSecret": "{{ .Values.fullnameOverride }}"}},
+            "dashboard",
+            "admin-password",
+        ),
+        (
+            {"admin": {"existingSecret": "{{ .Values.admin.userKey }}-admin", "userKey": "dashboard"}},
+            "dashboard-admin",
+            "dashboard",
+        ),
+        (
             {"admin": {"existingSecret": "{{- .Release.Namespace -}}-admin", "userKey": "dashboard"}},
             "sie-admin",
             "dashboard",
@@ -4731,13 +4741,15 @@ def test_the_applier_client_token_is_kept_apart_from_the_grafana_admin_secret_wh
     [
         '{{ if contains "grafana" (index . "Template" "BasePath") }}shared{{ else }}other{{ end }}',
         '{{ .Template.Name | base | trimSuffix ".yaml" }}',
-        "{{ .Chart.Name }}-admin",
-        "{{ .Values.x }}",
+        "{{ $.Template.BasePath }}-graf",
+        '{{ index .Values "admin" }}',
+        "{{ .Values }}",
         '{{ include "grafana.fullname" . }}',
         "{{ .Release.Name | upper }}-graf",
+        "{{ .Capabilities.KubeVersion.Major }}-graf",
         "Graf-{{ .Release.Name }}",
     ],
-    ids=["index-template", "template", "chart", "values", "include", "pipeline", "uppercase"],
+    ids=["index-template", "template", "template-dollar", "index-values", "bare-values", "include", "pipeline", "capabilities", "uppercase"],
 )
 def test_a_grafana_admin_secret_that_depends_on_more_than_the_release_is_refused(
     tmp_path: Path, existing: str
@@ -4752,9 +4764,15 @@ def test_a_grafana_admin_secret_that_depends_on_more_than_the_release_is_refused
 
 @pytest.mark.parametrize(
     "existing",
-    ["{{ .Release.Name }}-graf", "{{- .Release.Namespace -}}-graf", "{{ $.Release.Name }}-graf", "graf"],
+    [
+        "{{ .Release.Name }}-graf",
+        "{{- .Release.Namespace -}}-graf",
+        "{{ $.Release.Name }}-graf",
+        "{{ .Chart.Name }}-admin",
+        "graf",
+    ],
 )
-def test_a_grafana_admin_secret_that_depends_only_on_the_release_renders(tmp_path: Path, existing: str) -> None:
+def test_a_grafana_admin_secret_that_names_release_values_or_chart_fields_renders(tmp_path: Path, existing: str) -> None:
     values = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": existing}}}}
     result = render_chart(tmp_path, values)
     assert result.returncode == 0, result.stderr
