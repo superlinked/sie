@@ -146,6 +146,10 @@ def test_teaching_distills_without_verifying_in_same_process(
     demo = Demo(
         {}, {"distill_batches": 1, "retrieve_top_k": 5}, {}, {}, "test", tmp_path, tmp_path, {"query": "new input"}
     )
+    marker = tmp_path / "cognee/sie-cognee.json"
+    marker.parent.mkdir()
+    marker.write_text('{"embedding_model": "test-embedding", "embedding_dimensions": 1024}')
+    marker_before = marker.read_bytes()
     asyncio.run(learn.main(demo))
     session_ids = json.loads((tmp_path / "session-ids.json").read_text())
     assert set(session_ids) == {"teaching"}
@@ -156,6 +160,7 @@ def test_teaching_distills_without_verifying_in_same_process(
     retrieval.assert_not_awaited()
     assert json.loads((tmp_path / "actual-distillation.json").read_text())["documents"] == documents
     assert not (tmp_path / "fresh-session.json").exists()
+    assert marker.read_bytes() == marker_before
     assert f"WORKSHOP_NAMESPACE=test uv run 04_learn.py --verify-run {tmp_path}" in capsys.readouterr().out
 
 
@@ -256,6 +261,73 @@ def test_verify_cannot_seed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
         asyncio.run(learn.main(demo))
     assert error.value.code == 2
     initialization.assert_not_called()
+
+
+@pytest.mark.parametrize("missing", ["embedding.json", "cognee/sie-cognee.json"])
+def test_verify_checks_missing_markers_before_reading_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    learn = script("04_learn.py")
+    demo, prior, _ = verification_fixture(tmp_path)
+    (demo.storage / missing).unlink()
+    reads: list[Path] = []
+    original_read = Path.read_text
+
+    def track_read(path, *args, **kwargs):
+        reads.append(path)
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", track_read)
+    initialization = Mock()
+    monkeypatch.setattr(learn, "initialize", initialization)
+    with pytest.raises(learn.MissingMemoryStateError, match="Restore the teaching run's original memory"):
+        asyncio.run(learn.verify(demo, prior))
+    assert demo.storage / "embedding.json" not in reads
+    assert demo.storage / "cognee/sie-cognee.json" not in reads
+    initialization.assert_not_called()
+
+
+@pytest.mark.parametrize("missing", ["embedding.json", "cognee/sie-cognee.json"])
+def test_missing_state_cli_displays_safe_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], missing: str
+) -> None:
+    import common
+
+    learn = script("04_learn.py")
+    demo, prior, _ = verification_fixture(tmp_path)
+    demo.limits["experiment_timeout_seconds"] = 1
+    (demo.storage / missing).unlink()
+    monkeypatch.setattr(common, "load_demo", lambda experiment: demo)
+    initialization = Mock()
+    monkeypatch.setattr(learn, "initialize", initialization)
+    monkeypatch.setattr(sys, "argv", ["04_learn.py", "--verify-run", str(prior)])
+    with pytest.raises(SystemExit) as error:
+        learn.launch("04-learn", learn.main)
+    assert error.value.code == 2
+    stderr = capsys.readouterr().err
+    assert learn.MISSING_STATE_RECOVERY in stderr
+    assert "--seed with a fresh WORKSHOP_NAMESPACE" in stderr
+    assert "FileNotFoundError" not in stderr
+    assert str(tmp_path) not in stderr
+    initialization.assert_not_called()
+
+
+def test_verify_cli_still_redacts_upstream_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import common
+
+    learn = script("04_learn.py")
+    demo, prior, _ = verification_fixture(tmp_path)
+    demo.limits["experiment_timeout_seconds"] = 1
+    monkeypatch.setattr(common, "load_demo", lambda experiment: demo)
+    monkeypatch.setattr(learn, "initialize", Mock(side_effect=ValueError("upstream-private-detail")))
+    monkeypatch.setattr(sys, "argv", ["04_learn.py", "--verify-run", str(prior)])
+    with pytest.raises(SystemExit) as error:
+        learn.launch("04-learn", learn.main)
+    assert "ValueError" in str(error.value)
+    output = capsys.readouterr()
+    assert "upstream-private-detail" not in str(error.value) + output.out + output.err
 
 
 @pytest.mark.parametrize("evidence", ["present", "missing", "oversized"])

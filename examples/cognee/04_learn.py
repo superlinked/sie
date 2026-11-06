@@ -11,6 +11,16 @@ from sie_cognee.retrieval import SourceChunk, retrieve_chunks
 
 from common import ROOT, Demo, initialize, json_value, launch, seed_memory
 
+MISSING_STATE_RECOVERY = (
+    "Stored embedding identity is missing. Restore the teaching run's original memory directory, including "
+    "embedding.json and cognee/sie-cognee.json, or run 04_learn.py --seed with a fresh WORKSHOP_NAMESPACE "
+    "and verify that new teaching run."
+)
+
+
+class MissingMemoryStateError(ValueError):
+    """The local identity markers needed to verify stored memory are absent."""
+
 
 def distillation_summary(result: Any) -> dict[str, Any]:
     payload = json_value(result)
@@ -50,8 +60,12 @@ def verification_summary(demo: Demo, prior_run: Path) -> dict[str, Any]:
     expected = {key: demo.models[key] for key in ("embedding", "embedding_dimensions")}
     if {key: models.get(key) for key in expected} != expected:
         raise ValueError("Use the teaching run's embedding model and dimensions when verifying its memory.")
-    stored = json.loads((demo.storage / "embedding.json").read_text())
-    owned = json.loads((demo.storage / "cognee/sie-cognee.json").read_text())
+    embedding_manifest = demo.storage / "embedding.json"
+    cognee_marker = demo.storage / "cognee/sie-cognee.json"
+    if not embedding_manifest.is_file() or not cognee_marker.is_file():
+        raise MissingMemoryStateError(MISSING_STATE_RECOVERY)
+    stored = json.loads(embedding_manifest.read_text())
+    owned = json.loads(cognee_marker.read_text())
     if stored != expected or owned != {
         "embedding_model": expected["embedding"],
         "embedding_dimensions": expected["embedding_dimensions"],
@@ -149,7 +163,10 @@ async def main(demo: Demo) -> None:
     modes.add_argument("--verify-run", type=Path, help="Verify stored lessons from a prior teaching run; no teaching")
     args = parser.parse_args()
     if args.verify_run is not None:
-        await verify(demo, args.verify_run)
+        try:
+            await verify(demo, args.verify_run)
+        except MissingMemoryStateError:
+            parser.error(MISSING_STATE_RECOVERY)
     else:
         await teach(demo, seed=args.seed)
 
