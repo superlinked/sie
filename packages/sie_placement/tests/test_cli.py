@@ -79,11 +79,21 @@ class FakeGateway(_Server):
         self.pools: dict[str, dict] = {}
         self.fail_reads = False
         self.read_reply: object | None = None
+        self.raw_reply: tuple[int, bytes] | None = None
 
     def respond(self, handler: _Handler, method: str, body: object) -> None:
         path = urlsplit(handler.path).path
         authorization = handler.headers.get("Authorization")
         self.requests.append({"method": method, "path": path, "authorization": authorization, "body": body})
+        if self.raw_reply is not None:
+            status, payload = self.raw_reply
+            handler.send_response(status)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(payload)))
+            handler.send_header("Location", "http://127.0.0.1:9/v1/pools")
+            handler.end_headers()
+            handler.wfile.write(payload)
+            return
         if method == "GET" and path.startswith("/v1/pools/"):
             if self.read_reply is not None:
                 handler._reply(200, self.read_reply)
@@ -479,9 +489,108 @@ def test_a_transport_failure_is_reported_without_the_header_it_carried(gateway):
     assert gateway.pools == {}
 
 
+PASSWORD = "s3cret-password"  # noqa: S105 - a test value
+
+
+@pytest.mark.parametrize(
+    ("url", "message"),
+    [
+        ("sie-gateway:8080", "must be an absolute http or https URL"),
+        ("ftp://sie-gateway:8080", "must be an absolute http or https URL"),
+        ("http:///v1", "must be an absolute http or https URL"),
+        (f"http://user:{PASSWORD}@sie-gateway:8080", "must not embed credentials"),
+        (f"http://user:{PASSWORD}@sie-gateway:notaport", "must not embed credentials"),
+        (f"http://sie-gateway:8080/?token={PASSWORD}", "must not carry a query or a fragment"),
+        (f"http://sie-gateway:8080/#{PASSWORD}", "must not carry a query or a fragment"),
+        ("http://sie-gateway:notaport", "has an invalid port"),
+    ],
+)
+def test_a_gateway_url_that_is_not_a_plain_base_url_is_refused_without_echoing_it(
+    gateway, prometheus, read_token_file, monkeypatch, url, message, capsys, caplog
+):
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setenv("SIE_ADMIN_TOKEN", ADMIN_TOKEN)
+    argv = ["tune", "--plan", str(FIXTURES / "tune-plan.json"), "--prometheus-url", prometheus.url]
+    argv += ["--gateway-url", url, "--api-key-file", str(read_token_file), "--apply", "--once"]
+    assert cli.main(argv) == cli.EXIT_REFUSED
+    captured = capsys.readouterr()
+    assert f"the gateway URL {message}" in captured.err
+    for text in (captured.out, captured.err, caplog.text):
+        assert url not in text
+        assert PASSWORD not in text
+    assert gateway.requests == []
+    assert prometheus.requests == []
+
+
+def test_a_gateway_url_httpx_cannot_parse_is_refused_without_echoing_it():
+    with pytest.raises(ValueError, match=r"^the gateway URL is not a valid URL$"):
+        pools.connect(f"http://user:{PASSWORD}@sie-gateway:notaport", READ_TOKEN)
+
+
 def test_a_token_an_http_header_cannot_encode_is_refused_without_echoing_it(gateway):
     with pytest.raises(ValueError, match=r"^a gateway token holds a character that an HTTP header cannot carry$"):
         pools.connect(gateway.url, "caf\u00e9-secret")
+
+
+CARRIER = "placement-floor-default-l4-default"
+NESTED = b"[" * 100_000
+
+
+def write_carrier(writer: pools.SdkPools) -> None:
+    writer.create_pool(CARRIER, {"l4": 0}, bundle="default", minimum_worker_count=1, queue_pool="default")
+
+
+@pytest.mark.parametrize(
+    ("reply", "message"),
+    [
+        ((200, NESTED), "the gateway returned an unexpected response"),
+        ((307, json.dumps({"spec": {"name": CARRIER}}).encode()), "the gateway answered HTTP 307"),
+        ((302, b"{}"), "the gateway answered HTTP 302"),
+    ],
+)
+def test_a_pool_reply_the_applier_cannot_use_fails_the_call(gateway, reply, message):
+    gateway.raw_reply = reply
+    reader = pools.connect(gateway.url, READ_TOKEN)
+    try:
+        with pytest.raises(keda.GatewayError) as raised:
+            reader.get_pool(CARRIER)
+    finally:
+        reader.close()
+    assert str(raised.value).startswith(message)
+    with pytest.raises(keda.GatewayError) as raised:
+        write_carrier(pools.connect(gateway.url, ADMIN_TOKEN))
+    assert str(raised.value).startswith(message)
+    assert [request["method"] for request in gateway.requests] == ["GET", "POST"]
+
+
+def test_a_deeply_nested_pool_reply_fails_only_the_tick(gateway, prometheus, read_token_file, capsys):
+    gateway.raw_reply = (200, NESTED)
+    assert tune(gateway, prometheus, "--api-key-file", str(read_token_file)) == cli.EXIT_FAILED
+    errors = [row["error"] for row in rows(capsys.readouterr().out)]
+    assert errors == [
+        f"reading pool {CARRIER!r} failed: the gateway returned an unexpected response",
+        "reading pool 'placement-floor-default-a100-80gb-generation' failed: "
+        "the gateway returned an unexpected response",
+    ]
+
+
+def test_a_redirected_write_is_not_recorded_as_applied(gateway, prometheus, read_token_file, monkeypatch, capsys):
+    monkeypatch.setenv("SIE_ADMIN_TOKEN", ADMIN_TOKEN)
+    gateway.auth = False
+    original = gateway.respond
+
+    def redirect_writes(handler: _Handler, method: str, body: object) -> None:
+        gateway.raw_reply = (307, json.dumps({"spec": body}).encode()) if method == "POST" else None
+        original(handler, method, body)
+
+    monkeypatch.setattr(gateway, "respond", redirect_writes)
+    assert tune(gateway, prometheus, "--api-key-file", str(read_token_file), "--apply") == cli.EXIT_FAILED
+    written = [row for row in rows(capsys.readouterr().out) if row["floor"]]
+    assert written
+    for row in written:
+        assert row["applied"] is False
+        assert "the gateway answered HTTP 307" in row["error"]
+    assert gateway.pools == {}
 
 
 def test_a_malformed_pool_reply_fails_only_the_tick(gateway, prometheus, read_token_file, capsys):
