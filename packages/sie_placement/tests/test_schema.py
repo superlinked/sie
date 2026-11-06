@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from sie_placement.schema import (
     BootEvidence,
+    Capacity,
     Cell,
     ContainerShape,
     Demand,
@@ -29,7 +30,9 @@ from sie_placement.schema import (
     SchemaError,
     ServiceLevel,
     ServiceLevels,
+    SharedQuota,
     Throughput,
+    TypeCeiling,
     Warmth,
 )
 
@@ -42,6 +45,7 @@ DOCUMENTS: list[tuple[str, Callable[..., object]]] = [
     ("boot-evidence.json", BootEvidence.from_dict),
     ("price-list.json", PriceList.from_dict),
     ("demand.json", Demand.from_dict),
+    ("capacity.json", Capacity.from_dict),
     ("plan.json", Plan.from_dict),
 ]
 
@@ -183,6 +187,9 @@ def test_numbers_built_in_code_must_be_numbers(value, described):
         (lambda value: ServiceLevel(come_alive_p95_s=value), "comeAliveP95S"),
         (lambda value: Envelope(floor_min=0, floor_max=value), "floorMax"),
         (lambda value: DemandHour(start=datetime(2026, 1, 1, tzinfo=UTC), requests=value), "requests"),
+        (lambda value: Capacity(total=value), "total"),
+        (lambda value: TypeCeiling(gpu_product="NVIDIA-L4", accelerators=value), "accelerators"),
+        (lambda value: SharedQuota(accelerators=8, held_elsewhere=value), "heldElsewhere"),
     ],
 )
 @pytest.mark.parametrize(("value", "described"), [(1.5, "number 1.5"), (2.0, "number 2.0"), (True, "boolean true")])
@@ -405,6 +412,100 @@ def test_boot_evidence_borrowed_is_a_strict_boolean(value, described):
     assert str(schema_error(BootEvidence.from_dict, data)) == f"$.borrowed: expected a boolean, got {described}"
 
 
+def test_boot_evidence_records_an_unplaced_attempt_without_a_boot():
+    data = load("boot-evidence.json")
+    data["outcome"] = "unplaced"
+    del data["bootSeconds"]
+    evidence = BootEvidence.from_dict(data)
+    assert (evidence.outcome.value, evidence.boot_seconds, evidence.placement_wait_s) == ("unplaced", None, 41.2)
+    assert evidence.to_dict() == data
+    del data["placementWaitS"]
+    assert BootEvidence.from_dict(data).to_dict() == data
+    data["bootSeconds"] = 30
+    assert str(schema_error(BootEvidence.from_dict, data)) == (
+        "$.bootSeconds: must be omitted for an unplaced attempt, which never booted"
+    )
+
+
+@pytest.mark.parametrize("outcome", ["succeeded", "failed", "timed-out"])
+def test_boot_evidence_of_a_placed_attempt_records_its_boot(outcome):
+    data = load("boot-evidence.json")
+    data["outcome"] = outcome
+    del data["bootSeconds"]
+    assert str(schema_error(BootEvidence.from_dict, data)) == (
+        "$.bootSeconds: is required for an attempt that was placed"
+    )
+
+
+def test_boot_evidence_placement_waits_are_optional_and_non_negative():
+    data = load("boot-evidence.json")
+    del data["placementWaitS"]
+    evidence = BootEvidence.from_dict(data)
+    assert evidence.placement_wait_s is None
+    assert "placementWaitS" not in evidence.to_dict()
+    data["placementWaitS"] = -1
+    assert str(schema_error(BootEvidence.from_dict, data)) == "$.placementWaitS: must be at least 0, got -1"
+
+
+def test_a_lazy_resident_load_runs_on_a_placed_container():
+    data = load("boot-evidence.json")
+    data["warmth"] = "lazy-resident"
+    assert str(schema_error(BootEvidence.from_dict, data)) == (
+        "$.placementWaitS: must be omitted for a lazy-resident load, which runs on a placed container"
+    )
+    del data["placementWaitS"]
+    assert BootEvidence.from_dict(data).warmth is Warmth.LAZY_RESIDENT
+    data["outcome"] = "unplaced"
+    del data["bootSeconds"]
+    assert str(schema_error(BootEvidence.from_dict, data)) == (
+        "$.outcome: a lazy-resident load runs on a placed container and is never unplaced"
+    )
+
+
+def test_capacity_declares_a_total_type_ceilings_or_a_shared_quota():
+    assert str(schema_error(Capacity.from_dict, {"kind": "placement-capacity", "schemaVersion": 1})) == (
+        "$: must declare total, types or sharedQuota"
+    )
+    assert Capacity(total=0).to_dict() == {"kind": "placement-capacity", "schemaVersion": 1, "total": 0}
+    quota = Capacity.from_dict(
+        {"kind": "placement-capacity", "schemaVersion": 1, "sharedQuota": {"accelerators": 4}}
+    ).shared_quota
+    assert quota == SharedQuota(accelerators=4, held_elsewhere=0)
+    assert quota.to_dict() == {"accelerators": 4, "heldElsewhere": 0}
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda data: data.update(total=-1), "$.total: must be at least 0, got -1"),
+        (lambda data: data["types"][1].update(accelerators=-2), "$.types[1].accelerators: must be at least 0, got -2"),
+        (
+            lambda data: data["types"][1].update(gpuProduct="NVIDIA-L4"),
+            "$.types[1].gpuProduct: duplicates 'NVIDIA-L4'",
+        ),
+        (lambda data: data["types"][0].update(gpuProduct="NVIDIA L4"), "$.types[0].gpuProduct: must be a non-empty"),
+        (
+            lambda data: data["sharedQuota"].update(heldElsewhere=-1),
+            "$.sharedQuota.heldElsewhere: must be at least 0, got -1",
+        ),
+        (lambda data: data["sharedQuota"].pop("accelerators"), "$.sharedQuota.accelerators: is required"),
+        (lambda data: data["types"][0].update(max=3), "$.types[0].max: is not a field of this object"),
+    ],
+)
+def test_capacity_ceilings_are_validated(mutate, message):
+    data = load("capacity.json")
+    mutate(data)
+    assert str(schema_error(Capacity.from_dict, data)).startswith(message)
+
+
+def test_capacity_built_in_code_names_type_ceilings_by_gpu_product():
+    capacity = Capacity(types=(TypeCeiling(gpu_product="NVIDIA-L4", accelerators=2),))
+    assert Capacity.from_dict(json.loads(json.dumps(capacity.to_dict()))) == capacity
+    with pytest.raises(SchemaError) as caught:
+        TypeCeiling(gpu_product="", accelerators=1)
+    assert caught.value.path == "gpuProduct"
+
+
 def test_price_lists_validate_currency_rates_and_names():
     data = load("price-list.json")
     data["currency"] = "usd"
@@ -572,6 +673,40 @@ def test_plan_accepts_every_zero_floor_warmth(warmth):
     data = load("plan.json")
     data["identities"][2]["warmth"] = warmth
     assert Plan.from_dict(data).identities[2].warmth.value == warmth
+
+
+def test_plan_lanes_name_fallback_cells_after_their_cell():
+    data = load("plan.json")
+    lane = Plan.from_dict(data).lanes[1]
+    assert lane.cells == (
+        Cell(machine_profile="a100-80gb", gpu_product="NVIDIA-A100-SXM4-80GB"),
+        Cell(machine_profile="h100", gpu_product="NVIDIA-H100-80GB-HBM3"),
+    )
+    assert "fallbackCells" not in Plan.from_dict(data).lanes[0].to_dict()
+    assert Plan.from_dict(data).lanes[0].cells == (Plan.from_dict(data).lanes[0].cell,)
+
+
+@pytest.mark.parametrize(
+    ("cells", "message"),
+    [
+        (
+            [{"machineProfile": "a100-80gb", "gpuProduct": "NVIDIA-A100-SXM4-80GB"}],
+            "$.lanes[1].fallbackCells[0]: repeats 'a100-80gb' with 'NVIDIA-A100-SXM4-80GB', already a cell of this lane",
+        ),
+        (
+            [
+                {"machineProfile": "h100", "gpuProduct": "NVIDIA-H100-80GB-HBM3"},
+                {"machineProfile": "h100", "gpuProduct": "NVIDIA-H100-80GB-HBM3"},
+            ],
+            "$.lanes[1].fallbackCells[1]: repeats 'h100' with 'NVIDIA-H100-80GB-HBM3', already a cell of this lane",
+        ),
+        ({"machineProfile": "h100"}, "$.lanes[1].fallbackCells: expected an array, got an object"),
+    ],
+)
+def test_plan_lane_fallback_cells_are_distinct_from_each_other_and_the_cell(cells, message):
+    data = load("plan.json")
+    data["lanes"][1]["fallbackCells"] = cells
+    assert str(schema_error(Plan.from_dict, data)) == message
 
 
 def test_plan_lane_names_and_identities_are_unique():

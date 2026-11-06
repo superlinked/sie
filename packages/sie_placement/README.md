@@ -29,7 +29,8 @@ name the offending field by its JSON path, for example
 | `placement-boot-evidence` | `BootEvidence` | One measured boot, snapshot restore or resident load of one identity on one cell and container shape |
 | `placement-price-list` | `PriceList` | Accelerator, core and memory rates per machine profile, and the region multiplier per placement |
 | `placement-demand` | `Demand` | Hourly request counts per identity and operation over a UTC window |
-| `placement-plan` | `Plan` | Lanes with their cell, container shape, concurrency, ceiling and envelope, and the lane and warmth of every identity |
+| `placement-capacity` | `Capacity` | The accelerators a plan may hold: in total, per GPU product, and in a quota it shares with other environments |
+| `placement-plan` | `Plan` | Lanes with their cell, fallback cells, container shape, concurrency, ceiling and envelope, and the lane and warmth of every identity |
 
 Each type parses with `from_dict(data)` and serializes with `to_dict()`.
 Constructing a type in code applies the same rules as parsing it:
@@ -74,11 +75,16 @@ A plan gives every identity one warmth: `pinned`, `cold-with-bound`,
 `lazy-resident` identity sits on a lane whose envelope keeps `floorMin` at 1
 or more; every other warmth sits on a lane whose `floorMin` is 0. Boot
 evidence records `cold-with-bound` boots, `snapshot-cold` restores and
-`lazy-resident` loads, with outcome `succeeded`, `failed` or `timed-out`.
-`borrowed: true` marks a boot measured in another environment whose
-boot-shaping inputs match: the identity and its model revision, the image, the
-realized GPU product and count, the container shape, the warmth and the
-placement class. Whoever supplies the evidence decides the match.
+`lazy-resident` loads, one attempt per document, with outcome `succeeded`,
+`failed`, `timed-out` or `unplaced`. `placementWaitS` is the time the attempt
+waited for a container to be placed before its `bootSeconds` began. An
+`unplaced` attempt never got a container: it records no `bootSeconds`, and
+`placementWaitS`, when present, is how long it waited before giving up. A
+`lazy-resident` load runs on a container that is already placed, so it records
+neither. `borrowed: true` marks an attempt measured in another environment
+whose boot-shaping inputs match: the identity and its model revision, the
+image, the realized GPU product and count, the container shape, the warmth and
+the placement class. Whoever supplies the evidence decides the match.
 
 ## Lanes
 
@@ -93,6 +99,39 @@ refers to its lane by that name. The chart compares the three tokens without
 regard to case. Two plan lanes may carry the same three tokens, and so name one
 chart lane, which cannot give them separate envelopes or concurrency; the
 planner's report lists every such chart lane.
+
+`fallbackCells` is an optional ordered candidate list: cells, after `cell`,
+that the lane's containers may be placed on when `cell` cannot be placed. No
+fallback cell repeats `cell` or another fallback cell. A realized card is
+billed at its own price, so the planner prices such a lane at its dearest
+member.
+
+## Capacity
+
+A `placement-capacity` document states the accelerators an environment can
+obtain. Each field is optional, and at least one is declared:
+
+| Field | Meaning |
+| --- | --- |
+| `total` | The accelerators every lane of the plan may hold together |
+| `types` | Per `gpuProduct`, the `accelerators` the lanes that may be placed on that product may hold together |
+| `sharedQuota` | A quota of `accelerators` that this environment shares with others, which hold `heldElsewhere` of it |
+
+Every container holds the `gpuCount` accelerators of its lane's container
+shape. `total` and each of `types` must hold every lane they cover at its
+container ceiling, `maxContainers` containers, at once, as a deployment
+compiler that enforces the ceiling charges it, and so at its envelope maximum,
+`floorMax` containers, too. `sharedQuota` must hold every lane at its envelope
+maximum, the most a tuner may hold warm, together with its `heldElsewhere`
+accelerators. Warm capacity is held continuously, so it must fit the quota the
+environments share. A burst above the floors is bounded by each environment's
+own `total` and `types`, environments that share a quota rarely burst
+together, and a burst that meets the shared quota shows as a measured
+placement wait, which the planner adds to a cold come-alive. A lane with
+fallback cells counts against the ceiling of every product it names, and once
+against `total` and `sharedQuota`. The planner never lowers a lane's
+`maxContainers` or `floorMax` to fit a capacity document: a plan that does not
+fit is refused whole.
 
 ## Envelope
 
@@ -116,9 +155,16 @@ result = plan(
     demand,
     current_plan,
     PlannerParameters(placement="us-central1", max_containers=4, fallback_floor=2, cooldown_s=900),
+    capacity=capacity,
 )
 print(render(result.plan.to_dict()), render(result.report.to_dict()))
 ```
+
+`capacity` is optional. A plan whose lanes exceed a capacity ceiling, as
+[Capacity](#capacity) states, is not returned: `plan` raises `CapacityExceededError`, a `PlannerInputError`
+whose message names each exceeded ceiling and the lanes that hold it, whose
+`exceeded` lists those ceilings, and whose `result` carries the refused plan
+and its report.
 
 `plan` is a pure function of its documents. The same inputs render to the
 same bytes in whatever order the receipts, boot evidence, identities and demand
@@ -137,6 +183,7 @@ may rejoin that lane as a lazy resident on the next run.
 | `fallback_floor` | The least containers an active zero-floor lane holds, the `sie-cluster` chart's `autoscaling.fallbackReplicas` |
 | `cooldown_s` | How long an active lane keeps its containers after its last request, the chart's `autoscaling.cooldownPeriod` |
 | `buffer_containers` | The declared warm buffer above a lane's floor, `0` by default |
+| `hold_budget_s` | The longest a request for a cold lane is held for it before it is refused, `0` by default. An identity whose `comeAliveP95S` is at most this is served by holding its requests, and avoids unreliable GPU products |
 | `hours_per_month` | The hours a monthly figure covers, `730` by default |
 | `queue_pool`, `bundle`, `bundles` | Every lane's queue pool, and each identity's bundle: its `bundles` entry, otherwise `bundle` |
 
@@ -155,11 +202,21 @@ document:
    class, the cell of its current lane, is blocked by the undeclared bound, and
    an identity without a current lane has no unblocked cell.
 3. A cell offers `pinned`, and `cold-with-bound` or `snapshot-cold` where boot
-   evidence for the identity, cell and container shape exists. Below 20
-   successful boots the slowest stands for the come-alive percentile; from 20,
-   their 95th percentile by nearest rank does, so one slow boot stops deciding
-   once enough boots exist. A boot that did not succeed withdraws the warmth,
-   and the environment's own evidence replaces borrowed evidence. A
+   evidence for the identity, cell and container shape exists. A cold
+   warmth's come-alive is its placement wait plus its boot, each taken at the
+   same percentile. The boot is taken over the identity's attempts at that
+   cell, container shape and warmth that got a container. The placement wait
+   is taken over every cold attempt on the cell's GPU product, whatever the
+   identity. An attempt that got a container without recording
+   `placementWaitS` waited none, and a product none of whose cold attempts
+   records `placementWaitS` or was `unplaced` adds no wait. Below 20 attempts
+   the slowest stands for the percentile; from 20, their 95th percentile by
+   nearest rank does, so one slow attempt stops deciding once enough exist. An
+   attempt that did not succeed, a failed or timed-out boot or an unplaced
+   placement, ranks above every success, so the warmth is withdrawn when the
+   percentile falls on one.
+   The environment's own attempts replace borrowed ones, per cell, container
+   shape and warmth for the boot and per GPU product for the placement wait. A
    `comeAliveP95S` of `0` admits `pinned` only.
 4. A cell also offers `lazy-resident` on each host lane with its cell,
    container shape and concurrency. A host lane is a lane of the current plan
@@ -170,31 +227,43 @@ document:
    so no other choice moves them. The identity's own current lane is also a
    host when it is a lazy resident there already. The come-alive is the
    identity's `lazy-resident` boot evidence, its measured load onto that cell
-   and container shape, under the same statistic. The option costs what the
+   and container shape, under the same statistic, with no placement wait,
+   since the host's container is already placed. The option costs what the
    identity's demand needs above the host lane's floor, plus the floor itself
    on a lane where no such identity stays pinned, since no other identity pays
-   it.
-5. The cheapest unblocked option wins. Ties go to the current placement,
-   then to the faster come-alive.
+   it. A lane with fallback cells hosts no lazy resident.
+5. A GPU product is unreliable when more than 5% of the cold attempts on it
+   were `unplaced`, counting the environment's own attempts in place of
+   borrowed ones. For an identity whose `comeAliveP95S` is at most
+   `hold_budget_s`, every option on an unreliable product is blocked by
+   `placementFailureRate`. Such an identity may still be pinned on an
+   unreliable product through a candidate list: a lane whose fallback cell is
+   on another product no cheaper than the first, where the identity has a
+   receipt meeting its warm bounds at the same container shape and
+   concurrency on both. The list is priced at the dearer product and at the
+   slower of the two receipts.
+6. The cheapest unblocked option wins. Ties go to the current placement,
+   then to the faster come-alive, then to a lane without fallback cells.
 
 The current placement is the identity's current lane when that lane has the
-option's cell, container shape and concurrency, the identity's warmth is the
-option's, and the lane's `queuePool` and `bundle` are the ones the parameters
-give the identity; a `lazy-resident` option must also be hosted by that lane.
-A current placement that no option matches lacks evidence: a receipt at its
-lane's cell, container shape and concurrency, a boot for a cold warmth, or a
-load for a lazy resident. Unless it is known to miss a bound, through a receipt
-at the lane that misses a warm bound, a measured come-alive over the bound, a
-boot or load at the lane that did not succeed, or a cold or `lazy-resident`
-warmth under a bound of `0`, the identity keeps that placement and leaves it
-only for an unblocked option at least a cent cheaper than the placement. The
-placement is priced as an option of its warmth at the lane's fastest receipt,
-or without one at its floor alone: one container all month for `pinned`, for
-`lazy-resident` nothing beyond the lane's floor, or the floor itself where no
-identity whose `comeAliveP95S` is `0` stays pinned on the lane, and the burst
-tails for a cold warmth. What the placement lacks becomes a measurement
-request. Such a placement on a lane the price list cannot price has no cost to
-compare, so the identity keeps it.
+option's cell and fallback cells, container shape and concurrency, the
+identity's warmth is the option's, and the lane's `queuePool` and `bundle` are
+the ones the parameters give the identity; a `lazy-resident` option must also be
+hosted by that lane. A current placement that no option matches lacks evidence:
+a receipt at its lane's cell, container shape and concurrency, a boot for a cold
+warmth, or a load for a lazy resident. Unless it is known to miss a bound,
+through a receipt at the lane that misses a warm bound, a measured come-alive
+over the bound, a boot or load at the lane that did not succeed, a cold or
+`lazy-resident` warmth under a bound of `0`, or an unreliable product without a
+fallback cell on another product under a bound `hold_budget_s` fits, the
+identity keeps that placement and leaves it only for an unblocked option at
+least a cent cheaper than the placement. The placement is priced as an option of
+its warmth at the lane's fastest receipt, or without one at its floor alone: one
+container all month for `pinned`, for `lazy-resident` nothing beyond the lane's
+floor, or the floor itself where no identity whose `comeAliveP95S` is `0` stays
+pinned on the lane, and the burst tails for a cold warmth. What the placement
+lacks becomes a measurement request. Such a placement on a lane the price list
+cannot price has no cost to compare, so the identity keeps it.
 
 An identity that stays on its current placement keeps that lane exactly as it
 is, beside whoever else the lane hosts: its cell, container shape,
@@ -226,7 +295,9 @@ resident's demand needs beyond the floor: on a lane with a floor, the
 containers an hour needs above it, and on a zero-floor lane, the work and the
 tails a cold warmth pays. A placed identity's demand is priced at its chosen
 receipt, and a kept identity's at the slowest receipt it has for its lane's
-cell, container shape and concurrency, under that lane's own ceiling.
+cells, container shape and concurrency, under that lane's own ceiling. A lane
+with fallback cells costs the hourly rate of its dearest cell, and a candidate
+list's demand is priced at the slower of its two receipts.
 
 ### Envelope
 
@@ -236,7 +307,11 @@ the ceiling. A floor raised on a zero-floor lane realizes as at least
 `fallback_floor`, so a zero-floor lane's nonzero `floorMax` is at least
 `fallback_floor` capped by the ceiling. The envelope carries the floor range
 only. A lane carried from the current plan keeps its envelope, capped by the
-ceiling.
+ceiling. Given a `capacity` document, the lanes must fit each of its ceilings,
+at their container ceilings and envelope maxima as [Capacity](#capacity)
+states, or the plan is refused as described above. A
+loosened service level whose plan the ceilings would refuse saves nothing in
+the report.
 
 ### Report
 
@@ -249,26 +324,38 @@ The report renders as a `placement-report` document:
   effective service level and demand, its lane and `monthlyCost`, what its
   demand costs there with the lane's floor, the chosen cell, warmth, monthly
   cost and come-alive with its basis (`warm-floor`, `boot-evidence` or
-  `borrowed-boot-evidence`) and, for a lazy resident, its host `lane`, the peak
-  containers its demand needs, and `nextCheaper`: the nearest option cheaper
-  than the choice, or than a kept identity's current placement, that a
-  service level blocks, the bounds that block it, and `saving`, the fall in
-  the plan total found by planning again from this plan with each of those
-  bounds loosened to what the option measured, rounded up to a whole second or
-  millisecond and never below 1. A bound the identity does not declare blocks
-  with no `bound`, and loosening it declares it. The loosened bounds may admit
-  a cheaper option still, and the saving counts it. The saving is 0 when the
-  total would not fall, as for an identity whose lane keeps its floor for its
-  other residents. An identity without a placement names its
-  `unplacedReason`: `no-receipt`, `warm-bound-missed`,
-  `warm-bound-undeclared` when no cell is on its current class,
-  `current-unmeasured` when it keeps a current placement that lacks evidence
-  and no unblocked option is cheaper, or `current-unpriced` when it keeps a
-  current placement on a lane the price list cannot price. A kept identity's
-  `blockedBy` names the bounds its kept placement is known to miss: its
-  receipt's warm latencies, a measured come-alive over the bound, and with no
-  `measured` value a boot or load at its lane that did not succeed, or a cold
-  or `lazy-resident` warmth under a bound of `0`, which needs no measurement.
+  `borrowed-boot-evidence`), the `placementWaitS` part of a cold come-alive
+  where a placement wait was measured, the `fallbackCells` of a candidate list
+  and, for a lazy resident, its host `lane`, the peak containers its demand
+  needs, and `nextCheaper`: the nearest option cheaper than the choice, or than
+  a kept identity's current placement, that a service level blocks, the bounds
+  that block it, and `saving`, the fall in the plan total found by planning
+  again from this plan with each of those bounds loosened to what the option
+  measured, rounded up to a whole second or millisecond and never below 1. A
+  bound the identity does not declare blocks with no `bound`, and loosening it
+  declares it. A `placementFailureRate` blocker, whose `bound` is `0.05` and
+  `measured` the product's failure rate, is loosened by raising `comeAliveP95S`
+  to one second above `hold_budget_s`. The loosened bounds may admit a cheaper
+  option still, and the saving counts it. The saving is 0 when the total would
+  not fall, as for an identity whose lane keeps its floor for its other
+  residents. An identity without a placement names its `unplacedReason`:
+  `no-receipt`, `warm-bound-missed`, `warm-bound-undeclared` when no cell is on
+  its current class, `placement-unreliable` when its options are on unreliable
+  products only, `current-unmeasured` when it keeps a current placement that
+  lacks evidence and no unblocked option is cheaper, or `current-unpriced` when
+  it keeps a current placement on a lane the price list cannot price. A kept
+  identity's `blockedBy` names the bounds its kept placement is known to miss:
+  its receipt's warm latencies, a measured come-alive over the bound, an
+  unreliable product, and with no `measured` value a boot or load at its lane
+  that did not succeed, or a cold or `lazy-resident` warmth under a bound of
+  `0`, which needs no measurement.
+- `capacity`: for each ceiling of the `capacity` document, its `scope`
+  (`total`, `type` with its `gpuProduct`, or `shared-quota` with
+  `heldElsewhere`), the `ceiling`, the `accelerators` the plan's envelope
+  maxima hold against it, with `heldElsewhere` for `shared-quota`, for `total`
+  and `type` the `peakAccelerators` its lanes hold at `maxContainers`, the
+  `lanes` that hold them, and whether it is `exceeded`. `total` and `type` are
+  charged at `peakAccelerators`, and `shared-quota` at `accelerators`.
 - `lanes`: each lane's hourly cost, its monthly cost, its floor's monthly cost
   and the monthly cost of its `floorMax`, which a floor budget prices. A lane
   on a cell the price list cannot price carries `unpricedReason` and no cost,
@@ -279,28 +366,42 @@ The report renders as a `placement-report` document:
 - `measurementRequests`: options that lack evidence, ranked by the saving they
   could unlock. A profile without a receipt is bounded by price alone: one
   accelerator at its rate, kept warm or, where the come-alive bound allows,
-  paying burst tails only. A cell whose receipt has no successful boot asks for
-  boot evidence and is bounded by its cold cost, and a host lane without the
-  identity's load asks for `lazy-resident` boot evidence on it, bounded by
+  paying burst tails only. A profile on an unreliable product is not requested
+  for an identity whose bound `hold_budget_s` fits. A cell whose receipt has no
+  successful boot asks for boot evidence and is bounded by its cold cost, with
+  reason `failed`, or `unplaced` when no attempt got a container or the
+  product's placement wait falls on an unplaced attempt, and a host lane without
+  the identity's load asks for `lazy-resident` boot evidence on it, bounded by
   what that option would cost. Savings are measured against the choice, or
   against a kept identity's current placement. A request that cannot save is
-  dropped, and the requests of an identity without a placement or a current
-  one carry no bound and rank first. The evidence a kept current placement
-  lacks is requested at its lane, named in `lane` with its `concurrency`, and
-  also ranks first without a bound; a profile it asks for there is not asked
-  for again.
-- `comeAliveLevers`: cold and `lazy-resident` warmths whose measured
-  come-alive misses the bound on a cell that meets the warm bounds for less
-  than the choice, or than a kept identity's current placement, listed only
-  when loosening the identity's bound to `permittedBoundS`, the bound the
-  measured come-alive would permit, lowers the plan total. Both savings are
-  found by planning again from this plan and taking the fall in its total:
+  dropped, and the requests of an identity without a placement or a current one
+  carry no bound and rank first. The evidence a kept current placement lacks is
+  requested at its lane, named in `lane` with its `concurrency`, and also ranks
+  first without a bound; a profile it asks for there is not asked for again.
+- `comeAliveLevers`: cold and `lazy-resident` warmths whose measured come-alive
+  misses the bound on a cell that meets the warm bounds for less than the
+  choice, or than a kept identity's current placement, listed only when
+  loosening the identity's bound to `permittedBoundS`, the bound the measured
+  come-alive would permit, lowers the plan total. Both savings are found by
+  planning again from this plan and taking the fall in its total:
   `savingAtPermittedBound` with the bound loosened, and `savingUnderBound` with
-  the warmth's boot measured at the identity's bound, which is 0 under a bound
-  of 0, since no boot comes under it, and when the total would not fall. An
-  identity that shares its lane saves nothing of the lane's floor by leaving,
-  since the other residents keep it. Levers rank by the saving under the bound,
-  then by the saving at the permitted bound.
+  the warmth's boot measured at the identity's bound less its placement wait,
+  which is 0 under a bound of 0, since no boot comes under it, when the
+  placement wait alone exceeds the bound, and when the total would not fall. A
+  lever names the `placementWaitS` part of its come-alive where one was
+  measured. An identity that shares its lane saves nothing of the lane's floor
+  by leaving, since the other residents keep it. Levers rank by the saving under
+  the bound, then by the saving at the permitted bound.
+- `scarcity`: every option cheaper than an identity's choice, or than a kept
+  identity's current placement, that scarcity alone blocks, so scarcity is
+  part of why the identity stays warm or pays more: `placement-wait`, a cold
+  warmth whose boot fits the come-alive bound and whose boot plus placement
+  wait does not; `unplaced`, a cold warmth whose boot fits the bound and whose
+  product's placement wait falls on an unplaced attempt; and
+  `unreliable-type`, an option on an unreliable product under a bound
+  `hold_budget_s` fits. Each names the option's cell, container shape, warmth
+  and monthly cost, the bound, the boot and placement wait it measured, and
+  the product's `placementFailureRate`.
 - `queueWaitUnattained`: every identity that declares `queueWaitP99Ms`. No
   plan claims that bound as met.
 - `warmBoundUndeclared`: every identity that has a cell and declares neither

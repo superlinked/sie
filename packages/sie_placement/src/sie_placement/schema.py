@@ -17,6 +17,7 @@ RECEIPT_KIND = "placement-receipt"
 BOOT_EVIDENCE_KIND = "placement-boot-evidence"
 PRICE_LIST_KIND = "placement-price-list"
 DEMAND_KIND = "placement-demand"
+CAPACITY_KIND = "placement-capacity"
 PLAN_KIND = "placement-plan"
 
 ROOT_PATH = "$"
@@ -57,6 +58,7 @@ class BootOutcome(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     TIMED_OUT = "timed-out"
+    UNPLACED = "unplaced"
 
 
 def _join(path: str, key: str) -> str:
@@ -693,9 +695,10 @@ class BootEvidence:
     cell: Cell
     container_shape: ContainerShape
     warmth: Warmth
-    boot_seconds: float
     outcome: BootOutcome
     source: SourceRef
+    boot_seconds: float | None = None
+    placement_wait_s: float | None = None
     borrowed: bool = False
 
     def __post_init__(self) -> None:
@@ -703,6 +706,17 @@ class BootEvidence:
         if self.warmth not in BOOT_WARMTHS:
             choices = ", ".join(repr(warmth.value) for warmth in Warmth if warmth in BOOT_WARMTHS)
             raise SchemaError("warmth", f"boot evidence records one of {choices}, got {self.warmth.value!r}")
+        if self.warmth is Warmth.LAZY_RESIDENT:
+            if self.outcome is BootOutcome.UNPLACED:
+                raise SchemaError("outcome", "a lazy-resident load runs on a placed container and is never unplaced")
+            _require_absent(
+                "placementWaitS", self.placement_wait_s, "for a lazy-resident load, which runs on a placed container"
+            )
+        if self.outcome is BootOutcome.UNPLACED:
+            _require_absent("bootSeconds", self.boot_seconds, "for an unplaced attempt, which never booted")
+        elif self.boot_seconds is None:
+            raise SchemaError("bootSeconds", "is required for an attempt that was placed")
+        _require_at_least("placementWaitS", self.placement_wait_s, 0)
         _require_at_least("bootSeconds", self.boot_seconds, 0)
 
     @classmethod
@@ -715,7 +729,8 @@ class BootEvidence:
             cell=reader.child("cell", Cell.from_dict),
             container_shape=reader.child("containerShape", ContainerShape.from_dict),
             warmth=reader.enum("warmth", Warmth),
-            boot_seconds=reader.number("bootSeconds"),
+            placement_wait_s=reader.optional_number("placementWaitS"),
+            boot_seconds=reader.optional_number("bootSeconds"),
             outcome=reader.enum("outcome", BootOutcome),
             borrowed=reader.optional_boolean("borrowed") is True,
             source=reader.child("source", SourceRef.from_dict),
@@ -730,6 +745,7 @@ class BootEvidence:
                 "cell": self.cell.to_dict(),
                 "containerShape": self.container_shape.to_dict(),
                 "warmth": self.warmth.value,
+                "placementWaitS": self.placement_wait_s,
                 "bootSeconds": self.boot_seconds,
                 "outcome": self.outcome.value,
                 "borrowed": True if self.borrowed else None,
@@ -927,6 +943,81 @@ class Demand:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class TypeCeiling:
+    gpu_product: str
+    accelerators: int
+
+    def __post_init__(self) -> None:
+        _require_identifier("gpuProduct", self.gpu_product)
+        _require_count("accelerators", self.accelerators, 0)
+
+    @classmethod
+    def from_dict(cls, data: object, path: str = ROOT_PATH) -> Self:
+        reader = _Reader(data, path)
+        return reader.build(cls, gpu_product=reader.string("gpuProduct"), accelerators=reader.integer("accelerators"))
+
+    def to_dict(self) -> dict[str, object]:
+        return {"gpuProduct": self.gpu_product, "accelerators": self.accelerators}
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SharedQuota:
+    accelerators: int
+    held_elsewhere: int = 0
+
+    def __post_init__(self) -> None:
+        _require_count("accelerators", self.accelerators, 0)
+        _require_count("heldElsewhere", self.held_elsewhere, 0)
+
+    @classmethod
+    def from_dict(cls, data: object, path: str = ROOT_PATH) -> Self:
+        reader = _Reader(data, path)
+        return reader.build(
+            cls,
+            accelerators=reader.integer("accelerators"),
+            held_elsewhere=reader.optional_integer("heldElsewhere") or 0,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {"accelerators": self.accelerators, "heldElsewhere": self.held_elsewhere}
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Capacity:
+    total: int | None = None
+    types: tuple[TypeCeiling, ...] = ()
+    shared_quota: SharedQuota | None = None
+
+    def __post_init__(self) -> None:
+        _require_count("total", self.total, 0)
+        _require_unique("types", "gpuProduct", (ceiling.gpu_product for ceiling in self.types))
+        if self.total is None and not self.types and self.shared_quota is None:
+            raise SchemaError("", "must declare total, types or sharedQuota")
+
+    @classmethod
+    def from_dict(cls, data: object, path: str = ROOT_PATH) -> Self:
+        reader = _Reader(data, path)
+        reader.header(CAPACITY_KIND)
+        return reader.build(
+            cls,
+            total=reader.optional_integer("total"),
+            types=reader.children("types", TypeCeiling.from_dict, required=False),
+            shared_quota=reader.optional_child("sharedQuota", SharedQuota.from_dict),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return _compact(
+            {
+                "kind": CAPACITY_KIND,
+                "schemaVersion": SCHEMA_VERSION,
+                "total": self.total,
+                "types": [ceiling.to_dict() for ceiling in self.types] or None,
+                "sharedQuota": None if self.shared_quota is None else self.shared_quota.to_dict(),
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Envelope:
     floor_min: int
     floor_max: int
@@ -985,6 +1076,7 @@ class PlanLane:
     concurrency: int
     max_containers: int
     envelope: Envelope
+    fallback_cells: tuple[Cell, ...] = ()
 
     def __post_init__(self) -> None:
         _require_identifier("name", self.name)
@@ -992,11 +1084,21 @@ class PlanLane:
         _require_identifier("bundle", self.bundle)
         _require_count("concurrency", self.concurrency, 1)
         _require_count("maxContainers", self.max_containers, 1)
+        for index, cell in enumerate(self.fallback_cells):
+            if cell in self.cells[: index + 1]:
+                raise SchemaError(
+                    f"fallbackCells[{index}]",
+                    f"repeats {cell.machine_profile!r} with {cell.gpu_product!r}, already a cell of this lane",
+                )
         if self.envelope.floor_max > self.max_containers:
             raise SchemaError(
                 "envelope.floorMax",
                 f"must not exceed maxContainers ({self.max_containers}), got {self.envelope.floor_max}",
             )
+
+    @property
+    def cells(self) -> tuple[Cell, ...]:
+        return (self.cell, *self.fallback_cells)
 
     @classmethod
     def from_dict(cls, data: object, path: str = ROOT_PATH) -> Self:
@@ -1007,6 +1109,7 @@ class PlanLane:
             queue_pool=reader.string("queuePool"),
             bundle=reader.string("bundle"),
             cell=reader.child("cell", Cell.from_dict),
+            fallback_cells=reader.children("fallbackCells", Cell.from_dict, required=False),
             container_shape=reader.child("containerShape", ContainerShape.from_dict),
             concurrency=reader.integer("concurrency"),
             max_containers=reader.integer("maxContainers"),
@@ -1014,16 +1117,23 @@ class PlanLane:
         )
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        document: dict[str, object] = {
             "name": self.name,
             "queuePool": self.queue_pool,
             "bundle": self.bundle,
             "cell": self.cell.to_dict(),
-            "containerShape": self.container_shape.to_dict(),
-            "concurrency": self.concurrency,
-            "maxContainers": self.max_containers,
-            "envelope": self.envelope.to_dict(),
         }
+        if self.fallback_cells:
+            document["fallbackCells"] = [cell.to_dict() for cell in self.fallback_cells]
+        document.update(
+            {
+                "containerShape": self.container_shape.to_dict(),
+                "concurrency": self.concurrency,
+                "maxContainers": self.max_containers,
+                "envelope": self.envelope.to_dict(),
+            }
+        )
+        return document
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

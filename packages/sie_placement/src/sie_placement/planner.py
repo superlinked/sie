@@ -13,6 +13,8 @@ from datetime import datetime
 
 from sie_placement.report import (
     Blocker,
+    CapacityScope,
+    CapacityUse,
     ComeAliveBasis,
     IdentityChange,
     IdentityReport,
@@ -27,6 +29,8 @@ from sie_placement.report import (
     RefusedRecord,
     Report,
     RequestReason,
+    Scarcity,
+    ScarcityReason,
     SharedChartLane,
     UnplacedReason,
 )
@@ -35,6 +39,7 @@ from sie_placement.schema import (
     WARM_FLOOR_WARMTHS,
     BootEvidence,
     BootOutcome,
+    Capacity,
     Cell,
     ContainerShape,
     Demand,
@@ -58,6 +63,8 @@ HOURS_PER_MONTH = 730.0
 PINNED_FLOOR = 1
 BOOT_PERCENTILE = 95
 BOOT_PERCENTILE_MIN_ROWS = 20
+PLACEMENT_FAILURE_RATE_LIMIT = 0.05
+PLACEMENT_FAILURE_FIELD = "placementFailureRate"
 COLD_WARMTHS = (Warmth.COLD_WITH_BOUND, Warmth.SNAPSHOT_COLD)
 
 _SLUG = re.compile(r"[^a-z0-9]+")
@@ -90,6 +97,7 @@ class PlannerParameters:
     fallback_floor: int
     cooldown_s: int
     buffer_containers: int = 0
+    hold_budget_s: int = 0
     hours_per_month: float = HOURS_PER_MONTH
     queue_pool: str = "default"
     bundle: str = "default"
@@ -101,6 +109,7 @@ class PlannerParameters:
         _require_minimum("fallbackFloor", self.fallback_floor, 0)
         _require_minimum("cooldownS", self.cooldown_s, 0)
         _require_minimum("bufferContainers", self.buffer_containers, 0)
+        _require_minimum("holdBudgetS", self.hold_budget_s, 0)
         if not (math.isfinite(self.hours_per_month) and self.hours_per_month > 0):
             raise SchemaError("hoursPerMonth", f"must be greater than 0, got {self.hours_per_month!r}")
         _require_name("queuePool", self.queue_pool)
@@ -123,6 +132,7 @@ class PlannerParameters:
             "fallbackFloor": self.fallback_floor,
             "cooldownS": self.cooldown_s,
             "bufferContainers": self.buffer_containers,
+            "holdBudgetS": self.hold_budget_s,
             "hoursPerMonth": self.hours_per_month,
             "queuePool": self.queue_pool,
             "bundle": self.bundle,
@@ -136,6 +146,13 @@ class PlannerParameters:
 class PlannerResult:
     plan: Plan
     report: Report
+
+
+class CapacityExceededError(PlannerInputError):
+    def __init__(self, result: PlannerResult) -> None:
+        self.result = result
+        self.exceeded = tuple(use for use in result.report.capacity if use.exceeded)
+        super().__init__("; ".join(use.describe() for use in self.exceeded))
 
 
 def container_hourly_cost(price: MachineProfilePrice, shape: ContainerShape, region_multiplier: float) -> float:
@@ -189,14 +206,46 @@ class _Window:
         return seconds / SECONDS_PER_HOUR * self.scale
 
 
-@dataclass(frozen=True, slots=True)
-class _Boot:
-    seconds: float | None
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Placement:
+    wait_s: float | None
+    measured: bool
+    failure_rate: float
     borrowed: bool
+
+
+_UNMEASURED_PLACEMENT = _Placement(wait_s=0.0, measured=False, failure_rate=0.0, borrowed=False)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Boot:
+    boot_s: float | None
+    borrowed: bool
+    placement: _Placement = _UNMEASURED_PLACEMENT
+    booted: bool = True
+
+    @property
+    def seconds(self) -> float | None:
+        if self.boot_s is None or self.placement.wait_s is None:
+            return None
+        if not self.placement.measured:
+            return self.boot_s
+        return round(self.boot_s + self.placement.wait_s, 3)
+
+    @property
+    def placement_wait_s(self) -> float | None:
+        return self.placement.wait_s if self.placement.measured else None
 
     @property
     def basis(self) -> ComeAliveBasis:
-        return ComeAliveBasis.BORROWED_BOOT_EVIDENCE if self.borrowed else ComeAliveBasis.BOOT_EVIDENCE
+        borrowed = self.borrowed or (self.placement.measured and self.placement.borrowed)
+        return ComeAliveBasis.BORROWED_BOOT_EVIDENCE if borrowed else ComeAliveBasis.BOOT_EVIDENCE
+
+    @property
+    def reason(self) -> RequestReason:
+        if not self.booted or (self.boot_s is not None and self.placement.wait_s is None):
+            return RequestReason.UNPLACED
+        return RequestReason.FAILED
 
 
 type _BootKey = tuple[str, Cell, ContainerShape, Warmth]
@@ -213,14 +262,33 @@ class _Option:
     blockers: tuple[Blocker, ...]
     current: bool
     host: str | None = None
+    fallbacks: tuple[Receipt, ...] = ()
+    boot_s: float | None = None
+    placement_wait_s: float | None = None
 
     @property
     def feasible(self) -> bool:
         return not self.blockers
 
     @property
-    def rank(self) -> tuple[float, bool, float, str, str, str]:
-        return (self.cost, not self.current, self.come_alive_s, self.order, self.warmth.value, self.host or "")
+    def cells(self) -> tuple[Cell, ...]:
+        return (self.receipt.cell, *(receipt.cell for receipt in self.fallbacks))
+
+    @property
+    def pricing_receipt(self) -> Receipt:
+        return min((self.receipt, *self.fallbacks), key=lambda receipt: receipt.throughput.requests_per_second)
+
+    @property
+    def rank(self) -> tuple[float, bool, float, int, str, str, str]:
+        return (
+            self.cost,
+            not self.current,
+            self.come_alive_s,
+            len(self.fallbacks),
+            self.order,
+            self.warmth.value,
+            self.host or "",
+        )
 
     def summary(self, saving: float | None = None) -> Option:
         return Option(
@@ -235,6 +303,8 @@ class _Option:
             blocked_by=self.blockers,
             saving=saving,
             lane=self.host,
+            fallback_cells=self.cells[1:],
+            placement_wait_s=self.placement_wait_s,
         )
 
 
@@ -250,6 +320,7 @@ class _Choice:
     held: float | None = None
     gaps: tuple[MeasurementRequest, ...] = ()
     unpriced: bool = False
+    withdrawn: tuple[_Option, ...] = ()
 
     @property
     def baseline(self) -> float | None:
@@ -263,6 +334,8 @@ class _Choice:
             return UnplacedReason.NO_RECEIPT
         if not _declares_warm_bound(self.level):
             return UnplacedReason.WARM_BOUND_UNDECLARED
+        if any(_fields(option.blockers) == [PLACEMENT_FAILURE_FIELD] for option in self.options):
+            return UnplacedReason.PLACEMENT_UNRELIABLE
         return UnplacedReason.WARM_BOUND_MISSED
 
 
@@ -288,6 +361,14 @@ def _refusal_reason(cell: Cell, prices: Mapping[str, MachineProfilePrice]) -> st
             f"the product machine profile {cell.machine_profile!r} requests"
         )
     return None
+
+
+def _lane_refusal(lane: PlanLane, prices: Mapping[str, MachineProfilePrice]) -> str | None:
+    return next((reason for cell in lane.cells if (reason := _refusal_reason(cell, prices)) is not None), None)
+
+
+def _fields(blockers: Iterable[Blocker]) -> list[str]:
+    return [blocker.field for blocker in blockers]
 
 
 def _incomparable_reason(level: ServiceLevel, receipt: Receipt) -> str | None:
@@ -334,25 +415,64 @@ def _come_alive_blocker(level: ServiceLevel, seconds: float) -> Blocker | None:
     return Blocker(field="comeAliveP95S", bound=bound, measured=seconds)
 
 
-def _come_alive(seconds: Iterable[float]) -> float:
-    ordered = sorted(float(value) for value in seconds)
-    if len(ordered) < BOOT_PERCENTILE_MIN_ROWS:
-        return ordered[-1]
-    return ordered[(len(ordered) * BOOT_PERCENTILE + 99) // 100 - 1]
+def _percentile(samples: Sequence[float | None]) -> float | None:
+    succeeded = sorted(value for value in samples if value is not None)
+    if len(samples) < BOOT_PERCENTILE_MIN_ROWS:
+        return succeeded[-1] if len(succeeded) == len(samples) else None
+    rank = (len(samples) * BOOT_PERCENTILE + 99) // 100
+    return succeeded[rank - 1] if rank <= len(succeeded) else None
 
 
-def _boot_index(records: Iterable[BootEvidence]) -> dict[_BootKey, _Boot]:
+def _boot_sample(record: BootEvidence) -> float | None:
+    if record.outcome is not BootOutcome.SUCCEEDED or record.boot_seconds is None:
+        return None
+    return float(record.boot_seconds)
+
+
+def _placement_index(records: Iterable[BootEvidence]) -> dict[str, _Placement]:
+    grouped: defaultdict[str, list[BootEvidence]] = defaultdict(list)
+    for record in records:
+        if record.warmth in COLD_WARMTHS:
+            grouped[record.cell.gpu_product].append(record)
+    index: dict[str, _Placement] = {}
+    for product, group in grouped.items():
+        own = [record for record in group if not record.borrowed]
+        used = own or group
+        samples = [
+            None if record.outcome is BootOutcome.UNPLACED else float(record.placement_wait_s or 0.0) for record in used
+        ]
+        measured = any(record.outcome is BootOutcome.UNPLACED or record.placement_wait_s is not None for record in used)
+        unplaced = sum(record.outcome is BootOutcome.UNPLACED for record in used)
+        index[product] = _Placement(
+            wait_s=_percentile(samples) if measured else 0.0,
+            measured=measured,
+            failure_rate=unplaced / len(used),
+            borrowed=not own,
+        )
+    return index
+
+
+def _boot_index(records: Iterable[BootEvidence], placements: Mapping[str, _Placement]) -> dict[_BootKey, _Boot]:
     grouped: defaultdict[_BootKey, list[BootEvidence]] = defaultdict(list)
     for record in records:
         grouped[(record.identity, record.cell, record.container_shape, record.warmth)].append(record)
     index: dict[_BootKey, _Boot] = {}
     for key, group in grouped.items():
-        own = [record for record in group if not record.borrowed]
-        used = own or group
-        if any(record.outcome is not BootOutcome.SUCCEEDED for record in used):
-            index[key] = _Boot(seconds=None, borrowed=not own)
-        else:
-            index[key] = _Boot(seconds=_come_alive(record.boot_seconds for record in used), borrowed=not own)
+        _, cell, _, warmth = key
+        placement = placements.get(cell.gpu_product, _UNMEASURED_PLACEMENT)
+        if warmth not in COLD_WARMTHS:
+            placement = _UNMEASURED_PLACEMENT
+        booted = [record for record in group if record.outcome is not BootOutcome.UNPLACED]
+        own = [record for record in booted if not record.borrowed]
+        used = own or booted
+        if not used:
+            index[key] = _Boot(
+                boot_s=None, borrowed=all(record.borrowed for record in group), placement=placement, booted=False
+            )
+            continue
+        index[key] = _Boot(
+            boot_s=_percentile([_boot_sample(record) for record in used]), borrowed=not own, placement=placement
+        )
     return index
 
 
@@ -368,7 +488,7 @@ def _hourly_requests(demand: Demand) -> dict[str, tuple[int, ...]]:
 
 def _runs_on(receipt: Receipt, lane: PlanLane) -> bool:
     return (
-        lane.cell == receipt.cell
+        receipt.cell in lane.cells
         and lane.container_shape == receipt.container_shape
         and lane.concurrency == receipt.concurrency
     )
@@ -384,6 +504,7 @@ class _Planner:
         demand: Demand,
         current_plan: Plan | None,
         parameters: PlannerParameters,
+        capacity: Capacity | None = None,
     ) -> None:
         receipts = tuple(receipts)
         boot_evidence = tuple(boot_evidence)
@@ -396,6 +517,7 @@ class _Planner:
                 f"the current plan is for placement {current_plan.placement!r}, not {parameters.placement!r}"
             )
         self.parameters = parameters
+        self.capacity = capacity
         self.service_levels = service_levels
         self.receipt_records = receipts
         self.boot_records = boot_evidence
@@ -425,7 +547,10 @@ class _Planner:
         self.refused_profiles: set[tuple[str, str]] = set()
         self.savings: dict[tuple[str, tuple[tuple[str, int], ...]], float] = {}
         self.receipts = self._accept_receipts(receipts)
-        self.boots = _boot_index(self._accept_boot_evidence(boot_evidence))
+        self.placements = _placement_index(
+            record for record in boot_evidence if _refusal_reason(record.cell, self.prices) is None
+        )
+        self.boots = _boot_index(self._accept_boot_evidence(boot_evidence), self.placements)
 
     def _accept_receipts(self, receipts: Iterable[Receipt]) -> dict[str, list[tuple[str, Receipt]]]:
         accepted: defaultdict[str, list[tuple[str, Receipt]]] = defaultdict(list)
@@ -456,7 +581,7 @@ class _Planner:
     def _refuse(self, record: RefusedRecord, identity: str, cell: Cell, source: SourceRef, reason: str) -> None:
         self.refusals.append(Refusal(record=record, identity=identity, cell=cell, source=source, reason=reason))
 
-    def is_current(self, identity: str, receipt: Receipt, warmth: Warmth) -> bool:
+    def is_current(self, identity: str, receipt: Receipt, warmth: Warmth, fallbacks: tuple[Cell, ...] = ()) -> bool:
         current = self.current.get(identity)
         if current is None:
             return False
@@ -465,8 +590,44 @@ class _Planner:
             entry.warmth is warmth
             and lane.queue_pool == self.parameters.queue_pool
             and lane.bundle == self.parameters.bundle_of(identity)
+            and lane.cells == (receipt.cell, *fallbacks)
             and _runs_on(receipt, lane)
         )
+
+    def hourly(self, receipt: Receipt) -> float:
+        return container_hourly_cost(
+            self.prices[receipt.cell.machine_profile], receipt.container_shape, self.multiplier
+        )
+
+    def lane_hourly(self, lane: PlanLane) -> float:
+        return max(
+            container_hourly_cost(self.prices[cell.machine_profile], lane.container_shape, self.multiplier)
+            for cell in lane.cells
+        )
+
+    def tight(self, level: ServiceLevel) -> bool:
+        bound = level.come_alive_p95_s
+        return bound is not None and bound <= self.parameters.hold_budget_s
+
+    def unreliable(self, gpu_product: str) -> bool:
+        placement = self.placements.get(gpu_product)
+        return placement is not None and placement.failure_rate > PLACEMENT_FAILURE_RATE_LIMIT
+
+    def reliability_blockers(self, level: ServiceLevel, cells: Sequence[Cell]) -> tuple[Blocker, ...]:
+        first = cells[0].gpu_product
+        if not self.tight(level) or not self.unreliable(first):
+            return ()
+        if any(cell.gpu_product != first for cell in cells[1:]):
+            return ()
+        rate = self.placements[first].failure_rate
+        return (Blocker(field=PLACEMENT_FAILURE_FIELD, bound=PLACEMENT_FAILURE_RATE_LIMIT, measured=rate),)
+
+    @staticmethod
+    def warm_blockers(level: ServiceLevel, receipt: Receipt, current_class: Cell | None) -> tuple[Blocker, ...]:
+        warm = _warm_blockers(level, receipt)
+        if receipt.cell != current_class:
+            warm = (*warm, *_undeclared_blockers(level, receipt))
+        return warm
 
     def current_class(self, identity: str) -> Cell | None:
         current = self.current.get(identity)
@@ -504,6 +665,7 @@ class _Planner:
             for name, lane in sorted(self.current_lanes.items())
             if (lazy if name == home else self.floor_paid(name, identity))
             and lane.envelope.floor_min >= PINNED_FLOOR
+            and not lane.fallback_cells
             and lane.queue_pool == self.parameters.queue_pool
             and lane.bundle == bundle
         )
@@ -519,9 +681,9 @@ class _Planner:
         return floor + window.above_floor_hours(requests, rate, capped.envelope.floor_min)
 
     def current_cost(self, identity: str, entry: PlanIdentity, lane: PlanLane) -> float | None:
-        if _refusal_reason(lane.cell, self.prices) is not None:
+        if _lane_refusal(lane, self.prices) is not None:
             return None
-        hourly = container_hourly_cost(self.prices[lane.cell.machine_profile], lane.container_shape, self.multiplier)
+        hourly = self.lane_hourly(lane)
         requests = self.requests.get(identity, ())
         rate = max(
             (
@@ -574,19 +736,19 @@ class _Planner:
         level = self.levels[identity]
         requests = self.requests.get(identity, ())
         options: list[_Option] = []
+        withdrawn: list[_Option] = []
         boot_requests: dict[tuple[Cell, ContainerShape], MeasurementRequest] = {}
         load_requests: dict[str, MeasurementRequest] = {}
         receipts = self.receipts.get(identity, [])
         current_class = self.current_class(identity)
         hosts = self.lazy_hosts(identity)
         for order, receipt in receipts:
-            hourly = container_hourly_cost(
-                self.prices[receipt.cell.machine_profile], receipt.container_shape, self.multiplier
-            )
+            hourly = self.hourly(receipt)
             rate = receipt.throughput.requests_per_second
-            warm = _warm_blockers(level, receipt)
-            if receipt.cell != current_class:
-                warm = (*warm, *_undeclared_blockers(level, receipt))
+            blocked = (
+                *self.warm_blockers(level, receipt, current_class),
+                *self.reliability_blockers(level, (receipt.cell,)),
+            )
             options.append(
                 _Option(
                     receipt=receipt,
@@ -595,7 +757,7 @@ class _Planner:
                     cost=hourly * self.window.warm_container_hours(requests, rate),
                     come_alive_s=0.0,
                     basis=ComeAliveBasis.WARM_FLOOR,
-                    blockers=warm,
+                    blockers=blocked,
                     current=self.is_current(identity, receipt, Warmth.PINNED),
                 )
             )
@@ -603,7 +765,7 @@ class _Planner:
             for warmth in COLD_WARMTHS:
                 boot = self.boots.get((identity, receipt.cell, receipt.container_shape, warmth))
                 if boot is None or boot.seconds is None:
-                    if warmth is Warmth.COLD_WITH_BOUND and not warm and level.come_alive_p95_s != 0:
+                    if warmth is Warmth.COLD_WITH_BOUND and not blocked and level.come_alive_p95_s != 0:
                         key = (receipt.cell, receipt.container_shape)
                         known = boot_requests.get(key)
                         if known is None or cold_cost < known.cost_bound:
@@ -613,10 +775,24 @@ class _Planner:
                                 container_shape=receipt.container_shape,
                                 measure=(Measurement.BOOT_EVIDENCE,),
                                 warmth=warmth,
-                                reason=RequestReason.UNMEASURED if boot is None else RequestReason.FAILED,
+                                reason=RequestReason.UNMEASURED if boot is None else boot.reason,
                                 cost_bound=cold_cost,
                                 saving_bound=None,
                             )
+                    if boot is not None and boot.boot_s is not None and not blocked:
+                        withdrawn.append(
+                            _Option(
+                                receipt=receipt,
+                                order=order,
+                                warmth=warmth,
+                                cost=cold_cost,
+                                come_alive_s=math.inf,
+                                basis=boot.basis,
+                                blockers=(Blocker(field="comeAliveP95S", bound=level.come_alive_p95_s, measured=None),),
+                                current=False,
+                                boot_s=boot.boot_s,
+                            )
+                        )
                     continue
                 blocker = _come_alive_blocker(level, boot.seconds)
                 options.append(
@@ -627,8 +803,10 @@ class _Planner:
                         cost=cold_cost,
                         come_alive_s=boot.seconds,
                         basis=boot.basis,
-                        blockers=warm if blocker is None else (*warm, blocker),
+                        blockers=blocked if blocker is None else (*blocked, blocker),
                         current=self.is_current(identity, receipt, warmth),
+                        boot_s=boot.boot_s,
+                        placement_wait_s=boot.placement_wait_s,
                     )
                 )
             for host in hosts:
@@ -638,7 +816,7 @@ class _Planner:
                 load = self.boots.get((identity, host.cell, host.container_shape, Warmth.LAZY_RESIDENT))
                 if load is None or load.seconds is None:
                     known = load_requests.get(host.name)
-                    if not warm and level.come_alive_p95_s != 0 and (known is None or lazy_cost < known.cost_bound):
+                    if not blocked and level.come_alive_p95_s != 0 and (known is None or lazy_cost < known.cost_bound):
                         load_requests[host.name] = MeasurementRequest(
                             identity=identity,
                             cell=host.cell,
@@ -661,12 +839,15 @@ class _Planner:
                         cost=lazy_cost,
                         come_alive_s=load.seconds,
                         basis=load.basis,
-                        blockers=warm if blocker is None else (*warm, blocker),
+                        blockers=blocked if blocker is None else (*blocked, blocker),
                         current=self.is_current(identity, receipt, Warmth.LAZY_RESIDENT)
                         and self.current[identity][1].name == host.name,
                         host=host.name,
+                        boot_s=load.boot_s,
                     )
                 )
+        if self.tight(level):
+            options.extend(self.candidate_lists(identity, level, receipts, requests, current_class))
         feasible = [option for option in options if option.feasible]
         chosen = min(feasible, key=lambda option: option.rank) if feasible else None
         held = None
@@ -703,7 +884,46 @@ class _Planner:
             held=held,
             gaps=gaps,
             unpriced=unpriced,
+            withdrawn=tuple(withdrawn),
         )
+
+    def candidate_lists(
+        self,
+        identity: str,
+        level: ServiceLevel,
+        receipts: Sequence[tuple[str, Receipt]],
+        requests: Sequence[int],
+        current_class: Cell | None,
+    ) -> list[_Option]:
+        lists = []
+        for order, receipt in receipts:
+            if not self.unreliable(receipt.cell.gpu_product) or self.warm_blockers(level, receipt, current_class):
+                continue
+            for second_order, second in receipts:
+                if (
+                    second.cell.gpu_product == receipt.cell.gpu_product
+                    or self.hourly(second) < self.hourly(receipt)
+                    or second.container_shape != receipt.container_shape
+                    or second.concurrency != receipt.concurrency
+                    or self.warm_blockers(level, second, current_class)
+                ):
+                    continue
+                hourly = max(self.hourly(receipt), self.hourly(second))
+                rate = min(receipt.throughput.requests_per_second, second.throughput.requests_per_second)
+                lists.append(
+                    _Option(
+                        receipt=receipt,
+                        fallbacks=(second,),
+                        order=f"{order}\n{second_order}",
+                        warmth=Warmth.PINNED,
+                        cost=hourly * self.window.warm_container_hours(requests, rate),
+                        come_alive_s=0.0,
+                        basis=ComeAliveBasis.WARM_FLOOR,
+                        blockers=(),
+                        current=self.is_current(identity, receipt, Warmth.PINNED, (second.cell,)),
+                    )
+                )
+        return lists
 
     def receipt_requests(self, choice: _Choice, baseline: float | None) -> list[MeasurementRequest]:
         measured = {receipt.cell.machine_profile for _, receipt in self.receipts.get(choice.identity, [])}
@@ -711,9 +931,10 @@ class _Planner:
             request.cell.machine_profile for request in choice.gaps if Measurement.RECEIPT in request.measure
         )
         bound = choice.level.come_alive_p95_s
+        tight = self.tight(choice.level)
         requests = []
         for profile in sorted(self.price_list.machine_profiles, key=lambda price: price.name):
-            if profile.name in measured:
+            if profile.name in measured or (tight and self.unreliable(profile.gpu_product)):
                 continue
             accelerator = profile.accelerator_per_hour * self.multiplier
             candidates = [(accelerator * self.window.warm_container_hours((), 1.0), Warmth.PINNED)]
@@ -770,8 +991,12 @@ class _Planner:
             self.demand,
             current,
             self.parameters,
+            self.capacity,
         )
-        return planner.run(price_savings=False).report.monthly_cost
+        report = planner.run(price_savings=False).report
+        if any(use.exceeded for use in report.capacity):
+            return math.inf
+        return report.monthly_cost
 
     def loosened(self, identity: str, bounds: Mapping[str, int]) -> ServiceLevels:
         fields = {_LEVEL_FIELDS[name]: bound for name, bound in bounds.items()}
@@ -790,11 +1015,25 @@ class _Planner:
             self.savings[key] = _saving(total, replanned)
         return self.savings[key]
 
+    def loosening(self, blockers: Iterable[Blocker]) -> dict[str, int]:
+        bounds: dict[str, int] = {}
+        for blocker in blockers:
+            if blocker.field == PLACEMENT_FAILURE_FIELD:
+                name, bound = "comeAliveP95S", self.parameters.hold_budget_s + 1
+            elif blocker.measured is not None:
+                name, bound = blocker.field, _permitted(blocker.measured)
+            else:
+                continue
+            bounds[name] = max(bound, bounds.get(name, 0))
+        return bounds
+
     def booted_within(self, identity: str, option: _Option, bound: int) -> tuple[BootEvidence, ...]:
         key = (identity, option.receipt.cell, option.receipt.container_shape, option.warmth)
+        budget = max(0.0, bound - (option.placement_wait_s or 0.0))
         return tuple(
-            replace(record, boot_seconds=min(record.boot_seconds, bound))
+            replace(record, boot_seconds=min(record.boot_seconds, budget))
             if (record.identity, record.cell, record.container_shape, record.warmth) == key
+            and record.boot_seconds is not None
             else record
             for record in self.boot_records
         )
@@ -839,6 +1078,7 @@ class _Planner:
                     saving_under_bound=under,
                     permitted_bound_s=permitted,
                     saving_at_permitted_bound=saving,
+                    placement_wait_s=option.placement_wait_s,
                 )
             )
         return levers
@@ -851,15 +1091,101 @@ class _Planner:
             return None
         cost = max(option.cost for option in cheaper)
         nearest = min((option for option in cheaper if option.cost == cost), key=lambda option: option.rank)
-        bounds = {
-            blocker.field: _permitted(blocker.measured) for blocker in nearest.blockers if blocker.measured is not None
-        }
+        bounds = self.loosening(nearest.blockers)
         return nearest.summary(saving=self.saving_when_loosened(choice.identity, bounds, written, total))
+
+    def scarcity(self, choice: _Choice) -> list[Scarcity]:
+        baseline = choice.baseline
+        if baseline is None:
+            return []
+        bound = choice.level.come_alive_p95_s
+        candidates = [(option, _scarcity_reason(option, bound)) for option in choice.options]
+        candidates.extend(
+            (option, ScarcityReason.UNPLACED)
+            for option in choice.withdrawn
+            if bound is None or (bound > 0 and (option.boot_s or 0.0) <= bound)
+        )
+        best: dict[tuple[Cell, ContainerShape, Warmth, str], tuple[_Option, ScarcityReason]] = {}
+        for option, reason in candidates:
+            if reason is None or round(baseline - option.cost, 2) <= 0:
+                continue
+            key = (option.receipt.cell, option.receipt.container_shape, option.warmth, option.host or "")
+            known = best.get(key)
+            if known is None or option.rank < known[0].rank:
+                best[key] = (option, reason)
+        return [
+            Scarcity(
+                identity=choice.identity,
+                reason=reason,
+                cell=option.receipt.cell,
+                container_shape=option.receipt.container_shape,
+                warmth=option.warmth,
+                monthly_cost=option.cost,
+                placement_failure_rate=self.placements.get(
+                    option.receipt.cell.gpu_product, _UNMEASURED_PLACEMENT
+                ).failure_rate,
+                come_alive_bound_s=bound,
+                boot_s=option.boot_s,
+                placement_wait_s=option.placement_wait_s,
+                lane=option.host,
+            )
+            for option, reason in best.values()
+        ]
+
+    def capacity_use(self, plan: Plan) -> tuple[CapacityUse, ...]:
+        capacity = self.capacity
+        if capacity is None:
+            return ()
+
+        def held(lanes: Iterable[PlanLane]) -> tuple[int, int, tuple[str, ...]]:
+            lanes = tuple(lanes)
+            envelope = sum(lane.envelope.floor_max * lane.container_shape.gpu_count for lane in lanes)
+            peak = sum(lane.max_containers * lane.container_shape.gpu_count for lane in lanes)
+            return envelope, peak, tuple(lane.name for lane in lanes)
+
+        total, peak, names = held(plan.lanes)
+        uses = []
+        if capacity.total is not None:
+            uses.append(
+                CapacityUse(
+                    scope=CapacityScope.TOTAL,
+                    ceiling=capacity.total,
+                    accelerators=total,
+                    peak_accelerators=peak,
+                    lanes=names,
+                )
+            )
+        for ceiling in sorted(capacity.types, key=lambda entry: entry.gpu_product):
+            accelerators, peak_accelerators, lanes = held(
+                lane for lane in plan.lanes if any(cell.gpu_product == ceiling.gpu_product for cell in lane.cells)
+            )
+            uses.append(
+                CapacityUse(
+                    scope=CapacityScope.TYPE,
+                    gpu_product=ceiling.gpu_product,
+                    ceiling=ceiling.accelerators,
+                    accelerators=accelerators,
+                    peak_accelerators=peak_accelerators,
+                    lanes=lanes,
+                )
+            )
+        if capacity.shared_quota is not None:
+            quota = capacity.shared_quota
+            uses.append(
+                CapacityUse(
+                    scope=CapacityScope.SHARED_QUOTA,
+                    ceiling=quota.accelerators,
+                    accelerators=total + quota.held_elsewhere,
+                    held_elsewhere=quota.held_elsewhere,
+                    lanes=tuple(lane.name for lane in plan.lanes if lane.envelope.floor_max),
+                )
+            )
+        return tuple(uses)
 
     @staticmethod
     def lane_names(placed: Mapping[str, _Option], reserved: set[str]) -> dict[str, str]:
         bases = {
-            identity: _slug(f"{identity}-{option.receipt.cell.machine_profile}") or "lane"
+            identity: _slug("-".join((identity, *(cell.machine_profile for cell in option.cells)))) or "lane"
             for identity, option in placed.items()
         }
         counts = Counter(bases.values())
@@ -882,6 +1208,7 @@ class _Planner:
             queue_pool=self.parameters.queue_pool,
             bundle=self.parameters.bundle_of(identity),
             cell=receipt.cell,
+            fallback_cells=option.cells[1:],
             container_shape=receipt.container_shape,
             concurrency=receipt.concurrency,
             max_containers=self.parameters.max_containers,
@@ -917,6 +1244,7 @@ class _Planner:
                 blockers.extend(() if blocker is None else (blocker,))
             elif boot is not None or level.come_alive_p95_s == 0:
                 blockers.append(Blocker(field="comeAliveP95S", bound=level.come_alive_p95_s, measured=None))
+        blockers.extend(self.reliability_blockers(level, lane.cells))
         return tuple(blockers)
 
     def demand_hours(self, lane: PlanLane, identity: str, receipt: Receipt | None) -> float | None:
@@ -973,15 +1301,17 @@ class _Planner:
             lanes=tuple(lanes[name] for name in sorted(lanes)),
             identities=tuple(sorted(identities, key=lambda entry: entry.identity)),
         )
-        receipts: dict[str, Receipt | None] = {identity: option.receipt for identity, option in placed.items()}
+        receipts: dict[str, Receipt | None] = {identity: option.pricing_receipt for identity, option in placed.items()}
         receipts.update({identity: self.slowest_receipt(identity, lane) for identity, (_, lane) in kept.items()})
         lane_reports, costs = self._pricing(new_plan, receipts)
         total = sum(lane.monthly_cost for lane in lane_reports if lane.monthly_cost is not None)
         reports: list[IdentityReport] = []
         requests: list[MeasurementRequest] = []
         levers: list[Lever] = []
+        scarcity: list[Scarcity] = []
         for choice in choices:
             baseline = choice.baseline
+            scarcity.extend(self.scarcity(choice))
             requests.extend(choice.gaps)
             requests.extend(self.receipt_requests(choice, baseline))
             requests.extend(self.boot_requests(choice, baseline))
@@ -1015,6 +1345,8 @@ class _Planner:
                 for identity in sorted(self.levels)
                 if not _declares_warm_bound(self.levels[identity]) and self.receipts.get(identity)
             ),
+            capacity=self.capacity_use(new_plan),
+            scarcity=tuple(sorted(scarcity, key=_scarcity_rank)),
         )
         return PlannerResult(plan=new_plan, report=report)
 
@@ -1050,7 +1382,7 @@ class _Planner:
                     next_cheaper=next_cheaper,
                 )
             return replace(report, unplaced_reason=reason)
-        rate = chosen.receipt.throughput.requests_per_second
+        rate = chosen.pricing_receipt.throughput.requests_per_second
         return replace(
             report,
             status=IdentityStatus.PLACED,
@@ -1072,13 +1404,11 @@ class _Planner:
         costs: dict[str, float] = {}
         for lane in plan.lanes:
             hosted = tuple(sorted(residents[lane.name]))
-            reason = _refusal_reason(lane.cell, self.prices)
+            reason = _lane_refusal(lane, self.prices)
             if reason is not None:
                 reports.append(LaneReport(name=lane.name, identities=hosted, unpriced_reason=reason))
                 continue
-            hourly = container_hourly_cost(
-                self.prices[lane.cell.machine_profile], lane.container_shape, self.multiplier
-            )
+            hourly = self.lane_hourly(lane)
             floor = lane.envelope.floor_min * hours
             demand = {identity: self.demand_hours(lane, identity, receipts.get(identity)) for identity in hosted}
             priced = {identity: value for identity, value in demand.items() if value is not None}
@@ -1095,6 +1425,17 @@ class _Planner:
                 )
             )
         return tuple(reports), costs
+
+
+def _scarcity_reason(option: _Option, bound: int | None) -> ScarcityReason | None:
+    fields = _fields(option.blockers)
+    if fields == [PLACEMENT_FAILURE_FIELD]:
+        return ScarcityReason.UNRELIABLE_TYPE
+    if option.warmth not in COLD_WARMTHS or fields != ["comeAliveP95S"] or not option.placement_wait_s:
+        return None
+    if not bound or option.boot_s is None or option.boot_s > bound:
+        return None
+    return ScarcityReason.PLACEMENT_WAIT
 
 
 def _saving(total: float, replanned: float) -> float:
@@ -1165,6 +1506,18 @@ def _lever_rank(lever: Lever) -> tuple[object, ...]:
     )
 
 
+def _scarcity_rank(entry: Scarcity) -> tuple[object, ...]:
+    return (
+        entry.identity,
+        entry.reason.value,
+        entry.cell.machine_profile,
+        entry.cell.gpu_product,
+        _shape_key(entry.container_shape),
+        entry.warmth.value,
+        entry.lane or "",
+    )
+
+
 def _refusal_rank(refusal: Refusal) -> tuple[str, ...]:
     return (
         refusal.record.value,
@@ -1185,5 +1538,12 @@ def plan(
     demand: Demand,
     current_plan: Plan | None,
     parameters: PlannerParameters,
+    *,
+    capacity: Capacity | None = None,
 ) -> PlannerResult:
-    return _Planner(service_levels, receipts, boot_evidence, price_list, demand, current_plan, parameters).run()
+    result = _Planner(
+        service_levels, receipts, boot_evidence, price_list, demand, current_plan, parameters, capacity
+    ).run()
+    if any(use.exceeded for use in result.report.capacity):
+        raise CapacityExceededError(result)
+    return result
