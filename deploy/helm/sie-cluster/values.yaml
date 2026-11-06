@@ -2114,9 +2114,9 @@ kube-prometheus-stack:
                 storage: "100Gi"
   # -- Grafana sub-chart values. A Grafana admin.existingSecret that holds "{{"
   # may hold only lowercase letters, digits, '-', '.', whitespace and actions
-  # that name a field path of .Release, .Values (Grafana's values) or .Chart,
-  # such as "{{ .Release.Name }}-grafana-admin", so the chart can check the
-  # Secret Grafana reads; see "Gateway token" in the chart README.
+  # that hold one chain of names on .Release, .Values (Grafana's values) or
+  # .Chart, such as "{{ .Release.Name }}-grafana-admin", so the chart can
+  # check the Secret Grafana reads; see "Gateway token" in the chart README.
   grafana:
     sidecar:
       alerts:

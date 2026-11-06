@@ -1836,12 +1836,15 @@ workloads, not every dependency. These rules follow the versions in `Chart.lock`
 Grafana evaluates `kube-prometheus-stack.grafana.admin.existingSecret` as a
 template in its own chart, and the chart evaluates it the same way to find the
 admin Secret Grafana reads. A value that holds `{{` may therefore hold only
-lowercase letters, digits, `-`, `.`, whitespace and actions that name a field
-path of `.Release`, `.Values` or `.Chart`, such as
+lowercase letters, digits, `-`, `.`, whitespace and actions that hold one chain
+of names on `.Release`, `.Values` or `.Chart`, such as
 `{{ .Release.Name }}-grafana-admin`. An action may use `{{-` and `-}}` trim
-markers, a leading `$` and whitespace around the field path, and `.Values` is
-the Grafana chart's values. The render fails for any other action, including
-`include`, `template`, function calls, pipelines and comments.
+markers, a leading `$` and whitespace around the chain, and `.Values` is the
+Grafana chart's values. The render fails for any other action, including
+`include`, `template`, function calls, pipelines and comments. Go templates
+resolve a name in the chain as a field, a map key or a method without
+arguments, such as `{{ .Values.YAML }}`. When the evaluated value is not a
+Secret name, the render fails and its error shows the template, not the value.
 
 This is not an inventory of arbitrary dependency configuration. Operators must
 keep SIE credentials separate from Grafana `envValueFrom` / `envFromSecret`,

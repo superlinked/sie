@@ -36,13 +36,17 @@ CONFIG_CONSUMERS = (GATEWAY, "sie-sie-cluster-worker-l4-default/worker-sidecar")
 L4_POOL = {"workers": {"pools": {"l4": {"enabled": True}}}}
 
 
+def values_json(values: object) -> str:
+    return json.dumps(values, ensure_ascii=False)
+
+
 def render_workers(tmp_path: Path, values: dict) -> subprocess.CompletedProcess[str]:
     return render_template(tmp_path, values, WORKER_TEMPLATE)
 
 
 def render_template(tmp_path: Path, values: dict, template: str) -> subprocess.CompletedProcess[str]:
     values_file = tmp_path / "values.yaml"
-    values_file.write_text(yaml.safe_dump(values), encoding="utf-8")
+    values_file.write_text(values_json(values), encoding="utf-8")
     return subprocess.run(
         [
             "mise",
@@ -89,7 +93,7 @@ def render_collector_config(tmp_path: Path, *, remote_enabled: bool = True) -> t
         "localTraceExporters": [],
         "logExporters": [],
     }
-    (chart / "values.yaml").write_text(yaml.safe_dump(values))
+    (chart / "values.yaml").write_text(values_json(values), encoding="utf-8")
     rendered = subprocess.run(  # noqa: S603 - fixed local Helm test chart
         ["mise", "exec", "--", "helm", "template", "test", str(chart)],  # noqa: S607 - mise-managed Helm
         cwd=ROOT,
@@ -334,7 +338,7 @@ def test_dashboards_cover_public_prometheus_metrics(tmp_path: Path) -> None:
 
 def render_chart(tmp_path: Path, values: dict, overlays: tuple[str, ...] = ()) -> subprocess.CompletedProcess[str]:
     values_file = tmp_path / "chart-values.yaml"
-    values_file.write_text(json.dumps(values), encoding="utf-8")
+    values_file.write_text(values_json(values), encoding="utf-8")
     overlay_args = [arg for overlay in overlays for arg in ("-f", str(helm.CHART_DIR / overlay))]
     return subprocess.run(
         [
@@ -1095,7 +1099,7 @@ def render_with_ingress_classes(tmp_path: Path, values: dict, classes: list[dict
         source.replace(INGRESS_CLASS_LOOKUP, "(default (dict) .Values.ingressClassFixture)"), encoding="utf-8"
     )
     values_file = tmp_path / "overrides.yaml"
-    values_file.write_text(yaml.safe_dump({**values, "ingressClassFixture": {"items": classes}}), encoding="utf-8")
+    values_file.write_text(values_json({**values, "ingressClassFixture": {"items": classes}}), encoding="utf-8")
     return subprocess.run(
         [
             "mise",
@@ -1200,7 +1204,7 @@ NATS_CLIENTS = {
 
 def render_nats_chart(tmp_path: Path, values: dict, *extra: str) -> subprocess.CompletedProcess[str]:
     values_file = tmp_path / "nats-values.yaml"
-    values_file.write_text(yaml.safe_dump(values), encoding="utf-8")
+    values_file.write_text(values_json(values), encoding="utf-8")
     return subprocess.run(
         [
             "mise",
@@ -2545,7 +2549,7 @@ def test_an_empty_allowed_list_renders_no_public_rule(tmp_path: Path) -> None:
 
 def test_an_extra_egress_port_range_set_on_the_command_line_renders(tmp_path: Path) -> None:
     values_file = tmp_path / "values.yaml"
-    values_file.write_text(yaml.safe_dump(remote_pool_values()), encoding="utf-8")
+    values_file.write_text(values_json(remote_pool_values()), encoding="utf-8")
     rule = "workers.remote.networkPolicy.extraEgress[0]"
 
     result = subprocess.run(
@@ -3543,7 +3547,7 @@ def rendered_notes(tmp_path: Path, values: dict) -> str:
         encoding="utf-8",
     )
     values_file = tmp_path / "notes-values.yaml"
-    values_file.write_text(yaml.safe_dump(values), encoding="utf-8")
+    values_file.write_text(values_json(values), encoding="utf-8")
     result = subprocess.run(
         [
             "mise",
@@ -4117,7 +4121,7 @@ def render_placement(tmp_path: Path, *layers: dict) -> subprocess.CompletedProce
     files = []
     for index, layer in enumerate(layers):
         path = tmp_path / f"placement-{index}.yaml"
-        path.write_text(yaml.safe_dump(layer), encoding="utf-8")
+        path.write_text(values_json(layer), encoding="utf-8")
         files += ["-f", str(path)]
     return subprocess.run(
         ["mise", "exec", "--", "helm", "template", "sie", str(helm.CHART_DIR), "--namespace", "sie"]
@@ -4833,6 +4837,55 @@ def test_the_notes_name_the_grafana_admin_secret_that_grafana_reads(tmp_path: Pa
     assert grafana_admin_password_secret(rendered_documents(tmp_path, values)) == secret
     notes = rendered_notes(tmp_path, values)
     assert f"Grafana password: kubectl get secret -n sie {secret} -o jsonpath=" in notes
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"GF_SECURITY_ADMIN_USER": "admin", "GF_SECURITY_ADMIN_PASSWORD": "fixture-password"},
+        {"GF_SECURITY_ADMIN_USER": "admin", "GF_SECURITY_ADMIN_PASSWORD__FILE": "/etc/grafana/password"},
+        {"GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION": "true"},
+    ],
+    ids=["password", "password-file", "no-initial-admin"],
+)
+def test_the_notes_name_no_grafana_admin_secret_when_grafana_reads_none(tmp_path: Path, env: dict) -> None:
+    grafana = {
+        "namespaceOverride": "monitoring",
+        "env": env,
+        "admin": {"existingSecret": "{{ .Values.gateway.auth.mode }}-admin"},
+    }
+    notes = rendered_notes(tmp_path, {"kube-prometheus-stack": {"install": True, "grafana": grafana}})
+    assert "Grafana:    enabled" in notes
+    assert "Grafana password" not in notes
+
+
+@pytest.mark.parametrize(
+    ("existing", "grafana", "error"),
+    [
+        (
+            "{{ .Values.YAML }}",
+            {"adminPassword": "Fixture-Admin-Password"},
+            "kube-prometheus-stack.grafana.admin.existingSecret must name a Kubernetes Secret (lowercase letters, "
+            "digits, '-' and '.'), got the value of \"{{ .Values.YAML }}\" (not shown, as it may hold chart values)",
+        ),
+        (
+            "{{ .Values.adminPassword }}",
+            {"adminPassword": "20261106"},
+            "kube-prometheus-stack.grafana.admin.existingSecret is written unquoted by its chart, and YAML does not "
+            "read the value of \"{{ .Values.adminPassword }}\" (not shown, as it may hold chart values) as that "
+            "string",
+        ),
+    ],
+    ids=["invalid-name", "yaml-number"],
+)
+def test_a_grafana_admin_secret_template_that_names_no_secret_fails_without_showing_its_value(
+    tmp_path: Path, existing: str, grafana: dict, error: str
+) -> None:
+    grafana = {**grafana, "admin": {"existingSecret": existing}}
+    result = render_chart(tmp_path, {"kube-prometheus-stack": {"install": True, "grafana": grafana}})
+    assert result.returncode != 0
+    assert error in result.stderr
+    assert grafana["adminPassword"] not in result.stderr
 
 
 @pytest.mark.parametrize("value", ["null", "true", "no", "123", "1e3", "0x1f", "12.5", "0b-1", "0b-10"])
