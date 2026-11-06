@@ -22,6 +22,7 @@ MAX_ERROR_LENGTH = 512
 REDACTED = "[redacted]"
 _BEARER = "Bearer "
 _UNEXPECTED_REPLY = "the gateway returned an unexpected response"
+_ACCESS_BY_EFFECTIVE_IDS = os.access in os.supports_effective_ids
 
 
 class _Replies:
@@ -47,7 +48,7 @@ def _holds_files(path: str) -> bool:
         with os.scandir(path) as entries:
             return any(_is_file(entry) for entry in entries)
     except PermissionError:
-        return os.access(path, os.X_OK)
+        return os.access(path, os.X_OK, effective_ids=_ACCESS_BY_EFFECTIVE_IDS)
     except OSError:
         return False
 

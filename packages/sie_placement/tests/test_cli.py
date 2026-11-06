@@ -802,6 +802,23 @@ def test_a_ca_location_the_applier_may_not_search_is_refused_before_any_call(mon
         locked.chmod(0o755)
 
 
+@pytest.mark.skipif(os.access not in os.supports_effective_ids, reason="no effective-id access checks here")
+def test_a_ca_directory_the_applier_cannot_list_is_checked_with_its_effective_ids(monkeypatch, tmp_path):
+    checks: list[dict] = []
+
+    def unlistable(path):
+        raise PermissionError(path)
+
+    def access(path, mode, *, effective_ids=False):
+        checks.append({"path": path, "mode": mode, "effective_ids": effective_ids})
+        return effective_ids
+
+    monkeypatch.setattr(os, "scandir", unlistable)
+    monkeypatch.setattr(os, "access", access)
+    assert pools._holds_files(str(tmp_path)) is True
+    assert checks == [{"path": str(tmp_path), "mode": os.X_OK, "effective_ids": True}]
+
+
 def test_a_ca_directory_list_with_one_usable_entry_is_passed_through_unchanged(monkeypatch, tmp_path):
     good = certificate_directory(tmp_path / "certs")
     listing = os.pathsep.join([str(tmp_path / "missing"), str(good), ""])
