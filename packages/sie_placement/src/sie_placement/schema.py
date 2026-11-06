@@ -258,13 +258,28 @@ def _require_identifier(name: str, value: str) -> None:
         raise SchemaError(name, f"must be a non-empty string without whitespace, got {value!r}")
 
 
+def _require_finite(name: str, value: float) -> None:
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        raise SchemaError(name, "must be a finite number, got an integer beyond the float range") from None
+    if not finite:
+        raise SchemaError(name, f"must be a finite number, got {value!r}")
+
+
 def _require_at_least(name: str, value: float | None, minimum: int) -> None:
-    if value is not None and value < minimum:
+    if value is None:
+        return
+    _require_finite(name, value)
+    if value < minimum:
         raise SchemaError(name, f"must be at least {minimum}, got {value!r}")
 
 
 def _require_positive(name: str, value: float | None) -> None:
-    if value is not None and value <= 0:
+    if value is None:
+        return
+    _require_finite(name, value)
+    if value <= 0:
         raise SchemaError(name, f"must be greater than 0, got {value!r}")
 
 
