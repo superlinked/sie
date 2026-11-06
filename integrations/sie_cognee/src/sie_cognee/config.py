@@ -53,6 +53,7 @@ class CogneeSettings:
     embedding_dimensions: int
     storage_root: Path
     auto_feedback: bool = False
+    native_json_schema: bool = True
 
 
 def configure(settings: CogneeSettings) -> None:
@@ -141,6 +142,20 @@ def configure(settings: CogneeSettings) -> None:
         "CACHE_DB_URL": f"sqlite+aiosqlite:///{system_root / 'cache.db'}",
     }
     os.environ.update(environment)
+    import litellm
+
+    # Cognee consults LiteLLM's catalog before sending a JSON schema. SIE model
+    # IDs are absent from that catalog, so declare the endpoint's capability
+    # through LiteLLM's public registration API instead of falling back to prose.
+    litellm.register_model(
+        {
+            f"openai/{llm_model}": {
+                "litellm_provider": "openai",
+                "mode": "chat",
+                "supports_response_schema": settings.native_json_schema,
+            }
+        }
+    )
     import cognee
 
     cognee.config.set_llm_config(llm_config)

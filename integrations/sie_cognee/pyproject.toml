@@ -7,6 +7,7 @@ license = { text = "Apache-2.0" }
 dependencies = [
     "sie-sdk>=0.11.0",
     "cognee==1.6.7",
+    "litellm>=1.108.1,<2",
 ]
 
 [project.optional-dependencies]

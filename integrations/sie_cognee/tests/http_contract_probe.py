@@ -7,6 +7,7 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 import tiktoken
 from sie_cognee.config import CogneeSettings, Endpoint, configure
@@ -18,21 +19,19 @@ from sie_cognee.retrieval import retrieve_chunks
 encoding = tiktoken.Encoding(
     name="byte-fixture", pat_str=r"[\s\S]", mergeable_ranks={bytes([i]): i for i in range(256)}, special_tokens={}
 )
-tiktoken.get_encoding = lambda *_args, **_kwargs: encoding
-tiktoken.encoding_for_model = lambda *_args, **_kwargs: encoding
 text = "The projector is confirmed for the workshop on 2026-11-14."
 requests = []
 
 
 class Handler(BaseHTTPRequestHandler):
-    def log_message(self, *_args):
+    def log_message(self, format: str, *args: object) -> None:
         pass
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         requests.append((self.path, body))
         if self.path == "/v1/embeddings":
-            assert body["model"] == "text-embedding-3-small"
+            assert body["model"] == "BAAI/bge-m3"
             payload = {
                 "object": "list",
                 "data": [
@@ -43,14 +42,29 @@ class Handler(BaseHTTPRequestHandler):
                 "usage": {"prompt_tokens": len(body["input"]), "total_tokens": len(body["input"])},
             }
         elif self.path == "/v1/chat/completions":
-            assert body["model"] == "gpt-4o"
+            assert body["model"] == "Qwen/Qwen3.5-4B"
             schema = body.get("response_format", {}).get("json_schema", {}).get("schema", {})
             if not schema:
+                # Cognee deliberately uses response_model=str for its connection
+                # probe. Every extraction call must still send a native schema.
+                assert body["messages"] == [
+                    {"role": "system", "content": 'Respond to me with the following string: "test"'},
+                    {"role": "user", "content": "test"},
+                ], "SIE extraction must use native JSON schemas"
                 output = "test"
             elif "nodes" in schema["properties"]:
                 output = {
                     "nodes": [{"id": "projector", "name": "Projector", "type": "Equipment", "description": text}],
                     "edges": [],
+                }
+            elif "lessons" in schema["properties"]:
+                output = {
+                    "lessons": [
+                        {
+                            "working_statement": "Workshop readiness requires confirmed step-free access.",
+                            "member_entry_ids": [],
+                        }
+                    ]
                 }
             else:
                 assert "summary" in schema["properties"], schema["properties"]
@@ -59,7 +73,7 @@ class Handler(BaseHTTPRequestHandler):
                 "id": "fixture",
                 "object": "chat.completion",
                 "created": 1,
-                "model": "gpt-4o",
+                "model": "Qwen/Qwen3.5-4B",
                 "choices": [
                     {
                         "index": 0,
@@ -85,8 +99,10 @@ async def main():
         thread.start()
         try:
             endpoint = Endpoint(f"http://127.0.0.1:{server.server_port}")
-            configure(CogneeSettings(endpoint, endpoint, "gpt-4o", "text-embedding-3-small", 3, Path(sys.argv[1])))
+            configure(CogneeSettings(endpoint, endpoint, "Qwen/Qwen3.5-4B", "BAAI/bge-m3", 3, Path(sys.argv[1])))
             import cognee
+            from cognee.infrastructure.llm.LLMGateway import LLMGateway
+            from cognee.modules.session_distillation.models import CuratorBatchOutput
 
             document = SourceDocument(text, "workshop-projector", "note.txt")
             await cognee.remember(document.to_data_item(), dataset_name="fixture", self_improvement=False)
@@ -95,6 +111,14 @@ async def main():
             assert text in chunks[0].text
             assert chunks[0].chunk_id
             assert chunks[0].metadata.get("data_id") or chunks[0].metadata.get("doc_id")
+            lessons = await LLMGateway.acreate_structured_output(
+                text_input="Every workshop needs confirmed step-free access.",
+                system_prompt="Extract the durable lesson.",
+                response_model=CuratorBatchOutput,
+            )
+            assert isinstance(lessons, CuratorBatchOutput)
+            assert lessons.lessons[0].member_entry_ids == []
+            assert "step-free access" in lessons.lessons[0].working_statement
             assert any(path == "/v1/chat/completions" for path, _ in requests)
             assert any(path == "/v1/embeddings" for path, _ in requests)
             assert os.environ["GRAPH_EXTRACTOR"] == "llm"
@@ -104,4 +128,8 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    with (
+        patch.object(tiktoken, "get_encoding", return_value=encoding),
+        patch.object(tiktoken, "encoding_for_model", return_value=encoding),
+    ):
+        asyncio.run(main())

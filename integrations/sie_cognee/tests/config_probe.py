@@ -23,6 +23,7 @@ from cognee.infrastructure.databases.cache.config import get_cache_config
 from cognee.infrastructure.databases.relational.config import get_relational_config
 from cognee.infrastructure.databases.vector.embeddings.config import get_embedding_config
 from cognee.infrastructure.llm.config import get_llm_config
+from litellm import supports_response_schema
 
 llm = get_llm_config()
 embedding = get_embedding_config()
@@ -43,3 +44,4 @@ assert cache.cache_backend == "sqlite"
 assert str(root) in cache.cache_db_url
 assert Path(get_relational_config().db_path).is_relative_to(root)
 assert os.environ["GRAPH_EXTRACTOR"] == "llm"
+assert supports_response_schema("openai/Qwen/test")

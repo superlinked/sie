@@ -63,6 +63,13 @@ compatible API key becomes the harmless placeholder `sie-local-no-key`.
 Remote endpoints require an explicit key. Credentials are excluded from
 `Endpoint` representations.
 
+Generation uses native JSON schemas for Cognee's graph extraction and lesson
+distillation. The helper registers the selected SIE model's schema capability
+through LiteLLM's public `register_model` API; it does not add a new Cognee
+provider or change pricing. Use a generation model that supports SIE structured
+output. For an endpoint without that capability, set `native_json_schema=False`
+to use Cognee's prompted JSON mode.
+
 Configuration owns Cognee's inference routes, SQLite/LanceDB/Ladybug storage,
 local SQLite session cache and logs. It explicitly sets `GRAPH_EXTRACTOR=llm`
 and disables mock embeddings, avoiding an accidental local model fallback.
