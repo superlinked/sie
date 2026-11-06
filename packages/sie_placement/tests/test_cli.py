@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import ssl
 import sys
 import threading
 import time
@@ -15,6 +17,8 @@ import pytest
 
 pytest.importorskip("sie_sdk")
 
+import certifi
+import httpx
 from sie_placement import cli, keda, pools
 from sie_sdk import SIEError
 
@@ -160,6 +164,14 @@ class FakePrometheus(_Server):
         handler._reply(200, vector())
 
 
+class FakeProxy(_Server):
+    def respond(self, handler: _Handler, method: str, body: object) -> None:
+        self.requests.append(
+            {"method": method, "target": handler.path, "authorization": handler.headers.get("Authorization")}
+        )
+        handler._reply(502, {"detail": "this proxy forwards nothing"})
+
+
 def _serve(server: _Server) -> Iterator[_Server]:
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
@@ -180,6 +192,8 @@ def clean_environment(monkeypatch):
         "SIE_API_KEY",
         "SIE_BASE_URL",
         "SIE_ADMIN_TOKEN",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -192,6 +206,11 @@ def gateway() -> Iterator[FakeGateway]:
 @pytest.fixture
 def prometheus() -> Iterator[FakePrometheus]:
     yield from _serve(FakePrometheus())
+
+
+@pytest.fixture
+def proxy() -> Iterator[FakeProxy]:
+    yield from _serve(FakeProxy())
 
 
 @pytest.fixture
@@ -384,6 +403,15 @@ def test_a_plan_that_is_not_a_plan_is_refused(gateway, prometheus, tmp_path, cap
     plan.write_text("{", encoding="utf-8")
     assert tune(gateway, prometheus, plan=plan) == cli.EXIT_REFUSED
     assert "is not JSON" in capsys.readouterr().err
+
+
+def test_a_plan_nested_deeper_than_the_parser_allows_is_refused(gateway, prometheus, tmp_path, capsys):
+    plan = tmp_path / "plan.json"
+    plan.write_text("[" * 200_000, encoding="utf-8")
+    assert tune(gateway, prometheus, plan=plan) == cli.EXIT_REFUSED
+    assert "is not JSON: it nests deeper than the parser allows" in capsys.readouterr().err
+    assert gateway.requests == []
+    assert prometheus.requests == []
 
 
 def test_an_unreachable_prometheus_holds_every_lane_and_fails_the_tick(gateway, read_token_file, capsys):
@@ -654,6 +682,155 @@ def test_an_error_the_sdk_raises_before_any_reply_is_redacted_and_cut():
     assert BACKSLASH_ADMIN_TOKEN not in error
     assert error.startswith("connection error after sending Bearer [redacted] x")
     assert len(error) == pools.MAX_ERROR_LENGTH
+
+
+@pytest.mark.parametrize("variable", ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"])
+def test_the_gateway_client_sends_no_token_through_a_proxy_the_environment_names(gateway, proxy, monkeypatch, variable):
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(variable, proxy.url)
+    reader = pools.connect(gateway.url, READ_TOKEN)
+    try:
+        assert reader.get_pool(CARRIER) is None
+    finally:
+        reader.close()
+    writer = pools.connect(gateway.url, ADMIN_TOKEN)
+    try:
+        write_carrier(writer)
+    finally:
+        writer.close()
+    assert proxy.requests == []
+    assert [(request["method"], request["authorization"]) for request in gateway.requests] == [
+        ("GET", f"Bearer {READ_TOKEN}"),
+        ("POST", f"Bearer {ADMIN_TOKEN}"),
+    ]
+
+
+HTTPS_GATEWAY = "https://gateway.example:8443"
+
+
+def recorded_locations(monkeypatch) -> list[dict]:
+    calls: list[dict] = []
+
+    def record(self, cafile=None, capath=None, cadata=None):
+        calls.append({"cafile": cafile, "capath": capath})
+
+    monkeypatch.setattr(ssl.SSLContext, "load_verify_locations", record)
+    return calls
+
+
+def certificate_directory(path: Path) -> Path:
+    path.mkdir()
+    (path / "ca.0").write_text("")
+    return path
+
+
+@pytest.mark.parametrize(
+    ("variable", "also_set_directory"),
+    [("SSL_CERT_FILE", False), ("SSL_CERT_DIR", False), ("SSL_CERT_FILE", True)],
+)
+def test_an_https_gateway_is_verified_against_the_ca_certificates_the_environment_names(
+    monkeypatch, tmp_path, variable, also_set_directory
+):
+    location = tmp_path / "ca.pem" if variable == "SSL_CERT_FILE" else certificate_directory(tmp_path / "certs")
+    monkeypatch.setenv(variable, str(location))
+    if also_set_directory:
+        monkeypatch.setenv("SSL_CERT_DIR", str(certificate_directory(tmp_path / "other-certs")))
+    calls = recorded_locations(monkeypatch)
+    context = pools._verification(HTTPS_GATEWAY)
+    expected = {"cafile": str(location), "capath": None}
+    if variable == "SSL_CERT_DIR":
+        expected = {"cafile": None, "capath": str(location)}
+    assert calls == [expected]
+    assert context.keylog_filename is None
+
+
+def test_a_ca_directory_list_with_one_usable_entry_is_passed_through_unchanged(monkeypatch, tmp_path):
+    good = certificate_directory(tmp_path / "certs")
+    listing = os.pathsep.join([str(tmp_path / "missing"), str(good), ""])
+    monkeypatch.setenv("SSL_CERT_DIR", listing)
+    calls = recorded_locations(monkeypatch)
+    pools._verification(HTTPS_GATEWAY)
+    assert calls == [{"cafile": None, "capath": listing}]
+
+
+@pytest.mark.parametrize("url", [HTTPS_GATEWAY, "http://gateway.example:8080"])
+def test_the_gateway_client_uses_the_default_ca_bundle_without_those_variables(monkeypatch, url):
+    calls = recorded_locations(monkeypatch)
+    pools._verification(url)
+    assert calls == [{"cafile": certifi.where(), "capath": None}]
+
+
+def test_an_http_gateway_reads_no_ca_variables(gateway, monkeypatch, tmp_path):
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "missing.pem"))
+    monkeypatch.setenv("SSL_CERT_DIR", os.pathsep.join([str(tmp_path / "missing"), str(tmp_path / "gone")]))
+    reader = pools.connect(gateway.url, READ_TOKEN)
+    try:
+        assert reader.get_pool(CARRIER) is None
+    finally:
+        reader.close()
+
+
+@pytest.mark.parametrize("url", [HTTPS_GATEWAY, "http://gateway.example:8080"])
+def test_the_gateway_client_verifies_as_httpx_does_and_never_writes_tls_secrets_to_a_key_log(
+    monkeypatch, tmp_path, url
+):
+    key_log = tmp_path / "keys.log"
+    monkeypatch.setenv("SSLKEYLOGFILE", str(key_log))
+    assert ssl.create_default_context().keylog_filename == str(key_log)
+    context = pools._verification(url)
+    reference = httpx.create_ssl_context()
+    assert context.keylog_filename is None
+    assert context.verify_mode is ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+    assert (context.verify_mode, context.check_hostname, context.minimum_version) == (
+        reference.verify_mode,
+        reference.check_hostname,
+        reference.minimum_version,
+    )
+
+
+@pytest.mark.parametrize("key_log", ["directory", "missing-parent"])
+def test_a_key_log_the_client_cannot_open_neither_stops_it_nor_receives_anything(
+    gateway, monkeypatch, tmp_path, key_log
+):
+    directory = tmp_path / "keys"
+    directory.mkdir()
+    path = directory if key_log == "directory" else tmp_path / "missing" / "keys.log"
+    monkeypatch.setenv("SSLKEYLOGFILE", str(path))
+    with pytest.raises(IsADirectoryError if key_log == "directory" else FileNotFoundError):
+        ssl.create_default_context()
+    assert pools._verification(HTTPS_GATEWAY).keylog_filename is None
+    pools.connect(HTTPS_GATEWAY, READ_TOKEN).close()
+    reader = pools.connect(gateway.url, READ_TOKEN)
+    try:
+        assert reader.get_pool(CARRIER) is None
+    finally:
+        reader.close()
+    assert list(directory.iterdir()) == []
+    assert not (tmp_path / "missing").exists()
+
+
+def test_a_ca_bundle_that_cannot_be_loaded_is_refused_before_any_call(monkeypatch, tmp_path):
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "missing.pem"))
+    with pytest.raises(ValueError, match="the CA certificates that SSL_CERT_FILE names cannot be loaded"):
+        pools.connect(HTTPS_GATEWAY, READ_TOKEN)
+
+
+@pytest.mark.parametrize("directory", ["missing", "empty", "file", "list"])
+def test_a_ca_directory_that_holds_no_certificates_is_refused_before_any_call(monkeypatch, tmp_path, directory):
+    location = tmp_path / "certs"
+    value = str(location)
+    if directory == "empty":
+        location.mkdir()
+    elif directory == "file":
+        location.write_text("")
+    elif directory == "list":
+        (tmp_path / "empty").mkdir()
+        value = os.pathsep.join([str(location), str(tmp_path / "empty")])
+    monkeypatch.setenv("SSL_CERT_DIR", value)
+    with pytest.raises(ValueError, match="the CA certificates that SSL_CERT_DIR names cannot be loaded"):
+        pools.connect(HTTPS_GATEWAY, READ_TOKEN)
 
 
 def test_a_malformed_pool_reply_fails_only_the_tick(gateway, prometheus, read_token_file, capsys):

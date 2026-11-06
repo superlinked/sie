@@ -386,9 +386,25 @@ status 1.
 The gateway admin token authorizes every gateway admin route, not only pools.
 The applier reads it only with `--apply`, sends it only on pool writes to
 `--gateway-url`, never takes it as a command-line value and never prints or
-logs it. Without it, `--apply` sends its writes with no credential, which a
-gateway with token auth refuses. The client token is never sent on writes. A
-refused token is named by its source, never by its value. A gateway call that
+logs it. Without the admin token, `--apply` sends its writes with no
+credential, which a gateway with token auth refuses. The client token is never
+sent on writes.
+
+The gateway client ignores `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and
+`NO_PROXY`, so a proxy configured for other traffic never receives either
+token, and it ignores `SSLKEYLOGFILE`, so it never writes TLS secrets to a key
+log. It verifies an https gateway against the CA certificates that
+`SSL_CERT_FILE` or `SSL_CERT_DIR` names, `SSL_CERT_FILE` winning when both are
+set, or against the default bundle when neither is. `SSL_CERT_DIR` may list
+several directories separated by the platform's path separator, `:` on Linux. A
+bundle file it cannot load, or an `SSL_CERT_DIR` none of whose directories
+holds a file, is refused before any call. OpenSSL reads the certificates in a
+directory only when it verifies a connection, so a directory whose files it
+cannot use fails each gateway call with the TLS error. An http gateway reads
+none of these variables. Prometheus queries, which carry no credential, follow
+the usual proxy variables.
+
+A refused token is named by its source, never by its value. A gateway call that
 gets an error reply is reported by its HTTP status alone, and so is a reply
 that is neither a success nor an error, such as a redirect; a success reply the
 SDK cannot parse is reported as an unexpected response. No text a server

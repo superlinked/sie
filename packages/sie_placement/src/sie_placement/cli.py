@@ -120,6 +120,8 @@ def _load_plan(path: Path) -> Plan:
         raise _UsageError(f"cannot read the plan {str(path)!r}: {error.strerror}") from None
     except ValueError as error:
         raise _UsageError(f"the plan {str(path)!r} is not JSON: {error}") from None
+    except RecursionError:
+        raise _UsageError(f"the plan {str(path)!r} is not JSON: it nests deeper than the parser allows") from None
     return Plan.from_dict(document)
 
 

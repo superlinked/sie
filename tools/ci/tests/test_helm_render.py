@@ -3361,6 +3361,7 @@ def test_client_and_worker_tokens_are_kept_apart_from_every_wired_secret_key(
             "sie-admin",
             "password",
         ),
+        ({"fullnameOverride": "dashboard"}, "dashboard", "admin-password"),
         (
             {"fullnameOverride": "dashboard", "admin": {"existingSecret": "{{ .Values.fullnameOverride }}"}},
             "dashboard",
@@ -3371,6 +3372,12 @@ def test_client_and_worker_tokens_are_kept_apart_from_every_wired_secret_key(
             "dashboard-admin",
             "dashboard",
         ),
+        (
+            {"admin": {"existingSecret": "{{- .Release.Namespace -}}-admin", "userKey": "dashboard"}},
+            "sie-admin",
+            "dashboard",
+        ),
+        ({"admin": {"existingSecret": "{{ .Chart.Name }}-admin"}}, "grafana-admin", "admin-password"),
     ],
 )
 def test_inference_credentials_cannot_reuse_bundled_grafana_admin_keys(
@@ -4696,6 +4703,149 @@ def test_the_applier_mounts_the_trimmed_client_token_secret_key(tmp_path: Path) 
         "defaultMode": SECRET_FILE_MODE,
         "items": [{"key": "token", "path": "token"}],
     }
+
+
+@pytest.mark.parametrize(
+    ("existing", "client", "error"),
+    [
+        (
+            "graf ",
+            "graf ",
+            "The placement applier client token and the Grafana admin password are the same Secret key "
+            "(graf/admin-password)",
+        ),
+        (
+            "graf ",
+            "graf",
+            "The placement applier client token and the Grafana admin password are the same Secret key "
+            "(graf/admin-password)",
+        ),
+        (
+            "graf #x",
+            "graf",
+            "kube-prometheus-stack.grafana.admin.existingSecret must name a Kubernetes Secret (lowercase letters, "
+            "digits, '-' and '.'), got \"graf #x\"",
+        ),
+    ],
+    ids=["both-spaced", "grafana-spaced", "grafana-comment"],
+)
+def test_the_applier_client_token_is_kept_apart_from_the_grafana_admin_secret_whatever_its_spelling(
+    tmp_path: Path, existing: str, client: str, error: str
+) -> None:
+    stack = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": existing}}}}
+    token = {"existingSecretName": client, "secretKey": "admin-password"}
+    result = render_placement(tmp_path, *applier_layers(APPLIER_AUTH, stack, clientToken=token))
+    assert result.returncode != 0
+    assert error in result.stderr
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        '{{ if contains "grafana" (index . "Template" "BasePath") }}shared{{ else }}other{{ end }}',
+        '{{ .Template.Name | base | trimSuffix ".yaml" }}',
+        "{{ $.Template.BasePath }}-graf",
+        '{{ index .Values "admin" }}',
+        "{{ .Values }}",
+        '{{ include "grafana.fullname" . }}',
+        "{{ .Release.Name | upper }}-graf",
+        "{{ .Capabilities.KubeVersion.Major }}-graf",
+        "Graf-{{ .Release.Name }}",
+    ],
+    ids=[
+        "index-template",
+        "template",
+        "template-dollar",
+        "index-values",
+        "bare-values",
+        "include",
+        "pipeline",
+        "capabilities",
+        "uppercase",
+    ],
+)
+def test_a_grafana_admin_secret_that_depends_on_more_than_the_release_is_refused(tmp_path: Path, existing: str) -> None:
+    values = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": existing}}}}
+    result = render_chart(tmp_path, values)
+    assert result.returncode != 0
+    assert "kube-prometheus-stack.grafana.admin.existingSecret may hold only lowercase letters, digits" in (
+        result.stderr
+    )
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        "{{ .Release.Name }}-graf",
+        "{{- .Release.Namespace -}}-graf",
+        "{{ $.Release.Name }}-graf",
+        "{{ .Chart.Name }}-admin",
+        "graf",
+    ],
+)
+def test_a_grafana_admin_secret_that_names_release_values_or_chart_fields_renders(
+    tmp_path: Path, existing: str
+) -> None:
+    values = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": existing}}}}
+    result = render_chart(tmp_path, values)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("value", ["null", "true", "no", "123", "1e3", "0x1f", "12.5"])
+def test_an_unquoted_subchart_secret_name_that_yaml_reads_as_a_scalar_is_refused(tmp_path: Path, value: str) -> None:
+    values = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": value}}}}
+    result = render_chart(tmp_path, values)
+    assert result.returncode != 0
+    assert "is written unquoted by its chart" in result.stderr or "wrong type for value" in result.stderr
+
+
+@pytest.mark.parametrize("key", [".5", "-.5", "+.5e3", "1.5", "true"])
+def test_an_unquoted_subchart_secret_key_that_yaml_reads_as_a_scalar_is_refused(tmp_path: Path, key: str) -> None:
+    grafana = {"admin": {"existingSecret": "graf", "userKey": key}}
+    values = {"kube-prometheus-stack": {"install": True, "grafana": grafana}}
+    result = render_chart(tmp_path, values)
+    assert result.returncode != 0
+    assert "is written unquoted by its chart" in result.stderr or "wrong type for value" in result.stderr
+
+
+@pytest.mark.parametrize("key", [".htpasswd", ".5x", "admin-user", "v1.5"])
+def test_an_unquoted_subchart_secret_key_that_yaml_reads_as_a_string_renders(tmp_path: Path, key: str) -> None:
+    grafana = {"admin": {"existingSecret": "graf", "userKey": key}}
+    values = {"kube-prometheus-stack": {"install": True, "grafana": grafana}}
+    result = render_chart(tmp_path, values)
+    assert result.returncode == 0, result.stderr
+    assert f"key: {key}" in result.stdout
+
+
+@pytest.mark.parametrize("value", ["1-graf", "graf-1.2.3", "nullable", "one"])
+def test_an_unquoted_subchart_secret_name_that_yaml_reads_as_a_string_renders(tmp_path: Path, value: str) -> None:
+    values = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": value}}}}
+    result = render_chart(tmp_path, values)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("keda", "error"),
+    [
+        (
+            {"certificates": {"secretName": "keda-certs "}},
+            "The worker token and the KEDA serving TLS credentials are the same Secret key (keda-certs/tls.key)",
+        ),
+        (
+            {"certificates": {"secretName": "keda-certs #x"}},
+            "keda.certificates.secretName must name a Kubernetes Secret",
+        ),
+    ],
+    ids=["spaced", "comment"],
+)
+def test_the_worker_token_is_kept_apart_from_the_keda_serving_secret_whatever_its_spelling(
+    tmp_path: Path, keda: dict, error: str
+) -> None:
+    values = {
+        "keda": {"install": True, **keda},
+        "workers": worker_with(tokenSecretName="keda-certs", tokenSecretKey="tls.key"),
+    }
+    assert error in render_error(tmp_path, values)
 
 
 INJECTED_PULL_POLICY = "IfNotPresent\n          env:\n            - name: INJECTED\n              value: x"

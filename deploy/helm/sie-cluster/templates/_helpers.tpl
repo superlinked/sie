@@ -1227,6 +1227,15 @@ manifest names another Secret key than the reference does.
 {{- if not (and (le (len $key) 253) (regexMatch "^[-._a-zA-Z0-9]+$" $key)) -}}
 {{- fail (printf "%s must be a Kubernetes Secret data key (letters, digits, '-', '_' and '.'), got %q" .keyField $key) -}}
 {{- end -}}
+{{- if .unquoted -}}
+{{- $scalar := `^((?i)~|null|true|false|yes|no|on|off|y|n|[-+]?\.(inf|nan)|[-+]?0[xob][0-9a-f_]+)$|^[-+]?[0-9][0-9_]*([.:][0-9_:]*)?([eE][-+]?[0-9]+)?$|^[-+]?\.[0-9][0-9_]*([eE][-+]?[0-9]+)?$` -}}
+{{- if regexMatch $scalar $name -}}
+{{- fail (printf "%s is written unquoted by its chart, so %q would be read as a YAML null, boolean or number rather than a Secret name" .nameField $name) -}}
+{{- end -}}
+{{- if regexMatch $scalar $key -}}
+{{- fail (printf "%s is written unquoted by its chart, so %q would be read as a YAML null, boolean or number rather than a Secret data key" .keyField $key) -}}
+{{- end -}}
+{{- end -}}
 {{- printf "%s/%s" $name $key -}}
 {{- end }}
 
@@ -1288,23 +1297,27 @@ token-separation check and the upstream-key collision check read this list.
 {{- with index $root.Subcharts "kube-prometheus-stack" -}}
 {{- with index .Subcharts "grafana" -}}
 {{- if eq (include "grafana.namespace" .) (include "sie-cluster.namespace" $root) -}}
+{{- $existingSecret := toString (default "" .Values.admin.existingSecret) -}}
+{{- if and (contains "{{" $existingSecret) (not (regexMatch `^([a-z0-9.-]|\{\{-? *\$?\.(Release|Values|Chart)(\.[A-Za-z0-9_]+)+ *-?\}\})+$` $existingSecret)) -}}
+{{- fail (printf "kube-prometheus-stack.grafana.admin.existingSecret may hold only lowercase letters, digits, '-', '.' and actions that name a field of .Release, .Values or .Chart, such as {{ .Release.Name }}, optionally with {{- -}} trim markers or a leading $: the Grafana chart evaluates it in its own templates, so the chart can check the Secret Grafana reads only when it depends on nothing but those fields, got %q" $existingSecret) -}}
+{{- end -}}
 {{- $context := merge (dict "Template" $root.Template) . -}}
 {{- $secretName := tpl .Values.admin.existingSecret $context | default (include "grafana.fullname" .) -}}
 {{- if and (not .Values.env.GF_SECURITY_ADMIN_USER) (not .Values.env.GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION) -}}
-{{- $keys = append $keys (dict "owner" "the Grafana admin username" "name" "Grafana admin username" "ref" (printf "%s/%s" $secretName (default "admin-user" .Values.admin.userKey))) -}}
+{{- $keys = append $keys (dict "owner" "the Grafana admin username" "name" "Grafana admin username" "ref" (include "sie-cluster.secretKeyRef" (dict "unquoted" true "name" $secretName "key" (default "admin-user" .Values.admin.userKey) "nameField" "kube-prometheus-stack.grafana.admin.existingSecret" "keyField" "kube-prometheus-stack.grafana.admin.userKey"))) -}}
 {{- end -}}
 {{- if and (not .Values.env.GF_SECURITY_ADMIN_PASSWORD) (not .Values.env.GF_SECURITY_ADMIN_PASSWORD__FILE) (not .Values.env.GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION) -}}
-{{- $keys = append $keys (dict "owner" "the Grafana admin password" "name" "Grafana admin password" "ref" (printf "%s/%s" $secretName (default "admin-password" .Values.admin.passwordKey))) -}}
+{{- $keys = append $keys (dict "owner" "the Grafana admin password" "name" "Grafana admin password" "ref" (include "sie-cluster.secretKeyRef" (dict "unquoted" true "name" $secretName "key" (default "admin-password" .Values.admin.passwordKey) "nameField" "kube-prometheus-stack.grafana.admin.existingSecret" "keyField" "kube-prometheus-stack.grafana.admin.passwordKey"))) -}}
 {{- end -}}
 {{- if .Values.smtp.existingSecret -}}
 {{- $smtpSecret := .Values.smtp.existingSecret -}}
 {{- range $key := list (default "user" .Values.smtp.userKey) (default "password" .Values.smtp.passwordKey) -}}
-{{- $keys = append $keys (dict "owner" "the Grafana SMTP credentials" "name" "Grafana SMTP credentials" "ref" (printf "%s/%s" $smtpSecret $key)) -}}
+{{- $keys = append $keys (dict "owner" "the Grafana SMTP credentials" "name" "Grafana SMTP credentials" "ref" (include "sie-cluster.secretKeyRef" (dict "unquoted" true "name" $smtpSecret "key" $key "nameField" "kube-prometheus-stack.grafana.smtp.existingSecret" "keyField" "kube-prometheus-stack.grafana.smtp.userKey or passwordKey"))) -}}
 {{- end -}}
 {{- end -}}
 {{- if .Values.ldap.enabled -}}
 {{- $ldapSecret := default (include "grafana.fullname" .) .Values.ldap.existingSecret -}}
-{{- $keys = append $keys (dict "owner" "the Grafana LDAP configuration" "name" "Grafana LDAP configuration" "ref" (printf "%s/ldap-toml" $ldapSecret)) -}}
+{{- $keys = append $keys (dict "owner" "the Grafana LDAP configuration" "name" "Grafana LDAP configuration" "ref" (include "sie-cluster.secretKeyRef" (dict "unquoted" true "name" $ldapSecret "key" "ldap-toml" "nameField" "kube-prometheus-stack.grafana.ldap.existingSecret" "keyField" "kube-prometheus-stack.grafana.ldap.existingSecret"))) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -1316,12 +1329,12 @@ token-separation check and the upstream-key collision check read this list.
 {{/* Generation and webhooks flags do not disable operator/metrics TLS mounts. */}}
 {{- $secretName := .Values.certificates.secretName -}}
 {{- range $key := list "ca.crt" "tls.crt" "tls.key" -}}
-{{- $keys = append $keys (dict "owner" "the KEDA serving TLS credentials" "name" "KEDA serving TLS credentials" "ref" (printf "%s/%s" $secretName $key)) -}}
+{{- $keys = append $keys (dict "owner" "the KEDA serving TLS credentials" "name" "KEDA serving TLS credentials" "ref" (include "sie-cluster.secretKeyRef" (dict "unquoted" true "name" $secretName "key" $key "nameField" "keda.certificates.secretName" "keyField" "keda.certificates.secretName"))) -}}
 {{- end -}}
 {{- $cm := .Values.certificates.certManager -}}
 {{- if and $cm.enabled $cm.issuer.generate -}}
 {{- range $key := list "tls.crt" "tls.key" -}}
-{{- $keys = append $keys (dict "owner" "the KEDA CA signer" "name" "KEDA CA signer" "ref" (printf "%s/%s" $cm.caSecretName $key)) -}}
+{{- $keys = append $keys (dict "owner" "the KEDA CA signer" "name" "KEDA CA signer" "ref" (include "sie-cluster.secretKeyRef" (dict "unquoted" true "name" $cm.caSecretName "key" $key "nameField" "keda.certificates.certManager.caSecretName" "keyField" "keda.certificates.certManager.caSecretName"))) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -1334,19 +1347,19 @@ token-separation check and the upstream-key collision check read this list.
 {{- if and $operator.enabled (or $operator.tls.enabled (and $admission.deployment.enabled $admission.deployment.tls.enabled)) -}}
 {{- $tlsKeys := ternary (list "tls.crt" "tls.key") (list "cert" "key") $admission.certManager.enabled -}}
 {{- range $key := $tlsKeys -}}
-{{- $keys = append $keys (dict "owner" "the Prometheus admission TLS credentials" "name" "Prometheus admission TLS credentials" "ref" (printf "%s-admission/%s" $fullname $key)) -}}
+{{- $keys = append $keys (dict "owner" "the Prometheus admission TLS credentials" "name" "Prometheus admission TLS credentials" "ref" (include "sie-cluster.secretKeyRef" (dict "unquoted" true "name" (printf "%s-admission" $fullname) "key" $key "nameField" "the Prometheus admission TLS Secret" "keyField" "the Prometheus admission TLS Secret"))) -}}
 {{- end -}}
 {{- end -}}
 {{/* certgen create/patch Jobs also read ca, even without serving TLS or a monitor. */}}
 {{- $patchReadsCA := and $admission.enabled $admission.patch.enabled (not $admission.certManager.enabled) -}}
 {{- if and $operator.enabled (or (and $operator.serviceMonitor.selfMonitor $operator.tls.enabled) $patchReadsCA) -}}
 {{- $key := ternary "ca.crt" "ca" $admission.certManager.enabled -}}
-{{- $keys = append $keys (dict "owner" "the Prometheus admission CA" "name" "Prometheus admission CA" "ref" (printf "%s-admission/%s" $fullname $key)) -}}
+{{- $keys = append $keys (dict "owner" "the Prometheus admission CA" "name" "Prometheus admission CA" "ref" (include "sie-cluster.secretKeyRef" (dict "unquoted" true "name" (printf "%s-admission" $fullname) "key" $key "nameField" "the Prometheus admission TLS Secret" "keyField" "the Prometheus admission TLS Secret"))) -}}
 {{- end -}}
 {{/* This CA Issuer exists even when the operator Deployment is disabled. */}}
 {{- if and $admission.certManager.enabled (not $admission.certManager.issuerRef) -}}
 {{- range $key := list "tls.crt" "tls.key" -}}
-{{- $keys = append $keys (dict "owner" "the Prometheus root CA signer" "name" "Prometheus root CA signer" "ref" (printf "%s-root-cert/%s" $fullname $key)) -}}
+{{- $keys = append $keys (dict "owner" "the Prometheus root CA signer" "name" "Prometheus root CA signer" "ref" (include "sie-cluster.secretKeyRef" (dict "unquoted" true "name" (printf "%s-root-cert" $fullname) "key" $key "nameField" "the Prometheus root CA Secret" "keyField" "the Prometheus root CA Secret"))) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -1355,7 +1368,7 @@ token-separation check and the upstream-key collision check read this list.
 {{- if eq (include "trust-manager.namespace" .) (include "sie-cluster.namespace" $root) -}}
 {{- $secretName := printf "%s-tls" (include "trust-manager.name" .) -}}
 {{- range $key := list "tls.crt" "tls.key" -}}
-{{- $keys = append $keys (dict "owner" "the trust-manager serving TLS credentials" "name" "trust-manager serving TLS credentials" "ref" (printf "%s/%s" $secretName $key)) -}}
+{{- $keys = append $keys (dict "owner" "the trust-manager serving TLS credentials" "name" "trust-manager serving TLS credentials" "ref" (include "sie-cluster.secretKeyRef" (dict "unquoted" true "name" $secretName "key" $key "nameField" "the trust-manager serving TLS Secret" "keyField" "the trust-manager serving TLS Secret"))) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -1363,12 +1376,12 @@ token-separation check and the upstream-key collision check read this list.
 {{- if eq .Release.Namespace (include "sie-cluster.namespace" $root) -}}
 {{- if and .Values.gateway.enabled .Values.gateway.basicAuth.enabled (not (and .Values.enterprise.enabled .Values.enterprise.gelGateway)) -}}
 {{- $secretName := include "loki.gatewayAuthSecret" . -}}
-{{- $keys = append $keys (dict "owner" "the Loki gateway basic auth credentials" "name" "Loki gateway basic auth credentials" "ref" (printf "%s/.htpasswd" $secretName)) -}}
+{{- $keys = append $keys (dict "owner" "the Loki gateway basic auth credentials" "name" "Loki gateway basic auth credentials" "ref" (include "sie-cluster.secretKeyRef" (dict "unquoted" true "name" $secretName "key" ".htpasswd" "nameField" "loki.gateway.basicAuth.existingSecret" "keyField" "loki.gateway.basicAuth.existingSecret"))) -}}
 {{- end -}}
 {{- with index .Subcharts "minio" -}}
 {{- $secretName := include "minio.secretName" . -}}
 {{- range $key := list "rootUser" "rootPassword" -}}
-{{- $keys = append $keys (dict "owner" "the Loki MinIO root credentials" "name" "Loki MinIO root credentials" "ref" (printf "%s/%s" $secretName $key)) -}}
+{{- $keys = append $keys (dict "owner" "the Loki MinIO root credentials" "name" "Loki MinIO root credentials" "ref" (include "sie-cluster.secretKeyRef" (dict "unquoted" true "name" $secretName "key" $key "nameField" "loki.minio.existingSecret" "keyField" "loki.minio.existingSecret"))) -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

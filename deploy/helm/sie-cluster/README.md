@@ -1576,7 +1576,8 @@ from the sie-config tokens: the render fails when it names the Secret and key
 of the sie-config admin token, which would give every gateway pod catalog
 write access, or of the read token, which every worker sidecar holds. The
 placement applier mounts the same Secret only when `placementApplier.apply` is
-true.
+true and the gateway may authenticate, with token auth or a mode known only at
+run time.
 
 ### Who holds which token
 
@@ -1585,7 +1586,8 @@ true.
   sidecar. It can read the whole catalog, including every model config, but
   cannot write.
 - **Gateway admin token (when set):** every gateway pod, the placement applier
-  when `placementApplier.apply` is true (see
+  when `placementApplier.apply` is true and the gateway may authenticate, with
+  token auth or a mode known only at run time (see
   [Lane envelopes and the placement applier](#lane-envelopes-and-the-placement-applier)),
   and the tooling that manages pools.
 - **Gateway client token (when set or generated):** API clients, every gateway
