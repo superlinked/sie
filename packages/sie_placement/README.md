@@ -390,8 +390,11 @@ logs it. Its gateway client reads no settings from the environment: it ignores
 `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`, so a proxy configured
 for other traffic never receives either token. It still verifies an https
 gateway against the CA certificates that `SSL_CERT_FILE` or `SSL_CERT_DIR`
-names, as httpx does by default, and refuses before any call a bundle it
-cannot load. Prometheus queries, which carry no credential, follow the
+names, as httpx does by default. `SSL_CERT_FILE` wins when both are set. A
+bundle file it cannot load, or a certificate directory that is missing or
+empty, is refused before any call. OpenSSL reads the certificates in a
+directory only when it verifies a connection, so a directory whose files it
+cannot use fails each gateway call with the TLS error. Prometheus queries, which carry no credential, follow the
 usual proxy variables. Without it, `--apply` sends its writes with no credential, which a
 gateway with token auth refuses. The client token is never sent on writes. A
 refused token is named by its source, never by its value. A gateway call that

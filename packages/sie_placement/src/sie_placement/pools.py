@@ -32,11 +32,21 @@ class _Replies:
             raise GatewayError(f"the gateway answered HTTP {status}, which is neither a success nor an error")
 
 
+def _holds_entries(path: str) -> bool:
+    try:
+        with os.scandir(path) as entries:
+            return any(True for _ in entries)
+    except OSError:
+        return False
+
+
 def _verification() -> ssl.SSLContext | bool:
     cafile = os.environ.get("SSL_CERT_FILE") or None
     capath = None if cafile else os.environ.get("SSL_CERT_DIR") or None
     if cafile is None and capath is None:
         return True
+    if capath is not None and not _holds_entries(capath):
+        raise ValueError("the CA certificates that SSL_CERT_DIR names cannot be loaded")
     try:
         return ssl.create_default_context(cafile=cafile, capath=capath)
     except (OSError, ssl.SSLError):
