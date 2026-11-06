@@ -644,8 +644,8 @@ class Receipt:
     def __post_init__(self) -> None:
         _require_identifier("identity", self.identity)
         _require_count("concurrency", self.concurrency, 1)
-        _require_at_least("footprintMiB", self.footprint_mib, 1)
-        _require_at_least("workingMemoryMiB", self.working_memory_mib, 0)
+        _require_count("footprintMiB", self.footprint_mib, 1)
+        _require_count("workingMemoryMiB", self.working_memory_mib, 0)
         for index, resident in enumerate(self.co_residents):
             _require_identifier(f"coResidents[{index}]", resident)
             if resident == self.identity:
@@ -742,7 +742,7 @@ class BootEvidence:
             raise SchemaError("bootSeconds", "is required for an attempt that was placed")
         _require_at_least("placementWaitS", self.placement_wait_s, 0)
         _require_at_least("bootSeconds", self.boot_seconds, 0)
-        _require_at_least("footprintMiB", self.footprint_mib, 1)
+        _require_count("footprintMiB", self.footprint_mib, 1)
         if self.outcome is not BootOutcome.SUCCEEDED:
             _require_absent("footprintMiB", self.footprint_mib, "for an attempt that did not succeed")
 
@@ -798,7 +798,7 @@ class MachineProfilePrice:
         _require_at_least("acceleratorPerHour", self.accelerator_per_hour, 0)
         _require_at_least("corePerHour", self.core_per_hour, 0)
         _require_at_least("memoryGiBPerHour", self.memory_gib_per_hour, 0)
-        _require_at_least("gpuMemoryMiB", self.gpu_memory_mib, 1)
+        _require_count("gpuMemoryMiB", self.gpu_memory_mib, 1)
 
     @classmethod
     def from_dict(cls, data: object, path: str = ROOT_PATH) -> Self:
