@@ -16,6 +16,7 @@ import pytest
 pytest.importorskip("sie_sdk")
 
 from sie_placement import cli, keda, pools
+from sie_sdk import SIEError
 
 FIXTURES = Path(__file__).parent / "fixtures"
 READ_TOKEN = "read-token-for-tests"  # noqa: S105 - a test value
@@ -318,8 +319,7 @@ def test_a_rejected_write_fails_the_tick_and_names_the_pool(gateway, prometheus,
     assert tune(gateway, prometheus, "--api-key-file", str(read_token_file), "--apply") == 1
     l4_row = rows(capsys.readouterr().out)[0]
     assert l4_row["applied"] is False
-    assert l4_row["error"].startswith("writing pool 'placement-floor-default-l4-default' failed")
-    assert "Admin token required" in l4_row["error"]
+    assert l4_row["error"] == "writing pool 'placement-floor-default-l4-default' failed: the gateway answered HTTP 403"
 
 
 def test_an_envelope_above_the_pool_floor_limit_is_refused_before_any_call(
@@ -611,41 +611,49 @@ def test_a_redirected_write_is_not_recorded_as_applied(gateway, prometheus, read
     assert gateway.pools == {}
 
 
+BACKSLASH_READ_TOKEN = "read\\token-for-tests"  # noqa: S105 - a test value
+BACKSLASH_ADMIN_TOKEN = "admin\\token-for-tests"  # noqa: S105 - a test value
 ECHOES = {
-    "403-json": lambda token: (
+    "403-message": lambda token: (
         403,
         json.dumps({"detail": {"code": "FORBIDDEN", "message": f"token not allowed: Bearer {token}"}}).encode(),
+    ),
+    "403-detail": lambda token: (
+        403,
+        json.dumps({"detail": {"code": "FORBIDDEN", "seen": f"Bearer {token}"}}).encode(),
     ),
     "502-text": lambda token: (502, f"upstream echoed Authorization: Bearer {token}".encode()),
 }
 
 
 @pytest.mark.parametrize("echo", sorted(ECHOES))
-@pytest.mark.parametrize(("method", "token"), [("GET", READ_TOKEN), ("POST", ADMIN_TOKEN)])
-def test_a_reply_that_echoes_the_clients_token_is_redacted_in_the_audit_row(
-    gateway, prometheus, read_token_file, monkeypatch, method, token, echo, capsys
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_a_reply_that_echoes_the_clients_token_is_reported_by_its_status_alone(
+    gateway, prometheus, tmp_path, monkeypatch, method, echo, capsys
 ):
-    monkeypatch.setenv("SIE_ADMIN_TOKEN", ADMIN_TOKEN)
-    gateway.raw_replies[method] = ECHOES[echo](token)
-    assert tune(gateway, prometheus, "--api-key-file", str(read_token_file), "--apply") == cli.EXIT_FAILED
+    read_token = tmp_path / "read-token"
+    read_token.write_text(BACKSLASH_READ_TOKEN + "\n", encoding="utf-8")
+    monkeypatch.setenv("SIE_ADMIN_TOKEN", BACKSLASH_ADMIN_TOKEN)
+    gateway.auth = False
+    status, body = ECHOES[echo](BACKSLASH_READ_TOKEN if method == "GET" else BACKSLASH_ADMIN_TOKEN)
+    gateway.raw_replies[method] = (status, body)
+    assert tune(gateway, prometheus, "--api-key-file", str(read_token), "--apply") == cli.EXIT_FAILED
     captured = capsys.readouterr()
     errors = [row["error"] for row in rows(captured.out) if row["error"]]
     assert errors
-    assert all("Bearer [redacted]" in error for error in errors)
-    for secret in (READ_TOKEN, ADMIN_TOKEN):
-        assert secret not in captured.out
-        assert secret not in captured.err
+    assert all(error.endswith(f" failed: the gateway answered HTTP {status}") for error in errors)
+    for secret in (BACKSLASH_READ_TOKEN, BACKSLASH_ADMIN_TOKEN):
+        for form in (secret, secret.replace("\\", "\\\\")):
+            assert form not in captured.out
+            assert form not in captured.err
 
 
-def test_a_long_gateway_error_is_cut_to_512_characters(gateway, prometheus, read_token_file, capsys):
-    gateway.raw_replies["GET"] = (502, b"x" * 5000)
-    assert tune(gateway, prometheus, "--api-key-file", str(read_token_file)) == cli.EXIT_FAILED
-    errors = [row["error"] for row in rows(capsys.readouterr().out)]
-    assert errors
-    for error in errors:
-        prefix, message = error.split(" failed: ", 1)
-        assert prefix.startswith("reading pool ")
-        assert len(message) == pools.MAX_ERROR_LENGTH
+def test_an_error_the_sdk_raises_before_any_reply_is_redacted_and_cut():
+    message = f"connection error after sending Bearer {BACKSLASH_ADMIN_TOKEN} " + "x" * 5000
+    error = str(pools._gateway_error(SIEError(message), None, BACKSLASH_ADMIN_TOKEN))
+    assert BACKSLASH_ADMIN_TOKEN not in error
+    assert error.startswith("connection error after sending Bearer [redacted] x")
+    assert len(error) == pools.MAX_ERROR_LENGTH
 
 
 def test_a_malformed_pool_reply_fails_only_the_tick(gateway, prometheus, read_token_file, capsys):
