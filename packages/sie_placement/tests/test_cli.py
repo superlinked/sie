@@ -399,6 +399,15 @@ def test_a_plan_that_is_not_a_plan_is_refused(gateway, prometheus, tmp_path, cap
     assert "is not JSON" in capsys.readouterr().err
 
 
+def test_a_plan_nested_deeper_than_the_parser_allows_is_refused(gateway, prometheus, tmp_path, capsys):
+    plan = tmp_path / "plan.json"
+    plan.write_text("[" * 200_000, encoding="utf-8")
+    assert tune(gateway, prometheus, plan=plan) == cli.EXIT_REFUSED
+    assert "is not JSON: it nests deeper than the parser allows" in capsys.readouterr().err
+    assert gateway.requests == []
+    assert prometheus.requests == []
+
+
 def test_an_unreachable_prometheus_holds_every_lane_and_fails_the_tick(gateway, read_token_file, capsys):
     unreachable = FakePrometheus()
     unreachable.server_close()
