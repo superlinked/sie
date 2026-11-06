@@ -62,7 +62,7 @@ def test_config_isolation_and_embedding_change(tmp_path: Path, monkeypatch: pyte
     assert demo.storage == tmp_path / ".state/test-workshop"
     assert demo.dataset == "sie-test-workshop"
     (tmp_path / "config.toml").write_text(original.replace("embedding_dimensions = 1024", "embedding_dimensions = 768"))
-    with pytest.raises(ValueError, match="fresh WORKSHOP_NAMESPACE"):
+    with pytest.raises(SystemExit, match="fresh WORKSHOP_NAMESPACE"):
         load_demo("changed")
     monkeypatch.setenv("WORKSHOP_NAMESPACE", "../unowned")
     with pytest.raises(ValueError, match="WORKSHOP_NAMESPACE"):
@@ -246,8 +246,9 @@ def test_verify_rejects_identity_mismatch_before_cognee_import(
     initialization = Mock(side_effect=AssertionError("Must validate before Cognee import"))
     monkeypatch.setattr(learn, "initialize", initialization)
     monkeypatch.setattr(sys, "argv", ["04_learn.py", "--verify-run", str(prior)])
-    with pytest.raises(ValueError):
+    with pytest.raises(SystemExit) as error:
         asyncio.run(learn.main(demo))
+    assert error.value.code == 2
     initialization.assert_not_called()
 
 
@@ -280,7 +281,7 @@ def test_verify_checks_missing_markers_before_reading_state(
     monkeypatch.setattr(Path, "read_text", track_read)
     initialization = Mock()
     monkeypatch.setattr(learn, "initialize", initialization)
-    with pytest.raises(learn.MissingMemoryStateError, match="Restore the teaching run's original memory"):
+    with pytest.raises(learn.MemoryStateError, match="Restore the original intact memory"):
         asyncio.run(learn.verify(demo, prior))
     assert demo.storage / "embedding.json" not in reads
     assert demo.storage / "cognee/sie-cognee.json" not in reads
@@ -305,8 +306,8 @@ def test_missing_state_cli_displays_safe_recovery(
         learn.launch("04-learn", learn.main)
     assert error.value.code == 2
     stderr = capsys.readouterr().err
-    assert learn.MISSING_STATE_RECOVERY in stderr
-    assert "--seed with a fresh WORKSHOP_NAMESPACE" in stderr
+    assert learn.MEMORY_STATE_RECOVERY in stderr
+    assert "fresh WORKSHOP_NAMESPACE" in stderr
     assert "FileNotFoundError" not in stderr
     assert str(tmp_path) not in stderr
     initialization.assert_not_called()
@@ -371,11 +372,14 @@ def test_real_bootstrap_missing_owned_marker_displays_safe_recovery(
         learn.launch("04-learn", learn.main)
     assert error.value.code == 2
     stderr = capsys.readouterr().err
-    assert learn.MISSING_STATE_RECOVERY in stderr
+    assert learn.MEMORY_STATE_RECOVERY in stderr
     assert "FileNotFoundError" not in stderr
     assert str(tmp_path) not in stderr
     assert outer.is_file()
     assert not marker.exists()
+    failures = list(teaching.run.parent.glob("*/failure.json"))
+    assert len(failures) == 1
+    assert json.loads(failures[0].read_text()) == {"type": "MemoryStateError", "completed": False}
     initialization.assert_not_called()
 
 
@@ -413,13 +417,170 @@ def test_real_bootstrap_reconstructs_outer_metadata_but_checks_owned_identity(
         cognee.recall.assert_awaited_once()
         retrieval.assert_awaited_once()
     else:
-        with pytest.raises(SystemExit, match="ValueError"):
+        with pytest.raises(SystemExit) as error:
             learn.launch("04-learn", learn.main)
+        assert error.value.code == 2
         initialization.assert_not_called()
         cognee.recall.assert_not_awaited()
         retrieval.assert_not_awaited()
     assert json.loads(outer.read_text()) == {key: teaching.models[key] for key in ("embedding", "embedding_dimensions")}
     assert marker.read_bytes() == marker_before
+
+
+@pytest.mark.parametrize("target", ["outer", "owned", "configuration", "distillation"])
+@pytest.mark.parametrize("problem", ["malformed", "non-object", "invalid-utf8", "unreadable", "invalid-object"])
+def test_real_bootstrap_invalid_state_records_safe_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], target: str, problem: str
+) -> None:
+    learn = script("04_learn.py")
+    teaching = bootstrap_verification_fixture(tmp_path, monkeypatch)
+    paths = {
+        "outer": teaching.storage / "embedding.json",
+        "owned": teaching.storage / "cognee/sie-cognee.json",
+        "configuration": teaching.run / "configuration.json",
+        "distillation": teaching.run / "actual-distillation.json",
+    }
+    path = paths[target]
+    invalid = {
+        "malformed": b'{"private-local-detail":',
+        "non-object": b'["private-local-detail"]',
+        "invalid-utf8": b"\xffprivate-local-detail",
+        "invalid-object": b'{"unexpected": "private-local-detail"}',
+    }
+    if problem == "unreadable":
+        original_read = Path.read_text
+
+        def fail_read(self, *args, **kwargs):
+            if self == path:
+                raise PermissionError("private-local-detail")
+            return original_read(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fail_read)
+    else:
+        path.write_bytes(invalid[problem])
+    before = {key: value.read_bytes() for key, value in paths.items()}
+    initialization = Mock()
+    monkeypatch.setattr(learn, "initialize", initialization)
+    monkeypatch.setattr(sys, "argv", ["04_learn.py", "--verify-run", str(teaching.run)])
+    with pytest.raises(SystemExit) as error:
+        learn.launch("04-learn", learn.main)
+    failures = list(teaching.run.parent.glob("*/failure.json"))
+    assert len(failures) == 1
+    assert failures[0].parent != teaching.run
+    assert json.loads(failures[0].read_text()) == {"type": "MemoryStateError", "completed": False}
+    output = capsys.readouterr()
+    displayed = str(error.value) + output.out + output.err
+    assert learn.MEMORY_STATE_RECOVERY in displayed
+    assert "private-local-detail" not in displayed + failures[0].read_text()
+    assert {key: value.read_bytes() for key, value in paths.items()} == before
+    initialization.assert_not_called()
+
+
+def test_real_bootstrap_failed_outer_metadata_write_records_safe_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    learn = script("04_learn.py")
+    teaching = bootstrap_verification_fixture(tmp_path, monkeypatch)
+    outer = teaching.storage / "embedding.json"
+    outer.unlink()
+    owned = teaching.storage / "cognee/sie-cognee.json"
+    owned_before = owned.read_bytes()
+    original_write = Path.write_text
+
+    def fail_write(self, *args, **kwargs):
+        if self == outer:
+            raise PermissionError("private-local-detail")
+        return original_write(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_write)
+    initialization = Mock()
+    monkeypatch.setattr(learn, "initialize", initialization)
+    monkeypatch.setattr(sys, "argv", ["04_learn.py", "--verify-run", str(teaching.run)])
+    with pytest.raises(SystemExit) as error:
+        learn.launch("04-learn", learn.main)
+    failures = list(teaching.run.parent.glob("*/failure.json"))
+    assert len(failures) == 1
+    assert json.loads(failures[0].read_text()) == {"type": "MemoryStateError", "completed": False}
+    output = capsys.readouterr()
+    displayed = str(error.value) + output.out + output.err
+    assert learn.MEMORY_STATE_RECOVERY in displayed
+    assert "private-local-detail" not in displayed + failures[0].read_text()
+    assert owned.read_bytes() == owned_before
+    assert not outer.exists()
+    initialization.assert_not_called()
+
+
+@pytest.mark.parametrize("stage", ["endpoint", "configuration"])
+def test_real_bootstrap_redacts_setup_failure_and_records_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], stage: str
+) -> None:
+    import common
+
+    learn = script("04_learn.py")
+    teaching = bootstrap_verification_fixture(tmp_path, monkeypatch)
+    if stage == "endpoint":
+        monkeypatch.setattr(common, "endpoint_for", Mock(side_effect=ValueError("private-local-detail")))
+        error_type = "ValueError"
+    else:
+        original_write = Path.write_text
+
+        def fail_write(self, *args, **kwargs):
+            if self.name == "configuration.json":
+                raise PermissionError("private-local-detail")
+            return original_write(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", fail_write)
+        error_type = "PermissionError"
+    initialization = Mock()
+    monkeypatch.setattr(learn, "initialize", initialization)
+    monkeypatch.setattr(sys, "argv", ["04_learn.py", "--verify-run", str(teaching.run)])
+    with pytest.raises(SystemExit) as error:
+        learn.launch("04-learn", learn.main)
+    failures = list(teaching.run.parent.glob("*/failure.json"))
+    assert len(failures) == 1
+    assert json.loads(failures[0].read_text()) == {"type": error_type, "completed": False}
+    output = capsys.readouterr()
+    displayed = str(error.value) + output.out + output.err
+    assert "private-local-detail" not in displayed + failures[0].read_text()
+    assert learn.MEMORY_STATE_RECOVERY not in displayed
+    initialization.assert_not_called()
+
+
+@pytest.mark.parametrize("stage", ["outer", "owned", "endpoint"])
+def test_unwritable_failure_artifact_does_not_expose_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], stage: str
+) -> None:
+    import common
+
+    learn = script("04_learn.py")
+    teaching = bootstrap_verification_fixture(tmp_path, monkeypatch)
+    if stage == "endpoint":
+        monkeypatch.setattr(common, "endpoint_for", Mock(side_effect=ValueError("private-local-detail")))
+    else:
+        name = "embedding.json" if stage == "outer" else "cognee/sie-cognee.json"
+        (teaching.storage / name).write_text('{"private-local-detail":')
+    original_write = Path.write_text
+
+    def fail_write(self, *args, **kwargs):
+        if self.name == "failure.json":
+            raise PermissionError("private-write-detail")
+        return original_write(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_write)
+    initialization = Mock()
+    monkeypatch.setattr(learn, "initialize", initialization)
+    monkeypatch.setattr(sys, "argv", ["04_learn.py", "--verify-run", str(teaching.run)])
+    with pytest.raises(SystemExit) as error:
+        learn.launch("04-learn", learn.main)
+    output = capsys.readouterr()
+    displayed = str(error.value) + output.out + output.err
+    assert "Could not write failure.json." in displayed
+    assert "private-local-detail" not in displayed
+    assert "private-write-detail" not in displayed
+    if stage != "endpoint":
+        assert learn.MEMORY_STATE_RECOVERY in displayed
+    assert not list(teaching.run.parent.glob("*/failure.json"))
+    initialization.assert_not_called()
 
 
 @pytest.mark.parametrize("evidence", ["present", "missing", "oversized"])

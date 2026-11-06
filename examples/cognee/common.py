@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, NoReturn
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -28,6 +28,45 @@ SEEDS = (
     ("CHECK-01", "projector-check.txt"),
     ("CHECK-02", "microphone-check.txt"),
 )
+MEMORY_STATE_RECOVERY = (
+    "Stored memory state is missing, unreadable, invalid or mismatched. Restore the original intact memory "
+    "directory and teaching-run artifacts with matching namespace and embedding settings, or use a fresh "
+    "WORKSHOP_NAMESPACE and rebuild memory before verification."
+)
+
+
+class MemoryStateError(ValueError):
+    """Local stored state cannot safely be reused with this configuration."""
+
+
+def read_state_object(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise MemoryStateError(MEMORY_STATE_RECOVERY) from None
+    if not isinstance(value, dict):
+        raise MemoryStateError(MEMORY_STATE_RECOVERY)
+    return value
+
+
+def record_failure(run: Path, error: Exception) -> bool:
+    """Record only the error type, without replacing recovery if the disk is unwritable."""
+    try:
+        (run / "failure.json").write_text(json.dumps({"type": type(error).__name__, "completed": False}) + "\n")
+    except (OSError, UnicodeError):
+        return False
+    return True
+
+
+def stop_run(run: Path, error: Exception) -> NoReturn:
+    saved = record_failure(run, error)
+    recovery = (
+        MEMORY_STATE_RECOVERY
+        if isinstance(error, MemoryStateError)
+        else "Check endpoint availability, cold-start budget and context limits. No success was recorded."
+    )
+    artifact = f" Inspect {run / 'failure.json'}." if saved else " Could not write failure.json."
+    raise SystemExit(f"{type(error).__name__}: {recovery}{artifact}") from None
 
 
 def json_value(value: Any) -> Any:
@@ -107,32 +146,47 @@ def load_demo(experiment: str) -> Demo:
             raise ValueError(f"limits.{name} must be positive.")
     if not config["learning"]["query"].strip():
         raise ValueError("The learning demonstration requires a nonempty query for the new session.")
-    storage = ROOT / ".state" / namespace
-    storage.mkdir(parents=True, exist_ok=True)
-    identity = {key: config["models"][key] for key in ("embedding", "embedding_dimensions")}
-    manifest = storage / "embedding.json"
-    if manifest.exists() and json.loads(manifest.read_text()) != identity:
-        raise ValueError("Embedding configuration changed. Choose a fresh WORKSHOP_NAMESPACE.")
-    manifest.write_text(json.dumps(identity, indent=2) + "\n")
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8]
     run = ROOT / "runs" / namespace / f"{run_id}-{experiment}"
     run.mkdir(parents=True)
-    endpoints = {
-        role: endpoint_for(role, dict(os.environ)) for role in ("llm", "embedding", "ocr", "rerank", "decision")
-    }
-    demo = Demo(
-        config["models"], config["limits"], config["decision"], endpoints, namespace, storage, run, config["learning"]
-    )
-    demo.show(
-        "configuration",
-        {
-            "models": demo.models,
-            "endpoints": {role: endpoint.base_url for role, endpoint in endpoints.items()},
-            "dataset": demo.dataset,
-            "storage": str(storage.relative_to(ROOT)),
-            "run": str(run.relative_to(ROOT)),
-        },
-    )
+    try:
+        storage = ROOT / ".state" / namespace
+        identity = {key: config["models"][key] for key in ("embedding", "embedding_dimensions")}
+        manifest = storage / "embedding.json"
+        try:
+            storage.mkdir(parents=True, exist_ok=True)
+            if manifest.exists():
+                if read_state_object(manifest) != identity:
+                    raise MemoryStateError(MEMORY_STATE_RECOVERY)
+            else:
+                manifest.write_text(json.dumps(identity, indent=2) + "\n")
+        except (OSError, UnicodeError):
+            raise MemoryStateError(MEMORY_STATE_RECOVERY) from None
+        endpoints = {
+            role: endpoint_for(role, dict(os.environ)) for role in ("llm", "embedding", "ocr", "rerank", "decision")
+        }
+        demo = Demo(
+            config["models"],
+            config["limits"],
+            config["decision"],
+            endpoints,
+            namespace,
+            storage,
+            run,
+            config["learning"],
+        )
+        demo.show(
+            "configuration",
+            {
+                "models": demo.models,
+                "endpoints": {role: endpoint.base_url for role, endpoint in endpoints.items()},
+                "dataset": demo.dataset,
+                "storage": str(storage.relative_to(ROOT)),
+                "run": str(run.relative_to(ROOT)),
+            },
+        )
+    except Exception as error:
+        stop_run(run, error)
     return demo
 
 
@@ -232,9 +286,4 @@ def launch(experiment: str, action: Callable[[Demo], Awaitable[None]]) -> None:
     try:
         asyncio.run(bounded())
     except Exception as error:
-        # Upstream errors can contain request headers. Persist the type, not secrets.
-        demo.show("failure", {"type": type(error).__name__, "completed": False})
-        raise SystemExit(
-            f"{experiment} stopped: {type(error).__name__}. Inspect the completed artifacts in {demo.run}; "
-            "check endpoint availability, cold-start budget and context limits. No success was recorded."
-        ) from None
+        stop_run(demo.run, error)

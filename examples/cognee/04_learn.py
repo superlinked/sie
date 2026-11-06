@@ -1,7 +1,6 @@
 """Distill a correction, then verify stored lessons in a separate process."""
 
 import argparse
-import json
 import shlex
 from pathlib import Path
 from typing import Any
@@ -9,17 +8,18 @@ from uuid import uuid4
 
 from sie_cognee.retrieval import SourceChunk, retrieve_chunks
 
-from common import ROOT, Demo, initialize, json_value, launch, seed_memory
-
-MISSING_STATE_RECOVERY = (
-    "Stored embedding identity is missing. Restore the teaching run's original memory directory, including "
-    "embedding.json and cognee/sie-cognee.json, or run 04_learn.py --seed with a fresh WORKSHOP_NAMESPACE "
-    "and verify that new teaching run."
+from common import (
+    MEMORY_STATE_RECOVERY,
+    ROOT,
+    Demo,
+    MemoryStateError,
+    initialize,
+    json_value,
+    launch,
+    read_state_object,
+    record_failure,
+    seed_memory,
 )
-
-
-class MissingMemoryStateError(ValueError):
-    """The local identity markers needed to verify stored memory are absent."""
 
 
 def distillation_summary(result: Any) -> dict[str, Any]:
@@ -50,27 +50,33 @@ def exact_lesson_matches(documents: list[str], chunks: list[SourceChunk]) -> lis
 
 def verification_summary(demo: Demo, prior_run: Path) -> dict[str, Any]:
     """Check the explicit teaching run and stored vector identity before Cognee imports."""
-    configuration = json.loads((prior_run / "configuration.json").read_text())
-    summary = distillation_summary(json.loads((prior_run / "actual-distillation.json").read_text()))
-    if not isinstance(configuration, dict) or configuration.get("dataset") != demo.dataset:
-        raise ValueError("The teaching run uses a different dataset; use its original WORKSHOP_NAMESPACE.")
+    configuration = read_state_object(prior_run / "configuration.json")
+    try:
+        summary = distillation_summary(read_state_object(prior_run / "actual-distillation.json"))
+    except ValueError:
+        raise MemoryStateError(MEMORY_STATE_RECOVERY) from None
+    if configuration.get("dataset") != demo.dataset:
+        raise MemoryStateError(MEMORY_STATE_RECOVERY)
     models = configuration.get("models")
     if not isinstance(models, dict):
-        raise ValueError("The teaching run is missing its recorded model configuration.")
+        raise MemoryStateError(MEMORY_STATE_RECOVERY)
     expected = {key: demo.models[key] for key in ("embedding", "embedding_dimensions")}
     if {key: models.get(key) for key in expected} != expected:
-        raise ValueError("Use the teaching run's embedding model and dimensions when verifying its memory.")
+        raise MemoryStateError(MEMORY_STATE_RECOVERY)
     embedding_manifest = demo.storage / "embedding.json"
     cognee_marker = demo.storage / "cognee/sie-cognee.json"
-    if not embedding_manifest.is_file() or not cognee_marker.is_file():
-        raise MissingMemoryStateError(MISSING_STATE_RECOVERY)
-    stored = json.loads(embedding_manifest.read_text())
-    owned = json.loads(cognee_marker.read_text())
+    try:
+        if not embedding_manifest.is_file() or not cognee_marker.is_file():
+            raise MemoryStateError(MEMORY_STATE_RECOVERY)
+    except OSError:
+        raise MemoryStateError(MEMORY_STATE_RECOVERY) from None
+    stored = read_state_object(embedding_manifest)
+    owned = read_state_object(cognee_marker)
     if stored != expected or owned != {
         "embedding_model": expected["embedding"],
         "embedding_dimensions": expected["embedding_dimensions"],
     }:
-        raise ValueError("Stored embedding identity differs from the teaching run; verify its original memory.")
+        raise MemoryStateError(MEMORY_STATE_RECOVERY)
     return summary
 
 
@@ -165,8 +171,10 @@ async def main(demo: Demo) -> None:
     if args.verify_run is not None:
         try:
             await verify(demo, args.verify_run)
-        except MissingMemoryStateError:
-            parser.error(MISSING_STATE_RECOVERY)
+        except MemoryStateError as error:
+            saved = record_failure(demo.run, error)
+            note = "" if saved else " Could not write failure.json."
+            parser.error(MEMORY_STATE_RECOVERY + note)
     else:
         await teach(demo, seed=args.seed)
 
