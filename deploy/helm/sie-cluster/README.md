@@ -601,10 +601,11 @@ read-only as a file of mode `0440` owned by group 65532, under
 `--api-key-file`. The applier sends the admin token only on pool writes to the
 in-cluster gateway Service, never the client token on writes, and never takes a
 token on its command line or prints or logs one: a rejected token file is named
-by its path, and a failed gateway call by the server's error message or the
-exception type. Anyone who can read the applier's log sees lane telemetry and
-floors, not credentials. Anyone who can create pods in the namespace with that
-Secret can still read it, so the Secret read limits under
+by its path, and a failed gateway call by the server's error message, a failed
+connection by the SDK's connection error message, and any other transport
+failure by its exception type. Anyone who can read the applier's log sees lane
+telemetry and floors, not credentials. Anyone who can create pods in the
+namespace with that Secret can still read it, so the Secret read limits under
 [Who holds which token](#who-holds-which-token) apply.
 
 The applier reads both token files once, when it starts. After you rotate the
@@ -618,11 +619,13 @@ kubectl rollout restart deployment/<FULLNAME>-gateway -n <NAMESPACE>
 kubectl rollout restart deployment/<FULLNAME>-placement-applier -n <NAMESPACE>
 ```
 
-The cutover is complete once both run with the new token. Until then the
-gateway refuses the applier's pool reads or writes and the pod keeps running:
-each tick's audit rows record the failures, and in apply mode each carrier
-lapses 1200 seconds after its last write and the lane returns to the largest
-floor its chart and its other pools set.
+The cutover is complete once both run with the new token. Pool reads use the
+client token and pool writes the admin token, so a stale client token makes the
+gateway refuse the applier's reads, and a tick that cannot read a carrier does
+not write it, while a stale admin token makes it refuse only the writes. Either
+way the pod keeps running: each tick's audit rows record the failures, and in
+apply mode each carrier lapses 1200 seconds after its last write and the lane
+returns to the largest floor its chart and its other pools set.
 
 The Deployment runs one replica with the `Recreate` strategy, so at most one
 applier writes carriers, also during a rollout. Its pod runs as user and group
