@@ -9,6 +9,7 @@ standard framework interfaces.
 | Package | Framework | Install | Status |
 |---------|-----------|---------|--------|
 | `sie-chroma` | Chroma | `pip install sie-chroma` | Ready |
+| [`sie-cognee`](./sie_cognee) | Cognee | [Install from source](./sie_cognee/README.md) | Source preview |
 | `sie-crewai` | CrewAI | `pip install sie-crewai` | Ready |
 | `sie-dspy` | DSPy | `pip install sie-dspy` | Ready |
 | `sie-haystack` | Haystack | `pip install sie-haystack` | Ready |
@@ -19,6 +20,11 @@ standard framework interfaces.
 | `sie-weaviate` | Weaviate | `pip install sie-weaviate` | Ready |
 
 ## Quick Start
+
+For persistent graph memory with SIE inference, start with the
+[four Cognee experiments](../examples/cognee): memory, OCR, evidence-based
+decisions, and learning from corrections. The Cognee integration configures
+its supported compatible providers and adds source-preserving helpers.
 
 ```python
 # LangChain example

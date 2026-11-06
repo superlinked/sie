@@ -20,6 +20,7 @@
         { "type": "toml", "path": "integrations/sie_dspy/pyproject.toml", "jsonpath": "$.project.version" },
         { "type": "toml", "path": "integrations/sie_crewai/pyproject.toml", "jsonpath": "$.project.version" },
         { "type": "toml", "path": "integrations/sie_chroma/pyproject.toml", "jsonpath": "$.project.version" },
+        { "type": "toml", "path": "integrations/sie_cognee/pyproject.toml", "jsonpath": "$.project.version" },
         { "type": "toml", "path": "integrations/sie_lancedb/pyproject.toml", "jsonpath": "$.project.version" },
         { "type": "toml", "path": "integrations/sie_qdrant/pyproject.toml", "jsonpath": "$.project.version" },
         { "type": "toml", "path": "integrations/sie_weaviate/pyproject.toml", "jsonpath": "$.project.version" },
