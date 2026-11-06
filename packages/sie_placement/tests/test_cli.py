@@ -522,6 +522,11 @@ def test_a_gateway_url_that_is_not_a_plain_base_url_is_refused_without_echoing_i
     assert prometheus.requests == []
 
 
+def test_a_gateway_url_httpx_cannot_parse_is_refused_without_echoing_it():
+    with pytest.raises(ValueError, match=r"^the gateway URL is not a valid URL$"):
+        pools.connect(f"http://user:{PASSWORD}@sie-gateway:notaport", READ_TOKEN)
+
+
 def test_a_token_an_http_header_cannot_encode_is_refused_without_echoing_it(gateway):
     with pytest.raises(ValueError, match=r"^a gateway token holds a character that an HTTP header cannot carry$"):
         pools.connect(gateway.url, "caf\u00e9-secret")
@@ -539,6 +544,8 @@ def write_carrier(writer: pools.SdkPools) -> None:
     ("reply", "message"),
     [
         ((200, NESTED), "the gateway returned an unexpected response"),
+        ((307, json.dumps({"spec": {"name": CARRIER}}).encode()), "the gateway answered HTTP 307"),
+        ((302, b"{}"), "the gateway answered HTTP 302"),
     ],
 )
 def test_a_pool_reply_the_applier_cannot_use_fails_the_call(gateway, reply, message):
@@ -565,6 +572,25 @@ def test_a_deeply_nested_pool_reply_fails_only_the_tick(gateway, prometheus, rea
         "reading pool 'placement-floor-default-a100-80gb-generation' failed: "
         "the gateway returned an unexpected response",
     ]
+
+
+def test_a_redirected_write_is_not_recorded_as_applied(gateway, prometheus, read_token_file, monkeypatch, capsys):
+    monkeypatch.setenv("SIE_ADMIN_TOKEN", ADMIN_TOKEN)
+    gateway.auth = False
+    original = gateway.respond
+
+    def redirect_writes(handler: _Handler, method: str, body: object) -> None:
+        gateway.raw_reply = (307, json.dumps({"spec": body}).encode()) if method == "POST" else None
+        original(handler, method, body)
+
+    monkeypatch.setattr(gateway, "respond", redirect_writes)
+    assert tune(gateway, prometheus, "--api-key-file", str(read_token_file), "--apply") == cli.EXIT_FAILED
+    written = [row for row in rows(capsys.readouterr().out) if row["floor"]]
+    assert written
+    for row in written:
+        assert row["applied"] is False
+        assert "the gateway answered HTTP 307" in row["error"]
+    assert gateway.pools == {}
 
 
 def test_a_malformed_pool_reply_fails_only_the_tick(gateway, prometheus, read_token_file, capsys):
