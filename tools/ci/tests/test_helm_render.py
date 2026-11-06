@@ -3361,14 +3361,10 @@ def test_client_and_worker_tokens_are_kept_apart_from_every_wired_secret_key(
             "sie-admin",
             "password",
         ),
+        ({"fullnameOverride": "dashboard"}, "dashboard", "admin-password"),
         (
-            {"fullnameOverride": "dashboard", "admin": {"existingSecret": "{{ .Values.fullnameOverride }}"}},
-            "dashboard",
-            "admin-password",
-        ),
-        (
-            {"admin": {"existingSecret": "{{ .Values.admin.userKey }}-admin", "userKey": "dashboard"}},
-            "dashboard-admin",
+            {"admin": {"existingSecret": "{{- .Release.Namespace -}}-admin", "userKey": "dashboard"}},
+            "sie-admin",
             "dashboard",
         ),
     ],
@@ -4731,24 +4727,37 @@ def test_the_applier_client_token_is_kept_apart_from_the_grafana_admin_secret_wh
 
 
 @pytest.mark.parametrize(
-    ("existing", "refused"),
+    "existing",
     [
-        ('{{ .Template.Name | base | trimSuffix ".yaml" }}', True),
-        ("{{ $.Template.BasePath | base }}-graf", True),
-        ("{{ .Release.Name }}-graf", False),
+        '{{ if contains "grafana" (index . "Template" "BasePath") }}shared{{ else }}other{{ end }}',
+        '{{ .Template.Name | base | trimSuffix ".yaml" }}',
+        "{{ .Chart.Name }}-admin",
+        "{{ .Values.x }}",
+        '{{ include "grafana.fullname" . }}',
+        "{{ .Release.Name | upper }}-graf",
+        "Graf-{{ .Release.Name }}",
     ],
-    ids=["template-name", "template-base-path", "release-name"],
+    ids=["index-template", "template", "chart", "values", "include", "pipeline", "uppercase"],
 )
-def test_a_grafana_admin_secret_that_reads_the_template_is_refused(
-    tmp_path: Path, existing: str, refused: bool
+def test_a_grafana_admin_secret_that_depends_on_more_than_the_release_is_refused(
+    tmp_path: Path, existing: str
 ) -> None:
     values = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": existing}}}}
     result = render_chart(tmp_path, values)
-    if refused:
-        assert result.returncode != 0
-        assert "kube-prometheus-stack.grafana.admin.existingSecret must not reference .Template" in result.stderr
-    else:
-        assert result.returncode == 0, result.stderr
+    assert result.returncode != 0
+    assert "kube-prometheus-stack.grafana.admin.existingSecret may hold only lowercase letters, digits" in (
+        result.stderr
+    )
+
+
+@pytest.mark.parametrize(
+    "existing",
+    ["{{ .Release.Name }}-graf", "{{- .Release.Namespace -}}-graf", "{{ $.Release.Name }}-graf", "graf"],
+)
+def test_a_grafana_admin_secret_that_depends_only_on_the_release_renders(tmp_path: Path, existing: str) -> None:
+    values = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": existing}}}}
+    result = render_chart(tmp_path, values)
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize(
