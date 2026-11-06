@@ -94,6 +94,45 @@ lane's `maxContainers`. `bufferMin` with `bufferMax`, and
 `scaledownWindowMinS` with `scaledownWindowMaxS`, are optional pairs for
 platforms that can move a warm buffer or a scale-down window per lane.
 
+## Tuner
+
+`sie_placement.tuner.step(envelope, observation, current)` decides one tick of
+an online tuner for one lane. It is a pure function, so every applier calls the
+same decision. The `Observation` gives the containers running on the lane, the
+requests waiting for capacity, the requests in flight and an `attainment` of
+`met`, `breached` or `unmeasured`. An attainment given as its wire string reads
+as that value, and any other value is rejected. `current` is the `Settings` in
+force on the lane: the floor, and optionally the buffer and the scale-down
+window. The result is a `Step`, one action and the settings to apply.
+
+An applier reads `current` on every tick from the platform that scales the
+lane, or records it again whenever a deploy or another writer resets those
+settings. It never feeds the previous `Step.settings` back in as `current`
+across such a reset, because the step then steers from settings the lane no
+longer has. It applies `Step.settings` whenever they differ from `current`,
+whatever the action. The action labels the decision for the audit record.
+
+| Action | When | Settings |
+| --- | --- | --- |
+| `raise_to_floor` | The current floor is below `floorMin` | Floor `floorMin`, and a buffer or window outside its range brought inside it |
+| `hold_at_cap` | The current floor is above `floorMax`, or the lane is under pressure and every tuned setting is at its maximum | Floor `floorMax` if it was above it, and a buffer or window outside its range brought inside it. Otherwise unchanged |
+| `scale_up` | Requests wait or the service level is breached, and the lane runs at least its current floor | Floor and buffer one container higher and window halfway to its maximum, each up to the top of its range |
+| `scale_down` | Nothing waits, nothing is in flight and the service level is not breached | Floor and buffer one container lower and window halfway to its minimum, each down to the bottom of its range |
+| `hold` | Otherwise, including a lane under pressure that has not yet started its current floor | Unchanged, except that a buffer or window outside its range is brought inside it |
+
+Every returned setting lies inside the envelope. `hold` and `hold_at_cap`
+return settings other than `current` only when `current` lay outside it. The
+buffer and the window are tuned only when the envelope declares their range
+and `current` carries a value, and otherwise pass through unchanged, so an
+applier that moves only the floor passes `Settings(floor=n)`. The floor never
+depends on the buffer or the window. An `unmeasured` attainment steers on the
+queue alone, as `met` does.
+
+A deploy that resets the applied settings to the envelope minimum is a fresh
+start: read back as `current`, the settings climb one step per tick under
+steady demand until the lane serves the demand or reaches the top of its
+envelope.
+
 ## Tests
 
 ```bash
