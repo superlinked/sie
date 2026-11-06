@@ -604,12 +604,13 @@ read-only as a file of mode `0440` owned by group 65532, under
 `--api-key-file`. The applier sends the admin token only on pool writes to the
 in-cluster gateway Service, never the client token on writes, and never takes a
 token on its command line or prints or logs one: a rejected token file is named
-by its path, and a failed gateway call by the server's error message, a failed
-connection by the SDK's connection error message, and any other transport
-failure by its exception type. Anyone who can read the applier's log sees lane
-telemetry and floors, not credentials. Anyone who can create pods in the
-namespace with that Secret can still read it, so the Secret read limits under
-[Who holds which token](#who-holds-which-token) apply.
+by its path, a gateway call that gets an error reply by its HTTP status alone,
+so no text the server returns reaches the log, a failed connection by the SDK's
+connection error message, and any other transport failure by its exception
+type. Anyone who can read the applier's log sees lane telemetry and floors, not
+credentials. Anyone who can create pods in the namespace with that Secret can
+still read it, so the Secret read limits under [Who holds which
+token](#who-holds-which-token) apply.
 
 The applier reads both token files once, when it starts. After you rotate the
 gateway client token, restart it as step 2 of
