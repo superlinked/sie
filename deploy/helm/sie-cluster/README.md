@@ -1833,6 +1833,16 @@ workloads, not every dependency. These rules follow the versions in `Chart.lock`
 | Loki NGINX gateway basic auth | Literal `gateway.basicAuth.existingSecret` or gateway fullname, `.htpasswd`; excludes the enterprise GEL gateway. |
 | Loki's optional MinIO | Literal MinIO `existingSecret` or MinIO fullname, `rootUser` / `rootPassword`. |
 
+Grafana evaluates `kube-prometheus-stack.grafana.admin.existingSecret` as a
+template in its own chart, and the chart evaluates it the same way to find the
+admin Secret Grafana reads. A value that holds `{{` may therefore hold only
+lowercase letters, digits, `-`, `.`, whitespace and actions that name a field
+path of `.Release`, `.Values` or `.Chart`, such as
+`{{ .Release.Name }}-grafana-admin`. An action may use `{{-` and `-}}` trim
+markers, a leading `$` and whitespace around the field path, and `.Values` is
+the Grafana chart's values. The render fails for any other action, including
+`include`, `template`, function calls, pipelines and comments.
+
 This is not an inventory of arbitrary dependency configuration. Operators must
 keep SIE credentials separate from Grafana `envValueFrom` / `envFromSecret`,
 extra env/volumes, raw Loki/enterprise/cloud-storage configuration, MinIO extra

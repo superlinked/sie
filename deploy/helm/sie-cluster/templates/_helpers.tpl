@@ -160,7 +160,7 @@ Mirrors kube-prometheus-stack's fullname helper truncation and service suffix.
 {{- default .Release.Namespace $grafana.namespaceOverride -}}
 {{- end }}
 
-{{/* Mirror the vendored Grafana subchart's fullname and admin Secret rules. */}}
+{{/* Mirror the vendored Grafana subchart's fullname rules. */}}
 {{- define "sie-cluster.kubePrometheusStack.grafanaFullname" -}}
 {{- $values := (index .Values "kube-prometheus-stack") | default dict -}}
 {{- $grafana := $values.grafana | default dict -}}
@@ -177,13 +177,12 @@ Mirrors kube-prometheus-stack's fullname helper truncation and service suffix.
 {{- end }}
 
 {{- define "sie-cluster.kubePrometheusStack.grafanaAdminSecretName" -}}
-{{- $values := (index .Values "kube-prometheus-stack") | default dict -}}
-{{- $grafana := $values.grafana | default dict -}}
-{{- $admin := $grafana.admin | default dict -}}
-{{- if $admin.existingSecret -}}
-{{- tpl ($admin.existingSecret | toString) . -}}
-{{- else -}}
-{{- include "sie-cluster.kubePrometheusStack.grafanaFullname" . -}}
+{{- $root := . -}}
+{{- with index .Subcharts "kube-prometheus-stack" -}}
+{{- with index .Subcharts "grafana" -}}
+{{- $context := merge (dict "Template" $root.Template) . -}}
+{{- tpl .Values.admin.existingSecret $context | default (include "grafana.fullname" .) | trim -}}
+{{- end -}}
 {{- end -}}
 {{- end }}
 
@@ -1301,8 +1300,8 @@ token-separation check and the upstream-key collision check read this list.
 {{- with index .Subcharts "grafana" -}}
 {{- if eq (include "grafana.namespace" .) (include "sie-cluster.namespace" $root) -}}
 {{- $existingSecret := toString (default "" .Values.admin.existingSecret) -}}
-{{- if and (contains "{{" $existingSecret) (not (regexMatch `^([a-z0-9.-]|\{\{-? *\$?\.(Release|Values|Chart)(\.[A-Za-z0-9_]+)+ *-?\}\})+$` $existingSecret)) -}}
-{{- fail (printf "kube-prometheus-stack.grafana.admin.existingSecret may hold only lowercase letters, digits, '-', '.' and actions that name a field of .Release, .Values or .Chart, such as {{ .Release.Name }}, optionally with {{- -}} trim markers or a leading $: the Grafana chart evaluates it in its own templates, so the chart can check the Secret Grafana reads only when it depends on nothing but those fields, got %q" $existingSecret) -}}
+{{- if and (contains "{{" $existingSecret) (not (regexMatch `^([a-z0-9. \t\r\n-]|\{\{-?[ \t\r\n]*\$?\.(Release|Values|Chart)(\.[A-Za-z0-9_]+)+[ \t\r\n]*-?\}\})+$` $existingSecret)) -}}
+{{- fail (printf "kube-prometheus-stack.grafana.admin.existingSecret may hold only lowercase letters, digits, '-', '.', whitespace and actions that name a field of .Release, .Values or .Chart, such as {{ .Release.Name }}, optionally with {{- -}} trim markers or a leading $: the Grafana chart evaluates it in its own templates, so the chart can check the Secret Grafana reads only when it depends on nothing but those fields, got %q" $existingSecret) -}}
 {{- end -}}
 {{- $context := merge (dict "Template" $root.Template) . -}}
 {{- $secretName := tpl .Values.admin.existingSecret $context | default (include "grafana.fullname" .) -}}

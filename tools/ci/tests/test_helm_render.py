@@ -4726,8 +4726,14 @@ def test_the_applier_mounts_the_trimmed_client_token_secret_key(tmp_path: Path) 
             "kube-prometheus-stack.grafana.admin.existingSecret must name a Kubernetes Secret (lowercase letters, "
             "digits, '-' and '.'), got \"graf #x\"",
         ),
+        (
+            "{{\t.Release.Name }}-graf\n",
+            "sie-graf",
+            "The placement applier client token and the Grafana admin password are the same Secret key "
+            "(sie-graf/admin-password)",
+        ),
     ],
-    ids=["both-spaced", "grafana-spaced", "grafana-comment"],
+    ids=["both-spaced", "grafana-spaced", "grafana-comment", "template-spaced"],
 )
 def test_the_applier_client_token_is_kept_apart_from_the_grafana_admin_secret_whatever_its_spelling(
     tmp_path: Path, existing: str, client: str, error: str
@@ -4751,6 +4757,8 @@ def test_the_applier_client_token_is_kept_apart_from_the_grafana_admin_secret_wh
         "{{ .Release.Name | upper }}-graf",
         "{{ .Capabilities.KubeVersion.Major }}-graf",
         "Graf-{{ .Release.Name }}",
+        "{{/* c */}}graf",
+        '{{ printf "%s-graf" .Release.Name }}',
     ],
     ids=[
         "index-template",
@@ -4762,6 +4770,8 @@ def test_the_applier_client_token_is_kept_apart_from_the_grafana_admin_secret_wh
         "pipeline",
         "capabilities",
         "uppercase",
+        "comment",
+        "function",
     ],
 )
 def test_a_grafana_admin_secret_that_depends_on_more_than_the_release_is_refused(tmp_path: Path, existing: str) -> None:
@@ -4781,6 +4791,9 @@ def test_a_grafana_admin_secret_that_depends_on_more_than_the_release_is_refused
         "{{ $.Release.Name }}-graf",
         "{{ .Chart.Name }}-admin",
         "graf",
+        "{{\t.Release.Name\t}}-graf",
+        "{{\n.Release.Name\n}}-graf",
+        " {{ .Release.Name }}-graf\n",
     ],
 )
 def test_a_grafana_admin_secret_that_names_release_values_or_chart_fields_renders(
@@ -4789,6 +4802,37 @@ def test_a_grafana_admin_secret_that_names_release_values_or_chart_fields_render
     values = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": existing}}}}
     result = render_chart(tmp_path, values)
     assert result.returncode == 0, result.stderr
+
+
+def grafana_admin_password_secret(documents: list[dict]) -> str:
+    (variable,) = [
+        variable
+        for doc in documents
+        if doc["kind"] == "Deployment"
+        for container in doc["spec"]["template"]["spec"]["containers"]
+        if container["name"] == "grafana"
+        for variable in container.get("env", [])
+        if variable["name"] == "GF_SECURITY_ADMIN_PASSWORD"
+    ]
+    return variable["valueFrom"]["secretKeyRef"]["name"]
+
+
+@pytest.mark.parametrize(
+    ("existing", "secret"),
+    [
+        ("", "sie-grafana"),
+        ("graf", "graf"),
+        ("{{ .Values.admin.userKey }}-admin", "admin-user-admin"),
+        ("{{ .Chart.Name }}-admin", "grafana-admin"),
+        ("{{ .Release.Name }}-graf\n", "sie-graf"),
+    ],
+    ids=["default", "literal", "grafana-values", "grafana-chart", "trailing-newline"],
+)
+def test_the_notes_name_the_grafana_admin_secret_that_grafana_reads(tmp_path: Path, existing: str, secret: str) -> None:
+    values = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": existing}}}}
+    assert grafana_admin_password_secret(rendered_documents(tmp_path, values)) == secret
+    notes = rendered_notes(tmp_path, values)
+    assert f"Grafana password: kubectl get secret -n sie {secret} -o jsonpath=" in notes
 
 
 @pytest.mark.parametrize("value", ["null", "true", "no", "123", "1e3", "0x1f", "12.5", "0b-1", "0b-10"])
