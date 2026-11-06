@@ -1,0 +1,24 @@
+sie_id: perplexity-ai/pplx-decider-v1.2
+hf_id: perplexity-ai/pplx-decider-v1.2
+hf_revision: cce0f3f80033e9d89d80831d5281fd72124aacce
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 8192
+profiles:
+  default:
+    max_batch_tokens: 8192
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.pplx_decider.adapter:PerplexityDecisionAdapter
+    adapter_options:
+      loadtime:
+        max_forward_tokens: 8192
+      runtime: {}
+description: Perplexity Decider v1.2 typed text decisions over the 27B Qwen3.5 architecture. Joint protocol v3 with
+  checkpoint-calibrated readouts for choice, noul and score questions.

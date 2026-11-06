@@ -53,9 +53,15 @@ pub(crate) const MAX_RETRY_AFTER_S: u64 = 60;
 /// Adapter modules that answer typed questions: the modules of the single
 /// server's `DECISION_ADAPTERS` (`sie_server.api.systemone`), which names
 /// their classes.
-const DECISION_ADAPTER_MODULES: [&str; 2] = [
+const DECISION_ADAPTER_MODULES: [&str; 8] = [
     "sie_server.adapters.gliner2.decide",
+    "sie_server.adapters.gliner2.decide_lora",
     "sie_server.adapters.laya.adapter",
+    "sie_server.adapters.laya.runtime_lora",
+    "sie_server.adapters.pplx_decider.adapter",
+    "sie_server.adapters.pplx_decider.runtime_lora",
+    "sie_server.adapters.decision.qwen",
+    "sie_server.adapters.sglang.decision",
 ];
 /// Request fields for media the decision models cannot read.
 const MEDIA_FIELDS: [&str; 3] = ["images", "audio", "videos"];
@@ -671,6 +677,21 @@ mod tests {
     fn fixture() -> Value {
         serde_json::from_str(include_str!("../../../wire-fixtures/systemone.json"))
             .expect("systemone fixture")
+    }
+
+    #[test]
+    fn decision_adapter_modules_match_the_python_contract() {
+        let document = fixture();
+        let mut expected: Vec<_> = document["decision_adapters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|adapter| adapter.as_str().unwrap().split(':').next().unwrap())
+            .collect();
+        let mut actual = DECISION_ADAPTER_MODULES.to_vec();
+        expected.sort_unstable();
+        actual.sort_unstable();
+        assert_eq!(actual, expected);
     }
 
     #[test]

@@ -1,0 +1,32 @@
+sie_id: PelaAI/KnowLine-31B-Gen1
+pool: decision
+hf_id: PelaAI/KnowLine-31B-Gen1
+hf_revision: 8f052a8130e599b53e5324c34f0f5ff90696e1c6
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 8192
+profiles:
+  default:
+    max_batch_tokens: 8192
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.decision:SGLangDecisionAdapter
+    adapter_options:
+      loadtime:
+        max_forward_tokens: 8192
+        structured_noul: true
+        temperatures:
+          score: 0.6944
+        mem_fraction_static: 0.9
+        extra_launch_args:
+        - --enable-fp32-lm-head
+        - --disable-radix-cache
+      runtime: {}
+description: KnowLine-31B typed text decisions over Gemma 4. Preserves the release read-twice prompt, BF16 backbone,
+  FP32 option-token readout and score calibration through SGLang.

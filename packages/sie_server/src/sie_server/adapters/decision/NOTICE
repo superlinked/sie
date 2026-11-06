@@ -1,0 +1,37 @@
+The decision prompt recipes and block-attention implementation are adapted
+from the following independently maintained reference implementations:
+
+d3-code-readout-v1 (Apache-2.0):
+https://huggingface.co/vllm-sr/d3-ultra/tree/37fee01926f3de396620e794201b074fb427ac2d
+
+qev-labels-v2 (Apache-2.0), with the checkpoint's serving patch:
+https://github.com/OmniJev/OneJev/tree/81ce62f1597c91e46767d4d02d6ac2e18534fe94
+https://huggingface.co/baselabs/elephant-1/tree/14537f08b0374edf9867ed0a4d2bd8df59e0400c
+
+KnowLine serving and read-twice layout (MIT):
+https://huggingface.co/PelaAI/KnowLine-4B-Gen5.5/tree/779944d2cc8ffa19cef386aee83c83bcb967ade2
+https://huggingface.co/PelaAI/KnowLine-31B-Gen1/tree/8f052a8130e599b53e5324c34f0f5ff90696e1c6
+Copyright (c) 2026 AnyJev contributors
+
+Choice and score confidence formulas are also described by the TypeSafe
+System One adapter (MIT, Copyright (c) 2026 TypeSafe AI).
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.

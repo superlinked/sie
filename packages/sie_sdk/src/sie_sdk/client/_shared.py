@@ -1005,6 +1005,21 @@ def _parse_nonnegative_meter_header(headers: Any, name: str) -> int | None:
     return parsed if parsed <= _MAX_METER_VALUE else None
 
 
+def _parse_request_meter(headers: Any, body: Any, unit: str) -> int | None:
+    header = REQUEST_USAGE_HEADERS[unit]
+    if any(_header_value(headers, name) is not None for name in REQUEST_USAGE_HEADERS.values()):
+        return _parse_nonnegative_meter_header(headers, header)
+    if not isinstance(body, dict) or not any(isinstance(body.get(key), list) for key in ("items", "scores")):
+        return None
+    usage = body.get("usage")
+    value = usage.get(unit) if isinstance(usage, dict) else None
+    if unit == "content_input_tokens" and isinstance(usage, dict):
+        details = usage.get("input_tokens_details")
+        if isinstance(details, dict) and "content_tokens" in details:
+            value = details["content_tokens"]
+    return value if type(value) is int and 0 <= value <= _MAX_METER_VALUE else None
+
+
 _GATEWAY_TIMING_HEADERS = {
     "publish_ms": "x-queue-publish-time",
     "result_wait_ms": "x-queue-wait-time",
@@ -1112,6 +1127,9 @@ def parse_request_metadata(headers: Any, body: Any = None) -> RequestMetadata | 
     non-empty visible ASCII without surrounding whitespace. If no valid fields
     remain, no metadata is attached.
 
+    Native body meters are used only when no meter header is present. Header
+    readings stay separate, including incomplete or invalid observations.
+
     ``body`` is the decoded response envelope, when the caller has one. The
     settled charge is read from its ``usage`` block FIRST and falls back to the
     ``x-sie-credits-debited`` header, which is the only source on a gateway
@@ -1131,13 +1149,13 @@ def parse_request_metadata(headers: Any, body: Any = None) -> RequestMetadata | 
         metadata["id"] = request_id
 
     usage: RequestUsage = {}
-    input_tokens = _parse_nonnegative_meter_header(headers, REQUEST_USAGE_HEADERS["input_tokens"])
-    pairs = _parse_nonnegative_meter_header(headers, REQUEST_USAGE_HEADERS["pairs"])
-    content_input_tokens = _parse_nonnegative_meter_header(headers, REQUEST_USAGE_HEADERS["content_input_tokens"])
-    images = _parse_nonnegative_meter_header(headers, REQUEST_USAGE_HEADERS["images"])
-    pages = _parse_nonnegative_meter_header(headers, REQUEST_USAGE_HEADERS["pages"])
-    output_tokens = _parse_nonnegative_meter_header(headers, REQUEST_USAGE_HEADERS["output_tokens"])
-    audio_ms = _parse_nonnegative_meter_header(headers, REQUEST_USAGE_HEADERS["audio_ms"])
+    input_tokens = _parse_request_meter(headers, body, "input_tokens")
+    pairs = _parse_request_meter(headers, body, "pairs")
+    content_input_tokens = _parse_request_meter(headers, body, "content_input_tokens")
+    images = _parse_request_meter(headers, body, "images")
+    pages = _parse_request_meter(headers, body, "pages")
+    output_tokens = _parse_request_meter(headers, body, "output_tokens")
+    audio_ms = _parse_request_meter(headers, body, "audio_ms")
     if input_tokens is not None:
         usage["input_tokens"] = input_tokens
     if pairs is not None:

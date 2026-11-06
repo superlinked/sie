@@ -19,6 +19,7 @@ adapters:
 # Perplexity's native calibrated decision readout (Qwen3.8/Qwen3.5 architecture).
 - sie_server.adapters.pplx_decider.adapter
 - sie_server.adapters.pplx_decider.runtime_lora
+- sie_server.adapters.decision.qwen
 # SAM 3 open-vocabulary detection (Sam3Model / Sam3Processor exist only in transformers 5.x).
 - sie_server.adapters.sam3.adapter
 # EmbeddingGemma 2 text embeddings (EmbeddingGemma2Model). The class first
