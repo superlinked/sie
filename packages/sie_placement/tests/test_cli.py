@@ -790,29 +790,25 @@ def test_the_gateway_client_verifies_as_httpx_does_and_never_writes_tls_secrets_
     )
 
 
-@pytest.mark.parametrize("key_log", ["directory", "unwritable"])
+@pytest.mark.parametrize("key_log", ["directory", "missing-parent"])
 def test_a_key_log_the_client_cannot_open_neither_stops_it_nor_receives_anything(
     gateway, monkeypatch, tmp_path, key_log
 ):
-    locked = tmp_path / "locked"
-    locked.mkdir()
-    path = locked if key_log == "directory" else locked / "keys.log"
+    directory = tmp_path / "keys"
+    directory.mkdir()
+    path = directory if key_log == "directory" else tmp_path / "missing" / "keys.log"
     monkeypatch.setenv("SSLKEYLOGFILE", str(path))
-    if key_log == "unwritable":
-        locked.chmod(0o500)
+    with pytest.raises(IsADirectoryError if key_log == "directory" else FileNotFoundError):
+        ssl.create_default_context()
+    assert pools._verification(HTTPS_GATEWAY).keylog_filename is None
+    pools.connect(HTTPS_GATEWAY, READ_TOKEN).close()
+    reader = pools.connect(gateway.url, READ_TOKEN)
     try:
-        with pytest.raises(IsADirectoryError if key_log == "directory" else PermissionError):
-            ssl.create_default_context()
-        assert pools._verification(HTTPS_GATEWAY).keylog_filename is None
-        pools.connect(HTTPS_GATEWAY, READ_TOKEN).close()
-        reader = pools.connect(gateway.url, READ_TOKEN)
-        try:
-            assert reader.get_pool(CARRIER) is None
-        finally:
-            reader.close()
-        assert list(locked.iterdir()) == []
+        assert reader.get_pool(CARRIER) is None
     finally:
-        locked.chmod(0o700)
+        reader.close()
+    assert list(directory.iterdir()) == []
+    assert not (tmp_path / "missing").exists()
 
 
 def test_a_ca_bundle_that_cannot_be_loaded_is_refused_before_any_call(monkeypatch, tmp_path):

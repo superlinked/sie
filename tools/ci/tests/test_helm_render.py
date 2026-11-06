@@ -3377,6 +3377,7 @@ def test_client_and_worker_tokens_are_kept_apart_from_every_wired_secret_key(
             "sie-admin",
             "dashboard",
         ),
+        ({"admin": {"existingSecret": "{{ .Chart.Name }}-admin"}}, "grafana-admin", "admin-password"),
     ],
 )
 def test_inference_credentials_cannot_reuse_bundled_grafana_admin_keys(
@@ -4777,6 +4778,21 @@ def test_a_grafana_admin_secret_that_names_release_values_or_chart_fields_render
     result = render_chart(tmp_path, values)
     assert result.returncode == 0, result.stderr
 
+
+
+@pytest.mark.parametrize("value", ["null", "true", "no", "123", "1e3", "0x1f", "12.5"])
+def test_an_unquoted_subchart_secret_name_that_yaml_reads_as_a_scalar_is_refused(tmp_path: Path, value: str) -> None:
+    values = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": value}}}}
+    result = render_chart(tmp_path, values)
+    assert result.returncode != 0
+    assert "is written unquoted by its chart" in result.stderr or "wrong type for value" in result.stderr
+
+
+@pytest.mark.parametrize("value", ["1-graf", "graf-1.2.3", "nullable", "one"])
+def test_an_unquoted_subchart_secret_name_that_yaml_reads_as_a_string_renders(tmp_path: Path, value: str) -> None:
+    values = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": value}}}}
+    result = render_chart(tmp_path, values)
+    assert result.returncode == 0, result.stderr
 
 @pytest.mark.parametrize(
     ("keda", "error"),
