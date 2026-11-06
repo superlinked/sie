@@ -729,8 +729,9 @@ The report renders as a `placement-report` document:
 
 ## Helm values
 
-`helm_values` turns a plan into a values overlay for the `sie-cluster` Helm
-chart, to pass with `-f` after the release's own values:
+`helm_values` turns a plan, such as the `result.plan` of the planner example
+above, into a values overlay for the `sie-cluster` Helm chart, to pass with
+`-f` after the release's own values:
 
 ```python
 import json
@@ -738,7 +739,7 @@ import json
 from sie_placement.helm import ChartParameters, helm_values
 
 with open("placement-values.json", "w", encoding="utf-8") as handle:
-    json.dump(helm_values(plan, ChartParameters(fallback_replicas=2)), handle, indent=2)
+    json.dump(helm_values(result.plan, ChartParameters(fallback_replicas=2)), handle, indent=2)
 ```
 
 | Parameter | Meaning |
@@ -759,8 +760,10 @@ overlay sets:
   `resources` requests and limits equal to the container shape. Each chart
   lane is an enabled `bundles.<bundle>` entry whose `minReplicas` is the
   envelope's `floorMin` and whose `maxReplicas` is `maxContainers`. Every other
-  bundle that `base_pools` enables under the group is set to
-  `enabled: false`, so the release runs no lane the plan does not place.
+  bundle that `base_pools` enables under the group is set to `enabled: false`,
+  so a worker group the overlay emits runs no lane the plan does not place on
+  it. A worker group the plan does not use is not in the overlay and keeps the
+  values beneath it, so the lanes they enable there still run outside the plan.
   `gpu.deviceGroup` is `false` for a single GPU and the `device_groups` entry
   of the machine profile for more.
 - `queueRouting.staticQueuePools.<queuePool>`: one static queue pool for every
