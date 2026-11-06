@@ -203,7 +203,7 @@ def _validate_root_constraints(
             for requirement in constraints[name]
             if requirement.marker is None or requirement.marker.evaluate(target.marker_environment())
         ]
-        if not active or any(
+        if active and any(
             not requirement.specifier.contains(packages[name]["version"], prereleases=True) for requirement in active
         ):
             msg = f"bundle root constraint is not satisfied for target {target.name}: {name}"

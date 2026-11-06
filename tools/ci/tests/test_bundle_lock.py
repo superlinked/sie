@@ -57,6 +57,20 @@ def test_ambiguous_root_versions_without_markers_still_fail(tmp_path):
     assert root_versions_digest(path)
 
 
+def test_inactive_root_constraints_do_not_reject_a_bundle_package(tmp_path):
+    path = tmp_path / "uv.lock"
+    path.write_text(
+        "version = 1\n"
+        '[[package]]\nname = "graph-db"\nversion = "1.0"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        "resolution-markers = [\"sys_platform == 'darwin'\"]\n"
+        '[[package]]\nname = "graph-db"\nversion = "2.0"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        "resolution-markers = [\"sys_platform == 'win32'\"]\n"
+    )
+    _validate_root_constraints({"graph-db": {"version": "1.0"}}, path, {}, Target("cpu", "default", "amd64"))
+
+
 def test_target_matrix_preserves_cpu_arm64_in_addition_to_every_release():
     selected = bundle_lock.targets(bundle_lock.ROOT)
     assert len(selected) == 16
