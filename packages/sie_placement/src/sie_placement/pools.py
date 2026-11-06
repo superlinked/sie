@@ -37,6 +37,7 @@ def _client(base_url: str, api_key: str | None) -> tuple[SIEClient, _Replies, st
             base_url=base_url,
             timeout=TIMEOUT_S,
             follow_redirects=False,
+            trust_env=False,
             event_hooks={"response": [replies]},
         )
     except httpx.InvalidURL:

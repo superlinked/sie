@@ -160,6 +160,14 @@ class FakePrometheus(_Server):
         handler._reply(200, vector())
 
 
+class FakeProxy(_Server):
+    def respond(self, handler: _Handler, method: str, body: object) -> None:
+        self.requests.append(
+            {"method": method, "target": handler.path, "authorization": handler.headers.get("Authorization")}
+        )
+        handler._reply(502, {"detail": "this proxy forwards nothing"})
+
+
 def _serve(server: _Server) -> Iterator[_Server]:
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
@@ -192,6 +200,11 @@ def gateway() -> Iterator[FakeGateway]:
 @pytest.fixture
 def prometheus() -> Iterator[FakePrometheus]:
     yield from _serve(FakePrometheus())
+
+
+@pytest.fixture
+def proxy() -> Iterator[FakeProxy]:
+    yield from _serve(FakeProxy())
 
 
 @pytest.fixture
@@ -654,6 +667,28 @@ def test_an_error_the_sdk_raises_before_any_reply_is_redacted_and_cut():
     assert BACKSLASH_ADMIN_TOKEN not in error
     assert error.startswith("connection error after sending Bearer [redacted] x")
     assert len(error) == pools.MAX_ERROR_LENGTH
+
+
+@pytest.mark.parametrize("variable", ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"])
+def test_the_gateway_client_sends_no_token_through_a_proxy_the_environment_names(gateway, proxy, monkeypatch, variable):
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(variable, proxy.url)
+    reader = pools.connect(gateway.url, READ_TOKEN)
+    try:
+        assert reader.get_pool(CARRIER) is None
+    finally:
+        reader.close()
+    writer = pools.connect(gateway.url, ADMIN_TOKEN)
+    try:
+        write_carrier(writer)
+    finally:
+        writer.close()
+    assert proxy.requests == []
+    assert [(request["method"], request["authorization"]) for request in gateway.requests] == [
+        ("GET", f"Bearer {READ_TOKEN}"),
+        ("POST", f"Bearer {ADMIN_TOKEN}"),
+    ]
 
 
 def test_a_malformed_pool_reply_fails_only_the_tick(gateway, prometheus, read_token_file, capsys):

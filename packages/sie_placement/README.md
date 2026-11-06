@@ -386,7 +386,11 @@ status 1.
 The gateway admin token authorizes every gateway admin route, not only pools.
 The applier reads it only with `--apply`, sends it only on pool writes to
 `--gateway-url`, never takes it as a command-line value and never prints or
-logs it. Without it, `--apply` sends its writes with no credential, which a
+logs it. Its gateway client reads no settings from the environment: it ignores
+`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`, so a proxy configured
+for other traffic never receives either token, and it ignores `SSL_CERT_FILE`
+and `SSL_CERT_DIR`. Prometheus queries, which carry no credential, follow the
+usual proxy variables. Without it, `--apply` sends its writes with no credential, which a
 gateway with token auth refuses. The client token is never sent on writes. A
 refused token is named by its source, never by its value. A gateway call that
 gets an error reply is reported by its HTTP status alone, and so is a reply
