@@ -559,14 +559,18 @@ The render fails unless:
   image that installs `sie-placement` with its `keda` extra and can run as user
   and group 65532. The chart publishes no such image.
   `placementApplier.image.pullPolicy` is `Always`, `IfNotPresent` or `Never`.
-- `placementApplier.plan` is a placement-plan document. Each of its lanes names
-  an enabled worker lane by its `queuePool`, `cell.machineProfile` and
-  `bundle`, compared as the chart canonicalizes lane tokens, and that worker
-  lane declares an `envelope` equal to the plan lane's. A plan therefore cannot
-  move a floor outside a range that the chart values bound. The values overlay
-  that `helm_values` in `sie-placement` emits from a plan sets each lane's
+- `placementApplier.plan` is a map whose `kind` is `placement-plan` and whose
+  `lanes` list holds at least one lane. Each of its lanes names an enabled
+  worker lane by its `queuePool`, `cell.machineProfile` and `bundle`, compared
+  as the chart canonicalizes lane tokens, and that worker lane declares an
+  `envelope` equal to the plan lane's. A plan therefore cannot move a floor
+  outside a range that the chart values bound. The values overlay that
+  `helm_values` in `sie-placement` emits from a plan sets each lane's
   `minReplicas` and `maxReplicas` but no `envelope`, so copy each plan lane's
   `envelope.floorMin` and `envelope.floorMax` into the worker lane it names.
+  The chart checks only these fields. The applier parses the whole plan when
+  it starts and refuses one that is not a valid placement-plan document, an
+  unsupported `schemaVersion` included.
 - With gateway token auth, or a gateway auth mode known only at run time,
   `placementApplier.clientToken.existingSecretName` names a Secret key that
   holds one gateway client token, which the applier presents on pool reads.
