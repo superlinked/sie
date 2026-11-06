@@ -549,7 +549,8 @@ ScaledObject triggers are the same with or without the applier.
 - **Apply mode** (`placementApplier.apply: true`) upserts each lane's carrier on
   every tick, which renews the carrier's lease and sets its floor. When the
   applier stops, each carrier lapses 1200 seconds after its last write by
-  default, the gateway removes it, and the lane returns to its chart floor.
+  default, the gateway removes it, and the lane returns to the largest floor
+  its chart and its other pools set.
 
 The render fails unless:
 
@@ -582,8 +583,9 @@ The applier itself refuses a plan whose `floorMax` exceeds the gateway's
 per-pool floor limit, 4 by default, or whose lanes need more carriers than the
 gateway admits, 64 by default. A refusal, an unreadable token file or an
 invalid flag ends the container, which then shows as `CrashLoopBackOff`. A
-failed Prometheus query or pool call fails only its tick, which the audit row
-records.
+failed Prometheus query or pool call fails only its tick. The applier prints a
+failed query to standard error, and the audit rows show each series it could
+not read as `null`. The audit row's `error` records a failed pool call.
 
 #### Applier permissions
 
@@ -606,16 +608,21 @@ Secret can still read it, so the Secret read limits under
 [Who holds which token](#who-holds-which-token) apply.
 
 The applier reads both token files once, when it starts. After you rotate the
-gateway client token or the gateway admin token, restart it:
+gateway client token, restart it as step 2 of
+[rotating the gateway token](#gateway-token) says. The gateway also reads its
+admin token once, when it starts, and accepts one at a time, so after you
+rotate the gateway admin token, restart the gateway and then the applier:
 
 ```bash
+kubectl rollout restart deployment/<FULLNAME>-gateway -n <NAMESPACE>
 kubectl rollout restart deployment/<FULLNAME>-placement-applier -n <NAMESPACE>
 ```
 
-Until it restarts, the gateway refuses its pool reads or writes and the pod
-keeps running: each tick's audit rows record the failures, and in apply mode
-each carrier lapses 1200 seconds after its last write and the lane returns to
-its chart floor.
+The cutover is complete once both run with the new token. Until then the
+gateway refuses the applier's pool reads or writes and the pod keeps running:
+each tick's audit rows record the failures, and in apply mode each carrier
+lapses 1200 seconds after its last write and the lane returns to the largest
+floor its chart and its other pools set.
 
 The Deployment runs one replica with the `Recreate` strategy, so at most one
 applier writes carriers, also during a rollout. Its pod runs as user and group
