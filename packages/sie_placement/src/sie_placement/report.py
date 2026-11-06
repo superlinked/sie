@@ -45,6 +45,8 @@ class ComeAliveBasis(StrEnum):
 class Measurement(StrEnum):
     RECEIPT = "receipt"
     BOOT_EVIDENCE = "boot-evidence"
+    FOOTPRINT = "footprint"
+    CO_RESIDENCY_RECEIPT = "co-residency-receipt"
 
 
 class RequestReason(StrEnum):
@@ -108,6 +110,7 @@ class Option:
     lane: str | None = None
     fallback_cells: tuple[Cell, ...] = ()
     placement_wait_s: float | None = None
+    co_residents: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return _compact(
@@ -117,6 +120,7 @@ class Option:
                 "containerShape": self.container_shape.to_dict(),
                 "concurrency": self.concurrency,
                 "lane": self.lane,
+                "coResidents": list(self.co_residents) or None,
                 "warmth": self.warmth.value,
                 "monthlyCost": _money(self.monthly_cost),
                 "saving": None if self.saving is None else _money(self.saving),
@@ -173,6 +177,8 @@ class LaneReport:
     envelope_max_monthly_cost: float | None = None
     unpriced_reason: str | None = None
     unpriced_identities: tuple[str, ...] = ()
+    memory_mib: int | None = None
+    memory_limit_mib: float | None = None
 
     @property
     def unpriced(self) -> bool:
@@ -191,6 +197,8 @@ class LaneReport:
                 ),
                 "unpricedReason": self.unpriced_reason,
                 "unpricedIdentities": list(self.unpriced_identities) or None,
+                "memoryMiB": self.memory_mib,
+                "memoryLimitMiB": self.memory_limit_mib,
             }
         )
 
@@ -223,6 +231,7 @@ class MeasurementRequest:
     container_shape: ContainerShape | None = None
     concurrency: int | None = None
     lane: str | None = None
+    co_residents: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return _compact(
@@ -232,6 +241,7 @@ class MeasurementRequest:
                 "containerShape": None if self.container_shape is None else self.container_shape.to_dict(),
                 "concurrency": self.concurrency,
                 "lane": self.lane,
+                "coResidents": list(self.co_residents) or None,
                 "measure": [measurement.value for measurement in self.measure],
                 "warmth": self.warmth.value,
                 "reason": self.reason.value,
@@ -418,6 +428,7 @@ class Report:
     warm_bound_undeclared: tuple[str, ...] = ()
     capacity: tuple[CapacityUse, ...] = ()
     scarcity: tuple[Scarcity, ...] = ()
+    gpu_memory_undeclared: tuple[str, ...] = ()
 
     @property
     def monthly_cost(self) -> float:
@@ -462,6 +473,7 @@ class Report:
             "scarcity": [entry.to_dict() for entry in self.scarcity],
             "queueWaitUnattained": list(self.queue_wait_unattained),
             "warmBoundUndeclared": list(self.warm_bound_undeclared),
+            "gpuMemoryUndeclared": list(self.gpu_memory_undeclared),
             "refusals": [refusal.to_dict() for refusal in self.refusals],
             "changes": {
                 "identities": [change.to_dict() for change in self.identity_changes],

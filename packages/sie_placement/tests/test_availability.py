@@ -55,6 +55,7 @@ L4 = Cell(machine_profile="l4", gpu_product="NVIDIA-L4")
 A100 = Cell(machine_profile="a100-80gb", gpu_product="NVIDIA-A100-SXM4-80GB")
 H100 = Cell(machine_profile="h100", gpu_product="NVIDIA-H100-80GB-HBM3")
 RATES = {L4: 1.0, A100: 3.0, H100: 4.0}
+CARD_MIB = {L4: 23034, A100: 81920, H100: 81559}
 SHAPE = ContainerShape(gpu_count=1, cpu_cores=4, memory_mib=16384)
 PAIR = ContainerShape(gpu_count=2, cpu_cores=8, memory_mib=32768)
 IDENTITY = "org/model"
@@ -68,6 +69,7 @@ PRICES = PriceList(
             accelerator_per_hour=rate,
             core_per_hour=0.0,
             memory_gib_per_hour=0.0,
+            gpu_memory_mib=CARD_MIB[cell],
         )
         for cell, rate in RATES.items()
     ),
@@ -76,7 +78,9 @@ PRICES = PriceList(
 UNRELIABLE = 1 / 3
 
 
-def receipt(identity=IDENTITY, cell=L4, *, shape=SHAPE, concurrency=8, rps=10.0, p99=100.0) -> Receipt:
+def receipt(
+    identity=IDENTITY, cell=L4, *, shape=SHAPE, concurrency=8, rps=10.0, p99=100.0, footprint=None, working=None
+) -> Receipt:
     return Receipt(
         identity=identity,
         cell=cell,
@@ -85,6 +89,8 @@ def receipt(identity=IDENTITY, cell=L4, *, shape=SHAPE, concurrency=8, rps=10.0,
         request_shape=RequestShape(operation=Operation.ENCODE, items_per_request=1),
         throughput=Throughput(requests_per_second=rps),
         latency=Percentiles(p99_ms=p99),
+        footprint_mib=footprint,
+        working_memory_mib=working,
         source=SourceRef(uri=f"receipts/{identity}/{cell.machine_profile}/{shape.gpu_count}/{concurrency}/{rps}/{p99}"),
     )
 
@@ -185,9 +191,13 @@ def lane(name, cell=L4, *, fallbacks=(), floor=1, buffer=0) -> PlanLane:
 
 
 def plan_of(lanes, residents) -> Plan:
+    pinning = {name for name, warmth in residents.values() if warmth is Warmth.PINNED}
     return Plan(
         placement="test",
-        lanes=tuple(lanes),
+        lanes=tuple(
+            replace(lane, queue_pool=lane.name) if lane.name in pinning and lane.queue_pool == "default" else lane
+            for lane in lanes
+        ),
         identities=tuple(
             PlanIdentity(identity=identity, lane=name, warmth=warmth)
             for identity, (name, warmth) in sorted(residents.items())
@@ -331,7 +341,8 @@ def test_a_lazy_resident_load_waits_for_no_placement():
     )
     service_levels = levels(**{OTHER: 0, IDENTITY: 60})
     boots = [attempt(warmth=Warmth.LAZY_RESIDENT, boot=20.0), attempt(OTHER, boot=1.0, wait=500.0, index=1)]
-    result = run(service_levels, [receipt(OTHER), receipt()], boots, current=current)
+    receipts = [receipt(OTHER, footprint=4000, working=1000), receipt(footprint=2000, working=1000)]
+    result = run(service_levels, receipts, boots, current=current)
     chosen = result.report.identity(IDENTITY).chosen
     assert (chosen.warmth, chosen.lane, chosen.come_alive_s, chosen.placement_wait_s) == (
         Warmth.LAZY_RESIDENT,

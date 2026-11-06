@@ -137,6 +137,12 @@ class _Reader:
             raise SchemaError(self._at(key), f"expected a string, got {_describe(value)}")
         return value
 
+    @staticmethod
+    def text(value: object, path: str) -> str:
+        if not isinstance(value, str):
+            raise SchemaError(path, f"expected a string, got {_describe(value)}")
+        return value
+
     def _boolean(self, key: str, value: object) -> bool:
         if not isinstance(value, bool):
             raise SchemaError(self._at(key), f"expected a boolean, got {_describe(value)}")
@@ -631,10 +637,21 @@ class Receipt:
     latency: Percentiles | None = None
     ttft: Percentiles | None = None
     itl: Percentiles | None = None
+    footprint_mib: int | None = None
+    working_memory_mib: int | None = None
+    co_residents: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _require_identifier("identity", self.identity)
         _require_count("concurrency", self.concurrency, 1)
+        _require_count("footprintMiB", self.footprint_mib, 1)
+        _require_count("workingMemoryMiB", self.working_memory_mib, 0)
+        for index, resident in enumerate(self.co_residents):
+            _require_identifier(f"coResidents[{index}]", resident)
+            if resident == self.identity:
+                raise SchemaError(f"coResidents[{index}]", f"names the receipt's own identity {resident!r}")
+            if resident in self.co_residents[:index]:
+                raise SchemaError(f"coResidents[{index}]", f"duplicates {resident!r}")
         if self.request_shape.operation is Operation.GENERATE:
             _require_absent("latency", self.latency, "for the generate operation, which reports ttft and itl")
             if self.ttft is None:
@@ -667,6 +684,9 @@ class Receipt:
             latency=reader.optional_child("latency", Percentiles.from_dict),
             ttft=reader.optional_child("ttft", Percentiles.from_dict),
             itl=reader.optional_child("itl", Percentiles.from_dict),
+            footprint_mib=reader.optional_integer("footprintMiB"),
+            working_memory_mib=reader.optional_integer("workingMemoryMiB"),
+            co_residents=reader.children("coResidents", _Reader.text, required=False),
             source=reader.child("source", SourceRef.from_dict),
         )
 
@@ -679,11 +699,14 @@ class Receipt:
                 "cell": self.cell.to_dict(),
                 "containerShape": self.container_shape.to_dict(),
                 "concurrency": self.concurrency,
+                "coResidents": list(self.co_residents) or None,
                 "requestShape": self.request_shape.to_dict(),
                 "throughput": self.throughput.to_dict(),
                 "latency": None if self.latency is None else self.latency.to_dict(),
                 "ttft": None if self.ttft is None else self.ttft.to_dict(),
                 "itl": None if self.itl is None else self.itl.to_dict(),
+                "footprintMiB": self.footprint_mib,
+                "workingMemoryMiB": self.working_memory_mib,
                 "source": self.source.to_dict(),
             }
         )
@@ -699,6 +722,7 @@ class BootEvidence:
     source: SourceRef
     boot_seconds: float | None = None
     placement_wait_s: float | None = None
+    footprint_mib: int | None = None
     borrowed: bool = False
 
     def __post_init__(self) -> None:
@@ -718,6 +742,9 @@ class BootEvidence:
             raise SchemaError("bootSeconds", "is required for an attempt that was placed")
         _require_at_least("placementWaitS", self.placement_wait_s, 0)
         _require_at_least("bootSeconds", self.boot_seconds, 0)
+        _require_count("footprintMiB", self.footprint_mib, 1)
+        if self.outcome is not BootOutcome.SUCCEEDED:
+            _require_absent("footprintMiB", self.footprint_mib, "for an attempt that did not succeed")
 
     @classmethod
     def from_dict(cls, data: object, path: str = ROOT_PATH) -> Self:
@@ -732,6 +759,7 @@ class BootEvidence:
             placement_wait_s=reader.optional_number("placementWaitS"),
             boot_seconds=reader.optional_number("bootSeconds"),
             outcome=reader.enum("outcome", BootOutcome),
+            footprint_mib=reader.optional_integer("footprintMiB"),
             borrowed=reader.optional_boolean("borrowed") is True,
             source=reader.child("source", SourceRef.from_dict),
         )
@@ -748,6 +776,7 @@ class BootEvidence:
                 "placementWaitS": self.placement_wait_s,
                 "bootSeconds": self.boot_seconds,
                 "outcome": self.outcome.value,
+                "footprintMiB": self.footprint_mib,
                 "borrowed": True if self.borrowed else None,
                 "source": self.source.to_dict(),
             }
@@ -761,6 +790,7 @@ class MachineProfilePrice:
     accelerator_per_hour: float
     core_per_hour: float
     memory_gib_per_hour: float
+    gpu_memory_mib: int | None = None
 
     def __post_init__(self) -> None:
         _require_identifier("name", self.name)
@@ -768,6 +798,7 @@ class MachineProfilePrice:
         _require_at_least("acceleratorPerHour", self.accelerator_per_hour, 0)
         _require_at_least("corePerHour", self.core_per_hour, 0)
         _require_at_least("memoryGiBPerHour", self.memory_gib_per_hour, 0)
+        _require_count("gpuMemoryMiB", self.gpu_memory_mib, 1)
 
     @classmethod
     def from_dict(cls, data: object, path: str = ROOT_PATH) -> Self:
@@ -776,19 +807,23 @@ class MachineProfilePrice:
             cls,
             name=reader.string("name"),
             gpu_product=reader.string("gpuProduct"),
+            gpu_memory_mib=reader.optional_integer("gpuMemoryMiB"),
             accelerator_per_hour=reader.number("acceleratorPerHour"),
             core_per_hour=reader.number("corePerHour"),
             memory_gib_per_hour=reader.number("memoryGiBPerHour"),
         )
 
     def to_dict(self) -> dict[str, object]:
-        return {
-            "name": self.name,
-            "gpuProduct": self.gpu_product,
-            "acceleratorPerHour": self.accelerator_per_hour,
-            "corePerHour": self.core_per_hour,
-            "memoryGiBPerHour": self.memory_gib_per_hour,
-        }
+        return _compact(
+            {
+                "name": self.name,
+                "gpuProduct": self.gpu_product,
+                "gpuMemoryMiB": self.gpu_memory_mib,
+                "acceleratorPerHour": self.accelerator_per_hour,
+                "corePerHour": self.core_per_hour,
+                "memoryGiBPerHour": self.memory_gib_per_hour,
+            }
+        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

@@ -25,9 +25,9 @@ name the offending field by its JSON path, for example
 | Kind | Type | Contents |
 | --- | --- | --- |
 | `placement-service-levels` | `ServiceLevels` | Optional named `tiers` and the `identities` that declare or inherit service levels |
-| `placement-receipt` | `Receipt` | One throughput and latency measurement of one identity on one cell, container shape, concurrency and request shape |
-| `placement-boot-evidence` | `BootEvidence` | One measured boot, snapshot restore or resident load of one identity on one cell and container shape |
-| `placement-price-list` | `PriceList` | Accelerator, core and memory rates per machine profile, and the region multiplier per placement |
+| `placement-receipt` | `Receipt` | One throughput and latency measurement of one identity on one cell, container shape, concurrency and request shape, alone or beside named co-residents, with the GPU memory the identity holds |
+| `placement-boot-evidence` | `BootEvidence` | One measured boot, snapshot restore or resident load of one identity on one cell and container shape, with the GPU memory a successful one left in use |
+| `placement-price-list` | `PriceList` | Accelerator, core and memory rates and the card memory per machine profile, and the region multiplier per placement |
 | `placement-demand` | `Demand` | Hourly request counts per identity and operation over a UTC window |
 | `placement-capacity` | `Capacity` | The accelerators a plan may hold: in total, per GPU product, and in a quota it shares with other environments |
 | `placement-plan` | `Plan` | Lanes with their cell, fallback cells, container shape, concurrency, ceiling and envelope, and the lane and warmth of every identity |
@@ -100,6 +100,21 @@ regard to case. Two plan lanes may carry the same three tokens, and so name one
 chart lane, which cannot give them separate envelopes or concurrency; the
 planner's report lists every such chart lane.
 
+The planner gives each lane that pins at least one identity a named queue pool
+of its own, since the chart carries a lane's pinned set on a static queue pool
+and the default queue pool carries no pins. A lane the current plan already
+puts on a named queue pool keeps it, so planning again leaves the pool as it
+is, unless the pool is `default`, the parameters' `queue_pool` or a pool
+another lane keeps, compared without regard to case as the chart compares them.
+Otherwise the pool is derived from the lane's `name`: its slug, which
+lowercases the name, replaces each run of characters outside `a-z` and `0-9`
+with a hyphen and drops leading and trailing hyphens, or `lane` when nothing
+remains. The slug is cut to 63 characters with a digest of the name appended
+when it is longer or when another lane of the plan, `default`, or the
+parameters' `queue_pool` already has it. A lane on which every identity is
+lazy-resident or cold is on the parameters' `queue_pool`. Identities that share
+a lane share its queue pool.
+
 `fallbackCells` is an optional ordered candidate list: cells, after `cell`,
 that the lane's containers may be placed on when `cell` cannot be placed. No
 fallback cell repeats `cell` or another fallback cell. A realized card is
@@ -132,6 +147,57 @@ fallback cells counts against the ceiling of every product it names, and once
 against `total` and `sharedQuota`. The planner never lowers a lane's
 `maxContainers` or `floorMax` to fit a capacity document: a plan that does not
 fit is refused whole.
+
+## Several models on one GPU
+
+A lane can hold several identities on one card: some `pinned`, always
+resident, and the rest `lazy-resident`, loaded on demand and evicted least
+recently used. The planner decides this from measurements only:
+
+- `footprintMiB`, on a receipt or on a boot record that succeeded, is the GPU
+  memory the identity holds once loaded: the memory in use after its load less
+  the memory in use before it. The planner takes the largest an identity
+  records on a cell.
+- `workingMemoryMiB`, on a receipt, is the GPU memory its run needed at the
+  receipt's concurrency beyond the footprint. The planner takes the largest an
+  identity records at a cell, container shape and concurrency.
+- `coResidents`, on a receipt, names the identities pinned and loaded on the
+  same container while it was measured, which makes it a co-residency receipt.
+  A receipt without `coResidents` measured the identity alone and is a cell;
+  a co-residency receipt is not.
+- `gpuMemoryMiB`, on a price-list machine profile, is the memory of one of its
+  cards.
+
+A lane fits its residents when the footprints of its pinned identities, the
+largest footprint of its lazy residents and the largest working memory any
+resident needs at the lane's concurrency come to at most 80% of `gpuMemoryMiB`.
+The planner puts an identity beside another only on a lane that fits them, of
+one card per container and without fallback cells, on a profile that states
+`gpuMemoryMiB`. A pinned identity beside other pinned identities is judged by a
+co-residency receipt at the lane's cell, container shape and concurrency rather
+than by a receipt of it alone: one whose `coResidents` include every other
+identity pinned on the lane, since a receipt measured beside more residents
+stands for fewer. Its warm bounds are checked and its demand is priced at that
+receipt. The planner never places a generation identity, one that declares
+`ttftP99Ms` and `itlP99Ms` or has a generate receipt, or an identity that the
+`unshared` parameter names, beside another identity, nor another identity on a
+lane that hosts one. Such an identity keeps a current lane it already shares.
+
+Every lane that an identity joins in a run must fit all of its residents in
+the plan that run writes, not only each joining identity beside the residents
+it had before. Where the identities that join a lane do not fit it together,
+they are admitted first fit in decreasing order of footprint, ties broken by
+identity, and the others are decided again without that lane.
+
+Where an identity would join a lane and a resident's footprint or working
+memory is not on file, the planner asks that resident for it, under its own
+identity and warmth at the lane, in a `footprint` measurement request. For a
+lane the plan keeps, it asks only when a lazy resident is placed there. A kept
+lane whose pinned residents have no footprint on file gets no `footprint`
+request, so the report does not name every unmeasured shared lane. A profile
+without `gpuMemoryMiB` takes no new identity beside another, and the report
+names that profile. A lane the plan already shares on such a profile stays
+shared.
 
 ## Envelope
 
@@ -170,11 +236,7 @@ and its report.
 same bytes in whatever order the receipts, boot evidence, identities and demand
 series arrive. An identity that stays on its current placement keeps its
 current lane as it is, so a run whose `current_plan` already holds every
-choice, such as its own previous plan, reports no change. The exceptions are
-lazy residents that join a host lane one run later: a lane the previous run
-created for an identity whose `comeAliveP95S` is `0` hosts lazy residents only
-from the run after it, and an identity that left a host lane it was pinned on
-may rejoin that lane as a lazy resident on the next run.
+choice, such as its own previous plan, reports no change.
 
 | Parameter | Meaning |
 | --- | --- |
@@ -185,7 +247,8 @@ may rejoin that lane as a lazy resident on the next run.
 | `buffer_containers` | The declared warm buffer above a lane's floor, `0` by default |
 | `hold_budget_s` | The longest a request for a cold lane is held for it before it is refused, `0` by default. An identity whose `comeAliveP95S` is at most this is served by holding its requests, and avoids unreliable GPU products |
 | `hours_per_month` | The hours a monthly figure covers, `730` by default |
-| `queue_pool`, `bundle`, `bundles` | Every lane's queue pool, and each identity's bundle: its `bundles` entry, otherwise `bundle` |
+| `queue_pool`, `bundle`, `bundles` | The queue pool of every lane that pins no identity, and each identity's bundle: its `bundles` entry, otherwise `bundle` |
+| `unshared` | Identities that never share a lane: none is packed or made a lazy resident beside another identity, and no other identity joins a lane one of them is on. Empty by default |
 
 ### Selection
 
@@ -220,8 +283,7 @@ document:
    `comeAliveP95S` of `0` admits `pinned` only.
 4. A cell also offers `lazy-resident` on each host lane with its cell,
    container shape and concurrency. A host lane is a lane of the current plan
-   with a `floorMin` of at least 1, on the parameters' queue pool and the
-   identity's bundle, on which another identity whose `comeAliveP95S` is `0`
+   with a `floorMin` of at least 1, on the identity's bundle, on which another identity whose `comeAliveP95S` is `0`
    stays pinned in this run, on its current placement or kept there. Those
    identities are placed first: a bound of `0` admits no cold or lazy option,
    so no other choice moves them. The identity's own current lane is also a
@@ -231,7 +293,12 @@ document:
    since the host's container is already placed. The option costs what the
    identity's demand needs above the host lane's floor, plus the floor itself
    on a lane where no such identity stays pinned, since no other identity pays
-   it. A lane with fallback cells hosts no lazy resident.
+   it. The host must fit the identity beside the residents of its current
+   lane, as [Several models on one GPU](#several-models-on-one-gpu) states;
+   where a footprint or a working memory is not on file the option is a
+   measurement request for it, asked of each resident that lacks it. A lane
+   with fallback cells, or one that hosts a generation or `unshared` identity,
+   hosts no lazy resident, and neither identity is ever one.
 5. A GPU product is unreliable when more than 5% of the cold attempts on it
    were `unplaced`, counting the environment's own attempts in place of
    borrowed ones. For an identity whose `comeAliveP95S` is at most
@@ -247,23 +314,25 @@ document:
 
 The current placement is the identity's current lane when that lane has the
 option's cell and fallback cells, container shape and concurrency, the
-identity's warmth is the option's, and the lane's `queuePool` and `bundle` are
-the ones the parameters give the identity; a `lazy-resident` option must also be
-hosted by that lane. A current placement that no option matches lacks evidence:
-a receipt at its lane's cell, container shape and concurrency, a boot for a cold
-warmth, or a load for a lazy resident. Unless it is known to miss a bound,
-through a receipt at the lane that misses a warm bound, a measured come-alive
-over the bound, a boot or load at the lane that did not succeed, a cold or
-`lazy-resident` warmth under a bound of `0`, or an unreliable product without a
-fallback cell on another product under a bound `hold_budget_s` fits, the
-identity keeps that placement and leaves it only for an unblocked option at
-least a cent cheaper than the placement. The placement is priced as an option of
-its warmth at the lane's fastest receipt, or without one at its floor alone: one
-container all month for `pinned`, for `lazy-resident` nothing beyond the lane's
-floor, or the floor itself where no identity whose `comeAliveP95S` is `0` stays
-pinned on the lane, and the burst tails for a cold warmth. What the placement
-lacks becomes a measurement request. Such a placement on a lane the price list
-cannot price has no cost to compare, so the identity keeps it.
+identity's warmth is the option's, and the lane's `bundle` is the one the
+parameters give the identity; a `lazy-resident` option must also be
+hosted by that lane, and a `pinned` option on a lane where other identities are
+pinned must stand on a co-residency receipt beside them. A current placement
+that no option matches lacks evidence: a receipt at its lane's cell, container
+shape and concurrency, a co-residency receipt beside the identities pinned with
+it, a boot for a cold warmth, or a load for a lazy resident. Unless it is known
+to miss a bound, through a receipt at the lane that misses a warm bound, a
+measured come-alive over the bound, a boot or load at the lane that did not
+succeed, a cold or `lazy-resident` warmth under a bound of `0`, or an unreliable
+product without a fallback cell on another product under a bound `hold_budget_s`
+fits, the identity keeps that placement and leaves it only for an unblocked
+option at least a cent cheaper than the placement. The placement is priced as an
+option of its warmth at the lane's fastest receipt, or without one at its floor
+alone: one container all month for `pinned`, for `lazy-resident` nothing beyond
+the lane's floor, or the floor itself where no identity whose `comeAliveP95S` is
+`0` stays pinned on the lane, and the burst tails for a cold warmth. What the
+placement lacks becomes a measurement request. Such a placement on a lane the
+price list cannot price has no cost to compare, so the identity keeps it.
 
 An identity that stays on its current placement keeps that lane exactly as it
 is, beside whoever else the lane hosts: its cell, container shape,
@@ -274,6 +343,42 @@ the identity added when that name is taken. The planner does not select
 `bridged` or `scheduled-warm`. An identity with no unblocked option keeps its
 current lane, capped by the reviewed ceiling, or stays out of the plan when it
 has none.
+
+### Sharing a lane
+
+Once every identity has an option, the planner prices the plan as a whole and
+changes it in the steps below. A floor is paid once per lane, so an option an
+identity is offered alone can look cheaper than the lane it shares while the
+plan total does not fall.
+
+1. A pinned identity whose co-pinned neighbours change in this run is decided
+   again beside the neighbours it is left with, until no identity's
+   neighbours change.
+2. Identities that left a current lane return to it, one at a time and then
+   together, wherever their return does not raise the plan total. An identity
+   whose current placement is known to miss a bound does not return.
+3. The identities that joined a lane are held to fitting it together, as
+   [Several models on one GPU](#several-models-on-one-gpu) states, and step 1
+   runs again for every identity decided again.
+4. Packing. The planner visits every placed identity that is alone on its lane
+   and is neither a generation nor an `unshared` identity, in decreasing order
+   of its lane's floor cost, ties broken by identity. For each it tries the
+   other lanes of the plan on its bundle that keep a floor and
+   host a pinned identity, where it has a receipt at the lane's cell, container
+   shape and concurrency: first the lanes on which an identity whose
+   `comeAliveP95S` is `0` is pinned, since nothing moves that identity, then in
+   decreasing order of the footprint already on them, then by name. On the
+   first lane where a move fits and lowers the plan total by at least a cent,
+   the identity joins it, as a lazy resident when an identity whose
+   `comeAliveP95S` is `0` is pinned on the lane, its bound admits its measured
+   load onto the lane and selection did not already offer it the lane,
+   otherwise pinned, which needs every pinned identity's co-residency receipt
+   beside the others to meet its warm bounds. A move that would lower the total
+   but lacks a footprint, a working memory, a load or a co-residency receipt is
+   not made: it is a measurement request whose `savingBound` is that fall. A
+   move after which the lane's residents together need more containers than
+   its `maxContainers` in some hour is not made either.
+5. Steps 1 and 3 run again for the lanes packing changed.
 
 ### Pricing
 
@@ -290,14 +395,17 @@ demand window to `hours_per_month`.
   every request: the active floor for `cooldown_s`, at most the whole hour.
   The active floor is `fallback_floor` capped by the ceiling, and at least one.
 
-A lane costs its floor all month once, whoever it hosts, plus what each
-resident's demand needs beyond the floor: on a lane with a floor, the
-containers an hour needs above it, and on a zero-floor lane, the work and the
-tails a cold warmth pays. A placed identity's demand is priced at its chosen
-receipt, and a kept identity's at the slowest receipt it has for its lane's
-cells, container shape and concurrency, under that lane's own ceiling. A lane
-with fallback cells costs the hourly rate of its dearest cell, and a candidate
-list's demand is priced at the slower of its two receipts.
+A lane costs its floor all month once, whoever it hosts, plus what its
+residents' demand needs beyond the floor. On a lane with a floor, that is the
+containers an hour needs above it for the residents together: each resident's
+requests in the hour take the share of a container that its priced receipt's
+rate gives them, and the shares are summed, since residents scale together and
+share the card under load. On a zero-floor lane, it is the work and the tails a
+cold warmth pays for each resident. A placed identity's demand is priced at its
+chosen receipt, and a kept identity's at the slowest receipt it has for its
+lane's cells, container shape and concurrency, under that lane's own ceiling. A
+lane with fallback cells costs the hourly rate of its dearest cell, and a
+candidate list's demand is priced at the slower of its two receipts.
 
 ### Envelope
 
@@ -325,8 +433,10 @@ The report renders as a `placement-report` document:
   demand costs there with the lane's floor, the chosen cell, warmth, monthly
   cost and come-alive with its basis (`warm-floor`, `boot-evidence` or
   `borrowed-boot-evidence`), the `placementWaitS` part of a cold come-alive
-  where a placement wait was measured, the `fallbackCells` of a candidate list
-  and, for a lazy resident, its host `lane`, the peak containers its demand
+  where a placement wait was measured, the `fallbackCells` of a candidate list,
+  the `coResidents` of the co-residency receipt a co-pinned identity is judged
+  by and, for a resident that joins another identity's lane, its `lane`, the
+  peak containers its demand
   needs, and `nextCheaper`: the nearest option cheaper than the choice, or than
   a kept identity's current placement, that a service level blocks, the bounds
   that block it, and `saving`, the fall in the plan total found by planning
@@ -360,7 +470,9 @@ The report renders as a `placement-report` document:
   and the monthly cost of its `floorMax`, which a floor budget prices. A lane
   on a cell the price list cannot price carries `unpricedReason` and no cost,
   and `unpricedIdentities` lists residents whose demand has no receipt to price
-  it on the lane.
+  it on the lane. A lane that hosts more than one identity names the GPU memory
+  its residents need, `memoryMiB`, and the 80% of its card's memory they may
+  use, `memoryLimitMiB`, where both are known.
 - `sharedChartLanes`: every chart lane, by `queuePool`, `machineProfile` and
   `bundle` in lowercase, that more than one plan lane names.
 - `measurementRequests`: options that lack evidence, ranked by the saving they
@@ -372,12 +484,23 @@ The report renders as a `placement-report` document:
   reason `failed`, or `unplaced` when no attempt got a container or the
   product's placement wait falls on an unplaced attempt, and a host lane without
   the identity's load asks for `lazy-resident` boot evidence on it, bounded by
-  what that option would cost. Savings are measured against the choice, or
-  against a kept identity's current placement. A request that cannot save is
-  dropped, and the requests of an identity without a placement or a current one
-  carry no bound and rank first. The evidence a kept current placement lacks is
-  requested at its lane, named in `lane` with its `concurrency`, and also ranks
-  first without a bound; a profile it asks for there is not asked for again.
+  what that option would cost, with `footprint` asked of each resident whose
+  footprint or working memory is not on file, under that resident's identity
+  and warmth. A packing that lacks evidence asks at the lane it would join for
+  `boot-evidence`, `footprint` or `co-residency-receipt`, with the
+  `coResidents` the receipt is to be measured beside, bounded by the fall in
+  the plan total the packing would bring, and asks a resident there for its
+  own missing `footprint` the same way. A kept identity pinned beside others
+  asks at its lane for a `co-residency-receipt` beside them, and a kept lazy
+  resident asks each resident of its lane, itself included, for a missing
+  `footprint`. A request repeated for the same identity, cell, container
+  shape, concurrency, lane, measurements, warmth and `coResidents` is listed
+  once, at its highest rank. Savings are measured against the choice, or
+  against a kept identity's current placement. A request that cannot save is dropped, and the
+  requests of an identity without a placement or a current one carry no bound
+  and rank first. The evidence a kept current placement lacks is requested at
+  its lane, named in `lane` with its `concurrency`, and also ranks first without
+  a bound; a profile it asks for there is not asked for again.
 - `comeAliveLevers`: cold and `lazy-resident` warmths whose measured come-alive
   misses the bound on a cell that meets the warm bounds for less than the
   choice, or than a kept identity's current placement, listed only when
@@ -406,6 +529,9 @@ The report renders as a `placement-report` document:
   plan claims that bound as met.
 - `warmBoundUndeclared`: every identity that has a cell and declares neither
   `warmP99Ms` nor `ttftP99Ms` and `itlP99Ms`, so keeps its current class.
+- `gpuMemoryUndeclared`: every machine profile without `gpuMemoryMiB` on which
+  the planner weighed an identity beside another, so its lanes host no
+  identity beside another and a lane that already shares one is not checked.
 - `refusals`, and `changes`: the identities and lanes that differ from
   `current_plan`.
 
