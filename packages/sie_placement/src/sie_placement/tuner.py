@@ -24,7 +24,11 @@ class Attainment(StrEnum):
 
 
 def _require_non_negative(name: str, value: int | None) -> None:
-    if value is not None and value < 0:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer, got {value!r}")
+    if value < 0:
         raise ValueError(f"{name} must be at least 0, got {value!r}")
 
 
