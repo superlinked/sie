@@ -173,6 +173,32 @@ def test_numbers_built_in_code_must_be_finite(build, field, value):
     assert caught.value.message.startswith("must be a finite number")
 
 
+@pytest.mark.parametrize(("value", "described"), [(True, "boolean true"), ("1", "string '1'")])
+def test_numbers_built_in_code_must_be_numbers(value, described):
+    with pytest.raises(SchemaError) as caught:
+        Throughput(requests_per_second=value)
+    assert str(caught.value) == f"requestsPerSecond: must be a number, got {described}"
+
+
+@pytest.mark.parametrize(
+    ("build", "field"),
+    [
+        (lambda value: ContainerShape(gpu_count=value, cpu_cores=1.0, memory_mib=1024), "gpuCount"),
+        (lambda value: ServiceLevel(come_alive_p95_s=value), "comeAliveP95S"),
+        (lambda value: Envelope(floor_min=0, floor_max=value), "floorMax"),
+        (lambda value: DemandHour(start=datetime(2026, 1, 1, tzinfo=UTC), requests=value), "requests"),
+        (lambda value: Capacity(total=value), "total"),
+        (lambda value: TypeCeiling(gpu_product="NVIDIA-L4", accelerators=value), "accelerators"),
+        (lambda value: SharedQuota(accelerators=8, held_elsewhere=value), "heldElsewhere"),
+    ],
+)
+@pytest.mark.parametrize(("value", "described"), [(1.5, "number 1.5"), (2.0, "number 2.0"), (True, "boolean true")])
+def test_integers_built_in_code_must_be_integers(build, field, value, described):
+    with pytest.raises(SchemaError) as caught:
+        build(value)
+    assert str(caught.value) == f"{field}: must be an integer, got {described}"
+
+
 def test_numbers_reject_booleans():
     data = load("price-list.json")
     data["placements"][0]["regionMultiplier"] = False

@@ -264,7 +264,9 @@ def _require_identifier(name: str, value: str) -> None:
         raise SchemaError(name, f"must be a non-empty string without whitespace, got {value!r}")
 
 
-def _require_finite(name: str, value: float) -> None:
+def _require_number(name: str, value: float) -> None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise SchemaError(name, f"must be a number, got {_describe(value)}")
     try:
         finite = math.isfinite(value)
     except OverflowError:
@@ -273,10 +275,19 @@ def _require_finite(name: str, value: float) -> None:
         raise SchemaError(name, f"must be a finite number, got {value!r}")
 
 
+def _require_count(name: str, value: int | None, minimum: int) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SchemaError(name, f"must be an integer, got {_describe(value)}")
+    if value < minimum:
+        raise SchemaError(name, f"must be at least {minimum}, got {value!r}")
+
+
 def _require_at_least(name: str, value: float | None, minimum: int) -> None:
     if value is None:
         return
-    _require_finite(name, value)
+    _require_number(name, value)
     if value < minimum:
         raise SchemaError(name, f"must be at least {minimum}, got {value!r}")
 
@@ -284,7 +295,7 @@ def _require_at_least(name: str, value: float | None, minimum: int) -> None:
 def _require_positive(name: str, value: float | None) -> None:
     if value is None:
         return
-    _require_finite(name, value)
+    _require_number(name, value)
     if value <= 0:
         raise SchemaError(name, f"must be greater than 0, got {value!r}")
 
@@ -333,7 +344,7 @@ class ServiceLevel:
 
     def __post_init__(self) -> None:
         for name, value in self._fields():
-            _require_at_least(name, value, 0)
+            _require_count(name, value, 0)
         if self.warm_p99_ms is not None and (self.ttft_p99_ms is not None or self.itl_p99_ms is not None):
             raise SchemaError("warmP99Ms", "must be omitted when ttftP99Ms and itlP99Ms declare a generation identity")
 
@@ -486,9 +497,9 @@ class ContainerShape:
     memory_mib: int
 
     def __post_init__(self) -> None:
-        _require_at_least("gpuCount", self.gpu_count, 1)
+        _require_count("gpuCount", self.gpu_count, 1)
         _require_positive("cpuCores", self.cpu_cores)
-        _require_at_least("memoryMiB", self.memory_mib, 1)
+        _require_count("memoryMiB", self.memory_mib, 1)
 
     @classmethod
     def from_dict(cls, data: object, path: str = ROOT_PATH) -> Self:
@@ -512,12 +523,12 @@ class RequestShape:
     output_tokens: int | None = None
 
     def __post_init__(self) -> None:
-        _require_at_least("itemsPerRequest", self.items_per_request, 1)
-        _require_at_least("inputTokensPerItem", self.input_tokens_per_item, 0)
+        _require_count("itemsPerRequest", self.items_per_request, 1)
+        _require_count("inputTokensPerItem", self.input_tokens_per_item, 0)
         if self.operation is Operation.GENERATE:
             if self.output_tokens is None:
                 raise SchemaError("outputTokens", "is required for the generate operation")
-            _require_at_least("outputTokens", self.output_tokens, 1)
+            _require_count("outputTokens", self.output_tokens, 1)
         else:
             _require_absent("outputTokens", self.output_tokens, "for an operation other than generate")
 
@@ -632,7 +643,7 @@ class Receipt:
 
     def __post_init__(self) -> None:
         _require_identifier("identity", self.identity)
-        _require_at_least("concurrency", self.concurrency, 1)
+        _require_count("concurrency", self.concurrency, 1)
         _require_at_least("footprintMiB", self.footprint_mib, 1)
         _require_at_least("workingMemoryMiB", self.working_memory_mib, 0)
         for index, resident in enumerate(self.co_residents):
@@ -878,8 +889,8 @@ class DemandHour:
 
     def __post_init__(self) -> None:
         _require_hour("start", self.start)
-        _require_at_least("requests", self.requests, 0)
-        _require_at_least("units", self.units, 0)
+        _require_count("requests", self.requests, 0)
+        _require_count("units", self.units, 0)
 
     @classmethod
     def from_dict(cls, data: object, path: str = ROOT_PATH) -> Self:
@@ -973,7 +984,7 @@ class TypeCeiling:
 
     def __post_init__(self) -> None:
         _require_identifier("gpuProduct", self.gpu_product)
-        _require_at_least("accelerators", self.accelerators, 0)
+        _require_count("accelerators", self.accelerators, 0)
 
     @classmethod
     def from_dict(cls, data: object, path: str = ROOT_PATH) -> Self:
@@ -990,8 +1001,8 @@ class SharedQuota:
     held_elsewhere: int = 0
 
     def __post_init__(self) -> None:
-        _require_at_least("accelerators", self.accelerators, 0)
-        _require_at_least("heldElsewhere", self.held_elsewhere, 0)
+        _require_count("accelerators", self.accelerators, 0)
+        _require_count("heldElsewhere", self.held_elsewhere, 0)
 
     @classmethod
     def from_dict(cls, data: object, path: str = ROOT_PATH) -> Self:
@@ -1013,7 +1024,7 @@ class Capacity:
     shared_quota: SharedQuota | None = None
 
     def __post_init__(self) -> None:
-        _require_at_least("total", self.total, 0)
+        _require_count("total", self.total, 0)
         _require_unique("types", "gpuProduct", (ceiling.gpu_product for ceiling in self.types))
         if self.total is None and not self.types and self.shared_quota is None:
             raise SchemaError("", "must declare total, types or sharedQuota")
@@ -1052,7 +1063,7 @@ class Envelope:
 
     def __post_init__(self) -> None:
         for name, value in self._fields():
-            _require_at_least(name, value, 0)
+            _require_count(name, value, 0)
         _require_ordered("floorMin", self.floor_min, "floorMax", self.floor_max)
         _require_pair("bufferMin", self.buffer_min, "bufferMax", self.buffer_max)
         _require_ordered("bufferMin", self.buffer_min, "bufferMax", self.buffer_max)
@@ -1106,8 +1117,8 @@ class PlanLane:
         _require_identifier("name", self.name)
         _require_identifier("queuePool", self.queue_pool)
         _require_identifier("bundle", self.bundle)
-        _require_at_least("concurrency", self.concurrency, 1)
-        _require_at_least("maxContainers", self.max_containers, 1)
+        _require_count("concurrency", self.concurrency, 1)
+        _require_count("maxContainers", self.max_containers, 1)
         for index, cell in enumerate(self.fallback_cells):
             if cell in self.cells[: index + 1]:
                 raise SchemaError(
