@@ -168,16 +168,20 @@ def test_generative_ocr_defaults_to_isolated_sglang_extract_and_keeps_transforme
 
 
 @pytest.mark.parametrize("bundle_yaml", sorted(BUNDLES_DIR.glob("*.yaml")))
-def test_bundle_does_not_mix_generation_and_non_generation_models(bundle_yaml: Path) -> None:
+def test_bundle_pool_does_not_mix_generation_and_non_generation_models(bundle_yaml: Path) -> None:
     generation_flags = _load_model_generation_flags()
-    matched = match_bundle_models(bundle_yaml, MODELS_DIR)
-    generation = sorted(model_id for model_id in matched if generation_flags[model_id.split(":", 1)[0]])
-    non_generation = sorted(model_id for model_id in matched if not generation_flags[model_id.split(":", 1)[0]])
-
-    assert not (generation and non_generation), (
-        f"{bundle_yaml.name} mixes generation and non-generation worker task classes; "
-        f"generation={generation}, non_generation={non_generation}"
-    )
+    pools = {"default"}
+    for model_yaml in MODELS_DIR.glob("*.yaml"):
+        config = yaml.safe_load(model_yaml.read_text()) or {}
+        pools.add(config.get("pool") or "default")
+    for pool in pools:
+        matched = match_bundle_models(bundle_yaml, MODELS_DIR, pool_name=pool)
+        generation = sorted(model_id for model_id in matched if generation_flags[model_id.split(":", 1)[0]])
+        non_generation = sorted(model_id for model_id in matched if not generation_flags[model_id.split(":", 1)[0]])
+        assert not (generation and non_generation), (
+            f"{bundle_yaml.name} pool {pool!r} mixes generation and non-generation worker task classes; "
+            f"generation={generation}, non_generation={non_generation}"
+        )
 
 
 def test_gte_multilingual_candle_profile_targets_rust_fp16() -> None:

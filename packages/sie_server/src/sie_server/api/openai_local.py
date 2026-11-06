@@ -965,6 +965,15 @@ def _prepare_sglang_body(
     max_tokens: int | None,
     seed: int | None,
 ) -> dict[str, Any]:
+    # SGLang's chat endpoint parses Muse Glimmer's tool calls without constraining
+    # them and ignores a regex sent alongside ``tool_choice``, so it would return a
+    # plain answer to a request that requires a call. The queued route can force one.
+    if adapter.reasoning_parser == "muse" and body.get("tool_choice") not in (None, "auto", "none"):
+        raise _bad_request(
+            "'tool_choice' must be 'auto' or 'none' on this route for this model, which cannot force a tool call",
+            param="tool_choice",
+            code="unsupported_field",
+        )
     proxied = _prepare_chat_body(
         body,
         config=config,
