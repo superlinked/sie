@@ -205,19 +205,23 @@ def parse_vector(document: object) -> tuple[Sample, ...]:
     return tuple(samples)
 
 
+def require_base_url(label: str, base_url: str) -> None:
+    parts = urllib.parse.urlsplit(base_url)
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        raise ValueError(f"the {label} URL must be an absolute http or https URL")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError(f"the {label} URL must not embed credentials")
+    if parts.query or parts.fragment:
+        raise ValueError(f"the {label} URL must not carry a query or a fragment")
+    try:
+        parts.port  # noqa: B018
+    except ValueError:
+        raise ValueError(f"the {label} URL has an invalid port") from None
+
+
 class PrometheusHttp:
     def __init__(self, base_url: str, *, timeout_s: float = PROMETHEUS_TIMEOUT_S) -> None:
-        parts = urllib.parse.urlsplit(base_url)
-        if parts.scheme not in {"http", "https"} or not parts.hostname:
-            raise ValueError("the Prometheus URL must be an absolute http or https URL")
-        if parts.username is not None or parts.password is not None:
-            raise ValueError("the Prometheus URL must not embed credentials")
-        if parts.query or parts.fragment:
-            raise ValueError("the Prometheus URL must not carry a query or a fragment")
-        try:
-            parts.port  # noqa: B018
-        except ValueError:
-            raise ValueError("the Prometheus URL has an invalid port") from None
+        require_base_url("Prometheus", base_url)
         self._endpoint = f"{base_url.rstrip('/')}/api/v1/query"
         self._timeout_s = timeout_s
 

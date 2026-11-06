@@ -249,8 +249,10 @@ The command exits with status 2 before it calls Prometheus or the gateway when:
   identity is `bridged`, `snapshot-cold` or `scheduled-warm`, warmths the chart
   does not realize;
 - a token file or `SIE_ADMIN_TOKEN` holds anything but one run of printable
-  ASCII characters without spaces after trimming, or the Prometheus URL has an
-  invalid port.
+  ASCII characters without spaces after trimming;
+- `--prometheus-url` or `--gateway-url` is not an absolute http or https URL
+  with a host, embeds credentials, carries a query or a fragment, or has an
+  invalid port. The refusal does not repeat the URL.
 
 A failed query, pool read or pool write fails only its tick, which is recorded,
 and the next tick runs as usual.

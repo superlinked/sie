@@ -135,6 +135,7 @@ def _tune(args: argparse.Namespace) -> int:
         carriers = keda.carriers(_load_plan(args.plan), max_pool_floor=args.max_pool_floor, max_pools=args.max_pools)
         keda.series_queries(args.series_selector)
         prometheus = keda.PrometheusHttp(args.prometheus_url)
+        keda.require_base_url("gateway", args.gateway_url)
         read_token = _secret(args.api_key_file, None, "gateway client token")
         if read_token is None:
             _secret(None, SDK_API_KEY_ENV, "gateway client token")

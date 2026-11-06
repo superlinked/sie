@@ -489,6 +489,39 @@ def test_a_transport_failure_is_reported_without_the_header_it_carried(gateway):
     assert gateway.pools == {}
 
 
+PASSWORD = "s3cret-password"  # noqa: S105 - a test value
+
+
+@pytest.mark.parametrize(
+    ("url", "message"),
+    [
+        ("sie-gateway:8080", "must be an absolute http or https URL"),
+        ("ftp://sie-gateway:8080", "must be an absolute http or https URL"),
+        ("http:///v1", "must be an absolute http or https URL"),
+        (f"http://user:{PASSWORD}@sie-gateway:8080", "must not embed credentials"),
+        (f"http://user:{PASSWORD}@sie-gateway:notaport", "must not embed credentials"),
+        (f"http://sie-gateway:8080/?token={PASSWORD}", "must not carry a query or a fragment"),
+        (f"http://sie-gateway:8080/#{PASSWORD}", "must not carry a query or a fragment"),
+        ("http://sie-gateway:notaport", "has an invalid port"),
+    ],
+)
+def test_a_gateway_url_that_is_not_a_plain_base_url_is_refused_without_echoing_it(
+    gateway, prometheus, read_token_file, monkeypatch, url, message, capsys, caplog
+):
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setenv("SIE_ADMIN_TOKEN", ADMIN_TOKEN)
+    argv = ["tune", "--plan", str(FIXTURES / "tune-plan.json"), "--prometheus-url", prometheus.url]
+    argv += ["--gateway-url", url, "--api-key-file", str(read_token_file), "--apply", "--once"]
+    assert cli.main(argv) == cli.EXIT_REFUSED
+    captured = capsys.readouterr()
+    assert f"the gateway URL {message}" in captured.err
+    for text in (captured.out, captured.err, caplog.text):
+        assert url not in text
+        assert PASSWORD not in text
+    assert gateway.requests == []
+    assert prometheus.requests == []
+
+
 def test_a_token_an_http_header_cannot_encode_is_refused_without_echoing_it(gateway):
     with pytest.raises(ValueError, match=r"^a gateway token holds a character that an HTTP header cannot carry$"):
         pools.connect(gateway.url, "caf\u00e9-secret")
