@@ -398,9 +398,10 @@ log. It verifies an https gateway against the CA certificates that
 set, or against the default bundle when neither is. `SSL_CERT_DIR` may list
 several directories separated by the platform's path separator, `:` on Linux. A
 bundle file it cannot load, or an `SSL_CERT_DIR` none of whose directories
-holds a file, is refused before any call. OpenSSL reads the certificates in a
-directory only when it verifies a connection, so a directory whose files it
-cannot use fails each gateway call with the TLS error. An http gateway reads
+holds a file, is refused before any call. A directory the applier may not list
+is left to OpenSSL, which opens certificates there by name. OpenSSL reads the
+certificates in a directory only when it verifies a connection, so a directory
+whose files it cannot use fails each gateway call with the TLS error. An http gateway reads
 none of these variables. Prometheus queries, which carry no credential, follow
 the usual proxy variables.
 

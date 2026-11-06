@@ -46,6 +46,8 @@ def _holds_files(path: str) -> bool:
     try:
         with os.scandir(path) as entries:
             return any(_is_file(entry) for entry in entries)
+    except PermissionError:
+        return True
     except OSError:
         return False
 

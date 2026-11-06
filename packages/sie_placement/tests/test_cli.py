@@ -776,6 +776,18 @@ def test_a_ca_directory_entry_that_cannot_be_inspected_does_not_hide_a_certifica
     assert calls == [{"cafile": None, "capath": str(certs)}]
 
 
+def test_a_ca_directory_the_applier_cannot_list_is_left_to_openssl(monkeypatch, tmp_path):
+    certs = certificate_directory(tmp_path / "certs")
+    certs.chmod(0o311)
+    try:
+        monkeypatch.setenv("SSL_CERT_DIR", str(certs))
+        calls = recorded_locations(monkeypatch)
+        pools._verification(HTTPS_GATEWAY)
+    finally:
+        certs.chmod(0o755)
+    assert calls == [{"cafile": None, "capath": str(certs)}]
+
+
 def test_a_ca_directory_list_with_one_usable_entry_is_passed_through_unchanged(monkeypatch, tmp_path):
     good = certificate_directory(tmp_path / "certs")
     listing = os.pathsep.join([str(tmp_path / "missing"), str(good), ""])
