@@ -127,14 +127,20 @@ obtain. Each field is optional, and at least one is declared:
 | `sharedQuota` | A quota of `accelerators` that this environment shares with others, which hold `heldElsewhere` of it |
 
 Every container holds the `gpuCount` accelerators of its lane's container
-shape. Each ceiling must hold every lane it covers at its container ceiling,
-`maxContainers` containers, at once, as a deployment compiler that enforces the
-ceiling charges it, and so at its envelope maximum, `floorMax` containers, too.
-`total` and `sharedQuota` cover every lane, and `sharedQuota` holds them
-together with its `heldElsewhere` accelerators. A lane with fallback cells
-counts against the ceiling of every product it names, and once against `total`
-and `sharedQuota`. The planner never lowers a lane's `maxContainers` or
-`floorMax` to fit a capacity document: a plan that does not fit is refused.
+shape. `total` and each of `types` must hold every lane they cover at its
+container ceiling, `maxContainers` containers, at once, as a deployment
+compiler that enforces the ceiling charges it, and so at its envelope maximum,
+`floorMax` containers, too. `sharedQuota` must hold every lane at its envelope
+maximum, the most a tuner may hold warm, together with its `heldElsewhere`
+accelerators. Warm capacity is held continuously, so it must fit the quota the
+environments share. A burst above the floors is bounded by each environment's
+own `total` and `types`, environments that share a quota rarely burst
+together, and a burst that meets the shared quota shows as a measured
+placement wait, which the planner adds to a cold come-alive. A lane with
+fallback cells counts against the ceiling of every product it names, and once
+against `total` and `sharedQuota`. The planner never lowers a lane's
+`maxContainers` or `floorMax` to fit a capacity document: a plan that does not
+fit is refused whole.
 
 ## Several models on one GPU
 
@@ -440,9 +446,10 @@ The report renders as a `placement-report` document:
 - `capacity`: for each ceiling of the `capacity` document, its `scope`
   (`total`, `type` with its `gpuProduct`, or `shared-quota` with
   `heldElsewhere`), the `ceiling`, the `accelerators` the plan's envelope
-  maxima hold against it, the `peakAccelerators` its lanes hold at
-  `maxContainers`, both with `heldElsewhere` for `shared-quota`, the `lanes`
-  that hold them, and whether it is `exceeded`.
+  maxima hold against it, with `heldElsewhere` for `shared-quota`, for `total`
+  and `type` the `peakAccelerators` its lanes hold at `maxContainers`, the
+  `lanes` that hold them, and whether it is `exceeded`. `total` and `type` are
+  charged at `peakAccelerators`, and `shared-quota` at `accelerators`.
 - `lanes`: each lane's hourly cost, its monthly cost, its floor's monthly cost
   and the monthly cost of its `floorMax`, which a floor budget prices. A lane
   on a cell the price list cannot price carries `unpricedReason` and no cost,
