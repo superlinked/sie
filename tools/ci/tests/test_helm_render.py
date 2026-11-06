@@ -36,8 +36,49 @@ CONFIG_CONSUMERS = (GATEWAY, "sie-sie-cluster-worker-l4-default/worker-sidecar")
 L4_POOL = {"workers": {"pools": {"l4": {"enabled": True}}}}
 
 
+YAML_UNSAFE_CHARACTERS = re.compile("[\x7f-\x9f\u2028\u2029\ud800-\udfff\ufffe\uffff]")
+
+
 def values_json(values: object) -> str:
-    return json.dumps(values, ensure_ascii=False)
+    text = json.dumps(values, ensure_ascii=False)
+    return YAML_UNSAFE_CHARACTERS.sub(lambda match: f"\\u{ord(match.group()):04x}", text)
+
+
+def test_helm_reads_a_values_file_back_as_the_values_written(tmp_path: Path) -> None:
+    strings = [
+        "a\x85b",
+        "a \u2028b",
+        "a\u2029",
+        "\x7f",
+        "\x9f",
+        "\u6a21\u578b" * 200,
+        "1e3",
+        "y",
+        "tab\there",
+        "\ufffe",
+    ]
+    chart = tmp_path / "echo-chart"
+    (chart / "templates").mkdir(parents=True)
+    (chart / "Chart.yaml").write_text("apiVersion: v2\nname: echo\nversion: 0.0.0\n", encoding="utf-8")
+    (chart / "templates" / "echo.yaml").write_text(
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: echo\ndata:\n"
+        "  strings: {{ .Values.strings | toJson | b64enc | quote }}\n"
+        "  keys: {{ .Values.keyed | keys | sortAlpha | toJson | b64enc | quote }}\n",
+        encoding="utf-8",
+    )
+    values_file = tmp_path / "echo-values.json"
+    values_file.write_text(values_json({"strings": strings, "keyed": dict.fromkeys(strings, 1)}), encoding="utf-8")
+    result = subprocess.run(
+        ["mise", "exec", "--", "helm", "template", "echo", str(chart), "-f", str(values_file)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    data = yaml.safe_load(result.stdout)["data"]
+    assert json.loads(base64.b64decode(data["strings"])) == strings
+    assert json.loads(base64.b64decode(data["keys"])) == sorted(strings)
 
 
 def render_workers(tmp_path: Path, values: dict) -> subprocess.CompletedProcess[str]:
@@ -4872,7 +4913,7 @@ def test_the_notes_name_no_grafana_admin_secret_when_grafana_reads_none(tmp_path
             "{{ .Values.adminPassword }}",
             {"adminPassword": "20261106"},
             "kube-prometheus-stack.grafana.admin.existingSecret is written unquoted by its chart, and YAML does not "
-            "read the value of \"{{ .Values.adminPassword }}\" (not shown, as it may hold chart values) as that "
+            'read the value of "{{ .Values.adminPassword }}" (not shown, as it may hold chart values) as that '
             "string",
         ),
     ],
