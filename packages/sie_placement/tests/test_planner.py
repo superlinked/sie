@@ -1566,6 +1566,13 @@ def test_a_replan_keeps_a_named_queue_pool_and_derives_one_for_a_pinned_lane_on_
     }
 
 
+def test_a_derived_queue_pool_is_the_slug_of_the_lane_name():
+    current = single_lane_plan(name="Shared_Lane")
+    current = replace(current, lanes=(replace(current.lanes[0], queue_pool="default"),))
+    result = run(levels((IDENTITY, ServiceLevel(come_alive_p95_s=0))), [receipt()], prices=L4_ONLY, current=current)
+    assert {lane.name: lane.queue_pool for lane in result.plan.lanes} == {"Shared_Lane": "shared-lane"}
+
+
 def test_a_derived_lane_name_never_takes_a_kept_lane_named_with_its_digest():
     digest = hashlib.sha256(IDENTITY.encode()).hexdigest()
     first = single_lane_plan(name="org-model-l4", identity="org/kept")

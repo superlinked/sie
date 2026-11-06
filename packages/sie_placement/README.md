@@ -104,11 +104,14 @@ The planner gives each lane that pins at least one identity a named queue pool
 of its own, since the chart carries a lane's pinned set on a static queue pool
 and the default queue pool carries no pins. A lane the current plan already
 puts on a named queue pool keeps it, so planning again leaves the pool as it
-is. Otherwise the pool is derived from the lane's `name`: the name itself, cut
-to 63 characters with a digest of the name appended when it is longer or when
-another lane of the plan, `default`, or the parameters' `queue_pool` already
-has it. A lane on which every identity is lazy-resident or cold is on the
-parameters' `queue_pool`. Identities that share a lane share its queue pool.
+is. Otherwise the pool is derived from the lane's `name`: its slug, which
+lowercases the name, replaces each run of characters outside `a-z` and `0-9`
+with a hyphen and drops leading and trailing hyphens, or `lane` when nothing
+remains. The slug is cut to 63 characters with a digest of the name appended
+when it is longer or when another lane of the plan, `default`, or the
+parameters' `queue_pool` already has it. A lane on which every identity is
+lazy-resident or cold is on the parameters' `queue_pool`. Identities that share
+a lane share its queue pool.
 
 `fallbackCells` is an optional ordered candidate list: cells, after `cell`,
 that the lane's containers may be placed on when `cell` cannot be placed. No
