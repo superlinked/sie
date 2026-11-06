@@ -3625,7 +3625,9 @@ def test_the_mcp_edge_api_key_is_kept_apart_from_the_admin_token_whatever_its_sp
 
 def test_the_mcp_edge_reads_the_trimmed_api_key_secret_key(tmp_path: Path) -> None:
     api_key = {"existingSecretName": " mcp-key ", "secretKey": " token "}
-    docs = rendered_documents(tmp_path, {**L4_POOL, **MCP_TOKEN_AUTH, "mcpEdge": {"enabled": True, "clusterApiKey": api_key}})
+    docs = rendered_documents(
+        tmp_path, {**L4_POOL, **MCP_TOKEN_AUTH, "mcpEdge": {"enabled": True, "clusterApiKey": api_key}}
+    )
     assert env_entries(docs, "SIE_API_KEY") == {"sie-sie-cluster-mcp/mcp-edge": {"name": "mcp-key", "key": "token"}}
 
 
@@ -4674,7 +4676,7 @@ def test_the_applier_client_token_is_kept_apart_from_the_admin_token_whatever_it
     [
         (
             {"existingSecretName": "gateway-admin #x", "secretKey": "admin"},
-            'placementApplier.clientToken.existingSecretName must name a Kubernetes Secret (lowercase letters, digits, '
+            "placementApplier.clientToken.existingSecretName must name a Kubernetes Secret (lowercase letters, digits, "
             "'-' and '.'), got \"gateway-admin #x\"",
         ),
         (
@@ -4856,7 +4858,9 @@ def test_an_applier_pull_policy_kubernetes_does_not_know_fails_the_render(tmp_pa
 
 
 def test_the_applier_holds_no_admin_token_when_the_gateway_authenticates_nothing(tmp_path: Path) -> None:
-    auth = {"gateway": {"auth": {"mode": "none", "adminTokenSecretName": "gateway-admin", "adminTokenSecretKey": "admin"}}}
+    auth = {
+        "gateway": {"auth": {"mode": "none", "adminTokenSecretName": "gateway-admin", "adminTokenSecretKey": "admin"}}
+    }
     spec = applier_pod(placement_documents(tmp_path, applier_layers(auth, apply=True)))["spec"]
     (container,) = spec["containers"]
     assert container["args"] == [*APPLIER_ARGS, "--apply"]
