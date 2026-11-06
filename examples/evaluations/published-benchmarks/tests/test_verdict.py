@@ -1067,5 +1067,33 @@ class IdenticalIdsTest(TemporaryCase):
         self.assertEqual(rows, record["metrics"])
 
 
+# A pinned table, so the band stays the one the 2% rule on the method page describes.
+VERDICT_TABLE = (
+    (0.5, 0.5, "PASS", "within_margin"),
+    (0.5, 0.4901, "PASS", "within_margin"),
+    (0.5, 0.4899, "FAIL (regression)", "below_margin"),
+    (0.5, 0.5102, "PASS", "within_margin"),
+    (0.5, 0.5103, "WARN (suspicious-improvement)", "above_margin"),
+    (0.5, 0.0, "FAIL (no-output)", "current_zero"),
+    (0.31411, 0.3079, "PASS", "within_margin"),
+    (0.31411, 0.3078, "FAIL (regression)", "below_margin"),
+    (0.59526, 0.61433, "WARN (suspicious-improvement)", "above_margin"),
+)
+
+
+class TestVerdictTable(unittest.TestCase):
+    def test_every_row(self):
+        for baseline, current, label, reason in VERDICT_TABLE:
+            with self.subTest(baseline=baseline, current=current):
+                verdict = compute_verdict(
+                    {"ndcg_at_10": current},
+                    {"kind": "supplied", "metric": "ndcg_at_10", "value": baseline, "source": "table"},
+                    limited=False,
+                )
+                self.assertEqual((verdict["verdict"], verdict["reason"]), (label, reason))
+                self.assertEqual(verdict["threshold_low"], baseline * 0.98)
+                self.assertEqual(verdict["threshold_high"], baseline / 0.98)
+
+
 if __name__ == "__main__":
     unittest.main()
