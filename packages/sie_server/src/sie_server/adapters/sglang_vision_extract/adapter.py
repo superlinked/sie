@@ -17,12 +17,13 @@ from typing import TYPE_CHECKING, Any
 
 from huggingface_hub import snapshot_download
 
-from sie_server.adapters._generation_base import GenerationResult, collect_generation
+from sie_server.adapters._generation_base import GenerationInputTooLongError, GenerationResult, collect_generation
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters.base import ModelCapabilities, ModelDims
 from sie_server.adapters.lighton_ocr._markdown import lightonocr3_markdown
+from sie_server.adapters.sglang._window import SGLangInputTooLongError
 from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
 from sie_server.core.inference_output import ExtractOutput
 from sie_server.types.inputs import InvalidMediaError
@@ -313,7 +314,12 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
             self._extract_async(prompt, images, max_new_tokens=max_new_tokens),
             self._request_loop,
         )
-        results = future.result()
+        # Extract callers only recognise the input-error type: the generation one
+        # would be reported as a 500.
+        try:
+            results = future.result()
+        except GenerationInputTooLongError as exc:
+            raise SGLangInputTooLongError(str(exc)) from exc
         entities = [
             [
                 Entity(

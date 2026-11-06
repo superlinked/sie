@@ -52,13 +52,13 @@ from torch.nn import functional as F
 
 from sie_server.adapters._base_adapter import BaseAdapter
 from sie_server.adapters._multivector import maxsim_scores_batched
+from sie_server.adapters._qwen3_5_packed import PackedTextModel, Packing, resolve_kernels, to_device
 from sie_server.adapters._spec import AdapterSpec
 from sie_server.adapters._transformers_compat import install_transformers_security_fixes
 from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters._utils import grouped_score_pairs, validate_output_types
 from sie_server.adapters.topk_embed import vision_rotary
 from sie_server.adapters.topk_embed.graphs import GRAPH_MODES, GraphMode, GraphRunner, default_max_tokens
-from sie_server.adapters.topk_embed.packed import PackedTextModel, Packing, resolve_kernels, to_device
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.oom import is_oom_error
 from sie_server.core.postprocessor import MuveraConfig, MuveraPostprocessor, SmveConfig, SmvePostprocessor
