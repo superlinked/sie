@@ -49,15 +49,15 @@ def _verification(base_url: str) -> ssl.SSLContext:
         capath = None if cafile else os.environ.get("SSL_CERT_DIR") or None
     if capath is not None and not any(_holds_entries(entry) for entry in capath.split(os.pathsep) if entry):
         raise ValueError("the CA certificates that SSL_CERT_DIR names cannot be loaded")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     try:
         if cafile is None and capath is None:
-            context = ssl.create_default_context(cafile=certifi.where())
+            context.load_verify_locations(cafile=certifi.where())
         else:
-            context = ssl.create_default_context(cafile=cafile, capath=capath)
+            context.load_verify_locations(cafile=cafile, capath=capath)
     except (OSError, ssl.SSLError):
         variable = "SSL_CERT_FILE" if cafile else "SSL_CERT_DIR"
         raise ValueError(f"the CA certificates that {variable} names cannot be loaded") from None
-    context.keylog_filename = None  # ty: ignore[invalid-assignment]
     return context
 
 

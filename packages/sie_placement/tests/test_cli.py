@@ -18,6 +18,7 @@ import pytest
 pytest.importorskip("sie_sdk")
 
 import certifi
+import httpx
 from sie_placement import cli, keda, pools
 from sie_sdk import SIEError
 
@@ -708,15 +709,13 @@ def test_the_gateway_client_sends_no_token_through_a_proxy_the_environment_names
 HTTPS_GATEWAY = "https://gateway.example:8443"
 
 
-def recorded_contexts(monkeypatch) -> list[dict]:
+def recorded_locations(monkeypatch) -> list[dict]:
     calls: list[dict] = []
-    create = ssl.create_default_context
 
-    def record(**kwargs):
-        calls.append(kwargs)
-        return create()
+    def record(self, cafile=None, capath=None, cadata=None):
+        calls.append({"cafile": cafile, "capath": capath})
 
-    monkeypatch.setattr(ssl, "create_default_context", record)
+    monkeypatch.setattr(ssl.SSLContext, "load_verify_locations", record)
     return calls
 
 
@@ -737,7 +736,7 @@ def test_an_https_gateway_is_verified_against_the_ca_certificates_the_environmen
     monkeypatch.setenv(variable, str(location))
     if also_set_directory:
         monkeypatch.setenv("SSL_CERT_DIR", str(certificate_directory(tmp_path / "other-certs")))
-    calls = recorded_contexts(monkeypatch)
+    calls = recorded_locations(monkeypatch)
     context = pools._verification(HTTPS_GATEWAY)
     expected = {"cafile": str(location), "capath": None}
     if variable == "SSL_CERT_DIR":
@@ -750,16 +749,16 @@ def test_a_ca_directory_list_with_one_usable_entry_is_passed_through_unchanged(m
     good = certificate_directory(tmp_path / "certs")
     listing = os.pathsep.join([str(tmp_path / "missing"), str(good), ""])
     monkeypatch.setenv("SSL_CERT_DIR", listing)
-    calls = recorded_contexts(monkeypatch)
+    calls = recorded_locations(monkeypatch)
     pools._verification(HTTPS_GATEWAY)
     assert calls == [{"cafile": None, "capath": listing}]
 
 
 @pytest.mark.parametrize("url", [HTTPS_GATEWAY, "http://gateway.example:8080"])
 def test_the_gateway_client_uses_the_default_ca_bundle_without_those_variables(monkeypatch, url):
-    calls = recorded_contexts(monkeypatch)
+    calls = recorded_locations(monkeypatch)
     pools._verification(url)
-    assert calls == [{"cafile": certifi.where()}]
+    assert calls == [{"cafile": certifi.where(), "capath": None}]
 
 
 def test_an_http_gateway_reads_no_ca_variables(gateway, monkeypatch, tmp_path):
@@ -773,11 +772,47 @@ def test_an_http_gateway_reads_no_ca_variables(gateway, monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("url", [HTTPS_GATEWAY, "http://gateway.example:8080"])
-def test_the_gateway_client_never_writes_tls_secrets_to_a_key_log(monkeypatch, tmp_path, url):
+def test_the_gateway_client_verifies_as_httpx_does_and_never_writes_tls_secrets_to_a_key_log(
+    monkeypatch, tmp_path, url
+):
     key_log = tmp_path / "keys.log"
     monkeypatch.setenv("SSLKEYLOGFILE", str(key_log))
     assert ssl.create_default_context().keylog_filename == str(key_log)
-    assert pools._verification(url).keylog_filename is None
+    context = pools._verification(url)
+    reference = httpx.create_ssl_context()
+    assert context.keylog_filename is None
+    assert context.verify_mode is ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+    assert (context.verify_mode, context.check_hostname, context.minimum_version) == (
+        reference.verify_mode,
+        reference.check_hostname,
+        reference.minimum_version,
+    )
+
+
+@pytest.mark.parametrize("key_log", ["directory", "unwritable"])
+def test_a_key_log_the_client_cannot_open_neither_stops_it_nor_receives_anything(
+    gateway, monkeypatch, tmp_path, key_log
+):
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    path = locked if key_log == "directory" else locked / "keys.log"
+    monkeypatch.setenv("SSLKEYLOGFILE", str(path))
+    if key_log == "unwritable":
+        locked.chmod(0o500)
+    try:
+        with pytest.raises(IsADirectoryError if key_log == "directory" else PermissionError):
+            ssl.create_default_context()
+        assert pools._verification(HTTPS_GATEWAY).keylog_filename is None
+        pools.connect(HTTPS_GATEWAY, READ_TOKEN).close()
+        reader = pools.connect(gateway.url, READ_TOKEN)
+        try:
+            assert reader.get_pool(CARRIER) is None
+        finally:
+            reader.close()
+        assert list(locked.iterdir()) == []
+    finally:
+        locked.chmod(0o700)
 
 
 def test_a_ca_bundle_that_cannot_be_loaded_is_refused_before_any_call(monkeypatch, tmp_path):
