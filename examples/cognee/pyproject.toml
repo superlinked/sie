@@ -1,0 +1,31 @@
+[project]
+name = "sie-cognee-workshop-experiments"
+version = "0.1.0"
+description = "Four experiments in persistent memory, document reading, decisions and learning"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "cognee==1.6.7",
+    "sie-cognee==0.11.0",
+    "sie-sdk==0.11.0",
+    "pillow>=11,<13",
+    "pypdfium2>=4.30,<6",
+    "python-dotenv>=1,<2",
+]
+
+[dependency-groups]
+dev = ["pytest>=9,<10", "ruff==0.15.12", "ty==0.0.32"]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+sie-cognee = { path = "../../integrations/sie_cognee", editable = true }
+sie-sdk = { path = "../../packages/sie_sdk", editable = true }
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

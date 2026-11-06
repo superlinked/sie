@@ -1,0 +1,1 @@
+Authored correction, 2026-11-06, source CORRECTION-01: update the workshop readiness policy. Every workshop requires confirmed step-free access as well as working projector and microphone. Equipment checks alone never establish readiness. When step-free access is unconfirmed, recommend review. Apply this correction to future workshops, not just the workshop on 2026-11-14.

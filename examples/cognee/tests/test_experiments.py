@@ -1,0 +1,134 @@
+"""Offline boundary checks. No model weights, network requests or recorded replies."""
+
+import asyncio
+import importlib.util
+import json
+import sys
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+from PIL import Image
+
+from common import ROOT, Demo, endpoint_for, load_demo
+
+
+def script(name: str) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(f"experiment_{name[:2]}", ROOT / name)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_role_keys_do_not_cross_origins() -> None:
+    env = {
+        "SIE_BASE_URL": "https://api.superlinked.com",
+        "SIE_API_KEY": "test-only",
+        "SIE_LLM_BASE_URL": "http://localhost:8081",
+    }
+    assert endpoint_for("llm", env).api_key is None
+    assert endpoint_for("embedding", env).api_key == "test-only"
+    env["SIE_EMBEDDING_API_KEY"] = ""
+    with pytest.raises(ValueError, match="SIE_EMBEDDING_API_KEY"):
+        endpoint_for("embedding", env)
+
+
+@pytest.mark.parametrize("url", ["http://user:password@localhost:8080", "http://localhost:8080?key=secret"])
+def test_endpoint_does_not_print_secrets(url: str) -> None:
+    with pytest.raises(ValueError, match="without credentials") as error:
+        endpoint_for("llm", {"SIE_BASE_URL": url})
+    assert "secret" not in str(error.value)
+    assert "password" not in str(error.value)
+
+
+def test_config_isolation_and_embedding_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import common
+
+    original = (ROOT / "config.toml").read_text()
+    (tmp_path / "config.toml").write_text(original)
+    monkeypatch.setattr(common, "ROOT", tmp_path)
+    monkeypatch.setattr(common, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setenv("SIE_BASE_URL", "http://localhost:8080")
+    monkeypatch.setenv("WORKSHOP_NAMESPACE", "test-workshop")
+    monkeypatch.setenv("SIE_LLM_MODEL", "Qwen/Qwen3.8-27B-FP8")
+    demo = load_demo("test")
+    assert demo.models["llm"] == "Qwen/Qwen3.8-27B-FP8"
+    assert demo.storage == tmp_path / ".state/test-workshop"
+    assert demo.dataset == "sie-test-workshop"
+    (tmp_path / "config.toml").write_text(original.replace("embedding_dimensions = 1024", "embedding_dimensions = 768"))
+    with pytest.raises(ValueError, match="fresh WORKSHOP_NAMESPACE"):
+        load_demo("changed")
+    monkeypatch.setenv("WORKSHOP_NAMESPACE", "../unowned")
+    with pytest.raises(ValueError, match="WORKSHOP_NAMESPACE"):
+        load_demo("escape")
+
+
+def test_document_limits_and_pdf_page_provenance(tmp_path: Path) -> None:
+    documents = script("02_read_documents.py")
+    path = tmp_path / "pages.pdf"
+    first = Image.new("RGB", (100, 60), "white")
+    second = Image.new("RGB", (100, 60), "gray")
+    first.save(path, save_all=True, append_images=[second])
+    limits = {"max_bytes": 100000, "max_pages": 2, "max_pixels": 10000, "scale": 1}
+    rendered = list(documents.pages(path, **limits))
+    assert [number for number, _ in rendered] == [1, 2]
+    assert all(data.startswith(b"\x89PNG") for _, data in rendered)
+    with pytest.raises(ValueError, match="document_pages"):
+        list(documents.pages(path, **{**limits, "max_pages": 1}))
+    with pytest.raises(ValueError, match="document_bytes"):
+        list(documents.pages(path, **{**limits, "max_bytes": 1}))
+    with pytest.raises(ValueError, match="page_pixels"):
+        list(documents.pages(path, **{**limits, "max_pixels": 1}))
+
+
+@pytest.mark.parametrize("status", ["no_gated_entries", "no_new_entries", "no_proposed_lessons", "no_accepted_lessons"])
+def test_distillation_empty_status_is_not_success(status: str) -> None:
+    learn = script("04_learn.py")
+    result = learn.distillation_summary({"status": status, "documents": [], "session_id": "test-session"})
+    assert result["persisted_lessons"] is False
+    assert result["accepted_document_count"] == 0
+
+
+def test_distillation_requires_actual_documents() -> None:
+    learn = script("04_learn.py")
+    assert learn.distillation_summary({"status": "completed", "documents": []})["persisted_lessons"] is False
+    document = "# Session learning\n\nA hand-authored unit-test stand-in lesson."
+    result = learn.distillation_summary({"status": "completed", "documents": [document]})
+    assert result["persisted_lessons"] is True
+    assert result["documents"] == [document]
+    with pytest.raises(ValueError, match="lesson texts"):
+        learn.distillation_summary({"status": "completed", "documents": [123]})
+
+
+@pytest.mark.parametrize("status", ["completed", "no_gated_entries"])
+def test_learning_invokes_distillation_and_queries_fresh_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    learn = script("04_learn.py")
+    cognee = ModuleType("cognee")
+    cognee.recall = AsyncMock(return_value=[])  # type: ignore[attr-defined]
+    documents = ["# Session learning\n\nSynthetic accepted lesson."] if status == "completed" else []
+    cognee.session = SimpleNamespace(  # type: ignore[attr-defined]
+        get_session=AsyncMock(return_value=[]),
+        distill_session=AsyncMock(return_value={"status": status, "documents": documents}),
+    )
+    search = ModuleType("cognee.api.v1.search")
+    search.SearchType = SimpleNamespace(HYBRID_COMPLETION="hybrid")  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "cognee.api.v1.search", search)
+    monkeypatch.setattr(learn, "initialize", lambda *args, **kwargs: cognee)
+    decisions = AsyncMock(return_value={"choice": "review", "probabilities": {"review": 1.0}})
+    monkeypatch.setattr(learn, "run_decision", decisions)
+    monkeypatch.setattr(sys, "argv", ["04_learn.py"])
+    demo = Demo(
+        {}, {"distill_batches": 1}, {"query": "old input", "new_query": "new input"}, {}, "test", tmp_path, tmp_path
+    )
+    asyncio.run(learn.main(demo))
+    session_ids = json.loads((tmp_path / "session-ids.json").read_text())
+    assert session_ids["teaching"] != session_ids["fresh"]
+    cognee.session.distill_session.assert_awaited_once_with(session_ids["teaching"], demo.dataset, max_batches=1)
+    assert cognee.recall.await_args_list[-1].kwargs["session_id"] == session_ids["fresh"]
+    assert cognee.recall.await_args_list[-1].args[0] == "new input"
+    assert [call.args[1] for call in decisions.await_args_list] == ["old input", "new input"]
+    assert json.loads((tmp_path / "actual-distillation.json").read_text())["documents"] == documents
