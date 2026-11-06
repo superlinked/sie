@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import ssl
 from collections.abc import Mapping
 
 import httpx
@@ -30,14 +32,28 @@ class _Replies:
             raise GatewayError(f"the gateway answered HTTP {status}, which is neither a success nor an error")
 
 
+def _verification() -> ssl.SSLContext | bool:
+    cafile = os.environ.get("SSL_CERT_FILE") or None
+    capath = None if cafile else os.environ.get("SSL_CERT_DIR") or None
+    if cafile is None and capath is None:
+        return True
+    try:
+        return ssl.create_default_context(cafile=cafile, capath=capath)
+    except (OSError, ssl.SSLError):
+        variable = "SSL_CERT_FILE" if cafile else "SSL_CERT_DIR"
+        raise ValueError(f"the CA certificates that {variable} names cannot be loaded") from None
+
+
 def _client(base_url: str, api_key: str | None) -> tuple[SIEClient, _Replies, str | None]:
     replies = _Replies()
+    verify = _verification()
     try:
         http_client = httpx.Client(
             base_url=base_url,
             timeout=TIMEOUT_S,
             follow_redirects=False,
             trust_env=False,
+            verify=verify,
             event_hooks={"response": [replies]},
         )
     except httpx.InvalidURL:

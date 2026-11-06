@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import ssl
 import sys
 import threading
 import time
@@ -188,6 +189,8 @@ def clean_environment(monkeypatch):
         "SIE_API_KEY",
         "SIE_BASE_URL",
         "SIE_ADMIN_TOKEN",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -698,6 +701,42 @@ def test_the_gateway_client_sends_no_token_through_a_proxy_the_environment_names
         ("GET", f"Bearer {READ_TOKEN}"),
         ("POST", f"Bearer {ADMIN_TOKEN}"),
     ]
+
+
+@pytest.mark.parametrize("variable", ["SSL_CERT_FILE", "SSL_CERT_DIR"])
+def test_the_gateway_client_verifies_against_the_ca_certificates_the_environment_names(
+    gateway, monkeypatch, tmp_path, variable
+):
+    location = tmp_path / ("ca.pem" if variable == "SSL_CERT_FILE" else "certs")
+    monkeypatch.setenv(variable, str(location))
+    calls = []
+    create = ssl.create_default_context
+
+    def record(**kwargs):
+        calls.append(kwargs)
+        return create()
+
+    monkeypatch.setattr(ssl, "create_default_context", record)
+    reader = pools.connect(gateway.url, READ_TOKEN)
+    try:
+        assert reader.get_pool(CARRIER) is None
+    finally:
+        reader.close()
+    expected = {"cafile": str(location), "capath": None}
+    if variable == "SSL_CERT_DIR":
+        expected = {"cafile": None, "capath": str(location)}
+    assert calls == [expected]
+
+
+def test_the_gateway_client_uses_the_default_ca_bundle_without_those_variables():
+    assert pools._verification() is True
+
+
+def test_a_ca_bundle_that_cannot_be_loaded_is_refused_before_any_call(gateway, monkeypatch, tmp_path):
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "missing.pem"))
+    with pytest.raises(ValueError, match="the CA certificates that SSL_CERT_FILE names cannot be loaded"):
+        pools.connect(gateway.url, READ_TOKEN)
+    assert gateway.requests == []
 
 
 def test_a_malformed_pool_reply_fails_only_the_tick(gateway, prometheus, read_token_file, capsys):
