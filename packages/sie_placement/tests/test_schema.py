@@ -4,6 +4,7 @@ import copy
 import json
 import math
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -171,6 +172,43 @@ def test_numbers_built_in_code_must_be_finite(build, field, value):
         build(value)
     assert caught.value.path == field
     assert caught.value.message.startswith("must be a finite number")
+
+
+@pytest.mark.parametrize(("value", "described"), [(True, "boolean true"), ("1", "string '1'")])
+def test_numbers_built_in_code_must_be_numbers(value, described):
+    with pytest.raises(SchemaError) as caught:
+        Throughput(requests_per_second=value)
+    assert str(caught.value) == f"requestsPerSecond: must be a number, got {described}"
+
+
+@pytest.mark.parametrize(
+    ("build", "field"),
+    [
+        (lambda value: ContainerShape(gpu_count=value, cpu_cores=1.0, memory_mib=1024), "gpuCount"),
+        (lambda value: ServiceLevel(come_alive_p95_s=value), "comeAliveP95S"),
+        (lambda value: Envelope(floor_min=0, floor_max=value), "floorMax"),
+        (lambda value: DemandHour(start=datetime(2026, 1, 1, tzinfo=UTC), requests=value), "requests"),
+        (lambda value: Capacity(total=value), "total"),
+        (lambda value: TypeCeiling(gpu_product="NVIDIA-L4", accelerators=value), "accelerators"),
+        (lambda value: SharedQuota(accelerators=8, held_elsewhere=value), "heldElsewhere"),
+        (
+            lambda value: MachineProfilePrice(
+                name="l4",
+                gpu_product="NVIDIA-L4",
+                accelerator_per_hour=0,
+                core_per_hour=0,
+                memory_gib_per_hour=0,
+                gpu_memory_mib=value,
+            ),
+            "gpuMemoryMiB",
+        ),
+    ],
+)
+@pytest.mark.parametrize(("value", "described"), [(1.5, "number 1.5"), (2.0, "number 2.0"), (True, "boolean true")])
+def test_integers_built_in_code_must_be_integers(build, field, value, described):
+    with pytest.raises(SchemaError) as caught:
+        build(value)
+    assert str(caught.value) == f"{field}: must be an integer, got {described}"
 
 
 def test_numbers_reject_booleans():
@@ -538,6 +576,21 @@ def test_boot_evidence_records_the_footprint_of_a_load_that_succeeded():
     assert str(schema_error(BootEvidence.from_dict, data)) == (
         "$.footprintMiB: must be omitted for an attempt that did not succeed"
     )
+
+
+@pytest.mark.parametrize(
+    ("parse", "name", "field"),
+    [
+        (Receipt.from_dict, "receipt-encode.json", "footprint_mib"),
+        (Receipt.from_dict, "receipt-encode.json", "working_memory_mib"),
+        (BootEvidence.from_dict, "boot-evidence.json", "footprint_mib"),
+    ],
+)
+def test_memory_built_in_code_must_be_integers(parse, name, field):
+    document = parse(load(name))
+    with pytest.raises(SchemaError) as caught:
+        replace(document, **{field: 1.5})
+    assert caught.value.message == "must be an integer, got number 1.5"
 
 
 def test_machine_profiles_may_state_the_memory_of_their_card():
