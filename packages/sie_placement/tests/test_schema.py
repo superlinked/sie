@@ -187,6 +187,9 @@ def test_numbers_built_in_code_must_be_numbers(value, described):
         (lambda value: ServiceLevel(come_alive_p95_s=value), "comeAliveP95S"),
         (lambda value: Envelope(floor_min=0, floor_max=value), "floorMax"),
         (lambda value: DemandHour(start=datetime(2026, 1, 1, tzinfo=UTC), requests=value), "requests"),
+        (lambda value: Capacity(total=value), "total"),
+        (lambda value: TypeCeiling(gpu_product="NVIDIA-L4", accelerators=value), "accelerators"),
+        (lambda value: SharedQuota(accelerators=8, held_elsewhere=value), "heldElsewhere"),
     ],
 )
 @pytest.mark.parametrize(("value", "described"), [(1.5, "number 1.5"), (2.0, "number 2.0"), (True, "boolean true")])

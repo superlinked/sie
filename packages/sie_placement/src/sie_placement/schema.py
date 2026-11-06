@@ -949,7 +949,7 @@ class TypeCeiling:
 
     def __post_init__(self) -> None:
         _require_identifier("gpuProduct", self.gpu_product)
-        _require_at_least("accelerators", self.accelerators, 0)
+        _require_count("accelerators", self.accelerators, 0)
 
     @classmethod
     def from_dict(cls, data: object, path: str = ROOT_PATH) -> Self:
@@ -966,8 +966,8 @@ class SharedQuota:
     held_elsewhere: int = 0
 
     def __post_init__(self) -> None:
-        _require_at_least("accelerators", self.accelerators, 0)
-        _require_at_least("heldElsewhere", self.held_elsewhere, 0)
+        _require_count("accelerators", self.accelerators, 0)
+        _require_count("heldElsewhere", self.held_elsewhere, 0)
 
     @classmethod
     def from_dict(cls, data: object, path: str = ROOT_PATH) -> Self:
@@ -989,7 +989,7 @@ class Capacity:
     shared_quota: SharedQuota | None = None
 
     def __post_init__(self) -> None:
-        _require_at_least("total", self.total, 0)
+        _require_count("total", self.total, 0)
         _require_unique("types", "gpuProduct", (ceiling.gpu_product for ceiling in self.types))
         if self.total is None and not self.types and self.shared_quota is None:
             raise SchemaError("", "must declare total, types or sharedQuota")
