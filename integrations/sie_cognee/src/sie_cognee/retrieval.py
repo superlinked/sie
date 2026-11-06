@@ -35,7 +35,7 @@ def normalize_chunks(results: object) -> list[SourceChunk]:
     seen = set()
     for entry in results:
         if isinstance(entry, SearchResultItem):
-            result = entry.model_dump()
+            result = entry.model_dump(mode="json")
         elif isinstance(entry, dict):
             result = cast("dict[str, Any]", entry)
         else:

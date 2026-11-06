@@ -20,6 +20,7 @@ encoding = tiktoken.Encoding(
     name="byte-fixture", pat_str=r"[\s\S]", mergeable_ranks={bytes([i]): i for i in range(256)}, special_tokens={}
 )
 text = "The projector is confirmed for the workshop on 2026-11-14."
+llm_model = sys.argv[2] if len(sys.argv) > 2 else "Qwen/Qwen3.5-4B"
 requests = []
 
 
@@ -42,7 +43,7 @@ class Handler(BaseHTTPRequestHandler):
                 "usage": {"prompt_tokens": len(body["input"]), "total_tokens": len(body["input"])},
             }
         elif self.path == "/v1/chat/completions":
-            assert body["model"] == "Qwen/Qwen3.5-4B"
+            assert body["model"] == llm_model, body["model"]
             schema = body.get("response_format", {}).get("json_schema", {}).get("schema", {})
             if not schema:
                 # Cognee deliberately uses response_model=str for its connection
@@ -73,7 +74,7 @@ class Handler(BaseHTTPRequestHandler):
                 "id": "fixture",
                 "object": "chat.completion",
                 "created": 1,
-                "model": "Qwen/Qwen3.5-4B",
+                "model": llm_model,
                 "choices": [
                     {
                         "index": 0,
@@ -99,7 +100,7 @@ async def main():
         thread.start()
         try:
             endpoint = Endpoint(f"http://127.0.0.1:{server.server_port}")
-            configure(CogneeSettings(endpoint, endpoint, "Qwen/Qwen3.5-4B", "BAAI/bge-m3", 3, Path(sys.argv[1])))
+            configure(CogneeSettings(endpoint, endpoint, llm_model, "BAAI/bge-m3", 3, Path(sys.argv[1])))
             import cognee
             from cognee.infrastructure.llm.LLMGateway import LLMGateway
             from cognee.modules.session_distillation.models import CuratorBatchOutput

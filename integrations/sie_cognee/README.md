@@ -56,7 +56,9 @@ asyncio.run(main())
 
 `configure` sets the supported `custom` LLM provider with
 `openai/<SIE model ID>` and `openai_compatible` embeddings with the raw model
-ID. Each endpoint gets exactly one final `/v1`. Generation and embeddings can
+ID. Pass raw SIE identifiers to both model settings, including any vendor
+namespace such as `openai/`; `configure` adds the transport prefix separately.
+Each endpoint gets exactly one final `/v1`. Generation and embeddings can
 use separate endpoints and keys; native OCR/rerank/decision calls use a
 separately constructed `sie_sdk.SIEClient`. With a loopback URL only, a missing
 compatible API key becomes the harmless placeholder `sie-local-no-key`.

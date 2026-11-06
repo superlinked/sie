@@ -83,7 +83,8 @@ def test_actual_configuration_and_storage_isolation(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_released_cognee_remember_recall_http_contract(tmp_path):
+@pytest.mark.parametrize("model", ["Qwen/Qwen3.5-4B", "openai/test-model"])
+def test_released_cognee_remember_recall_http_contract(tmp_path, model):
     script = Path(__file__).with_name("http_contract_probe.py")
     env = {key: value for key, value in os.environ.items() if not key.startswith(("LLM_", "EMBEDDING_", "FALLBACK_"))}
     env.update(
@@ -99,7 +100,7 @@ def test_released_cognee_remember_recall_http_contract(tmp_path):
         }
     )
     result = subprocess.run(  # noqa: S603 - fixed local contract probe
-        [sys.executable, str(script), str(tmp_path / "state")],
+        [sys.executable, str(script), str(tmp_path / "state"), model],
         env=env,
         check=False,
         capture_output=True,

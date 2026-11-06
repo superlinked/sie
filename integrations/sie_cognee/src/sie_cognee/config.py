@@ -70,9 +70,7 @@ def configure(settings: CogneeSettings) -> None:
         raise ValueError("embedding_dimensions must be a positive integer")
     if not settings.llm_model.strip() or not settings.embedding_model.strip():
         raise ValueError("Both model identifiers are required")
-    llm_model = settings.llm_model.removeprefix("openai/")
-    if settings.embedding_model.startswith("openai/"):
-        raise ValueError("embedding_model must be the raw SIE model identifier")
+    llm_model = settings.llm_model
     llm_config: dict[str, object] = {
         "llm_provider": "custom",
         "llm_model": f"openai/{llm_model}",
@@ -149,11 +147,12 @@ def configure(settings: CogneeSettings) -> None:
     # through LiteLLM's public registration API instead of falling back to prose.
     litellm.register_model(
         {
-            f"openai/{llm_model}": {
+            name: {
                 "litellm_provider": "openai",
                 "mode": "chat",
                 "supports_response_schema": settings.native_json_schema,
             }
+            for name in {llm_model, f"openai/{llm_model}"}
         }
     )
     import cognee

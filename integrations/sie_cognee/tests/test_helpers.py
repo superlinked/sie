@@ -1,6 +1,10 @@
 """Fail-closed boundaries for literal sources and native inference outputs."""
 
+import json
+from datetime import UTC, datetime
+from enum import Enum
 from unittest.mock import MagicMock
+from uuid import UUID
 
 import pytest
 from sie_cognee.decision import EvidenceOverflowError, decide, evidence_packet
@@ -61,6 +65,33 @@ def test_normalizes_actual_released_cognee_chunk_objects():
         normalize_chunks([entry, entry])
     with pytest.raises(ValueError, match="source chunks"):
         normalize_chunks([entry.model_copy(update={"kind": "graph_completion"})])
+
+
+def test_chunk_metadata_remains_json_serializable():
+    from cognee.api.v1.search import SearchType
+    from cognee.modules.recall.types.RecallResponse import ResponseGraphEntry
+
+    class SourceKind(Enum):
+        NOTE = "note"
+
+    entry = ResponseGraphEntry(
+        source="graph",
+        kind="chunk",
+        search_type=SearchType.CHUNKS,
+        text="Source text",
+        metadata={"chunk_id": "c1"},
+        raw={
+            "data_id": UUID("bfa87d58-78b9-446c-a044-d371103e82f6"),
+            "created_at": datetime(2026, 1, 2, tzinfo=UTC),
+            "source_kind": SourceKind.NOTE,
+        },
+    )
+    chunk = normalize_chunks([entry])[0]
+    assert json.loads(json.dumps(chunk.raw)) == {
+        "data_id": "bfa87d58-78b9-446c-a044-d371103e82f6",
+        "created_at": "2026-01-02T00:00:00Z",
+        "source_kind": "note",
+    }
 
 
 @pytest.mark.parametrize("result", ["generated context", [{"kind": "chunk", "text": "text", "metadata": {}}]])
