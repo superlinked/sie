@@ -1408,9 +1408,10 @@ placementApplier:
   enabled: false
   # -- Write the floor-carrier pools (a boolean). false runs in shadow mode:
   # the applier decides and prints one audit row per lane and writes nothing.
-  # true also mounts the gateway admin token from the Secret named by
-  # gateway.auth.adminTokenSecretName, which authorizes every gateway admin
-  # route, and passes --apply.
+  # true passes --apply and, when the gateway may authenticate (token auth or
+  # a mode known only at run time), also mounts the gateway admin token from
+  # the Secret named by gateway.auth.adminTokenSecretName, which authorizes
+  # every gateway admin route.
   apply: false
   # -- An image that runs `sie-placement` with the sie-placement keda extra
   # installed, as a non-root user. The chart publishes none, so repository and
