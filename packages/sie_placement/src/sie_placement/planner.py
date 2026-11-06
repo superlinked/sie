@@ -1433,9 +1433,8 @@ class _Planner:
                     scope=CapacityScope.SHARED_QUOTA,
                     ceiling=quota.accelerators,
                     accelerators=total + quota.held_elsewhere,
-                    peak_accelerators=peak + quota.held_elsewhere,
                     held_elsewhere=quota.held_elsewhere,
-                    lanes=names,
+                    lanes=tuple(lane.name for lane in plan.lanes if lane.envelope.floor_max),
                 )
             )
         return tuple(uses)
