@@ -1573,6 +1573,20 @@ def test_a_derived_queue_pool_is_the_slug_of_the_lane_name():
     assert {lane.name: lane.queue_pool for lane in result.plan.lanes} == {"Shared_Lane": "shared-lane"}
 
 
+def test_plan_lanes_whose_tokens_differ_only_in_case_name_one_chart_lane():
+    service_levels = levels(("org/a", WARM), ("org/b", WARM))
+    receipts = [receipt(identity=identity) for identity in ("org/a", "org/b")]
+    result = run(service_levels, receipts, prices=L4_ONLY, bundles={"org/a": "Default"})
+    assert {lane.name: lane.bundle for lane in result.plan.lanes} == {"org-a-l4": "Default", "org-b-l4": "default"}
+    (shared,) = result.report.shared_chart_lanes
+    assert shared.to_dict() == {
+        "queuePool": "default",
+        "machineProfile": "l4",
+        "bundle": "default",
+        "lanes": ["org-a-l4", "org-b-l4"],
+    }
+
+
 def test_a_derived_lane_name_never_takes_a_kept_lane_named_with_its_digest():
     digest = hashlib.sha256(IDENTITY.encode()).hexdigest()
     first = single_lane_plan(name="org-model-l4", identity="org/kept")
