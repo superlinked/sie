@@ -4696,6 +4696,64 @@ def test_the_applier_mounts_the_trimmed_client_token_secret_key(tmp_path: Path) 
     }
 
 
+@pytest.mark.parametrize(
+    ("existing", "client", "error"),
+    [
+        (
+            "graf ",
+            "graf ",
+            "The placement applier client token and the Grafana admin password are the same Secret key "
+            "(graf/admin-password)",
+        ),
+        (
+            "graf ",
+            "graf",
+            "The placement applier client token and the Grafana admin password are the same Secret key "
+            "(graf/admin-password)",
+        ),
+        (
+            "graf #x",
+            "graf",
+            "kube-prometheus-stack.grafana.admin.existingSecret must name a Kubernetes Secret (lowercase letters, "
+            'digits, \'-\' and \'.\'), got "graf #x"',
+        ),
+    ],
+    ids=["both-spaced", "grafana-spaced", "grafana-comment"],
+)
+def test_the_applier_client_token_is_kept_apart_from_the_grafana_admin_secret_whatever_its_spelling(
+    tmp_path: Path, existing: str, client: str, error: str
+) -> None:
+    stack = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": existing}}}}
+    token = {"existingSecretName": client, "secretKey": "admin-password"}
+    result = render_placement(tmp_path, *applier_layers(APPLIER_AUTH, stack, clientToken=token))
+    assert result.returncode != 0
+    assert error in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("keda", "error"),
+    [
+        (
+            {"certificates": {"secretName": "keda-certs "}},
+            "The worker token and the KEDA serving TLS credentials are the same Secret key (keda-certs/tls.key)",
+        ),
+        (
+            {"certificates": {"secretName": "keda-certs #x"}},
+            "keda.certificates.secretName must name a Kubernetes Secret",
+        ),
+    ],
+    ids=["spaced", "comment"],
+)
+def test_the_worker_token_is_kept_apart_from_the_keda_serving_secret_whatever_its_spelling(
+    tmp_path: Path, keda: dict, error: str
+) -> None:
+    values = {
+        "keda": {"install": True, **keda},
+        "workers": worker_with(tokenSecretName="keda-certs", tokenSecretKey="tls.key"),
+    }
+    assert error in render_error(tmp_path, values)
+
+
 INJECTED_PULL_POLICY = "IfNotPresent\n          env:\n            - name: INJECTED\n              value: x"
 
 
