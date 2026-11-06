@@ -1013,6 +1013,10 @@ def _parse_request_meter(headers: Any, body: Any, unit: str) -> int | None:
         return None
     usage = body.get("usage")
     value = usage.get(unit) if isinstance(usage, dict) else None
+    if unit == "content_input_tokens" and isinstance(usage, dict):
+        details = usage.get("input_tokens_details")
+        if isinstance(details, dict) and "content_tokens" in details:
+            value = details["content_tokens"]
     return value if type(value) is int and 0 <= value <= _MAX_METER_VALUE else None
 
 
