@@ -1228,7 +1228,7 @@ manifest names another Secret key than the reference does.
 {{- fail (printf "%s must be a Kubernetes Secret data key (letters, digits, '-', '_' and '.'), got %q" .keyField $key) -}}
 {{- end -}}
 {{- if .unquoted -}}
-{{- $scalar := `^((?i)~|null|true|false|yes|no|on|off|y|n|[-+]?\.(inf|nan)|[-+]?0[xob][0-9a-f_]+)$|^[-+]?[0-9][0-9_]*([.:][0-9_:]*)?([eE][-+]?[0-9]+)?$` -}}
+{{- $scalar := `^((?i)~|null|true|false|yes|no|on|off|y|n|[-+]?\.(inf|nan)|[-+]?0[xob][0-9a-f_]+)$|^[-+]?[0-9][0-9_]*([.:][0-9_:]*)?([eE][-+]?[0-9]+)?$|^[-+]?\.[0-9][0-9_]*([eE][-+]?[0-9]+)?$` -}}
 {{- if regexMatch $scalar $name -}}
 {{- fail (printf "%s is written unquoted by its chart, so %q would be read as a YAML null, boolean or number rather than a Secret name" .nameField $name) -}}
 {{- end -}}

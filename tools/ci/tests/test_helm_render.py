@@ -4788,6 +4788,24 @@ def test_an_unquoted_subchart_secret_name_that_yaml_reads_as_a_scalar_is_refused
     assert "is written unquoted by its chart" in result.stderr or "wrong type for value" in result.stderr
 
 
+@pytest.mark.parametrize("key", [".5", "-.5", "+.5e3", "1.5", "true"])
+def test_an_unquoted_subchart_secret_key_that_yaml_reads_as_a_scalar_is_refused(tmp_path: Path, key: str) -> None:
+    grafana = {"admin": {"existingSecret": "graf", "userKey": key}}
+    values = {"kube-prometheus-stack": {"install": True, "grafana": grafana}}
+    result = render_chart(tmp_path, values)
+    assert result.returncode != 0
+    assert "is written unquoted by its chart" in result.stderr or "wrong type for value" in result.stderr
+
+
+@pytest.mark.parametrize("key", [".htpasswd", ".5x", "admin-user", "v1.5"])
+def test_an_unquoted_subchart_secret_key_that_yaml_reads_as_a_string_renders(tmp_path: Path, key: str) -> None:
+    grafana = {"admin": {"existingSecret": "graf", "userKey": key}}
+    values = {"kube-prometheus-stack": {"install": True, "grafana": grafana}}
+    result = render_chart(tmp_path, values)
+    assert result.returncode == 0, result.stderr
+    assert f"key: {key}" in result.stdout
+
+
 @pytest.mark.parametrize("value", ["1-graf", "graf-1.2.3", "nullable", "one"])
 def test_an_unquoted_subchart_secret_name_that_yaml_reads_as_a_string_renders(tmp_path: Path, value: str) -> None:
     values = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": value}}}}
