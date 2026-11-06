@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import ssl
 import sys
 import threading
@@ -703,24 +704,11 @@ def test_the_gateway_client_sends_no_token_through_a_proxy_the_environment_names
     ]
 
 
-@pytest.mark.parametrize(
-    ("variable", "also_set_directory"),
-    [("SSL_CERT_FILE", False), ("SSL_CERT_DIR", False), ("SSL_CERT_FILE", True)],
-)
-def test_the_gateway_client_verifies_against_the_ca_certificates_the_environment_names(
-    gateway, monkeypatch, tmp_path, variable, also_set_directory
-):
-    location = tmp_path / ("ca.pem" if variable == "SSL_CERT_FILE" else "certs")
-    if variable == "SSL_CERT_DIR":
-        location.mkdir()
-        (location / "ca.0").write_text("")
-    monkeypatch.setenv(variable, str(location))
-    if also_set_directory:
-        directory = tmp_path / "other-certs"
-        directory.mkdir()
-        (directory / "ca.0").write_text("")
-        monkeypatch.setenv("SSL_CERT_DIR", str(directory))
-    calls = []
+HTTPS_GATEWAY = "https://gateway.example:8443"
+
+
+def recorded_contexts(monkeypatch) -> list[dict]:
+    calls: list[dict] = []
     create = ssl.create_default_context
 
     def record(**kwargs):
@@ -728,41 +716,78 @@ def test_the_gateway_client_verifies_against_the_ca_certificates_the_environment
         return create()
 
     monkeypatch.setattr(ssl, "create_default_context", record)
-    reader = pools.connect(gateway.url, READ_TOKEN)
-    try:
-        assert reader.get_pool(CARRIER) is None
-    finally:
-        reader.close()
+    return calls
+
+
+def certificate_directory(path: Path) -> Path:
+    path.mkdir()
+    (path / "ca.0").write_text("")
+    return path
+
+
+@pytest.mark.parametrize(
+    ("variable", "also_set_directory"),
+    [("SSL_CERT_FILE", False), ("SSL_CERT_DIR", False), ("SSL_CERT_FILE", True)],
+)
+def test_an_https_gateway_is_verified_against_the_ca_certificates_the_environment_names(
+    monkeypatch, tmp_path, variable, also_set_directory
+):
+    location = tmp_path / "ca.pem" if variable == "SSL_CERT_FILE" else certificate_directory(tmp_path / "certs")
+    monkeypatch.setenv(variable, str(location))
+    if also_set_directory:
+        monkeypatch.setenv("SSL_CERT_DIR", str(certificate_directory(tmp_path / "other-certs")))
+    calls = recorded_contexts(monkeypatch)
+    pools._verification(HTTPS_GATEWAY)
     expected = {"cafile": str(location), "capath": None}
     if variable == "SSL_CERT_DIR":
         expected = {"cafile": None, "capath": str(location)}
     assert calls == [expected]
 
 
-def test_the_gateway_client_uses_the_default_ca_bundle_without_those_variables():
-    assert pools._verification() is True
+def test_a_ca_directory_list_with_one_usable_entry_is_passed_through_unchanged(monkeypatch, tmp_path):
+    good = certificate_directory(tmp_path / "certs")
+    listing = os.pathsep.join([str(tmp_path / "missing"), str(good), ""])
+    monkeypatch.setenv("SSL_CERT_DIR", listing)
+    calls = recorded_contexts(monkeypatch)
+    pools._verification(HTTPS_GATEWAY)
+    assert calls == [{"cafile": None, "capath": listing}]
 
 
-def test_a_ca_bundle_that_cannot_be_loaded_is_refused_before_any_call(gateway, monkeypatch, tmp_path):
+@pytest.mark.parametrize("url", [HTTPS_GATEWAY, "http://gateway.example:8080"])
+def test_the_gateway_client_uses_the_default_ca_bundle_without_those_variables(url):
+    assert pools._verification(url) is True
+
+
+def test_an_http_gateway_reads_no_ca_variables(gateway, monkeypatch, tmp_path):
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "missing.pem"))
+    monkeypatch.setenv("SSL_CERT_DIR", os.pathsep.join([str(tmp_path / "missing"), str(tmp_path / "gone")]))
+    reader = pools.connect(gateway.url, READ_TOKEN)
+    try:
+        assert reader.get_pool(CARRIER) is None
+    finally:
+        reader.close()
+
+
+def test_a_ca_bundle_that_cannot_be_loaded_is_refused_before_any_call(monkeypatch, tmp_path):
     monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "missing.pem"))
     with pytest.raises(ValueError, match="the CA certificates that SSL_CERT_FILE names cannot be loaded"):
-        pools.connect(gateway.url, READ_TOKEN)
-    assert gateway.requests == []
+        pools.connect(HTTPS_GATEWAY, READ_TOKEN)
 
 
-@pytest.mark.parametrize("directory", ["missing", "empty", "file"])
-def test_a_ca_directory_that_holds_no_certificates_is_refused_before_any_call(
-    gateway, monkeypatch, tmp_path, directory
-):
+@pytest.mark.parametrize("directory", ["missing", "empty", "file", "list"])
+def test_a_ca_directory_that_holds_no_certificates_is_refused_before_any_call(monkeypatch, tmp_path, directory):
     location = tmp_path / "certs"
+    value = str(location)
     if directory == "empty":
         location.mkdir()
     elif directory == "file":
         location.write_text("")
-    monkeypatch.setenv("SSL_CERT_DIR", str(location))
+    elif directory == "list":
+        (tmp_path / "empty").mkdir()
+        value = os.pathsep.join([str(location), str(tmp_path / "empty")])
+    monkeypatch.setenv("SSL_CERT_DIR", value)
     with pytest.raises(ValueError, match="the CA certificates that SSL_CERT_DIR names cannot be loaded"):
-        pools.connect(gateway.url, READ_TOKEN)
-    assert gateway.requests == []
+        pools.connect(HTTPS_GATEWAY, READ_TOKEN)
 
 
 def test_a_malformed_pool_reply_fails_only_the_tick(gateway, prometheus, read_token_file, capsys):

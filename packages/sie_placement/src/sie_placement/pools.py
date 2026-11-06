@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import ssl
+import urllib.parse
 from collections.abc import Mapping
 
 import httpx
@@ -40,13 +41,15 @@ def _holds_entries(path: str) -> bool:
         return False
 
 
-def _verification() -> ssl.SSLContext | bool:
-    cafile = os.environ.get("SSL_CERT_FILE") or None
-    capath = None if cafile else os.environ.get("SSL_CERT_DIR") or None
+def _verification(base_url: str) -> ssl.SSLContext | bool:
+    cafile = capath = None
+    if urllib.parse.urlsplit(base_url).scheme == "https":
+        cafile = os.environ.get("SSL_CERT_FILE") or None
+        capath = None if cafile else os.environ.get("SSL_CERT_DIR") or None
+    if capath is not None and not any(_holds_entries(entry) for entry in capath.split(os.pathsep) if entry):
+        raise ValueError("the CA certificates that SSL_CERT_DIR names cannot be loaded")
     if cafile is None and capath is None:
         return True
-    if capath is not None and not _holds_entries(capath):
-        raise ValueError("the CA certificates that SSL_CERT_DIR names cannot be loaded")
     try:
         return ssl.create_default_context(cafile=cafile, capath=capath)
     except (OSError, ssl.SSLError):
@@ -56,7 +59,7 @@ def _verification() -> ssl.SSLContext | bool:
 
 def _client(base_url: str, api_key: str | None) -> tuple[SIEClient, _Replies, str | None]:
     replies = _Replies()
-    verify = _verification()
+    verify = _verification(base_url)
     try:
         http_client = httpx.Client(
             base_url=base_url,
