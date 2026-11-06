@@ -18,6 +18,16 @@
   ],
   "max_score_levels": 10,
   "max_retry_after_s": 60,
+  "decision_adapters": [
+    "sie_server.adapters.gliner2.decide:GLiNER2DecideAdapter",
+    "sie_server.adapters.gliner2.decide_lora:GLiNER2DecideLoraAdapter",
+    "sie_server.adapters.laya.adapter:LayaAdapter",
+    "sie_server.adapters.laya.runtime_lora:LayaLoraAdapter",
+    "sie_server.adapters.pplx_decider.adapter:PerplexityDecisionAdapter",
+    "sie_server.adapters.pplx_decider.runtime_lora:PerplexityDecisionLoraAdapter",
+    "sie_server.adapters.decision.qwen:QwenDecisionAdapter",
+    "sie_server.adapters.sglang.decision:SGLangDecisionAdapter"
+  ],
   "requests": [
     {
       "name": "text state, all three question types",

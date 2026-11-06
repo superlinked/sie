@@ -37,6 +37,7 @@ from sie_server.adapters._types import ERR_NOT_LOADED, ERR_REQUIRES_TEXT, Comput
 from sie_server.adapters.sglang import _server
 from sie_server.adapters.sglang._lora import SGLangLoraManager, SGLangLoraMixin, leased_encode
 from sie_server.adapters.sglang._memory import SGLangMemoryBudget
+from sie_server.adapters.sglang._window import SGLangInputTooLongError, window_refusal_message
 from sie_server.core.inference_output import EncodeOutput
 from sie_server.core.tokenizer import load_tokenizer
 
@@ -82,6 +83,19 @@ def _resolve_embed_concurrency(configured: int | None) -> int:
     if configured is not None and configured >= 1:
         return configured
     return _DEFAULT_EMBED_CONCURRENCY
+
+
+def _raise_for_window_refusal(response: requests.Response) -> None:
+    """Report an embedding request the engine refused for its length as a client error."""
+    if response.status_code != 400:
+        return
+    try:
+        body = response.json()
+    except ValueError:
+        return
+    refusal = window_refusal_message(body.get("message")) if isinstance(body, dict) else None
+    if refusal is not None:
+        raise SGLangInputTooLongError(refusal)
 
 
 class SGLangEmbeddingAdapter(SGLangLoraMixin, BaseAdapter):
@@ -766,6 +780,7 @@ class SGLangEmbeddingAdapter(SGLangLoraMixin, BaseAdapter):
             timeout=self._request_read_timeout_s,
         )
         if response.status_code != 200:
+            _raise_for_window_refusal(response)
             logger.error(
                 "SGLang error %d for %d texts: %s",
                 response.status_code,
