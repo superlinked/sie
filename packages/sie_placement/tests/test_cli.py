@@ -745,6 +745,17 @@ def test_an_https_gateway_is_verified_against_the_ca_certificates_the_environmen
     assert context.keylog_filename is None
 
 
+def test_a_ca_directory_of_hash_links_to_certificate_files_is_passed_through(monkeypatch, tmp_path):
+    (tmp_path / "ca.pem").write_text("")
+    links = tmp_path / "certs"
+    links.mkdir()
+    (links / "ca.0").symlink_to(tmp_path / "ca.pem")
+    monkeypatch.setenv("SSL_CERT_DIR", str(links))
+    calls = recorded_locations(monkeypatch)
+    pools._verification(HTTPS_GATEWAY)
+    assert calls == [{"cafile": None, "capath": str(links)}]
+
+
 def test_a_ca_directory_list_with_one_usable_entry_is_passed_through_unchanged(monkeypatch, tmp_path):
     good = certificate_directory(tmp_path / "certs")
     listing = os.pathsep.join([str(tmp_path / "missing"), str(good), ""])
@@ -783,11 +794,15 @@ def test_the_gateway_client_verifies_as_httpx_does_and_never_writes_tls_secrets_
     assert context.keylog_filename is None
     assert context.verify_mode is ssl.CERT_REQUIRED
     assert context.check_hostname is True
-    assert (context.verify_mode, context.check_hostname, context.minimum_version) == (
-        reference.verify_mode,
-        reference.check_hostname,
-        reference.minimum_version,
-    )
+    settings = ("verify_mode", "check_hostname", "minimum_version", "verify_flags", "options", "security_level")
+    assert {name: getattr(context, name) for name in settings} == {name: getattr(reference, name) for name in settings}
+
+
+def test_the_gateway_client_sets_the_strict_verify_flags_a_newer_default_context_sets(monkeypatch):
+    monkeypatch.setattr(sys, "version_info", (3, 13, 0, "final", 0))
+    flags = pools._verification(HTTPS_GATEWAY).verify_flags
+    assert flags & ssl.VERIFY_X509_STRICT
+    assert flags & ssl.VERIFY_X509_PARTIAL_CHAIN
 
 
 @pytest.mark.parametrize("key_log", ["directory", "missing-parent"])
@@ -817,12 +832,25 @@ def test_a_ca_bundle_that_cannot_be_loaded_is_refused_before_any_call(monkeypatc
         pools.connect(HTTPS_GATEWAY, READ_TOKEN)
 
 
-@pytest.mark.parametrize("directory", ["missing", "empty", "file", "list"])
+@pytest.mark.parametrize("url", [HTTPS_GATEWAY, "http://gateway.example:8080"])
+def test_a_default_ca_bundle_that_cannot_be_loaded_is_refused_by_its_path(monkeypatch, tmp_path, url):
+    bundle = tmp_path / "missing.pem"
+    monkeypatch.setattr(certifi, "where", lambda: str(bundle))
+    with pytest.raises(ValueError, match=r"^the default CA bundle ") as refused:
+        pools.connect(url, READ_TOKEN)
+    assert str(refused.value) == f"the default CA bundle {bundle} cannot be loaded"
+
+
+@pytest.mark.parametrize("directory", ["missing", "empty", "file", "list", "subdirectory", "dangling-link"])
 def test_a_ca_directory_that_holds_no_certificates_is_refused_before_any_call(monkeypatch, tmp_path, directory):
     location = tmp_path / "certs"
     value = str(location)
-    if directory == "empty":
+    if directory in {"empty", "subdirectory", "dangling-link"}:
         location.mkdir()
+    if directory == "subdirectory":
+        (location / "nested").mkdir()
+    elif directory == "dangling-link":
+        (location / "ca.0").symlink_to(tmp_path / "missing.pem")
     elif directory == "file":
         location.write_text("")
     elif directory == "list":

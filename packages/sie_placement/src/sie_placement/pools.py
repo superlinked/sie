@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import ssl
+import sys
 import urllib.parse
 from collections.abc import Mapping
 
@@ -34,10 +35,10 @@ class _Replies:
             raise GatewayError(f"the gateway answered HTTP {status}, which is neither a success nor an error")
 
 
-def _holds_entries(path: str) -> bool:
+def _holds_files(path: str) -> bool:
     try:
         with os.scandir(path) as entries:
-            return any(True for _ in entries)
+            return any(entry.is_file() for entry in entries)
     except OSError:
         return False
 
@@ -47,17 +48,20 @@ def _verification(base_url: str) -> ssl.SSLContext:
     if urllib.parse.urlsplit(base_url).scheme == "https":
         cafile = os.environ.get("SSL_CERT_FILE") or None
         capath = None if cafile else os.environ.get("SSL_CERT_DIR") or None
-    if capath is not None and not any(_holds_entries(entry) for entry in capath.split(os.pathsep) if entry):
+    if capath is not None and not any(_holds_files(entry) for entry in capath.split(os.pathsep) if entry):
         raise ValueError("the CA certificates that SSL_CERT_DIR names cannot be loaded")
+    if cafile is None and capath is None:
+        cafile = certifi.where()
+        source = f"the default CA bundle {cafile}"
+    else:
+        source = f"the CA certificates that {'SSL_CERT_FILE' if cafile else 'SSL_CERT_DIR'} names"
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    if sys.version_info >= (3, 13):
+        context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN | ssl.VERIFY_X509_STRICT
     try:
-        if cafile is None and capath is None:
-            context.load_verify_locations(cafile=certifi.where())
-        else:
-            context.load_verify_locations(cafile=cafile, capath=capath)
+        context.load_verify_locations(cafile=cafile, capath=capath)
     except (OSError, ssl.SSLError):
-        variable = "SSL_CERT_FILE" if cafile else "SSL_CERT_DIR"
-        raise ValueError(f"the CA certificates that {variable} names cannot be loaded") from None
+        raise ValueError(f"{source} cannot be loaded") from None
     return context
 
 
