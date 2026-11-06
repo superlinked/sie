@@ -40,6 +40,21 @@ def test_native_fallback_does_not_reinterpret_compatibility_usage() -> None:
     assert parse_request_metadata({}, {"object": "response", "usage": {"input_tokens": 42}}) is None
 
 
+@pytest.mark.parametrize("value", [0, 42, 2**64 - 1, -1, 2**64, True, "42", None])
+def test_native_content_meter_uses_the_nested_wire_value(value: object) -> None:
+    body = {"scores": [], "usage": {"input_tokens_details": {"content_tokens": value}, "content_input_tokens": 999}}
+    expected = {"usage": {"content_input_tokens": value}} if type(value) is int and 0 <= value < 2**64 else None
+    assert parse_request_metadata({}, body) == expected
+
+
+@pytest.mark.parametrize("header", ["7", "0", "bad"])
+def test_native_content_meter_keeps_header_authority(header: str) -> None:
+    body = {"scores": [], "usage": {"input_tokens_details": {"content_tokens": 42}}}
+    assert parse_request_metadata({"x-sie-units-content-input-tokens": header}, body) == (
+        {"usage": {"content_input_tokens": int(header)}} if header in {"7", "0"} else None
+    )
+
+
 def _error_response(status_code: int, headers: dict[str, str]) -> MagicMock:
     response = MagicMock()
     response.status_code = status_code
