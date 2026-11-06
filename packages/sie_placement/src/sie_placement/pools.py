@@ -35,10 +35,17 @@ class _Replies:
             raise GatewayError(f"the gateway answered HTTP {status}, which is neither a success nor an error")
 
 
+def _is_file(entry: os.DirEntry[str]) -> bool:
+    try:
+        return entry.is_file()
+    except OSError:
+        return False
+
+
 def _holds_files(path: str) -> bool:
     try:
         with os.scandir(path) as entries:
-            return any(entry.is_file() for entry in entries)
+            return any(_is_file(entry) for entry in entries)
     except OSError:
         return False
 

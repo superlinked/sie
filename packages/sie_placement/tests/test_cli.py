@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -754,6 +755,25 @@ def test_a_ca_directory_of_hash_links_to_certificate_files_is_passed_through(mon
     calls = recorded_locations(monkeypatch)
     pools._verification(HTTPS_GATEWAY)
     assert calls == [{"cafile": None, "capath": str(links)}]
+
+
+def test_a_ca_directory_entry_that_cannot_be_inspected_does_not_hide_a_certificate_file(monkeypatch, tmp_path):
+    certs = tmp_path / "certs"
+    certs.mkdir()
+    (certs / "0000.0").symlink_to(certs / "0000.0")
+    (certs / "ffff.0").write_text("")
+    scandir = os.scandir
+
+    @contextmanager
+    def in_name_order(path):
+        with scandir(path) as entries:
+            yield iter(sorted(entries, key=lambda entry: entry.name))
+
+    monkeypatch.setattr(os, "scandir", in_name_order)
+    monkeypatch.setenv("SSL_CERT_DIR", str(certs))
+    calls = recorded_locations(monkeypatch)
+    pools._verification(HTTPS_GATEWAY)
+    assert calls == [{"cafile": None, "capath": str(certs)}]
 
 
 def test_a_ca_directory_list_with_one_usable_entry_is_passed_through_unchanged(monkeypatch, tmp_path):
