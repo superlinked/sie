@@ -1,0 +1,114 @@
+{
+  "kind": "placement-plan",
+  "schemaVersion": 1,
+  "placement": "us-central1",
+  "lanes": [
+    {
+      "name": "baai-bge-m3-sparse-l4",
+      "queuePool": "default",
+      "bundle": "default",
+      "cell": {
+        "machineProfile": "l4",
+        "gpuProduct": "NVIDIA-L4"
+      },
+      "containerShape": {
+        "gpuCount": 1,
+        "cpuCores": 4,
+        "memoryMiB": 16384
+      },
+      "concurrency": 16,
+      "maxContainers": 4,
+      "envelope": {
+        "floorMin": 0,
+        "floorMax": 2
+      }
+    },
+    {
+      "name": "default-l4-default",
+      "queuePool": "default-l4-default",
+      "bundle": "default",
+      "cell": {
+        "machineProfile": "l4",
+        "gpuProduct": "NVIDIA-L4"
+      },
+      "containerShape": {
+        "gpuCount": 1,
+        "cpuCores": 4,
+        "memoryMiB": 16384
+      },
+      "concurrency": 16,
+      "maxContainers": 4,
+      "envelope": {
+        "floorMin": 1,
+        "floorMax": 2
+      }
+    },
+    {
+      "name": "qwen-qwen3-8b-a100-80gb",
+      "queuePool": "default",
+      "bundle": "sglang",
+      "cell": {
+        "machineProfile": "a100-80gb",
+        "gpuProduct": "NVIDIA-A100-SXM4-80GB"
+      },
+      "containerShape": {
+        "gpuCount": 1,
+        "cpuCores": 8,
+        "memoryMiB": 65536
+      },
+      "concurrency": 32,
+      "maxContainers": 4,
+      "envelope": {
+        "floorMin": 0,
+        "floorMax": 2
+      }
+    },
+    {
+      "name": "qwen-qwen3-embedding-4b-l4",
+      "queuePool": "qwen-qwen3-embedding-4b-l4",
+      "bundle": "default",
+      "cell": {
+        "machineProfile": "l4",
+        "gpuProduct": "NVIDIA-L4"
+      },
+      "containerShape": {
+        "gpuCount": 1,
+        "cpuCores": 4,
+        "memoryMiB": 16384
+      },
+      "concurrency": 8,
+      "maxContainers": 4,
+      "envelope": {
+        "floorMin": 1,
+        "floorMax": 2
+      }
+    }
+  ],
+  "identities": [
+    {
+      "identity": "BAAI/bge-m3",
+      "lane": "default-l4-default",
+      "warmth": "pinned"
+    },
+    {
+      "identity": "BAAI/bge-m3:sparse",
+      "lane": "baai-bge-m3-sparse-l4",
+      "warmth": "cold-with-bound"
+    },
+    {
+      "identity": "Qwen/Qwen3-8B",
+      "lane": "qwen-qwen3-8b-a100-80gb",
+      "warmth": "cold-with-bound"
+    },
+    {
+      "identity": "Qwen/Qwen3-Embedding-4B",
+      "lane": "qwen-qwen3-embedding-4b-l4",
+      "warmth": "pinned"
+    },
+    {
+      "identity": "intfloat/e5-base-v2",
+      "lane": "default-l4-default",
+      "warmth": "pinned"
+    }
+  ]
+}

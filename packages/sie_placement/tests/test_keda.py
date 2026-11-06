@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
-from sie_placement import keda
+from sie_placement import helm, keda
 from sie_placement.schema import Plan
 from sie_placement.tuner import Action
 
@@ -223,7 +223,7 @@ def test_a_pin_on_the_default_queue_pool_is_refused_as_the_helm_emitter_refuses_
     assert pinned.name == "placement-floor-embed-l4-default"
 
 
-@pytest.mark.parametrize("warmth", sorted(keda.UNREALIZED_WARMTHS))
+@pytest.mark.parametrize("warmth", sorted(helm.UNREALIZED_WARMTHS))
 def test_a_warmth_the_chart_does_not_realize_is_refused_as_the_helm_emitter_refuses_it(warmth):
     document = plan_document()
     document["identities"][2]["warmth"] = warmth.value
@@ -231,7 +231,7 @@ def test_a_warmth_the_chart_does_not_realize_is_refused_as_the_helm_emitter_refu
         keda.carriers(Plan.from_dict(document))
     assert raised.value.problems == (
         f"$.identities[2].warmth: is {warmth.value!r} for 'Qwen/Qwen3-8B' on lane 'default-a100-80gb-generation', "
-        f"which the sie-cluster chart does not realize: {keda.UNREALIZED_WARMTHS[warmth]}; plan the identity "
+        f"which the sie-cluster chart does not realize: {helm.UNREALIZED_WARMTHS[warmth]}; plan the identity "
         "pinned, lazy-resident or cold-with-bound",
     )
 
@@ -245,10 +245,35 @@ def test_every_problem_of_a_refused_plan_is_reported():
     with pytest.raises(keda.PlanRefusedError) as raised:
         keda.carriers(Plan.from_dict(document))
     assert [problem.split(":", 1)[0] for problem in raised.value.problems] == [
-        "$.identities[0].warmth",
         "$.lanes[1].envelope.floorMax",
+        "$.identities[0].warmth",
         "$.identities[2].warmth",
     ]
+
+
+def test_a_lane_with_fallback_cells_is_refused_as_the_helm_emitter_refuses_it():
+    document = plan_document()
+    document["lanes"][1]["fallbackCells"] = [{"machineProfile": "h100", "gpuProduct": "NVIDIA-H100-80GB-HBM3"}]
+    plan = Plan.from_dict(document)
+    with pytest.raises(keda.PlanRefusedError) as raised:
+        keda.carriers(plan)
+    with pytest.raises(helm.UnrealizablePlanError) as emitted:
+        helm.helm_values(plan, helm.ChartParameters(fallback_replicas=1))
+    assert raised.value.problems == (str(emitted.value),)
+    assert raised.value.problems[0].startswith(
+        "$.lanes[1].fallbackCells: lists 'h100' with 'NVIDIA-H100-80GB-HBM3' after the lane's cell"
+    )
+
+
+def test_the_tuner_refuses_with_the_helm_emitter_s_own_words():
+    document = plan_document()
+    document["identities"][0]["warmth"] = "pinned"
+    plan = Plan.from_dict(document)
+    with pytest.raises(keda.PlanRefusedError) as raised:
+        keda.carriers(plan)
+    with pytest.raises(helm.UnrealizablePlanError) as emitted:
+        helm.helm_values(plan, helm.ChartParameters(fallback_replicas=1))
+    assert raised.value.problems == (str(emitted.value),)
 
 
 def test_the_series_queries_read_each_lane_from_fresh_gateway_producers_and_the_worker_series():
