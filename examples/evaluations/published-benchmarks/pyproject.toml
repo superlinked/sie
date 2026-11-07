@@ -1,7 +1,7 @@
 [project]
 name = "superlinked-sie-published-benchmarks-example"
 version = "0.1.0"
-description = "Repeat the method behind the published SIE benchmark numbers from one client process"
+description = "Repeat the method behind the published SIE benchmark numbers, or test a new model the same way, from one client process"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "sie-sdk>=0.10.1,<0.11",
