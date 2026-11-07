@@ -1,0 +1,31 @@
+{
+  "models": {
+    "llm": "zai-org/GLM-5.3-Flash:relay",
+    "embedding": "BAAI/bge-m3",
+    "embeddingDimensions": 1024,
+    "ocr": "lightonai/LightOnOCR-2-1B",
+    "rerank": "Qwen/Qwen3-Reranker-0.6B",
+    "decision": "fastino/GLiNER2.5-Decide"
+  },
+  "limits": {
+    "retrieveTopK": 5,
+    "rerankTopK": 1,
+    "evidenceChars": 1000,
+    "requestTimeoutMs": 150000,
+    "provisionTimeoutMs": 180000,
+    "experimentTimeoutMs": 600000,
+    "documentBytes": 10000000
+  },
+  "decision": {
+    "query": "Has the projector passed its image check?",
+    "instructions": "Has the projector passed its image check?",
+    "choices": {
+      "confirmed": "The projector passed its image check.",
+      "failed": "The projector failed its image check.",
+      "unknown": "No projector test result is given."
+    }
+  },
+  "learning": {
+    "query": "For a new workshop whose projector and microphone work, must I still confirm step-free access?"
+  }
+}

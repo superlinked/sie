@@ -1,0 +1,30 @@
+{
+  "name": "sie-cognee-typescript-examples",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check *.ts tests",
+    "test": "vitest run",
+    "fetch-data": "node dist/fetch.js",
+    "memory": "node --env-file-if-exists=.env dist/01_memory.js",
+    "documents": "node --env-file-if-exists=.env dist/02_read_documents.js",
+    "decide": "node --env-file-if-exists=.env dist/03_decide.js",
+    "learn": "node --env-file-if-exists=.env dist/04_learn.js"
+  },
+  "dependencies": {
+    "@superlinked/sie-sdk": "workspace:*",
+    "@superlinked/sie-cognee": "workspace:*",
+    "@cognee/cognee-ts": "0.2.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/node": "^22.14.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
