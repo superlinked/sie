@@ -119,3 +119,20 @@ it("rejects incompatible model and hidden fallback/mock settings before initiali
   vi.stubEnv("MOCK_EMBEDDING", "true");
   expect(() => cogneeConfiguration(settings())).toThrow(/Unset MOCK_EMBEDDING/);
 });
+
+it.each([0, -1, 1.5, 65537, Number.NaN])(
+  "rejects an invalid completion budget %s",
+  (maxCompletionTokens) => {
+    expect(() => cogneeConfiguration({ ...settings(), maxCompletionTokens })).toThrow(
+      /maxCompletionTokens/,
+    );
+  },
+);
+it("rejects symlinks at active database paths, including dangling links", () => {
+  for (const name of ["cognee.db", "graph", "vectors"]) {
+    const input = settings();
+    prepareStorage(input);
+    symlinkSync(join(input.storageRoot, "missing-target"), join(input.storageRoot, name));
+    expect(() => prepareStorage(input)).toThrow(/database paths/);
+  }
+});

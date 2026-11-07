@@ -16,6 +16,8 @@ export interface CogneeSettings {
   storageRoot: string;
   /** Bounds both the native runtime and model-request concurrency. Defaults to two. */
   concurrency?: number;
+  /** Maximum generation output tokens, including structured graph extraction. Default: 8192. */
+  maxCompletionTokens?: number;
 }
 
 export function compatibleUrl(endpoint: Endpoint): string {
@@ -52,12 +54,15 @@ const ROUTE_ENV = [
   "LLM_ARGS",
   "LLM_CASSETTE",
   "LLM_RECORD_PATH",
+  "MOCK_LLM_CASSETTE",
+  "COGNEE_RECORD_LLM",
   "LLM_FALLBACK_MODEL",
   "LLM_FALLBACK_PROVIDER",
   "LLM_FALLBACK_ENDPOINT",
   "LLM_FALLBACK_API_KEY",
 ];
 
+/** Validated setting values. Use createCognee to apply runtime initialization and output budgets. */
 export function cogneeConfiguration(settings: CogneeSettings): Record<string, unknown> {
   if (!settings.llmModel?.trim() || !settings.embeddingModel?.trim()) {
     throw new Error("Generation and embedding model IDs must be nonempty.");
@@ -74,6 +79,13 @@ export function cogneeConfiguration(settings: CogneeSettings): Record<string, un
   if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 16) {
     throw new Error("concurrency must be an integer from 1 to 16.");
   }
+  const maxCompletionTokens = settings.maxCompletionTokens ?? 8192;
+  if (
+    !Number.isSafeInteger(maxCompletionTokens) ||
+    maxCompletionTokens < 1 ||
+    maxCompletionTokens > 65536
+  )
+    throw new Error("maxCompletionTokens must be an integer from 1 to 65536.");
   if (!settings.storageRoot?.trim()) throw new Error("storageRoot must be nonempty.");
   for (const name of ROUTE_ENV) {
     if (process.env[name]?.trim())
@@ -87,6 +99,7 @@ export function cogneeConfiguration(settings: CogneeSettings): Record<string, un
     llmApiKey: compatibleKey(settings.llm),
     llmMaxParallelRequests: concurrency,
     llmMaxRetries: 2,
+    llmMaxCompletionTokens: maxCompletionTokens,
     llmMock: false,
     llmCassette: "",
     llmRecordPath: "",
@@ -162,8 +175,27 @@ export function prepareStorage(settings: CogneeSettings): string {
     if (lstatSync(directory).isSymbolicLink())
       throw new Error("Storage directories must not be symbolic links.");
   }
+  for (const name of ["cognee.db", "cognee.db-wal", "cognee.db-shm", "graph", "vectors"]) {
+    try {
+      if (lstatSync(join(root, name)).isSymbolicLink())
+        throw new Error("Storage database paths must not be symbolic links.");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
   return root;
 }
+
+// These settings have environment support but no config.set key in Cognee 0.2.0.
+const ENV_SETTINGS: Record<string, string> = {
+  cacheBackend: "CACHE_BACKEND",
+  autoFeedback: "AUTO_FEEDBACK",
+  enableCaching: "CACHING",
+  dbProvider: "DB_PROVIDER",
+  storageBackend: "STORAGE_BACKEND",
+  storageBucketName: "STORAGE_BUCKET_NAME",
+  graphDatabaseUrl: "GRAPH_DATABASE_URL",
+};
 
 let runtimeInitialized = false;
 
@@ -178,5 +210,30 @@ export async function createCognee(settings: CogneeSettings): Promise<Cognee> {
     library.initWithThreads(settings.concurrency ?? 2);
     runtimeInitialized = true;
   }
-  return new library.Cognee(configuration);
+  const overrides: Record<string, string> = {
+    LLM_ARGS: JSON.stringify({ max_tokens: configuration.llmMaxCompletionTokens }),
+  };
+  for (const [key, name] of Object.entries(ENV_SETTINGS))
+    overrides[name] = String(configuration[key]);
+  const previous = Object.fromEntries(Object.keys(overrides).map((key) => [key, process.env[key]]));
+  try {
+    // No await inside this scope: each handle captures its own settings before the environment is restored.
+    for (const [key, value] of Object.entries(overrides)) process.env[key] = value;
+    // Passing constructor settings would discard Cognee's env-only llm_args during deserialization.
+    const cognee = new library.Cognee();
+    for (const [key, value] of Object.entries(configuration)) {
+      if (Object.hasOwn(ENV_SETTINGS, key)) continue;
+      const nativeKey =
+        key === "embeddingModel"
+          ? "embedding_model_name"
+          : key.replace(/[A-Z]/g, (character) => `_${character.toLowerCase()}`);
+      cognee.config.set(nativeKey, value);
+    }
+    return cognee;
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
 }

@@ -65,7 +65,13 @@ it("uses the published Cognee runtime with compatible endpoints and stable sourc
   const code = `
     const {createCognee,SourceDocument,SourceMemory}=await import(${JSON.stringify(entry)});
     const settings={llm:{baseUrl:${JSON.stringify(endpoint)},apiKey:'generation-test-key'},embedding:{baseUrl:${JSON.stringify(endpoint)},apiKey:'embedding-test-key'},llmModel:'test/model',embeddingModel:'test/embedding',embeddingDimensions:4,storageRoot:${JSON.stringify(root)},concurrency:1};
-    const cognee=await createCognee(settings);
+    const otherSettings={...settings,llm:{baseUrl:settings.llm.baseUrl,apiKey:'second-generation-key'},embedding:{baseUrl:settings.embedding.baseUrl,apiKey:'second-embedding-key'},llmModel:'test/second',embeddingModel:'test/embedding-second',maxCompletionTokens:4096,storageRoot:settings.storageRoot+'/second'};
+    const [cognee,other]=await Promise.all([createCognee(settings),createCognee(otherSettings)]);
+    if(process.env.LLM_ARGS!==''||process.env.CACHE_BACKEND!=='redis')throw new Error('Environment was not restored');
+    for(const [client,expected] of [[cognee,settings],[other,otherSettings]]) {
+      const actual=client.config.get();
+      if(actual.llmModel!==expected.llmModel||actual.embeddingModel!==expected.embeddingModel||actual.systemRootDirectory!==expected.storageRoot||actual.cacheBackend!=='fs'||actual.dbProvider!=='sqlite'||actual.storageBackend!=='local'||actual.autoFeedback!==false||actual.enableCaching!==true)throw new Error('Handle settings were not isolated');
+    }
     try {
       await cognee.warm();
       const memory=new SourceMemory(cognee,{dataset:'evidence',storageRoot:settings.storageRoot});
@@ -78,6 +84,10 @@ it("uses the published Cognee runtime with compatible endpoints and stable sourc
       await memory.build();
       const later=await memory.retrieve('What happened to the microphone?',3);
       if(!later.some(chunk=>chunk.documentId===next.documentId&&chunk.sources[0].sourceId==='SOURCE-02'))throw new Error('Incremental source was not indexed');
+      await other.warm();
+      const otherMemory=new SourceMemory(other,{dataset:'other-evidence',storageRoot:otherSettings.storageRoot});
+      await otherMemory.add(new SourceDocument({text:'A separate memory has its own generation budget.',sourceId:'OTHER',filename:'other.txt'}));
+      await otherMemory.build();
       console.log('CONTRACT_OK');
     } finally {(await import('@cognee/cognee-ts')).shutdown();}
   `;
@@ -94,6 +104,9 @@ it("uses the published Cognee runtime with compatible endpoints and stable sourc
           MOCK_LLM: "",
           MOCK_EMBEDDING: "",
           LLM_ARGS: "",
+          CACHE_BACKEND: "redis",
+          CACHING: "false",
+          AUTO_FEEDBACK: "true",
           LLM_CASSETTE: "",
           LLM_RECORD_PATH: "",
           LLM_FALLBACK_MODEL: "",
@@ -128,18 +141,27 @@ it("uses the published Cognee runtime with compatible endpoints and stable sourc
     const generation = requests.filter((request) => request.path === "/v1/chat/completions");
     expect(embeddings.length).toBeGreaterThan(0);
     expect(generation.length).toBeGreaterThan(0);
+    expect(new Set(generation.map((request) => request.body.model))).toEqual(
+      new Set(["test/model", "test/second"]),
+    );
     expect(
       embeddings.every(
         (request) =>
-          request.authorization === "Bearer embedding-test-key" &&
-          request.body.model === "test/embedding",
+          (request.authorization === "Bearer embedding-test-key" &&
+            request.body.model === "test/embedding") ||
+          (request.authorization === "Bearer second-embedding-key" &&
+            request.body.model === "test/embedding-second"),
       ),
     ).toBe(true);
     expect(
       generation.every(
         (request) =>
-          request.authorization === "Bearer generation-test-key" &&
-          request.body.model === "test/model" &&
+          ((request.authorization === "Bearer generation-test-key" &&
+            request.body.model === "test/model" &&
+            request.body.max_tokens === 8192) ||
+            (request.authorization === "Bearer second-generation-key" &&
+              request.body.model === "test/second" &&
+              request.body.max_tokens === 4096)) &&
           !Object.hasOwn(request.body, "functions") &&
           !Object.hasOwn(request.body, "think"),
       ),

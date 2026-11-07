@@ -209,15 +209,14 @@ export class SourceMemory {
         documents: Object.create(null),
       };
       const documentId = records[0].id;
-      const existing = Object.hasOwn(manifest.documents, documentId)
-        ? (manifest.documents[documentId] ?? [])
-        : [];
+      const knownDocument = Object.hasOwn(manifest.documents, documentId);
+      const existing = knownDocument ? (manifest.documents[documentId] ?? []) : [];
       if (
         !existing.some((metadata) => JSON.stringify(metadata) === JSON.stringify(source.metadata))
       )
         existing.push({ ...source.metadata });
       manifest.documents[documentId] = existing;
-      manifest.needsBuild ||= result.addedCount > 0;
+      manifest.needsBuild ||= !knownDocument || result.addedCount > 0;
       this.writeManifest(manifest);
       return { documentId, deduplicated: result.deduplicatedCount > 0 };
     });

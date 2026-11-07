@@ -25,7 +25,8 @@ export interface Configuration {
     | "requestTimeoutMs"
     | "provisionTimeoutMs"
     | "experimentTimeoutMs"
-    | "documentBytes",
+    | "documentBytes"
+    | "maxCompletionTokens",
     number
   >;
   decision: { query: string; instructions: string; choices: Record<string, string> };
@@ -122,6 +123,7 @@ export async function launch(name: string, action: (demo: Demo) => Promise<void>
       embeddingDimensions: config.models.embeddingDimensions,
       storageRoot,
       concurrency: 2,
+      maxCompletionTokens: config.limits.maxCompletionTokens,
     });
     initialized = true;
     const dataset = `sie-ts-${namespace}`;

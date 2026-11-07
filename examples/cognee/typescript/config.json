@@ -8,6 +8,7 @@
     "decision": "fastino/GLiNER2.5-Decide"
   },
   "limits": {
+    "maxCompletionTokens": 8192,
     "retrieveTopK": 5,
     "rerankTopK": 1,
     "evidenceChars": 1000,

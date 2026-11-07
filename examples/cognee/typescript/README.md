@@ -9,12 +9,6 @@ They use the [SIE TypeScript integration](../../../integrations/sie_ts_cognee/RE
 and the official `@cognee/cognee-ts` 0.2.0 Node.js bindings. The bindings run
 Cognee's Rust engine inside your process. No Python server is needed.
 
-**Compatibility limit:** Cognee TypeScript 0.2.0 omits an explicit output-token
-budget on structured graph-extraction requests. Responses can exceed an
-endpoint's default budget and fail even for ordinary documents. A fix in the
-upstream request path is required before these examples are ready for general
-use with SIE Serverless.
-
 ## Run
 
 Use Node.js 22 or newer on a platform with Cognee's prebuilt native bindings.
@@ -100,7 +94,9 @@ used by the decision example.
 
 ## Models and endpoints
 
-Model IDs, bounds and questions live in `config.json`:
+Model IDs, bounds and questions live in `config.json`. Generation has an
+explicit `maxCompletionTokens` budget of 8,192, including graph extraction:
+
 
 | Role | Default model |
 | --- | --- |

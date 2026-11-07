@@ -16,12 +16,6 @@ The package provides:
 See [the four TypeScript examples](../../examples/cognee/typescript/README.md)
 for memory, document ingestion, decisions and session learning.
 
-**Compatibility limit:** Cognee TypeScript 0.2.0 omits an explicit output-token
-budget on structured graph-extraction requests. Responses can exceed an
-endpoint's default budget and fail even for ordinary documents. A fix in the
-upstream request path is required before these examples are ready for general
-use with SIE Serverless.
-
 ## Set up
 
 Use Node.js 22 or newer. From a source checkout:
@@ -95,7 +89,13 @@ Serverless; choose a locally served model/profile for fully local inference.
 selects explicit generation/embedding routes, and sets SQLite, graph, vector,
 cache and log paths below `storageRoot`. Load your application's environment
 before calling it. Inherited mock, fallback and extra-request settings are
-rejected. Initialize a fresh process to change the runtime configuration.
+rejected. Configure each handle before warming it.
+
+`createCognee` sets an explicit output budget for generation, including
+structured graph extraction. `maxCompletionTokens` defaults to 8,192 and accepts
+integers from 1 to 65,536; the selected model may impose a smaller limit. The
+factory applies the budget during startup and restores temporary environment
+settings before returning.
 
 Use an empty dedicated storage directory. An ownership marker prevents reuse
 with a different embedding model, endpoint or dimension count. Python and

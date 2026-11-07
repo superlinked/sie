@@ -136,3 +136,54 @@ it("does not manufacture source state on a query before ingestion", async () => 
   await expect(fixture.memory.retrieve("query")).rejects.toThrow(/provenance is missing/);
   expect(fixture.search).not.toHaveBeenCalled();
 });
+
+it("indexes a deduplicated retry when the original ingestion failed before provenance was saved", async () => {
+  const fixture = setup();
+  const first = new SourceDocument({ text: "First document", sourceId: "A", filename: "a.txt" });
+  const second = new SourceDocument({ text: "Second document", sourceId: "B", filename: "b.txt" });
+  await fixture.memory.add(first);
+  await fixture.memory.build();
+  vi.mocked(fixture.cognee.users.resetPipelineRunStatus).mockClear();
+  fixture.add.mockResolvedValue({
+    added: [{ id: "second-id" }],
+    addedCount: 1,
+    deduplicated: [],
+    deduplicatedCount: 0,
+  });
+  vi.mocked(fixture.cognee.datasets.list).mockRejectedValueOnce(new Error("metadata unavailable"));
+  await expect(fixture.memory.add(second)).rejects.toThrow("metadata unavailable");
+  fixture.add.mockResolvedValue({
+    added: [],
+    addedCount: 0,
+    deduplicated: [{ id: "second-id" }],
+    deduplicatedCount: 1,
+  });
+  await fixture.memory.add(second);
+  await fixture.memory.build();
+  expect(fixture.cognee.users.resetPipelineRunStatus).toHaveBeenCalledExactlyOnceWith(
+    datasetId,
+    "cognify",
+  );
+});
+it("does not reset an already-built dataset for another source alias of a known document", async () => {
+  const fixture = setup();
+  await fixture.memory.add(
+    new SourceDocument({ text: "Same document", sourceId: "A", filename: "a.txt" }),
+  );
+  await fixture.memory.build();
+  vi.mocked(fixture.cognee.users.resetPipelineRunStatus).mockClear();
+  fixture.add.mockResolvedValue({
+    added: [],
+    addedCount: 0,
+    deduplicated: [{ id: documentId }],
+    deduplicatedCount: 1,
+  });
+  await fixture.memory.add(
+    new SourceDocument({ text: "Same document", sourceId: "B", filename: "b.txt" }),
+  );
+  vi.mocked(fixture.cognee.cognify).mockResolvedValue({ alreadyCompleted: true } as Awaited<
+    ReturnType<Cognee["cognify"]>
+  >);
+  await expect(fixture.memory.build()).resolves.toMatchObject({ alreadyCompleted: true });
+  expect(fixture.cognee.users.resetPipelineRunStatus).not.toHaveBeenCalled();
+});
