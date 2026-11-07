@@ -339,8 +339,10 @@ npm requires a package to exist before its trusted publisher can be configured
 (see [npm trust prerequisites](https://docs.npmjs.com/cli/v11/commands/npm-trust/#prerequisites)).
 A new name such as `@superlinked/sie-cognee` therefore needs a separately
 approved first upload. Merging its source or passing package checks does not
-approve that upload. Keep the `npm` publication approval pending until the
-registry owner has completed this bootstrap.
+approve that upload. Before enabling publication, verify that the GitHub `npm`
+environment has a required-reviewer protection rule; an environment name alone
+does not pause its jobs. Keep that approval pending until the registry owner
+has completed this bootstrap.
 
 1. Obtain the release owner's explicit approval for the one-time authenticated
    upload, including its authentication and provenance implications. This is
@@ -367,11 +369,16 @@ registry owner has completed this bootstrap.
    the retained archive's SHA-512 integrity, then approve the original run's
    `npm` job. Its publisher verifies and skips the identical existing version
    while publishing the remaining packages normally. A mismatch is a stop.
-5. After the full release completes, the registry owner sets the new package's
-   `latest` tag to the verified version with
+5. After the full release completes, coordinate promotion with the release
+   owner so no later publisher can change `latest` concurrently. Read the new
+   package's current tag with
+   `npm view @superlinked/sie-cognee dist-tags --json --registry=https://registry.npmjs.org`.
+   If `latest` already equals this version, leave it unchanged. If it is a newer
+   semantic version, skip promotion; never move it backwards. Only when the tag
+   is absent or older, set it to the verified version with
    `npm dist-tag add @superlinked/sie-cognee@X.Y.Z latest --registry=https://registry.npmjs.org`.
-   Check a fresh install. Skipping an identical bootstrap archive does not test
-   the new OIDC connection. npm expires an unused trusted-publisher connection
+   Stop if the registry state cannot be verified. Check a fresh install.
+   Skipping an identical bootstrap archive does not test the new OIDC connection. npm expires an unused trusted-publisher connection
    after two days; recheck or recreate it immediately before the first later
    OIDC publication if necessary (see [configuration expiry](https://docs.npmjs.com/trusted-publishers/#trusted-publisher-configuration-expiry)).
    Verify that first actual OIDC upload and its provenance before treating the
