@@ -43,10 +43,15 @@ tasks:
 # two trained prompts accepted. The `transformers` profile runs the same contract in-process in the
 # transformers5 bundle.
 #
-# Throughput: up to 128 pages run in the engine at once. The radix cache is off: every page is a
-# new image, so it saves nothing, and with it on SGLang turns overlap scheduling off for this
-# hybrid (Gated DeltaNet) model. FlashInfer serves the attention layers. Sampling is unchanged and
-# outputs stay within bf16 run-to-run variance.
+# Throughput: up to 128 pages run in the engine at once; on an L4 at this memory reservation SGLang
+# caps it at 64. The radix cache is off: every page is a new image, so it saves nothing, and with it
+# on SGLang turns overlap scheduling off for this hybrid (Gated DeltaNet) model. FlashInfer serves
+# the attention layers. Sampling is unchanged and outputs stay within bf16 run-to-run variance.
+#
+# Memory: SGLang keeps (1 - mem_fraction_static) of the memory free at launch as runtime headroom.
+# One page at the 16 MP limit peaks 4.8 GiB above the memory in use after load, in the vision
+# encoder. On an L4, 0.75 and 0.85 run out of memory there and the engine exits, which fails every
+# page in flight. 0.70 leaves 0.7 GiB free at that peak.
 max_sequence_length: 24576
 profiles:
   default:
@@ -55,7 +60,7 @@ profiles:
     adapter_path: sie_server.adapters.sglang_vision_extract.adapter:SGLangVisionExtractAdapter
     adapter_options:
       loadtime:
-        mem_fraction_static: 0.85
+        mem_fraction_static: 0.70
         served_model_name: lightonai/LightOnOCR-3-4B
         trust_remote_code: false
         max_concurrent_requests: 128
@@ -78,7 +83,7 @@ profiles:
     adapter_options:
       # Profile inheritance replaces loadtime, so retain every engine/sampling option.
       loadtime:
-        mem_fraction_static: 0.85
+        mem_fraction_static: 0.70
         served_model_name: lightonai/LightOnOCR-3-4B
         trust_remote_code: false
         max_concurrent_requests: 128

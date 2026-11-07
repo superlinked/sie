@@ -127,6 +127,14 @@ def test_markdown_profile_retains_default_generation_context_and_engine_options(
     assert adapter._extra_launch_args == ["--disable-radix-cache"]
 
 
+def test_sglang_profiles_keep_their_l4_calibrated_reservation() -> None:
+    profiles = yaml.safe_load(_CONFIG.read_text())["profiles"]
+    for name in ("default", "markdown"):
+        loadtime = profiles[name]["adapter_options"]["loadtime"]
+        assert loadtime["mem_fraction_static"] == 0.70
+        assert loadtime["max_concurrent_requests"] == 128
+
+
 def test_default_routes_to_sglang_vision_extract_bundle_only() -> None:
     assert _ADAPTER in yaml.safe_load((_BUNDLES / "transformers5.yaml").read_text())["adapters"]
     for bundle in sorted(_BUNDLES.glob("*.yaml")):
