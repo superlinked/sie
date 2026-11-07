@@ -372,7 +372,7 @@ has completed this bootstrap.
 5. After the full release completes, coordinate promotion with the release
    owner so no later publisher can change `latest` concurrently. Read the new
    package's current tag with
-   `npm view @superlinked/sie-cognee dist-tags --json --registry=https://registry.npmjs.org`.
+   `npm dist-tag ls @superlinked/sie-cognee --registry=https://registry.npmjs.org`.
    If `latest` already equals this version, leave it unchanged. If it is a newer
    semantic version, skip promotion; never move it backwards. Only when the tag
    is absent or older, set it to the verified version with
