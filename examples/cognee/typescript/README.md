@@ -83,11 +83,14 @@ pnpm learn -- --verify-run "runs/.../04-learn-run-directory"
 Run that command in a new process with the same namespace. The new session
 starts empty. Its retrieval query names the project but does not contain the
 expected code. Verification checks that an actual permanent source chunk has
-the correct dataset, document, session tag and authored rule.
+the correct dataset, document, session tag and complete authored rule, including
+the requirement to record the code before publishing and retain it in later sessions.
 
 `sessionTransferVerified` reports whether the raw guidance is retrievable.
 `distilledLessonVerified` separately reports an accepted lesson published by
-Cognee's optional distillation stage. Distillation is not guaranteed; an
+Cognee's optional distillation stage that retains the complete authored wording.
+Both checks require the exact full rule; paraphrases and partial summaries remain
+unverified. Distillation is not guaranteed; an
 `improve()` result alone proves neither outcome. These derived records live in
 a separate learning dataset and are not mixed into the original-source evidence
 used by the decision example.

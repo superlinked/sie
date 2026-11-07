@@ -12,6 +12,10 @@ export interface TeachingRecord {
   stagesRun: string[];
 }
 
+export function authoredRule(project: string, expectedCode: string): string {
+  return `For every future ${project} release, the reviewer must record approval code ${expectedCode} before publishing. This is the standing project rule and continues to apply in later sessions.`;
+}
+
 export function nodeSets(value: string | null): string[] {
   if (value === null) return [];
   const parsed: unknown = JSON.parse(value);
@@ -33,6 +37,7 @@ export function learningEvidence(
   )
     throw new Error("Learning verification requires original chunks from the teaching dataset.");
   const byId = new Map(documents.map((document) => [document.id, document]));
+  const rule = authoredRule(record.project, record.expectedCode);
   const transferred: { documentId: string; chunkId: string; text: string }[] = [];
   const distilled: { documentId: string; chunkId: string; text: string }[] = [];
   for (const item of response.result.data) {
@@ -49,8 +54,7 @@ export function learningEvidence(
     const document = byId.get(payload.document_id);
     if (!document) throw new Error("Retrieved learning chunk is not in the teaching dataset.");
     const sets = nodeSets(document.node_set);
-    if (!payload.text.includes(record.project) || !payload.text.includes(record.expectedCode))
-      continue;
+    if (!payload.text.includes(rule)) continue;
     const match = { documentId: document.id, chunkId: item.id, text: payload.text };
     if (sets.includes("user_sessions_from_cache") && payload.text.includes(record.teachingSession))
       transferred.push(match);

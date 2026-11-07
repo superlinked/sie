@@ -1,13 +1,13 @@
 import type { CogneeData, CogneeSearchResponse } from "@cognee/cognee-ts";
 import { expect, it } from "vitest";
-import { type TeachingRecord, learningEvidence, nodeSets } from "../learning";
+import { type TeachingRecord, authoredRule, learningEvidence, nodeSets } from "../learning";
 
 const record: TeachingRecord = {
   format: "sie-cognee-teaching-v1",
   dataset: "learning",
   datasetId: "dataset",
   storageRoot: "/tmp/state",
-  teachingSession: "session",
+  teachingSession: "teaching-session-789",
   project: "QuillDock-123",
   expectedCode: "VIOLET-456",
   query: "What code does QuillDock-123 need?",
@@ -42,30 +42,75 @@ const response = (documentId: string, text: string): CogneeSearchResponse => ({
 const document = (id: string, sets: string[]): CogneeData =>
   ({ id, node_set: JSON.stringify(sets) }) as CogneeData;
 
-it("requires exact unique guidance, session linkage, and persisted document origin", () => {
+const fullRule =
+  "For every future QuillDock-123 release, the reviewer must record approval code VIOLET-456 before publishing. This is the standing project rule and continues to apply in later sessions.";
+
+it("requires the full authored rule, session linkage, and persisted document origin", () => {
+  expect(authoredRule(record.project, record.expectedCode)).toBe(fullRule);
   const docs = [document("raw", ["user_sessions_from_cache"])];
   expect(
     learningEvidence(
       record,
       docs,
-      response("raw", "Session ID: session. QuillDock-123 requires VIOLET-456."),
+      response("raw", `Session ID: teaching-session-789. Answer: ${fullRule}`),
     ).sessionTransferVerified,
   ).toBe(true);
   expect(
     learningEvidence(
       record,
       docs,
-      response("raw", "Session ID: session. QuillDock-123 requires an approval code."),
+      response(
+        "raw",
+        `Session ID: teaching-session-789. Answer: ${fullRule.replace("VIOLET-456", "OTHER-789")}`,
+      ),
     ).sessionTransferVerified,
   ).toBe(false);
-  expect(
-    learningEvidence(record, docs, response("raw", "QuillDock-123 VIOLET-456."))
-      .sessionTransferVerified,
-  ).toBe(false);
+  expect(learningEvidence(record, docs, response("raw", fullRule)).sessionTransferVerified).toBe(
+    false,
+  );
 });
-it("distinguishes transferred sessions from separately accepted generated lessons", () => {
-  const docs = [document("lesson", ["session_learnings", "session_learnings:session"])];
-  const result = response("lesson", "For QuillDock-123, always record VIOLET-456.");
+it.each([
+  ["identifiers alone", "QuillDock-123 requires VIOLET-456."],
+  ["missing publication timing", fullRule.replace(" before publishing", "")],
+  ["reversed publication timing", fullRule.replace("before publishing", "after publishing")],
+  [
+    "missing later-session instruction",
+    fullRule.replace(
+      " This is the standing project rule and continues to apply in later sessions.",
+      "",
+    ),
+  ],
+  [
+    "contradictory later-session instruction",
+    fullRule.replace("continues to apply", "does not apply"),
+  ],
+  ["negated recording instruction", fullRule.replace("must record", "must not record")],
+])(
+  "does not verify %s even with all project, code and session identifiers",
+  (_description, text) => {
+    expect(text).toContain(record.project);
+    expect(text).toContain(record.expectedCode);
+    for (const sets of [
+      ["user_sessions_from_cache"],
+      ["session_learnings", "session_learnings:teaching-session-789"],
+    ]) {
+      const evidence = learningEvidence(
+        { ...record, stagesRun: ["persist_sessions", "distill_sessions"] },
+        [document("derived", sets)],
+        response("derived", `Session ID: teaching-session-789. ${text}`),
+      );
+      expect(evidence.sessionTransferVerified).toBe(false);
+      expect(evidence.distilledLessonVerified).toBe(false);
+      expect(evidence.transferredSessionChunks).toEqual([]);
+      expect(evidence.generatedLessonChunks).toEqual([]);
+    }
+  },
+);
+it("distinguishes complete transferred rules from separately accepted complete generated lessons", () => {
+  const docs = [
+    document("lesson", ["session_learnings", "session_learnings:teaching-session-789"]),
+  ];
+  const result = response("lesson", fullRule);
   expect(learningEvidence(record, docs, result).distilledLessonVerified).toBe(false);
   const evidence = learningEvidence({ ...record, stagesRun: ["distill_sessions"] }, docs, result);
   expect(evidence.distilledLessonVerified).toBe(true);

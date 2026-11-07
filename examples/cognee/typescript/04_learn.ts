@@ -5,7 +5,7 @@ import { SourceDocument, SourceMemory } from "@superlinked/sie-cognee";
 import { learningRun } from "./cli.js";
 import { type Demo, launch } from "./common.js";
 import { UserError } from "./errors.js";
-import { type TeachingRecord, learningEvidence } from "./learning.js";
+import { type TeachingRecord, authoredRule, learningEvidence } from "./learning.js";
 
 async function teach(demo: Demo): Promise<void> {
   const nonce = randomUUID().slice(0, 8);
@@ -13,7 +13,7 @@ async function teach(demo: Demo): Promise<void> {
   const expectedCode = `VIOLET-${randomUUID().slice(0, 8)}`;
   const dataset = `${demo.dataset}-learning-${nonce}`;
   const query = `What approval code must the reviewer record before publishing the next ${project} release?`;
-  const rule = `For every future ${project} release, the reviewer must record approval code ${expectedCode} before publishing. This is the standing project rule and continues to apply in later sessions.`;
+  const rule = authoredRule(project, expectedCode);
   const memory = new SourceMemory(demo.cognee, { dataset, storageRoot: demo.storageRoot });
   await memory.add(
     new SourceDocument({
