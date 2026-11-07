@@ -54,7 +54,8 @@ The npm train contains six packages under `@superlinked`: `sie-sdk`,
 
 `@superlinked/sie-cognee` first ships in the release containing its integration.
 It follows the same version, packed-consumer checks and publication gates as
-the other npm integrations.
+the other npm integrations. Its first upload also requires the
+[new npm package bootstrap](#new-npm-package-bootstrap).
 
 The GHCR image names are `sie-server`, `sie-gateway`, `sie-config`, `sie-mcp`,
 `sie-server-sidecar`, and `sie-server-rust`, under `ghcr.io/superlinked`.
@@ -291,7 +292,7 @@ does not extend a token already issued to the first attempt. Recovery verifies
 and skips byte-identical files already uploaded and consumes the same retained
 archives. Audio assets do not need another PyPI registration.
 
-npm supports one trusted publisher per package. Its actual upload job uses a
+npm trusted publishers are configured per package. The upload job uses a
 GitHub-hosted runner and a pinned supported npm version. Ordinary builds and
 tests use Blacksmith. Do not carry a long-lived npm token into the OIDC upload
 job. See [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/).
@@ -331,6 +332,52 @@ baseline, required checks, publisher identities, package access and build
 capacity have been checked. Build-only paths need neither this setting nor
 registry credentials. Do not enable two competing publishers for the same
 artifact destination.
+
+## New npm package bootstrap
+
+npm requires a package to exist before its trusted publisher can be configured
+(see [npm trust prerequisites](https://docs.npmjs.com/cli/v11/commands/npm-trust/#prerequisites)).
+A new name such as `@superlinked/sie-cognee` therefore needs a separately
+approved first upload. Merging its source or passing package checks does not
+approve that upload. Keep the `npm` publication approval pending until the
+registry owner has completed this bootstrap.
+
+1. Obtain the release owner's explicit approval for the one-time authenticated
+   upload, including its authentication and provenance implications. This is
+   an exception for creating a new package name, not a token fallback in
+   `release.yml`. Without that approval, first publication remains blocked.
+2. Use the `npm-distributions` artifact from the original stable release run
+   after `artifacts-ready` succeeds. From that release's exact source revision,
+   run the same `tools.ci.release_artifact check` and
+   `tools/ci/distributions.py verify npm` commands as `npm-publish`, with its
+   version, protected tag, source revision and original run ID. Retain the
+   complete tested archive set. Never upload a PR archive, placeholder version,
+   locally rebuilt package or archive from another run.
+3. The registry owner signs in with interactive npm authentication and 2FA,
+   then publishes only the new package's verified archive with
+   `npm publish PATH_TO_ARCHIVE --access public --ignore-scripts --tag release-vX.Y.Z --registry=https://registry.npmjs.org`,
+   substituting the coordinated release version. Record the artifact integrity
+   and the approved bootstrap action. This upload uses owner authentication;
+   do not claim npm-generated OIDC provenance for a manual upload.
+4. Configure the package's trusted publisher for GitHub organization
+   `superlinked`, repository `sie`, workflow `release.yml`, environment `npm`,
+   allowing direct publication. Compare the registry's `dist.integrity` with
+   the retained archive's SHA-512 integrity, then approve the original run's
+   `npm` job. Its publisher verifies and skips the identical existing version
+   while publishing the remaining packages normally. A mismatch is a stop.
+5. After the full release completes, the registry owner sets the new package's
+   `latest` tag to the verified version with
+   `npm dist-tag add @superlinked/sie-cognee@X.Y.Z latest --registry=https://registry.npmjs.org`.
+   Check a fresh install. Skipping an identical bootstrap archive does not test
+   the new OIDC connection. npm expires an unused trusted-publisher connection
+   after two days; recheck or recreate it immediately before the first later
+   OIDC publication if necessary (see [configuration expiry](https://docs.npmjs.com/trusted-publishers/#trusted-publisher-configuration-expiry)).
+   Verify that first actual OIDC upload and its provenance before treating the
+   connection as proven. Later versions use the ordinary publisher.
+
+The bootstrap is an account-side prerequisite, not something a source change
+or a successful candidate build can establish. Do not approve the npm publisher
+while the new package's first upload or trusted-publisher setup is incomplete.
 
 ## Recovery
 
