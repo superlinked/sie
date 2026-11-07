@@ -1,8 +1,8 @@
 # SIE Framework Integrations
 
 This directory contains framework integrations for the Search Inference Engine (SIE).
-Each integration is a separate PyPI package that wraps `SIEClient` to implement
-standard framework interfaces.
+These packages connect frameworks to SIE through the Python SDK or compatible
+APIs.
 
 ## Available Integrations
 
@@ -21,10 +21,10 @@ standard framework interfaces.
 
 ## Quick Start
 
-For persistent graph memory with SIE inference, start with the
-[four Cognee experiments](../examples/cognee): memory, OCR, evidence-based
-decisions, and learning from corrections. The Cognee integration configures
-its supported compatible providers and adds source-preserving helpers.
+Start with the [four Cognee examples](../examples/cognee) for memory, document
+reading, typed decisions and learning from corrections. Cognee stores and
+searches memory; SIE supplies inference. The helpers retain source text and IDs
+for inspection.
 
 ```python
 # LangChain example
@@ -187,7 +187,7 @@ Framework integrations implement **callback protocols** - the framework calls SI
 
 ### Sparse Embeddings
 
-All integrations support sparse embeddings for hybrid search:
+The following integrations provide sparse embedding adapters for hybrid search:
 
 ```python
 # LangChain - works with PineconeHybridSearchRetriever

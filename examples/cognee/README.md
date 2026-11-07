@@ -11,30 +11,44 @@ conversation. Each saves its inputs and intermediate results for inspection.
 The examples share a fictional workshop notebook: a readiness policy, equipment
 checks, a scanned access note and an authored policy correction. The inputs
 are [synthetic and CC0](data/README.md), downloaded from a pinned public dataset.
-Cognee stores the memory on your machine. Recommendations never trigger actions.
+Recommendations never trigger actions.
 
 ```mermaid
 flowchart LR
-  subgraph Machine[Your machine]
-    P[Python experiments] --> C[Cognee]
-    C --> D[(Documents, graph and sessions)]
+  subgraph Machine["Your machine"]
+    App["Python examples"] --> Cognee["Cognee"]
+    Cognee --> Memory[("Documents, graph and sessions")]
+    Cognee -->|Generation and embeddings| Clients["Model API clients"]
+    App -->|OCR, reranking and decisions| Clients
+    Local["SIE Local<br/>Models on your machine"]
   end
-  C -->|LLM + embeddings| S[SIE API]
-  P -->|OCR + reranking + decisions| S
-  S --> L[SIE Local / SIE Cluster]
-  S --> H[SIE Serverless]
+  subgraph Cloud["Your cloud"]
+    Cluster["SIE Cluster<br/>Model workers"]
+  end
+  subgraph Provider["Third-party cloud"]
+    Serverless["SIE Serverless<br/>Hosted models"]
+  end
+  Clients --> Local
+  Clients --> Cluster
+  Clients --> Serverless
 ```
 
-Storage and inference location are separate choices. Serverless receives the
-text, images and evidence used for inference. To keep inference local, serve
-every role locally; a local memory database alone does not do that.
+Cognee stores and searches memory on your machine. SIE Local runs models on
+that machine, SIE Cluster runs model workers in your cloud, and SIE Serverless
+uses hosted models in a third-party cloud.
 
-Cognee owns the memory calls: its supported LiteLLM backend sends structured
-generation requests to SIE's OpenAI-compatible endpoint, and its compatible
-embedding adapter handles embeddings. LiteLLM is the transport Cognee already
-uses, so the integration configures that backend instead of inventing a new
-Cognee provider. OCR, reranking and typed decisions call SIE directly through
-the native `SIEClient`.
+The model API clients are Python libraries in the example process. Each role
+calls its configured endpoint; different roles can use different deployments.
+The three outgoing arrows show those deployment choices.
+
+Cognee calls generation and embedding models through compatible APIs. The OCR,
+reranking and decision steps use the SIE Python SDK. See the
+[integration configuration](../../integrations/sie_cognee/README.md#configure-before-importing-cognee)
+for provider and transport details.
+
+Serverless receives the text, images and evidence sent for inference. Local
+memory alone does not keep remote inference inputs on your machine. Fully local
+inference requires every model role to run locally.
 
 ## Run it
 
@@ -75,8 +89,8 @@ SIE_COGNEE_NAMESPACE=learning-v1 uv run 04_learn.py --seed
 
 Each command prints its configuration and saves JSON under
 `runs/<namespace>/<timestamp>-<experiment>/`. Cold provisioning and distillation
-can take minutes. Configurable budgets are 180
-seconds for native provisioning, 90 seconds per native request attempt and 600
+can take minutes. Configurable budgets are 180 seconds for native provisioning,
+90 seconds per native request attempt and 600
 seconds per experiment. In-flight work may take longer to unwind on cancellation.
 
 ## 1. Remember and retrieve
@@ -194,7 +208,7 @@ stored memory. `--verify-run` cannot be combined with `--seed`.
 flowchart LR
   A[Authored correction] --> B[Teaching session]
   B --> C[Cognee distill_session]
-  C --> D[Accepted lesson documents]
+  C -->|If accepted| D[Accepted lesson documents]
   D --> E[New process + new session]
   E --> F[Retrieve persisted lesson text]
 ```
@@ -241,6 +255,9 @@ guidance into the typed decision building block from experiment 03.
 ```sh
 SIE_LLM_MODEL=Qwen/Qwen3.8-27B-FP8 SIE_COGNEE_NAMESPACE=another-llm uv run 01_memory.py
 ```
+
+To serve this override on your own NVIDIA GPU, use the
+[CUDA 13 generation alternative](LOCAL.md#cuda-13-alternative).
 
 [`.env.example`](.env.example) shows separate URLs and keys for each role.
 Compatible LLM/embedding endpoints append `/v1` once. A role inherits the

@@ -5,10 +5,11 @@ for generation, embeddings, OCR, source reranking and typed decisions. This
 integration configures Cognee 1.6.7's supported LiteLLM and compatible embedding
 transports and provides native SIE helpers for OCR, reranking and decisions.
 
-Choose SIE Local, SIE Cluster or SIE Serverless endpoints for each role.
-Cognee's databases and session cache stay in the directory you select.
-Serverless receives inference inputs; fully local inference requires every
-model role to run locally.
+Choose an endpoint for each role: SIE Local runs models on your machine,
+SIE Cluster runs workers in your cloud, and SIE Serverless runs hosted models
+in a third-party cloud. Cognee's databases and session cache stay in the
+directory you select. Serverless receives inference inputs; fully local
+inference requires every model role to run locally.
 
 Install from a source checkout:
 
@@ -37,7 +38,7 @@ configure(CogneeSettings(
     llm_model="Qwen/Qwen3.5-4B",
     embedding_model="BAAI/bge-m3",
     embedding_dimensions=1024,
-    storage_root=Path(".memory/example-v1"),
+    storage_root=Path(".local/cognee/example-v1"),
 ))
 
 import cognee
@@ -55,6 +56,9 @@ async def main():
 asyncio.run(main())
 ```
 
+The `.local/` directory is ignored by this repository. Use an ignored storage
+directory in your application too.
+
 `configure` sets the supported `custom` LLM provider with
 `openai/<SIE model ID>` and `openai_compatible` embeddings with the raw model
 ID. Pass raw SIE identifiers to both model settings, including any vendor
@@ -63,8 +67,9 @@ Each endpoint gets exactly one final `/v1`. Generation and embeddings can
 use separate endpoints and keys; native OCR/rerank/decision calls use a
 separately constructed `sie_sdk.SIEClient`. With a loopback URL only, a missing
 compatible API key becomes the harmless placeholder `sie-local-no-key`.
-Remote endpoints require an explicit key. Credentials are excluded from
-`Endpoint` representations.
+Remote compatible generation/embedding endpoints require an explicit key.
+Native SDK endpoint authentication follows the configured service.
+Credentials are excluded from `Endpoint` representations.
 
 Generation uses native JSON schemas for Cognee's graph extraction and lesson
 distillation. The helper registers the selected SIE model's schema capability
@@ -73,7 +78,7 @@ provider or change pricing. Use a generation model that supports SIE structured
 output. For an endpoint without that capability, set `native_json_schema=False`
 to use Cognee's prompted JSON mode.
 
-Configuration owns Cognee's inference routes, SQLite/LanceDB/Ladybug storage,
+`configure` sets Cognee's model endpoints, SQLite/LanceDB/Ladybug storage,
 local SQLite session cache and logs. It explicitly sets `GRAPH_EXTRACTOR=llm`
 and disables mock embeddings, avoiding an accidental local model fallback.
 Inherited stage-specific LLM routes, fallback routes, API versions or
