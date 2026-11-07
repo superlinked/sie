@@ -24,6 +24,7 @@ members = [
     "sie-langchain",
     "sie-llamaindex",
     "sie-mcp",
+    "sie-placement",
     "sie-qdrant",
     "sie-sdk",
     "sie-server",
@@ -5635,6 +5636,21 @@ dev = [
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", specifier = ">=1.0" },
 ]
+
+[[package]]
+name = "sie-placement"
+version = "0.0.0"
+source = { editable = "packages/sie_placement" }
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=9.0.3" }]
 
 [[package]]
 name = "sie-qdrant"

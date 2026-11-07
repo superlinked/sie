@@ -67,6 +67,7 @@ git switch -c <next-topic-branch> upstream/main
 | [`packages/sie_sdk`](packages/sie_sdk/README.md) | Python client SDK and public request and response types |
 | `packages/sie_config` | Python configuration service |
 | [`packages/sie_mcp`](packages/sie_mcp/README.md) | Python MCP edge service, plugin, and agent skill |
+| [`packages/sie_placement`](packages/sie_placement/README.md) | Standard-library Python schemas for placement planner inputs and plans; a workspace package that is not published |
 | [`packages/sie_audio_prep`](packages/sie_audio_prep/README.md) | Native audio preparation extension with Python bindings |
 | [`packages/sie_ts_sdk`](packages/sie_ts_sdk/README.md) | TypeScript client SDK |
 | [`packages/sie_gateway`](packages/sie_gateway/README.md) | Rust gateway for routing, queuing, API compatibility, and cluster state |

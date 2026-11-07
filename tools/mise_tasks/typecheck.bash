@@ -10,6 +10,7 @@ else
     PATHS_TO_CHECK=(
         packages/sie_config
         packages/sie_mcp
+        packages/sie_placement
         packages/sie_sdk
         packages/sie_server
     )

@@ -1,0 +1,32 @@
+{
+  "kind": "placement-receipt",
+  "schemaVersion": 1,
+  "identity": "BAAI/bge-m3",
+  "cell": {
+    "machineProfile": "l4",
+    "gpuProduct": "NVIDIA-L4"
+  },
+  "containerShape": {
+    "gpuCount": 1,
+    "cpuCores": 7.5,
+    "memoryMiB": 30720
+  },
+  "concurrency": 16,
+  "requestShape": {
+    "operation": "encode",
+    "itemsPerRequest": 8,
+    "inputTokensPerItem": 256
+  },
+  "throughput": {
+    "requestsPerSecond": 42.5
+  },
+  "latency": {
+    "p50Ms": 110.2,
+    "p95Ms": 171.9,
+    "p99Ms": 214
+  },
+  "source": {
+    "uri": "benchmarks/bge-m3/l4/encode-8x256.json",
+    "sha256": "4f2d8c1e9b7a6053d2e1f0c9b8a7d6e5f4c3b2a1908f7e6d5c4b3a2918f7e6d5"
+  }
+}

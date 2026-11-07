@@ -9,6 +9,7 @@
 source_pkgs =
     sie_config
     sie_mcp
+    sie_placement
     sie_sdk
     sie_server
 relative_files = True
