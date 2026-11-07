@@ -82,9 +82,11 @@
 //! extract and clears them only when empty. Rust re-anchors them to the actual
 //! remainder because the sidecar's cross-key FCFS selector reads that state:
 //! retaining a removed request's timestamp can repeatedly prioritize a hot key
-//! and can make a newer tail skip its own coalescing window. Python's packing
-//! remains strictly cost-sorted; Rust promotes at most one aged request per
-//! extract, outside batchable turns (points 3 and 5).
+//! and can make a newer tail skip its own coalescing window. Python's default
+//! packing alternates cost-sorted fitting items with an arrival-ordered
+//! over-budget lane when nothing is flagged. Its optional bounded-progress
+//! policy can reserve a bypassed oldest item instead. Rust promotes at most
+//! one aged request per extract, outside batchable turns (points 3 and 5).
 //!
 //! The runs-alone lane (point 5) is the Python batcher's rule too (#601),
 //! with three differences:
