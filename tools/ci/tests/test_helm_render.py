@@ -4051,3 +4051,49 @@ def test_extra_volumes_cannot_reuse_a_chart_worker_volume_name(tmp_path: Path, n
     result = render_workers(tmp_path, extra_init_values(extraVolumes=[{"name": name, "emptyDir": {}}]))
     assert result.returncode != 0
     assert f'workers.common.extraVolumes: "{name}" is a chart-owned worker volume name' in result.stderr
+
+
+GKE_ACCELERATOR_LABEL = "cloud.google.com/gke-accelerator-count"
+
+
+def dcgm_exporter_node_selector(tmp_path: Path, overlays: tuple[str, ...] = ()) -> dict:
+    docs = rendered_documents(tmp_path, {"dcgm-exporter": {"install": True}}, overlays)
+    (daemonset,) = [doc for doc in docs if doc["kind"] == "DaemonSet" and "dcgm-exporter" in doc["metadata"]["name"]]
+    return daemonset["spec"]["template"]["spec"].get("nodeSelector") or {}
+
+
+@pytest.mark.parametrize(
+    ("overlay", "expected"),
+    [
+        ("values-aws.yaml", {"sie.superlinked.com/node-type": "gpu"}),
+        ("values-aks.yaml", {"sie.superlinked.com/node-type": "gpu"}),
+        (
+            "values-ack.yaml",
+            {
+                "ack.node.gpu.schedule": "default",
+                "sie.superlinked.com/gpu-type": "a10",
+                "sie.superlinked.com/node-type": "gpu",
+            },
+        ),
+        ("values-gke.yaml", {GKE_ACCELERATOR_LABEL: "1"}),
+    ],
+)
+def test_dcgm_exporter_selects_only_the_cloud_overlay_gpu_labels(tmp_path: Path, overlay: str, expected: dict) -> None:
+    assert dcgm_exporter_node_selector(tmp_path, (overlay,)) == expected
+
+
+def test_dcgm_exporter_has_no_cloud_specific_default_selector(tmp_path: Path) -> None:
+    assert dcgm_exporter_node_selector(tmp_path) == {}
+
+
+def test_dcgm_exporter_tolerates_the_aks_spot_taint(tmp_path: Path) -> None:
+    docs = rendered_documents(tmp_path, {"dcgm-exporter": {"install": True}}, ("values-aks.yaml",))
+    (daemonset,) = [doc for doc in docs if doc["kind"] == "DaemonSet" and "dcgm-exporter" in doc["metadata"]["name"]]
+    tolerations = daemonset["spec"]["template"]["spec"]["tolerations"]
+    assert {"key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule"} in tolerations
+    assert {
+        "key": "kubernetes.azure.com/scalesetpriority",
+        "operator": "Equal",
+        "value": "spot",
+        "effect": "NoSchedule",
+    } in tolerations

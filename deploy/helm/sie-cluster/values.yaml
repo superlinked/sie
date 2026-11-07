@@ -2124,11 +2124,8 @@ dcgm-exporter:
     interval: "15s"
     additionalLabels:
       app.kubernetes.io/part-of: sie
-  # -- Run on GPU nodes only. Override per cloud:
-  # GCP: cloud.google.com/gke-accelerator-count: "1"
-  # AWS: add dcgm-exporter.nodeSelector: {} in values-aws.yaml
-  nodeSelector:
-    cloud.google.com/gke-accelerator-count: "1"
+  # -- GPU node labels; set per cloud in the values-<cloud>.yaml overlays.
+  nodeSelector: {}
   tolerations:
     - key: nvidia.com/gpu
       operator: Exists
