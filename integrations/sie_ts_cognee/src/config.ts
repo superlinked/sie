@@ -16,7 +16,7 @@ export interface CogneeSettings {
   storageRoot: string;
   /** Bounds both the native runtime and model-request concurrency. Defaults to two. */
   concurrency?: number;
-  /** Maximum generation output tokens, including structured graph extraction. Default: 8192. */
+  /** Default output-token budget for generation and graph extraction. Default: 8192. */
   maxCompletionTokens?: number;
 }
 

@@ -91,10 +91,11 @@ cache and log paths below `storageRoot`. Load your application's environment
 before calling it. Inherited mock, fallback and extra-request settings are
 rejected. Configure each handle before warming it.
 
-`createCognee` sets an explicit output budget for generation, including
+`createCognee` sets a default output budget for generation, including
 structured graph extraction. `maxCompletionTokens` defaults to 8,192 and accepts
-integers from 1 to 65,536; the selected model may impose a smaller limit. The
-factory applies the budget during startup and restores temporary environment
+integers from 1 to 65,536; the selected model may impose a smaller limit.
+Operations with their own explicit output budget can override this default.
+The factory applies it during startup and restores temporary environment
 settings before returning.
 
 Use an empty dedicated storage directory. An ownership marker prevents reuse

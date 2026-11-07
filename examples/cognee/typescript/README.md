@@ -94,9 +94,9 @@ used by the decision example.
 
 ## Models and endpoints
 
-Model IDs, bounds and questions live in `config.json`. Generation has an
-explicit `maxCompletionTokens` budget of 8,192, including graph extraction:
-
+Model IDs, bounds and questions live in `config.json`. The default
+`maxCompletionTokens` budget is 8,192 for generation and graph extraction.
+Operations with their own explicit output budget can override this default.
 
 | Role | Default model |
 | --- | --- |
