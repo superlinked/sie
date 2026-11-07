@@ -88,6 +88,7 @@ SERVER_TESTS = (
 SERVER_TEST_MODELS = ("BAAI/bge-m3", "NeuML/gliner-bert-tiny", "rasyosef/splade-mini")
 PYTHON_INTEGRATIONS = (
     "sie_chroma",
+    "sie_cognee",
     "sie_crewai",
     "sie_dspy",
     "sie_haystack",

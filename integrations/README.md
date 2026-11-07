@@ -1,14 +1,15 @@
 # SIE Framework Integrations
 
 This directory contains framework integrations for the Search Inference Engine (SIE).
-Each integration is a separate PyPI package that wraps `SIEClient` to implement
-standard framework interfaces.
+These packages connect frameworks to SIE through the Python SDK or compatible
+APIs.
 
 ## Available Integrations
 
 | Package | Framework | Install | Status |
 |---------|-----------|---------|--------|
 | `sie-chroma` | Chroma | `pip install sie-chroma` | Ready |
+| [`sie-cognee`](./sie_cognee) | Cognee | [Install from source](./sie_cognee/README.md) | Source preview |
 | `sie-crewai` | CrewAI | `pip install sie-crewai` | Ready |
 | `sie-dspy` | DSPy | `pip install sie-dspy` | Ready |
 | `sie-haystack` | Haystack | `pip install sie-haystack` | Ready |
@@ -19,6 +20,11 @@ standard framework interfaces.
 | `sie-weaviate` | Weaviate | `pip install sie-weaviate` | Ready |
 
 ## Quick Start
+
+Start with the [four Cognee examples](../examples/cognee) for memory, document
+reading, typed decisions and learning from corrections. Cognee stores and
+searches memory; SIE supplies inference. The helpers retain source text and IDs
+for inspection.
 
 ```python
 # LangChain example
@@ -181,7 +187,7 @@ Framework integrations implement **callback protocols** - the framework calls SI
 
 ### Sparse Embeddings
 
-All integrations support sparse embeddings for hybrid search:
+The following integrations provide sparse embedding adapters for hybrid search:
 
 ```python
 # LangChain - works with PineconeHybridSearchRetriever

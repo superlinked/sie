@@ -1,0 +1,35 @@
+[models]
+llm = "Qwen/Qwen3.5-4B"
+embedding = "BAAI/bge-m3"
+embedding_dimensions = 1024
+ocr = "lightonai/LightOnOCR-2-1B"
+rerank = "Qwen/Qwen3-Reranker-0.6B"
+decision = "fastino/GLiNER2.5-Decide"
+
+[limits]
+retrieve_top_k = 5
+rerank_top_k = 1
+# Character budget is a conservative client guard, not an exact token count.
+# The server still enforces overflow_policy=error for its combined context.
+evidence_chars = 1000
+request_timeout_seconds = 90
+provision_timeout_seconds = 180
+experiment_timeout_seconds = 600
+document_bytes = 10000000
+document_pages = 3
+page_pixels = 12000000
+pdf_scale = 1.5
+distill_batches = 1
+
+[decision]
+instructions = "Has the projector passed its image check?"
+query = "Has the projector passed its image check?"
+rerank_top_k = 1
+
+[decision.choices]
+confirmed = "The projector passed its image check."
+failed = "The projector failed its image check."
+unknown = "No projector test result is given."
+
+[learning]
+query = "For a new workshop whose projector and microphone work, must I still confirm step-free access?"

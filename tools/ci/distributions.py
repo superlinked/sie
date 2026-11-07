@@ -33,6 +33,7 @@ PYTHON_PATHS = (
     "integrations/sie_dspy",
     "integrations/sie_crewai",
     "integrations/sie_chroma",
+    "integrations/sie_cognee",
     "integrations/sie_lancedb",
     "integrations/sie_qdrant",
     "integrations/sie_weaviate",

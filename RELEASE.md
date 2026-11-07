@@ -38,12 +38,16 @@ trigger normal CI. No PR build is a publication job.
 
 ## Published outputs
 
-The Python train contains 13 distributions:
+The Python train contains 14 distributions:
 
 - `sie-sdk`, `sie-server`, `sie-config`, and `sie-mcp`;
 - `sie-langchain`, `sie-llamaindex`, `sie-haystack`, `sie-dspy`,
-  `sie-crewai`, `sie-chroma`, `sie-lancedb`, `sie-qdrant`, and
-  `sie-weaviate`.
+  `sie-crewai`, `sie-chroma`, `sie-lancedb`, `sie-qdrant`,
+  `sie-weaviate`, and `sie-cognee`.
+
+`sie-cognee` first ships in the release containing its integration. Its initial
+source version follows the train; it is not an additional artifact of an
+earlier published release.
 
 The npm train contains five packages under `@superlinked`: `sie-sdk`,
 `sie-chroma`, `sie-langchain`, `sie-llamaindex`, and `sie-lancedb`.

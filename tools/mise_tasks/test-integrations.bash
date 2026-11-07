@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #MISE description="Run integration SDK surface tests (Python + TypeScript, no server required)"
-#USAGE flag "--python-only" help="Run only the nine Python framework suites"
+#USAGE flag "--python-only" help="Run only the ten Python framework suites"
 
 set -euo pipefail
 
@@ -15,7 +15,7 @@ echo ""
 # (each integration has its own conftest with framework-specific fixtures).
 # The root pyproject.toml addopts filter out @pytest.mark.integration tests
 # so only fast, mocked-SIE-server tests run here.
-for dir in integrations/sie_{chroma,crewai,dspy,haystack,lancedb,langchain,llamaindex,qdrant,weaviate}/tests; do
+for dir in integrations/sie_{chroma,cognee,crewai,dspy,haystack,lancedb,langchain,llamaindex,qdrant,weaviate}/tests; do
   name=$(echo "$dir" | cut -d/ -f2)
   echo "--- ${name} ---"
   if ! mise exec -- uv run --frozen --project "${dir%/tests}" --no-sync pytest -c pyproject.toml "${dir}" -q; then
