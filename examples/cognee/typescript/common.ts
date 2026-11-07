@@ -11,6 +11,7 @@ import {
   createCognee,
 } from "@superlinked/sie-cognee";
 import { SIEClient } from "@superlinked/sie-sdk";
+import { UserError, formatError } from "./errors.js";
 
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const DATA = resolve(ROOT, "../data");
@@ -36,8 +37,14 @@ export interface Configuration {
 export function endpointFor(role: Role, env: NodeJS.ProcessEnv): Endpoint {
   const base = env.SIE_BASE_URL || "https://api.superlinked.com";
   const baseUrl = env[`SIE_${role.toUpperCase()}_BASE_URL`] || base;
-  compatibleUrl({ baseUrl: base });
-  compatibleUrl({ baseUrl });
+  try {
+    compatibleUrl({ baseUrl: base });
+    compatibleUrl({ baseUrl });
+  } catch {
+    throw new UserError(
+      "Model endpoints must be HTTP(S) URLs without credentials, query or fragment.",
+    );
+  }
   const keyName = `SIE_${role.toUpperCase()}_API_KEY`;
   const apiKey = Object.hasOwn(env, keyName)
     ? env[keyName]
@@ -63,7 +70,7 @@ export function readInput(filename: string): string {
   try {
     return readFileSync(join(DATA, filename), "utf8");
   } catch {
-    throw new Error("Download the pinned inputs with pnpm fetch-data first.");
+    throw new UserError("Download the pinned inputs with pnpm fetch-data first.");
   }
 }
 
@@ -78,21 +85,38 @@ export async function seedMemory(demo: Demo): Promise<void> {
   demo.show("memory-build", await demo.memory.build());
 }
 
-export async function launch(name: string, action: (demo: Demo) => Promise<void>): Promise<void> {
+export function namespaceFor(env: NodeJS.ProcessEnv): string {
+  const namespace = env.SIE_COGNEE_NAMESPACE || "example-v1";
+  if (!/^[a-z0-9][a-z0-9-]{0,49}$/.test(namespace))
+    throw new UserError(
+      "SIE_COGNEE_NAMESPACE must contain 1–50 lowercase letters, digits or hyphens.",
+    );
+  return namespace;
+}
+
+export async function launch<T = undefined>(
+  name: string,
+  action: (demo: Demo, input: T) => Promise<void>,
+  prepare?: (config: Configuration) => T,
+): Promise<void> {
   let initialized = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const config = JSON.parse(readFileSync(join(ROOT, "config.json"), "utf8")) as Configuration;
+    let config: Configuration;
+    try {
+      config = JSON.parse(readFileSync(join(ROOT, "config.json"), "utf8")) as Configuration;
+    } catch {
+      throw new UserError("Cannot read config.json. Restore a valid example configuration.");
+    }
     for (const role of ROLES)
       config.models[role] = process.env[`SIE_${role.toUpperCase()}_MODEL`] || config.models[role];
     if (process.env.SIE_EMBEDDING_DIMENSIONS)
       config.models.embeddingDimensions = Number(process.env.SIE_EMBEDDING_DIMENSIONS);
     for (const value of Object.values(config.limits))
       if (!Number.isSafeInteger(value) || value < 1)
-        throw new Error("All limits must be positive integers.");
-    const namespace = process.env.SIE_COGNEE_NAMESPACE || "example-v1";
-    if (!/^[a-z0-9][a-z0-9-]{0,49}$/.test(namespace))
-      throw new Error("Namespace must contain 1–50 lowercase letters, digits or hyphens.");
+        throw new UserError("All limits in config.json must be positive integers.");
+    const namespace = namespaceFor(process.env);
+    const input = prepare?.(config) as T;
     const endpoints = Object.fromEntries(
       ROLES.map((role) => [role, endpointFor(role, process.env)]),
     ) as Record<Role, Endpoint>;
@@ -152,12 +176,10 @@ export async function launch(name: string, action: (demo: Demo) => Promise<void>
       run,
     });
     await cognee.warm();
-    await action(demo);
+    await action(demo, input);
     console.log(`\nSaved output to ${run}`);
   } catch (error) {
-    console.error(
-      `${error instanceof Error ? error.name : "Error"}: The example did not complete. Check the configured model routes, input files and storage settings.`,
-    );
+    console.error(formatError(error));
     process.exitCode = 1;
   } finally {
     if (timer) clearTimeout(timer);

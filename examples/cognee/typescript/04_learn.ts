@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { SourceDocument, SourceMemory } from "@superlinked/sie-cognee";
+import { learningRun } from "./cli.js";
 import { type Demo, launch } from "./common.js";
+import { UserError } from "./errors.js";
 import { type TeachingRecord, learningEvidence } from "./learning.js";
 
 async function teach(demo: Demo): Promise<void> {
@@ -31,7 +33,7 @@ async function teach(demo: Demo): Promise<void> {
   );
   demo.show("session-entry", entry);
   if (entry.status !== "SessionStored" || !entry.entry_id)
-    throw new Error("The teaching session was not stored.");
+    throw new UserError("The teaching session was not stored.");
   await demo.cognee.sessions.addFeedback(
     teachingSession,
     entry.entry_id,
@@ -41,7 +43,7 @@ async function teach(demo: Demo): Promise<void> {
   const session = await demo.cognee.sessions.get(teachingSession);
   demo.show("teaching-session", session);
   if (!session.some((item) => item.answer === rule))
-    throw new Error("Stored session does not contain the authored guidance.");
+    throw new UserError("Stored session does not contain the authored guidance.");
   const improve = await demo.cognee.improve({
     datasetName: dataset,
     sessionIds: [teachingSession],
@@ -49,12 +51,12 @@ async function teach(demo: Demo): Promise<void> {
   demo.show("actual-improvement", improve);
   const matches = (await demo.cognee.datasets.list()).filter((item) => item.name === dataset);
   const datasetId = matches.length === 1 ? matches[0]?.id : undefined;
-  if (!datasetId) throw new Error("The teaching dataset is missing or ambiguous.");
+  if (!datasetId) throw new UserError("The teaching dataset is missing or ambiguous.");
   // The published SDK caches cognify independently of improve's newly persisted documents.
   await demo.cognee.users.resetPipelineRunStatus(datasetId, "cognify");
   const index = await demo.cognee.cognify(dataset, { summarization: false });
   demo.show("index-transferred-documents", index);
-  if (index.alreadyCompleted) throw new Error("Transferred documents were not indexed.");
+  if (index.alreadyCompleted) throw new UserError("Transferred documents were not indexed.");
   demo.show("stored-learning-documents", await demo.cognee.datasets.listData(datasetId));
   const record: TeachingRecord = {
     format: "sie-cognee-teaching-v1",
@@ -72,10 +74,19 @@ async function teach(demo: Demo): Promise<void> {
 }
 
 async function verify(demo: Demo, priorRun: string): Promise<void> {
-  const record = JSON.parse(
-    readFileSync(join(resolve(priorRun), "teaching-record.json"), "utf8"),
-  ) as TeachingRecord;
+  let record: TeachingRecord;
+  try {
+    record = JSON.parse(
+      readFileSync(join(resolve(priorRun), "teaching-record.json"), "utf8"),
+    ) as TeachingRecord;
+  } catch {
+    throw new UserError(
+      "Cannot read teaching-record.json. Pass the run directory printed by pnpm learn.",
+    );
+  }
   if (
+    !record ||
+    typeof record !== "object" ||
     record.format !== "sie-cognee-teaching-v1" ||
     record.storageRoot !== demo.storageRoot ||
     typeof record.dataset !== "string" ||
@@ -86,11 +97,11 @@ async function verify(demo: Demo, priorRun: string): Promise<void> {
     !record.teachingSession ||
     !Array.isArray(record.stagesRun)
   )
-    throw new Error("The teaching record does not match this memory namespace.");
+    throw new UserError("The teaching record does not match this memory namespace.");
   const query = `What approval code must the reviewer record before publishing the next ${record.project} release?`;
   const freshSession = randomUUID();
   if ((await demo.cognee.sessions.get(freshSession)).length)
-    throw new Error("Verification requires a new empty session.");
+    throw new UserError("Verification requires a new empty session.");
   demo.show("fresh-verification-session", {
     sessionId: freshSession,
     query,
@@ -107,7 +118,7 @@ async function verify(demo: Demo, priorRun: string): Promise<void> {
   const evidence = learningEvidence(record, documents, response);
   demo.show("learning-evidence", evidence);
   if (!evidence.sessionTransferVerified)
-    throw new Error(
+    throw new UserError(
       "No retrieved permanent chunk proves transfer of the unique authored guidance.",
     );
   console.log(
@@ -115,10 +126,11 @@ async function verify(demo: Demo, priorRun: string): Promise<void> {
   );
 }
 
-await launch("04-learn", async (demo) => {
-  const arguments_ = process.argv.slice(2).filter((argument) => argument !== "--");
-  if (arguments_.length === 0) await teach(demo);
-  else if (arguments_.length === 2 && arguments_[0] === "--verify-run" && arguments_[1])
-    await verify(demo, arguments_[1]);
-  else throw new Error("Use pnpm learn, or pnpm learn -- --verify-run PATH.");
-});
+await launch(
+  "04-learn",
+  async (demo, priorRun) => {
+    if (priorRun === undefined) await teach(demo);
+    else await verify(demo, priorRun);
+  },
+  () => learningRun(process.argv.slice(2)),
+);

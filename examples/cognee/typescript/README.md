@@ -11,7 +11,7 @@ Cognee's Rust engine inside your process. No Python server is needed.
 
 ## Run
 
-Use Node.js 22 or newer on a platform with Cognee's prebuilt native bindings.
+Use Node.js 22.9 or newer on a platform with Cognee's prebuilt native bindings.
 Linux x64 is tested. From the repository root:
 
 ```bash
