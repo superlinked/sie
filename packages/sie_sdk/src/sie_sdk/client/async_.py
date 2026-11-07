@@ -2101,7 +2101,8 @@ class SIEAsyncClient:
         timeout = provision_timeout_s if provision_timeout_s is not None else DEFAULT_PROVISION_TIMEOUT_S
         start_time = time.monotonic()
 
-        # Model loading uses time-based timeout only (no retry counter)
+        # Local retry counter for LoRA loading (model loading uses time-based timeout only)
+        lora_retries = 0
         # OOM retry counter (RESOURCE_EXHAUSTED) — bounded with exponential backoff.
         oom_retries = 0
         connect_retries = 0
@@ -2176,7 +2177,7 @@ class SIEAsyncClient:
             # Short-circuit terminal load failures.
             raise_if_model_load_failed(response, model=model)
 
-            # Handle 503 with MODEL_LOADING - auto-retry
+            # Handle 503 with LORA_LOADING or MODEL_LOADING - auto-retry
             if response.status_code == 503:
                 error_code = get_error_code(response)
                 if error_code == PROVISIONING_ERROR_CODE:
@@ -2195,6 +2196,34 @@ class SIEAsyncClient:
                     self._record_retry()
                     await asyncio.sleep(actual_delay)
                     after_capacity_wait = True
+                    continue
+
+                if error_code == LORA_LOADING_ERROR_CODE:
+                    lora_retries += 1
+
+                    if lora_retries > LORA_LOADING_MAX_RETRIES:
+                        # Extract lora from options for error message
+                        selected_lora = lora_selection(resolved_options)
+                        lora_name = None if selected_lora is LORA_UNSET else selected_lora
+                        msg = f"LoRA loading timeout after {lora_retries} retries"
+                        raise LoraLoadingError(
+                            msg,
+                            lora=str(lora_name) if lora_name else None,
+                            model=model,
+                            request=parse_request_metadata(response.headers),
+                        )
+
+                    # Wait and retry
+                    retry_after = get_retry_after(response)
+                    delay = retry_after_or_default(retry_after, LORA_LOADING_DEFAULT_DELAY_S)
+                    logger.debug(
+                        "LoRA loading, retrying in %.1fs (attempt %d/%d)",
+                        delay,
+                        lora_retries,
+                        LORA_LOADING_MAX_RETRIES,
+                    )
+                    self._record_retry()
+                    await asyncio.sleep(delay)
                     continue
 
                 if error_code == MODEL_LOADING_ERROR_CODE:
@@ -3231,7 +3260,8 @@ class SIEAsyncClient:
         timeout = provision_timeout_s if provision_timeout_s is not None else DEFAULT_PROVISION_TIMEOUT_S
         start_time = time.monotonic()
 
-        # Model loading uses time-based timeout only (no retry counter)
+        # Local retry counter for LoRA loading (model loading uses time-based timeout only)
+        lora_retries = 0
         # OOM retry counter (RESOURCE_EXHAUSTED) — bounded with exponential backoff.
         oom_retries = 0
         connect_retries = 0
@@ -3309,7 +3339,7 @@ class SIEAsyncClient:
             # Short-circuit token-budget overruns (#849).
             raise_if_input_too_long(response, model=model)
 
-            # Handle 503 with MODEL_LOADING - auto-retry
+            # Handle 503 with LORA_LOADING or MODEL_LOADING - auto-retry
             if response.status_code == 503:
                 error_code = get_error_code(response)
                 if error_code == PROVISIONING_ERROR_CODE:
@@ -3328,6 +3358,34 @@ class SIEAsyncClient:
                     self._record_retry()
                     await asyncio.sleep(actual_delay)
                     after_capacity_wait = True
+                    continue
+
+                if error_code == LORA_LOADING_ERROR_CODE:
+                    lora_retries += 1
+
+                    if lora_retries > LORA_LOADING_MAX_RETRIES:
+                        # Extract lora from options for error message
+                        selected_lora = lora_selection(resolved_options)
+                        lora_name = None if selected_lora is LORA_UNSET else selected_lora
+                        msg = f"LoRA loading timeout after {lora_retries} retries"
+                        raise LoraLoadingError(
+                            msg,
+                            lora=str(lora_name) if lora_name else None,
+                            model=model,
+                            request=parse_request_metadata(response.headers),
+                        )
+
+                    # Wait and retry
+                    retry_after = get_retry_after(response)
+                    delay = retry_after_or_default(retry_after, LORA_LOADING_DEFAULT_DELAY_S)
+                    logger.debug(
+                        "LoRA loading, retrying in %.1fs (attempt %d/%d)",
+                        delay,
+                        lora_retries,
+                        LORA_LOADING_MAX_RETRIES,
+                    )
+                    self._record_retry()
+                    await asyncio.sleep(delay)
                     continue
 
                 if error_code == MODEL_LOADING_ERROR_CODE:
