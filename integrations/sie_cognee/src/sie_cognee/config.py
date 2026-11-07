@@ -5,8 +5,11 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -54,6 +57,25 @@ class CogneeSettings:
     storage_root: Path
     auto_feedback: bool = False
     native_json_schema: bool = True
+
+
+@contextmanager
+def _isolated_initialization_env() -> Iterator[None]:
+    """Disable automatic dotenv loading while initializing the owned settings."""
+    previous = {name: os.environ.get(name) for name in ("COGNEE_ENV_FILE", "LITELLM_MODE")}
+    with TemporaryDirectory(prefix="sie-cognee-") as directory:
+        empty_env = Path(directory) / "empty.env"
+        empty_env.touch()
+        try:
+            os.environ["COGNEE_ENV_FILE"] = str(empty_env)
+            os.environ["LITELLM_MODE"] = "PRODUCTION"
+            yield
+        finally:
+            for name, value in previous.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
 
 
 def configure(settings: CogneeSettings) -> None:
@@ -122,6 +144,7 @@ def configure(settings: CogneeSettings) -> None:
         "MOCK_EMBEDDING": "false",
         "SYSTEM_ROOT_DIRECTORY": str(system_root),
         "COGNEE_LOGS_DIR": str(root / "logs"),
+        "LOG_FILE_NAME": "",
         "DATA_ROOT_DIRECTORY": str(data_root),
         "DB_PROVIDER": "sqlite",
         "DB_PATH": str(system_root / "databases"),
@@ -139,25 +162,26 @@ def configure(settings: CogneeSettings) -> None:
         "CACHE_BACKEND": "sqlite",
         "CACHE_DB_URL": f"sqlite+aiosqlite:///{system_root / 'cache.db'}",
     }
-    os.environ.update(environment)
-    import litellm
+    with _isolated_initialization_env():
+        os.environ.update(environment)
+        import litellm
 
-    # Cognee consults LiteLLM's catalog before sending a JSON schema. SIE model
-    # IDs are absent from that catalog, so declare the endpoint's capability
-    # through LiteLLM's public registration API instead of falling back to prose.
-    litellm.register_model(
-        {
-            name: {
-                "litellm_provider": "openai",
-                "mode": "chat",
-                "supports_response_schema": settings.native_json_schema,
+        # Cognee consults LiteLLM's catalog before sending a JSON schema. SIE model
+        # IDs are absent from that catalog, so declare the endpoint's capability
+        # through LiteLLM's public registration API instead of falling back to prose.
+        litellm.register_model(
+            {
+                name: {
+                    "litellm_provider": "openai",
+                    "mode": "chat",
+                    "supports_response_schema": settings.native_json_schema,
+                }
+                for name in {llm_model, f"openai/{llm_model}"}
             }
-            for name in {llm_model, f"openai/{llm_model}"}
-        }
-    )
-    import cognee
+        )
+        import cognee
 
-    cognee.config.set_llm_config(llm_config)
-    cognee.config.set_embedding_config(embedding_config)
-    cognee.config.system_root_directory(str(system_root))
-    cognee.config.data_root_directory(str(data_root))
+        cognee.config.set_llm_config(llm_config)
+        cognee.config.set_embedding_config(embedding_config)
+        cognee.config.system_root_directory(str(system_root))
+        cognee.config.data_root_directory(str(data_root))

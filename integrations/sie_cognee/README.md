@@ -23,6 +23,12 @@ for scripts, synthetic inputs and deployment choices.
 
 ## Configure before importing Cognee
 
+Load your application's environment files explicitly before calling
+`configure`. During initialization, the helper disables automatic dotenv loading
+by Cognee and LiteLLM so another file cannot override its model endpoints,
+storage or cache. Caller-loaded options outside those owned settings remain
+available. Start a fresh process to change the Cognee configuration.
+
 ```python
 import asyncio
 import os

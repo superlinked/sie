@@ -125,6 +125,18 @@ shell values take precedence over `.env`, including these general settings.
 To route roles separately, set each role's URL and key explicitly. Changing
 only `SIE_BASE_URL` leaves existing role-specific overrides in effect.
 
+A worker pool scaling from zero can exceed the native helpers' default
+180-second provisioning budget. [Keep required workers warm](../../deploy/helm/sie-cluster/README.md#reducing-cold-start-time)
+or adjust `provision_timeout_seconds` and `experiment_timeout_seconds` in
+`config.toml`. Cognee's compatible generation/embedding clients have their own
+request timeouts and retries; the native provisioning setting does not set them.
+
+Configure the [Cluster payload store](../../deploy/helm/sie-cluster/README.md#payload-store)
+for serialized work items larger than the 1 MB inline limit, including large
+OCR requests. This limit applies to the serialized work item, not the original
+image size. `payloadStore.enabled=true` also needs a resolved store URL and
+access; follow the linked guide to configure them.
+
 Combining local and Serverless roles is supported. Describe that as mixed
 inference: local memory does not keep remote model inputs on your machine.
 Fully local execution requires every model role to be served locally.

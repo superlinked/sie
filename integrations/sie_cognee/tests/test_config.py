@@ -1,10 +1,12 @@
 """Inspect actual released Cognee settings in a fresh isolated process."""
 
+import builtins
 import os
 import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sie_cognee.config import CogneeSettings, Endpoint, configure
@@ -68,13 +70,28 @@ def test_rejects_stage_fallback_and_unowned_storage(monkeypatch, settings):
         configure(settings)
 
 
-def test_actual_configuration_and_storage_isolation(tmp_path):
+def probe_environment(tmp_path):
+    env = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT") if key in os.environ}
+    for key, name in (("HOME", "home"), ("XDG_CONFIG_HOME", "config"), ("XDG_CACHE_HOME", "cache"), ("TMPDIR", "tmp")):
+        directory = tmp_path / name
+        directory.mkdir()
+        env[key] = str(directory)
+    env.update(
+        HF_HUB_OFFLINE="1",
+        LITELLM_LOCAL_MODEL_COST_MAP="True",
+        TELEMETRY_DISABLED="true",
+        OPENBLAS_NUM_THREADS="1",
+        OMP_NUM_THREADS="1",
+    )
+    return env
+
+
+@pytest.mark.parametrize("scenario", ["project", "explicit", "hot_reload"])
+def test_actual_configuration_and_storage_isolation(tmp_path, scenario):
     script = Path(__file__).with_name("config_probe.py")
-    env = {key: value for key, value in os.environ.items() if not key.startswith(("LLM_", "EMBEDDING_", "FALLBACK_"))}
-    env.update({"HF_HUB_OFFLINE": "1", "LITELLM_LOCAL_MODEL_COST_MAP": "True", "TELEMETRY_DISABLED": "true"})
     result = subprocess.run(  # noqa: S603 - fixed local contract probe
-        [sys.executable, str(script), str(tmp_path / "state")],
-        env=env,
+        [sys.executable, str(script), str(tmp_path / "state"), scenario],
+        env=probe_environment(tmp_path),
         check=False,
         capture_output=True,
         text=True,
@@ -83,10 +100,56 @@ def test_actual_configuration_and_storage_isolation(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.parametrize(("original", "failure"), [(None, "litellm"), ("", "cognee"), ("explicit", "setter")])
+def test_initialization_failure_restores_selectors(monkeypatch, settings, original, failure):
+    monkeypatch.setattr(os, "environ", dict(os.environ))
+    monkeypatch.delitem(sys.modules, "cognee", raising=False)
+    original_file = settings.storage_root.parent / "original.env"
+    original_file.write_bytes(b"APP_MARKER=original\n")
+    original = str(original_file) if original == "explicit" else original
+    for key in ("COGNEE_ENV_FILE", "LITELLM_MODE"):
+        if original is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, original)
+    original_import = builtins.__import__
+    temporary_files = []
+
+    def check_guard():
+        path = Path(os.environ["COGNEE_ENV_FILE"])
+        assert path.is_file()
+        assert not path.is_symlink()
+        assert path.read_bytes() == b""
+        assert os.environ["LITELLM_MODE"] == "PRODUCTION"
+        temporary_files.append(path)
+
+    def fail_setter(_config):
+        check_guard()
+        raise RuntimeError("controlled initialization failure")
+
+    def controlled_import(name, *args, **kwargs):
+        if name in {"litellm", "cognee"}:
+            check_guard()
+            if name == failure:
+                raise RuntimeError("controlled initialization failure")
+            if name == "litellm":
+                return SimpleNamespace(register_model=lambda _models: check_guard())
+            return SimpleNamespace(config=SimpleNamespace(set_llm_config=fail_setter))
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", controlled_import)
+    with pytest.raises(RuntimeError, match="controlled initialization failure"):
+        configure(settings)
+    assert all(os.environ.get(key) == original for key in ("COGNEE_ENV_FILE", "LITELLM_MODE"))
+    assert temporary_files
+    assert all(not path.parent.exists() for path in temporary_files)
+    assert original_file.read_bytes() == b"APP_MARKER=original\n"
+
+
 @pytest.mark.parametrize("model", ["Qwen/Qwen3.5-4B", "openai/test-model"])
 def test_released_cognee_remember_recall_http_contract(tmp_path, model):
     script = Path(__file__).with_name("http_contract_probe.py")
-    env = {key: value for key, value in os.environ.items() if not key.startswith(("LLM_", "EMBEDDING_", "FALLBACK_"))}
+    env = probe_environment(tmp_path)
     env.update(
         {
             "HF_HUB_OFFLINE": "1",
