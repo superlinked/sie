@@ -345,7 +345,9 @@ registry owner has completed this bootstrap.
 1. Obtain the release owner's explicit approval for the one-time authenticated
    upload, including its authentication and provenance implications. This is
    an exception for creating a new package name, not a token fallback in
-   `release.yml`. Without that approval, first publication remains blocked.
+   `release.yml`. Require `PUBLIC_RELEASE_PUBLISHING_ENABLED=true` and the
+   same protected-tag and exact-source conditions as `npm-publish`. Without
+   that approval and those conditions, first publication remains blocked.
 2. Use the `npm-distributions` artifact from the original stable release run
    after `artifacts-ready` succeeds. From that release's exact source revision,
    run the same `tools.ci.release_artifact check` and
