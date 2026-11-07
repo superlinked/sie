@@ -1,0 +1,5 @@
+.env
+.state/
+runs/
+dist/
+node_modules/

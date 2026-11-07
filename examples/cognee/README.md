@@ -7,6 +7,10 @@ SIE Cluster or SIE Serverless endpoints for each model role.
 These four Python examples show how to store and retrieve records, read a
 document, make a decision from source text and teach guidance for a later
 conversation. Each saves its inputs and intermediate results for inspection.
+For Node.js applications, use the [TypeScript examples](typescript/README.md) and
+[TypeScript integration](../../integrations/sie_ts_cognee/README.md). The two
+versions use separate Cognee engines and storage directories; the TypeScript
+guide describes its supported learning API.
 
 The examples share a fictional workshop notebook: a readiness policy, equipment
 checks, a scanned access note and an authored policy correction. The inputs

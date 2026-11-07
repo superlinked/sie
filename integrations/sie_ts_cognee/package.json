@@ -1,0 +1,63 @@
+{
+  "name": "@superlinked/sie-cognee",
+  "version": "0.11.0",
+  "description": "SIE generation, embeddings, OCR and evidence decisions for Cognee",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src tests",
+    "lint-fix": "biome check --write src tests",
+    "prepack": "pnpm run build"
+  },
+  "dependencies": {
+    "@superlinked/sie-sdk": "workspace:*"
+  },
+  "peerDependencies": {
+    "@cognee/cognee-ts": "0.2.0"
+  },
+  "devDependencies": {
+    "@cognee/cognee-ts": "0.2.0",
+    "@biomejs/biome": "^1.9.4",
+    "@types/node": "^22.14.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "keywords": [
+    "sie",
+    "cognee",
+    "memory",
+    "embeddings",
+    "ocr",
+    "reranking"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/superlinked/sie.git",
+    "directory": "integrations/sie_ts_cognee"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

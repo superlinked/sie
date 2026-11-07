@@ -4,3 +4,5 @@ packages:
   - "integrations/sie_ts_llamaindex"
   - "integrations/sie_ts_chroma"
   - "integrations/sie_ts_lancedb"
+  - "integrations/sie_ts_cognee"
+  - "examples/cognee/typescript"
