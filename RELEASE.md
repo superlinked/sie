@@ -49,8 +49,12 @@ The Python train contains 14 distributions:
 source version follows the train; it is not an additional artifact of an
 earlier published release.
 
-The npm train contains five packages under `@superlinked`: `sie-sdk`,
-`sie-chroma`, `sie-langchain`, `sie-llamaindex`, and `sie-lancedb`.
+The npm train contains six packages under `@superlinked`: `sie-sdk`,
+`sie-chroma`, `sie-cognee`, `sie-langchain`, `sie-llamaindex`, and `sie-lancedb`.
+
+`@superlinked/sie-cognee` first ships in the release containing its integration.
+It follows the same version, packed-consumer checks and publication gates as
+the other npm integrations.
 
 The GHCR image names are `sie-server`, `sie-gateway`, `sie-config`, `sie-mcp`,
 `sie-server-sidecar`, and `sie-server-rust`, under `ghcr.io/superlinked`.

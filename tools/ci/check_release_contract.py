@@ -35,6 +35,7 @@ PYTHON_DISTRIBUTIONS = (
 NPM_PACKAGES = (
     "@superlinked/sie-sdk",
     "@superlinked/sie-chroma",
+    "@superlinked/sie-cognee",
     "@superlinked/sie-langchain",
     "@superlinked/sie-llamaindex",
     "@superlinked/sie-lancedb",
@@ -64,6 +65,7 @@ EXTRA_VERSION_PATHS = {
     "integrations/sie_weaviate/pyproject.toml",
     "packages/sie_ts_sdk/package.json",
     "integrations/sie_ts_chroma/package.json",
+    "integrations/sie_ts_cognee/package.json",
     "integrations/sie_ts_langchain/package.json",
     "integrations/sie_ts_llamaindex/package.json",
     "integrations/sie_ts_lancedb/package.json",
@@ -1063,7 +1065,7 @@ def validate() -> list[str]:
     if python_matrices() != (PYTHON_DISTRIBUTIONS, PYTHON_DISTRIBUTIONS):
         errors.append("Python build/publish matrices differ from the exact 13-package contract")
     if npm_matrix() != NPM_PACKAGES:
-        errors.append("npm publish matrix differs from the exact five-package contract")
+        errors.append("npm publish matrix differs from the exact six-package contract")
     if not (ROOT / "pnpm-lock.yaml").is_file() or (ROOT / "packages/sie_ts_sdk/pnpm-lock.yaml").exists():
         errors.append("root pnpm lock must be the only TypeScript lock authority")
     return errors

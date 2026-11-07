@@ -41,6 +41,7 @@ PYTHON_PATHS = (
 NPM_PATHS = (
     "packages/sie_ts_sdk",
     "integrations/sie_ts_chroma",
+    "integrations/sie_ts_cognee",
     "integrations/sie_ts_langchain",
     "integrations/sie_ts_llamaindex",
     "integrations/sie_ts_lancedb",

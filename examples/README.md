@@ -14,7 +14,7 @@ to a separately maintained repository (clone and run there).
 
 | Example | Best for | SIE primitives | Setup | Status |
 |---|---|---|---|---|
-| [Build memory that can learn from corrections](./cognee) | Exploring Cognee memory, OCR with source provenance, reranking, typed decisions, and session distillation | `chat/completions`, `encode`, `score`, `extract` | Source checkout, Cognee, and SIE Local, SIE Cluster or SIE Serverless endpoints | Technical starter |
+| [Build memory that can learn from corrections](./cognee) | Exploring Cognee memory, OCR with source provenance, reranking, typed decisions, and session distillation | `chat/completions`, `encode`, `score`, `extract` | Source checkout, Python or [TypeScript](./cognee/typescript), Cognee, and SIE Local, SIE Cluster or SIE Serverless endpoints | Technical starter |
 | [Self-hosted product search in 5 min](./ecommerce-product-search) | Showing the fastest local product-search path with extraction, embeddings, and reranking | `extract`, `encode`, `score` | Local SIE Docker image, Python or TypeScript app | Runnable |
 | [Find the best retrieval strategy for your RAG](./retrieval-ablation) | Picking a production RAG retrieval pipeline by evals on real financial documents | `encode`, `score` | SIE endpoint, Turbopuffer key, optional SIE API key for auth-enabled clusters | Runnable benchmark |
 | [Rank exact primary-source passages](./rerank) | Testing a reranker on verbatim SEC, CMS, NTSB, and Supreme Court excerpts, where the closest wrong passage answers half the question | `score` | SIE endpoint with Qwen3 Reranker 4B; `fetch.py` pulls the recorded run, `score.py` reproduces the scores with no key | Runnable recorded example |
