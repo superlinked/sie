@@ -63,9 +63,10 @@ The seeded gate, which needs `claude` and `uv` on `PATH`:
 ./run_gate.sh laptop     # sie-server on this machine, see below
 ```
 
-The cloud and cluster recipes have not been run against a live endpoint yet.
-Their checks below were run against the gateway's own tests and against a
-recording stub.
+The cloud recipe passed this gate against SIE Serverless on 2026-11-05
+([recorded below](#the-gate-against-sie-serverless-recorded)). The cluster
+recipe has not been run against a live endpoint yet. Its checks below were run
+against the gateway's own tests and against a recording stub.
 
 ### On this machine
 
@@ -336,6 +337,18 @@ This checks the plumbing only: the recipe, `--bare` with the key helper, the
 effort refusal and retry, the tool permissions and the verdict. It says
 nothing about a model.
 
+### The gate against SIE Serverless, recorded
+
+`./run_gate.sh cloud` with Claude Code 2.1.318 against SIE Serverless and
+GLM-5.3-Flash via SIE Relay, 2026-11-05: 2 failed and 1 passed before the run,
+3 passed after it with the tests unchanged, in 7 turns and 17 seconds, with no
+API retries.
+
+A second run used a copy of `run_gate.sh`, not checked in, with `--bare` and the
+`--settings` line removed from the `claude` command, so the key came from
+`ANTHROPIC_AUTH_TOKEN` as `recipes/cloud.sh` sets it. It gave the same verdict in
+7 turns and 16 seconds, with one retry after a 503.
+
 ### Checked in this repository
 
 - The gateway's tests replay the shared vectors in
@@ -372,8 +385,9 @@ uv run pytest
 - **Not supported by Anthropic.** Anthropic does not support Claude Code with
   non-Claude models behind a gateway. A Claude Code release can change what it
   sends. The capture above is how to re-check a new version.
-- **Not a live result yet.** The cloud and cluster recipes have not been run
-  against a live endpoint.
+- **A few live runs, not a track record.** The cloud recipe passed the gate
+  against SIE Serverless on one day. The cluster recipe has not been run against
+  a live endpoint.
 - **Not a claim about every laptop.** The laptop recipe was run on one Apple
   Silicon machine with the MLX backend and one 4B model. It has not been run
   on an NVIDIA machine.
