@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, expect, it } from "vitest";
 import { documentPage, learningRun } from "../cli";
 import { namespaceFor, readInput } from "../common";
@@ -59,7 +60,9 @@ it.each([
 ])(
   "reports invalid %s usage before connecting to an inference endpoint",
   (script, args, message) => {
-    const result = spawnSync(process.execPath, [resolve("dist", script), ...args], {
+    const scriptPath = fileURLToPath(new URL(`../dist/${script}`, import.meta.url));
+    const result = spawnSync(process.execPath, [scriptPath, ...args], {
+      cwd: tmpdir(),
       env: {
         ...process.env,
         SIE_API_KEY: "",

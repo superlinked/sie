@@ -6,7 +6,7 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "lint": "biome check *.ts tests",
-    "test": "vitest run",
+    "test": "pnpm run build && vitest run",
     "fetch-data": "node dist/fetch.js",
     "memory": "node --env-file-if-exists=.env dist/01_memory.js",
     "documents": "node --env-file-if-exists=.env dist/02_read_documents.js",
