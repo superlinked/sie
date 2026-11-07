@@ -157,7 +157,7 @@ async def teach(demo: Demo, *, seed: bool) -> None:
     if not summary["persisted_lessons"]:
         print("No accepted lesson documents were persisted; verification will retain this status.", flush=True)
     command = (
-        f"WORKSHOP_NAMESPACE={shlex.quote(demo.namespace)} uv run 04_learn.py "
+        f"SIE_COGNEE_NAMESPACE={shlex.quote(demo.namespace)} uv run 04_learn.py "
         f"--verify-run {shlex.quote(str(demo.run.resolve()))}"
     )
     print(f"\nTeaching finished. Run this from the example folder in a new process:\n{command}", flush=True)

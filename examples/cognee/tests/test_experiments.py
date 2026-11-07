@@ -56,17 +56,17 @@ def test_config_isolation_and_embedding_change(tmp_path: Path, monkeypatch: pyte
     monkeypatch.setattr(common, "ROOT", tmp_path)
     monkeypatch.setattr(common, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.setenv("SIE_BASE_URL", "http://localhost:8080")
-    monkeypatch.setenv("WORKSHOP_NAMESPACE", "test-workshop")
+    monkeypatch.setenv("SIE_COGNEE_NAMESPACE", "test-example")
     monkeypatch.setenv("SIE_LLM_MODEL", "Qwen/Qwen3.8-27B-FP8")
     demo = load_demo("test")
     assert demo.models["llm"] == "Qwen/Qwen3.8-27B-FP8"
-    assert demo.storage == tmp_path / ".state/test-workshop"
-    assert demo.dataset == "sie-test-workshop"
+    assert demo.storage == tmp_path / ".state/test-example"
+    assert demo.dataset == "sie-test-example"
     (tmp_path / "config.toml").write_text(original.replace("embedding_dimensions = 1024", "embedding_dimensions = 768"))
-    with pytest.raises(SystemExit, match="fresh WORKSHOP_NAMESPACE"):
+    with pytest.raises(SystemExit, match="fresh SIE_COGNEE_NAMESPACE"):
         load_demo("changed")
-    monkeypatch.setenv("WORKSHOP_NAMESPACE", "../unowned")
-    with pytest.raises(ValueError, match="WORKSHOP_NAMESPACE"):
+    monkeypatch.setenv("SIE_COGNEE_NAMESPACE", "../unowned")
+    with pytest.raises(ValueError, match="SIE_COGNEE_NAMESPACE"):
         load_demo("escape")
 
 
@@ -165,7 +165,7 @@ def test_teaching_distills_without_verifying_in_same_process(
     assert json.loads((tmp_path / "actual-distillation.json").read_text())["documents"] == documents
     assert not (tmp_path / "fresh-session.json").exists()
     assert marker.read_bytes() == marker_before
-    assert f"WORKSHOP_NAMESPACE=test uv run 04_learn.py --verify-run {tmp_path}" in capsys.readouterr().out
+    assert f"SIE_COGNEE_NAMESPACE=test uv run 04_learn.py --verify-run {tmp_path}" in capsys.readouterr().out
 
 
 def verification_fixture(tmp_path: Path, *, status: str = "completed") -> tuple[Demo, Path, list[str]]:
@@ -311,7 +311,7 @@ def test_missing_state_cli_displays_safe_recovery(
     assert error.value.code == 2
     stderr = capsys.readouterr().err
     assert learn.MEMORY_STATE_RECOVERY in stderr
-    assert "fresh WORKSHOP_NAMESPACE" in stderr
+    assert "fresh SIE_COGNEE_NAMESPACE" in stderr
     assert "FileNotFoundError" not in stderr
     assert str(tmp_path) not in stderr
     initialization.assert_not_called()
@@ -345,7 +345,7 @@ def bootstrap_verification_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         if name.startswith("SIE_"):
             monkeypatch.delenv(name)
     monkeypatch.setenv("SIE_BASE_URL", "http://localhost:8080")
-    monkeypatch.setenv("WORKSHOP_NAMESPACE", "test")
+    monkeypatch.setenv("SIE_COGNEE_NAMESPACE", "test")
     demo = load_demo("04-learn")
     demo.show("actual-distillation", {"status": "no_proposed_lessons", "documents": []})
     marker = demo.storage / "cognee/sie-cognee.json"

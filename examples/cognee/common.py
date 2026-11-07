@@ -31,7 +31,7 @@ SEEDS = (
 MEMORY_STATE_RECOVERY = (
     "Stored memory state is missing, unreadable, invalid or mismatched. Restore the original intact memory "
     "directory and teaching-run artifacts with matching namespace and embedding settings, or use a fresh "
-    "WORKSHOP_NAMESPACE and rebuild memory before verification."
+    "SIE_COGNEE_NAMESPACE and rebuild memory before verification."
 )
 CONFIGURATION_MESSAGES = {
     "endpoint_url": "Endpoint must be an HTTP(S) URL without credentials, query or fragment, and with a valid port.",
@@ -168,9 +168,9 @@ def load_demo(experiment: str) -> Demo:
             config["models"][role] = model
     if dimensions := os.environ.get("SIE_EMBEDDING_DIMENSIONS"):
         config["models"]["embedding_dimensions"] = int(dimensions)
-    namespace = os.environ.get("WORKSHOP_NAMESPACE", "workshop-v1")
+    namespace = os.environ.get("SIE_COGNEE_NAMESPACE", "example-v1")
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,49}", namespace):
-        raise ValueError("WORKSHOP_NAMESPACE must contain 1–50 lowercase letters, digits or hyphens.")
+        raise ValueError("SIE_COGNEE_NAMESPACE must contain 1–50 lowercase letters, digits or hyphens.")
     for name, value in config["limits"].items():
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
             raise ValueError(f"limits.{name} must be positive.")

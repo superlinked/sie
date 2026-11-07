@@ -1,23 +1,24 @@
 # SIE for Cognee
 
-Cognee turns documents and interactions into persistent, retrievable memory.
-This integration connects Cognee 1.6.7 to SIE's compatible generation and
-embedding APIs, and provides native SIE helpers for OCR, source reranking and
-bounded decisions. Inference can use SIE Local, SIE Cluster or SIE Serverless;
-Cognee's databases and session cache stay in the directory you select.
-Serverless receives inference inputs. Local storage alone does not make
-inference local or provide confidential cloud execution.
+Combine Cognee's persistent document and conversation memory with SIE models
+for generation, embeddings, OCR, source reranking and typed decisions. This
+integration configures Cognee 1.6.7's supported LiteLLM and compatible embedding
+transports and provides native SIE helpers for OCR, reranking and decisions.
 
-The package joins the SIE release train at version 0.11.0. Until a release
-containing it is published, install from a source checkout:
+Choose SIE Local, SIE Cluster or SIE Serverless endpoints for each role.
+Cognee's databases and session cache stay in the directory you select.
+Serverless receives inference inputs; fully local inference requires every
+model role to run locally.
+
+Install from a source checkout:
 
 ```bash
 uv venv --python 3.12
 uv pip install ./packages/sie_sdk ./integrations/sie_cognee
 ```
 
-See [the four experiments](../../examples/cognee/README.md) for runnable
-scripts, synthetic documents, deployment choices and a presentation outline.
+See [the runnable memory, document, decision and learning examples](../../examples/cognee/README.md)
+for scripts, synthetic inputs and deployment choices.
 
 ## Configure before importing Cognee
 
@@ -36,7 +37,7 @@ configure(CogneeSettings(
     llm_model="Qwen/Qwen3.5-4B",
     embedding_model="BAAI/bge-m3",
     embedding_dimensions=1024,
-    storage_root=Path(".memory/workshop-v1"),
+    storage_root=Path(".memory/example-v1"),
 ))
 
 import cognee
@@ -47,8 +48,8 @@ async def main():
         source_id="equipment-2026-11-14",
         filename="equipment.txt",
     )
-    await cognee.remember(source.to_data_item(), dataset_name="workshop-v1", self_improvement=False)
-    for chunk in await retrieve_chunks("Is the projector confirmed?", dataset="workshop-v1"):
+    await cognee.remember(source.to_data_item(), dataset_name="example-v1", self_improvement=False)
+    for chunk in await retrieve_chunks("Is the projector confirmed?", dataset="example-v1"):
         print(chunk.chunk_id, chunk.text, chunk.metadata)
 
 asyncio.run(main())
@@ -118,7 +119,7 @@ The decision model also counts schema/instructions against its context window;
 handle a server overflow by selecting fewer sources or requesting review.
 Native helpers default to a 180-second provisioning budget; configure the
 client's request timeout too. Compatible Cognee transports own their timeouts
-and retries. Prewarm hosted generation/embedding models before a timed demo.
+and retries. Cold model provisioning can take minutes.
 
 Generated graph assertions can add facts absent from source text. Use source
 chunks for decisions and display graph context separately. Cognee may not
@@ -146,5 +147,5 @@ The credential-free suite tests configuration against installed Cognee,
 remember/recall over deterministic loopback HTTP fixtures, literal provenance,
 score alignment, invalid outputs and overflow. It never loads model weights.
 The opt-in `tests/test_integration.py` uses only the existing real-model lane's
-BGE-M3 embedding and Jina reranker; full OCR/generation/learning rehearsal is
-separate and requires configured endpoints.
+BGE-M3 embedding and Jina reranker. Full OCR, generation and learning runs
+require configured endpoints.

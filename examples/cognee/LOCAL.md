@@ -3,8 +3,8 @@
 The examples use the same API with SIE Local, SIE Cluster and SIE Serverless.
 Configure each model role explicitly when its serving runtime uses a different
 port. These commands follow the repository's [server setup](../../README.md)
-and [model catalog](../../packages/sie_server/models). Check support and memory
-requirements on the hardware you will present with before a workshop.
+and [model catalog](../../packages/sie_server/models). Check that your machine
+supports the selected models and has enough memory to run them.
 
 ## Linux CPU
 
@@ -17,7 +17,7 @@ docker run -p 127.0.0.1:8080:8080 \
 ```
 
 Generation, OCR and decision models need their own supported runtimes; the
-default CPU bundle does not supply the whole demonstration.
+default CPU bundle does not supply every example's model roles.
 
 ## Apple Silicon
 
@@ -69,7 +69,7 @@ SIE_RERANK_BASE_URL=http://localhost:8080
 SIE_LLM_BASE_URL=http://localhost:8081
 SIE_OCR_BASE_URL=http://localhost:8082
 SIE_DECISION_BASE_URL=http://localhost:8083
-WORKSHOP_NAMESPACE=local-workshop-v1
+SIE_COGNEE_NAMESPACE=local-example-v1
 ```
 
 Remove conflicting exported shell values; they take precedence over `.env`.

@@ -1,5 +1,5 @@
 [project]
-name = "sie-cognee-workshop-experiments"
+name = "sie-cognee-examples"
 version = "0.1.0"
 description = "Four experiments in persistent memory, document reading, decisions and learning"
 requires-python = ">=3.12,<3.13"

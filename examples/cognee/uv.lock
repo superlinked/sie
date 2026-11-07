@@ -2404,7 +2404,7 @@ requires-dist = [
 ]
 
 [[package]]
-name = "sie-cognee-workshop-experiments"
+name = "sie-cognee-examples"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

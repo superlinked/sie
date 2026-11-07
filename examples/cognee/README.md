@@ -1,18 +1,17 @@
-# Build with memory: SIE + Cognee
+# Memory and model tools with SIE + Cognee
 
-Four small Python experiments to remember facts, read a document, make a typed
-decision and carry learned guidance into a new conversation. Each exposes its
-inputs and intermediate results so you can adapt one building block at a time.
+Combine Cognee's persistent document and conversation memory with SIE's models
+for generation, embeddings, OCR, reranking and typed decisions. Choose SIE Local,
+SIE Cluster or SIE Serverless endpoints for each model role.
 
-The shared example is a workshop notebook: a readiness policy, equipment
+These four Python examples show how to store and retrieve records, read a
+document, make a decision from source text and teach guidance for a later
+conversation. Each saves its inputs and intermediate results for inspection.
+
+The examples share a fictional workshop notebook: a readiness policy, equipment
 checks, a scanned access note and an authored policy correction. The inputs
 are [synthetic and CC0](data/README.md), downloaded from a pinned public dataset.
-Recommendations never trigger actions.
-
-**SIE** provides specialized models through one API using SIE Local, SIE Cluster
-or SIE Serverless. **Cognee** organizes documents and interactions into
-persistent memory. Cognee stores this example's memory on your machine; SIE
-supplies its LLM, embeddings, OCR, reranking and decision inference.
+Cognee stores the memory on your machine. Recommendations never trigger actions.
 
 ```mermaid
 flowchart LR
@@ -49,7 +48,7 @@ cp .env.example .env
 ```
 
 The lock installs Cognee 1.6.7 and the integration/SDK from their relative paths
-in this checkout. It works before the integration is published to PyPI.
+in this checkout.
 
 `fetch.py` anonymously downloads six inputs from
 [the pinned workshop dataset](https://huggingface.co/datasets/superlinked/sie-task-evidence/tree/487cdc3bd0480659afd7ee88329449e6a6c8655d/cognee/workshop-starter/2026-11-06/v1).
@@ -58,26 +57,25 @@ ignored `data/` copies. No Hugging Face account or API key is needed. Re-running
 the fetch verifies cached files; move edited copies elsewhere before restoring
 the pinned inputs. The Python standard library is sufficient to run the fetch.
 
-Get an API key from the [Superlinked console](https://console.superlinked.com).
-Check starter-credit availability and any required access approval before your
-workshop. Put the key in the ignored `.env` file:
+Get an API key from the [Superlinked console](https://console.superlinked.com)
+and put it in the ignored `.env` file:
 
 ```dotenv
 SIE_BASE_URL=https://api.superlinked.com
 SIE_API_KEY=<your-key>
-WORKSHOP_NAMESPACE=workshop-v1
+SIE_COGNEE_NAMESPACE=example-v1
 ```
 
 ```sh
 uv run 01_memory.py --graph
 uv run 02_read_documents.py
 uv run 03_decide.py
-WORKSHOP_NAMESPACE=learning-v1 uv run 04_learn.py --seed
+SIE_COGNEE_NAMESPACE=learning-v1 uv run 04_learn.py --seed
 ```
 
 Each command prints its configuration and saves JSON under
-`runs/<namespace>/<timestamp>-<experiment>/`. Rehearse before presenting: cold
-provisioning and distillation can take minutes. Configurable budgets are 180
+`runs/<namespace>/<timestamp>-<experiment>/`. Cold provisioning and distillation
+can take minutes. Configurable budgets are 180
 seconds for native provisioning, 90 seconds per native request attempt and 600
 seconds per experiment. In-flight work may take longer to unwind on cancellation.
 
@@ -155,7 +153,7 @@ flowchart LR
 Run experiment 01 first, or seed this building block independently:
 
 ```sh
-WORKSHOP_NAMESPACE=decision-demo uv run 03_decide.py --seed
+SIE_COGNEE_NAMESPACE=decision-v1 uv run 03_decide.py --seed
 ```
 
 Inspect candidates → reranking scores → `decision-exact-packet.json` → outcome.
@@ -182,9 +180,9 @@ session and invokes Cognee's public session distillation. After that command
 exits, a second invocation verifies the stored lessons in a fresh process:
 
 ```sh
-WORKSHOP_NAMESPACE=learning-v1 uv run 04_learn.py --seed
+SIE_COGNEE_NAMESPACE=learning-v1 uv run 04_learn.py --seed
 # Replace TEACHING_RUN with the output directory printed by the first command.
-WORKSHOP_NAMESPACE=learning-v1 uv run 04_learn.py --verify-run runs/learning-v1/TEACHING_RUN
+SIE_COGNEE_NAMESPACE=learning-v1 uv run 04_learn.py --verify-run runs/learning-v1/TEACHING_RUN
 ```
 
 The teaching command prints the exact verification command, including its run
@@ -241,7 +239,7 @@ guidance into the typed decision building block from experiment 03.
 `DECISION`; `SIE_EMBEDDING_DIMENSIONS` overrides dimensions. For example:
 
 ```sh
-SIE_LLM_MODEL=Qwen/Qwen3.8-27B-FP8 WORKSHOP_NAMESPACE=another-llm uv run 01_memory.py
+SIE_LLM_MODEL=Qwen/Qwen3.8-27B-FP8 SIE_COGNEE_NAMESPACE=another-llm uv run 01_memory.py
 ```
 
 [`.env.example`](.env.example) shows separate URLs and keys for each role.
@@ -250,21 +248,8 @@ general API key only when its endpoint shares the general endpoint's origin.
 
 For **SIE Local or SIE Cluster**, follow [LOCAL.md](LOCAL.md): Linux CPU
 embedding/reranking, Apple Silicon MLX generation, GPU bundles and endpoint
-settings. Check model support and memory capacity on your presenting hardware.
-
-## Present it in ten minutes
-
-| Minutes | Show |
-| --- | --- |
-| 0–1 | Deployment diagram: memory and inference boundaries |
-| 1–3 | Source chunks and optional graph context |
-| 3–5 | Page image, OCR text and provenance |
-| 5–7 | Candidates, ranks, exact packet and typed result |
-| 7–9 | Teaching session, accepted documents and fresh-process verification |
-| 9–10 | Change one model, source or rule and discuss an extension |
-
-Keep rehearsal artifacts open if cold starts would exceed the slot. Label them
-as a prior live run; model responses are not bundled with this starter.
+settings. Check that your hardware supports the selected models and has enough
+memory to run them.
 
 ## State and offline checks
 
@@ -272,7 +257,7 @@ Each namespace owns `.state/<namespace>/cognee` and dataset `sie-<namespace>`.
 Use a new namespace when changing embeddings or starting a clean learning
 exercise. Do not run two scripts against one namespace simultaneously.
 
-Inspect or remove only this example's rehearsal data from this folder, after
+Inspect or remove only this example's saved state and results from this folder, after
 stopping scripts that use it:
 
 ```sh
