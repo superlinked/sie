@@ -1,15 +1,16 @@
 # SIE Framework Integrations
 
 This directory contains framework integrations for the Search Inference Engine (SIE).
-These packages connect frameworks to SIE through the Python SDK or compatible
-APIs.
+These packages connect frameworks to SIE through the Python and TypeScript SDKs
+or compatible APIs.
 
 ## Available Integrations
 
 | Package | Framework | Install | Status |
 |---------|-----------|---------|--------|
 | `sie-chroma` | Chroma | `pip install sie-chroma` | Ready |
-| [`sie-cognee`](./sie_cognee) | Cognee | [Install from source](./sie_cognee/README.md) | Source preview |
+| [`sie-cognee`](./sie_cognee) | Cognee (Python) | [Install from source](./sie_cognee/README.md) | Source preview |
+| [`@superlinked/sie-cognee`](./sie_ts_cognee) | Cognee (TypeScript / Node.js) | [Install from source](./sie_ts_cognee/README.md) | Source preview |
 | `sie-crewai` | CrewAI | `pip install sie-crewai` | Ready |
 | `sie-dspy` | DSPy | `pip install sie-dspy` | Ready |
 | `sie-haystack` | Haystack | `pip install sie-haystack` | Ready |
@@ -24,7 +25,8 @@ APIs.
 Start with the [four Cognee examples](../examples/cognee) for memory, document
 reading, typed decisions and learning from corrections. Cognee stores and
 searches memory; SIE supplies inference. The helpers retain source text and IDs
-for inspection.
+for inspection. A [TypeScript version](../examples/cognee/typescript) uses
+Cognee's native Node.js SDK with the SIE TypeScript SDK.
 
 ```python
 # LangChain example

@@ -26,6 +26,7 @@
         { "type": "toml", "path": "integrations/sie_weaviate/pyproject.toml", "jsonpath": "$.project.version" },
         { "type": "json", "path": "packages/sie_ts_sdk/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "integrations/sie_ts_chroma/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "integrations/sie_ts_cognee/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "integrations/sie_ts_langchain/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "integrations/sie_ts_llamaindex/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "integrations/sie_ts_lancedb/package.json", "jsonpath": "$.version" },
