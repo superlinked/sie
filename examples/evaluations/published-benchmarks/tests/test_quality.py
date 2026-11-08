@@ -622,8 +622,8 @@ class CommandTest(unittest.TestCase):
         self.reference = reference_file(self.temporary.name)
 
     def command(self, fake, *flags, environ=None):
-        def measured(plan, data, client):
-            return run_quality(plan, data, fake, results_dir=Path(self.temporary.name) / "results", now=clock)
+        def measured(plan, data, client, **kwargs):
+            return run_quality(plan, data, fake, results_dir=Path(self.temporary.name) / "results", now=clock, **kwargs)
 
         def loader(plan):
             return load_quality_data(plan, tiny_loaders())
@@ -635,6 +635,7 @@ class CommandTest(unittest.TestCase):
             patch.object(run, "load_quality_data", side_effect=loader) as self.loader,
             patch.object(run, "run_quality", side_effect=measured),
             patch.object(run, "SIEClient") as client,
+            patch.object(run, "http_fetch", side_effect=AssertionError("a reference run must not look anything up")),
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):
