@@ -5,7 +5,9 @@ repeats the method behind the benchmark numbers published on the SIE website,
 six quality records and six fixed-rate performance records. And it measures a
 model you are adding the same way, against an official number it looks up in
 the public results repository or one you supply, before you open a pull
-request: see [Test a new model](#test-a-new-model).
+request: see [Test a new model](#test-a-new-model). It also times one request
+at a time against your own server, beside a per-request time the website
+shows: see [Check a time on the website](#check-a-time-on-the-website).
 
 Each `references/<id>.json` is a projection of one published benchmark record:
 the model and profile, the task key, the pinned dataset revision, the request
@@ -623,6 +625,84 @@ no official number, so they need it to get a verdict.
 Some rows on the model pages are measured on our own GPUs, and a row may differ
 from your run for that reason. Read the `verdict:` line with that in mind.
 
+## Check a time on the website
+
+The per-request times the website shows for SIE come from one public study: the
+`latency-fastest-config/2026-10-11` folder of the Hugging Face dataset
+[`superlinked/sie-task-evidence`](https://huggingface.co/datasets/superlinked/sie-task-evidence).
+It timed each model one request at a time on an L4, an RTX PRO 6000 and an
+H100, and the website shows the median of the fastest of the three, rounded up.
+`run.py latency` repeats that study for two pages against your own server:
+
+| `--page` | On the website | Model | Server bundle | Inputs | One request |
+| --- | --- | --- | --- | --- | --- |
+| `classify` | `/classify`: "Median time per message 13.1 ms" | `fastino/GLiNER2.5-Decide` | `transformers5` | 400 CLINC150 and BANKING77 messages | `extract` with the message's 8 labels and `options={"overflow_policy": "error"}` |
+| `search` | home page and `/about`: 15.7 ms; `/serverless`: 16ms | `Qwen/Qwen3-Embedding-4B` | `sglang-embedding` | 440 questions | `encode` with `is_query=True` and `output_types=["dense"]`, no instruction |
+
+On a Linux machine with an NVIDIA GPU, start the server for the page with its
+bundle image:
+
+```sh
+docker run --gpus all -p 127.0.0.1:8080:8080 \
+  -v sie-hf-cache:/app/.cache/huggingface \
+  -e SIE_PRELOAD_MODELS=fastino/GLiNER2.5-Decide \
+  ghcr.io/superlinked/sie-server:v0.11.0-cuda12-transformers5
+```
+
+Then, from this directory, on the same machine:
+
+```sh
+uv run python run.py latency --page classify --endpoint http://localhost:8080
+```
+
+For `search`, stop that server and start this one instead:
+
+```sh
+docker run --gpus all -p 127.0.0.1:8080:8080 \
+  -v sie-hf-cache:/app/.cache/huggingface \
+  -e SIE_PRELOAD_MODELS=Qwen/Qwen3-Embedding-4B \
+  ghcr.io/superlinked/sie-server:v0.11.0-cuda12-sglang-embedding
+```
+
+```sh
+uv run python run.py latency --page search --endpoint http://localhost:8080
+```
+
+`--endpoint` is required. The key rule is the one in
+[Run it against your own server](#run-it-against-your-own-server): a server
+without a token needs no key.
+
+The run:
+
+1. downloads the study's inputs at their pinned revisions, rebuilds the
+   request list the way the study's build scripts wrote it, and stops before
+   any request when its SHA-256 differs from the one the study published;
+2. sends 20 warm-up requests built from the end of that list, as the study
+   did, and does not time them. The `search` warm-ups carry a `[c1-<n>] `
+   prefix, as the study's did, so the server's prefix cache never holds a
+   timed request. The first warm-up waits up to 15 minutes for the model to
+   load;
+3. sends every input once, in order, one request in flight, one attempt, and
+   times each `SIEClient` call;
+4. prints your n, p50, p95 and mean beside the published values for each GPU,
+   with percentiles interpolated linearly as the study computed them, and
+   writes `results/latency-<page>-<utc>.json` with the time of every request.
+
+Every run also prints what differs from the study:
+
+- the study's client ran inside the server's container and sent each request
+  over the sidecar's local Unix socket, with no HTTP. This run sends HTTP
+  through `sie_sdk.SIEClient`, so your time also includes the HTTP server and
+  the path from the client to the server. Run the client on the GPU machine to
+  keep that path short;
+- your GPU, and the server you started. The study ran the v0.10.0 images with
+  the server package from `main` at `2b3f7d2e`; the commands above start
+  v0.11.0.
+
+A failed request is counted, listed by error, and left out of the numbers. The
+run exits 1 only when the inputs fail the check or no request succeeds. There
+is no pass or fail: the numbers are set side by side.
+
 ## Validation
 
 `validation/` holds the example's own output from 2026-11-03: three
@@ -757,6 +837,8 @@ The tests use a fake client, in-memory datasets and the committed
   scorer's implementation digest;
 - no multi-process client, load ladder, Poisson arrivals or clock calibration;
 - no cost, price or accounting fields;
-- no recorded-evidence download: the inputs are the six reference files and
-  the pinned public datasets;
+- no recorded-evidence download beyond what `run.py latency` reads: the
+  quality and performance inputs are the six reference files and the pinned
+  public datasets, and `run.py latency` reads the per-request time study's
+  inputs and published results at a pinned revision;
 - no PyPI distribution, and the flags are not a compatibility surface.

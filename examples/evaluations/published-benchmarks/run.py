@@ -26,11 +26,14 @@ import sie_sdk
 from scipy.sparse import csr_matrix
 from sie_sdk import SIEClient
 
+import latency as latency_mode
 from official import (
     MODEL_ID,
     SKIPPED,
     Fetch,
     Lookup,
+    LookupFailed,
+    NotFound,
     checked_baseline_value,
     http_fetch,
     lookup_official,
@@ -249,6 +252,9 @@ def build_parser() -> argparse.ArgumentParser:
     performance.add_argument("--rate", type=float, help="Requests per second; the reference's published level")
     performance.add_argument("--duration", type=float, help="Seconds of scheduled arrivals (default 60)")
     performance.add_argument("--warmup", type=float, help="Seconds of unrecorded warmup (default 30; 0 skips it)")
+    latency = commands.add_parser("latency", help="Time one request at a time beside a per-request time on the website")
+    latency.add_argument("--page", required=True, choices=sorted(latency_mode.PAGES), help="The website page")
+    latency.add_argument("--endpoint", required=True, help="Your SIE server, for example http://localhost:8080")
     return parser
 
 
@@ -1548,6 +1554,32 @@ def performance_command(parser: argparse.ArgumentParser, args: argparse.Namespac
         raise SystemExit(1)
 
 
+def latency_command(parser: argparse.ArgumentParser, args: argparse.Namespace, fetch: Fetch = http_fetch) -> None:
+    try:
+        endpoint = normalize_endpoint(args.endpoint)
+    except ValueError as exc:
+        parser.error(str(exc))
+    api_key = _resolve_api_key(parser, endpoint)
+    try:
+        with SIEClient(endpoint, api_key=api_key, timeout_s=latency_mode.REQUEST_TIMEOUT_S) as client:
+            record, result_path = latency_mode.run_latency(
+                args.page,
+                client,
+                fetch,
+                endpoint=_without_credentials(endpoint),
+                client_description=client_description(),
+                results_dir=RESULTS_DIR,
+            )
+    except (latency_mode.InputMismatch, NotFound, LookupFailed) as exc:
+        print(f"stopped: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+    print(result_path)
+    for line in latency_mode.format_report(record):
+        print(line)
+    if record["run"]["failure_count"] == record["run"]["request_count"]:
+        raise SystemExit(1)
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1555,6 +1587,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         quality_command(parser, args)
     elif args.command == "performance":
         performance_command(parser, args)
+    elif args.command == "latency":
+        latency_command(parser, args)
 
 
 if __name__ == "__main__":
