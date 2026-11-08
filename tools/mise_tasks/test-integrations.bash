@@ -5,8 +5,14 @@
 set -euo pipefail
 
 rc=0
+# SIE_SYNC_NO_EXTRA lists extras to leave out, as in tools/mise_tasks/sync.bash.
+no_extra=()
+# shellcheck disable=SC2086 # word splitting on purpose
+for extra in ${SIE_SYNC_NO_EXTRA:-}; do
+  no_extra+=(--no-extra "$extra")
+done
 mise exec -- uv lock --check --project .
-mise exec -- uv sync --frozen --project . --all-packages --all-extras --no-install-package sie-audio-prep
+mise exec -- uv sync --frozen --project . --all-packages --all-extras ${no_extra[@]+"${no_extra[@]}"} --no-install-package sie-audio-prep
 
 echo "## Python integration SDK tests"
 echo ""
