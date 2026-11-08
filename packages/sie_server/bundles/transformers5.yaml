@@ -77,5 +77,5 @@ deps:
     marker: sys_platform == 'linux'
   # The prebuilt wheel the default bundle uses (torch 2.9, CUDA 12.9, cp312).
   flash-attn:
-    url: https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.11/flash_attn-2.7.4+cu129torch2.9-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl
+    url: https://huggingface.co/superlinked/sie-wheels/resolve/43a7ce6286d60d5b8feaad1417e20a412b4b761e/flash_attn-2.7.4+cu129torch2.9-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl
     marker: sys_platform == 'linux'

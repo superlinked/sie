@@ -7,10 +7,10 @@
     "https://pypi.org/simple"
   ],
   "inputs": {
-    "requirements_sha256": "1da4cc3c38305188df3a38287ca48a750637d2b316f6c7eb933e07e1ae665ee0",
+    "requirements_sha256": "e0fa717e278923313f4d0dcc72ffdd1e0d5d30116fdd0da9da631bb2f19e02ab",
     "root_versions_sha256": "baaee3f4ed167d22897e99edc787077a74b2ce56dbbf986ebc4e1a80bdde6f24"
   },
-  "lock_sha256": "d153383d41b9c1dbbc37abac085f8c3b58ca91b546e62f602d53b0caf467372d",
+  "lock_sha256": "326af35075dac1d4598257f9b485ec0710888909d09683b35fcd2afffabcf2bb",
   "policy_sha256": "d64e8e1cf9c2341810e07b556520974b73f5ccd3d09721efb3b6b107d2473d0f",
   "root_exclude_newer": "2026-11-06T20:00:00Z",
   "schema_version": 1,

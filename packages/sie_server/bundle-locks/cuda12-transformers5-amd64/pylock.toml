@@ -77,7 +77,7 @@ wheels = [{ url = "https://files.pythonhosted.org/packages/2d/ed/dfe19c4da779957
 name = "flash-attn"
 version = "2.7.4+cu129torch2.9"
 marker = "sys_platform == 'linux'"
-archive = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.11/flash_attn-2.7.4+cu129torch2.9-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hashes = { sha256 = "0a8f6219e61f8ff923cfd2cdad105d95a66106a6c9e754486d778c3a25e7707f" } }
+archive = { url = "https://huggingface.co/superlinked/sie-wheels/resolve/43a7ce6286d60d5b8feaad1417e20a412b4b761e/flash_attn-2.7.4+cu129torch2.9-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hashes = { sha256 = "0a8f6219e61f8ff923cfd2cdad105d95a66106a6c9e754486d778c3a25e7707f" } }
 
 [[packages]]
 name = "fsspec"
