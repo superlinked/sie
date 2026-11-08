@@ -103,7 +103,12 @@ def test_bootstrap_builds_fresh_trees_and_checks_all_locks():
     # The tool cache may be restored (tools/init.sh still runs the install), but
     # the action itself installs nothing: the lane proves the repository's own
     # bootstrap, and the Python and pnpm trees must start empty.
-    assert setup["with"] == {"version": "2026.5.5", "cache": True, "install": False}
+    assert setup["with"] == {
+        "version": "2026.5.5",
+        "sha256": "3aaab5c05a8a94a93b42b4f581779bbd5c44ddb251e7f3639fc671ec5c6aab8a",
+        "cache": True,
+        "install": False,
+    }
     script = (ROOT / "tools/ci/fresh_bootstrap.bash").read_text()
     assert "./tools/init.sh" in script
     assert "test ! -e .venv" in script
@@ -166,10 +171,11 @@ def test_pnpm_installs_prepare_local_native_builds():
 
 
 def test_mise_binary_prefetch_matches_every_action_version():
-    """Every mise-action step pins the version tools/ci/mise_binary.bash pre-places, and runs after it."""
+    """Every mise-action step pins the version and hash tools/ci/mise_binary.bash pre-places, and runs after it."""
     script = (ROOT / "tools/ci/mise_binary.bash").read_text()
     pinned = re.search(r"^MISE_VERSION=([0-9.]+)$", script, re.MULTILINE).group(1)
-    assert re.fullmatch(r"[0-9a-f]{64}", re.search(r"^MISE_SHA256_LINUX_X64=(\w+)$", script, re.MULTILINE).group(1))
+    digest = re.search(r"^MISE_SHA256_LINUX_X64=(\w+)$", script, re.MULTILINE).group(1)
+    assert re.fullmatch(r"[0-9a-f]{64}", digest)
     for path in _ci_workflow_files():
         workflow = yaml.safe_load(path.read_text())
         for name, job in workflow["jobs"].items():
@@ -178,6 +184,9 @@ def test_mise_binary_prefetch_matches_every_action_version():
                 if not step.get("uses", "").startswith("jdx/mise-action@"):
                     continue
                 assert str(step["with"]["version"]) == pinned, f"{path.name}: {name} pins a different mise"
+                # The action hashes the binary it ends up with, whether this script
+                # placed it, the cache restored it or the action downloaded it.
+                assert step["with"].get("sha256") == digest, f"{path.name}: {name} must verify the mise binary"
                 assert index > 0, f"{path.name}: {name} must fetch the mise binary before jdx/mise-action"
                 assert steps[index - 1].get("run") == "bash tools/ci/mise_binary.bash", (
                     f"{path.name}: {name} must fetch the mise binary before jdx/mise-action"

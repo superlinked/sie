@@ -2,8 +2,11 @@
 # Place the pinned mise binary where jdx/mise-action looks for it, so the action
 # skips its own download from GitHub release assets. mise.jdx.dev is mise's
 # release CDN and serves every tagged version; the hash is from the release's
-# SHASUMS256.txt. The version must match the
-# `version:` given to every mise-action step; tools/ci/tests check that.
+# SHASUMS256.txt and is the same binary GitHub's release archives carry. The
+# version and hash must match the `version:` and `sha256:` given to every
+# mise-action step: the action hashes the binary it ends up with, whether this
+# script placed it, its cache restored it or it downloaded it. tools/ci/tests
+# check that.
 set -euo pipefail
 
 MISE_VERSION=2026.5.5
@@ -23,7 +26,9 @@ esac
 bin_dir="${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}/bin"
 mkdir -p "$bin_dir"
 cdn="${MISE_CDN:-https://mise.jdx.dev}"
-if ! curl -fsSL --retry 3 --retry-all-errors --retry-delay 3 \
+# Each attempt is bounded, so a CDN that connects and then stalls cannot hold
+# the job: at most three attempts of a minute each before the fallback below.
+if ! curl -fsSL --connect-timeout 10 --max-time 60 --retry 2 --retry-all-errors --retry-delay 3 \
   "${cdn}/v${MISE_VERSION}/mise-v${MISE_VERSION}-${target}" \
   -o "$bin_dir/mise.download"; then
   # Not fatal: without the binary in place, mise-action downloads it from

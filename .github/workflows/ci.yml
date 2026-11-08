@@ -36,6 +36,7 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           version: 2026.5.5
+          sha256: 3aaab5c05a8a94a93b42b4f581779bbd5c44ddb251e7f3639fc671ec5c6aab8a
           install_args: --jobs=1 python uv github:rhysd/actionlint
           cache: true
       - run: >-
@@ -63,6 +64,7 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           version: 2026.5.5
+          sha256: 3aaab5c05a8a94a93b42b4f581779bbd5c44ddb251e7f3639fc671ec5c6aab8a
           # Restores the tool cache the other jobs save; tools/init.sh still runs
           # the install itself, and the Python and pnpm trees start empty.
           cache: true
@@ -83,6 +85,7 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           version: 2026.5.5
+          sha256: 3aaab5c05a8a94a93b42b4f581779bbd5c44ddb251e7f3639fc671ec5c6aab8a
           install_args: --jobs=1
           cache: true
       - run: mise exec -- uv lock --check --project .
@@ -139,6 +142,7 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           version: 2026.5.5
+          sha256: 3aaab5c05a8a94a93b42b4f581779bbd5c44ddb251e7f3639fc671ec5c6aab8a
           install_args: --jobs=1
           cache: true
       - run: mise run sync
@@ -164,6 +168,7 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           version: 2026.5.5
+          sha256: 3aaab5c05a8a94a93b42b4f581779bbd5c44ddb251e7f3639fc671ec5c6aab8a
           install_args: --jobs=1
           cache: true
       - name: Restore the pnpm workspace
@@ -201,6 +206,7 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           version: 2026.5.5
+          sha256: 3aaab5c05a8a94a93b42b4f581779bbd5c44ddb251e7f3639fc671ec5c6aab8a
           install_args: --jobs=1
           # With rustup's and cargo's homes set above, the toolchain and its
           # components restore with the cache. The other jobs leave Rust in
@@ -242,6 +248,7 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           version: 2026.5.5
+          sha256: 3aaab5c05a8a94a93b42b4f581779bbd5c44ddb251e7f3639fc671ec5c6aab8a
           install_args: --jobs=1
           cache: true
       - run: mise run sync
@@ -266,6 +273,7 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           version: 2026.5.5
+          sha256: 3aaab5c05a8a94a93b42b4f581779bbd5c44ddb251e7f3639fc671ec5c6aab8a
           install_args: --jobs=1
           cache: true
       - name: Restore the chart dependencies
@@ -314,6 +322,7 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           version: 2026.5.5
+          sha256: 3aaab5c05a8a94a93b42b4f581779bbd5c44ddb251e7f3639fc671ec5c6aab8a
           install_args: --jobs=1
           cache: true
       - run: mise run sync
@@ -358,6 +367,7 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           version: 2026.5.5
+          sha256: 3aaab5c05a8a94a93b42b4f581779bbd5c44ddb251e7f3639fc671ec5c6aab8a
           install_args: --jobs=1
           cache: true
       - run: mise run cpu-stack
