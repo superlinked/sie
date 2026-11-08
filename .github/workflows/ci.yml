@@ -173,7 +173,11 @@ jobs:
         with:
           version: 2026.5.5
           install_args: --jobs=1
-          cache: true
+          # The Rust toolchain lives in rustup's home, outside the mise data
+          # directory that mise-action caches. A restored cache leaves a dangling
+          # toolchain link, and rustup then installs a minimal profile without
+          # rustfmt or clippy, so this job installs its tools afresh.
+          cache: false
       - run: mise run sync
       - run: mise run rust-fmt -- --check
       - run: mise run rust-check
