@@ -3,7 +3,9 @@ experimental = true
 
 [tools]
 python = "3.12.12"
-uv = "0.5.31"
+# 0.5.31 is the workspace's uv. 0.9.28 reads the Docker-pinned bundle locks
+# (tools/ci/bundle_lock.py); listing it here keeps it in the CI tool cache.
+uv = ["0.5.31", "0.9.28"]
 rust = { version = "1.98.1", profile = "default", components = ["rustfmt", "clippy", "llvm-tools"] }
 "cargo:cargo-deny" = "0.20.2"
 "cargo:cargo-llvm-cov" = "0.8.7"

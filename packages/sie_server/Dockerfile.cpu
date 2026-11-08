@@ -6,6 +6,11 @@
 #   docker buildx build --platform linux/amd64,linux/arm64 -f packages/sie_server/Dockerfile.cpu -t sie-server:cpu .
 
 ARG BUNDLE=default
+ARG UV_VERSION=0.9.28
+
+# uv comes from its published image on ghcr.io; the installer script would
+# download the binary from a GitHub release on every build.
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 
 # Build the internal Rust extension from checked-in source; it is not published
 # to PyPI.
@@ -41,10 +46,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     git \
     zlib1g-dev
 
-ARG UV_VERSION=0.9.28
-RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | sh \
-    && mv /root/.local/bin/uv /bin/uv \
-    && mv /root/.local/bin/uvx /bin/uvx
+COPY --from=uv /uv /uvx /bin/
 
 WORKDIR /app
 

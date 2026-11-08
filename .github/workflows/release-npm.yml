@@ -48,6 +48,22 @@ jobs:
             test -n "$RELEASE_VERSION"
             mise exec -- python tools/ci/release_guard.py build --source-ref "$SOURCE_REF" --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG"
           fi
+      # Pull-request builds reuse the installed pnpm workspace; release builds
+      # start from an empty tree.
+      - name: Restore the pnpm workspace
+        if: inputs.build_only == true
+        id: pnpm-modules
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+            integrations/*/node_modules
+            examples/*/*/node_modules
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'pnpm-workspace.yaml', 'mise.toml') }}
+      - name: Provide libvips so sharp builds instead of downloading it
+        if: steps.pnpm-modules.outputs.cache-hit != 'true'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libvips-dev
       - name: Build complete archives and test clean packed consumers
         env:
           RELEASE_VERSION: ${{ inputs.version }}

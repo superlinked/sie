@@ -23,6 +23,10 @@
 ARG BUNDLE=sglang-cu130
 ARG UV_VERSION=0.9.28
 
+# uv comes from its published image on ghcr.io; the installer script would
+# download the binary from a GitHub release on every build.
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
 # Build the native Rust extension from checked-in source; it is not published
 # to PyPI.
 FROM ghcr.io/pyo3/maturin:v1.13.3 AS audio-prep-builder
@@ -59,10 +63,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libopenmpi3 \
     openmpi-bin
 
-ARG UV_VERSION
-RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | sh \
-    && mv /root/.local/bin/uv /bin/uv \
-    && mv /root/.local/bin/uvx /bin/uvx
+COPY --from=uv /uv /uvx /bin/
 
 # Install a standalone Python 3.12 from python-build-standalone (fully relocatable,
 # glibc 2.17+ compat). This replaces the deadsnakes PPA entirely.

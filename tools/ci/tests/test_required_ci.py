@@ -95,11 +95,14 @@ def test_required_check_reports_on_merge_queue_groups():
             assert all(context not in json.dumps(document) for document in documents), (name, context)
 
 
-def test_bootstrap_is_uncached_and_checks_all_locks():
+def test_bootstrap_builds_fresh_trees_and_checks_all_locks():
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     bootstrap = workflow["jobs"]["bootstrap"]
     setup = next(step for step in bootstrap["steps"] if step.get("uses", "").startswith("jdx/mise-action@"))
-    assert setup["with"] == {"version": "2026.5.5", "cache": False, "install": False}
+    # The tool cache may be restored (tools/init.sh still runs the install), but
+    # the action itself installs nothing: the lane proves the repository's own
+    # bootstrap, and the Python and pnpm trees must start empty.
+    assert setup["with"] == {"version": "2026.5.5", "cache": True, "install": False}
     script = (ROOT / "tools/ci/fresh_bootstrap.bash").read_text()
     assert "./tools/init.sh" in script
     assert "test ! -e .venv" in script

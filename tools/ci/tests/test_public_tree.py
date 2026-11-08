@@ -61,7 +61,9 @@ def test_root_workspace_uses_the_mise_uv_resolver() -> None:
     mise_config = tomllib.loads((REPOSITORY_ROOT / "mise.toml").read_text())
     manifest = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text())
     lock = tomllib.loads((REPOSITORY_ROOT / "uv.lock").read_text())
-    uv_version = mise_config["tools"]["uv"]
+    uv_versions = mise_config["tools"]["uv"]
+    # mise puts the first listed version on PATH; later entries serve other tasks.
+    uv_version = uv_versions[0] if isinstance(uv_versions, list) else uv_versions
     assert f"uv=={uv_version}" in manifest["dependency-groups"]["dev"]
     locked_uv = [package for package in lock["package"] if package["name"] == "uv"]
     assert len(locked_uv) == 1

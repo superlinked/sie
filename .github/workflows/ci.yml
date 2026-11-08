@@ -14,6 +14,9 @@ env:
   # that sync the Python workspace from fetching its 414 MB prebuilt wheel,
   # which is served from a GitHub release and not from a package index.
   SIE_SYNC_NO_EXTRA: flash-attn
+  # onnxruntime-node's install script would otherwise fetch CUDA binaries from
+  # a GitHub release on every install; the runners have no GPU.
+  ONNXRUNTIME_NODE_INSTALL_CUDA: skip
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -48,7 +51,8 @@ jobs:
     timeout-minutes: 60
     env:
       UV_NO_CACHE: "1"
-      # A clean-machine check installs every extra and every tool afresh.
+      # A clean-machine check builds the Python and pnpm trees from scratch and
+      # installs every extra.
       SIE_SYNC_NO_EXTRA: ""
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -57,8 +61,12 @@ jobs:
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           version: 2026.5.5
-          cache: false
+          # Restores the tool cache the other jobs save; tools/init.sh still runs
+          # the install itself, and the Python and pnpm trees start empty.
+          cache: true
           install: false
+      - name: Provide libvips so sharp builds instead of downloading it
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libvips-dev
       - run: bash tools/ci/fresh_bootstrap.bash
 
   python:
@@ -130,8 +138,6 @@ jobs:
           install_args: --jobs=1
           cache: true
       - run: mise run sync
-      - name: Install the Docker-pinned lock reader
-        run: mise install uv@0.9.28
       - name: Verify saved bundle closures and input drift
         run: mise exec -- uv run --frozen --project . --no-sync python tools/ci/bundle_lock.py check
       - name: Validate every saved target with the Docker installer
@@ -155,6 +161,19 @@ jobs:
           version: 2026.5.5
           install_args: --jobs=1
           cache: true
+      - name: Restore the pnpm workspace
+        id: pnpm-modules
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+            integrations/*/node_modules
+            examples/*/*/node_modules
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'pnpm-workspace.yaml', 'mise.toml') }}
+      - name: Provide libvips so sharp builds instead of downloading it
+        if: steps.pnpm-modules.outputs.cache-hit != 'true'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libvips-dev
       - run: mise exec -- pnpm install --frozen-lockfile
       - run: mise run ts -- build
       - run: mise run ts -- typecheck
@@ -169,15 +188,19 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           persist-credentials: false
+      - name: Keep the Rust toolchain inside the directory mise-action caches
+        run: |
+          echo "RUSTUP_HOME=$HOME/.local/share/mise/rustup" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=$HOME/.local/share/mise/cargo" >> "$GITHUB_ENV"
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           version: 2026.5.5
           install_args: --jobs=1
-          # The Rust toolchain lives in rustup's home, outside the mise data
-          # directory that mise-action caches. A restored cache leaves a dangling
-          # toolchain link, and rustup then installs a minimal profile without
-          # rustfmt or clippy, so this job installs its tools afresh.
-          cache: false
+          # With rustup's and cargo's homes set above, the toolchain and its
+          # components restore with the cache. The other jobs leave Rust in
+          # rustup's default home, so this entry needs its own key.
+          cache_key_prefix: mise-rust
+          cache: true
       - run: mise run sync
       - run: mise run rust-fmt -- --check
       - run: mise run rust-check
@@ -237,7 +260,16 @@ jobs:
           version: 2026.5.5
           install_args: --jobs=1
           cache: true
-      - run: mise run helm -- dependencies
+      - name: Restore the chart dependencies
+        id: helm-charts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: deploy/helm/sie-cluster/charts
+          key: helm-charts-${{ hashFiles('deploy/helm/sie-cluster/Chart.yaml', 'deploy/helm/sie-cluster/Chart.lock') }}
+      # helm dependency build downloads every chart again even when the
+      # archives are present, so it runs only when the lock changed.
+      - if: steps.helm-charts.outputs.cache-hit != 'true'
+        run: mise run helm -- dependencies
       - run: mise run helm -- lint --set payloadStore.enabled=false
       - run: mise run helm -- template --set payloadStore.enabled=false >/dev/null
       - name: Render public cloud overlays
@@ -276,6 +308,19 @@ jobs:
           install_args: --jobs=1
           cache: true
       - run: mise run sync
+      - name: Restore the pnpm workspace
+        id: pnpm-modules
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+            integrations/*/node_modules
+            examples/*/*/node_modules
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'pnpm-workspace.yaml', 'mise.toml') }}
+      - name: Provide libvips so sharp builds instead of downloading it
+        if: steps.pnpm-modules.outputs.cache-hit != 'true'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libvips-dev
       - run: mise exec -- pnpm install --frozen-lockfile
       - run: mise run ts -- build
       - run: mise exec -- uv run --frozen --project . --no-sync python tools/ci/live_sdk.py
