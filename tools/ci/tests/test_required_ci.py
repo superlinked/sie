@@ -96,6 +96,7 @@ def test_required_check_reports_on_merge_queue_groups():
 
 
 def test_bootstrap_builds_fresh_trees_and_checks_all_locks():
+    """The bootstrap lane may restore the tool cache but must build the Python and pnpm trees itself."""
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     bootstrap = workflow["jobs"]["bootstrap"]
     setup = next(step for step in bootstrap["steps"] if step.get("uses", "").startswith("jdx/mise-action@"))
@@ -135,7 +136,37 @@ def _ci_workflow_files() -> list:
     return [ci, *sorted(set(called))]
 
 
+def test_pnpm_installs_prepare_local_native_builds():
+    """Every job that may run `pnpm install` first runs tools/ci/pnpm_native_deps.bash."""
+    script = (ROOT / "tools/ci/pnpm_native_deps.bash").read_text()
+    assert "libvips-dev" in script
+    assert re.search(r"node-gyp@\$\{NODE_GYP_VERSION\}", script)
+    assert re.search(r"^NODE_GYP_VERSION=[0-9.]+$", script, re.MULTILINE)
+    assert "npm_config_nodedir" in script
+    for path in _ci_workflow_files():
+        workflow = yaml.safe_load(path.read_text())
+        for name, job in workflow["jobs"].items():
+            steps = job.get("steps", [])
+            runs = [step.get("run", "") for step in steps]
+            installs = "\n".join(runs)
+            if (
+                "pnpm install" not in installs
+                and "fresh_bootstrap" not in installs
+                and "distributions.py build npm" not in installs
+            ):
+                continue
+            prepared = [i for i, run in enumerate(runs) if run == "bash tools/ci/pnpm_native_deps.bash"]
+            assert prepared, f"{path.name}: {name} installs the pnpm workspace without preparing native builds"
+            first_install = next(
+                i
+                for i, run in enumerate(runs)
+                if "pnpm install" in run or "fresh_bootstrap" in run or "distributions.py build npm" in run
+            )
+            assert prepared[0] < first_install, f"{path.name}: {name} must prepare native builds before installing"
+
+
 def test_mise_binary_prefetch_matches_every_action_version():
+    """Every mise-action step pins the version tools/ci/mise_binary.bash pre-places, and runs after it."""
     script = (ROOT / "tools/ci/mise_binary.bash").read_text()
     pinned = re.search(r"^MISE_VERSION=([0-9.]+)$", script, re.MULTILINE).group(1)
     assert re.fullmatch(r"[0-9a-f]{64}", re.search(r"^MISE_SHA256_LINUX_X64=(\w+)$", script, re.MULTILINE).group(1))
@@ -147,7 +178,8 @@ def test_mise_binary_prefetch_matches_every_action_version():
                 if not step.get("uses", "").startswith("jdx/mise-action@"):
                     continue
                 assert str(step["with"]["version"]) == pinned, f"{path.name}: {name} pins a different mise"
-                assert index > 0 and steps[index - 1].get("run") == "bash tools/ci/mise_binary.bash", (
+                assert index > 0, f"{path.name}: {name} must fetch the mise binary before jdx/mise-action"
+                assert steps[index - 1].get("run") == "bash tools/ci/mise_binary.bash", (
                     f"{path.name}: {name} must fetch the mise binary before jdx/mise-action"
                 )
 

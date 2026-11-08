@@ -64,9 +64,9 @@ jobs:
           key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'pnpm-workspace.yaml', 'mise.toml') }}
       # On release builds the restore step is skipped and its output is empty,
       # which this condition counts as a miss on purpose.
-      - name: Provide libvips so sharp builds instead of downloading it
+      - name: Let pnpm build native addons instead of downloading them
         if: steps.pnpm-modules.outputs.cache-hit != 'true'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libvips-dev
+        run: bash tools/ci/pnpm_native_deps.bash
       - name: Build complete archives and test clean packed consumers
         env:
           RELEASE_VERSION: ${{ inputs.version }}

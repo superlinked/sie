@@ -67,8 +67,8 @@ jobs:
           # the install itself, and the Python and pnpm trees start empty.
           cache: true
           install: false
-      - name: Provide libvips so sharp builds instead of downloading it
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libvips-dev
+      - name: Let pnpm build native addons instead of downloading them
+        run: bash tools/ci/pnpm_native_deps.bash
       - run: bash tools/ci/fresh_bootstrap.bash
 
   python:
@@ -176,9 +176,9 @@ jobs:
             integrations/*/node_modules
             examples/*/*/node_modules
           key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'pnpm-workspace.yaml', 'mise.toml') }}
-      - name: Provide libvips so sharp builds instead of downloading it
+      - name: Let pnpm build native addons instead of downloading them
         if: steps.pnpm-modules.outputs.cache-hit != 'true'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libvips-dev
+        run: bash tools/ci/pnpm_native_deps.bash
       - run: mise exec -- pnpm install --frozen-lockfile
       - run: mise run ts -- build
       - run: mise run ts -- typecheck
@@ -327,9 +327,9 @@ jobs:
             integrations/*/node_modules
             examples/*/*/node_modules
           key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'pnpm-workspace.yaml', 'mise.toml') }}
-      - name: Provide libvips so sharp builds instead of downloading it
+      - name: Let pnpm build native addons instead of downloading them
         if: steps.pnpm-modules.outputs.cache-hit != 'true'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libvips-dev
+        run: bash tools/ci/pnpm_native_deps.bash
       - run: mise exec -- pnpm install --frozen-lockfile
       - run: mise run ts -- build
       - run: mise exec -- uv run --frozen --project . --no-sync python tools/ci/live_sdk.py
