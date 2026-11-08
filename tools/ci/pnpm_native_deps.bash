@@ -12,9 +12,11 @@ set -euo pipefail
 
 NODE_GYP_VERSION=12.4.0
 
-sudo apt-get update -qq
-sudo apt-get install -y -qq --no-install-recommends libvips-dev
-mise exec -- npm install --global --no-fund --no-audit "node-gyp@${NODE_GYP_VERSION}"
+# Both package sources get retries, so a transient mirror or registry error
+# does not fail the job this script exists to shield.
+sudo apt-get -o Acquire::Retries=3 update -qq
+sudo apt-get -o Acquire::Retries=3 install -y -qq --no-install-recommends libvips-dev
+mise exec -- npm install --global --no-fund --no-audit --fetch-retries 5 "node-gyp@${NODE_GYP_VERSION}"
 node_dir="$(mise where node)"
 if [ -n "${GITHUB_ENV:-}" ]; then
   echo "npm_config_nodedir=${node_dir}" >> "$GITHUB_ENV"
