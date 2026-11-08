@@ -11,7 +11,7 @@ dependencies = [
     "httpx>=0.28,<1",
 
     # WebSocket client
-    "websockets>=14,<15",
+    "websockets>=14,<16",
 
     # Serialization
     "msgpack>=1.2.1,<2",

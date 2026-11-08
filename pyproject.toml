@@ -66,6 +66,7 @@ members = [
     "packages/sie_sdk",
     "packages/sie_server",
     "integrations/sie_chroma",
+    "integrations/sie_cognee",
     "integrations/sie_crewai",
     "integrations/sie_dspy",
     "integrations/sie_haystack",

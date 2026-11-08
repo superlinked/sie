@@ -12,10 +12,11 @@
   ],
   "inputs": {
     "requirements_sha256": "378dabe9b77bc2c593a05e1113534e8f50093ca205d3344a7ba2e20fe660e38a",
-    "root_versions_sha256": "3d69200d45fb5e395d3e4b707eac86b4b2a9ce22214bfacd85dd19f73c98a765"
+    "root_versions_sha256": "baaee3f4ed167d22897e99edc787077a74b2ce56dbbf986ebc4e1a80bdde6f24"
   },
-  "lock_sha256": "e250fa531458fcdb9a3f2dff6fbb7e6b6e0144e114a835bbcd999b371ba0da60",
-  "policy_sha256": "6c835f64b277b782d89eb5f2374924124cc3ddc058bb3232c7e0362ff907f377",
+  "lock_sha256": "176e49681671029c1ad5d91cca3635a979fe9d38241397c9d31aaf259062e8f1",
+  "policy_sha256": "d64e8e1cf9c2341810e07b556520974b73f5ccd3d09721efb3b6b107d2473d0f",
+  "root_exclude_newer": "2026-11-06T20:00:00Z",
   "schema_version": 1,
   "source_pins_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
   "target": {

@@ -32,6 +32,7 @@ from sie_server.bundle_lock import (
     policy_digest,
     read_packages,
     root_constraints,
+    root_packages,
     root_versions_digest,
     source_constraints,
     validate_exceptions,
@@ -138,7 +139,9 @@ def complete_artifact_hashes(lock: Path) -> list[dict[str, object]]:
     return completed
 
 
-def compile_target(root: Path, target: Target, uv: str, cutoff: str, cache: Path | None) -> None:
+def compile_target(
+    root: Path, target: Target, uv: str, cutoff: str, cache: Path | None, root_cutoff: str | None = None
+) -> None:
     policy = json.loads((root / LOCKS / "exceptions.json").read_text())
     exceptions = policy["targets"].get(target.name, {})
     source_pins = policy.get("source_pins", {}).get(target.name, {})
@@ -178,6 +181,11 @@ def compile_target(root: Path, target: Target, uv: str, cutoff: str, cache: Path
             cutoff,
             *index_arguments(target),
         ]
+        if root_cutoff is not None:
+            # Only already exact-pinned root packages may use the newer cutoff.
+            # Bundle-only dependencies retain the global resolution boundary.
+            for name in sorted(root_packages(root / "uv.lock")):
+                command += ["--exclude-newer-package", f"{name}={root_cutoff}"]
         if cache is not None:
             command += ["--cache-dir", str(cache.resolve())]
         subprocess.run(  # noqa: S603 - fixed compile arguments and explicit public indexes
@@ -203,6 +211,8 @@ def compile_target(root: Path, target: Target, uv: str, cutoff: str, cache: Path
             "source_pins_sha256": canonical_digest(source_pins),
             "lock_sha256": digest(directory / "pylock.toml"),
         }
+        if root_cutoff is not None:
+            manifest["root_exclude_newer"] = root_cutoff
         destination = root / LOCKS / target.name
         destination.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(directory / "pylock.toml", destination / "pylock.toml")
@@ -217,6 +227,10 @@ def main() -> int:
     parser.add_argument("--target", action="append")
     parser.add_argument("--uv", default="uv")
     parser.add_argument("--exclude-newer")
+    parser.add_argument(
+        "--root-exclude-newer",
+        help="Optional cutoff for exactly pinned root packages; bundle-only packages keep --exclude-newer",
+    )
     parser.add_argument("--cache", type=Path)
     args = parser.parse_args()
     if args.command == "check":
@@ -231,7 +245,7 @@ def main() -> int:
             parser.error(f"unsupported targets: {sorted(unknown)}")
         selected = [target for target in selected if target.name in args.target]
     for target in selected:
-        compile_target(args.root, target, args.uv, args.exclude_newer, args.cache)
+        compile_target(args.root, target, args.uv, args.exclude_newer, args.cache, args.root_exclude_newer)
     return 0
 
 

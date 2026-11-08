@@ -33,6 +33,7 @@ PYTHON_PATHS = (
     "integrations/sie_dspy",
     "integrations/sie_crewai",
     "integrations/sie_chroma",
+    "integrations/sie_cognee",
     "integrations/sie_lancedb",
     "integrations/sie_qdrant",
     "integrations/sie_weaviate",
@@ -40,6 +41,7 @@ PYTHON_PATHS = (
 NPM_PATHS = (
     "packages/sie_ts_sdk",
     "integrations/sie_ts_chroma",
+    "integrations/sie_ts_cognee",
     "integrations/sie_ts_langchain",
     "integrations/sie_ts_llamaindex",
     "integrations/sie_ts_lancedb",

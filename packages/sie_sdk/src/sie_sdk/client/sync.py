@@ -44,6 +44,7 @@ import warnings
 import weakref
 from collections.abc import Iterator, Mapping, Sequence
 from functools import partial
+from inspect import signature
 from pathlib import Path
 from typing import IO, Any, Literal, Self, cast, overload
 from urllib.parse import quote, urlencode
@@ -2062,7 +2063,10 @@ class SIEClient:
         for path in paths:
             ws_url = self._ws_url(path)
             try:
-                with connect(ws_url, additional_headers=self._websocket_headers(ws_url)) as ws:
+                # websockets 15 enables ambient proxies by default; preserve direct
+                # connections across the supported 14/15 dependency range.
+                proxy_options: dict[str, Any] = {"proxy": None} if "proxy" in signature(connect).parameters else {}
+                with connect(ws_url, additional_headers=self._websocket_headers(ws_url), **proxy_options) as ws:
                     for message in ws:
                         if isinstance(message, bytes):
                             payload = message.decode("utf-8")
