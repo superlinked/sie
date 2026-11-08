@@ -124,6 +124,34 @@ def test_mise_workflow_setups_pin_concrete_versions():
                     )
 
 
+def _ci_workflow_files() -> list:
+    """ci.yml and every reusable workflow it calls."""
+    ci = ROOT / ".github/workflows/ci.yml"
+    called = [
+        ROOT / job["uses"]
+        for job in yaml.safe_load(ci.read_text())["jobs"].values()
+        if job.get("uses", "").startswith("./")
+    ]
+    return [ci, *sorted(set(called))]
+
+
+def test_mise_binary_prefetch_matches_every_action_version():
+    script = (ROOT / "tools/ci/mise_binary.bash").read_text()
+    pinned = re.search(r"^MISE_VERSION=([0-9.]+)$", script, re.MULTILINE).group(1)
+    assert re.fullmatch(r"[0-9a-f]{64}", re.search(r"^MISE_SHA256_LINUX_X64=(\w+)$", script, re.MULTILINE).group(1))
+    for path in _ci_workflow_files():
+        workflow = yaml.safe_load(path.read_text())
+        for name, job in workflow["jobs"].items():
+            steps = job.get("steps", [])
+            for index, step in enumerate(steps):
+                if not step.get("uses", "").startswith("jdx/mise-action@"):
+                    continue
+                assert str(step["with"]["version"]) == pinned, f"{path.name}: {name} pins a different mise"
+                assert index > 0 and steps[index - 1].get("run") == "bash tools/ci/mise_binary.bash", (
+                    f"{path.name}: {name} must fetch the mise binary before jdx/mise-action"
+                )
+
+
 def test_mise_bootstrap_serializes_required_toolsets():
     # Unqualified `mise exec` installs missing tools outside install_args.
     for path in sorted((ROOT / ".github/workflows").glob("*.y*ml")):
@@ -146,6 +174,7 @@ def test_policy_exec_does_not_lazily_install_unrelated_tools():
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     policy = workflow["jobs"]["policy"]
     commands = [shlex.split(step["run"]) for step in policy["steps"] if "run" in step]
+    commands = [command for command in commands if command != ["bash", "tools/ci/mise_binary.bash"]]
     prefix = ["mise", "exec", "--no-deps", "python", "uv", "github:rhysd/actionlint", "--"]
     assert len(commands) == 3
     assert all(command[: len(prefix)] == prefix for command in commands)
@@ -257,7 +286,7 @@ def test_helm_render_tests_run_after_chart_dependencies():
 def test_cpu_lane_uses_cpu_stack_task():
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     commands = [step.get("run") for step in workflow["jobs"]["cpu-stack"]["steps"] if "run" in step]
-    assert commands == ["mise run cpu-stack"]
+    assert commands == ["bash tools/ci/mise_binary.bash", "mise run cpu-stack"]
 
 
 def test_rust_audits_both_committed_dependency_graphs():

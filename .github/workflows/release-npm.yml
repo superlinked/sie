@@ -28,6 +28,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - run: bash tools/ci/mise_binary.bash
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           version: 2026.5.5
@@ -61,6 +62,8 @@ jobs:
             integrations/*/node_modules
             examples/*/*/node_modules
           key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'pnpm-workspace.yaml', 'mise.toml') }}
+      # On release builds the restore step is skipped and its output is empty,
+      # which this condition counts as a miss on purpose.
       - name: Provide libvips so sharp builds instead of downloading it
         if: steps.pnpm-modules.outputs.cache-hit != 'true'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libvips-dev
