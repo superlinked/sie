@@ -699,9 +699,10 @@ Every run also prints what differs from the study:
   the server package from `main` at `2b3f7d2e`; the commands above start
   v0.11.0.
 
-A failed request is counted, listed by error, and left out of the numbers. The
-run exits 1 only when the inputs fail the check or no request succeeds. There
-is no pass or fail: the numbers are set side by side.
+A failed request, or one that succeeded only after an SDK retry, is counted,
+listed by status, and left out of the numbers. The run exits 1 only when the
+inputs fail the check or no request succeeds on its first attempt. There is no
+pass or fail: the numbers are set side by side.
 
 ## Validation
 
