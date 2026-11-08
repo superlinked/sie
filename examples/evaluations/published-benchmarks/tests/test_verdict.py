@@ -16,6 +16,7 @@ from test_quality import FakeClient, clock, parse, reference_file, tiny_loaders
 
 import run
 import score
+from official import NotFound
 from run import (
     DEFAULT_ENDPOINT,
     Loaders,
@@ -103,8 +104,8 @@ class TemporaryCase(unittest.TestCase):
         return run_quality(plan, data, client, results_dir=self.directory / "results", now=clock)
 
     def command(self, fake, *argv):
-        def measured(plan, data, client):
-            return run_quality(plan, data, fake, results_dir=self.directory / "results", now=clock)
+        def measured(plan, data, client, **kwargs):
+            return run_quality(plan, data, fake, results_dir=self.directory / "results", now=clock, **kwargs)
 
         def loader(plan):
             return load_quality_data(plan, tiny_loaders())
@@ -116,6 +117,7 @@ class TemporaryCase(unittest.TestCase):
             patch.object(run, "load_quality_data", side_effect=loader),
             patch.object(run, "run_quality", side_effect=measured),
             patch.object(run, "SIEClient"),
+            patch.object(run, "http_fetch", side_effect=NotFound),
             contextlib.redirect_stdout(stdout),
             contextlib.redirect_stderr(stderr),
         ):
@@ -1063,6 +1065,34 @@ class IdenticalIdsTest(TemporaryCase):
         with patch("score.load_qrels", return_value={"q1": {"d4": 1}}):
             _, rows, _ = score.rescore(result_path)
         self.assertEqual(rows, record["metrics"])
+
+
+# A pinned table, so the band stays the one the 2% rule on the method page describes.
+VERDICT_TABLE = (
+    (0.5, 0.5, "PASS", "within_margin"),
+    (0.5, 0.4901, "PASS", "within_margin"),
+    (0.5, 0.4899, "FAIL (regression)", "below_margin"),
+    (0.5, 0.5102, "PASS", "within_margin"),
+    (0.5, 0.5103, "WARN (suspicious-improvement)", "above_margin"),
+    (0.5, 0.0, "FAIL (no-output)", "current_zero"),
+    (0.31411, 0.3079, "PASS", "within_margin"),
+    (0.31411, 0.3078, "FAIL (regression)", "below_margin"),
+    (0.59526, 0.61433, "WARN (suspicious-improvement)", "above_margin"),
+)
+
+
+class TestVerdictTable(unittest.TestCase):
+    def test_every_row(self):
+        for baseline, current, label, reason in VERDICT_TABLE:
+            with self.subTest(baseline=baseline, current=current):
+                verdict = compute_verdict(
+                    {"ndcg_at_10": current},
+                    {"kind": "supplied", "metric": "ndcg_at_10", "value": baseline, "source": "table"},
+                    limited=False,
+                )
+                self.assertEqual((verdict["verdict"], verdict["reason"]), (label, reason))
+                self.assertEqual(verdict["threshold_low"], baseline * 0.98)
+                self.assertEqual(verdict["threshold_high"], baseline / 0.98)
 
 
 if __name__ == "__main__":

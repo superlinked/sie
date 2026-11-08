@@ -13,7 +13,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from fractions import Fraction
 from pathlib import Path
@@ -26,9 +26,20 @@ import sie_sdk
 from scipy.sparse import csr_matrix
 from sie_sdk import SIEClient
 
+from official import (
+    MODEL_ID,
+    SKIPPED,
+    Fetch,
+    Lookup,
+    checked_baseline_value,
+    http_fetch,
+    lookup_official,
+    plain_text,
+)
 from score import (
     BASELINE_METRICS,
     HF_DATASETS,
+    MAIN_SCORE,
     NS_PER_MS,
     NS_PER_S,
     PERFORMANCE_MODE,
@@ -38,6 +49,7 @@ from score import (
     Rows,
     compare,
     compute_verdict,
+    eval_split,
     format_rows,
     format_verdict,
     load_corpus,
@@ -62,7 +74,19 @@ DOCUMENT_CHUNK = 500
 QUERY_TOKEN_ROWS = 256
 COSINE_NORM_FLOOR = 1e-12
 RESULTS_DIR = Path("results")
-SCORE_TASKS = frozenset({"mteb/AskUbuntuDupQuestions"})
+SCORE_TASKS = frozenset(
+    {
+        "mteb/AskUbuntuDupQuestions",
+        "mteb/MMarcoReranking",
+        "mteb/T2Reranking",
+        "mteb/CMedQAv1-reranking",
+        "mteb/CMedQAv2-reranking",
+    }
+)
+SCORE_ITEMS_PER_REQUEST = 100
+CANDIDATE_ENCODE_ITEMS_PER_REQUEST = 64
+QUALITY_PARAMETERS = frozenset({"limit", "candidates_model", "candidates_k"})
+PERFORMANCE_PARAMETERS = frozenset({"limit", "candidates-k", "split", "filter", "role"})
 ENCODE_OUTPUTS = ("sparse", "dense", "multivector")
 MUVERA_PROFILE = "muvera"
 REFERENCE_KIND = "published-benchmark-reference"
@@ -108,6 +132,8 @@ class QualityPlan:
     comparable_reasons: list[str]
     baseline: dict[str, Any] | None = None
     instruction: str | None = None
+    candidates_model: str | None = None
+    candidates_k: int | None = None
 
     @property
     def route(self) -> str:
@@ -177,6 +203,7 @@ class CallLog:
     failure_count: int = 0
     sdk_retries: int = 0
     execution_revisions: list[str] = field(default_factory=list)
+    encoder_revisions: list[str] = field(default_factory=list)
     failure: str | None = None
     readiness_failure: str | None = None
 
@@ -193,6 +220,10 @@ class CallLog:
         self.sdk_retries += int(client.last_retry_count)
         self.failure = f"{type(exc).__name__}: {exc}"
 
+    @property
+    def revision_changed(self) -> bool:
+        return len(self.execution_revisions) > 1 or len(self.encoder_revisions) > 1
+
 
 def _add_shared_arguments(command: argparse.ArgumentParser) -> None:
     command.add_argument("--reference", type=Path, help="A references/<id>.json file")
@@ -206,7 +237,9 @@ def _add_shared_arguments(command: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    quality = commands.add_parser("quality", help="Measure quality against a published record or a supplied baseline")
+    quality = commands.add_parser(
+        "quality", help="Measure quality against a published record, an official number or a supplied baseline"
+    )
     _add_shared_arguments(quality)
     quality.add_argument("--baseline", help="The number to compare with, <metric>=<value>, for example ndcg_at_10=0.32")
     quality.add_argument("--baseline-source", help="Where the baseline comes from: model card, paper or leaderboard")
@@ -227,12 +260,12 @@ def plan_quality(args: argparse.Namespace) -> QualityPlan:
 
 
 def _endpoint_key(url: str) -> tuple[str, str | None, int, str]:
-    parts = urlsplit(url)
-    scheme = parts.scheme.lower()
     try:
+        parts = urlsplit(url)
         port = parts.port
     except ValueError:
         raise ValueError("endpoint must be an http(s) URL") from None
+    scheme = parts.scheme.lower()
     if port is None:
         port = 443 if scheme == "https" else 80
     elif port == 0:
@@ -273,7 +306,7 @@ def _resolve_api_key(parser: argparse.ArgumentParser, endpoint: str) -> str:
     key, scope = _key_scope()
     if key and not api_key:
         print(
-            f"note: SIE_API_KEY is scoped to {scope} and was not sent to {endpoint}; "
+            f"note: SIE_API_KEY is scoped to {_scope_text(scope)} and was not sent to {endpoint}; "
             "set SIE_BASE_URL to the endpoint to send it",
             file=sys.stderr,
         )
@@ -283,6 +316,14 @@ def _resolve_api_key(parser: argparse.ArgumentParser, endpoint: str) -> str:
 def _without_credentials(url: str) -> str:
     parts = urlsplit(url)
     return urlunsplit((parts.scheme, parts.netloc.rpartition("@")[2], parts.path, "", ""))
+
+
+def _scope_text(scope: str) -> str:
+    try:
+        normalize_endpoint(scope)
+    except ValueError:
+        return "an SIE_BASE_URL that is not an http(s) URL"
+    return _without_credentials(scope)
 
 
 def _endpoint_reasons(endpoint: str) -> list[str]:
@@ -301,11 +342,19 @@ def _check_positive_integer(params: Mapping[str, str], name: str) -> None:
         raise ValueError(f"{name} must be a positive integer")
 
 
-def _check_performance_params(params: Mapping[str, str], operation: str) -> None:
+def _check_performance_params(task_name: str, params: Mapping[str, str], operation: str) -> None:
+    unknown = sorted(set(params) - PERFORMANCE_PARAMETERS)
+    if unknown:
+        raise ValueError(
+            f"a performance task key takes {', '.join(sorted(PERFORMANCE_PARAMETERS))}, got {', '.join(unknown)}"
+        )
     _check_limit(params)
     _check_positive_integer(params, "candidates-k")
-    if params.get("split", "test") != "test":
-        raise ValueError("only split=test is available")
+    if int(params.get("candidates-k", 1)) > SCORE_ITEMS_PER_REQUEST:
+        raise ValueError(f"candidates-k must be at most {SCORE_ITEMS_PER_REQUEST}; a performance request is one call")
+    split = eval_split(task_name)
+    if params.get("split", split) != split:
+        raise ValueError(f"only split={split} is available")
     if params.get("filter", "nonempty") != "nonempty":
         raise ValueError("filter must be nonempty")
     role = params.get("role", "queries")
@@ -355,12 +404,6 @@ def _check_output_flags(args: argparse.Namespace, operation: str) -> None:
         raise ValueError("--items-per-request must be a positive integer")
 
 
-def _checked_baseline_value(value: float) -> float:
-    if not math.isfinite(value) or value <= 0 or value > 1:
-        raise ValueError("a baseline value must be finite, above 0 and at most 1")
-    return value
-
-
 def _supplied_baseline(args: argparse.Namespace) -> dict[str, Any] | None:
     if args.baseline is None and args.baseline_source is None:
         return None
@@ -378,7 +421,7 @@ def _supplied_baseline(args: argparse.Namespace) -> dict[str, Any] | None:
     return {
         "kind": "supplied",
         "metric": metric,
-        "value": _checked_baseline_value(parsed),
+        "value": checked_baseline_value(parsed),
         "source": args.baseline_source,
     }
 
@@ -389,7 +432,7 @@ def _published_baseline(reference: Mapping[str, Any]) -> dict[str, Any]:
             return {
                 "kind": "published",
                 "metric": PRIMARY_METRIC,
-                "value": _checked_baseline_value(float(row["value"])),
+                "value": checked_baseline_value(float(row["value"])),
                 "source": reference["reference_id"],
             }
     raise ValueError(f"the reference has no {PRIMARY_METRIC} metric")
@@ -405,6 +448,20 @@ def _checked_instruction(args: argparse.Namespace, operation: str) -> str | None
     if not args.instruction.isprintable():
         raise ValueError("--instruction must be one line of printable text")
     return args.instruction
+
+
+def _checked_two_stage(task_name: str, params: Mapping[str, str]) -> tuple[str | None, int | None]:
+    model, k = params.get("candidates_model"), params.get("candidates_k")
+    if model is None and k is None:
+        return None, None
+    if model is None or k is None:
+        raise ValueError("candidates_model and candidates_k go together")
+    if task_name in SCORE_TASKS:
+        raise ValueError(f"candidates_model and candidates_k are for the encode tasks; {task_name} is a score task")
+    if not MODEL_ID.fullmatch(model):
+        raise ValueError("candidates_model must be a plain <org>/<name> model id, with no profile")
+    _check_positive_integer(params, "candidates_k")
+    return model, int(k)
 
 
 def _override(value: float | None, fixed: float, label: str, reasons: list[str]) -> float:
@@ -462,12 +519,16 @@ def _plan_from_flags(args: argparse.Namespace) -> QualityPlan:
     if args.model is None or args.task is None:
         raise ValueError("--model and --task are required without --reference")
     task_name, params = parse_task_key(args.task)
-    other_params = sorted(set(params) - {"limit"})
+    other_params = sorted(set(params) - QUALITY_PARAMETERS)
     if other_params:
-        raise ValueError(f"a quality task key takes only limit, got {', '.join(other_params)}")
+        raise ValueError(
+            f"a quality task key takes only limit, got {', '.join(other_params)}; "
+            "a two-stage key adds candidates_model and candidates_k"
+        )
     _check_limit(params)
+    candidates_model, candidates_k = _checked_two_stage(task_name, params)
     model, _, profile = args.model.partition(":")
-    operation = "score" if task_name in SCORE_TASKS else "encode"
+    operation = "score" if task_name in SCORE_TASKS or candidates_model is not None else "encode"
     _check_output_flags(args, operation)
     if args.output == "dense" and profile.casefold() == MUVERA_PROFILE:
         raise ValueError(
@@ -498,6 +559,8 @@ def _plan_from_flags(args: argparse.Namespace) -> QualityPlan:
         comparable_reasons=reasons,
         baseline=baseline,
         instruction=instruction,
+        candidates_model=candidates_model,
+        candidates_k=candidates_k,
     )
 
 
@@ -518,7 +581,7 @@ def _performance_plan_from_reference(args: argparse.Namespace, reference: Mappin
         raise ValueError(f"--task must equal the reference task_key {task_key!r}")
     task_name, params = parse_task_key(task_key)
     operation = reference["operation"]
-    _check_performance_params(params, operation)
+    _check_performance_params(task_name, params, operation)
     level, timing = reference["schedule"]["levels"][0], reference["timing"]
     reasons: list[str] = []
     rate = _override(args.rate, float(level["rate"]), "rate", reasons)
@@ -565,7 +628,7 @@ def _performance_plan_from_flags(args: argparse.Namespace) -> PerformancePlan:
     task_name, params = parse_task_key(args.task)
     model, _, profile = args.model.partition(":")
     operation = "score" if task_name in SCORE_TASKS else "encode"
-    _check_performance_params(params, operation)
+    _check_performance_params(task_name, params, operation)
     _check_output_flags(args, operation)
     duration_s = DEFAULT_DURATION_S if args.duration is None else args.duration
     warmup_s = DEFAULT_WARMUP_S if args.warmup is None else args.warmup
@@ -611,7 +674,7 @@ def load_quality_data(plan: QualityPlan, loaders: Loaders | None = None) -> Qual
     qrels = loaders.qrels(plan.task_name, plan.revision)
     queries = select_queries(loaders.queries(plan.task_name, plan.revision), qrels, plan.task_params)
     top_ranked = None
-    if plan.operation == "score":
+    if plan.operation == "score" and plan.candidates_model is None:
         candidates = loaders.top_ranked(plan.task_name, plan.revision)
         top_ranked = {query_id: list(candidates[query_id]) for query_id in queries}
     return QualityData(
@@ -646,7 +709,7 @@ def load_performance_data(plan: PerformancePlan, loaders: Loaders | None = None)
         corpus = loaders.corpus(plan.task_name, plan.revision)
         top_ranked = loaders.top_ranked(plan.task_name, plan.revision)
         selected = select_ids(queries, params)
-        k = int(params["candidates-k"]) if "candidates-k" in params else None
+        k = int(params.get("candidates-k", SCORE_ITEMS_PER_REQUEST))
         requests: list[ScoreRequest] = [
             (
                 {"text": queries[query_id]},
@@ -801,11 +864,29 @@ def warmup(client: Any, plan: PerformancePlan, data: PerformanceData) -> None:
             performance_call(client, plan, payload, wait_for_capacity=False, provision_timeout_s=plan.request_timeout_s)
 
 
+def encoder_plan(plan: QualityPlan) -> QualityPlan:
+    return replace(
+        plan,
+        model=plan.candidates_model,
+        profile="default",
+        operation="encode",
+        output_contract="dense",
+        items_per_request=CANDIDATE_ENCODE_ITEMS_PER_REQUEST,
+    )
+
+
 def quality_readiness_request(client: Any, plan: QualityPlan, data: QualityData) -> None:
+    if plan.candidates_model is not None:
+        _encode_readiness_request(client, encoder_plan(plan), data)
     if plan.operation == "score":
         query_id, text = next(iter(data.queries.items()))
+        if plan.candidates_model is not None:
+            candidates = list(data.corpus)[: plan.candidates_k]
+        else:
+            candidates = (data.top_ranked or {})[query_id]
         items = [
-            {"id": doc_id, "text": document_text(data.corpus[doc_id])} for doc_id in (data.top_ranked or {})[query_id]
+            {"id": doc_id, "text": document_text(data.corpus[doc_id])}
+            for doc_id in candidates[:SCORE_ITEMS_PER_REQUEST]
         ]
         client.score(
             plan.route,
@@ -816,6 +897,10 @@ def quality_readiness_request(client: Any, plan: QualityPlan, data: QualityData)
             max_oom_retries=0,
         )
         return
+    _encode_readiness_request(client, plan, data)
+
+
+def _encode_readiness_request(client: Any, plan: QualityPlan, data: QualityData) -> None:
     document_ids = list(data.corpus)[: plan.items_per_request]
     client.encode(
         plan.route,
@@ -958,7 +1043,9 @@ def top_k_predictions(
     return predictions
 
 
-def encode_predictions(client: Any, plan: QualityPlan, data: QualityData, log: CallLog) -> PredictionMap:
+def encode_predictions(
+    client: Any, plan: QualityPlan, data: QualityData, log: CallLog, *, k: int = TOP_K
+) -> PredictionMap:
     document_ids = list(data.corpus)
     document_texts = [document_text(data.corpus[doc_id]) for doc_id in document_ids]
     documents = encode_texts(client, plan, document_ids, document_texts, log, is_query=False)
@@ -967,34 +1054,54 @@ def encode_predictions(client: Any, plan: QualityPlan, data: QualityData, log: C
     if plan.output_contract == "sparse":
         scores = sparse_scores(queries, documents)
     elif plan.output_contract == "dense":
-        scores = dense_scores([q["dense"] for q in queries], [d["dense"] for d in documents])
+        query_vectors, document_vectors = [q["dense"] for q in queries], [d["dense"] for d in documents]
+        for role, vectors in (("document", document_vectors), ("query", query_vectors)):
+            if not any(np.any(vector) for vector in vectors):
+                raise ValueError(f"every returned dense {role} vector is all zeros")
+        scores = dense_scores(query_vectors, document_vectors)
     else:
         scores = maxsim_scores([q["multivector"] for q in queries], [d["multivector"] for d in documents])
-    return top_k_predictions(scores, query_ids, document_ids)
+    return top_k_predictions(scores, query_ids, document_ids, k)
+
+
+def candidate_batches(candidates: Sequence[str]) -> list[Sequence[str]]:
+    return [
+        candidates[start : start + SCORE_ITEMS_PER_REQUEST]
+        for start in range(0, len(candidates), SCORE_ITEMS_PER_REQUEST)
+    ]
 
 
 def rerank_predictions(client: Any, plan: QualityPlan, data: QualityData, log: CallLog) -> PredictionMap:
     top_ranked = data.top_ranked or {}
     predictions: PredictionMap = {}
     for query_id, text in data.queries.items():
-        candidates = top_ranked[query_id]
-        items = [{"id": doc_id, "text": document_text(data.corpus[doc_id])} for doc_id in candidates]
-        result = _call(
-            log,
-            client,
-            client.score,
-            plan.route,
-            {"text": text},
-            items,
-            wait_for_capacity=False,
-            provision_timeout_s=plan.request_timeout_s,
-            max_oom_retries=0,
-        )
-        scored = {entry["item_id"]: float(entry["score"]) for entry in result["scores"]}
-        if set(scored) != set(candidates):
-            raise ValueError(f"score returned item ids that differ from the candidates of query {query_id}")
+        scored: dict[str, float] = {}
+        for candidates in candidate_batches(top_ranked[query_id]):
+            items = [{"id": doc_id, "text": document_text(data.corpus[doc_id])} for doc_id in candidates]
+            result = _call(
+                log,
+                client,
+                client.score,
+                plan.route,
+                {"text": text},
+                items,
+                wait_for_capacity=False,
+                provision_timeout_s=plan.request_timeout_s,
+                max_oom_retries=0,
+            )
+            batch = {entry["item_id"]: float(entry["score"]) for entry in result["scores"]}
+            if set(batch) != set(candidates):
+                raise ValueError(f"score returned item ids that differ from the candidates of query {query_id}")
+            scored.update(batch)
         predictions[query_id] = scored
     return predictions
+
+
+def two_stage_predictions(client: Any, plan: QualityPlan, data: QualityData, log: CallLog) -> PredictionMap:
+    retrieved = encode_predictions(client, encoder_plan(plan), data, log, k=plan.candidates_k or TOP_K)
+    log.encoder_revisions, log.execution_revisions = log.execution_revisions, []
+    top_ranked = {query_id: list(documents) for query_id, documents in retrieved.items()}
+    return rerank_predictions(client, plan, replace(data, top_ranked=top_ranked), log)
 
 
 def client_description() -> str:
@@ -1027,7 +1134,7 @@ def quality_command_line(plan: QualityPlan) -> str:
             flags += ["--task", plan.task_key]
     else:
         flags = _common_flags(plan)
-        if plan.baseline is not None:
+        if plan.baseline is not None and plan.baseline["kind"] == "supplied":
             metric, value, source = plan.baseline["metric"], plan.baseline["value"], plan.baseline["source"]
             flags += ["--baseline", f"{metric}={value!r}", f"--baseline-source={source}"]
         if plan.instruction is not None:
@@ -1052,6 +1159,24 @@ def comparison_basis(reference_id: str | None, comparable: bool, reasons: Sequen
     return "same method, different parameters: " + "; ".join(reasons)
 
 
+def _largest_score_request(plan: QualityPlan, data: QualityData) -> int:
+    if plan.candidates_k is not None:
+        largest = min(plan.candidates_k, len(data.corpus))
+    else:
+        largest = max((len(candidates) for candidates in (data.top_ranked or {}).values()), default=0)
+    return min(largest, SCORE_ITEMS_PER_REQUEST)
+
+
+def _payload_parameters(plan: QualityPlan) -> list[dict[str, Any]]:
+    parameters: list[dict[str, Any]] = []
+    if plan.instruction is not None:
+        parameters.append({"name": "instruction", "value": plan.instruction})
+    if plan.candidates_model is not None:
+        parameters.append({"name": "candidates_model", "value": plan.candidates_model})
+        parameters.append({"name": "candidates_k", "value": plan.candidates_k})
+    return parameters
+
+
 def build_record(
     plan: QualityPlan,
     data: QualityData,
@@ -1060,9 +1185,10 @@ def build_record(
     finished: datetime,
     predictions_path: Path | None,
     rows: list[dict[str, Any]],
+    official_lookup: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     reasons = list(plan.comparable_reasons)
-    if len(log.execution_revisions) > 1:
+    if log.revision_changed:
         reasons.append("execution revision changed")
     comparable = not reasons
     validity_reasons: list[str] = []
@@ -1072,8 +1198,7 @@ def build_record(
         validity_reasons.append(f"sdk retries {log.sdk_retries}")
     if log.failure is not None:
         validity_reasons.append(f"request failed: {log.failure}")
-    candidate_counts = [len(candidates) for candidates in (data.top_ranked or {}).values()]
-    return {
+    record = {
         "kind": RESULT_KIND,
         "schema_version": 1,
         "reference_id": plan.reference_id,
@@ -1084,19 +1209,19 @@ def build_record(
         "profile": plan.profile,
         "operation": plan.operation,
         "model_version": plan.model_version,
-        "execution_revisions": list(log.execution_revisions),
+        "execution_revisions": list(dict.fromkeys([*log.encoder_revisions, *log.execution_revisions])),
         "ingress": {"url": plan.endpoint},
         "task_key": plan.task_key,
         "dataset": {
             "name": plan.task_name,
             "revision": plan.revision,
-            "subset": "test",
+            "subset": eval_split(plan.task_name),
             "parameters": [{"name": name, "value": value} for name, value in plan.task_params.items()],
         },
         "payload": {
-            "items_per_request": plan.items_per_request or max(candidate_counts, default=0),
+            "items_per_request": plan.items_per_request or _largest_score_request(plan, data),
             "output_contract": plan.output_contract,
-            "parameters": [{"name": "instruction", "value": plan.instruction}] if plan.instruction is not None else [],
+            "parameters": _payload_parameters(plan),
         },
         "client": {"description": client_description(), "worker_count": 1, "processes_per_worker": 1},
         "scorer": {"id": SCORER_ID, "version": scorer_version(), "reference_scorer_matched": False},
@@ -1118,6 +1243,9 @@ def build_record(
             {row["name"]: row["value"] for row in rows}, plan.baseline, limited="limit" in plan.task_params
         ),
     }
+    if official_lookup is not None:
+        record["official_lookup"] = dict(official_lookup)
+    return record
 
 
 def performance_validity(plan: PerformancePlan, dispatcher: Dispatcher, metrics: Mapping[str, float]) -> dict[str, Any]:
@@ -1176,7 +1304,7 @@ def build_performance_record(
         "dataset": {
             "name": plan.task_name,
             "revision": plan.revision,
-            "subset": "test",
+            "subset": eval_split(plan.task_name),
             "parameters": [{"name": name, "value": value} for name, value in plan.task_params.items()],
             "selected_ids": list(data.selected_ids),
         },
@@ -1224,6 +1352,7 @@ def run_quality(
     *,
     results_dir: Path = RESULTS_DIR,
     now: Callable[[], datetime] | None = None,
+    official_lookup: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, Any], Path]:
     clock = now or (lambda: datetime.now(UTC))
     started = clock()
@@ -1235,7 +1364,9 @@ def run_quality(
         except Exception as exc:  # noqa: BLE001
             log.readiness_failure = f"{type(exc).__name__}: {exc}"
         if log.readiness_failure is None:
-            if plan.operation == "score":
+            if plan.candidates_model is not None:
+                predictions = two_stage_predictions(client, plan, data, log)
+            elif plan.operation == "score":
                 predictions = rerank_predictions(client, plan, data, log)
             else:
                 predictions = encode_predictions(client, plan, data, log)
@@ -1253,7 +1384,7 @@ def run_quality(
         predictions_path = results_dir / f"{stem}.predictions.json"
         write_json(predictions_path, predictions, compact=True)
         rows = metric_rows(task_metrics(predictions, data.qrels, plan.task_name))
-    record = build_record(plan, data, log, started, finished, predictions_path, rows)
+    record = build_record(plan, data, log, started, finished, predictions_path, rows, official_lookup)
     write_json(result_path, record)
     return record, result_path
 
@@ -1292,6 +1423,82 @@ def run_performance(
     return record, result_path
 
 
+def _plan_skip_reason(plan: QualityPlan) -> str | None:
+    if "limit" in plan.task_params:
+        return "a task key with limit is not compared with a full-dataset number"
+    if plan.candidates_model is not None:
+        return "the results repository has no number for a retriever and reranker pair"
+    if plan.profile != "default":
+        return "the results repository has no number for a profile"
+    return None
+
+
+def _served_model(client: Any, model: str) -> tuple[set[str] | None, str | None]:
+    try:
+        info = client.get_model(model)
+        outputs, revision = info.get("outputs"), info.get("revision")
+        known = set(ENCODE_OUTPUTS).intersection(outputs) if isinstance(outputs, list) and outputs else None
+    except Exception:  # noqa: BLE001
+        return None, None
+    return known, plain_text(revision)
+
+
+def _output_skip_reason(plan: QualityPlan, outputs: set[str] | None) -> str | None:
+    if plan.operation != "encode" or plan.output_contract == "dense":
+        return None
+    if outputs is None:
+        return f"the endpoint did not say what the model outputs, and an official number is for dense, not {plan.output_contract}"
+    if len(outputs) > 1:
+        return f"the model has several outputs and the official number is for dense, not {plan.output_contract}"
+    return None
+
+
+def _official_lookup(plan: QualityPlan, client: Any, fetch: Fetch) -> tuple[Lookup, str | None]:
+    reason = _plan_skip_reason(plan)
+    if reason is not None:
+        return Lookup(SKIPPED, reason), None
+    outputs, served_revision = _served_model(client, plan.model)
+    reason = _output_skip_reason(plan, outputs)
+    if reason is not None:
+        return Lookup(SKIPPED, reason), served_revision
+    lookup = lookup_official(
+        plan.model, plan.task_name, eval_split(plan.task_name), MAIN_SCORE[plan.task_name], served_revision, fetch
+    )
+    return lookup, served_revision
+
+
+def _official_notes(plan: QualityPlan, baseline: Mapping[str, Any], served_revision: str | None) -> list[str]:
+    notes = []
+    if served_revision is not None and baseline["model_revision"] != served_revision:
+        notes.append(
+            f"the official number is for model revision {baseline['model_revision']}, the endpoint serves {served_revision}"
+        )
+    if baseline["dataset_revision"] is not None and baseline["dataset_revision"] != plan.revision:
+        notes.append(
+            f"the official number is for dataset revision {baseline['dataset_revision']}, this run uses {plan.revision}"
+        )
+    return notes
+
+
+def official_baseline(plan: QualityPlan, client: Any, fetch: Fetch) -> tuple[QualityPlan, dict[str, str] | None]:
+    """Look the official number up for a run with no baseline; say what happened before anything is spent."""
+    if plan.reference_id is not None or plan.baseline is not None:
+        return plan, None
+    lookup, served_revision = _official_lookup(plan, client, fetch)
+    if lookup.baseline is None:
+        reading = "the run reads MEASUREMENT"
+        if "limit" not in plan.task_params:
+            reading += " unless you pass --baseline"
+        print(f"official: none, {lookup.detail}; {reading}", flush=True)
+        return plan, {"status": lookup.status, "detail": lookup.detail}
+    notes = _official_notes(plan, lookup.baseline, served_revision)
+    print(f"official: {lookup.detail}", flush=True)
+    for note in notes:
+        print(f"note: {note}", flush=True)
+    detail = "; ".join([lookup.detail, *notes])
+    return replace(plan, baseline=lookup.baseline), {"status": lookup.status, "detail": detail}
+
+
 def report_invalid(record: Mapping[str, Any]) -> None:
     if not record["validity"]["valid"]:
         for reason in record["validity"]["reasons"]:
@@ -1308,7 +1515,8 @@ def quality_command(parser: argparse.ArgumentParser, args: argparse.Namespace) -
     api_key = _resolve_api_key(parser, plan.endpoint)
     data = load_quality_data(plan)
     with SIEClient(plan.endpoint, api_key=api_key, timeout_s=plan.request_timeout_s) as client:
-        record, result_path = run_quality(plan, data, client)
+        plan, official_lookup = official_baseline(plan, client, http_fetch)
+        record, result_path = run_quality(plan, data, client, official_lookup=official_lookup)
     print(result_path)
     for line in format_rows(record["metrics"], record["comparison"]):
         print(line)

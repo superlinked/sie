@@ -27,6 +27,15 @@ HF_DATASETS = {
         "mteb/legalbench_consumer_contracts_qa",
         "b23590301ec94e8087e2850b21d43d4956b1cca9",
     ),
+    "mteb/MMarcoReranking": ("mteb/MMarcoReranking", "91c0f9d5cbd4cdc7ecd7039c5c2e57740cb62b00"),
+    "mteb/T2Reranking": ("mteb/T2Reranking", "a34fe6bc0dff185af1228e49a0f6fb1de1565627"),
+    "mteb/CMedQAv1-reranking": ("mteb/CMedQAv1-reranking", "f77f0345c9b6ac0a2447a3a71483d5b27393cb35"),
+    "mteb/CMedQAv2-reranking": ("mteb/CMedQAv2-reranking", "01399b6956a4c6bf9edc5b6b90e176aeeb399686"),
+    "mteb/NanoFiQA2018Retrieval": ("zeta-alpha-ai/NanoFiQA2018", "4163ba032953d5044a7a6244261413f609c14342"),
+}
+TASK_ALIASES = {
+    "mteb/CMedQAv1Reranking": "mteb/CMedQAv1-reranking",
+    "mteb/CMedQAv2Reranking": "mteb/CMedQAv2-reranking",
 }
 MAIN_SCORE = {
     "mteb/SciFact": "ndcg_at_10",
@@ -38,6 +47,11 @@ MAIN_SCORE = {
     "mteb/CosQA": "ndcg_at_10",
     "mteb/StackOverflowQA": "ndcg_at_10",
     "mteb/LegalBenchConsumerContractsQA": "ndcg_at_10",
+    "mteb/MMarcoReranking": "map_at_1000",
+    "mteb/T2Reranking": "map_at_1000",
+    "mteb/CMedQAv1-reranking": "map_at_1000",
+    "mteb/CMedQAv2-reranking": "map_at_1000",
+    "mteb/NanoFiQA2018Retrieval": "ndcg_at_10",
 }
 ROLE_SPLITS = {
     "mteb/SciFact": {"corpus": "corpus", "queries": "queries"},
@@ -49,7 +63,20 @@ ROLE_SPLITS = {
     "mteb/CosQA": {"corpus": "corpus", "queries": "queries"},
     "mteb/StackOverflowQA": {"corpus": "corpus", "queries": "queries"},
     "mteb/LegalBenchConsumerContractsQA": {"corpus": "corpus", "queries": "queries"},
+    "mteb/MMarcoReranking": {"corpus": "dev", "queries": "dev"},
+    "mteb/T2Reranking": {"corpus": "dev", "queries": "dev"},
+    "mteb/CMedQAv1-reranking": {"corpus": "test", "queries": "test"},
+    "mteb/CMedQAv2-reranking": {"corpus": "test", "queries": "test"},
+    "mteb/NanoFiQA2018Retrieval": {"corpus": "train", "queries": "train"},
 }
+EVAL_SPLITS = {
+    "mteb/MMarcoReranking": "dev",
+    "mteb/T2Reranking": "dev",
+    "mteb/NanoFiQA2018Retrieval": "train",
+}
+DEFAULT_EVAL_SPLIT = "test"
+QRELS_CONFIGS = {"mteb/NanoFiQA2018Retrieval": "qrels"}
+DEFAULT_QRELS_CONFIG = "default"
 IGNORE_IDENTICAL_IDS = frozenset({"mteb/FiQA2018"})
 METRIC_UNIT = "ratio"
 AGGREGATION = "task_native"
@@ -94,9 +121,18 @@ Rows = list[dict[str, Any]]
 
 def parse_task_key(task_key: str) -> tuple[str, dict[str, str]]:
     task_name, _, query = task_key.partition("?")
+    task_name = TASK_ALIASES.get(task_name, task_name)
     if task_name not in HF_DATASETS:
         raise ValueError(f"unknown task {task_name!r}; known tasks: {', '.join(HF_DATASETS)}")
-    return task_name, dict(parse_qsl(query, keep_blank_values=True))
+    pairs = parse_qsl(query, keep_blank_values=True)
+    params = dict(pairs)
+    if len(params) != len(pairs):
+        raise ValueError(f"the task key {task_key!r} repeats a parameter")
+    return task_name, params
+
+
+def eval_split(task_name: str) -> str:
+    return EVAL_SPLITS.get(task_name, DEFAULT_EVAL_SPLIT)
 
 
 def scorer_version() -> str:
@@ -124,16 +160,18 @@ def load_queries(task_name: str, revision: str) -> dict[str, str]:
     return {str(query_id): text for query_id, text in zip(rows["_id"], rows["text"], strict=True)}
 
 
-def load_qrels(task_name: str, revision: str, split: str = "test") -> Qrels:
-    rows = _rows(task_name, "default", split, revision)
+def load_qrels(task_name: str, revision: str, split: str | None = None) -> Qrels:
+    config = QRELS_CONFIGS.get(task_name, DEFAULT_QRELS_CONFIG)
+    rows = _rows(task_name, config, split or eval_split(task_name), revision)
+    grades = rows["score"] if "score" in rows.column_names else [1] * len(rows)
     qrels: Qrels = {}
-    for query_id, doc_id, grade in zip(rows["query-id"], rows["corpus-id"], rows["score"], strict=True):
+    for query_id, doc_id, grade in zip(rows["query-id"], rows["corpus-id"], grades, strict=True):
         qrels.setdefault(str(query_id), {})[str(doc_id)] = int(grade)
     return qrels
 
 
-def load_top_ranked(task_name: str, revision: str, split: str = "test") -> dict[str, list[str]]:
-    rows = _rows(task_name, "top_ranked", split, revision)
+def load_top_ranked(task_name: str, revision: str, split: str | None = None) -> dict[str, list[str]]:
+    rows = _rows(task_name, "top_ranked", split or eval_split(task_name), revision)
     return {
         str(query_id): [str(doc_id) for doc_id in doc_ids]
         for query_id, doc_ids in zip(rows["query-id"], rows["corpus-ids"], strict=True)

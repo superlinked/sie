@@ -3,8 +3,9 @@
 This example does two things from one client process on your machine. It
 repeats the method behind the benchmark numbers published on the SIE website,
 six quality records and six fixed-rate performance records. And it measures a
-model you are adding the same way, against an official number you supply,
-before you open a pull request: see [Test a new model](#test-a-new-model).
+model you are adding the same way, against an official number it looks up in
+the public results repository or one you supply, before you open a pull
+request: see [Test a new model](#test-a-new-model).
 
 Each `references/<id>.json` is a projection of one published benchmark record:
 the model and profile, the task key, the pinned dataset revision, the request
@@ -64,10 +65,10 @@ and request timeout come from the file. The only flags accepted beside it are
 `--endpoint` (default `https://api.superlinked.com`) and `--task` with the
 smoke key. Without a reference, `--model <id[:profile]>` and `--task` are
 required; `--output sparse|dense|multivector` and `--items-per-request` are
-required for the encode tasks and refused for `mteb/AskUbuntuDupQuestions`,
-which scores each query against its 20 task-native candidates. `--baseline`,
-`--baseline-source` and `--instruction` belong to a run without a reference:
-see [Test a new model](#test-a-new-model).
+required for the encode tasks and refused for the score tasks, which score each
+query against its task-native candidates. `--baseline`, `--baseline-source` and
+`--instruction` belong to a run without a reference: see
+[Test a new model](#test-a-new-model).
 
 When a result is not valid, the command prints each reason to stderr.
 
@@ -84,7 +85,7 @@ in `validity.reasons`:
   run. It is rebuilt from the plan, so credentials in a URL never reach the
   result.
 - `results/<id>-<utc>.predictions.json`: the ranked list per query, the top
-  1000 documents with their scores, or the reranker's 20 candidates per query.
+  1000 documents with their scores, or the reranker's candidates per query.
   Every metric is recomputed from this file.
 
 ### Recompute offline
@@ -108,8 +109,9 @@ place.
 These are not flags. They are the method behind the published numbers, and
 the example applies them to every run:
 
-- the whole `test` split of the pinned dataset revision; queries with no
-  relevance judgement are dropped, as MTEB does;
+- the whole evaluation split of the pinned dataset revision, `test` unless
+  [Task keys](#task-keys) names another; queries with no relevance judgement
+  are dropped, as MTEB does;
 - one readiness request on the first batch, not recorded, waits up to 300 s
   for the model to load; a failure writes `valid: false` with the reason and
   exits 1;
@@ -120,7 +122,8 @@ the example applies them to every run:
   unless `--instruction` gives one, which goes with queries only;
 - sparse vectors are scored by the raw dot product, dense vectors by cosine
   over L2-normalised vectors, multivector outputs by MaxSim over L2-normalised
-  token rows, and the reranker's own scores rank its candidates. A `muvera`
+  token rows, and the reranker's own scores rank its candidates, sent in
+  requests of at most 100 items for one query and merged. A `muvera`
   profile is refused with `--output dense` on a quality run, because the
   published method scores those vectors by the similarity the profile declares,
   usually the raw dot product, and this example scores dense only by cosine;
@@ -164,10 +167,11 @@ gets a verdict.
 ### The verdict
 
 After the metrics, a quality run prints one `verdict:` line. It compares one
-metric with a baseline: the record's `main_score` for a `--reference` run, or
-the number you supply with `--baseline`. With a margin of 0.98, the low bound
-is the baseline × 0.98 and the high bound is the baseline ÷ 0.98. The first
-row that matches decides:
+metric with a baseline: the record's `main_score` for a `--reference` run,
+the number you supply with `--baseline`, or the official number the tool looks
+up when you pass neither. With a margin of 0.98, the low bound is the baseline
+× 0.98 and the high bound is the baseline ÷ 0.98. The first row that matches
+decides:
 
 | Case | Verdict | Reason |
 | --- | --- | --- |
@@ -194,10 +198,11 @@ The verdict is a report. The exit status does not follow it: the command exits
 it writes reaches the website or a published record, and it is no floor, target
 or gate.
 
-The result stores `baseline`, null when there is none, with `kind` (`published`
-or `supplied`), `metric`, `value` and `source`, and `verdict` with `verdict`,
-`reason`, `metric`, `current`, `baseline`, `delta_pct`, `threshold_low`,
-`threshold_high` and `margin`.
+The result stores `baseline`, null when there is none, with `kind` (`published`,
+`supplied` or `official`), `metric`, `value` and `source`, and `verdict` with
+`verdict`, `reason`, `metric`, `current`, `baseline`, `delta_pct`,
+`threshold_low`, `threshold_high` and `margin`. An `official` baseline also has
+`model_revision`, `dataset_revision` and `mteb_version`.
 
 ## Performance
 
@@ -234,7 +239,7 @@ the record's published level, `--duration` to 60 and `--warmup` to 30,
 `--endpoint` is accepted as for quality, and any value that differs from the
 reference adds a `comparable_reasons` entry. Without a reference, `--model`,
 `--task` and `--rate` are required, `--output` and `--items-per-request` are
-required for the encode tasks and refused for the score task, and the timeout
+required for the encode tasks and refused for the score tasks, and the timeout
 and cap are 30 s and 64 for encode, 300 s and 128 for score. `--output` takes
 `sparse`, `dense` or `multivector`. No other flags exist.
 
@@ -258,11 +263,12 @@ and cap are 30 s and 64 for encode, 300 s and 128 for score. `--output` takes
   read and written on the request's row;
 - selection by the task key: `filter=nonempty` drops rows whose text is empty
   after stripping whitespace; `role=corpus` takes the documents, otherwise
-  the queries with relevance judgments in the test split; the remaining rows are ordered by source id compared as strings
-  and `limit=N` keeps the first N; for AskUbuntu, `limit=64` keeps the first
+  the queries with relevance judgments in the task's split; the remaining rows
+  are ordered by source id compared as strings and `limit=N` keeps the first N; for AskUbuntu, `limit=64` keeps the first
   64 queries in that order and `candidates-k=20` each query's 20 task-native
-  candidates in source order; the chosen ids go to `dataset.selected_ids` in
-  that order;
+  candidates in source order; one request sends at most 100 candidates, so a
+  key without `candidates-k` sends the first 100 and `candidates-k` above 100
+  exits 2; the chosen ids go to `dataset.selected_ids` in that order;
 - rows cycle: encode request `s` takes documents `s × n` to `s × n + n − 1`
   of the selection, modulo its size, with `n` the items per request (1 in
   every record); score request `s` takes query `s` modulo the selection
@@ -408,12 +414,26 @@ official number.
    [Run it against your own server](#run-it-against-your-own-server) apply: no
    key unless the server runs in token mode, and the first request loads the
    model.
-3. **Find the official number** on the model card, in the paper or on a
-   leaderboard. It must be for the same benchmark and the same metric: the same
-   dataset and split, and the same metric at the same cut. A number for another
-   dataset, or `ndcg_at_100` where you compare `ndcg_at_10`, is not a baseline.
-   This example ships no official numbers.
-4. **Run it** from this directory:
+3. **Run it** from this directory. The tool first looks the official number up
+   in the public results repository,
+   [embeddings-benchmark/results](https://github.com/embeddings-benchmark/results),
+   and prints an `official:` line before any inference request:
+
+   ```sh
+   uv run python run.py quality \
+     --model your-org/your-model \
+     --task mteb/NFCorpus \
+     --output dense \
+     --items-per-request 32 \
+     --endpoint http://localhost:8080
+   ```
+
+4. **If it finds none**, the `official:` line says why and the run reads
+   `MEASUREMENT`. Find the number on the model card, in the paper or on a
+   leaderboard and pass it. It must be for the same benchmark and the same
+   metric: the same dataset and split, and the same metric at the same cut. A
+   number for another dataset, or `ndcg_at_100` where you compare `ndcg_at_10`,
+   is not a baseline. This example ships no official numbers.
 
    ```sh
    uv run python run.py quality \
@@ -436,10 +456,50 @@ official number.
 
 ### The baseline
 
-`--baseline <metric>=<value>` and `--baseline-source <text>` go together. The
-metric is one a quality run writes: `main_score`, `accuracy`, or
-`<family>_at_<k>` with family `ndcg`, `map`, `recall`, `precision` or `mrr` and
-k one of 1, 3, 5, 10, 20, 100, 1000; a bare family name is refused. The value is
+A run with neither `--reference` nor `--baseline` looks the number up. The
+lookup sends the model id and the task name to GitHub, with no key or token, so
+do not use it for a model id you want to keep private: pass `--baseline`
+instead. It asks for the current commit of the repository's `main`, the model's
+revision directories, and `<TaskName>.json` in each. It reads the task's main
+metric from the one `default` entry of the task's split. When several directories
+have the file, it prefers the revision the endpoint serves, then the highest
+`mteb_version`.
+
+It prints one line first, so you know before you spend anything:
+
+```text
+official: <metric> <value> from <link to the file>
+official: none, <reason>; the run reads MEASUREMENT unless you pass --baseline
+```
+
+A `note:` line follows when the file's model revision differs from the one the
+endpoint serves, or its `dataset_revision` differs from the pinned one. These
+are notes only and the run still compares, because mismatched revisions usually
+give the same score.
+
+The lookup is skipped, with the reason on that line, for a key with `limit`, for
+a two-stage key, for a profile other than the default, and for an output other
+than `dense` on a model with more than one of dense, sparse and multivector, or
+on a model whose outputs the endpoint does not report, because the number in the
+repository is for the dense output. A key with `limit` stays `MEASUREMENT` even
+with `--baseline`, so its line leaves that part out.
+
+A network error, a rate limit or a bad response never blocks the run: it goes on
+as `MEASUREMENT`. Older result files of the reranking tasks name their number
+`map` and not `map_at_1000`, and the lookup finds nothing in them. Read the file
+and pass `--baseline` if it is the number you want to compare with.
+
+A run with no `--baseline` records `official_lookup` with `status` (`found`,
+`not_found`, `failed` or `skipped`) and `detail`, and a found number is stored as
+the `baseline`. `score.py` recomputes the verdict from that stored value and
+looks nothing up. `run.command` gains no `--baseline`, so repeating it looks the
+number up again.
+
+`--baseline <metric>=<value>` and `--baseline-source <text>` go together and win
+over the lookup, which then does not run. The metric is one a quality run
+writes: `main_score`, `accuracy`, or `<family>_at_<k>` with family `ndcg`, `map`,
+`recall`, `precision` or `mrr` and k one of 1, 3, 5, 10, 20, 100, 1000; a bare
+family name is refused. The value is
 a ratio, finite, above 0 and at most 1, so a leaderboard that prints percent
 needs dividing by 100. A bad form exits 2 before any request, and both flags are
 refused beside `--reference`, which brings its own baseline.
@@ -461,9 +521,9 @@ does not expose a query template. Read `query_template` in the model's config:
   prepended to every query, which pollutes the query.
 
 `--instruction` is sent with queries only, never with documents, and is recorded
-in `payload.parameters`. It is refused beside `--reference` and on the score
-task. `run.py performance` has no such flag, because its encode requests set
-`is_query` to false.
+in `payload.parameters`. It is refused beside `--reference`, on the score tasks
+and on a two-stage key. `run.py performance` has no such flag, because its encode
+requests set `is_query` to false.
 
 ### The limited-run rule
 
@@ -479,27 +539,89 @@ every document.
 Each key is pinned to the dataset revision mteb 2.7.5 names; the revisions are
 in `score.py`. All of them load anonymously from Hugging Face.
 
-| Task key | Dataset | Operation | `main_score` |
-| --- | --- | --- | --- |
-| `mteb/SciFact` | `mteb/scifact` | encode | `ndcg_at_10` |
-| `mteb/NFCorpus` | `mteb/nfcorpus` | encode | `ndcg_at_10` |
-| `mteb/AskUbuntuDupQuestions` | `mteb/AskUbuntuDupQuestions` | score | `map_at_1000` |
-| `mteb/FiQA2018` | `mteb/fiqa` | encode | `ndcg_at_10` |
-| `mteb/SCIDOCS` | `mteb/scidocs` | encode | `ndcg_at_10` |
-| `mteb/CQADupstackPhysicsRetrieval` | `mteb/cqadupstack-physics` | encode | `ndcg_at_10` |
-| `mteb/CosQA` | `CoIR-Retrieval/cosqa` | encode | `ndcg_at_10` |
-| `mteb/StackOverflowQA` | `CoIR-Retrieval/stackoverflow-qa` | encode | `ndcg_at_10` |
-| `mteb/LegalBenchConsumerContractsQA` | `mteb/legalbench_consumer_contracts_qa` | encode | `ndcg_at_10` |
+| Task key | Dataset | Split | Operation | `main_score` |
+| --- | --- | --- | --- | --- |
+| `mteb/SciFact` | `mteb/scifact` | `test` | encode | `ndcg_at_10` |
+| `mteb/NFCorpus` | `mteb/nfcorpus` | `test` | encode | `ndcg_at_10` |
+| `mteb/AskUbuntuDupQuestions` | `mteb/AskUbuntuDupQuestions` | `test` | score | `map_at_1000` |
+| `mteb/FiQA2018` | `mteb/fiqa` | `test` | encode | `ndcg_at_10` |
+| `mteb/SCIDOCS` | `mteb/scidocs` | `test` | encode | `ndcg_at_10` |
+| `mteb/CQADupstackPhysicsRetrieval` | `mteb/cqadupstack-physics` | `test` | encode | `ndcg_at_10` |
+| `mteb/CosQA` | `CoIR-Retrieval/cosqa` | `test` | encode | `ndcg_at_10` |
+| `mteb/StackOverflowQA` | `CoIR-Retrieval/stackoverflow-qa` | `test` | encode | `ndcg_at_10` |
+| `mteb/LegalBenchConsumerContractsQA` | `mteb/legalbench_consumer_contracts_qa` | `test` | encode | `ndcg_at_10` |
+| `mteb/MMarcoReranking` | `mteb/MMarcoReranking` | `dev` | score | `map_at_1000` |
+| `mteb/T2Reranking` | `mteb/T2Reranking` | `dev` | score | `map_at_1000` |
+| `mteb/CMedQAv1-reranking` | `mteb/CMedQAv1-reranking` | `test` | score | `map_at_1000` |
+| `mteb/CMedQAv2-reranking` | `mteb/CMedQAv2-reranking` | `test` | score | `map_at_1000` |
+| `mteb/NanoFiQA2018Retrieval` | `zeta-alpha-ai/NanoFiQA2018` | `train` | encode | `ndcg_at_10` |
+
+`mteb/CMedQAv1Reranking` and `mteb/CMedQAv2Reranking` are accepted as other
+spellings of the two CMedQA keys; the result keeps the key you typed in
+`task_key` and names the dataset in `dataset.name`.
 
 `mteb/FiQA2018` sets mteb's `ignore_identical_ids`: a document whose id equals
 the query's id is removed from that query's ranking after the top-1000 cut and
 before scoring, as mteb does. The predictions file keeps it, and `score.py`
 applies the same rule.
 
-`run.py quality` takes a name alone or with `limit`; any other parameter exits 2
-before any request. `run.py performance` takes the same names with the
-parameters its selection rule reads, for example
-`mteb/FiQA2018?split=test&role=corpus&limit=256&filter=nonempty`.
+`run.py quality` takes a name alone or with `limit`, and an encode task also
+takes a [two-stage key](#two-stage-keys); any other parameter exits 2 before any
+request. `run.py performance` takes the same names with the parameters its
+selection rule reads, for example
+`mteb/FiQA2018?split=test&role=corpus&limit=256&filter=nonempty`; any other
+parameter exits 2 before any request.
+
+### Two-stage keys
+
+A two-stage key scores a reranker over a retriever's top candidates:
+
+```sh
+uv run python run.py quality \
+  --model your-org/your-reranker \
+  --task "mteb/NFCorpus?candidates_model=Alibaba-NLP/gte-multilingual-base&candidates_k=50" \
+  --endpoint http://localhost:8080
+```
+
+`candidates_model`, a plain `<org>/<name>` id, and `candidates_k`, a positive
+integer, go together on an encode task, optionally with `limit`. A bad form exits
+2 before any request. The method is fixed, so `--output`, `--items-per-request`
+and `--instruction` are refused:
+
+- one readiness request for each model;
+- the whole corpus goes to the encoder in batches of 64 documents with
+  `is_query=False`, then the queries with `is_query=True`, as dense vectors with
+  no instruction;
+- cosine over L2-normalised vectors picks the top k documents per query, ties
+  broken by corpus order;
+- the reranker scores each query's k documents, in requests of at most 100 items,
+  and its scores rank them. Only those k documents are in the predictions.
+
+The result names the encoder and k in `payload.parameters`, and
+`execution_revisions` holds the revisions of both models. There is no official
+number for such a pair, so the verdict is `MEASUREMENT` unless you pass
+`--baseline`. `score.py` recomputes the metrics from the predictions file as for
+any other key.
+
+## Check a number on the website
+
+A row on a model page maps to the flags below. Start every command with
+`uv run python run.py quality` and add `--endpoint` for your own server. Without
+a baseline the run compares with the official number when there is one. To
+compare with the number in the row, add `--baseline <metric>=<value in the row>
+--baseline-source "<link to the page>"`. A profile row and a two-stage row have
+no official number, so they need it to get a verdict.
+
+| Row on a model page | Flags |
+| --- | --- |
+| A plain row | `--model <model> --task mteb/NFCorpus --output dense --items-per-request 32` |
+| A profile row | `--model <model>:<profile> --task mteb/NFCorpus --output <the profile's output> --items-per-request 32` |
+| A reranker row | `--model <reranker> --task mteb/T2Reranking` |
+| A row that says "reranking the top 50 from \<model\>" | `--model <reranker> --task "mteb/NFCorpus?candidates_model=<model>&candidates_k=50"` |
+| Image retrieval, and non-MTEB tasks such as extraction, classification, OCR, detection, speech and generation | This example does not run these |
+
+Some rows on the model pages are measured on our own GPUs, and a row may differ
+from your run for that reason. Read the `verdict:` line with that in mind.
 
 ## Validation
 
@@ -633,8 +755,7 @@ The tests use a fake client, in-memory datasets and the committed
   records, and no floor, target or gate;
 - no `mteb` dependency, no nAUC or cv_recall metrics, and no match of the
   scorer's implementation digest;
-- no multi-process client, load ladder, Poisson arrivals, clock calibration
-  or candidate generation;
+- no multi-process client, load ladder, Poisson arrivals or clock calibration;
 - no cost, price or accounting fields;
 - no recorded-evidence download: the inputs are the six reference files and
   the pinned public datasets;
