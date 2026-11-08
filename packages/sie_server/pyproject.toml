@@ -161,8 +161,11 @@ packages = ["src/sie_server"]
 [tool.uv.sources]
 # Prebuilt flash-attn wheel for torch 2.9 + cu129 (official wheels only go up to torch 2.8).
 # Platform-specific: Linux x86_64 only. Non-Linux users should not install the flash-attn extra.
-# Source: mjun0812/flash-attention-prebuild-wheels v0.7.11 (first release with cu129torch2.9 cp312 manylinux).
-flash-attn = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.11/flash_attn-2.7.4+cu129torch2.9-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux'" }
+# Built by mjun0812/flash-attention-prebuild-wheels v0.7.11 (first release with cu129torch2.9 cp312
+# manylinux); served from our Hugging Face copy, pinned to a repository revision, because every
+# `uv lock --check` fetches this URL and GitHub release downloads have timed out for hours at a time.
+# The sha256 recorded in uv.lock is the upstream file's hash.
+flash-attn = { url = "https://huggingface.co/superlinked/sie-wheels/resolve/43a7ce6286d60d5b8feaad1417e20a412b4b761e/flash_attn-2.7.4+cu129torch2.9-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux'" }
 
 [dependency-groups]
 dev = []
