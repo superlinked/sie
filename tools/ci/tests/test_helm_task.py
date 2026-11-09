@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import re
+import shutil
 import subprocess
 import tarfile
 from pathlib import Path
@@ -24,6 +26,149 @@ def test_dependency_repositories_are_derived_and_idempotent() -> None:
     assert len(urls) == len(set(urls))
     assert "https://kedacore.github.io/charts" in urls
     assert all(not url.startswith("oci://") for url in urls)
+
+
+def test_locked_archives_follow_the_checked_in_lock() -> None:
+    """The task's line parser and a YAML parser agree on the pinned archives."""
+    lock = yaml.safe_load((helm.resolve_project_root() / helm.CHART_DIR / "Chart.lock").read_text())
+    expected = {f"{entry['name']}-{entry['version']}.tgz" for entry in lock["dependencies"]}
+    assert expected
+    assert set(helm.locked_dependency_archives()) == expected
+
+
+def test_lock_digest_is_computed_the_way_helm_writes_it() -> None:
+    """The digest Helm wrote into the checked-in lock is reproduced exactly."""
+    assert helm.lock_matches_chart()
+
+
+def write_chart_archive(archive: Path, name: str, version: str) -> None:
+    """Write a chart archive that declares the given name and version."""
+    manifest = f"apiVersion: v2\nname: {name}\nversion: {version}\n".encode()
+    member = tarfile.TarInfo(f"{name}/Chart.yaml")
+    member.size = len(manifest)
+    with tarfile.open(archive, "w:gz") as chart:
+        chart.addfile(member, io.BytesIO(manifest))
+
+
+@pytest.fixture
+def locked_chart(tmp_path: Path, monkeypatch) -> Path:
+    """A copy of the checked-in chart and lock, with every pinned archive in charts/."""
+    source = helm.resolve_project_root() / helm.CHART_DIR
+    chart = tmp_path / helm.CHART_DIR
+    (chart / "charts").mkdir(parents=True)
+    for name in ("Chart.yaml", "Chart.lock"):
+        shutil.copy2(source / name, chart / name)
+    for entry in yaml.safe_load((chart / "Chart.lock").read_text())["dependencies"]:
+        archive = chart / "charts" / f"{entry['name']}-{entry['version']}.tgz"
+        write_chart_archive(archive, entry["name"], entry["version"])
+    monkeypatch.setattr(helm, "resolve_project_root", lambda: tmp_path)
+    return chart
+
+
+def a_locked_dependency(chart: Path) -> tuple[Path, str, str]:
+    """Return one pinned dependency: its archive in charts/, its name and its version."""
+    entry = yaml.safe_load((chart / "Chart.lock").read_text())["dependencies"][0]
+    return chart / "charts" / f"{entry['name']}-{entry['version']}.tgz", entry["name"], entry["version"]
+
+
+def test_dependencies_are_present_when_charts_match_the_lock(locked_chart: Path) -> None:
+    """Every pinned archive on disk and nothing else means no build is needed."""
+    assert helm.locked_dependencies_present()
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "missing",
+        "other-version",
+        "leftover",
+        "directory",
+        "no-charts",
+        "no-lock",
+        "stale-lock",
+        "tags",
+        "declares-other-version",
+        "declares-other-chart",
+        "unreadable",
+    ],
+)
+def test_dependencies_are_absent_unless_charts_match_a_current_lock(locked_chart: Path, state: str) -> None:
+    """Anything short of an exact match with a current lock sends the task back to a full build."""
+    charts = locked_chart / "charts"
+    archive, name, version = a_locked_dependency(locked_chart)
+    manifest = locked_chart / "Chart.yaml"
+    # The first dependency's version line: the chart's own version is not indented.
+    constraint = re.compile(r"(?m)^(    version: ).*$")
+    if state == "missing":
+        archive.unlink()
+    elif state == "other-version":
+        archive.rename(charts / f"{archive.stem}-older.tgz")
+    elif state == "leftover":
+        (charts / f"{archive.stem}-older.tgz").write_bytes(b"archive")
+    elif state == "directory":
+        archive.unlink()
+        archive.mkdir()
+    elif state == "no-charts":
+        shutil.rmtree(charts)
+    elif state == "no-lock":
+        (locked_chart / "Chart.lock").unlink()
+    elif state == "stale-lock":
+        # Chart.yaml asks for another version and the lock was not regenerated.
+        manifest.write_text(constraint.sub(r"\g<1>0.0.x", manifest.read_text(), count=1))
+    elif state == "declares-other-version":
+        # The file name matches the lock, the chart inside does not.
+        write_chart_archive(archive, name, "0.0.0")
+    elif state == "declares-other-chart":
+        write_chart_archive(archive, "another-chart", version)
+    elif state == "unreadable":
+        archive.write_bytes(b"not an archive")
+    else:
+        # A field the task does not read: the digest cannot be confirmed.
+        manifest.write_text(constraint.sub(r"\g<0>\n    tags:\n      - extra", manifest.read_text(), count=1))
+    assert not helm.locked_dependencies_present()
+
+
+@pytest.fixture
+def helm_calls(locked_chart: Path, monkeypatch) -> list[list[str]]:
+    """Record the Helm commands one task run issues, without running Helm."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(helm, "check_helm", lambda: True)
+    monkeypatch.setattr(helm, "run_helm", lambda args: calls.append(args) or 0)
+    monkeypatch.setattr(helm, "_sync_configs_to_helm", lambda: None)
+    monkeypatch.setattr(helm, "_cleanup_helm_configs", lambda: None)
+    return calls
+
+
+def run_task(monkeypatch, command: str) -> int:
+    """Run the task's entry point as `mise run helm -- <command>` would."""
+    monkeypatch.setattr(helm, "get_usage_flag", lambda _: command)
+    monkeypatch.setattr(helm.sys, "argv", ["helm.py", command])
+    return helm.main()
+
+
+@pytest.mark.parametrize("command", ["lint", "template"])
+def test_render_commands_reuse_dependencies_that_match_the_lock(helm_calls, monkeypatch, command: str) -> None:
+    """A render command downloads nothing when charts/ already matches the lock."""
+    assert run_task(monkeypatch, command) == 0
+    assert [call[0] for call in helm_calls] == [command]
+
+
+def test_render_commands_build_dependencies_that_do_not_match(locked_chart: Path, helm_calls, monkeypatch) -> None:
+    """A missing archive brings back the full build before the command runs."""
+    a_locked_dependency(locked_chart)[0].unlink()
+    assert run_task(monkeypatch, "lint") == 0
+    commands = [call[:2] for call in helm_calls]
+    assert set(map(tuple, commands[:-2])) == {("repo", "add")}
+    assert commands[-2:] == [["dependency", "build"], ["lint", "deploy/helm/sie-cluster"]]
+
+
+def test_explicit_dependencies_always_build(helm_calls, monkeypatch) -> None:
+    """`dependencies` rebuilds even when charts/ already matches the lock."""
+    assert helm.locked_dependencies_present()
+    assert run_task(monkeypatch, "dependencies") == 0
+    commands = [call[:2] for call in helm_calls]
+    assert set(map(tuple, commands[:-1])) == {("repo", "add")}
+    assert commands[-1] == ["dependency", "build"]
 
 
 def test_validation_defaults_disable_payload_store(monkeypatch) -> None:
