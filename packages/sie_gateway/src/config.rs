@@ -549,9 +549,13 @@ fn item_text_byte_limit_from_env() -> usize {
 /// Read the pool API bounds from `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT`,
 /// `SIE_GATEWAY_POOL_MAX_TTL_S`, and `SIE_GATEWAY_MAX_POOLS`. An unset value
 /// keeps that bound's default; an unparsable one keeps it with a warning.
-pub fn pool_limits_from_env() -> PoolLimits {
-    let defaults = PoolLimits::default();
+/// `admin_gated` picks the defaults (see [`PoolLimits::for_pool_writes`]): it
+/// must be true only when every `POST /v1/pools` is checked against the admin
+/// token, which allows pools that never expire and a 30-day TTL limit.
+pub fn pool_limits_from_env(admin_gated: bool) -> PoolLimits {
+    let defaults = PoolLimits::for_pool_writes(admin_gated);
     PoolLimits {
+        allow_no_expiry: defaults.allow_no_expiry,
         max_minimum_worker_count: env_pool_limit(
             "SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT",
             defaults.max_minimum_worker_count,
@@ -1285,7 +1289,11 @@ mod tests {
             "SIE_GATEWAY_MAX_POOLS",
         ];
         without_env(&keys, || {
-            assert_eq!(pool_limits_from_env(), PoolLimits::default());
+            assert_eq!(pool_limits_from_env(false), PoolLimits::default());
+            assert_eq!(
+                pool_limits_from_env(true),
+                PoolLimits::for_pool_writes(true)
+            );
         });
         with_env(
             &[
@@ -1295,11 +1303,12 @@ mod tests {
             ],
             || {
                 assert_eq!(
-                    pool_limits_from_env(),
+                    pool_limits_from_env(false),
                     PoolLimits {
                         max_minimum_worker_count: 0,
                         max_ttl_seconds: 86_400,
                         max_pools: PoolLimits::default().max_pools,
+                        allow_no_expiry: false,
                     }
                 );
             },
@@ -1314,10 +1323,14 @@ mod tests {
                 ("SIE_GATEWAY_MAX_POOLS", "0"),
             ],
             || {
-                let limits = pool_limits_from_env();
+                let limits = pool_limits_from_env(false);
                 assert_eq!(
                     limits.max_ttl_seconds,
                     PoolLimits::default().max_ttl_seconds
+                );
+                assert_eq!(
+                    pool_limits_from_env(true).max_ttl_seconds,
+                    PoolLimits::for_pool_writes(true).max_ttl_seconds
                 );
                 assert_eq!(limits.max_pools, 0);
             },

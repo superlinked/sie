@@ -656,17 +656,25 @@ export interface PoolCreateSpec {
 }
 
 /**
+ * How long a pool lives after its last renewal: whole seconds, or `"never"`
+ * for a pool that lives until it is deleted.
+ */
+export type PoolTtl = number | "never";
+
+/**
  * Optional arguments for `SIEClient.createPool`, mirroring the Python SDK's
  * `create_pool` keyword arguments (`bundle`, `minimum_worker_count`,
- * `pinned_models`).
+ * `pinned_models`, `ttl_seconds`).
  */
 export interface CreatePoolOptions {
   /** Optional bundle filter. When set, only workers running this bundle will be assigned to the pool. */
   bundle?: string;
   /**
-   * Per-pool warm floor (minimum machines kept warm). The gateway emits
-   * canonical `sie.gateway.pool.warm_floor` telemetry; the collector exposes
-   * `sie_gateway_pool_warm_floor` to KEDA. Defaults to 0 (scale to zero).
+   * Per-pool warm floor: machines kept warm even with no traffic. It is only
+   * the always-on floor: the lane autoscales above it on demand, up to its
+   * KEDA maximum. The gateway emits canonical `sie.gateway.pool.warm_floor`
+   * telemetry; the collector exposes `sie_gateway_pool_warm_floor` to KEDA.
+   * Defaults to 0 (scale to zero).
    */
   minimumWorkerCount?: number;
   /**
@@ -675,6 +683,17 @@ export interface CreatePoolOptions {
    * profile-qualified ("model-name:profile_name"); unknown ids are rejected.
    */
   pinnedModels?: string[];
+  /**
+   * How long the pool lives after this client stops renewing it. Omit for the
+   * gateway default (1200 s) on a new pool, or to keep an existing pool's
+   * lifetime. While the client is open it renews the pool every 60 s, so the
+   * pool lasts as long as the client plus this grace period. Whole seconds,
+   * up to the gateway limit (`SIE_GATEWAY_POOL_MAX_TTL_S`: by default 30 days
+   * with gateway auth on, 1 hour without). `"never"` creates a pool that
+   * lives until it is deleted, so it outlives this process and the client
+   * does not renew it; it needs gateway auth (an admin `apiKey`).
+   */
+  ttlSeconds?: PoolTtl;
 }
 
 /**
@@ -691,8 +710,12 @@ export interface PoolSpec {
   gpus?: Record<string, number>;
   /** Optional maximum assigned workers per machine profile, as returned by the gateway */
   gpu_caps?: Record<string, number>;
-  /** Optional TTL for dynamic pool leases */
-  ttl_seconds?: number | null;
+  /**
+   * Lease in seconds, `"never"` for a pool that never expires (the `default`
+   * pool and static Helm queue pools report it too), or `null` for the
+   * gateway's default lease.
+   */
+  ttl_seconds?: PoolTtl | null;
   /** Minimum workers kept warm for this pool */
   minimum_worker_count?: number;
   /** Models pinned for this pool */

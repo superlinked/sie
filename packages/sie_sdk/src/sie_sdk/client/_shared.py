@@ -461,7 +461,27 @@ def attempt_timeout_cap(remaining: float) -> float:
 
 
 # Pool settings
-DEFAULT_LEASE_RENEWAL_INTERVAL_S = 60.0  # Renew lease every 60s (lease is 1200s)
+DEFAULT_LEASE_RENEWAL_INTERVAL_S = 60.0  # Renew lease every 60s (default lease is 1200s)
+
+#: ``ttl_seconds`` for a pool that lives until it is deleted. Such a pool has no
+#: lease, so clients do not renew it.
+POOL_TTL_NEVER = "never"
+
+
+def validate_pool_ttl(ttl_seconds: object) -> None:
+    """Refuse a ``ttl_seconds`` the gateway would reject, before any request."""
+    if ttl_seconds is None or ttl_seconds == POOL_TTL_NEVER:
+        return
+    if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or ttl_seconds < 1:
+        msg = f'ttl_seconds must be a positive whole number of seconds or "never", got {ttl_seconds!r}'
+        raise ValueError(msg)
+
+
+def pool_never_expires(body: Any) -> bool:
+    """Whether a gateway pool response describes a pool without a lease."""
+    spec = body.get("spec") if isinstance(body, dict) else None
+    return isinstance(spec, dict) and spec.get("ttl_seconds") == POOL_TTL_NEVER
+
 
 # LoRA loading retry settings
 LORA_LOADING_MAX_RETRIES = 10  # Max retries for LoRA loading (usually completes in 1-2s)
