@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 from sie_mcp import describe
 from sie_mcp.describe import DescribeImageError
+from sie_sdk import RequestError
 
 _CAPTION_MODEL = "microsoft/Florence-2-base-ft"
 _EMBED_MODEL = "openai/clip-vit-base-patch32"
@@ -224,4 +225,26 @@ async def test_raises_on_embedding_dim_mismatch() -> None:
     client = _client(label_vectors={"cat": [1.0, 0.0]}, image_vector=[1.0])
 
     with pytest.raises(DescribeImageError):
+        await _describe(client, labels=["cat"], top_k=1)
+
+
+async def test_names_the_setting_when_the_caption_model_is_not_served() -> None:
+    class _NoCaptioner(_FakeClient):
+        async def extract(self, model: str, items: Any, **kwargs: Any) -> Any:
+            raise RequestError(f"Model '{model}' not found", code="MODEL_NOT_FOUND", status_code=404)
+
+    client = _NoCaptioner(caption_entities=[])
+
+    with pytest.raises(DescribeImageError, match="SIE_MCP_CAPTION_MODEL"):
+        await _describe(client)
+
+
+async def test_names_the_setting_when_the_embed_model_is_not_served() -> None:
+    class _NoEmbedder(_FakeClient):
+        async def encode(self, model: str, items: Any, **kwargs: Any) -> Any:
+            raise RequestError(f"Model '{model}' not found", code="MODEL_NOT_FOUND", status_code=404)
+
+    client = _NoEmbedder(caption_entities=[{"text": "a cat"}])
+
+    with pytest.raises(DescribeImageError, match="SIE_MCP_EMBED_MODEL"):
         await _describe(client, labels=["cat"], top_k=1)

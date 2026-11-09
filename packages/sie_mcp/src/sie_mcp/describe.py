@@ -17,7 +17,10 @@ import asyncio
 import base64
 import binascii
 import math
+from collections.abc import Awaitable
 from typing import Any, Protocol, TypedDict
+
+from sie_sdk import RequestError
 
 from sie_mcp.config import DEFAULT_MAX_IMAGE_BYTES
 
@@ -28,6 +31,17 @@ _DETAILED_CAPTION_TASK = "<DETAILED_CAPTION>"
 
 class DescribeImageError(Exception):
     """Raised when the cluster could not caption or classify the image."""
+
+
+async def _served(call: Awaitable[Any], *, model: str, env_var: str) -> Any:
+    """Await a cluster call, turning "model not found" into an error that names the setting."""
+    try:
+        return await call
+    except RequestError as exc:
+        if exc.code != "MODEL_NOT_FOUND":
+            raise
+        msg = f"model {model!r} is not served by this SIE deployment; set {env_var} to a model it serves"
+        raise DescribeImageError(msg) from exc
 
 
 class DescribeClient(Protocol):
@@ -159,7 +173,11 @@ async def describe_image(
     image_item = {"images": [data]}
 
     task = _DETAILED_CAPTION_TASK if detailed else _CAPTION_TASK
-    caption_result = await client.extract(caption_model, image_item, options={"task": task}, gpu=gpu)
+    caption_result = await _served(
+        client.extract(caption_model, image_item, options={"task": task}, gpu=gpu),
+        model=caption_model,
+        env_var="SIE_MCP_CAPTION_MODEL",
+    )
     caption = _caption_text(caption_result)
 
     tags: list[Tag] = []
@@ -169,8 +187,12 @@ async def describe_image(
         # The label-batch and image embeds are independent — run them concurrently
         # so the tag path costs one round-trip of wall-clock, not two.
         label_results, image_result = await asyncio.gather(
-            client.encode(embed_model, [{"text": label} for label in labels], gpu=gpu),
-            client.encode(embed_model, image_item, gpu=gpu),
+            _served(
+                client.encode(embed_model, [{"text": label} for label in labels], gpu=gpu),
+                model=embed_model,
+                env_var="SIE_MCP_EMBED_MODEL",
+            ),
+            _served(client.encode(embed_model, image_item, gpu=gpu), model=embed_model, env_var="SIE_MCP_EMBED_MODEL"),
         )
         label_vecs = [_dense_vector(result) for result in label_results]
         image_vec = _dense_vector(image_result)

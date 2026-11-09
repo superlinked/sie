@@ -3,6 +3,7 @@ from typing import Any
 import pytest
 from sie_mcp import qa
 from sie_mcp.qa import AnswerQuestionsError
+from sie_sdk import RequestError
 
 # A tiny keyword vocabulary lets the fake produce deterministic embeddings:
 # encode() returns per-keyword counts, so cosine / dot-product retrieval is
@@ -265,6 +266,24 @@ async def test_raises_when_reranker_returns_no_scores() -> None:
 
     with pytest.raises(AnswerQuestionsError, match="no scores"):
         await qa.answer_questions(_NoScores(), documents=_DOCS, questions=["alpha?"], **_PARAMS)
+
+
+async def test_names_the_setting_when_the_reranker_is_not_served() -> None:
+    class _NoReranker(_FakeQAClient):
+        async def score(self, model: str, query: Any, items: list[Any], **kwargs: Any) -> Any:
+            raise RequestError(f"Model '{model}' not found", code="MODEL_NOT_FOUND", status_code=404)
+
+    with pytest.raises(AnswerQuestionsError, match=r"'rr' is not served.*SIE_MCP_RERANK_MODEL"):
+        await qa.answer_questions(_NoReranker(), documents=_DOCS, questions=["alpha?"], **_PARAMS)
+
+
+async def test_other_request_errors_pass_through() -> None:
+    class _BadRequest(_FakeQAClient):
+        async def score(self, model: str, query: Any, items: list[Any], **kwargs: Any) -> Any:
+            raise RequestError("bad request", code="INVALID_INPUT", status_code=400)
+
+    with pytest.raises(RequestError, match="bad request"):
+        await qa.answer_questions(_BadRequest(), documents=_DOCS, questions=["alpha?"], **_PARAMS)
 
 
 async def test_doc_index_points_to_original_documents_when_some_are_empty() -> None:

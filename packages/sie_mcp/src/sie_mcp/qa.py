@@ -20,8 +20,10 @@ Each answer is returned with the passages it used, so the grounding is visible.
 """
 
 import math
-from collections.abc import Sequence
+from collections.abc import Awaitable, Sequence
 from typing import Any, Protocol, TypedDict
+
+from sie_sdk import RequestError
 
 from sie_mcp.chunking import Chunk, chunk_documents
 
@@ -34,6 +36,17 @@ _SYSTEM = (
 
 class AnswerQuestionsError(Exception):
     """Raised when the QA pipeline cannot produce a grounded answer."""
+
+
+async def _served(call: Awaitable[Any], *, model: str, env_var: str) -> Any:
+    """Await a cluster call, turning "model not found" into an error that names the setting."""
+    try:
+        return await call
+    except RequestError as exc:
+        if exc.code != "MODEL_NOT_FOUND":
+            raise
+        msg = f"model {model!r} is not served by this SIE deployment; set {env_var} to a model it serves"
+        raise AnswerQuestionsError(msg) from exc
 
 
 def _validate_params(
@@ -230,17 +243,25 @@ async def _answer_one(
     gpu: str | None,
 ) -> Answer:
     # 1. Dense shortlist: cheap bi-encoder pass over every chunk.
-    q_encoded = await client.encode(encode_model, {"text": question}, output_types=["dense"], is_query=True, gpu=gpu)
+    q_encoded = await _served(
+        client.encode(encode_model, {"text": question}, output_types=["dense"], is_query=True, gpu=gpu),
+        model=encode_model,
+        env_var="SIE_MCP_ENCODE_MODEL",
+    )
     question_vec = _dense_floats(q_encoded)
     shortlist_idx = _shortlist(question_vec, chunk_vecs, limit=rerank_candidates)
     shortlist = [chunks[i] for i in shortlist_idx]
 
     # 2. Rerank the shortlist with the cross-encoder to select final passages.
-    score_result = await client.score(
-        rerank_model,
-        {"text": question},
-        [{"id": chunk.id, "text": chunk.text} for chunk in shortlist],
-        gpu=gpu,
+    score_result = await _served(
+        client.score(
+            rerank_model,
+            {"text": question},
+            [{"id": chunk.id, "text": chunk.text} for chunk in shortlist],
+            gpu=gpu,
+        ),
+        model=rerank_model,
+        env_var="SIE_MCP_RERANK_MODEL",
     )
     passages = _select_passages(score_result, shortlist, top_k=top_k)
     if not passages:
@@ -255,13 +276,17 @@ async def _answer_one(
         f"Question: {question}\n\n"
         "Answer using only the passages above."
     )
-    response = await client.chat_completions(
-        generate_model,
-        [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
-        # Deterministic, grounded answer — no creative sampling.
-        temperature=0.0,
-        max_completion_tokens=max_tokens,
-        gpu=gpu,
+    response = await _served(
+        client.chat_completions(
+            generate_model,
+            [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
+            # Deterministic, grounded answer — no creative sampling.
+            temperature=0.0,
+            max_completion_tokens=max_tokens,
+            gpu=gpu,
+        ),
+        model=generate_model,
+        env_var="SIE_MCP_GENERATE_MODEL",
     )
     return Answer(question=question, answer=_message_content(response), passages=passages)
 
@@ -335,12 +360,16 @@ async def answer_questions(
 
     # Encode every chunk once for this call; the vectors live only for its
     # duration — no index is built or stored (transient retrieval).
-    encoded = await client.encode(
-        encode_model,
-        [{"id": chunk.id, "text": chunk.text} for chunk in chunks],
-        output_types=["dense"],
-        is_query=False,
-        gpu=gpu,
+    encoded = await _served(
+        client.encode(
+            encode_model,
+            [{"id": chunk.id, "text": chunk.text} for chunk in chunks],
+            output_types=["dense"],
+            is_query=False,
+            gpu=gpu,
+        ),
+        model=encode_model,
+        env_var="SIE_MCP_ENCODE_MODEL",
     )
     chunk_vecs = [_dense_floats(result) for result in encoded]
 
