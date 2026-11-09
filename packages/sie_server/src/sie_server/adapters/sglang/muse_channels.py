@@ -288,7 +288,7 @@ async def translate_muse_channels(chunks: AsyncIterator[GenerationChunk]) -> Asy
                 chunk,
                 text_delta=text,
                 is_first=is_first,
-                logprobs=chunk.logprobs if text == chunk.text_delta else None,
+                logprobs=chunk.logprobs if text == chunk.text_delta and (text or ending) else None,
                 candidates=candidates,
             )
     finally:

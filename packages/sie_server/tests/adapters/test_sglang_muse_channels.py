@@ -232,6 +232,23 @@ def test_stream_keeps_logprobs_only_on_text_it_did_not_change() -> None:
     assert [chunk.logprobs for chunk in chunks[:2]] == [None, logprobs]
 
 
+def test_a_forwarded_chunk_without_text_carries_no_logprobs() -> None:
+    logprobs = ({"token": "x", "logprob": -0.1},)
+
+    async def script() -> AsyncIterator[GenerationChunk]:
+        yield GenerationChunk(text_delta=FORCED_TOOL_CALL[:60], logprobs=logprobs)
+        yield GenerationChunk(text_delta="", logprobs=logprobs)
+        yield GenerationChunk(text_delta=FORCED_TOOL_CALL[60:], logprobs=logprobs)
+        yield GenerationChunk(text_delta=f"<|eom|>{U}Price <", logprobs=logprobs)
+        yield GenerationChunk(text_delta="", logprobs=logprobs)
+        yield GenerationChunk(text_delta="", done=True, finish_reason="stop")
+
+    chunks = asyncio.run(_collect(translate_muse_channels(script())))
+
+    assert len(chunks) == 6
+    assert [chunk.logprobs for chunk in chunks[:5] if not chunk.text_delta] == [None, None, None, None]
+
+
 def test_closing_the_stream_closes_the_upstream_iterator() -> None:
     closed = asyncio.Event()
 
