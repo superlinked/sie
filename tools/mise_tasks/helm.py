@@ -219,13 +219,13 @@ def lock_matches_chart() -> bool:
     return f"digest: sha256:{digest}" in lock.read_text().splitlines()
 
 
-def locked_dependency_archives() -> dict[str, tuple[str, str]] | None:
-    """Return each archive Chart.lock pins with its chart name and version, or None when unknown."""
+def locked_dependencies() -> set[tuple[str, str]] | None:
+    """Return the chart name and version of every dependency Chart.lock pins, or None when unknown."""
     lock = resolve_project_root() / CHART_DIR / "Chart.lock"
     locked = _dependency_entries(lock) if lock.is_file() else None
     if not locked or not all(entry.get("name") and entry.get("version") for entry in locked):
         return None
-    return {f"{entry['name']}-{entry['version']}.tgz": (entry["name"], entry["version"]) for entry in locked}
+    return {(entry["name"], entry["version"]) for entry in locked}
 
 
 def _archive_identity(archive: Path) -> tuple[str, str] | None:
@@ -253,17 +253,19 @@ def locked_dependencies_present() -> bool:
 
     Helm downloads every dependency again on each build, even when the
     archive is already there. No build is needed when the lock is still the
-    one generated from Chart.yaml and charts/ matches it exactly: nothing
-    missing, nothing left over from another version, and every archive
-    declaring the chart name and version the lock pins.
+    one generated from Chart.yaml and charts/ holds one archive for each
+    locked dependency and nothing else.
+
+    Archives are matched by the chart name and version they declare. Their
+    file names are not used: Helm keeps the name the repository publishes,
+    which is not always ``<name>-<version>.tgz``.
     """
-    expected = locked_dependency_archives()
+    expected = locked_dependencies()
     charts = resolve_project_root() / CHART_DIR / "charts"
     if expected is None or not charts.is_dir() or not lock_matches_chart():
         return False
-    return {entry.name for entry in charts.iterdir()} == set(expected) and all(
-        _archive_identity(charts / name) == identity for name, identity in expected.items()
-    )
+    entries = list(charts.iterdir())
+    return len(entries) == len(expected) and {_archive_identity(entry) for entry in entries} == expected
 
 
 def validation_args(extra_args: list[str]) -> list[str]:
