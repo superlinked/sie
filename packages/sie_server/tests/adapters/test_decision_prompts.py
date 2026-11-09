@@ -131,3 +131,19 @@ def test_knowline_preserves_tool_messages_and_neutralizes_every_template_field()
 @pytest.mark.parametrize("message", [{"role": "unrecognized", "content": "x"}, {"role": "user", "extra": "x"}])
 def test_knowline_unknown_message_shapes_remain_plain_state(message):
     assert knowline.state_messages([message]) == [{"role": "user", "content": knowline.render_value([message])}]
+
+
+@pytest.mark.parametrize("structured_noul", [True, False])
+@pytest.mark.parametrize(
+    ("criteria", "options"),
+    [
+        ({"true": None, "false": "It rained"}, "A. Yes: yes\nB. No: It rained"),
+        ({"true": "It rained", "false": None}, "A. Yes: It rained\nB. No: no"),
+    ],
+)
+def test_knowline_null_noul_criterion_renders_its_default(structured_noul, criteria, options):
+    question = parse_questions({"q": {"type": "noul", "criteria": criteria}})[0]
+
+    block = knowline.question_block(question, ("A", "B"), structured_noul)
+
+    assert block.endswith(f"Options:\n{options}")

@@ -185,7 +185,8 @@ def question_block(question: Question, codes: tuple[str, ...], structured_noul: 
     if question.kind == "noul":
         criteria = criteria or {}
         convert = render_value if structured_noul else str
-        texts = [f"Yes: {convert(criteria.get('true', 'yes'))}", f"No: {convert(criteria.get('false', 'no'))}"]
+        true, false = criteria.get("true"), criteria.get("false")
+        texts = [f"Yes: {convert('yes' if true is None else true)}", f"No: {convert('no' if false is None else false)}"]
     elif question.kind == "choice":
         texts = [
             key if value is None else f"{key}: {render_value(value)}"
