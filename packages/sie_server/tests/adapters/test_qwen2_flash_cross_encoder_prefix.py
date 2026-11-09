@@ -21,7 +21,10 @@ from sie_server.adapters.qwen2_flash_cross_encoder._prefix import (
     plan_shared_forward,
     prefix_key,
 )
-from sie_server.adapters.qwen2_flash_cross_encoder.adapter import Qwen2FlashCrossEncoderAdapter
+from sie_server.adapters.qwen2_flash_cross_encoder.adapter import (
+    QWEN3_DOCUMENT_SEPARATOR,
+    Qwen2FlashCrossEncoderAdapter,
+)
 from sie_server.core.loader import load_model_config
 from sie_server.types.inputs import Item
 
@@ -379,8 +382,10 @@ def test_a_repeated_question_is_tokenized_once(monkeypatch: pytest.MonkeyPatch) 
     )
     question = Item(text="is this message spam")
 
+    documents = {QWEN3_DOCUMENT_SEPARATOR + doc for doc in _DOCS}
+
     def beside_documents() -> list[str]:  # the stub's batched call encodes each document through ``encode``
-        return [text for text in encoded if text not in _DOCS]
+        return [text for text in encoded if text not in documents]
 
     first = adapter.score_pairs([question], [Item(text=_DOCS[0])], instruction="answer yes or no")
     # The prefix, and the question and the instruction alone for the token counts.
@@ -490,7 +495,8 @@ def test_a_graph_over_a_cached_prefix_scores_as_the_eager_forward() -> None:
     assert graphed._prefix_graphs == {}
     assert graphed._graph_tokens == 128
     question = Item(text="is this message spam")
-    closing = len(graphed._chat_suffix_ids)  # a tail is the document and the template's closing tokens
+    # A tail is the space after "<Document>:", the document and the template's closing tokens.
+    closing = len(graphed._document_separator_ids) + len(graphed._chat_suffix_ids)
     # Tails of 60 and 64 tokens (one graph), 100 and 128 (another), and 129, which is past the graphs.
     docs = [Item(text="d" * (n - closing)) for n in (60, 100, 64, 128, 129)]
 
