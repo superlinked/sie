@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -35,13 +36,58 @@ CONFIG_CONSUMERS = (GATEWAY, "sie-sie-cluster-worker-l4-default/worker-sidecar")
 L4_POOL = {"workers": {"pools": {"l4": {"enabled": True}}}}
 
 
+YAML_UNSAFE_CHARACTERS = re.compile("[\x7f-\x9f\u2028\u2029\ud800-\udfff\ufffe\uffff]")
+
+
+def values_json(values: object) -> str:
+    text = json.dumps(values, ensure_ascii=False)
+    return YAML_UNSAFE_CHARACTERS.sub(lambda match: f"\\u{ord(match.group()):04x}", text)
+
+
+def test_helm_reads_a_values_file_back_as_the_values_written(tmp_path: Path) -> None:
+    strings = [
+        "a\x85b",
+        "a \u2028b",
+        "a\u2029",
+        "\x7f",
+        "\x9f",
+        "\u6a21\u578b" * 200,
+        "1e3",
+        "y",
+        "tab\there",
+        "\ufffe",
+    ]
+    chart = tmp_path / "echo-chart"
+    (chart / "templates").mkdir(parents=True)
+    (chart / "Chart.yaml").write_text("apiVersion: v2\nname: echo\nversion: 0.0.0\n", encoding="utf-8")
+    (chart / "templates" / "echo.yaml").write_text(
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: echo\ndata:\n"
+        "  strings: {{ .Values.strings | toJson | b64enc | quote }}\n"
+        "  keys: {{ .Values.keyed | keys | sortAlpha | toJson | b64enc | quote }}\n",
+        encoding="utf-8",
+    )
+    values_file = tmp_path / "echo-values.json"
+    values_file.write_text(values_json({"strings": strings, "keyed": dict.fromkeys(strings, 1)}), encoding="utf-8")
+    result = subprocess.run(
+        ["mise", "exec", "--", "helm", "template", "echo", str(chart), "-f", str(values_file)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    data = yaml.safe_load(result.stdout)["data"]
+    assert json.loads(base64.b64decode(data["strings"])) == strings
+    assert json.loads(base64.b64decode(data["keys"])) == sorted(strings)
+
+
 def render_workers(tmp_path: Path, values: dict) -> subprocess.CompletedProcess[str]:
     return render_template(tmp_path, values, WORKER_TEMPLATE)
 
 
 def render_template(tmp_path: Path, values: dict, template: str) -> subprocess.CompletedProcess[str]:
     values_file = tmp_path / "values.yaml"
-    values_file.write_text(yaml.safe_dump(values), encoding="utf-8")
+    values_file.write_text(values_json(values), encoding="utf-8")
     return subprocess.run(
         [
             "mise",
@@ -88,7 +134,7 @@ def render_collector_config(tmp_path: Path, *, remote_enabled: bool = True) -> t
         "localTraceExporters": [],
         "logExporters": [],
     }
-    (chart / "values.yaml").write_text(yaml.safe_dump(values))
+    (chart / "values.yaml").write_text(values_json(values), encoding="utf-8")
     rendered = subprocess.run(  # noqa: S603 - fixed local Helm test chart
         ["mise", "exec", "--", "helm", "template", "test", str(chart)],  # noqa: S607 - mise-managed Helm
         cwd=ROOT,
@@ -333,7 +379,7 @@ def test_dashboards_cover_public_prometheus_metrics(tmp_path: Path) -> None:
 
 def render_chart(tmp_path: Path, values: dict, overlays: tuple[str, ...] = ()) -> subprocess.CompletedProcess[str]:
     values_file = tmp_path / "chart-values.yaml"
-    values_file.write_text(yaml.safe_dump(values), encoding="utf-8")
+    values_file.write_text(values_json(values), encoding="utf-8")
     overlay_args = [arg for overlay in overlays for arg in ("-f", str(helm.CHART_DIR / overlay))]
     return subprocess.run(
         [
@@ -1094,7 +1140,7 @@ def render_with_ingress_classes(tmp_path: Path, values: dict, classes: list[dict
         source.replace(INGRESS_CLASS_LOOKUP, "(default (dict) .Values.ingressClassFixture)"), encoding="utf-8"
     )
     values_file = tmp_path / "overrides.yaml"
-    values_file.write_text(yaml.safe_dump({**values, "ingressClassFixture": {"items": classes}}), encoding="utf-8")
+    values_file.write_text(values_json({**values, "ingressClassFixture": {"items": classes}}), encoding="utf-8")
     return subprocess.run(
         [
             "mise",
@@ -1199,7 +1245,7 @@ NATS_CLIENTS = {
 
 def render_nats_chart(tmp_path: Path, values: dict, *extra: str) -> subprocess.CompletedProcess[str]:
     values_file = tmp_path / "nats-values.yaml"
-    values_file.write_text(yaml.safe_dump(values), encoding="utf-8")
+    values_file.write_text(values_json(values), encoding="utf-8")
     return subprocess.run(
         [
             "mise",
@@ -2544,7 +2590,7 @@ def test_an_empty_allowed_list_renders_no_public_rule(tmp_path: Path) -> None:
 
 def test_an_extra_egress_port_range_set_on_the_command_line_renders(tmp_path: Path) -> None:
     values_file = tmp_path / "values.yaml"
-    values_file.write_text(yaml.safe_dump(remote_pool_values()), encoding="utf-8")
+    values_file.write_text(values_json(remote_pool_values()), encoding="utf-8")
     rule = "workers.remote.networkPolicy.extraEgress[0]"
 
     result = subprocess.run(
@@ -3360,6 +3406,7 @@ def test_client_and_worker_tokens_are_kept_apart_from_every_wired_secret_key(
             "sie-admin",
             "password",
         ),
+        ({"fullnameOverride": "dashboard"}, "dashboard", "admin-password"),
         (
             {"fullnameOverride": "dashboard", "admin": {"existingSecret": "{{ .Values.fullnameOverride }}"}},
             "dashboard",
@@ -3370,6 +3417,12 @@ def test_client_and_worker_tokens_are_kept_apart_from_every_wired_secret_key(
             "dashboard-admin",
             "dashboard",
         ),
+        (
+            {"admin": {"existingSecret": "{{- .Release.Namespace -}}-admin", "userKey": "dashboard"}},
+            "sie-admin",
+            "dashboard",
+        ),
+        ({"admin": {"existingSecret": "{{ .Chart.Name }}-admin"}}, "grafana-admin", "admin-password"),
     ],
 )
 def test_inference_credentials_cannot_reuse_bundled_grafana_admin_keys(
@@ -3535,7 +3588,7 @@ def rendered_notes(tmp_path: Path, values: dict) -> str:
         encoding="utf-8",
     )
     values_file = tmp_path / "notes-values.yaml"
-    values_file.write_text(yaml.safe_dump(values), encoding="utf-8")
+    values_file.write_text(values_json(values), encoding="utf-8")
     result = subprocess.run(
         [
             "mise",
@@ -3583,6 +3636,44 @@ def test_the_notes_say_when_the_gateway_mode_is_known_only_at_run_time(tmp_path:
 )
 def test_the_mcp_edge_renders_when_it_has_what_its_gateway_needs(tmp_path: Path, values: dict) -> None:
     rendered_documents(tmp_path, {**L4_POOL, **values})
+
+
+MCP_ADMIN_AUTH = {
+    "gateway": {
+        "auth": {
+            "mode": "token",
+            "generateToken": True,
+            "adminTokenSecretName": "gateway-admin",
+            "adminTokenSecretKey": "admin",
+        }
+    }
+}
+
+
+@pytest.mark.parametrize(
+    "api_key",
+    [
+        {"existingSecretName": "gateway-admin", "secretKey": "admin "},
+        {"existingSecretName": "gateway-admin ", "secretKey": "admin"},
+    ],
+    ids=["key-space", "name-space"],
+)
+def test_the_mcp_edge_api_key_is_kept_apart_from_the_admin_token_whatever_its_spacing(
+    tmp_path: Path, api_key: dict
+) -> None:
+    values = {**L4_POOL, **MCP_ADMIN_AUTH, "mcpEdge": {"enabled": True, "clusterApiKey": api_key}}
+    assert (
+        "The MCP edge cluster API key and the gateway admin token are the same Secret key (gateway-admin/admin)"
+        in render_error(tmp_path, values)
+    )
+
+
+def test_the_mcp_edge_reads_the_trimmed_api_key_secret_key(tmp_path: Path) -> None:
+    api_key = {"existingSecretName": " mcp-key ", "secretKey": " token "}
+    docs = rendered_documents(
+        tmp_path, {**L4_POOL, **MCP_TOKEN_AUTH, "mcpEdge": {"enabled": True, "clusterApiKey": api_key}}
+    )
+    assert env_entries(docs, "SIE_API_KEY") == {"sie-sie-cluster-mcp/mcp-edge": {"name": "mcp-key", "key": "token"}}
 
 
 def test_a_gateway_mode_from_value_from_gets_the_generated_token(tmp_path: Path) -> None:
@@ -4051,3 +4142,975 @@ def test_extra_volumes_cannot_reuse_a_chart_worker_volume_name(tmp_path: Path, n
     result = render_workers(tmp_path, extra_init_values(extraVolumes=[{"name": name, "emptyDir": {}}]))
     assert result.returncode != 0
     assert f'workers.common.extraVolumes: "{name}" is a chart-owned worker volume name' in result.stderr
+
+
+PLACEMENT_FIXTURES = ROOT / "packages/sie_placement/tests/fixtures/helm"
+PLACEMENT_VALUES = PLACEMENT_FIXTURES / "values.json"
+PLACEMENT_TRIGGERS = (
+    "sie_gateway_pending_demand",
+    "sie_gateway_queue_depth",
+    "sie_gateway_active_lease_gpus",
+    "sie_gateway_pool_warm_floor",
+    "sie_gateway_rejected_rate",
+    "sie_gateway_model_loads_in_progress",
+)
+CHART_FALLBACK_REPLICAS = 2
+LANE_LABELS = ("pool", "machine-profile", "bundle")
+
+
+def render_placement(tmp_path: Path, *layers: dict) -> subprocess.CompletedProcess[str]:
+    files = []
+    for index, layer in enumerate(layers):
+        path = tmp_path / f"placement-{index}.yaml"
+        path.write_text(values_json(layer), encoding="utf-8")
+        files += ["-f", str(path)]
+    return subprocess.run(
+        ["mise", "exec", "--", "helm", "template", "sie", str(helm.CHART_DIR), "--namespace", "sie"]
+        + helm.validation_args(files),
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def worker_scaled_objects(docs: list[dict]) -> list[dict]:
+    return [
+        manifest
+        for doc in docs
+        if doc.get("kind") == "ConfigMap"
+        for manifest in yaml.safe_load_all(doc.get("data", {}).get("scaledobjects.yaml", ""))
+        if manifest
+        and manifest["kind"] == "ScaledObject"
+        and manifest["spec"]["scaleTargetRef"]["kind"] == "StatefulSet"
+    ]
+
+
+def placement_lanes(overlay: dict) -> dict[tuple[str, str, str], tuple[str, str, dict]]:
+    return {
+        (group["queuePool"], group["machineProfile"], bundle): (name, bundle, settings)
+        for name, group in overlay["workers"]["pools"].items()
+        for bundle, settings in group["bundles"].items()
+        if settings["enabled"]
+    }
+
+
+def configured_lanes(docs: list[dict]) -> list[tuple[str, str, str]]:
+    (gpu_config,) = [doc for doc in docs if doc["metadata"]["name"] == "sie-sie-cluster-gpu-config"]
+    catalog = json.loads(gpu_config["data"]["configured-physical-lanes"])
+    return [(lane["pool"], lane["machineProfile"], lane["bundle"]) for lane in catalog]
+
+
+def test_the_placement_chart_pools_are_the_charts_worker_groups() -> None:
+    values = yaml.safe_load((helm.CHART_DIR / "values.yaml").read_text(encoding="utf-8"))
+    pools = {
+        name: {
+            "enabled": bool(group.get("enabled")),
+            "bundles": {
+                bundle: {"enabled": bool((settings or {}).get("enabled", True))}
+                for bundle, settings in group["bundles"].items()
+            },
+        }
+        for name, group in values["workers"]["pools"].items()
+    }
+    assert pools == json.loads((PLACEMENT_FIXTURES / "chart-pools.json").read_text(encoding="utf-8"))
+
+
+def test_placement_values_render_the_planned_lanes(tmp_path: Path) -> None:
+    overlay = json.loads(PLACEMENT_VALUES.read_text(encoding="utf-8"))
+    result = render_placement(tmp_path, AUTOSCALING_VALUES, overlay)
+    assert result.returncode == 0, result.stderr
+    docs = [doc for doc in yaml.safe_load_all(result.stdout) if doc]
+    lanes = placement_lanes(overlay)
+    assert any(
+        not settings["enabled"]
+        for group in overlay["workers"]["pools"].values()
+        for settings in group["bundles"].values()
+    )
+    assert any(group["gpu"]["deviceGroup"] for group in overlay["workers"]["pools"].values())
+
+    assert sorted(configured_lanes(docs)) == sorted(lanes)
+    gateway = container_env(docs, "sie-sie-cluster-gateway", "gateway")
+    static_queue_pools = overlay["queueRouting"]["staticQueuePools"]
+    assert json.loads(gateway["SIE_GATEWAY_STATIC_QUEUE_POOLS"]["value"]) == static_queue_pools
+    pinned = {name: pool for name, pool in static_queue_pools.items() if pool["pinnedModels"]}
+    assert any(len(pool["pinnedModels"]) > 1 for pool in pinned.values())
+    products = []
+    for name, pool in pinned.items():
+        (profile,) = pool["gpus"]
+        group = overlay["workers"]["pools"][profile]
+        assert group["queuePool"] == name
+        assert [lane for lane in lanes if lane[0] == name] == [(name, profile, pool["bundle"])]
+        products.append(group["gpu"]["product"])
+    assert len(set(products)) < len(products)
+
+    scaled_objects = {
+        tuple(scaled_object["metadata"]["labels"][f"sie.superlinked.com/{label}"] for label in LANE_LABELS): (
+            scaled_object["spec"]
+        )
+        for scaled_object in worker_scaled_objects(docs)
+    }
+    assert set(scaled_objects) == set(lanes)
+    for lane, (group, bundle, settings) in lanes.items():
+        spec = scaled_objects[lane]
+        minimum, maximum = settings["minReplicas"], settings["maxReplicas"]
+        fallback_floor = min(maximum, max(minimum, CHART_FALLBACK_REPLICAS))
+        assert spec["minReplicaCount"] == (minimum or fallback_floor)
+        assert spec.get("idleReplicaCount") == (None if minimum else 0)
+        assert spec["maxReplicaCount"] == maximum
+        assert spec["fallback"]["replicas"] == fallback_floor
+        assert [trigger["type"] for trigger in spec["triggers"]] == ["prometheus"] * len(PLACEMENT_TRIGGERS)
+        assert [trigger["metadata"]["metricName"] for trigger in spec["triggers"]] == [
+            f"{metric}_{group}_{bundle}" for metric in PLACEMENT_TRIGGERS
+        ]
+
+        pool = overlay["workers"]["pools"][group]
+        workload = f"sie-sie-cluster-worker-{group}-{bundle}"
+        (statefulset,) = [doc for doc in docs if doc["kind"] == "StatefulSet" and doc["metadata"]["name"] == workload]
+        (worker,) = [
+            container
+            for container in statefulset["spec"]["template"]["spec"]["containers"]
+            if container["name"] == "worker"
+        ]
+        gpus = {"nvidia.com/gpu": str(pool["gpu"]["count"])}
+        assert worker["resources"] == {kind: pool["resources"][kind] | gpus for kind in ("requests", "limits")}
+        assert [container["name"] for container in statefulset["spec"]["template"]["spec"]["containers"]] == [
+            "worker",
+            "worker-sidecar",
+        ]
+        env = container_env(docs, workload, "worker")
+        assert (env["SIE_POOL"]["value"], env["SIE_MACHINE_PROFILE"]["value"], env["SIE_BUNDLE"]["value"]) == lane
+
+
+def placement_lane_values(count: int) -> dict:
+    group = {
+        "enabled": True,
+        "machineProfile": "lanes",
+        "queuePool": "default",
+        "gpu": {"count": 1, "product": "NVIDIA-L4"},
+        "resources": {
+            "requests": {"cpu": "4", "memory": "16384Mi"},
+            "limits": {"cpu": "4", "memory": "16384Mi"},
+        },
+        "bundles": {f"b{index}": {"enabled": True, "minReplicas": 0, "maxReplicas": 1} for index in range(count)},
+    }
+    return {"workers": {"pools": {"lanes": group}}}
+
+
+@pytest.mark.parametrize(
+    ("dependencies", "limit", "topology"),
+    [({}, 192, "external KEDA and Prometheus"), ({"keda": {"install": True}}, 96, "bundled KEDA or Prometheus")],
+)
+def test_placement_values_at_the_lane_limit_render(
+    tmp_path: Path, dependencies: dict, limit: int, topology: str
+) -> None:
+    overlay = json.loads(PLACEMENT_VALUES.read_text(encoding="utf-8"))
+    planned = len(placement_lanes(overlay))
+    base = {**AUTOSCALING_VALUES, **dependencies}
+    accepted = render_placement(tmp_path, base, placement_lane_values(limit - planned), overlay)
+    assert accepted.returncode == 0, accepted.stderr
+    assert len(configured_lanes([doc for doc in yaml.safe_load_all(accepted.stdout) if doc])) == limit
+    refused = render_placement(tmp_path, base, placement_lane_values(limit - planned + 1), overlay)
+    assert refused.returncode != 0
+    assert f"configured physical lane count exceeds Helm release limit {limit} with {topology}" in refused.stderr
+
+
+APPLIER = "sie-sie-cluster-placement-applier"
+APPLIER_IMAGE = {"repository": "registry.example.com/sie-placement", "tag": "1.0.0"}
+APPLIER_ARGS = [
+    "tune",
+    "--plan",
+    "/etc/sie-placement/plan/plan.json",
+    "--prometheus-url",
+    "http://prometheus-operated.monitoring.svc.cluster.local:9090",
+    "--gateway-url",
+    "http://sie-sie-cluster-gateway.sie.svc.cluster.local:8080",
+    "--series-selector",
+    'namespace="sie",service="sie-sie-cluster-otel-collector",endpoint="prometheus"',
+]
+APPLIER_AUTH = {
+    "gateway": {
+        "auth": {
+            "mode": "token",
+            "tokenSecretName": "gateway-tokens",
+            "adminTokenSecretName": "gateway-admin",
+            "adminTokenSecretKey": "admin",
+        }
+    }
+}
+APPLIER_CLIENT_TOKEN = {"existingSecretName": "applier-client", "secretKey": "token"}
+RUNTIME_AUTH_MODE = [
+    {"name": "SIE_AUTH_MODE", "valueFrom": {"configMapKeyRef": {"name": "gateway-auth", "key": "mode"}}}
+]
+APPLIER_RUNTIME_AUTH = {"gateway": {**APPLIER_AUTH["gateway"], "extraEnv": RUNTIME_AUTH_MODE}}
+SECRET_FILE_MODE = 0o440
+
+
+def placement_plan() -> dict:
+    return json.loads((PLACEMENT_FIXTURES / "plan.json").read_text(encoding="utf-8"))
+
+
+def plan_envelopes(overlay: dict, plan: dict) -> dict:
+    lanes = placement_lanes(overlay)
+    pools: dict = {}
+    for lane in plan["lanes"]:
+        key = tuple(
+            token.strip().lower() for token in (lane["queuePool"], lane["cell"]["machineProfile"], lane["bundle"])
+        )
+        group, bundle, _ = lanes[key]
+        envelope = {field: lane["envelope"][field] for field in ("floorMin", "floorMax")}
+        pools.setdefault(group, {"bundles": {}})["bundles"][bundle] = {"envelope": envelope}
+    return {"workers": {"pools": pools}}
+
+
+def applier_layers(*extra: dict, **applier: object) -> list[dict]:
+    overlay = json.loads(PLACEMENT_VALUES.read_text(encoding="utf-8"))
+    plan = placement_plan()
+    settings = {"enabled": True, "image": APPLIER_IMAGE, "plan": plan, **applier}
+    return [AUTOSCALING_VALUES, overlay, plan_envelopes(overlay, plan), *extra, {"placementApplier": settings}]
+
+
+def placement_documents(tmp_path: Path, layers: list[dict]) -> list[dict]:
+    result = render_placement(tmp_path, *layers)
+    assert result.returncode == 0, result.stderr
+    return [doc for doc in yaml.safe_load_all(result.stdout) if doc]
+
+
+def applier_documents(docs: list[dict]) -> list[dict]:
+    return [
+        doc
+        for doc in docs
+        if doc["metadata"].get("labels", {}).get("app.kubernetes.io/component") == "placement-applier"
+    ]
+
+
+def applier_pod(docs: list[dict]) -> dict:
+    (deployment,) = [doc for doc in docs if doc["kind"] == "Deployment" and doc["metadata"]["name"] == APPLIER]
+    return deployment["spec"]["template"]
+
+
+def without_secrets(docs: list[dict]) -> list[dict]:
+    return [doc for doc in docs if doc["kind"] != "Secret"]
+
+
+@pytest.mark.parametrize("values", [{}, {"placementApplier": None}])
+def test_the_placement_applier_is_off_by_default(tmp_path: Path, values: dict) -> None:
+    assert applier_documents(rendered_documents(tmp_path, values)) == []
+    overlay = json.loads(PLACEMENT_VALUES.read_text(encoding="utf-8"))
+    planned = placement_documents(tmp_path, [AUTOSCALING_VALUES, overlay])
+    with_envelopes = placement_documents(
+        tmp_path, [AUTOSCALING_VALUES, overlay, plan_envelopes(overlay, placement_plan())]
+    )
+    assert applier_documents(with_envelopes) == []
+    assert without_secrets(with_envelopes) == without_secrets(planned)
+
+
+def test_the_placement_applier_runs_in_shadow_mode_without_credentials(tmp_path: Path) -> None:
+    docs = placement_documents(tmp_path, applier_layers())
+    assert sorted((doc["kind"], doc["metadata"]["name"]) for doc in applier_documents(docs)) == [
+        ("ConfigMap", f"{APPLIER}-plan"),
+        ("Deployment", APPLIER),
+        ("ServiceAccount", APPLIER),
+    ]
+    (config_map,) = [doc for doc in docs if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == f"{APPLIER}-plan"]
+    plan_json = config_map["data"]["plan.json"]
+    assert json.loads(plan_json) == placement_plan()
+    (account,) = [doc for doc in docs if doc["kind"] == "ServiceAccount" and doc["metadata"]["name"] == APPLIER]
+    assert account["automountServiceAccountToken"] is False
+    assert "annotations" not in account["metadata"]
+    assert not [
+        doc
+        for doc in docs
+        if doc["kind"] in {"RoleBinding", "ClusterRoleBinding"}
+        and any(subject.get("name") == APPLIER for subject in doc.get("subjects", []))
+    ]
+
+    (deployment,) = [doc for doc in docs if doc["kind"] == "Deployment" and doc["metadata"]["name"] == APPLIER]
+    assert deployment["spec"]["replicas"] == 1
+    assert deployment["spec"]["strategy"] == {"type": "Recreate"}
+    pod = applier_pod(docs)
+    assert pod["metadata"]["annotations"] == {
+        "checksum/plan": hashlib.sha256(plan_json.rstrip("\n").encode()).hexdigest()
+    }
+    spec = pod["spec"]
+    assert spec["serviceAccountName"] == APPLIER
+    assert spec["automountServiceAccountToken"] is False
+    assert spec["securityContext"] == {
+        "runAsNonRoot": True,
+        "runAsUser": 65532,
+        "runAsGroup": 65532,
+        "fsGroup": 65532,
+        "seccompProfile": {"type": "RuntimeDefault"},
+    }
+    (container,) = spec["containers"]
+    assert container["image"] == "registry.example.com/sie-placement:1.0.0"
+    assert container["command"] == ["sie-placement"]
+    assert container["args"] == APPLIER_ARGS
+    assert "env" not in container
+    assert container["securityContext"] == {
+        "allowPrivilegeEscalation": False,
+        "readOnlyRootFilesystem": True,
+        "capabilities": {"drop": ["ALL"]},
+    }
+    assert container["volumeMounts"] == [{"name": "plan", "mountPath": "/etc/sie-placement/plan", "readOnly": True}]
+    assert spec["volumes"] == [
+        {"name": "plan", "configMap": {"name": f"{APPLIER}-plan", "items": [{"key": "plan.json", "path": "plan.json"}]}}
+    ]
+
+
+@pytest.mark.parametrize("apply", [False, True])
+@pytest.mark.parametrize("auth", [APPLIER_AUTH, APPLIER_RUNTIME_AUTH], ids=["token", "run-time"])
+def test_the_placement_applier_mounts_the_admin_token_only_to_write(tmp_path: Path, auth: dict, apply: bool) -> None:
+    docs = placement_documents(tmp_path, applier_layers(auth, apply=apply, clientToken=APPLIER_CLIENT_TOKEN))
+    spec = applier_pod(docs)["spec"]
+    (container,) = spec["containers"]
+    client = ["--api-key-file", "/etc/sie-placement/client-token/token"]
+    write = ["--apply", "--admin-token-file", "/etc/sie-placement/admin-token/token"] if apply else []
+    assert container["args"] == [*APPLIER_ARGS, *client, *write]
+    mounts = {mount["name"]: mount for mount in container["volumeMounts"]}
+    volumes = {volume["name"]: volume for volume in spec["volumes"]}
+    expected = {"client-token": ("applier-client", "token")}
+    if apply:
+        expected["admin-token"] = ("gateway-admin", "admin")
+    assert set(mounts) == set(volumes) == {"plan", *expected}
+    for name, (secret, key) in expected.items():
+        assert mounts[name] == {"name": name, "mountPath": f"/etc/sie-placement/{name}", "readOnly": True}
+        assert volumes[name]["secret"] == {
+            "secretName": secret,
+            "defaultMode": SECRET_FILE_MODE,
+            "items": [{"key": key, "path": "token"}],
+        }
+    assert "env" not in container
+    assert not [
+        doc
+        for doc in docs
+        if doc["kind"] == "Secret" and doc["metadata"]["name"] in {"gateway-admin", "applier-client"}
+    ]
+    assert env_entries(docs, "SIE_ADMIN_TOKEN") == {
+        CONFIG_SERVICE: GENERATED_ADMIN,
+        GATEWAY: {"name": "gateway-admin", "key": "admin"},
+    }
+
+
+def test_the_placement_applier_writes_without_a_token_when_the_gateway_authenticates_nothing(
+    tmp_path: Path,
+) -> None:
+    spec = applier_pod(placement_documents(tmp_path, applier_layers(apply=True)))["spec"]
+    (container,) = spec["containers"]
+    assert container["args"] == [*APPLIER_ARGS, "--apply"]
+    assert [mount["name"] for mount in container["volumeMounts"]] == ["plan"]
+    assert [volume["name"] for volume in spec["volumes"]] == ["plan"]
+
+
+@pytest.mark.parametrize(
+    ("dependencies", "address"),
+    [
+        ({}, "http://prometheus-operated.monitoring.svc.cluster.local:9090"),
+        (
+            {"kube-prometheus-stack": {"install": True}},
+            "http://sie-kube-prometheus-stack-prometheus.sie.svc.cluster.local:9090",
+        ),
+    ],
+)
+def test_the_placement_applier_queries_the_prometheus_that_keda_queries(
+    tmp_path: Path, dependencies: dict, address: str
+) -> None:
+    docs = placement_documents(tmp_path, applier_layers(dependencies))
+    (container,) = applier_pod(docs)["spec"]["containers"]
+    args = container["args"]
+    assert args[args.index("--prometheus-url") + 1] == address
+    assert {
+        trigger["metadata"]["serverAddress"]
+        for scaled_object in worker_scaled_objects(docs)
+        for trigger in scaled_object["spec"]["triggers"]
+    } == {address}
+
+
+@pytest.mark.parametrize(
+    ("extra_env", "limits"),
+    [
+        (
+            [
+                {"name": "SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT", "value": " 6 "},
+                {"name": "SIE_GATEWAY_MAX_POOLS", "value": "many"},
+            ],
+            ["--max-pool-floor", "6"],
+        ),
+        ([{"name": "SIE_GATEWAY_MAX_POOLS", "value": "32"}], ["--max-pools", "32"]),
+        (
+            [
+                {"name": "SIE_GATEWAY_MAX_POOLS", "value": "32"},
+                {"name": "SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT", "value": "3"},
+            ],
+            ["--max-pool-floor", "3", "--max-pools", "32"],
+        ),
+    ],
+)
+def test_the_placement_applier_uses_the_gateways_literal_pool_limits(
+    tmp_path: Path, extra_env: list[dict], limits: list[str]
+) -> None:
+    docs = placement_documents(tmp_path, applier_layers({"gateway": {"extraEnv": extra_env}}))
+    (container,) = applier_pod(docs)["spec"]["containers"]
+    assert container["args"] == [*APPLIER_ARGS, *limits]
+
+
+def drop_l4_envelope(layers: list[dict]) -> None:
+    del layers[2]["workers"]["pools"]["l4"]["bundles"]["default"]["envelope"]
+
+
+def widen_l4_envelope(layers: list[dict]) -> None:
+    layers[2]["workers"]["pools"]["l4"]["bundles"]["default"]["envelope"]["floorMax"] = 3
+
+
+def disable_h100(layers: list[dict]) -> None:
+    layers[1]["workers"]["pools"]["h100"]["enabled"] = False
+
+
+def plan_without_lanes(layers: list[dict]) -> None:
+    layers[-1]["placementApplier"]["plan"]["lanes"] = []
+
+
+@pytest.mark.parametrize(
+    ("change", "applier", "error"),
+    [
+        (
+            lambda layers: layers.__setitem__(0, {}),
+            {},
+            "placementApplier.enabled needs autoscaling.enabled",
+        ),
+        (None, {"image": {"repository": "registry.example.com/sie-placement", "tag": " "}}, "placementApplier.image"),
+        (None, {"apply": "true"}, 'placementApplier.apply must be a boolean (true or false), got "true"'),
+        (None, {"enabled": "true"}, 'placementApplier.enabled must be a boolean (true or false), got "true"'),
+        (None, {"plan": {}}, "placementApplier.plan must be a placement-plan document"),
+        (plan_without_lanes, {}, "placementApplier.plan.lanes must list at least one lane"),
+        (
+            disable_h100,
+            {},
+            'placementApplier.plan.lanes[4] names the lane "batch|h100|default" (queuePool|machineProfile|bundle), '
+            "which is not an enabled worker lane",
+        ),
+        (
+            drop_l4_envelope,
+            {},
+            'placementApplier.plan.lanes[0] names workers.pools.l4.bundles["default"], which declares no envelope',
+        ),
+        (
+            widen_l4_envelope,
+            {},
+            "placementApplier.plan.lanes[0].envelope (floorMin 1, floorMax 2) differs from "
+            'workers.pools.l4.bundles["default"].envelope (floorMin 1, floorMax 3)',
+        ),
+        (None, {"podAnnotations": {"checksum/plan": "x"}}, "must not override chart-owned annotation checksum/plan"),
+        (
+            lambda layers: layers.insert(3, APPLIER_AUTH),
+            {},
+            "placementApplier.enabled with gateway token auth (or a gateway auth mode known only at run time) needs "
+            "placementApplier.clientToken.existingSecretName",
+        ),
+        (
+            lambda layers: layers.insert(
+                3, {"gateway": {"auth": {"mode": "token", "tokenSecretName": "gateway-tokens"}}}
+            ),
+            {"apply": True, "clientToken": APPLIER_CLIENT_TOKEN},
+            "placementApplier.apply=true with gateway token auth (or a gateway auth mode known only at run time) needs "
+            "gateway.auth.adminTokenSecretName",
+        ),
+        (
+            lambda layers: layers.insert(3, APPLIER_RUNTIME_AUTH),
+            {},
+            "placementApplier.enabled with gateway token auth (or a gateway auth mode known only at run time) needs "
+            "placementApplier.clientToken.existingSecretName",
+        ),
+        (
+            lambda layers: layers.insert(
+                3, {"gateway": {"auth": {"tokenSecretName": "gateway-tokens"}, "extraEnv": RUNTIME_AUTH_MODE}}
+            ),
+            {"apply": True, "clientToken": APPLIER_CLIENT_TOKEN},
+            "placementApplier.apply=true with gateway token auth (or a gateway auth mode known only at run time) needs "
+            "gateway.auth.adminTokenSecretName",
+        ),
+        (
+            lambda layers: layers.insert(3, APPLIER_AUTH),
+            {"clientToken": {"existingSecretName": "applier-client", "secretKey": " "}},
+            "placementApplier.clientToken.secretKey is empty",
+        ),
+        (
+            lambda layers: layers.insert(
+                3,
+                {
+                    "gateway": {
+                        "extraEnv": [
+                            {
+                                "name": "SIE_GATEWAY_MAX_POOLS",
+                                "valueFrom": {"configMapKeyRef": {"name": "limits", "key": "pools"}},
+                            }
+                        ]
+                    }
+                },
+            ),
+            {},
+            "placementApplier.enabled needs gateway.extraEnv SIE_GATEWAY_MAX_POOLS as a literal value",
+        ),
+    ],
+)
+def test_an_unrealizable_placement_applier_fails_the_render(
+    tmp_path: Path, change: object, applier: dict, error: str
+) -> None:
+    layers = applier_layers(**applier)
+    if callable(change):
+        change(layers)
+    result = render_placement(tmp_path, *layers)
+    assert result.returncode != 0
+    assert error in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("auth", "example"),
+    [({"mode": "token", "generateToken": True}, True), ({"mode": "token", "tokenSecretName": "gateway-tokens"}, False)],
+    ids=["generated", "operator-managed"],
+)
+def test_the_applier_client_token_error_suggests_only_a_single_token_secret(
+    tmp_path: Path, auth: dict, example: bool
+) -> None:
+    result = render_placement(tmp_path, *applier_layers({"gateway": {"auth": auth}}))
+    assert result.returncode != 0
+    generated = (
+        "for example placementApplier.clientToken.existingSecretName=sie-sie-cluster-gateway-token and "
+        "placementApplier.clientToken.secretKey=SIE_AUTH_TOKEN"
+    )
+    assert (generated in result.stderr) is example
+    assert ("for example" in result.stderr) is example
+    assert "The applier presents the whole value, so the key must not list several comma-separated tokens" in (
+        result.stderr
+    )
+
+
+def test_the_applier_client_token_is_kept_apart_from_the_admin_token(tmp_path: Path) -> None:
+    client = {"existingSecretName": "gateway-admin", "secretKey": "admin"}
+    result = render_placement(tmp_path, *applier_layers(APPLIER_AUTH, clientToken=client))
+    assert result.returncode != 0
+    assert (
+        "The placement applier client token and the gateway admin token are the same Secret key (gateway-admin/admin)"
+        in result.stderr
+    )
+
+
+@pytest.mark.parametrize(
+    "client",
+    [
+        {"existingSecretName": "gateway-admin", "secretKey": "admin "},
+        {"existingSecretName": "gateway-admin ", "secretKey": "admin"},
+        {"existingSecretName": " gateway-admin", "secretKey": "\tadmin"},
+    ],
+    ids=["key-space", "name-space", "leading-space"],
+)
+@pytest.mark.parametrize("apply", [False, True])
+def test_the_applier_client_token_is_kept_apart_from_the_admin_token_whatever_its_spacing(
+    tmp_path: Path, client: dict, apply: bool
+) -> None:
+    result = render_placement(tmp_path, *applier_layers(APPLIER_AUTH, apply=apply, clientToken=client))
+    assert result.returncode != 0
+    assert (
+        "The placement applier client token and the gateway admin token are the same Secret key (gateway-admin/admin)"
+        in result.stderr
+    )
+
+
+@pytest.mark.parametrize(
+    ("client", "error"),
+    [
+        (
+            {"existingSecretName": "gateway-admin #x", "secretKey": "admin"},
+            "placementApplier.clientToken.existingSecretName must name a Kubernetes Secret (lowercase letters, digits, "
+            "'-' and '.'), got \"gateway-admin #x\"",
+        ),
+        (
+            {"existingSecretName": "applier-client", "secretKey": "admin #x"},
+            "placementApplier.clientToken.secretKey must be a Kubernetes Secret data key (letters, digits, '-', '_' "
+            "and '.'), got \"admin #x\"",
+        ),
+    ],
+)
+def test_an_applier_client_token_that_is_not_a_secret_key_fails_the_render(
+    tmp_path: Path, client: dict, error: str
+) -> None:
+    result = render_placement(tmp_path, *applier_layers(APPLIER_AUTH, clientToken=client))
+    assert result.returncode != 0
+    assert error in result.stderr
+
+
+def test_the_applier_mounts_the_trimmed_client_token_secret_key(tmp_path: Path) -> None:
+    client = {"existingSecretName": " applier-client ", "secretKey": " token "}
+    spec = applier_pod(placement_documents(tmp_path, applier_layers(APPLIER_AUTH, clientToken=client)))["spec"]
+    volumes = {volume["name"]: volume for volume in spec["volumes"]}
+    assert volumes["client-token"]["secret"] == {
+        "secretName": "applier-client",
+        "defaultMode": SECRET_FILE_MODE,
+        "items": [{"key": "token", "path": "token"}],
+    }
+
+
+@pytest.mark.parametrize(
+    ("existing", "client", "error"),
+    [
+        (
+            "graf ",
+            "graf ",
+            "The placement applier client token and the Grafana admin password are the same Secret key "
+            "(graf/admin-password)",
+        ),
+        (
+            "graf ",
+            "graf",
+            "The placement applier client token and the Grafana admin password are the same Secret key "
+            "(graf/admin-password)",
+        ),
+        (
+            "graf #x",
+            "graf",
+            "kube-prometheus-stack.grafana.admin.existingSecret must name a Kubernetes Secret (lowercase letters, "
+            "digits, '-' and '.'), got \"graf #x\"",
+        ),
+        (
+            "{{\t.Release.Name }}-graf\n",
+            "sie-graf",
+            "The placement applier client token and the Grafana admin password are the same Secret key "
+            "(sie-graf/admin-password)",
+        ),
+    ],
+    ids=["both-spaced", "grafana-spaced", "grafana-comment", "template-spaced"],
+)
+def test_the_applier_client_token_is_kept_apart_from_the_grafana_admin_secret_whatever_its_spelling(
+    tmp_path: Path, existing: str, client: str, error: str
+) -> None:
+    stack = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": existing}}}}
+    token = {"existingSecretName": client, "secretKey": "admin-password"}
+    result = render_placement(tmp_path, *applier_layers(APPLIER_AUTH, stack, clientToken=token))
+    assert result.returncode != 0
+    assert error in result.stderr
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        '{{ if contains "grafana" (index . "Template" "BasePath") }}shared{{ else }}other{{ end }}',
+        '{{ .Template.Name | base | trimSuffix ".yaml" }}',
+        "{{ $.Template.BasePath }}-graf",
+        '{{ index .Values "admin" }}',
+        "{{ .Values }}",
+        '{{ include "grafana.fullname" . }}',
+        "{{ .Release.Name | upper }}-graf",
+        "{{ .Capabilities.KubeVersion.Major }}-graf",
+        "Graf-{{ .Release.Name }}",
+        "{{/* c */}}graf",
+        '{{ printf "%s-graf" .Release.Name }}',
+    ],
+    ids=[
+        "index-template",
+        "template",
+        "template-dollar",
+        "index-values",
+        "bare-values",
+        "include",
+        "pipeline",
+        "capabilities",
+        "uppercase",
+        "comment",
+        "function",
+    ],
+)
+def test_a_grafana_admin_secret_that_depends_on_more_than_the_release_is_refused(tmp_path: Path, existing: str) -> None:
+    values = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": existing}}}}
+    result = render_chart(tmp_path, values)
+    assert result.returncode != 0
+    assert "kube-prometheus-stack.grafana.admin.existingSecret may hold only lowercase letters, digits" in (
+        result.stderr
+    )
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        "{{ .Release.Name }}-graf",
+        "{{- .Release.Namespace -}}-graf",
+        "{{ $.Release.Name }}-graf",
+        "{{ .Chart.Name }}-admin",
+        "graf",
+        "{{\t.Release.Name\t}}-graf",
+        "{{\n.Release.Name\n}}-graf",
+        " {{ .Release.Name }}-graf\n",
+    ],
+)
+def test_a_grafana_admin_secret_that_names_release_values_or_chart_fields_renders(
+    tmp_path: Path, existing: str
+) -> None:
+    values = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": existing}}}}
+    result = render_chart(tmp_path, values)
+    assert result.returncode == 0, result.stderr
+
+
+def grafana_admin_password_secret(documents: list[dict]) -> str:
+    (variable,) = [
+        variable
+        for doc in documents
+        if doc["kind"] == "Deployment"
+        for container in doc["spec"]["template"]["spec"]["containers"]
+        if container["name"] == "grafana"
+        for variable in container.get("env", [])
+        if variable["name"] == "GF_SECURITY_ADMIN_PASSWORD"
+    ]
+    return variable["valueFrom"]["secretKeyRef"]["name"]
+
+
+@pytest.mark.parametrize(
+    ("existing", "secret"),
+    [
+        ("", "sie-grafana"),
+        ("graf", "graf"),
+        ("{{ .Values.admin.userKey }}-admin", "admin-user-admin"),
+        ("{{ .Chart.Name }}-admin", "grafana-admin"),
+        ("{{ .Release.Name }}-graf\n", "sie-graf"),
+    ],
+    ids=["default", "literal", "grafana-values", "grafana-chart", "trailing-newline"],
+)
+def test_the_notes_name_the_grafana_admin_secret_that_grafana_reads(tmp_path: Path, existing: str, secret: str) -> None:
+    values = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": existing}}}}
+    assert grafana_admin_password_secret(rendered_documents(tmp_path, values)) == secret
+    notes = rendered_notes(tmp_path, values)
+    assert f"Grafana password: kubectl get secret -n sie {secret} -o jsonpath=" in notes
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"GF_SECURITY_ADMIN_USER": "admin", "GF_SECURITY_ADMIN_PASSWORD": "fixture-password"},
+        {"GF_SECURITY_ADMIN_USER": "admin", "GF_SECURITY_ADMIN_PASSWORD__FILE": "/etc/grafana/password"},
+        {"GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION": "true"},
+    ],
+    ids=["password", "password-file", "no-initial-admin"],
+)
+def test_the_notes_name_no_grafana_admin_secret_when_grafana_reads_none(tmp_path: Path, env: dict) -> None:
+    grafana = {
+        "namespaceOverride": "monitoring",
+        "env": env,
+        "admin": {"existingSecret": "{{ .Values.gateway.auth.mode }}-admin"},
+    }
+    notes = rendered_notes(tmp_path, {"kube-prometheus-stack": {"install": True, "grafana": grafana}})
+    assert "Grafana:    enabled" in notes
+    assert "Grafana password" not in notes
+
+
+@pytest.mark.parametrize(
+    ("existing", "grafana", "error"),
+    [
+        (
+            "{{ .Values.YAML }}",
+            {"adminPassword": "Fixture-Admin-Password"},
+            "kube-prometheus-stack.grafana.admin.existingSecret must name a Kubernetes Secret (lowercase letters, "
+            "digits, '-' and '.'), got the value of \"{{ .Values.YAML }}\" (not shown, as it may hold chart values)",
+        ),
+        (
+            "{{ .Values.adminPassword }}",
+            {"adminPassword": "20261106"},
+            "kube-prometheus-stack.grafana.admin.existingSecret is written unquoted by its chart, and YAML does not "
+            'read the value of "{{ .Values.adminPassword }}" (not shown, as it may hold chart values) as that '
+            "string",
+        ),
+    ],
+    ids=["invalid-name", "yaml-number"],
+)
+def test_a_grafana_admin_secret_template_that_names_no_secret_fails_without_showing_its_value(
+    tmp_path: Path, existing: str, grafana: dict, error: str
+) -> None:
+    grafana = {**grafana, "admin": {"existingSecret": existing}}
+    result = render_chart(tmp_path, {"kube-prometheus-stack": {"install": True, "grafana": grafana}})
+    assert result.returncode != 0
+    assert error in result.stderr
+    assert grafana["adminPassword"] not in result.stderr
+
+
+@pytest.mark.parametrize("value", ["null", "true", "no", "123", "1e3", "0x1f", "12.5", "0b-1", "0b-10"])
+def test_an_unquoted_subchart_secret_name_that_yaml_reads_as_a_scalar_is_refused(tmp_path: Path, value: str) -> None:
+    values = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": value}}}}
+    result = render_chart(tmp_path, values)
+    assert result.returncode != 0
+    assert (
+        "kube-prometheus-stack.grafana.admin.existingSecret is written unquoted by its chart, "
+        f"and YAML does not read {json.dumps(value)} as that string"
+    ) in result.stderr
+
+
+@pytest.mark.parametrize("key", [".5", "-.5", ".5e-3", "1.5", "true", "y", "1e_3", "-_1", "0_x1", "-"])
+def test_an_unquoted_subchart_secret_key_that_yaml_does_not_read_as_that_string_is_refused(
+    tmp_path: Path, key: str
+) -> None:
+    grafana = {"admin": {"existingSecret": "graf", "userKey": key}}
+    values = {"kube-prometheus-stack": {"install": True, "grafana": grafana}}
+    result = render_chart(tmp_path, values)
+    assert result.returncode != 0
+    assert (
+        "kube-prometheus-stack.grafana.admin.userKey is written unquoted by its chart, "
+        f"and YAML does not read {json.dumps(key)} as that string"
+    ) in result.stderr
+
+
+@pytest.mark.parametrize("key", [".htpasswd", ".5x", "admin-user", "v1.5", "yEs", "tRue", ".1_"])
+def test_an_unquoted_subchart_secret_key_that_yaml_reads_as_a_string_renders(tmp_path: Path, key: str) -> None:
+    grafana = {"admin": {"existingSecret": "graf", "userKey": key}}
+    values = {"kube-prometheus-stack": {"install": True, "grafana": grafana}}
+    result = render_chart(tmp_path, values)
+    assert result.returncode == 0, result.stderr
+    assert f"key: {key}\n" in result.stdout
+
+
+@pytest.mark.parametrize("value", ["1-graf", "graf-1.2.3", "nullable", "one", "0b12", "0bb"])
+def test_an_unquoted_subchart_secret_name_that_yaml_reads_as_a_string_renders(tmp_path: Path, value: str) -> None:
+    values = {"kube-prometheus-stack": {"install": True, "grafana": {"admin": {"existingSecret": value}}}}
+    result = render_chart(tmp_path, values)
+    assert result.returncode == 0, result.stderr
+    assert f"name: {value}\n" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("keda", "error"),
+    [
+        (
+            {"certificates": {"secretName": "keda-certs "}},
+            "The worker token and the KEDA serving TLS credentials are the same Secret key (keda-certs/tls.key)",
+        ),
+        (
+            {"certificates": {"secretName": "keda-certs #x"}},
+            "keda.certificates.secretName must name a Kubernetes Secret",
+        ),
+    ],
+    ids=["spaced", "comment"],
+)
+def test_the_worker_token_is_kept_apart_from_the_keda_serving_secret_whatever_its_spelling(
+    tmp_path: Path, keda: dict, error: str
+) -> None:
+    values = {
+        "keda": {"install": True, **keda},
+        "workers": worker_with(tokenSecretName="keda-certs", tokenSecretKey="tls.key"),
+    }
+    assert error in render_error(tmp_path, values)
+
+
+INJECTED_PULL_POLICY = "IfNotPresent\n          env:\n            - name: INJECTED\n              value: x"
+
+
+@pytest.mark.parametrize("policy", ["Always", "IfNotPresent", "Never"])
+def test_the_applier_takes_a_kubernetes_pull_policy(tmp_path: Path, policy: str) -> None:
+    image = {**APPLIER_IMAGE, "pullPolicy": policy}
+    (container,) = applier_pod(placement_documents(tmp_path, applier_layers(image=image)))["spec"]["containers"]
+    assert container["imagePullPolicy"] == policy
+    assert "env" not in container
+
+
+@pytest.mark.parametrize("policy", [INJECTED_PULL_POLICY, "ifnotpresent", "Sometimes"])
+def test_an_applier_pull_policy_kubernetes_does_not_know_fails_the_render(tmp_path: Path, policy: str) -> None:
+    result = render_placement(tmp_path, *applier_layers(image={**APPLIER_IMAGE, "pullPolicy": policy}))
+    assert result.returncode != 0
+    assert "placementApplier.image.pullPolicy must be Always, IfNotPresent or Never" in result.stderr
+    assert "INJECTED" not in result.stdout
+
+
+def test_the_applier_holds_no_admin_token_when_the_gateway_authenticates_nothing(tmp_path: Path) -> None:
+    auth = {
+        "gateway": {"auth": {"mode": "none", "adminTokenSecretName": "gateway-admin", "adminTokenSecretKey": "admin"}}
+    }
+    spec = applier_pod(placement_documents(tmp_path, applier_layers(auth, apply=True)))["spec"]
+    (container,) = spec["containers"]
+    assert container["args"] == [*APPLIER_ARGS, "--apply"]
+    assert [mount["name"] for mount in container["volumeMounts"]] == ["plan"]
+    assert [volume["name"] for volume in spec["volumes"]] == ["plan"]
+
+
+def envelope_values(settings: dict, *, autoscaling: bool = False) -> dict:
+    values = {"workers": {"pools": {"l4": {"enabled": True, "bundles": {"default": settings}}}}}
+    return {**values, **AUTOSCALING_VALUES} if autoscaling else values
+
+
+ENVELOPE = 'workers.pools.l4.bundles["default"].envelope'
+
+
+@pytest.mark.parametrize(
+    ("settings", "autoscaling"),
+    [
+        ({"minReplicas": 0, "maxReplicas": 4, "envelope": {"floorMin": 0, "floorMax": 0}}, True),
+        ({"minReplicas": 0, "maxReplicas": 4, "envelope": {"floorMin": 0, "floorMax": 2}}, True),
+        ({"minReplicas": 0, "maxReplicas": 4, "envelope": {"floorMin": 0, "floorMax": 1}}, False),
+        ({"minReplicas": 0, "maxReplicas": 1, "envelope": {"floorMin": 0, "floorMax": 1}}, True),
+        ({"minReplicas": 1, "maxReplicas": 4, "envelope": {"floorMin": 1, "floorMax": 4}}, True),
+    ],
+)
+def test_a_lane_envelope_inside_the_lane_bounds_renders(tmp_path: Path, settings: dict, autoscaling: bool) -> None:
+    result = render_workers(tmp_path, envelope_values(settings, autoscaling=autoscaling))
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("settings", "autoscaling", "error"),
+    [
+        (
+            {"minReplicas": 1, "maxReplicas": 4, "envelope": {"floorMin": 0, "floorMax": 2}},
+            False,
+            f"{ENVELOPE}.floorMin must equal minReplicas (1), got 0",
+        ),
+        (
+            {"minReplicas": 1, "maxReplicas": 4, "envelope": {"floorMin": 1, "floorMax": 5}},
+            False,
+            f"{ENVELOPE}.floorMax must not exceed maxReplicas (4), got 5",
+        ),
+        (
+            {"minReplicas": 1, "maxReplicas": 4, "envelope": {"floorMin": 1, "floorMax": 0}},
+            False,
+            f"{ENVELOPE}.floorMax must be at least floorMin (1), got 0",
+        ),
+        (
+            {"minReplicas": 0, "maxReplicas": 4, "envelope": {"floorMin": 0, "floorMax": 1}},
+            True,
+            f"{ENVELOPE}.floorMax must be 0 or at least the lane's fallback floor (2), got 1",
+        ),
+        (
+            {"minReplicas": 1, "maxReplicas": 4, "envelope": {"floorMin": 1, "floorMax": "2"}},
+            False,
+            f"{ENVELOPE}.floorMax must be a non-negative integer, got 2",
+        ),
+        (
+            {"minReplicas": 1, "maxReplicas": 4, "envelope": {"floorMin": 1, "floorMax": 1.5}},
+            False,
+            f"{ENVELOPE}.floorMax must be a non-negative integer, got 1.5",
+        ),
+        (
+            {"minReplicas": 1, "maxReplicas": 4, "envelope": {"floorMin": 1}},
+            False,
+            f"{ENVELOPE}.floorMax must be a non-negative integer, got nothing",
+        ),
+        (
+            {"minReplicas": 1, "maxReplicas": 4, "envelope": {"floorMin": 1, "floorMax": 2, "bufferMin": 0}},
+            False,
+            f"{ENVELOPE}.bufferMin is not an envelope field",
+        ),
+        (
+            {"minReplicas": 1, "maxReplicas": 4, "envelope": [1, 2]},
+            False,
+            f"{ENVELOPE} must be a map with floorMin and floorMax",
+        ),
+    ],
+)
+def test_a_lane_envelope_outside_the_lane_bounds_fails_the_render(
+    tmp_path: Path, settings: dict, autoscaling: bool, error: str
+) -> None:
+    result = render_workers(tmp_path, envelope_values(settings, autoscaling=autoscaling))
+    assert result.returncode != 0
+    assert error in result.stderr
+
+
+def test_readme_envelope_example_renders(tmp_path: Path) -> None:
+    readme = (ROOT / helm.CHART_DIR / "README.md").read_text(encoding="utf-8")
+    section = readme.split("### Lane envelopes and the placement applier\n", 1)[1].split("\n### ", 1)[0]
+    (example,) = re.findall(r"```yaml\n(.*?)```", section, flags=re.DOTALL)
+    values = yaml.safe_load(example)
+    assert values["workers"]["pools"]["l4"]["bundles"]["default"]["envelope"]
+    result = render_workers(tmp_path, {**values, **AUTOSCALING_VALUES})
+    assert result.returncode == 0, result.stderr

@@ -6,6 +6,15 @@ requires-python = ">=3.12,<3.13"
 license = { text = "Apache-2.0" }
 dependencies = []
 
+[project.optional-dependencies]
+keda = [
+    "httpx>=0.28,<1",
+    "sie-sdk>=0.11",
+]
+
+[project.scripts]
+sie-placement = "sie_placement.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

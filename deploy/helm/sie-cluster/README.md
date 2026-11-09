@@ -490,6 +490,168 @@ metrics, the bundled collector Prometheus exporter, and its ServiceMonitor.
 The chart therefore cannot render collector-scoped application alerts without
 a scrape path.
 
+### Lane envelopes and the placement applier
+
+A worker lane may declare an `envelope`, the range of warm floors that the
+placement applier may hold it at:
+
+```yaml
+workers:
+  pools:
+    l4:
+      enabled: true
+      bundles:
+        default:
+          minReplicas: 1
+          maxReplicas: 4
+          envelope:
+            floorMin: 1
+            floorMax: 2
+```
+
+The render fails unless `floorMin` and `floorMax` are non-negative integers,
+`floorMin` equals `minReplicas`, and `floorMax` lies between `floorMin` and
+`maxReplicas`. A lane returns to `minReplicas` whenever nothing raises its
+floor, and KEDA never runs more than `maxReplicas`. With autoscaling enabled, a
+lane with `minReplicas: 0` takes a `floorMax` of 0 or at least its fallback
+floor, `min(maxReplicas, autoscaling.fallbackReplicas)`, because KEDA runs at
+least that many workers once a floor activates the lane. The envelope renders
+nothing by itself: the lane's StatefulSet and ScaledObject are the same with or
+without it.
+
+`placementApplier.enabled=true` renders one Deployment that runs
+`sie-placement tune` from the `sie-placement` package, whose README describes
+the command, its audit rows and its refusals, against a placement plan:
+
+```bash
+helm upgrade <RELEASE> oci://ghcr.io/superlinked/charts/sie-cluster \
+  --namespace <NAMESPACE> \
+  -f <VALUES_FILE> \
+  --set placementApplier.enabled=true \
+  --set placementApplier.image.repository=<IMAGE> \
+  --set placementApplier.image.tag=<TAG> \
+  --set-json "placementApplier.plan=$(cat plan.json)"
+```
+
+Every 60 seconds the applier reads each plan lane's series from the Prometheus
+that KEDA queries, scoped to this release's collector target, reads the lane's
+floor-carrier pool from the gateway, decides one step inside the lane's
+envelope, and prints one JSON audit row per lane to its log. A floor carrier is
+an API logical pool named `placement-floor-<queuePool>-<machineProfile>-<bundle>`.
+The gateway keeps each lane at the largest warm floor among its pools and
+reports it to the lane's warm-floor KEDA trigger, so a carrier raises a lane
+above its chart floor and never lowers the floor another pool sets. The
+ScaledObject triggers are the same with or without the applier.
+
+- **Shadow mode** (`placementApplier.apply: false`, the default) decides and
+  records and writes nothing. Run it first to see how often each lane reads as
+  under pressure.
+- **Apply mode** (`placementApplier.apply: true`) upserts each lane's carrier on
+  every tick, which renews the carrier's lease and sets its floor. When the
+  applier stops, each carrier lapses 1200 seconds after its last write by
+  default, the gateway removes it, and the lane returns to the largest floor
+  its chart and its other pools set.
+
+The render fails unless:
+
+- `autoscaling.enabled=true`.
+- `placementApplier.image.repository` and `placementApplier.image.tag` name an
+  image that installs `sie-placement` with its `keda` extra and can run as user
+  and group 65532. The chart publishes no such image.
+  `placementApplier.image.pullPolicy` is `Always`, `IfNotPresent` or `Never`.
+- `placementApplier.plan` is a map whose `kind` is `placement-plan` and whose
+  `lanes` list holds at least one lane. Each of its lanes names an enabled
+  worker lane by its `queuePool`, `cell.machineProfile` and `bundle`, compared
+  as the chart canonicalizes lane tokens, and that worker lane declares an
+  `envelope` equal to the plan lane's. A plan therefore cannot move a floor
+  outside a range that the chart values bound. The values overlay that
+  `helm_values` in `sie-placement` emits from a plan sets each lane's
+  `minReplicas` and `maxReplicas` but no `envelope`, so copy each plan lane's
+  `envelope.floorMin` and `envelope.floorMax` into the worker lane it names.
+  The chart checks only these fields. The applier parses the whole plan when
+  it starts and refuses one that is not a valid placement-plan document, an
+  unsupported `schemaVersion` included.
+- With gateway token auth, or a gateway auth mode known only at run time,
+  `placementApplier.clientToken.existingSecretName` names a Secret key that
+  holds one gateway client token, which the applier presents on pool reads.
+  The applier presents the whole value, so the key must not list several
+  comma-separated tokens, as an operator-managed `gateway.auth.tokenSecretName`
+  does during a [rotation](#gateway-token). The Secret name and key, after
+  trimming surrounding whitespace, are a Kubernetes Secret name and data key
+  that hold no other credential the chart wires.
+- With `placementApplier.apply: true` and gateway token auth, or a mode known
+  only at run time, `gateway.auth.adminTokenSecretName` is set.
+- `gateway.extraEnv` sets `SIE_GATEWAY_POOL_MAX_MINIMUM_WORKER_COUNT` and
+  `SIE_GATEWAY_MAX_POOLS`, if at all, as literal values. The chart passes an
+  integer value of either to the applier as `--max-pool-floor` or
+  `--max-pools`, so the applier refuses the plans the gateway would.
+
+The applier itself refuses a plan whose `floorMax` exceeds the gateway's
+per-pool floor limit, 4 by default, or whose lanes need more carriers than the
+gateway admits, 64 by default. A refusal, an unreadable token file or an
+invalid flag ends the container, which then shows as `CrashLoopBackOff`. A
+failed Prometheus query or pool call fails only its tick. The applier prints a
+failed query to standard error, and the audit rows show each series it could
+not read as `null`. The audit row's `error` records a failed pool call.
+
+#### Applier permissions
+
+| Credential | Held | Authorizes |
+| --- | --- | --- |
+| Gateway admin token | Only with `placementApplier.apply: true` and a gateway that may authenticate, with token auth or a mode known only at run time, from the Secret `gateway.auth.adminTokenSecretName` (key `gateway.auth.adminTokenSecretKey`) | `POST`, `PUT` and `DELETE` under `/v1/pools`, `/v1/admin` and `/v1/configs`: every gateway admin route, not only floor carriers |
+| Gateway client token | When `placementApplier.clientToken.existingSecretName` is set | Every gateway route that is not an admin route, inference included; the applier uses it for `GET /v1/pools/{name}` |
+| Kubernetes API | Never | Nothing: the applier has its own ServiceAccount, mounts no ServiceAccount token, and has no Role or RoleBinding |
+
+The chart never creates either token or renders its value. Each is mounted
+read-only as a file of mode `0440` owned by group 65532, under
+`/etc/sie-placement/`, and passed by path with `--admin-token-file` or
+`--api-key-file`. The applier sends the admin token only on pool writes to the
+in-cluster gateway Service, never the client token on writes, and never takes a
+token on its command line or prints or logs one: a rejected token file is named
+by its path, a gateway call that gets an error reply by its HTTP status alone,
+so no text the server returns reaches the log, a failed connection by the SDK's
+connection error message, and any other transport failure by its exception
+type. Anyone who can read the applier's log sees lane telemetry and floors, not
+credentials. Anyone who can create pods in the namespace with that Secret can
+still read it, so the Secret read limits under [Who holds which
+token](#who-holds-which-token) apply.
+
+The applier reads both token files once, when it starts. After you rotate the
+gateway client token, restart it as step 2 of
+[rotating the gateway token](#gateway-token) says. The gateway also reads its
+admin token once, when it starts, and accepts one at a time, so after you
+rotate the gateway admin token, restart the gateway and then the applier:
+
+```bash
+kubectl rollout restart deployment/<FULLNAME>-gateway -n <NAMESPACE>
+kubectl rollout restart deployment/<FULLNAME>-placement-applier -n <NAMESPACE>
+```
+
+The cutover is complete once both run with the new token. Pool reads use the
+client token and pool writes the admin token, so a stale client token makes the
+gateway refuse the applier's reads, and a tick that cannot read a carrier does
+not write it, while a stale admin token makes it refuse only the writes. Either
+way the pod keeps running: each tick's audit rows record the failures, and in
+apply mode each carrier lapses 1200 seconds after its last write and the lane
+returns to the largest floor its chart and its other pools set.
+
+The Deployment runs one replica with the `Recreate` strategy, so at most one
+applier writes carriers, also during a rollout. Its pod runs as user and group
+65532 with `runAsNonRoot`, the `RuntimeDefault` seccomp profile, a read-only
+root filesystem, no privilege escalation and every capability dropped. A
+change to `placementApplier.plan` restarts it.
+
+#### Applier network access
+
+The applier accepts no connections. It opens connections to the gateway
+Service (`gateway.service.port`, 8080 by default), to the Prometheus query API
+(`autoscaling.prometheusAddress`, or the bundled Prometheus Service), and to
+cluster DNS. The chart renders no NetworkPolicy for it. Under a default-deny
+egress policy, allow those destinations for pods labelled
+`app.kubernetes.io/component: placement-applier` and
+`app.kubernetes.io/instance: <RELEASE>`. A policy that restricts ingress to the
+gateway or to Prometheus must admit the same pods.
+
 ### Worker-sidecar Telemetry
 
 When `workers.common.workerSidecar.enabled=true`, each worker Pod includes a
@@ -1412,7 +1574,10 @@ default `SIE_ADMIN_TOKEN`), which the chart passes to the gateway as
 configured`). The chart does not generate this token, and it must be separate
 from the sie-config tokens: the render fails when it names the Secret and key
 of the sie-config admin token, which would give every gateway pod catalog
-write access, or of the read token, which every worker sidecar holds.
+write access, or of the read token, which every worker sidecar holds. The
+placement applier mounts the same Secret only when `placementApplier.apply` is
+true and the gateway may authenticate, with token auth or a mode known only at
+run time.
 
 ### Who holds which token
 
@@ -1420,8 +1585,11 @@ write access, or of the read token, which every worker sidecar holds.
 - **sie-config read token:** sie-config, every gateway pod, and every worker
   sidecar. It can read the whole catalog, including every model config, but
   cannot write.
-- **Gateway admin token (when set):** every gateway pod and the tooling that
-  manages pools.
+- **Gateway admin token (when set):** every gateway pod, the placement applier
+  when `placementApplier.apply` is true and the gateway may authenticate, with
+  token auth or a mode known only at run time (see
+  [Lane envelopes and the placement applier](#lane-envelopes-and-the-placement-applier)),
+  and the tooling that manages pools.
 - **Gateway client token (when set or generated):** API clients, every gateway
   pod, and every worker sidecar, which presents it when it calls the gateway.
   See [Securing the cluster](#securing-the-cluster).
@@ -1665,6 +1833,19 @@ workloads, not every dependency. These rules follow the versions in `Chart.lock`
 | Loki NGINX gateway basic auth | Literal `gateway.basicAuth.existingSecret` or gateway fullname, `.htpasswd`; excludes the enterprise GEL gateway. |
 | Loki's optional MinIO | Literal MinIO `existingSecret` or MinIO fullname, `rootUser` / `rootPassword`. |
 
+Grafana evaluates `kube-prometheus-stack.grafana.admin.existingSecret` as a
+template in its own chart, and the chart evaluates it the same way to find the
+admin Secret Grafana reads. A value that holds `{{` may therefore hold only
+lowercase letters, digits, `-`, `.`, whitespace and actions that hold one chain
+of names on `.Release`, `.Values` or `.Chart`, such as
+`{{ .Release.Name }}-grafana-admin`. An action may use `{{-` and `-}}` trim
+markers, a leading `$` and whitespace around the chain, and `.Values` is the
+Grafana chart's values. The render fails for any other action, including
+`include`, `template`, function calls, pipelines and comments. Go templates
+resolve a name in the chain as a field, a map key or a method without
+arguments, such as `{{ .Values.YAML }}`. When the evaluated value is not a
+Secret name, the render fails and its error shows the template, not the value.
+
 This is not an inventory of arbitrary dependency configuration. Operators must
 keep SIE credentials separate from Grafana `envValueFrom` / `envFromSecret`,
 extra env/volumes, raw Loki/enterprise/cloud-storage configuration, MinIO extra
@@ -1718,7 +1899,9 @@ without a cutover, use an operator-managed Secret:
    `helm upgrade` (with the Secret's name in `gateway.auth.tokenSecretName`)
    and restart the gateway and the worker StatefulSets. The gateway accepts
    both tokens, and the worker sidecars present the first one.
-2. Move every client, including the MCP edge's key, to the new token.
+2. Move every client, including the MCP edge's key and the placement
+   applier's `placementApplier.clientToken` key, to the new token, and restart
+   the placement applier, which reads its token at start.
 3. Remove the old token from the Secret and restart the gateway.
 
 To leave a generated token, copy it into your own Secret as the old token in

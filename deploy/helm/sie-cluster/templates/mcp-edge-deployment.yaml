@@ -58,12 +58,12 @@ spec:
             - name: SIE_MCP_OAUTH_ENABLED
               value: "0"
             {{- end }}
-            {{- if .Values.mcpEdge.clusterApiKey.existingSecretName }}
+            {{- with trim (toString (default "" .Values.mcpEdge.clusterApiKey.existingSecretName)) }}
             - name: SIE_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.mcpEdge.clusterApiKey.existingSecretName }}
-                  key: {{ .Values.mcpEdge.clusterApiKey.secretKey }}
+                  name: {{ . | quote }}
+                  key: {{ trim (toString (default "" $.Values.mcpEdge.clusterApiKey.secretKey)) | quote }}
             {{- end }}
             - name: SIE_LOG_LEVEL
               value: {{ .Values.logging.level | quote }}

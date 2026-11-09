@@ -1,0 +1,48 @@
+{
+  "kind": "placement-service-levels",
+  "schemaVersion": 1,
+  "tiers": [
+    {
+      "name": "interactive-retrieval",
+      "comeAliveP95S": 0,
+      "warmP99Ms": 250,
+      "queueWaitP99Ms": 500
+    },
+    {
+      "name": "batch-generation",
+      "comeAliveP95S": 600,
+      "ttftP99Ms": 4000,
+      "itlP99Ms": 120
+    }
+  ],
+  "identities": [
+    {
+      "identity": "BAAI/bge-m3",
+      "tier": "interactive-retrieval"
+    },
+    {
+      "identity": "BAAI/bge-m3:sparse",
+      "tier": "interactive-retrieval",
+      "comeAliveP95S": 120
+    },
+    {
+      "identity": "Qwen/Qwen3-8B",
+      "tier": "batch-generation",
+      "itlP99Ms": 80
+    },
+    {
+      "identity": "Qwen/Qwen3-Reranker-0.6B",
+      "comeAliveP95S": 90,
+      "warmP99Ms": 400
+    },
+    {
+      "identity": "intfloat/e5-base-v2",
+      "tier": "interactive-retrieval"
+    },
+    {
+      "identity": "Qwen/Qwen3-Embedding-4B",
+      "comeAliveP95S": 30,
+      "warmP99Ms": 300
+    }
+  ]
+}
