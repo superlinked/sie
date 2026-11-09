@@ -23,9 +23,8 @@ Only the channel framing produces those tags. The model's own text is data, and
 the tags a downstream parser reads are removed from it. Downstream, the reasoning
 and tool-call blocks are taken out of the answer, so the answer text of a whole
 turn is cleaned as one run, and so is its reasoning. Text on either side of a
-block cannot join into a tag. A tool or parameter name that the Qwen XML form
-cannot carry exactly becomes an empty ``<tool_call>`` block, which the parser
-rejects.
+block cannot join into a tag. A tool call that the Qwen XML form cannot carry
+becomes an empty ``<tool_call>`` block, which the parser treats as malformed.
 """
 
 from __future__ import annotations
@@ -50,8 +49,9 @@ _ARGUMENT_TAGS = (_THINK_OPEN, _THINK_CLOSE, _TOOL_CALL_CLOSE, "</parameter>")
 _HEADER_RE = re.compile(r"(?:<\|start\|>assistant)?\s*(?:to=([^\s<]+))?\s*<\|message\|>")
 _INVOKE_RE = re.compile(r'<atem:invoke\b[^>]*?\bname="([^"]+)"[^>]*?>(.*?)</atem:invoke>', re.DOTALL)
 _PARAMETER_RE = re.compile(r'<atem:parameter\b[^>]*?\bname="([^"]+)"[^>]*?>(.*?)</atem:parameter>', re.DOTALL)
-_FUNCTION_NAME_RE = re.compile(r"[^<>\s]+")
-_PARAMETER_NAME_RE = re.compile(r"[^<>]*[^<>\s]")
+_FUNCTION_NAME_RE = re.compile(r"[^<>\s]+\s*")
+_PARAMETER_NAME_RE = re.compile(r"[^<>]*[^<>\s][^<>]*")
+_MAX_HELD = 1024
 
 
 def _may_become_header(text: str) -> bool:
@@ -83,12 +83,15 @@ class _TagRemover:
     Every tag starts with its only ``<``, so text since the last ``<`` is the one
     place a tag can still form. Each held run is a proper prefix of a tag, and
     removing a later run exposes the one before it, so the whole held tail stays
-    back until it can no longer become a tag.
+    back until it can no longer become a tag. Only text made of nothing but tag
+    prefixes keeps it growing; past ``_MAX_HELD`` characters it is released
+    without its ``<``, so no later text can complete a tag in it.
     """
 
     def __init__(self, tags: tuple[str, ...]) -> None:
         self._tags = tags
         self._held: list[str] = []
+        self._held_size = 0
 
     def feed(self, text: str) -> str:
         """Return the text that can no longer become part of a tag."""
@@ -102,34 +105,33 @@ class _TagRemover:
                     break
                 output.append(text[at:start])
                 self._held.append("<")
+                self._held_size = 1
                 at = start + 1
                 continue
             char = text[at]
             at += 1
             if char == "<":
                 self._held.append(char)
-                continue
-            run = self._held[-1] + char
-            if run in self._tags:
-                self._held.pop()
-            elif any(tag.startswith(run) for tag in self._tags):
-                self._held[-1] = run
             else:
-                output.append("".join(self._held) + char)
-                self._held.clear()
+                run = self._held[-1] + char
+                if run in self._tags:
+                    self._held_size -= len(self._held.pop())
+                    continue
+                if not any(tag.startswith(run) for tag in self._tags):
+                    output.append(self.flush() + char)
+                    continue
+                self._held[-1] = run
+            self._held_size += 1
+            if self._held_size > _MAX_HELD:
+                output.append(self.flush().replace("<", ""))
         return "".join(output)
 
     def flush(self) -> str:
         """Return the held tail; nothing that follows can complete it any more."""
         held = "".join(self._held)
         self._held.clear()
+        self._held_size = 0
         return held
-
-
-def _without(text: str, tags: tuple[str, ...]) -> str:
-    """Return complete ``text`` with every tag removed."""
-    remover = _TagRemover(tags)
-    return remover.feed(text) + remover.flush()
 
 
 def _tool_name(emitted: str) -> str:
@@ -141,18 +143,21 @@ def _tool_name(emitted: str) -> str:
 def _tool_call_blocks(body: str) -> str:
     """Rewrite each complete ``atem:invoke`` as a ``<tool_call>`` block.
 
-    A name or key that the parser would not read back exactly gives an empty
-    block, which the parser rejects.
+    A call the Qwen XML form cannot carry becomes an empty block, which the parser
+    treats as malformed: the parser would not find its name or a key in place, or
+    a value holds a tag that a parser reads there.
     """
     blocks: list[str] = []
     for emitted, invoke in _INVOKE_RE.findall(body):
         name, parameters = _tool_name(emitted), _PARAMETER_RE.findall(invoke)
-        if not _FUNCTION_NAME_RE.fullmatch(name) or not all(_PARAMETER_NAME_RE.fullmatch(key) for key, _ in parameters):
+        carried = _FUNCTION_NAME_RE.fullmatch(name) and all(
+            _PARAMETER_NAME_RE.fullmatch(key) and not any(tag in value for tag in _ARGUMENT_TAGS)
+            for key, value in parameters
+        )
+        if not carried:
             blocks.append(f"{_TOOL_CALL_OPEN}\n{_TOOL_CALL_CLOSE}")
             continue
-        arguments = "".join(
-            f"<parameter={key}>\n{_without(value, _ARGUMENT_TAGS)}\n</parameter>\n" for key, value in parameters
-        )
+        arguments = "".join(f"<parameter={key}>\n{value}\n</parameter>\n" for key, value in parameters)
         blocks.append(f"{_TOOL_CALL_OPEN}\n<function={name}>\n{arguments}</function>\n{_TOOL_CALL_CLOSE}")
     return "".join(blocks)
 
