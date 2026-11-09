@@ -8,6 +8,8 @@
 """Helm chart operations for SIE cluster deployment.
 
 This task handles:
+- Preparing the locked chart dependencies, reusing the archives in charts/
+  when they already match Chart.lock
 - Linting the Helm chart
 - Rendering templates locally
 - Installing/upgrading/uninstalling releases
@@ -149,6 +151,42 @@ def dependency_repository_commands() -> list[list[str]]:
         ]
         for repository in repositories
     ]
+
+
+def locked_dependency_archives() -> set[str] | None:
+    """Return the archive names Chart.lock pins, or None when they are unknown."""
+    lock = resolve_project_root() / CHART_DIR / "Chart.lock"
+    if not lock.is_file():
+        return None
+    names: list[str] = []
+    versions: list[str] = []
+    for line in lock.read_text().splitlines():
+        key, _, value = line.strip().removeprefix("- ").partition(":")
+        value = value.strip().strip("\"'")
+        if key == "name":
+            names.append(value)
+        elif key == "version":
+            versions.append(value)
+    if not names or len(names) != len(versions):
+        return None
+    return {f"{name}-{version}.tgz" for name, version in zip(names, versions, strict=True)}
+
+
+def locked_dependencies_present() -> bool:
+    """Return whether charts/ holds exactly the archives Chart.lock pins.
+
+    Helm downloads every dependency again on each build, even when the
+    archive is already there. A directory that matches the lock exactly, with
+    nothing missing and nothing left over from another version, needs no
+    build.
+    """
+    expected = locked_dependency_archives()
+    charts = resolve_project_root() / CHART_DIR / "charts"
+    if expected is None or not charts.is_dir():
+        return False
+    return {entry.name for entry in charts.iterdir()} == expected and all(
+        (charts / name).is_file() for name in expected
+    )
 
 
 def validation_args(extra_args: list[str]) -> list[str]:
@@ -424,7 +462,11 @@ def main() -> int:
     # Commands that render templates need bundle/model configs in files/
     needs_configs = command in ("lint", "template", "package", "install", "upgrade")
     if needs_configs:
-        if cmd_dependencies([]) != 0:
+        # An explicit `dependencies` always builds. Before the other commands
+        # the build runs only when charts/ does not already match the lock.
+        if locked_dependencies_present():
+            log(f"[helm] Locked dependencies already present for: {CHART_DIR}")
+        elif cmd_dependencies([]) != 0:
             return 1
         with _helm_config_sync_lock():
             _sync_configs_to_helm()

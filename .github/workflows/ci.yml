@@ -125,10 +125,17 @@ jobs:
           mise exec -- uv run --frozen ruff format --check .
           mise exec -- uv run --frozen ruff check .
           mise exec -- uv run --frozen pytest -q
+      - name: Restore the chart dependencies
+        id: helm-charts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: deploy/helm/sie-cluster/charts
+          key: helm-charts-${{ hashFiles('deploy/helm/sie-cluster/Chart.yaml', 'deploy/helm/sie-cluster/Chart.lock') }}
+      # The collector privacy tests render the chart with its dependencies.
+      - if: steps.helm-charts.outputs.cache-hit != 'true'
+        run: mise run helm -- dependencies
       - name: Pinned collector privacy
-        run: |
-          mise run helm -- dependencies
-          mise exec -- uv run --frozen --project . --no-sync pytest -q -m docker tools/ci/tests/test_collector_*privacy.py
+        run: mise exec -- uv run --frozen --project . --no-sync pytest -q -m docker tools/ci/tests/test_collector_*privacy.py
 
   bundle-resolution:
     name: CI / Bundle resolution

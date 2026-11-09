@@ -26,6 +26,108 @@ def test_dependency_repositories_are_derived_and_idempotent() -> None:
     assert all(not url.startswith("oci://") for url in urls)
 
 
+def test_locked_archives_follow_the_checked_in_lock() -> None:
+    """The task's line parser and a YAML parser agree on the pinned archives."""
+    lock = yaml.safe_load((helm.resolve_project_root() / helm.CHART_DIR / "Chart.lock").read_text())
+    expected = {f"{entry['name']}-{entry['version']}.tgz" for entry in lock["dependencies"]}
+    assert expected
+    assert helm.locked_dependency_archives() == expected
+
+
+@pytest.fixture
+def locked_chart(tmp_path: Path, monkeypatch) -> Path:
+    """A chart whose lock pins two dependencies, both present in charts/."""
+    chart = tmp_path / "deploy/helm/sie-cluster"
+    (chart / "charts").mkdir(parents=True)
+    (chart / "Chart.yaml").write_text(
+        "apiVersion: v2\nname: sie-cluster\nversion: 0.8.1\ndependencies:\n"
+        "  - name: keda\n    repository: https://example.test/charts\n    version: 2.14.x\n"
+        "  - name: cert-manager\n    repository: https://example.test/charts\n    version: 1.16.x\n"
+    )
+    (chart / "Chart.lock").write_text(
+        "dependencies:\n"
+        "- name: keda\n  repository: https://example.test/charts\n  version: 2.14.3\n"
+        '- name: cert-manager\n  repository: https://example.test/charts\n  version: "v1.16.5"\n'
+        "digest: sha256:0000\n"
+        'generated: "2026-01-01T00:00:00Z"\n'
+    )
+    for archive in ("keda-2.14.3.tgz", "cert-manager-v1.16.5.tgz"):
+        (chart / "charts" / archive).write_bytes(b"archive")
+    monkeypatch.setattr(helm, "resolve_project_root", lambda: tmp_path)
+    return chart
+
+
+def test_dependencies_are_present_when_charts_match_the_lock(locked_chart: Path) -> None:
+    """Every pinned archive on disk and nothing else means no build is needed."""
+    assert helm.locked_dependency_archives() == {"keda-2.14.3.tgz", "cert-manager-v1.16.5.tgz"}
+    assert helm.locked_dependencies_present()
+
+
+@pytest.mark.parametrize("state", ["missing", "other-version", "leftover", "directory", "no-charts", "no-lock"])
+def test_dependencies_are_absent_unless_charts_match_the_lock_exactly(locked_chart: Path, state: str) -> None:
+    """Anything short of an exact match sends the task back to a full build."""
+    charts = locked_chart / "charts"
+    if state == "missing":
+        (charts / "keda-2.14.3.tgz").unlink()
+    elif state == "other-version":
+        (charts / "keda-2.14.3.tgz").rename(charts / "keda-2.14.2.tgz")
+    elif state == "leftover":
+        (charts / "keda-2.14.2.tgz").write_bytes(b"archive")
+    elif state == "directory":
+        (charts / "keda-2.14.3.tgz").unlink()
+        (charts / "keda-2.14.3.tgz").mkdir()
+    elif state == "no-charts":
+        for archive in charts.iterdir():
+            archive.unlink()
+        charts.rmdir()
+    else:
+        (locked_chart / "Chart.lock").unlink()
+    assert not helm.locked_dependencies_present()
+
+
+@pytest.fixture
+def helm_calls(locked_chart: Path, monkeypatch) -> list[list[str]]:
+    """Record the Helm commands one task run issues, without running Helm."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(helm, "check_helm", lambda: True)
+    monkeypatch.setattr(helm, "run_helm", lambda args: calls.append(args) or 0)
+    monkeypatch.setattr(helm, "_sync_configs_to_helm", lambda: None)
+    monkeypatch.setattr(helm, "_cleanup_helm_configs", lambda: None)
+    return calls
+
+
+def run_task(monkeypatch, command: str) -> int:
+    """Run the task's entry point as `mise run helm -- <command>` would."""
+    monkeypatch.setattr(helm, "get_usage_flag", lambda _: command)
+    monkeypatch.setattr(helm.sys, "argv", ["helm.py", command])
+    return helm.main()
+
+
+@pytest.mark.parametrize("command", ["lint", "template"])
+def test_render_commands_reuse_dependencies_that_match_the_lock(helm_calls, monkeypatch, command: str) -> None:
+    """A render command downloads nothing when charts/ already matches the lock."""
+    assert run_task(monkeypatch, command) == 0
+    assert [call[0] for call in helm_calls] == [command]
+
+
+def test_render_commands_build_dependencies_that_do_not_match(locked_chart: Path, helm_calls, monkeypatch) -> None:
+    """A missing archive brings back the full build before the command runs."""
+    (locked_chart / "charts" / "keda-2.14.3.tgz").unlink()
+    assert run_task(monkeypatch, "lint") == 0
+    assert [call[:2] for call in helm_calls] == [
+        ["repo", "add"],
+        ["dependency", "build"],
+        ["lint", "deploy/helm/sie-cluster"],
+    ]
+
+
+def test_explicit_dependencies_always_build(helm_calls, monkeypatch) -> None:
+    """`dependencies` rebuilds even when charts/ already matches the lock."""
+    assert helm.locked_dependencies_present()
+    assert run_task(monkeypatch, "dependencies") == 0
+    assert [call[:2] for call in helm_calls] == [["repo", "add"], ["dependency", "build"]]
+
+
 def test_validation_defaults_disable_payload_store(monkeypatch) -> None:
     calls: list[list[str]] = []
     monkeypatch.setattr(helm, "run_helm", lambda args: calls.append(args) or 0)
