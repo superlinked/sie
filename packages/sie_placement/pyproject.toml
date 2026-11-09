@@ -1,0 +1,19 @@
+[project]
+name = "sie-placement"
+version = "0.0.0"
+description = "SIE placement planner - versioned input and plan documents for measured-only placement"
+requires-python = ">=3.12,<3.13"
+license = { text = "Apache-2.0" }
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sie_placement"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

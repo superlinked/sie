@@ -1,0 +1,37 @@
+{
+  "kind": "placement-receipt",
+  "schemaVersion": 1,
+  "identity": "Qwen/Qwen3-8B",
+  "cell": {
+    "machineProfile": "a100-80gb",
+    "gpuProduct": "NVIDIA-A100-SXM4-80GB"
+  },
+  "containerShape": {
+    "gpuCount": 1,
+    "cpuCores": 12,
+    "memoryMiB": 87040
+  },
+  "concurrency": 32,
+  "requestShape": {
+    "operation": "generate",
+    "itemsPerRequest": 1,
+    "inputTokensPerItem": 1024,
+    "outputTokens": 256
+  },
+  "throughput": {
+    "requestsPerSecond": 3.1,
+    "outputTokensPerSecond": 793.6
+  },
+  "ttft": {
+    "p50Ms": 310,
+    "p99Ms": 1480
+  },
+  "itl": {
+    "p50Ms": 24.5,
+    "p95Ms": 31,
+    "p99Ms": 44.8
+  },
+  "source": {
+    "uri": "https://example.com/receipts/qwen3-8b-a100-80gb.json"
+  }
+}

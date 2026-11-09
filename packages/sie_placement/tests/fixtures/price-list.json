@@ -1,0 +1,31 @@
+{
+  "kind": "placement-price-list",
+  "schemaVersion": 1,
+  "currency": "USD",
+  "machineProfiles": [
+    {
+      "name": "l4",
+      "gpuProduct": "NVIDIA-L4",
+      "acceleratorPerHour": 0.56,
+      "corePerHour": 0.031,
+      "memoryGiBPerHour": 0.0042
+    },
+    {
+      "name": "a100-80gb",
+      "gpuProduct": "NVIDIA-A100-SXM4-80GB",
+      "acceleratorPerHour": 3.4,
+      "corePerHour": 0.031,
+      "memoryGiBPerHour": 0.0042
+    }
+  ],
+  "placements": [
+    {
+      "name": "us-central1",
+      "regionMultiplier": 1
+    },
+    {
+      "name": "europe-west4",
+      "regionMultiplier": 1.15
+    }
+  ]
+}
