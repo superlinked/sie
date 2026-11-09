@@ -39,13 +39,18 @@ class AnswerQuestionsError(Exception):
 
 
 async def _served(call: Awaitable[Any], *, model: str, env_var: str) -> Any:
-    """Await a cluster call, turning "model not found" into an error that names the setting."""
+    """Await a cluster call, turning "model not found" into an error that names the setting.
+
+    The native endpoints send ``MODEL_NOT_FOUND`` and the OpenAI-shaped chat endpoint
+    sends ``model_not_found``, so the code is compared case-insensitively. The
+    cluster's own message is kept, since it can carry a "did you mean" suggestion.
+    """
     try:
         return await call
     except RequestError as exc:
-        if exc.code != "MODEL_NOT_FOUND":
+        if (exc.code or "").upper() != "MODEL_NOT_FOUND":
             raise
-        msg = f"model {model!r} is not served by this SIE deployment; set {env_var} to a model it serves"
+        msg = f"SIE could not use model {model!r} ({exc}); set {env_var} to a model your SIE deployment serves"
         raise AnswerQuestionsError(msg) from exc
 
 

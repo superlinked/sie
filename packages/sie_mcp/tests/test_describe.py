@@ -248,3 +248,12 @@ async def test_names_the_setting_when_the_embed_model_is_not_served() -> None:
 
     with pytest.raises(DescribeImageError, match="SIE_MCP_EMBED_MODEL"):
         await _describe(client, labels=["cat"], top_k=1)
+
+
+async def test_other_request_errors_pass_through() -> None:
+    class _BadRequest(_FakeClient):
+        async def extract(self, model: str, items: Any, **kwargs: Any) -> Any:
+            raise RequestError("bad request", code="INVALID_INPUT", status_code=400)
+
+    with pytest.raises(RequestError, match="bad request"):
+        await _describe(_BadRequest(caption_entities=[]))

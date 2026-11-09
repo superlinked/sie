@@ -273,7 +273,7 @@ async def test_names_the_setting_when_the_reranker_is_not_served() -> None:
         async def score(self, model: str, query: Any, items: list[Any], **kwargs: Any) -> Any:
             raise RequestError(f"Model '{model}' not found", code="MODEL_NOT_FOUND", status_code=404)
 
-    with pytest.raises(AnswerQuestionsError, match=r"'rr' is not served.*SIE_MCP_RERANK_MODEL"):
+    with pytest.raises(AnswerQuestionsError, match=r"'rr'.*not found.*SIE_MCP_RERANK_MODEL"):
         await qa.answer_questions(_NoReranker(), documents=_DOCS, questions=["alpha?"], **_PARAMS)
 
 
@@ -342,3 +342,23 @@ async def test_raises_when_generation_returns_no_content() -> None:
 
     with pytest.raises(AnswerQuestionsError, match="no choices"):
         await qa.answer_questions(_NoContent(), documents=_DOCS, questions=["alpha?"], **_PARAMS)
+
+
+async def test_names_the_setting_when_the_generate_model_is_not_served() -> None:
+    # The OpenAI-shaped chat endpoint reports a missing model as lower-case
+    # "model_not_found"; the hint must still name the setting.
+    class _NoGenerator(_FakeQAClient):
+        async def chat_completions(self, model: str, messages: list[Any], **kwargs: Any) -> Any:
+            raise RequestError(f"Model '{model}' not found", code="model_not_found", status_code=404)
+
+    with pytest.raises(AnswerQuestionsError, match=r"not found.*SIE_MCP_GENERATE_MODEL"):
+        await qa.answer_questions(_NoGenerator(), documents=_DOCS, questions=["alpha?"], **_PARAMS)
+
+
+async def test_names_the_setting_when_the_encoder_is_not_served() -> None:
+    class _NoEncoder(_FakeQAClient):
+        async def encode(self, model: str, items: Any, **kwargs: Any) -> Any:
+            raise RequestError(f"Model '{model}' not found", code="MODEL_NOT_FOUND", status_code=404)
+
+    with pytest.raises(AnswerQuestionsError, match=r"not found.*SIE_MCP_ENCODE_MODEL"):
+        await qa.answer_questions(_NoEncoder(), documents=_DOCS, questions=["alpha?"], **_PARAMS)

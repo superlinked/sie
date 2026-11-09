@@ -6,7 +6,7 @@ import pytest
 from PIL import Image
 from sie_mcp import ocr_routing
 from sie_mcp.ocr_routing import DocsToMarkdownError
-from sie_sdk import SIEError
+from sie_sdk import RequestError, SIEError
 
 
 class _RoutingFakeClient:
@@ -23,10 +23,12 @@ class _RoutingFakeClient:
         docling: Any = None,
         vl_pages: list[list[dict[str, Any]]] | None = None,
         vl_error: Exception | None = None,
+        vl_page_errors: dict[int, Any] | None = None,
     ) -> None:
         self._docling = docling
         self._vl_pages = vl_pages or []
         self._vl_error = vl_error
+        self._vl_page_errors = vl_page_errors or {}
         self.calls: list[dict[str, Any]] = []
 
     async def extract(self, model: str, items: Any, **kwargs: Any) -> Any:
@@ -34,7 +36,10 @@ class _RoutingFakeClient:
         if isinstance(items, list):
             if self._vl_error is not None:
                 raise self._vl_error
-            return [{"entities": self._vl_pages[i]} for i in range(len(items))]
+            return [
+                {"error": self._vl_page_errors[i]} if i in self._vl_page_errors else {"entities": self._vl_pages[i]}
+                for i in range(len(items))
+            ]
         return {"data": self._docling}
 
 
@@ -234,22 +239,108 @@ async def test_auto_keeps_docling_when_vl_ocr_recovers_nothing() -> None:
     assert result.markdown == "tiny"
 
 
-@pytest.mark.parametrize("docling_markdown", ["", "tiny"])
-async def test_auto_raises_when_vl_ocr_fails_on_text_poor_docling(docling_markdown: str) -> None:
-    # Docling found (almost) no text, so this is a scan, and the cluster VL-OCR call
-    # fails (e.g. the model is not served). An empty "success" would hide that the
-    # document was never read, so the error names the model and the setting to change.
-    client = _RoutingFakeClient(docling={"markdown": docling_markdown}, vl_error=SIEError("Model 'mineru' not found"))
+def _not_found() -> RequestError:
+    return RequestError("no such model", code="MODEL_NOT_FOUND", status_code=404)
 
-    with pytest.raises(DocsToMarkdownError, match=r"'mineru'.*not found.*SIE_MCP_VLOCR_MODEL"):
+
+@pytest.mark.parametrize("docling_markdown", ["", "tiny"])
+async def test_auto_raises_when_vl_ocr_model_is_not_found_on_text_poor_docling(docling_markdown: str) -> None:
+    # Docling found (almost) no text, so this is a scan, and the VL-OCR model isn't
+    # served. An empty "success" would hide that the document was never read, so the
+    # error names the model, keeps the cluster's message and names the setting.
+    client = _RoutingFakeClient(docling={"markdown": docling_markdown}, vl_error=_not_found())
+
+    with pytest.raises(DocsToMarkdownError) as excinfo:
         await _route(client, engine="auto", render=_fake_render(1))
+    message = str(excinfo.value)
+    assert f"Docling returned only {len(docling_markdown)} characters" in message
+    assert "'mineru'" in message
+    assert "no such model" in message
+    assert "SIE_MCP_VLOCR_MODEL" in message
+    assert isinstance(excinfo.value.__cause__, RequestError)
     assert len(client.calls) == 2  # Docling, then the attempted VL-OCR fallback
 
 
-async def test_auto_names_vl_ocr_model_when_docling_errors_and_vl_ocr_fails() -> None:
-    client = _RoutingFakeClient(docling={"error": "no text layer"}, vl_error=SIEError("Model 'mineru' not found"))
+async def test_auto_keeps_docling_errors_reason_when_vl_ocr_model_is_not_found() -> None:
+    client = _RoutingFakeClient(docling={"error": "no text layer"}, vl_error=_not_found())
 
-    with pytest.raises(DocsToMarkdownError, match="SIE_MCP_VLOCR_MODEL"):
+    with pytest.raises(DocsToMarkdownError, match=r"Docling failed \(.*no text layer.*SIE_MCP_VLOCR_MODEL"):
+        await _route(client, engine="auto", render=_fake_render(1))
+
+
+async def test_auto_vl_ocr_failure_other_than_not_found_has_no_setting_hint() -> None:
+    # A cold start or a 5xx is not fixed by changing the model setting.
+    client = _RoutingFakeClient(docling={"markdown": ""}, vl_error=SIEError("timed out while provisioning"))
+
+    with pytest.raises(DocsToMarkdownError, match="timed out while provisioning") as excinfo:
+        await _route(client, engine="auto", render=_fake_render(1))
+    assert "SIE_MCP_VLOCR_MODEL" not in str(excinfo.value)
+
+
+async def test_auto_render_failure_reports_the_render_error() -> None:
+    def _too_many_pages(data: bytes, *, scale: float) -> list[Any]:
+        raise DocsToMarkdownError("PDF has 150 pages; VL-OCR is capped at 100")
+
+    client = _RoutingFakeClient(docling={"markdown": ""})
+
+    with pytest.raises(DocsToMarkdownError, match="capped at 100") as excinfo:
+        await _route(client, engine="auto", render=_too_many_pages)
+    assert "SIE_MCP_VLOCR_MODEL" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("docling_markdown", ["", "   "])
+async def test_auto_raises_when_neither_engine_returns_text(docling_markdown: str) -> None:
+    client = _RoutingFakeClient(docling={"markdown": docling_markdown}, vl_pages=[[]])
+
+    with pytest.raises(DocsToMarkdownError, match="neither Docling nor the VL-OCR"):
+        await _route(client, engine="auto", render=_fake_render(1))
+
+
+async def test_auto_raises_when_docling_errors_and_vl_ocr_returns_no_text() -> None:
+    client = _RoutingFakeClient(docling={"error": "no text layer"}, vl_pages=[[]])
+
+    with pytest.raises(DocsToMarkdownError, match=r"Docling failed .*returned no text"):
+        await _route(client, engine="auto", render=_fake_render(1))
+
+
+async def test_vl_ocr_page_error_raises_instead_of_dropping_the_page() -> None:
+    client = _RoutingFakeClient(
+        docling={"markdown": ""},
+        vl_pages=[_page("p1"), _page("unused"), _page("p3")],
+        vl_page_errors={1: {"code": "INFERENCE_ERROR", "message": "out of memory"}},
+    )
+
+    with pytest.raises(DocsToMarkdownError, match=r"failed on 1 of 3 pages \(page 2: out of memory\)"):
+        await _route(client, engine="vl-ocr", render=_fake_render(3))
+
+
+async def test_engine_vl_ocr_raises_on_empty_result() -> None:
+    client = _RoutingFakeClient(vl_pages=[[], []])
+
+    with pytest.raises(DocsToMarkdownError, match=r"returned no text for 2 page"):
+        await _route(client, engine="vl-ocr", render=_fake_render(2))
+
+
+async def test_engine_vl_ocr_names_the_setting_when_the_model_is_not_found() -> None:
+    client = _RoutingFakeClient(vl_error=_not_found())
+
+    with pytest.raises(DocsToMarkdownError, match=r"'mineru'.*no such model.*SIE_MCP_VLOCR_MODEL"):
+        await _route(client, engine="vl-ocr", render=_fake_render(1))
+
+
+async def test_auto_threshold_keeps_docling_at_16_chars_without_calling_vl_ocr() -> None:
+    client = _RoutingFakeClient(docling={"markdown": "x" * 16}, vl_error=_not_found())
+
+    result = await _route(client, engine="auto", render=_fake_render(1))
+
+    assert result.engine == "docling"
+    assert len(client.calls) == 1
+
+
+async def test_auto_threshold_tries_vl_ocr_below_16_chars() -> None:
+    client = _RoutingFakeClient(docling={"markdown": "x" * 15}, vl_error=_not_found())
+
+    with pytest.raises(DocsToMarkdownError, match="only 15 characters"):
         await _route(client, engine="auto", render=_fake_render(1))
 
 

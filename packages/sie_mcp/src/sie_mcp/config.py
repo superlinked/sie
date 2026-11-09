@@ -14,7 +14,7 @@ _DEFAULT_MODEL = "docling"
 # The grounded-answer generator reuses _DEFAULT_GENERATE_MODEL (defined below).
 _DEFAULT_ENCODE_MODEL = "BAAI/bge-m3"
 # Qwen3-Reranker-0.6B is served both by SIE Serverless and by the default cluster
-# bundle; BAAI/bge-reranker-v2-m3 is not served by SIE Serverless.
+# bundle. BAAI/bge-reranker-v2-m3 was not served by SIE Serverless (checked 2026-11).
 _DEFAULT_RERANK_MODEL = "Qwen/Qwen3-Reranker-0.6B"
 # Passages fed to the generator, candidates kept before reranking, the character
 # window / overlap the documents are chunked into (~4 chars/token), and the
