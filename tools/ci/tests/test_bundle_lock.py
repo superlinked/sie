@@ -9,9 +9,66 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sie_server.bundle_lock import Target
+from packaging.requirements import Requirement
+from sie_server.bundle_lock import Target, _validate_root_constraints, root_constraints, root_versions_digest
 
 from tools.ci import bundle_lock
+
+
+def test_root_platform_versions_remain_exact_constraints(tmp_path):
+    path = tmp_path / "uv.lock"
+    path.write_text(
+        "version = 1\n"
+        '[[package]]\nname = "graph-db"\nversion = "0.17.1"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        "resolution-markers = [\"sys_platform == 'darwin'\"]\n"
+        '[[package]]\nname = "graph-db"\nversion = "0.19.0"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        "resolution-markers = [\"sys_platform == 'linux'\", \"sys_platform == 'win32'\"]\n"
+    )
+    constraints = [Requirement(line) for line in root_constraints(path, {})]
+    for platform, version in (("darwin", "0.17.1"), ("linux", "0.19.0"), ("win32", "0.19.0")):
+        active = [requirement for requirement in constraints if requirement.marker.evaluate({"sys_platform": platform})]
+        assert len(active) == 1
+        assert str(active[0].specifier) == f"=={version}"
+    assert root_constraints(path, {"graph-db": {"version": "0.18.0"}}) == ["graph-db==0.18.0"]
+    target = Target("cpu", "default", "amd64")
+    _validate_root_constraints({"graph-db": {"version": "0.19.0"}}, path, {}, target)
+    with pytest.raises(ValueError, match="root constraint is not satisfied for target"):
+        _validate_root_constraints({"graph-db": {"version": "0.17.1"}}, path, {}, target)
+    _validate_root_constraints({"graph-db": {"version": "0.18.0"}}, path, {"graph-db": {"version": "0.18.0"}}, target)
+    original_digest = root_versions_digest(path)
+    path.write_text(path.read_text().replace("darwin", "freebsd"))
+    assert root_versions_digest(path) != original_digest
+
+
+def test_ambiguous_root_versions_without_markers_still_fail(tmp_path):
+    path = tmp_path / "uv.lock"
+    path.write_text(
+        "version = 1\n"
+        '[[package]]\nname = "graph-db"\nversion = "1.0"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        '[[package]]\nname = "graph-db"\nversion = "2.0"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+    )
+    with pytest.raises(ValueError, match="unmarked multiple public versions"):
+        root_constraints(path, {})
+    assert root_constraints(path, {"graph-db": {"version": "1.5"}}) == ["graph-db==1.5"]
+    assert root_versions_digest(path)
+
+
+def test_inactive_root_constraints_do_not_reject_a_bundle_package(tmp_path):
+    path = tmp_path / "uv.lock"
+    path.write_text(
+        "version = 1\n"
+        '[[package]]\nname = "graph-db"\nversion = "1.0"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        "resolution-markers = [\"sys_platform == 'darwin'\"]\n"
+        '[[package]]\nname = "graph-db"\nversion = "2.0"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+        "resolution-markers = [\"sys_platform == 'win32'\"]\n"
+    )
+    _validate_root_constraints({"graph-db": {"version": "1.0"}}, path, {}, Target("cpu", "default", "amd64"))
 
 
 def test_target_matrix_preserves_cpu_arm64_in_addition_to_every_release():
@@ -108,7 +165,8 @@ def test_repository_locks_bind_current_public_inputs():
     bundle_lock.check_all(bundle_lock.ROOT)
 
 
-def test_compile_another_checkout_binds_its_compiler_policy(tmp_path, monkeypatch):
+@pytest.mark.parametrize("root_cutoff", [None, "2026-11-06T20:00:00Z"])
+def test_compile_another_checkout_binds_its_compiler_policy(tmp_path, monkeypatch, root_cutoff):
     target = Target("cpu", "default", "amd64")
     compiler = tmp_path / "tools/ci/bundle_lock.py"
     compiler.parent.mkdir(parents=True)
@@ -143,12 +201,20 @@ def test_compile_another_checkout_binds_its_compiler_policy(tmp_path, monkeypatc
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(bundle_lock.subprocess, "run", controlled_resolver)
-    bundle_lock.compile_target(tmp_path, target, "uv", "2026-10-18T00:00:00Z", None)
+    bundle_lock.compile_target(tmp_path, target, "uv", "2026-10-18T00:00:00Z", None, root_cutoff)
     assert len(calls) == 2
     checked = bundle_lock.check_lock(locks, bundles, tmp_path / "uv.lock", target, compiler=compiler)
     assert checked["manifest"]["policy_sha256"] == bundle_lock.policy_digest(compiler)
     assert checked["manifest"]["policy_sha256"] != bundle_lock.policy_digest()
     assert checked["packages"]["demo"]["version"] == "1.0"
+    assert calls[1][calls[1].index("--exclude-newer") + 1] == "2026-10-18T00:00:00Z"
+    if root_cutoff is None:
+        assert "--exclude-newer-package" not in calls[1]
+        assert "root_exclude_newer" not in checked["manifest"]
+    else:
+        overrides = [calls[1][index + 1] for index, arg in enumerate(calls[1]) if arg == "--exclude-newer-package"]
+        assert overrides == [f"demo={root_cutoff}"]
+        assert checked["manifest"]["root_exclude_newer"] == root_cutoff
     with pytest.raises(ValueError, match="policy changed"):
         bundle_lock.check_lock(locks, bundles, tmp_path / "uv.lock", target)
     compiler.write_text("# Unreviewed change in the other checkout.\n")
@@ -156,15 +222,23 @@ def test_compile_another_checkout_binds_its_compiler_policy(tmp_path, monkeypatc
         bundle_lock.check_lock(locks, bundles, tmp_path / "uv.lock", target, compiler=compiler)
 
 
-def test_direct_platform_pins_keep_the_global_index_cutoff(tmp_path, monkeypatch):
+@pytest.mark.parametrize("root_cutoff", [None, "2026-11-06T20:00:00Z"])
+def test_direct_platform_pins_keep_the_global_index_cutoff(tmp_path, monkeypatch, root_cutoff):
     target = Target("cuda13", "sglang-cu130", "amd64")
     locks = tmp_path / bundle_lock.LOCKS
     locks.mkdir(parents=True)
     url = "https://example.test/demo-1.0+cu130-cp312-cp312-manylinux_2_28_x86_64.whl"
     pin = {"version": "1.0+cu130", "url": url, "sha256": "a" * 64, "reason": "Undated native platform wheel."}
-    (locks / "exceptions.json").write_text(json.dumps({"targets": {}, "source_pins": {target.name: {"demo": pin}}}))
+    (locks / "exceptions.json").write_text(
+        json.dumps(
+            {"targets": {target.name: {"packaging": {"version": "24.2"}}}, "source_pins": {target.name: {"demo": pin}}}
+        )
+    )
+    (tmp_path / "uv.lock").write_text(
+        'version = 1\n[[package]]\nname = "packaging"\nversion = "23.1"\n'
+        'source = { registry = "https://pypi.org/simple" }\n'
+    )
     monkeypatch.setattr(bundle_lock, "bundle_requirements", lambda *_args: ["demo==1.0"])
-    monkeypatch.setattr(bundle_lock, "root_constraints", lambda *_args: ["packaging==24.2"])
     calls = []
 
     def compile_probe(command, **kwargs):
@@ -174,10 +248,11 @@ def test_direct_platform_pins_keep_the_global_index_cutoff(tmp_path, monkeypatch
         constraints = (Path(kwargs["cwd"]) / "constraints.txt").read_text().splitlines()
         assert constraints == ["packaging==24.2", f"demo @ {url}#sha256={'a' * 64}"]
         assert command[command.index("--exclude-newer") + 1] == "2026-10-18T00:00:00Z"
-        assert "--exclude-newer-package" not in command
+        overrides = [command[index + 1] for index, arg in enumerate(command) if arg == "--exclude-newer-package"]
+        assert overrides == ([] if root_cutoff is None else [f"packaging={root_cutoff}"])
         raise RuntimeError("stop before resolver")
 
     monkeypatch.setattr(bundle_lock.subprocess, "run", compile_probe)
     with pytest.raises(RuntimeError, match="stop before resolver"):
-        bundle_lock.compile_target(tmp_path, target, "uv", "2026-10-18T00:00:00Z", None)
+        bundle_lock.compile_target(tmp_path, target, "uv", "2026-10-18T00:00:00Z", None, root_cutoff)
     assert len(calls) == 1

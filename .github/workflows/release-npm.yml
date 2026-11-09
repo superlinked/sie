@@ -28,9 +28,11 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - run: bash tools/ci/mise_binary.bash
       - uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
         with:
           version: 2026.5.5
+          sha256: 3aaab5c05a8a94a93b42b4f581779bbd5c44ddb251e7f3639fc671ec5c6aab8a
           # Install everything here; later mise exec would auto-install omitted tools.
           install_args: --jobs=1
       - name: Validate source and optional release identity
@@ -48,6 +50,24 @@ jobs:
             test -n "$RELEASE_VERSION"
             mise exec -- python tools/ci/release_guard.py build --source-ref "$SOURCE_REF" --version "$RELEASE_VERSION" --tag-name "$RELEASE_TAG"
           fi
+      # Pull-request builds reuse the installed pnpm workspace; release builds
+      # start from an empty tree.
+      - name: Restore the pnpm workspace
+        if: inputs.build_only == true
+        id: pnpm-modules
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+            integrations/*/node_modules
+            examples/*/*/node_modules
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'pnpm-workspace.yaml', 'mise.toml') }}
+      # On release builds the restore step is skipped and its output is empty,
+      # which this condition counts as a miss on purpose.
+      - name: Let pnpm build native addons instead of downloading them
+        if: steps.pnpm-modules.outputs.cache-hit != 'true'
+        run: bash tools/ci/pnpm_native_deps.bash
       - name: Build complete archives and test clean packed consumers
         env:
           RELEASE_VERSION: ${{ inputs.version }}

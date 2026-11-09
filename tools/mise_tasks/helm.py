@@ -8,6 +8,8 @@
 """Helm chart operations for SIE cluster deployment.
 
 This task handles:
+- Preparing the locked chart dependencies, reusing the archives in charts/
+  when they already match a Chart.lock that is current for Chart.yaml
 - Linting the Helm chart
 - Rendering templates locally
 - Installing/upgrading/uninstalling releases
@@ -17,7 +19,9 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import fnmatch
 import hashlib
+import json
 import os
 import shutil
 import stat
@@ -25,6 +29,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import zlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -149,6 +154,140 @@ def dependency_repository_commands() -> list[list[str]]:
         ]
         for repository in repositories
     ]
+
+
+# A dependency's fields, in the order Helm writes them for the lock digest.
+_DEPENDENCY_FIELDS = ("name", "version", "repository", "condition", "alias")
+
+
+def _dependency_entries(path: Path) -> list[dict[str, str]] | None:
+    """Return the ``dependencies`` entries of Chart.yaml or Chart.lock.
+
+    Only plain ``key: value`` fields are read. Anything else under the list,
+    such as tags, gives None, and the caller then treats the lock as unknown.
+    """
+    entries: list[dict[str, str]] = []
+    inside = False
+    for raw in path.read_text().splitlines():
+        line = raw.split(" #", maxsplit=1)[0].rstrip()
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith((" ", "-")):
+            inside = line == "dependencies:"
+            continue
+        if not inside:
+            continue
+        item = line.strip()
+        if item.startswith("- "):
+            entries.append({})
+            item = item[2:].strip()
+        key, separator, value = item.partition(":")
+        if not separator or not entries or key not in _DEPENDENCY_FIELDS:
+            return None
+        entries[-1][key] = value.strip().strip("\"'")
+    return entries
+
+
+def _as_helm_writes(entry: dict[str, str]) -> dict[str, str]:
+    """Return one dependency the way Helm serializes it: ordered, empty optional fields left out."""
+    return {key: entry.get(key, "") for key in _DEPENDENCY_FIELDS if key in ("name", "repository") or entry.get(key)}
+
+
+def lock_matches_chart() -> bool:
+    """Return whether Chart.lock was generated from the current Chart.yaml.
+
+    Helm stores a digest of both dependency lists in the lock and refuses to
+    build once Chart.yaml has changed without a new lock. The same digest is
+    computed here the way Helm does it: SHA-256 over the JSON of the two lists.
+    A digest that cannot be computed counts as no match.
+    """
+    chart = resolve_project_root() / CHART_DIR
+    lock = chart / "Chart.lock"
+    if not lock.is_file() or not (chart / "Chart.yaml").is_file():
+        return False
+    requested = _dependency_entries(chart / "Chart.yaml")
+    locked = _dependency_entries(lock)
+    if requested is None or locked is None:
+        return False
+    payload = json.dumps(
+        [[_as_helm_writes(entry) for entry in requested], [_as_helm_writes(entry) for entry in locked]],
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    for char in "&<>":  # Go's JSON encoder escapes these three.
+        payload = payload.replace(char, f"\\u{ord(char):04x}")
+    digest = hashlib.sha256(payload.encode()).hexdigest()
+    return f"digest: sha256:{digest}" in lock.read_text().splitlines()
+
+
+def locked_dependencies() -> set[tuple[str, str]] | None:
+    """Return the chart name and version of every dependency Chart.lock pins, or None when unknown."""
+    lock = resolve_project_root() / CHART_DIR / "Chart.lock"
+    locked = _dependency_entries(lock) if lock.is_file() else None
+    if not locked or not all(entry.get("name") and entry.get("version") for entry in locked):
+        return None
+    return {(entry["name"], entry["version"]) for entry in locked}
+
+
+def _archive_identity(archive: Path) -> tuple[str, str] | None:
+    """Return the chart name and version an archive declares, or None when it cannot be read."""
+    try:
+        with tarfile.open(archive, "r:gz") as chart:
+            for member in chart:
+                if member.isfile() and member.name.count("/") == 1 and member.name.endswith("/Chart.yaml"):
+                    manifest = chart.extractfile(member).read().decode()
+                    break
+            else:
+                return None
+    except (OSError, EOFError, tarfile.TarError, zlib.error, UnicodeDecodeError):
+        return None
+    declared: dict[str, str] = {}
+    for line in manifest.splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key in ("name", "version") and key not in declared:
+            declared[key] = value.split(" #", maxsplit=1)[0].strip().strip("\"'")
+    return declared.get("name", ""), declared.get("version", "")
+
+
+def _helmignore_name_patterns() -> list[str]:
+    """Return the plain file-name patterns in the chart's .helmignore.
+
+    Helm skips a file in charts/ whose name matches one of them. Patterns
+    with a path or a negation are not evaluated.
+    """
+    ignore = resolve_project_root() / CHART_DIR / ".helmignore"
+    if not ignore.is_file():
+        return []
+    lines = (line.strip() for line in ignore.read_text().splitlines())
+    return [line for line in lines if line and not line.startswith(("#", "!")) and "/" not in line]
+
+
+def locked_dependencies_present() -> bool:
+    """Return whether charts/ holds exactly what the current Chart.yaml locks.
+
+    Helm downloads every dependency again on each build, even when the
+    archive is already there. No build is needed when the lock is still the
+    one generated from Chart.yaml and charts/ holds one archive for each
+    locked dependency and nothing else.
+
+    Archives are matched by the chart name and version they declare. Their
+    file names only have to be ones Helm loads: Helm keeps the name the
+    repository publishes, which is not always ``<name>-<version>.tgz``.
+    """
+    expected = locked_dependencies()
+    charts = resolve_project_root() / CHART_DIR / "charts"
+    if expected is None or not charts.is_dir() or not lock_matches_chart():
+        return False
+    entries = list(charts.iterdir())
+    # Helm loads only .tgz files from charts/. It skips names that start with
+    # "." or "_" and names the chart's .helmignore excludes.
+    ignored = _helmignore_name_patterns()
+    for entry in entries:
+        if entry.suffix != ".tgz" or entry.name[0] in "._":
+            return False
+        if any(fnmatch.fnmatchcase(entry.name, pattern) for pattern in ignored):
+            return False
+    return len(entries) == len(expected) and {_archive_identity(entry) for entry in entries} == expected
 
 
 def validation_args(extra_args: list[str]) -> list[str]:
@@ -424,7 +563,11 @@ def main() -> int:
     # Commands that render templates need bundle/model configs in files/
     needs_configs = command in ("lint", "template", "package", "install", "upgrade")
     if needs_configs:
-        if cmd_dependencies([]) != 0:
+        # An explicit `dependencies` always builds. Before the other commands
+        # the build runs unless charts/ already holds what Chart.yaml locks.
+        if locked_dependencies_present():
+            log(f"[helm] Locked dependencies already present for: {CHART_DIR}")
+        elif cmd_dependencies([]) != 0:
             return 1
         with _helm_config_sync_lock():
             _sync_configs_to_helm()

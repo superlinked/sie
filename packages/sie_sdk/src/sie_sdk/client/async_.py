@@ -36,6 +36,7 @@ import logging
 import time
 import warnings
 from collections.abc import AsyncIterator, Mapping, Sequence
+from inspect import signature
 from pathlib import Path
 from typing import IO, Any, Literal, Self, cast, overload
 from urllib.parse import quote, urlencode
@@ -1919,9 +1920,15 @@ class SIEAsyncClient:
         for path in paths:
             ws_url = self._ws_url(path)
             try:
+                # websockets 15 enables ambient proxies by default; preserve direct
+                # connections across the supported 14/15 dependency range.
+                proxy_options: dict[str, Any] = (
+                    {"proxy": None} if "proxy" in signature(websockets.connect).parameters else {}
+                )
                 async with _NoRedirectConnect(
                     ws_url,
                     additional_headers=self._websocket_headers(ws_url),
+                    **proxy_options,
                 ) as ws:
                     async for message in ws:
                         if isinstance(message, bytes):

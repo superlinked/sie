@@ -25,7 +25,8 @@ isolation; a missing cu130 `nvidia` submodule may fall through to the base.
 Live GPU qualification remains separate from lock validation.
 
 Before installing, the verifier binds the lock to the exact third-party versions
-of the root lock, resolved bundle declarations, target, uv version, exact
+and effective platform constraints of the root lock, resolved bundle
+declarations, target, uv version, exact
 exception manifest, and the compiler/verifier/declaration-resolver source
 hashes. Workspace package versions and lock serialization are not part of that
 binding, so a release version bump does not require recompilation; every check
@@ -45,7 +46,10 @@ and resolved commits must match exactly.
 
 ## Root pins and deliberate differences
 
-All compatible root versions constrain compilation. `exceptions.json` records
+All compatible root versions constrain compilation. When the root lock selects
+different versions by platform, the compiler preserves its resolution markers
+alongside each exact version. Ambiguous versions without markers still fail.
+`exceptions.json` records
 every target-specific version or source difference with an exact version,
 artifact-set fingerprint, and reason. An unexplained new difference or stale
 exception fails validation. Packages missing from the root lock still receive
@@ -62,8 +66,9 @@ The CUDA 13 SGLang index omits upload timestamps for its native cu130 wheels.
 The global cutoff therefore excludes those index candidates in uv 0.9.28.
 The `source_pins` records preserve the established cu130 variants with exact
 public wheel URLs, versions, SHA256 hashes, and reasons. These are explicit
-exceptions for the named artifacts, not a disabled cutoff: all index-resolved
-candidates still obey the compilation cutoff. The verifier rejects a missing,
+exceptions for the named artifacts, not a disabled cutoff: index-resolved
+candidates obey the global cutoff or the explicitly recorded root-package
+cutoff described below. The verifier rejects a missing,
 changed, or substituted source pin, and binds its digest into the build receipt.
 
 ## Validation and updates
@@ -93,6 +98,21 @@ indexes, then review the complete lock and manifest diff:
 # Recompile one target with an explicit dependency cutoff.
 mise exec -- uv run --frozen --no-sync python tools/ci/bundle_lock.py compile --uv "$SIE_BUNDLE_LOCK_UV" --target cpu-default-amd64 --exclude-newer 2026-10-18T00:00:00Z
 ```
+
+When exact root pins were published after the saved global cutoff, set
+`--root-exclude-newer` to admit those pins while retaining the older cutoff for
+bundle-only dependencies:
+
+```console
+mise exec -- uv run --frozen --no-sync python tools/ci/bundle_lock.py compile --uv "$SIE_BUNDLE_LOCK_UV" --target cpu-default-amd64 --exclude-newer 2026-10-18T00:00:00Z --root-exclude-newer 2026-11-06T20:00:00Z
+```
+
+This passes uv's per-package cutoff only for external names already exactly
+constrained by the root lock, including documented exact target alternatives.
+It does not relax their version pins or source checks. The manifest records the
+optional `root_exclude_newer` alongside `exclude_newer`; its root-version and
+policy hashes bind the package set and the compiler behavior. Without the
+option, every index-resolved package uses the global cutoff.
 
 The compiler rejects a different uv version and strips ambient pip/uv index,
 override, and hash-bypass settings. Some public mirror entries omit hashes even

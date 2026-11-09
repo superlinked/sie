@@ -95,11 +95,20 @@ def test_required_check_reports_on_merge_queue_groups():
             assert all(context not in json.dumps(document) for document in documents), (name, context)
 
 
-def test_bootstrap_is_uncached_and_checks_all_locks():
+def test_bootstrap_builds_fresh_trees_and_checks_all_locks():
+    """The bootstrap lane may restore the tool cache but must build the Python and pnpm trees itself."""
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     bootstrap = workflow["jobs"]["bootstrap"]
     setup = next(step for step in bootstrap["steps"] if step.get("uses", "").startswith("jdx/mise-action@"))
-    assert setup["with"] == {"version": "2026.5.5", "cache": False, "install": False}
+    # The tool cache may be restored (tools/init.sh still runs the install), but
+    # the action itself installs nothing: the lane proves the repository's own
+    # bootstrap, and the Python and pnpm trees must start empty.
+    assert setup["with"] == {
+        "version": "2026.5.5",
+        "sha256": "3aaab5c05a8a94a93b42b4f581779bbd5c44ddb251e7f3639fc671ec5c6aab8a",
+        "cache": True,
+        "install": False,
+    }
     script = (ROOT / "tools/ci/fresh_bootstrap.bash").read_text()
     assert "./tools/init.sh" in script
     assert "test ! -e .venv" in script
@@ -119,6 +128,76 @@ def test_mise_workflow_setups_pin_concrete_versions():
                     assert re.fullmatch(r"[0-9]{4}\.[0-9]+\.[0-9]+", str(version)), (
                         f"{path.name}: {name} must pin a concrete mise version"
                     )
+
+
+def _ci_workflow_files() -> list:
+    """ci.yml and every reusable workflow it calls."""
+    ci = ROOT / ".github/workflows/ci.yml"
+    called = [
+        ROOT / job["uses"]
+        for job in yaml.safe_load(ci.read_text())["jobs"].values()
+        if job.get("uses", "").startswith("./")
+    ]
+    return [ci, *sorted(set(called))]
+
+
+def test_pnpm_installs_prepare_local_native_builds():
+    """Every job that may run `pnpm install` first runs tools/ci/pnpm_native_deps.bash."""
+    script = (ROOT / "tools/ci/pnpm_native_deps.bash").read_text()
+    assert "libvips-dev" in script
+    assert re.search(r"node-gyp@\$\{NODE_GYP_VERSION\}", script)
+    assert re.search(r"^NODE_GYP_VERSION=[0-9.]+$", script, re.MULTILINE)
+    assert "npm_config_nodedir" in script
+    # The cold bootstrap lane has no tool installed when this runs: node is
+    # installed serially, like tools/init.sh does, and nothing else lazily.
+    assert "mise install --jobs=1 node" in script
+    assert "mise exec -- " not in script
+    assert all(
+        line.startswith("mise exec --no-deps node -- ") for line in script.splitlines() if line.startswith("mise exec")
+    )
+    for path in _ci_workflow_files():
+        workflow = yaml.safe_load(path.read_text())
+        for name, job in workflow["jobs"].items():
+            steps = job.get("steps", [])
+            runs = [step.get("run", "") for step in steps]
+            installs = "\n".join(runs)
+            if (
+                "pnpm install" not in installs
+                and "fresh_bootstrap" not in installs
+                and "distributions.py build npm" not in installs
+            ):
+                continue
+            prepared = [i for i, run in enumerate(runs) if run == "bash tools/ci/pnpm_native_deps.bash"]
+            assert prepared, f"{path.name}: {name} installs the pnpm workspace without preparing native builds"
+            first_install = next(
+                i
+                for i, run in enumerate(runs)
+                if "pnpm install" in run or "fresh_bootstrap" in run or "distributions.py build npm" in run
+            )
+            assert prepared[0] < first_install, f"{path.name}: {name} must prepare native builds before installing"
+
+
+def test_mise_binary_prefetch_matches_every_action_version():
+    """Every mise-action step pins the version and hash tools/ci/mise_binary.bash pre-places, and runs after it."""
+    script = (ROOT / "tools/ci/mise_binary.bash").read_text()
+    pinned = re.search(r"^MISE_VERSION=([0-9.]+)$", script, re.MULTILINE).group(1)
+    digest = re.search(r"^MISE_SHA256_LINUX_X64=(\w+)$", script, re.MULTILINE).group(1)
+    assert re.fullmatch(r"[0-9a-f]{64}", digest)
+    for path in _ci_workflow_files():
+        workflow = yaml.safe_load(path.read_text())
+        for name, job in workflow["jobs"].items():
+            steps = job.get("steps", [])
+            for index, step in enumerate(steps):
+                if not step.get("uses", "").startswith("jdx/mise-action@"):
+                    continue
+                assert str(step["with"]["version"]) == pinned, f"{path.name}: {name} pins a different mise"
+                # The action hashes the binary it ends up with, whether this script
+                # placed it, the cache restored it or the action downloaded it.
+                assert step["with"].get("sha256") == digest, f"{path.name}: {name} must verify the mise binary"
+                assert index > 0, f"{path.name}: {name} must fetch the mise binary before jdx/mise-action"
+                assert steps[index - 1].get("run") == "bash tools/ci/mise_binary.bash", (
+                    f"{path.name}: {name} must fetch the mise binary before jdx/mise-action"
+                )
 
 
 def test_mise_bootstrap_serializes_required_toolsets():
@@ -143,6 +222,7 @@ def test_policy_exec_does_not_lazily_install_unrelated_tools():
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     policy = workflow["jobs"]["policy"]
     commands = [shlex.split(step["run"]) for step in policy["steps"] if "run" in step]
+    commands = [command for command in commands if command != ["bash", "tools/ci/mise_binary.bash"]]
     prefix = ["mise", "exec", "--no-deps", "python", "uv", "github:rhysd/actionlint", "--"]
     assert len(commands) == 3
     assert all(command[: len(prefix)] == prefix for command in commands)
@@ -254,7 +334,7 @@ def test_helm_render_tests_run_after_chart_dependencies():
 def test_cpu_lane_uses_cpu_stack_task():
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
     commands = [step.get("run") for step in workflow["jobs"]["cpu-stack"]["steps"] if "run" in step]
-    assert commands == ["mise run cpu-stack"]
+    assert commands == ["bash tools/ci/mise_binary.bash", "mise run cpu-stack"]
 
 
 def test_rust_audits_both_committed_dependency_graphs():

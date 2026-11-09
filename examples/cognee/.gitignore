@@ -1,0 +1,8 @@
+.env
+.venv/
+.state/
+runs/
+.pytest_cache/
+__pycache__/
+/data/*
+!/data/README.md

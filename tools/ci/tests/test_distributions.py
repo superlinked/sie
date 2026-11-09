@@ -51,10 +51,13 @@ def python_archives(tmp_path, name="sie-sdk", version="0.7.2"):
 
 def test_pr_checks_actual_versions_and_release_checks_coordinated_versions():
     actual = packages.manifests("python")
-    assert len(actual) == 13
+    assert len(actual) == 14
     assert "sie-config" in actual
     assert "sie-mcp" in actual
-    assert len(packages.manifests("npm")) == 5
+    assert "sie-cognee" in actual
+    npm_packages = packages.manifests("npm")
+    assert len(npm_packages) == 6
+    assert "@superlinked/sie-cognee" in npm_packages
     with pytest.raises(ValueError, match="actual"):
         packages.manifests("python", "999.0.0")
 
