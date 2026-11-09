@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import zlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -218,13 +219,33 @@ def lock_matches_chart() -> bool:
     return f"digest: sha256:{digest}" in lock.read_text().splitlines()
 
 
-def locked_dependency_archives() -> set[str] | None:
-    """Return the archive names Chart.lock pins, or None when they are unknown."""
+def locked_dependency_archives() -> dict[str, tuple[str, str]] | None:
+    """Return each archive Chart.lock pins with its chart name and version, or None when unknown."""
     lock = resolve_project_root() / CHART_DIR / "Chart.lock"
     locked = _dependency_entries(lock) if lock.is_file() else None
     if not locked or not all(entry.get("name") and entry.get("version") for entry in locked):
         return None
-    return {f"{entry['name']}-{entry['version']}.tgz" for entry in locked}
+    return {f"{entry['name']}-{entry['version']}.tgz": (entry["name"], entry["version"]) for entry in locked}
+
+
+def _archive_identity(archive: Path) -> tuple[str, str] | None:
+    """Return the chart name and version an archive declares, or None when it cannot be read."""
+    try:
+        with tarfile.open(archive, "r:gz") as chart:
+            for member in chart:
+                if member.isfile() and member.name.count("/") == 1 and member.name.endswith("/Chart.yaml"):
+                    manifest = chart.extractfile(member).read().decode()
+                    break
+            else:
+                return None
+    except (OSError, EOFError, tarfile.TarError, zlib.error, UnicodeDecodeError):
+        return None
+    declared: dict[str, str] = {}
+    for line in manifest.splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key in ("name", "version") and key not in declared:
+            declared[key] = value.split(" #", maxsplit=1)[0].strip().strip("\"'")
+    return declared.get("name", ""), declared.get("version", "")
 
 
 def locked_dependencies_present() -> bool:
@@ -232,15 +253,16 @@ def locked_dependencies_present() -> bool:
 
     Helm downloads every dependency again on each build, even when the
     archive is already there. No build is needed when the lock is still the
-    one generated from Chart.yaml and charts/ matches it exactly, with nothing
-    missing and nothing left over from another version.
+    one generated from Chart.yaml and charts/ matches it exactly: nothing
+    missing, nothing left over from another version, and every archive
+    declaring the chart name and version the lock pins.
     """
     expected = locked_dependency_archives()
     charts = resolve_project_root() / CHART_DIR / "charts"
     if expected is None or not charts.is_dir() or not lock_matches_chart():
         return False
-    return {entry.name for entry in charts.iterdir()} == expected and all(
-        (charts / name).is_file() for name in expected
+    return {entry.name for entry in charts.iterdir()} == set(expected) and all(
+        _archive_identity(charts / name) == identity for name, identity in expected.items()
     )
 
 

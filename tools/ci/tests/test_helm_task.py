@@ -33,12 +33,21 @@ def test_locked_archives_follow_the_checked_in_lock() -> None:
     lock = yaml.safe_load((helm.resolve_project_root() / helm.CHART_DIR / "Chart.lock").read_text())
     expected = {f"{entry['name']}-{entry['version']}.tgz" for entry in lock["dependencies"]}
     assert expected
-    assert helm.locked_dependency_archives() == expected
+    assert set(helm.locked_dependency_archives()) == expected
 
 
 def test_lock_digest_is_computed_the_way_helm_writes_it() -> None:
     """The digest Helm wrote into the checked-in lock is reproduced exactly."""
     assert helm.lock_matches_chart()
+
+
+def write_chart_archive(archive: Path, name: str, version: str) -> None:
+    """Write a chart archive that declares the given name and version."""
+    manifest = f"apiVersion: v2\nname: {name}\nversion: {version}\n".encode()
+    member = tarfile.TarInfo(f"{name}/Chart.yaml")
+    member.size = len(manifest)
+    with tarfile.open(archive, "w:gz") as chart:
+        chart.addfile(member, io.BytesIO(manifest))
 
 
 @pytest.fixture
@@ -50,14 +59,16 @@ def locked_chart(tmp_path: Path, monkeypatch) -> Path:
     for name in ("Chart.yaml", "Chart.lock"):
         shutil.copy2(source / name, chart / name)
     for entry in yaml.safe_load((chart / "Chart.lock").read_text())["dependencies"]:
-        (chart / "charts" / f"{entry['name']}-{entry['version']}.tgz").write_bytes(b"archive")
+        archive = chart / "charts" / f"{entry['name']}-{entry['version']}.tgz"
+        write_chart_archive(archive, entry["name"], entry["version"])
     monkeypatch.setattr(helm, "resolve_project_root", lambda: tmp_path)
     return chart
 
 
-def a_locked_archive(chart: Path) -> Path:
-    """Return one of the archives the fixture placed in charts/."""
-    return min((chart / "charts").iterdir())
+def a_locked_dependency(chart: Path) -> tuple[Path, str, str]:
+    """Return one pinned dependency: its archive in charts/, its name and its version."""
+    entry = yaml.safe_load((chart / "Chart.lock").read_text())["dependencies"][0]
+    return chart / "charts" / f"{entry['name']}-{entry['version']}.tgz", entry["name"], entry["version"]
 
 
 def test_dependencies_are_present_when_charts_match_the_lock(locked_chart: Path) -> None:
@@ -66,12 +77,25 @@ def test_dependencies_are_present_when_charts_match_the_lock(locked_chart: Path)
 
 
 @pytest.mark.parametrize(
-    "state", ["missing", "other-version", "leftover", "directory", "no-charts", "no-lock", "stale-lock", "tags"]
+    "state",
+    [
+        "missing",
+        "other-version",
+        "leftover",
+        "directory",
+        "no-charts",
+        "no-lock",
+        "stale-lock",
+        "tags",
+        "declares-other-version",
+        "declares-other-chart",
+        "unreadable",
+    ],
 )
 def test_dependencies_are_absent_unless_charts_match_a_current_lock(locked_chart: Path, state: str) -> None:
     """Anything short of an exact match with a current lock sends the task back to a full build."""
     charts = locked_chart / "charts"
-    archive = a_locked_archive(locked_chart)
+    archive, name, version = a_locked_dependency(locked_chart)
     manifest = locked_chart / "Chart.yaml"
     # The first dependency's version line: the chart's own version is not indented.
     constraint = re.compile(r"(?m)^(    version: ).*$")
@@ -91,6 +115,13 @@ def test_dependencies_are_absent_unless_charts_match_a_current_lock(locked_chart
     elif state == "stale-lock":
         # Chart.yaml asks for another version and the lock was not regenerated.
         manifest.write_text(constraint.sub(r"\g<1>0.0.x", manifest.read_text(), count=1))
+    elif state == "declares-other-version":
+        # The file name matches the lock, the chart inside does not.
+        write_chart_archive(archive, name, "0.0.0")
+    elif state == "declares-other-chart":
+        write_chart_archive(archive, "another-chart", version)
+    elif state == "unreadable":
+        archive.write_bytes(b"not an archive")
     else:
         # A field the task does not read: the digest cannot be confirmed.
         manifest.write_text(constraint.sub(r"\g<0>\n    tags:\n      - extra", manifest.read_text(), count=1))
@@ -124,7 +155,7 @@ def test_render_commands_reuse_dependencies_that_match_the_lock(helm_calls, monk
 
 def test_render_commands_build_dependencies_that_do_not_match(locked_chart: Path, helm_calls, monkeypatch) -> None:
     """A missing archive brings back the full build before the command runs."""
-    a_locked_archive(locked_chart).unlink()
+    a_locked_dependency(locked_chart)[0].unlink()
     assert run_task(monkeypatch, "lint") == 0
     commands = [call[:2] for call in helm_calls]
     assert set(map(tuple, commands[:-2])) == {("repo", "add")}
