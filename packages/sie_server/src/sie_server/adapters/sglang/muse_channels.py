@@ -49,7 +49,7 @@ _ARGUMENT_TAGS = (_THINK_OPEN, _THINK_CLOSE, _TOOL_CALL_CLOSE, "</parameter>")
 _HEADER_RE = re.compile(r"(?:<\|start\|>assistant)?\s*(?:to=([^\s<]+))?\s*<\|message\|>")
 _INVOKE_RE = re.compile(r'<atem:invoke\b[^>]*?\bname="([^"]+)"[^>]*?>(.*?)</atem:invoke>', re.DOTALL)
 _PARAMETER_RE = re.compile(r'<atem:parameter\b[^>]*?\bname="([^"]+)"[^>]*?>(.*?)</atem:parameter>', re.DOTALL)
-_MAX_HELD = 64
+_MAX_HELD = 1024
 _BARRIER = "\u200b"
 
 
@@ -278,8 +278,6 @@ async def translate_muse_channels(chunks: AsyncIterator[GenerationChunk]) -> Asy
             ending = chunk.done or chunk.finish_reason is not None
             if ending:
                 text += translator.finish()
-            elif not text:
-                continue
             candidates = chunk.candidates
             if candidates is not None:
                 candidates = tuple(_translate_candidate(candidate) for candidate in candidates)

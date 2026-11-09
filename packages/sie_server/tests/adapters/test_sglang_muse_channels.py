@@ -459,16 +459,23 @@ def test_trailing_whitespace_in_a_name_or_key_is_read_as_the_parser_reads_it() -
     assert _calls(_worker_pipeline(text)) == [("get_weather", {"city": "Paris"})]
 
 
-@pytest.mark.parametrize("prefix", ["<", "<t", "</thi", "<tool_"])
-def test_a_long_run_of_tag_prefixes_keeps_streaming_and_keeps_its_text(prefix: str) -> None:
-    translator = MuseChannelTranslator()
-    start = translator.feed(f"{U}Answer: ")
-    pieces = [translator.feed(prefix) for _ in range(2_000)]
-    output = start + "".join(pieces) + translator.feed(" done") + translator.finish()
+@pytest.mark.parametrize(
+    ("pieces", "text"),
+    [
+        (["<"], "<" * 2_000),
+        (["<t"], "<t" * 2_000),
+        (["</thi"], "</thi" * 2_000),
+        (["<", "think", ">"], ""),
+        (["<tool_", "call>"], ""),
+    ],
+)
+def test_every_upstream_chunk_reaches_downstream_while_text_is_held_or_removed(pieces: list[str], text: str) -> None:
+    upstream = [f"{U}Answer: ", *(pieces * 2_000), " done"]
 
-    silent = max(len(run) for run in "".join("x" if piece else "_" for piece in pieces).split("x"))
-    assert silent <= 65
-    assert output.replace("\u200b", "") == "Answer: " + prefix * 2_000 + " done"
+    chunks = asyncio.run(_collect(translate_muse_channels(_chunks(*upstream))))
+
+    assert len(chunks) == len(upstream) + 1
+    assert _text(chunks).replace("\u200b", "") == f"Answer: {text} done"
 
 
 def test_a_long_run_of_tag_prefixes_forms_no_tag_with_later_text() -> None:
