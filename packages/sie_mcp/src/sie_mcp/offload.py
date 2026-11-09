@@ -421,6 +421,9 @@ def redact_text(text: str, entities: Sequence[Mapping[str, Any]]) -> tuple[str, 
     placeholder_map: dict[str, str] = {}
     label_counters: dict[str, int] = {}
     assignments: dict[tuple[str, str], str] = {}
+    replacements: list[tuple[int, int, str]] = []
+    # Placeholder of the highest-scoring detection of each value (``chosen`` is score-ordered).
+    value_placeholders: dict[str, str] = {}
     for span in chosen:
         start, end = int(span["start"]), int(span["end"])
         label = str(span["label"])
@@ -431,14 +434,36 @@ def redact_text(text: str, entities: Sequence[Mapping[str, Any]]) -> tuple[str, 
             placeholder = f"[{base}_{label_counters[base]}]"
             assignments[key] = placeholder
             placeholder_map[placeholder] = key[0]
+        replacements.append((start, end, assignments[key]))
+        value_placeholders.setdefault(key[0], assignments[key])
+
+    # The model can find a value in one place and miss it in another (a name in a
+    # signature line, a fax number in a page header). Mask every other exact
+    # occurrence of each detected value with the same placeholder, so a value found
+    # once never leaks elsewhere. Longer values go first so a shorter one cannot
+    # claim part of a longer one, and word edges hold so "Al" never masks "Also".
+    for value, placeholder in sorted(value_placeholders.items(), key=lambda item: -len(item[0])):
+        if not value.strip():
+            continue
+        for match in re.finditer(_whole_value_pattern(value), text):
+            start, end = match.start(), match.end()
+            if any(start < taken_end and end > taken_start for taken_start, taken_end in taken):
+                continue
+            replacements.append((start, end, placeholder))
+            taken.append((start, end))
 
     redacted = text
-    for span in sorted(chosen, key=lambda entity: int(entity["start"]), reverse=True):
-        start, end = int(span["start"]), int(span["end"])
-        key = (text[start:end], str(span["label"]))
-        redacted = redacted[:start] + assignments[key] + redacted[end:]
+    for start, end, placeholder in sorted(replacements, reverse=True):
+        redacted = redacted[:start] + placeholder + redacted[end:]
 
-    return redacted, placeholder_map, len(chosen)
+    return redacted, placeholder_map, len(replacements)
+
+
+def _whole_value_pattern(value: str) -> str:
+    """Match ``value`` exactly, never as part of a longer word."""
+    prefix = r"(?<!\w)" if re.match(r"\w", value) else ""
+    suffix = r"(?!\w)" if re.search(r"\w\Z", value) else ""
+    return prefix + re.escape(value) + suffix
 
 
 def _label_counts_from_placeholders(placeholder_map: Mapping[str, str]) -> dict[str, int]:

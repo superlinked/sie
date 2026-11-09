@@ -146,6 +146,33 @@ def test_redact_text_drops_overlapping_lower_score_spans() -> None:
     assert count == 1
 
 
+def test_redact_text_masks_every_occurrence_of_a_detected_value() -> None:
+    # The model found the name and the fax number only once each, but both appear
+    # again elsewhere; every copy must get the same placeholder.
+    text = (
+        "FAX FROM (555) 010-6621\n"
+        "Provider: Lucas Brennan, PA-C\n"
+        "Signed, Lucas Brennan. Call back on (555) 010-6621. Lucas Brennanson is someone else."
+    )
+    name_at = text.index("Lucas Brennan.")
+    phone_at = text.rindex("(555) 010-6621")
+    redacted, placeholder_map, count = offload.redact_text(
+        text,
+        [
+            {"label": "person", "start": name_at, "end": name_at + 13, "score": 0.9},
+            {"label": "phone number", "start": phone_at, "end": phone_at + 14, "score": 0.8},
+        ],
+    )
+
+    assert redacted == (
+        "FAX FROM [PHONE_NUMBER_1]\n"
+        "Provider: [PERSON_1], PA-C\n"
+        "Signed, [PERSON_1]. Call back on [PHONE_NUMBER_1]. Lucas Brennanson is someone else."
+    )
+    assert placeholder_map == {"[PERSON_1]": "Lucas Brennan", "[PHONE_NUMBER_1]": "(555) 010-6621"}
+    assert count == 4
+
+
 @pytest.mark.parametrize(
     ("content", "labels"),
     [
