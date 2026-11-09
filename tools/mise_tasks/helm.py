@@ -257,14 +257,17 @@ def locked_dependencies_present() -> bool:
     locked dependency and nothing else.
 
     Archives are matched by the chart name and version they declare. Their
-    file names are not used: Helm keeps the name the repository publishes,
-    which is not always ``<name>-<version>.tgz``.
+    file names only have to be ones Helm loads: Helm keeps the name the
+    repository publishes, which is not always ``<name>-<version>.tgz``.
     """
     expected = locked_dependencies()
     charts = resolve_project_root() / CHART_DIR / "charts"
     if expected is None or not charts.is_dir() or not lock_matches_chart():
         return False
     entries = list(charts.iterdir())
+    # Helm loads only .tgz files from charts/ and skips names that start with "." or "_".
+    if not all(entry.suffix == ".tgz" and entry.name[0] not in "._" for entry in entries):
+        return False
     return len(entries) == len(expected) and {_archive_identity(entry) for entry in entries} == expected
 
 

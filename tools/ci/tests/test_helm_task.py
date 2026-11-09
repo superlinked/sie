@@ -97,6 +97,9 @@ def test_dependencies_are_present_whatever_the_archives_are_called(locked_chart:
         "declares-other-version",
         "declares-other-chart",
         "unreadable",
+        "named-tar-gz",
+        "named-hidden",
+        "named-underscore",
     ],
 )
 def test_dependencies_are_absent_unless_charts_match_a_current_lock(locked_chart: Path, state: str) -> None:
@@ -130,6 +133,13 @@ def test_dependencies_are_absent_unless_charts_match_a_current_lock(locked_chart
         write_chart_archive(archive, "another-chart", version)
     elif state == "unreadable":
         archive.write_bytes(b"not an archive")
+    elif state == "named-tar-gz":
+        # The right chart under a name Helm does not load as a dependency.
+        archive.rename(archive.with_suffix(".tar.gz"))
+    elif state == "named-hidden":
+        archive.rename(archive.with_name(f".{archive.name}"))
+    elif state == "named-underscore":
+        archive.rename(archive.with_name(f"_{archive.name}"))
     else:
         # A field the task does not read: the digest cannot be confirmed.
         manifest.write_text(constraint.sub(r"\g<0>\n    tags:\n      - extra", manifest.read_text(), count=1))
