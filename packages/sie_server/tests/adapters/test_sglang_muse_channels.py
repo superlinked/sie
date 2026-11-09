@@ -436,6 +436,21 @@ def test_a_name_the_call_form_cannot_carry_rejects_the_call(original: str, repla
     assert chunks[-1].error_code == "MODEL_OUTPUT_PARSE_ERROR"
 
 
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    [
+        ('name="city"', 'name="' + "The quick brown fox jumps over the lazy dog. " * 4_000 + '>"'),
+        ('invoke name="get_weather"', 'invoke name="' + "get_weather" * 16_000 + ' x"'),
+    ],
+    ids=["key", "name"],
+)
+def test_a_long_name_the_call_form_cannot_carry_is_rejected_in_linear_time(original: str, replacement: str) -> None:
+    chunks = _worker_pipeline(FORCED_TOOL_CALL.replace(original, replacement))
+
+    assert _calls(chunks) == []
+    assert chunks[-1].error_code == "MODEL_OUTPUT_PARSE_ERROR"
+
+
 def test_trailing_whitespace_in_a_name_or_key_is_read_as_the_parser_reads_it() -> None:
     text = FORCED_TOOL_CALL.replace('name="city"', 'name="city "').replace(
         'invoke name="get_weather"', 'invoke name="get_weather\n"'

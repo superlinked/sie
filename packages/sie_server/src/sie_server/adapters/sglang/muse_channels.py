@@ -49,8 +49,6 @@ _ARGUMENT_TAGS = (_THINK_OPEN, _THINK_CLOSE, _TOOL_CALL_CLOSE, "</parameter>")
 _HEADER_RE = re.compile(r"(?:<\|start\|>assistant)?\s*(?:to=([^\s<]+))?\s*<\|message\|>")
 _INVOKE_RE = re.compile(r'<atem:invoke\b[^>]*?\bname="([^"]+)"[^>]*?>(.*?)</atem:invoke>', re.DOTALL)
 _PARAMETER_RE = re.compile(r'<atem:parameter\b[^>]*?\bname="([^"]+)"[^>]*?>(.*?)</atem:parameter>', re.DOTALL)
-_FUNCTION_NAME_RE = re.compile(r"[^<>\s]+\s*")
-_PARAMETER_NAME_RE = re.compile(r"[^<>]*[^<>\s][^<>]*")
 _MAX_HELD = 1024
 
 
@@ -140,6 +138,17 @@ def _tool_name(emitted: str) -> str:
     return head if head == tail else emitted
 
 
+def _function_name_in_place(name: str) -> bool:
+    """Return whether the parser reads ``<function=name>`` here: no ``<``, ``>`` or whitespace before trailing space."""
+    stem = name.rstrip()
+    return bool(stem) and not any(char in "<>" or char.isspace() for char in stem)
+
+
+def _parameter_name_in_place(key: str) -> bool:
+    """Return whether the parser reads ``<parameter=key>`` here: no ``<`` or ``>``, and not only whitespace."""
+    return bool(key.strip()) and "<" not in key and ">" not in key
+
+
 def _tool_call_blocks(body: str) -> str:
     """Rewrite each complete ``atem:invoke`` as a ``<tool_call>`` block.
 
@@ -150,8 +159,8 @@ def _tool_call_blocks(body: str) -> str:
     blocks: list[str] = []
     for emitted, invoke in _INVOKE_RE.findall(body):
         name, parameters = _tool_name(emitted), _PARAMETER_RE.findall(invoke)
-        carried = _FUNCTION_NAME_RE.fullmatch(name) and all(
-            _PARAMETER_NAME_RE.fullmatch(key) and not any(tag in value for tag in _ARGUMENT_TAGS)
+        carried = _function_name_in_place(name) and all(
+            _parameter_name_in_place(key) and not any(tag in value for tag in _ARGUMENT_TAGS)
             for key, value in parameters
         )
         if not carried:
