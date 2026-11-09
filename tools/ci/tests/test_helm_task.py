@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import re
+import shutil
 import subprocess
 import tarfile
 from pathlib import Path
@@ -34,54 +36,64 @@ def test_locked_archives_follow_the_checked_in_lock() -> None:
     assert helm.locked_dependency_archives() == expected
 
 
+def test_lock_digest_is_computed_the_way_helm_writes_it() -> None:
+    """The digest Helm wrote into the checked-in lock is reproduced exactly."""
+    assert helm.lock_matches_chart()
+
+
 @pytest.fixture
 def locked_chart(tmp_path: Path, monkeypatch) -> Path:
-    """A chart whose lock pins two dependencies, both present in charts/."""
-    chart = tmp_path / "deploy/helm/sie-cluster"
+    """A copy of the checked-in chart and lock, with every pinned archive in charts/."""
+    source = helm.resolve_project_root() / helm.CHART_DIR
+    chart = tmp_path / helm.CHART_DIR
     (chart / "charts").mkdir(parents=True)
-    (chart / "Chart.yaml").write_text(
-        "apiVersion: v2\nname: sie-cluster\nversion: 0.8.1\ndependencies:\n"
-        "  - name: keda\n    repository: https://example.test/charts\n    version: 2.14.x\n"
-        "  - name: cert-manager\n    repository: https://example.test/charts\n    version: 1.16.x\n"
-    )
-    (chart / "Chart.lock").write_text(
-        "dependencies:\n"
-        "- name: keda\n  repository: https://example.test/charts\n  version: 2.14.3\n"
-        '- name: cert-manager\n  repository: https://example.test/charts\n  version: "v1.16.5"\n'
-        "digest: sha256:0000\n"
-        'generated: "2026-01-01T00:00:00Z"\n'
-    )
-    for archive in ("keda-2.14.3.tgz", "cert-manager-v1.16.5.tgz"):
-        (chart / "charts" / archive).write_bytes(b"archive")
+    for name in ("Chart.yaml", "Chart.lock"):
+        shutil.copy2(source / name, chart / name)
+    for entry in yaml.safe_load((chart / "Chart.lock").read_text())["dependencies"]:
+        (chart / "charts" / f"{entry['name']}-{entry['version']}.tgz").write_bytes(b"archive")
     monkeypatch.setattr(helm, "resolve_project_root", lambda: tmp_path)
     return chart
 
 
+def a_locked_archive(chart: Path) -> Path:
+    """Return one of the archives the fixture placed in charts/."""
+    return min((chart / "charts").iterdir())
+
+
 def test_dependencies_are_present_when_charts_match_the_lock(locked_chart: Path) -> None:
     """Every pinned archive on disk and nothing else means no build is needed."""
-    assert helm.locked_dependency_archives() == {"keda-2.14.3.tgz", "cert-manager-v1.16.5.tgz"}
     assert helm.locked_dependencies_present()
 
 
-@pytest.mark.parametrize("state", ["missing", "other-version", "leftover", "directory", "no-charts", "no-lock"])
-def test_dependencies_are_absent_unless_charts_match_the_lock_exactly(locked_chart: Path, state: str) -> None:
-    """Anything short of an exact match sends the task back to a full build."""
+@pytest.mark.parametrize(
+    "state", ["missing", "other-version", "leftover", "directory", "no-charts", "no-lock", "stale-lock", "tags"]
+)
+def test_dependencies_are_absent_unless_charts_match_a_current_lock(locked_chart: Path, state: str) -> None:
+    """Anything short of an exact match with a current lock sends the task back to a full build."""
     charts = locked_chart / "charts"
+    archive = a_locked_archive(locked_chart)
+    manifest = locked_chart / "Chart.yaml"
+    # The first dependency's version line: the chart's own version is not indented.
+    constraint = re.compile(r"(?m)^(    version: ).*$")
     if state == "missing":
-        (charts / "keda-2.14.3.tgz").unlink()
+        archive.unlink()
     elif state == "other-version":
-        (charts / "keda-2.14.3.tgz").rename(charts / "keda-2.14.2.tgz")
+        archive.rename(charts / f"{archive.stem}-older.tgz")
     elif state == "leftover":
-        (charts / "keda-2.14.2.tgz").write_bytes(b"archive")
+        (charts / f"{archive.stem}-older.tgz").write_bytes(b"archive")
     elif state == "directory":
-        (charts / "keda-2.14.3.tgz").unlink()
-        (charts / "keda-2.14.3.tgz").mkdir()
+        archive.unlink()
+        archive.mkdir()
     elif state == "no-charts":
-        for archive in charts.iterdir():
-            archive.unlink()
-        charts.rmdir()
-    else:
+        shutil.rmtree(charts)
+    elif state == "no-lock":
         (locked_chart / "Chart.lock").unlink()
+    elif state == "stale-lock":
+        # Chart.yaml asks for another version and the lock was not regenerated.
+        manifest.write_text(constraint.sub(r"\g<1>0.0.x", manifest.read_text(), count=1))
+    else:
+        # A field the task does not read: the digest cannot be confirmed.
+        manifest.write_text(constraint.sub(r"\g<0>\n    tags:\n      - extra", manifest.read_text(), count=1))
     assert not helm.locked_dependencies_present()
 
 
@@ -112,20 +124,20 @@ def test_render_commands_reuse_dependencies_that_match_the_lock(helm_calls, monk
 
 def test_render_commands_build_dependencies_that_do_not_match(locked_chart: Path, helm_calls, monkeypatch) -> None:
     """A missing archive brings back the full build before the command runs."""
-    (locked_chart / "charts" / "keda-2.14.3.tgz").unlink()
+    a_locked_archive(locked_chart).unlink()
     assert run_task(monkeypatch, "lint") == 0
-    assert [call[:2] for call in helm_calls] == [
-        ["repo", "add"],
-        ["dependency", "build"],
-        ["lint", "deploy/helm/sie-cluster"],
-    ]
+    commands = [call[:2] for call in helm_calls]
+    assert set(map(tuple, commands[:-2])) == {("repo", "add")}
+    assert commands[-2:] == [["dependency", "build"], ["lint", "deploy/helm/sie-cluster"]]
 
 
 def test_explicit_dependencies_always_build(helm_calls, monkeypatch) -> None:
     """`dependencies` rebuilds even when charts/ already matches the lock."""
     assert helm.locked_dependencies_present()
     assert run_task(monkeypatch, "dependencies") == 0
-    assert [call[:2] for call in helm_calls] == [["repo", "add"], ["dependency", "build"]]
+    commands = [call[:2] for call in helm_calls]
+    assert set(map(tuple, commands[:-1])) == {("repo", "add")}
+    assert commands[-1] == ["dependency", "build"]
 
 
 def test_validation_defaults_disable_payload_store(monkeypatch) -> None:
