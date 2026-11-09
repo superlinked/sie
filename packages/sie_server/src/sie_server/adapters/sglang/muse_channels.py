@@ -86,6 +86,7 @@ class _TagRemover:
         self._held: list[str] = []
 
     def feed(self, text: str) -> str:
+        """Return the text that can no longer become part of a tag."""
         output: list[str] = []
         at = 0
         while at < len(text):
@@ -114,12 +115,14 @@ class _TagRemover:
         return "".join(output)
 
     def flush(self) -> str:
+        """Return the held tail; nothing that follows can complete it any more."""
         held = "".join(self._held)
         self._held.clear()
         return held
 
 
 def _without(text: str, tags: tuple[str, ...]) -> str:
+    """Return complete ``text`` with every tag removed."""
     remover = _TagRemover(tags)
     return remover.feed(text) + remover.flush()
 
