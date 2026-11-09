@@ -65,13 +65,13 @@ def plain_text(value: Any) -> str | None:
     return None
 
 
-def http_fetch(url: str, accept: str | None = None) -> bytes:
+def http_fetch(url: str, accept: str | None = None, *, max_bytes: int = MAX_BYTES) -> bytes:
     headers = {"User-Agent": USER_AGENT}
     if accept is not None:
         headers["Accept"] = accept
     try:
         with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=TIMEOUT_S) as response:
-            body = response.read(MAX_BYTES + 1)
+            body = response.read(max_bytes + 1)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             raise NotFound(url) from None
@@ -79,8 +79,8 @@ def http_fetch(url: str, accept: str | None = None) -> bytes:
         raise LookupFailed(f"HTTP {exc.code} from {urlsplit(url).hostname}{hint}") from None
     except OSError as exc:
         raise LookupFailed(f"could not reach {urlsplit(url).hostname} ({type(exc).__name__})") from None
-    if len(body) > MAX_BYTES:
-        raise LookupFailed(f"a response from {urlsplit(url).hostname} is larger than {MAX_BYTES} bytes")
+    if len(body) > max_bytes:
+        raise LookupFailed(f"a response from {urlsplit(url).hostname} is larger than {max_bytes} bytes")
     return body
 
 
