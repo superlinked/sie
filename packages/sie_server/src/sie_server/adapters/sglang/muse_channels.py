@@ -19,10 +19,13 @@ rest of the stack: the ``to=self`` channel becomes a ``<think>`` block, tool
 channels become ``<tool_call>`` blocks in the Qwen XML form, and the ``to=user``
 channel becomes plain text.
 
-Only the channel framing produces those tags. The model's own text is data: the
-tags are removed from reasoning, answers and tool arguments, and angle brackets
-from tool and parameter names, so no channel's text can open, close or forge a
-block downstream.
+Only the channel framing produces those tags. The model's own text is data, and
+the tags a downstream parser reads are removed from it. Downstream, the reasoning
+and tool-call blocks are taken out of the answer, so the answer text of a whole
+turn is cleaned as one run, and so is its reasoning. Text on either side of a
+block cannot join into a tag. A tool or parameter name that the Qwen XML form
+cannot carry exactly becomes an empty ``<tool_call>`` block, which the parser
+rejects.
 """
 
 from __future__ import annotations
@@ -41,12 +44,14 @@ _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
 _TOOL_CALL_OPEN = "<tool_call>"
 _TOOL_CALL_CLOSE = "</tool_call>"
-_TEXT_TAGS = (_THINK_OPEN, _THINK_CLOSE, _TOOL_CALL_OPEN, _TOOL_CALL_CLOSE)
-_ARGUMENT_TAGS = (*_TEXT_TAGS, "<function=", "</function>", "<parameter=", "</parameter>")
+_TEXT_TAGS = (_THINK_OPEN, _THINK_CLOSE, _TOOL_CALL_OPEN)
+_ARGUMENT_TAGS = (_THINK_OPEN, _THINK_CLOSE, _TOOL_CALL_CLOSE, "</parameter>")
 
 _HEADER_RE = re.compile(r"(?:<\|start\|>assistant)?\s*(?:to=([^\s<]+))?\s*<\|message\|>")
 _INVOKE_RE = re.compile(r'<atem:invoke\b[^>]*?\bname="([^"]+)"[^>]*?>(.*?)</atem:invoke>', re.DOTALL)
 _PARAMETER_RE = re.compile(r'<atem:parameter\b[^>]*?\bname="([^"]+)"[^>]*?>(.*?)</atem:parameter>', re.DOTALL)
+_FUNCTION_NAME_RE = re.compile(r"[^<>\s]+")
+_PARAMETER_NAME_RE = re.compile(r"[^<>]*[^<>\s]")
 
 
 def _may_become_header(text: str) -> bool:
@@ -127,11 +132,6 @@ def _without(text: str, tags: tuple[str, ...]) -> str:
     return remover.feed(text) + remover.flush()
 
 
-def _bare(name: str) -> str:
-    """Drop the angle brackets a name would need to leave its opening tag."""
-    return name.replace("<", "").replace(">", "")
-
-
 def _tool_name(emitted: str) -> str:
     """Undo the doubled namespace (``name.name``) the chat template can provoke."""
     head, _, tail = emitted.partition(".")
@@ -139,14 +139,21 @@ def _tool_name(emitted: str) -> str:
 
 
 def _tool_call_blocks(body: str) -> str:
-    """Rewrite each complete ``atem:invoke`` as a ``<tool_call>`` block."""
+    """Rewrite each complete ``atem:invoke`` as a ``<tool_call>`` block.
+
+    A name or key that the parser would not read back exactly gives an empty
+    block, which the parser rejects.
+    """
     blocks: list[str] = []
-    for name, invoke in _INVOKE_RE.findall(body):
-        parameters = "".join(
-            f"<parameter={_bare(key)}>\n{_without(value, _ARGUMENT_TAGS)}\n</parameter>\n"
-            for key, value in _PARAMETER_RE.findall(invoke)
+    for emitted, invoke in _INVOKE_RE.findall(body):
+        name, parameters = _tool_name(emitted), _PARAMETER_RE.findall(invoke)
+        if not _FUNCTION_NAME_RE.fullmatch(name) or not all(_PARAMETER_NAME_RE.fullmatch(key) for key, _ in parameters):
+            blocks.append(f"{_TOOL_CALL_OPEN}\n{_TOOL_CALL_CLOSE}")
+            continue
+        arguments = "".join(
+            f"<parameter={key}>\n{_without(value, _ARGUMENT_TAGS)}\n</parameter>\n" for key, value in parameters
         )
-        blocks.append(f"<tool_call>\n<function={_bare(_tool_name(name))}>\n{parameters}</function>\n</tool_call>")
+        blocks.append(f"{_TOOL_CALL_OPEN}\n<function={name}>\n{arguments}</function>\n{_TOOL_CALL_CLOSE}")
     return "".join(blocks)
 
 
@@ -157,7 +164,8 @@ class MuseChannelTranslator:
         self._buffer = ""
         # ``self``, ``user`` or ``tool``; ``None`` while between channels.
         self._channel: str | None = None
-        self._channel_text = _TagRemover(_TEXT_TAGS)
+        self._answer = _TagRemover(_TEXT_TAGS)
+        self._reasoning = _TagRemover(_TEXT_TAGS)
 
     def feed(self, text: str) -> str:
         self._buffer += text
@@ -172,20 +180,25 @@ class MuseChannelTranslator:
         buffered, self._buffer = self._buffer, ""
         channel, self._channel = self._channel, None
         if channel == "tool":
-            output = self._markup(_tool_call_blocks(buffered))
+            output = _tool_call_blocks(buffered)
         elif channel == "self":
-            output = self._channel_text.feed(buffered) + self._markup(_THINK_CLOSE)
+            output = self._reasoning.feed(buffered)
         elif channel == "user":
-            output = self._channel_text.feed(buffered)
+            output = self._answer.feed(buffered)
         else:
             stripped = buffered.lstrip()
             ignored = not stripped or "=" in stripped or stripped.startswith("<")
-            output = "" if ignored else self._channel_text.feed(buffered)
-        return output + self._channel_text.flush()
+            output = "" if ignored else self._answer.feed(buffered)
+        reasoning = self._reasoning.flush()
+        if channel == "self":
+            output += reasoning + _THINK_CLOSE
+        elif reasoning:
+            output += _THINK_OPEN + reasoning + _THINK_CLOSE
+        return output + self._answer.flush()
 
-    def _markup(self, markup: str) -> str:
-        """Return the translation's own markup, after the channel text it follows."""
-        return self._channel_text.flush() + markup if markup else ""
+    def _text(self) -> _TagRemover:
+        """Return the remover for the open channel: the turn's reasoning or its answer."""
+        return self._reasoning if self._channel == "self" else self._answer
 
     def _open_channel(self, output: list[str]) -> bool:
         stripped = self._buffer.lstrip()
@@ -195,7 +208,7 @@ class MuseChannelTranslator:
             self._channel = recipient if recipient in ("self", "user") else "tool"
             self._buffer = stripped[header.end() :]
             if self._channel == "self":
-                output.append(self._markup(_THINK_OPEN))
+                output.append(_THINK_OPEN)
             return True
         if _may_become_header(stripped):
             return False
@@ -210,17 +223,14 @@ class MuseChannelTranslator:
             if self._channel == "tool":
                 return False  # A call is rewritten whole, once it has closed.
             cut = len(self._buffer) - _held_back(self._buffer, _CHANNEL_ENDS)
-            output.append(self._channel_text.feed(self._buffer[:cut]))
+            output.append(self._text().feed(self._buffer[:cut]))
             self._buffer = self._buffer[cut:]
             return False
         end_at, end_length = min(ends)
         body = self._buffer[:end_at]
-        if self._channel == "tool":
-            output.append(self._markup(_tool_call_blocks(body)))
-        else:
-            output.append(self._channel_text.feed(body))
+        output.append(_tool_call_blocks(body) if self._channel == "tool" else self._text().feed(body))
         if self._channel == "self":
-            output.append(self._markup(_THINK_CLOSE))
+            output.append(_THINK_CLOSE)
         self._buffer = self._buffer[end_at + end_length :]
         self._channel = None
         return True
