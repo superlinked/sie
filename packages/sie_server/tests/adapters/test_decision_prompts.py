@@ -134,9 +134,16 @@ def test_knowline_unknown_message_shapes_remain_plain_state(message):
 
 
 @pytest.mark.parametrize("structured_noul", [True, False])
-def test_knowline_null_noul_criterion_renders_its_default(structured_noul):
-    question = parse_questions({"q": {"type": "noul", "criteria": {"true": None, "false": "It rained"}}})[0]
+@pytest.mark.parametrize(
+    ("criteria", "options"),
+    [
+        ({"true": None, "false": "It rained"}, "A. Yes: yes\nB. No: It rained"),
+        ({"true": "It rained", "false": None}, "A. Yes: It rained\nB. No: no"),
+    ],
+)
+def test_knowline_null_noul_criterion_renders_its_default(structured_noul, criteria, options):
+    question = parse_questions({"q": {"type": "noul", "criteria": criteria}})[0]
 
     block = knowline.question_block(question, ("A", "B"), structured_noul)
 
-    assert block.endswith("Options:\nA. Yes: yes\nB. No: It rained")
+    assert block.endswith(f"Options:\n{options}")
