@@ -28,12 +28,12 @@ def test_dependency_repositories_are_derived_and_idempotent() -> None:
     assert all(not url.startswith("oci://") for url in urls)
 
 
-def test_locked_archives_follow_the_checked_in_lock() -> None:
-    """The task's line parser and a YAML parser agree on the pinned archives."""
+def test_locked_dependencies_follow_the_checked_in_lock() -> None:
+    """The task's line parser and a YAML parser agree on the pinned dependencies."""
     lock = yaml.safe_load((helm.resolve_project_root() / helm.CHART_DIR / "Chart.lock").read_text())
-    expected = {f"{entry['name']}-{entry['version']}.tgz" for entry in lock["dependencies"]}
+    expected = {(entry["name"], entry["version"]) for entry in lock["dependencies"]}
     assert expected
-    assert set(helm.locked_dependency_archives()) == expected
+    assert helm.locked_dependencies() == expected
 
 
 def test_lock_digest_is_computed_the_way_helm_writes_it() -> None:
@@ -56,7 +56,7 @@ def locked_chart(tmp_path: Path, monkeypatch) -> Path:
     source = helm.resolve_project_root() / helm.CHART_DIR
     chart = tmp_path / helm.CHART_DIR
     (chart / "charts").mkdir(parents=True)
-    for name in ("Chart.yaml", "Chart.lock"):
+    for name in ("Chart.yaml", "Chart.lock", ".helmignore"):
         shutil.copy2(source / name, chart / name)
     for entry in yaml.safe_load((chart / "Chart.lock").read_text())["dependencies"]:
         archive = chart / "charts" / f"{entry['name']}-{entry['version']}.tgz"
@@ -76,12 +76,19 @@ def test_dependencies_are_present_when_charts_match_the_lock(locked_chart: Path)
     assert helm.locked_dependencies_present()
 
 
+def test_dependencies_are_present_whatever_the_archives_are_called(locked_chart: Path) -> None:
+    """Helm keeps the file name a repository publishes, which need not be ``<name>-<version>.tgz``."""
+    archive, _, _ = a_locked_dependency(locked_chart)
+    archive.rename(archive.with_name(f"{archive.stem} copy.tgz"))
+    assert helm.locked_dependencies_present()
+
+
 @pytest.mark.parametrize(
     "state",
     [
         "missing",
-        "other-version",
         "leftover",
+        "duplicate",
         "directory",
         "no-charts",
         "no-lock",
@@ -90,6 +97,10 @@ def test_dependencies_are_present_when_charts_match_the_lock(locked_chart: Path)
         "declares-other-version",
         "declares-other-chart",
         "unreadable",
+        "named-tar-gz",
+        "named-hidden",
+        "named-underscore",
+        "named-ignored",
     ],
 )
 def test_dependencies_are_absent_unless_charts_match_a_current_lock(locked_chart: Path, state: str) -> None:
@@ -101,10 +112,11 @@ def test_dependencies_are_absent_unless_charts_match_a_current_lock(locked_chart
     constraint = re.compile(r"(?m)^(    version: ).*$")
     if state == "missing":
         archive.unlink()
-    elif state == "other-version":
-        archive.rename(charts / f"{archive.stem}-older.tgz")
     elif state == "leftover":
-        (charts / f"{archive.stem}-older.tgz").write_bytes(b"archive")
+        # Another version of a locked chart, left beside the locked one.
+        write_chart_archive(charts / f"{name}-0.0.0.tgz", name, "0.0.0")
+    elif state == "duplicate":
+        shutil.copy2(archive, charts / f"{archive.stem} copy.tgz")
     elif state == "directory":
         archive.unlink()
         archive.mkdir()
@@ -116,12 +128,23 @@ def test_dependencies_are_absent_unless_charts_match_a_current_lock(locked_chart
         # Chart.yaml asks for another version and the lock was not regenerated.
         manifest.write_text(constraint.sub(r"\g<1>0.0.x", manifest.read_text(), count=1))
     elif state == "declares-other-version":
-        # The file name matches the lock, the chart inside does not.
+        # The file is named after the locked version, the chart inside is another one.
         write_chart_archive(archive, name, "0.0.0")
     elif state == "declares-other-chart":
         write_chart_archive(archive, "another-chart", version)
     elif state == "unreadable":
         archive.write_bytes(b"not an archive")
+    elif state == "named-tar-gz":
+        # The right chart under a name Helm does not load as a dependency.
+        archive.rename(archive.with_suffix(".tar.gz"))
+    elif state == "named-hidden":
+        archive.rename(archive.with_name(f".{archive.name}"))
+    elif state == "named-underscore":
+        archive.rename(archive.with_name(f"_{archive.name}"))
+    elif state == "named-ignored":
+        # A name the chart's .helmignore excludes, so Helm does not load the file.
+        (locked_chart / ".helmignore").write_text("# build residue\ntmpcharts-*\n")
+        archive.rename(archive.with_name(f"tmpcharts-{archive.name}"))
     else:
         # A field the task does not read: the digest cannot be confirmed.
         manifest.write_text(constraint.sub(r"\g<0>\n    tags:\n      - extra", manifest.read_text(), count=1))
