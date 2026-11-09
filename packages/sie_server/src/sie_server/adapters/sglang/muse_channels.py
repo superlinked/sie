@@ -18,6 +18,13 @@ so rewriting the stream once at the adapter boundary keeps the format out of the
 rest of the stack: the ``to=self`` channel becomes a ``<think>`` block, tool
 channels become ``<tool_call>`` blocks in the Qwen XML form, and the ``to=user``
 channel becomes plain text.
+
+Only the channel framing produces those tags. The model's own text is data, and
+the tags a downstream parser reads are removed from it. Downstream, the reasoning
+and tool-call blocks are taken out of the answer, so the answer text of a whole
+turn is cleaned as one run, and so is its reasoning. Text on either side of a
+block cannot join into a tag. A tool call that the Qwen XML form cannot carry
+becomes an empty ``<tool_call>`` block, which the parser treats as malformed.
 """
 
 from __future__ import annotations
@@ -34,10 +41,16 @@ _MESSAGE = "<|message|>"
 _CHANNEL_ENDS = ("<|eom|>", "<|eot|>")
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
+_TOOL_CALL_OPEN = "<tool_call>"
+_TOOL_CALL_CLOSE = "</tool_call>"
+_TEXT_TAGS = (_THINK_OPEN, _THINK_CLOSE, _TOOL_CALL_OPEN)
+_ARGUMENT_TAGS = (_THINK_OPEN, _THINK_CLOSE, _TOOL_CALL_CLOSE, "</parameter>")
 
 _HEADER_RE = re.compile(r"(?:<\|start\|>assistant)?\s*(?:to=([^\s<]+))?\s*<\|message\|>")
 _INVOKE_RE = re.compile(r'<atem:invoke\b[^>]*?\bname="([^"]+)"[^>]*?>(.*?)</atem:invoke>', re.DOTALL)
 _PARAMETER_RE = re.compile(r'<atem:parameter\b[^>]*?\bname="([^"]+)"[^>]*?>(.*?)</atem:parameter>', re.DOTALL)
+_MAX_HELD = 1024
+_BARRIER = "\u200b"
 
 
 def _may_become_header(text: str) -> bool:
@@ -63,20 +76,100 @@ def _held_back(text: str, markers: tuple[str, ...]) -> int:
     return 0
 
 
+class _TagRemover:
+    """Remove tags from streamed text, including a tag that an earlier removal joins together.
+
+    Every tag starts with its only ``<``, so text since the last ``<`` is the one
+    place a tag can still form. Each held run is a proper prefix of a tag, and
+    removing a later run exposes the one before it, so the whole held tail stays
+    back until it can no longer become a tag. Only text made of nothing but tag
+    prefixes keeps it growing; past ``_MAX_HELD`` characters it is released as
+    written and followed by a zero-width space, which no tag contains, so no
+    later text can complete a tag in it.
+    """
+
+    def __init__(self, tags: tuple[str, ...]) -> None:
+        self._tags = tags
+        self._held: list[str] = []
+        self._held_size = 0
+
+    def feed(self, text: str) -> str:
+        """Return the text that can no longer become part of a tag."""
+        output: list[str] = []
+        at = 0
+        while at < len(text):
+            if not self._held:
+                start = text.find("<", at)
+                if start < 0:
+                    output.append(text[at:])
+                    break
+                output.append(text[at:start])
+                self._held.append("<")
+                self._held_size = 1
+                at = start + 1
+                continue
+            char = text[at]
+            at += 1
+            if char == "<":
+                self._held.append(char)
+            else:
+                run = self._held[-1] + char
+                if run in self._tags:
+                    self._held_size -= len(self._held.pop())
+                    continue
+                if not any(tag.startswith(run) for tag in self._tags):
+                    output.append(self.flush() + char)
+                    continue
+                self._held[-1] = run
+            self._held_size += 1
+            if self._held_size > _MAX_HELD:
+                output.append(self.flush() + _BARRIER)
+        return "".join(output)
+
+    def flush(self) -> str:
+        """Return the held tail; nothing that follows can complete it any more."""
+        held = "".join(self._held)
+        self._held.clear()
+        self._held_size = 0
+        return held
+
+
 def _tool_name(emitted: str) -> str:
     """Undo the doubled namespace (``name.name``) the chat template can provoke."""
     head, _, tail = emitted.partition(".")
     return head if head == tail else emitted
 
 
+def _function_name_in_place(name: str) -> bool:
+    """Return whether the parser reads ``<function=name>`` here: no ``<``, ``>`` or whitespace before trailing space."""
+    stem = name.rstrip()
+    return bool(stem) and not any(char in "<>" or char.isspace() for char in stem)
+
+
+def _parameter_name_in_place(key: str) -> bool:
+    """Return whether the parser reads ``<parameter=key>`` here: no ``<`` or ``>``, and not only whitespace."""
+    return bool(key.strip()) and "<" not in key and ">" not in key
+
+
 def _tool_call_blocks(body: str) -> str:
-    """Rewrite each complete ``atem:invoke`` as a ``<tool_call>`` block."""
+    """Rewrite each complete ``atem:invoke`` as a ``<tool_call>`` block.
+
+    A call the Qwen XML form cannot carry becomes an empty block, which the parser
+    treats as malformed: the parser would not find its name or a key in place, or
+    a value holds a tag that a parser reads there.
+    """
     blocks: list[str] = []
-    for name, invoke in _INVOKE_RE.findall(body):
-        parameters = "".join(
-            f"<parameter={key}>\n{value}\n</parameter>\n" for key, value in _PARAMETER_RE.findall(invoke)
+    for emitted, invoke in _INVOKE_RE.findall(body):
+        name, parameters = _tool_name(emitted), _PARAMETER_RE.findall(invoke)
+        carried = _function_name_in_place(name) and all(
+            _parameter_name_in_place(key) and not any(tag in value for tag in _ARGUMENT_TAGS)
+            for key, value in parameters
         )
-        blocks.append(f"<tool_call>\n<function={_tool_name(name)}>\n{parameters}</function>\n</tool_call>")
+        if not carried:
+            blocks.append(f"{_TOOL_CALL_OPEN}\n{_TOOL_CALL_CLOSE}")
+            continue
+        arguments = "".join(f"<parameter={key}>\n{value}\n</parameter>\n" for key, value in parameters)
+        blocks.append(f"{_TOOL_CALL_OPEN}\n<function={name}>\n{arguments}</function>\n{_TOOL_CALL_CLOSE}")
     return "".join(blocks)
 
 
@@ -87,6 +180,8 @@ class MuseChannelTranslator:
         self._buffer = ""
         # ``self``, ``user`` or ``tool``; ``None`` while between channels.
         self._channel: str | None = None
+        self._answer = _TagRemover(_TEXT_TAGS)
+        self._reasoning = _TagRemover(_TEXT_TAGS)
 
     def feed(self, text: str) -> str:
         self._buffer += text
@@ -101,13 +196,25 @@ class MuseChannelTranslator:
         buffered, self._buffer = self._buffer, ""
         channel, self._channel = self._channel, None
         if channel == "tool":
-            return _tool_call_blocks(buffered)
+            output = _tool_call_blocks(buffered)
+        elif channel == "self":
+            output = self._reasoning.feed(buffered)
+        elif channel == "user":
+            output = self._answer.feed(buffered)
+        else:
+            stripped = buffered.lstrip()
+            ignored = not stripped or "=" in stripped or stripped.startswith("<")
+            output = "" if ignored else self._answer.feed(buffered)
+        reasoning = self._reasoning.flush()
         if channel == "self":
-            return buffered.replace(_THINK_CLOSE, "") + _THINK_CLOSE
-        if channel == "user":
-            return buffered
-        stripped = buffered.lstrip()
-        return "" if not stripped or "=" in stripped or stripped.startswith("<") else buffered
+            output += reasoning + _THINK_CLOSE
+        elif reasoning:
+            output += _THINK_OPEN + reasoning + _THINK_CLOSE
+        return output + self._answer.flush()
+
+    def _text(self) -> _TagRemover:
+        """Return the remover for the open channel: the turn's reasoning or its answer."""
+        return self._reasoning if self._channel == "self" else self._answer
 
     def _open_channel(self, output: list[str]) -> bool:
         stripped = self._buffer.lstrip()
@@ -131,23 +238,18 @@ class MuseChannelTranslator:
         if not ends:
             if self._channel == "tool":
                 return False  # A call is rewritten whole, once it has closed.
-            markers = (*_CHANNEL_ENDS, _THINK_CLOSE) if self._channel == "self" else _CHANNEL_ENDS
-            cut = len(self._buffer) - _held_back(self._buffer, markers)
-            output.append(self._visible(self._buffer[:cut]))
+            cut = len(self._buffer) - _held_back(self._buffer, _CHANNEL_ENDS)
+            output.append(self._text().feed(self._buffer[:cut]))
             self._buffer = self._buffer[cut:]
             return False
         end_at, end_length = min(ends)
         body = self._buffer[:end_at]
-        output.append(_tool_call_blocks(body) if self._channel == "tool" else self._visible(body))
+        output.append(_tool_call_blocks(body) if self._channel == "tool" else self._text().feed(body))
         if self._channel == "self":
             output.append(_THINK_CLOSE)
         self._buffer = self._buffer[end_at + end_length :]
         self._channel = None
         return True
-
-    def _visible(self, text: str) -> str:
-        # Reasoning that quotes the closing tag must not end the private block early.
-        return text.replace(_THINK_CLOSE, "") if self._channel == "self" else text
 
 
 def translate_muse_text(text: str) -> str:
@@ -176,8 +278,6 @@ async def translate_muse_channels(chunks: AsyncIterator[GenerationChunk]) -> Asy
             ending = chunk.done or chunk.finish_reason is not None
             if ending:
                 text += translator.finish()
-            elif not text:
-                continue
             candidates = chunk.candidates
             if candidates is not None:
                 candidates = tuple(_translate_candidate(candidate) for candidate in candidates)
@@ -188,7 +288,7 @@ async def translate_muse_channels(chunks: AsyncIterator[GenerationChunk]) -> Asy
                 chunk,
                 text_delta=text,
                 is_first=is_first,
-                logprobs=chunk.logprobs if text == chunk.text_delta else None,
+                logprobs=chunk.logprobs if text == chunk.text_delta and (text or ending) else None,
                 candidates=candidates,
             )
     finally:
