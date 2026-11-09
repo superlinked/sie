@@ -282,6 +282,20 @@ def test_a_full_batch_holds_sixteen_items_whatever_the_case() -> None:
         assert probe._companions(suite, case, "alone") == ()
 
 
+def _float_arrays(node: object) -> list[list[Any]]:
+    """Return every JSON array under ``node`` that holds a float.
+
+    The record's own arrays hold integers, strings and objects, so an array
+    with a float in it is vector contents.
+    """
+    if isinstance(node, dict):
+        return [found for value in node.values() for found in _float_arrays(value)]
+    if not isinstance(node, list):
+        return []
+    found = [node] if any(isinstance(item, float) for item in node) else []
+    return found + [nested for item in node for nested in _float_arrays(item)]
+
+
 @pytest.mark.parametrize(
     ("remote_offset", "contract_mismatch", "instance_mismatch", "remote_execution", "batch_offset"),
     [
@@ -445,7 +459,9 @@ profiles:
     assert "retrieval " not in serialized
     assert "Represent this text" not in serialized
     assert 'values"' in serialized  # Measurement count, never vector contents.
-    assert "1.01" not in serialized
+    # Checked on the parsed record: a text search for a vector value also
+    # matches the timestamp whenever its seconds happen to read the same.
+    assert not _float_arrays(json.loads(serialized))
 
 
 @pytest.mark.parametrize(
