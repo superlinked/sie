@@ -318,6 +318,11 @@ def test_full_cli_runs_real_sdk_transport_and_only_writes_evidence(
     remote_execution: str | None,
     batch_offset: float,
 ) -> None:
+    """Run the probe CLI against a live local server and check what it records.
+
+    The record must hold the measurements and the request shape, and never
+    the probe texts or the vectors that came back.
+    """
     requests: list[tuple[dict[str, Any], bool]] = []
     remote_contract: str | None = None
 
