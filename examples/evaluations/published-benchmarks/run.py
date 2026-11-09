@@ -1554,7 +1554,11 @@ def performance_command(parser: argparse.ArgumentParser, args: argparse.Namespac
         raise SystemExit(1)
 
 
-def latency_command(parser: argparse.ArgumentParser, args: argparse.Namespace, fetch: Fetch = http_fetch) -> None:
+def latency_fetch(url: str, accept: str | None = None) -> bytes:
+    return http_fetch(url, accept, max_bytes=latency_mode.MAX_DOWNLOAD_BYTES)
+
+
+def latency_command(parser: argparse.ArgumentParser, args: argparse.Namespace, fetch: Fetch = latency_fetch) -> None:
     try:
         endpoint = normalize_endpoint(args.endpoint)
     except ValueError as exc:

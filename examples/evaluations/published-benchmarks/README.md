@@ -627,20 +627,28 @@ from your run for that reason. Read the `verdict:` line with that in mind.
 
 ## Check a time on the website
 
-The per-request times the website shows for SIE come from one public study: the
-`latency-fastest-config/2026-10-11` folder of the Hugging Face dataset
+The per-request times the website shows for SIE come from public studies in the
+Hugging Face dataset
 [`superlinked/sie-task-evidence`](https://huggingface.co/datasets/superlinked/sie-task-evidence).
-It timed each model one request at a time on an L4, an RTX PRO 6000 and an
-H100, and the website shows the median of the fastest of the three, rounded up.
-`run.py latency` repeats that study for two pages against your own server:
+Each study timed a model one request at a time, with the client inside the
+server's container. `run.py latency` repeats that timing against your own
+server for ten pages:
 
-| `--page` | On the website | Model | Server bundle | Inputs | One request |
-| --- | --- | --- | --- | --- | --- |
-| `classify` | `/classify`: "Median time per message 13.1 ms" | `fastino/GLiNER2.5-Decide` | `transformers5` | 400 CLINC150 and BANKING77 messages | `extract` with the message's 8 labels and `options={"overflow_policy": "error"}` |
-| `search` | home page and `/about`: 15.7 ms; `/serverless`: 16ms | `Qwen/Qwen3-Embedding-4B` | `sglang-embedding` | 440 questions | `encode` with `is_query=True` and `output_types=["dense"]`, no instruction |
+| `--page` | On the website | Model | Bundle | GPU it was timed on | Inputs | One request |
+| --- | --- | --- | --- | --- | --- | --- |
+| `classify` | `/classify`: 13.1 ms | `fastino/GLiNER2.5-Decide` | `transformers5` | RTX PRO 6000 | 400 CLINC150 and BANKING77 messages | `extract` with the message's 8 labels, `options={"overflow_policy": "error"}` |
+| `search` | home page and `/about`: 15.7 ms | `Qwen/Qwen3-Embedding-4B` | `sglang-embedding` | RTX PRO 6000 | 440 questions | `encode` with `is_query=True` and `output_types=["dense"]`, no instruction |
+| `named-entities` | industry pages, extract entities: 24 ms | `numind/NuNER_Zero-span` | `default` | RTX PRO 6000 | 652 sentences in 7 sets | `extract` with the set's labels, `options={"threshold": 0.5}` |
+| `redact` | `/redact`: 61 ms | `superlinked/pii-redact` | `default` | RTX PRO 6000 | 660 documents | `extract` with the study's 39 labels |
+| `typed-decisions` | `/typed-decisions`: 13.8 ms | `MoritzLaurer/deberta-v3-large-zeroshot-v2.0` | `default` | RTX PRO 6000 | the first 200 test comments of the comment-spam set | `extract` with one label statement, `options={"hypothesis_template": "{}", "multi_label": true}` |
+| `rerank` | `/rerank`: 55 ms | `Qwen/Qwen3-Reranker-4B:fast` | `default` | H100 | 499 questions with 20 candidates each | `score` with the study's instruction |
+| `request-routing` | `/request-routing`: 8.5 ms | `Qwen/Qwen3-Reranker-4B:fast` | `default` | H100 | 200 requests | `score`: one request against one description, with the study's instruction |
+| `ocr` | industry pages, OCR a page: 287 ms | `zai-org/GLM-OCR` | `sglang-vision-extract` | H100 | 372 photos (115 MB) | `extract` with the photo, instruction `Text Recognition:` |
+| `chat` | `/chat`: 0.74 s | `Qwen/Qwen3.8-27B-FP8` | `sglang-cu130` | H100 | 330 turns of 55 conversations | a chat completion, 400 new tokens at most, temperature 0 |
+| `structured-output` | industry pages, structured output: 938 ms | `Qwen/Qwen3.8-27B-FP8` | `sglang-cu130` | H100 | 100 Structured Output Benchmark records | a chat completion with a strict JSON schema, 2,048 new tokens at most, temperature 0 |
 
 On a Linux machine with an NVIDIA GPU, start the server for the page with its
-bundle image:
+bundle image. For `classify`:
 
 ```sh
 docker run --gpus all -p 127.0.0.1:8080:8080 \
@@ -655,18 +663,12 @@ Then, from this directory, on the same machine:
 uv run python run.py latency --page classify --endpoint http://localhost:8080
 ```
 
-For `search`, stop that server and start this one instead:
-
-```sh
-docker run --gpus all -p 127.0.0.1:8080:8080 \
-  -v sie-hf-cache:/app/.cache/huggingface \
-  -e SIE_PRELOAD_MODELS=Qwen/Qwen3-Embedding-4B \
-  ghcr.io/superlinked/sie-server:v0.11.0-cuda12-sglang-embedding
-```
-
-```sh
-uv run python run.py latency --page search --endpoint http://localhost:8080
-```
+For another page, stop that server and start the page's bundle with its model
+in `SIE_PRELOAD_MODELS`. The images are
+`ghcr.io/superlinked/sie-server:v0.11.0-cuda12-<bundle>`, except `sglang-cu130`,
+which is `v0.11.0-cuda13-sglang-cu130`. For `rerank` and `request-routing`,
+preload `Qwen/Qwen3-Reranker-4B:fast`. `chat` and `structured-output` need an
+80 GB GPU.
 
 `--endpoint` is required. The key rule is the one in
 [Run it against your own server](#run-it-against-your-own-server): a server
@@ -676,17 +678,30 @@ The run:
 
 1. downloads the study's inputs at their pinned revisions, rebuilds the
    request list the way the study's build scripts wrote it, and stops before
-   any request when its SHA-256 differs from the one the study published;
-2. sends 20 warm-up requests built from the end of that list, as the study
-   did, and does not time them. The `search` warm-ups carry a `[c1-<n>] `
-   prefix, as the study's did, so the server's prefix cache never holds a
-   timed request. The first warm-up waits up to 15 minutes for the model to
-   load;
+   any request when its SHA-256 differs from the one the study published. The
+   `redact` and `typed-decisions` studies published no such hash, so the check
+   uses the hash of the rebuild, pinned in `latency.py`. `ocr` also downloads
+   its 372 photos;
+2. sends the study's warm-up requests, built from the end of that list, and
+   does not time them: 20 for `classify`, `search` and `named-entities`, 10 for
+   `redact`, 5 for `typed-decisions`, `rerank`, `request-routing` and `ocr`, 3
+   for `chat` and 2 for `structured-output`. Where the server keeps a cache,
+   a warm-up carries a `[<level>-<n>] ` text prefix or one changed pixel, as
+   the study's did, so it never equals a timed request. The first warm-up
+   waits up to 15 minutes for the model to load;
 3. sends every input once, in order, one request in flight, one attempt, and
-   times each `SIEClient` call;
-4. prints your n, p50, p95 and mean beside the published values for each GPU,
-   with percentiles interpolated linearly as the study computed them, and
-   writes `results/latency-<page>-<utc>.json` with the time of every request.
+   times each `SIEClient` call. A chat completion is timed to the complete
+   reply;
+4. prints your n, p50, p95 and mean beside the published values, with
+   percentiles interpolated linearly as the studies computed them, says how
+   the published figure was made, and writes
+   `results/latency-<page>-<utc>.json` with the time of every request.
+
+The published figure is one run per GPU, except `rerank` and
+`request-routing`, which are the median of three runs on fresh servers, and
+`typed-decisions`, which is the median of five containers of three runs each.
+Your run is one run. For `chat`, the website shows a run of 2026-10-13; the
+same requests from the 2026-10-11 study are shown beside it.
 
 Every run also prints what differs from the study:
 
@@ -695,14 +710,19 @@ Every run also prints what differs from the study:
   through `sie_sdk.SIEClient`, so your time also includes the HTTP server and
   the path from the client to the server. Run the client on the GPU machine to
   keep that path short;
-- your GPU, and the server you started. The study ran the v0.10.0 images with
-  the server package from `main` at `2b3f7d2e`; the commands above start
-  v0.11.0.
+- your GPU, and the server you started. The studies ran v0.10.0 images with a
+  newer server package; the commands above start v0.11.0;
+- for `chat` and `structured-output`, a chat completion on a standalone server
+  goes to the SGLang server it runs, while the study's client used the
+  sidecar's generation stream.
 
 A failed request, or one that succeeded only after an SDK retry, is counted,
 listed by status, and left out of the numbers. The run exits 1 only when the
 inputs fail the check or no request succeeds on its first attempt. There is no
 pass or fail: the numbers are set side by side.
+
+`/detect` (82.2 ms) is not covered: its 300 photos are not in the dataset, and
+fetching them from their original archives means streaming about 11.5 GB.
 
 ## Validation
 
@@ -840,6 +860,6 @@ The tests use a fake client, in-memory datasets and the committed
 - no cost, price or accounting fields;
 - no recorded-evidence download beyond what `run.py latency` reads: the
   quality and performance inputs are the six reference files and the pinned
-  public datasets, and `run.py latency` reads the per-request time study's
-  inputs and published results at a pinned revision;
+  public datasets, and `run.py latency` reads the per-request time studies'
+  inputs and published results at pinned revisions;
 - no PyPI distribution, and the flags are not a compatibility surface.
