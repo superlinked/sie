@@ -668,7 +668,8 @@ in `SIE_PRELOAD_MODELS`. The images are
 `ghcr.io/superlinked/sie-server:v0.11.0-cuda12-<bundle>`, except `sglang-cu130`,
 which is `v0.11.0-cuda13-sglang-cu130`. For `rerank` and `request-routing`,
 preload `Qwen/Qwen3-Reranker-4B:fast`. `chat` and `structured-output` need an
-80 GB GPU.
+80 GB GPU, and their CUDA 13 image needs an NVIDIA driver from the 580 series
+or newer.
 
 `--endpoint` is required. The key rule is the one in
 [Run it against your own server](#run-it-against-your-own-server): a server
