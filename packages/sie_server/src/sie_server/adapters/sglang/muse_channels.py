@@ -49,7 +49,8 @@ _ARGUMENT_TAGS = (_THINK_OPEN, _THINK_CLOSE, _TOOL_CALL_CLOSE, "</parameter>")
 _HEADER_RE = re.compile(r"(?:<\|start\|>assistant)?\s*(?:to=([^\s<]+))?\s*<\|message\|>")
 _INVOKE_RE = re.compile(r'<atem:invoke\b[^>]*?\bname="([^"]+)"[^>]*?>(.*?)</atem:invoke>', re.DOTALL)
 _PARAMETER_RE = re.compile(r'<atem:parameter\b[^>]*?\bname="([^"]+)"[^>]*?>(.*?)</atem:parameter>', re.DOTALL)
-_MAX_HELD = 1024
+_MAX_HELD = 64
+_BARRIER = "\u200b"
 
 
 def _may_become_header(text: str) -> bool:
@@ -82,8 +83,9 @@ class _TagRemover:
     place a tag can still form. Each held run is a proper prefix of a tag, and
     removing a later run exposes the one before it, so the whole held tail stays
     back until it can no longer become a tag. Only text made of nothing but tag
-    prefixes keeps it growing; past ``_MAX_HELD`` characters it is released
-    without its ``<``, so no later text can complete a tag in it.
+    prefixes keeps it growing; past ``_MAX_HELD`` characters it is released as
+    written and followed by a zero-width space, which no tag contains, so no
+    later text can complete a tag in it.
     """
 
     def __init__(self, tags: tuple[str, ...]) -> None:
@@ -121,7 +123,7 @@ class _TagRemover:
                 self._held[-1] = run
             self._held_size += 1
             if self._held_size > _MAX_HELD:
-                output.append(self.flush().replace("<", ""))
+                output.append(self.flush() + _BARRIER)
         return "".join(output)
 
     def flush(self) -> str:

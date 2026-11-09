@@ -459,15 +459,24 @@ def test_trailing_whitespace_in_a_name_or_key_is_read_as_the_parser_reads_it() -
     assert _calls(_worker_pipeline(text)) == [("get_weather", {"city": "Paris"})]
 
 
-def test_a_long_run_of_tag_prefixes_keeps_streaming_and_forms_no_tag() -> None:
+@pytest.mark.parametrize("prefix", ["<", "<t", "</thi", "<tool_"])
+def test_a_long_run_of_tag_prefixes_keeps_streaming_and_keeps_its_text(prefix: str) -> None:
+    translator = MuseChannelTranslator()
+    start = translator.feed(f"{U}Answer: ")
+    pieces = [translator.feed(prefix) for _ in range(2_000)]
+    output = start + "".join(pieces) + translator.feed(" done") + translator.finish()
+
+    silent = max(len(run) for run in "".join("x" if piece else "_" for piece in pieces).split("x"))
+    assert silent <= 65
+    assert output.replace("\u200b", "") == "Answer: " + prefix * 2_000 + " done"
+
+
+def test_a_long_run_of_tag_prefixes_forms_no_tag_with_later_text() -> None:
     translator = MuseChannelTranslator()
 
-    early = translator.feed(f"{U}Answer: " + "<t" * 2_000)
-    late = translator.feed("hink>" * 2_000) + translator.finish()
+    output = translator.feed(f"{U}" + "<t" * 2_000) + translator.feed("hink>" * 2_000) + translator.finish()
 
-    assert len(early) > 1_000
-    assert "<think>" not in early + late
-    assert "<" not in late
+    assert "<think>" not in output
 
 
 def test_markup_no_parser_reads_stays_in_the_argument() -> None:
