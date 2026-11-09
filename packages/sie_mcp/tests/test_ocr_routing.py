@@ -234,16 +234,23 @@ async def test_auto_keeps_docling_when_vl_ocr_recovers_nothing() -> None:
     assert result.markdown == "tiny"
 
 
-async def test_auto_keeps_docling_when_vl_ocr_raises_sdk_error() -> None:
-    # Docling is text-poor (would normally fall back), but the cluster VL-OCR call
-    # fails with an SDK/server error. The usable Docling markdown must still survive.
-    client = _RoutingFakeClient(docling={"markdown": "tiny"}, vl_error=SIEError("cluster unavailable"))
+@pytest.mark.parametrize("docling_markdown", ["", "tiny"])
+async def test_auto_raises_when_vl_ocr_fails_on_text_poor_docling(docling_markdown: str) -> None:
+    # Docling found (almost) no text, so this is a scan, and the cluster VL-OCR call
+    # fails (e.g. the model is not served). An empty "success" would hide that the
+    # document was never read, so the error names the model and the setting to change.
+    client = _RoutingFakeClient(docling={"markdown": docling_markdown}, vl_error=SIEError("Model 'mineru' not found"))
 
-    result = await _route(client, engine="auto", render=_fake_render(1))
-
-    assert result.engine == "docling"
-    assert result.markdown == "tiny"
+    with pytest.raises(DocsToMarkdownError, match=r"'mineru'.*not found.*SIE_MCP_VLOCR_MODEL"):
+        await _route(client, engine="auto", render=_fake_render(1))
     assert len(client.calls) == 2  # Docling, then the attempted VL-OCR fallback
+
+
+async def test_auto_names_vl_ocr_model_when_docling_errors_and_vl_ocr_fails() -> None:
+    client = _RoutingFakeClient(docling={"error": "no text layer"}, vl_error=SIEError("Model 'mineru' not found"))
+
+    with pytest.raises(DocsToMarkdownError, match="SIE_MCP_VLOCR_MODEL"):
+        await _route(client, engine="auto", render=_fake_render(1))
 
 
 async def test_auto_propagates_docling_error_when_not_renderable() -> None:
