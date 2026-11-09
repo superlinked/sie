@@ -56,7 +56,7 @@ def locked_chart(tmp_path: Path, monkeypatch) -> Path:
     source = helm.resolve_project_root() / helm.CHART_DIR
     chart = tmp_path / helm.CHART_DIR
     (chart / "charts").mkdir(parents=True)
-    for name in ("Chart.yaml", "Chart.lock"):
+    for name in ("Chart.yaml", "Chart.lock", ".helmignore"):
         shutil.copy2(source / name, chart / name)
     for entry in yaml.safe_load((chart / "Chart.lock").read_text())["dependencies"]:
         archive = chart / "charts" / f"{entry['name']}-{entry['version']}.tgz"
@@ -100,6 +100,7 @@ def test_dependencies_are_present_whatever_the_archives_are_called(locked_chart:
         "named-tar-gz",
         "named-hidden",
         "named-underscore",
+        "named-ignored",
     ],
 )
 def test_dependencies_are_absent_unless_charts_match_a_current_lock(locked_chart: Path, state: str) -> None:
@@ -140,6 +141,10 @@ def test_dependencies_are_absent_unless_charts_match_a_current_lock(locked_chart
         archive.rename(archive.with_name(f".{archive.name}"))
     elif state == "named-underscore":
         archive.rename(archive.with_name(f"_{archive.name}"))
+    elif state == "named-ignored":
+        # A name the chart's .helmignore excludes, so Helm does not load the file.
+        (locked_chart / ".helmignore").write_text("# build residue\ntmpcharts-*\n")
+        archive.rename(archive.with_name(f"tmpcharts-{archive.name}"))
     else:
         # A field the task does not read: the digest cannot be confirmed.
         manifest.write_text(constraint.sub(r"\g<0>\n    tags:\n      - extra", manifest.read_text(), count=1))

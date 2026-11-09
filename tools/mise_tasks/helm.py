@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import fnmatch
 import hashlib
 import json
 import os
@@ -248,6 +249,19 @@ def _archive_identity(archive: Path) -> tuple[str, str] | None:
     return declared.get("name", ""), declared.get("version", "")
 
 
+def _helmignore_name_patterns() -> list[str]:
+    """Return the plain file-name patterns in the chart's .helmignore.
+
+    Helm skips a file in charts/ whose name matches one of them. Patterns
+    with a path or a negation are not evaluated.
+    """
+    ignore = resolve_project_root() / CHART_DIR / ".helmignore"
+    if not ignore.is_file():
+        return []
+    lines = (line.strip() for line in ignore.read_text().splitlines())
+    return [line for line in lines if line and not line.startswith(("#", "!")) and "/" not in line]
+
+
 def locked_dependencies_present() -> bool:
     """Return whether charts/ holds exactly what the current Chart.yaml locks.
 
@@ -265,9 +279,14 @@ def locked_dependencies_present() -> bool:
     if expected is None or not charts.is_dir() or not lock_matches_chart():
         return False
     entries = list(charts.iterdir())
-    # Helm loads only .tgz files from charts/ and skips names that start with "." or "_".
-    if not all(entry.suffix == ".tgz" and entry.name[0] not in "._" for entry in entries):
-        return False
+    # Helm loads only .tgz files from charts/. It skips names that start with
+    # "." or "_" and names the chart's .helmignore excludes.
+    ignored = _helmignore_name_patterns()
+    for entry in entries:
+        if entry.suffix != ".tgz" or entry.name[0] in "._":
+            return False
+        if any(fnmatch.fnmatchcase(entry.name, pattern) for pattern in ignored):
+            return False
     return len(entries) == len(expected) and {_archive_identity(entry) for entry in entries} == expected
 
 
