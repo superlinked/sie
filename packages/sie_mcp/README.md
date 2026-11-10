@@ -169,7 +169,7 @@ not pass one), then the env var below, then a built-in default.
 | `redact_pii` | `SIE_MCP_PII_MODEL` | `urchade/gliner_multi_pii-v1` |
 | `describe_image` | `SIE_MCP_CAPTION_MODEL`, `SIE_MCP_EMBED_MODEL` | Florence-2, CLIP |
 | `summarize_document`, `extract_structured`, `generate_structured` | `SIE_MCP_GENERATE_MODEL` | `Qwen/Qwen3.5-4B` |
-| `answer_questions` | `SIE_MCP_ENCODE_MODEL`, `SIE_MCP_RERANK_MODEL`, `SIE_MCP_GENERATE_MODEL` | bge-m3, bge-reranker, the generate model |
+| `answer_questions` | `SIE_MCP_ENCODE_MODEL`, `SIE_MCP_RERANK_MODEL`, `SIE_MCP_GENERATE_MODEL` | bge-m3, `Qwen/Qwen3-Reranker-0.6B`, the generate model |
 
 **GPU lanes.** `SIE_MCP_GPU` sets the default lane for every tool. Each tool also
 has a per-tool override that falls back to `SIE_MCP_GPU` when unset, so a
@@ -191,6 +191,25 @@ export SIE_MCP_GENERATE_MODEL="Qwen/Qwen3.5-4B"   # already the default
 export SIE_MCP_GENERATE_GPU="rtx6000"             # route generation to its lane
 export SIE_MCP_GPU="l4"                            # everything else on l4
 ```
+
+## Running Against SIE Serverless
+
+Set `SIE_BASE_URL=https://api.superlinked.com` and `SIE_API_KEY` to run the
+edge against SIE Serverless. SIE Serverless serves most of the defaults above,
+but not all of them. When a model is not found, `answer_questions`,
+`describe_image` and the `docs_to_markdown` VL-OCR path fail with an error that
+names the model and the env var to set. The other tools return SIE's own
+"model not found" error, which names the model.
+
+| Tool | Default not served | What to set |
+| --- | --- | --- |
+| `docs_to_markdown` (and the tools that accept `document_base64`) | `opendatalab/MinerU2.5-Pro-2604-1.2B`, the VL-OCR model for scanned pages | `SIE_MCP_VLOCR_MODEL=lightonai/LightOnOCR-3-4B` |
+| `describe_image` | `microsoft/Florence-2-base-ft` (caption) and `openai/clip-vit-base-patch32` (tags) | No replacement: SIE Serverless serves no captioning model on the `extract` path. Run `describe_image` against a cluster that serves Florence-2. |
+
+Without `SIE_MCP_VLOCR_MODEL`, documents where Docling extracts text convert as
+before. A PDF or image that Docling returns little or no text for (a scan, a
+photo of a page, a near-blank page) now fails with an error instead of
+returning near-empty markdown, because the VL-OCR fallback can't run.
 
 ## Smoke Test The MCP Tool Path
 

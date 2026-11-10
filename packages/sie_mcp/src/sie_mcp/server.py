@@ -137,7 +137,9 @@ def build_server(config: MCPConfig) -> FastMCP:
             engine: Conversion engine. "auto" (default) runs Docling and falls back to
                 VL-OCR for scanned/image-only pages; "docling" forces the Docling front
                 door; "vl-ocr" rasterizes the document and runs the VL-OCR model per page
-                (best for scanned or complex-layout PDFs).
+                (best for scanned or complex-layout PDFs). Under "auto" and "vl-ocr",
+                the call fails with an error, not empty markdown, when VL-OCR fails or
+                no engine returns any text.
         """
         lifespan_ctx = ctx.request_context.lifespan_context
         client = lifespan_ctx["client"]

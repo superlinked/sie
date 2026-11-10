@@ -23,7 +23,7 @@ from typing import Any, Literal, Protocol
 
 import pypdfium2 as pdfium
 from PIL import Image
-from sie_sdk import SIEError
+from sie_sdk import RequestError, SIEError
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ _RENDER_SCALE = 2.0
 # Page boundary in the stitched markdown — a blank line reads as a paragraph break,
 # preserving document structure without injecting synthetic page markers.
 _PAGE_SEPARATOR = "\n\n"
-# Below this many non-whitespace chars, a renderable document is treated as
+# Below this many characters (after stripping the ends), a renderable document is treated as
 # imaged/scanned and (in ``auto``) re-run through VL-OCR. Born-digital pages clear
 # this comfortably; a text-layer-less scan lands at ~0.
 _NEAR_EMPTY_MARKDOWN_CHARS = 16
@@ -258,8 +258,30 @@ async def _vl_ocr_markdown(
     results = await client.extract(model, items, gpu=gpu)
     if not isinstance(results, list):
         results = [results]
+    if len(results) != len(images):
+        msg = f"VL-OCR model {model!r} returned {len(results)} results for {len(images)} pages"
+        raise DocsToMarkdownError(msg)
+    # The SDK reports a per-page failure on the item instead of raising. A page that
+    # failed must not be stitched in as an empty page, or the document would come back
+    # as a success with pages silently missing.
+    failed = [
+        f"page {number}: {_item_error(result)}" for number, result in enumerate(results, start=1) if _item_error(result)
+    ]
+    if failed:
+        msg = f"VL-OCR model {model!r} failed on {len(failed)} of {len(images)} pages ({'; '.join(failed)})"
+        raise DocsToMarkdownError(msg)
     page_markdowns = [entities_to_markdown(result) for result in results]
     return _PAGE_SEPARATOR.join(page_markdowns), len(images)
+
+
+def _item_error(result: Any) -> str:
+    """The per-item error the SDK attached to one extract result, or ``""``."""
+    error = result.get("error") if isinstance(result, dict) else None
+    if not error:
+        return ""
+    if isinstance(error, dict):
+        return str(error.get("message") or error.get("code") or error)
+    return str(error)
 
 
 async def route_to_markdown(
@@ -289,8 +311,14 @@ async def route_to_markdown(
     non-empty — masking the scan from the near-empty fallback trigger. Docling stays
     the text-layer front door (OCR off); scans land near-empty and fall back cleanly.
 
-    Auto fallback is best-effort: a VL-OCR failure or an emptier VL-OCR result never
-    discards a usable Docling result. Per-page hybrid routing (Docling for digital
+    In ``auto``, VL-OCR runs only when Docling raised or returned fewer than
+    ``_NEAR_EMPTY_MARKDOWN_CHARS`` characters. If VL-OCR returns less text than
+    Docling, Docling's result is kept. If the VL-OCR call fails, or neither engine
+    returns any text, the call raises ``DocsToMarkdownError`` instead of returning
+    near-empty markdown as a success; the message says what Docling returned and why
+    VL-OCR failed, and names ``SIE_MCP_VLOCR_MODEL`` only when the model was not
+    found. ``vl-ocr`` raises the same way when the call fails or returns no text.
+    Per-page hybrid routing (Docling for digital
     pages, VL-OCR only for scanned pages within one mixed doc) is a future thickening;
     today a mixed doc is best served by forcing ``engine='vl-ocr'``.
     """
@@ -302,7 +330,13 @@ async def route_to_markdown(
         return await _vl_ocr_markdown(client, data=data, model=vlocr_model, gpu=gpu, scale=scale, render=render)
 
     if engine == "vl-ocr":
-        markdown, pages = await _vl_ocr()
+        try:
+            markdown, pages = await _vl_ocr()
+        except SIEError as exc:
+            raise _vl_ocr_failed(vlocr_model, exc, docling="") from exc
+        if not markdown.strip():
+            msg = f"VL-OCR model {vlocr_model!r} returned no text for {pages} page(s)"
+            raise DocsToMarkdownError(msg)
         return RouteResult(markdown=markdown, engine="vl-ocr", pages=pages)
 
     # Honor ``ocr`` only when Docling is pinned; in ``auto`` VL-OCR is the OCR path.
@@ -315,28 +349,60 @@ async def route_to_markdown(
         markdown, document = await _docling_markdown(
             client, data=data, fmt=fmt, ocr=docling_ocr, model=docling_model, gpu=gpu
         )
-    except DocsToMarkdownError:
+    except DocsToMarkdownError as docling_error:
         # Docling refused (e.g. no text layer). For a rasterizable input, try VL-OCR
         # before giving up; otherwise the error stands.
         if engine == "auto" and is_renderable(data):
-            vl_markdown, pages = await _vl_ocr()
+            docling_note = f"Docling failed ({docling_error})"
+            try:
+                vl_markdown, pages = await _vl_ocr()
+            except (DocsToMarkdownError, SIEError) as exc:
+                raise _vl_ocr_failed(vlocr_model, exc, docling=docling_note) from exc
             if vl_markdown.strip():
                 return RouteResult(markdown=vl_markdown, engine="vl-ocr", pages=pages)
+            msg = f"{docling_note}, and the VL-OCR fallback model {vlocr_model!r} returned no text"
+            raise DocsToMarkdownError(msg) from docling_error
         raise
 
     if engine == "auto" and _looks_text_poor(markdown) and is_renderable(data):
         try:
             vl_markdown, pages = await _vl_ocr()
-        except (DocsToMarkdownError, SIEError):
-            # VL-OCR is best-effort here: a render error *or* an SDK/server failure
-            # from the cluster must not discard the usable Docling markdown we hold.
-            logger.warning("VL-OCR fallback failed; keeping Docling result", exc_info=True)
-            vl_markdown, pages = "", 0
+        except (DocsToMarkdownError, SIEError) as exc:
+            # Docling found almost no text, so this is most likely a scan and the
+            # VL-OCR text was the real result. Returning Docling's near-empty
+            # markdown as a success would hide that the document was never read.
+            note = f"Docling returned only {len(markdown.strip())} characters"
+            raise _vl_ocr_failed(vlocr_model, exc, docling=note) from exc
         # Only prefer VL-OCR when it actually recovered more text than Docling.
         if len(vl_markdown.strip()) > len(markdown.strip()):
             return RouteResult(markdown=vl_markdown, engine="vl-ocr", pages=pages)
+        if not markdown.strip():
+            msg = f"neither Docling nor the VL-OCR fallback model {vlocr_model!r} returned any text"
+            raise DocsToMarkdownError(msg)
 
     return RouteResult(markdown=markdown, engine="docling", document=document)
+
+
+def _vl_ocr_failed(model: str, exc: Exception, *, docling: str) -> DocsToMarkdownError:
+    """Explain a failed VL-OCR call: what Docling returned, and VL-OCR's own error.
+
+    The ``SIE_MCP_VLOCR_MODEL`` hint is given only when the model was not found; a
+    page cap, a render error or a cold-start timeout is not fixed by changing it.
+    """
+    prefix = f"{docling}, and the VL-OCR" if docling else "The VL-OCR"
+    msg = f"{prefix} model {model!r} failed: {exc}"
+    if is_model_not_found(exc):
+        msg += ". Set SIE_MCP_VLOCR_MODEL to a VL-OCR model your SIE deployment serves"
+    return DocsToMarkdownError(msg)
+
+
+def is_model_not_found(exc: BaseException) -> bool:
+    """Whether the cluster said the model isn't there.
+
+    The native endpoints send ``MODEL_NOT_FOUND``; the OpenAI-shaped chat and
+    generate endpoints send ``model_not_found``.
+    """
+    return isinstance(exc, RequestError) and (exc.code or "").upper() == "MODEL_NOT_FOUND"
 
 
 def _looks_text_poor(markdown: str) -> bool:

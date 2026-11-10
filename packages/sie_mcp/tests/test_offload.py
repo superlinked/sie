@@ -146,6 +146,33 @@ def test_redact_text_drops_overlapping_lower_score_spans() -> None:
     assert count == 1
 
 
+def test_redact_text_masks_every_occurrence_of_a_detected_value() -> None:
+    # The model found the name and the fax number only once each, but both appear
+    # again elsewhere; every copy must get the same placeholder.
+    text = (
+        "FAX FROM (555) 010-6621\n"
+        "Provider: Lucas Brennan, PA-C\n"
+        "Signed, Lucas Brennan. Call back on (555) 010-6621. Lucas Brennanson is someone else."
+    )
+    name_at = text.index("Lucas Brennan.")
+    phone_at = text.rindex("(555) 010-6621")
+    redacted, placeholder_map, count = offload.redact_text(
+        text,
+        [
+            {"label": "person", "start": name_at, "end": name_at + 13, "score": 0.9},
+            {"label": "phone number", "start": phone_at, "end": phone_at + 14, "score": 0.8},
+        ],
+    )
+
+    assert redacted == (
+        "FAX FROM [PHONE_NUMBER_1]\n"
+        "Provider: [PERSON_1], PA-C\n"
+        "Signed, [PERSON_1]. Call back on [PHONE_NUMBER_1]. Lucas Brennanson is someone else."
+    )
+    assert placeholder_map == {"[PERSON_1]": "Lucas Brennan", "[PHONE_NUMBER_1]": "(555) 010-6621"}
+    assert count == 4
+
+
 @pytest.mark.parametrize(
     ("content", "labels"),
     [
@@ -306,3 +333,26 @@ async def test_extraction_rejects_content_over_cap(tool: str) -> None:
             await offload.extract_entities(client, content=oversized, labels=["person"], model="g")
         else:
             await offload.redact_pii(client, content=oversized, labels=["person"], model="g")
+
+
+def test_redact_text_masks_copies_in_other_case_and_across_lines() -> None:
+    text = "LUCAS BRENNAN\nSigned, Lucas\nBrennan. Notes by Lucas Brennan."
+    at = text.rindex("Lucas Brennan")
+    redacted, _, count = offload.redact_text(text, [{"label": "person", "start": at, "end": at + 13, "score": 0.9}])
+
+    assert redacted == "[PERSON_1]\nSigned, [PERSON_1]. Notes by [PERSON_1]."
+    assert count == 3
+
+
+def test_redact_text_does_not_mask_a_detected_value_inside_a_longer_address() -> None:
+    text = "Write to a@b.com, not a@b.com.au or ops@b.com"
+    redacted, _, count = offload.redact_text(
+        text,
+        [
+            {"label": "email", "start": 9, "end": 16, "score": 0.9},
+            {"label": "domain", "start": text.rindex("b.com"), "end": len(text), "score": 0.9},
+        ],
+    )
+
+    assert redacted == "Write to [EMAIL_1], not a@b.com.au or ops@[DOMAIN_1]"
+    assert count == 2

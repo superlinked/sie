@@ -399,7 +399,13 @@ def _placeholder_base(label: str) -> str:
 
 
 def redact_text(text: str, entities: Sequence[Mapping[str, Any]]) -> tuple[str, dict[str, str], int]:
-    """Replace detected spans with placeholders, keeping original values server-side only."""
+    """Replace each detected span, and every other copy of a detected value, with a placeholder.
+
+    Original values stay server-side only. Returns ``(redacted_text, placeholder_map,
+    replaced_count)``: ``placeholder_map`` has one entry per distinct value, and
+    ``replaced_count`` counts every masked occurrence, so it can exceed the number of
+    values when a value appears more than once.
+    """
     spans = [
         entity
         for entity in entities
@@ -421,6 +427,9 @@ def redact_text(text: str, entities: Sequence[Mapping[str, Any]]) -> tuple[str, 
     placeholder_map: dict[str, str] = {}
     label_counters: dict[str, int] = {}
     assignments: dict[tuple[str, str], str] = {}
+    replacements: list[tuple[int, int, str]] = []
+    # Placeholder of the highest-scoring detection of each value (``chosen`` is score-ordered).
+    value_placeholders: dict[str, str] = {}
     for span in chosen:
         start, end = int(span["start"]), int(span["end"])
         label = str(span["label"])
@@ -431,14 +440,45 @@ def redact_text(text: str, entities: Sequence[Mapping[str, Any]]) -> tuple[str, 
             placeholder = f"[{base}_{label_counters[base]}]"
             assignments[key] = placeholder
             placeholder_map[placeholder] = key[0]
+        replacements.append((start, end, assignments[key]))
+        value_placeholders.setdefault(key[0], assignments[key])
+
+    # The model can find a value in one place and miss it in another (a name in a
+    # signature line, a fax number in a page header). Mask every other copy of each
+    # detected value with the same placeholder: ignoring case, and with any run of
+    # whitespace between its words, so "LUCAS BRENNAN" and a name broken across a line
+    # are caught too. Other spellings of a value (a phone number in another format, a
+    # surname on its own) are not. Longer values go first so a shorter one cannot
+    # claim part of a longer one; a copy that overlaps an already-masked span is left
+    # to that span. Word edges hold so "Al" never masks "Also".
+    for value, placeholder in sorted(value_placeholders.items(), key=lambda item: -len(item[0])):
+        if not value.strip():
+            continue
+        for match in re.finditer(_whole_value_pattern(value), text, flags=re.IGNORECASE):
+            start, end = match.start(), match.end()
+            if any(start < taken_end and end > taken_start for taken_start, taken_end in taken):
+                continue
+            replacements.append((start, end, placeholder))
+            taken.append((start, end))
 
     redacted = text
-    for span in sorted(chosen, key=lambda entity: int(entity["start"]), reverse=True):
-        start, end = int(span["start"]), int(span["end"])
-        key = (text[start:end], str(span["label"]))
-        redacted = redacted[:start] + assignments[key] + redacted[end:]
+    for start, end, placeholder in sorted(replacements, reverse=True):
+        redacted = redacted[:start] + placeholder + redacted[end:]
 
-    return redacted, placeholder_map, len(chosen)
+    return redacted, placeholder_map, len(replacements)
+
+
+def _whole_value_pattern(value: str) -> str:
+    """Match ``value`` with any whitespace between its words, never inside a longer token.
+
+    Besides word characters, a "." or "@" joined to a word on either side counts as part
+    of the token, so a detected ``a@b.com`` does not match inside ``a@b.com.au`` and a
+    detected ``example.com`` does not match inside ``user@example.com``.
+    """
+    body = r"\s+".join(re.escape(word) for word in value.split())
+    prefix = r"(?<!\w)(?<!\w[.@])" if re.match(r"\w", value) else ""
+    suffix = r"(?!\w)(?![.@]\w)" if re.search(r"\w\Z", value) else ""
+    return prefix + body + suffix
 
 
 def _label_counts_from_placeholders(placeholder_map: Mapping[str, str]) -> dict[str, int]:
