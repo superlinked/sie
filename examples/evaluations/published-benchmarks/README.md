@@ -632,7 +632,7 @@ Hugging Face dataset
 [`superlinked/sie-task-evidence`](https://huggingface.co/datasets/superlinked/sie-task-evidence).
 Each study timed a model one request at a time, with the client inside the
 server's container. `run.py latency` repeats that timing against your own
-server for ten pages:
+server for eleven pages:
 
 | `--page` | On the website | Model | Bundle | GPU it was timed on | Inputs | One request |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -644,6 +644,7 @@ server for ten pages:
 | `rerank` | `/rerank`: 55 ms | `Qwen/Qwen3-Reranker-4B:fast` | `default` | H100 | 499 questions with 20 candidates each | `score` with the study's instruction |
 | `request-routing` | `/request-routing`: 8.5 ms | `Qwen/Qwen3-Reranker-4B:fast` | `default` | H100 | 200 requests | `score`: one request against one description, with the study's instruction |
 | `ocr` | industry pages, OCR a page: 287 ms | `zai-org/GLM-OCR` | `sglang-vision-extract` | H100 | 372 photos (115 MB) | `extract` with the photo, instruction `Text Recognition:` |
+| `detect` | `/detect`: 82.2 ms | `facebook/sam3` | `transformers5` | RTX PRO 6000 | 300 drone and aerial photos (379 MB) | `extract` with the photo and its dataset's labels, no options |
 | `chat` | `/chat`: 0.74 s | `Qwen/Qwen3.8-27B-FP8` | `sglang-cu130` | H100 | 330 turns of 55 conversations | a chat completion, 400 new tokens at most, temperature 0 |
 | `structured-output` | industry pages, structured output: 938 ms | `Qwen/Qwen3.8-27B-FP8` | `sglang-cu130` | H100 | 100 Structured Output Benchmark records | a chat completion with a strict JSON schema, 2,048 new tokens at most, temperature 0 |
 
@@ -669,7 +670,10 @@ in `SIE_PRELOAD_MODELS`. The images are
 which is `v0.11.0-cuda13-sglang-cu130`. For `rerank` and `request-routing`,
 preload `Qwen/Qwen3-Reranker-4B:fast`. `chat` and `structured-output` need an
 80 GB GPU, and their CUDA 13 image needs an NVIDIA driver from the 580 series
-or newer.
+or newer. `facebook/sam3`, the `detect` model, is gated on Hugging Face: accept
+its terms on the model page, set `HF_TOKEN` to your token in your shell's
+environment, and add `-e HF_TOKEN` to `docker run`, which passes it on without
+writing the token in the command.
 
 `--endpoint` is required. The key rule is the one in
 [Run it against your own server](#run-it-against-your-own-server): a server
@@ -682,11 +686,12 @@ The run:
    any request when its SHA-256 differs from the one the study published. The
    `redact` and `typed-decisions` studies published no such hash, so the check
    uses the hash of the rebuild, pinned in `latency.py`. `ocr` also downloads
-   its 372 photos;
+   its 372 photos. `detect` downloads its 300 photos and checks each one
+   against the SHA-256 the study recorded for it;
 2. sends the study's warm-up requests, built from the end of that list, and
    does not time them: 20 for `classify`, `search` and `named-entities`, 10 for
-   `redact`, 5 for `typed-decisions`, `rerank`, `request-routing` and `ocr`, 3
-   for `chat` and 2 for `structured-output`. Where the server keeps a cache,
+   `redact`, 5 for `typed-decisions`, `rerank`, `request-routing`, `ocr` and
+   `detect`, 3 for `chat` and 2 for `structured-output`. Where the server keeps a cache,
    a warm-up carries a `[<level>-<n>] ` text prefix or one changed pixel, as
    the study's did, so it never equals a timed request. The first warm-up
    waits up to 15 minutes for the model to load;
@@ -722,8 +727,9 @@ listed by status, and left out of the numbers. The run exits 1 only when the
 inputs fail the check or no request succeeds on its first attempt. There is no
 pass or fail: the numbers are set side by side.
 
-`/detect` (82.2 ms) is not covered: its 300 photos are not in the dataset, and
-fetching them from their original archives means streaming about 11.5 GB.
+The `detect` photos come from four datasets under CC BY 4.0. Their creators,
+sources and the one change made (GeoTIFF tiles saved as PNG) are in
+`detect-photo300/2026-11-10/README.md` in the dataset.
 
 ## Validation
 

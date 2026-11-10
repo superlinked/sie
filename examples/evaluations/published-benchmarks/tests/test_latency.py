@@ -73,6 +73,43 @@ MANIFEST_RAW = json.dumps(
 ).encode()
 
 
+def png(color: int) -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), (color, 0, 0)).save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+DETECT_PHOTOS = {"images/amvd/a.jpg": jpeg(30), "images/neon/t.png": png(60)}
+DETECT_SUBSET_RAW = json.dumps(
+    {
+        "photos": [
+            {"dataset": "amvd", "image_id": "a", "bucket": "b1", "hero": True},
+            {"dataset": "neon", "image_id": "t", "bucket": "b2", "hero": False},
+        ]
+    }
+).encode()
+DETECT_LISTING_RAW = json.dumps(
+    [
+        {
+            "dataset": ds,
+            "image_id": iid,
+            "path": path,
+            "sha256": hashlib.sha256(DETECT_PHOTOS[path]).hexdigest(),
+            "size": [8, 8],
+        }
+        for ds, iid, path in (("amvd", "a", "images/amvd/a.jpg"), ("neon", "t", "images/neon/t.png"))
+    ]
+).encode()
+DETECT_MANIFEST_RAW = json.dumps(
+    {
+        "rows": [
+            {"dataset": "amvd", "image_id": "a", "labels": ["car"]},
+            {"dataset": "neon", "image_id": "t", "labels": ["tree"]},
+        ]
+    }
+).encode()
+
+
 def study_doc(page: str) -> dict:
     classes = {}
     for key, gpu, p50 in (("l4", "L4", 49.09), ("rtx", "RTX PRO 6000", 13.04), ("h100", "H100", 18.6)):
@@ -101,6 +138,7 @@ INPUTS = {
     "rerank": (CASES_RAW, RERANK_FROZEN_RAW),
     "chat": (CHAT_SYSTEM_RAW, CHAT_RAW),
     "ocr": (MANIFEST_RAW,),
+    "detect": (DETECT_SUBSET_RAW, DETECT_LISTING_RAW, DETECT_MANIFEST_RAW),
 }
 
 
@@ -108,6 +146,7 @@ class FakeFetch:
     """The pages' inputs, hashes and published files for the pages tested end to end."""
 
     def __init__(self, *, jobs_sha256: dict | None = None, missing: str | None = None):
+        """Serve every tested page's inputs, the jobs hashes their builds give, results and photos."""
         self.files: dict[str, bytes] = {}
         sha = {}
         with patch.object(latency, "OCR_MANIFEST_SHA256", hashlib.sha256(MANIFEST_RAW).hexdigest()):
@@ -119,7 +158,7 @@ class FakeFetch:
         self.files[url(latency.Ref(latency.STUDY_REVISION, latency.JOBS_SHA256))] = json.dumps(
             jobs_sha256 or sha
         ).encode()
-        for name in ("classify", "search", "ocr"):
+        for name in ("classify", "search", "ocr", "detect"):
             ref = latency.Ref(latency.STUDY_REVISION, f"{latency.STUDY}/results/{name}.json")
             self.files[url(ref)] = json.dumps(study_doc(name)).encode()
         chat = study_doc("chat")
@@ -137,6 +176,10 @@ class FakeFetch:
         photos = latency.PAGES["ocr"].photos
         for name, data in PHOTOS.items():
             self.files[url(latency.Ref(photos.revision, f"{photos.path}/{name}"))] = data
+        detect = latency.PAGES["detect"]
+        for path, data in DETECT_PHOTOS.items():
+            name = detect.photo_name(f"detect/{path}")
+            self.files[url(latency.Ref(detect.photos.revision, f"{detect.photos.path}/{name}"))] = data
         self.missing = missing
         self.urls: list[str] = []
 
@@ -296,6 +339,33 @@ class JobsTests(unittest.TestCase):
         self.assertEqual(doc["jobs"][0]["image"], "ocr-photo372/p1.jpg")
         self.assertEqual(doc["defaults"]["instruction"], "Text Recognition:")
 
+    def test_detect_jobs_name_each_photo_with_its_labels_and_hash(self):
+        """A job carries the photo's path, its dataset's labels and the listing's SHA-256."""
+        doc = latency.detect_jobs(DETECT_SUBSET_RAW, DETECT_LISTING_RAW, DETECT_MANIFEST_RAW)
+        self.assertEqual((doc["model"], doc["op"]), ("facebook/sam3", "extract"))
+        self.assertNotIn("defaults", doc)
+        self.assertEqual(doc["source"]["subset_sha256"], hashlib.sha256(DETECT_SUBSET_RAW).hexdigest())
+        first = doc["jobs"][0]
+        self.assertEqual(
+            (first["id"], first["image"], first["labels"]), ("amvd/a", "detect/images/amvd/a.jpg", ["car"])
+        )
+        self.assertEqual(first["meta"]["sha256"], hashlib.sha256(DETECT_PHOTOS["images/amvd/a.jpg"]).hexdigest())
+        self.assertEqual((first["meta"]["pixels"], first["meta"]["hero"]), (64, True))
+
+    def test_detect_photos_are_stored_under_dataset_and_file_name(self):
+        """A job's image path maps to the ``<dataset>__<file>`` name in the photo folder."""
+        self.assertEqual(latency.detect_photo_name("detect/images/amvd/DJI-1.jpg.jpg"), "amvd__DJI-1.jpg.jpg")
+
+    def test_a_photo_with_another_hash_stops_the_run(self):
+        """A downloaded photo whose bytes differ from the recorded SHA-256 raises InputMismatch."""
+        fetch = FakeFetch()
+        page = latency.PAGES["detect"]
+        doc = latency.detect_jobs(DETECT_SUBSET_RAW, DETECT_LISTING_RAW, DETECT_MANIFEST_RAW)
+        address = url(latency.Ref(page.photos.revision, f"{page.photos.path}/amvd__a.jpg"))
+        fetch.files[address] = jpeg(31)
+        with self.assertRaises(latency.InputMismatch):
+            latency.load_photos(page, doc, fetch)
+
     def test_chat_turns_carry_the_conversation_so_far_with_the_recorded_replies(self):
         doc = latency.chat_jobs(CHAT_SYSTEM_RAW, CHAT_RAW)
         self.assertEqual([job["id"] for job in doc["jobs"]], ["s1#1", "s1#2"])
@@ -360,6 +430,11 @@ class JobsTests(unittest.TestCase):
                 ),
             ],
         )
+
+    def test_a_file_name_with_spaces_or_brackets_is_escaped(self):
+        """Spaces and brackets in a dataset path are percent-encoded in the URL."""
+        address = latency.dataset_url("a" * 40, "x/amvd__DJI 1 (7_42).jpg")
+        self.assertTrue(address.endswith("/x/amvd__DJI%201%20%287_42%29.jpg"))
 
     def test_every_page_pins_full_revisions(self):
         for page in latency.PAGES.values():
@@ -644,6 +719,20 @@ class RunTests(unittest.TestCase):
         self.assertEqual(record["inputs"]["photos"]["revision"], latency.PAGES["ocr"].photos.revision)
         self.assertTrue(any(address.endswith("images/input/p1.jpg") for address in fetch.urls))
 
+    def test_detect_sends_each_photo_in_its_format_with_its_labels(self):
+        """Each timed request sends the photo bytes, PNG or JPEG by extension, with that photo's labels."""
+        client, fetch = FakeClient(), FakeFetch()
+        record = self.run_page("detect", client, fetch)
+        timed = client.calls[5:]
+        self.assertEqual([call[2]["images"][0]["data"] for call in timed], list(DETECT_PHOTOS.values()))
+        self.assertEqual([call[2]["images"][0]["format"] for call in timed], ["jpeg", "png"])
+        self.assertEqual([call[3]["labels"] for call in timed], [["car"], ["tree"]])
+        self.assertNotIn("options", timed[0][3])
+        self.assertEqual(client.calls[0][2]["images"][0]["format"], "png")
+        self.assertNotEqual(client.calls[0][2]["images"][0]["data"], DETECT_PHOTOS["images/neon/t.png"])
+        self.assertEqual(record["inputs"]["photos"]["revision"], latency.PAGES["detect"].photos.revision)
+        self.assertTrue(any(address.endswith("images/neon__t.png") for address in fetch.urls))
+
     def test_chat_times_one_completion_per_turn(self):
         client = FakeClient()
         record = self.run_page("chat", client)
@@ -723,7 +812,7 @@ class CommandTests(unittest.TestCase):
         for name in latency.PAGES:
             self.assertEqual(parser.parse_args(["latency", "--page", name, "--endpoint", "http://x"]).page, name)
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            parser.parse_args(["latency", "--page", "detect", "--endpoint", "http://localhost:8080"])
+            parser.parse_args(["latency", "--page", "speech-to-text", "--endpoint", "http://localhost:8080"])
 
     def test_a_run_prints_the_result_path_and_the_table(self):
         argv = ["latency", "--page", "classify", "--endpoint", "http://LOCALHOST:8080/"]
