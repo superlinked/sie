@@ -1,5 +1,6 @@
 """Public LightOnOCR-3 catalog pin, generation contract and bundle routing."""
 
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
@@ -20,6 +21,8 @@ _MODEL = "lightonai/LightOnOCR-3-4B"
 _REVISION = "b71010f095dc3735de7ee6b9969bff8f8f50b39a"
 _CONFIG = _MODELS / "lightonai__LightOnOCR-3-4B.yaml"
 _GENERATION = {"max_new_tokens": 12288, "do_sample": True, "num_beams": 1, "temperature": 0.1, "top_p": 1.0}
+_PAGE_PIXELS = {"min_pixels": 65536, "max_pixels": 5242880}
+_LAUNCH_ARGS = ["--disable-radix-cache", "--mm-process-config", '{"image":{"min_pixels":65536,"max_pixels":5242880}}']
 
 
 def test_catalog_pins_checkpoint_and_upstream_generation() -> None:
@@ -45,7 +48,7 @@ def test_catalog_pins_checkpoint_and_upstream_generation() -> None:
     assert loadtime["meter_pages"] is True
     assert loadtime["max_concurrent_requests"] == 128
     assert loadtime["attention_backend"] == "flashinfer"
-    assert loadtime["extra_launch_args"] == ["--disable-radix-cache"]
+    assert loadtime["extra_launch_args"] == _LAUNCH_ARGS
     assert "system_prompt" not in loadtime
     assert "extra_env" not in loadtime
     assert "default_prompt" not in loadtime
@@ -74,7 +77,7 @@ def test_loader_builds_pinned_sglang_default(monkeypatch: pytest.MonkeyPatch) ->
     assert adapter._system_prompt is None
     assert adapter._trust_remote_code is False
     assert adapter.max_concurrent_dispatch() == 128
-    assert adapter._extra_launch_args == ["--disable-radix-cache"]
+    assert adapter._extra_launch_args == _LAUNCH_ARGS
     engine_load.assert_not_called()
 
 
@@ -124,7 +127,7 @@ def test_markdown_profile_retains_default_generation_context_and_engine_options(
     assert adapter._allowed_instructions == frozenset({"grounding"})
     assert adapter._meter_pages is True
     assert adapter.max_concurrent_dispatch() == 128
-    assert adapter._extra_launch_args == ["--disable-radix-cache"]
+    assert adapter._extra_launch_args == _LAUNCH_ARGS
 
 
 def test_sglang_profiles_keep_their_l4_calibrated_reservation() -> None:
@@ -133,6 +136,20 @@ def test_sglang_profiles_keep_their_l4_calibrated_reservation() -> None:
         loadtime = profiles[name]["adapter_options"]["loadtime"]
         assert loadtime["mem_fraction_static"] == 0.70
         assert loadtime["max_concurrent_requests"] == 128
+
+
+def test_sglang_profiles_cap_a_page_at_5_mp_within_the_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(SGLangVisionExtractAdapter, "load", Mock())
+    config = load_model_config(_CONFIG)
+    variants = expand_profile_variants([config])
+    for variant in (config, variants[f"{_MODEL}:markdown"]):
+        adapter = load_adapter(variant, _MODELS, device="cuda:0")
+        assert isinstance(adapter, SGLangVisionExtractAdapter)
+        args = adapter._extra_launch_args
+        assert args.count("--mm-process-config") == 1
+        assert json.loads(args[args.index("--mm-process-config") + 1]) == {"image": _PAGE_PIXELS}
+        assert adapter.image_token_budget == adapter.multi_image_token_budget == 5120
+        assert adapter.image_token_budget + adapter._max_new_tokens < config.max_sequence_length
 
 
 def test_default_routes_to_sglang_vision_extract_bundle_only() -> None:
