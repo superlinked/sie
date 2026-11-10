@@ -671,8 +671,9 @@ which is `v0.11.0-cuda13-sglang-cu130`. For `rerank` and `request-routing`,
 preload `Qwen/Qwen3-Reranker-4B:fast`. `chat` and `structured-output` need an
 80 GB GPU, and their CUDA 13 image needs an NVIDIA driver from the 580 series
 or newer. `facebook/sam3`, the `detect` model, is gated on Hugging Face: accept
-its terms on the model page, then add `-e HF_TOKEN=<your token>` to
-`docker run`.
+its terms on the model page, set `HF_TOKEN` to your token in your shell's
+environment, and add `-e HF_TOKEN` to `docker run`, which passes it on without
+writing the token in the command.
 
 `--endpoint` is required. The key rule is the one in
 [Run it against your own server](#run-it-against-your-own-server): a server
