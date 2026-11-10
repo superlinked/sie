@@ -55,12 +55,18 @@ pub(crate) fn visible_model_suggestions(
     ext: &axum::http::Extensions,
     requested: &str,
 ) -> Vec<String> {
-    let candidates = state.model_registry.list_models().into_iter().filter(|id| {
-        state
-            .model_access_policy
-            .as_ref()
-            .is_none_or(|policy| policy.visible(id, ext))
-    });
+    let candidates = state
+        .model_registry
+        .list_models()
+        .into_iter()
+        // Variants are never suggested, so the policy is not asked about them.
+        .filter(|id| !id.contains(':'))
+        .filter(|id| {
+            state
+                .model_access_policy
+                .as_ref()
+                .is_none_or(|policy| policy.visible(id, ext))
+        });
     suggest_model_ids(requested, candidates)
 }
 

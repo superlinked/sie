@@ -20057,10 +20057,28 @@ mod tests {
         String::from_utf8(body.to_vec()).expect("utf8")
     }
 
+    async fn openai_not_found_body(state: &AppState, model: &str) -> String {
+        let response = match resolve_model_and_bundle(state, model, &axum::http::Extensions::new())
+        {
+            Ok(_) => panic!("{model} must 404"),
+            Err(response) => response,
+        };
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        String::from_utf8(body.to_vec()).expect("utf8")
+    }
+
     /// The "Did you mean" hint keeps the no-oracle property. The same caller
     /// sends the same strings to a deployment that holds another tenant's model
-    /// and to one that does not; every body must match, and the hidden id must
-    /// never be the hint, even for the string that is one edit away from it.
+    /// and to one that does not; every body must match on the native and the
+    /// OpenAI routes, and the hidden id must never be the hint.
+    ///
+    /// The strings cover both arms that build this 404. One under the hidden
+    /// organization is stopped by the visibility gate. One without it reaches
+    /// the unknown-model arm, where only the candidate filter keeps the hidden
+    /// id out, so that arm needs a string one edit from the hidden model's name.
     #[tokio::test]
     async fn not_found_hint_is_the_same_whether_a_hidden_model_exists_or_not() {
         const VISIBLE: &str = "vendor/embedder-large";
@@ -20071,24 +20089,38 @@ mod tests {
         let lacks_hidden = state_with_registry_hiding_org_42(without_hidden);
 
         for requested in [
-            // The hidden id itself: the visibility gate answers.
+            // Visibility gate: the hidden id itself, and near misses under the
+            // hidden organization.
             HIDDEN,
-            // One edit from the hidden id: the unknown-model arm answers.
             "org-42/embedder-large-tune",
-            // Close to the visible id, and a prefix of the hidden one.
             "org-42/embedder-large",
+            // Unknown-model arm: no organization, or a visible one, so the
+            // gate lets the string through. Each is one edit from the hidden
+            // model's name and not close to any visible id.
+            "embedder-large-tune",
+            "vendor/embedder-large-tune",
+            "acme/embedder-large-tuned",
         ] {
-            let hidden_exists = native_encode_not_found_body(&holds_hidden, requested).await;
-            let hidden_absent = native_encode_not_found_body(&lacks_hidden, requested).await;
-            assert_eq!(
-                hidden_exists, hidden_absent,
-                "'{requested}' must get one response whether or not the hidden model exists"
+            let native = (
+                native_encode_not_found_body(&holds_hidden, requested).await,
+                native_encode_not_found_body(&lacks_hidden, requested).await,
             );
-            if requested != HIDDEN {
-                assert!(
-                    !hidden_exists.contains(HIDDEN),
-                    "the hidden id must never be suggested: {hidden_exists}"
+            let openai = (
+                openai_not_found_body(&holds_hidden, requested).await,
+                openai_not_found_body(&lacks_hidden, requested).await,
+            );
+            for (route, (hidden_exists, hidden_absent)) in [("native", native), ("openai", openai)]
+            {
+                assert_eq!(
+                    hidden_exists, hidden_absent,
+                    "{route}: '{requested}' must get one response whether or not the hidden model exists"
                 );
+                if requested != HIDDEN {
+                    assert!(
+                        !hidden_exists.contains(HIDDEN),
+                        "{route}: the hidden id must never be suggested: {hidden_exists}"
+                    );
+                }
             }
         }
 
