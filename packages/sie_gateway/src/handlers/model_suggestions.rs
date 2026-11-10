@@ -63,6 +63,10 @@ pub(crate) fn visible_model_suggestions(
 
 /// Up to [`MAX_SUGGESTIONS`] ids from `candidates` that `requested` most
 /// likely meant, closest first. Empty when nothing is close.
+///
+/// A registry also lists `model:profile` variants. Those are skipped: the
+/// request is matched without its own `:profile`, and naming every variant of
+/// one model would crowd out other models.
 pub(crate) fn suggest_model_ids(
     requested: &str,
     candidates: impl IntoIterator<Item = String>,
@@ -76,6 +80,7 @@ pub(crate) fn suggest_model_ids(
     }
     let mut scored: Vec<(Closeness, String)> = candidates
         .into_iter()
+        .filter(|id| !id.contains(':'))
         .filter_map(|id| closeness(&wanted, &normalize(&id)).map(|score| (score, id)))
         .collect();
     scored.sort();
@@ -225,6 +230,14 @@ mod tests {
     fn a_bundle_prefix_and_a_profile_suffix_are_ignored_when_matching() {
         assert_eq!(suggest("default:/bge-m3"), ["BAAI/bge-m3"]);
         assert_eq!(suggest("BAAI/bge-n3:banking"), ["BAAI/bge-m3"]);
+    }
+
+    #[test]
+    fn profile_variants_of_a_model_are_not_suggested() {
+        let listed = ["BAAI/bge-m3", "BAAI/bge-m3:dense", "BAAI/bge-m3:candle"]
+            .into_iter()
+            .map(String::from);
+        assert_eq!(suggest_model_ids("bge-m3", listed), ["BAAI/bge-m3"]);
     }
 
     #[test]
