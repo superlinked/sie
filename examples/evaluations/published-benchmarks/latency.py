@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from sie_sdk import ModelLoadingError, ProvisioningError, SIEConnectionError
 
@@ -59,7 +60,7 @@ class Page:
     ``jobs_sha256`` is the published hash file (read at key ``jobs_key``), or a hash pinned here when the study
     published none. ``model`` is the id to call when it differs from the jobs file's model (a profile such as
     ``:fast``). ``timed`` keeps only the first jobs for timing when the study sent the rest as warm-ups. ``photos``
-    is the folder that holds the images the jobs name.
+    is the folder that holds the images the jobs name, and ``photo_name`` the file name there of a job's image.
     """
 
     name: str
@@ -74,6 +75,7 @@ class Page:
     timed: int | None = None
     model: str | None = None
     photos: Ref | None = None
+    photo_name: Callable[[str], str] = lambda image: Path(image).name
     differences: tuple[str, ...] = ()
 
 
@@ -294,6 +296,52 @@ def ocr_jobs(manifest_raw: bytes) -> dict[str, Any]:
     }
 
 
+DETECT_REVISION = "7e5ba8a5cc0e49f7a9cdd5d61ebb31eb7a79617b"
+
+
+def detect_jobs(subset_raw: bytes, listing_raw: bytes, manifest_raw: bytes) -> dict[str, Any]:
+    listing = {(r["dataset"], r["image_id"]): r for r in json.loads(listing_raw)}
+    labels = {(r["dataset"], r["image_id"]): r["labels"] for r in json.loads(manifest_raw)["rows"]}
+    source = {
+        "subset": f"detect-current-arms-2026-10-11/prereg/d1-subset.json @{DETECT_REVISION[:8]}",
+        "subset_sha256": sha256(subset_raw),
+        "photos": "the D1 study photos staged from the pinned Zenodo archives; every byte matches the study's image listing",
+        "request": "one photo per extract call with that dataset's labels, no options (shipped threshold)",
+    }
+    jobs = []
+    for photo in json.loads(subset_raw)["photos"]:
+        key = (photo["dataset"], photo["image_id"])
+        r = listing[key]
+        meta = {
+            "dataset": r["dataset"],
+            "bucket": photo["bucket"],
+            "hero": photo["hero"],
+            "pixels": r["size"][0] * r["size"][1],
+            "sha256": r["sha256"],
+        }
+        jobs.append(
+            {
+                "id": f"{r['dataset']}/{r['image_id']}",
+                "image": f"detect/{r['path']}",
+                "labels": list(labels[key]),
+                "meta": meta,
+            }
+        )
+    return {
+        "page": "detect",
+        "model": "facebook/sam3",
+        "profile": "default",
+        "op": "extract",
+        "source": source,
+        "jobs": jobs,
+    }
+
+
+def detect_photo_name(image: str) -> str:
+    """``detect/images/<dataset>/<file>`` is stored as ``<dataset>__<file>``."""
+    return "__".join(Path(image).parts[-2:])
+
+
 def chat_jobs(system_raw: bytes, transcripts_raw: bytes) -> dict[str, Any]:
     system = system_raw.decode("utf-8")
     jobs = []
@@ -444,7 +492,7 @@ def structured_output_jobs(sample_raw: bytes, parquet_raw: bytes) -> dict[str, A
 
 
 def dataset_url(revision: str, path: str, dataset: str = DATASET) -> str:
-    return f"{RESOLVE_URL.format(dataset=dataset)}/{revision}/{path}"
+    return f"{RESOLVE_URL.format(dataset=dataset)}/{revision}/{quote(path)}"
 
 
 def fetch_ref(ref: Ref, fetch: Fetch) -> bytes:
@@ -774,6 +822,22 @@ PAGES = {
             photos=Ref("d03e04fd2f7f768afcc753b952fb9c9abc47748b", "ocr-photo372-prereg/2026-10-11/images/input"),
         ),
         Page(
+            "detect",
+            (
+                Ref(DETECT_REVISION, "detect-current-arms-2026-10-11/prereg/d1-subset.json"),
+                Ref(DETECT_REVISION, "detect-dense-results/2026-10-08/inputs/image-listing.json"),
+                Ref(DETECT_REVISION, "detect-current-arms-2026-10-11/prereg/items-manifest.json"),
+            ),
+            detect_jobs,
+            study_hash(),
+            "detect.json",
+            study_published("detect"),
+            "82.2 ms on /detect: the RTX PRO 6000 p50, rounded",
+            warmups=5,
+            photos=Ref("dfbd42d1e2ff4ef6baf8435c9c0af79f2cda6bfb", "detect-photo300/2026-11-10/images"),
+            photo_name=detect_photo_name,
+        ),
+        Page(
             "chat",
             (
                 Ref("4fbd23b7a53de46b52532722d2f37fc17feb60d5", "support-assistant-policy/inputs/system_prompt.md"),
@@ -840,13 +904,18 @@ def load_jobs(page: Page, fetch: Fetch) -> tuple[dict[str, Any], str]:
 
 
 def load_photos(page: Page, doc: Mapping[str, Any], fetch: Fetch) -> dict[str, bytes]:
+    """Each photo the jobs name; one whose job records a SHA-256 must have it."""
     if page.photos is None:
         return {}
     folder = page.photos
-    return {
-        job["image"]: fetch_ref(Ref(folder.revision, f"{folder.path}/{Path(job['image']).name}", folder.dataset), fetch)
-        for job in doc["jobs"]
-    }
+    photos = {}
+    for job in doc["jobs"]:
+        data = fetch_ref(Ref(folder.revision, f"{folder.path}/{page.photo_name(job['image'])}", folder.dataset), fetch)
+        expected = (job.get("meta") or {}).get("sha256")
+        if expected and sha256(data) != expected:
+            raise InputMismatch(f"the photo for {job['id']} has sha256 {sha256(data)}, the study's {expected}")
+        photos[job["image"]] = data
+    return photos
 
 
 def percentile(values: Sequence[float], q: float) -> float:
@@ -889,6 +958,11 @@ def pixel_variant(data: bytes, fmt: str, k: int) -> bytes:
     return buffer.getvalue()
 
 
+def image_format(spec: Mapping[str, Any]) -> str:
+    """The job's format, else PNG for a ``.png`` file and JPEG otherwise, as the study's client chose."""
+    return spec.get("image_format") or ("png" if spec["image"].lower().endswith(".png") else "jpeg")
+
+
 def warm_variant(doc: Mapping[str, Any]) -> str:
     return doc.get("warm_variant") or ("tagged" if doc["op"] == "generate" else "exact")
 
@@ -903,7 +977,7 @@ def warmup_jobs(page: Page, doc: Mapping[str, Any], photos: Mapping[str, bytes])
         job = copy.deepcopy(jobs[-1 - (i % len(jobs))])
         tag = f"[{page.level}-{k}] "
         if "image" in job:
-            job["image_bytes"] = pixel_variant(photos[job["image"]], job.get("image_format", "jpeg"), k)
+            job["image_bytes"] = pixel_variant(photos[job["image"]], image_format(job), k)
         elif variant == "tagged":
             if "messages" in job:
                 user = next(m for m in job["messages"] if m["role"] == "user")
@@ -951,7 +1025,7 @@ def send(
         return client.score(model, {"text": spec["query"]}, [{"text": text} for text in spec["docs"]], **calls)
     if "image" in spec:
         data = spec.get("image_bytes") or (photos or {})[spec["image"]]
-        item = {"id": spec["id"], "images": [{"data": data, "format": spec.get("image_format", "jpeg")}]}
+        item = {"id": spec["id"], "images": [{"data": data, "format": image_format(spec)}]}
     else:
         item = {"id": spec["id"], "text": spec["text"]}
     if op == "extract":
