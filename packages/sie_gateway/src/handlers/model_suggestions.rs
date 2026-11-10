@@ -46,7 +46,10 @@ pub(crate) fn unknown_model_message(requested: &str, suggestions: &[String]) -> 
 
 /// Suggestions for `requested`, drawn only from the ids this caller may list.
 ///
-/// The candidate set passes the same visibility filter as `GET /v1/models`.
+/// Candidates are the registry's ids that pass the visibility filter
+/// `GET /v1/models` applies, so every suggestion is an id that listing shows.
+/// The listing can show more: ids only a worker advertises are left out,
+/// because a request for one gets this same 404 from a populated registry.
 pub(crate) fn visible_model_suggestions(
     state: &AppState,
     ext: &axum::http::Extensions,

@@ -1535,22 +1535,6 @@ pub async fn proxy_generate(state: State<Arc<AppState>>, req: Request) -> impl I
     proxy_request(state, req, "generate").await
 }
 
-/// Resolve a request's model id to its serving bundle.
-///
-/// Extracted from `proxy_request` (#1543) so the model→bundle decision is one
-/// testable unit instead of being inlined in the 2000-line handler. Behaviour
-/// is identical to the block it replaces: on any failure it returns the exact
-/// caller-facing error `Response` (boxed to keep the `Result` small) that the
-/// inline code produced — model-not-found 404, bundle-routing-conflict 409, or
-/// the unknown-model 404 when the registry is populated. With an empty registry
-/// it falls back to the caller's bundle override (or `"default"`).
-///
-/// `requested` is the string the CALLER sent; `model_name` is what it resolved
-/// to. The unknown-model 404 echoes `requested`, never `model_name` (#2542): a
-/// resolved id can be a registry alias's target, and a 404 that names it hands
-/// every caller a read of the alias table — including targets in another org's
-/// reserved namespace. It also makes this 404 byte-identical to the #1841
-/// cross-org one, which is the whole point of answering "not found" there.
 /// The one native-surface `MODEL_NOT_FOUND` body.
 ///
 /// Three native call sites answer "this model is not here": the #1841
@@ -1590,6 +1574,25 @@ fn absent_from_populated_registry(registry: &ModelRegistry, model_name: &str) ->
     !registry.model_exists(model_name) && registry.has_any_models()
 }
 
+/// Resolve a request's model id to its serving bundle.
+///
+/// Extracted from `proxy_request` (#1543) so the model→bundle decision is one
+/// testable unit instead of being inlined in the 2000-line handler. Behaviour
+/// is identical to the block it replaces: on any failure it returns the exact
+/// caller-facing error `Response` (boxed to keep the `Result` small) that the
+/// inline code produced — model-not-found 404, bundle-routing-conflict 409, or
+/// the unknown-model 404 when the registry is populated. With an empty registry
+/// it falls back to the caller's bundle override (or `"default"`).
+///
+/// `requested` is the string the CALLER sent; `model_name` is what it resolved
+/// to. The unknown-model 404 echoes `requested`, never `model_name` (#2542): a
+/// resolved id can be a registry alias's target, and a 404 that names it hands
+/// every caller a read of the alias table — including targets in another org's
+/// reserved namespace. It also makes this 404 byte-identical to the #1841
+/// cross-org one, which is the whole point of answering "not found" there.
+///
+/// `suggestions` supplies the "Did you mean" ids for that 404. It is called
+/// with `requested` and only when the 404 is built.
 fn resolve_bundle_for_request(
     registry: &ModelRegistry,
     model_name: &str,
