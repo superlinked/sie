@@ -685,8 +685,8 @@ The run:
    any request when its SHA-256 differs from the one the study published. The
    `redact` and `typed-decisions` studies published no such hash, so the check
    uses the hash of the rebuild, pinned in `latency.py`. `ocr` also downloads
-   its 372 photos, and `detect` its 300 photos, each checked against the
-   SHA-256 the study recorded for it;
+   its 372 photos. `detect` downloads its 300 photos and checks each one
+   against the SHA-256 the study recorded for it;
 2. sends the study's warm-up requests, built from the end of that list, and
    does not time them: 20 for `classify`, `search` and `named-entities`, 10 for
    `redact`, 5 for `typed-decisions`, `rerank`, `request-routing`, `ocr` and
