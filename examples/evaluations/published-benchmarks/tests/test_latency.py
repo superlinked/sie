@@ -146,6 +146,7 @@ class FakeFetch:
     """The pages' inputs, hashes and published files for the pages tested end to end."""
 
     def __init__(self, *, jobs_sha256: dict | None = None, missing: str | None = None):
+        """Serve every tested page's inputs, the jobs hashes their builds give, results and photos."""
         self.files: dict[str, bytes] = {}
         sha = {}
         with patch.object(latency, "OCR_MANIFEST_SHA256", hashlib.sha256(MANIFEST_RAW).hexdigest()):
@@ -339,6 +340,7 @@ class JobsTests(unittest.TestCase):
         self.assertEqual(doc["defaults"]["instruction"], "Text Recognition:")
 
     def test_detect_jobs_name_each_photo_with_its_labels_and_hash(self):
+        """A job carries the photo's path, its dataset's labels and the listing's SHA-256."""
         doc = latency.detect_jobs(DETECT_SUBSET_RAW, DETECT_LISTING_RAW, DETECT_MANIFEST_RAW)
         self.assertEqual((doc["model"], doc["op"]), ("facebook/sam3", "extract"))
         self.assertNotIn("defaults", doc)
@@ -351,9 +353,11 @@ class JobsTests(unittest.TestCase):
         self.assertEqual((first["meta"]["pixels"], first["meta"]["hero"]), (64, True))
 
     def test_detect_photos_are_stored_under_dataset_and_file_name(self):
+        """A job's image path maps to the ``<dataset>__<file>`` name in the photo folder."""
         self.assertEqual(latency.detect_photo_name("detect/images/amvd/DJI-1.jpg.jpg"), "amvd__DJI-1.jpg.jpg")
 
     def test_a_photo_with_another_hash_stops_the_run(self):
+        """A downloaded photo whose bytes differ from the recorded SHA-256 raises InputMismatch."""
         fetch = FakeFetch()
         page = latency.PAGES["detect"]
         doc = latency.detect_jobs(DETECT_SUBSET_RAW, DETECT_LISTING_RAW, DETECT_MANIFEST_RAW)
@@ -428,6 +432,7 @@ class JobsTests(unittest.TestCase):
         )
 
     def test_a_file_name_with_spaces_or_brackets_is_escaped(self):
+        """Spaces and brackets in a dataset path are percent-encoded in the URL."""
         address = latency.dataset_url("a" * 40, "x/amvd__DJI 1 (7_42).jpg")
         self.assertTrue(address.endswith("/x/amvd__DJI%201%20%287_42%29.jpg"))
 
@@ -715,6 +720,7 @@ class RunTests(unittest.TestCase):
         self.assertTrue(any(address.endswith("images/input/p1.jpg") for address in fetch.urls))
 
     def test_detect_sends_each_photo_in_its_format_with_its_labels(self):
+        """Each timed request sends the photo bytes, PNG or JPEG by extension, with that photo's labels."""
         client, fetch = FakeClient(), FakeFetch()
         record = self.run_page("detect", client, fetch)
         timed = client.calls[5:]

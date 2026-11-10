@@ -300,6 +300,11 @@ DETECT_REVISION = "7e5ba8a5cc0e49f7a9cdd5d61ebb31eb7a79617b"
 
 
 def detect_jobs(subset_raw: bytes, listing_raw: bytes, manifest_raw: bytes) -> dict[str, Any]:
+    """The study's ``detect.json``: one job per D1 photo, in the subset's order, with its dataset's labels.
+
+    Each job names its photo as ``detect/images/<dataset>/<file>`` and records the photo's size and SHA-256
+    from the image listing, as the study's builder wrote them.
+    """
     listing = {(r["dataset"], r["image_id"]): r for r in json.loads(listing_raw)}
     labels = {(r["dataset"], r["image_id"]): r["labels"] for r in json.loads(manifest_raw)["rows"]}
     source = {
