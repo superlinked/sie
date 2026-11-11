@@ -614,6 +614,7 @@ mod tests {
             static_queue_pools: Vec::new(),
             model_aliases: HashMap::new(),
             published_model_aliases: Default::default(),
+            retired_models: HashMap::new(),
             bundles_dir: String::new(),
             models_dir: String::new(),
             config_service_url: None,

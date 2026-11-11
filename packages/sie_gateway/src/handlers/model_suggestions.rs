@@ -1,12 +1,17 @@
-//! "Did you mean ...?" hints for the `MODEL_NOT_FOUND` response.
+//! Hints for the `MODEL_NOT_FOUND` response: "was retired" or "Did you mean".
 //!
-//! The hint is a function of exactly two inputs: the string the caller sent
-//! and the model ids that caller may list. Nothing resolved from the request
-//! (an alias target, a canonical id, a governed route) takes part, so a model
-//! hidden by a [`ModelAccessPolicy`](crate::server::ModelAccessPolicy), a model
-//! that does not exist, and a model whose route was never compiled still
-//! produce the same body for the same request string.
+//! The hint is a function of exactly three inputs: the string the caller sent,
+//! the operator's retired-model map, and the model ids that caller may list.
+//! Nothing resolved from the request (an alias target, a canonical id, a
+//! governed route) takes part, and the lookup never asks whether the requested
+//! id itself exists, so a model hidden by a
+//! [`ModelAccessPolicy`](crate::server::ModelAccessPolicy), a model that does
+//! not exist, and a model whose route was never compiled still produce the same
+//! body for the same request string.
 
+use std::collections::HashMap;
+
+use crate::config::RetiredModel;
 use crate::server::AppState;
 
 /// Most ids one response suggests.
@@ -26,11 +31,25 @@ const MAX_TYPO_DISTANCE: usize = 3;
 /// One accepted edit per this many normalized characters.
 const TYPO_CHARS_PER_EDIT: usize = 6;
 
-/// The `MODEL_NOT_FOUND` message for `requested`, with a hint when
-/// `suggestions` is not empty.
+/// What the `MODEL_NOT_FOUND` message adds after "not found".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NotFoundHint {
+    /// "Did you mean" ids, closest first. Empty means no hint.
+    Suggestions(Vec<String>),
+    /// The operator retired the requested id in favour of `replacement`.
+    Retired { replacement: String },
+}
+
+/// The `MODEL_NOT_FOUND` message for `requested` with its `hint`.
 ///
 /// `requested` is always the caller's own string.
-pub(crate) fn unknown_model_message(requested: &str, suggestions: &[String]) -> String {
+pub(crate) fn unknown_model_message(requested: &str, hint: &NotFoundHint) -> String {
+    let suggestions = match hint {
+        NotFoundHint::Retired { replacement } => {
+            return format!("Model '{requested}' was retired. Use '{replacement}'.");
+        }
+        NotFoundHint::Suggestions(suggestions) => suggestions.as_slice(),
+    };
     match suggestions {
         [] => format!("Model '{requested}' not found"),
         [only] => format!("Model '{requested}' not found. Did you mean '{only}'?"),
@@ -44,30 +63,91 @@ pub(crate) fn unknown_model_message(requested: &str, suggestions: &[String]) -> 
     }
 }
 
-/// Suggestions for `requested`, drawn only from the ids this caller may list.
+/// The hint every `MODEL_NOT_FOUND` site renders for `requested`.
 ///
-/// Candidates are the registry's ids that pass the visibility filter
-/// `GET /v1/models` applies, so every suggestion is an id that listing shows.
+/// A retired note wins when the operator retired the caller's string and this
+/// caller may list both the retired id and its replacement. Otherwise the
+/// "Did you mean" ids, drawn only from what this caller may list: the
+/// registry's ids that pass the visibility filter `GET /v1/models` applies.
 /// The listing can show more: ids only a worker advertises are left out,
 /// because a request for one gets this same 404 from a populated registry.
-pub(crate) fn visible_model_suggestions(
+///
+/// An alias with the same name as a retired id wins on its own, because the
+/// request then resolves and never reaches this 404.
+pub(crate) fn not_found_hint(
     state: &AppState,
     ext: &axum::http::Extensions,
     requested: &str,
-) -> Vec<String> {
-    let candidates = state
-        .model_registry
-        .list_models()
+) -> NotFoundHint {
+    let visible = |id: &str| {
+        state
+            .model_access_policy
+            .as_ref()
+            .is_none_or(|policy| policy.visible(id, ext))
+    };
+    hint_for(
+        requested,
+        &state.config.retired_models,
+        state.model_registry.list_models(),
+        visible,
+    )
+}
+
+/// [`not_found_hint`] over plain inputs: `listed` is every registry id and
+/// `visible` says which of them this caller may list.
+fn hint_for(
+    requested: &str,
+    retired: &HashMap<String, RetiredModel>,
+    listed: Vec<String>,
+    visible: impl Fn(&str) -> bool,
+) -> NotFoundHint {
+    if let Some(entry) = retired_entry(retired, requested) {
+        // The policy is asked about the retired id as the operator declared
+        // it, not about the lookup key, so a case-sensitive policy sees the
+        // same canonical id it sees everywhere else.
+        if listed.contains(&entry.replacement)
+            && visible(&entry.declared)
+            && visible(&entry.replacement)
+        {
+            return NotFoundHint::Retired {
+                replacement: entry.replacement.clone(),
+            };
+        }
+    }
+    // Variants are never suggested, so the policy is not asked about them.
+    let candidates = listed
         .into_iter()
-        // Variants are never suggested, so the policy is not asked about them.
         .filter(|id| !id.contains(':'))
-        .filter(|id| {
-            state
-                .model_access_policy
-                .as_ref()
-                .is_none_or(|policy| policy.visible(id, ext))
-        });
-    suggest_model_ids(requested, candidates)
+        .filter(|id| visible(id));
+    NotFoundHint::Suggestions(suggest_model_ids(requested, candidates))
+}
+
+/// The retired-map entry for `requested`, matched exactly on
+/// [`retired_model_key`]. Never fuzzy.
+fn retired_entry<'a>(
+    retired: &'a HashMap<String, RetiredModel>,
+    requested: &str,
+) -> Option<&'a RetiredModel> {
+    if retired.is_empty() || requested.len() > MAX_REQUEST_LEN {
+        return None;
+    }
+    retired.get(&retired_model_key(requested))
+}
+
+/// A retired id as the operator declared it: trimmed, without a `bundle:/`
+/// prefix or `:profile` suffix, case and `__` spelling untouched. This is the
+/// form the access policy is asked about.
+pub(crate) fn retired_model_declared(id: &str) -> &str {
+    model_part(id.trim())
+}
+
+/// The key a retired-model entry is stored and looked up under: the model id
+/// without a `bundle:/` prefix or `:profile` suffix, lower case, `__` read as
+/// `/`. Other separators are kept, so only the same id matches.
+pub(crate) fn retired_model_key(id: &str) -> String {
+    retired_model_declared(id)
+        .replace("__", "/")
+        .to_ascii_lowercase()
 }
 
 /// Up to [`MAX_SUGGESTIONS`] ids from `candidates` that `requested` most
@@ -289,20 +369,148 @@ mod tests {
         assert!(suggest_model_ids("acme/secret-modle", visible).is_empty());
     }
 
+    fn suggested(ids: &[&str]) -> NotFoundHint {
+        NotFoundHint::Suggestions(ids.iter().map(|id| id.to_string()).collect())
+    }
+
     #[test]
     fn the_message_keeps_the_plain_form_without_suggestions() {
-        assert_eq!(unknown_model_message("x/y", &[]), "Model 'x/y' not found");
+        assert_eq!(
+            unknown_model_message("x/y", &suggested(&[])),
+            "Model 'x/y' not found"
+        );
     }
 
     #[test]
     fn the_message_names_one_or_several_suggestions() {
         assert_eq!(
-            unknown_model_message("bge-m3", &["BAAI/bge-m3".to_string()]),
+            unknown_model_message("bge-m3", &suggested(&["BAAI/bge-m3"])),
             "Model 'bge-m3' not found. Did you mean 'BAAI/bge-m3'?"
         );
         assert_eq!(
-            unknown_model_message("q", &["a/b".to_string(), "c/d".to_string()]),
+            unknown_model_message("q", &suggested(&["a/b", "c/d"])),
             "Model 'q' not found. Did you mean one of: 'a/b', 'c/d'?"
+        );
+    }
+
+    #[test]
+    fn the_retired_message_echoes_the_request_and_names_the_replacement() {
+        let hint = NotFoundHint::Retired {
+            replacement: "Qwen/Qwen3.6-27B".to_string(),
+        };
+        assert_eq!(
+            unknown_model_message("qwen__qwen3-4b:fast", &hint),
+            "Model 'qwen__qwen3-4b:fast' was retired. Use 'Qwen/Qwen3.6-27B'."
+        );
+    }
+
+    fn retired_map(entries: &[(&str, &str)]) -> HashMap<String, RetiredModel> {
+        crate::config::build_retired_models(
+            entries
+                .iter()
+                .map(|(id, replacement)| (id.to_string(), replacement.to_string()))
+                .collect(),
+        )
+    }
+
+    fn retired() -> HashMap<String, RetiredModel> {
+        retired_map(&[("Qwen/Qwen3-4B", "Qwen/Qwen3.6-27B")])
+    }
+
+    fn hint(requested: &str) -> NotFoundHint {
+        hint_for(requested, &retired(), catalog(), |_| true)
+    }
+
+    fn retired_hint() -> NotFoundHint {
+        NotFoundHint::Retired {
+            replacement: "Qwen/Qwen3.6-27B".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_retired_id_names_its_replacement() {
+        assert_eq!(hint("Qwen/Qwen3-4B"), retired_hint());
+    }
+
+    #[test]
+    fn a_retired_id_matches_in_any_case_and_in_the_double_underscore_form() {
+        assert_eq!(hint("qwen/qwen3-4b"), retired_hint());
+        assert_eq!(hint("Qwen__Qwen3-4B"), retired_hint());
+    }
+
+    #[test]
+    fn a_retired_id_matches_with_a_bundle_prefix_or_a_profile_suffix() {
+        assert_eq!(hint("default:/Qwen/Qwen3-4B"), retired_hint());
+        assert_eq!(hint("Qwen/Qwen3-4B:fast"), retired_hint());
+    }
+
+    #[test]
+    fn a_retired_id_is_matched_exactly_not_by_closeness() {
+        // One edit away, and a different separator: both fall back to the
+        // "Did you mean" ids.
+        assert_eq!(hint("Qwen/Qwen3-4C"), suggested(&["Qwen/Qwen3.5-4B"]));
+        assert!(matches!(
+            hint("Qwen/Qwen3_4B"),
+            NotFoundHint::Suggestions(_)
+        ));
+    }
+
+    #[test]
+    fn without_a_retired_entry_the_suggestions_are_unchanged() {
+        assert_eq!(hint("bge-m3"), suggested(&["BAAI/bge-m3"]));
+        assert_eq!(
+            hint_for("bge-m3", &HashMap::new(), catalog(), |_| true),
+            suggested(&["BAAI/bge-m3"])
+        );
+    }
+
+    #[test]
+    fn a_replacement_missing_from_the_registry_gives_no_retired_note() {
+        let listed = vec!["Qwen/Qwen3.5-4B".to_string()];
+        assert_eq!(
+            hint_for("Qwen/Qwen3-4B", &retired(), listed, |_| true),
+            suggested(&["Qwen/Qwen3.5-4B"])
+        );
+    }
+
+    #[test]
+    fn a_retired_or_replacement_id_the_caller_may_not_list_gives_no_retired_note() {
+        let hides_replacement = |id: &str| id != "Qwen/Qwen3.6-27B";
+        let hides_retired = |id: &str| id != "Qwen/Qwen3-4B";
+        for visible in [&hides_replacement as &dyn Fn(&str) -> bool, &hides_retired] {
+            let hint = hint_for("Qwen/Qwen3-4B", &retired(), catalog(), visible);
+            assert!(matches!(hint, NotFoundHint::Suggestions(_)), "{hint:?}");
+        }
+    }
+
+    #[test]
+    fn the_policy_is_asked_about_the_retired_id_as_declared() {
+        let retired = retired_map(&[("bundle:/Org-42__Old:fast", "Qwen/Qwen3.6-27B")]);
+        let asked = std::cell::RefCell::new(Vec::new());
+        let hides_declared = |id: &str| {
+            asked.borrow_mut().push(id.to_string());
+            id != "Org-42__Old"
+        };
+        let hint = hint_for("org-42/old", &retired, catalog(), hides_declared);
+        assert!(matches!(hint, NotFoundHint::Suggestions(_)), "{hint:?}");
+        assert!(asked.borrow().iter().any(|id| id == "Org-42__Old"));
+        assert!(!asked.borrow().iter().any(|id| id == "org-42/old"));
+
+        // A policy that hides only the lower-cased key is never asked about it.
+        let hides_key = |id: &str| id != "org-42/old";
+        assert_eq!(
+            hint_for("org-42/old", &retired, catalog(), hides_key),
+            retired_hint()
+        );
+    }
+
+    #[test]
+    fn an_oversized_request_gets_no_retired_note() {
+        let long = format!("{}{}", "x".repeat(MAX_REQUEST_LEN), "/model");
+        let retired = retired_map(&[(&long, "Qwen/Qwen3.6-27B")]);
+        assert_eq!(
+            hint_for(&long, &retired, catalog(), |_| true),
+            suggested(&[])
         );
     }
 

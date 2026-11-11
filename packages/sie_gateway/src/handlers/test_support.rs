@@ -1024,6 +1024,7 @@ fn test_config(
         static_queue_pools: Vec::new(),
         model_aliases: HashMap::new(),
         published_model_aliases: Default::default(),
+        retired_models: HashMap::new(),
         bundles_dir: bundles_dir.to_string(),
         models_dir: models_dir.to_string(),
         config_service_url: None,

@@ -198,6 +198,16 @@ gateway:
   #     sql: "bf16-27b:/Qwen/Qwen3.6-27B"
   modelAliases: {}
 
+  # -- Retired model id → replacement model id. A request for a retired id
+  # still gets `404 MODEL_NOT_FOUND`, but the message names the replacement:
+  # "Model '<id>' was retired. Use '<replacement>'." An alias reroutes a
+  # request silently; a retired entry refuses it and explains. The note is
+  # shown only when the replacement is in the model registry and the caller may
+  # list both ids. An entry stays until you remove it. Example:
+  #   retiredModels:
+  #     org/old-model: "org/new-model"
+  retiredModels: {}
+
   # -- Number of gateway replicas (default 1; bump to 2+ for HA).
   # Also used as KEDA's `minReplicaCount` floor (see
   # templates/keda-scaledobject.yaml). The gateway is stateless on the
