@@ -1,6 +1,6 @@
 {
   "name": "@superlinked/sie-cognee",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "SIE generation, embeddings, OCR and evidence decisions for Cognee",
   "type": "module",
   "main": "./dist/index.cjs",
