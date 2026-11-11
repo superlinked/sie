@@ -1544,30 +1544,36 @@ class ModelRegistry:
                 )
                 self._unload_sync(lru_model, reason="preload_pressure")
 
-            # Try to load onto device, with OOM retry.
-            try:
-                loaded = self._loader.load_and_register(name, load_device, adapter, config)
-            except RuntimeError as exc:
-                if not self._is_oom_error(exc):
-                    raise
-
-                # OOM - try to evict LRU non-pinned model and retry.
-                lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
-                if lru_model is None:
-                    logger.error("OOM loading '%s' but no non-pinned models to evict", name)
-                    raise
-
-                logger.warning(
-                    "OOM loading '%s', evicting LRU model '%s' and retrying",
-                    name,
-                    lru_model,
-                )
-                self._unload_sync(lru_model, reason="load_oom")
-
-                # Retry once after eviction - weights still on disk so we
-                # skip ``ensure_weights_cached`` here.
+            while True:
+                attempt_free_bytes = memory_manager.get_stats().available_bytes
+                try:
+                    loaded = self._loader.load_and_register(name, load_device, adapter, config)
+                    break
+                except RuntimeError as exc:
+                    if not self._is_oom_error(exc):
+                        raise
+                    if memory_manager.get_lru_model(exclude=self._pinned_models) is None:
+                        logger.error("OOM loading '%s' but no non-pinned models to evict", name)
+                        self._release_failed_load_sync(adapter, name)
+                        raise
+                # The failed attempt's traceback holds what it allocated,
+                # so it is released only once the except clause has ended.
+                self._release_failed_load_sync(adapter, name)
+                evicted = False
+                while not evicted or memory_manager.get_stats().available_bytes < 2 * attempt_free_bytes:
+                    lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
+                    if lru_model is None:
+                        break
+                    logger.warning(
+                        "OOM loading '%s': %.2f GB free, retrying with %.2f GB free; evicting '%s'",
+                        name,
+                        memory_manager.get_stats().available_gb,
+                        2 * attempt_free_bytes / (1024**3),
+                        lru_model,
+                    )
+                    self._unload_sync(lru_model, reason="load_oom")
+                    evicted = True
                 adapter = self._loader.instantiate_adapter(name, config, model_dir, load_device)
-                loaded = self._loader.load_and_register(name, load_device, adapter, config)
 
             # Track loaded state and register it for LRU accounting.
             self._loaded[name] = loaded
@@ -1604,7 +1610,9 @@ class ModelRegistry:
         - Waits for an in-flight unload of the same model instead of failing
         - Proactively evicts LRU models if memory pressure or load headroom requires it
         - Runs the blocking load in a thread pool to avoid blocking the event loop
-        - Falls back to OOM-triggered eviction if load still fails (fragmentation)
+        - After an OOM, releases the failed attempt and evicts LRU models until
+          twice the memory that attempt had is free, retrying while any unpinned
+          model is left to evict
         - On-demand config discovery: rescans models_dir if model not found
         - Dependency checking: verifies model deps match installed packages
 
@@ -1617,7 +1625,7 @@ class ModelRegistry:
 
         Raises:
             KeyError: If model not found after rescan.
-            RuntimeError: If OOM persists after eviction.
+            RuntimeError: If OOM persists with no unpinned model left to evict.
         """
         # Pre-load validation: config discovery
         # Done before acquiring lock to surface errors early
@@ -1760,32 +1768,26 @@ class ModelRegistry:
                             )
                         await self._do_unload(lru_model, reason="preload_pressure")
 
-                    try:
-                        # Load onto device (loader handles main thread vs executor)
-                        loaded = await self._loader.load_and_register_async(name, load_device, adapter, config)
-                    except RuntimeError as e:
-                        if not self._is_oom_error(e):
-                            raise
-
-                        # OOM despite pre-load eviction: evict LRU non-pinned model and retry once
+                    while True:
                         await self._wait_for_unloads()
-                        async with lock:
-                            lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
-                        if lru_model is None:
-                            logger.error("OOM loading '%s' but no non-pinned models to evict", name)
-                            raise
-
-                        logger.warning(
-                            "OOM loading '%s' despite pre-eviction, evicting '%s' and retrying",
-                            name,
-                            lru_model,
-                        )
-                        await self._do_unload(lru_model, reason="load_oom")
-
-                        # Retry once after eviction. Weights are still cached
-                        # on disk so we skip ``ensure_weights_cached_async``.
+                        attempt_free_bytes = memory_manager.get_stats().available_bytes
+                        try:
+                            loaded = await self._loader.load_and_register_async(name, load_device, adapter, config)
+                            break
+                        except RuntimeError as e:
+                            if not self._is_oom_error(e):
+                                raise
+                            async with lock:
+                                lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
+                            if lru_model is None:
+                                logger.error("OOM loading '%s' but no non-pinned models to evict", name)
+                                await self._release_failed_load(adapter, name)
+                                raise
+                        # The failed attempt's traceback holds what it allocated,
+                        # so it is released only once the except clause has ended.
+                        await self._release_failed_load(adapter, name)
+                        await self._evict_for_load_retry(name, memory_manager, 2 * attempt_free_bytes)
                         adapter = await self._loader.instantiate_adapter_async(name, config, model_dir, load_device)
-                        loaded = await self._loader.load_and_register_async(name, load_device, adapter, config)
 
                     async with lock:
                         # Track loaded state
@@ -1825,6 +1827,50 @@ class ModelRegistry:
                 )
                 # Always clear loading state when done (success or failure)
                 self._loading.discard(name)
+
+    def _release_failed_load_sync(self, adapter: ModelAdapter, name: str) -> None:
+        """Free the device memory a load that raised had already allocated."""
+        try:
+            adapter.unload()
+        except Exception:  # noqa: BLE001 - the load's own error is the one that is reported
+            logger.warning("Releasing the failed load of '%s' raised; continuing", name, exc_info=True)
+
+    async def _release_failed_load(self, adapter: ModelAdapter, name: str) -> None:
+        """Free the device memory a load that raised had already allocated."""
+        try:
+            await self._run_adapter_unload(adapter, name)
+        except Exception:  # noqa: BLE001 - the load's own error is the one that is reported
+            logger.warning("Releasing the failed load of '%s' raised; continuing", name, exc_info=True)
+
+    async def _evict_for_load_retry(self, name: str, memory_manager: MemoryManager, target_free_bytes: int) -> None:
+        """Evict LRU non-pinned models until ``target_free_bytes`` are free, evicting at least one."""
+        lock = self._get_load_lock()
+        evicted = False
+        while True:
+            await self._wait_for_unloads()
+            async with lock:
+                stats = memory_manager.get_stats()
+                if evicted and stats.available_bytes >= target_free_bytes:
+                    return
+                lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
+                if lru_model is None:
+                    return
+                if lru_model not in self._loaded:
+                    logger.warning(
+                        "Evictor found ghost '%s' (in memory manager, not loaded); dropping stale entry",
+                        lru_model,
+                    )
+                    memory_manager.unregister_model(lru_model)
+                    continue
+                logger.warning(
+                    "OOM loading '%s': %.2f GB free, retrying with %.2f GB free; evicting '%s'",
+                    name,
+                    stats.available_gb,
+                    target_free_bytes / (1024**3),
+                    lru_model,
+                )
+            await self._do_unload(lru_model, reason="load_oom")
+            evicted = True
 
     async def start_load_async(self, name: str, device: str) -> bool:
         """Start loading a model in the background (non-blocking).
