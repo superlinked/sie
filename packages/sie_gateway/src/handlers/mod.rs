@@ -14,3 +14,4 @@ pub mod systemone;
 pub(crate) mod test_support;
 
 pub(crate) mod lora;
+pub(crate) mod model_suggestions;

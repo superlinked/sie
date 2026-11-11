@@ -43,6 +43,7 @@ use crate::types::AuditEntry;
 
 use crate::middleware::auth::request_token_id;
 
+use super::model_suggestions::{unknown_model_message, visible_model_suggestions};
 use super::serving_disclosure::{
     remote_forbidden, DeferredFallbackFinish, FallbackAttempt, ServingDisclosure,
     UnansweredBeforeDeadline,
@@ -1534,6 +1535,45 @@ pub async fn proxy_generate(state: State<Arc<AppState>>, req: Request) -> impl I
     proxy_request(state, req, "generate").await
 }
 
+/// The one native-surface `MODEL_NOT_FOUND` body.
+///
+/// Three native call sites answer "this model is not here": the #1841
+/// visibility gate, the populated-registry unknown-model arm of
+/// [`resolve_bundle_for_request`], and the #3441 pre-governed ordering check in
+/// [`resolve_routing`]. They must stay **byte-identical** — the no-oracle
+/// property (#2542) is that a hidden model, an absent model, and a model whose
+/// governed route was never compiled are one indistinguishable response — so
+/// they render through this one function instead of three copies that can drift.
+///
+/// `requested` is always the CALLER's string, never a resolved/governed id: a
+/// resolved id can be an alias target in another org's reserved namespace.
+///
+/// `suggestions` come from [`visible_model_suggestions`] for the same
+/// `requested` string at every call site, so the hint depends only on what the
+/// caller sent and may list, and the three responses stay identical.
+fn unknown_model_response(endpoint: &str, requested: &str, suggestions: &[String]) -> Response {
+    endpoint_error_response(
+        endpoint,
+        StatusCode::NOT_FOUND,
+        err_code::MODEL_NOT_FOUND,
+        oai_type::MODEL_NOT_FOUND,
+        oai_code::MODEL_NOT_FOUND,
+        Some("model"),
+        unknown_model_message(requested, suggestions),
+    )
+}
+
+/// Is this id absent from a registry that has models?
+///
+/// The exact condition the populated-registry 404 arm below fires on, named so
+/// the #3441 ordering check in [`resolve_routing`] can ask the same question
+/// ahead of governed lookup without restating it. An EMPTY registry is
+/// deliberately not "absent": that is the pre-bootstrap deployment path, which
+/// falls back to the caller's bundle override rather than 404ing.
+fn absent_from_populated_registry(registry: &ModelRegistry, model_name: &str) -> bool {
+    !registry.model_exists(model_name) && registry.has_any_models()
+}
+
 /// Resolve a request's model id to its serving bundle.
 ///
 /// Extracted from `proxy_request` (#1543) so the model→bundle decision is one
@@ -1550,41 +1590,9 @@ pub async fn proxy_generate(state: State<Arc<AppState>>, req: Request) -> impl I
 /// every caller a read of the alias table — including targets in another org's
 /// reserved namespace. It also makes this 404 byte-identical to the #1841
 /// cross-org one, which is the whole point of answering "not found" there.
-/// The one native-surface `MODEL_NOT_FOUND` body.
 ///
-/// Three native call sites answer "this model is not here": the #1841
-/// visibility gate, the populated-registry unknown-model arm of
-/// [`resolve_bundle_for_request`], and the #3441 pre-governed ordering check in
-/// [`resolve_routing`]. They must stay **byte-identical** — the no-oracle
-/// property (#2542) is that a hidden model, an absent model, and a model whose
-/// governed route was never compiled are one indistinguishable response — so
-/// they render through this one function instead of three copies that can drift.
-///
-/// `requested` is always the CALLER's string, never a resolved/governed id: a
-/// resolved id can be an alias target in another org's reserved namespace.
-fn unknown_model_response(endpoint: &str, requested: &str) -> Response {
-    endpoint_error_response(
-        endpoint,
-        StatusCode::NOT_FOUND,
-        err_code::MODEL_NOT_FOUND,
-        oai_type::MODEL_NOT_FOUND,
-        oai_code::MODEL_NOT_FOUND,
-        Some("model"),
-        format!("Model '{}' not found", requested),
-    )
-}
-
-/// Is this id absent from a registry that has models?
-///
-/// The exact condition the populated-registry 404 arm below fires on, named so
-/// the #3441 ordering check in [`resolve_routing`] can ask the same question
-/// ahead of governed lookup without restating it. An EMPTY registry is
-/// deliberately not "absent": that is the pre-bootstrap deployment path, which
-/// falls back to the caller's bundle override rather than 404ing.
-fn absent_from_populated_registry(registry: &ModelRegistry, model_name: &str) -> bool {
-    !registry.model_exists(model_name) && registry.has_any_models()
-}
-
+/// `suggestions` supplies the "Did you mean" ids for that 404. It is called
+/// with `requested` and only when the 404 is built.
 fn resolve_bundle_for_request(
     registry: &ModelRegistry,
     model_name: &str,
@@ -1592,6 +1600,7 @@ fn resolve_bundle_for_request(
     bundle_override: &str,
     engine_pin: Option<&str>,
     endpoint: &str,
+    suggestions: &dyn Fn(&str) -> Vec<String>,
 ) -> Result<String, Box<Response>> {
     let bundle_override_ref = if bundle_override.is_empty() {
         None
@@ -1635,7 +1644,11 @@ fn resolve_bundle_for_request(
             }
         }
     } else if registry.has_any_models() {
-        return Err(Box::new(unknown_model_response(endpoint, requested)));
+        return Err(Box::new(unknown_model_response(
+            endpoint,
+            requested,
+            &suggestions(requested),
+        )));
     } else if bundle_override.is_empty() {
         "default".to_string()
     } else {
@@ -2193,7 +2206,11 @@ async fn resolve_routing(
         .as_ref()
         .is_some_and(|p| !p.visible(&model_name, ext))
     {
-        return Err(Box::new(unknown_model_response(endpoint, &model)));
+        return Err(Box::new(unknown_model_response(
+            endpoint,
+            &model,
+            &visible_model_suggestions(state, ext, &model),
+        )));
     }
     // #2542 deployment serving policy on the RESOLVED id: the authoritative
     // "we do not serve this model here" verdict (the managed service's §6.5
@@ -2332,7 +2349,11 @@ async fn resolve_routing(
     if generation_intent.is_some()
         && absent_from_populated_registry(&state.model_registry, &model_name)
     {
-        return Err(Box::new(unknown_model_response(endpoint, &model)));
+        return Err(Box::new(unknown_model_response(
+            endpoint,
+            &model,
+            &visible_model_suggestions(state, ext, &model),
+        )));
     }
     let governed_route = if let Some(intent) = generation_intent {
         match governed_generation_route(state, &model_name, &dispatch_model, intent) {
@@ -2399,6 +2420,7 @@ async fn resolve_routing(
         effective_bundle_override,
         engine_pin.as_deref(),
         endpoint,
+        &|requested| visible_model_suggestions(state, ext, requested),
     )?;
 
     let engine = state
@@ -8538,7 +8560,10 @@ pub(crate) fn resolve_model_and_bundle(
         return Err((
             StatusCode::NOT_FOUND,
             Json(json_openai_error(
-                format!("Model '{model_spec}' not found"),
+                unknown_model_message(
+                    model_spec,
+                    &visible_model_suggestions(state, ext, model_spec),
+                ),
                 oai_type::MODEL_NOT_FOUND,
                 Some("model"),
                 oai_code::MODEL_NOT_FOUND,
@@ -8608,7 +8633,10 @@ pub(crate) fn resolve_model_and_bundle(
             Json(json_openai_error(
                 // The caller's string, never the resolved one — see the
                 // visibility gate above (#2542).
-                format!("Model '{model_spec}' not found"),
+                unknown_model_message(
+                    model_spec,
+                    &visible_model_suggestions(state, ext, model_spec),
+                ),
                 oai_type::MODEL_NOT_FOUND,
                 Some("model"),
                 oai_code::MODEL_NOT_FOUND,
@@ -16911,9 +16939,16 @@ mod tests {
         let registry = ModelRegistry::new(bundles_dir.path(), models_dir.path(), true);
         assert!(!registry.has_any_models());
 
-        let default =
-            resolve_bundle_for_request(&registry, "org/model", "org/model", "", None, "encode")
-                .expect("empty registry + no override resolves");
+        let default = resolve_bundle_for_request(
+            &registry,
+            "org/model",
+            "org/model",
+            "",
+            None,
+            "encode",
+            &|_| Vec::new(),
+        )
+        .expect("empty registry + no override resolves");
         assert_eq!(default, "default");
 
         let overridden = resolve_bundle_for_request(
@@ -16923,6 +16958,7 @@ mod tests {
             "custom-bundle",
             None,
             "encode",
+            &|_| Vec::new(),
         )
         .expect("empty registry preserves caller bundle");
         assert_eq!(overridden, "custom-bundle");
@@ -19947,6 +19983,184 @@ mod tests {
             String::from_utf8(absent_body.to_vec()).expect("utf8"),
             "hidden and absent must be one response"
         );
+    }
+
+    /// A registry holding exactly `ids`, in temp dirs the CALLER owns (see
+    /// [`populated_registry`] for why the dirs must outlive the registry).
+    fn registry_with_models(
+        ids: &[&str],
+    ) -> (Arc<ModelRegistry>, tempfile::TempDir, tempfile::TempDir) {
+        let bundles_dir = tempfile::TempDir::new().unwrap();
+        let models_dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            bundles_dir.path().join("default.yaml"),
+            "name: default\nadapters:\n  - module\ndefault: true\n",
+        )
+        .unwrap();
+        for (index, id) in ids.iter().enumerate() {
+            std::fs::write(
+                models_dir.path().join(format!("model-{index}.yaml")),
+                format!(
+                    "sie_id: {id}\nprofiles:\n  default:\n    adapter_path: sie_server.adapters.sentence_transformer:Adapter\n"
+                ),
+            )
+            .unwrap();
+        }
+        let registry = Arc::new(ModelRegistry::new(
+            bundles_dir.path(),
+            models_dir.path(),
+            true,
+        ));
+        for id in ids {
+            assert!(registry.model_exists(id), "{id} must be registered");
+        }
+        (registry, bundles_dir, models_dir)
+    }
+
+    /// Hides every id under one organization prefix and shows the rest: one
+    /// caller's view of a deployment that also holds another tenant's models.
+    struct HidesOrganization(&'static str);
+    impl crate::server::ModelAccessPolicy for HidesOrganization {
+        fn visible(&self, resolved_model: &str, _ext: &axum::http::Extensions) -> bool {
+            !resolved_model.starts_with(self.0)
+        }
+    }
+
+    fn state_with_registry_hiding_org_42(registry: Arc<ModelRegistry>) -> AppState {
+        let pm = Arc::new(PoolManager::new(vec!["l4".to_string()]));
+        let mut state = admission_test_state(pm);
+        state.model_registry = registry;
+        state.model_access_policy = Some(
+            Arc::new(HidesOrganization("org-42/")) as Arc<dyn crate::server::ModelAccessPolicy>
+        );
+        state
+    }
+
+    async fn native_encode_not_found_body(state: &AppState, model: &str) -> String {
+        let response = match resolve_routing(
+            state,
+            &HeaderMap::new(),
+            &axum::http::Extensions::new(),
+            &format!("/v1/encode/{model}"),
+            "encode",
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("{model} must 404"),
+            Err(response) => *response,
+        };
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        String::from_utf8(body.to_vec()).expect("utf8")
+    }
+
+    async fn openai_not_found_body(state: &AppState, model: &str) -> String {
+        let response = match resolve_model_and_bundle(state, model, &axum::http::Extensions::new())
+        {
+            Ok(_) => panic!("{model} must 404"),
+            Err(response) => response,
+        };
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        String::from_utf8(body.to_vec()).expect("utf8")
+    }
+
+    /// The "Did you mean" hint keeps the no-oracle property. The same caller
+    /// sends the same strings to a deployment that holds another tenant's model
+    /// and to one that does not; every body must match on the native and the
+    /// OpenAI routes, and the hidden id must never be the hint.
+    ///
+    /// The strings cover both arms that build this 404. One under the hidden
+    /// organization is stopped by the visibility gate. One without it reaches
+    /// the unknown-model arm, where only the candidate filter keeps the hidden
+    /// id out, so that arm needs a string one edit from the hidden model's name.
+    #[tokio::test]
+    async fn not_found_hint_is_the_same_whether_a_hidden_model_exists_or_not() {
+        const VISIBLE: &str = "vendor/embedder-large";
+        const HIDDEN: &str = "org-42/embedder-large-tuned";
+        let (with_hidden, _b1, _m1) = registry_with_models(&[VISIBLE, HIDDEN]);
+        let (without_hidden, _b2, _m2) = registry_with_models(&[VISIBLE]);
+        let holds_hidden = state_with_registry_hiding_org_42(with_hidden);
+        let lacks_hidden = state_with_registry_hiding_org_42(without_hidden);
+
+        for requested in [
+            // Visibility gate: the hidden id itself, and near misses under the
+            // hidden organization.
+            HIDDEN,
+            "org-42/embedder-large-tune",
+            "org-42/embedder-large",
+            // Unknown-model arm: no organization, or a visible one, so the
+            // gate lets the string through. Each is one edit from the hidden
+            // model's name and not close to any visible id.
+            "embedder-large-tune",
+            "vendor/embedder-large-tune",
+            "acme/embedder-large-tuned",
+        ] {
+            let native = (
+                native_encode_not_found_body(&holds_hidden, requested).await,
+                native_encode_not_found_body(&lacks_hidden, requested).await,
+            );
+            let openai = (
+                openai_not_found_body(&holds_hidden, requested).await,
+                openai_not_found_body(&lacks_hidden, requested).await,
+            );
+            for (route, (hidden_exists, hidden_absent)) in [("native", native), ("openai", openai)]
+            {
+                assert_eq!(
+                    hidden_exists, hidden_absent,
+                    "{route}: '{requested}' must get one response whether or not the hidden model exists"
+                );
+                if requested != HIDDEN {
+                    assert!(
+                        !hidden_exists.contains(HIDDEN),
+                        "{route}: the hidden id must never be suggested: {hidden_exists}"
+                    );
+                }
+            }
+        }
+
+        let hinted = native_encode_not_found_body(&holds_hidden, "org-42/embedder-large").await;
+        assert!(
+            hinted.contains("Did you mean 'vendor/embedder-large'?"),
+            "a visible id close to the request is suggested: {hinted}"
+        );
+        let unhinted = native_encode_not_found_body(&holds_hidden, HIDDEN).await;
+        assert!(
+            !unhinted.contains("Did you mean"),
+            "nothing visible is close to the hidden id: {unhinted}"
+        );
+    }
+
+    /// The native routes and the OpenAI body routes render the hint through one
+    /// function, so the same input reads the same on both.
+    #[tokio::test]
+    async fn not_found_hint_reads_the_same_on_native_and_openai_routes() {
+        let (registry, _bundles, _models) = registry_with_models(&["vendor/embedder-large"]);
+        let state = state_with_registry_hiding_org_42(registry);
+        let expected = "Model 'embedder-large' not found. Did you mean 'vendor/embedder-large'?";
+
+        let native = native_encode_not_found_body(&state, "embedder-large").await;
+        let native: serde_json::Value = serde_json::from_str(&native).expect("error JSON");
+        assert_eq!(native["detail"]["message"], expected);
+
+        let openai = match resolve_model_and_bundle(
+            &state,
+            "embedder-large",
+            &axum::http::Extensions::new(),
+        ) {
+            Ok(_) => panic!("an unknown model must 404"),
+            Err(response) => response,
+        };
+        assert_eq!(openai.status(), StatusCode::NOT_FOUND);
+        let openai = to_bytes(openai.into_body(), 64 * 1024).await.expect("body");
+        let openai: serde_json::Value = serde_json::from_slice(&openai).expect("error JSON");
+        assert_eq!(openai["error"]["message"], expected);
+        assert_eq!(openai["error"]["code"], "model_not_found");
     }
 
     /// The same rule on the OpenAI body seam, and the same
