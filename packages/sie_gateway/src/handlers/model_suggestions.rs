@@ -78,8 +78,13 @@ pub(crate) fn unknown_model_message(requested: &str, hint: &NotFoundHint) -> Str
 /// The listing can show more: ids only a worker advertises are left out,
 /// because a request for one gets this same 404 from a populated registry.
 ///
-/// An alias with the same name as a retired id wins on its own, because the
-/// request then resolves and never reaches this 404.
+/// An alias with the same name as a retired id wins: when `requested` names a
+/// configured alias (matched by [`names_model_alias`], the same lookup the
+/// request resolution uses), no retired note is given, even if the alias
+/// target then answers not found. Only the caller's string and the alias
+/// names are consulted, never the alias target or the registry.
+///
+/// [`names_model_alias`]: crate::handlers::proxy::names_model_alias
 pub(crate) fn not_found_hint(
     state: &AppState,
     ext: &axum::http::Extensions,
@@ -93,14 +98,17 @@ pub(crate) fn not_found_hint(
     };
     hint_for(
         requested,
+        crate::handlers::proxy::names_model_alias(&state.config.model_aliases, requested),
         &state.config.retired_models,
         state.model_registry.list_models(),
         visible,
     )
 }
 
-/// [`not_found_hint`] over plain inputs: `listed` is every registry id and
-/// `visible` says which of them this caller may list.
+/// [`not_found_hint`] over plain inputs: `requested_is_alias` says whether
+/// the caller's string names a configured alias (then no retired note),
+/// `listed` is every registry id and `visible` says which of them this caller
+/// may list.
 ///
 /// The retired id is asked about twice, as the operator spelled it (`__` read
 /// as `/`) and lower-cased (the map key), because it has no registry entry
@@ -108,11 +116,17 @@ pub(crate) fn not_found_hint(
 /// second call is skipped when the two forms are equal.
 fn hint_for(
     requested: &str,
+    requested_is_alias: bool,
     retired: &HashMap<String, RetiredModel>,
     listed: Vec<String>,
     visible: impl Fn(&str) -> bool,
 ) -> NotFoundHint {
-    if let Some((key, entry)) = retired_entry(retired, requested) {
+    let retired_hit = if requested_is_alias {
+        None
+    } else {
+        retired_entry(retired, requested)
+    };
+    if let Some((key, entry)) = retired_hit {
         // Never the `__` spelling: the policy contract takes `/`.
         if let Some(replacement) = registered_replacement(&listed, &entry.replacement) {
             if visible(&entry.declared)
@@ -443,7 +457,7 @@ mod tests {
     }
 
     fn hint(requested: &str) -> NotFoundHint {
-        hint_for(requested, &retired(), catalog(), |_| true)
+        hint_for(requested, false, &retired(), catalog(), |_| true)
     }
 
     fn retired_hint() -> NotFoundHint {
@@ -484,7 +498,7 @@ mod tests {
     fn without_a_retired_entry_the_suggestions_are_unchanged() {
         assert_eq!(hint("bge-m3"), suggested(&["BAAI/bge-m3"]));
         assert_eq!(
-            hint_for("bge-m3", &HashMap::new(), catalog(), |_| true),
+            hint_for("bge-m3", false, &HashMap::new(), catalog(), |_| true),
             suggested(&["BAAI/bge-m3"])
         );
     }
@@ -493,7 +507,7 @@ mod tests {
     fn a_replacement_missing_from_the_registry_gives_no_retired_note() {
         let listed = vec!["Qwen/Qwen3.5-4B".to_string()];
         assert_eq!(
-            hint_for("Qwen/Qwen3-4B", &retired(), listed, |_| true),
+            hint_for("Qwen/Qwen3-4B", false, &retired(), listed, |_| true),
             suggested(&["Qwen/Qwen3.5-4B"])
         );
     }
@@ -503,7 +517,7 @@ mod tests {
         let hides_replacement = |id: &str| id != "Qwen/Qwen3.6-27B";
         let hides_retired = |id: &str| id != "Qwen/Qwen3-4B";
         for visible in [&hides_replacement as &dyn Fn(&str) -> bool, &hides_retired] {
-            let hint = hint_for("Qwen/Qwen3-4B", &retired(), catalog(), visible);
+            let hint = hint_for("Qwen/Qwen3-4B", false, &retired(), catalog(), visible);
             assert!(matches!(hint, NotFoundHint::Suggestions(_)), "{hint:?}");
         }
     }
@@ -517,7 +531,7 @@ mod tests {
             true
         };
         assert_eq!(
-            hint_for("org-42/old", &retired, catalog(), records),
+            hint_for("org-42/old", false, &retired, catalog(), records),
             retired_hint()
         );
         assert!(asked.borrow().iter().any(|id| id == "Org-42/Old"));
@@ -526,7 +540,9 @@ mod tests {
 
         // Hiding either asked form blocks the note.
         for hidden in ["Org-42/Old", "org-42/old"] {
-            let hint = hint_for("org-42/old", &retired, catalog(), |id: &str| id != hidden);
+            let hint = hint_for("org-42/old", false, &retired, catalog(), |id: &str| {
+                id != hidden
+            });
             assert!(
                 matches!(hint, NotFoundHint::Suggestions(_)),
                 "{hidden}: {hint:?}"
@@ -534,7 +550,7 @@ mod tests {
         }
         // The `__` spelling is never asked about, so hiding it changes nothing.
         assert_eq!(
-            hint_for("org-42/old", &retired, catalog(), |id: &str| id
+            hint_for("org-42/old", false, &retired, catalog(), |id: &str| id
                 != "Org-42__Old"),
             retired_hint()
         );
@@ -549,7 +565,7 @@ mod tests {
             true
         };
         assert_eq!(
-            hint_for("Org/Old", &retired, catalog(), records),
+            hint_for("Org/Old", false, &retired, catalog(), records),
             retired_hint()
         );
         assert_eq!(
@@ -568,7 +584,7 @@ mod tests {
                 true
             };
             assert_eq!(
-                hint_for("Qwen/Qwen3-4B", &retired, catalog(), visible),
+                hint_for("Qwen/Qwen3-4B", false, &retired, catalog(), visible),
                 retired_hint(),
                 "{written}"
             );
@@ -590,7 +606,7 @@ mod tests {
             "Org/New:fast".to_string(),
         ];
         assert_eq!(
-            hint_for("Org/Old", &retired, listed, |_| true),
+            hint_for("Org/Old", false, &retired, listed, |_| true),
             NotFoundHint::Retired {
                 replacement: "Org/New".to_string()
             }
@@ -603,6 +619,7 @@ mod tests {
         assert_eq!(
             hint_for(
                 "Org/Old",
+                false,
                 &retired_map(&[("Org/Old", "org/new:fast")]),
                 listed.clone(),
                 |_| true
@@ -613,6 +630,7 @@ mod tests {
         );
         let hint = hint_for(
             "Org/Old",
+            false,
             &retired_map(&[("Org/Old", "Org/New")]),
             listed,
             |_| true,
@@ -621,11 +639,19 @@ mod tests {
     }
 
     #[test]
+    fn a_string_that_names_an_alias_gets_suggestions_not_the_retired_note() {
+        assert_eq!(
+            hint_for("Qwen/Qwen3-4B", true, &retired(), catalog(), |_| true),
+            suggested(&["Qwen/Qwen3.5-4B"])
+        );
+    }
+
+    #[test]
     fn an_oversized_request_gets_no_retired_note() {
         let long = format!("{}{}", "x".repeat(MAX_REQUEST_LEN), "/model");
         let retired = retired_map(&[(&long, "Qwen/Qwen3.6-27B")]);
         assert_eq!(
-            hint_for(&long, &retired, catalog(), |_| true),
+            hint_for(&long, false, &retired, catalog(), |_| true),
             suggested(&[])
         );
     }

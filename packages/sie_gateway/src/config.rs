@@ -794,7 +794,8 @@ pub struct RetiredModel {
 /// replacement)` pair sorts first in byte order wins, so the result never
 /// depends on map order. Unlike an alias, which reroutes
 /// the request silently, a retired entry refuses it and names the
-/// replacement.
+/// replacement. A string that is also an alias name is treated as the alias:
+/// it never gets the retired note (see `not_found_hint`).
 pub(crate) fn build_retired_models(
     entries: HashMap<String, String>,
 ) -> HashMap<String, RetiredModel> {

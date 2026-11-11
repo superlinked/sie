@@ -12004,6 +12004,21 @@ pub fn resolve_model_spec_with_aliases(
     (req_bundle, model_name)
 }
 
+/// Whether `spec` names a configured job/friendly alias, matched exactly as
+/// [`resolve_model_spec_with_aliases`] matches it: a `bundle:/` prefix is
+/// dropped, then [`lookup_alias`] (lower case, then the base before a
+/// `:profile`) runs on the id as given and, when it contains `__`, on its
+/// `/` form. Unlike the resolution, the registry is never consulted, so the
+/// answer depends only on `spec` and the alias names.
+pub(crate) fn names_model_alias(
+    aliases: &std::collections::HashMap<String, String>,
+    spec: &str,
+) -> bool {
+    let (_bundle, model) = parse_model_spec(spec);
+    lookup_alias(aliases, &model).is_some()
+        || (model.contains("__") && lookup_alias(aliases, &model.replace("__", "/")).is_some())
+}
+
 /// `pub` for the same reason as [`resolve_model_spec_with_aliases`]: the
 /// estimate receives a target PATH and must decode its model segment the way
 /// the route does before rating it.
@@ -20170,6 +20185,65 @@ mod tests {
         );
         state.config = Arc::new(config);
         state
+    }
+
+    /// `state` with `aliases` added to the configured job/friendly aliases.
+    fn with_model_aliases(mut state: AppState, aliases: &[(&str, &str)]) -> AppState {
+        let mut config = (*state.config).clone();
+        for (alias, target) in aliases {
+            config
+                .model_aliases
+                .insert(alias.to_ascii_lowercase(), target.to_string());
+        }
+        state.config = Arc::new(config);
+        state
+    }
+
+    #[test]
+    fn names_model_alias_matches_like_the_alias_resolution() {
+        let aliases: std::collections::HashMap<String, String> = [
+            ("old-name".to_string(), "vendor/x".to_string()),
+            ("org/job".to_string(), "vendor/y".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        for spec in [
+            "old-name",
+            "OLD-NAME",
+            "old-name:fast",
+            "fp8:/old-name",
+            "org__job",
+            "Org__Job:fast",
+        ] {
+            assert!(names_model_alias(&aliases, spec), "{spec}");
+        }
+        for spec in ["old-name-2", "old", "vendor/x", "old-name:"] {
+            assert!(!names_model_alias(&aliases, spec), "{spec}");
+        }
+    }
+
+    /// A string that is both an alias and a retired id: the alias wins, so
+    /// when the alias target answers not found (hidden or absent) the body is
+    /// the plain not-found body, with no retired note and no alias target.
+    #[tokio::test]
+    async fn an_alias_named_like_a_retired_id_gets_no_retired_note() {
+        const VISIBLE: &str = "vendor/embedder-large";
+        const HIDDEN: &str = "org-42/embedder-next";
+        let (registry, _bundles, _models) = registry_with_models(&[VISIBLE, HIDDEN]);
+        for target in [HIDDEN, "vendor/embedder-gone"] {
+            let aliased = || {
+                with_model_aliases(
+                    state_with_registry_hiding_org_42(Arc::clone(&registry)),
+                    &[("old-name", target)],
+                )
+            };
+            let plain = not_found_bodies(&aliased(), "old-name").await;
+            let with_entry = with_retired_models(aliased(), &[("old-name", VISIBLE)]);
+            let got = not_found_bodies(&with_entry, "old-name").await;
+            assert_eq!(got, plain, "alias target '{target}'");
+            assert!(!got.0.contains("retired") && !got.1.contains("retired"));
+            assert!(!got.0.contains(target) && !got.1.contains(target));
+        }
     }
 
     /// Native and OpenAI 404 bodies for `requested`.
