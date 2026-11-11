@@ -776,7 +776,9 @@ fn build_model_aliases(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetiredModel {
     /// The retired id in the operator's case with `__` read as `/`
-    /// (`retired_model_declared`): what the access policy is asked about.
+    /// (`retired_model_declared`). The retired note needs the caller to be
+    /// allowed to list this spelling and its lower-cased form (the map key),
+    /// plus the replacement.
     pub declared: String,
     /// The id the 404 names instead, trimmed.
     pub replacement: String,

@@ -20195,6 +20195,9 @@ mod tests {
             ("vendor/embedder-old", "vendor/embedder-old", HIDDEN),
             // The retired id is hidden from this caller.
             ("org-42/embedder-old", "org-42/embedder-old", VISIBLE),
+            // Declared with a capital letter the case-sensitive policy does
+            // not hide; the lower-cased form is hidden, so no note.
+            ("org-42/embedder-old", "Org-42/embedder-old", VISIBLE),
             // The replacement is not in the registry.
             (
                 "vendor/embedder-old",
