@@ -616,9 +616,17 @@ fn env_csv(key: &str) -> Vec<String> {
 
 fn env_json_string_map(key: &str) -> HashMap<String, String> {
     match env::var(key) {
-        Ok(s) if !s.trim().is_empty() => {
-            serde_json::from_str::<HashMap<String, String>>(&s).unwrap_or_default()
-        }
+        Ok(s) if !s.trim().is_empty() => serde_json::from_str::<HashMap<String, String>>(&s)
+            .unwrap_or_else(|error| {
+                // The value is not logged: it is operator config, and the
+                // serde error already says where the JSON broke.
+                tracing::warn!(
+                    env = key,
+                    %error,
+                    "ignoring {key}: not a JSON object of strings; using no entries"
+                );
+                HashMap::new()
+            }),
         _ => HashMap::new(),
     }
 }
@@ -767,8 +775,8 @@ fn build_model_aliases(
 /// One `SIE_GATEWAY_RETIRED_MODELS` entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetiredModel {
-    /// The retired id as the operator declared it (`retired_model_declared`):
-    /// what the access policy is asked about.
+    /// The retired id in the operator's case with `__` read as `/`
+    /// (`retired_model_declared`): what the access policy is asked about.
     pub declared: String,
     /// The id the 404 names instead, trimmed.
     pub replacement: String,
@@ -777,10 +785,12 @@ pub struct RetiredModel {
 /// Retired model id -> replacement id from `SIE_GATEWAY_RETIRED_MODELS`.
 ///
 /// Keys go through `retired_model_key`, the same normalization the lookup
-/// applies to the caller's string; the declared id and the replacement are
-/// kept as written (trimmed). Entries with an empty key or replacement are
-/// skipped. If two declared ids share a key, the one that sorts first wins,
-/// so the result never depends on map order. Unlike an alias, which reroutes
+/// applies to the caller's string. The declared id keeps the operator's case
+/// with `__` read as `/` (`retired_model_declared`); the replacement is kept
+/// as written (trimmed). Entries with an empty key or replacement are
+/// skipped. If two entries share a key, the one whose `(declared,
+/// replacement)` pair sorts first in byte order wins, so the result never
+/// depends on map order. Unlike an alias, which reroutes
 /// the request silently, a retired entry refuses it and names the
 /// replacement.
 pub(crate) fn build_retired_models(
@@ -794,12 +804,13 @@ pub(crate) fn build_retired_models(
             continue;
         }
         let entry = RetiredModel {
-            declared: retired_model_declared(&retired).to_string(),
+            declared: retired_model_declared(&retired),
             replacement,
         };
         match map.entry(key) {
             std::collections::hash_map::Entry::Occupied(mut slot) => {
-                if entry.declared < slot.get().declared {
+                let held = slot.get();
+                if (&entry.declared, &entry.replacement) < (&held.declared, &held.replacement) {
                     slot.insert(entry);
                 }
             }
@@ -1578,7 +1589,7 @@ mod tests {
         assert_eq!(
             result.get("qwen/qwen3-4b"),
             Some(&RetiredModel {
-                declared: "Qwen__Qwen3-4B".to_string(),
+                declared: "Qwen/Qwen3-4B".to_string(),
                 replacement: "Qwen/Qwen3.6-27B".to_string(),
             })
         );
@@ -1611,6 +1622,24 @@ mod tests {
     }
 
     #[test]
+    fn test_build_retired_models_breaks_a_declared_id_tie_on_the_replacement() {
+        let mut entries = HashMap::new();
+        entries.insert("Org/Old:fast".to_string(), "Org/B".to_string());
+        entries.insert("Org/Old:slow".to_string(), "Org/A".to_string());
+        entries.insert("bundle:/Org/Old".to_string(), "Org/C".to_string());
+
+        let result = build_retired_models(entries);
+
+        assert_eq!(
+            result.get("org/old"),
+            Some(&RetiredModel {
+                declared: "Org/Old".to_string(),
+                replacement: "Org/A".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn test_build_retired_models_skips_empty_entries() {
         let mut entries = HashMap::new();
         entries.insert("".to_string(), "Org/New".to_string());
@@ -1633,7 +1662,7 @@ mod tests {
                 assert_eq!(
                     cfg.retired_models.get("org/old"),
                     Some(&RetiredModel {
-                        declared: "Org__Old".to_string(),
+                        declared: "Org/Old".to_string(),
                         replacement: "Org/New".to_string(),
                     })
                 );

@@ -102,16 +102,16 @@ fn hint_for(
     visible: impl Fn(&str) -> bool,
 ) -> NotFoundHint {
     if let Some(entry) = retired_entry(retired, requested) {
-        // The policy is asked about the retired id as the operator declared
-        // it, not about the lookup key, so a case-sensitive policy sees the
-        // same canonical id it sees everywhere else.
-        if listed.contains(&entry.replacement)
-            && visible(&entry.declared)
-            && visible(&entry.replacement)
-        {
-            return NotFoundHint::Retired {
-                replacement: entry.replacement.clone(),
-            };
+        // The policy is asked about the retired id in the operator's case
+        // with `__` read as `/` (the canonical form its contract expects),
+        // never about the lower-cased lookup key, and about the replacement
+        // as the registry spells it.
+        if let Some(replacement) = registered_replacement(&listed, &entry.replacement) {
+            if visible(&entry.declared) && visible(replacement) {
+                return NotFoundHint::Retired {
+                    replacement: replacement.to_string(),
+                };
+            }
         }
     }
     // Variants are never suggested, so the policy is not asked about them.
@@ -120,6 +120,19 @@ fn hint_for(
         .filter(|id| !id.contains(':'))
         .filter(|id| visible(id));
     NotFoundHint::Suggestions(suggest_model_ids(requested, candidates))
+}
+
+/// The registry's spelling of `replacement`: the id that matches it ignoring
+/// case and reading `__` as `/`, as the gateway resolves ids. `model:profile`
+/// variants are skipped. If several ids match, the byte-order first wins.
+fn registered_replacement<'a>(listed: &'a [String], replacement: &str) -> Option<&'a str> {
+    let wanted = replacement.replace("__", "/").to_ascii_lowercase();
+    listed
+        .iter()
+        .filter(|id| !id.contains(':'))
+        .filter(|id| id.replace("__", "/").to_ascii_lowercase() == wanted)
+        .map(String::as_str)
+        .min()
 }
 
 /// The retired-map entry for `requested`, matched exactly on
@@ -134,20 +147,18 @@ fn retired_entry<'a>(
     retired.get(&retired_model_key(requested))
 }
 
-/// A retired id as the operator declared it: trimmed, without a `bundle:/`
-/// prefix or `:profile` suffix, case and `__` spelling untouched. This is the
-/// form the access policy is asked about.
-pub(crate) fn retired_model_declared(id: &str) -> &str {
-    model_part(id.trim())
+/// A retired id in the operator's case and in canonical form: trimmed,
+/// without a `bundle:/` prefix or `:profile` suffix, `__` read as `/`. This
+/// is the form the access policy is asked about.
+pub(crate) fn retired_model_declared(id: &str) -> String {
+    model_part(id.trim()).replace("__", "/")
 }
 
 /// The key a retired-model entry is stored and looked up under: the model id
 /// without a `bundle:/` prefix or `:profile` suffix, lower case, `__` read as
 /// `/`. Other separators are kept, so only the same id matches.
 pub(crate) fn retired_model_key(id: &str) -> String {
-    retired_model_declared(id)
-        .replace("__", "/")
-        .to_ascii_lowercase()
+    retired_model_declared(id).to_ascii_lowercase()
 }
 
 /// Up to [`MAX_SUGGESTIONS`] ids from `candidates` that `requested` most
@@ -484,23 +495,67 @@ mod tests {
     }
 
     #[test]
-    fn the_policy_is_asked_about_the_retired_id_as_declared() {
+    fn the_policy_is_asked_about_the_retired_id_in_the_operators_case_and_slash_form() {
         let retired = retired_map(&[("bundle:/Org-42__Old:fast", "Qwen/Qwen3.6-27B")]);
         let asked = std::cell::RefCell::new(Vec::new());
         let hides_declared = |id: &str| {
             asked.borrow_mut().push(id.to_string());
-            id != "Org-42__Old"
+            id != "Org-42/Old"
         };
         let hint = hint_for("org-42/old", &retired, catalog(), hides_declared);
         assert!(matches!(hint, NotFoundHint::Suggestions(_)), "{hint:?}");
-        assert!(asked.borrow().iter().any(|id| id == "Org-42__Old"));
-        assert!(!asked.borrow().iter().any(|id| id == "org-42/old"));
+        assert!(asked.borrow().iter().any(|id| id == "Org-42/Old"));
+        assert!(!asked
+            .borrow()
+            .iter()
+            .any(|id| id == "Org-42__Old" || id == "org-42/old"));
 
-        // A policy that hides only the lower-cased key is never asked about it.
-        let hides_key = |id: &str| id != "org-42/old";
+        // Policies that hide only the `__` spelling or only the lower-cased
+        // key are never asked about those forms.
+        for hidden in ["Org-42__Old", "org-42/old"] {
+            assert_eq!(
+                hint_for("org-42/old", &retired, catalog(), |id: &str| id != hidden),
+                retired_hint()
+            );
+        }
+    }
+
+    #[test]
+    fn a_replacement_written_in_another_case_or_spelling_names_the_registered_id() {
+        for written in ["qwen/qwen3.6-27b", "QWEN__Qwen3.6-27B"] {
+            let retired = retired_map(&[("Qwen/Qwen3-4B", written)]);
+            let asked = std::cell::RefCell::new(Vec::new());
+            let visible = |id: &str| {
+                asked.borrow_mut().push(id.to_string());
+                true
+            };
+            assert_eq!(
+                hint_for("Qwen/Qwen3-4B", &retired, catalog(), visible),
+                retired_hint(),
+                "{written}"
+            );
+            assert!(asked.borrow().iter().any(|id| id == "Qwen/Qwen3.6-27B"));
+            assert!(!asked.borrow().iter().any(|id| id == written));
+            assert_eq!(
+                unknown_model_message("Qwen/Qwen3-4B", &retired_hint()),
+                "Model 'Qwen/Qwen3-4B' was retired. Use 'Qwen/Qwen3.6-27B'."
+            );
+        }
+    }
+
+    #[test]
+    fn a_replacement_matching_several_registered_ids_names_the_byte_order_first() {
+        let retired = retired_map(&[("Org/Old", "org/new")]);
+        let listed = vec![
+            "org/new".to_string(),
+            "Org/New".to_string(),
+            "Org/New:fast".to_string(),
+        ];
         assert_eq!(
-            hint_for("org-42/old", &retired, catalog(), hides_key),
-            retired_hint()
+            hint_for("Org/Old", &retired, listed, |_| true),
+            NotFoundHint::Retired {
+                replacement: "Org/New".to_string()
+            }
         );
     }
 
