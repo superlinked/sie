@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.11.1](https://github.com/superlinked/sie/compare/v0.11.0...v0.11.1) (2026-11-11)
+
+
+### Features
+
+* add Cognee integration and memory primitives ([#915](https://github.com/superlinked/sie/issues/915)) ([b85d083](https://github.com/superlinked/sie/commit/b85d08348fb3545b37021b3d30c9fee4d409de36))
+* **cognee:** add TypeScript integration and examples ([#921](https://github.com/superlinked/sie/issues/921)) ([7271948](https://github.com/superlinked/sie/commit/72719487cd6540c09c58c6c3e4d82d5a013598a6))
+* **examples:** look up official numbers in the benchmark example ([#912](https://github.com/superlinked/sie/issues/912)) ([027153a](https://github.com/superlinked/sie/commit/027153ade739c2e47cd7015922f4cb70861b5bbd))
+* **examples:** run the published-benchmarks example against your own server ([#889](https://github.com/superlinked/sie/issues/889)) ([991540b](https://github.com/superlinked/sie/commit/991540b0bfc75d19b1270cd03532032cd7d1cf72))
+* **examples:** test a new model against an official number ([#898](https://github.com/superlinked/sie/issues/898)) ([3d62c0a](https://github.com/superlinked/sie/commit/3d62c0a818234c7584d2bcf4b0705cd36e9e7441))
+* **examples:** time eight more website pages one request at a time ([#931](https://github.com/superlinked/sie/issues/931)) ([e91c9a2](https://github.com/superlinked/sie/commit/e91c9a28bc5353f2d625e507ffe6f55ab771b1ac))
+* **examples:** time one request at a time beside the website's times ([#923](https://github.com/superlinked/sie/issues/923)) ([f11ec14](https://github.com/superlinked/sie/commit/f11ec14f87498e6f5109be01a614ec8aa223da46))
+* **examples:** time the /detect page one request at a time ([#937](https://github.com/superlinked/sie/issues/937)) ([58748cd](https://github.com/superlinked/sie/commit/58748cdfb34995660249288847ee87340ba4b19c))
+* **gateway:** name the replacement when a retired model id is requested ([#944](https://github.com/superlinked/sie/issues/944)) ([70fe04b](https://github.com/superlinked/sie/commit/70fe04b069297aba6c2a0734df84c8ca3eb739f8))
+* **gateway:** suggest the closest visible model ids on MODEL_NOT_FOUND ([#942](https://github.com/superlinked/sie/issues/942)) ([a64c300](https://github.com/superlinked/sie/commit/a64c300fef40041bf084f8afca49a6f9bd11e94e))
+* **models:** onboard meta-models/Muse-Glimmer-30B ([#888](https://github.com/superlinked/sie/issues/888)) ([e8aeb68](https://github.com/superlinked/sie/commit/e8aeb682281acabf79413964870db6ef2648849c))
+* **placement:** add the sie_placement planner, tuner and cluster appliers ([#914](https://github.com/superlinked/sie/issues/914)) ([c2cf482](https://github.com/superlinked/sie/commit/c2cf482f94c66e41da6804a88a40400ca32ae25b))
+* **placement:** add versioned planner input and plan schemas ([#904](https://github.com/superlinked/sie/issues/904)) ([ba4faf0](https://github.com/superlinked/sie/commit/ba4faf0f157e446cb816bb5355e4ac4a1e31771a))
+* **server:** reuse decision adapters for Qwen and Gemma families ([#894](https://github.com/superlinked/sie/issues/894)) ([2c22434](https://github.com/superlinked/sie/commit/2c224342dbec762ba1b0e91e17c9313c3adcef38))
+* **server:** share label classification across decision adapters ([#901](https://github.com/superlinked/sie/issues/901)) ([57b572e](https://github.com/superlinked/sie/commit/57b572e41710ed461d96e7a10c52925d8964e745))
+
+
+### Bug Fixes
+
+* **deps:** update rustix to 1.1.6 for RUSTSEC-2026-0486 ([#945](https://github.com/superlinked/sie/issues/945)) ([9442378](https://github.com/superlinked/sie/commit/9442378ce6d90bdb86288294f99e889d2a0618ec))
+* **helm:** match reused chart archives by the chart they declare ([#933](https://github.com/superlinked/sie/issues/933)) ([32b55d3](https://github.com/superlinked/sie/commit/32b55d3fb5e243215a47e9c819d89209c976f88c))
+* **models:** raise the Muse Glimmer default output budget to 16,384 tokens ([#897](https://github.com/superlinked/sie/issues/897)) ([06b10dc](https://github.com/superlinked/sie/commit/06b10dc1594c5d9dd6f43f9a073a7e86fcef087f))
+* preserve native extraction token usage ([#900](https://github.com/superlinked/sie/issues/900)) ([aab8376](https://github.com/superlinked/sie/commit/aab837655282ab3721ac2464ace4fb743fa058ed))
+* **sdk:** parse nested native content token usage ([#902](https://github.com/superlinked/sie/issues/902)) ([ae50f8d](https://github.com/superlinked/sie/commit/ae50f8dd1cff09731d3ccb3d4f96488240238f2e))
+* **server:** keep memory free for full-size LightOnOCR-3-4B pages ([#891](https://github.com/superlinked/sie/issues/891)) ([4b104c2](https://github.com/superlinked/sie/commit/4b104c26d38b097a6204cfc9479b42b4da43a85d))
+* **server:** keep Muse channel text from forming think and tool-call tags ([#935](https://github.com/superlinked/sie/issues/935)) ([d55df1a](https://github.com/superlinked/sie/commit/d55df1ae155eccd0498c55c49e60d811ca4d6759))
+* **server:** render a null KnowLine noul criterion as its default ([#934](https://github.com/superlinked/sie/issues/934)) ([2a6c63a](https://github.com/superlinked/sie/commit/2a6c63a073fbd67adaab3a3e7278695cdda91ac9))
+* **server:** report SGLang window refusals as client errors ([#896](https://github.com/superlinked/sie/issues/896)) ([5f21c08](https://github.com/superlinked/sie/commit/5f21c08b79473765418679a72a915b71e443750b))
+
+
+### Performance Improvements
+
+* **models:** cap LightOnOCR-3-4B SGLang pages at 5 MP ([#943](https://github.com/superlinked/sie/issues/943)) ([f8eee87](https://github.com/superlinked/sie/commit/f8eee874ed699d11be887ef93e8d42b406871c76))
+
 ## [0.11.0](https://github.com/superlinked/sie/compare/v0.10.1...v0.11.0) (2026-11-03)
 
 
