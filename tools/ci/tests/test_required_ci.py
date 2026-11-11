@@ -7,6 +7,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -198,6 +199,19 @@ def test_mise_binary_prefetch_matches_every_action_version():
                 assert steps[index - 1].get("run") == "bash tools/ci/mise_binary.bash", (
                     f"{path.name}: {name} must fetch the mise binary before jdx/mise-action"
                 )
+
+
+def test_mise_installs_skip_remote_version_lists():
+    """Cached CI tools must install without listing remote versions, so every pin must be exact."""
+    config = tomllib.loads((ROOT / "mise.toml").read_text())
+    # mise-action caches only mise's data directory. Without prefer_offline,
+    # `mise install` lists remote versions again on every run and fails when
+    # the GitHub API is slow, even though nothing needs to be downloaded.
+    assert config["settings"].get("prefer_offline") is True
+    for tool, spec in config["tools"].items():
+        for entry in spec if isinstance(spec, list) else [spec]:
+            version = entry["version"] if isinstance(entry, dict) else entry
+            assert re.fullmatch(r"\d+\.\d+\.\d+", version), f"mise.toml: {tool} must pin an exact version"
 
 
 def test_mise_bootstrap_serializes_required_toolsets():
