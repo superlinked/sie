@@ -43,7 +43,7 @@ use crate::types::AuditEntry;
 
 use crate::middleware::auth::request_token_id;
 
-use super::model_suggestions::{unknown_model_message, visible_model_suggestions};
+use super::model_suggestions::{not_found_hint, unknown_model_message, NotFoundHint};
 use super::serving_disclosure::{
     remote_forbidden, DeferredFallbackFinish, FallbackAttempt, ServingDisclosure,
     UnansweredBeforeDeadline,
@@ -1548,10 +1548,11 @@ pub async fn proxy_generate(state: State<Arc<AppState>>, req: Request) -> impl I
 /// `requested` is always the CALLER's string, never a resolved/governed id: a
 /// resolved id can be an alias target in another org's reserved namespace.
 ///
-/// `suggestions` come from [`visible_model_suggestions`] for the same
-/// `requested` string at every call site, so the hint depends only on what the
-/// caller sent and may list, and the three responses stay identical.
-fn unknown_model_response(endpoint: &str, requested: &str, suggestions: &[String]) -> Response {
+/// `hint` comes from [`not_found_hint`] for the same `requested` string at
+/// every call site, so it depends only on what the caller sent, the operator's
+/// retired-model map, and what the caller may list, and the three responses
+/// stay identical.
+fn unknown_model_response(endpoint: &str, requested: &str, hint: &NotFoundHint) -> Response {
     endpoint_error_response(
         endpoint,
         StatusCode::NOT_FOUND,
@@ -1559,7 +1560,7 @@ fn unknown_model_response(endpoint: &str, requested: &str, suggestions: &[String
         oai_type::MODEL_NOT_FOUND,
         oai_code::MODEL_NOT_FOUND,
         Some("model"),
-        unknown_model_message(requested, suggestions),
+        unknown_model_message(requested, hint),
     )
 }
 
@@ -1591,8 +1592,8 @@ fn absent_from_populated_registry(registry: &ModelRegistry, model_name: &str) ->
 /// reserved namespace. It also makes this 404 byte-identical to the #1841
 /// cross-org one, which is the whole point of answering "not found" there.
 ///
-/// `suggestions` supplies the "Did you mean" ids for that 404. It is called
-/// with `requested` and only when the 404 is built.
+/// `hint` supplies the retired note or the "Did you mean" ids for that 404. It
+/// is called with `requested` and only when the 404 is built.
 fn resolve_bundle_for_request(
     registry: &ModelRegistry,
     model_name: &str,
@@ -1600,7 +1601,7 @@ fn resolve_bundle_for_request(
     bundle_override: &str,
     engine_pin: Option<&str>,
     endpoint: &str,
-    suggestions: &dyn Fn(&str) -> Vec<String>,
+    hint: &dyn Fn(&str) -> NotFoundHint,
 ) -> Result<String, Box<Response>> {
     let bundle_override_ref = if bundle_override.is_empty() {
         None
@@ -1647,7 +1648,7 @@ fn resolve_bundle_for_request(
         return Err(Box::new(unknown_model_response(
             endpoint,
             requested,
-            &suggestions(requested),
+            &hint(requested),
         )));
     } else if bundle_override.is_empty() {
         "default".to_string()
@@ -2209,7 +2210,7 @@ async fn resolve_routing(
         return Err(Box::new(unknown_model_response(
             endpoint,
             &model,
-            &visible_model_suggestions(state, ext, &model),
+            &not_found_hint(state, ext, &model),
         )));
     }
     // #2542 deployment serving policy on the RESOLVED id: the authoritative
@@ -2352,7 +2353,7 @@ async fn resolve_routing(
         return Err(Box::new(unknown_model_response(
             endpoint,
             &model,
-            &visible_model_suggestions(state, ext, &model),
+            &not_found_hint(state, ext, &model),
         )));
     }
     let governed_route = if let Some(intent) = generation_intent {
@@ -2420,7 +2421,7 @@ async fn resolve_routing(
         effective_bundle_override,
         engine_pin.as_deref(),
         endpoint,
-        &|requested| visible_model_suggestions(state, ext, requested),
+        &|requested| not_found_hint(state, ext, requested),
     )?;
 
     let engine = state
@@ -8560,10 +8561,7 @@ pub(crate) fn resolve_model_and_bundle(
         return Err((
             StatusCode::NOT_FOUND,
             Json(json_openai_error(
-                unknown_model_message(
-                    model_spec,
-                    &visible_model_suggestions(state, ext, model_spec),
-                ),
+                unknown_model_message(model_spec, &not_found_hint(state, ext, model_spec)),
                 oai_type::MODEL_NOT_FOUND,
                 Some("model"),
                 oai_code::MODEL_NOT_FOUND,
@@ -8633,10 +8631,7 @@ pub(crate) fn resolve_model_and_bundle(
             Json(json_openai_error(
                 // The caller's string, never the resolved one — see the
                 // visibility gate above (#2542).
-                unknown_model_message(
-                    model_spec,
-                    &visible_model_suggestions(state, ext, model_spec),
-                ),
+                unknown_model_message(model_spec, &not_found_hint(state, ext, model_spec)),
                 oai_type::MODEL_NOT_FOUND,
                 Some("model"),
                 oai_code::MODEL_NOT_FOUND,
@@ -12007,6 +12002,21 @@ pub fn resolve_model_spec_with_aliases(
         }
     }
     (req_bundle, model_name)
+}
+
+/// Whether `spec` names a configured job/friendly alias, matched exactly as
+/// [`resolve_model_spec_with_aliases`] matches it: a `bundle:/` prefix is
+/// dropped, then [`lookup_alias`] (lower case, then the base before a
+/// `:profile`) runs on the id as given and, when it contains `__`, on its
+/// `/` form. Unlike the resolution, the registry is never consulted, so the
+/// answer depends only on `spec` and the alias names.
+pub(crate) fn names_model_alias(
+    aliases: &std::collections::HashMap<String, String>,
+    spec: &str,
+) -> bool {
+    let (_bundle, model) = parse_model_spec(spec);
+    lookup_alias(aliases, &model).is_some()
+        || (model.contains("__") && lookup_alias(aliases, &model.replace("__", "/")).is_some())
 }
 
 /// `pub` for the same reason as [`resolve_model_spec_with_aliases`]: the
@@ -16946,7 +16956,7 @@ mod tests {
             "",
             None,
             "encode",
-            &|_| Vec::new(),
+            &|_| NotFoundHint::Suggestions(Vec::new()),
         )
         .expect("empty registry + no override resolves");
         assert_eq!(default, "default");
@@ -16958,7 +16968,7 @@ mod tests {
             "custom-bundle",
             None,
             "encode",
-            &|_| Vec::new(),
+            &|_| NotFoundHint::Suggestions(Vec::new()),
         )
         .expect("empty registry preserves caller bundle");
         assert_eq!(overridden, "custom-bundle");
@@ -17494,6 +17504,7 @@ mod tests {
             static_queue_pools: Vec::new(),
             model_aliases: std::collections::HashMap::new(),
             published_model_aliases: Default::default(),
+            retired_models: Default::default(),
             bundles_dir: bundles_dir.path().to_string_lossy().to_string(),
             models_dir: models_dir.path().to_string_lossy().to_string(),
             config_service_url: None,
@@ -20161,6 +20172,189 @@ mod tests {
         let openai: serde_json::Value = serde_json::from_slice(&openai).expect("error JSON");
         assert_eq!(openai["error"]["message"], expected);
         assert_eq!(openai["error"]["code"], "model_not_found");
+    }
+
+    /// `state` with `retired` as the operator's retired-model map.
+    fn with_retired_models(mut state: AppState, retired: &[(&str, &str)]) -> AppState {
+        let mut config = (*state.config).clone();
+        config.retired_models = crate::config::build_retired_models(
+            retired
+                .iter()
+                .map(|(id, replacement)| (id.to_string(), replacement.to_string()))
+                .collect(),
+        );
+        state.config = Arc::new(config);
+        state
+    }
+
+    /// `state` with `aliases` added to the configured job/friendly aliases.
+    fn with_model_aliases(mut state: AppState, aliases: &[(&str, &str)]) -> AppState {
+        let mut config = (*state.config).clone();
+        for (alias, target) in aliases {
+            config
+                .model_aliases
+                .insert(alias.to_ascii_lowercase(), target.to_string());
+        }
+        state.config = Arc::new(config);
+        state
+    }
+
+    #[test]
+    fn names_model_alias_matches_like_the_alias_resolution() {
+        let aliases: std::collections::HashMap<String, String> = [
+            ("old-name".to_string(), "vendor/x".to_string()),
+            ("org/job".to_string(), "vendor/y".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        for spec in [
+            "old-name",
+            "OLD-NAME",
+            "old-name:fast",
+            "fp8:/old-name",
+            "org__job",
+            "Org__Job:fast",
+        ] {
+            assert!(names_model_alias(&aliases, spec), "{spec}");
+        }
+        for spec in ["old-name-2", "old", "vendor/x", "old-name:"] {
+            assert!(!names_model_alias(&aliases, spec), "{spec}");
+        }
+    }
+
+    /// A string that is both an alias and a retired id: the alias wins, so
+    /// when the alias target answers not found (hidden or absent) the body is
+    /// the plain not-found body, with no retired note and no alias target.
+    #[tokio::test]
+    async fn an_alias_named_like_a_retired_id_gets_no_retired_note() {
+        const VISIBLE: &str = "vendor/embedder-large";
+        const HIDDEN: &str = "org-42/embedder-next";
+        let (registry, _bundles, _models) = registry_with_models(&[VISIBLE, HIDDEN]);
+        for target in [HIDDEN, "vendor/embedder-gone"] {
+            let aliased = || {
+                with_model_aliases(
+                    state_with_registry_hiding_org_42(Arc::clone(&registry)),
+                    &[("old-name", target)],
+                )
+            };
+            let plain = not_found_bodies(&aliased(), "old-name").await;
+            let with_entry = with_retired_models(aliased(), &[("old-name", VISIBLE)]);
+            let got = not_found_bodies(&with_entry, "old-name").await;
+            assert_eq!(got, plain, "alias target '{target}'");
+            assert!(!got.0.contains("retired") && !got.1.contains("retired"));
+            assert!(!got.0.contains(target) && !got.1.contains(target));
+        }
+    }
+
+    /// Native and OpenAI 404 bodies for `requested`.
+    async fn not_found_bodies(state: &AppState, requested: &str) -> (String, String) {
+        (
+            native_encode_not_found_body(state, requested).await,
+            openai_not_found_body(state, requested).await,
+        )
+    }
+
+    /// A retired entry the caller may not fully see leaves the 404 exactly as
+    /// it is without the entry: a hidden replacement, a hidden retired id, or a
+    /// replacement the registry does not hold.
+    #[tokio::test]
+    async fn a_retired_note_needs_both_ids_visible_and_the_replacement_registered() {
+        const VISIBLE: &str = "vendor/embedder-large";
+        const HIDDEN: &str = "org-42/embedder-next";
+        let (registry, _bundles, _models) = registry_with_models(&[VISIBLE, HIDDEN]);
+        let plain = state_with_registry_hiding_org_42(Arc::clone(&registry));
+
+        for (requested, retired, replacement) in [
+            // The replacement is hidden from this caller.
+            ("vendor/embedder-old", "vendor/embedder-old", HIDDEN),
+            // The retired id is hidden from this caller.
+            ("org-42/embedder-old", "org-42/embedder-old", VISIBLE),
+            // Declared with a capital letter the case-sensitive policy does
+            // not hide; the lower-cased form is hidden, so no note.
+            ("org-42/embedder-old", "Org-42/embedder-old", VISIBLE),
+            // The replacement is not in the registry.
+            (
+                "vendor/embedder-old",
+                "vendor/embedder-old",
+                "vendor/embedder-gone",
+            ),
+        ] {
+            let with_entry = with_retired_models(
+                state_with_registry_hiding_org_42(Arc::clone(&registry)),
+                &[(retired, replacement)],
+            );
+            let expected = not_found_bodies(&plain, requested).await;
+            let got = not_found_bodies(&with_entry, requested).await;
+            assert_eq!(got, expected, "'{requested}' -> '{replacement}'");
+            assert!(!got.0.contains("retired"), "{}", got.0);
+            assert!(!got.0.contains(HIDDEN) && !got.1.contains(HIDDEN));
+        }
+    }
+
+    /// A retired id whose replacement the caller may list reads the same on a
+    /// native route and an OpenAI route, and replaces the "Did you mean" ids.
+    #[tokio::test]
+    async fn a_retired_note_reads_the_same_on_native_and_openai_routes() {
+        let (registry, _bundles, _models) = registry_with_models(&["vendor/embedder-large"]);
+        let state = with_retired_models(
+            state_with_registry_hiding_org_42(registry),
+            &[("vendor/embedder-larg", "vendor/embedder-large")],
+        );
+        let expected = "Model 'vendor/embedder-larg' was retired. Use 'vendor/embedder-large'.";
+
+        let (native, openai) = not_found_bodies(&state, "vendor/embedder-larg").await;
+        let native: serde_json::Value = serde_json::from_str(&native).expect("error JSON");
+        assert_eq!(native["detail"]["message"], expected);
+        assert_eq!(native["detail"]["code"], "MODEL_NOT_FOUND");
+        let openai: serde_json::Value = serde_json::from_str(&openai).expect("error JSON");
+        assert_eq!(openai["error"]["message"], expected);
+        assert_eq!(openai["error"]["code"], "model_not_found");
+        assert_eq!(openai["error"]["param"], "model");
+    }
+
+    /// The no-oracle property with a retired map in place: the same request
+    /// string gets one body whether or not a hidden model with that id, or
+    /// with the id of its replacement, exists.
+    #[tokio::test]
+    async fn retired_note_is_the_same_whether_a_hidden_model_exists_or_not() {
+        const VISIBLE: &str = "vendor/embedder-large";
+        const HIDDEN: &str = "org-42/embedder-large-tuned";
+        let retired = [
+            (HIDDEN, VISIBLE),
+            ("vendor/embedder-old", HIDDEN),
+            ("vendor/embedder-older", VISIBLE),
+        ];
+        let (with_hidden, _b1, _m1) = registry_with_models(&[VISIBLE, HIDDEN]);
+        let (without_hidden, _b2, _m2) = registry_with_models(&[VISIBLE]);
+        let holds_hidden =
+            with_retired_models(state_with_registry_hiding_org_42(with_hidden), &retired);
+        let lacks_hidden =
+            with_retired_models(state_with_registry_hiding_org_42(without_hidden), &retired);
+
+        for requested in [
+            HIDDEN,
+            "org-42/embedder-large",
+            "vendor/embedder-old",
+            "Vendor__Embedder-Old",
+            "vendor/embedder-older",
+            "embedder-large-tune",
+        ] {
+            let held = not_found_bodies(&holds_hidden, requested).await;
+            let lacked = not_found_bodies(&lacks_hidden, requested).await;
+            assert_eq!(
+                held, lacked,
+                "'{requested}' must get one response whether or not the hidden model exists"
+            );
+            if requested != HIDDEN {
+                assert!(!held.0.contains(HIDDEN) && !held.1.contains(HIDDEN));
+            }
+        }
+
+        let (noted, _) = not_found_bodies(&holds_hidden, "vendor/embedder-older").await;
+        assert!(
+            noted.contains("was retired. Use 'vendor/embedder-large'."),
+            "a visible replacement is named: {noted}"
+        );
     }
 
     /// The same rule on the OpenAI body seam, and the same

@@ -5,6 +5,7 @@ use std::time::Duration;
 use axum::http::HeaderValue;
 use serde::Deserialize;
 
+use crate::handlers::model_suggestions::{retired_model_declared, retired_model_key};
 use crate::state::demand_tracker::PhysicalLaneCatalog;
 use crate::state::pool_manager::PoolLimits;
 use crate::types::pool::PoolSpec;
@@ -206,6 +207,12 @@ pub struct Config {
     // publishable — those are the names the epic exists to make discoverable.
     pub published_model_aliases: HashSet<String>,
 
+    // Retired model id -> replacement id, from `SIE_GATEWAY_RETIRED_MODELS`
+    // (JSON map). Keys are stored as `retired_model_key` reads them; a request
+    // for one gets `MODEL_NOT_FOUND` naming the replacement. See
+    // `build_retired_models`.
+    pub retired_models: HashMap<String, RetiredModel>,
+
     // Model registry paths (filesystem seed; same volume mounted into sie-config
     // for consistency, but the gateway never writes to them).
     pub bundles_dir: String,
@@ -349,6 +356,7 @@ impl std::fmt::Debug for Config {
             .field("configured_physical_lanes", &self.configured_physical_lanes)
             .field("static_queue_pools", &self.static_queue_pools)
             .field("model_aliases", &self.model_aliases)
+            .field("retired_models", &self.retired_models)
             .field("bundles_dir", &self.bundles_dir)
             .field("models_dir", &self.models_dir)
             .field("config_service_url", &self.config_service_url)
@@ -608,9 +616,17 @@ fn env_csv(key: &str) -> Vec<String> {
 
 fn env_json_string_map(key: &str) -> HashMap<String, String> {
     match env::var(key) {
-        Ok(s) if !s.trim().is_empty() => {
-            serde_json::from_str::<HashMap<String, String>>(&s).unwrap_or_default()
-        }
+        Ok(s) if !s.trim().is_empty() => serde_json::from_str::<HashMap<String, String>>(&s)
+            .unwrap_or_else(|error| {
+                // The value is not logged: it is operator config, and the
+                // serde error already says where the JSON broke.
+                tracing::warn!(
+                    env = key,
+                    %error,
+                    "ignoring {key}: not a JSON object of strings; using no entries"
+                );
+                HashMap::new()
+            }),
         _ => HashMap::new(),
     }
 }
@@ -756,6 +772,59 @@ fn build_model_aliases(
     (map, published)
 }
 
+/// One `SIE_GATEWAY_RETIRED_MODELS` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetiredModel {
+    /// The retired id in the operator's case with `__` read as `/`
+    /// (`retired_model_declared`). The retired note needs the caller to be
+    /// allowed to list this spelling and its lower-cased form (the map key),
+    /// plus the replacement.
+    pub declared: String,
+    /// The id the 404 names instead, trimmed.
+    pub replacement: String,
+}
+
+/// Retired model id -> replacement id from `SIE_GATEWAY_RETIRED_MODELS`.
+///
+/// Keys go through `retired_model_key`, the same normalization the lookup
+/// applies to the caller's string. The declared id keeps the operator's case
+/// with `__` read as `/` (`retired_model_declared`); the replacement is kept
+/// as written (trimmed). Entries with an empty key or replacement are
+/// skipped. If two entries share a key, the one whose `(declared,
+/// replacement)` pair sorts first in byte order wins, so the result never
+/// depends on map order. Unlike an alias, which reroutes
+/// the request silently, a retired entry refuses it and names the
+/// replacement. A string that is also an alias name is treated as the alias:
+/// it never gets the retired note (see `not_found_hint`).
+pub(crate) fn build_retired_models(
+    entries: HashMap<String, String>,
+) -> HashMap<String, RetiredModel> {
+    let mut map: HashMap<String, RetiredModel> = HashMap::new();
+    for (retired, replacement) in entries {
+        let key = retired_model_key(&retired);
+        let replacement = replacement.trim().to_string();
+        if key.is_empty() || replacement.is_empty() {
+            continue;
+        }
+        let entry = RetiredModel {
+            declared: retired_model_declared(&retired),
+            replacement,
+        };
+        match map.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                let held = slot.get();
+                if (&entry.declared, &entry.replacement) < (&held.declared, &held.replacement) {
+                    slot.insert(entry);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(entry);
+            }
+        }
+    }
+    map
+}
+
 fn build_gpu_profile_map(
     configured_gpus: &[String],
     aliases: HashMap<String, String>,
@@ -856,6 +925,8 @@ impl Config {
         );
         let (model_aliases, published_model_aliases) =
             build_model_aliases(env_json_string_map("SIE_GATEWAY_MODEL_ALIASES"));
+        let retired_models =
+            build_retired_models(env_json_string_map("SIE_GATEWAY_RETIRED_MODELS"));
 
         Self {
             host: "0.0.0.0".to_string(),
@@ -920,6 +991,7 @@ impl Config {
             static_queue_pools: env_static_queue_pools("SIE_GATEWAY_STATIC_QUEUE_POOLS"),
             model_aliases,
             published_model_aliases,
+            retired_models,
 
             bundles_dir: env_default("SIE_BUNDLES_DIR", "bundles"),
             models_dir: env_default("SIE_MODELS_DIR", "models"),
@@ -1506,6 +1578,99 @@ mod tests {
         assert!(published.contains("sql"));
         assert!(!published.contains("blank"));
         assert!(!published.contains("guard"));
+    }
+
+    #[test]
+    fn test_build_retired_models_normalizes_keys_and_keeps_replacements() {
+        let mut entries = HashMap::new();
+        entries.insert("Qwen__Qwen3-4B".to_string(), "Qwen/Qwen3.6-27B".to_string());
+        entries.insert(" Org/Old:fast ".to_string(), " Org/New ".to_string());
+
+        let result = build_retired_models(entries);
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(
+            result.get("qwen/qwen3-4b"),
+            Some(&RetiredModel {
+                declared: "Qwen/Qwen3-4B".to_string(),
+                replacement: "Qwen/Qwen3.6-27B".to_string(),
+            })
+        );
+        assert_eq!(
+            result.get("org/old"),
+            Some(&RetiredModel {
+                declared: "Org/Old".to_string(),
+                replacement: "Org/New".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_build_retired_models_keeps_the_first_sorted_id_on_a_shared_key() {
+        let mut entries = HashMap::new();
+        entries.insert("org/old".to_string(), "Org/B".to_string());
+        entries.insert("Org/Old".to_string(), "Org/A".to_string());
+        entries.insert("Org__Old".to_string(), "Org/C".to_string());
+
+        let result = build_retired_models(entries);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result.get("org/old"),
+            Some(&RetiredModel {
+                declared: "Org/Old".to_string(),
+                replacement: "Org/A".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_build_retired_models_breaks_a_declared_id_tie_on_the_replacement() {
+        let mut entries = HashMap::new();
+        entries.insert("Org/Old:fast".to_string(), "Org/B".to_string());
+        entries.insert("Org/Old:slow".to_string(), "Org/A".to_string());
+        entries.insert("bundle:/Org/Old".to_string(), "Org/C".to_string());
+
+        let result = build_retired_models(entries);
+
+        assert_eq!(
+            result.get("org/old"),
+            Some(&RetiredModel {
+                declared: "Org/Old".to_string(),
+                replacement: "Org/A".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_build_retired_models_skips_empty_entries() {
+        let mut entries = HashMap::new();
+        entries.insert("".to_string(), "Org/New".to_string());
+        entries.insert("Org/Old".to_string(), "  ".to_string());
+        entries.insert("bundle:/".to_string(), "Org/New".to_string());
+
+        assert!(build_retired_models(entries).is_empty());
+    }
+
+    #[test]
+    fn test_config_load_reads_retired_models() {
+        with_env(
+            &[(
+                "SIE_GATEWAY_RETIRED_MODELS",
+                r#"{"Org__Old":"Org/New","":"Org/Other"}"#,
+            )],
+            || {
+                let cfg = Config::load();
+                assert_eq!(cfg.retired_models.len(), 1);
+                assert_eq!(
+                    cfg.retired_models.get("org/old"),
+                    Some(&RetiredModel {
+                        declared: "Org/Old".to_string(),
+                        replacement: "Org/New".to_string(),
+                    })
+                );
+            },
+        );
     }
 
     #[test]
@@ -2227,6 +2392,7 @@ mod tests {
             static_queue_pools: Vec::new(),
             model_aliases: HashMap::new(),
             published_model_aliases: Default::default(),
+            retired_models: HashMap::new(),
             bundles_dir: String::new(),
             models_dir: String::new(),
             config_service_url: None,

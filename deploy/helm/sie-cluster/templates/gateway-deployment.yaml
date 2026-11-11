@@ -33,6 +33,7 @@
         "SIE_GATEWAY_GPU_ALIASES"
         "SIE_GATEWAY_HEALTH_MODE"
         "SIE_GATEWAY_MACHINE_PROFILES"
+        "SIE_GATEWAY_RETIRED_MODELS"
         "SIE_GATEWAY_STATIC_QUEUE_POOLS"
         "SIE_ADMIN_TOKEN"
         "SIE_CONFIG_SERVICE_TOKEN"
@@ -255,6 +256,13 @@ spec:
             # bundle (e.g. route SQL to a BF16 27B variant). Opt-in: only
             # rendered when gateway.modelAliases is set.
             - name: SIE_GATEWAY_MODEL_ALIASES
+              value: {{ toJson . | quote }}
+            {{- end }}
+            {{- with .Values.gateway.retiredModels }}
+            # Retired model id -> replacement id. A request for a retired id
+            # gets a 404 that names the replacement. Opt-in: only rendered
+            # when gateway.retiredModels is set.
+            - name: SIE_GATEWAY_RETIRED_MODELS
               value: {{ toJson . | quote }}
             {{- end }}
             # Machine profiles (JSON format for pool validation and routing)
