@@ -17,10 +17,13 @@ tasks:
 # `![label](x1,y1,x2,y2)` block marker, in 0-1000 page coordinates, before each layout block.
 # These are the only two trained prompts. The adapter rejects any other prompt and thinking.
 #
-# Page image: the processor resizes only outside 65,536-16,777,216 pixels, so the model sees the
-# page as sent. Render PDF pages at 400 DPI and downscale to a 2048 px longest edge, as the
-# model card and the upstream client do. Upstream's published benchmark scores used 400 DPI pages
-# capped at 5 MP.
+# Page image: the SGLang profiles bound each page to 65,536-5,242,880 pixels, the 5 MP cap that
+# upstream's published benchmark scores used on 400 DPI pages. The processor downscales a larger
+# page, keeping its aspect ratio, to at most 5,120 image tokens (one per 32x32 px cell): a 400 DPI
+# US Letter page drops from 14,628 to 5,022. It applies the bound only when given both values.
+# Pages rendered at 400 DPI and downscaled to a 2048 px longest edge, as the model card and the
+# upstream client do, stay under the cap and reach the model as sent. The `transformers` profile
+# keeps the checkpoint's 65,536-16,777,216 pixel range.
 #
 # Sampling: temperature 0.1, top_p 1.0, one beam. The upstream README says "use temperature 0.1,
 # not greedy decoding", and the benchmark pipeline uses 0.1. The model card examples use 0.2.
@@ -49,9 +52,10 @@ tasks:
 # the attention layers. Sampling is unchanged and outputs stay within bf16 run-to-run variance.
 #
 # Memory: SGLang keeps (1 - mem_fraction_static) of the memory free at launch as runtime headroom.
-# One page at the 16 MP limit peaks 4.8 GiB above the memory in use after load, in the vision
-# encoder. On an L4, 0.75 and 0.85 run out of memory there and the engine exits, which fails every
-# page in flight. 0.70 leaves 0.7 GiB free at that peak.
+# One page at the checkpoint's 16 MP limit peaks 4.8 GiB above the memory in use after load, in the
+# vision encoder. On an L4, 0.75 and 0.85 run out of memory there and the engine exits, which fails
+# every page in flight. 0.70 leaves 0.7 GiB free at that peak; the 5 MP page cap lowers the peak,
+# which has not been re-measured.
 max_sequence_length: 24576
 profiles:
   default:
@@ -75,6 +79,8 @@ profiles:
         attention_backend: flashinfer
         extra_launch_args:
           - --disable-radix-cache
+          - --mm-process-config
+          - '{"image":{"min_pixels":65536,"max_pixels":5242880}}'
       runtime:
         max_new_tokens: 12288
         num_beams: 1
@@ -98,6 +104,8 @@ profiles:
         attention_backend: flashinfer
         extra_launch_args:
           - --disable-radix-cache
+          - --mm-process-config
+          - '{"image":{"min_pixels":65536,"max_pixels":5242880}}'
         default_prompt: grounding
         output_postprocess: lightonocr3_markdown
   transformers:
