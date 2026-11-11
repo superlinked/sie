@@ -1,5 +1,11 @@
 [settings]
 experimental = true
+# Every tool below is pinned to an exact version, so mise never needs a remote
+# version list. Without this, `mise install` with the tools already installed
+# still lists versions from GitHub and other registries whenever its cache
+# directory is empty, which is how CI restores it, and a slow API fails the
+# job. Missing tools still download as before.
+prefer_offline = true
 
 [tools]
 python = "3.12.12"
