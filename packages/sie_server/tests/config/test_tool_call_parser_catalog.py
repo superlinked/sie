@@ -21,8 +21,6 @@ MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
 # remove an entry once its model names a parser (the test fails if one is stale).
 _KNOWN_UNMAPPED = frozenset(
     {
-        # No ``tool_call_parser`` in any profile.
-        "Qwen/Qwen3-4B-Instruct-2507",
         # The fake test model: a stub adapter with no on-wire tool-call format.
         "sie-fake",
     }

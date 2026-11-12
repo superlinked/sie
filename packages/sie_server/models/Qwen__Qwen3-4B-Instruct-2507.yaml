@@ -111,6 +111,12 @@ profiles:
         # and serves json_schema + regex identically (GPU-verified on L4,
         # SGLang 0.5.10.post1). Same backend the Gemma-4 profiles pin.
         grammar_backend: xgrammar
+        # The chat template writes Hermes-style JSON tool calls
+        # (``<tool_call>{"name": ..., "arguments": ...}</tool_call>``).
+        # Naming the parser gives the worker an explicit tool-call format,
+        # which forced ``tool_choice`` (``required`` / a named function)
+        # needs to build its grammar. Set on every profile.
+        tool_call_parser: qwen25
         # speculative decoding (MTP/EAGLE/NGRAM) intentionally absent;
         # week-1 validation decides whether to promote a side-cell. See §4.9.
       runtime:
@@ -148,6 +154,7 @@ profiles:
         # XGrammar, matching the default profile — Outlines crashes SGLang's
         # scheduler on anchored regexes (``^``/``$``). See the default profile.
         grammar_backend: xgrammar
+        tool_call_parser: qwen25
       runtime:
         first_chunk_timeout_s: 30
         inter_chunk_timeout_s: 10
@@ -176,6 +183,7 @@ profiles:
         # XGrammar, matching the default profile — Outlines crashes SGLang's
         # scheduler on anchored regexes (``^``/``$``). See the default profile.
         grammar_backend: xgrammar
+        tool_call_parser: qwen25
       runtime:
         first_chunk_timeout_s: 30
         inter_chunk_timeout_s: 10
