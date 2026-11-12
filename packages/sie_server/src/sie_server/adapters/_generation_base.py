@@ -704,6 +704,11 @@ def _candidates_have_visible_text(candidates: tuple[dict[str, Any], ...] | None)
     return any(isinstance(text := candidate.get("text"), str) and text.strip() for candidate in candidates)
 
 
+def _candidates_hit_length(candidates: tuple[dict[str, Any], ...] | None) -> bool:
+    """Return whether any ``n > 1`` candidate aggregate ran out of budget."""
+    return any(candidate.get("finish_reason") == "length" for candidate in candidates or ())
+
+
 async def aclose_with_error_precedence(
     resource: Any,
     *,
@@ -859,6 +864,7 @@ async def suppress_thinking_blocks(
                 and not emitted_tool_call
                 and rewritten.error_code is None
                 and rewritten.finish_reason == "stop"
+                and not _candidates_hit_length(rewritten.candidates)
                 and not _candidates_have_visible_text(rewritten.candidates)
             ):
                 reason = " (the model produced only private reasoning)" if hid_reasoning else ""

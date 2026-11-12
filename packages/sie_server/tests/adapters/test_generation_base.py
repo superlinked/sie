@@ -634,6 +634,29 @@ async def test_truncated_reasoning_candidates_keep_the_length_finish() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_truncated_candidate_keeps_a_stop_terminal_unstamped() -> None:
+    """SGLang's n>1 terminal reports ``stop`` at the top level; a candidate that
+    ran out of budget during reasoning keeps its own ``length`` instead of
+    turning the whole answer into an empty-output error.
+    """
+    terminal = GenerationChunk(
+        text_delta="",
+        done=True,
+        finish_reason="stop",
+        candidates=(
+            {"index": 0, "text": "<think>truncated reasoning", "finish_reason": "length"},
+            {"index": 1, "text": "<think>reasoning</think>", "finish_reason": "stop"},
+        ),
+    )
+
+    [normalized] = [chunk async for chunk in suppress_thinking_blocks(_chunks(terminal))]
+
+    assert normalized.finish_reason == "stop"
+    assert normalized.error_code is None
+    assert [candidate["finish_reason"] for candidate in normalized.candidates or ()] == ["length", "stop"]
+
+
+@pytest.mark.asyncio
 async def test_collect_generation_carries_terminal_error_fields() -> None:
     """#3104/#3136: buffered aggregation must not drop the terminal chunk's
     typed error — ``empty_model_output`` keeps a ``stop``/``length``
