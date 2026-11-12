@@ -46,6 +46,18 @@ impl ReasoningEffortDecl {
             .map(str::to_owned);
         Some(Self { accepted, default })
     }
+
+    /// The YAML shape that parses back to this declaration. The gateway keeps
+    /// only the accepted values and the default, so each value's own settings
+    /// are left empty.
+    pub fn to_yaml_value(&self) -> Value {
+        let values: Map<String, Value> = self
+            .accepted
+            .iter()
+            .map(|value| (value.clone(), json!({})))
+            .collect();
+        json!({"default": self.default, "values": values})
+    }
 }
 
 /// Fields mirrored from model YAML for ``/v1/models`` wire parity with

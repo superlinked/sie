@@ -135,8 +135,10 @@ class ReasoningEffortLevel(BaseModel):
 class ReasoningEffortDeclaration(BaseModel):
     """The ``reasoning_effort`` values a generation profile accepts, and what each does.
 
-    ``default`` names the value the profile runs at when a request names none,
-    or is ``None`` when that is not one of the declared values.
+    ``default`` names the value the profile already runs at when a request
+    names none, or is ``None`` when that is not one of the declared values. It
+    is reported on ``/v1/models`` and never applied, so a request without the
+    field renders and calls its upstream exactly as before.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)

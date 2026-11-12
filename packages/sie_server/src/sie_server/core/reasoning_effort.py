@@ -50,7 +50,8 @@ def apply_reasoning_effort(
     """Resolve ``value`` against the declaration of ``config``'s default profile.
 
     ``None`` means nothing changes: the request named no value, or named
-    ``none`` for a model that does not reason at all.
+    ``none`` for a model that does not reason at all. The declared default is
+    not applied to a request that names no value.
 
     Raises:
         GenerationUnsupportedFieldError: When the profile does not accept ``value``.

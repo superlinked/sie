@@ -1066,6 +1066,7 @@ impl ModelRegistry {
     fn merge_profiles_for_resolution(
         existing: &HashMap<String, CanonicalProfile>,
         existing_output_caps: &HashMap<String, u32>,
+        existing_reasoning_effort: &HashMap<String, crate::types::model::ReasoningEffortDecl>,
         incoming: &HashMap<String, crate::types::model::ProfileConfig>,
     ) -> HashMap<String, crate::types::model::ProfileConfig> {
         let mut merged: HashMap<String, crate::types::model::ProfileConfig> = existing
@@ -1078,7 +1079,9 @@ impl ModelRegistry {
                         max_output_tokens: existing_output_caps.get(name).copied(),
                         grammar_profile: canon.grammar_profile.clone(),
                         chat_template_kwargs: canon.chat_template_kwargs.clone(),
-                        reasoning_effort: None,
+                        reasoning_effort: existing_reasoning_effort
+                            .get(name)
+                            .map(crate::types::model::ReasoningEffortDecl::to_yaml_value),
                         adapter_path: canon.adapter_path.clone(),
                         max_batch_tokens: canon.max_batch_tokens,
                         compute_precision: canon.compute_precision.clone(),
@@ -2848,6 +2851,7 @@ impl ModelRegistry {
             let merged_profiles = Self::merge_profiles_for_resolution(
                 &existing.profile_configs,
                 &existing.info_extras.profile_max_output_tokens,
+                &existing.info_extras.profile_reasoning_effort,
                 &config.profiles,
             );
 
@@ -6804,6 +6808,79 @@ profiles:
             Some("no-spec"),
             "delta apply must retain the profile inheritance relationship",
         );
+    }
+
+    #[test]
+    fn test_profile_delta_keeps_stored_reasoning_effort_declarations() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            "name: default\npriority: 10\nadapters:\n  - sie_server.adapters.sentence_transformer\n",
+        )
+        .unwrap();
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        let seed: ModelConfig = serde_saphyr::from_str(
+            r#"
+sie_id: test/model
+tasks: {generate: {context_length: 4096, max_output_tokens: 1024}}
+profiles:
+  default:
+    adapter_path: "sie_server.adapters.sentence_transformer:SentenceTransformerAdapter"
+    max_batch_tokens: 4096
+    reasoning_effort: {default: high, values: {low: {}, high: {}}}
+  parent:
+    adapter_path: "sie_server.adapters.sentence_transformer:SentenceTransformerAdapter"
+    max_batch_tokens: 4096
+    reasoning_effort: {values: {low: {}}}
+"#,
+        )
+        .unwrap();
+        registry.add_model_config(seed).expect("seed");
+
+        let delta: ModelConfig = serde_saphyr::from_str(
+            r#"
+sie_id: test/model
+profiles:
+  child:
+    extends: parent
+    max_batch_tokens: 8192
+"#,
+        )
+        .unwrap();
+        registry
+            .add_model_config(delta)
+            .expect("profile-only delta");
+
+        let accepts = |model: &str, value: &str| {
+            registry
+                .get_model_info(model)
+                .expect(model)
+                .reasoning_effort_refusal(value, model)
+                .is_none()
+        };
+        assert!(
+            accepts("test/model", "high"),
+            "default keeps its declaration"
+        );
+        assert!(!accepts("test/model", "max"));
+        assert_eq!(
+            registry
+                .get_model_info("test/model")
+                .unwrap()
+                .effective_reasoning_effort()
+                .and_then(|declaration| declaration.default.clone())
+                .as_deref(),
+            Some("high"),
+        );
+        assert!(
+            accepts("test/model:parent", "low"),
+            "parent keeps its declaration"
+        );
+        assert!(
+            accepts("test/model:child", "low"),
+            "child inherits the stored parent's"
+        );
+        assert!(!accepts("test/model:child", "high"));
     }
 
     /// M10 follow-up: a delta-update that adds a profile with new
