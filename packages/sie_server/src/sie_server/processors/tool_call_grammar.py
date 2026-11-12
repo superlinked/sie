@@ -20,7 +20,10 @@ for shape, but have NOT been run end-to-end against xgrammar + Qwen3.5 on
 GPU. One verification pass should confirm the backend accepts the pattern and the model
 terminates cleanly before relying on forced ``tool_choice`` in
 production. The failure mode if a pattern is rejected is a clean
-``grammar_compile_failed`` terminal chunk, not a crash.
+``grammar_compile_failed`` terminal chunk, not a crash. The ``gemma4``
+pattern has had that pass with xgrammar and Gemma 4 E2B: forced and named
+calls parse and stop cleanly, including when the model does not want the call
+(see :func:`_gemma4_force_regex`).
 """
 
 from __future__ import annotations
@@ -121,6 +124,8 @@ def build_tool_choice_grammar(
         pattern = _glm_xml_force_regex(allowed)
     elif tool_call_format == "muse_atem":
         pattern = _muse_atem_force_regex(allowed)
+    elif tool_call_format == "gemma4":
+        pattern = _gemma4_force_regex(allowed)
     elif tool_call_format == "auto":
         # ``auto`` means the model's on-wire tool-call format could not be
         # confidently resolved from config. Guessing Qwen XML here would
@@ -232,3 +237,30 @@ def _muse_atem_force_regex(names: list[str]) -> str:
     parameter = r'<atem:parameter name="[^"<>]+">' + _INNER + r"</atem:parameter>\s*"
     invoke = r'<atem:invoke name="' + name + r'">\s*(?:' + parameter + r")*</atem:invoke>"
     return r" to=" + name + r"<\|message\|><atem:function_calls>\s*(?:" + invoke + r"\s*)+</atem:function_calls>"
+
+
+def _gemma4_force_regex(names: list[str]) -> str:
+    """Force one-or-more consecutive Gemma 4 tool-call blocks.
+
+    A single block looks like::
+
+        <|tool_call>call:NAME{KEY:<|"|>VALUE<|"|>,KEY:42}<tool_call|>
+
+    The pattern pins ``NAME`` to the allowed set in every block. Nothing
+    optional precedes, separates or follows the blocks: greedy decoding fills
+    optional whitespace up to the token limit.
+
+    Unlike the Qwen and Hermes patterns, the argument body is not free text.
+    With a free body, a Gemma 4 model that was forced to call a tool it did not
+    want wrote ``}</tool_call>`` and then prose up to the token limit, which
+    never closes the block. So outside ``<|"|>`` strings the body admits no
+    whitespace, no ``"`` and no ``<``: after the arguments the only way on is
+    the closing ``<tool_call|>``. Strings stay free except that they cannot
+    contain ``<|`` or end with ``<``, which keeps the string delimiter
+    unambiguous without lookahead. Values are not otherwise checked; the
+    parser still validates the call.
+    """
+    string = r'<\|"\|>(?:[^<]|<+[^|<])*<\|"\|>'
+    body = r'(?:[^\s<"]|' + string + r")*"
+    block = r"<\|tool_call>call:" + _name_alternation(names) + r"\{" + body + r"\}<tool_call\|>"
+    return r"(?:" + block + r")+"

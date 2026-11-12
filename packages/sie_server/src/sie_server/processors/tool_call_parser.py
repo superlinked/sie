@@ -1,4 +1,4 @@
-"""Strict streaming parser for Qwen/Hermes-style tool-call tags.
+"""Strict streaming parser for model tool-call tags.
 
 The SGLang adapter yields text deltas. Qwen3 chat templates encode tool calls as
 ``<tool_call>{"name":"...","arguments":{...}}</tool_call>`` inside that text
@@ -15,6 +15,12 @@ The XML forms carry every argument value as text. Each value is converted by
 the JSON-schema type its parameter declares in the request's ``tools``: a
 string parameter keeps its exact text, and a value that does not convert, or
 that belongs to an undeclared tool or parameter, stays a string.
+
+Gemma 4 uses its own tags, ``<|tool_call>call:NAME{key:value,…}<tool_call|>``,
+and writes typed values (strings between ``<|"|>`` delimiters, numbers,
+booleans, ``null``, nested objects and arrays), so its values keep their native
+types; only a top-level argument whose parameter is declared as a string keeps
+the exact text of a bare token.
 
 For streaming ``n>1`` the parser maintains independent per-candidate state
 keyed by ``chunk.choice_index`` (H5): each candidate's tool-call deltas
@@ -45,6 +51,9 @@ logger = logging.getLogger(__name__)
 
 _OPEN = "<tool_call>"
 _CLOSE = "</tool_call>"
+# Gemma 4 delimits a call with its own special tokens instead of the tags above.
+_GEMMA_OPEN = "<|tool_call>"
+_GEMMA_CLOSE = "<tool_call|>"
 _PARSE_ERROR = "MODEL_OUTPUT_PARSE_ERROR"
 # Terminal error code emitted when a model ignores ``parallel_tool_calls=false``
 # and tries to open a second ``<tool_call>`` block in the same turn. We refuse
@@ -53,12 +62,14 @@ _PARSE_ERROR = "MODEL_OUTPUT_PARSE_ERROR"
 _PARALLEL_TOOL_CALLS_VIOLATED = "parallel_tool_calls_violated"
 
 # On-the-wire tool-call encodings that can appear inside
-# ``<tool_call>…</tool_call>``:
+# ``<tool_call>…</tool_call>`` (``gemma4`` uses its own tags):
 #   - ``qwen_xml``    — Qwen3(-Coder): ``<function=NAME><parameter=K>V</parameter>…</function>``
 #   - ``hermes_json`` — Hermes: ``{"name": "...", "arguments": {...}}``
 #   - ``glm_xml``     — GLM: ``NAME<arg_key>K</arg_key><arg_value>V</arg_value>…``
 #   - ``muse_atem``   — Muse Glimmer: its adapter rewrites ``atem:invoke`` blocks
 #                       into the ``qwen_xml`` form; only forcing sees the original.
+#   - ``gemma4``      — Gemma 4: ``<|tool_call>call:NAME{K:V,…}<tool_call|>`` with
+#                       typed values and ``<|"|>``-delimited strings.
 #   - ``auto``        — runtime heuristic (XML if the block starts with
 #                       ``<function=``, else JSON). Kept as a fallback for
 #                       callers that cannot resolve the model's configured
@@ -66,7 +77,41 @@ _PARALLEL_TOOL_CALLS_VIOLATED = "parallel_tool_calls_violated"
 #                       model config (``tasks.generate`` → adapter
 #                       ``tool_call_parser``) so production traffic uses an
 #                       explicit format rather than guessing per block.
-ToolCallFormat = Literal["auto", "qwen_xml", "hermes_json", "glm_xml", "muse_atem"]
+ToolCallFormat = Literal["auto", "qwen_xml", "hermes_json", "glm_xml", "muse_atem", "gemma4"]
+
+
+def tool_call_format_for_parser(parser: object) -> ToolCallFormat:
+    """Map a model's configured ``tool_call_parser`` name to its on-wire format.
+
+    The name is the same value passed to SGLang's ``--tool-call-parser``.
+    ``qwen25`` (Qwen2.5-style Hermes JSON) and ``hermes*`` → ``hermes_json``;
+    any other ``qwen*`` (e.g. ``qwen3_coder``) → ``qwen_xml``; ``glm*`` →
+    ``glm_xml``; ``muse`` → ``muse_atem``; ``gemma4`` → ``gemma4``. A missing
+    or unknown name maps to ``auto`` so out-of-tree models keep the runtime
+    heuristic.
+    """
+    if not isinstance(parser, str):
+        return "auto"
+    name = parser.lower()
+    if name == "qwen25" or "hermes" in name:
+        return "hermes_json"
+    if name.startswith("qwen"):
+        return "qwen_xml"
+    if name.startswith("glm"):
+        return "glm_xml"
+    if name == "muse":
+        return "muse_atem"
+    if name == "gemma4":
+        return "gemma4"
+    return "auto"
+
+
+def _tool_call_tags(tool_call_format: ToolCallFormat) -> tuple[str, str]:
+    """Return the ``(open, close)`` tags that delimit one call in this format."""
+    if tool_call_format == "gemma4":
+        return _GEMMA_OPEN, _GEMMA_CLOSE
+    return _OPEN, _CLOSE
+
 
 # A model that emits ``<tool_call>`` and never closes it would let
 # ``tool_buffer`` grow without bound (same for free-form prose with no
@@ -372,16 +417,17 @@ def _process_text(
     out: list[GenerationChunk] = []
     if not incoming:
         return out, False
+    open_tag, close_tag = _tool_call_tags(tool_call_format)
     incoming = state.text_buffer + incoming
     state.text_buffer = ""
     cursor = 0
     while cursor < len(incoming):
         if state.in_tool_call:
-            close_idx = incoming.find(_CLOSE, cursor)
+            close_idx = incoming.find(close_tag, cursor)
             if close_idx == -1:
                 # See the in-line comment in the original implementation
                 # below — preserve the close-tag-straddle handling.
-                keep = len(_CLOSE) - 1
+                keep = len(close_tag) - 1
                 absorb_end = max(cursor, len(incoming) - keep)
                 state.tool_buffer += incoming[cursor:absorb_end]
                 if len(state.tool_buffer) + (len(incoming) - absorb_end) > _MAX_TOOL_BUFFER_CHARS:
@@ -414,10 +460,10 @@ def _process_text(
             state.tool_index += 1
             state.tool_buffer = ""
             state.in_tool_call = False
-            cursor = close_idx + len(_CLOSE)
+            cursor = close_idx + len(close_tag)
             continue
 
-        open_idx = incoming.find(_OPEN, cursor)
+        open_idx = incoming.find(open_tag, cursor)
         if open_idx == -1:
             state.text_buffer += incoming[cursor:]
             cursor = len(incoming)
@@ -428,7 +474,7 @@ def _process_text(
                     )
                 )
                 return out, True
-            flush_len = max(0, len(state.text_buffer) - (len(_OPEN) - 1))
+            flush_len = max(0, len(state.text_buffer) - (len(open_tag) - 1))
             if flush_len:
                 out.append(
                     GenerationChunk(
@@ -463,7 +509,7 @@ def _process_text(
             out.append(_parallel_tool_calls_violation_chunk())
             return out, True
         state.in_tool_call = True
-        cursor = open_idx + len(_OPEN)
+        cursor = open_idx + len(open_tag)
     return out, False
 
 
@@ -756,20 +802,21 @@ def _parse_candidate_text(
     a per-candidate parse error, and dropping the block would let a
     candidate whose only call was malformed finish as an ordinary answer.
     """
-    if not text or _OPEN not in text:
+    open_tag, close_tag = _tool_call_tags(tool_call_format)
+    if not text or open_tag not in text:
         return text, []
     out_text_parts: list[str] = []
     tool_calls: list[dict] = []
     cursor = 0
     tool_index = 0
     while cursor < len(text):
-        open_idx = text.find(_OPEN, cursor)
+        open_idx = text.find(open_tag, cursor)
         if open_idx == -1:
             out_text_parts.append(text[cursor:])
             break
         out_text_parts.append(text[cursor:open_idx])
-        body_start = open_idx + len(_OPEN)
-        close_idx = text.find(_CLOSE, body_start)
+        body_start = open_idx + len(open_tag)
+        close_idx = text.find(close_tag, body_start)
         if close_idx == -1:
             # Unterminated block: bail; surface the rest as text so the
             # candidate's prose isn't silently lost.
@@ -779,8 +826,8 @@ def _parse_candidate_text(
         try:
             deltas = _tool_call_deltas(body, tool_index, tool_call_format, schemas)
         except ValueError:
-            out_text_parts.append(text[open_idx : close_idx + len(_CLOSE)])
-            cursor = close_idx + len(_CLOSE)
+            out_text_parts.append(text[open_idx : close_idx + len(close_tag)])
+            cursor = close_idx + len(close_tag)
             continue
         # ``_tool_call_deltas`` returns two deltas per call: announcement
         # (id+name) and body (arguments). Re-assemble into the
@@ -798,7 +845,7 @@ def _parse_candidate_text(
                 }
             )
         tool_index += 1
-        cursor = close_idx + len(_CLOSE)
+        cursor = close_idx + len(close_tag)
     return "".join(out_text_parts), tool_calls
 
 
@@ -821,6 +868,8 @@ def _tool_call_deltas(
         name, arguments = _parse_hermes_tool_call(raw)
     elif tool_call_format == "glm_xml":
         name, arguments = _parse_glm_tool_call(raw, schemas)
+    elif tool_call_format == "gemma4":
+        name, arguments = _parse_gemma4_tool_call(raw, schemas)
     elif raw.startswith("<function="):
         name, arguments = _parse_xml_tool_call(raw, schemas)
     else:
@@ -972,6 +1021,203 @@ def _parse_glm_tool_call(raw: str, schemas: ToolSchemas | None = None) -> tuple[
         count += 1
     if _skip_whitespace(raw, pos) < len(raw):
         raise ValueError(f"malformed GLM tool-call: more than {_MAX_XML_PARAMS} arguments")
+    return name, arguments
+
+
+_GEMMA_CALL_PREFIX = "call:"
+_GEMMA_STRING = '<|"|>'
+# Characters that end a bare name, key or scalar token. A token never contains
+# ``<``, so it cannot swallow the start of a ``<|"|>`` string delimiter.
+_GEMMA_NAME_STOP = frozenset("{}[]<>:,")
+_GEMMA_TOKEN_STOP = frozenset('{}[]<>:,"')
+_GEMMA_LITERALS: dict[str, object] = {"true": True, "false": False, "null": None}
+# The JSON number grammar: no leading zeros, no bare ``1.``/``.5``, no ``NaN``.
+_GEMMA_NUMBER_RE = re.compile(r"-?(?:0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?")
+# Nesting bound for objects and arrays (the argument object is depth 1).
+_MAX_GEMMA_DEPTH = _MAX_SCHEMA_DEPTH
+
+
+def _gemma_error(reason: str) -> ValueError:
+    return ValueError(f"malformed Gemma tool-call: {reason}")
+
+
+class _GemmaArgumentParser:
+    """Single-pass recursive-descent reader for a Gemma 4 argument object.
+
+    Each method takes the position to read from and returns ``(value, next
+    position)``. Every character is read once, nesting is bounded by
+    ``_MAX_GEMMA_DEPTH`` and any deviation from the grammar raises.
+    """
+
+    def __init__(self, text: str, schemas: ToolSchemas, name: str) -> None:
+        self.text = text
+        self.schemas = schemas
+        self.name = name
+
+    def skip(self, pos: int) -> int:
+        return _skip_whitespace(self.text, pos)
+
+    def token(self, pos: int) -> tuple[str, int]:
+        """Read a bare token: a run of characters that are neither whitespace nor structural."""
+        text = self.text
+        end = pos
+        while end < len(text) and not text[end].isspace() and text[end] not in _GEMMA_TOKEN_STOP:
+            end += 1
+        return text[pos:end], end
+
+    def string(self, pos: int) -> tuple[str, int]:
+        """Read a ``<|"|>``-delimited string. The format has no escapes, so the text is kept exactly."""
+        start = pos + len(_GEMMA_STRING)
+        end = self.text.find(_GEMMA_STRING, start)
+        if end == -1:
+            raise _gemma_error("unterminated string")
+        return self.text[start:end], end + len(_GEMMA_STRING)
+
+    def key(self, pos: int) -> tuple[str, int]:
+        if self.text.startswith(_GEMMA_STRING, pos):
+            return self.string(pos)
+        key, end = self.token(pos)
+        if not key:
+            raise _gemma_error(f"expected an argument key at offset {pos}")
+        return key, end
+
+    def read_object(self, pos: int, depth: int, *, top_level: bool = False) -> tuple[dict[str, object], int]:
+        if depth > _MAX_GEMMA_DEPTH:
+            raise _gemma_error(f"nesting deeper than {_MAX_GEMMA_DEPTH} levels")
+        result: dict[str, object] = {}
+        pos = self.skip(pos + 1)
+        if self.text.startswith("}", pos):
+            return result, pos + 1
+        while True:
+            key, pos = self.key(pos)
+            pos = self.skip(pos)
+            if not self.text.startswith(":", pos):
+                raise _gemma_error(f"expected ':' after key {key[:64]!r}")
+            pos = self.skip(pos + 1)
+            if key in result:
+                raise _gemma_error(f"duplicate key {key[:64]!r}")
+            if top_level:
+                if len(result) >= _MAX_XML_PARAMS:
+                    raise _gemma_error(f"more than {_MAX_XML_PARAMS} arguments")
+                result[key], pos = self.argument(pos, key)
+            else:
+                result[key], pos = self.value(pos, depth)
+            pos = self.skip(pos)
+            if self.text.startswith(",", pos):
+                pos = self.skip(pos + 1)
+                continue
+            if self.text.startswith("}", pos):
+                return result, pos + 1
+            raise _gemma_error(f"expected ',' or '}}' at offset {pos}")
+
+    def read_array(self, pos: int, depth: int) -> tuple[list[object], int]:
+        if depth > _MAX_GEMMA_DEPTH:
+            raise _gemma_error(f"nesting deeper than {_MAX_GEMMA_DEPTH} levels")
+        result: list[object] = []
+        pos = self.skip(pos + 1)
+        if self.text.startswith("]", pos):
+            return result, pos + 1
+        while True:
+            item, pos = self.value(pos, depth)
+            result.append(item)
+            pos = self.skip(pos)
+            if self.text.startswith(",", pos):
+                pos = self.skip(pos + 1)
+                continue
+            if self.text.startswith("]", pos):
+                return result, pos + 1
+            raise _gemma_error(f"expected ',' or ']' at offset {pos}")
+
+    def value(self, pos: int, depth: int) -> tuple[object, int]:
+        """Read one value held by a container at ``depth``, keeping its native type."""
+        if self.text.startswith(_GEMMA_STRING, pos):
+            return self.string(pos)
+        if self.text.startswith("{", pos):
+            return self.read_object(pos, depth + 1)
+        if self.text.startswith("[", pos):
+            return self.read_array(pos, depth + 1)
+        token, end = self.token(pos)
+        return _gemma_scalar(token, pos), end
+
+    def argument(self, pos: int, key: str) -> tuple[object, int]:
+        """Read one top-level argument, converted by its declared parameter type.
+
+        A quoted string for a string or undeclared parameter keeps its exact
+        text: unlike the XML formats, Gemma writes ``null`` unquoted, so a
+        quoted ``null`` is the word. A quoted string for any other declared
+        type goes through :func:`_convert_argument`, as in the XML formats. A
+        bare token for a parameter declared as a string keeps its exact text
+        (``zip:02134`` stays ``"02134"``); every other value keeps its native
+        type.
+        """
+        schema, root = _parameter_schema(self.schemas, self.name, key)
+        kind = None if schema is None else _schema_type(schema, root)
+        if self.text.startswith(_GEMMA_STRING, pos):
+            text, end = self.string(pos)
+            if kind is None or kind in _STRING_TYPES:
+                return text, end
+            return _convert_argument(text, schema, root), end
+        if kind in _STRING_TYPES:
+            token, end = self.token(pos)
+            if token:
+                return _convert_argument(token, schema, root), end
+        return self.value(pos, 1)
+
+
+def _gemma_scalar(word: str, pos: int) -> object:
+    """Parse a bare scalar: ``true``, ``false``, ``null`` or a JSON number. Nothing else is guessed."""
+    if word in _GEMMA_LITERALS:
+        return _GEMMA_LITERALS[word]
+    if not word:
+        raise _gemma_error(f"expected a value at offset {pos}")
+    match = _GEMMA_NUMBER_RE.fullmatch(word)
+    if match is None:
+        raise _gemma_error(f"unquoted value {word[:64]!r}")
+    try:
+        if match.group(1) is None and match.group(2) is None:
+            return int(word)
+        number = float(word)
+    except ValueError as exc:  # an integer longer than Python's digit limit
+        raise _gemma_error(f"unrepresentable number {word[:64]!r}") from exc
+    if not math.isfinite(number):
+        raise _gemma_error(f"non-finite number {word[:64]!r}")
+    return number
+
+
+def _parse_gemma4_tool_call(raw: str, schemas: ToolSchemas | None = None) -> tuple[str, dict[str, object]]:
+    """Parse the Gemma 4 tool-call form (the text between ``<|tool_call>`` and ``<tool_call|>``).
+
+    Example::
+
+        call:get_weather{city:<|"|>Paris<|"|>,days:3,opts:{metric:true}}
+
+    The chat template renders arguments with sorted bare keys, strings between
+    ``<|"|>`` delimiters (with no escape mechanism), ``true``/``false``/``null``,
+    numbers, and nested ``{…}`` objects and ``[…]`` arrays. Keys may also be
+    ``<|"|>``-quoted, as the template's key-escaping form writes them, and
+    whitespace between tokens is ignored. The parse is strict: anything else,
+    including an unquoted word, a trailing comma or text after the argument
+    object, raises instead of guessing. Top-level arguments are converted by
+    their declared parameter type (see :meth:`_GemmaArgumentParser.argument`);
+    nested values keep their native types.
+
+    Known limitation: the block's end is located by searching for
+    ``<tool_call|>`` before this parse, so a string argument that contains that
+    text ends as a parse error, never as corrupted arguments.
+    """
+    text = raw.strip()
+    if not text.startswith(_GEMMA_CALL_PREFIX):
+        raise _gemma_error("expected 'call:NAME{...}'")
+    brace = text.find("{", len(_GEMMA_CALL_PREFIX))
+    if brace == -1:
+        raise _gemma_error("missing argument object")
+    name = text[len(_GEMMA_CALL_PREFIX) : brace].rstrip()
+    if not name or any(char.isspace() or char in _GEMMA_NAME_STOP for char in name):
+        raise _gemma_error("invalid function name")
+    parser = _GemmaArgumentParser(text, schemas or {}, name)
+    arguments, end = parser.read_object(brace, 1, top_level=True)
+    if parser.skip(end) != len(text):
+        raise _gemma_error(f"unexpected text after the argument object at offset {end}")
     return name, arguments
 
 
