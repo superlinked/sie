@@ -1,6 +1,8 @@
 import asyncio
 import gc
 import itertools
+import threading
+import time
 import weakref
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -46,6 +48,7 @@ class _Device:
         self._after_unload: dict[str, Callable[[], None]] = {}
         self.adapters: dict[str, list[MagicMock]] = {}
         self.stranded_bytes: list[int] = []
+        self.failed_loads: list[str] = []
 
     def used_bytes(self) -> int:
         return sum(self._held.values()) + sum(self._partial.values())
@@ -78,6 +81,7 @@ class _Device:
             if footprint > free:
                 partial = _Allocation(self._partial, free)
                 msg = f"CUDA out of memory. Tried to allocate {footprint - partial.nbytes} bytes"
+                self.failed_loads.append(name)
                 raise RuntimeError(msg)
             held[key] = footprint
 
@@ -349,3 +353,34 @@ async def test_retry_fails_when_the_last_unpinned_model_is_still_releasing_optio
     assert registry.loaded_model_names == ["pinned", "a"]
     done.set()
     await release
+
+
+async def test_cancelling_the_load_while_the_attempt_is_released_still_unloads_it() -> None:
+    device = _Device(total_bytes=10 * GIB)
+    registry = await _registry(
+        device,
+        {"pinned": 3 * GIB, "cold": 3 * GIB, "new": 5 * GIB},
+        pinned=["pinned"],
+        resident=["pinned", "cold"],
+    )
+    loop = asyncio.get_running_loop()
+    load = asyncio.ensure_future(registry.load_now("new", "cpu"))
+    cancelled = threading.Event()
+
+    def cancel_when_the_release_collects(phase: str, _info: dict[str, int]) -> None:
+        off_loop = threading.current_thread() is not threading.main_thread()
+        if phase == "start" and off_loop and "new" in device.failed_loads and not cancelled.is_set():
+            cancelled.set()
+            loop.call_soon_threadsafe(load.cancel)
+            time.sleep(0.05)
+
+    gc.callbacks.append(cancel_when_the_release_collects)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await load
+    finally:
+        gc.callbacks.remove(cancel_when_the_release_collects)
+
+    assert cancelled.is_set()
+    device.adapters["new"][0].unload.assert_called_once()
+    assert registry.loaded_model_names == ["pinned", "cold"]

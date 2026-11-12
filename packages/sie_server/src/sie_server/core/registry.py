@@ -175,6 +175,16 @@ def _adapter_has_releasable_memory(adapter: ModelAdapter) -> bool:
         return False
 
 
+def _collect_then_unload(adapter: ModelAdapter) -> None:
+    """Release a failed load: collect garbage, then ``unload()``.
+
+    The failed attempt's frames take two collector passes to free and
+    ``unload()`` runs one, so they would outlive its cache release.
+    """
+    gc.collect()
+    adapter.unload()
+
+
 def _adapter_load_required_bytes(adapter: ModelAdapter, memory_manager: MemoryManager) -> int | None:
     """Return an adapter-provided load-headroom estimate, if any."""
     stats = memory_manager.get_stats()
@@ -1842,8 +1852,7 @@ class ModelRegistry:
     def _release_failed_load_sync(self, adapter: ModelAdapter, name: str) -> bool:
         """Free the device memory a load that raised had already allocated; False if that raised."""
         try:
-            gc.collect()
-            adapter.unload()
+            _collect_then_unload(adapter)
         except Exception:
             logger.exception("Releasing the failed load of '%s' raised", name)
             return False
@@ -1852,10 +1861,7 @@ class ModelRegistry:
     async def _release_failed_load(self, adapter: ModelAdapter, name: str) -> bool:
         """Free the device memory a load that raised had already allocated; False if that raised."""
         try:
-            # The failed attempt's frames take two collector passes to free and
-            # ``unload()`` runs one, so they would outlive its cache release.
-            await asyncio.to_thread(gc.collect)
-            await self._run_adapter_unload(adapter, name)
+            await self._run_adapter_unload(adapter, name, teardown=functools.partial(_collect_then_unload, adapter))
         except Exception:
             logger.exception("Releasing the failed load of '%s' raised", name)
             return False
@@ -2163,8 +2169,10 @@ class ModelRegistry:
                 cleared += 1
         return cleared
 
-    async def _run_adapter_unload(self, adapter: ModelAdapter, name: str) -> None:
-        """Run the blocking ``adapter.unload()`` on a worker thread.
+    async def _run_adapter_unload(
+        self, adapter: ModelAdapter, name: str, *, teardown: Callable[[], None] | None = None
+    ) -> None:
+        """Run the blocking ``adapter.unload()``, or ``teardown`` in its place, on a worker thread.
 
         Shielded, and awaited again if we are cancelled. Once teardown has
         begun it must be allowed to finish: ``_finish_unload``'s ``finally``
@@ -2180,7 +2188,7 @@ class ModelRegistry:
         every adapter and is safe off the loop.
         """
         loop = asyncio.get_running_loop()
-        unload_future = loop.run_in_executor(None, adapter.unload)
+        unload_future = loop.run_in_executor(None, teardown or adapter.unload)
         try:
             await asyncio.shield(unload_future)
         except asyncio.CancelledError:
