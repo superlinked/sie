@@ -671,7 +671,22 @@ async def _parse_tool_call_stream_impl(
                 any_tool_call = False
                 for cand in chunk.candidates:
                     cand_text = cand.get("text", "") if isinstance(cand, dict) else ""
-                    parsed_text, parsed_calls = _parse_candidate_text(cand_text, tool_call_format, schemas)
+                    try:
+                        parsed_text, parsed_calls = _parse_candidate_text(
+                            cand_text,
+                            tool_call_format,
+                            schemas,
+                            parallel_tool_calls=parallel_tool_calls,
+                        )
+                    except _ParallelToolCallsViolatedError:
+                        logger.info(
+                            "parallel_tool_calls=false: candidate %d opened a second tool-call block; "
+                            "terminating with %s",
+                            len(updated_candidates),
+                            _PARALLEL_TOOL_CALLS_VIOLATED,
+                        )
+                        yield _parallel_tool_calls_violation_chunk()
+                        return
                     new_cand = dict(cand) if isinstance(cand, dict) else {}
                     if parsed_calls:
                         # OpenAI non-streaming shape: message.content=null,
@@ -783,10 +798,16 @@ async def _parse_tool_call_stream_impl(
     yield GenerationChunk(text_delta="", done=True, finish_reason="tool_calls" if any_tool else "stop")
 
 
+class _ParallelToolCallsViolatedError(Exception):
+    """A candidate opened a second tool-call block under ``parallel_tool_calls=false``."""
+
+
 def _parse_candidate_text(
     text: str,
     tool_call_format: ToolCallFormat,
     schemas: ToolSchemas | None = None,
+    *,
+    parallel_tool_calls: bool = True,
 ) -> tuple[str, list[dict]]:
     """Parse a single candidate's full text for ``<tool_call>`` blocks.
 
@@ -801,6 +822,10 @@ def _parse_candidate_text(
     candidate's text verbatim: the non-streaming path has no channel for
     a per-candidate parse error, and dropping the block would let a
     candidate whose only call was malformed finish as an ordinary answer.
+
+    With ``parallel_tool_calls=False``, a block opened after a parsed call
+    raises :class:`_ParallelToolCallsViolatedError`, the rule the streaming
+    path applies to each choice.
     """
     open_tag, close_tag = _tool_call_tags(tool_call_format)
     if not text or open_tag not in text:
@@ -814,6 +839,8 @@ def _parse_candidate_text(
         if open_idx == -1:
             out_text_parts.append(text[cursor:])
             break
+        if not parallel_tool_calls and tool_calls:
+            raise _ParallelToolCallsViolatedError
         out_text_parts.append(text[cursor:open_idx])
         body_start = open_idx + len(open_tag)
         close_idx = text.find(close_tag, body_start)

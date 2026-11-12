@@ -1088,3 +1088,93 @@ async def test_arguments_too_large_for_one_queue_message_end_with_a_parse_error(
     assert out[-1].error_code == "MODEL_OUTPUT_PARSE_ERROR"
     assert "bytes, exceeds" in (out[-1].error_message or "")
     assert not _deltas(out)
+
+
+def _hermes_call(name: str, **values: str) -> str:
+    return "<tool_call>" + json.dumps({"name": name, "arguments": values}) + "</tool_call>"
+
+
+_CANDIDATE_FORMATS = [
+    pytest.param("hermes_json", _hermes_call, id="hermes_json"),
+    pytest.param("qwen_xml", _qwen_call, id="qwen_xml"),
+]
+
+
+async def _parse_candidates(
+    texts: list[str], tool_call_format: str, *, parallel_tool_calls: bool
+) -> list[GenerationChunk]:
+    candidates = tuple({"text": text, "finish_reason": "stop", "logprobs": None} for text in texts)
+    return [
+        item
+        async for item in parse_tool_call_stream(
+            _chunks([GenerationChunk(text_delta="", done=True, finish_reason="stop", candidates=candidates)]),
+            tool_call_format=tool_call_format,
+            parallel_tool_calls=parallel_tool_calls,
+            tools=[_EDIT_TOOL],
+        )
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("tool_call_format", "call"), _CANDIDATE_FORMATS)
+async def test_non_streaming_candidate_with_a_second_call_violates_parallel_tool_calls(
+    tool_call_format: str, call
+) -> None:
+    out = await _parse_candidates(
+        [call("edit_file", path="a"), call("edit_file", path="b") + call("edit_file", path="c")],
+        tool_call_format,
+        parallel_tool_calls=False,
+    )
+
+    terminal = out[-1]
+    assert terminal.done is True
+    assert terminal.finish_reason == "error"
+    assert terminal.error_code == "parallel_tool_calls_violated"
+    assert not terminal.candidates
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("tool_call_format", "call"), _CANDIDATE_FORMATS)
+async def test_non_streaming_candidates_with_one_call_each_pass_parallel_tool_calls_false(
+    tool_call_format: str, call
+) -> None:
+    out = await _parse_candidates(
+        [call("edit_file", path="a"), "Calling " + call("edit_file", path="b") + " done"],
+        tool_call_format,
+        parallel_tool_calls=False,
+    )
+
+    terminal = out[-1]
+    assert terminal.error_code is None
+    assert terminal.finish_reason == "tool_calls"
+    assert [len(candidate["tool_calls"]) for candidate in terminal.candidates] == [1, 1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("tool_call_format", "call"), _CANDIDATE_FORMATS)
+async def test_non_streaming_candidate_keeps_every_call_when_parallel_tool_calls_is_true(
+    tool_call_format: str, call
+) -> None:
+    out = await _parse_candidates(
+        [call("edit_file", path="a") + call("edit_file", path="b")],
+        tool_call_format,
+        parallel_tool_calls=True,
+    )
+
+    (candidate,) = out[-1].candidates
+    assert [json.loads(tc["function"]["arguments"])["path"] for tc in candidate["tool_calls"]] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_candidate_with_a_malformed_first_block_keeps_one_call_under_parallel_false() -> None:
+    malformed = "<tool_call>{not json</tool_call>"
+    out = await _parse_candidates(
+        [malformed + _hermes_call("edit_file", path="a")],
+        "hermes_json",
+        parallel_tool_calls=False,
+    )
+
+    (candidate,) = out[-1].candidates
+    assert out[-1].error_code is None
+    assert candidate["text"] == malformed
+    assert [tc["function"]["name"] for tc in candidate["tool_calls"]] == ["edit_file"]
