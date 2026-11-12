@@ -21,8 +21,10 @@ GPU. One verification pass should confirm the backend accepts the pattern and th
 terminates cleanly before relying on forced ``tool_choice`` in
 production. The failure mode if a pattern is rejected is a clean
 ``grammar_compile_failed`` terminal chunk, not a crash. The ``gemma4``
-pattern likewise has its shape unit-tested but has not yet been run against
-the constrained-decoding backend with a Gemma 4 model.
+pattern was first run on GPU with a free argument body: xgrammar accepted it
+and forced calls stopped cleanly, except when the model did not want the call
+(see :func:`_gemma4_force_regex`). The stricter body that fixes that case is
+unit-tested for shape and still needs its own GPU pass.
 """
 
 from __future__ import annotations
@@ -245,12 +247,21 @@ def _gemma4_force_regex(names: list[str]) -> str:
 
         <|tool_call>call:NAME{KEY:<|"|>VALUE<|"|>,KEY:42}<tool_call|>
 
-    The pattern pins ``NAME`` to the allowed set and leaves the argument body
-    free, as the Qwen and Hermes patterns do. With the default non-thinking
-    prompt the generation prompt already closes the empty thought channel, so
-    the output starts right at the call. Nothing optional precedes, separates
-    or follows the blocks: greedy decoding fills optional whitespace up to the
-    token limit.
+    The pattern pins ``NAME`` to the allowed set in every block. Nothing
+    optional precedes, separates or follows the blocks: greedy decoding fills
+    optional whitespace up to the token limit.
+
+    Unlike the Qwen and Hermes patterns, the argument body is not free text.
+    With a free body, a Gemma 4 model that was forced to call a tool it did not
+    want wrote ``}</tool_call>`` and then prose up to the token limit, which
+    never closes the block. So outside ``<|"|>`` strings the body admits no
+    whitespace, no ``"`` and no ``<``: after the arguments the only way on is
+    the closing ``<tool_call|>``. Strings stay free except that they cannot
+    contain ``<|`` or end with ``<``, which keeps the string delimiter
+    unambiguous without lookahead. Values are not otherwise checked; the
+    parser still validates the call.
     """
-    block = r"<\|tool_call>call:" + _name_alternation(names) + r"\{" + _INNER + r"\}<tool_call\|>"
+    string = r'<\|"\|>(?:[^<]|<+[^|<])*<\|"\|>'
+    body = r'(?:[^\s<"]|' + string + r")*"
+    block = r"<\|tool_call>call:" + _name_alternation(names) + r"\{" + body + r"\}<tool_call\|>"
     return r"(?:" + block + r")+"
