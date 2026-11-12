@@ -424,11 +424,17 @@ next section for the `RESOURCE_EXHAUSTED` budget):
   `ResourceExhaustedError` when retries run out. Pass
   `max_oom_retries=0` to disable these retries and fail fast.
 
-Admission rejections happen before any work is dispatched, so every call
-retries them within `provision_timeout_s`, honouring `Retry-After`:
-`429 RATE_LIMIT`, `503 QUEUE_FULL`, and the gateway's queue backpressure,
-a `503 QUEUE_UNAVAILABLE` that carries `Retry-After`. A
-`QUEUE_UNAVAILABLE` without `Retry-After` is terminal.
+Admission rejections happen before any work is dispatched, so every
+inference call retries them within `provision_timeout_s`, honouring
+`Retry-After` (`estimate()` raises them without retrying):
+`429 RATE_LIMIT`, `503 QUEUE_FULL`, `503 BILLING_CAPACITY_UNAVAILABLE`,
+and the gateway's queue backpressure, a `503 QUEUE_UNAVAILABLE` that
+carries `Retry-After`. A `QUEUE_UNAVAILABLE` without `Retry-After` is
+terminal. On SIE Cloud, `429 RATE_LIMIT` means the API key or its account
+has reached its limit on requests in flight or per second, and
+`503 BILLING_CAPACITY_UNAVAILABLE` means the gateway could not reserve
+billing capacity for the request in time. Neither means the credit
+balance ran out, and neither is billed.
 [`packages/wire-fixtures/retry_classification.json`](../wire-fixtures/retry_classification.json)
 lists how each response is classified; the Python and TypeScript SDKs
 both test against it.
