@@ -1,7 +1,7 @@
 sie_id: PelaAI/KnowLine-31B-Gen1
 pool: decision
 hf_id: PelaAI/KnowLine-31B-Gen1
-hf_revision: 8f052a8130e599b53e5324c34f0f5ff90696e1c6
+hf_revision: a45b64060e1d6928e7e20bdffd2c482e4ebf7de6
 inputs:
   text: true
   image: false
