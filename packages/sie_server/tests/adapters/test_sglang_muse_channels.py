@@ -314,7 +314,7 @@ def test_worker_pipeline_converts_arguments_by_their_declared_type() -> None:
     assert json.loads(deltas[1].arguments_delta) == {"days": 3}
 
 
-def test_reasoning_that_uses_the_whole_budget_is_an_explicit_error() -> None:
+def test_reasoning_that_uses_the_whole_budget_keeps_the_length_finish() -> None:
     stream = suppress_thinking_blocks(
         translate_muse_channels(_chunks(" to=self<|message|>Still", finish_reason="length"))
     )
@@ -322,7 +322,8 @@ def test_reasoning_that_uses_the_whole_budget_is_an_explicit_error() -> None:
     chunks = asyncio.run(_collect(stream))
 
     assert _text(chunks) == ""
-    assert chunks[-1].error_code == "empty_model_output"
+    assert chunks[-1].finish_reason == "length"
+    assert chunks[-1].error_code is None
 
 
 def test_adapter_translates_what_the_base_adapter_streams() -> None:

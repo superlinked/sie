@@ -5012,6 +5012,27 @@ async def test_queued_chat_include_reasoning_still_fails_an_answer_that_is_only_
     nc, proc = _reasoning_processor(
         monkeypatch,
         [
+            GenerationChunk(text_delta="thinking and then stopping", is_first=True),
+            GenerationChunk(text_delta="", done=True, finish_reason="stop", prompt_tokens=1, completion_tokens=8),
+        ],
+    )
+
+    await proc.process(_make_msg(_reasoning_work(stream=True)), "Qwen/Qwen3.5-4B")
+
+    decoded = _decode_chunks(nc)
+    assert "".join(chunk.get("reasoning_delta", "") for chunk in decoded) == "thinking and then stopping"
+    assert not any(chunk.get("text_delta") for chunk in decoded)
+    assert decoded[-1]["done"] is True
+    assert decoded[-1]["error"]["code"] == "empty_model_output"
+
+
+@pytest.mark.asyncio
+async def test_queued_chat_include_reasoning_reports_truncated_reasoning_as_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    nc, proc = _reasoning_processor(
+        monkeypatch,
+        [
             GenerationChunk(text_delta="thinking until the budget ends", is_first=True),
             GenerationChunk(text_delta="", done=True, finish_reason="length", prompt_tokens=1, completion_tokens=8),
         ],
@@ -5023,4 +5044,5 @@ async def test_queued_chat_include_reasoning_still_fails_an_answer_that_is_only_
     assert "".join(chunk.get("reasoning_delta", "") for chunk in decoded) == "thinking until the budget ends"
     assert not any(chunk.get("text_delta") for chunk in decoded)
     assert decoded[-1]["done"] is True
-    assert decoded[-1]["error"]["code"] == "empty_model_output"
+    assert decoded[-1]["finish_reason"] == "length"
+    assert "error" not in decoded[-1]

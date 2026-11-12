@@ -773,13 +773,15 @@ async def suppress_thinking_blocks(
     Closing the wrapper eagerly closes the upstream adapter iterator so client
     cancellation still reaches SGLang's ``/abort_request`` cleanup.
 
-    A stream that terminates without ever producing meaningful visible output
-    (no non-whitespace text on any choice or candidate, no tool calls) is
-    stamped with ``error_code="empty_model_output"`` on the terminal chunk —
-    e.g. when private reasoning consumed the entire generation budget. Without
-    the stamp such a request settles as a nominally successful but unusable
+    A stream that stops without ever producing meaningful visible output (no
+    non-whitespace text on any choice or candidate, no tool calls) is stamped
+    with ``error_code="empty_model_output"`` on the terminal chunk. Without the
+    stamp such a request settles as a nominally successful but unusable
     response that clients cannot distinguish from a real answer (#3104/#3136).
-    Cancelled and already-errored terminals are left untouched.
+    A ``length`` terminal keeps its finish reason even when private reasoning
+    consumed the whole budget: ``length`` already reports the truncation, as
+    the OpenAI contract does for reasoning models. Cancelled and
+    already-errored terminals are left untouched.
     """
     states: dict[int, ThinkingBlockStripper] = {}
     emitted_visible_text = False
@@ -856,10 +858,10 @@ async def suppress_thinking_blocks(
                 and not emitted_meaningful_text
                 and not emitted_tool_call
                 and rewritten.error_code is None
-                and rewritten.finish_reason in ("stop", "length")
+                and rewritten.finish_reason == "stop"
                 and not _candidates_have_visible_text(rewritten.candidates)
             ):
-                reason = " (private reasoning consumed the generation budget)" if hid_reasoning else ""
+                reason = " (the model produced only private reasoning)" if hid_reasoning else ""
                 rewritten = replace(
                     rewritten,
                     finish_reason="error",

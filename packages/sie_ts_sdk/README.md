@@ -160,8 +160,9 @@ Granite Guardian's shipped risk dimension is `harm`; requesting another
 dimension in prompt text does not change it. Valid thresholded verdicts are
 `Yes` (unsafe) and `No` (safe); missing or invalid verdicts fail with
 `invalid_guard_verdict`. Never interpret an error or empty output as safe.
-Reasoning remains private; a budget exhausted without usable output fails with
-`empty_model_output`.
+Reasoning remains private. A budget exhausted during reasoning returns an empty
+answer whose finish reason is `"length"`; a model that stops without usable output
+fails with `empty_model_output`.
 
 ```typescript
 // Aggregated result

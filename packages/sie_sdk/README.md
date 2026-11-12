@@ -247,8 +247,9 @@ different dimension does not change that setting. Its configured threshold
 produces `Yes` (unsafe) or `No` (safe). A missing or invalid verdict returns
 `invalid_guard_verdict`; never treat an error or an empty response as safe.
 Private reasoning is hidden on both input surfaces. If it consumes the entire
-generation budget without usable output, the request fails with
-`empty_model_output`.
+generation budget, the answer is empty with `finish_reason` `"length"`; raise
+`max_tokens` to leave room for the answer. A model that stops without usable
+output fails with `empty_model_output`.
 
 ## Connecting to SIE Serverless or a managed gateway
 
@@ -466,10 +467,11 @@ the dropped items when every submitted item carried an `id`.
 
 Two generation-specific errors are terminal and never retried:
 
-- `empty_model_output` — the generation finished nominally but produced
-  no visible output text (for example, private reasoning consumed the
-  whole token budget). Tokens were genuinely consumed, so the request
-  is not re-run. Surfaces as `ServerError` with
+- `empty_model_output` — the generation stopped but produced no visible
+  output text (for example, the model emitted only private reasoning).
+  Tokens were genuinely consumed, so the request is not re-run. A
+  budget that runs out during reasoning is not this error: the answer
+  is empty with `finish_reason` `"length"`. Surfaces as `ServerError` with
   `code == "empty_model_output"`; on streaming calls it is raised
   mid-stream with the gateway request id attached for correlation.
 - `MODEL_OUTPUT_PARSE_ERROR` — a strict grammar (`grammar.strict` or

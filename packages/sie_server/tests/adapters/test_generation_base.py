@@ -292,8 +292,8 @@ async def test_suppress_thinking_blocks_hides_truncated_reasoning_and_its_logpro
     assert normalized[0].is_first is False
     assert normalized[0].logprobs is None
     assert normalized[1].done is True
-    assert normalized[1].finish_reason == "error"
-    assert normalized[1].error_code == "empty_model_output"
+    assert normalized[1].finish_reason == "length"
+    assert normalized[1].error_code is None
     assert normalized[1].completion_tokens == 2
     assert normalized[1].text_delta == ""
     assert normalized[1].logprobs is None
@@ -474,15 +474,37 @@ async def test_suppress_thinking_blocks_surfaces_standalone_close_failure() -> N
 
 
 @pytest.mark.asyncio
-async def test_reasoning_consuming_the_whole_budget_stamps_empty_output_error() -> None:
-    """#3104/#3136: budget exhausted inside a think block -> only whitespace is
-    visible and the terminal chunk must carry the typed empty-output error.
+async def test_reasoning_consuming_the_whole_budget_keeps_the_length_finish() -> None:
+    """Budget exhausted inside a think block: ``length`` already reports the
+    truncation, so the terminal keeps it instead of an empty-output error.
     """
     source = _chunks(
         GenerationChunk(text_delta="\n\n", is_first=True),
         GenerationChunk(text_delta="<think>"),
         GenerationChunk(text_delta="private reasoning that never closes"),
         GenerationChunk(text_delta="", done=True, finish_reason="length", completion_tokens=32),
+    )
+
+    normalized = [chunk async for chunk in suppress_thinking_blocks(source)]
+
+    assert "".join(chunk.text_delta for chunk in normalized) == "\n\n"
+    terminal = normalized[-1]
+    assert terminal.done is True
+    assert terminal.finish_reason == "length"
+    assert terminal.error_code is None
+    assert terminal.error_message is None
+    assert terminal.completion_tokens == 32
+
+
+@pytest.mark.asyncio
+async def test_reasoning_only_answer_that_stops_stamps_empty_output_error() -> None:
+    """#3104/#3136: a model that stops after only private reasoning must not
+    settle as a nominally successful empty answer.
+    """
+    source = _chunks(
+        GenerationChunk(text_delta="\n\n", is_first=True),
+        GenerationChunk(text_delta="<think>private reasoning</think>"),
+        GenerationChunk(text_delta="", done=True, finish_reason="stop", completion_tokens=32),
     )
 
     normalized = [chunk async for chunk in suppress_thinking_blocks(source)]
@@ -573,7 +595,27 @@ async def test_candidates_with_visible_text_are_not_stamped() -> None:
 
 @pytest.mark.asyncio
 async def test_candidates_all_reasoning_are_stamped() -> None:
-    """Non-streaming n>1 where every candidate was reasoning-only."""
+    """Non-streaming n>1 where every candidate stopped after reasoning only."""
+    terminal = GenerationChunk(
+        text_delta="",
+        done=True,
+        finish_reason="stop",
+        candidates=(
+            {"index": 0, "text": "<think>reasoning</think>", "finish_reason": "stop"},
+            {"index": 1, "text": "<think>more reasoning</think>", "finish_reason": "stop"},
+        ),
+    )
+
+    [normalized] = [chunk async for chunk in suppress_thinking_blocks(_chunks(terminal))]
+
+    assert normalized.error_code == "empty_model_output"
+    assert normalized.error_message is not None
+    assert "reasoning" in normalized.error_message
+
+
+@pytest.mark.asyncio
+async def test_truncated_reasoning_candidates_keep_the_length_finish() -> None:
+    """Non-streaming n>1 where every candidate ran out of budget while reasoning."""
     terminal = GenerationChunk(
         text_delta="",
         done=True,
@@ -586,9 +628,9 @@ async def test_candidates_all_reasoning_are_stamped() -> None:
 
     [normalized] = [chunk async for chunk in suppress_thinking_blocks(_chunks(terminal))]
 
-    assert normalized.error_code == "empty_model_output"
-    assert normalized.error_message is not None
-    assert "reasoning" in normalized.error_message
+    assert normalized.finish_reason == "length"
+    assert normalized.error_code is None
+    assert [candidate["text"] for candidate in normalized.candidates or ()] == ["", ""]
 
 
 @pytest.mark.asyncio
@@ -710,7 +752,8 @@ async def test_suppress_thinking_blocks_keeps_truncated_reasoning_when_asked() -
 
     assert "".join(chunk.reasoning_delta for chunk in kept) == "cut off mid"
     assert "".join(chunk.text_delta for chunk in kept) == ""
-    assert kept[-1].error_code == "empty_model_output"
+    assert kept[-1].finish_reason == "length"
+    assert kept[-1].error_code is None
 
 
 @pytest.mark.asyncio
