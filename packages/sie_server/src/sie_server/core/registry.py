@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import gc
 import hashlib
 import json
 import logging
@@ -73,6 +74,8 @@ logger = logging.getLogger(__name__)
 _ERR_MODEL_NOT_FOUND = "Model '{name}' not found in registry"
 _ERR_MODEL_NOT_LOADED = "Model '{name}' is not loaded"
 _ERR_MODEL_ALREADY_LOADED = "Model '{name}' is already loaded"
+_ERR_OOM_RELEASE_FAILED = "{oom}; releasing the failed attempt raised, so no model was evicted to retry it"
+_ERR_OOM_ONLY_RELEASING = "{oom}; the unpinned models left are still releasing optional memory"
 
 _ENGINE_STABLE_UPTIME_S = 600.0
 # Same bound as ``evict_lru_excluding``'s load-lock wait. A graph drop finishes
@@ -1556,9 +1559,12 @@ class ModelRegistry:
                         logger.error("OOM loading '%s' but no non-pinned models to evict", name)
                         self._release_failed_load_sync(adapter, name)
                         raise
+                    oom_message = str(exc)
                 # The failed attempt's traceback holds what it allocated,
                 # so it is released only once the except clause has ended.
-                self._release_failed_load_sync(adapter, name)
+                if not self._release_failed_load_sync(adapter, name):
+                    msg = _ERR_OOM_RELEASE_FAILED.format(oom=oom_message)
+                    raise RuntimeError(msg)
                 evicted = False
                 while not evicted or memory_manager.get_stats().available_bytes < 2 * attempt_free_bytes:
                     lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
@@ -1783,10 +1789,15 @@ class ModelRegistry:
                                 logger.error("OOM loading '%s' but no non-pinned models to evict", name)
                                 await self._release_failed_load(adapter, name)
                                 raise
+                            oom_message = str(e)
                         # The failed attempt's traceback holds what it allocated,
                         # so it is released only once the except clause has ended.
-                        await self._release_failed_load(adapter, name)
-                        await self._evict_for_load_retry(name, memory_manager, 2 * attempt_free_bytes)
+                        if not await self._release_failed_load(adapter, name):
+                            msg = _ERR_OOM_RELEASE_FAILED.format(oom=oom_message)
+                            raise RuntimeError(msg)
+                        if not await self._evict_for_load_retry(name, memory_manager, 2 * attempt_free_bytes):
+                            msg = _ERR_OOM_ONLY_RELEASING.format(oom=oom_message)
+                            raise RuntimeError(msg)
                         adapter = await self._loader.instantiate_adapter_async(name, config, model_dir, load_device)
 
                     async with lock:
@@ -1828,47 +1839,76 @@ class ModelRegistry:
                 # Always clear loading state when done (success or failure)
                 self._loading.discard(name)
 
-    def _release_failed_load_sync(self, adapter: ModelAdapter, name: str) -> None:
-        """Free the device memory a load that raised had already allocated."""
+    def _release_failed_load_sync(self, adapter: ModelAdapter, name: str) -> bool:
+        """Free the device memory a load that raised had already allocated; False if that raised."""
         try:
+            gc.collect()
             adapter.unload()
-        except Exception:  # noqa: BLE001 - the load's own error is the one that is reported
-            logger.warning("Releasing the failed load of '%s' raised; continuing", name, exc_info=True)
+        except Exception:
+            logger.exception("Releasing the failed load of '%s' raised", name)
+            return False
+        return True
 
-    async def _release_failed_load(self, adapter: ModelAdapter, name: str) -> None:
-        """Free the device memory a load that raised had already allocated."""
+    async def _release_failed_load(self, adapter: ModelAdapter, name: str) -> bool:
+        """Free the device memory a load that raised had already allocated; False if that raised."""
         try:
+            # The failed attempt's frames take two collector passes to free and
+            # ``unload()`` runs one, so they would outlive its cache release.
+            await asyncio.to_thread(gc.collect)
             await self._run_adapter_unload(adapter, name)
-        except Exception:  # noqa: BLE001 - the load's own error is the one that is reported
-            logger.warning("Releasing the failed load of '%s' raised; continuing", name, exc_info=True)
+        except Exception:
+            logger.exception("Releasing the failed load of '%s' raised", name)
+            return False
+        return True
 
-    async def _evict_for_load_retry(self, name: str, memory_manager: MemoryManager, target_free_bytes: int) -> None:
-        """Evict LRU non-pinned models until ``target_free_bytes`` are free, evicting at least one."""
+    async def _evict_for_load_retry(self, name: str, memory_manager: MemoryManager, target_free_bytes: int) -> bool:
+        """Evict LRU non-pinned models until ``target_free_bytes`` are free; False if none could be evicted.
+
+        A model whose optional-memory release is still running is skipped, as
+        the memory monitor skips it: its unload would join the inference
+        thread that release holds. When only such models are left, their
+        releases are awaited once, up to the release bound.
+        """
         lock = self._get_load_lock()
         evicted = False
+        awaited_releases = False
         while True:
             await self._wait_for_unloads()
             async with lock:
                 stats = memory_manager.get_stats()
                 if evicted and stats.available_bytes >= target_free_bytes:
-                    return
-                lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
+                    return True
+                lru_model = memory_manager.get_lru_model(
+                    exclude=self._pinned_models | self._optional_release_inflight()
+                )
                 if lru_model is None:
-                    return
-                if lru_model not in self._loaded:
+                    resident = set(memory_manager.loaded_models)
+                    releasing = [
+                        task
+                        for model, task in self._optional_release_tasks.items()
+                        if not task.done() and model in resident and model.lower() not in self._pinned_models
+                    ]
+                    if awaited_releases or not releasing:
+                        return evicted
+                elif lru_model not in self._loaded:
                     logger.warning(
                         "Evictor found ghost '%s' (in memory manager, not loaded); dropping stale entry",
                         lru_model,
                     )
                     memory_manager.unregister_model(lru_model)
                     continue
-                logger.warning(
-                    "OOM loading '%s': %.2f GB free, retrying with %.2f GB free; evicting '%s'",
-                    name,
-                    stats.available_gb,
-                    target_free_bytes / (1024**3),
-                    lru_model,
-                )
+                else:
+                    logger.warning(
+                        "OOM loading '%s': %.2f GB free, retrying with %.2f GB free; evicting '%s'",
+                        name,
+                        stats.available_gb,
+                        target_free_bytes / (1024**3),
+                        lru_model,
+                    )
+            if lru_model is None:
+                awaited_releases = True
+                await asyncio.wait(releasing, timeout=_OPTIONAL_MEMORY_RELEASE_TIMEOUT_S)
+                continue
             await self._do_unload(lru_model, reason="load_oom")
             evicted = True
 
