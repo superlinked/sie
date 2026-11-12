@@ -58,6 +58,8 @@ def test_qwen38_uses_the_pinned_official_fp8_checkpoint() -> None:
         "h100-256k-thinking",
         "h100-256k-thinking-no-spec",
         "thinking",
+        "rtx-pro-6000-32k-thinking-bounded-rlm",
+        "rtx-pro-6000-32k-thinking-bounded-rlm-no-spec",
     }
 
 
@@ -273,6 +275,67 @@ def test_qwen38_h100_batch_grammar_requests_stay_on_the_batch_launch() -> None:
     assert (
         resolve_grammar_serving_model(registry, f"{_MODEL_ID}:h100-256k-batch-no-spec")
         == f"{_MODEL_ID}:h100-256k-batch-no-spec"
+    )
+
+
+def test_qwen38_rtx_rlm_profile_is_the_rtx_no_spec_launch_with_bounded_thinking_and_64_requests() -> None:
+    config = load_model_config(_MODEL_PATH)
+    configs = expand_profile_variants([config])
+    single = config.resolve_profile("rtx-pro-6000-256k-no-spec")
+    rlm = config.resolve_profile("rtx-pro-6000-32k-thinking-bounded-rlm")
+    twin = config.resolve_profile("rtx-pro-6000-32k-thinking-bounded-rlm-no-spec")
+
+    assert rlm.grammar_profile == "rtx-pro-6000-32k-thinking-bounded-rlm-no-spec"
+    assert twin.grammar_profile is None
+    assert twin.loadtime == rlm.loadtime
+    assert twin.runtime == rlm.runtime
+    assert rlm.adapter_path == _THINKING_ADAPTER
+    assert rlm.loadtime["speculative"] == {"enabled": False}
+    assert rlm.loadtime["reasoning_parser"] == "qwen3"
+    assert rlm.loadtime["max_seq_length"] == 32768
+    assert rlm.loadtime["extra_env"] == single.loadtime["extra_env"] | {"SGLANG_MAX_THINK_TOKENS": "4096"}
+    # SIE admits more reserved tokens than one window; SGLang queues what its KV pool cannot hold.
+    assert rlm.kv_budget_tokens == 1048576
+    assert rlm.max_batch_tokens == single.max_batch_tokens
+
+    # The only launch differences from the single-request RTX lane: up to 64
+    # running requests and decode CUDA graphs captured through batch 64.
+    args = list(rlm.loadtime["extra_launch_args"])
+    assert args[args.index("--max-running-requests") + 1] == "64"
+    assert args[args.index("--cuda-graph-max-bs-decode") + 1] == "64"
+    single_args = list(single.loadtime["extra_launch_args"])
+    for flag in ("--max-running-requests", "--cuda-graph-max-bs-decode"):
+        args[args.index(flag) + 1] = single_args[single_args.index(flag) + 1]
+    assert args == single_args
+    unchanged = {"extra_launch_args": None, "extra_env": None, "max_seq_length": None, "reasoning_parser": None}
+    assert rlm.loadtime | unchanged == single.loadtime | unchanged
+
+    assert rlm.runtime["default_sampling"] == {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "presence_penalty": 0.0,
+    }
+    assert rlm.runtime | {"default_sampling": None} == single.runtime | {"default_sampling": None}
+
+    for name in ("rtx-pro-6000-32k-thinking-bounded-rlm", "rtx-pro-6000-32k-thinking-bounded-rlm-no-spec"):
+        variant = configs[f"{_MODEL_ID}:{name}"]
+        assert variant.tasks.generate is not None
+        assert variant.tasks.generate.context_length == 32768
+        assert variant.tasks.generate.max_output_tokens == 8192
+        assert variant.tasks.generate.chat_template_kwargs == {"enable_thinking": True}
+
+
+def test_qwen38_rtx_rlm_grammar_requests_stay_on_the_rlm_launch() -> None:
+    registry = _ConfigRegistry()
+
+    assert (
+        resolve_grammar_serving_model(registry, f"{_MODEL_ID}:rtx-pro-6000-32k-thinking-bounded-rlm")
+        == f"{_MODEL_ID}:rtx-pro-6000-32k-thinking-bounded-rlm-no-spec"
+    )
+    assert (
+        resolve_grammar_serving_model(registry, f"{_MODEL_ID}:rtx-pro-6000-32k-thinking-bounded-rlm-no-spec")
+        == f"{_MODEL_ID}:rtx-pro-6000-32k-thinking-bounded-rlm-no-spec"
     )
 
 

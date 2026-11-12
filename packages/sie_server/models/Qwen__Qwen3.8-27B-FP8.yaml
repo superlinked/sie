@@ -545,3 +545,73 @@ profiles:
           - "1"
           - "--cuda-graph-max-bs-decode"
           - "1"
+
+  # RTX PRO 6000 96GB recursive-language-model (RLM) lane: many short thinking
+  # calls at once. The rtx-pro-6000-256k launch shape without speculation, plus
+  # the strict-thinking adapter and qwen3 reasoning parser with a hard
+  # 4,096-token thinking bound. Every RLM call fits 32,768 tokens, so the window
+  # is capped there and up to 64 requests run at once (decode CUDA graphs to 64);
+  # SIE admits up to 1,048,576 reserved tokens and SGLang queues what its KV
+  # pool cannot hold. Sampling is the model card's thinking recipe. Measured on
+  # replayed RLM requests (about 20 per trace, 9K prompt and 2.4K completion
+  # tokens on average): 2.97 GPU-minutes per trace at 8 in flight, 1.32 at 32
+  # and 1.19 at 64; a real run of 100 traces, 32 at a time, used 1.27 per trace.
+  rtx-pro-6000-32k-thinking-bounded-rlm:
+    grammar_profile: rtx-pro-6000-32k-thinking-bounded-rlm-no-spec
+    max_output_tokens: 8192
+    max_batch_tokens: 262144
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang.cuda13:SGLangStrictThinkingAdapter
+    kv_budget_tokens: 1048576
+    chat_template_kwargs:
+      enable_thinking: true
+    adapter_options:
+      loadtime:
+        max_seq_length: 32768
+        mem_fraction_static: 0.85
+        served_model_name: Qwen/Qwen3.8-27B-FP8
+        attention_backend: flashinfer
+        grammar_backend: xgrammar
+        json_number_max_digits: 19
+        reasoning_parser: qwen3
+        tool_call_parser: qwen3_coder
+        extra_env:
+          SIE_SGLANG_SINGLE_IMAGE_MAX_PIXELS: "3211264"
+          SGLANG_JIT_DEEPGEMM_FAST_WARMUP: "1"
+          SGLANG_MAX_THINK_TOKENS: "4096"
+        speculative:
+          enabled: false
+        extra_launch_args:
+          - "--mm-process-config"
+          - '{"image":{"min_pixels":65536,"max_pixels":1003520}}'
+          - "--constrained-json-disable-any-whitespace"
+          - "--kv-cache-dtype"
+          - "bfloat16"
+          - "--mamba-ssm-dtype"
+          - "bfloat16"
+          - "--mamba-radix-cache-strategy"
+          - "extra_buffer"
+          - "--disable-overlap-schedule"
+          - "--page-size"
+          - "64"
+          - "--chunked-prefill-size"
+          - "2048"
+          - "--max-running-requests"
+          - "64"
+          - "--cuda-graph-max-bs-decode"
+          - "64"
+      runtime:
+        first_chunk_timeout_s: 900
+        inter_chunk_timeout_s: 30
+        overall_timeout_s: 1800
+        default_sampling:
+          temperature: 1.0
+          top_p: 0.95
+          top_k: 20
+          presence_penalty: 0.0
+        stop_tokens:
+          - "<|im_end|>"
+  # Constrained-decoding identity for the RLM lane; identical because the
+  # parent is already non-speculative and grammar-safe.
+  rtx-pro-6000-32k-thinking-bounded-rlm-no-spec:
+    extends: rtx-pro-6000-32k-thinking-bounded-rlm
