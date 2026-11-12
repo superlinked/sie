@@ -30,7 +30,11 @@ from sie_server.core.runtime_options import bound_generation, resolve_generation
 from sie_server.core.tokenizer import load_tokenizer
 from sie_server.processors.remote_chat import _check_tools
 from sie_server.processors.tool_call_grammar import normalize_tool_choice
-from sie_server.processors.tool_call_parser import ToolCallFormat, parse_tool_call_stream
+from sie_server.processors.tool_call_parser import (
+    ToolCallFormat,
+    parse_tool_call_stream,
+    tool_call_format_for_parser,
+)
 
 _MAX_PROMPT_BYTES = 4_000_000
 
@@ -41,19 +45,7 @@ def _tokenizer(source: str, revision: str | None) -> Any:
 
 
 def _tool_format(config: ModelConfig) -> ToolCallFormat:
-    parser = config.resolve_profile("default").loadtime.get("tool_call_parser")
-    if not isinstance(parser, str):
-        return "auto"
-    parser = parser.lower()
-    if parser == "qwen25" or "hermes" in parser:
-        return "hermes_json"
-    if parser.startswith("qwen"):
-        return "qwen_xml"
-    if parser.startswith("glm"):
-        return "glm_xml"
-    if parser == "muse":
-        return "muse_atem"
-    return "auto"
+    return tool_call_format_for_parser(config.resolve_profile("default").loadtime.get("tool_call_parser"))
 
 
 async def prepare_rendered_chat(
