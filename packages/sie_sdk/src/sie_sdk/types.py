@@ -325,6 +325,19 @@ class ModelDims(TypedDict, total=False):
     multivector: int
 
 
+class ModelReasoning(TypedDict, total=False):
+    """How a model's reasoning can be steered with the chat ``reasoning_effort`` field."""
+
+    effort: list[str]
+    """Accepted ``reasoning_effort`` values in OpenAI's order. Empty means the field is refused."""
+
+    default_effort: str | None
+    """The value the model runs at when a request names none, ``None`` when it is not a declared value."""
+
+    budget_tokens: dict[str, int]
+    """The hard reasoning-token ceiling of each value that has one. Other values only instruct the model."""
+
+
 class ModelCapabilities(TypedDict, total=False):
     """Advertised model capabilities.
 
@@ -348,6 +361,8 @@ class ModelCapabilities(TypedDict, total=False):
     tools: bool
     lora_adapters: list[str]
     profile_lora_adapters: dict[str, list[str]]
+    reasoning: ModelReasoning | None
+    """``None`` when nothing in the model's config lets it reason."""
     code: bool
     sql: bool
     guard: bool
@@ -453,6 +468,10 @@ class ModelInfo(TypedDict, total=False):
     outputs: list[str]  # ["dense"], ["dense", "sparse"], etc.
     dims: ModelDims
     max_sequence_length: int | None
+    context_length: int | None
+    """Prompt plus completion tokens the route admits, ``None`` without a generate task."""
+    max_output_tokens: int | None
+    """The largest output-token request the route admits, ``None`` without a generate task."""
     revision: str | None
     description: str
     """One line about the model; ``""`` when the catalog sets none."""

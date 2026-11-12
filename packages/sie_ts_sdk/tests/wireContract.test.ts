@@ -33,9 +33,11 @@ function jsonResponse(body: unknown): Response {
   });
 }
 
-/** The four top-level keys the client camelCases; everything else passes through. */
+/** The six top-level keys the client camelCases; everything else passes through. */
 const WIRE_TO_CLIENT_KEY: Record<string, string> = {
   max_sequence_length: "maxSequenceLength",
+  context_length: "contextLength",
+  max_output_tokens: "maxOutputTokens",
   last_error: "lastError",
   pending_generation: "pendingGeneration",
   release_date: "releaseDate",
@@ -72,6 +74,8 @@ const FULL_WIRE_ENTRY = {
   outputs: ["dense", "sparse"],
   dims: { dense: 1024, sparse: 250002 },
   max_sequence_length: 8192,
+  context_length: 8192,
+  max_output_tokens: 1024,
   revision: "5617a9f61b028005a4858fdac845db406aefb181",
   description: "BAAI/bge-m3: embedding and reranking model.",
   release_date: "2024-07-03",
@@ -189,6 +193,8 @@ describe("getModel wire mapping", () => {
         outputs: ["dense"],
         last_error: null,
         max_sequence_length: null,
+        context_length: null,
+        max_output_tokens: null,
         revision: null,
         capabilities: null,
       }),
@@ -198,6 +204,8 @@ describe("getModel wire mapping", () => {
 
     expect(model.lastError).toBeNull();
     expect(model.maxSequenceLength).toBeNull();
+    expect(model.contextLength).toBeNull();
+    expect(model.maxOutputTokens).toBeNull();
     expect(model.revision).toBeNull();
     expect(model.capabilities).toBeNull();
   });

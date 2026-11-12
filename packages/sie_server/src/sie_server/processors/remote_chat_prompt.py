@@ -78,6 +78,7 @@ async def prepare_rendered_chat(
         or mode in {"required", "named"}
         or (body.get("n") or 1) > 1
         or response_format.get("type", "text") != "text"
+        or body.get("reasoning_effort") is not None
         or body.get("logprobs")
         or body.get("logit_bias")
         or any(

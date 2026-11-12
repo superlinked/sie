@@ -280,10 +280,21 @@ def test_max_tokens_cuts_the_answer_with_a_max_tokens_stop(client: TestClient) -
 
 def test_a_translation_refusal_reaches_no_engine(client: TestClient, registry: MagicMock) -> None:
     registry.get.reset_mock()
+    response = _post(client, _body(output_config={"format": {"type": "json_schema"}}))
+
+    assert _error(response, 400, "invalid_request_error") == "output_config.format: Extra inputs are not permitted"
+    assert response.headers["x-sie-error-code"] == "INVALID_REQUEST"
+    registry.get.assert_not_called()
+
+
+def test_an_effort_the_model_does_not_accept_answers_the_recovery_wording(
+    client: TestClient, registry: MagicMock
+) -> None:
+    registry.get.reset_mock()
     response = _post(client, _body(output_config={"effort": "high"}))
 
     assert _error(response, 400, "invalid_request_error") == "output_config.effort: Extra inputs are not permitted"
-    assert response.headers["x-sie-error-code"] == "INVALID_REQUEST"
+    assert response.headers["x-sie-error-code"] == "unsupported_field"
     registry.get.assert_not_called()
 
 

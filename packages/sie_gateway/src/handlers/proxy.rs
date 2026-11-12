@@ -38,7 +38,9 @@ use crate::state::demand_tracker::PhysicalLane;
 use crate::state::model_registry::{ModelRegistry, ResolveError};
 use crate::state::pool_manager::{normalize_pool_name, PoolManager, DEFAULT_POOL_NAME};
 use crate::state::worker_registry::{QueueRoute, WorkerRegistry};
-use crate::types::model::FallbackTrigger;
+use crate::types::model::{
+    reasoning_effort_malformed_message, FallbackTrigger, REASONING_EFFORT_VALUES,
+};
 use crate::types::AuditEntry;
 
 use crate::middleware::auth::request_token_id;
@@ -6488,6 +6490,9 @@ struct ChatRequestParams {
     /// publish the model's reasoning as ``reasoning_content`` on the
     /// message and on stream deltas. Absent or ``false`` keeps it private.
     include_reasoning: Option<bool>,
+    /// OpenAI ``reasoning_effort``: one of OpenAI's values, checked against the
+    /// route's declaration before publication and resolved by the worker.
+    reasoning_effort: Option<String>,
     /// OpenAI ``stream`` flag. ``true`` switches the handler to the
     /// SSE response branch; ``false`` (default) uses the existing
     /// aggregating path. Parsed by :func:`chat_params_from_json`;
@@ -6572,6 +6577,7 @@ impl ChatRequestParams {
                 grammar: self.grammar,
                 schema_in_prompt: self.schema_in_prompt,
                 include_reasoning: self.include_reasoning,
+                reasoning_effort: self.reasoning_effort,
                 routing_key: self.routing_key.clone(),
                 prompt_cache_key: self.prompt_cache_key.clone(),
                 tools: self.tools,
@@ -7772,7 +7778,6 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
         "store",
         "service_tier",
         "prediction",
-        "reasoning_effort",
         "verbosity",
     ] {
         if obj.contains_key(fname) {
@@ -7845,6 +7850,21 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
             return bad(
                 "'include_reasoning' must be a boolean",
                 Some("include_reasoning"),
+                oai_code::INVALID_REQUEST,
+            );
+        }
+    };
+    let reasoning_effort = match obj.get("reasoning_effort") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(value))
+            if REASONING_EFFORT_VALUES.contains(&value.as_str()) =>
+        {
+            Some(value.clone())
+        }
+        Some(_) => {
+            return bad(
+                &reasoning_effort_malformed_message(),
+                Some("reasoning_effort"),
                 oai_code::INVALID_REQUEST,
             );
         }
@@ -7924,6 +7944,7 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
         "response_format",
         "schema_in_prompt",
         "include_reasoning",
+        "reasoning_effort",
         "stream",
         "tools",
         "tool_choice",
@@ -7976,6 +7997,7 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
         grammar,
         schema_in_prompt,
         include_reasoning,
+        reasoning_effort,
         stream,
         stream_include_usage,
         tools,
@@ -9628,6 +9650,20 @@ async fn proxy_chat_inner(
                     .into_response();
             }
         }
+        if let Some(value) = params.reasoning_effort.as_deref() {
+            if let Some(message) = info.reasoning_effort_refusal(value, &model_name) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json_openai_error(
+                        message,
+                        oai_type::INVALID_REQUEST,
+                        Some("reasoning_effort"),
+                        oai_code::UNSUPPORTED_FIELD,
+                    )),
+                )
+                    .into_response();
+            }
+        }
         // Vision capability gate. ``image_url`` content parts were decoded
         // into ``ChatMessage.images`` capability-agnostically (the model
         // wasn't resolved yet); reject here unless the model YAML declares
@@ -9693,6 +9729,17 @@ async fn proxy_chat_inner(
                 format!("Model '{model_name}' does not support tool calling (no model info)"),
                 oai_type::INVALID_REQUEST,
                 Some("tools"),
+                oai_code::UNSUPPORTED_FIELD,
+            )),
+        )
+            .into_response();
+    } else if params.reasoning_effort.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json_openai_error(
+                format!("Model '{model_name}' does not support reasoning_effort"),
+                oai_type::INVALID_REQUEST,
+                Some("reasoning_effort"),
                 oai_code::UNSUPPORTED_FIELD,
             )),
         )
@@ -14287,6 +14334,7 @@ fn generate_params_from_json(
         stream,
         lora_adapter,
         include_reasoning: None,
+        reasoning_effort: None,
         native_prompt: Some(true),
     }))
 }
@@ -14720,6 +14768,7 @@ fn generate_params_from_rmpv(
         stream,
         lora_adapter,
         include_reasoning: None,
+        reasoning_effort: None,
         native_prompt: Some(true),
     }))
 }
@@ -17957,6 +18006,7 @@ mod tests {
                 max_output_tokens: None,
                 grammar_profile: None,
                 chat_template_kwargs: None,
+                reasoning_effort: None,
                 adapter_path: Some("sie_server.adapters.sentence_transformer:Adapter".to_string()),
                 max_batch_tokens: Some(4096),
                 compute_precision: None,
@@ -18705,6 +18755,115 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn chat_reasoning_effort_is_refused_before_publication_or_reaches_the_worker() {
+        use crate::types::model::{ModelConfig, ProfileConfig};
+
+        let (state, probe) = mixed_governed_generation_state(false).await;
+        let body = |value: &str| {
+            json!({
+                "model": "org/g",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 4,
+                "reasoning_effort": value,
+            })
+        };
+        let refused = proxy_chat(
+            State(Arc::clone(&state)),
+            json_request("/v1/chat/completions", body("low")),
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        let error: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(refused.into_body(), 1 << 16)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(error["error"]["param"], "reasoning_effort");
+        assert_eq!(error["error"]["code"], "unsupported_field");
+        assert_eq!(
+            error["error"]["message"],
+            "Model 'org/g' does not support reasoning_effort"
+        );
+
+        let profile = ProfileConfig {
+            kv_budget_tokens: None,
+            max_output_tokens: None,
+            grammar_profile: None,
+            chat_template_kwargs: None,
+            reasoning_effort: None,
+            adapter_path: Some("sie_server.adapters.sentence_transformer:Adapter".to_string()),
+            max_batch_tokens: Some(4096),
+            compute_precision: None,
+            adapter_options: None,
+            extends: None,
+        };
+        let mut no_spec = profile.clone();
+        no_spec.adapter_options = Some(json!({"loadtime": {"speculative": {"enabled": false}}}));
+        let tasks: serde_json::Value = serde_saphyr::from_str(
+            "generate:\n  grammar_profile: no-spec\n  capabilities:\n    grammar: [json_schema]\n  reasoning_effort:\n    values:\n      low:\n        chat_template_kwargs:\n          reasoning_effort: low\n",
+        )
+        .unwrap();
+        state
+            .model_registry
+            .add_model_config_authoritative(ModelConfig {
+                name: "org/g".to_string(),
+                hf_revision: None,
+                description: None,
+                release_date: None,
+                routing: None,
+                adapter_module: None,
+                default_bundle: None,
+                pool: None,
+                profiles: [
+                    ("default".to_string(), profile),
+                    ("no-spec".to_string(), no_spec),
+                ]
+                .into_iter()
+                .collect(),
+                inputs: None,
+                max_sequence_length: None,
+                tasks: Some(tasks),
+            })
+            .expect("declared model");
+
+        let undeclared = proxy_chat(
+            State(Arc::clone(&state)),
+            json_request("/v1/chat/completions", body("high")),
+        )
+        .await;
+        assert_eq!(undeclared.status(), StatusCode::BAD_REQUEST);
+
+        *probe.worker_chunks.lock().unwrap() = vec![
+            reasoning_worker_chunk(0, json!({"text_delta": "Hi", "is_first": true})),
+            reasoning_worker_terminal(1, json!({})),
+        ];
+        let accepted = proxy_chat(
+            State(Arc::clone(&state)),
+            json_request("/v1/chat/completions", body("low")),
+        )
+        .await;
+        let status = accepted.status();
+        let text = String::from_utf8(
+            axum::body::to_bytes(accepted.into_body(), 1 << 16)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert_eq!(
+            probe
+                .take_params()
+                .generate
+                .expect("generate")
+                .reasoning_effort
+                .as_deref(),
+            Some("low")
+        );
     }
 
     #[tokio::test]
@@ -22702,6 +22861,7 @@ mod tests {
             max_output_tokens: None,
             grammar_profile: None,
             chat_template_kwargs: None,
+            reasoning_effort: None,
             adapter_path: Some("sie_server.adapters.sentence_transformer:Adapter".to_string()),
             max_batch_tokens: None,
             compute_precision: None,
@@ -26057,6 +26217,7 @@ mod tests {
                 max_output_tokens: None,
                 grammar_profile: None,
                 chat_template_kwargs: None,
+                reasoning_effort: None,
                 adapter_path: Some("sie_server.adapters.sentence_transformer:Adapter".to_string()),
                 max_batch_tokens: Some(4096),
                 compute_precision: None,
@@ -26112,6 +26273,7 @@ mod tests {
             max_output_tokens: None,
             grammar_profile: None,
             chat_template_kwargs: None,
+            reasoning_effort: None,
             adapter_path: Some("sie_server.adapters.sentence_transformer:Adapter".to_string()),
             max_batch_tokens: Some(4096),
             compute_precision: None,
@@ -26211,6 +26373,7 @@ mod tests {
                 max_output_tokens: None,
                 grammar_profile: None,
                 chat_template_kwargs: None,
+                reasoning_effort: None,
                 adapter_path: Some("sie_server.adapters.sentence_transformer:Adapter".to_string()),
                 max_batch_tokens: Some(4096),
                 compute_precision: None,
@@ -26258,6 +26421,7 @@ mod tests {
             max_output_tokens: None,
             grammar_profile: None,
             chat_template_kwargs: None,
+            reasoning_effort: None,
             adapter_path: Some("sie_server.adapters.sentence_transformer:Adapter".to_string()),
             max_batch_tokens: Some(4096),
             compute_precision: None,
@@ -26271,6 +26435,7 @@ mod tests {
             max_output_tokens: None,
             grammar_profile: None,
             chat_template_kwargs: None,
+            reasoning_effort: None,
             adapter_path: Some("sie_server.adapters.sentence_transformer:Adapter".to_string()),
             max_batch_tokens: Some(4096),
             compute_precision: None,
@@ -26341,6 +26506,7 @@ mod tests {
                 max_output_tokens: None,
                 grammar_profile: None,
                 chat_template_kwargs: None,
+                reasoning_effort: None,
                 adapter_path: Some("sie_server.adapters.sentence_transformer:Adapter".to_string()),
                 max_batch_tokens: Some(4096),
                 compute_precision: None,
@@ -26572,6 +26738,57 @@ mod tests {
         let generate = _expect_chat_ok(body).into_work_params().generate.unwrap();
         let wire = serde_json::to_value(&generate).unwrap();
         assert_eq!(wire["include_reasoning"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn test_chat_reasoning_effort_is_forwarded_and_absent_by_default() {
+        let mut body = _chat_body_min("m");
+        let generate = _expect_chat_ok(body.clone())
+            .into_work_params()
+            .generate
+            .expect("generate params");
+        assert_eq!(generate.reasoning_effort, None);
+        assert!(serde_json::to_value(&generate)
+            .unwrap()
+            .get("reasoning_effort")
+            .is_none());
+
+        body["reasoning_effort"] = serde_json::Value::Null;
+        let generate = _expect_chat_ok(body.clone())
+            .into_work_params()
+            .generate
+            .unwrap();
+        assert_eq!(generate.reasoning_effort, None);
+
+        for value in REASONING_EFFORT_VALUES {
+            body["reasoning_effort"] = serde_json::json!(value);
+            let generate = _expect_chat_ok(body.clone())
+                .into_work_params()
+                .generate
+                .unwrap();
+            assert_eq!(generate.reasoning_effort.as_deref(), Some(*value));
+            let wire = serde_json::to_value(&generate).unwrap();
+            assert_eq!(wire["reasoning_effort"], serde_json::json!(value));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_chat_reasoning_effort_outside_openais_values_is_malformed() {
+        let vectors: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../conformance/openai_generation/reasoning_effort_vectors.json"
+        ))
+        .unwrap();
+        for value in vectors["malformed"].as_array().unwrap() {
+            let mut body = _chat_body_min("m");
+            body["reasoning_effort"] = value.clone();
+            let err = _expect_chat_err(body).await;
+            assert_eq!(err["error"]["param"], "reasoning_effort", "{value}");
+            assert_eq!(err["error"]["code"], "invalid_request", "{value}");
+            assert_eq!(
+                err["error"]["message"], vectors["malformed_message"],
+                "{value}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -30372,6 +30589,11 @@ profiles:
             routing: None,
             max_output_tokens: None,
             profile_max_output_tokens: std::collections::HashMap::new(),
+            context_length: None,
+            profile_context_length: std::collections::HashMap::new(),
+            reasoning_effort: None,
+            profile_reasoning_effort: std::collections::HashMap::new(),
+            declares_no_reasoning: false,
             grammar_capabilities: None,
             streaming_supported: None,
             grammar_profile: None,

@@ -167,12 +167,13 @@ pub(crate) fn messages_to_chat(
     let Some(body) = body.as_object() else {
         return Err(invalid("body: Input should be a valid dictionary"));
     };
+    let mut effort = None;
     for key in body.keys() {
         match key.as_str() {
             "model" | "max_tokens" | "messages" | "system" | "stop_sequences" | "temperature"
             | "top_p" | "top_k" | "stream" | "tools" | "tool_choice" | "thinking" | "metadata"
             | "cache_control" => {}
-            "output_config" => output_config(body.get(key).unwrap_or(&Value::Null))?,
+            "output_config" => effort = output_config(body.get(key).unwrap_or(&Value::Null))?,
             "context_management" => return Err(invalid(CONTEXT_MANAGEMENT_REFUSAL)),
             other => return Err(extra(other)),
         }
@@ -289,6 +290,9 @@ pub(crate) fn messages_to_chat(
         chat.insert("parallel_tool_calls".into(), json!(parallel));
     }
     chat.insert("include_reasoning".into(), json!(include_reasoning));
+    if let Some(effort) = effort {
+        chat.insert("reasoning_effort".into(), Value::String(effort));
+    }
     Ok(ChatTranslation {
         chat: Value::Object(chat),
         model,
@@ -297,13 +301,28 @@ pub(crate) fn messages_to_chat(
     })
 }
 
-fn output_config(value: &Value) -> Result<(), MessagesError> {
+/// Anthropic's ``output_config.effort`` values. Each is also an OpenAI
+/// ``reasoning_effort`` value, which the chat route checks against the model.
+const ANTHROPIC_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+/// The chat route's ``reasoning_effort`` from ``output_config``, whose only
+/// accepted key is ``effort``.
+fn output_config(value: &Value) -> Result<Option<String>, MessagesError> {
     if value.is_null() {
-        return Ok(());
+        return Ok(None);
     }
-    match object(value, "output_config")?.keys().next() {
-        Some(key) => Err(extra(&format!("output_config.{key}"))),
-        None => Ok(()),
+    let config = object(value, "output_config")?;
+    if let Some(key) = config.keys().find(|key| key.as_str() != "effort") {
+        return Err(extra(&format!("output_config.{key}")));
+    }
+    match config.get("effort") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(effort)) if ANTHROPIC_EFFORTS.contains(&effort.as_str()) => {
+            Ok(Some(effort.clone()))
+        }
+        Some(_) => Err(invalid(
+            "output_config.effort: Input should be 'low', 'medium', 'high', 'xhigh' or 'max'",
+        )),
     }
 }
 

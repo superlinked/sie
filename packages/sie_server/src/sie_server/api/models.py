@@ -56,6 +56,19 @@ class ModelLoadError(BaseModel):
     """True when the failure will not auto-retry; operator must intervene."""
 
 
+class ModelReasoning(BaseModel):
+    """How a model's reasoning can be steered with the chat ``reasoning_effort`` field."""
+
+    effort: list[str] = []
+    """Accepted ``reasoning_effort`` values in OpenAI's order. Empty means the field is refused."""
+
+    default_effort: str | None = None
+    """The value the model runs at when a request names none, ``None`` when it is not a declared value."""
+
+    budget_tokens: dict[str, int] = {}
+    """The hard reasoning-token ceiling of each value that has one. Other values only instruct the model."""
+
+
 class ModelCapabilities(BaseModel):
     """Advertised generation capabilities for a model.
 
@@ -80,6 +93,8 @@ class ModelCapabilities(BaseModel):
     code: bool = False
     sql: bool = False
     guard: bool = False
+    reasoning: ModelReasoning | None = None
+    """``None`` when nothing in the model's config lets it reason."""
 
 
 class ModelRouting(BaseModel):
@@ -109,6 +124,12 @@ class ModelInfo(BaseModel):
     """Recorded load failure (when ``state == 'failed'``), else ``None``."""
 
     max_sequence_length: int | None = None
+    context_length: int | None = None
+    """Prompt plus completion tokens the route admits, ``None`` for a model without a generate task."""
+
+    max_output_tokens: int | None = None
+    """The largest output-token request the route admits, ``None`` for a model without a generate task."""
+
     profiles: dict[str, ProfileInfo] = {}
     lora_adapters: list[str] = Field(default_factory=list)
     """LoRA served names currently ready on this worker, excluding loading/evicting adapters."""
@@ -139,6 +160,12 @@ def _config_text(config: Any, field: str) -> str:
     """A string field of a model config, or ``""`` when it is unset."""
     value = getattr(config, field, None)
     return value if isinstance(value, str) else ""
+
+
+def _generate_limit(config: ModelConfig, field: str) -> int | None:
+    """A generation limit of the route ``config`` describes, as admission reads it."""
+    generate = config.tasks.generate
+    return getattr(generate, field) if generate is not None else None
 
 
 def _resolve_routing(config: ModelConfig) -> ModelRouting:
@@ -215,7 +242,17 @@ def _resolve_capabilities(config: Any) -> ModelCapabilities | None:
         code=caps.code,
         sql=caps.sql,
         guard=caps.guard,
+        reasoning=_resolve_reasoning(config),
     )
+
+
+def _resolve_reasoning(config: ModelConfig) -> ModelReasoning | None:
+    if config.declares_no_reasoning:
+        return None
+    declaration = config.reasoning_effort_for("default")
+    if declaration is None:
+        return ModelReasoning()
+    return ModelReasoning(effort=list(declaration.accepted), default_effort=declaration.default)
 
 
 def _profile_info(registry: "ModelRegistry | Any", name: str, config: ModelConfig, profile: str) -> ProfileInfo:
@@ -268,6 +305,8 @@ async def list_models(http_request: Request) -> ModelsListResponse:
                 state=state,
                 last_error=last_error,
                 max_sequence_length=config.max_sequence_length,
+                context_length=_generate_limit(config, "context_length"),
+                max_output_tokens=_generate_limit(config, "max_output_tokens"),
                 profiles=profiles,
                 revision=getattr(config, "hf_revision", None),
                 description=_config_text(config, "description"),
@@ -321,6 +360,8 @@ async def get_model(model: str, http_request: Request) -> ModelInfo:
         state=state,
         last_error=last_error,
         max_sequence_length=config.max_sequence_length,
+        context_length=_generate_limit(config, "context_length"),
+        max_output_tokens=_generate_limit(config, "max_output_tokens"),
         profiles=profiles,
         revision=getattr(config, "hf_revision", None),
         description=_config_text(config, "description"),

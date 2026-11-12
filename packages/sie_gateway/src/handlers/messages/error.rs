@@ -157,6 +157,15 @@ pub(crate) fn translate_error_body(
     if status != StatusCode::BAD_REQUEST {
         return (error_type, message, code);
     }
+    // A route that does not accept the effort answers in the wording clients
+    // that drop the field recover from.
+    if param == Some("reasoning_effort") && code.as_deref() == Some("unsupported_field") {
+        return (
+            error_type,
+            "output_config.effort: Extra inputs are not permitted".to_string(),
+            code,
+        );
+    }
     if let Some((requested, cap)) = output_cap(&message) {
         return (
             error_type,
@@ -200,6 +209,9 @@ fn anthropic_param(param: &str) -> String {
     }
     if param == "stop" {
         return "stop_sequences".to_string();
+    }
+    if param == "reasoning_effort" {
+        return "output_config.effort".to_string();
     }
     if let Some(rest) = param.strip_prefix("tools[") {
         if let Some((index, field)) = rest.split_once("].function.") {

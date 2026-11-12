@@ -264,6 +264,20 @@ export interface ModelCapabilities {
   sql?: boolean;
   /** Generative guard model; backs model="guard" */
   guard?: boolean;
+  /** How `reasoning_effort` steers the model's reasoning; null when nothing lets it reason */
+  reasoning?: ModelReasoning | null;
+}
+
+/**
+ * How a model's reasoning can be steered with the chat `reasoning_effort` field.
+ */
+export interface ModelReasoning {
+  /** Accepted `reasoning_effort` values in OpenAI's order; empty means the field is refused */
+  effort?: string[];
+  /** The value the model runs at when a request names none; null when it is not a declared value */
+  default_effort?: string | null;
+  /** The hard reasoning-token ceiling of each value that has one; other values only instruct the model */
+  budget_tokens?: Record<string, number>;
 }
 
 /**
@@ -373,6 +387,10 @@ export interface ModelInfo {
   dims?: ModelDims;
   /** Maximum sequence length the model supports; null when the config pins none */
   maxSequenceLength?: number | null;
+  /** Prompt plus completion tokens the route admits; null without a generate task */
+  contextLength?: number | null;
+  /** The largest output-token request the route admits; null without a generate task */
+  maxOutputTokens?: number | null;
   /** Pinned HF commit SHA for the weights; null for unpinned/package-backed models */
   revision?: string | null;
   /** One line about the model; "" when the catalog sets none */
@@ -404,7 +422,7 @@ export interface ModelInfo {
 
 /**
  * A `/v1/models` entry exactly as the gateway emits it, before the client
- * camelCases the four renamed top-level keys.
+ * camelCases the six renamed top-level keys.
  *
  * Declared once here (rather than inline per call site) so `listModels` and
  * `getModel` cannot drift apart, and so the emitted key set has a single
@@ -419,6 +437,8 @@ export interface WireModelInfo {
   outputs: string[];
   dims?: ModelDims;
   max_sequence_length?: number | null;
+  context_length?: number | null;
+  max_output_tokens?: number | null;
   revision?: string | null;
   description?: string;
   release_date?: string;
@@ -440,12 +460,14 @@ export interface WireModelInfo {
 const MODEL_INFO_WIRE_FIELD_SET: Record<keyof WireModelInfo, true> = {
   aliases: true,
   capabilities: true,
+  context_length: true,
   description: true,
   dims: true,
   inputs: true,
   last_error: true,
   loaded: true,
   lora_adapters: true,
+  max_output_tokens: true,
   max_sequence_length: true,
   name: true,
   outputs: true,

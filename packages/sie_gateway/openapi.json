@@ -395,7 +395,7 @@
         "type": "object"
       },
       "ChatCompletionRequest": {
-        "description": "OpenAI-compatible ``POST /v1/chat/completions`` request.\n\n**Strict allow-list:** unknown top-level fields reject with 400\n``unsupported_field``. Type-invalid values for accepted fields reject\nwith 400 ``invalid_request``.\n\n**Known-rejected fields**:\n- ``functions`` / ``function_call`` — deprecated by OpenAI; use ``tools`` instead.\n- ``modalities``, ``audio``, ``metadata``, ``store``, ``service_tier``,\n  ``prediction``, ``reasoning_effort``, ``verbosity`` — out of scope.\n\n**Streaming:** ``stream: true`` is supported (SSE ``chat.completion.chunk``).\n``n > 1`` streaming fans candidates out as per-``choice_index``-tagged delta\nchunks with a per-choice closure carrying ``finish_reason`` (and a per-choice\n``delta.role:\"assistant\"`` once per choice) before the single global ``[DONE]``.",
+        "description": "OpenAI-compatible ``POST /v1/chat/completions`` request.\n\n**Strict allow-list:** unknown top-level fields reject with 400\n``unsupported_field``. Type-invalid values for accepted fields reject\nwith 400 ``invalid_request``.\n\n**Known-rejected fields**:\n- ``functions`` / ``function_call`` — deprecated by OpenAI; use ``tools`` instead.\n- ``modalities``, ``audio``, ``metadata``, ``store``, ``service_tier``,\n  ``prediction``, ``verbosity`` — out of scope.\n\n**Streaming:** ``stream: true`` is supported (SSE ``chat.completion.chunk``).\n``n > 1`` streaming fans candidates out as per-``choice_index``-tagged delta\nchunks with a per-choice closure carrying ``finish_reason`` (and a per-choice\n``delta.role:\"assistant\"`` once per choice) before the single global ``[DONE]``.",
         "properties": {
           "best_of": {
             "description": "Generate this many candidates and return the top `n` by cumulative logprob. Integer in [1, 128]. Cross-field rule: `best_of >= n` (otherwise 400 invalid_request). Rejected with 400 unsupported_field when `stream: true` (mirrors OpenAI).",
@@ -523,6 +523,14 @@
           },
           "prompt_cache_key": {
             "description": "Prompt-cache hint; plumbed onto the work envelope and\nignored by the worker on the chat-completions surface.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reasoning_effort": {
+            "description": "OpenAI reasoning effort: ``none``, ``minimal``, ``low``, ``medium``,\n``high``, ``xhigh`` or ``max``. Each model accepts the values listed in\n``capabilities.reasoning.effort`` on ``GET /v1/models``, and any other\nvalue is refused with 400 ``unsupported_field``. A value only listed\nthere instructs the model to reason less or more. A value with an entry\nin ``capabilities.reasoning.budget_tokens`` also caps its reasoning\ntokens. ``max_tokens`` still bounds reasoning and answer together.\n``none`` is accepted on a model that cannot reason. Absent keeps the\nmodel's own default.",
+            "example": "low",
             "type": [
               "string",
               "null"
@@ -2612,6 +2620,17 @@
               "null"
             ]
           },
+          "reasoning": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ModelReasoningWire",
+                "description": "How ``reasoning_effort`` steers the model's reasoning. ``null`` for a\nmodel without a generate task or one that cannot reason."
+              }
+            ]
+          },
           "sql": {
             "description": "Whether the model targets the SQL path — backs the ``model=\"sql\"``\nalias. Informational only; never request-gated. Precision-sensitive:\nSQL quality can regress sharply under FP8, so this model-level flag is a\nsupport signal, not a per-profile quality guarantee.",
             "type": "boolean"
@@ -2730,6 +2749,15 @@
               }
             ]
           },
+          "context_length": {
+            "description": "Prompt plus completion tokens this id admits; ``null`` for a model\nwithout a generate task.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "description": {
             "description": "One line about the model; `\"\"` when the catalog sets none. Reported for\nSystem One model-list clients (the TypeSafe SDKs).",
             "type": "string"
@@ -2753,6 +2781,15 @@
           "last_error": {},
           "loaded": {
             "type": "boolean"
+          },
+          "max_output_tokens": {
+            "description": "The largest ``max_tokens`` this id admits; ``null`` for a model without\na generate task.",
+            "format": "int32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "max_sequence_length": {
             "format": "int64",
@@ -2846,6 +2883,42 @@
         },
         "required": [
           "detail"
+        ],
+        "type": "object"
+      },
+      "ModelReasoningWire": {
+        "description": "``capabilities.reasoning`` on a ``GET /v1/models`` entry.",
+        "properties": {
+          "budget_tokens": {
+            "additionalProperties": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "description": "The hard reasoning-token ceiling of each value that has one. Other\nvalues only instruct the model.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "default_effort": {
+            "description": "The value the model runs at when a request names none; ``null`` when\nthat is not one of the accepted values.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effort": {
+            "description": "Accepted ``reasoning_effort`` values in OpenAI's order. Empty when the\nmodel refuses the field.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "effort",
+          "budget_tokens"
         ],
         "type": "object"
       },

@@ -409,6 +409,16 @@
       "name": "empty output_config is accepted",
       "body": {"model": "m", "max_tokens": 16, "output_config": {}, "messages": [{"role": "user", "content": "x"}]},
       "chat": {"model": "m", "messages": [{"role": "user", "content": "x"}], "max_tokens": 16, "stream": false, "include_reasoning": false}
+    },
+    {
+      "name": "output_config effort becomes reasoning_effort",
+      "body": {"model": "m", "max_tokens": 16, "output_config": {"effort": "high"}, "messages": [{"role": "user", "content": "x"}]},
+      "chat": {"model": "m", "messages": [{"role": "user", "content": "x"}], "max_tokens": 16, "stream": false, "include_reasoning": false, "reasoning_effort": "high"}
+    },
+    {
+      "name": "null output_config effort is accepted",
+      "body": {"model": "m", "max_tokens": 16, "output_config": {"effort": null}, "messages": [{"role": "user", "content": "x"}]},
+      "chat": {"model": "m", "messages": [{"role": "user", "content": "x"}], "max_tokens": 16, "stream": false, "include_reasoning": false}
     }
   ],
   "rejected": [
@@ -419,7 +429,8 @@
     {"name": "missing messages", "body": {"model": "m", "max_tokens": 1}, "message": "messages: Field required"},
     {"name": "empty messages", "body": {"model": "m", "max_tokens": 1, "messages": []}, "message": "messages: List should have at least 1 item"},
     {"name": "unknown top-level field", "body": {"model": "m", "max_tokens": 1, "service_tier": "auto", "messages": [{"role": "user", "content": "x"}]}, "message": "service_tier: Extra inputs are not permitted"},
-    {"name": "effort", "body": {"model": "m", "max_tokens": 1, "output_config": {"effort": "high"}, "messages": [{"role": "user", "content": "x"}]}, "message": "output_config.effort: Extra inputs are not permitted"},
+    {"name": "effort outside Anthropic's values", "body": {"model": "m", "max_tokens": 1, "output_config": {"effort": "none"}, "messages": [{"role": "user", "content": "x"}]}, "message": "output_config.effort: Input should be 'low', 'medium', 'high', 'xhigh' or 'max'"},
+    {"name": "effort beside another output_config key", "body": {"model": "m", "max_tokens": 1, "output_config": {"effort": "low", "format": {"type": "json_schema"}}, "messages": [{"role": "user", "content": "x"}]}, "message": "output_config.format: Extra inputs are not permitted"},
     {"name": "structured output format", "body": {"model": "m", "max_tokens": 1, "output_config": {"format": {"type": "json_schema"}}, "messages": [{"role": "user", "content": "x"}]}, "message": "output_config.format: Extra inputs are not permitted"},
     {"name": "context management", "body": {"model": "m", "max_tokens": 1, "context_management": {"edits": []}, "messages": [{"role": "user", "content": "x"}]}, "message": "context_management: Extra inputs are not permitted (Claude Code: set CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1)"},
     {"name": "unsupported anthropic-version", "anthropic_version": "2024-01-01", "body": {"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": "x"}]}, "message": "anthropic-version: only 2023-06-01 is supported"},

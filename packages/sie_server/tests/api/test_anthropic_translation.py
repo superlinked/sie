@@ -109,6 +109,7 @@ def test_a_captured_claude_code_request_translates_or_fails_with_the_recovery_wo
     assert translation.chat["include_reasoning"] == chat["include_reasoning"]
     assert len(translation.chat.get("tools") or []) == chat["tool_count"]
     assert translation.chat.get("stop") == chat.get("stop")
+    assert translation.chat.get("reasoning_effort") == chat.get("reasoning_effort")
     _chat_route_accepts(translation.chat)
 
 

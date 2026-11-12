@@ -305,11 +305,12 @@ def messages_to_chat(body: Any, anthropic_version: str | None) -> ChatTranslatio
         raise _invalid(f"anthropic-version: only {SUPPORTED_ANTHROPIC_VERSION} is supported")
     if not isinstance(body, dict):
         raise _invalid("body: Input should be a valid dictionary")
+    effort: str | None = None
     for key in body:
         if key in _TOP_LEVEL_FIELDS:
             continue
         if key == "output_config":
-            _output_config(body[key])
+            effort = _output_config(body[key])
         elif key == "context_management":
             raise _invalid(CONTEXT_MANAGEMENT_REFUSAL)
         else:
@@ -379,14 +380,30 @@ def messages_to_chat(body: Any, anthropic_version: str | None) -> ChatTranslatio
     if parallel_tool_calls is not None:
         chat["parallel_tool_calls"] = parallel_tool_calls
     chat["include_reasoning"] = include_reasoning
+    if effort is not None:
+        chat["reasoning_effort"] = effort
     return ChatTranslation(chat=chat, model=model, stream=stream, first_image=first_image[0] if first_image else None)
 
 
-def _output_config(value: Any) -> None:
+_ANTHROPIC_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+EFFORT_REFUSAL = "output_config.effort: Extra inputs are not permitted"
+"""A route that does not accept the effort answers in the wording clients that drop the field recover from."""
+
+
+def _output_config(value: Any) -> str | None:
+    """The chat route's ``reasoning_effort`` from ``output_config``, whose only accepted key is ``effort``."""
     if value is None:
-        return
-    for key in _object(value, "output_config"):
-        raise _extra(f"output_config.{key}")
+        return None
+    config = _object(value, "output_config")
+    for key in config:
+        if key != "effort":
+            raise _extra(f"output_config.{key}")
+    effort = config.get("effort")
+    if effort is None:
+        return None
+    if not isinstance(effort, str) or effort not in _ANTHROPIC_EFFORTS:
+        raise _invalid("output_config.effort: Input should be 'low', 'medium', 'high', 'xhigh' or 'max'")
+    return effort
 
 
 def _max_tokens(value: Any) -> int:
@@ -1294,6 +1311,8 @@ def translate_error_body(status: int, body: Any, context: ErrorContext) -> tuple
         message = _default_message(status)
     if status != HTTPStatus.BAD_REQUEST:
         return error_type, message, code
+    if param == "reasoning_effort" and code == "unsupported_field":
+        return error_type, EFFORT_REFUSAL, code
     cap = _output_cap(message)
     if cap is not None:
         requested, limit = cap
@@ -1324,6 +1343,8 @@ def _anthropic_param(param: str) -> str:
         return "max_tokens"
     if param == "stop":
         return "stop_sequences"
+    if param == "reasoning_effort":
+        return "output_config.effort"
     if param.startswith("tools["):
         index, separator, field = param[len("tools[") :].partition("].function.")
         if separator:

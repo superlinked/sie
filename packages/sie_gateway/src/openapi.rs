@@ -110,6 +110,7 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         MessageResponse,
         ModelAckBundleStatus,
         ModelCapabilitiesWire,
+        ModelReasoningWire,
         ModelConfigStatusResponse,
         ModelInfoWire,
         ModelRoutingWire,
@@ -2292,7 +2293,7 @@ pub struct ChatTemplateKwargs {
 /// **Known-rejected fields**:
 /// - ``functions`` / ``function_call`` — deprecated by OpenAI; use ``tools`` instead.
 /// - ``modalities``, ``audio``, ``metadata``, ``store``, ``service_tier``,
-///   ``prediction``, ``reasoning_effort``, ``verbosity`` — out of scope.
+///   ``prediction``, ``verbosity`` — out of scope.
 ///
 /// **Streaming:** ``stream: true`` is supported (SSE ``chat.completion.chunk``).
 /// ``n > 1`` streaming fans candidates out as per-``choice_index``-tagged delta
@@ -2428,6 +2429,18 @@ pub struct ChatCompletionRequest {
     /// ``usage`` is unchanged either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_reasoning: Option<bool>,
+    /// OpenAI reasoning effort: ``none``, ``minimal``, ``low``, ``medium``,
+    /// ``high``, ``xhigh`` or ``max``. Each model accepts the values listed in
+    /// ``capabilities.reasoning.effort`` on ``GET /v1/models``, and any other
+    /// value is refused with 400 ``unsupported_field``. A value only listed
+    /// there instructs the model to reason less or more. A value with an entry
+    /// in ``capabilities.reasoning.budget_tokens`` also caps its reasoning
+    /// tokens. ``max_tokens`` still bounds reasoning and answer together.
+    /// ``none`` is accepted on a model that cannot reason. Absent keeps the
+    /// model's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, example = "low")]
+    pub reasoning_effort: Option<String>,
     /// SSE streaming. When ``true``, the response is a stream of
     /// ``chat.completion.chunk`` events terminated by ``data: [DONE]``.
     /// For ``n > 1``, per-``choice_index`` delta chunks include a per-choice
@@ -2767,6 +2780,12 @@ pub struct ModelInfoWire {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<serde_json::Value>,
     pub max_sequence_length: Option<u64>,
+    /// Prompt plus completion tokens this id admits; ``null`` for a model
+    /// without a generate task.
+    pub context_length: Option<u32>,
+    /// The largest ``max_tokens`` this id admits; ``null`` for a model without
+    /// a generate task.
+    pub max_output_tokens: Option<u32>,
     /// Immutable model weights revision, when the catalog pins one.
     pub revision: Option<String>,
     /// One line about the model; `""` when the catalog sets none. Reported for
@@ -2874,6 +2893,23 @@ pub struct ModelCapabilitiesWire {
     /// backs the ``model="guard"`` alias. Informational only; never
     /// request-gated.
     pub guard: bool,
+    /// How ``reasoning_effort`` steers the model's reasoning. ``null`` for a
+    /// model without a generate task or one that cannot reason.
+    pub reasoning: Option<ModelReasoningWire>,
+}
+
+/// ``capabilities.reasoning`` on a ``GET /v1/models`` entry.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ModelReasoningWire {
+    /// Accepted ``reasoning_effort`` values in OpenAI's order. Empty when the
+    /// model refuses the field.
+    pub effort: Vec<String>,
+    /// The value the model runs at when a request names none; ``null`` when
+    /// that is not one of the accepted values.
+    pub default_effort: Option<String>,
+    /// The hard reasoning-token ceiling of each value that has one. Other
+    /// values only instruct the model.
+    pub budget_tokens: std::collections::HashMap<String, u32>,
 }
 
 /// One OpenAI-shaped model object in the `data` array of
