@@ -731,8 +731,8 @@ class GenerationUsage(TypedDict):
     ``stream_options.include_usage`` — without that there is no usage chunk at
     all. Native generate always carries usage on its terminal chunk. A stream
     whose terminal settle did not commit in time reports its tokens without a
-    charge rather than guessing one; ``GET /me/usage`` remains the balance
-    authority.
+    charge rather than guessing one. The account balance is not readable with
+    an API key; the console shows it.
     """
 
     prompt_tokens: int

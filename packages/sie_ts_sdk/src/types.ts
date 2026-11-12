@@ -1477,8 +1477,8 @@ export interface ChatCompletionRequest {
  * stream there is no header to fall back to: without
  * `stream_options.include_usage` there is no usage chunk at all, and a stream
  * whose terminal settle did not commit in time reports its tokens without a
- * charge rather than guessing one. `GET /me/usage` remains the balance
- * authority.
+ * charge rather than guessing one. The account balance is not readable with
+ * an API key; the console shows it.
  */
 export interface ChatUsage {
   prompt_tokens: number;
