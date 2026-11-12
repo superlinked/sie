@@ -424,8 +424,9 @@ next section for the `RESOURCE_EXHAUSTED` budget):
   `ResourceExhaustedError` when retries run out. Pass
   `max_oom_retries=0` to disable these retries and fail fast.
 
-Admission rejections happen before any work is dispatched, so every call
-retries them within `provision_timeout_s`, honouring `Retry-After`:
+Admission rejections happen before any work is dispatched, so every
+inference call retries them within `provision_timeout_s`, honouring
+`Retry-After` (`estimate()` raises them without retrying):
 `429 RATE_LIMIT`, `503 QUEUE_FULL`, `503 BILLING_CAPACITY_UNAVAILABLE`,
 and the gateway's queue backpressure, a `503 QUEUE_UNAVAILABLE` that
 carries `Retry-After`. A `QUEUE_UNAVAILABLE` without `Retry-After` is

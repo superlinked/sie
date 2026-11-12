@@ -234,9 +234,10 @@ Retry semantics for transient `503` codes:
   exponential backoff; throws `ResourceExhaustedError` (a `ServerError`
   subclass) when retries run out.
 
-Admission rejections happen before any work is dispatched, so every call
-retries them within `provisionTimeout`, honouring `Retry-After` (delay
-seconds or an HTTP date): `429 RATE_LIMIT`, `503 QUEUE_FULL`,
+Admission rejections happen before any work is dispatched, so every
+inference call retries them within `provisionTimeout`, honouring
+`Retry-After` (delay seconds or an HTTP date; `estimate()` throws them
+without retrying): `429 RATE_LIMIT`, `503 QUEUE_FULL`,
 `503 BILLING_CAPACITY_UNAVAILABLE`, and the gateway's queue backpressure, a
 `503 QUEUE_UNAVAILABLE` that carries `Retry-After`. A `QUEUE_UNAVAILABLE`
 without `Retry-After` is terminal. On SIE Cloud, `429 RATE_LIMIT` means the
