@@ -1,0 +1,117 @@
+{
+  "description": [
+    "Chat completions reasoning_effort, read by the gateway and the single-instance server suites.",
+    "Each model is a model config. A case names a model and the request's value. An accepted case",
+    "gives what the worker applies (null when nothing changes). A refused case gives the message,",
+    "sent as 400 unsupported_field with param reasoning_effort. `capability` is the",
+    "capabilities.reasoning object /v1/models reports for the model."
+  ],
+  "malformed_message": "'reasoning_effort' must be one of: none, minimal, low, medium, high, xhigh, max",
+  "malformed": ["extreme", "", "LOW", 3, true, ["low"], {"value": "low"}],
+  "models": {
+    "acme/declared": {
+      "config": {
+        "sie_id": "acme/declared",
+        "package_backed": true,
+        "tasks": {
+          "generate": {
+            "context_length": 4096,
+            "max_output_tokens": 256,
+            "chat_template_kwargs": {"enable_thinking": true},
+            "reasoning_effort": {
+              "default": "max",
+              "values": {
+                "max": {},
+                "high": {"chat_template_kwargs": {"reasoning_effort": "high"}},
+                "low": {"chat_template_kwargs": {"reasoning_effort": "low"}}
+              }
+            }
+          }
+        },
+        "profiles": {
+          "default": {"adapter_path": "sie_server.adapters.fake.adapter:FakeAdapter", "max_batch_tokens": 8192, "kv_budget_tokens": 8192}
+        }
+      },
+      "capability": {"effort": ["low", "high", "max"], "default_effort": "max", "budget_tokens": {}}
+    },
+    "acme/silent": {
+      "config": {
+        "sie_id": "acme/silent",
+        "package_backed": true,
+        "tasks": {"generate": {"context_length": 4096, "max_output_tokens": 256}},
+        "profiles": {
+          "default": {"adapter_path": "sie_server.adapters.fake.adapter:FakeAdapter", "max_batch_tokens": 8192, "kv_budget_tokens": 8192}
+        }
+      },
+      "capability": null
+    },
+    "acme/thinking": {
+      "config": {
+        "sie_id": "acme/thinking",
+        "package_backed": true,
+        "tasks": {"generate": {"context_length": 4096, "max_output_tokens": 256, "chat_template_kwargs": {"enable_thinking": true}}},
+        "profiles": {
+          "default": {"adapter_path": "sie_server.adapters.fake.adapter:FakeAdapter", "max_batch_tokens": 8192, "kv_budget_tokens": 8192}
+        }
+      },
+      "capability": {"effort": [], "default_effort": null, "budget_tokens": {}}
+    },
+    "acme/remote": {
+      "config": {
+        "sie_id": "acme/remote",
+        "remote_backed": true,
+        "tasks": {
+          "generate": {
+            "context_length": 1000000,
+            "max_output_tokens": 32768,
+            "reasoning_effort": {
+              "default": "high",
+              "values": {
+                "none": {"upstream": "none"},
+                "low": {"upstream": "low"},
+                "high": {"upstream": "high"}
+              }
+            }
+          }
+        },
+        "profiles": {
+          "default": {
+            "adapter_path": "sie_server.adapters.remote.openai:OpenAIUpstreamAdapter",
+            "max_batch_tokens": 16384,
+            "adapter_options": {"loadtime": {"upstream": "acme-openai", "upstream_model": "acme/upstream-model"}}
+          }
+        }
+      },
+      "capability": {"effort": ["none", "low", "high"], "default_effort": "high", "budget_tokens": {}}
+    },
+    "acme/profile-declared": {
+      "config": {
+        "sie_id": "acme/profile-declared",
+        "package_backed": true,
+        "tasks": {"generate": {"context_length": 4096, "max_output_tokens": 256}},
+        "profiles": {
+          "default": {
+            "adapter_path": "sie_server.adapters.fake.adapter:FakeAdapter",
+            "max_batch_tokens": 8192,
+            "kv_budget_tokens": 8192,
+            "reasoning_effort": {"values": {"low": {"chat_template_kwargs": {"reasoning_strength": "low"}}}}
+          }
+        }
+      },
+      "capability": {"effort": ["low"], "default_effort": null, "budget_tokens": {}}
+    }
+  },
+  "cases": [
+    {"name": "a declared template value", "model": "acme/declared", "value": "low", "applied": {"chat_template_kwargs": {"reasoning_effort": "low"}, "upstream": null}},
+    {"name": "a declared value that changes nothing", "model": "acme/declared", "value": "max", "applied": {"chat_template_kwargs": {}, "upstream": null}},
+    {"name": "an undeclared value", "model": "acme/declared", "value": "minimal", "message": "Model 'acme/declared' does not support reasoning_effort 'minimal'. Supported values: low, high, max"},
+    {"name": "none where it is not declared", "model": "acme/declared", "value": "none", "message": "Model 'acme/declared' does not support reasoning_effort 'none'. Supported values: low, high, max"},
+    {"name": "none on a model that cannot reason", "model": "acme/silent", "value": "none", "applied": null},
+    {"name": "another value on a model that cannot reason", "model": "acme/silent", "value": "low", "message": "Model 'acme/silent' does not support reasoning_effort"},
+    {"name": "a reasoning model without a declaration", "model": "acme/thinking", "value": "none", "message": "Model 'acme/thinking' does not support reasoning_effort"},
+    {"name": "a remote value", "model": "acme/remote", "value": "none", "applied": {"chat_template_kwargs": {}, "upstream": "none"}},
+    {"name": "an undeclared remote value", "model": "acme/remote", "value": "medium", "message": "Model 'acme/remote' does not support reasoning_effort 'medium'. Supported values: none, low, high"},
+    {"name": "a profile's own declaration", "model": "acme/profile-declared", "value": "low", "applied": {"chat_template_kwargs": {"reasoning_strength": "low"}, "upstream": null}},
+    {"name": "a value outside a profile's own declaration", "model": "acme/profile-declared", "value": "high", "message": "Model 'acme/profile-declared' does not support reasoning_effort 'high'. Supported values: low"}
+  ]
+}

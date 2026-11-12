@@ -801,6 +801,7 @@ adapters:
                         max_output_tokens: None,
                         grammar_profile: None,
                         chat_template_kwargs: None,
+                        reasoning_effort: None,
                         adapter_path: Some(
                             "sie_server.adapters.sentence_transformer:Adapter".to_string(),
                         ),

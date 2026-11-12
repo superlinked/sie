@@ -294,6 +294,10 @@ def _expand_profile_variants(configs: dict[str, ModelConfig]) -> None:
             )
             if profile_max_output_tokens is not None and config.tasks.generate is not None:
                 generate_updates["max_output_tokens"] = profile_max_output_tokens
+            if config.tasks.generate is not None:
+                profile_reasoning_effort = config.reasoning_effort_for(profile_name)
+                if profile_reasoning_effort != config.tasks.generate.reasoning_effort:
+                    generate_updates["reasoning_effort"] = profile_reasoning_effort
             if generate_updates and config.tasks.generate is not None:
                 variant_updates["tasks"] = config.tasks.model_copy(
                     update={

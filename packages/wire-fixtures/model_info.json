@@ -15,12 +15,14 @@
   "typed": [
     "aliases",
     "capabilities",
+    "context_length",
     "description",
     "dims",
     "inputs",
     "last_error",
     "loaded",
     "lora_adapters",
+    "max_output_tokens",
     "max_sequence_length",
     "name",
     "outputs",
@@ -39,10 +41,11 @@
   },
   "notes": {
     "excluded_scope": "The four excluded keys are merged in by GET /v1/models/{model} for vanilla OpenAI 'retrieve model' clients; on GET /v1/models they live in the sibling `data` array instead, never on a `models` entry.",
-    "optionality": "Python marks every typed key optional (`total=False`). TypeScript requires `name`, `loaded`, `inputs` and `outputs` on both `ModelInfo` and `WireModelInfo`; its remaining keys are optional. `pending_generation` is gateway-only. `last_error`/`max_sequence_length`/`revision`/`capabilities` are the four the emitters can send as an explicit null, so the SDK types admit null on each. The fixture pins which keys are declarable, not which are always present.",
-    "ts_renames": "The TS SDK camelCases four top-level keys \u2014 max_sequence_length -> maxSequenceLength, last_error -> lastError, pending_generation -> pendingGeneration, release_date -> releaseDate \u2014 and leaves nested objects wire-shaped. Its consumer test checks the wire-side names listed here.",
+    "optionality": "Python marks every typed key optional (`total=False`). TypeScript requires `name`, `loaded`, `inputs` and `outputs` on both `ModelInfo` and `WireModelInfo`; its remaining keys are optional. `pending_generation` is gateway-only. `last_error`/`max_sequence_length`/`context_length`/`max_output_tokens`/`revision`/`capabilities` are the six the emitters can send as an explicit null, so the SDK types admit null on each. The fixture pins which keys are declarable, not which are always present.",
+    "ts_renames": "The TS SDK camelCases six top-level keys \u2014 max_sequence_length -> maxSequenceLength, context_length -> contextLength, max_output_tokens -> maxOutputTokens, last_error -> lastError, pending_generation -> pendingGeneration, release_date -> releaseDate \u2014 and leaves nested objects wire-shaped. Its consumer test checks the wire-side names listed here.",
     "aliases": "Short task-tier names resolving to this model. Always emitted, empty when the model has none, so callers can distinguish 'no aliases' from an older gateway. Only catalog- or operator-declared names appear; the gateway's compiled-in routing defaults are not public API and are never listed.",
     "routing": "How the bare model name is served: `policy` (`remote_only`, `fallback`, `threshold`, or null for local only) and `upstream_kind` (`sie`, `openai`, or null). The single server and the gateway emit it on every entry.",
-    "lora_adapters": "Single-server only: ready served LoRA names, excluding loading or evicting adapters. Gateways omit this field because they do not aggregate worker residency; capabilities.lora_adapters remains the declared allowlist."
+    "lora_adapters": "Single-server only: ready served LoRA names, excluding loading or evicting adapters. Gateways omit this field because they do not aggregate worker residency; capabilities.lora_adapters remains the declared allowlist.",
+    "limits": "`context_length` and `max_output_tokens` are the generation limits the route admits, resolved for the listed id as admission resolves them, and null for a model without a generate task."
   }
 }

@@ -2,6 +2,64 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 
+/// OpenAI's ``reasoning_effort`` values in rising order, the only ones a
+/// request or a model declaration may name.
+pub const REASONING_EFFORT_VALUES: &[&str] =
+    &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// Refusal text for a ``reasoning_effort`` that is not one of OpenAI's values.
+pub fn reasoning_effort_malformed_message() -> String {
+    format!(
+        "'reasoning_effort' must be one of: {}",
+        REASONING_EFFORT_VALUES.join(", ")
+    )
+}
+
+/// The ``reasoning_effort`` values a route accepts, read from the model YAML
+/// (``tasks.generate.reasoning_effort`` or ``profiles.<p>.reasoning_effort``).
+/// The worker resolves what each value does; the gateway only checks that the
+/// route accepts it and reports the set on ``/v1/models``.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReasoningEffortDecl {
+    /// Accepted values in OpenAI's order.
+    pub accepted: Vec<String>,
+    /// The value the route runs at when a request names none.
+    pub default: Option<String>,
+}
+
+impl ReasoningEffortDecl {
+    fn from_yaml(value: &Value) -> Option<Self> {
+        let declaration = value.as_object()?;
+        let values = declaration.get("values")?.as_object()?;
+        let accepted: Vec<String> = REASONING_EFFORT_VALUES
+            .iter()
+            .filter(|candidate| values.contains_key(**candidate))
+            .map(|candidate| (*candidate).to_string())
+            .collect();
+        if accepted.is_empty() {
+            return None;
+        }
+        let default = declaration
+            .get("default")
+            .and_then(Value::as_str)
+            .filter(|default| accepted.iter().any(|value| value == default))
+            .map(str::to_owned);
+        Some(Self { accepted, default })
+    }
+
+    /// The YAML shape that parses back to this declaration. The gateway keeps
+    /// only the accepted values and the default, so each value's own settings
+    /// are left empty.
+    pub fn to_yaml_value(&self) -> Value {
+        let values: Map<String, Value> = self
+            .accepted
+            .iter()
+            .map(|value| (value.clone(), json!({})))
+            .collect();
+        json!({"default": self.default, "values": values})
+    }
+}
+
 /// Fields mirrored from model YAML for ``/v1/models`` wire parity with
 /// ``sie_server`` ``ModelInfo`` (inputs, outputs, dims, profiles, …).
 #[derive(Debug, Clone, Default)]
@@ -32,6 +90,23 @@ pub struct ModelInfoExtras {
     /// admission can use the concrete route's cap without widening the bare
     /// model or sibling variants.
     pub profile_max_output_tokens: HashMap<String, u32>,
+    /// ``tasks.generate.context_length`` from the model YAML: the prompt plus
+    /// completion envelope of the bare route.
+    pub context_length: Option<u32>,
+    /// Per-profile context windows. A materialized ``model:profile`` variant
+    /// admits its resolved ``adapter_options.loadtime.max_seq_length`` as its
+    /// context, as the worker's profile expansion does.
+    pub profile_context_length: HashMap<String, u32>,
+    /// ``tasks.generate.reasoning_effort`` from the model YAML.
+    pub reasoning_effort: Option<ReasoningEffortDecl>,
+    /// Per-profile ``reasoning_effort`` declarations: a profile's own, else
+    /// its parent's. A profile without either uses the model-level one.
+    pub profile_reasoning_effort: HashMap<String, ReasoningEffortDecl>,
+    /// Nothing in the YAML lets the model reason: a generate task with no
+    /// ``enable_thinking`` switch, reasoning parser, ``reasoning_effort``
+    /// declaration or remote profile. Mirrors
+    /// ``sie_server.config.model.ModelConfig.declares_no_reasoning``.
+    pub declares_no_reasoning: bool,
     /// ``tasks.generate.capabilities.grammar`` from the
     /// model YAML — the list of grammar ``kind`` strings the model
     /// supports (e.g. ``["json_schema", "regex"]``). Gateway rejects
@@ -101,6 +176,57 @@ pub struct ModelInfoExtras {
     /// profile B. ``lora_adapters`` (the union) is derivable by flattening
     /// the values and deduping.
     pub profile_lora_adapters: Option<HashMap<String, Vec<String>>>,
+}
+
+/// Whether nothing in a raw model YAML lets the model reason. A remote
+/// profile counts as able to reason, because SIE cannot know whether its
+/// upstream does.
+fn declares_no_reasoning(raw: &Value) -> bool {
+    let Some(generate) = raw
+        .get("tasks")
+        .and_then(|tasks| tasks.get("generate"))
+        .and_then(Value::as_object)
+    else {
+        return false;
+    };
+    if raw.get("remote_backed").and_then(Value::as_bool) == Some(true)
+        || generate
+            .get("reasoning_effort")
+            .is_some_and(|value| !value.is_null())
+        || generate
+            .get("chat_template_kwargs")
+            .and_then(|kwargs| kwargs.get("enable_thinking"))
+            .is_some()
+    {
+        return false;
+    }
+    let Some(profiles) = raw.get("profiles").and_then(Value::as_object) else {
+        return true;
+    };
+    profiles.values().all(|profile| {
+        let adapter_path = profile
+            .get("adapter_path")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                profile
+                    .get("extends")
+                    .and_then(Value::as_str)
+                    .and_then(|parent| profiles.get(parent))
+                    .and_then(|parent| parent.get("adapter_path"))
+                    .and_then(Value::as_str)
+            });
+        !adapter_path.is_some_and(|path| path.starts_with(REMOTE_ADAPTER_MODULE_PREFIX))
+            && profile.get("reasoning_effort").is_none_or(Value::is_null)
+            && profile
+                .get("chat_template_kwargs")
+                .and_then(|kwargs| kwargs.get("enable_thinking"))
+                .is_none()
+            && profile
+                .get("adapter_options")
+                .and_then(|options| options.get("loadtime"))
+                .and_then(|loadtime| loadtime.get("reasoning_parser"))
+                .is_none_or(Value::is_null)
+    })
 }
 
 impl ModelInfoExtras {
@@ -193,6 +319,13 @@ impl ModelInfoExtras {
                 {
                     extras.max_output_tokens = Some(cap);
                 }
+                extras.context_length = gen
+                    .get("context_length")
+                    .and_then(Value::as_u64)
+                    .and_then(|n| u32::try_from(n).ok());
+                extras.reasoning_effort = gen
+                    .get("reasoning_effort")
+                    .and_then(ReasoningEffortDecl::from_yaml);
                 // Read the per-model grammar capability list.
                 // The YAML shape is
                 // ``tasks.generate.capabilities.grammar: [kind, ...]``;
@@ -301,7 +434,46 @@ impl ModelInfoExtras {
                         .insert(profile_name.to_string(), cap);
                 }
             }
+
+            let parent_of = |profile: &Value| -> Option<&Value> {
+                profiles.get(profile.get("extends").and_then(Value::as_str)?)
+            };
+            for (profile_name, profile) in profiles {
+                if let Some(declaration) = profile
+                    .get("reasoning_effort")
+                    .or_else(|| {
+                        parent_of(profile).and_then(|parent| parent.get("reasoning_effort"))
+                    })
+                    .and_then(ReasoningEffortDecl::from_yaml)
+                {
+                    extras
+                        .profile_reasoning_effort
+                        .insert(profile_name.to_string(), declaration);
+                }
+                let own_loadtime = profile
+                    .get("adapter_options")
+                    .and_then(|options| options.get("loadtime"))
+                    .and_then(Value::as_object)
+                    .filter(|loadtime| !loadtime.is_empty());
+                let loadtime = own_loadtime.or_else(|| {
+                    parent_of(profile)
+                        .and_then(|parent| parent.get("adapter_options"))
+                        .and_then(|options| options.get("loadtime"))
+                        .and_then(Value::as_object)
+                });
+                if let Some(window) = loadtime
+                    .and_then(|loadtime| loadtime.get("max_seq_length"))
+                    .and_then(Value::as_u64)
+                    .filter(|value| *value > 0)
+                    .and_then(|value| u32::try_from(value).ok())
+                {
+                    extras
+                        .profile_context_length
+                        .insert(profile_name.to_string(), window);
+                }
+            }
         }
+        extras.declares_no_reasoning = declares_no_reasoning(raw);
 
         // Multi-LoRA: collect the served-names declared per profile and
         // also flatten/dedup them into the model-level union. The
@@ -367,6 +539,11 @@ impl ModelInfoExtras {
                 routing: None,
                 max_output_tokens: None,
                 profile_max_output_tokens: HashMap::new(),
+                context_length: None,
+                profile_context_length: HashMap::new(),
+                reasoning_effort: None,
+                profile_reasoning_effort: HashMap::new(),
+                declares_no_reasoning: false,
                 grammar_capabilities: None,
                 streaming_supported: None,
                 grammar_profile: None,
@@ -617,6 +794,10 @@ pub struct ProfileConfig {
     /// preserve these exactly so routing cannot switch thinking mode.
     #[serde(default)]
     pub chat_template_kwargs: Option<serde_json::Value>,
+    /// Per-profile ``reasoning_effort`` declaration; see
+    /// :struct:`ReasoningEffortDecl`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<serde_json::Value>,
     #[serde(default)]
     pub adapter_options: Option<serde_json::Value>,
     #[serde(default)]
@@ -680,6 +861,63 @@ impl ModelEntry {
             .or(self.info_extras.max_output_tokens)
     }
 
+    /// Prompt plus completion tokens this concrete route admits. An explicit
+    /// profile variant admits its profile's window, the bare route the
+    /// model-level context, as the worker's profile expansion materializes them.
+    pub fn effective_context_length(&self) -> Option<u32> {
+        if self.canonical_profile != "default" {
+            if let Some(window) = self
+                .info_extras
+                .profile_context_length
+                .get(&self.canonical_profile)
+            {
+                return Some(*window);
+            }
+        }
+        self.info_extras.context_length
+    }
+
+    /// The ``reasoning_effort`` declaration that governs this concrete route.
+    pub fn effective_reasoning_effort(&self) -> Option<&ReasoningEffortDecl> {
+        self.info_extras
+            .profile_reasoning_effort
+            .get(&self.canonical_profile)
+            .or(self.info_extras.reasoning_effort.as_ref())
+    }
+
+    /// The refusal text for ``value`` on this route, ``None`` when the route
+    /// accepts it. ``none`` is accepted on a model that cannot reason at all.
+    pub fn reasoning_effort_refusal(&self, value: &str, model_name: &str) -> Option<String> {
+        match self.effective_reasoning_effort() {
+            Some(declaration) if declaration.accepted.iter().any(|accepted| accepted == value) => {
+                None
+            }
+            Some(declaration) => Some(format!(
+                "Model '{model_name}' does not support reasoning_effort '{value}'. Supported values: {}",
+                declaration.accepted.join(", ")
+            )),
+            None if value == "none" && self.info_extras.declares_no_reasoning => None,
+            None => Some(format!(
+                "Model '{model_name}' does not support reasoning_effort"
+            )),
+        }
+    }
+
+    /// ``capabilities.reasoning`` on ``/v1/models``: null for a model without a
+    /// generate task or one that cannot reason.
+    fn reasoning_capability_value(&self) -> Value {
+        if self.info_extras.streaming_supported.is_none() || self.info_extras.declares_no_reasoning
+        {
+            return Value::Null;
+        }
+        let declaration = self.effective_reasoning_effort();
+        json!({
+            "effort": declaration.map(|declaration| declaration.accepted.clone()).unwrap_or_default(),
+            "default_effort": declaration.and_then(|declaration| declaration.default.clone()),
+            "budget_tokens": {},
+        })
+    }
+
     /// JSON shaped like ``sie_server.api.models.ModelInfo`` for HTTP clients.
     pub fn to_model_info_value(&self, loaded: bool) -> Value {
         let state = if loaded { "loaded" } else { "available" };
@@ -696,6 +934,8 @@ impl ModelEntry {
             "state": state,
             "last_error": Value::Null,
             "max_sequence_length": self.info_extras.max_sequence_length,
+            "context_length": self.effective_context_length(),
+            "max_output_tokens": self.effective_max_output_tokens(),
             "revision": self.info_extras.revision,
             "description": self.info_extras.description.as_deref().unwrap_or(""),
             "release_date": self.info_extras.release_date.as_deref().unwrap_or(""),
@@ -717,6 +957,7 @@ impl ModelEntry {
                 "code": self.info_extras.code,
                 "sql": self.info_extras.sql,
                 "guard": self.info_extras.guard,
+                "reasoning": self.reasoning_capability_value(),
             },
             "routing": self.routing_value(),
         })
@@ -899,6 +1140,7 @@ mod tests {
             max_output_tokens: None,
             grammar_profile: None,
             chat_template_kwargs: Some(serde_json::json!({"enable_thinking": true})),
+            reasoning_effort: None,
             adapter_path: Some("module:Adapter".into()),
             max_batch_tokens: Some(4096),
             compute_precision: Some("float16".into()),
@@ -923,6 +1165,7 @@ mod tests {
             max_output_tokens: None,
             grammar_profile: None,
             chat_template_kwargs: None,
+            reasoning_effort: None,
             adapter_path: Some("mod:A".into()),
             max_batch_tokens: None,
             compute_precision: None,
@@ -940,6 +1183,7 @@ mod tests {
             max_output_tokens: None,
             grammar_profile: None,
             chat_template_kwargs: None,
+            reasoning_effort: None,
             adapter_path: Some("mod:A".into()),
             max_batch_tokens: None,
             compute_precision: None,
@@ -958,6 +1202,7 @@ mod tests {
             max_output_tokens: None,
             grammar_profile: None,
             chat_template_kwargs: None,
+            reasoning_effort: None,
             adapter_path: Some("mod:A".into()),
             max_batch_tokens: None,
             compute_precision: None,
@@ -975,6 +1220,7 @@ mod tests {
             max_output_tokens: None,
             grammar_profile: None,
             chat_template_kwargs: None,
+            reasoning_effort: None,
             adapter_path: Some("mod:A".into()),
             max_batch_tokens: None,
             compute_precision: None,
@@ -1014,6 +1260,7 @@ mod tests {
                 max_output_tokens: None,
                 grammar_profile: None,
                 chat_template_kwargs: None,
+                reasoning_effort: None,
                 adapter_path: Some("mod:A".into()),
                 max_batch_tokens: None,
                 compute_precision: None,
@@ -1076,6 +1323,7 @@ mod tests {
             max_output_tokens: None,
             grammar_profile: None,
             chat_template_kwargs: None,
+            reasoning_effort: None,
             adapter_path: Some("mod:A".into()),
             max_batch_tokens: None,
             compute_precision: None,
@@ -1093,6 +1341,7 @@ mod tests {
             max_output_tokens: None,
             grammar_profile: None,
             chat_template_kwargs: None,
+            reasoning_effort: None,
             adapter_path: Some("mod:A".into()),
             max_batch_tokens: Some(4096),
             compute_precision: None,
@@ -1255,6 +1504,115 @@ profiles:
         );
         assert!(!extras.profile_max_output_tokens.contains_key("default"));
         assert!(!extras.profile_max_output_tokens.contains_key("sibling"));
+    }
+
+    fn vector_entry(config: &Value, name: &str, profile: &str) -> ModelEntry {
+        ModelEntry {
+            name: name.to_string(),
+            canonical_base_model: name.to_string(),
+            canonical_profile: profile.to_string(),
+            pool: None,
+            bundles: Vec::new(),
+            adapter_modules: HashSet::new(),
+            profile_names: HashSet::new(),
+            profile_configs: HashMap::new(),
+            info_extras: ModelInfoExtras::from_yaml_raw(config),
+        }
+    }
+
+    #[test]
+    fn test_reasoning_effort_shared_vectors() {
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../../../../conformance/openai_generation/reasoning_effort_vectors.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            reasoning_effort_malformed_message(),
+            vectors["malformed_message"]
+        );
+        for case in vectors["cases"].as_array().unwrap() {
+            let model = case["model"].as_str().unwrap();
+            let entry = vector_entry(&vectors["models"][model]["config"], model, "default");
+            let refusal = entry.reasoning_effort_refusal(case["value"].as_str().unwrap(), model);
+            assert_eq!(
+                refusal.as_deref(),
+                case.get("message").and_then(Value::as_str),
+                "{}",
+                case["name"]
+            );
+        }
+        for (name, model) in vectors["models"].as_object().unwrap() {
+            let config = &model["config"];
+            let info = vector_entry(config, name, "default").to_model_info_value(false);
+            assert_eq!(
+                info["capabilities"]["reasoning"], model["capability"],
+                "{name}"
+            );
+            let generate = &config["tasks"]["generate"];
+            assert_eq!(info["context_length"], generate["context_length"], "{name}");
+            assert_eq!(
+                info["max_output_tokens"], generate["max_output_tokens"],
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_profile_variant_reports_its_own_reasoning_and_limits() {
+        let config = json!({
+            "sie_id": "acme/hybrid",
+            "tasks": {"generate": {"context_length": 16384, "max_output_tokens": 4096}},
+            "profiles": {
+                "default": {
+                    "adapter_path": "sie_server.adapters.fake.adapter:FakeAdapter",
+                    "reasoning_effort": {"default": "max", "values": {"low": {}, "max": {}}}
+                },
+                "relay": {
+                    "adapter_path": "sie_server.adapters.remote.openai:OpenAIUpstreamAdapter",
+                    "max_output_tokens": 32768,
+                    "adapter_options": {"loadtime": {"max_seq_length": 131072}},
+                    "reasoning_effort": {"values": {"low": {"upstream": "low"}, "max": {"upstream": "max"}}}
+                },
+                "relay-alias": {"extends": "relay"}
+            },
+            "routing": {"policy": "fallback", "fallback_profile": "relay"}
+        });
+        let bare = vector_entry(&config, "acme/hybrid", "default").to_model_info_value(false);
+        assert_eq!(bare["context_length"], 16384);
+        assert_eq!(bare["max_output_tokens"], 4096);
+        assert_eq!(bare["capabilities"]["reasoning"]["default_effort"], "max");
+        for profile in ["relay", "relay-alias"] {
+            let variant = vector_entry(&config, &format!("acme/hybrid:{profile}"), profile);
+            let info = variant.to_model_info_value(false);
+            assert_eq!(info["context_length"], 131072, "{profile}");
+            assert_eq!(info["max_output_tokens"], 32768, "{profile}");
+            assert_eq!(
+                info["capabilities"]["reasoning"]["effort"],
+                json!(["low", "max"])
+            );
+            assert_eq!(
+                info["capabilities"]["reasoning"]["default_effort"],
+                Value::Null
+            );
+            assert_eq!(variant.reasoning_effort_refusal("low", "acme/hybrid"), None);
+        }
+    }
+
+    #[test]
+    fn test_a_model_without_a_generate_task_reports_no_reasoning_or_limits() {
+        let config = json!({
+            "sie_id": "acme/embedder",
+            "tasks": {"encode": {"dense": {"dim": 8}}},
+            "profiles": {"default": {"adapter_path": "module:Adapter"}}
+        });
+        let entry = vector_entry(&config, "acme/embedder", "default");
+        let info = entry.to_model_info_value(false);
+        assert_eq!(info["capabilities"]["reasoning"], Value::Null);
+        assert_eq!(info["context_length"], Value::Null);
+        assert_eq!(info["max_output_tokens"], Value::Null);
+        assert!(entry
+            .reasoning_effort_refusal("none", "acme/embedder")
+            .is_some());
     }
 
     #[test]

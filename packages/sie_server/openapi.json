@@ -2099,6 +2099,16 @@
             "type": "boolean",
             "title": "Guard",
             "default": false
+          },
+          "reasoning": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelReasoning"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -2168,6 +2178,28 @@
               }
             ],
             "title": "Max Sequence Length"
+          },
+          "context_length": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Length"
+          },
+          "max_output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Output Tokens"
           },
           "profiles": {
             "additionalProperties": {
@@ -2258,6 +2290,40 @@
         ],
         "title": "ModelLoadError",
         "description": "Diagnostic detail for a recorded load failure.\n\nSurfaced in :class:`ModelInfo` when the registry has a sticky\nfailure for the model. Attributes mirror the server-side\n:class:`sie_server.core.load_errors.LoadFailure`."
+      },
+      "ModelReasoning": {
+        "properties": {
+          "effort": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Effort",
+            "default": []
+          },
+          "default_effort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Effort"
+          },
+          "budget_tokens": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Budget Tokens",
+            "default": {}
+          }
+        },
+        "type": "object",
+        "title": "ModelReasoning",
+        "description": "How a model's reasoning can be steered with the chat ``reasoning_effort`` field."
       },
       "ModelRouting": {
         "properties": {

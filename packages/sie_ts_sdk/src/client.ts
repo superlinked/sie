@@ -196,6 +196,8 @@ type OpenAiCompatModelKeys = Partial<Record<"id" | "object" | "created" | "owned
 function toModelInfo(wire: WireModelInfo): ModelInfo {
   const {
     max_sequence_length,
+    context_length,
+    max_output_tokens,
     last_error,
     pending_generation,
     release_date,
@@ -214,6 +216,8 @@ function toModelInfo(wire: WireModelInfo): ModelInfo {
     // caller `undefined` for a field `ModelInfo` declares as always present.
     aliases: aliases ?? [],
     ...(max_sequence_length !== undefined ? { maxSequenceLength: max_sequence_length } : {}),
+    ...(context_length !== undefined ? { contextLength: context_length } : {}),
+    ...(max_output_tokens !== undefined ? { maxOutputTokens: max_output_tokens } : {}),
     ...(last_error !== undefined ? { lastError: last_error } : {}),
     ...(pending_generation !== undefined ? { pendingGeneration: pending_generation } : {}),
     ...(release_date !== undefined ? { releaseDate: release_date } : {}),

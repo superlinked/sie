@@ -133,6 +133,12 @@
       "headers": {"retry-after": "5"},
       "body": {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}, "request_id": null},
       "expect": {"status": 529, "type": "overloaded_error", "message": "Overloaded", "headers": {"retry-after": "5", "x-should-retry": "true"}}
+    },
+    {
+      "name": "model without a reasoning_effort declaration",
+      "status": 400,
+      "body": {"error": {"message": "Model 'm' does not support reasoning_effort", "type": "invalid_request_error", "param": "reasoning_effort", "code": "unsupported_field"}},
+      "expect": {"status": 400, "type": "invalid_request_error", "message": "output_config.effort: Extra inputs are not permitted", "headers": {"x-sie-error-code": "unsupported_field"}}
     }
   ]
 }

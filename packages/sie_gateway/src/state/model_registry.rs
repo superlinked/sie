@@ -989,6 +989,7 @@ impl ModelRegistry {
             max_output_tokens: None,
             grammar_profile: None,
             chat_template_kwargs: None,
+            reasoning_effort: None,
             adapter_path: None,
             max_batch_tokens: None,
             compute_precision: None,
@@ -1065,6 +1066,7 @@ impl ModelRegistry {
     fn merge_profiles_for_resolution(
         existing: &HashMap<String, CanonicalProfile>,
         existing_output_caps: &HashMap<String, u32>,
+        existing_reasoning_effort: &HashMap<String, crate::types::model::ReasoningEffortDecl>,
         incoming: &HashMap<String, crate::types::model::ProfileConfig>,
     ) -> HashMap<String, crate::types::model::ProfileConfig> {
         let mut merged: HashMap<String, crate::types::model::ProfileConfig> = existing
@@ -1077,6 +1079,9 @@ impl ModelRegistry {
                         max_output_tokens: existing_output_caps.get(name).copied(),
                         grammar_profile: canon.grammar_profile.clone(),
                         chat_template_kwargs: canon.chat_template_kwargs.clone(),
+                        reasoning_effort: existing_reasoning_effort
+                            .get(name)
+                            .map(crate::types::model::ReasoningEffortDecl::to_yaml_value),
                         adapter_path: canon.adapter_path.clone(),
                         max_batch_tokens: canon.max_batch_tokens,
                         compute_precision: canon.compute_precision.clone(),
@@ -2846,6 +2851,7 @@ impl ModelRegistry {
             let merged_profiles = Self::merge_profiles_for_resolution(
                 &existing.profile_configs,
                 &existing.info_extras.profile_max_output_tokens,
+                &existing.info_extras.profile_reasoning_effort,
                 &config.profiles,
             );
 
@@ -3051,6 +3057,8 @@ impl ModelRegistry {
             // reload (otherwise grammar_route_variant keeps routing to the
             // stale profile).
             existing.grammar_profile = refreshed.grammar_profile;
+            existing.context_length = refreshed.context_length;
+            existing.reasoning_effort = refreshed.reasoning_effort.clone();
         }
         if config.max_sequence_length.is_some() {
             existing.max_sequence_length = refreshed.max_sequence_length;
@@ -3076,6 +3084,35 @@ impl ModelRegistry {
             existing.lora_adapters = lora_refreshed.lora_adapters;
             existing.profile_lora_adapters = lora_refreshed.profile_lora_adapters;
             existing.profile_max_output_tokens = lora_refreshed.profile_max_output_tokens;
+            existing.profile_context_length = lora_refreshed.profile_context_length;
+            existing.profile_reasoning_effort = lora_refreshed.profile_reasoning_effort;
+        }
+        // Whether the model can reason at all depends on its generate task and
+        // every profile. A delta without ``tasks`` keeps the known answer and
+        // can only take it away: a ``true`` here accepts ``none`` as a no-op.
+        if config.tasks.is_some() {
+            let mut merged_config = config.clone();
+            merged_config.profiles = merged_profiles.clone();
+            existing.declares_no_reasoning =
+                ModelInfoExtras::from_model_config(&merged_config).declares_no_reasoning;
+        } else if touches_profiles {
+            existing.declares_no_reasoning &= config.profiles.values().all(|profile| {
+                profile.reasoning_effort.is_none()
+                    && profile
+                        .chat_template_kwargs
+                        .as_ref()
+                        .and_then(|kwargs| kwargs.get("enable_thinking"))
+                        .is_none()
+                    && !profile.adapter_path.as_deref().is_some_and(|path| {
+                        path.starts_with(crate::types::model::REMOTE_ADAPTER_MODULE_PREFIX)
+                    })
+                    && profile
+                        .adapter_options
+                        .as_ref()
+                        .and_then(|options| options.get("loadtime"))
+                        .and_then(|loadtime| loadtime.get("reasoning_parser"))
+                        .is_none_or(serde_json::Value::is_null)
+            });
         }
     }
 }
@@ -3109,6 +3146,7 @@ mod tests {
             max_output_tokens: None,
             grammar_profile: None,
             chat_template_kwargs: None,
+            reasoning_effort: None,
             adapter_path: adapter_path.map(str::to_string),
             max_batch_tokens,
             compute_precision: None,
@@ -3585,6 +3623,7 @@ mod tests {
                 max_output_tokens: None,
                 grammar_profile: None,
                 chat_template_kwargs: None,
+                reasoning_effort: None,
                 adapter_path: Some("sie_server.adapters.sentence_transformer:Adapter".to_string()),
                 max_batch_tokens: Some(4096),
                 compute_precision: None,
@@ -3629,6 +3668,7 @@ mod tests {
             max_output_tokens: None,
             grammar_profile: None,
             chat_template_kwargs: None,
+            reasoning_effort: None,
             adapter_path: Some("sie_server.adapters.sentence_transformer:Adapter".to_string()),
             max_batch_tokens: Some(4096),
             compute_precision: None,
@@ -4405,6 +4445,7 @@ profiles:
                 max_output_tokens: None,
                 grammar_profile: None,
                 chat_template_kwargs: None,
+                reasoning_effort: None,
                 adapter_path: Some("sie_server.adapters.sentence_transformer:Adapter".to_string()),
                 max_batch_tokens: Some(4096),
                 compute_precision: None,
@@ -4449,6 +4490,7 @@ profiles:
             max_output_tokens: None,
             grammar_profile: None,
             chat_template_kwargs: None,
+            reasoning_effort: None,
             adapter_path: Some("sie_server.adapters.sentence_transformer:Adapter".to_string()),
             max_batch_tokens: Some(4096),
             compute_precision: None,
@@ -4691,6 +4733,7 @@ profiles:
                 max_output_tokens: None,
                 grammar_profile: None,
                 chat_template_kwargs: None,
+                reasoning_effort: None,
                 adapter_path: Some("sie_server.adapters.sentence_transformer:Adapter".to_string()),
                 max_batch_tokens: Some(4096),
                 compute_precision: None,
@@ -4749,6 +4792,7 @@ profiles:
                 max_output_tokens: None,
                 grammar_profile: None,
                 chat_template_kwargs: None,
+                reasoning_effort: None,
                 adapter_path: Some("sie_server.adapters.sentence_transformer:Adapter".to_string()),
                 max_batch_tokens: Some(4096),
                 compute_precision: None,
@@ -4765,6 +4809,7 @@ profiles:
                 max_output_tokens: None,
                 grammar_profile: None,
                 chat_template_kwargs: None,
+                reasoning_effort: None,
                 adapter_path: Some("sie_server.adapters.sentence_transformer:Adapter".to_string()),
                 max_batch_tokens: Some(4096),
                 compute_precision: None,
@@ -4933,6 +4978,7 @@ profiles:
                 max_output_tokens: None,
                 grammar_profile: None,
                 chat_template_kwargs: None,
+                reasoning_effort: None,
                 adapter_path: Some(
                     "sie_server_rust.adapters.candle:CandleEmbeddingAdapter".to_string(),
                 ),
@@ -5422,6 +5468,7 @@ profiles:
                             max_output_tokens: None,
                             grammar_profile: None,
                             chat_template_kwargs: None,
+                            reasoning_effort: None,
                             adapter_path: Some(
                                 "sie_server.adapters.sentence_transformer:Adapter".to_string(),
                             ),
@@ -5704,6 +5751,7 @@ adapters:
                         max_output_tokens: None,
                         grammar_profile: None,
                         chat_template_kwargs: None,
+                        reasoning_effort: None,
                         adapter_path: Some(
                             "sie_server.adapters.sentence_transformer:SentenceTransformerAdapter"
                                 .to_string(),
@@ -5755,6 +5803,7 @@ adapters:
                 max_output_tokens: None,
                 grammar_profile: None,
                 chat_template_kwargs: None,
+                reasoning_effort: None,
                 adapter_path: Some("module:Adapter".to_string()),
                 max_batch_tokens: Some(4096),
                 compute_precision: None,
@@ -5801,6 +5850,7 @@ encode:
                 max_output_tokens: None,
                 grammar_profile: None,
                 chat_template_kwargs: None,
+                reasoning_effort: None,
                 adapter_path: Some("module:Adapter".to_string()),
                 max_batch_tokens: Some(4096),
                 compute_precision: None,
@@ -5815,6 +5865,7 @@ encode:
                 max_output_tokens: None,
                 grammar_profile: None,
                 chat_template_kwargs: None,
+                reasoning_effort: None,
                 adapter_path: Some("module:Adapter".to_string()),
                 max_batch_tokens: Some(2048),
                 compute_precision: None,
@@ -5972,6 +6023,7 @@ encode:
             max_output_tokens: None,
             grammar_profile: None,
             chat_template_kwargs: None,
+            reasoning_effort: None,
             adapter_path: Some("module:Adapter".to_string()),
             max_batch_tokens: Some(4096),
             compute_precision: None,
@@ -6082,6 +6134,7 @@ adapters:
                 max_output_tokens: None,
                 grammar_profile: None,
                 chat_template_kwargs: None,
+                reasoning_effort: None,
                 adapter_path: Some("module:Adapter".to_string()),
                 max_batch_tokens: Some(4096),
                 compute_precision: None,
@@ -6123,6 +6176,7 @@ encode:
                 max_output_tokens: None,
                 grammar_profile: None,
                 chat_template_kwargs: None,
+                reasoning_effort: None,
                 adapter_path: Some("module:Adapter".to_string()),
                 max_batch_tokens: Some(4096),
                 compute_precision: None,
@@ -6137,6 +6191,7 @@ encode:
                 max_output_tokens: None,
                 grammar_profile: None,
                 chat_template_kwargs: None,
+                reasoning_effort: None,
                 adapter_path: Some("module:Adapter".to_string()),
                 max_batch_tokens: Some(2048),
                 compute_precision: None,
@@ -6191,6 +6246,7 @@ encode:
                         max_output_tokens: None,
                         grammar_profile: None,
                         chat_template_kwargs: None,
+                        reasoning_effort: None,
                         adapter_path: Some(adapter_path.to_string()),
                         max_batch_tokens: Some(max_batch_tokens),
                         compute_precision: None,
@@ -6422,6 +6478,7 @@ adapters:
                         max_output_tokens: None,
                         grammar_profile: None,
                         chat_template_kwargs: None,
+                        reasoning_effort: None,
                         compute_precision: None,
                         adapter_options: None,
                         extends: None,
@@ -6753,6 +6810,79 @@ profiles:
         );
     }
 
+    #[test]
+    fn test_profile_delta_keeps_stored_reasoning_effort_declarations() {
+        let (_dir, bundles_dir, models_dir) = create_test_dirs();
+        fs::write(
+            bundles_dir.join("default.yaml"),
+            "name: default\npriority: 10\nadapters:\n  - sie_server.adapters.sentence_transformer\n",
+        )
+        .unwrap();
+        let registry = ModelRegistry::new(&bundles_dir, &models_dir, true);
+        let seed: ModelConfig = serde_saphyr::from_str(
+            r#"
+sie_id: test/model
+tasks: {generate: {context_length: 4096, max_output_tokens: 1024}}
+profiles:
+  default:
+    adapter_path: "sie_server.adapters.sentence_transformer:SentenceTransformerAdapter"
+    max_batch_tokens: 4096
+    reasoning_effort: {default: high, values: {low: {}, high: {}}}
+  parent:
+    adapter_path: "sie_server.adapters.sentence_transformer:SentenceTransformerAdapter"
+    max_batch_tokens: 4096
+    reasoning_effort: {values: {low: {}}}
+"#,
+        )
+        .unwrap();
+        registry.add_model_config(seed).expect("seed");
+
+        let delta: ModelConfig = serde_saphyr::from_str(
+            r#"
+sie_id: test/model
+profiles:
+  child:
+    extends: parent
+    max_batch_tokens: 8192
+"#,
+        )
+        .unwrap();
+        registry
+            .add_model_config(delta)
+            .expect("profile-only delta");
+
+        let accepts = |model: &str, value: &str| {
+            registry
+                .get_model_info(model)
+                .expect(model)
+                .reasoning_effort_refusal(value, model)
+                .is_none()
+        };
+        assert!(
+            accepts("test/model", "high"),
+            "default keeps its declaration"
+        );
+        assert!(!accepts("test/model", "max"));
+        assert_eq!(
+            registry
+                .get_model_info("test/model")
+                .unwrap()
+                .effective_reasoning_effort()
+                .and_then(|declaration| declaration.default.clone())
+                .as_deref(),
+            Some("high"),
+        );
+        assert!(
+            accepts("test/model:parent", "low"),
+            "parent keeps its declaration"
+        );
+        assert!(
+            accepts("test/model:child", "low"),
+            "child inherits the stored parent's"
+        );
+        assert!(!accepts("test/model:child", "high"));
+    }
+
     /// M10 follow-up: a delta-update that adds a profile with new
     /// ``adapter_options.loadtime.lora_paths`` must refresh both the
     /// union (`info_extras.lora_adapters`) and the per-profile map
@@ -6795,6 +6925,7 @@ adapters:
                         max_output_tokens: None,
                         grammar_profile: None,
                         chat_template_kwargs: None,
+                        reasoning_effort: None,
                         adapter_path: Some(
                             "sie_server.adapters.sentence_transformer:SentenceTransformerAdapter"
                                 .to_string(),
@@ -6860,6 +6991,7 @@ adapters:
                         max_output_tokens: None,
                         grammar_profile: None,
                         chat_template_kwargs: None,
+                        reasoning_effort: None,
                         adapter_path: Some(
                             "sie_server.adapters.sentence_transformer:SentenceTransformerAdapter"
                                 .to_string(),
@@ -7668,6 +7800,7 @@ adapters:
                                 max_output_tokens: None,
                                 grammar_profile: None,
                                 chat_template_kwargs: None,
+                                reasoning_effort: None,
                                 adapter_path: Some(
                                     "sie_server.adapters.sentence_transformer:A".to_string(),
                                 ),

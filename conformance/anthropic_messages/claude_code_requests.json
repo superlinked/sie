@@ -665,7 +665,7 @@
         "stream": true
       },
       "expect": {
-        "error": "output_config.effort: Extra inputs are not permitted"
+        "error": "messages.1.role: role \"system\" is not supported in messages; use the top-level system parameter"
       }
     },
     {
@@ -5516,7 +5516,7 @@
         "stream": true
       },
       "expect": {
-        "error": "output_config.effort: Extra inputs are not permitted"
+        "error": "messages.1.role: role \"system\" is not supported in messages; use the top-level system parameter"
       }
     },
     {
@@ -5674,7 +5674,17 @@
         "stream": true
       },
       "expect": {
-        "error": "output_config.effort: Extra inputs are not permitted"
+        "chat": {
+          "roles": [
+            "system",
+            "user"
+          ],
+          "stream": true,
+          "max_tokens": 32768,
+          "tool_count": 3,
+          "include_reasoning": true,
+          "reasoning_effort": "high"
+        }
       }
     },
     {

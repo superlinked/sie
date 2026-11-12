@@ -162,6 +162,15 @@ fn every_captured_claude_code_request_translates_or_fails_with_the_recovery_word
                     chat.get("stop").cloned().unwrap_or(Value::Null),
                     "{name}"
                 );
+                assert_eq!(
+                    translation
+                        .chat
+                        .get("reasoning_effort")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    chat.get("reasoning_effort").cloned().unwrap_or(Value::Null),
+                    "{name}"
+                );
                 assert!(
                     chat_completions_dispatch_inputs(&translation.chat).is_ok(),
                     "{name}: the chat route accepts the translation"
@@ -868,7 +877,7 @@ async fn a_translation_refusal_publishes_nothing() {
         messages_request(json!({
             "model": "acme/chat",
             "max_tokens": 16,
-            "output_config": {"effort": "high"},
+            "output_config": {"format": {"type": "json_schema"}},
             "messages": [{"role": "user", "content": "hi"}],
         })),
     )
@@ -880,7 +889,7 @@ async fn a_translation_refusal_publishes_nothing() {
         body,
         json!({
             "type": "error",
-            "error": {"type": "invalid_request_error", "message": "output_config.effort: Extra inputs are not permitted"},
+            "error": {"type": "invalid_request_error", "message": "output_config.format: Extra inputs are not permitted"},
             "request_id": null,
         })
     );

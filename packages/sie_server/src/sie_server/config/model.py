@@ -89,6 +89,77 @@ def validate_chat_template_kwargs(value: dict[str, Any] | None) -> dict[str, Any
     return value
 
 
+REASONING_EFFORT_VALUES: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+"""OpenAI's ``reasoning_effort`` values in rising order, the only ones a request or a declaration may name."""
+ReasoningEffortValue = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+_REASONING_LEVEL_TEMPLATE_KWARGS = frozenset({"reasoning_effort", "reasoning_strength"})
+_REASONING_LEVEL_TEXT = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
+
+
+class ReasoningEffortLevel(BaseModel):
+    """What one accepted ``reasoning_effort`` value does on a generation profile.
+
+    ``chat_template_kwargs`` set the model's own effort switch where SIE renders
+    the prompt. ``upstream`` is the top-level ``reasoning_effort`` a remote
+    profile sends to its upstream chat. A level that sets neither accepts the
+    value and changes nothing, for the value the model already runs at.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    chat_template_kwargs: dict[str, str] | None = None
+    upstream: str | None = None
+
+    @field_validator("chat_template_kwargs")
+    @classmethod
+    def validate_level_template_kwargs(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        if value is None:
+            return None
+        unsupported = set(value) - _REASONING_LEVEL_TEMPLATE_KWARGS
+        if unsupported:
+            names = ", ".join(sorted(unsupported))
+            raise ValueError(f"unsupported reasoning_effort chat_template_kwargs key(s): {names}")
+        for key, text in value.items():
+            if not _REASONING_LEVEL_TEXT.fullmatch(text):
+                raise ValueError(f"reasoning_effort chat_template_kwargs.{key} must be 1 to 32 letters, digits, - or _")
+        return value
+
+    @field_validator("upstream")
+    @classmethod
+    def validate_upstream_value(cls, value: str | None) -> str | None:
+        if value is not None and not _REASONING_LEVEL_TEXT.fullmatch(value):
+            raise ValueError("reasoning_effort upstream must be 1 to 32 letters, digits, - or _")
+        return value
+
+
+class ReasoningEffortDeclaration(BaseModel):
+    """The ``reasoning_effort`` values a generation profile accepts, and what each does.
+
+    ``default`` names the value the profile already runs at when a request
+    names none, or is ``None`` when that is not one of the declared values. It
+    is reported on ``/v1/models`` and never applied, so a request without the
+    field renders and calls its upstream exactly as before.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    default: ReasoningEffortValue | None = None
+    values: dict[ReasoningEffortValue, ReasoningEffortLevel]
+
+    @model_validator(mode="after")
+    def validate_values(self) -> "ReasoningEffortDeclaration":
+        if not self.values:
+            raise ValueError("reasoning_effort.values must name at least one value")
+        if self.default is not None and self.default not in self.values:
+            raise ValueError(f"reasoning_effort.default '{self.default}' is not one of its values")
+        return self
+
+    @property
+    def accepted(self) -> tuple[str, ...]:
+        """The accepted values in OpenAI's order."""
+        return tuple(value for value in REASONING_EFFORT_VALUES if value in self.values)
+
+
 # Served-model version identity. An *immutable* HF revision is a full 40-char git
 # commit SHA (SHA-1, lowercase hex). Branch/tag names ("main", "v1.0") resolve to
 # *moving* targets on the Hub, so they are NOT acceptable pins for a promoted/served
@@ -261,6 +332,10 @@ class GenerateTask(BaseModel):
     budget is a per-worker/per-profile shape rather than a per-task
     semantic.
 
+    ``reasoning_effort`` declares the OpenAI ``reasoning_effort`` values the
+    model's profiles accept and what each does. A profile may replace it with
+    its own declaration. ``None`` refuses the request field.
+
     ``grammar_profile`` optionally names a profile that grammar-constrained
     requests (OpenAI ``response_format`` / SIE-native ``grammar``) must run on.
     When set, the gateway rewrites such a request's model id to the
@@ -286,6 +361,14 @@ class GenerateTask(BaseModel):
     chat_template_kwargs: dict[str, Any] = Field(default_factory=dict)
     prewarm_grammars: list[PrewarmGrammar] = Field(default_factory=list)
     grammar_profile: str | None = None
+    reasoning_effort: ReasoningEffortDeclaration | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_generate_task(self, handler: SerializerFunctionWrapHandler):  # noqa: ANN202 -- retain field-level serialization schema
+        data = handler(self)
+        if data.get("reasoning_effort") is None:
+            data.pop("reasoning_effort", None)
+        return data
 
     @field_validator("chat_template_kwargs")
     @classmethod
@@ -566,6 +649,9 @@ class ProfileConfig(BaseModel):
     gateway uses it only for constrained requests, allowing a long-context or
     thinking profile to route to a non-speculative twin without losing its
     context window, hardware launch shape, or tokenizer mode.
+
+    ``reasoning_effort`` replaces the generation task's declaration for this
+    profile and the profiles that extend it.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -583,6 +669,7 @@ class ProfileConfig(BaseModel):
     max_output_tokens: int | None = Field(default=None, gt=0)
     chat_template_kwargs: dict[str, Any] | None = None
     grammar_profile: str | None = None
+    reasoning_effort: ReasoningEffortDeclaration | None = None
 
     @model_serializer(mode="wrap")
     def _serialize_profile(self, handler: SerializerFunctionWrapHandler):  # noqa: ANN202 -- retain field-level serialization schema
@@ -591,6 +678,8 @@ class ProfileConfig(BaseModel):
         # new option is omitted. Explicit False must survive parent overrides.
         if data.get("bounded_batch_progress") is None:
             data.pop("bounded_batch_progress", None)
+        if data.get("reasoning_effort") is None:
+            data.pop("reasoning_effort", None)
         return data
 
     @field_validator("chat_template_kwargs")
@@ -1066,6 +1155,92 @@ class ModelConfig(BaseModel):
             return profile.adapter_path
         parent = self.profiles.get(profile.extends)
         return parent.adapter_path if parent is not None else None
+
+    @model_validator(mode="after")
+    def validate_reasoning_effort(self) -> "ModelConfig":
+        """A declaration fits the side that serves it, and a routed model's two profiles accept the same values."""
+        declared_on_profiles = [name for name, profile in self.profiles.items() if profile.reasoning_effort is not None]
+        if self.tasks.generate is None:
+            if declared_on_profiles:
+                msg = (
+                    f"Profile '{declared_on_profiles[0]}' declares reasoning_effort, but the model has no generate task"
+                )
+                raise ValueError(msg)
+            return self
+        for name in self.profiles:
+            declaration = self.reasoning_effort_for(name)
+            if declaration is None:
+                continue
+            remote = is_remote_adapter_path(self._declared_adapter_path(name))
+            for value, level in declaration.values.items():
+                if remote and level.chat_template_kwargs is not None:
+                    msg = (
+                        f"Profile '{name}' is remote, so its reasoning_effort value '{value}' can only name "
+                        "the upstream's own value, not chat_template_kwargs"
+                    )
+                    raise ValueError(msg)
+                if not remote and level.upstream is not None:
+                    msg = f"Profile '{name}' is local, so its reasoning_effort value '{value}' cannot name an upstream value"
+                    raise ValueError(msg)
+        routing = self.routing
+        if routing is not None and routing.fallback_profile is not None and "default" in self.profiles:
+            local = self.reasoning_effort_for("default")
+            remote = self.reasoning_effort_for(routing.fallback_profile)
+            local_values = local.accepted if local is not None else ()
+            remote_values = remote.accepted if remote is not None else ()
+            if local_values != remote_values:
+                msg = (
+                    f"Profiles 'default' and '{routing.fallback_profile}' serve one route, so they must accept "
+                    f"the same reasoning_effort values, got {list(local_values)} and {list(remote_values)}"
+                )
+                raise ValueError(msg)
+            local_default = local.default if local is not None else None
+            remote_default = remote.default if remote is not None else None
+            if local_default != remote_default:
+                msg = (
+                    f"Profiles 'default' and '{routing.fallback_profile}' serve one route, so they must declare "
+                    f"the same reasoning_effort default, got {local_default!r} and {remote_default!r}"
+                )
+                raise ValueError(msg)
+        return self
+
+    def reasoning_effort_for(self, profile_name: str = "default") -> ReasoningEffortDeclaration | None:
+        """The ``reasoning_effort`` declaration that governs ``profile_name``.
+
+        The profile's own declaration wins, then its parent's, then the
+        generation task's.
+        """
+        profile = self.profiles.get(profile_name)
+        if profile is not None:
+            if profile.reasoning_effort is not None:
+                return profile.reasoning_effort
+            parent = self.profiles.get(profile.extends) if profile.extends is not None else None
+            if parent is not None and parent.reasoning_effort is not None:
+                return parent.reasoning_effort
+        generate = self.tasks.generate
+        return generate.reasoning_effort if generate is not None else None
+
+    @property
+    def declares_no_reasoning(self) -> bool:
+        """Whether nothing in this config lets the model reason.
+
+        That needs a generate task with no ``enable_thinking`` switch, no
+        reasoning parser, no ``reasoning_effort`` declaration and no remote
+        profile, because SIE cannot know whether an upstream reasons.
+        """
+        generate = self.tasks.generate
+        if generate is None or self.remote_backed:
+            return False
+        if "enable_thinking" in generate.chat_template_kwargs or generate.reasoning_effort is not None:
+            return False
+        for name, profile in self.profiles.items():
+            if profile.reasoning_effort is not None or is_remote_adapter_path(self._declared_adapter_path(name)):
+                return False
+            if profile.chat_template_kwargs is not None and "enable_thinking" in profile.chat_template_kwargs:
+                return False
+            if profile.adapter_options.loadtime.get("reasoning_parser") is not None:
+                return False
+        return True
 
     def lora_revisions(self) -> dict[str, str | None]:
         """Every LoRA id any profile declares -> its pinned revision (``None`` = unpinned).

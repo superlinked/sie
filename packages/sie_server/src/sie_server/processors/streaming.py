@@ -80,6 +80,7 @@ from sie_server.adapters.remote.sie import SieUpstreamAdapter
 from sie_server.api.helpers import oom_retry_after_from_registry
 from sie_server.config.model import validate_chat_template_kwargs
 from sie_server.core.grammar_routing import resolve_grammar_serving_model
+from sie_server.core.reasoning_effort import AppliedReasoningEffort, apply_reasoning_effort, parse_reasoning_effort
 from sie_server.core.runtime_options import apply_generation_runtime_options
 from sie_server.core.text_tokens import estimate_tokens_from_chars
 from sie_server.core.tokenizer import image_first_chat_message, load_image_token_id, load_tokenizer
@@ -836,6 +837,9 @@ class _GenerateRequestParams:
     # ``reasoning_delta`` chunks instead of dropping it. Honoured only for a
     # model whose config declares reasoning.
     include_reasoning: bool = False
+    # Chat ``reasoning_effort``: one of OpenAI's values, resolved against the
+    # serving profile's declaration before rendering or the upstream call.
+    reasoning_effort: str | None = None
     # Set only by the native ``/v1/generate`` route: a remote-backed model on
     # a chat-only upstream receives the prompt as one user message. Other
     # routes' prompts are raw continuations.
@@ -877,13 +881,15 @@ def _remote_chat_parameters(
     *,
     images: bool = False,
     chat_template_kwargs: Mapping[str, Any] | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     """Project validated queue parameters onto the upstream chat contract.
 
     ``images`` admits message images, sent as base64 data-URI ``image_url``
     parts. ``chat_template_kwargs`` are the model's own template kwargs, sent
-    for the upstream to render with. Every refusal precedes image encoding,
-    which decodes each image and so runs off the event loop.
+    for the upstream to render with. ``reasoning_effort`` is the value the
+    remote profile declares for the request's value. Every refusal precedes
+    image encoding, which decodes each image and so runs off the event loop.
     """
     assert isinstance(params.input, _MessagesInput)
     for field in ("top_k", "repetition_penalty", "min_tokens", "chat_template_kwargs", "lora_adapter"):
@@ -921,6 +927,8 @@ def _remote_chat_parameters(
     }
     if chat_template_kwargs:
         body["chat_template_kwargs"] = dict(chat_template_kwargs)
+    if reasoning_effort is not None:
+        body["reasoning_effort"] = reasoning_effort
     for field in ("stop", "frequency_penalty", "presence_penalty", "seed", "logit_bias", "top_logprobs"):
         value = getattr(params, field)
         if value is not None:
@@ -1985,6 +1993,25 @@ class StreamingProcessor:
                 msg=msg,
             )
             return
+        effort: AppliedReasoningEffort | None = None
+        try:
+            if params.reasoning_effort is not None and not isinstance(params.input, _MessagesInput):
+                raise GenerationUnsupportedFieldError(
+                    "reasoning_effort", "'reasoning_effort' needs a chat messages request"
+                )
+            effort = apply_reasoning_effort(config, params.reasoning_effort, model=model_id)
+        except GenerationError as exc:
+            await self._terminal_error_then_settle(
+                reply_subject,
+                request_id=request_id,
+                attempt_id=attempt_id,
+                seq=0,
+                code=exc.code,
+                message=str(exc),
+                param=exc.param,
+                msg=msg,
+            )
+            return
         suppress_thinking = thinking_blocks_must_be_hidden(config)
         keep_reasoning = params.include_reasoning and suppress_thinking
         reasoning_format = resolve_reasoning_format(config, adapter)
@@ -2007,6 +2034,7 @@ class StreamingProcessor:
             and (
                 (config is not None and config.remote_backed)
                 or params.grammar is not None
+                or (effort is not None and effort.upstream is not None)
                 or tool_choice_mode in ("required", "named")
                 or any(tool.get("function", {}).get("strict") is True for tool in effective_tools or ())
                 or (params.n is not None and params.n > 1)
@@ -2043,6 +2071,7 @@ class StreamingProcessor:
                 chat_template_kwargs=(
                     generate_task.chat_template_kwargs if counted_upstream and generate_task is not None else None
                 ),
+                reasoning_effort=effort.upstream if effort is not None else None,
             )
             try:
                 assert isinstance(params.input, _MessagesInput)
@@ -2174,6 +2203,7 @@ class StreamingProcessor:
                 effective_tools,
                 request_kwargs=params.chat_template_kwargs,
                 response_format=params.grammar if params.schema_in_prompt else None,
+                level_kwargs=effort.chat_template_kwargs if effort is not None else None,
             )
             if isinstance(rendered, _ValidationError):
                 await self._terminal_error_then_settle(
@@ -3677,6 +3707,10 @@ class StreamingProcessor:
         if include_reasoning_raw is not None and not isinstance(include_reasoning_raw, bool):
             return _ValidationError(code="invalid_request", message="'include_reasoning' must be a boolean")
         include_reasoning = bool(include_reasoning_raw)
+        try:
+            reasoning_effort = parse_reasoning_effort(params.get("reasoning_effort"))
+        except GenerationInvalidRequestError as exc:
+            return _ValidationError(code="invalid_request", message=str(exc))
         native_prompt_raw = params.get("native_prompt")
         if native_prompt_raw is not None and not isinstance(native_prompt_raw, bool):
             return _ValidationError(code="invalid_request", message="'native_prompt' must be a boolean")
@@ -3827,6 +3861,7 @@ class StreamingProcessor:
             stream=stream,
             lora_adapter=lora_adapter,
             include_reasoning=include_reasoning,
+            reasoning_effort=reasoning_effort,
             native_prompt=bool(native_prompt_raw),
         )
 
@@ -3902,6 +3937,7 @@ class StreamingProcessor:
         tools: tuple[dict[str, Any], ...] | None = None,
         request_kwargs: dict[str, Any] | None = None,
         response_format: GrammarSpec | None = None,
+        level_kwargs: Mapping[str, str] | None = None,
     ) -> str | _ValidationError:
         """Render a chat-message list into a prompt string via the tokenizer's
         chat template. Returns the rendered string or a validation error
@@ -3921,6 +3957,10 @@ class StreamingProcessor:
         reasoning on a one-off basis). The YAML wins on conflict —
         operator config is authoritative; per-request overrides only
         fill in keys the YAML didn't set.
+
+        ``level_kwargs`` are the template kwargs the model's
+        ``reasoning_effort`` declaration names for the request's value. They
+        are operator configuration too, and are applied last.
 
         ``response_format`` is a ``json_schema`` grammar to show the model:
         it is written into the system message as a ``# Response Formats``
@@ -3958,6 +3998,8 @@ class StreamingProcessor:
             raw_kwargs = config.tasks.generate.chat_template_kwargs
             if isinstance(raw_kwargs, dict):
                 kwargs.update(raw_kwargs)
+        if level_kwargs:
+            kwargs.update(level_kwargs)
 
         # Reject pathologically large message lists before the CPU-bound
         # render: ``apply_chat_template`` is input-sized and runs on the

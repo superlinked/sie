@@ -50,6 +50,7 @@ from sie_server.adapters._generation_base import (
     GenerationAdapter,
     GenerationError,
     GenerationInputTooLongError,
+    GenerationInvalidRequestError,
     GenerationUnsupportedFieldError,
     GenerationUpstreamError,
     ReasoningFormat,
@@ -92,6 +93,7 @@ from sie_server.config.upstreams import RemoteServingDisabledError
 from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.inference_output import ScoreOutput
 from sie_server.core.loader import serves_remotely
+from sie_server.core.reasoning_effort import AppliedReasoningEffort, apply_reasoning_effort, parse_reasoning_effort
 from sie_server.core.runtime_options import (
     GenerationTimeoutError,
     grammar_default_sampling,
@@ -189,6 +191,7 @@ _CUDA_CHAT_FIELDS = frozenset(
         "response_format",
         "schema_in_prompt",
         "include_reasoning",
+        "reasoning_effort",
         "stream",
         "tools",
         "tool_choice",
@@ -223,6 +226,7 @@ _MLX_CHAT_FIELDS = frozenset(
         "stream",
         "stream_options",
         "include_reasoning",
+        "reasoning_effort",
         "tools",
         "tool_choice",
         "parallel_tool_calls",
@@ -830,6 +834,13 @@ def _merge_stops(request_stop: Any, configured: Any) -> Any:
     return merged
 
 
+def _apply_effort_template_kwargs(proxied: dict[str, Any], effort: AppliedReasoningEffort | None) -> None:
+    """Layer the declared template kwargs of the request's ``reasoning_effort`` over the merged kwargs."""
+    if effort is None or not effort.chat_template_kwargs:
+        return
+    proxied["chat_template_kwargs"] = {**(proxied.get("chat_template_kwargs") or {}), **effort.chat_template_kwargs}
+
+
 def _prepare_chat_body(
     body: dict[str, Any],
     *,
@@ -852,6 +863,7 @@ def _prepare_chat_body(
     proxied.pop("safety_identifier", None)
     proxied.pop("schema_in_prompt", None)
     proxied.pop("include_reasoning", None)
+    proxied.pop("reasoning_effort", None)
     proxied.pop("lora_adapter", None)
     if proxied.get("parallel_tool_calls") is None:
         proxied.pop("parallel_tool_calls", None)
@@ -1002,6 +1014,7 @@ def _prepare_mlx_body(
 ) -> dict[str, Any]:
     proxied = dict(body)
     proxied.pop("include_reasoning", None)
+    proxied.pop("reasoning_effort", None)
     proxied["model"] = adapter.mlx_repo
     requested_cap = max_completion_tokens if max_completion_tokens is not None else max_tokens
     if requested_cap is not None and requested_cap > cap:
@@ -1739,6 +1752,12 @@ async def _chat_completions(
             raise _bad_request(
                 f"Model '{model}' does not support tool calling", param="tools", code="unsupported_field"
             )
+        try:
+            reasoning_effort = parse_reasoning_effort(body.get("reasoning_effort"))
+            apply_reasoning_effort(config, reasoning_effort, model=model)
+        except (GenerationInvalidRequestError, GenerationUnsupportedFieldError) as exc:
+            code = "unsupported_field" if isinstance(exc, GenerationUnsupportedFieldError) else None
+            raise _bad_request(str(exc), param=exc.param, code=code) from exc
         adapter_chat = _adapter_answers_chat(config)
         if _has_image_parts(messages) and not (
             (config.inputs.image and str(device).startswith("cuda") and not adapter_chat)
@@ -1785,11 +1804,18 @@ async def _chat_completions(
         registry.touch_lru(route.key)
         await ensure_generation_lora(registry, route.key, lora, n=body.get("n"))
         route_config = registry.get_config(route.key)
+        try:
+            effort = apply_reasoning_effort(route_config, reasoning_effort, model=model)
+        except GenerationUnsupportedFieldError as exc:
+            raise _bad_request(str(exc), param=exc.param, code="unsupported_field") from exc
         if _adapter_answers_chat(route_config) and isinstance(adapter, GenerationAdapter):
             _validate_remote_chat_media(messages, images=_remote_chat_accepts_images(route_config))
+            upstream_effort = (
+                {"reasoning_effort": effort.upstream} if effort is not None and effort.upstream is not None else {}
+            )
             return await _remote_chat_response(
                 adapter,
-                {**prepared_chat, "messages": _remote_chat_messages(prepared_chat["messages"])},
+                {**prepared_chat, "messages": _remote_chat_messages(prepared_chat["messages"]), **upstream_effort},
                 requested_model=model,
                 config=config,
                 stream=bool(stream_opt),
@@ -1813,6 +1839,7 @@ async def _chat_completions(
                 max_tokens=max_tokens,
                 seed=seed,
             )
+            _apply_effort_template_kwargs(proxied, effort)
             try:
                 await adapter.check_chat_window(proxied, requested_model=model)
             except GenerationInputTooLongError as exc:
@@ -1830,6 +1857,7 @@ async def _chat_completions(
                 max_tokens=max_tokens,
                 seed=seed,
             )
+            _apply_effort_template_kwargs(proxied, effort)
             proxied["messages"] = await _messages_showing_response_format(body, config, proxied["messages"])
         else:
             raise _unsupported_chat(model, device)
