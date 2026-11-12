@@ -21,10 +21,9 @@ GPU. One verification pass should confirm the backend accepts the pattern and th
 terminates cleanly before relying on forced ``tool_choice`` in
 production. The failure mode if a pattern is rejected is a clean
 ``grammar_compile_failed`` terminal chunk, not a crash. The ``gemma4``
-pattern was first run on GPU with a free argument body: xgrammar accepted it
-and forced calls stopped cleanly, except when the model did not want the call
-(see :func:`_gemma4_force_regex`). The stricter body that fixes that case is
-unit-tested for shape and still needs its own GPU pass.
+pattern has had that pass with xgrammar and Gemma 4 E2B: forced and named
+calls parse and stop cleanly, including when the model does not want the call
+(see :func:`_gemma4_force_regex`).
 """
 
 from __future__ import annotations
