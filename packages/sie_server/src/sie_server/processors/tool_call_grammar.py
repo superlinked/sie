@@ -20,7 +20,9 @@ for shape, but have NOT been run end-to-end against xgrammar + Qwen3.5 on
 GPU. One verification pass should confirm the backend accepts the pattern and the model
 terminates cleanly before relying on forced ``tool_choice`` in
 production. The failure mode if a pattern is rejected is a clean
-``grammar_compile_failed`` terminal chunk, not a crash.
+``grammar_compile_failed`` terminal chunk, not a crash. The ``gemma4``
+pattern likewise has its shape unit-tested but has not yet been run against
+the constrained-decoding backend with a Gemma 4 model.
 """
 
 from __future__ import annotations
@@ -121,6 +123,8 @@ def build_tool_choice_grammar(
         pattern = _glm_xml_force_regex(allowed)
     elif tool_call_format == "muse_atem":
         pattern = _muse_atem_force_regex(allowed)
+    elif tool_call_format == "gemma4":
+        pattern = _gemma4_force_regex(allowed)
     elif tool_call_format == "auto":
         # ``auto`` means the model's on-wire tool-call format could not be
         # confidently resolved from config. Guessing Qwen XML here would
@@ -232,3 +236,21 @@ def _muse_atem_force_regex(names: list[str]) -> str:
     parameter = r'<atem:parameter name="[^"<>]+">' + _INNER + r"</atem:parameter>\s*"
     invoke = r'<atem:invoke name="' + name + r'">\s*(?:' + parameter + r")*</atem:invoke>"
     return r" to=" + name + r"<\|message\|><atem:function_calls>\s*(?:" + invoke + r"\s*)+</atem:function_calls>"
+
+
+def _gemma4_force_regex(names: list[str]) -> str:
+    """Force one-or-more consecutive Gemma 4 tool-call blocks.
+
+    A single block looks like::
+
+        <|tool_call>call:NAME{KEY:<|"|>VALUE<|"|>,KEY:42}<tool_call|>
+
+    The pattern pins ``NAME`` to the allowed set and leaves the argument body
+    free, as the Qwen and Hermes patterns do. With the default non-thinking
+    prompt the generation prompt already closes the empty thought channel, so
+    the output starts right at the call. Nothing optional precedes, separates
+    or follows the blocks: greedy decoding fills optional whitespace up to the
+    token limit.
+    """
+    block = r"<\|tool_call>call:" + _name_alternation(names) + r"\{" + _INNER + r"\}<tool_call\|>"
+    return r"(?:" + block + r")+"

@@ -109,7 +109,11 @@ from sie_server.processors.tool_call_grammar import (
     build_tool_choice_grammar,
     normalize_tool_choice,
 )
-from sie_server.processors.tool_call_parser import ToolCallFormat, parse_tool_call_stream
+from sie_server.processors.tool_call_parser import (
+    ToolCallFormat,
+    parse_tool_call_stream,
+    tool_call_format_for_parser,
+)
 from sie_server.types.grammar import (
     OUTLINES_JSON_SCHEMA_TYPE_MESSAGE,
     GrammarSpec,
@@ -1389,11 +1393,10 @@ class StreamingProcessor:
         Drives format selection from a single source of truth — the
         adapter's ``tool_call_parser`` (the same value passed to SGLang's
         ``--tool-call-parser`` launch flag) — instead of guessing per
-        block from the model output. ``qwen25`` (Qwen2.5-style Hermes JSON)
-        and ``hermes`` → ``hermes_json``; ``qwen3_coder`` (and any other
-        ``qwen*`` parser) → ``qwen_xml``; ``glm*`` → ``glm_xml``; ``muse`` →
-        ``muse_atem``; anything unknown / missing → ``auto`` (keep the runtime heuristic so
-        out-of-tree models still work).
+        block from the model output. The name-to-format mapping lives in
+        :func:`tool_call_format_for_parser`; a missing config or parser
+        resolves to ``auto`` (keep the runtime heuristic so out-of-tree
+        models still work).
         """
         try:
             config = self._registry.get_config(model_id)
@@ -1403,19 +1406,7 @@ class StreamingProcessor:
         loadtime = getattr(resolved, "loadtime", {})
         if not hasattr(loadtime, "get"):
             return "auto"
-        parser = loadtime.get("tool_call_parser")
-        if not isinstance(parser, str):
-            return "auto"
-        parser_l = parser.lower()
-        if parser_l == "qwen25" or "hermes" in parser_l:
-            return "hermes_json"
-        if parser_l.startswith("qwen"):
-            return "qwen_xml"
-        if parser_l.startswith("glm"):
-            return "glm_xml"
-        if parser_l == "muse":
-            return "muse_atem"
-        return "auto"
+        return tool_call_format_for_parser(loadtime.get("tool_call_parser"))
 
     @staticmethod
     def _grammar_backend_for_model_config(config: Any) -> str | None:
