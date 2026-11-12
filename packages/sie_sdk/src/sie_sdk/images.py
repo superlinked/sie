@@ -90,7 +90,7 @@ def to_jpeg_bytes(
 
     Supports:
     - PIL.Image → JPEG bytes
-    - np.ndarray (H,W,C) → PIL → JPEG bytes
+    - np.ndarray (H,W) or (H,W,C), uint8 or bool → PIL → JPEG bytes
     - bytes (JPEG/PNG) → pass through as-is
     - str/Path → read file → JPEG bytes
 
@@ -136,6 +136,18 @@ def to_jpeg_bytes(
         # Validate array shape
         if image.ndim not in (2, 3):
             msg = f"Expected 2D (grayscale) or 3D (H,W,C) array, got {image.ndim}D"
+            raise ValueError(msg)
+
+        # Pillow keeps a 2-D float or wider-integer array at its own depth
+        # (modes F, I, I;16), and the RGB conversion below clips its pixels
+        # to 0-255: a float image in [0, 1] is sent as solid black, most
+        # 16-bit images as solid white. Only 8-bit and boolean pixels map
+        # exactly, so refuse the rest rather than guess their range.
+        if image.dtype not in (np.dtype(np.uint8), np.dtype(np.bool_)):
+            msg = (
+                f"Expected a uint8 image array, got {image.dtype}. "
+                "Scale the pixels to 0-255 and convert with `.astype(np.uint8)`."
+            )
             raise ValueError(msg)
 
         # Convert to PIL
