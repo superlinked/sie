@@ -68,16 +68,21 @@ def test_extract_real_document(loaded_adapter: DoclingAdapter, format_hint: str,
     assert "document" in item
 
 
-def _make_glyph_name_pdf_bytes() -> bytes:
-    """One page whose font maps ``$`` and ``%`` to the non-standard glyph names ``/dollarsign`` and ``/percentsign``."""
-    content = b"BT /F1 12 Tf 72 700 Td (Net sales $209,586, up 5%) Tj ET"
+def _make_glyph_name_pdf_bytes(
+    text: bytes = b"Net sales $209,586, up 5%", differences: bytes = b"36 /dollarsign /percentsign"
+) -> bytes:
+    """One page of ``text`` whose font renames character codes per the encoding ``differences``.
+
+    The defaults map ``$`` and ``%`` to the non-standard glyph names ``/dollarsign`` and ``/percentsign``.
+    """
+    content = b"BT /F1 12 Tf 72 700 Td (%s) Tj ET" % text
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
         b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> "
         b"/Contents 5 0 R >>",
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /Type /Encoding "
-        b"/BaseEncoding /WinAnsiEncoding /Differences [36 /dollarsign /percentsign] >> >>",
+        b"/BaseEncoding /WinAnsiEncoding /Differences [%s] >> >>" % differences,
         b"<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content),
     ]
     out = bytearray(b"%PDF-1.4\n")
@@ -102,6 +107,20 @@ def test_extract_pdf_restores_unmapped_glyph_names(loaded_adapter: DoclingAdapte
         rendered = out.data[0][output_format]
         assert "Net sales $209,586, up 5%" in rendered
         assert "sign" not in rendered
+
+
+@pytest.mark.model
+def test_extract_pdf_restores_unicode_glyph_names(loaded_adapter: DoclingAdapter) -> None:
+    pdf = _make_glyph_name_pdf_bytes(text=b"let x2 = y", differences=b"120 /u1D465 /u1D466")
+
+    out = loaded_adapter.extract([Item(document={"data": pdf, "format": "pdf"})])
+
+    assert out.errors is None
+    assert out.data is not None
+    for output_format in ("text", "markdown"):
+        rendered = out.data[0][output_format]
+        assert "let \U0001d4652 = \U0001d466" in rendered
+        assert "/u" not in rendered
 
 
 _PROSE = (

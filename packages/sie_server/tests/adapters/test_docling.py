@@ -120,6 +120,47 @@ class TestDoclingExtract:
         assert [(text["text"], text["orig"]) for text in texts] == [(restored, restored), (untouched, untouched)]
         assert payload["document"]["tables"][0]["data"]["table_cells"][0]["text"] == "$1,200"
 
+    @pytest.mark.parametrize(
+        ("leaked", "restored"),
+        [
+            pytest.param("1990 /u2014 2000", "1990 — 2000", id="four-digit"),
+            pytest.param("let /u1D465 be", "let \U0001d465 be", id="five-digit"),
+            pytest.param("/u10FFFD", "\U0010fffd", id="six-digit"),
+            pytest.param("2/u1D4652 + /u1D466/u1D467", "2\U0001d4652 + \U0001d466\U0001d467", id="glued-to-digits"),
+            pytest.param("/u1D465C or /u1D465x", "\U0001d465C or \U0001d465x", id="glued-to-letters"),
+            pytest.param("/u0041BC", "ABC", id="four-digit-glued-to-hex-letters"),
+            pytest.param("/uD835/uDC65", "/uD835/uDC65", id="surrogates"),
+            pytest.param("/u12, /u1d465, /uFFG0", "/u12, /u1d465, /uFFG0", id="invalid"),
+        ],
+    )
+    def test_restores_unicode_glyph_names(self, leaked: str, restored: str) -> None:
+        document = DoclingDocument(name="paper")
+        document.add_text(label=DocItemLabel.TEXT, text=leaked)
+        cell = TableCell(
+            text=leaked,
+            start_row_offset_idx=0,
+            end_row_offset_idx=1,
+            start_col_offset_idx=0,
+            end_col_offset_idx=1,
+        )
+        document.add_table(data=TableData(num_rows=1, num_cols=1, table_cells=[cell]))
+        converter = MagicMock()
+        converter.convert.return_value = SimpleNamespace(
+            status=ConversionStatus.SUCCESS, document=document, pages=[object()]
+        )
+        adapter, _ = _make_adapter()
+        adapter._make_converter = MagicMock(return_value=converter)  # type: ignore[method-assign]
+
+        out = adapter.extract([Item(document={"data": b"pdf", "format": "pdf"})])
+
+        assert out.errors is None
+        assert out.data is not None
+        payload = out.data[0]
+        assert restored in payload["text"]
+        text = payload["document"]["texts"][0]
+        assert (text["text"], text["orig"]) == (restored, restored)
+        assert payload["document"]["tables"][0]["data"]["table_cells"][0]["text"] == restored
+
     def test_returns_text_markdown_and_document(self) -> None:
         adapter, _ = _make_adapter()
 
