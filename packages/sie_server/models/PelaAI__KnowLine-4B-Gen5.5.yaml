@@ -1,7 +1,7 @@
 sie_id: PelaAI/KnowLine-4B-Gen5.5
 pool: decision
 hf_id: PelaAI/KnowLine-4B-Gen5.5
-hf_revision: 779944d2cc8ffa19cef386aee83c83bcb967ade2
+hf_revision: 890ecc3765a16c8e22b884807e19827fa695eb9a
 inputs:
   text: true
   image: false

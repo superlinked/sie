@@ -9,8 +9,8 @@ https://github.com/OmniJev/OneJev/tree/81ce62f1597c91e46767d4d02d6ac2e18534fe94
 https://huggingface.co/baselabs/elephant-1/tree/14537f08b0374edf9867ed0a4d2bd8df59e0400c
 
 KnowLine serving and read-twice layout (MIT):
-https://huggingface.co/PelaAI/KnowLine-4B-Gen5.5/tree/779944d2cc8ffa19cef386aee83c83bcb967ade2
-https://huggingface.co/PelaAI/KnowLine-31B-Gen1/tree/8f052a8130e599b53e5324c34f0f5ff90696e1c6
+https://huggingface.co/PelaAI/KnowLine-4B-Gen5.5/tree/890ecc3765a16c8e22b884807e19827fa695eb9a
+https://huggingface.co/PelaAI/KnowLine-31B-Gen1/tree/a45b64060e1d6928e7e20bdffd2c482e4ebf7de6
 Copyright (c) 2026 AnyJev contributors
 
 Choice and score confidence formulas are also described by the TypeSafe
