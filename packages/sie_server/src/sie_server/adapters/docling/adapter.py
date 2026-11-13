@@ -406,7 +406,11 @@ class DoclingAdapter(BaseAdapter):
         *,
         format_hint: str | None,
     ) -> tuple[dict[str, Any], int, ExtractItemError | None]:
-        from docling.datamodel.base_models import ConversionStatus, DocumentStream  # ty: ignore[unresolved-import]
+        from docling.datamodel.base_models import (  # ty: ignore[unresolved-import]
+            ConversionStatus,
+            DocumentStream,
+            InputFormat,
+        )
 
         # Docling auto-detects format from bytes; the hint becomes the source name
         # (used for logging + extension-based fallback when sniffing is ambiguous).
@@ -430,7 +434,8 @@ class DoclingAdapter(BaseAdapter):
             )
         doc = result.document
         try:
-            _restore_glyph_names(doc)
+            if result.input.format == InputFormat.PDF:
+                _restore_glyph_names(doc)
             payload = {
                 "text": doc.export_to_text(traverse_pictures=True),
                 "markdown": doc.export_to_markdown(traverse_pictures=True),
