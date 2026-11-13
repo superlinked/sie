@@ -6,7 +6,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
-from docling.datamodel.base_models import ConversionStatus
+from docling.datamodel.base_models import ConversionStatus, InputFormat
 from docling_core.types.doc import DocItemLabel, DoclingDocument, TableCell, TableData
 from sie_server.adapters.docling.adapter import DoclingAdapter
 from sie_server.types.inputs import Item
@@ -64,7 +64,10 @@ class TestDoclingExtract:
         document.add_text(label=DocItemLabel.TEXT, text="TOTAL 15.40", parent=picture)
         converter = MagicMock()
         converter.convert.return_value = SimpleNamespace(
-            status=ConversionStatus.SUCCESS, document=document, pages=[object()]
+            status=ConversionStatus.SUCCESS,
+            document=document,
+            pages=[object()],
+            input=SimpleNamespace(format=InputFormat.IMAGE if format_hint == "png" else InputFormat.PDF),
         )
         adapter, _ = _make_adapter()
         adapter._make_converter = MagicMock(return_value=converter)  # type: ignore[method-assign]
@@ -102,7 +105,10 @@ class TestDoclingExtract:
         document.add_table(data=TableData(num_rows=1, num_cols=1, table_cells=[cell]))
         converter = MagicMock()
         converter.convert.return_value = SimpleNamespace(
-            status=ConversionStatus.SUCCESS, document=document, pages=[object()]
+            status=ConversionStatus.SUCCESS,
+            document=document,
+            pages=[object()],
+            input=SimpleNamespace(format=InputFormat.PDF),
         )
         adapter, _ = _make_adapter()
         adapter._make_converter = MagicMock(return_value=converter)  # type: ignore[method-assign]
@@ -119,6 +125,29 @@ class TestDoclingExtract:
         texts = payload["document"]["texts"]
         assert [(text["text"], text["orig"]) for text in texts] == [(restored, restored), (untouched, untouched)]
         assert payload["document"]["tables"][0]["data"]["table_cells"][0]["text"] == "$1,200"
+
+    @pytest.mark.parametrize("input_format", [InputFormat.HTML, InputFormat.DOCX, InputFormat.IMAGE])
+    def test_keeps_glyph_name_text_from_non_pdf_inputs(self, input_format: InputFormat) -> None:
+        literal = "Static files live under /dollarsign-assets"
+        document = DoclingDocument(name="site")
+        document.add_text(label=DocItemLabel.TEXT, text=literal)
+        converter = MagicMock()
+        converter.convert.return_value = SimpleNamespace(
+            status=ConversionStatus.SUCCESS,
+            document=document,
+            pages=[object()],
+            input=SimpleNamespace(format=input_format),
+        )
+        adapter, _ = _make_adapter()
+        adapter._make_converter = MagicMock(return_value=converter)  # type: ignore[method-assign]
+
+        out = adapter.extract([Item(document={"data": b"document", "format": input_format.value})])
+
+        assert out.errors is None
+        assert out.data is not None
+        for output_format in ("text", "markdown"):
+            assert literal in out.data[0][output_format]
+        assert out.data[0]["document"]["texts"][0]["text"] == literal
 
     def test_returns_text_markdown_and_document(self) -> None:
         adapter, _ = _make_adapter()
@@ -188,6 +217,7 @@ class TestDoclingExtract:
             status=ConversionStatus.PARTIAL_SUCCESS,
             document=document,
             pages=[object(), object()],
+            input=SimpleNamespace(format=InputFormat.PDF),
         )
         adapter._make_converter = MagicMock(return_value=converter)  # type: ignore[method-assign]
 
@@ -233,6 +263,7 @@ class TestDoclingExtract:
             status=ConversionStatus.SUCCESS,
             document=document,
             pages=[object(), object(), object()],
+            input=SimpleNamespace(format=InputFormat.PDF),
         )
         adapter._make_converter = MagicMock(return_value=converter)  # type: ignore[method-assign]
 
@@ -259,6 +290,7 @@ class TestDoclingExtract:
             status=ConversionStatus.SUCCESS,
             document=document,
             pages=[],
+            input=SimpleNamespace(format=InputFormat.PDF),
         )
         adapter._make_converter = MagicMock(return_value=converter)  # type: ignore[method-assign]
 

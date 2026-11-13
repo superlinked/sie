@@ -104,6 +104,17 @@ def test_extract_pdf_restores_unmapped_glyph_names(loaded_adapter: DoclingAdapte
         assert "sign" not in rendered
 
 
+def test_extract_html_keeps_literal_glyph_name_text(loaded_adapter: DoclingAdapter) -> None:
+    html = b"<html><body><p>Static files live under /dollarsign-assets.</p></body></html>"
+
+    out = loaded_adapter.extract([Item(document={"data": html, "format": "html"})])
+
+    assert out.errors is None
+    assert out.data is not None
+    for output_format in ("text", "markdown"):
+        assert "Static files live under /dollarsign-assets." in out.data[0][output_format]
+
+
 _PROSE = (
     "Alice was beginning to get very tired of sitting by her sister "
     "on the bank and of having nothing to do once or twice she had "
