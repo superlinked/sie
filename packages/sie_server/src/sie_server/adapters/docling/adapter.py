@@ -3,6 +3,8 @@ from __future__ import annotations
 import io
 import logging
 import math
+import re
+import unicodedata
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -42,6 +44,31 @@ def _processed_page_count(result: Any) -> int:
     except Exception:  # noqa: BLE001 — metering must never fail the parse
         return 0
     return 0
+
+
+# docling-parse emits a font glyph name it cannot map to Unicode as literal
+# ``/name`` text, joined to its neighbours without a separator. A non-standard
+# ``<word>sign`` name (``/dollarsign``) names the Unicode ``<WORD> SIGN``
+# character when one exists.
+_LEAKED_SIGN_GLYPH_NAME = re.compile(r"/(?P<word>[A-Za-z]+?)sign")
+
+
+def _sign_character(match: re.Match[str]) -> str:
+    try:
+        character = unicodedata.lookup(f"{match.group('word')} SIGN")
+    except KeyError:
+        return match.group(0)
+    return character if len(character) == 1 else match.group(0)
+
+
+def _restore_glyph_names(doc: Any) -> None:
+    """Replace leaked glyph names in the document's text and table cells with their characters."""
+    for item in doc.texts:
+        item.text = _LEAKED_SIGN_GLYPH_NAME.sub(_sign_character, item.text)
+        item.orig = _LEAKED_SIGN_GLYPH_NAME.sub(_sign_character, item.orig)
+    for table in doc.tables:
+        for cell in table.data.table_cells:
+            cell.text = _LEAKED_SIGN_GLYPH_NAME.sub(_sign_character, cell.text)
 
 
 _ERR_REQUIRES_DOCUMENT = "Document or image input is required"
@@ -355,7 +382,11 @@ class DoclingAdapter(BaseAdapter):
         *,
         format_hint: str | None,
     ) -> tuple[dict[str, Any], int, ExtractItemError | None]:
-        from docling.datamodel.base_models import ConversionStatus, DocumentStream  # ty: ignore[unresolved-import]
+        from docling.datamodel.base_models import (  # ty: ignore[unresolved-import]
+            ConversionStatus,
+            DocumentStream,
+            InputFormat,
+        )
 
         # Docling auto-detects format from bytes; the hint becomes the source name
         # (used for logging + extension-based fallback when sniffing is ambiguous).
@@ -379,6 +410,8 @@ class DoclingAdapter(BaseAdapter):
             )
         doc = result.document
         try:
+            if result.input.format == InputFormat.PDF:
+                _restore_glyph_names(doc)
             payload = {
                 "text": doc.export_to_text(traverse_pictures=True),
                 "markdown": doc.export_to_markdown(traverse_pictures=True),

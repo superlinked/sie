@@ -68,6 +68,53 @@ def test_extract_real_document(loaded_adapter: DoclingAdapter, format_hint: str,
     assert "document" in item
 
 
+def _make_glyph_name_pdf_bytes() -> bytes:
+    """One page whose font maps ``$`` and ``%`` to the non-standard glyph names ``/dollarsign`` and ``/percentsign``."""
+    content = b"BT /F1 12 Tf 72 700 Td (Net sales $209,586, up 5%) Tj ET"
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> "
+        b"/Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /Type /Encoding "
+        b"/BaseEncoding /WinAnsiEncoding /Differences [36 /dollarsign /percentsign] >> >>",
+        b"<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content),
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n%s\nendobj\n" % (number, body)
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    out += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+    return bytes(out)
+
+
+@pytest.mark.model
+def test_extract_pdf_restores_unmapped_glyph_names(loaded_adapter: DoclingAdapter) -> None:
+    out = loaded_adapter.extract([Item(document={"data": _make_glyph_name_pdf_bytes(), "format": "pdf"})])
+
+    assert out.errors is None
+    assert out.data is not None
+    for output_format in ("text", "markdown"):
+        rendered = out.data[0][output_format]
+        assert "Net sales $209,586, up 5%" in rendered
+        assert "sign" not in rendered
+
+
+def test_extract_html_keeps_literal_glyph_name_text(loaded_adapter: DoclingAdapter) -> None:
+    html = b"<html><body><p>Static files live under /dollarsign-assets.</p></body></html>"
+
+    out = loaded_adapter.extract([Item(document={"data": html, "format": "html"})])
+
+    assert out.errors is None
+    assert out.data is not None
+    for output_format in ("text", "markdown"):
+        assert "Static files live under /dollarsign-assets." in out.data[0][output_format]
+
+
 _PROSE = (
     "Alice was beginning to get very tired of sitting by her sister "
     "on the bank and of having nothing to do once or twice she had "
