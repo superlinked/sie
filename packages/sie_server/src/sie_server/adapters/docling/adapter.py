@@ -55,9 +55,10 @@ _LEAKED_SIGN_GLYPH_NAME = re.compile(r"/(?P<word>[A-Za-z]+?)sign")
 
 # An Adobe Glyph List ``u`` name (``/u1D465``) spells its code point in uppercase
 # hex, and a leaked name runs into the text that follows it, so its length is a
-# guess. Five digits are read as a plane-1 code point, which covers the leaked
-# mathematical alphanumerics; any other name is four digits, so ``/u20132`` is an
-# en dash followed by ``2``.
+# guess. Five digits are read only inside Mathematical Alphanumeric Symbols
+# (U+1D400 to U+1D7FF), the block of the leaked math letters; any other name is
+# four digits, so ``/u20132`` is an en dash followed by ``2`` and ``/u1ECCC`` is
+# U+1ECC followed by ``C``.
 _LEAKED_UNICODE_GLYPH_NAME = re.compile(r"/u(?P<digits>[0-9A-F]{4,5})")
 
 
@@ -71,7 +72,7 @@ def _sign_character(match: re.Match[str]) -> str:
 
 def _unicode_character(match: re.Match[str]) -> str:
     digits = match.group("digits")
-    if len(digits) == 5 and 0x10000 <= int(digits, 16) <= 0x1FFFF:
+    if len(digits) == 5 and 0x1D400 <= int(digits, 16) <= 0x1D7FF:
         return chr(int(digits, 16))
     code = int(digits[:4], 16)
     if 0xD800 <= code <= 0xDFFF:

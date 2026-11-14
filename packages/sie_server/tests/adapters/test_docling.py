@@ -136,6 +136,7 @@ class TestDoclingExtract:
                 "/u20142 and pages 10/u201320", "\u20142 and pages 10\u201320", id="four-digit-glued-to-digits"
             ),
             pytest.param("/u1D465C or /u1D465x", "\U0001d465C or \U0001d465x", id="glued-to-letters"),
+            pytest.param("H/u1ECCC and /u1F002", "H\u1eccC and \u1f002", id="bmp-glued-to-hex-digits"),
             pytest.param("/u0041BC", "ABC", id="four-digit-glued-to-hex-letters"),
             pytest.param("/uD835/uDC65", "/uD835/uDC65", id="surrogates"),
             pytest.param("/u12, /u1d465, /uFFG0", "/u12, /u1d465, /uFFG0", id="invalid"),
