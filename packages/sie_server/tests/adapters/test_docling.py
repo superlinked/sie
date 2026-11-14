@@ -131,8 +131,10 @@ class TestDoclingExtract:
         [
             pytest.param("1990 /u2014 2000", "1990 — 2000", id="four-digit"),
             pytest.param("let /u1D465 be", "let \U0001d465 be", id="five-digit"),
-            pytest.param("/u10FFFD", "\U0010fffd", id="six-digit"),
             pytest.param("2/u1D4652 + /u1D466/u1D467", "2\U0001d4652 + \U0001d466\U0001d467", id="glued-to-digits"),
+            pytest.param(
+                "/u20142 and pages 10/u201320", "\u20142 and pages 10\u201320", id="four-digit-glued-to-digits"
+            ),
             pytest.param("/u1D465C or /u1D465x", "\U0001d465C or \U0001d465x", id="glued-to-letters"),
             pytest.param("/u0041BC", "ABC", id="four-digit-glued-to-hex-letters"),
             pytest.param("/uD835/uDC65", "/uD835/uDC65", id="surrogates"),

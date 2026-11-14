@@ -53,11 +53,12 @@ def _processed_page_count(result: Any) -> int:
 _LEAKED_SIGN_GLYPH_NAME = re.compile(r"/(?P<word>[A-Za-z]+?)sign")
 
 
-# An Adobe Glyph List ``u`` name (``/u1D465``) spells its code point in four to
-# six uppercase hex digits, and a leaked name runs into the hex digits that
-# follow it. The longest reading above U+FFFF wins; otherwise the name is the
-# first four digits.
-_LEAKED_UNICODE_GLYPH_NAME = re.compile(r"/u(?P<digits>[0-9A-F]{4,6})")
+# An Adobe Glyph List ``u`` name (``/u1D465``) spells its code point in uppercase
+# hex, and a leaked name runs into the text that follows it, so its length is a
+# guess. Five digits are read as a plane-1 code point, which covers the leaked
+# mathematical alphanumerics; any other name is four digits, so ``/u20132`` is an
+# en dash followed by ``2``.
+_LEAKED_UNICODE_GLYPH_NAME = re.compile(r"/u(?P<digits>[0-9A-F]{4,5})")
 
 
 def _sign_character(match: re.Match[str]) -> str:
@@ -70,10 +71,8 @@ def _sign_character(match: re.Match[str]) -> str:
 
 def _unicode_character(match: re.Match[str]) -> str:
     digits = match.group("digits")
-    for length in range(len(digits), 4, -1):
-        code = int(digits[:length], 16)
-        if 0xFFFF < code <= 0x10FFFF:
-            return chr(code) + digits[length:]
+    if len(digits) == 5 and 0x10000 <= int(digits, 16) <= 0x1FFFF:
+        return chr(int(digits, 16))
     code = int(digits[:4], 16)
     if 0xD800 <= code <= 0xDFFF:
         return match.group(0)
