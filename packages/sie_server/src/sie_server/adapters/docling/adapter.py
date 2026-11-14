@@ -53,6 +53,15 @@ def _processed_page_count(result: Any) -> int:
 _LEAKED_SIGN_GLYPH_NAME = re.compile(r"/(?P<word>[A-Za-z]+?)sign")
 
 
+# An Adobe Glyph List ``u`` name (``/u1D465``) spells its code point in uppercase
+# hex, and a leaked name runs into the text that follows it, so its length is a
+# guess. Five digits are read only inside Mathematical Alphanumeric Symbols
+# (U+1D400 to U+1D7FF), the block of the leaked math letters; any other name is
+# four digits, so ``/u20132`` is an en dash followed by ``2`` and ``/u1ECCC`` is
+# U+1ECC followed by ``C``.
+_LEAKED_UNICODE_GLYPH_NAME = re.compile(r"/u(?P<digits>[0-9A-F]{4,5})")
+
+
 def _sign_character(match: re.Match[str]) -> str:
     try:
         character = unicodedata.lookup(f"{match.group('word')} SIGN")
@@ -61,14 +70,29 @@ def _sign_character(match: re.Match[str]) -> str:
     return character if len(character) == 1 else match.group(0)
 
 
+def _unicode_character(match: re.Match[str]) -> str:
+    digits = match.group("digits")
+    if len(digits) == 5 and 0x1D400 <= int(digits, 16) <= 0x1D7FF:
+        return chr(int(digits, 16))
+    code = int(digits[:4], 16)
+    if 0xD800 <= code <= 0xDFFF:
+        return match.group(0)
+    return chr(code) + digits[4:]
+
+
+def _restore_glyph_text(text: str) -> str:
+    text = _LEAKED_SIGN_GLYPH_NAME.sub(_sign_character, text)
+    return _LEAKED_UNICODE_GLYPH_NAME.sub(_unicode_character, text)
+
+
 def _restore_glyph_names(doc: Any) -> None:
     """Replace leaked glyph names in the document's text and table cells with their characters."""
     for item in doc.texts:
-        item.text = _LEAKED_SIGN_GLYPH_NAME.sub(_sign_character, item.text)
-        item.orig = _LEAKED_SIGN_GLYPH_NAME.sub(_sign_character, item.orig)
+        item.text = _restore_glyph_text(item.text)
+        item.orig = _restore_glyph_text(item.orig)
     for table in doc.tables:
         for cell in table.data.table_cells:
-            cell.text = _LEAKED_SIGN_GLYPH_NAME.sub(_sign_character, cell.text)
+            cell.text = _restore_glyph_text(cell.text)
 
 
 _ERR_REQUIRES_DOCUMENT = "Document or image input is required"
