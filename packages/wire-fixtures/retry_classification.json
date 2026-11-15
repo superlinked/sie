@@ -106,6 +106,22 @@
       "generation": "terminal"
     },
     {
+      "name": "key_state_unavailable",
+      "status": 503,
+      "headers": {"Retry-After": "5"},
+      "body": {"detail": {"code": "KEY_STATE_UNAVAILABLE", "message": "API key authorization state is temporarily unavailable"}},
+      "idempotent": "retry",
+      "generation": "retry"
+    },
+    {
+      "name": "key_state_unavailable_without_retry_after",
+      "status": 503,
+      "headers": {},
+      "body": {"detail": {"code": "KEY_STATE_UNAVAILABLE", "message": "API key authorization state is temporarily unavailable"}},
+      "idempotent": "terminal",
+      "generation": "terminal"
+    },
+    {
       "name": "account_state_unavailable",
       "status": 503,
       "headers": {"Retry-After": "1"},

@@ -11,7 +11,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SIEClient } from "../src/client.js";
-import { IncompleteBatchError, SIEConnectionError, SIEError } from "../src/errors.js";
+import { IncompleteBatchError, SIEConnectionError, SIEError, ServerError } from "../src/errors.js";
 import { getRetryAfter } from "../src/internal/retry.js";
 import { packMessage } from "../src/msgpack.js";
 
@@ -172,6 +172,84 @@ describe("shared retry classification table", () => {
     expect(mockFetch).toHaveBeenCalledTimes(2);
     expect(chunks).toHaveLength(1);
   });
+});
+
+describe("a just-created API key", () => {
+  const apiKey = "sk-sie-just-created";
+  const keyState = fixture.responses.find((testCase) => testCase.name === "key_state_unavailable");
+  if (!keyState) throw new Error("fixture case missing");
+  const retryAfterMs = Number(keyState.headers["Retry-After"]) * 1000;
+  const operations = [...OPERATIONS, "streamGenerate"] as const;
+
+  function successOf(operation: (typeof operations)[number]): Response {
+    if (operation !== "streamGenerate") return successFor(operation);
+    return new Response('data: {"request_id":"r","seq":0,"text_delta":"ok","done":true}\n\n', {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  }
+
+  async function run(client: SIEClient, operation: (typeof operations)[number]): Promise<unknown> {
+    if (operation !== "streamGenerate") return call(client, operation);
+    const chunks: unknown[] = [];
+    for await (const chunk of client.streamGenerate("m", "hi", { maxNewTokens: 4 })) {
+      chunks.push(chunk);
+    }
+    return chunks;
+  }
+
+  beforeEach(() => {
+    mockFetch.mockReset();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  for (const operation of operations) {
+    it(`${operation}: the first request waits out KEY_STATE_UNAVAILABLE and is retried`, async () => {
+      mockFetch
+        .mockResolvedValueOnce(fixtureResponse(keyState))
+        .mockResolvedValueOnce(successOf(operation));
+      const client = new SIEClient("http://localhost:8080", { apiKey, provisionTimeout: 30_000 });
+
+      const outcome = run(client, operation).then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      await vi.advanceTimersByTimeAsync(retryAfterMs - 1);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(await outcome).toEqual({ ok: true });
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      for (const [, init] of mockFetch.mock.calls) {
+        expect(new Headers((init as RequestInit).headers).get("Authorization")).toBe(
+          `Bearer ${apiKey}`,
+        );
+      }
+    });
+
+    it(`${operation}: KEY_STATE_UNAVAILABLE is thrown when its wait would end the budget`, async () => {
+      mockFetch
+        .mockResolvedValueOnce(fixtureResponse(keyState))
+        .mockResolvedValueOnce(successOf(operation));
+      const client = new SIEClient("http://localhost:8080", {
+        apiKey,
+        provisionTimeout: retryAfterMs,
+      });
+
+      const outcome = await settle(run(client, operation), 0);
+
+      expect(outcome.ok).toBe(false);
+      const error = outcome.ok ? undefined : outcome.error;
+      expect(error).toBeInstanceOf(ServerError);
+      expect((error as ServerError).code).toBe("KEY_STATE_UNAVAILABLE");
+      expect((error as ServerError).statusCode).toBe(503);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+  }
 });
 
 describe("fetch failure classification", () => {

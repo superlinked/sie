@@ -1306,9 +1306,10 @@ class SIEClient:
                 ``ResourceExhaustedError`` below; the ``RESOURCE_EXHAUSTED``
                 branch can be disabled by passing ``max_oom_retries=0``.
                 The pre-dispatch admission signals ``429 RATE_LIMIT``,
-                ``503 BILLING_CAPACITY_UNAVAILABLE``, ``503 QUEUE_FULL`` and
-                ``503 QUEUE_UNAVAILABLE`` with ``Retry-After`` (queue
-                backpressure) are likewise retried regardless of this flag —
+                ``503 BILLING_CAPACITY_UNAVAILABLE``, ``503 QUEUE_FULL``, and
+                ``503 QUEUE_UNAVAILABLE`` (queue backpressure) or
+                ``503 KEY_STATE_UNAVAILABLE`` (API key not yet decided) with
+                ``Retry-After`` are likewise retried regardless of this flag —
                 no work has been published yet — honouring ``Retry-After`` and
                 capped by ``provision_timeout_s``. On give-up they raise
                 ``RateLimitError`` (429) or the server's terminal 503.
@@ -2305,8 +2306,9 @@ class SIEClient:
                 ``RESOURCE_EXHAUSTED`` branch can be disabled by passing
                 ``max_oom_retries=0``. The pre-dispatch admission signals
                 ``429 RATE_LIMIT``, ``503 BILLING_CAPACITY_UNAVAILABLE``,
-                ``503 QUEUE_FULL`` and ``503 QUEUE_UNAVAILABLE`` with
-                ``Retry-After`` (queue backpressure) are likewise retried
+                ``503 QUEUE_FULL``, and ``503 QUEUE_UNAVAILABLE`` (queue
+                backpressure) or ``503 KEY_STATE_UNAVAILABLE`` (API key not
+                yet decided) with ``Retry-After`` are likewise retried
                 regardless of this flag — no work has been published yet — honouring
                 ``Retry-After`` and capped by ``provision_timeout_s``. On
                 give-up they raise ``RateLimitError`` (429) or the server's
@@ -2648,13 +2650,14 @@ class SIEClient:
                 (matching encode/score/extract): the worker has already
                 accepted the request and is loading the target model. The
                 pre-dispatch admission signals ``429 RATE_LIMIT``,
-                ``503 BILLING_CAPACITY_UNAVAILABLE``, ``503 QUEUE_FULL`` and
-                ``503 QUEUE_UNAVAILABLE`` with ``Retry-After`` are also
-                retried regardless of this flag — they reject the request
-                before any generation is published, so retrying cannot
-                double-bill — honouring ``Retry-After`` and capped by
-                ``provision_timeout_s``; on give-up they raise
-                ``RateLimitError`` (429) or the server's terminal 503.
+                ``503 BILLING_CAPACITY_UNAVAILABLE``, ``503 QUEUE_FULL``, and
+                ``503 QUEUE_UNAVAILABLE`` or ``503 KEY_STATE_UNAVAILABLE``
+                with ``Retry-After`` are also retried regardless of this
+                flag — they reject the request before any generation is
+                published, so retrying cannot double-bill — honouring
+                ``Retry-After`` and capped by ``provision_timeout_s``; on
+                give-up they raise ``RateLimitError`` (429) or the server's
+                terminal 503.
             provision_timeout_s: Maximum time to wait for capacity.
             max_oom_retries: Maximum number of worker-side
                 ``503 RESOURCE_EXHAUSTED`` retries.
@@ -3591,8 +3594,9 @@ class SIEClient:
                 ``RESOURCE_EXHAUSTED`` branch can be disabled by passing
                 ``max_oom_retries=0``. The pre-dispatch admission signals
                 ``429 RATE_LIMIT``, ``503 BILLING_CAPACITY_UNAVAILABLE``,
-                ``503 QUEUE_FULL`` and ``503 QUEUE_UNAVAILABLE`` with
-                ``Retry-After`` (queue backpressure) are likewise retried
+                ``503 QUEUE_FULL``, and ``503 QUEUE_UNAVAILABLE`` (queue
+                backpressure) or ``503 KEY_STATE_UNAVAILABLE`` (API key not
+                yet decided) with ``Retry-After`` are likewise retried
                 regardless of this flag — no work has been published yet — honouring
                 ``Retry-After`` and capped by ``provision_timeout_s``. On
                 give-up they raise ``RateLimitError`` (429) or the server's

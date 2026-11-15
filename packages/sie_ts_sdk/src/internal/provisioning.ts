@@ -165,6 +165,10 @@ export function nextOomRetryDelay(opts: {
  *   `Retry-After`: the gateway rejected the publish under queue backpressure.
  *   Without the hint these codes stay terminal. The give-up matches the
  *   previous arm.
+ * - `503 KEY_STATE_UNAVAILABLE` carrying a usable `Retry-After`: SIE Cloud has
+ *   not yet decided whether the API key is valid, for example on the first
+ *   request with a key created moments ago. Without the hint it stays
+ *   terminal. The give-up matches the previous arm.
  *
  * `packages/wire-fixtures/retry_classification.json` pins these decisions for
  * both SDKs.

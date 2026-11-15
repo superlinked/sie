@@ -76,9 +76,14 @@ export const BACKPRESSURE_503_DEFAULT_DELAY = 1_000; // Fallback (ms) when the s
 // retryable.
 export const QUEUE_UNAVAILABLE_ERROR_CODE = "QUEUE_UNAVAILABLE";
 export const OPENAI_TRANSPORT_FAILURE_ERROR_CODE = "transport_failure";
+// SIE Cloud answers 503 KEY_STATE_UNAVAILABLE plus Retry-After when it has not
+// yet decided whether the API key is valid, for example on the first request
+// with a key created moments ago. That decision precedes admission.
+export const KEY_STATE_UNAVAILABLE_ERROR_CODE = "KEY_STATE_UNAVAILABLE";
 export const RETRY_AFTER_GATED_503_ERROR_CODES: ReadonlySet<string> = new Set([
   QUEUE_UNAVAILABLE_ERROR_CODE,
   OPENAI_TRANSPORT_FAILURE_ERROR_CODE,
+  KEY_STATE_UNAVAILABLE_ERROR_CODE,
 ]);
 
 // Terminal credit / account errors (pass-2 audit B3) — NEVER retried. 402/403
