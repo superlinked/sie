@@ -162,6 +162,7 @@ export type {
   AppliedRate,
   RateIdentity,
   CostEstimate,
+  UsdPerCredit,
   // Model recommendation (client.recommend)
   RecommendOptions,
   RecommendedChoice,

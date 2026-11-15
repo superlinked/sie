@@ -97,6 +97,7 @@ from sie_sdk.types import (
     SparseResult,
     StatusMessage,
     TimingInfo,
+    UsdPerCredit,
     WorkerInfo,
     WorkerStatusMessage,
 )
@@ -178,6 +179,7 @@ __all__ = [
     "SpendLimitError",
     "StatusMessage",
     "TimingInfo",
+    "UsdPerCredit",
     "WorkerInfo",
     "WorkerStatusMessage",
     "build_job_body",
