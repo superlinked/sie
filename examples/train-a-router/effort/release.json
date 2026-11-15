@@ -1,0 +1,7 @@
+{
+  "dataset": "superlinked/train-a-router-bbeh",
+  "format": "train-a-router-release-v1",
+  "manifest_sha256": "e406935743a147e9c5e4044bac64fed8d03a7ae529010b3f32bf502e1584d51d",
+  "manifest_url": "https://huggingface.co/datasets/superlinked/train-a-router-bbeh/resolve/ff3d9b76029620095fb63e7f04df10f38ce8a2b4/effort/2026-10-26/luna-low/manifest.json",
+  "revision": "ff3d9b76029620095fb63e7f04df10f38ce8a2b4"
+}

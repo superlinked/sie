@@ -14,7 +14,7 @@ You will:
 6. **Compare cost estimates:** predict each request’s answer cost, then choose a policy on the full curve.
 7. **Route a new question:** call only the selected answer model.
 
-[One-page instructions](QUICKSTART.md) · [Labels and new answer collection](LABELS.md) · [Serve the encoder yourself](self-host/README.md)
+[One-page instructions](QUICKSTART.md) · [Labels and new answer collection](LABELS.md) · [Serve the encoder yourself](self-host/README.md) · [Luna low and latency](effort/README.md)
 
 ## 1. Understand the data and baseline [Sol 80.8% accuracy; Luna 55.6%]
 
@@ -265,7 +265,21 @@ The Cloud encoder measurement includes network time and saving the raw response 
 
 The opening table combines these router estimates with the selected answer costs. The explorer retains the original answer-only curves and can add per-request Cloud encoder fees; it does not insert a native hosting estimate into the frozen evaluation. Its unpriced native and CPU costs remain unknown, not zero.
 
-The cost calculations are:
+### Answer latency and reasoning effort
+
+The answer models also contribute latency. All results above use **medium reasoning for both Sol and Luna**. On the 975 final questions, Luna medium was cheaper but slower than Sol. We then collected Luna low on those same questions:
+
+| Answer model | Accuracy | Answer cost / 10k | Mean answer time | 95th-percentile answer time |
+|---|---:|---:|---:|---:|
+| Sol, medium | 80.8% | $70.77 | 9.87 s | 27.79 s |
+| Luna, medium | 55.6% | $12.23 | 22.01 s | 72.03 s |
+| Luna, low | 44.3% | $5.52 | 9.04 s | 19.40 s |
+
+Luna low cost **54.9% less**, with an **11.3-point accuracy loss** versus medium. For the existing embedding classifier + learned-cost policy at the 80% cap, replacing Luna medium with low changed accuracy **79.9% → 77.2%**, total cost **$58.97 → $58.05 / 10k**, and mean answer time **11.81 → 9.94 seconds**. The router’s decisions and encoder fee stayed fixed.
+
+These are elapsed API-request times, excluding router inference; time to first token was not measured. Low and medium were collected on different days, so provider load also affects their latency difference. Adding separately measured average router time can estimate the combined mean; adding their 95th percentiles is invalid. The [Luna-low comparison](effort/README.md) includes LoRA, both illustrated embedding spending levels, uncertainty intervals, saved responses and CPU replay commands.
+
+### Cost calculation
 
 - **Sol and Luna:** sum each model's token cost only for questions sent to that model, then multiply by `10,000 / 975`. Input, cached-input and cache-write prices follow the saved usage; output tokens already include reasoning tokens, so reasoning is charged once. Multiplying a routing share by the model's overall mean cost would be wrong: routers select different questions, with different answer lengths.
 - **Qwen embeddings:** the recorded Cloud rate is **$0.06 per million input tokens**, rounded up per request to a whole **$0.00001 credit**: `ceil(3 × input_tokens / 500)` credits. The 975 test questions total 1,235,875 encoder tokens and **7,910 credits after rounding**: `$0.07910 × 10,000 / 975 = $0.811282`. Both neighbors and classifiers need **one embedding for every incoming request**, whichever answer model is selected. The rate and rounding rule reproduce all 91 saved singleton charges and 245 successful batch charges. The table prices separate live requests, even when the exercise reuses cached vectors; it does not spread the original batch-collection bill across future requests.
