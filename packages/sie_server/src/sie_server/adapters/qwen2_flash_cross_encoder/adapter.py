@@ -96,6 +96,12 @@ _QWEN3_SYSTEM = (
     'and the Instruct provided. Note that the answer can only be "yes" or "no".'
 )
 QWEN3_DEFAULT_INSTRUCTION = "Given a web search query, retrieve relevant passages that answer the query"
+# The model card tokenizes "<Instruct>: {i}\n<Query>: {q}\n<Document>: {d}" as one
+# string, so the space after "<Document>:" joins the document's first word (one
+# " License" token, never " " then "License"). The pre-tokenizer always splits
+# after that colon, so a row keeps the reference's ids when the prefix ends at
+# "<Document>:" and the document is tokenized with the space in front of it.
+QWEN3_DOCUMENT_SEPARATOR = " "
 
 # Pre-composed chat template strings (used by the eval wrapper for non-flash inference)
 QWEN3_CHAT_PREFIX = f"<|im_start|>system\n{_QWEN3_SYSTEM}<|im_end|>\n<|im_start|>user\n"
@@ -276,6 +282,7 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
         self._chat_suffix_ids: list[int] = []
         self._task_prompt_ids: list[int] = []
         self._sep_ids: list[int] = []
+        self._document_separator_ids: list[int] = []
 
         # Shared prefixes (set during load when ``prefix_reuse`` applies)
         self._prefix_cache: PrefixCache | None = None
@@ -446,6 +453,7 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
             # qwen3 format puts instruction/query/document inline — no
             # separate task prompt
             self._task_prompt_ids = []
+            self._document_separator_ids = enc(QWEN3_DOCUMENT_SEPARATOR, add_special_tokens=False)
         else:
             # mxbai (default)
             prefix = f"<|im_start|>system\n{_MXBAI_SYSTEM}<|im_end|>\n<|im_start|>user\n"
@@ -567,7 +575,7 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
         doc_ids_list: list[list[int] | None] = [None] * len(texts)
         if content_counts is not None:
             doc_ids_list = self._tokenizer(
-                [doc_text for _, doc_text in texts],
+                [QWEN3_DOCUMENT_SEPARATOR + doc_text for _, doc_text in texts],
                 add_special_tokens=False,
                 return_attention_mask=False,
             )["input_ids"]
@@ -789,7 +797,10 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
         The row is ``prefix + tail``. The prefix (chat template, instruction
         and query) is the same list for every pair of one query when the
         caller passes ``user_prefixes``, a memo for one ``score_pairs`` call.
-        ``doc_ids`` are the document's token ids when the caller has them.
+        ``doc_ids`` are the token ids of ``QWEN3_DOCUMENT_SEPARATOR + document``
+        when the caller has them. The prefix ends at "<Document>:" and the
+        separating space is tokenized with the document, so the row is the ids
+        the model card's single tokenization of the whole user text gives.
         """
         assert self._tokenizer is not None
         effective_max_length = max_length or self._max_seq_length
@@ -798,7 +809,7 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
             inst = instruction or self._default_instruction or QWEN3_DEFAULT_INSTRUCTION
             prefix_ids = self._prefix_ids_memo.get((inst, query)) if self._prefix_reuse else None
             if prefix_ids is None:
-                user_prefix = f"<Instruct>: {inst}\n<Query>: {query}\n<Document>: "
+                user_prefix = f"<Instruct>: {inst}\n<Query>: {query}\n<Document>:"
                 prefix_ids = self._chat_prefix_ids + self._tokenizer.encode(
                     user_prefix,
                     add_special_tokens=False,
@@ -808,7 +819,7 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
             if user_prefixes is not None:
                 user_prefixes[query] = prefix_ids
         if doc_ids is None:
-            doc_ids = self._tokenizer.encode(document, add_special_tokens=False)
+            doc_ids = self._tokenizer.encode(QWEN3_DOCUMENT_SEPARATOR + document, add_special_tokens=False)
 
         # Truncate document if needed (keep instruction + query intact)
         predefined_len = len(prefix_ids) + len(self._chat_suffix_ids)
@@ -823,7 +834,13 @@ class Qwen2FlashCrossEncoderAdapter(FlashBaseAdapter):
         elif len(doc_ids) > max_doc_len:
             doc_ids = doc_ids[:max_doc_len]
 
-        return prefix_ids, doc_ids + self._chat_suffix_ids, len(doc_ids)
+        # The separator is template, not caller text: where it stays a token of
+        # its own (before a digit or a bracket, say) it is not a document token.
+        separator = self._document_separator_ids
+        document_tokens = len(doc_ids)
+        if separator and doc_ids[: len(separator)] == separator:
+            document_tokens -= len(separator)
+        return prefix_ids, doc_ids + self._chat_suffix_ids, document_tokens
 
     def _extract_text_only(self, item: Item) -> str:
         if item.images or item.audio is not None or item.video is not None or item.document is not None:
