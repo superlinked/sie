@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -9,12 +11,15 @@ import pytest
 import torch
 import transformers
 import yaml
+from peft import LoraConfig, get_peft_model
 from sie_server.adapters._types import ComputePrecision
 from sie_server.adapters.bge_m3_flash import BGEM3FlashAdapter
+from sie_server.adapters.peft_lora_mixin import _is_called_module
 from sie_server.config.model import ModelConfig
 from sie_server.core.inference_output import EncodeOutput, SparseVector
 from sie_server.core.loader import _build_adapter_kwargs
 from sie_server.types.inputs import Item
+from torch import nn
 from transformers import XLMRobertaConfig
 from transformers.models.xlm_roberta.modeling_xlm_roberta import XLMRobertaEmbeddings
 
@@ -190,6 +195,84 @@ class TestBGEM3EmbeddingParity:
 
         assert actual.dtype == dtype
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def _tiny_xlm_roberta() -> transformers.XLMRobertaModel:
+    torch.manual_seed(0)
+    config = XLMRobertaConfig(
+        vocab_size=8,
+        hidden_size=4,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        intermediate_size=8,
+        max_position_embeddings=8,
+        type_vocab_size=1,
+        hidden_dropout_prob=0.0,
+        pad_token_id=1,
+    )
+    return transformers.XLMRobertaModel(config).eval()
+
+
+def _save_lora(path: Path, *, trained: set[str]) -> str:
+    """Save a LoRA on every projection whose ``lora_B`` is zero except on the ``trained`` modules."""
+    lora = get_peft_model(
+        _tiny_xlm_roberta(),
+        LoraConfig(r=2, target_modules=["query", "key", "value", "dense"], bias="none", init_lora_weights=False),
+    )
+    with torch.no_grad():
+        for name, parameter in lora.named_parameters():
+            if ".lora_B." in name and not any(f".{module}.lora_B." in name for module in trained):
+                parameter.zero_()
+    lora.save_pretrained(str(path))
+    return str(path)
+
+
+class TestBGEM3LoraCalledModules:
+    """The declared LoRA modules are the ones the flash forward calls, so a pooler-only LoRA is refused."""
+
+    def test_declared_modules_are_exactly_the_modules_the_flash_forward_calls(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        flash_attn = ModuleType("flash_attn")
+        flash_attn.flash_attn_varlen_func = lambda query, key, value, **_: value  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "flash_attn", flash_attn)
+        model = _tiny_xlm_roberta()
+        adaptable = [name for name, module in model.named_modules() if isinstance(module, (nn.Linear, nn.Embedding))]
+        called: set[str] = set()
+        for name in adaptable:
+            model.get_submodule(name).register_forward_hook(lambda *_, name=name: called.add(name))
+        adapter = BGEM3FlashAdapter()
+        adapter._model = model
+
+        with torch.no_grad():
+            hidden = adapter._run_embeddings(torch.tensor([0, 4, 2, 0, 2]), torch.tensor([2, 3, 4, 2, 3]))
+            adapter._run_transformer_flash(hidden, torch.tensor([0, 3, 5], dtype=torch.int32), 3, 5)
+
+        declared = BGEM3FlashAdapter.lora_called_module_names
+        assert declared is not None
+        assert {name for name in adaptable if _is_called_module(name, declared)} == called
+        assert "pooler.dense" in adaptable
+        assert "pooler.dense" not in called
+
+    def test_lora_trained_only_on_the_pooler_is_refused(self, tmp_path: Path) -> None:
+        lora = _save_lora(tmp_path, trained={"pooler.dense"})
+        adapter = BGEM3FlashAdapter()
+        adapter._model = _tiny_xlm_roberta()
+
+        with pytest.raises(ValueError, match=r"cannot change any output.*\['pooler\.dense'\]"):
+            adapter.load_lora(lora)
+
+        assert adapter._peft_model is None
+        assert not adapter._loaded_loras
+
+    def test_lora_trained_on_a_called_projection_loads(self, tmp_path: Path) -> None:
+        lora = _save_lora(tmp_path, trained={"pooler.dense", "value"})
+        adapter = BGEM3FlashAdapter()
+        adapter._model = _tiny_xlm_roberta()
+
+        adapter.load_lora(lora)
+
+        assert adapter._loaded_loras == {lora}
 
 
 class TestBGEM3Packing:

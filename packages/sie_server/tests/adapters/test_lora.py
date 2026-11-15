@@ -36,7 +36,11 @@ from sie_server.adapters import peft_lora_mixin
 from sie_server.adapters.base import ModelAdapter, ModelCapabilities, ModelDims
 from sie_server.adapters.bert_flash import BertFlashAdapter
 from sie_server.adapters.nomic_flash import NomicFlashAdapter
-from sie_server.adapters.peft_lora_mixin import PEFTLoRAMixin, validate_lora_target_modules
+from sie_server.adapters.peft_lora_mixin import (
+    PEFTLoRAMixin,
+    validate_lora_has_effect,
+    validate_lora_target_modules,
+)
 from sie_server.adapters.sglang.embedding import SGLangEmbeddingAdapter
 from sie_server.api.helpers import ModelStateChecker
 from sie_server.config.model import AdapterOptions, EmbeddingDim, EncodeTask, ModelConfig, ProfileConfig, Tasks
@@ -745,6 +749,12 @@ class TestValidateLoraTargetModules:
 
     def test_empty_called_set_skips_check(self) -> None:
         validate_lora_target_modules("org/lora", ["anything"], frozenset())
+
+    def test_dotted_called_names_compare_by_leaf_name(self) -> None:
+        called = frozenset({"attention.self.query", "output.dense"})
+        validate_lora_target_modules("org/lora", ["query", "dense"], called)
+        with pytest.raises(ValueError, match="silently ignored"):
+            validate_lora_target_modules("org/lora", ["classifier"], called)
 
 
 class MockAdapterWithCalledModules(MockAdapterWithLoRA):
@@ -1680,3 +1690,157 @@ class TestEngineOwnedLoras:
             await worker.stop()
 
         assert not registry._background_tasks
+
+
+# =============================================================================
+# LoRAs whose weights cannot change any module the serving forward calls
+# =============================================================================
+
+
+class _Dense(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.dense = nn.Linear(4, 4)
+
+
+class _PooledEncoder(nn.Module):
+    """Serves ``output.dense(query(x))``; its ``pooler.dense`` is never called."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.query = nn.Linear(4, 4)
+        self.output = _Dense()
+        self.pooler = _Dense()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.output.dense(torch.relu(self.query(x)))
+
+
+def _pooled_encoder() -> _PooledEncoder:
+    model = _PooledEncoder()
+    generator = torch.Generator().manual_seed(0)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.copy_(torch.randn(parameter.shape, generator=generator))
+    return model
+
+
+def _save_pooled_lora(path: Path, *, trained: set[str]) -> str:
+    """Save a LoRA on every Linear whose ``lora_B`` is zero except on the ``trained`` modules."""
+    model = get_peft_model(
+        _pooled_encoder(),
+        LoraConfig(r=2, target_modules=["query", "dense"], bias="none", init_lora_weights=False),
+    )
+    with torch.no_grad():
+        for name, parameter in model.named_parameters():
+            if ".lora_B." in name and not any(f".{module}.lora_B." in name for module in trained):
+                parameter.zero_()
+    model.save_pretrained(str(path))
+    return str(path)
+
+
+class PooledLoRAAdapter(MockAdapterWithLoRA):
+    """PEFT mixin adapter whose forward calls ``query`` and ``output.dense``, never ``pooler.dense``."""
+
+    fetch_lora = PEFTLoRAMixin.fetch_lora
+    lora_called_module_names = frozenset({"query", "output.dense"})
+
+    def load(self, device: str) -> None:
+        self._device = device
+        self._model = _pooled_encoder()
+
+
+class TestLoraWithoutEffectRefused:
+    """A LoRA that cannot change any called module is refused after PEFT attaches it, and detached."""
+
+    def test_lora_trained_only_on_an_uncalled_module_is_refused(self, tmp_path: Path) -> None:
+        lora = _save_pooled_lora(tmp_path / "pooler-only", trained={"pooler.dense"})
+        adapter = PooledLoRAAdapter()
+        adapter.load("cpu")
+        base = adapter._model
+        snapshot = _snapshot(base)
+
+        with pytest.raises(ValueError, match=r"cannot change any output.*\['pooler\.dense'\]"):
+            adapter.load_lora(lora)
+
+        assert adapter._peft_model is None
+        assert adapter._model is base
+        assert not any(isinstance(module, BaseTunerLayer) for module in base.modules())
+        assert _unchanged(base, snapshot)
+        assert not adapter._loaded_loras
+
+    def test_lora_with_one_trained_called_module_loads(self, tmp_path: Path) -> None:
+        lora = _save_pooled_lora(tmp_path / "query-only", trained={"query"})
+        adapter = PooledLoRAAdapter()
+        adapter.load("cpu")
+        expected = adapter._model(_probe())
+
+        adapter.load_lora(lora)
+        adapter.set_active_lora(lora)
+
+        assert adapter._loaded_loras == {lora}
+        assert not torch.equal(adapter._model(_probe()), expected)
+
+    def test_untrained_lora_is_refused_without_a_called_set(self, tmp_path: Path) -> None:
+        untrained = get_peft_model(_tiny_encoder(), LoraConfig(r=2, target_modules=["query"], bias="none"))
+        untrained.save_pretrained(str(tmp_path / "untrained"))
+        adapter = TinyLoRAAdapter()
+        adapter.load("cpu")
+
+        with pytest.raises(ValueError, match="cannot change any output"):
+            adapter.load_lora(str(tmp_path / "untrained"))
+
+        assert adapter._peft_model is None
+        assert not adapter._loaded_loras
+
+    def test_a_later_refused_lora_leaves_the_loaded_one_serving(self, tmp_path: Path) -> None:
+        trained = _save_pooled_lora(tmp_path / "trained", trained={"query", "dense"})
+        pooler_only = _save_pooled_lora(tmp_path / "pooler-only", trained={"pooler.dense"})
+        adapter = PooledLoRAAdapter()
+        adapter.load("cpu")
+        adapter.load_lora(trained)
+        adapter.set_active_lora(trained)
+        expected = adapter._model(_probe())
+
+        with pytest.raises(ValueError, match="cannot change any output"):
+            adapter.load_lora(pooler_only)
+
+        assert adapter._loaded_loras == {trained}
+        assert set(adapter._peft_model.peft_config) == {adapter._get_peft_adapter_name(trained)}
+        assert torch.equal(adapter._model(_probe()), expected)
+
+
+class _Embedder(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.emb = nn.Embedding(5, 4)
+        self.query = nn.Linear(4, 4)
+
+
+class TestValidateLoraHasEffect:
+    """Direct tests for validate_lora_has_effect on real PEFT layers."""
+
+    @staticmethod
+    def _attached(**config: Any) -> PeftModel:
+        torch.manual_seed(0)
+        return get_peft_model(_Embedder(), LoraConfig(r=2, bias="none", **config))
+
+    def test_untrained_embedding_lora_is_refused(self) -> None:
+        """PEFT zeroes an embedding LoRA's ``A`` factor, not its ``B``."""
+        model = self._attached(target_modules=["emb"])
+        with pytest.raises(ValueError, match="cannot change any output"):
+            validate_lora_has_effect("org/lora", model, "default", None)
+
+    def test_trained_embedding_lora_passes(self) -> None:
+        validate_lora_has_effect(
+            "org/lora", self._attached(target_modules=["emb"], init_lora_weights=False), "default", None
+        )
+
+    def test_lora_bias_changes_output_without_a_b_weight(self) -> None:
+        model = self._attached(target_modules=["query"], lora_bias=True)
+        with torch.no_grad():
+            model.base_model.model.query.lora_B["default"].bias.fill_(1.0)
+        validate_lora_has_effect("org/lora", model, "default", None)
+
+    def test_dora_counts_as_changing_its_module(self) -> None:
+        validate_lora_has_effect("org/lora", self._attached(target_modules=["query"], use_dora=True), "default", None)
