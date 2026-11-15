@@ -40,6 +40,26 @@ _FILES = (
 )
 
 
+def d3_contract(config: dict[str, Any]) -> tuple[str, str]:
+    """Return (attention_mode, prompt layout) for a supported d3-code-readout-v1 checkpoint."""
+    expected = {
+        "format_version": 1,
+        "format_id": "d3-code-readout-v1",
+        "prompt": "d3",
+        "pooling": "last",
+        "readout_dtype": "float32",
+    }
+    if any(config.get(key) != value for key, value in expected.items()):
+        raise ValueError("Unsupported d3 checkpoint contract")
+    attention_mode = config.get("attention_mode")
+    prompt_layout = config.get("prompt_layout")
+    if attention_mode == "prefix_bidir" and prompt_layout == "header-v1":
+        return attention_mode, prompt_layout
+    if attention_mode == "noncausal_full_attention" and prompt_layout is None:
+        return attention_mode, "plain"
+    raise ValueError("Unsupported d3 checkpoint contract")
+
+
 def prefix_attention(
     module: Any,
     query: torch.Tensor,
@@ -73,12 +93,16 @@ def prefix_attention(
 
 
 class QwenReadout(torch.nn.Module):
-    def __init__(self, backbone: Any, weight: torch.Tensor) -> None:
+    def __init__(self, backbone: Any, weight: torch.Tensor, *, attention_mode: str = "prefix_bidir") -> None:
         super().__init__()
         from transformers import AttentionInterface
 
-        AttentionInterface.register(_ATTENTION, prefix_attention)
-        backbone.config._attn_implementation = _ATTENTION
+        if attention_mode not in {"prefix_bidir", "noncausal_full_attention"}:
+            raise ValueError("attention_mode must be prefix_bidir or noncausal_full_attention")
+        self.attention_mode = attention_mode
+        if attention_mode == "prefix_bidir":
+            AttentionInterface.register(_ATTENTION, prefix_attention)
+            backbone.config._attn_implementation = _ATTENTION
         self.backbone = backbone
         self.readout = torch.nn.Linear(
             weight.shape[1], weight.shape[0], bias=False, device=weight.device, dtype=weight.dtype
@@ -91,6 +115,8 @@ class QwenReadout(torch.nn.Module):
     def forward(self, ids: torch.Tensor, present: torch.Tensor, bounds: tuple[tuple[int, int], ...]) -> torch.Tensor:
         from transformers.masking_utils import create_recurrent_attention_mask  # ty: ignore[unresolved-import]
 
+        if self.attention_mode == "noncausal_full_attention":
+            return self._noncausal(ids, present)
         if self.packed is not None and (len(bounds) > 1 or self.pack_single):
             return self.packed(ids, present, bounds)
         embeddings = self.backbone.embed_tokens(ids)
@@ -103,6 +129,47 @@ class QwenReadout(torch.nn.Module):
             attention_mask={"full_attention": bounds, "linear_attention": scan},
             use_cache=False,
         ).last_hidden_state[:, -1]
+        logits = self.readout(hidden.to(self.readout.weight.dtype)).float()
+        if not torch.isfinite(logits).all():
+            raise ValueError("Decision head returned nonfinite logits")
+        return logits
+
+    def _noncausal(self, ids: torch.Tensor, present: torch.Tensor) -> torch.Tensor:
+        """Full-attention layers see the whole prompt; Gated DeltaNet layers stay causal.
+
+        Reimplements the published d3-mini PromptEncoder text path (noncausal_full_attention)
+        over the native Qwen3.5 language model, without importing Hub code. RoPE positions are
+        0..L-1 on the left-padded width, and last-token pooling reads the rightmost position.
+        """
+        from transformers.masking_utils import create_recurrent_attention_mask  # ty: ignore[unresolved-import]
+
+        model = self.backbone
+        embeddings = model.embed_tokens(ids)
+        rows, width = present.shape
+        ramp = torch.arange(width, device=embeddings.device).view(1, 1, -1).expand(4, rows, -1)
+        text_positions, mrope = ramp[0], ramp[1:]
+        rope = model.rotary_emb(embeddings, mrope)
+        keys = present.bool()[:, None, None, :]
+        scan = create_recurrent_attention_mask(
+            config=model.config,
+            inputs_embeds=embeddings,
+            attention_mask=present,
+            past_key_values=None,
+            position_ids=text_positions,
+        )
+        hidden = embeddings
+        depth = model.config.num_hidden_layers
+        for layer, kind in zip(model.layers[:depth], model.config.layer_types[:depth], strict=True):
+            output = layer(
+                hidden,
+                position_embeddings=rope,
+                attention_mask=keys if kind == "full_attention" else scan,
+                position_ids=text_positions,
+                past_key_values=None,
+                use_cache=False,
+            )
+            hidden = output[0] if isinstance(output, tuple) else output
+        hidden = model.norm(hidden)[:, -1]
         logits = self.readout(hidden.to(self.readout.weight.dtype)).float()
         if not torch.isfinite(logits).all():
             raise ValueError("Decision head returned nonfinite logits")
@@ -168,6 +235,8 @@ class QwenDecisionAdapter(DecisionBatchAdapter):
         self._codes: tuple[str, ...] = ()
         self._temperatures: tuple[float, ...] = (1.0,)
         self._temperature_bounds: tuple[int, ...] = ()
+        self._prompt_layout = "header-v1"
+        self._attention_mode = "prefix_bidir"
 
     def load(self, device: str) -> None:
         from safetensors.torch import load_file
@@ -183,17 +252,7 @@ class QwenDecisionAdapter(DecisionBatchAdapter):
         dtype = self._resolve_dtype() if device.startswith("cuda") else torch.float32
         if self._decision_format == "d3":
             config = json.loads((directory / "decision_config.json").read_text())
-            expected = {
-                "format_version": 1,
-                "format_id": "d3-code-readout-v1",
-                "prompt": "d3",
-                "pooling": "last",
-                "attention_mode": "prefix_bidir",
-                "prompt_layout": "header-v1",
-                "readout_dtype": "float32",
-            }
-            if any(config.get(key) != value for key, value in expected.items()):
-                raise ValueError("Unsupported d3 checkpoint contract")
+            self._attention_mode, self._prompt_layout = d3_contract(config)
             validate_tokenizer(tokenizer, config)
             codes = tuple(config["codes"])
             calibration = config.get("temperature_by_questions")
@@ -236,11 +295,13 @@ class QwenDecisionAdapter(DecisionBatchAdapter):
             bounds, temperatures = (), (1.0,)
         if weight.shape[1] != backbone.config.hidden_size or not torch.isfinite(weight).all():
             raise ValueError("Invalid decision readout shape or values")
-        native = QwenReadout(backbone, weight)
+        native = QwenReadout(backbone, weight, attention_mode=self._attention_mode)
         self._model = native
+        if self._packed and self._attention_mode == "noncausal_full_attention":
+            raise ValueError("Packed Qwen decisions require prefix_bidir attention")
         kernels = (
             resolve_kernels(device, mode=False if self._packed is False else None)
-            if device.startswith("cuda") and dtype == torch.bfloat16
+            if (device.startswith("cuda") and dtype == torch.bfloat16 and self._attention_mode == "prefix_bidir")
             else None
         )
         if kernels is not None:
@@ -279,7 +340,14 @@ class QwenDecisionAdapter(DecisionBatchAdapter):
         state = self._raw_state(item)
         with self._tokenizer_guard():
             rendered = (
-                d3.prompts(self._tokenizer, state, questions, self._codes, max_seq_length=self._max_seq_length)
+                d3.prompts(
+                    self._tokenizer,
+                    state,
+                    questions,
+                    self._codes,
+                    max_seq_length=self._max_seq_length,
+                    layout=self._prompt_layout,
+                )
                 if self._decision_format == "d3"
                 else qev.prompts(self._tokenizer, state, questions, max_seq_length=self._max_seq_length)
             )
