@@ -100,6 +100,14 @@ _ABORT_REQUEST_TIMEOUT_S = float(os.environ.get("SIE_SGLANG_ABORT_REQUEST_TIMEOU
 # distribution. The first-three-position scan keeps serving aligned with the
 # evaluation convention for locating the verdict.
 _GUARD_VERDICT_SCAN_POSITIONS = 3
+# FlashInfer builds its sampling kernels on the first request that samples, and
+# the engine serves nothing until the build ends. SGLang's startup warmup is
+# greedy, so only a sampled request moves that build ahead of readiness.
+_SAMPLING_WARMUP_BODY: dict[str, Any] = {
+    "text": "Hello",
+    "sampling_params": {"max_new_tokens": 1, "temperature": 0.7, "top_p": 0.8, "top_k": 20},
+    "stream": False,
+}
 
 
 def _resolve_read_timeout() -> float | None:
@@ -896,6 +904,15 @@ class SGLangGenerationAdapter(SGLangLoraMixin, GenerationAdapter):
         except BaseException:
             self._abort_failed_load()
             raise
+
+    def warmup(self) -> None:
+        self._check_loaded()
+        url = f"{self._server_url}/generate"
+        try:
+            response = httpx.post(url, json=_SAMPLING_WARMUP_BODY, timeout=self._startup_timeout_s)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.warning("SGLang sampling warmup failed for %s: %s", self._served_model_name, exc)
 
     def _start_server(self, *, port: int, device_indices: list[int], server_url: str) -> None:
         """Launch the SGLang child and block until it serves the model.
