@@ -166,6 +166,65 @@ def test_speculative_launch_args_support_qwen_eagle_and_gemma_assistant() -> Non
     ]
 
 
+def _loaded(adapter: SGLangGenerationAdapter) -> SGLangGenerationAdapter:
+    adapter._server_url = "http://localhost:30000"
+    adapter._process = MagicMock()
+    adapter._process.poll.return_value = None
+    return adapter
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.post")
+def test_warmup_samples_one_token_before_ready(mock_post: MagicMock, adapter) -> None:
+    mock_post.return_value = httpx.Response(200, json={"text": "x"}, request=httpx.Request("POST", "http://x"))
+
+    _loaded(adapter).warmup()
+
+    mock_post.assert_called_once()
+    assert mock_post.call_args.args[0] == "http://localhost:30000/generate"
+    body = mock_post.call_args.kwargs["json"]
+    sampling = body["sampling_params"]
+    assert sampling["max_new_tokens"] == 1
+    assert sampling["temperature"] > 0
+    assert 0 < sampling["top_p"] < 1
+    assert sampling["top_k"] > 0
+    assert body["stream"] is False
+    assert mock_post.call_args.kwargs["timeout"] == adapter._startup_timeout_s
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        httpx.ConnectError("refused"),
+        httpx.ReadTimeout("slow"),
+        httpx.Response(500, text="boom", request=httpx.Request("POST", "http://x")),
+    ],
+)
+@patch("sie_server.adapters.sglang.generation.httpx.post")
+def test_warmup_failure_leaves_the_model_loaded(
+    mock_post: MagicMock, outcome: object, adapter, caplog: pytest.LogCaptureFixture
+) -> None:
+    if isinstance(outcome, Exception):
+        mock_post.side_effect = outcome
+    else:
+        mock_post.return_value = outcome
+
+    with caplog.at_level("WARNING", logger="sie_server.adapters.sglang.generation"):
+        _loaded(adapter).warmup()
+
+    assert adapter._server_url == "http://localhost:30000"
+    assert "sampling warmup" in caplog.text
+
+
+@patch("sie_server.adapters.sglang.generation.httpx.post")
+def test_warmup_refuses_an_exited_engine(mock_post: MagicMock, adapter) -> None:
+    _loaded(adapter)._process.poll.return_value = 1
+
+    with pytest.raises(RuntimeError):
+        adapter.warmup()
+
+    mock_post.assert_not_called()
+
+
 def test_unloaded_generate_raises(adapter) -> None:
     # ``generate`` is now an async generator function; the loaded-check
     # fires when we first try to drive the iterator, not at call time.
