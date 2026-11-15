@@ -613,7 +613,13 @@ BACKPRESSURE_503_DEFAULT_DELAY_S = 1.0  # Fallback when the server omits Retry-A
 # retryable.
 QUEUE_UNAVAILABLE_ERROR_CODE = "QUEUE_UNAVAILABLE"
 OPENAI_TRANSPORT_FAILURE_ERROR_CODE = "transport_failure"
-RETRY_AFTER_GATED_503_ERROR_CODES = frozenset({QUEUE_UNAVAILABLE_ERROR_CODE, OPENAI_TRANSPORT_FAILURE_ERROR_CODE})
+# SIE Cloud answers 503 KEY_STATE_UNAVAILABLE plus Retry-After when it has not
+# yet decided whether the API key is valid, for example on the first request
+# with a key created moments ago. That decision precedes admission.
+KEY_STATE_UNAVAILABLE_ERROR_CODE = "KEY_STATE_UNAVAILABLE"
+RETRY_AFTER_GATED_503_ERROR_CODES = frozenset(
+    {QUEUE_UNAVAILABLE_ERROR_CODE, OPENAI_TRANSPORT_FAILURE_ERROR_CODE, KEY_STATE_UNAVAILABLE_ERROR_CODE}
+)
 
 # ── Terminal credit / account errors (pass-2 audit B3) — NEVER retried ──
 # 402/403 credit/account failures are mapped to typed exceptions in
@@ -1643,6 +1649,10 @@ def admission_retry_delay(
       ``Retry-After``: the gateway rejected the publish under queue
       backpressure. Without the hint these codes stay terminal. The give-up
       matches the previous arm.
+    * ``503 KEY_STATE_UNAVAILABLE`` carrying a usable ``Retry-After``: SIE
+      Cloud has not yet decided whether the API key is valid, for example on
+      the first request with a key created moments ago. Without the hint it
+      stays terminal. The give-up matches the previous arm.
 
     ``packages/wire-fixtures/retry_classification.json`` pins these
     decisions for both SDKs.

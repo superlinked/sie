@@ -28,6 +28,7 @@ from sie_sdk import (
     IncompleteBatchError,
     ModelLoadingError,
     ProvisioningError,
+    ServerError,
     SIEAsyncClient,
     SIEClient,
     SIEConnectionError,
@@ -63,11 +64,12 @@ class _Reply:
 
 
 class _StubServer:
-    """Threaded HTTP server that replays scripted replies and records request paths."""
+    """Threaded HTTP server that replays scripted replies and records request paths and credentials."""
 
     def __init__(self) -> None:
         self.replies: list[_Reply] = []
         self.paths: list[str] = []
+        self.authorizations: list[str | None] = []
         self._lock = threading.Lock()
         self._release = threading.Event()
         stub = self
@@ -77,7 +79,7 @@ class _StubServer:
 
             def do_POST(self) -> None:
                 self.rfile.read(int(self.headers.get("Content-Length") or 0))
-                reply = stub._next(self.path)
+                reply = stub._next(self.path, self.headers.get("Authorization"))
                 if reply.delay_s:
                     stub._release.wait(reply.delay_s)
                 try:
@@ -103,9 +105,10 @@ class _StubServer:
         host, port = self._server.server_address[:2]
         return f"http://{host!s}:{port}"
 
-    def _next(self, path: str) -> _Reply:
+    def _next(self, path: str, authorization: str | None) -> _Reply:
         with self._lock:
             self.paths.append(path)
+            self.authorizations.append(authorization)
             if len(self.replies) > 1:
                 return self.replies.pop(0)
             return self.replies[0]
@@ -590,3 +593,67 @@ async def test_async_refusal_of_the_final_attempt_is_raised_with_its_metadata(
     _assert_final_refusal(excinfo.value, code)
     assert len(stub.paths) == 2
     assert budget_clock.now == DEFAULT_PROVISION_TIMEOUT_S
+
+
+_FRESH_KEY = "sk-sie-just-created"
+_KEY_STATE_UNAVAILABLE = next(case for case in _RESPONSE_CASES if case["name"] == "key_state_unavailable")
+_KEY_STATE_RETRY_AFTER_S = float(_KEY_STATE_UNAVAILABLE["headers"]["Retry-After"])
+_INFERENCE_OPERATIONS = ("encode", "score", "extract", "generate", "chat_completions", "responses", "stream_generate")
+
+
+@pytest.mark.parametrize("operation", _INFERENCE_OPERATIONS)
+def test_sync_fresh_key_first_request_waits_out_key_state_unavailable(
+    stub: _StubServer, budget_clock: _BudgetClock, operation: str
+) -> None:
+    stub.replies = [_fixture_reply(_KEY_STATE_UNAVAILABLE), _success(operation)]
+    client = SIEClient(stub.url, api_key=_FRESH_KEY)
+    try:
+        _call_sync(client, operation, provision_timeout_s=30.0)
+        assert client.last_retry_count == 1
+    finally:
+        client.close()
+    assert stub.authorizations == [f"Bearer {_FRESH_KEY}"] * 2
+    assert budget_clock.now == _KEY_STATE_RETRY_AFTER_S
+
+
+@pytest.mark.parametrize("operation", _INFERENCE_OPERATIONS)
+async def test_async_fresh_key_first_request_waits_out_key_state_unavailable(
+    stub: _StubServer, budget_clock: _BudgetClock, operation: str
+) -> None:
+    stub.replies = [_fixture_reply(_KEY_STATE_UNAVAILABLE), _success(operation)]
+    async with SIEAsyncClient(stub.url, api_key=_FRESH_KEY) as client:
+        await _call_async(client, operation, provision_timeout_s=30.0)
+        assert client.last_retry_count == 1
+    assert stub.authorizations == [f"Bearer {_FRESH_KEY}"] * 2
+    assert budget_clock.now == _KEY_STATE_RETRY_AFTER_S
+
+
+@pytest.mark.parametrize("operation", _INFERENCE_OPERATIONS)
+def test_sync_key_state_unavailable_is_raised_when_its_wait_would_end_the_budget(
+    stub: _StubServer, budget_clock: _BudgetClock, operation: str
+) -> None:
+    stub.replies = [_fixture_reply(_KEY_STATE_UNAVAILABLE), _success(operation)]
+    client = SIEClient(stub.url, api_key=_FRESH_KEY)
+    try:
+        with pytest.raises(ServerError) as excinfo:
+            _call_sync(client, operation, provision_timeout_s=_KEY_STATE_RETRY_AFTER_S)
+    finally:
+        client.close()
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.code == "KEY_STATE_UNAVAILABLE"
+    assert len(stub.paths) == 1
+    assert budget_clock.now == 0.0
+
+
+@pytest.mark.parametrize("operation", _INFERENCE_OPERATIONS)
+async def test_async_key_state_unavailable_is_raised_when_its_wait_would_end_the_budget(
+    stub: _StubServer, budget_clock: _BudgetClock, operation: str
+) -> None:
+    stub.replies = [_fixture_reply(_KEY_STATE_UNAVAILABLE), _success(operation)]
+    async with SIEAsyncClient(stub.url, api_key=_FRESH_KEY) as client:
+        with pytest.raises(ServerError) as excinfo:
+            await _call_async(client, operation, provision_timeout_s=_KEY_STATE_RETRY_AFTER_S)
+    assert excinfo.value.status_code == 503
+    assert excinfo.value.code == "KEY_STATE_UNAVAILABLE"
+    assert len(stub.paths) == 1
+    assert budget_clock.now == 0.0
