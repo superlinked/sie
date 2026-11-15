@@ -178,6 +178,16 @@ describe("client.estimate", () => {
     }
   });
 
+  it("returns the credit price unchanged", async () => {
+    const usdPerCredit = { numerator: "1", denominator: "100000" };
+    mockFetch.mockResolvedValueOnce(jsonResponse(200, { ...QUOTE, usd_per_credit: usdPerCredit }));
+    const client = new SIEClient("http://localhost:8080");
+
+    const quote = await client.estimate("/v1/encode/BAAI/bge-m3", { items: [{ text: "Hello" }] });
+
+    expect(quote.usd_per_credit).toEqual(usdPerCredit);
+  });
+
   it("posts the envelope to /v1/estimate and returns the quote", async () => {
     mockFetch.mockResolvedValueOnce(jsonResponse(200, QUOTE));
     const client = new SIEClient("http://localhost:8080");

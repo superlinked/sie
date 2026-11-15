@@ -138,6 +138,19 @@ class TestSyncEstimate:
             assert quote.get("estimated_credits_decimal") == expected
             client.close()
 
+    def test_credit_price_is_returned_unchanged(self) -> None:
+        usd_per_credit = {"numerator": "1", "denominator": "100000"}
+        with patch("sie_sdk.client.sync.httpx.Client") as mock_client:
+            mock_client.return_value.post = MagicMock(
+                return_value=_resp(200, {**QUOTE, "usd_per_credit": usd_per_credit})
+            )
+            client = SIEClient("http://localhost:8080")
+
+            quote = client.estimate("/v1/encode/BAAI/bge-m3", {"items": [{"text": "Hello"}]})
+
+            assert quote.get("usd_per_credit") == usd_per_credit
+            client.close()
+
     def test_compat_body_rides_through_untouched(self) -> None:
         """The model stays in the BODY for an OpenAI-compatible target."""
         body = {

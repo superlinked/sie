@@ -1499,8 +1499,8 @@ export interface ChatCompletionRequest {
  * stream there is no header to fall back to: without
  * `stream_options.include_usage` there is no usage chunk at all, and a stream
  * whose terminal settle did not commit in time reports its tokens without a
- * charge rather than guessing one. The account balance is not readable with
- * an API key; the console shows it.
+ * charge rather than guessing one. On SIE Cloud, `GET /v1/usage` returns the
+ * account balance to an API key.
  */
 export interface ChatUsage {
   prompt_tokens: number;
@@ -1726,6 +1726,17 @@ export interface AppliedRate {
   rate_denominator: number;
 }
 
+/**
+ * The USD price of one credit as an exact reduced rational.
+ *
+ * Both halves are decimal strings so a float JSON reader cannot round them:
+ * `{ numerator: "1", denominator: "100000" }` is $0.00001 per credit.
+ */
+export interface UsdPerCredit {
+  numerator: string;
+  denominator: string;
+}
+
 /** The rate-book row set a request is priced under. */
 export interface RateIdentity {
   model: string;
@@ -1767,6 +1778,8 @@ export interface CostEstimate {
   rounding_rule: string;
   estimate_basis: string;
   minimum_billed_units?: Record<string, number> | null;
+  /** The USD price of one credit under the rate book that priced the quote, when the gateway reports it (SIE Cloud does). */
+  usd_per_credit?: UsdPerCredit;
 }
 
 // ---------------------------------------------------------------------------

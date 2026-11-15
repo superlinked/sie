@@ -750,8 +750,8 @@ class GenerationUsage(TypedDict):
     ``stream_options.include_usage`` — without that there is no usage chunk at
     all. Native generate always carries usage on its terminal chunk. A stream
     whose terminal settle did not commit in time reports its tokens without a
-    charge rather than guessing one. The account balance is not readable with
-    an API key; the console shows it.
+    charge rather than guessing one. On SIE Cloud, ``GET /v1/usage`` returns the
+    account balance to an API key.
     """
 
     prompt_tokens: int
@@ -1580,6 +1580,17 @@ class AppliedRate(TypedDict):
     rate_denominator: int
 
 
+class UsdPerCredit(TypedDict):
+    """The USD price of one credit as an exact reduced rational.
+
+    Both halves are decimal strings so a float JSON reader cannot round them:
+    ``{"numerator": "1", "denominator": "100000"}`` is $0.00001 per credit.
+    """
+
+    numerator: str
+    denominator: str
+
+
 class RecommendedChoice(TypedDict, total=False):
     """One tier's pick for a task family, with the evidence behind it."""
 
@@ -1669,6 +1680,9 @@ class CostEstimate(TypedDict):
     # `null` on every non-duration-priced identity, so it is always serialized
     # but never meaningful outside the sealed rate card.
     minimum_billed_units: NotRequired[dict[str, int] | None]
+    #: The USD price of one credit under the rate book that priced the quote,
+    #: when the gateway reports it (SIE Cloud does).
+    usd_per_credit: NotRequired[UsdPerCredit]
 
 
 class RateIdentity(TypedDict):
