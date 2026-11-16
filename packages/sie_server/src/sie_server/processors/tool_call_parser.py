@@ -383,6 +383,9 @@ class _ChoiceState:
     # Set once the choice's terminal closure has been emitted so the
     # global terminal does not double-emit.
     closed: bool = False
+    # Set when the token limit ended generation inside an open tool-call
+    # block; the choice then finishes as ``length``.
+    truncated: bool = False
     # Tool-call deltas observed so far (for parallel_tool_calls=false
     # enforcement, currently sufficient as the boolean
     # ``emitted_tool_call`` flag). Reserved field kept implicit.
@@ -513,6 +516,27 @@ def _process_text(
     return out, False
 
 
+def _drop_call_cut_by_length(state: _ChoiceState, finish: str | None) -> bool:
+    """Drop a tool-call block the token limit cut short.
+
+    Returns True when ``state`` was inside an open block and the upstream
+    finish reason is ``length``. The partial call is discarded, not
+    surfaced: its arguments are incomplete, so a client could not run it.
+    The choice finishes as ``length`` so the client knows the output was
+    truncated. An open block under any other finish reason stays a parse
+    error.
+    """
+    if not state.in_tool_call or finish != "length":
+        return False
+    state.in_tool_call = False
+    state.tool_buffer = ""
+    # While a block is open ``text_buffer`` only holds the tail kept back
+    # for a close tag split across deltas; it is part of the dropped call.
+    state.text_buffer = ""
+    state.truncated = True
+    return True
+
+
 def _close_choice(state: _ChoiceState, choice_index: int, fallback_finish: str | None) -> list[GenerationChunk]:
     """Emit the per-choice closure chunk for one candidate.
 
@@ -522,7 +546,7 @@ def _close_choice(state: _ChoiceState, choice_index: int, fallback_finish: str |
     or any choice that did not see a per-choice finish event).
     """
     out: list[GenerationChunk] = []
-    if state.in_tool_call:
+    if state.in_tool_call and not _drop_call_cut_by_length(state, state.pending_finish or fallback_finish):
         out.append(_parse_error_chunk("unterminated <tool_call> block"))
         return out
     if state.text_buffer:
@@ -536,7 +560,9 @@ def _close_choice(state: _ChoiceState, choice_index: int, fallback_finish: str |
         )
         state.text_buffer = ""
     finish: FinishReason = (
-        "tool_calls"
+        "length"
+        if state.truncated
+        else "tool_calls"
         if state.emitted_tool_call
         else cast("FinishReason", state.pending_finish or fallback_finish or "stop")
     )
@@ -657,6 +683,10 @@ async def _parse_tool_call_stream_impl(
             state.pending_completion_tokens = chunk.completion_tokens
             for ev in _close_choice(state, idx, chunk.finish_reason):
                 yield ev
+                if ev.done:
+                    # Parse error: terminal for the whole stream, so the
+                    # global terminal must not close this choice again.
+                    return
 
         if chunk.done:
             # Non-streaming ``n>1`` + tools (H5 non-streaming side): the
@@ -671,12 +701,14 @@ async def _parse_tool_call_stream_impl(
                 any_tool_call = False
                 for cand in chunk.candidates:
                     cand_text = cand.get("text", "") if isinstance(cand, dict) else ""
+                    cut_by_length = isinstance(cand, dict) and cand.get("finish_reason") == "length"
                     try:
-                        parsed_text, parsed_calls = _parse_candidate_text(
+                        parsed_text, parsed_calls, truncated = _parse_candidate_text(
                             cand_text,
                             tool_call_format,
                             schemas,
                             parallel_tool_calls=parallel_tool_calls,
+                            drop_unterminated=cut_by_length,
                         )
                     except _ParallelToolCallsViolatedError:
                         logger.info(
@@ -688,7 +720,14 @@ async def _parse_tool_call_stream_impl(
                         yield _parallel_tool_calls_violation_chunk()
                         return
                     new_cand = dict(cand) if isinstance(cand, dict) else {}
-                    if parsed_calls:
+                    if truncated:
+                        # The token limit cut a later block short: keep
+                        # the complete calls and the candidate's own
+                        # ``length`` so the truncation stays visible.
+                        new_cand["text"] = parsed_text
+                        if parsed_calls:
+                            new_cand["tool_calls"] = parsed_calls
+                    elif parsed_calls:
                         # OpenAI non-streaming shape: message.content=null,
                         # message.tool_calls=[{id, type, function:{name, arguments}}].
                         # The gateway candidate builder surfaces this as
@@ -735,8 +774,10 @@ async def _parse_tool_call_stream_impl(
             for cidx, st in list(states.items()):
                 if st.closed:
                     continue
-                # Mid-tool-call at terminal → error (mirrors prior impl).
-                if st.in_tool_call:
+                # Mid-tool-call at terminal → error, unless the token
+                # limit cut the block: then the stream finishes as
+                # ``length`` without the partial call.
+                if st.in_tool_call and not _drop_call_cut_by_length(st, chunk.finish_reason):
                     yield _parse_error_chunk("unterminated <tool_call> block")
                     return
                 if st.text_buffer:
@@ -756,7 +797,7 @@ async def _parse_tool_call_stream_impl(
             # Single-candidate emitted a tool call? Surface tool_calls
             # on the global terminal too so n=1 behaviour matches the
             # original wrapper exactly.
-            if len(states) == 1 and 0 in states and states[0].emitted_tool_call:
+            if len(states) == 1 and 0 in states and states[0].emitted_tool_call and not states[0].truncated:
                 global_finish = "tool_calls"
             elif global_finish is None:
                 global_finish = "tool_calls" if any(s.emitted_tool_call for s in states.values()) else "stop"
@@ -808,12 +849,16 @@ def _parse_candidate_text(
     schemas: ToolSchemas | None = None,
     *,
     parallel_tool_calls: bool = True,
-) -> tuple[str, list[dict]]:
+    drop_unterminated: bool = False,
+) -> tuple[str, list[dict], bool]:
     """Parse a single candidate's full text for ``<tool_call>`` blocks.
 
-    Returns ``(text_outside_tool_blocks, tool_calls)`` where
+    Returns ``(text_outside_tool_blocks, tool_calls, truncated)`` where
     ``tool_calls`` is the OpenAI non-streaming wire shape:
-    ``[{id, type, function: {name, arguments}}, ...]``.
+    ``[{id, type, function: {name, arguments}}, ...]``. ``truncated`` is
+    True when ``drop_unterminated`` is set (the candidate finished as
+    ``length``) and an unterminated block was dropped from the text, the
+    rule the streaming path applies to a call the token limit cut short.
 
     Used by the non-streaming ``n>1`` + tools path: the worker's
     multi-candidate adapter ships one terminal carrying the full text
@@ -829,9 +874,10 @@ def _parse_candidate_text(
     """
     open_tag, close_tag = _tool_call_tags(tool_call_format)
     if not text or open_tag not in text:
-        return text, []
+        return text, [], False
     out_text_parts: list[str] = []
     tool_calls: list[dict] = []
+    truncated = False
     cursor = 0
     tool_index = 0
     while cursor < len(text):
@@ -845,6 +891,9 @@ def _parse_candidate_text(
         body_start = open_idx + len(open_tag)
         close_idx = text.find(close_tag, body_start)
         if close_idx == -1:
+            if drop_unterminated:
+                truncated = True
+                break
             # Unterminated block: bail; surface the rest as text so the
             # candidate's prose isn't silently lost.
             out_text_parts.append(text[open_idx:])
@@ -873,7 +922,7 @@ def _parse_candidate_text(
             )
         tool_index += 1
         cursor = close_idx + len(close_tag)
-    return "".join(out_text_parts), tool_calls
+    return "".join(out_text_parts), tool_calls, truncated
 
 
 def _tool_call_deltas(

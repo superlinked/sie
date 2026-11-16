@@ -29,7 +29,7 @@ def _accepts(pattern: str, text: str) -> bool:
     accepted = re.fullmatch(pattern, text) is not None
     if accepted:
         # Everything the forcing grammar admits in these tests is a well-formed call.
-        remaining, calls = _parse_candidate_text(text, "gemma4")
+        remaining, calls, _ = _parse_candidate_text(text, "gemma4")
         assert remaining == ""
         assert calls
     return accepted
