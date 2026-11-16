@@ -3103,3 +3103,93 @@ def test_mlx_messages_refuse_a_prompt_over_the_window_with_the_compaction_wordin
         "type": "invalid_request_error",
         "message": f"prompt is too long: {42 + 32} tokens > {_WINDOW} maximum",
     }
+
+
+_IGNORED_OPENAI_FIELDS = {"metadata": {"run": "eval-7"}, "store": True, "service_tier": "auto"}
+
+
+def _chat_client_for(
+    engine: str, monkeypatch: pytest.MonkeyPatch, handler: Callable[[httpx.Request], httpx.Response]
+) -> TestClient:
+    if engine == "cuda":
+        return _cuda_chat_client(monkeypatch, handler)[0]
+    return _mlx_chat_client(monkeypatch, handler, chat_template_kwargs={"enable_thinking": False})[0]
+
+
+@pytest.mark.parametrize("engine", ["cuda", "mlx"])
+@pytest.mark.parametrize("extra", [_IGNORED_OPENAI_FIELDS, dict.fromkeys(_IGNORED_OPENAI_FIELDS)])
+def test_chat_accepts_and_drops_metadata_store_service_tier(
+    monkeypatch: pytest.MonkeyPatch, engine: str, extra: dict[str, Any]
+) -> None:
+    forwarded: list[dict[str, Any]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        forwarded.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "served",
+                "choices": [
+                    {"index": 0, "message": {"role": "assistant", "content": "Hello"}, "finish_reason": "stop"}
+                ],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+            },
+        )
+
+    client = _chat_client_for(engine, monkeypatch, _handler)
+    body = {"model": "Qwen/Qwen3.5-4B", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 8}
+
+    plain = client.post("/v1/chat/completions", json=body)
+    with_fields = client.post("/v1/chat/completions", json={**body, **extra})
+
+    assert plain.status_code == 200
+    assert with_fields.status_code == 200
+    # The engine sees the same request either way: the fields are not forwarded.
+    assert forwarded[1] == forwarded[0]
+    assert not forwarded[1].keys() & _IGNORED_OPENAI_FIELDS.keys()
+    assert with_fields.json()["choices"] == plain.json()["choices"]
+
+
+@pytest.mark.parametrize("engine", ["cuda", "mlx"])
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [("metadata", "run", "an object"), ("store", "yes", "a boolean"), ("service_tier", 1, "a string")],
+)
+def test_chat_rejects_wrongly_typed_metadata_store_service_tier(
+    monkeypatch: pytest.MonkeyPatch, engine: str, field: str, value: Any, expected: str
+) -> None:
+    client = _chat_client_for(
+        engine, monkeypatch, lambda _request: pytest.fail("rejected request must not reach the engine")
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "Qwen/Qwen3.5-4B", "messages": [{"role": "user", "content": "Hello"}], field: value},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["param"] == field
+    assert response.json()["error"]["message"] == f"'{field}' must be {expected}"
+    assert response.json()["error"]["code"] != "unsupported_field"
+
+
+@pytest.mark.parametrize("engine", ["cuda", "mlx"])
+@pytest.mark.parametrize("field", ["functions", "function_call", "modalities", "audio", "prediction", "verbosity"])
+def test_chat_still_rejects_out_of_scope_openai_fields(
+    monkeypatch: pytest.MonkeyPatch, engine: str, field: str
+) -> None:
+    client = _chat_client_for(
+        engine, monkeypatch, lambda _request: pytest.fail("rejected request must not reach the engine")
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "Qwen/Qwen3.5-4B", "messages": [{"role": "user", "content": "Hello"}], field: {}},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unsupported_field"
+    assert response.json()["error"]["param"] == field
