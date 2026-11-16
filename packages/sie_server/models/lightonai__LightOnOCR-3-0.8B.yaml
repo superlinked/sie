@@ -1,0 +1,129 @@
+sie_id: lightonai/LightOnOCR-3-0.8B
+hf_id: lightonai/LightOnOCR-3-0.8B
+hf_revision: 36d8636925327c671bd8e479c517a004f7566bd9
+inputs:
+  text: false
+  image: true
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+# Settings follow github.com/lightonai/LightOnOCR at 36755d461be079737860a5f03ae0c803501269e9
+# (README, lightonocr/models.py and render.py, benchmarks/ocr_bench/providers/__init__.py) and the model card.
+#
+# Mode: omit `instruction` for plain Markdown transcription. Send exactly `grounding` to get a
+# `![label](x1,y1,x2,y2)` block marker, in 0-1000 page coordinates, before each layout block.
+# These are the only two trained prompts. The adapter rejects any other prompt and thinking.
+#
+# Page image: the SGLang profiles bound each page to 65,536-5,242,880 pixels, the 5 MP cap that
+# upstream's published benchmark scores used on 400 DPI pages. The processor downscales a larger
+# page, keeping its aspect ratio, to at most 5,120 image tokens (one per 32x32 px cell): a 400 DPI
+# US Letter page drops from 14,628 to 5,022. It applies the bound only when given both values.
+# Pages rendered at 400 DPI and downscaled to a 2048 px longest edge, as the model card and the
+# upstream client do, stay under the cap and reach the model as sent. The `transformers` profile
+# keeps the checkpoint's 65,536-16,777,216 pixel range.
+#
+# Sampling: temperature 0.1, top_p 1.0, one beam. The upstream README says "use temperature 0.1,
+# not greedy decoding", and the benchmark pipeline uses 0.1. The model card examples use 0.2.
+#
+# Output cap: 4,096 new tokens in a 24,576-token context, the max_tokens of the upstream serving
+# client (saturate.py); the 4B descriptor keeps the benchmark's 12,288. On the full
+# olmOCR-bench split 12 of 1,403 official-recipe pages reach 4,096 (mostly tables and tiny text);
+# a larger cap mostly spends GPU time on pages that loop. A request can lower it.
+#
+# Normalization: none beyond trimming leading and trailing whitespace, which the default SGLang
+# profile applies; grounding markers are kept. The `transformers` profile returns the decoded text
+# untrimmed. The upstream client repairs escaped math dollars by default. Upstream's published
+# olmOCR-bench scores also drop header/footer/page-number blocks and apply its Markdown
+# post-processing.
+# The explicit `markdown` profile defaults to `grounding` and applies that published conversion:
+# omit margin/aside blocks and leading unmarked text, repair escaped math dollars, then PP3.
+# This is a lossy output policy; footnotes remain and all-margin pages can return empty text.
+# Native opt-in: set loadtime `output_postprocess: lightonocr3_markdown` and send `grounding`.
+#
+# Serving: the default profile runs the checkpoint on SGLang (sglang-vision-extract bundle) with
+# continuous batching, no system prompt, the chat template's enable_thinking=False, and only the
+# two trained prompts accepted. The `transformers` profile runs the same contract in-process in the
+# transformers5 bundle.
+#
+# Throughput: up to 256 pages are dispatched to the engine at once; 128 underfeeds the 0.8B model.
+# 256 is the effective ceiling: SIE's httpx pool to SGLang is capped at 256 connections
+# (adapters/sglang/generation.py:1516, max_connections=256); requests above it queue and fail with a
+# 500 PoolTimeout after 10 s unless SIE_SGLANG_GENERATE_POOL_TIMEOUT_S is raised. On an L4 at this
+# memory reservation SGLang may still run fewer at once. The radix cache is off: every page is a
+# new image, so it saves nothing, and with it on SGLang turns overlap scheduling off for this
+# hybrid (Gated DeltaNet) model. FlashInfer serves the attention layers. Sampling is unchanged and
+# outputs stay within bf16 run-to-run variance.
+#
+# Memory: SGLang keeps (1 - mem_fraction_static) of the memory free at launch as runtime headroom.
+# One page at the checkpoint's 16 MP limit peaks 4.8 GiB above the memory in use after load, in the
+# vision encoder. On an L4, 0.75 and 0.85 run out of memory there and the engine exits, which fails
+# every page in flight. 0.70 leaves 0.7 GiB free at that peak; the 5 MP page cap lowers the peak,
+# which has not been re-measured. The 0.8B descriptor inherits this 0.70 L4
+# reservation from the 4B calibration; the 0.8B
+# weights leave more headroom, but 0.75/0.85 have not been re-measured on an L4
+# for this checkpoint.
+max_sequence_length: 24576
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang_vision_extract.adapter:SGLangVisionExtractAdapter
+    adapter_options:
+      loadtime:
+        mem_fraction_static: 0.70
+        served_model_name: lightonai/LightOnOCR-3-0.8B
+        trust_remote_code: false
+        max_concurrent_requests: 256
+        meter_pages: true
+        max_new_tokens: 4096
+        temperature: 0.1
+        top_p: 1.0
+        chat_template_kwargs:
+          enable_thinking: false
+        allowed_instructions:
+          - grounding
+        attention_backend: flashinfer
+        extra_launch_args:
+          - --disable-radix-cache
+          - --mm-process-config
+          - '{"image":{"min_pixels":65536,"max_pixels":5242880}}'
+      runtime:
+        max_new_tokens: 4096
+        num_beams: 1
+  markdown:
+    extends: default
+    adapter_options:
+      # Profile inheritance replaces loadtime, so retain every engine/sampling option.
+      loadtime:
+        mem_fraction_static: 0.70
+        served_model_name: lightonai/LightOnOCR-3-0.8B
+        trust_remote_code: false
+        max_concurrent_requests: 256
+        meter_pages: true
+        max_new_tokens: 4096
+        temperature: 0.1
+        top_p: 1.0
+        chat_template_kwargs:
+          enable_thinking: false
+        allowed_instructions:
+          - grounding
+        attention_backend: flashinfer
+        extra_launch_args:
+          - --disable-radix-cache
+          - --mm-process-config
+          - '{"image":{"min_pixels":65536,"max_pixels":5242880}}'
+        default_prompt: grounding
+        output_postprocess: lightonocr3_markdown
+  transformers:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.lighton_ocr.adapter:LightOnOCR3Adapter
+    adapter_options:
+      loadtime:
+        max_new_tokens: 4096
+        temperature: 0.1
+        top_p: 1.0
+      runtime: {}
