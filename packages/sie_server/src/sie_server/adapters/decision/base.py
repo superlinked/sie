@@ -17,6 +17,9 @@ from sie_server.types.responses import ErrorCode
 
 MAX_ITEM_TOKENS = 32_768
 MAX_FORWARD_ROWS = 8
+# Character allowance per row for the system prompt, chat template and option framing that
+# the unloaded fallback cost does not render (the d3 and qev system prompts are ~180 chars).
+_ROW_CHARS = 384
 
 
 def check_token_budget(length: int, total: int, window: int) -> int:
@@ -182,21 +185,46 @@ class DecisionBatchAdapter(BaseAdapter):
         options: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[int] | None:
+        """Per-item batching cost in model tokens, the unit of the profile's ``max_batch_tokens``.
+
+        Once loaded, each item is rendered by ``_item_rows``, the same prompt template, question
+        rendering and tokenizer ``extract`` runs, and the cost is the sum of its unpadded row
+        lengths. Before load, or if rendering fails for a reason ``extract`` will report itself,
+        the cost falls back to one token per rendered character plus a per-row template allowance.
+        This only groups work: ``extract`` still enforces the exact row and item token limits.
+        """
         _ = kwargs
         try:
             questions = self._extract_questions(labels, output_schema, instruction, options)
         except (InvalidInputError, InputTooLongError):
             return None
-        prompt_chars = sum(
-            len(question.instructions) + sum(map(len, question.descriptions)) + 8 * len(question.keys) + 512
+        try:
+            self._check_decision_loaded()
+            loaded = True
+        except Exception:  # noqa: BLE001 - not loaded yet: use the character bound
+            loaded = False
+        question_chars = sum(
+            len(question.instructions) + sum(map(len, question.descriptions)) + 8 * len(question.keys) + _ROW_CHARS
             for question in questions
         )
         limit = MAX_ITEM_TOKENS * 4
         costs: list[int] = []
         for item in items:
             try:
-                state = describe(self._raw_state(item), self._max_seq_length * 64)
-                costs.append(min(limit, 2 * (len(questions) * len(state) + prompt_chars)))
+                tokens = self._item_tokens(item, questions) if loaded else None
+                if tokens is None:
+                    state = describe(self._raw_state(item), self._max_seq_length * 64)
+                    tokens = len(questions) * len(state) + question_chars
+                costs.append(min(limit, tokens))
             except (InvalidInputError, InputTooLongError):
                 costs.append(limit)
         return costs
+
+    def _item_tokens(self, item: Item, questions: tuple[Question, ...]) -> int | None:
+        """Unpadded tokens of the rows ``extract`` would run for ``item``; ``None`` if rendering failed."""
+        try:
+            return sum(row.length for row in self._item_rows(0, item, questions))
+        except (InvalidInputError, InputTooLongError):
+            raise
+        except Exception:  # noqa: BLE001 - a cost estimate must never fail the request
+            return None
