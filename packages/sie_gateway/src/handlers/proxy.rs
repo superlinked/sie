@@ -6770,6 +6770,9 @@ fn decode_video_data_uri(value: &serde_json::Value) -> Result<(String, String), 
 ///   ``stream`` / ``stream_options``.
 /// * ``user`` (debug-log only), ``safety_identifier`` (silent),
 ///   ``prompt_cache_key`` (plumbed), ``routing_key`` (plumbed)
+/// * ``metadata`` (object), ``store`` (boolean), ``service_tier`` (string) —
+///   accepted for OpenAI SDK compatibility and ignored: type-checked, never
+///   forwarded, no effect on the request.
 ///
 /// Any field outside this set surfaces as 400 with
 /// ``code: "unsupported_field"`` and ``param`` set to the offending field
@@ -7600,6 +7603,29 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
     // (decision 0.2 in plan §0). We just acknowledge its presence by
     // not rejecting it.
     let _ = obj.get("safety_identifier");
+    // ``metadata`` / ``store`` / ``service_tier`` — standard OpenAI SDK
+    // clients send these and SIE has no use for them. They are
+    // type-checked, then dropped: never forwarded to the worker.
+    for (fname, well_typed, expected) in [
+        (
+            "metadata",
+            serde_json::Value::is_object as fn(&serde_json::Value) -> bool,
+            "an object",
+        ),
+        ("store", serde_json::Value::is_boolean, "a boolean"),
+        ("service_tier", serde_json::Value::is_string, "a string"),
+    ] {
+        if obj
+            .get(fname)
+            .is_some_and(|v| !v.is_null() && !well_typed(v))
+        {
+            return bad(
+                &format!("'{fname}' must be {expected}"),
+                Some(fname),
+                oai_code::INVALID_REQUEST,
+            );
+        }
+    }
     // ``seed`` — validate once across every generation route and preserve the
     // signed value on the worker wire. ``null`` and absent are both no-ops.
     let seed = match parse_seed_field(obj.get("seed")) {
@@ -7774,9 +7800,6 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
         "function_call",
         "modalities",
         "audio",
-        "metadata",
-        "store",
-        "service_tier",
         "prediction",
         "verbosity",
     ] {
@@ -7935,6 +7958,9 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
         "lora_adapter",
         "user",
         "safety_identifier",
+        "metadata",
+        "store",
+        "service_tier",
         "seed",
         "logprobs",
         "top_logprobs",
@@ -27523,6 +27549,52 @@ mod tests {
         assert_eq!(p.messages.len(), 3);
         assert!(p.messages[1].tool_calls.is_some());
         assert_eq!(p.messages[2].tool_call_id.as_deref(), Some("call_1"));
+    }
+
+    #[tokio::test]
+    async fn test_chat_params_from_json_ignores_metadata_store_service_tier() {
+        let baseline = format!("{:?}", _expect_chat_ok(_chat_body_min("m")));
+        let mut body = _chat_body_min("m");
+        body["metadata"] = serde_json::json!({"run": "eval-7"});
+        body["store"] = serde_json::json!(true);
+        body["service_tier"] = serde_json::json!("auto");
+        assert_eq!(format!("{:?}", _expect_chat_ok(body)), baseline);
+        // ``null`` is the SDK's "unset" and is accepted too.
+        for fname in ["metadata", "store", "service_tier"] {
+            let mut body = _chat_body_min("m");
+            body[fname] = serde_json::Value::Null;
+            assert_eq!(format!("{:?}", _expect_chat_ok(body)), baseline);
+        }
+
+        for (fname, wrong) in [
+            ("metadata", serde_json::json!("run")),
+            ("store", serde_json::json!("yes")),
+            ("service_tier", serde_json::json!(1)),
+        ] {
+            let mut body = _chat_body_min("m");
+            body[fname] = wrong;
+            let v = _expect_chat_err(body).await;
+            assert_eq!(v["error"]["code"], "invalid_request");
+            assert_eq!(v["error"]["param"], fname);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_chat_params_from_json_still_rejects_out_of_scope_openai_fields() {
+        for fname in [
+            "functions",
+            "function_call",
+            "modalities",
+            "audio",
+            "prediction",
+            "verbosity",
+        ] {
+            let mut body = _chat_body_min("m");
+            body[fname] = serde_json::json!({});
+            let v = _expect_chat_err(body).await;
+            assert_eq!(v["error"]["code"], "unsupported_field");
+            assert_eq!(v["error"]["param"], fname);
+        }
     }
 
     #[tokio::test]
