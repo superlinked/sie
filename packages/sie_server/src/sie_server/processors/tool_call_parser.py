@@ -857,8 +857,9 @@ def _parse_candidate_text(
     ``tool_calls`` is the OpenAI non-streaming wire shape:
     ``[{id, type, function: {name, arguments}}, ...]``. ``truncated`` is
     True when ``drop_unterminated`` is set (the candidate finished as
-    ``length``) and an unterminated block was dropped from the text, the
-    rule the streaming path applies to a call the token limit cut short.
+    ``length``) and an unterminated block within the buffer cap was dropped
+    from the text, the rule the streaming path applies to a call the token
+    limit cut short.
 
     Used by the non-streaming ``n>1`` + tools path: the worker's
     multi-candidate adapter ships one terminal carrying the full text
@@ -891,7 +892,10 @@ def _parse_candidate_text(
         body_start = open_idx + len(open_tag)
         close_idx = text.find(close_tag, body_start)
         if close_idx == -1:
-            if drop_unterminated:
+            # A block past the buffer cap is not a call the token limit cut
+            # short: the streaming path fails it before the terminal. It
+            # stays in the text like any other malformed block.
+            if drop_unterminated and len(text) - body_start <= _MAX_TOOL_BUFFER_CHARS:
                 truncated = True
                 break
             # Unterminated block: bail; surface the rest as text so the

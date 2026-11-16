@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 from sie_server.adapters._generation_base import GenerationChunk
+from sie_server.processors import tool_call_parser
 from sie_server.processors.tool_call_parser import parse_tool_call_stream
 
 _CALL = '<tool_call>{"name":"get_weather","arguments":{"city":"Tokyo"}}</tool_call>'
@@ -191,3 +192,28 @@ async def test_buffered_candidates_cut_by_length_drop_the_partial_call() -> None
     # Not cut by the token limit: the malformed block stays in the text verbatim.
     assert unterminated_at_stop == {"text": "C " + _CUT_CALL, "finish_reason": "stop", "logprobs": None}
     assert complete["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.asyncio
+async def test_open_block_past_the_buffer_cap_is_not_treated_as_cut_by_length(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tool_call_parser, "_MAX_TOOL_BUFFER_CHARS", 64)
+    at_cap = "<tool_call>" + "x" * 64
+    over_cap = "<tool_call>" + "x" * 65
+
+    # Streaming: the cap fails the block before the ``length`` terminal arrives.
+    streamed = await _parse(
+        [GenerationChunk(text_delta=over_cap), GenerationChunk(text_delta="", done=True, finish_reason="length")]
+    )
+    assert streamed[-1].error_code == "MODEL_OUTPUT_PARSE_ERROR"
+    assert "exceeded 64 chars" in (streamed[-1].error_message or "")
+
+    # Buffered: there is no per-candidate error channel, so the oversized block
+    # stays in the text verbatim, as it did before ``length`` handling existed.
+    candidates = (
+        {"text": "A " + at_cap, "finish_reason": "length", "logprobs": None},
+        {"text": "B " + over_cap, "finish_reason": "length", "logprobs": None},
+    )
+    out = await _parse([GenerationChunk(text_delta="", done=True, finish_reason="length", candidates=candidates)])
+    within, oversized = out[-1].candidates or ()
+    assert within["text"] == "A "
+    assert oversized == {"text": "B " + over_cap, "finish_reason": "length", "logprobs": None}
