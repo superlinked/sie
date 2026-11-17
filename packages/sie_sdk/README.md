@@ -248,7 +248,9 @@ produces `Yes` (unsafe) or `No` (safe). A missing or invalid verdict returns
 `invalid_guard_verdict`; never treat an error or an empty response as safe.
 Private reasoning is hidden on both input surfaces. If it consumes the entire
 generation budget, the answer is empty with `finish_reason` `"length"`; raise
-`max_tokens` to leave room for the answer. A model that stops without usable
+`max_tokens` to leave room for the answer. A tool call the budget cuts short is
+dropped the same way: the choice ends with `finish_reason` `"length"` and
+carries only the calls that completed. A model that stops without usable
 output fails with `empty_model_output`.
 
 ## Connecting to SIE Serverless or a managed gateway

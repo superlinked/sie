@@ -395,7 +395,7 @@
         "type": "object"
       },
       "ChatCompletionRequest": {
-        "description": "OpenAI-compatible ``POST /v1/chat/completions`` request.\n\n**Strict allow-list:** unknown top-level fields reject with 400\n``unsupported_field``. Type-invalid values for accepted fields reject\nwith 400 ``invalid_request``.\n\n**Known-rejected fields**:\n- ``functions`` / ``function_call`` — deprecated by OpenAI; use ``tools`` instead.\n- ``modalities``, ``audio``, ``metadata``, ``store``, ``service_tier``,\n  ``prediction``, ``verbosity`` — out of scope.\n\n**Streaming:** ``stream: true`` is supported (SSE ``chat.completion.chunk``).\n``n > 1`` streaming fans candidates out as per-``choice_index``-tagged delta\nchunks with a per-choice closure carrying ``finish_reason`` (and a per-choice\n``delta.role:\"assistant\"`` once per choice) before the single global ``[DONE]``.",
+        "description": "OpenAI-compatible ``POST /v1/chat/completions`` request.\n\n**Strict allow-list:** unknown top-level fields reject with 400\n``unsupported_field``. Type-invalid values for accepted fields reject\nwith 400 ``invalid_request``.\n\n**Known-rejected fields**:\n- ``functions`` / ``function_call`` — deprecated by OpenAI; use ``tools`` instead.\n- ``modalities``, ``audio``, ``prediction``, ``verbosity`` — out of scope.\n\n**Accepted and ignored**: ``metadata``, ``store`` and ``service_tier`` are\ntype-checked, never forwarded, and have no effect on the request.\n\n**Streaming:** ``stream: true`` is supported (SSE ``chat.completion.chunk``).\n``n > 1`` streaming fans candidates out as per-``choice_index``-tagged delta\nchunks with a per-choice closure carrying ``finish_reason`` (and a per-choice\n``delta.role:\"assistant\"`` once per choice) before the single global ``[DONE]``.",
         "properties": {
           "best_of": {
             "description": "Generate this many candidates and return the top `n` by cumulative logprob. Integer in [1, 128]. Cross-field rule: `best_of >= n` (otherwise 400 invalid_request). Rejected with 400 unsupported_field when `stream: true` (mirrors OpenAI).",
@@ -485,6 +485,13 @@
               "$ref": "#/components/schemas/ChatCompletionMessage"
             },
             "type": "array"
+          },
+          "metadata": {
+            "description": "OpenAI ``metadata`` — accepted and ignored (never forwarded).",
+            "type": [
+              "object",
+              "null"
+            ]
           },
           "min_tokens": {
             "description": "SGLang ``sampling_params.min_new_tokens``: integer ``>= 0`` capping\nhow many tokens the model must emit before any stop condition can\nfire. Use to work around models that occasionally emit the stop\ntoken as the very first decoded token (e.g. Qwen3.6 thinking-off\nunder greedy decode). Absent → sampler default (no minimum).",
@@ -597,6 +604,13 @@
               "null"
             ]
           },
+          "service_tier": {
+            "description": "OpenAI ``service_tier`` — accepted and ignored (never forwarded).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "stop": {
             "description": "Either a string or an array of strings, mirroring OpenAI.",
             "oneOf": [
@@ -609,6 +623,13 @@
                 },
                 "type": "array"
               }
+            ]
+          },
+          "store": {
+            "description": "OpenAI ``store`` — accepted and ignored (never forwarded).",
+            "type": [
+              "boolean",
+              "null"
             ]
           },
           "stream": {
