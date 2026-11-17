@@ -46,6 +46,8 @@ class _Device:
         self._footprints: dict[str, int] = {}
         self._failing_unloads: set[str] = set()
         self._after_unload: dict[str, Callable[[], None]] = {}
+        self._before_load: dict[str, Callable[[], None]] = {}
+        self._held_unloads: dict[str, tuple[threading.Event, threading.Event]] = {}
         self.adapters: dict[str, list[MagicMock]] = {}
         self.stranded_bytes: list[int] = []
         self.failed_loads: list[str] = []
@@ -65,6 +67,16 @@ class _Device:
     def after_unload(self, name: str, callback: Callable[[], None]) -> None:
         self._after_unload[name] = callback
 
+    def before_load(self, name: str, callback: Callable[[], None]) -> None:
+        """Run ``callback`` at the start of the next load of ``name``, before it allocates."""
+        self._before_load[name] = callback
+
+    def hold_unload(self, name: str) -> tuple[threading.Event, threading.Event]:
+        """Hold the next unload of ``name`` with its memory still allocated; return (started, release)."""
+        started, release = threading.Event(), threading.Event()
+        self._held_unloads[name] = (started, release)
+        return started, release
+
     def make_adapter(self, name: str) -> MagicMock:
         footprint = self._footprints[name]
         adapter = MagicMock()
@@ -77,6 +89,9 @@ class _Device:
 
         def load(_device: str) -> None:
             self.stranded_bytes.append(sum(self._partial.values()))
+            before = self._before_load.pop(name, None)
+            if before is not None:
+                before()
             free = self.total_bytes - self.used_bytes()
             if footprint > free:
                 partial = _Allocation(self._partial, free)
@@ -91,6 +106,11 @@ class _Device:
             if name in self._failing_unloads:
                 msg = f"unload of {name} failed"
                 raise RuntimeError(msg)
+            hold = self._held_unloads.pop(name, None)
+            if hold is not None:
+                started, release = hold
+                started.set()
+                release.wait(5)
             held.pop(key, None)
             if name in self._after_unload:
                 self._after_unload[name]()
@@ -384,3 +404,88 @@ async def test_cancelling_the_load_while_the_attempt_is_released_still_unloads_i
     assert cancelled.is_set()
     device.adapters["new"][0].unload.assert_called_once()
     assert registry.loaded_model_names == ["pinned", "cold"]
+
+
+async def test_load_that_starts_during_an_eviction_waits_for_its_memory() -> None:
+    device = _Device(total_bytes=10 * GIB)
+    registry = await _registry(
+        device,
+        {"pinned": 2 * GIB, "cold": 4 * GIB, "new": 5 * GIB},
+        pinned=["pinned"],
+        resident=["pinned", "cold"],
+    )
+    started, release = device.hold_unload("cold")
+    eviction = asyncio.create_task(registry.unload_async("cold", reason="memory_pressure"))
+    assert await asyncio.to_thread(started.wait, 5)
+
+    load = asyncio.create_task(registry.load_now("new", "cpu"))
+    await asyncio.sleep(0.1)
+    assert not load.done()
+
+    release.set()
+    assert await load
+    await eviction
+
+    assert registry.loaded_model_names == ["pinned", "new"]
+    assert device.failed_loads == []
+    assert registry.get_failure("new") is None
+
+
+def _evict_during_the_first_attempt(
+    registry: ModelRegistry, device: _Device, *, evicted: str, loading: str
+) -> list[asyncio.Task[None]]:
+    """Evict ``evicted`` while the first load of ``loading`` allocates, as the memory monitor can.
+
+    The attempt runs while the eviction still holds its memory, and the
+    eviction's teardown finishes shortly after the attempt fails.
+    """
+    loop = asyncio.get_running_loop()
+    started, release = device.hold_unload(evicted)
+    evictions: list[asyncio.Task[None]] = []
+
+    def start_eviction() -> None:
+        evictions.append(asyncio.create_task(registry.unload_async(evicted, reason="memory_pressure")))
+
+    def evict_during_the_attempt() -> None:
+        loop.call_soon_threadsafe(start_eviction)
+        assert started.wait(5)
+        loop.call_soon_threadsafe(loop.call_later, 0.1, release.set)
+
+    device.before_load(loading, evict_during_the_attempt)
+    return evictions
+
+
+async def test_retry_uses_the_memory_an_eviction_freed_while_the_attempt_failed() -> None:
+    device = _Device(total_bytes=10 * GIB)
+    registry = await _registry(
+        device,
+        {"pinned": 2 * GIB, "cold": 4 * GIB, "new": 5 * GIB},
+        pinned=["pinned"],
+        resident=["pinned", "cold"],
+    )
+    evictions = _evict_during_the_first_attempt(registry, device, evicted="cold", loading="new")
+
+    assert await registry.load_now("new", "cpu")
+    await asyncio.gather(*evictions)
+
+    assert device.failed_loads == ["new"]
+    assert registry.loaded_model_names == ["pinned", "new"]
+    assert registry.get_failure("new") is None
+
+
+async def test_retry_evicts_nothing_more_when_a_finished_eviction_freed_enough() -> None:
+    device = _Device(total_bytes=11 * GIB)
+    registry = await _registry(
+        device,
+        {"pinned": 2 * GIB, "cold": 4 * GIB, "warm": 1 * GIB, "new": 5 * GIB},
+        pinned=["pinned"],
+        resident=["pinned", "cold", "warm"],
+    )
+    evictions = _evict_during_the_first_attempt(registry, device, evicted="cold", loading="new")
+
+    assert await registry.load_now("new", "cpu")
+    await asyncio.gather(*evictions)
+
+    assert device.failed_loads == ["new"]
+    assert registry.loaded_model_names == ["pinned", "warm", "new"]
+    assert registry.get_failure("new") is None

@@ -1628,7 +1628,8 @@ class ModelRegistry:
         - Runs the blocking load in a thread pool to avoid blocking the event loop
         - After an OOM, releases the failed attempt and evicts LRU models until
           twice the memory that attempt had is free, retrying while any unpinned
-          model is left to evict
+          model is left to evict; a model another eviction removed during the
+          attempt counts as evicted
         - On-demand config discovery: rescans models_dir if model not found
         - Dependency checking: verifies model deps match installed packages
 
@@ -1787,6 +1788,7 @@ class ModelRegistry:
                     while True:
                         await self._wait_for_unloads()
                         attempt_free_bytes = memory_manager.get_stats().available_bytes
+                        attempt_residents = frozenset(memory_manager.loaded_models)
                         try:
                             loaded = await self._loader.load_and_register_async(name, load_device, adapter, config)
                             break
@@ -1795,7 +1797,8 @@ class ModelRegistry:
                                 raise
                             async with lock:
                                 lru_model = memory_manager.get_lru_model(exclude=self._pinned_models)
-                            if lru_model is None:
+                                resident_left = bool(attempt_residents.difference(memory_manager.loaded_models))
+                            if lru_model is None and not resident_left:
                                 logger.error("OOM loading '%s' but no non-pinned models to evict", name)
                                 await self._release_failed_load(adapter, name)
                                 raise
@@ -1805,7 +1808,9 @@ class ModelRegistry:
                         if not await self._release_failed_load(adapter, name):
                             msg = _ERR_OOM_RELEASE_FAILED.format(oom=oom_message)
                             raise RuntimeError(msg)
-                        if not await self._evict_for_load_retry(name, memory_manager, 2 * attempt_free_bytes):
+                        if not await self._evict_for_load_retry(
+                            name, memory_manager, 2 * attempt_free_bytes, attempt_residents
+                        ):
                             msg = _ERR_OOM_ONLY_RELEASING.format(oom=oom_message)
                             raise RuntimeError(msg)
                         adapter = await self._loader.instantiate_adapter_async(name, config, model_dir, load_device)
@@ -1867,8 +1872,20 @@ class ModelRegistry:
             return False
         return True
 
-    async def _evict_for_load_retry(self, name: str, memory_manager: MemoryManager, target_free_bytes: int) -> bool:
-        """Evict LRU non-pinned models until ``target_free_bytes`` are free; False if none could be evicted.
+    async def _evict_for_load_retry(
+        self,
+        name: str,
+        memory_manager: MemoryManager,
+        target_free_bytes: int,
+        attempt_residents: frozenset[str],
+    ) -> bool:
+        """Evict LRU non-pinned models until ``target_free_bytes`` are free; False if none left the device.
+
+        A model of ``attempt_residents``, the residents when the failed attempt
+        began, that is no longer resident counts as evicted, whoever evicted
+        it. Memory an eviction already in flight freed is then used instead of
+        evicting another model, and the retry is not refused when that
+        eviction took the last unpinned model.
 
         A model whose optional-memory release is still running is skipped, as
         the memory monitor skips it: its unload would join the inference
@@ -1876,12 +1893,12 @@ class ModelRegistry:
         releases are awaited once, up to the release bound.
         """
         lock = self._get_load_lock()
-        evicted = False
         awaited_releases = False
         while True:
             await self._wait_for_unloads()
             async with lock:
                 stats = memory_manager.get_stats()
+                evicted = bool(attempt_residents.difference(memory_manager.loaded_models))
                 if evicted and stats.available_bytes >= target_free_bytes:
                     return True
                 lru_model = memory_manager.get_lru_model(
@@ -1916,7 +1933,6 @@ class ModelRegistry:
                 await asyncio.wait(releasing, timeout=_OPTIONAL_MEMORY_RELEASE_TIMEOUT_S)
                 continue
             await self._do_unload(lru_model, reason="load_oom")
-            evicted = True
 
     async def start_load_async(self, name: str, device: str) -> bool:
         """Start loading a model in the background (non-blocking).
