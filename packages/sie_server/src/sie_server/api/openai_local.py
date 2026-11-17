@@ -161,6 +161,14 @@ _ANSWER_FINISH_REASONS = frozenset({"stop", "tool_calls"})
 # Compatibility requests project onto the same native score bound.
 _MAX_RERANK_DOCS = MAX_SCORE_ITEMS
 
+# OpenAI request fields that standard SDK clients send and SIE has no use for.
+# They are type-checked, then dropped before the request reaches an engine.
+_IGNORED_CHAT_FIELDS: dict[str, tuple[type, str]] = {
+    "metadata": (dict, "an object"),
+    "store": (bool, "a boolean"),
+    "service_tier": (str, "a string"),
+}
+
 # Mirror the gateway's public chat field boundary, minus controls that require
 # gateway-owned admission/routing translation (best_of, cache
 # keys). Most importantly this excludes SGLang's backend/DP/custom-processor
@@ -198,6 +206,7 @@ _CUDA_CHAT_FIELDS = frozenset(
         "parallel_tool_calls",
         "stream_options",
         "lora_adapter",
+        *_IGNORED_CHAT_FIELDS,
     }
 )
 
@@ -231,6 +240,7 @@ _MLX_CHAT_FIELDS = frozenset(
         "tool_choice",
         "parallel_tool_calls",
         "role_mapping",
+        *_IGNORED_CHAT_FIELDS,
     }
 )
 
@@ -562,6 +572,9 @@ def _validate_cuda_chat_body(body: dict[str, Any]) -> None:
 
 
 def _validate_common_chat_body(body: dict[str, Any]) -> None:
+    for field, (expected, description) in _IGNORED_CHAT_FIELDS.items():
+        if body.get(field) is not None and not isinstance(body[field], expected):
+            raise _bad_request(f"'{field}' must be {description}", param=field)
     response_format = body.get("response_format")
     if response_format is not None and not isinstance(response_format, dict):
         raise _bad_request("'response_format' must be an object", param="response_format")
@@ -861,6 +874,8 @@ def _prepare_chat_body(
     # SIE owns these edge-only identifiers; do not send unknown metadata into
     # the engine process.
     proxied.pop("safety_identifier", None)
+    for field in _IGNORED_CHAT_FIELDS:
+        proxied.pop(field, None)
     proxied.pop("schema_in_prompt", None)
     proxied.pop("include_reasoning", None)
     proxied.pop("reasoning_effort", None)
@@ -1015,6 +1030,8 @@ def _prepare_mlx_body(
     proxied = dict(body)
     proxied.pop("include_reasoning", None)
     proxied.pop("reasoning_effort", None)
+    for field in _IGNORED_CHAT_FIELDS:
+        proxied.pop(field, None)
     proxied["model"] = adapter.mlx_repo
     requested_cap = max_completion_tokens if max_completion_tokens is not None else max_tokens
     if requested_cap is not None and requested_cap > cap:

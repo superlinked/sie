@@ -2292,8 +2292,10 @@ pub struct ChatTemplateKwargs {
 ///
 /// **Known-rejected fields**:
 /// - ``functions`` / ``function_call`` — deprecated by OpenAI; use ``tools`` instead.
-/// - ``modalities``, ``audio``, ``metadata``, ``store``, ``service_tier``,
-///   ``prediction``, ``verbosity`` — out of scope.
+/// - ``modalities``, ``audio``, ``prediction``, ``verbosity`` — out of scope.
+///
+/// **Accepted and ignored**: ``metadata``, ``store`` and ``service_tier`` are
+/// type-checked, never forwarded, and have no effect on the request.
 ///
 /// **Streaming:** ``stream: true`` is supported (SSE ``chat.completion.chunk``).
 /// ``n > 1`` streaming fans candidates out as per-``choice_index``-tagged delta
@@ -2380,6 +2382,16 @@ pub struct ChatCompletionRequest {
     /// Accepted and silently ignored (never logged, never forwarded).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub safety_identifier: Option<String>,
+    /// OpenAI ``metadata`` — accepted and ignored (never forwarded).
+    #[schema(value_type = Option<Object>)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+    /// OpenAI ``store`` — accepted and ignored (never forwarded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<bool>,
+    /// OpenAI ``service_tier`` — accepted and ignored (never forwarded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
     /// Prompt-cache hint; plumbed onto the work envelope and
     /// ignored by the worker on the chat-completions surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
