@@ -98,3 +98,81 @@ def test_native_loader_refuses_missing_backbone_weights(tmp_path):
     save_file(weights, tmp_path / "model.safetensors")
     with pytest.raises(ValueError, match="exactly match"):
         _strict_load(qwen.Qwen3_5TextModel, tmp_path, "cpu", torch.float32)
+
+
+def full_hidden_states(model, ids, present, bounds):
+    """Every position's final hidden state on the default block-attention path."""
+    from transformers.masking_utils import create_recurrent_attention_mask
+
+    embeddings = model.backbone.embed_tokens(ids)
+    scan = create_recurrent_attention_mask(
+        config=model.backbone.config, inputs_embeds=embeddings, attention_mask=present
+    )
+    return model.backbone(
+        inputs_embeds=embeddings,
+        position_ids=(present.long().cumsum(-1) - 1).clamp_min(0),
+        attention_mask={"full_attention": bounds, "linear_attention": scan},
+        use_cache=False,
+    ).last_hidden_state
+
+
+def moved(before, after, position):
+    return (before[0, position] - after[0, position]).abs().max().item() > 1e-4
+
+
+def test_noncausal_full_attention_lets_earlier_positions_read_later_tokens():
+    torch.manual_seed(41)
+    reference = tiny()
+    weight = torch.randn(255, 32)
+    noncausal = QwenReadout(copy.deepcopy(reference), weight, attention_mode="noncausal_full_attention")
+    block = QwenReadout(copy.deepcopy(reference), weight)
+    ids = torch.tensor([[0, 0, 2, 3, 4, 5]])
+    present = torch.tensor([[0, 0, 1, 1, 1, 1]])
+    changed = ids.clone()
+    changed[0, -1] = 9
+    bounds = ((2, 4),)
+    with torch.inference_mode():
+        before = noncausal._noncausal_hidden(ids, present)
+        after = noncausal._noncausal_hidden(changed, present)
+        causal_before = reference(input_ids=ids[:, 2:], use_cache=False).last_hidden_state
+        causal_after = reference(input_ids=changed[:, 2:], use_cache=False).last_hidden_state
+        block_before = full_hidden_states(block, ids, present, bounds)
+        block_after = full_hidden_states(block, changed, present, bounds)
+    # Noncausal: every earlier real token sees the perturbed last token through full attention.
+    assert all(moved(before, after, position) for position in (2, 3, 4, 5))
+    # Same weights under the stock causal mask: earlier positions cannot see it (and the recurrent
+    # layers do not leak it backwards), only the perturbed position moves.
+    torch.testing.assert_close(causal_before[:, :-1], causal_after[:, :-1], atol=1e-6, rtol=1e-6)
+    assert moved(causal_before, causal_after, 3)
+    # Default prefix_bidir path: the prefix block (positions 2-3) is isolated from the suffix.
+    torch.testing.assert_close(block_before[:, 2:4], block_after[:, 2:4], atol=1e-6, rtol=1e-6)
+    assert moved(block_before, block_after, 4)
+
+
+def test_noncausal_full_attention_ignores_left_padding():
+    torch.manual_seed(41)
+    weight = torch.randn(255, 32)
+    model = QwenReadout(tiny(), weight, attention_mode="noncausal_full_attention")
+    ids = torch.tensor([[0, 0, 2, 3, 4, 5], [7, 8, 9, 10, 11, 12]])
+    present = torch.tensor([[0, 0, 1, 1, 1, 1], [1, 1, 1, 1, 1, 1]])
+    bounds = ((2, 4), (0, 3))
+    other_pad = ids.clone()
+    other_pad[0, :2] = 30
+    with torch.inference_mode():
+        batch = model(ids, present, bounds)
+        repadded = model(other_pad, present, bounds)
+        single = model(ids[:1, 2:], present[:1, 2:], ((0, 2),))
+        neighbour = model(ids[1:], present[1:], ((0, 3),))
+    torch.testing.assert_close(batch[:1], single, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(batch[1:], neighbour, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(repadded, batch, atol=1e-6, rtol=1e-6)
+
+
+def test_noncausal_readout_keeps_the_native_sdpa_backbone():
+    backbone = tiny()
+    QwenReadout(backbone, torch.randn(255, 32), attention_mode="noncausal_full_attention")
+    assert backbone.config._attn_implementation == "sdpa"
+    eager = tiny()
+    eager.config._attn_implementation = "eager"
+    with pytest.raises(ValueError, match="requires the backbone's sdpa"):
+        QwenReadout(eager, torch.randn(255, 32), attention_mode="noncausal_full_attention")

@@ -1,16 +1,19 @@
 """Independent attention math and engine-boundary checks for typed decisions."""
 
+import json
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 import requests
 import torch
+import transformers
 from sie_server.adapters._generation_base import GenerationAdapter
-from sie_server.adapters.decision import knowline
+from sie_server.adapters.decision import knowline, qwen
 from sie_server.adapters.decision.base import Row
 from sie_server.adapters.decision.questions import parse_questions
-from sie_server.adapters.decision.qwen import QwenDecisionAdapter, prefix_attention
+from sie_server.adapters.decision.qwen import QwenDecisionAdapter, QwenReadout, d3_contract, prefix_attention
 from sie_server.adapters.sglang.decision import SGLangDecisionAdapter
 from sie_server.types.inputs import InvalidInputError, Item
 
@@ -198,3 +201,164 @@ def test_knowline_invalid_state_is_an_item_error_without_losing_healthy_neighbor
     assert output.errors[0] is output.errors[2] is None
     assert output.data[1] == {}
     assert output.data[0]["q"]["noul"] == output.data[2]["q"]["noul"] == 0.75
+
+
+D3_SHARED = {
+    "format_version": 1,
+    "format_id": "d3-code-readout-v1",
+    "prompt": "d3",
+    "pooling": "last",
+    "readout_dtype": "float32",
+}
+
+
+@pytest.mark.parametrize(
+    ("declared", "expected"),
+    [
+        ({"attention_mode": "prefix_bidir", "prompt_layout": "header-v1"}, ("prefix_bidir", "header-v1")),
+        ({"attention_mode": "noncausal_full_attention", "temperature": 1.0}, ("noncausal_full_attention", "plain")),
+    ],
+)
+def test_d3_contract_maps_supported_checkpoints_to_attention_and_layout(declared, expected):
+    assert d3_contract({**D3_SHARED, **declared}) == expected
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [
+        {"attention_mode": "causal", "prompt_layout": "header-v1"},
+        {"attention_mode": "causal"},
+        {"attention_mode": "noncausal_full_attention", "prompt_layout": "header-v1"},
+        {"attention_mode": "noncausal_full_attention", "prompt_layout": "plain"},
+        {"attention_mode": "prefix_bidir"},
+        {"attention_mode": "prefix_bidir", "prompt_layout": "plain"},
+        {"prompt_layout": "header-v1"},
+    ],
+)
+def test_d3_contract_rejects_unknown_or_mismatched_attention_and_layout(declared):
+    with pytest.raises(ValueError, match="Unsupported d3 checkpoint contract"):
+        d3_contract({**D3_SHARED, **declared})
+
+
+def test_d3_contract_rejects_a_different_readout_format():
+    with pytest.raises(ValueError, match="Unsupported d3 checkpoint contract"):
+        d3_contract({**D3_SHARED, "pooling": "mean", "attention_mode": "prefix_bidir", "prompt_layout": "header-v1"})
+
+
+def fake_backbone(attn_implementation="sdpa", layer_types=("linear_attention", "full_attention")):
+    config = SimpleNamespace(
+        _attn_implementation=attn_implementation, layer_types=list(layer_types), num_hidden_layers=len(layer_types)
+    )
+    return SimpleNamespace(config=config)
+
+
+def test_noncausal_readout_keeps_sdpa_and_registers_no_attention_function(monkeypatch):
+    register = Mock()
+    monkeypatch.setattr(transformers.AttentionInterface, "register", register)
+    backbone = fake_backbone()
+    readout = QwenReadout(backbone, torch.zeros(255, 4), attention_mode="noncausal_full_attention")
+    assert readout.attention_mode == "noncausal_full_attention"
+    assert backbone.config._attn_implementation == "sdpa"
+    register.assert_not_called()
+
+
+def test_prefix_readout_still_registers_and_selects_block_attention(monkeypatch):
+    register = Mock()
+    monkeypatch.setattr(transformers.AttentionInterface, "register", register)
+    backbone = fake_backbone()
+    readout = QwenReadout(backbone, torch.zeros(255, 4))
+    assert readout.attention_mode == "prefix_bidir"
+    assert backbone.config._attn_implementation == qwen._ATTENTION
+    register.assert_called_once_with(qwen._ATTENTION, prefix_attention)
+
+
+def test_readout_rejects_unknown_attention_mode():
+    with pytest.raises(ValueError, match="attention_mode must be"):
+        QwenReadout(fake_backbone(), torch.zeros(255, 4), attention_mode="causal")
+
+
+@pytest.mark.parametrize("implementation", ["eager", "flash_attention_2", qwen._ATTENTION, None])
+def test_noncausal_readout_requires_sdpa(implementation):
+    with pytest.raises(ValueError, match="requires the backbone's sdpa"):
+        QwenReadout(fake_backbone(implementation), torch.zeros(255, 4), attention_mode="noncausal_full_attention")
+
+
+def test_noncausal_readout_rejects_unknown_layer_types():
+    backbone = fake_backbone(layer_types=("linear_attention", "sliding_attention"))
+    with pytest.raises(ValueError, match="sliding_attention"):
+        QwenReadout(backbone, torch.zeros(255, 4), attention_mode="noncausal_full_attention")
+
+
+class BackboneLoadReachedError(Exception):
+    pass
+
+
+def stub_d3_checkpoint(monkeypatch, tmp_path, attention_mode):
+    declared = (
+        {"attention_mode": "noncausal_full_attention"}
+        if attention_mode == "noncausal_full_attention"
+        else {"attention_mode": "prefix_bidir", "prompt_layout": "header-v1"}
+    )
+    (tmp_path / "decision_config.json").write_text(json.dumps({**D3_SHARED, **declared}))
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers.models.qwen3_5.modeling_qwen3_5",
+        SimpleNamespace(Qwen3_5ForConditionalGeneration=object, Qwen3_5Model=object),
+    )
+    monkeypatch.setattr(qwen, "resolve_checkpoint", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(qwen, "install_transformers_security_fixes", lambda: False)
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", lambda *args, **kwargs: object())
+
+    def reached(*args, **kwargs):
+        raise BackboneLoadReachedError
+
+    monkeypatch.setattr(qwen, "validate_tokenizer", reached)
+    monkeypatch.setattr(qwen, "_strict_load", reached)
+
+
+def test_packed_noncausal_checkpoint_fails_before_the_backbone_loads(monkeypatch, tmp_path):
+    stub_d3_checkpoint(monkeypatch, tmp_path, "noncausal_full_attention")
+    adapter = QwenDecisionAdapter("unused", decision_format="d3", packed=True)
+    with pytest.raises(ValueError, match="Packed Qwen decisions require prefix_bidir attention"):
+        adapter.load("cpu")
+    assert adapter._model is None
+
+
+@pytest.mark.parametrize(
+    ("attention_mode", "packed"),
+    [("noncausal_full_attention", None), ("noncausal_full_attention", False), ("prefix_bidir", True)],
+)
+def test_supported_attention_and_packing_reach_checkpoint_validation(monkeypatch, tmp_path, attention_mode, packed):
+    stub_d3_checkpoint(monkeypatch, tmp_path, attention_mode)
+    adapter = QwenDecisionAdapter("unused", decision_format="d3", packed=packed)
+    with pytest.raises(BackboneLoadReachedError):
+        adapter.load("cpu")
+
+
+class TextTokenizer:
+    all_special_tokens = ("<|im_start|>", "<|im_end|>")
+
+    def apply_chat_template(self, messages, **kwargs):
+        return (
+            "".join(f"<|im_start|>{message['role']}\n{message['content']}<|im_end|>" for message in messages)
+            + "<|im_start|>assistant\n"
+        )
+
+    def encode(self, text, **kwargs):
+        return list(map(ord, text))
+
+    def __call__(self, text, **kwargs):
+        return {"input_ids": self.encode(text), "offset_mapping": [(i, i + 1) for i in range(len(text))]}
+
+
+@pytest.mark.parametrize(("layout", "has_header"), [(None, True), ("header-v1", True), ("plain", False)])
+def test_d3_item_rows_render_the_checkpoint_prompt_layout(layout, has_header):
+    adapter = QwenDecisionAdapter("unused", decision_format="d3")
+    adapter._tokenizer, adapter._codes = TextTokenizer(), ("A", "B")
+    if layout is not None:
+        adapter._prompt_layout = layout
+    questions = parse_questions({"route": {"type": "choice", "criteria": {"returns": None, "billing": None}}})
+    (row,) = adapter._item_rows(0, Item(text="arrived damaged"), questions)
+    text = "".join(map(chr, row.inputs["input_ids"].tolist()))
+    assert ("Questions in this request:" in text) is has_header
+    assert text[: row.prefix_length].endswith("State:\narrived damaged")
