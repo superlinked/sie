@@ -28,10 +28,12 @@ tasks:
 # Sampling: temperature 0.1, top_p 1.0, one beam. The upstream README says "use temperature 0.1,
 # not greedy decoding", and the benchmark pipeline uses 0.1. The model card examples use 0.2.
 #
-# Output cap: 4,096 new tokens in a 24,576-token context, the max_tokens of the upstream serving
-# client (saturate.py); the 4B descriptor keeps the benchmark's 12,288. On the full
-# olmOCR-bench split 12 of 1,403 official-recipe pages reach 4,096 (mostly tables and tiny text);
-# a larger cap mostly spends GPU time on pages that loop. A request can lower it.
+# Output cap: 4,096 new tokens in a 24,576-token context, the max_tokens of the model card's vLLM
+# example; the 4B descriptor keeps the upstream benchmark's 12,288. On the full olmOCR-bench split
+# 12 of 1,403 official-recipe pages reach 4,096 (mostly tables and tiny text); a larger cap mostly
+# spends GPU time on pages that loop. On the SGLang profiles a request's max_new_tokens replaces the
+# default in either direction, and SGLang refuses a request whose page plus max_new_tokens exceeds
+# the context. The `transformers` profile accepts 1-4,096 and rejects a larger value.
 #
 # Normalization: none beyond trimming leading and trailing whitespace, which the default SGLang
 # profile applies; grounding markers are kept. The `transformers` profile returns the decoded text
@@ -48,23 +50,22 @@ tasks:
 # two trained prompts accepted. The `transformers` profile runs the same contract in-process in the
 # transformers5 bundle.
 #
-# Throughput: up to 256 pages are dispatched to the engine at once; 128 underfeeds the 0.8B model.
-# 256 is the effective ceiling: SIE's httpx pool to SGLang is capped at 256 connections
-# (adapters/sglang/generation.py:1516, max_connections=256); requests above it queue and fail with a
-# 500 PoolTimeout after 10 s unless SIE_SGLANG_GENERATE_POOL_TIMEOUT_S is raised. On an L4 at this
-# memory reservation SGLang may still run fewer at once. The radix cache is off: every page is a
-# new image, so it saves nothing, and with it on SGLang turns overlap scheduling off for this
-# hybrid (Gated DeltaNet) model. FlashInfer serves the attention layers. Sampling is unchanged and
-# outputs stay within bf16 run-to-run variance.
+# Throughput: up to 256 pages are dispatched to the engine at once. SIE's HTTP client to SGLang
+# allows 256 connections (max_connections=256 in
+# SGLangGenerationAdapter._get_or_create_http_client), so 256 is the highest value that cannot
+# exhaust that pool; past it, requests wait for a connection and fail with a PoolTimeout after 10 s
+# unless SIE_SGLANG_GENERATE_POOL_TIMEOUT_S is raised. How many dispatched pages decode at once is
+# decided by SGLang's own running-request limit. The radix cache is off: every page is a new image,
+# so it saves nothing, and with it on SGLang turns overlap scheduling off for this hybrid (Gated
+# DeltaNet) model. FlashInfer serves the attention layers. Sampling is unchanged and outputs stay
+# within bf16 run-to-run variance.
 #
-# Memory: SGLang keeps (1 - mem_fraction_static) of the memory free at launch as runtime headroom.
-# One page at the checkpoint's 16 MP limit peaks 4.8 GiB above the memory in use after load, in the
-# vision encoder. On an L4, 0.75 and 0.85 run out of memory there and the engine exits, which fails
-# every page in flight. 0.70 leaves 0.7 GiB free at that peak; the 5 MP page cap lowers the peak,
-# which has not been re-measured. The 0.8B descriptor inherits this 0.70 L4
-# reservation from the 4B calibration; the 0.8B
-# weights leave more headroom, but 0.75/0.85 have not been re-measured on an L4
-# for this checkpoint.
+# Memory: the 0.70 L4 reservation and the measurements below are inherited from the 4B descriptor's
+# calibration and have not been re-measured on this 0.8B checkpoint. SGLang keeps
+# (1 - mem_fraction_static) of the memory free at launch as runtime headroom. On the 4B, one page at
+# the checkpoint's 16 MP limit peaks 4.8 GiB above the memory in use after load, in the vision
+# encoder; on an L4, 0.75 and 0.85 run out of memory there and the engine exits, which fails every
+# page in flight, while 0.70 leaves 0.7 GiB free at that peak. The 5 MP page cap lowers the peak.
 max_sequence_length: 24576
 profiles:
   default:

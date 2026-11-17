@@ -1,6 +1,7 @@
 """Public LightOnOCR-3 catalog pin, generation contract and bundle routing."""
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
@@ -20,30 +21,37 @@ _SGLANG_ADAPTER = "sie_server.adapters.sglang_vision_extract.adapter"
 _GENERATION = {"do_sample": True, "num_beams": 1, "temperature": 0.1, "top_p": 1.0}
 _PAGE_PIXELS = {"min_pixels": 65536, "max_pixels": 5242880}
 _LAUNCH_ARGS = ["--disable-radix-cache", "--mm-process-config", '{"image":{"min_pixels":65536,"max_pixels":5242880}}']
+
+
+@dataclass(frozen=True)
+class _Checkpoint:
+    test_id: str
+    model: str
+    revision: str
+    max_new_tokens: int
+    concurrency: int
+
+    @property
+    def config_path(self) -> Path:
+        return _MODELS / f"{self.model.replace('/', '__')}.yaml"
+
+
+# Shipped max_new_tokens and max_concurrent_requests. The 0.8B caps output at the model-card 4,096
+# and dispatches 256 pages, the SIE->SGLang httpx pool ceiling (sglang/generation.py).
 _CATALOG = (
-    ("lightonai/LightOnOCR-3-4B", "b71010f095dc3735de7ee6b9969bff8f8f50b39a", "lightonai__LightOnOCR-3-4B.yaml"),
-    (
-        "lightonai/LightOnOCR-3-0.8B",
-        "36d8636925327c671bd8e479c517a004f7566bd9",
-        "lightonai__LightOnOCR-3-0.8B.yaml",
-    ),
+    _Checkpoint("4B", "lightonai/LightOnOCR-3-4B", "b71010f095dc3735de7ee6b9969bff8f8f50b39a", 12288, 128),
+    _Checkpoint("0.8B", "lightonai/LightOnOCR-3-0.8B", "36d8636925327c671bd8e479c517a004f7566bd9", 4096, 256),
 )
 
 
-# Shipped (max_new_tokens, max_concurrent_requests). The 0.8B caps output at the model-card 4,096
-# and dispatches 256 pages, the SIE->SGLang httpx pool ceiling (sglang/generation.py).
-_LIMITS = {"lightonai/LightOnOCR-3-4B": (12288, 128), "lightonai/LightOnOCR-3-0.8B": (4096, 256)}
+@pytest.fixture(params=_CATALOG, ids=lambda checkpoint: checkpoint.test_id)
+def catalog(request: pytest.FixtureRequest) -> _Checkpoint:
+    return request.param
 
 
-@pytest.fixture(params=_CATALOG, ids=["4B", "0.8B"])
-def catalog(request: pytest.FixtureRequest) -> tuple[str, str, Path]:
-    model, revision, filename = request.param
-    return model, revision, _MODELS / filename
-
-
-def test_catalog_pins_checkpoint_and_upstream_generation(catalog: tuple[str, str, Path]) -> None:
-    model, revision, config_path = catalog
-    max_new_tokens, concurrency = _LIMITS[model]
+def test_catalog_pins_checkpoint_and_upstream_generation(catalog: _Checkpoint) -> None:
+    model, revision, config_path = catalog.model, catalog.revision, catalog.config_path
+    max_new_tokens, concurrency = catalog.max_new_tokens, catalog.concurrency
     config = yaml.safe_load(config_path.read_text())
     assert config["sie_id"] == config["hf_id"] == model
     assert config["hf_revision"] == revision
@@ -82,9 +90,9 @@ def test_catalog_pins_checkpoint_and_upstream_generation(catalog: tuple[str, str
     }
 
 
-def test_loader_builds_pinned_sglang_default(catalog: tuple[str, str, Path], monkeypatch: pytest.MonkeyPatch) -> None:
-    model, revision, config_path = catalog
-    max_new_tokens, concurrency = _LIMITS[model]
+def test_loader_builds_pinned_sglang_default(catalog: _Checkpoint, monkeypatch: pytest.MonkeyPatch) -> None:
+    revision, config_path = catalog.revision, catalog.config_path
+    max_new_tokens, concurrency = catalog.max_new_tokens, catalog.concurrency
     engine_load = Mock()
     monkeypatch.setattr(SGLangVisionExtractAdapter, "load", engine_load)
     config = load_model_config(config_path)
@@ -102,9 +110,9 @@ def test_loader_builds_pinned_sglang_default(catalog: tuple[str, str, Path], mon
     engine_load.assert_not_called()
 
 
-def test_transformers_profile_builds_profile_generation(catalog: tuple[str, str, Path]) -> None:
-    model, revision, config_path = catalog
-    max_new_tokens, _ = _LIMITS[model]
+def test_transformers_profile_builds_profile_generation(catalog: _Checkpoint) -> None:
+    model, revision, config_path = catalog.model, catalog.revision, catalog.config_path
+    max_new_tokens = catalog.max_new_tokens
     config = load_model_config(config_path)
     profile = config.resolve_profile("transformers")
     assert profile.adapter_path == f"{_ADAPTER}:LightOnOCR3Adapter"
@@ -121,10 +129,10 @@ def test_transformers_profile_builds_profile_generation(catalog: tuple[str, str,
 
 
 def test_markdown_profile_retains_default_generation_context_and_engine_options(
-    catalog: tuple[str, str, Path],
+    catalog: _Checkpoint,
 ) -> None:
-    model, revision, config_path = catalog
-    max_new_tokens, concurrency = _LIMITS[model]
+    model, revision, config_path = catalog.model, catalog.revision, catalog.config_path
+    max_new_tokens, concurrency = catalog.max_new_tokens, catalog.concurrency
     config = load_model_config(config_path)
     default = config.resolve_profile("default")
     markdown = config.resolve_profile("markdown")
@@ -157,20 +165,18 @@ def test_markdown_profile_retains_default_generation_context_and_engine_options(
     assert adapter._extra_launch_args == _LAUNCH_ARGS
 
 
-def test_sglang_profiles_keep_their_l4_calibrated_reservation(catalog: tuple[str, str, Path]) -> None:
-    model, _, config_path = catalog
-    _, concurrency = _LIMITS[model]
-    profiles = yaml.safe_load(config_path.read_text())["profiles"]
+def test_sglang_profiles_keep_their_l4_reservation_and_concurrency(catalog: _Checkpoint) -> None:
+    profiles = yaml.safe_load(catalog.config_path.read_text())["profiles"]
     for name in ("default", "markdown"):
         loadtime = profiles[name]["adapter_options"]["loadtime"]
         assert loadtime["mem_fraction_static"] == 0.70
-        assert loadtime["max_concurrent_requests"] == concurrency
+        assert loadtime["max_concurrent_requests"] == catalog.concurrency
 
 
 def test_sglang_profiles_cap_a_page_at_5_mp_within_the_context(
-    catalog: tuple[str, str, Path], monkeypatch: pytest.MonkeyPatch
+    catalog: _Checkpoint, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    model, _, config_path = catalog
+    model, config_path = catalog.model, catalog.config_path
     monkeypatch.setattr(SGLangVisionExtractAdapter, "load", Mock())
     config = load_model_config(config_path)
     variants = expand_profile_variants([config])
@@ -184,8 +190,8 @@ def test_sglang_profiles_cap_a_page_at_5_mp_within_the_context(
         assert adapter.image_token_budget + adapter._max_new_tokens < config.max_sequence_length
 
 
-def test_default_routes_to_sglang_vision_extract_bundle_only(catalog: tuple[str, str, Path]) -> None:
-    model, _, _ = catalog
+def test_default_routes_to_sglang_vision_extract_bundle_only(catalog: _Checkpoint) -> None:
+    model = catalog.model
     assert _ADAPTER in yaml.safe_load((_BUNDLES / "transformers5.yaml").read_text())["adapters"]
     for bundle in sorted(_BUNDLES.glob("*.yaml")):
         expected = bundle.name == "sglang-vision-extract.yaml"
