@@ -23,6 +23,8 @@ from sie_server.adapters.pplx_decider.model import validate_tokenizer
 from sie_server.types.inputs import InvalidInputError, Item
 
 _ATTENTION = "sie_decision_prefix_bidir"
+_ATTENTION_MODES = ("prefix_bidir", "noncausal_full_attention")
+_LAYER_TYPES = frozenset({"full_attention", "linear_attention"})
 logger = logging.getLogger(__name__)
 _FILES = (
     "config.json",
@@ -58,6 +60,15 @@ def d3_contract(config: dict[str, Any]) -> tuple[str, str]:
     if attention_mode == "noncausal_full_attention" and prompt_layout is None:
         return attention_mode, "plain"
     raise ValueError("Unsupported d3 checkpoint contract")
+
+
+def _check_noncausal_backbone(config: Any) -> None:
+    """Noncausal mode passes a boolean key mask, which only sdpa treats as keep/drop."""
+    if getattr(config, "_attn_implementation", None) != "sdpa":
+        raise ValueError("noncausal_full_attention requires the backbone's sdpa attention implementation")
+    kinds = set(config.layer_types[: config.num_hidden_layers])
+    if not kinds <= _LAYER_TYPES:
+        raise ValueError(f"noncausal_full_attention does not support layer types {sorted(kinds - _LAYER_TYPES)}")
 
 
 def prefix_attention(
@@ -97,12 +108,14 @@ class QwenReadout(torch.nn.Module):
         super().__init__()
         from transformers import AttentionInterface
 
-        if attention_mode not in {"prefix_bidir", "noncausal_full_attention"}:
+        if attention_mode not in _ATTENTION_MODES:
             raise ValueError("attention_mode must be prefix_bidir or noncausal_full_attention")
         self.attention_mode = attention_mode
         if attention_mode == "prefix_bidir":
             AttentionInterface.register(_ATTENTION, prefix_attention)
             backbone.config._attn_implementation = _ATTENTION
+        else:
+            _check_noncausal_backbone(backbone.config)
         self.backbone = backbone
         self.readout = torch.nn.Linear(
             weight.shape[1], weight.shape[0], bias=False, device=weight.device, dtype=weight.dtype
@@ -135,6 +148,13 @@ class QwenReadout(torch.nn.Module):
         return logits
 
     def _noncausal(self, ids: torch.Tensor, present: torch.Tensor) -> torch.Tensor:
+        hidden = self._noncausal_hidden(ids, present)[:, -1]
+        logits = self.readout(hidden.to(self.readout.weight.dtype)).float()
+        if not torch.isfinite(logits).all():
+            raise ValueError("Decision head returned nonfinite logits")
+        return logits
+
+    def _noncausal_hidden(self, ids: torch.Tensor, present: torch.Tensor) -> torch.Tensor:
         """Full-attention layers see the whole prompt; Gated DeltaNet layers stay causal.
 
         Reimplements the published d3-mini PromptEncoder text path (noncausal_full_attention)
@@ -144,6 +164,7 @@ class QwenReadout(torch.nn.Module):
         from transformers.masking_utils import create_recurrent_attention_mask  # ty: ignore[unresolved-import]
 
         model = self.backbone
+        _check_noncausal_backbone(model.config)
         embeddings = model.embed_tokens(ids)
         rows, width = present.shape
         ramp = torch.arange(width, device=embeddings.device).view(1, 1, -1).expand(4, rows, -1)
@@ -169,11 +190,7 @@ class QwenReadout(torch.nn.Module):
                 use_cache=False,
             )
             hidden = output[0] if isinstance(output, tuple) else output
-        hidden = model.norm(hidden)[:, -1]
-        logits = self.readout(hidden.to(self.readout.weight.dtype)).float()
-        if not torch.isfinite(logits).all():
-            raise ValueError("Decision head returned nonfinite logits")
-        return logits
+        return model.norm(hidden)
 
 
 def _strict_load(model_class: Any, directory: Path, device: str, dtype: torch.dtype) -> Any:
@@ -253,6 +270,8 @@ class QwenDecisionAdapter(DecisionBatchAdapter):
         if self._decision_format == "d3":
             config = json.loads((directory / "decision_config.json").read_text())
             self._attention_mode, self._prompt_layout = d3_contract(config)
+            if self._packed and self._attention_mode == "noncausal_full_attention":
+                raise ValueError("Packed Qwen decisions require prefix_bidir attention, not noncausal_full_attention")
             validate_tokenizer(tokenizer, config)
             codes = tuple(config["codes"])
             calibration = config.get("temperature_by_questions")
@@ -297,8 +316,6 @@ class QwenDecisionAdapter(DecisionBatchAdapter):
             raise ValueError("Invalid decision readout shape or values")
         native = QwenReadout(backbone, weight, attention_mode=self._attention_mode)
         self._model = native
-        if self._packed and self._attention_mode == "noncausal_full_attention":
-            raise ValueError("Packed Qwen decisions require prefix_bidir attention")
         kernels = (
             resolve_kernels(device, mode=False if self._packed is False else None)
             if (device.startswith("cuda") and dtype == torch.bfloat16 and self._attention_mode == "prefix_bidir")
