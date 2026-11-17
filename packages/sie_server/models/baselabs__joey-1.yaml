@@ -1,0 +1,25 @@
+sie_id: baselabs/joey-1
+hf_id: baselabs/joey-1
+hf_revision: 9efbe485efbed9598dfca5294cbbe8da00e21908
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 8192
+profiles:
+  default:
+    max_batch_tokens: 8192
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.decision.qwen:QwenDecisionAdapter
+    adapter_options:
+      loadtime:
+        decision_format: qev
+        max_forward_tokens: 8192
+      runtime: {}
+description: Joey-1 typed text decisions over Qwen3.5-2B, preserving qev-labels-v2 prompts, block-bidirectional
+  full attention and FP32 slot logits.
