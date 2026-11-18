@@ -840,6 +840,23 @@ impl ModelRegistry {
                     ));
                 }
                 Self::validate_grammar_effort_agrees(entry, "default", global_target)?;
+                let scoped_targets: HashSet<&str> = entry
+                    .profile_configs
+                    .values()
+                    .filter_map(|profile| profile.grammar_profile.as_deref())
+                    .collect();
+                for (profile_name, profile) in &entry.profile_configs {
+                    let remote = Self::effective_adapter_path_from_entry(entry, profile_name)
+                        .is_some_and(|path| path.starts_with(REMOTE_ADAPTER_MODULE_PREFIX));
+                    if profile_name == "default"
+                        || profile.grammar_profile.is_some()
+                        || scoped_targets.contains(profile_name.as_str())
+                        || remote
+                    {
+                        continue;
+                    }
+                    Self::validate_grammar_effort_agrees(entry, profile_name, global_target)?;
+                }
             }
         }
         for (profile_name, profile) in &entry.profile_configs {
@@ -4431,6 +4448,47 @@ profiles:
             error.contains("must declare the same reasoning_effort grammar value"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn test_a_sibling_on_the_grammar_target_must_declare_its_grammar_effort() {
+        let yaml = |fast_grammar: &str| {
+            format!(
+                r#"
+name: org/grammar-model
+tasks:
+  generate:
+    grammar_profile: safe
+    reasoning_effort:
+      grammar: none
+      values: {{none: {{}}, high: {{}}}}
+profiles:
+  default:
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+  safe:
+    extends: default
+    adapter_options:
+      loadtime:
+        speculative: {{enabled: false}}
+  fast:
+    extends: default
+    adapter_options:
+      loadtime:
+        speculative: {{enabled: true}}
+    reasoning_effort:
+      grammar: {fast_grammar}
+      values: {{none: {{}}, high: {{}}}}
+"#
+            )
+        };
+        let config: ModelConfig = serde_saphyr::from_str(&yaml("high")).unwrap();
+        let error = ModelRegistry::model_entry_from_config(&config).unwrap_err();
+        assert!(
+            error.contains("Profile 'safe' serves grammar requests for 'fast'"),
+            "{error}"
+        );
+        let config: ModelConfig = serde_saphyr::from_str(&yaml("none")).unwrap();
+        ModelRegistry::model_entry_from_config(&config).unwrap();
     }
 
     #[test]

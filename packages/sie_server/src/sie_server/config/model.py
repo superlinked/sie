@@ -1190,8 +1190,15 @@ class ModelConfig(BaseModel):
                 if not remote and level.upstream is not None:
                     msg = f"Profile '{name}' is local, so its reasoning_effort value '{value}' cannot name an upstream value"
                     raise ValueError(msg)
-        fallbacks = [("default", self.tasks.generate.grammar_profile)]
-        fallbacks += [(name, profile.grammar_profile) for name, profile in self.profiles.items()]
+        scoped_targets = {profile.grammar_profile for profile in self.profiles.values()}
+        fallbacks = [(name, profile.grammar_profile) for name, profile in self.profiles.items()]
+        fallbacks += [
+            (name, self.tasks.generate.grammar_profile)
+            for name, profile in self.profiles.items()
+            if profile.grammar_profile is None
+            and name not in scoped_targets
+            and (name == "default" or not is_remote_adapter_path(self._declared_adapter_path(name)))
+        ]
         for source, target in fallbacks:
             if target is None or target not in self.profiles:
                 continue

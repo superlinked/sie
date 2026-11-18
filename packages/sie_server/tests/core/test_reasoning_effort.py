@@ -233,6 +233,22 @@ def test_a_grammar_fallback_declares_the_grammar_value_it_serves(scope: str) -> 
     ModelConfig.model_validate(spec)
 
 
+def test_a_sibling_on_the_model_wide_grammar_fallback_declares_its_grammar_value() -> None:
+    spec = copy.deepcopy(_VECTORS["models"]["acme/declared"]["config"])
+    declaration = {**spec["tasks"]["generate"]["reasoning_effort"], "grammar": "low"}
+    spec["tasks"]["generate"]["reasoning_effort"] = declaration
+    spec["tasks"]["generate"]["grammar_profile"] = "safe"
+    spec["profiles"]["safe"] = {
+        "extends": "default",
+        "adapter_options": {"loadtime": {"speculative": {"enabled": False}}},
+    }
+    spec["profiles"]["fast"] = {"extends": "default", "reasoning_effort": {**declaration, "grammar": "high"}}
+    with pytest.raises(ValidationError, match="Profile 'safe' serves grammar requests for 'fast'"):
+        ModelConfig.model_validate(spec)
+    spec["profiles"]["fast"]["reasoning_effort"] = declaration
+    ModelConfig.model_validate(spec)
+
+
 def test_a_grammar_value_reaches_a_variant_of_its_profile() -> None:
     declaration = {"grammar": "low", "values": {"low": {"upstream": "low"}, "high": {"upstream": "high"}}}
     spec = copy.deepcopy(_VECTORS["models"]["acme/remote"]["config"])
