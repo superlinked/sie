@@ -882,6 +882,7 @@ class TestKernelCacheEnvironment:
         assert cache_env["SGLANG_DG_CACHE_DIR"] == str(namespace / "deep-gemm")
         assert cache_env["FLASHINFER_WORKSPACE_BASE"] == str(namespace / "flashinfer")
         assert cache_env["CUTE_DSL_CACHE_DIR"] == str(namespace / "cutlass")
+        assert cache_env["SGLANG_JIT_CACHE_DIR"] == str(namespace / "sglang" / "jit")
         assert cache_env["TRITON_CACHE_DIR"] == str(namespace / "triton")
         assert all(Path(path).is_dir() for path in cache_env.values())
 

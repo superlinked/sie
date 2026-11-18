@@ -113,6 +113,7 @@ _KERNEL_CACHE_DIRS = {
     "FLASHINFER_WORKSPACE_BASE": "flashinfer",
     "SGLANG_CACHE_DIR": "sglang",
     "SGLANG_DG_CACHE_DIR": "deep-gemm",
+    "SGLANG_JIT_CACHE_DIR": "sglang/jit",
     "TORCHINDUCTOR_CACHE_DIR": "torchinductor",
     "TRITON_CACHE_DIR": "triton",
     "XDG_CACHE_HOME": "xdg",
