@@ -20,6 +20,9 @@ assert torch.version.cuda and torch.version.cuda.startswith("13."), torch.versio
 """
 
 SGLANG_CHECKS = """
+from pathlib import Path
+
+import flashinfer_jit_cache
 import tvm_ffi
 import xgrammar
 from sie_server.adapters.sglang import cuda13, gemma, generation
@@ -35,9 +38,16 @@ expected = {
 }
 for distribution, version in expected.items():
     assert importlib.metadata.version(distribution) == version, distribution
-for distribution, upstream in (("sgl-deep-gemm", "0.2.0"), ("sglang-kernel", "0.4.7")):
+for distribution, upstream in (
+    ("flashinfer-jit-cache", "0.6.18"),
+    ("sgl-deep-gemm", "0.2.0"),
+    ("sglang-kernel", "0.4.7"),
+):
     actual_upstream, separator, variant = importlib.metadata.version(distribution).partition("+")
     assert (actual_upstream, separator, variant) == (upstream, "+", "cu130"), distribution
+flashinfer_version = importlib.metadata.version("flashinfer-python")
+assert flashinfer_jit_cache.__version__.startswith(flashinfer_version), flashinfer_jit_cache.__version__
+assert (Path(flashinfer_jit_cache.get_jit_cache_dir()) / "sampling" / "sampling.so").is_file()
 assert importlib.metadata.distribution("sglang").files
 """
 

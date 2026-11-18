@@ -251,6 +251,11 @@ sdist = { url = "https://files.pythonhosted.org/packages/dc/04/8749f4e48bc7f30a5
 wheels = [{ url = "https://files.pythonhosted.org/packages/bc/46/020652846c4028f4ec0af1d0f8f9ef1067a2813b9539fa666f4190ba86aa/flash_attn_4-4.0.0b35-py3-none-any.whl", upload-time = 2026-10-14T08:21:12Z, size = 509535, hashes = { sha256 = "6df9a60fab0ca55c3f9c35244e794411afeff565100955e40db6c73e72848f94" } }]
 
 [[packages]]
+name = "flashinfer-jit-cache"
+version = "0.6.18+cu130"
+archive = { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.18/flashinfer_jit_cache-0.6.18+cu130-cp39-abi3-manylinux_2_28_x86_64.whl", hashes = { sha256 = "428a47a554ade93c30a818e142b781df58582bf056bab94611fb4c906cc366bf" } }
+
+[[packages]]
 name = "flashinfer-python"
 version = "0.6.18"
 sdist = { url = "https://files.pythonhosted.org/packages/3e/72/12066c5f42a49e7eabe6ec445ac73c59785480bba1b763bd7e0a512f13c1/flashinfer_python-0.6.18.tar.gz", upload-time = 2026-08-29T02:09:18Z, size = 13286160, hashes = { sha256 = "70a2074d78cb17ed39c98e5ed47f626c6e8bb29015cf028c49cbf8f2629405a1" } }
