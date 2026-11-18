@@ -47,6 +47,7 @@ class _Device:
         self._failing_unloads: set[str] = set()
         self._after_unload: dict[str, Callable[[], None]] = {}
         self._before_load: dict[str, Callable[[], None]] = {}
+        self._on_oom: dict[str, Callable[[], None]] = {}
         self._held_unloads: dict[str, tuple[threading.Event, threading.Event]] = {}
         self.adapters: dict[str, list[MagicMock]] = {}
         self.stranded_bytes: list[int] = []
@@ -70,6 +71,10 @@ class _Device:
     def before_load(self, name: str, callback: Callable[[], None]) -> None:
         """Run ``callback`` at the start of the next load of ``name``, before it allocates."""
         self._before_load[name] = callback
+
+    def on_oom(self, name: str, callback: Callable[[], None]) -> None:
+        """Run ``callback`` when the next load of ``name`` runs out of memory, after it records the OOM."""
+        self._on_oom[name] = callback
 
     def hold_unload(self, name: str) -> tuple[threading.Event, threading.Event]:
         """Hold the next unload of ``name`` with its memory still allocated; return (started, release)."""
@@ -97,6 +102,9 @@ class _Device:
                 partial = _Allocation(self._partial, free)
                 msg = f"CUDA out of memory. Tried to allocate {footprint - partial.nbytes} bytes"
                 self.failed_loads.append(name)
+                on_oom = self._on_oom.pop(name, None)
+                if on_oom is not None:
+                    on_oom()
                 raise RuntimeError(msg)
             held[key] = footprint
 
@@ -437,7 +445,7 @@ def _evict_during_the_first_attempt(
     """Evict ``evicted`` while the first load of ``loading`` allocates, as the memory monitor can.
 
     The attempt runs while the eviction still holds its memory, and the
-    eviction's teardown finishes shortly after the attempt fails.
+    eviction's teardown finishes once the attempt has recorded its OOM.
     """
     loop = asyncio.get_running_loop()
     started, release = device.hold_unload(evicted)
@@ -449,9 +457,9 @@ def _evict_during_the_first_attempt(
     def evict_during_the_attempt() -> None:
         loop.call_soon_threadsafe(start_eviction)
         assert started.wait(5)
-        loop.call_soon_threadsafe(loop.call_later, 0.1, release.set)
 
     device.before_load(loading, evict_during_the_attempt)
+    device.on_oom(loading, release.set)
     return evictions
 
 
