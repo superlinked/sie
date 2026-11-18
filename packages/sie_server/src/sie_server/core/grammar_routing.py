@@ -24,15 +24,17 @@ The rules mirror the gateway's ``ModelRegistry::grammar_route_variant``:
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
 from typing import Any, Protocol
 
 from sie_server.adapters._generation_base import GenerationUnsupportedFieldError
+from sie_server.config.grammar_profiles import (
+    explicitly_disables_speculation,
+    grammar_serving_profile,
+    model_grammar_profile,
+    profile_is_grammar_compatible,
+)
 
 logger = logging.getLogger(__name__)
-
-_RAW_SPECULATIVE_FLAGS = frozenset({"--enable-multi-layer-eagle", "--config"})
-_GRAMMAR_SAFE_EXTRA_LAUNCH_ARGS = ("--quantization", "fp8")
 
 
 class ModelConfigSource(Protocol):
@@ -55,7 +57,7 @@ def resolve_grammar_serving_model(registry: ModelConfigSource, model_id: str) ->
     if target is None:
         return model_id
     base_id, grammar_profile = target
-    if model_id == base_id and _profile_is_grammar_compatible(registry.get_config(base_id), "default", grammar_profile):
+    if model_id == base_id and profile_is_grammar_compatible(registry.get_config(base_id), "default", grammar_profile):
         return model_id
     target_id = f"{base_id}:{grammar_profile}"
     if model_id == target_id:
@@ -80,34 +82,13 @@ def _grammar_target(registry: ModelConfigSource, model_id: str) -> tuple[str, st
     config = registry.get_config(model_id)
     source = getattr(config, "synthetic_profile_variant_source", None)
     if not isinstance(source, tuple):
-        grammar_profile = _model_grammar_profile(config)
+        grammar_profile = model_grammar_profile(config)
         return None if grammar_profile is None else (model_id, grammar_profile)
     base_id, source_profile = source
     if not registry.has_model(base_id):
         return _variant_only_target(config, base_id, source_profile)
-    base = registry.get_config(base_id)
-    profiles: Mapping[str, Any] = base.profiles
-    if any(profile.grammar_profile == source_profile for profile in profiles.values()):
-        return base_id, source_profile
-    source_config = profiles.get(source_profile)
-    if source_config is None:
-        return None
-    if source_config.grammar_profile is not None:
-        return base_id, source_config.grammar_profile
-    parent = profiles.get(source_config.extends)
-    parent_grammar_profile = None if parent is None else parent.grammar_profile
-    if parent_grammar_profile is not None and _profile_is_grammar_compatible(
-        base, source_profile, parent_grammar_profile
-    ):
-        return base_id, source_profile
-    grammar_profile = _model_grammar_profile(base)
-    if grammar_profile is None:
-        return None
-    if source_config.extends == grammar_profile and _profile_is_grammar_compatible(
-        base, source_profile, grammar_profile
-    ):
-        return base_id, source_profile
-    return base_id, grammar_profile
+    serving_profile = grammar_serving_profile(registry.get_config(base_id), source_profile)
+    return None if serving_profile is None else (base_id, serving_profile)
 
 
 def _variant_only_target(config: Any, base_id: str, source_profile: str) -> tuple[str, str] | None:
@@ -121,60 +102,9 @@ def _variant_only_target(config: Any, base_id: str, source_profile: str) -> tupl
     scoped = getattr(own_profile, "grammar_profile", None)
     if isinstance(scoped, str):
         return base_id, scoped
-    grammar_profile = _model_grammar_profile(config)
+    grammar_profile = model_grammar_profile(config)
     if grammar_profile is None:
         return None
-    if _explicitly_disables_speculation(config.resolve_profile("default")):
+    if explicitly_disables_speculation(config.resolve_profile("default")):
         return base_id, source_profile
     return base_id, grammar_profile
-
-
-def _model_grammar_profile(config: Any) -> str | None:
-    generate = getattr(getattr(config, "tasks", None), "generate", None)
-    grammar_profile = getattr(generate, "grammar_profile", None)
-    return grammar_profile if isinstance(grammar_profile, str) else None
-
-
-def _profile_is_grammar_compatible(config: Any, profile: str, grammar_profile: str) -> bool:
-    try:
-        candidate = config.resolve_profile(profile)
-        grammar = config.resolve_profile(grammar_profile)
-    except ValueError:
-        return False
-    return (
-        candidate.adapter_path == grammar.adapter_path
-        and _explicitly_disables_speculation(candidate)
-        and candidate.loadtime.get("grammar_backend") == grammar.loadtime.get("grammar_backend")
-        and _extra_launch_args_are_compatible(candidate.loadtime, grammar.loadtime)
-    )
-
-
-def _explicitly_disables_speculation(profile: Any) -> bool:
-    speculative = profile.loadtime.get("speculative")
-    return (
-        isinstance(speculative, Mapping)
-        and speculative.get("enabled") is False
-        and _has_no_raw_speculative_overrides(profile.loadtime)
-    )
-
-
-def _has_no_raw_speculative_overrides(loadtime: Mapping[str, Any]) -> bool:
-    args = loadtime.get("extra_launch_args")
-    if args is None:
-        return True
-    if not isinstance(args, list | tuple):
-        return False
-    for arg in args:
-        if not isinstance(arg, str):
-            return False
-        flag = arg.split("=", 1)[0]
-        if flag.startswith("--speculative-") or flag in _RAW_SPECULATIVE_FLAGS:
-            return False
-    return True
-
-
-def _extra_launch_args_are_compatible(candidate: Mapping[str, Any], grammar: Mapping[str, Any]) -> bool:
-    candidate_args = candidate.get("extra_launch_args")
-    if candidate_args == grammar.get("extra_launch_args"):
-        return True
-    return isinstance(candidate_args, list | tuple) and tuple(candidate_args) == _GRAMMAR_SAFE_EXTRA_LAUNCH_ARGS

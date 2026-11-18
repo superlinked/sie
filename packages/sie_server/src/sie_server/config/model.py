@@ -21,6 +21,11 @@ from pydantic import (
 
 from sie_server.config.device_groups import validate_tensor_parallel_size
 from sie_server.config.engine import ComputePrecision
+from sie_server.config.grammar_profiles import (
+    grammar_serving_profile,
+    model_grammar_profile,
+    profile_is_grammar_compatible,
+)
 from sie_server.config.package_artifacts import (
     PackageArtifactDeclaration,
     has_package_artifact_declaration,
@@ -1157,6 +1162,16 @@ class ModelConfig(BaseModel):
             raise ValueError(msg)
         return self
 
+    def _grammar_target(self, name: str) -> str | None:
+        grammar_profile = model_grammar_profile(self)
+        if name == "default":
+            if grammar_profile is None or profile_is_grammar_compatible(self, name, grammar_profile):
+                return None
+            return grammar_profile
+        if is_remote_adapter_path(self._declared_adapter_path(name)):
+            return None
+        return grammar_serving_profile(self, name)
+
     def _declared_adapter_path(self, name: str) -> str | None:
         profile = self.profiles[name]
         if profile.adapter_path is not None or profile.extends is None:
@@ -1190,17 +1205,9 @@ class ModelConfig(BaseModel):
                 if not remote and level.upstream is not None:
                     msg = f"Profile '{name}' is local, so its reasoning_effort value '{value}' cannot name an upstream value"
                     raise ValueError(msg)
-        scoped_targets = {profile.grammar_profile for profile in self.profiles.values()}
-        fallbacks = [(name, profile.grammar_profile) for name, profile in self.profiles.items()]
-        fallbacks += [
-            (name, self.tasks.generate.grammar_profile)
-            for name, profile in self.profiles.items()
-            if profile.grammar_profile is None
-            and name not in scoped_targets
-            and (name == "default" or not is_remote_adapter_path(self._declared_adapter_path(name)))
-        ]
-        for source, target in fallbacks:
-            if target is None or target not in self.profiles:
+        for source in self.profiles:
+            target = self._grammar_target(source)
+            if target is None or target == source or target not in self.profiles:
                 continue
             source_declaration = self.reasoning_effort_for(source)
             target_declaration = self.reasoning_effort_for(target)

@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from sie_server.adapters._generation_base import GenerationInvalidRequestError, GenerationUnsupportedFieldError
 from sie_server.api.models import _resolve_capabilities
 from sie_server.config.equivalence import canonical_digest
+from sie_server.config.grammar_profiles import grammar_serving_profile
 from sie_server.config.model import ModelConfig
 from sie_server.core.loader import expand_profile_variants
 from sie_server.core.reasoning_effort import MALFORMED_MESSAGE, apply_reasoning_effort, parse_reasoning_effort
@@ -247,6 +248,22 @@ def test_a_sibling_on_the_model_wide_grammar_fallback_declares_its_grammar_value
         ModelConfig.model_validate(spec)
     spec["profiles"]["fast"]["reasoning_effort"] = declaration
     ModelConfig.model_validate(spec)
+
+
+def test_a_profile_that_keeps_its_grammar_requests_declares_its_own_grammar_value() -> None:
+    spec = copy.deepcopy(_VECTORS["models"]["acme/declared"]["config"])
+    declaration = {**spec["tasks"]["generate"]["reasoning_effort"], "grammar": "low"}
+    spec["tasks"]["generate"]["reasoning_effort"] = declaration
+    spec["tasks"]["generate"]["grammar_profile"] = "safe"
+    no_speculation = {"loadtime": {"speculative": {"enabled": False}}}
+    spec["profiles"]["safe"] = {**spec["profiles"]["default"], "adapter_options": no_speculation}
+    spec["profiles"]["child"] = {
+        "extends": "safe",
+        "adapter_options": no_speculation,
+        "reasoning_effort": {**declaration, "grammar": "high"},
+    }
+    config = ModelConfig.model_validate(spec)
+    assert grammar_serving_profile(config, "child") == "child"
 
 
 def test_a_grammar_value_reaches_a_variant_of_its_profile() -> None:

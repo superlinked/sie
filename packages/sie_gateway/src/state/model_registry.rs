@@ -839,24 +839,6 @@ impl ModelRegistry {
                         "tasks.generate.grammar_profile target '{global_target}' must not enable speculation"
                     ));
                 }
-                Self::validate_grammar_effort_agrees(entry, "default", global_target)?;
-                let scoped_targets: HashSet<&str> = entry
-                    .profile_configs
-                    .values()
-                    .filter_map(|profile| profile.grammar_profile.as_deref())
-                    .collect();
-                for (profile_name, profile) in &entry.profile_configs {
-                    let remote = Self::effective_adapter_path_from_entry(entry, profile_name)
-                        .is_some_and(|path| path.starts_with(REMOTE_ADAPTER_MODULE_PREFIX));
-                    if profile_name == "default"
-                        || profile.grammar_profile.is_some()
-                        || scoped_targets.contains(profile_name.as_str())
-                        || remote
-                    {
-                        continue;
-                    }
-                    Self::validate_grammar_effort_agrees(entry, profile_name, global_target)?;
-                }
             }
         }
         for (profile_name, profile) in &entry.profile_configs {
@@ -898,9 +880,32 @@ impl ModelRegistry {
                     "Profile '{profile_name}' grammar_profile '{target_name}' must preserve adapter, precision, batch, KV/output limits, tokenizer mode and load-time settings while explicitly disabling speculation"
                 ));
             }
-            Self::validate_grammar_effort_agrees(entry, profile_name, target_name)?;
+        }
+        for profile_name in entry.profile_configs.keys() {
+            if let Some(target) = Self::grammar_target(entry, profile_name) {
+                Self::validate_grammar_effort_agrees(entry, profile_name, &target)?;
+            }
         }
         Ok(())
+    }
+
+    /// The sibling profile that serves ``profile``'s grammar-constrained
+    /// requests, ``None`` when ``profile`` serves them itself.
+    fn grammar_target(entry: &ModelEntry, profile: &str) -> Option<String> {
+        let target = if profile == "default" {
+            entry
+                .info_extras
+                .grammar_profile
+                .clone()
+                .filter(|target| !Self::profile_is_grammar_compatible(entry, profile, target))
+        } else if Self::effective_adapter_path_from_entry(entry, profile)
+            .is_some_and(|path| path.starts_with(REMOTE_ADAPTER_MODULE_PREFIX))
+        {
+            None
+        } else {
+            Self::grammar_serving_profile(entry, profile)
+        };
+        target.filter(|target| target != profile && entry.profile_configs.contains_key(target))
     }
 
     /// A grammar fallback serves the grammar requests of ``source``, so it runs
@@ -1485,46 +1490,54 @@ impl ModelRegistry {
         // hint). Strip the trailing ``:profile`` and read the base entry's hint.
         let (base, source_profile) = canonical.rsplit_once(':')?;
         let base_entry = snap.models.get(base)?;
+        Self::grammar_serving_profile(base_entry, source_profile)
+            .map(|target| (base.to_string(), target))
+    }
+
+    /// The profile of ``entry`` that serves grammar-constrained requests for
+    /// its non-default variant ``source_profile``: the profile itself when it
+    /// keeps them, ``None`` when nothing routes them.
+    fn grammar_serving_profile(entry: &ModelEntry, source_profile: &str) -> Option<String> {
         // A declared profile-scoped fallback is already a concrete safe
         // target. Keep it instead of applying the model-wide fallback again.
-        if base_entry
+        if entry
             .profile_configs
             .values()
             .any(|profile| profile.grammar_profile.as_deref() == Some(source_profile))
         {
-            return Some((base.to_string(), source_profile.to_string()));
+            return Some(source_profile.to_string());
         }
-        let scoped = base_entry
+        let scoped = entry
             .profile_configs
             .get(source_profile)
             .and_then(|profile| profile.grammar_profile.clone());
         if let Some(scoped) = scoped {
-            return Some((base.to_string(), scoped));
+            return Some(scoped);
         }
-        let parent_grammar_profile = base_entry
+        let parent_grammar_profile = entry
             .info_extras
             .profile_parents
             .get(source_profile)
-            .and_then(|parent| base_entry.profile_configs.get(parent))
+            .and_then(|parent| entry.profile_configs.get(parent))
             .and_then(|parent| parent.grammar_profile.as_deref());
         if parent_grammar_profile.is_some_and(|parent_grammar_profile| {
-            Self::profile_is_grammar_compatible(base_entry, source_profile, parent_grammar_profile)
+            Self::profile_is_grammar_compatible(entry, source_profile, parent_grammar_profile)
         }) {
-            return Some((base.to_string(), source_profile.to_string()));
+            return Some(source_profile.to_string());
         }
-        let gp = base_entry.info_extras.grammar_profile.clone()?;
-        let target_profile = if base_entry
+        let gp = entry.info_extras.grammar_profile.clone()?;
+        let target_profile = if entry
             .info_extras
             .profile_parents
             .get(source_profile)
             .is_some_and(|parent| parent == &gp)
-            && Self::profile_is_grammar_compatible(base_entry, source_profile, &gp)
+            && Self::profile_is_grammar_compatible(entry, source_profile, &gp)
         {
             source_profile.to_string()
         } else {
             gp
         };
-        Some((base.to_string(), target_profile))
+        Some(target_profile)
     }
 
     fn profile_scoped_grammar_fallback_is_compatible(
@@ -4466,7 +4479,7 @@ profiles:
   default:
     adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
   safe:
-    extends: default
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
     adapter_options:
       loadtime:
         speculative: {{enabled: false}}
@@ -4478,6 +4491,14 @@ profiles:
     reasoning_effort:
       grammar: {fast_grammar}
       values: {{none: {{}}, high: {{}}}}
+  child:
+    extends: safe
+    adapter_options:
+      loadtime:
+        speculative: {{enabled: false}}
+    reasoning_effort:
+      grammar: high
+      values: {{none: {{}}, high: {{}}}}
 "#
             )
         };
@@ -4488,7 +4509,11 @@ profiles:
             "{error}"
         );
         let config: ModelConfig = serde_saphyr::from_str(&yaml("none")).unwrap();
-        ModelRegistry::model_entry_from_config(&config).unwrap();
+        let entry = ModelRegistry::model_entry_from_config(&config).unwrap();
+        assert_eq!(
+            ModelRegistry::grammar_serving_profile(&entry, "child").as_deref(),
+            Some("child")
+        );
     }
 
     #[test]
