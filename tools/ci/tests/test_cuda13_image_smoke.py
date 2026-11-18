@@ -42,6 +42,7 @@ def test_sglang_native_wheels_require_exact_cu130_local_variants():
     assert '.partition("+")' in script
     assert '(upstream, "+", "cu130")' in script
 
+
 def test_sglang_image_carries_flashinfer_prebuilt_sampling_module():
     script = cuda13_image_smoke.validation_script("sglang-cu130")
     assert "flashinfer_jit_cache.__version__.startswith(flashinfer_version)" in script
