@@ -1999,7 +1999,12 @@ class StreamingProcessor:
                 raise GenerationUnsupportedFieldError(
                     "reasoning_effort", "'reasoning_effort' needs a chat messages request"
                 )
-            effort = apply_reasoning_effort(config, params.reasoning_effort, model=model_id)
+            effort = apply_reasoning_effort(
+                config,
+                params.reasoning_effort,
+                model=model_id,
+                grammar=params.grammar is not None and isinstance(params.input, _MessagesInput),
+            )
         except GenerationError as exc:
             await self._terminal_error_then_settle(
                 reply_subject,

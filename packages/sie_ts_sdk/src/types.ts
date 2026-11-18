@@ -276,6 +276,8 @@ export interface ModelReasoning {
   effort?: string[];
   /** The value the model runs at when a request names none; null when it is not a declared value */
   default_effort?: string | null;
+  /** The only value a `response_format` request runs at, also when it names none; null when not restricted */
+  grammar_effort?: string | null;
   /** The hard reasoning-token ceiling of each value that has one; other values only instruct the model */
   budget_tokens?: Record<string, number>;
 }

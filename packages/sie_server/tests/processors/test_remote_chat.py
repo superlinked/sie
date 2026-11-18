@@ -296,6 +296,53 @@ async def test_strict_schema_is_sent_and_finished_output_verified(remote: tuple)
     }
 
 
+def _declare_grammar_effort(proc: StreamingProcessor) -> None:
+    config_data = proc._registry.get_config(MODEL).model_dump()
+    config_data["tasks"]["generate"]["reasoning_effort"] = {
+        "default": "high",
+        "grammar": "none",
+        "values": {"none": {"upstream": "none"}, "high": {"upstream": "high"}},
+    }
+    proc._registry.get_config.return_value = ModelConfig.model_validate(config_data)
+
+
+_OBJECT = {"kind": "json_schema", "value": {"type": "object"}, "label": "json_object"}
+
+
+@pytest.mark.parametrize(
+    ("fields", "sent_effort"),
+    [
+        ({"grammar": _OBJECT}, "none"),
+        ({"grammar": _OBJECT, "reasoning_effort": "none"}, "none"),
+        ({"reasoning_effort": "high"}, "high"),
+        ({}, None),
+    ],
+)
+async def test_a_constrained_request_runs_at_the_declared_grammar_effort(
+    remote: tuple, fields: dict[str, Any], sent_effort: str | None
+) -> None:
+    _declare_grammar_effort(remote[1])
+    respond(remote)
+    msg, chunks = await run(remote, **fields)
+    assert chunks[-1]["done"]
+    assert "error" not in chunks[-1]
+    assert json.loads(remote[3][0].content).get("reasoning_effort") == sent_effort
+    msg.ack.assert_awaited_once()
+
+
+async def test_a_constrained_request_that_names_another_effort_refuses_without_dispatch(remote: tuple) -> None:
+    _declare_grammar_effort(remote[1])
+    respond(remote)
+    msg, chunks = await run(remote, grammar=_OBJECT, reasoning_effort="high")
+    assert chunks[-1]["error"]["code"] == "unsupported_field"
+    assert chunks[-1]["error"]["param"] == "reasoning_effort"
+    assert (
+        chunks[-1]["error"]["message"] == f"Model '{MODEL}' supports response_format only with reasoning_effort 'none'"
+    )
+    assert remote[3] == []
+    msg.ack.assert_awaited_once()
+
+
 async def test_regex_refuses_without_dispatch(remote: tuple) -> None:
     respond(remote)
     _msg, chunks = await run(remote, grammar={"kind": "regex", "value": "[a-z]+"})

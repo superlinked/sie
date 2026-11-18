@@ -58,13 +58,14 @@ def _hybrid(local: dict[str, Any] | None, remote: dict[str, Any] | None) -> dict
 @pytest.mark.parametrize("case", _VECTORS["cases"], ids=lambda case: case["name"])
 def test_shared_vectors_resolve_or_refuse(case: dict[str, Any]) -> None:
     config = _config(case["model"])
+    grammar = case.get("grammar", False)
     if "message" in case:
         with pytest.raises(GenerationUnsupportedFieldError) as refused:
-            apply_reasoning_effort(config, case["value"], model=case["model"])
+            apply_reasoning_effort(config, case["value"], model=case["model"], grammar=grammar)
         assert refused.value.param == "reasoning_effort"
         assert str(refused.value) == case["message"]
         return
-    applied = apply_reasoning_effort(config, case["value"], model=case["model"])
+    applied = apply_reasoning_effort(config, case["value"], model=case["model"], grammar=grammar)
     if case["applied"] is None:
         assert applied is None
     else:
@@ -101,6 +102,7 @@ def test_absent_and_null_change_nothing() -> None:
         ({"values": {}}, "at least one value"),
         ({"values": {"extreme": {}}}, "values"),
         ({"default": "low", "values": {"high": {}}}, "is not one of its values"),
+        ({"grammar": "none", "values": {"high": {}}}, "grammar 'none' is not one of its values"),
         ({"values": {"low": {"chat_template_kwargs": {"enable_thinking": "false"}}}}, "unsupported"),
         ({"values": {"low": {"chat_template_kwargs": {"reasoning_effort": "low; drop"}}}}, "letters, digits"),
         ({"values": {"low": {"budget": 512}}}, "budget"),
@@ -149,6 +151,8 @@ def test_both_profiles_of_a_routed_model_accept_the_same_values() -> None:
         ModelConfig.model_validate(_hybrid(low_local, {"values": {"low": {}, "high": {}}}))
     with pytest.raises(ValidationError, match="the same reasoning_effort default"):
         ModelConfig.model_validate(_hybrid(low_local, {"default": "low", "values": {"low": {"upstream": "low"}}}))
+    with pytest.raises(ValidationError, match="the same reasoning_effort grammar value"):
+        ModelConfig.model_validate(_hybrid(low_local, {"grammar": "low", "values": {"low": {"upstream": "low"}}}))
 
 
 def test_a_variant_carries_its_profiles_declaration() -> None:
@@ -207,6 +211,18 @@ def _chat_params(**overrides: Any) -> _GenerateRequestParams:
         max_new_tokens=64,
         **overrides,
     )
+
+
+def test_a_grammar_value_reaches_a_variant_of_its_profile() -> None:
+    declaration = {"grammar": "low", "values": {"low": {"upstream": "low"}, "high": {"upstream": "high"}}}
+    spec = copy.deepcopy(_VECTORS["models"]["acme/remote"]["config"])
+    spec["profiles"]["relay"] = {"extends": "default", "reasoning_effort": declaration}
+    variant = expand_profile_variants([ModelConfig.model_validate(spec)])["acme/remote:relay"]
+    applied = apply_reasoning_effort(variant, None, model="acme/remote:relay", grammar=True)
+    assert applied is not None
+    assert applied.upstream == "low"
+    with pytest.raises(GenerationUnsupportedFieldError, match="only with reasoning_effort 'low'"):
+        apply_reasoning_effort(variant, "high", model="acme/remote:relay", grammar=True)
 
 
 def test_the_relay_body_carries_only_the_declared_upstream_value() -> None:

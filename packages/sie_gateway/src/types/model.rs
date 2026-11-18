@@ -25,6 +25,9 @@ pub struct ReasoningEffortDecl {
     pub accepted: Vec<String>,
     /// The value the route runs at when a request names none.
     pub default: Option<String>,
+    /// The only value a grammar-constrained request runs at, when the route
+    /// restricts one.
+    pub grammar: Option<String>,
 }
 
 impl ReasoningEffortDecl {
@@ -39,24 +42,32 @@ impl ReasoningEffortDecl {
         if accepted.is_empty() {
             return None;
         }
-        let default = declaration
-            .get("default")
-            .and_then(Value::as_str)
-            .filter(|default| accepted.iter().any(|value| value == default))
-            .map(str::to_owned);
-        Some(Self { accepted, default })
+        let declared = |key: &str| {
+            declaration
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|named| accepted.iter().any(|value| value == named))
+                .map(str::to_owned)
+        };
+        let default = declared("default");
+        let grammar = declared("grammar");
+        Some(Self {
+            accepted,
+            default,
+            grammar,
+        })
     }
 
     /// The YAML shape that parses back to this declaration. The gateway keeps
-    /// only the accepted values and the default, so each value's own settings
-    /// are left empty.
+    /// only the accepted values, the default and the grammar value, so each
+    /// value's own settings are left empty.
     pub fn to_yaml_value(&self) -> Value {
         let values: Map<String, Value> = self
             .accepted
             .iter()
             .map(|value| (value.clone(), json!({})))
             .collect();
-        json!({"default": self.default, "values": values})
+        json!({"default": self.default, "grammar": self.grammar, "values": values})
     }
 }
 
@@ -903,6 +914,25 @@ impl ModelEntry {
         }
     }
 
+    /// The refusal text for ``value`` on a chat request to this route, ``None``
+    /// when the route accepts it. A grammar-constrained request may name only
+    /// the route's grammar value, when it declares one.
+    pub fn chat_reasoning_effort_refusal(
+        &self,
+        value: &str,
+        grammar: bool,
+        model_name: &str,
+    ) -> Option<String> {
+        self.reasoning_effort_refusal(value, model_name).or_else(|| {
+            let restricted = self.effective_reasoning_effort()?.grammar.as_deref()?;
+            (grammar && value != restricted).then(|| {
+                format!(
+                    "Model '{model_name}' supports response_format only with reasoning_effort '{restricted}'"
+                )
+            })
+        })
+    }
+
     /// ``capabilities.reasoning`` on ``/v1/models``: null for a model without a
     /// generate task or one that cannot reason.
     fn reasoning_capability_value(&self) -> Value {
@@ -914,6 +944,7 @@ impl ModelEntry {
         json!({
             "effort": declaration.map(|declaration| declaration.accepted.clone()).unwrap_or_default(),
             "default_effort": declaration.and_then(|declaration| declaration.default.clone()),
+            "grammar_effort": declaration.and_then(|declaration| declaration.grammar.clone()),
             "budget_tokens": {},
         })
     }
@@ -1533,7 +1564,10 @@ profiles:
         for case in vectors["cases"].as_array().unwrap() {
             let model = case["model"].as_str().unwrap();
             let entry = vector_entry(&vectors["models"][model]["config"], model, "default");
-            let refusal = entry.reasoning_effort_refusal(case["value"].as_str().unwrap(), model);
+            let grammar = case["grammar"].as_bool().unwrap_or(false);
+            let refusal = case["value"]
+                .as_str()
+                .and_then(|value| entry.chat_reasoning_effort_refusal(value, grammar, model));
             assert_eq!(
                 refusal.as_deref(),
                 case.get("message").and_then(Value::as_str),

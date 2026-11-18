@@ -139,11 +139,17 @@ class ReasoningEffortDeclaration(BaseModel):
     names none, or is ``None`` when that is not one of the declared values. It
     is reported on ``/v1/models`` and never applied, so a request without the
     field renders and calls its upstream exactly as before.
+
+    ``grammar`` names the only value a grammar-constrained chat request runs
+    at, for a model that cannot reason and constrain its answer together. Such
+    a request that names no value runs at it, and one that names another value
+    is refused. ``None`` leaves grammar-constrained requests to the rules above.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     default: ReasoningEffortValue | None = None
+    grammar: ReasoningEffortValue | None = None
     values: dict[ReasoningEffortValue, ReasoningEffortLevel]
 
     @model_validator(mode="after")
@@ -152,6 +158,8 @@ class ReasoningEffortDeclaration(BaseModel):
             raise ValueError("reasoning_effort.values must name at least one value")
         if self.default is not None and self.default not in self.values:
             raise ValueError(f"reasoning_effort.default '{self.default}' is not one of its values")
+        if self.grammar is not None and self.grammar not in self.values:
+            raise ValueError(f"reasoning_effort.grammar '{self.grammar}' is not one of its values")
         return self
 
     @property
@@ -1200,6 +1208,14 @@ class ModelConfig(BaseModel):
                 msg = (
                     f"Profiles 'default' and '{routing.fallback_profile}' serve one route, so they must declare "
                     f"the same reasoning_effort default, got {local_default!r} and {remote_default!r}"
+                )
+                raise ValueError(msg)
+            local_grammar = local.grammar if local is not None else None
+            remote_grammar = remote.grammar if remote is not None else None
+            if local_grammar != remote_grammar:
+                msg = (
+                    f"Profiles 'default' and '{routing.fallback_profile}' serve one route, so they must declare "
+                    f"the same reasoning_effort grammar value, got {local_grammar!r} and {remote_grammar!r}"
                 )
                 raise ValueError(msg)
         return self

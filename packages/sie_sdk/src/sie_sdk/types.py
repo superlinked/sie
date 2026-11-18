@@ -334,6 +334,9 @@ class ModelReasoning(TypedDict, total=False):
     default_effort: str | None
     """The value the model runs at when a request names none, ``None`` when it is not a declared value."""
 
+    grammar_effort: str | None
+    """The only value a ``response_format`` request runs at, also when it names none. ``None`` when not restricted."""
+
     budget_tokens: dict[str, int]
     """The hard reasoning-token ceiling of each value that has one. Other values only instruct the model."""
 
