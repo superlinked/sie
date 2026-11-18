@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from collections.abc import Iterator
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ from typing import Any
 import pytest
 import yaml
 from sie_server.adapters._generation_base import GenerationUnsupportedFieldError
+from sie_server.config.upstreams import Upstream, install_upstreams
 from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.registry import ModelRegistry
 
@@ -197,3 +199,36 @@ def test_explicit_child_grammar_fallback_precedes_the_parent_hint(tmp_path: Path
     else:
         with pytest.raises(GenerationUnsupportedFieldError, match=f"'{fallback}'"):
             resolve_grammar_serving_model(registry, requested)
+
+
+@pytest.fixture
+def relay_upstream() -> Iterator[None]:
+    upstream = Upstream.model_validate(
+        {
+            "kind": "sie",
+            "base_url": "http://127.0.0.1:8088",
+            "rate_cap": {"requests_per_minute": 60, "max_concurrency": 1},
+        }
+    )
+    install_upstreams({"relay": upstream})
+    try:
+        yield
+    finally:
+        install_upstreams({})
+
+
+@pytest.mark.usefixtures("relay_upstream")
+@pytest.mark.parametrize("serve_base", [True, False])
+def test_a_remote_variant_keeps_its_grammar_requests(tmp_path: Path, serve_base: bool) -> None:
+    config = yaml.safe_load(_GEMMA_FILE.read_text(encoding="utf-8"))
+    config["profiles"]["relay"] = {
+        "adapter_path": "sie_server.adapters.remote.sie:SieUpstreamAdapter",
+        "max_batch_tokens": 16384,
+        "adapter_options": {"loadtime": {"upstream": "relay", "upstream_model": "google/gemma-4-31B-it"}},
+        "reasoning_effort": {"grammar": "none", "values": {"none": {"upstream": "none"}, "high": {"upstream": "high"}}},
+    }
+    requested = f"{_GEMMA_ID}:relay"
+    model_filter = [_GEMMA_ID, requested] if serve_base else [requested]
+    registry = _gemma_registry(tmp_path, config=config, model_filter=model_filter)
+
+    assert resolve_grammar_serving_model(registry, requested) == requested

@@ -13,6 +13,8 @@ The rules mirror the gateway's ``ModelRegistry::grammar_route_variant``:
 - a model without a declared grammar profile keeps its id;
 - a default profile that is already grammar compatible keeps its id;
 - a request that names the grammar-safe variant keeps its id;
+- a variant served by a remote adapter keeps its id, since the upstream
+  enforces the grammar;
 - a variant that directly extends the grammar profile and is grammar
   compatible keeps its id;
 - a non-speculative variant compatible with its parent's declared grammar
@@ -33,6 +35,7 @@ from sie_server.config.grammar_profiles import (
     model_grammar_profile,
     profile_is_grammar_compatible,
 )
+from sie_server.config.model import is_remote_adapter_path
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +88,8 @@ def _grammar_target(registry: ModelConfigSource, model_id: str) -> tuple[str, st
         grammar_profile = model_grammar_profile(config)
         return None if grammar_profile is None else (model_id, grammar_profile)
     base_id, source_profile = source
+    if is_remote_adapter_path(config.resolve_profile("default").adapter_path):
+        return base_id, source_profile
     if not registry.has_model(base_id):
         return _variant_only_target(config, base_id, source_profile)
     serving_profile = grammar_serving_profile(registry.get_config(base_id), source_profile)

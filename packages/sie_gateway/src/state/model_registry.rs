@@ -820,6 +820,15 @@ impl ModelRegistry {
         if profile == "default" || profile_kind(profile).is_none() {
             return Err("fallback routing requires a non-default remote profile".into());
         }
+        let (local, remote) = (
+            Self::profile_grammar_effort(entry, "default"),
+            Self::profile_grammar_effort(entry, profile),
+        );
+        if local != remote {
+            return Err(format!(
+                "Profiles 'default' and '{profile}' serve one route, so they must declare the same reasoning_effort grammar value, got {local:?} and {remote:?}"
+            ));
+        }
         Ok(())
     }
 
@@ -915,21 +924,26 @@ impl ModelRegistry {
         source: &str,
         target: &str,
     ) -> Result<(), String> {
-        let grammar = |profile: &str| {
-            entry
-                .info_extras
-                .profile_reasoning_effort
-                .get(profile)
-                .or(entry.info_extras.reasoning_effort.as_ref())
-                .and_then(|declaration| declaration.grammar.clone())
-        };
-        let (source_grammar, target_grammar) = (grammar(source), grammar(target));
+        let (source_grammar, target_grammar) = (
+            Self::profile_grammar_effort(entry, source),
+            Self::profile_grammar_effort(entry, target),
+        );
         if source_grammar != target_grammar {
             return Err(format!(
                 "Profile '{target}' serves grammar requests for '{source}', so they must declare the same reasoning_effort grammar value, got {source_grammar:?} and {target_grammar:?}"
             ));
         }
         Ok(())
+    }
+
+    /// The ``reasoning_effort`` grammar value that governs ``profile``.
+    fn profile_grammar_effort(entry: &ModelEntry, profile: &str) -> Option<String> {
+        entry
+            .info_extras
+            .profile_reasoning_effort
+            .get(profile)
+            .or(entry.info_extras.reasoning_effort.as_ref())
+            .and_then(|declaration| declaration.grammar.clone())
     }
 
     fn normalize_model_pool(pool: Option<&str>) -> Result<Option<String>, String> {
@@ -3433,6 +3447,32 @@ mod tests {
                 .to_model_info_value(false)["routing"]["policy"],
             "remote_only"
         );
+    }
+
+    #[test]
+    fn fallback_routing_requires_the_same_grammar_effort() {
+        let (_dir, registry, _) = remote_routing_fixture();
+        let config = |remote_grammar: &str| -> ModelConfig {
+            serde_json::from_value(serde_json::json!({
+                "sie_id":"acme/hybrid",
+                "tasks":{"generate":{"reasoning_effort":{"grammar":"none", "values":{"none":{}, "high":{}}}}},
+                "profiles":{
+                    "default":{"adapter_path":"sie_server.adapters.bge_m3:BgeM3Adapter"},
+                    "remote":{"adapter_path":"sie_server.adapters.remote.sie:SieUpstreamAdapter",
+                        "adapter_options":{"loadtime":{"upstream":"team-sie", "upstream_model":"acme/hybrid:default"}},
+                        "reasoning_effort":{"grammar":remote_grammar,
+                            "values":{"none":{"upstream":"none"}, "high":{"upstream":"high"}}}}
+                },
+                "routing":{"policy":"fallback", "fallback_profile":"remote"}
+            }))
+            .unwrap()
+        };
+        let error = registry.add_model_config(config("high")).unwrap_err();
+        assert!(
+            error.contains("must declare the same reasoning_effort grammar value"),
+            "{error}"
+        );
+        registry.add_model_config(config("none")).unwrap();
     }
 
     #[test]
