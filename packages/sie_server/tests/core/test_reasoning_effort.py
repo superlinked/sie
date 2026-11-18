@@ -213,6 +213,26 @@ def _chat_params(**overrides: Any) -> _GenerateRequestParams:
     )
 
 
+@pytest.mark.parametrize("scope", ["model", "profile"])
+def test_a_grammar_fallback_declares_the_grammar_value_it_serves(scope: str) -> None:
+    spec = copy.deepcopy(_VECTORS["models"]["acme/declared"]["config"])
+    declaration = {**spec["tasks"]["generate"]["reasoning_effort"], "grammar": "low"}
+    spec["tasks"]["generate"]["reasoning_effort"] = declaration
+    spec["profiles"]["safe"] = {
+        "extends": "default",
+        "adapter_options": {"loadtime": {"speculative": {"enabled": False}}},
+        "reasoning_effort": {**declaration, "grammar": "high"},
+    }
+    if scope == "model":
+        spec["tasks"]["generate"]["grammar_profile"] = "safe"
+    else:
+        spec["profiles"]["long"] = {"extends": "default", "grammar_profile": "safe"}
+    with pytest.raises(ValidationError, match="must declare the same reasoning_effort grammar value"):
+        ModelConfig.model_validate(spec)
+    spec["profiles"]["safe"]["reasoning_effort"] = declaration
+    ModelConfig.model_validate(spec)
+
+
 def test_a_grammar_value_reaches_a_variant_of_its_profile() -> None:
     declaration = {"grammar": "low", "values": {"low": {"upstream": "low"}, "high": {"upstream": "high"}}}
     spec = copy.deepcopy(_VECTORS["models"]["acme/remote"]["config"])

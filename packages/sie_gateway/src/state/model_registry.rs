@@ -839,6 +839,7 @@ impl ModelRegistry {
                         "tasks.generate.grammar_profile target '{global_target}' must not enable speculation"
                     ));
                 }
+                Self::validate_grammar_effort_agrees(entry, "default", global_target)?;
             }
         }
         for (profile_name, profile) in &entry.profile_configs {
@@ -880,6 +881,31 @@ impl ModelRegistry {
                     "Profile '{profile_name}' grammar_profile '{target_name}' must preserve adapter, precision, batch, KV/output limits, tokenizer mode and load-time settings while explicitly disabling speculation"
                 ));
             }
+            Self::validate_grammar_effort_agrees(entry, profile_name, target_name)?;
+        }
+        Ok(())
+    }
+
+    /// A grammar fallback serves the grammar requests of ``source``, so it runs
+    /// them at the same ``reasoning_effort`` grammar value ``source`` reports.
+    fn validate_grammar_effort_agrees(
+        entry: &ModelEntry,
+        source: &str,
+        target: &str,
+    ) -> Result<(), String> {
+        let grammar = |profile: &str| {
+            entry
+                .info_extras
+                .profile_reasoning_effort
+                .get(profile)
+                .or(entry.info_extras.reasoning_effort.as_ref())
+                .and_then(|declaration| declaration.grammar.clone())
+        };
+        let (source_grammar, target_grammar) = (grammar(source), grammar(target));
+        if source_grammar != target_grammar {
+            return Err(format!(
+                "Profile '{target}' serves grammar requests for '{source}', so they must declare the same reasoning_effort grammar value, got {source_grammar:?} and {target_grammar:?}"
+            ));
         }
         Ok(())
     }
@@ -4373,6 +4399,38 @@ profiles:
         .unwrap();
         let error = ModelRegistry::model_entry_from_config(&config).unwrap_err();
         assert!(error.contains("must not enable speculation"));
+    }
+
+    #[test]
+    fn test_grammar_target_must_declare_the_sources_grammar_effort() {
+        let config: ModelConfig = serde_saphyr::from_str(
+            r#"
+name: org/grammar-model
+tasks:
+  generate:
+    grammar_profile: safe
+    reasoning_effort:
+      grammar: none
+      values: {none: {}, high: {}}
+profiles:
+  default:
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+  safe:
+    extends: default
+    adapter_options:
+      loadtime:
+        speculative: {enabled: false}
+    reasoning_effort:
+      grammar: high
+      values: {none: {}, high: {}}
+"#,
+        )
+        .unwrap();
+        let error = ModelRegistry::model_entry_from_config(&config).unwrap_err();
+        assert!(
+            error.contains("must declare the same reasoning_effort grammar value"),
+            "{error}"
+        );
     }
 
     #[test]

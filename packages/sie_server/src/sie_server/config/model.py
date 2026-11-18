@@ -1190,6 +1190,21 @@ class ModelConfig(BaseModel):
                 if not remote and level.upstream is not None:
                     msg = f"Profile '{name}' is local, so its reasoning_effort value '{value}' cannot name an upstream value"
                     raise ValueError(msg)
+        fallbacks = [("default", self.tasks.generate.grammar_profile)]
+        fallbacks += [(name, profile.grammar_profile) for name, profile in self.profiles.items()]
+        for source, target in fallbacks:
+            if target is None or target not in self.profiles:
+                continue
+            source_declaration = self.reasoning_effort_for(source)
+            target_declaration = self.reasoning_effort_for(target)
+            source_grammar = source_declaration.grammar if source_declaration is not None else None
+            target_grammar = target_declaration.grammar if target_declaration is not None else None
+            if source_grammar != target_grammar:
+                msg = (
+                    f"Profile '{target}' serves grammar requests for '{source}', so they must declare the same "
+                    f"reasoning_effort grammar value, got {source_grammar!r} and {target_grammar!r}"
+                )
+                raise ValueError(msg)
         routing = self.routing
         if routing is not None and routing.fallback_profile is not None and "default" in self.profiles:
             local = self.reasoning_effort_for("default")

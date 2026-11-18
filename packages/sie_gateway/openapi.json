@@ -2937,7 +2937,7 @@
             "type": "array"
           },
           "grammar_effort": {
-            "description": "The only value a ``response_format`` request runs at, also when it\nnames none; ``null`` when such a request follows the rules above.",
+            "description": "The only value a grammar-constrained request (a ``response_format``\nother than ``text``, or a ``grammar``) runs at, also when it names\nnone; ``null`` when such a request follows the rules above.",
             "type": [
               "string",
               "null"

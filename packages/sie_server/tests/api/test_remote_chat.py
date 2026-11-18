@@ -429,6 +429,7 @@ def test_a_constrained_request_runs_at_the_declared_grammar_effort(
 def test_a_constrained_request_that_names_another_effort_never_dispatches(remote_chat: tuple) -> None:
     client, _, config, requests = remote_chat
     _declare_grammar_effort(config)
+    answer_with(remote_chat, json_response(200, completion()))
     response = client.post(
         "/v1/chat/completions",
         json={**BODY, "response_format": {"type": "json_object"}, "reasoning_effort": "high"},
