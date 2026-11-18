@@ -26,14 +26,14 @@
     "allow"
   ],
   "inputs": {
-    "requirements_sha256": "6d29b7815d5f5105dbc70e23f5c3c51a225c6b2e0127eca3834a327d94eeec4a",
+    "requirements_sha256": "25831dec2002fa0748dde04a235e79ee88ac33ba885b02b7e5075f061011f8d2",
     "root_versions_sha256": "baaee3f4ed167d22897e99edc787077a74b2ce56dbbf986ebc4e1a80bdde6f24"
   },
-  "lock_sha256": "0097bf4a365e28cbc6ff9b35b49e5f13f19ad622d9862b29c3c9912fe959ab08",
+  "lock_sha256": "2e66cf20cf5acf02935a069d2c06796a1e4789414b15e1f3a8758e0c0e2ca67c",
   "policy_sha256": "d64e8e1cf9c2341810e07b556520974b73f5ccd3d09721efb3b6b107d2473d0f",
   "root_exclude_newer": "2026-11-06T20:00:00Z",
   "schema_version": 1,
-  "source_pins_sha256": "6808e668b2e2a0982ffa734b251936b07fab343a4b201d549e85333691f7ec85",
+  "source_pins_sha256": "f5cadfe1391c1d1e7feef6df532e25d9c1402832497ef81faa121a4946fb9b2e",
   "target": {
     "architecture": "amd64",
     "bundle": "sglang-cu130",

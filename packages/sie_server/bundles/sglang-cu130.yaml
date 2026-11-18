@@ -86,3 +86,9 @@ deps:
   # exactly, so declare the same version explicitly: this keeps the import in
   # the image and lets the bundle resolve as one compatible dependency set.
   apache-tvm-ffi: '==0.1.11'
+  # FlashInfer's prebuilt JIT modules for CUDA 13.0, including the sampling
+  # module every sampled request needs. Without them a new container compiles
+  # each module with nvcc the first time it is used. FlashInfer refuses a
+  # jit-cache whose version differs from flashinfer-python, so this pin moves
+  # with SGLang's flashinfer-python pin.
+  flashinfer-jit-cache: '==0.6.18'
