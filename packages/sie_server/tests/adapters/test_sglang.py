@@ -943,6 +943,12 @@ class TestKernelCacheEnvironment:
 
         assert _server._kernel_cache_env({_server.KERNEL_CACHE_ROOT_ENV_VAR: "relative"}, device_indices=[0]) == {}
         assert _server._kernel_cache_env({_server.KERNEL_CACHE_ROOT_ENV_VAR: str(blocker)}, device_indices=[0]) == {}
+        loop = tmp_path / "loop"
+        loop.symlink_to(loop)
+        assert (
+            _server._kernel_cache_env({_server.KERNEL_CACHE_ROOT_ENV_VAR: str(loop / "cache")}, device_indices=[0])
+            == {}
+        )
 
         with patch(
             "sie_server.adapters.sglang._server.tempfile.NamedTemporaryFile",
