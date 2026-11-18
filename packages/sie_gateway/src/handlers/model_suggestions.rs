@@ -14,7 +14,7 @@
 //! id both in the operator's spelling (with `__` read as `/`) and in lower
 //! case, plus the replacement as the registry spells it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::config::RetiredModel;
 use crate::server::AppState;
@@ -139,11 +139,9 @@ fn hint_for(
             }
         }
     }
-    // Variants are never suggested, so the policy is not asked about them.
-    let candidates = listed
-        .into_iter()
-        .filter(|id| !id.contains(':'))
-        .filter(|id| visible(id));
+    // The policy is asked about `model:profile` variants as well, as the
+    // listing does: a variant is suggested when its base id is not visible.
+    let candidates = listed.into_iter().filter(|id| visible(id));
     NotFoundHint::Suggestions(suggest_model_ids(requested, candidates))
 }
 
@@ -192,9 +190,13 @@ pub(crate) fn retired_model_key(id: &str) -> String {
 /// Up to [`MAX_SUGGESTIONS`] ids from `candidates` that `requested` most
 /// likely meant, closest first. Empty when nothing is close.
 ///
-/// A registry also lists `model:profile` variants. Those are skipped: the
-/// request is matched without its own `:profile`, and naming every variant of
-/// one model would crowd out other models.
+/// A registry also lists `model:profile` variants. A variant whose base id
+/// is itself a candidate is skipped: the base stands for the model, and
+/// naming every variant would crowd out other models. A variant whose base is
+/// not a candidate is the only way to name that model, so it is matched on
+/// the part before its `:` and suggested whole, never as the bare base.
+/// Variants of one base match equally and come in byte order, after the one
+/// whose profile the request named, if any.
 pub(crate) fn suggest_model_ids(
     requested: &str,
     candidates: impl IntoIterator<Item = String>,
@@ -206,15 +208,33 @@ pub(crate) fn suggest_model_ids(
     if wanted.is_empty() {
         return Vec::new();
     }
-    let mut scored: Vec<(Closeness, String)> = candidates
-        .into_iter()
+    let wanted_profile = profile_part(requested);
+    let candidates: Vec<String> = candidates.into_iter().collect();
+    let bases: HashSet<&str> = candidates
+        .iter()
         .filter(|id| !id.contains(':'))
-        .filter_map(|id| closeness(&wanted, &normalize(&id)).map(|score| (score, id)))
+        .map(String::as_str)
+        .collect();
+    // The `bool` is false, and so sorts first, for the requested profile.
+    let mut scored: Vec<(Closeness, bool, &str)> = candidates
+        .iter()
+        .filter_map(|id| {
+            let (base, profile) = match id.split_once(':') {
+                Some((base, _)) if bases.contains(base) => return None,
+                Some((base, profile)) => (base, Some(profile)),
+                None => (id.as_str(), None),
+            };
+            let other_profile = match (wanted_profile, profile) {
+                (Some(wanted), Some(profile)) => !wanted.eq_ignore_ascii_case(profile),
+                _ => false,
+            };
+            closeness(&wanted, &normalize(base)).map(|score| (score, other_profile, id.as_str()))
+        })
         .collect();
     scored.sort();
-    scored.dedup_by(|a, b| a.1 == b.1);
+    scored.dedup_by(|a, b| a.2 == b.2);
     scored.truncate(MAX_SUGGESTIONS);
-    scored.into_iter().map(|(_, id)| id).collect()
+    scored.into_iter().map(|(.., id)| id.to_string()).collect()
 }
 
 /// How a candidate matched, best first; the `usize` breaks ties inside a kind.
@@ -268,6 +288,15 @@ fn model_part(requested: &str) -> &str {
     without_bundle
         .split_once(':')
         .map_or(without_bundle, |(model, _)| model)
+}
+
+/// The `:profile` a request string names, if any, read the same way as
+/// [`model_part`].
+fn profile_part(requested: &str) -> Option<&str> {
+    let without_bundle = requested
+        .split_once(":/")
+        .map_or(requested, |(_, rest)| rest);
+    without_bundle.split_once(':').map(|(_, profile)| profile)
 }
 
 /// Lower case, `__` read as `/`, and every other separator dropped, so ids
@@ -366,6 +395,112 @@ mod tests {
             .into_iter()
             .map(String::from);
         assert_eq!(suggest_model_ids("bge-m3", listed), ["BAAI/bge-m3"]);
+    }
+
+    fn ids(listed: &[&str]) -> Vec<String> {
+        listed.iter().map(|id| id.to_string()).collect()
+    }
+
+    #[test]
+    fn a_base_offered_only_with_a_profile_suggests_the_whole_variant() {
+        let listed = ids(&["org/model-a:profile-x", "org/other-model"]);
+        for requested in ["org/model-", "org/modl-a", "model-a", "ORG__model_a"] {
+            assert_eq!(
+                suggest_model_ids(requested, listed.clone()),
+                ["org/model-a:profile-x"],
+                "{requested}"
+            );
+        }
+        // A near miss of a plain id is answered as before.
+        assert_eq!(
+            suggest_model_ids("org/other-modl", listed),
+            ["org/other-model"]
+        );
+    }
+
+    #[test]
+    fn a_base_whose_variants_are_not_offered_suggests_nothing() {
+        // `org/model-a:profile-x` exists but is not offered to this caller.
+        let listed = ids(&["org/other-model"]);
+        assert!(suggest_model_ids("org/modl-a", listed).is_empty());
+
+        let listed = ids(&["org/model-a", "org/model-a:profile-x"]);
+        let hides_model_a = |id: &str| !id.starts_with("org/model-a");
+        assert_eq!(
+            hint_for("org/modl-a", false, &HashMap::new(), listed, hides_model_a),
+            suggested(&[])
+        );
+    }
+
+    #[test]
+    fn a_hidden_base_is_never_named_only_its_visible_variant() {
+        let listed = ids(&[
+            "org/model-a",
+            "org/model-a:profile-x",
+            "org/model-a:profile-y",
+        ]);
+        let visible = |id: &str| id == "org/model-a:profile-y";
+        assert_eq!(
+            hint_for("org/modl-a", false, &HashMap::new(), listed, visible),
+            suggested(&["org/model-a:profile-y"])
+        );
+    }
+
+    #[test]
+    fn several_variants_of_one_base_come_in_byte_order_within_the_cap() {
+        let listed = ids(&[
+            "org/model-a:profile-z",
+            "org/model-a:profile-x",
+            "org/model-a:profile-w",
+            "org/model-a:profile-y",
+        ]);
+        let expected = [
+            "org/model-a:profile-w",
+            "org/model-a:profile-x",
+            "org/model-a:profile-y",
+        ];
+        assert_eq!(suggest_model_ids("org/modl-a", listed.clone()), expected);
+        let mut reversed = listed;
+        reversed.reverse();
+        assert_eq!(suggest_model_ids("org/modl-a", reversed), expected);
+    }
+
+    #[test]
+    fn the_requested_profile_comes_first_among_variants_of_one_base() {
+        let listed = ids(&[
+            "org/model-a:profile-w",
+            "org/model-a:profile-x",
+            "org/model-a:profile-y",
+            "org/model-a:profile-z",
+        ]);
+        // A typo in the base only.
+        assert_eq!(
+            suggest_model_ids("org/modl-a:Profile-Z", listed.clone()),
+            [
+                "org/model-a:profile-z",
+                "org/model-a:profile-w",
+                "org/model-a:profile-x",
+            ]
+        );
+        // A typo in the profile only: the variants of that base, in byte order.
+        assert_eq!(
+            suggest_model_ids("org/model-a:profle-z", listed),
+            [
+                "org/model-a:profile-w",
+                "org/model-a:profile-x",
+                "org/model-a:profile-y",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_closer_plain_id_ranks_ahead_of_a_variant() {
+        let listed = ids(&["org/model-a:profile-x", "org/model-ab"]);
+        assert_eq!(
+            suggest_model_ids("org/model-ab", listed.clone()),
+            ["org/model-ab", "org/model-a:profile-x"]
+        );
+        assert!(suggest_model_ids("acme/unrelated-model", listed).is_empty());
     }
 
     #[test]
