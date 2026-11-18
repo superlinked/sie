@@ -63,6 +63,8 @@ def apply_reasoning_effort(
     Raises:
         GenerationUnsupportedFieldError: When the profile does not accept ``value``.
     """
+    if value is None and not grammar:
+        return None
     declaration = config.reasoning_effort_for("default") if config is not None else None
     grammar_value = declaration.grammar if grammar and declaration is not None else None
     if value is None:
