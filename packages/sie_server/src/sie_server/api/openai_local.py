@@ -1733,7 +1733,8 @@ async def _chat_completions(
     device = registry.device
     requested_key = denormalize_model_id(model)
     registry_key = requested_key
-    if _response_format_constrains_decoding(body.get("response_format")):
+    constrained = _response_format_constrains_decoding(body.get("response_format"))
+    if constrained:
         try:
             registry_key = resolve_grammar_serving_model(registry, registry_key)
         except GenerationUnsupportedFieldError as exc:
@@ -1771,7 +1772,7 @@ async def _chat_completions(
             )
         try:
             reasoning_effort = parse_reasoning_effort(body.get("reasoning_effort"))
-            apply_reasoning_effort(config, reasoning_effort, model=model)
+            apply_reasoning_effort(config, reasoning_effort, model=model, grammar=constrained)
         except (GenerationInvalidRequestError, GenerationUnsupportedFieldError) as exc:
             code = "unsupported_field" if isinstance(exc, GenerationUnsupportedFieldError) else None
             raise _bad_request(str(exc), param=exc.param, code=code) from exc
@@ -1822,7 +1823,7 @@ async def _chat_completions(
         await ensure_generation_lora(registry, route.key, lora, n=body.get("n"))
         route_config = registry.get_config(route.key)
         try:
-            effort = apply_reasoning_effort(route_config, reasoning_effort, model=model)
+            effort = apply_reasoning_effort(route_config, reasoning_effort, model=model, grammar=constrained)
         except GenerationUnsupportedFieldError as exc:
             raise _bad_request(str(exc), param=exc.param, code="unsupported_field") from exc
         if _adapter_answers_chat(route_config) and isinstance(adapter, GenerationAdapter):

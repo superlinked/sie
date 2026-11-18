@@ -44,21 +44,33 @@ def unsupported_message(model: str, accepted: tuple[str, ...], value: str) -> st
     return f"Model '{model}' does not support reasoning_effort '{value}'. Supported values: {', '.join(accepted)}"
 
 
+def grammar_message(model: str, grammar: str) -> str:
+    """The refusal text for a grammar-constrained request that names a value other than ``grammar``."""
+    return f"Model '{model}' supports response_format only with reasoning_effort '{grammar}'"
+
+
 def apply_reasoning_effort(
-    config: ModelConfig | None, value: str | None, *, model: str
+    config: ModelConfig | None, value: str | None, *, model: str, grammar: bool = False
 ) -> AppliedReasoningEffort | None:
     """Resolve ``value`` against the declaration of ``config``'s default profile.
 
     ``None`` means nothing changes: the request named no value, or named
     ``none`` for a model that does not reason at all. The declared default is
-    not applied to a request that names no value.
+    not applied to a request that names no value. ``grammar`` marks a
+    grammar-constrained chat request, which runs at the declaration's
+    ``grammar`` value when it declares one.
 
     Raises:
         GenerationUnsupportedFieldError: When the profile does not accept ``value``.
     """
-    if value is None:
+    if value is None and not grammar:
         return None
     declaration = config.reasoning_effort_for("default") if config is not None else None
+    grammar_value = declaration.grammar if grammar and declaration is not None else None
+    if value is None:
+        if grammar_value is None:
+            return None
+        value = grammar_value
     if declaration is None:
         if value == "none" and config is not None and config.declares_no_reasoning:
             return None
@@ -66,6 +78,8 @@ def apply_reasoning_effort(
     level = declaration.values.get(cast("ReasoningEffortValue", value))
     if level is None:
         raise GenerationUnsupportedFieldError(PARAM, unsupported_message(model, declaration.accepted, value))
+    if grammar_value is not None and value != grammar_value:
+        raise GenerationUnsupportedFieldError(PARAM, grammar_message(model, grammar_value))
     return AppliedReasoningEffort(
         chat_template_kwargs=dict(level.chat_template_kwargs or {}),
         upstream=level.upstream,

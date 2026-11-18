@@ -9677,7 +9677,9 @@ async fn proxy_chat_inner(
             }
         }
         if let Some(value) = params.reasoning_effort.as_deref() {
-            if let Some(message) = info.reasoning_effort_refusal(value, &model_name) {
+            if let Some(message) =
+                info.chat_reasoning_effort_refusal(value, params.grammar.is_some(), &model_name)
+            {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json_openai_error(
@@ -18890,6 +18892,108 @@ mod tests {
                 .as_deref(),
             Some("low")
         );
+    }
+
+    #[tokio::test]
+    async fn chat_response_format_takes_only_the_declared_grammar_effort() {
+        use crate::types::model::{ModelConfig, ProfileConfig};
+
+        let (state, probe) = mixed_governed_generation_state(false).await;
+        let profile = ProfileConfig {
+            kv_budget_tokens: None,
+            max_output_tokens: None,
+            grammar_profile: None,
+            chat_template_kwargs: None,
+            reasoning_effort: None,
+            adapter_path: Some("sie_server.adapters.sentence_transformer:Adapter".to_string()),
+            max_batch_tokens: Some(4096),
+            compute_precision: None,
+            adapter_options: None,
+            extends: None,
+        };
+        let mut no_spec = profile.clone();
+        no_spec.adapter_options = Some(json!({"loadtime": {"speculative": {"enabled": false}}}));
+        let tasks: serde_json::Value = serde_saphyr::from_str(
+            "generate:\n  grammar_profile: no-spec\n  capabilities:\n    grammar: [json_schema]\n  reasoning_effort:\n    default: high\n    grammar: none\n    values:\n      none:\n        chat_template_kwargs:\n          reasoning_effort: none\n      high: {}\n",
+        )
+        .unwrap();
+        state
+            .model_registry
+            .add_model_config_authoritative(ModelConfig {
+                name: "org/g".to_string(),
+                hf_revision: None,
+                description: None,
+                release_date: None,
+                routing: None,
+                adapter_module: None,
+                default_bundle: None,
+                pool: None,
+                profiles: [
+                    ("default".to_string(), profile),
+                    ("no-spec".to_string(), no_spec),
+                ]
+                .into_iter()
+                .collect(),
+                inputs: None,
+                max_sequence_length: None,
+                tasks: Some(tasks),
+            })
+            .expect("declared model");
+        let body = |value: Option<&str>| {
+            let mut body = json!({
+                "model": "org/g",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 4,
+                "response_format": {"type": "json_object"},
+            });
+            if let Some(value) = value {
+                body["reasoning_effort"] = json!(value);
+            }
+            body
+        };
+
+        let refused = proxy_chat(
+            State(Arc::clone(&state)),
+            json_request("/v1/chat/completions", body(Some("high"))),
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        let error: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(refused.into_body(), 1 << 16)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(error["error"]["param"], "reasoning_effort");
+        assert_eq!(error["error"]["code"], "unsupported_field");
+        assert_eq!(
+            error["error"]["message"],
+            "Model 'org/g' supports response_format only with reasoning_effort 'none'"
+        );
+
+        for value in [Some("none"), None] {
+            *probe.worker_chunks.lock().unwrap() = vec![
+                reasoning_worker_chunk(0, json!({"text_delta": "{}", "is_first": true})),
+                reasoning_worker_terminal(1, json!({})),
+            ];
+            let accepted = proxy_chat(
+                State(Arc::clone(&state)),
+                json_request("/v1/chat/completions", body(value)),
+            )
+            .await;
+            let status = accepted.status();
+            let text = String::from_utf8(
+                axum::body::to_bytes(accepted.into_body(), 1 << 16)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap();
+            assert_eq!(status, StatusCode::OK, "{value:?}: {text}");
+            let generate = probe.take_params().generate.expect("generate");
+            assert!(generate.grammar.is_some(), "{value:?}");
+            assert_eq!(generate.reasoning_effort.as_deref(), value);
+        }
     }
 
     #[tokio::test]

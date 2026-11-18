@@ -820,6 +820,15 @@ impl ModelRegistry {
         if profile == "default" || profile_kind(profile).is_none() {
             return Err("fallback routing requires a non-default remote profile".into());
         }
+        let (local, remote) = (
+            Self::profile_grammar_effort(entry, "default"),
+            Self::profile_grammar_effort(entry, profile),
+        );
+        if local != remote {
+            return Err(format!(
+                "Profiles 'default' and '{profile}' serve one route, so they must declare the same reasoning_effort grammar value, got {local:?} and {remote:?}"
+            ));
+        }
         Ok(())
     }
 
@@ -881,7 +890,60 @@ impl ModelRegistry {
                 ));
             }
         }
+        for profile_name in entry.profile_configs.keys() {
+            if let Some(target) = Self::grammar_target(entry, profile_name) {
+                Self::validate_grammar_effort_agrees(entry, profile_name, &target)?;
+            }
+        }
         Ok(())
+    }
+
+    /// The sibling profile that serves ``profile``'s grammar-constrained
+    /// requests, ``None`` when ``profile`` serves them itself.
+    fn grammar_target(entry: &ModelEntry, profile: &str) -> Option<String> {
+        let target = if profile == "default" {
+            entry
+                .info_extras
+                .grammar_profile
+                .clone()
+                .filter(|target| !Self::profile_is_grammar_compatible(entry, profile, target))
+        } else if Self::effective_adapter_path_from_entry(entry, profile)
+            .is_some_and(|path| path.starts_with(REMOTE_ADAPTER_MODULE_PREFIX))
+        {
+            None
+        } else {
+            Self::grammar_serving_profile(entry, profile)
+        };
+        target.filter(|target| target != profile && entry.profile_configs.contains_key(target))
+    }
+
+    /// A grammar fallback serves the grammar requests of ``source``, so it runs
+    /// them at the same ``reasoning_effort`` grammar value ``source`` reports.
+    fn validate_grammar_effort_agrees(
+        entry: &ModelEntry,
+        source: &str,
+        target: &str,
+    ) -> Result<(), String> {
+        let (source_grammar, target_grammar) = (
+            Self::profile_grammar_effort(entry, source),
+            Self::profile_grammar_effort(entry, target),
+        );
+        if source_grammar != target_grammar {
+            return Err(format!(
+                "Profile '{target}' serves grammar requests for '{source}', so they must declare the same reasoning_effort grammar value, got {source_grammar:?} and {target_grammar:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The ``reasoning_effort`` grammar value that governs ``profile``.
+    fn profile_grammar_effort(entry: &ModelEntry, profile: &str) -> Option<String> {
+        entry
+            .info_extras
+            .profile_reasoning_effort
+            .get(profile)
+            .or(entry.info_extras.reasoning_effort.as_ref())
+            .and_then(|declaration| declaration.grammar.clone())
     }
 
     fn normalize_model_pool(pool: Option<&str>) -> Result<Option<String>, String> {
@@ -1442,46 +1504,54 @@ impl ModelRegistry {
         // hint). Strip the trailing ``:profile`` and read the base entry's hint.
         let (base, source_profile) = canonical.rsplit_once(':')?;
         let base_entry = snap.models.get(base)?;
+        Self::grammar_serving_profile(base_entry, source_profile)
+            .map(|target| (base.to_string(), target))
+    }
+
+    /// The profile of ``entry`` that serves grammar-constrained requests for
+    /// its non-default variant ``source_profile``: the profile itself when it
+    /// keeps them, ``None`` when nothing routes them.
+    fn grammar_serving_profile(entry: &ModelEntry, source_profile: &str) -> Option<String> {
         // A declared profile-scoped fallback is already a concrete safe
         // target. Keep it instead of applying the model-wide fallback again.
-        if base_entry
+        if entry
             .profile_configs
             .values()
             .any(|profile| profile.grammar_profile.as_deref() == Some(source_profile))
         {
-            return Some((base.to_string(), source_profile.to_string()));
+            return Some(source_profile.to_string());
         }
-        let scoped = base_entry
+        let scoped = entry
             .profile_configs
             .get(source_profile)
             .and_then(|profile| profile.grammar_profile.clone());
         if let Some(scoped) = scoped {
-            return Some((base.to_string(), scoped));
+            return Some(scoped);
         }
-        let parent_grammar_profile = base_entry
+        let parent_grammar_profile = entry
             .info_extras
             .profile_parents
             .get(source_profile)
-            .and_then(|parent| base_entry.profile_configs.get(parent))
+            .and_then(|parent| entry.profile_configs.get(parent))
             .and_then(|parent| parent.grammar_profile.as_deref());
         if parent_grammar_profile.is_some_and(|parent_grammar_profile| {
-            Self::profile_is_grammar_compatible(base_entry, source_profile, parent_grammar_profile)
+            Self::profile_is_grammar_compatible(entry, source_profile, parent_grammar_profile)
         }) {
-            return Some((base.to_string(), source_profile.to_string()));
+            return Some(source_profile.to_string());
         }
-        let gp = base_entry.info_extras.grammar_profile.clone()?;
-        let target_profile = if base_entry
+        let gp = entry.info_extras.grammar_profile.clone()?;
+        let target_profile = if entry
             .info_extras
             .profile_parents
             .get(source_profile)
             .is_some_and(|parent| parent == &gp)
-            && Self::profile_is_grammar_compatible(base_entry, source_profile, &gp)
+            && Self::profile_is_grammar_compatible(entry, source_profile, &gp)
         {
             source_profile.to_string()
         } else {
             gp
         };
-        Some((base.to_string(), target_profile))
+        Some(target_profile)
     }
 
     fn profile_scoped_grammar_fallback_is_compatible(
@@ -3380,6 +3450,32 @@ mod tests {
     }
 
     #[test]
+    fn fallback_routing_requires_the_same_grammar_effort() {
+        let (_dir, registry, _) = remote_routing_fixture();
+        let config = |remote_grammar: &str| -> ModelConfig {
+            serde_json::from_value(serde_json::json!({
+                "sie_id":"acme/hybrid",
+                "tasks":{"generate":{"reasoning_effort":{"grammar":"none", "values":{"none":{}, "high":{}}}}},
+                "profiles":{
+                    "default":{"adapter_path":"sie_server.adapters.bge_m3:BgeM3Adapter"},
+                    "remote":{"adapter_path":"sie_server.adapters.remote.sie:SieUpstreamAdapter",
+                        "adapter_options":{"loadtime":{"upstream":"team-sie", "upstream_model":"acme/hybrid:default"}},
+                        "reasoning_effort":{"grammar":remote_grammar,
+                            "values":{"none":{"upstream":"none"}, "high":{"upstream":"high"}}}}
+                },
+                "routing":{"policy":"fallback", "fallback_profile":"remote"}
+            }))
+            .unwrap()
+        };
+        let error = registry.add_model_config(config("high")).unwrap_err();
+        assert!(
+            error.contains("must declare the same reasoning_effort grammar value"),
+            "{error}"
+        );
+        registry.add_model_config(config("none")).unwrap();
+    }
+
+    #[test]
     fn remote_routing_invalid_delta_keeps_last_snapshot_and_triggers() {
         let (_dir, registry, mut config) = remote_routing_fixture();
         registry.add_model_config(config.clone()).unwrap();
@@ -4373,6 +4469,91 @@ profiles:
         .unwrap();
         let error = ModelRegistry::model_entry_from_config(&config).unwrap_err();
         assert!(error.contains("must not enable speculation"));
+    }
+
+    #[test]
+    fn test_grammar_target_must_declare_the_sources_grammar_effort() {
+        let config: ModelConfig = serde_saphyr::from_str(
+            r#"
+name: org/grammar-model
+tasks:
+  generate:
+    grammar_profile: safe
+    reasoning_effort:
+      grammar: none
+      values: {none: {}, high: {}}
+profiles:
+  default:
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+  safe:
+    extends: default
+    adapter_options:
+      loadtime:
+        speculative: {enabled: false}
+    reasoning_effort:
+      grammar: high
+      values: {none: {}, high: {}}
+"#,
+        )
+        .unwrap();
+        let error = ModelRegistry::model_entry_from_config(&config).unwrap_err();
+        assert!(
+            error.contains("must declare the same reasoning_effort grammar value"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn test_a_sibling_on_the_grammar_target_must_declare_its_grammar_effort() {
+        let yaml = |fast_grammar: &str| {
+            format!(
+                r#"
+name: org/grammar-model
+tasks:
+  generate:
+    grammar_profile: safe
+    reasoning_effort:
+      grammar: none
+      values: {{none: {{}}, high: {{}}}}
+profiles:
+  default:
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+  safe:
+    adapter_path: sie_server.adapters.sglang.generation:SGLangGenerationAdapter
+    adapter_options:
+      loadtime:
+        speculative: {{enabled: false}}
+  fast:
+    extends: default
+    adapter_options:
+      loadtime:
+        speculative: {{enabled: true}}
+    reasoning_effort:
+      grammar: {fast_grammar}
+      values: {{none: {{}}, high: {{}}}}
+  child:
+    extends: safe
+    adapter_options:
+      loadtime:
+        speculative: {{enabled: false}}
+    reasoning_effort:
+      grammar: high
+      values: {{none: {{}}, high: {{}}}}
+"#
+            )
+        };
+        let config: ModelConfig = serde_saphyr::from_str(&yaml("high")).unwrap();
+        let error = ModelRegistry::model_entry_from_config(&config).unwrap_err();
+        assert!(
+            error.contains("Profile 'safe' serves grammar requests for 'fast'"),
+            "{error}"
+        );
+        let config: ModelConfig = serde_saphyr::from_str(&yaml("none")).unwrap();
+        let entry = ModelRegistry::model_entry_from_config(&config).unwrap();
+        assert_eq!(
+            ModelRegistry::grammar_serving_profile(&entry, "child").as_deref(),
+            Some("child")
+        );
     }
 
     #[test]

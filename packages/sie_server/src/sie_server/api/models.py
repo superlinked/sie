@@ -65,6 +65,12 @@ class ModelReasoning(BaseModel):
     default_effort: str | None = None
     """The value the model runs at when a request names none, ``None`` when it is not a declared value."""
 
+    grammar_effort: str | None = None
+    """The only value a grammar-constrained request runs at, also when it names none. ``None`` when not restricted.
+
+    A request is grammar-constrained when its ``response_format`` is not ``text``, or when it carries a ``grammar``.
+    """
+
     budget_tokens: dict[str, int] = {}
     """The hard reasoning-token ceiling of each value that has one. Other values only instruct the model."""
 
@@ -252,7 +258,9 @@ def _resolve_reasoning(config: ModelConfig) -> ModelReasoning | None:
     declaration = config.reasoning_effort_for("default")
     if declaration is None:
         return ModelReasoning()
-    return ModelReasoning(effort=list(declaration.accepted), default_effort=declaration.default)
+    return ModelReasoning(
+        effort=list(declaration.accepted), default_effort=declaration.default, grammar_effort=declaration.grammar
+    )
 
 
 def _profile_info(registry: "ModelRegistry | Any", name: str, config: ModelConfig, profile: str) -> ProfileInfo:
