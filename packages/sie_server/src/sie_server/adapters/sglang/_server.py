@@ -184,6 +184,10 @@ def _kernel_cache_env(env: dict[str, str], *, device_indices: Sequence[int]) -> 
     if not root.is_absolute():
         logger.warning("SGLang kernel cache disabled: %s must be an absolute path", KERNEL_CACHE_ROOT_ENV_VAR)
         return {}
+    # SGLang's JIT cache leaves out its own build files only when their resolved
+    # path lies under the build directory it was given; under a symlinked root it
+    # records them by a per-build path, and no later process can reuse the build.
+    root = root.resolve()
 
     gpu_key = _gpu_cache_key(device_indices)
     if gpu_key is None:
