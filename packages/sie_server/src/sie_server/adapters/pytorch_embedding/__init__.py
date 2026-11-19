@@ -389,7 +389,13 @@ class PyTorchEmbeddingAdapter(PEFTLoRAMixin, BaseAdapter):
         if pooling == "mean":
             # Mean of non-padding tokens
             mask = attention_mask.unsqueeze(-1).float()
-            sum_embeddings = (hidden_state * mask).sum(dim=1)
+            if hidden_state.device.type == "cpu" and hidden_state.dtype == torch.float32:
+                # Avoid materializing a [batch, sequence, hidden] masked product.
+                # An outer CPU autocast must not lower the reduction precision.
+                with torch.autocast(device_type="cpu", enabled=False):
+                    sum_embeddings = torch.bmm(mask.transpose(1, 2), hidden_state).squeeze(1)
+            else:
+                sum_embeddings = (hidden_state * mask).sum(dim=1)
             sum_mask = mask.sum(dim=1).clamp(min=1e-9)
             return sum_embeddings / sum_mask
 
