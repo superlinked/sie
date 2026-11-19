@@ -178,5 +178,15 @@ serviceAccount:
   # azure.workload.identity/client-id: <client-id>  # inject via --set at deploy time
 
 dcgm-exporter:
-  # AKS GPU nodes use taints; no node selector required
-  nodeSelector: {}
+  # GPU node label set by the terraform-azure-sie GPU node pools
+  nodeSelector:
+    sie.superlinked.com/node-type: gpu
+  # Same taints as the GPU workers
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+    - key: kubernetes.azure.com/scalesetpriority
+      operator: Equal
+      value: spot
+      effect: NoSchedule
