@@ -1,7 +1,11 @@
 """Tests for SGLang embedding adapter (HTTP server mode)."""
 
 import json
+import os
+import shutil
 import socket
+import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -884,6 +888,7 @@ class TestKernelCacheEnvironment:
         assert cache_env["CUTE_DSL_CACHE_DIR"] == str(namespace / "cutlass")
         assert cache_env["SGLANG_JIT_CACHE_DIR"] == str(namespace / "sglang" / "jit")
         assert cache_env["TRITON_CACHE_DIR"] == str(namespace / "triton")
+        assert cache_env["TVM_FFI_CACHE_DIR"] == str(namespace / "tvm-ffi")
         assert all(Path(path).is_dir() for path in cache_env.values())
 
     def test_group_namespace_is_distinct_from_single_device(
@@ -934,6 +939,73 @@ class TestKernelCacheEnvironment:
         namespace = target.resolve() / "v1" / "abi123" / "sm90-gpu123" / "device-0"
         assert cache_env["SGLANG_JIT_CACHE_DIR"] == str(namespace / "sglang" / "jit")
         assert all(Path(path).is_relative_to(namespace) for path in cache_env.values())
+
+    @pytest.mark.skipif(shutil.which("ninja") is None or shutil.which("cc") is None, reason="needs ninja and cc")
+    def test_kept_ninja_build_is_reused_after_its_mtimes_move(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A build whose files come back with new mtimes is reused, not rebuilt.
+
+        A shared volume returns the files of an earlier container's build with
+        mtimes later than the ones ninja logged, and a source can come back newer
+        than its object.
+        """
+        monkeypatch.setattr(_server, "_installed_jit_abi_key", lambda: "abi123")
+        monkeypatch.setattr(_server, "_gpu_cache_key", lambda _device_indices: "sm90-gpu123")
+        ninja = str(shutil.which("ninja"))
+        build = tmp_path / "v1" / "abi123" / "sm90-gpu123" / "device-0" / "tvm-ffi" / "kernel_0123"
+        build.mkdir(parents=True)
+        (build / "kernel.c").write_text("int kernel(void) { return 0; }\n")
+        (build / "build.ninja").write_text(
+            "rule cc\n  command = cc -MMD -MF $out.d -c $in -o $out\n  depfile = $out.d\n  deps = gcc\n"
+            "build kernel.o: cc kernel.c\n"
+        )
+        subprocess.run([ninja], cwd=build, check=True, capture_output=True)  # noqa: S603 — trusted test command
+        now = time.time()
+        os.utime(build / "kernel.o", (now + 60, now + 60))
+        os.utime(build / "kernel.c", (now + 120, now + 120))
+
+        _server._kernel_cache_env({_server.KERNEL_CACHE_ROOT_ENV_VAR: str(tmp_path)}, device_indices=[0])
+
+        dry_run = subprocess.run(  # noqa: S603 — trusted test command
+            [ninja, "-n", "-d", "explain"], cwd=build, check=True, capture_output=True, text=True
+        )
+        assert "no work to do" in dry_run.stdout, dry_run.stdout + dry_run.stderr
+
+    def test_settles_each_ninja_build_to_its_oldest_logged_output(self, tmp_path: Path) -> None:
+        build = tmp_path / "tvm-ffi" / "kernel_0123"
+        build.mkdir(parents=True)
+        (build / ".ninja_log").write_text(
+            "# ninja log v7\n0\t10\t1700000005000000000\tkernel.so\tabc\n0\t5\t1700000002000000000\tkernel.o\tdef\n"
+        )
+        for name in ("kernel.cu", "kernel.o", "kernel.so", "build.ninja"):
+            (build / name).write_text(name)
+        triton = tmp_path / "triton" / "entry.json"
+        triton.parent.mkdir()
+        triton.write_text("{}")
+        before = triton.stat().st_mtime_ns
+
+        assert _server._settle_ninja_mtimes(tmp_path) == 5
+        assert {path.stat().st_mtime_ns for path in build.iterdir()} == {1_700_000_002_000_000_000}
+        assert triton.stat().st_mtime_ns == before
+        assert _server._settle_ninja_mtimes(tmp_path) == 0
+
+    def test_reads_every_kept_file_before_the_engine_starts(self, tmp_path: Path) -> None:
+        (tmp_path / "triton" / "a").mkdir(parents=True)
+        (tmp_path / "triton" / "a" / "kernel.cubin").write_bytes(b"x" * 3_000_000)
+        (tmp_path / "deep-gemm").mkdir()
+        (tmp_path / "deep-gemm" / "kernel.so").write_bytes(b"y" * 10)
+
+        assert _server._read_kernel_cache(tmp_path) == (2, 3_000_010)
+
+    def test_a_failed_pre_read_keeps_the_cache(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_server, "_installed_jit_abi_key", lambda: "abi123")
+        monkeypatch.setattr(_server, "_gpu_cache_key", lambda _device_indices: "sm90-gpu123")
+        monkeypatch.setattr(_server, "_read_kernel_cache", MagicMock(side_effect=OSError("transient read error")))
+
+        cache_env = _server._kernel_cache_env({_server.KERNEL_CACHE_ROOT_ENV_VAR: str(tmp_path)}, device_indices=[0])
+
+        assert "TVM_FFI_CACHE_DIR" in cache_env
 
     def test_invalid_or_unwritable_root_falls_back(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(_server, "_installed_jit_abi_key", lambda: "abi123")
