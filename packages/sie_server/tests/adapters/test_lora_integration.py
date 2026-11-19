@@ -31,7 +31,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 # LoRA paths matching the profiles in baai-bge-m3.yaml
-BANKING_LORA = "saivamshiatukuri/bge-m3-banking77-lora"
 MEDICAL_LORA = "doanbao/bge-m3-medical-vn-lora"
 
 
@@ -52,7 +51,7 @@ def _find_free_port(start: int = 8200, end: int = 8300) -> int:
 def lora_server(device: str, sie_server_process_factory: type[Any]) -> Generator[str]:
     """Start a SIE server with BGE-M3 for LoRA testing.
 
-    The server loads model profiles including banking and medical-vn LoRAs.
+    The server loads model profiles including the medical-vn LoRA.
     Skipped when cuda is not available (BAAI/bge-m3 requires flash-attn which needs CUDA).
     """
     # Use dynamic port to avoid conflicts with other test modules
@@ -102,20 +101,6 @@ class TestLoRAProfileIntegration:
         assert isinstance(result["dense"], np.ndarray)
         assert result["dense"].shape == (1024,)
 
-    def test_encode_with_banking_profile(self, lora_client: SIEClient) -> None:
-        """Can encode with banking LoRA profile."""
-        from sie_sdk.types import Item
-
-        result = lora_client.encode(
-            "BAAI/bge-m3",
-            Item(text="Transfer money to savings account"),
-            options={"profile": "banking"},
-        )
-
-        assert "dense" in result
-        assert isinstance(result["dense"], np.ndarray)
-        assert result["dense"].shape == (1024,)
-
     def test_encode_with_medical_profile(self, lora_client: SIEClient) -> None:
         """Can encode with medical-vn LoRA profile."""
         from sie_sdk.types import Item
@@ -135,15 +120,19 @@ class TestLoRAProfileIntegration:
         from sie_sdk.types import Item
 
         text = "Transfer money to savings account"
+        # The profile also sets an instruction; sending the same one on both
+        # requests leaves the LoRA as the only difference.
+        instruction = "Vietnamese medical retrieval"
 
         # Encode with base model (default profile)
-        base_result = lora_client.encode("BAAI/bge-m3", Item(text=text))
+        base_result = lora_client.encode("BAAI/bge-m3", Item(text=text), instruction=instruction)
 
-        # Encode with banking LoRA
+        # Encode with medical-vn LoRA
         lora_result = lora_client.encode(
             "BAAI/bge-m3",
             Item(text=text),
-            options={"profile": "banking"},
+            instruction=instruction,
+            options={"profile": "medical-vn"},
         )
 
         base_vec = base_result["dense"]
@@ -169,7 +158,7 @@ class TestLoRAInterleavedRequests:
         test_text = "Transfer money to savings account"
 
         results_default = []
-        results_banking = []
+        results_lora = []
 
         # Interleave encoding 3 times with SAME text
         for _ in range(3):
@@ -180,13 +169,13 @@ class TestLoRAInterleavedRequests:
             )
             results_default.append(result["dense"])
 
-            # Banking profile (with LoRA)
+            # medical-vn profile (with LoRA)
             result = lora_client.encode(
                 "BAAI/bge-m3",
                 Item(text=test_text),
-                options={"profile": "banking"},
+                options={"profile": "medical-vn"},
             )
-            results_banking.append(result["dense"])
+            results_lora.append(result["dense"])
 
         # All default results for same text should be identical
         # (same input produces same output - model is deterministic)
@@ -197,11 +186,11 @@ class TestLoRAInterleavedRequests:
                 decimal=5,
             )
 
-        # All banking results for same text should be identical
-        for i in range(1, len(results_banking)):
+        # All LoRA results for same text should be identical
+        for i in range(1, len(results_lora)):
             np.testing.assert_array_almost_equal(
-                results_banking[0],
-                results_banking[i],
+                results_lora[0],
+                results_lora[i],
                 decimal=5,
             )
 
@@ -225,24 +214,24 @@ class TestLoRAInterleavedRequests:
             futures = []
             for i in range(3):
                 futures.append(executor.submit(encode_with_profile, None, i))
-                futures.append(executor.submit(encode_with_profile, "banking", i))
+                futures.append(executor.submit(encode_with_profile, "medical-vn", i))
 
             results = [f.result(timeout=60) for f in futures]
 
         # Group by profile
         default_results = [r[1] for r in results if r[0] is None]
-        banking_results = [r[1] for r in results if r[0] == "banking"]
+        lora_results = [r[1] for r in results if r[0] == "medical-vn"]
 
         assert len(default_results) == 3
-        assert len(banking_results) == 3
+        assert len(lora_results) == 3
 
         # All default results should be similar (same text pattern)
-        # All banking results should be similar to each other
-        # But default and banking should differ
+        # All LoRA results should be similar to each other
+        # But default and LoRA should differ
         default_avg = np.mean(default_results, axis=0)
-        banking_avg = np.mean(banking_results, axis=0)
+        lora_avg = np.mean(lora_results, axis=0)
 
-        cosine_sim = np.dot(default_avg, banking_avg) / (np.linalg.norm(default_avg) * np.linalg.norm(banking_avg))
+        cosine_sim = np.dot(default_avg, lora_avg) / (np.linalg.norm(default_avg) * np.linalg.norm(lora_avg))
         # Profiles should produce noticeably different embeddings
         assert cosine_sim < 0.999, f"Profiles too similar: {cosine_sim}"
 
@@ -262,22 +251,22 @@ class TestLoRABatchIsolation:
         ]
         default_results = lora_client.encode("BAAI/bge-m3", default_items)
 
-        # Send batch with banking profile
-        banking_items = [
-            Item(id="banking-1", text="First banking item"),
-            Item(id="banking-2", text="Second banking item"),
+        # Send batch with medical-vn profile
+        lora_items = [
+            Item(id="lora-1", text="First LoRA item"),
+            Item(id="lora-2", text="Second LoRA item"),
         ]
-        banking_results = lora_client.encode(
+        lora_results = lora_client.encode(
             "BAAI/bge-m3",
-            banking_items,
-            options={"profile": "banking"},
+            lora_items,
+            options={"profile": "medical-vn"},
         )
 
         # Verify IDs are preserved correctly
         assert len(default_results) == 2
-        assert len(banking_results) == 2
+        assert len(lora_results) == 2
 
         assert default_results[0].get("id") == "default-1"
         assert default_results[1].get("id") == "default-2"
-        assert banking_results[0].get("id") == "banking-1"
-        assert banking_results[1].get("id") == "banking-2"
+        assert lora_results[0].get("id") == "lora-1"
+        assert lora_results[1].get("id") == "lora-2"

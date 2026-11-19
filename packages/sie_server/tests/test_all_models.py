@@ -478,18 +478,6 @@ def test_baai_bge_m3_multivector() -> None:
     _assert_multivector("BAAI/bge-m3", 1024, [0.01641845703125, 0.0304718017578125, -0.036468505859375])
 
 
-def test_baai_bge_m3_banking_dense() -> None:
-    _assert_dense("BAAI/bge-m3:banking", 1024, [0.001247406005859375, 0.0228271484375, -0.02349853515625])
-
-
-def test_baai_bge_m3_banking_sparse() -> None:
-    _assert_sparse("BAAI/bge-m3:banking", [3034], [0.342041015625])
-
-
-def test_baai_bge_m3_banking_multivector() -> None:
-    _assert_multivector("BAAI/bge-m3:banking", 1024, [0.01641845703125, 0.0304718017578125, -0.036468505859375])
-
-
 def test_baai_bge_m3_bge_m3_flag_dense() -> None:
     _assert_dense("BAAI/bge-m3:bge_m3_flag", 1024, [0.001247406005859375, 0.0228271484375, -0.02349853515625])
 
