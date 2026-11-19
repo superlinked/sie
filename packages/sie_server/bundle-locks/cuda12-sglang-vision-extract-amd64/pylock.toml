@@ -227,6 +227,11 @@ version = "0.6.7.post3"
 wheels = [{ url = "https://files.pythonhosted.org/packages/91/64/f516081e983a35e3f52b7e525e2e62f1d6148c175eb24df32c8786776ba5/flashinfer_cubin-0.6.7.post3-py3-none-any.whl", upload-time = 2026-04-06T01:43:16Z, size = 294635743, hashes = { sha256 = "724cbce52f917dd06ebcb61fff2146c30b69cfdb341891d7c293249e414d6e35" } }]
 
 [[packages]]
+name = "flashinfer-jit-cache"
+version = "0.6.7.post3+cu129"
+archive = { url = "https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.7.post3/flashinfer_jit_cache-0.6.7.post3+cu129-cp39-abi3-manylinux_2_28_x86_64.whl", hashes = { sha256 = "68458beb750a604935959bb1dba597da8fa4fcae15cb44c3b75354ee149fedba" } }
+
+[[packages]]
 name = "flashinfer-python"
 version = "0.6.7.post3"
 sdist = { url = "https://files.pythonhosted.org/packages/12/b5/466778818d195b96a062467ee389d0fcfa51fdfecad4a831922916d4c48a/flashinfer_python-0.6.7.post3.tar.gz", upload-time = 2026-04-06T01:43:00Z, size = 6508243, hashes = { sha256 = "defad86864e087f754ed0a632c2d15aa389a1dc8e3198fb6b7d7af4b36e3eaa5" } }

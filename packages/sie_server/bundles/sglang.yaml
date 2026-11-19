@@ -84,6 +84,14 @@ deps:
   flash-attn-4:
     version: '==4.0.0b19'
     marker: sys_platform == 'linux'
+  # FlashInfer's prebuilt JIT modules for the flashinfer-python that sglang
+  # resolves, built for CUDA 12.9 like this bundle's runtime toolkit. Without
+  # them a new container compiles the sampling, prefill and decode modules
+  # with nvcc on first use. FlashInfer refuses a jit-cache whose version
+  # differs from flashinfer-python, so this pin moves with SGLang's pin.
+  flashinfer-jit-cache:
+    version: '==0.6.7.post3'
+    marker: sys_platform == 'linux'
   # Apple Silicon (Metal) generation. SGLang is CUDA-only, so on macOS the
   # SGLangGenerationAdapter.create_for_device swap serves generation via Apple's
   # MLX (mlx_lm.server) instead — this makes the same bundle resolve correctly on

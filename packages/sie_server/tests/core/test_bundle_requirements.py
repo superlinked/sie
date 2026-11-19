@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ from sie_server.bundle_requirements import (
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _BUNDLES = _REPO_ROOT / "packages" / "sie_server" / "bundles"
+_LOCKS = _REPO_ROOT / "packages" / "sie_server" / "bundle-locks"
 
 
 def test_resolve_bundle_requirements_preserves_cli_semantics() -> None:
@@ -38,7 +40,13 @@ def test_resolve_bundle_requirements_preserves_cli_semantics() -> None:
 
 def test_resolve_bundle_requirements_can_exclude_normalized_cuda_packages() -> None:
     assert resolve_bundle_requirements(
-        {"Flash_Attn": "==1", "xformers": "==2", "FLA_core": {"version": "==3"}, "portable": "==4"},
+        {
+            "Flash_Attn": "==1",
+            "xformers": "==2",
+            "FLA_core": {"version": "==3"},
+            "FlashInfer_JIT_Cache": {"version": "==5", "marker": "sys_platform == 'linux'"},
+            "portable": "==4",
+        },
         exclude_cuda=True,
     ) == ["portable==4"]
 
@@ -544,3 +552,28 @@ def test_untrusted_paths_through_ambiguous_dependencies_still_unpin_shared_neigh
     assert "independent==1.0.0" in constraints
     for pin in ("old-only==3.0.0", "optional-only==5.0.0", "leaf==4.0.0"):
         assert pin not in constraints
+
+
+def _locked_versions(target: str) -> dict[str, str]:
+    lock = tomllib.loads((_LOCKS / target / "pylock.toml").read_text())
+    return {package["name"]: package["version"] for package in lock["packages"]}
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "cuda12-sglang-amd64",
+        "cuda12-sglang-embedding-amd64",
+        "cuda12-sglang-vision-extract-amd64",
+        "cuda13-sglang-cu130-amd64",
+    ],
+)
+def test_sglang_images_ship_the_flashinfer_jit_cache_of_their_flashinfer(target: str) -> None:
+    locked = _locked_versions(target)
+
+    assert locked["flashinfer-jit-cache"].split("+")[0] == locked["flashinfer-python"]
+
+
+@pytest.mark.parametrize("target", sorted(path.name for path in _LOCKS.glob("cpu-*") if path.is_dir()))
+def test_cpu_images_never_ship_gpu_kernel_caches(target: str) -> None:
+    assert "flashinfer-jit-cache" not in _locked_versions(target)

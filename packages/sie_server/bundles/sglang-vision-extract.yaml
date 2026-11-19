@@ -13,3 +13,5 @@ deps:
   # SGLang requires a flash-attn-4 pre-release. The explicit pin prevents
   # PyPI's stable 0.0.1 placeholder from disabling pre-release resolution.
   flash-attn-4: '==4.0.0b19'
+  # Prebuilt FlashInfer JIT modules, pinned with ``bundles/sglang.yaml``.
+  flashinfer-jit-cache: '==0.6.7.post3'

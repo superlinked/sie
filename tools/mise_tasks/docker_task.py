@@ -290,6 +290,15 @@ def inspect_loaded(image: str, source_revision: str) -> dict[str, str]:
     return {"image": image, "image_id": record["Id"], "os": "linux", "architecture": "amd64"}
 
 
+# FlashInfer refuses a jit-cache whose version differs from flashinfer-python at
+# import, so a mismatched image would compile every module at its first boot.
+_FLASHINFER_JIT_CACHE_CHECK = (
+    "import importlib.metadata, pathlib, flashinfer_jit_cache; "
+    "assert flashinfer_jit_cache.__version__.split('+')[0] == importlib.metadata.version('flashinfer-python'); "
+    "assert (pathlib.Path(flashinfer_jit_cache.get_jit_cache_dir()) / 'sampling' / 'sampling.so').is_file(); "
+)
+
+
 def smoke_image(image: str, *, bundle: str | None = None) -> None:
     if bundle in cuda13_image_smoke.ALLOWED_BUNDLES:
         # GPU engine imports need a host driver; use the same qualified CPU checks as PR image CI.
@@ -302,7 +311,7 @@ def smoke_image(image: str, *, bundle: str | None = None) -> None:
         if bundle == "ctranslate2":
             imports += "import ctranslate2; "
         elif bundle in {"sglang", "sglang-embedding", "sglang-vision-extract"}:
-            imports += "import sglang; "
+            imports += "import sglang; " + _FLASHINFER_JIT_CACHE_CHECK
         imports += "print('release image imports passed')"
         command.extend(["--entrypoint", "python", image, "-c", imports])
     else:

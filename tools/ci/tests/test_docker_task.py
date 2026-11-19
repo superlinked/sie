@@ -160,9 +160,9 @@ def test_release_cuda13_smoke_uses_qualified_driverless_checks(bundle, monkeypat
         ("default", ""),
         ("transformers5", ""),
         ("ctranslate2", "import ctranslate2; "),
-        ("sglang", "import sglang; "),
-        ("sglang-embedding", "import sglang; "),
-        ("sglang-vision-extract", "import sglang; "),
+        ("sglang", "import sglang; " + docker_task._FLASHINFER_JIT_CACHE_CHECK),
+        ("sglang-embedding", "import sglang; " + docker_task._FLASHINFER_JIT_CACHE_CHECK),
+        ("sglang-vision-extract", "import sglang; " + docker_task._FLASHINFER_JIT_CACHE_CHECK),
         (None, ""),
     ],
 )
