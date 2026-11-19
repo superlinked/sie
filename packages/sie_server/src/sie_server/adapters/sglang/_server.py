@@ -113,6 +113,7 @@ _KERNEL_CACHE_DIRS = {
     "FLASHINFER_WORKSPACE_BASE": "flashinfer",
     "SGLANG_CACHE_DIR": "sglang",
     "SGLANG_DG_CACHE_DIR": "deep-gemm",
+    "SGLANG_JIT_CACHE_DIR": "sglang/jit",
     "TORCHINDUCTOR_CACHE_DIR": "torchinductor",
     "TRITON_CACHE_DIR": "triton",
     "XDG_CACHE_HOME": "xdg",
@@ -182,6 +183,14 @@ def _kernel_cache_env(env: dict[str, str], *, device_indices: Sequence[int]) -> 
     root = Path(raw_root).expanduser()
     if not root.is_absolute():
         logger.warning("SGLang kernel cache disabled: %s must be an absolute path", KERNEL_CACHE_ROOT_ENV_VAR)
+        return {}
+    # SGLang's JIT cache leaves out its own build files only when their resolved
+    # path lies under the build directory it was given; under a symlinked root it
+    # records them by a per-build path, and no later process can reuse the build.
+    try:
+        root = root.resolve()
+    except (OSError, RuntimeError) as exc:
+        logger.warning("SGLang kernel cache disabled: cannot resolve %s: %s", root, exc)
         return {}
 
     gpu_key = _gpu_cache_key(device_indices)

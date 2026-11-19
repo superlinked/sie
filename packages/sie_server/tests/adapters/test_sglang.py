@@ -882,6 +882,7 @@ class TestKernelCacheEnvironment:
         assert cache_env["SGLANG_DG_CACHE_DIR"] == str(namespace / "deep-gemm")
         assert cache_env["FLASHINFER_WORKSPACE_BASE"] == str(namespace / "flashinfer")
         assert cache_env["CUTE_DSL_CACHE_DIR"] == str(namespace / "cutlass")
+        assert cache_env["SGLANG_JIT_CACHE_DIR"] == str(namespace / "sglang" / "jit")
         assert cache_env["TRITON_CACHE_DIR"] == str(namespace / "triton")
         assert all(Path(path).is_dir() for path in cache_env.values())
 
@@ -919,6 +920,21 @@ class TestKernelCacheEnvironment:
         assert not explicit.exists()
         assert "TRITON_CACHE_DIR" in cache_env
 
+    def test_symlinked_root_resolves_to_its_target(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A mount reached through a symlink yields resolved cache paths."""
+        monkeypatch.setattr(_server, "_installed_jit_abi_key", lambda: "abi123")
+        monkeypatch.setattr(_server, "_gpu_cache_key", lambda _device_indices: "sm90-gpu123")
+        target = tmp_path / "mounted-volume"
+        target.mkdir()
+        link = tmp_path / "kernel-cache"
+        link.symlink_to(target, target_is_directory=True)
+
+        cache_env = _server._kernel_cache_env({_server.KERNEL_CACHE_ROOT_ENV_VAR: str(link)}, device_indices=[0])
+
+        namespace = target.resolve() / "v1" / "abi123" / "sm90-gpu123" / "device-0"
+        assert cache_env["SGLANG_JIT_CACHE_DIR"] == str(namespace / "sglang" / "jit")
+        assert all(Path(path).is_relative_to(namespace) for path in cache_env.values())
+
     def test_invalid_or_unwritable_root_falls_back(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(_server, "_installed_jit_abi_key", lambda: "abi123")
         monkeypatch.setattr(_server, "_gpu_cache_key", lambda _device_indices: "sm90-gpu123")
@@ -927,6 +943,12 @@ class TestKernelCacheEnvironment:
 
         assert _server._kernel_cache_env({_server.KERNEL_CACHE_ROOT_ENV_VAR: "relative"}, device_indices=[0]) == {}
         assert _server._kernel_cache_env({_server.KERNEL_CACHE_ROOT_ENV_VAR: str(blocker)}, device_indices=[0]) == {}
+        loop = tmp_path / "loop"
+        loop.symlink_to(loop)
+        assert (
+            _server._kernel_cache_env({_server.KERNEL_CACHE_ROOT_ENV_VAR: str(loop / "cache")}, device_indices=[0])
+            == {}
+        )
 
         with patch(
             "sie_server.adapters.sglang._server.tempfile.NamedTemporaryFile",
