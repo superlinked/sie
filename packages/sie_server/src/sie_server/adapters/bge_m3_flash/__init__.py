@@ -43,6 +43,19 @@ class BGEM3FlashAdapter(BGEM3ScoreMixin, PEFTLoRAMixin, FlashBaseAdapter):
 
     fallback_adapter_path: ClassVar[str | None] = "bge_m3:BGEM3Adapter"
 
+    lora_called_module_names: ClassVar[frozenset[str] | None] = frozenset(
+        {
+            "word_embeddings",
+            "position_embeddings",
+            "token_type_embeddings",
+            "query",
+            "key",
+            "value",
+            "output.dense",
+            "intermediate.dense",
+        }
+    )
+
     spec = AdapterSpec(
         inputs=("text",),
         outputs=("dense", "sparse", "multivector", "score"),
