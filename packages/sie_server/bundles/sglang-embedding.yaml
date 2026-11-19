@@ -25,3 +25,5 @@ deps:
   # Runtime-inert for us: sglang's default attention backend is flashinfer;
   # fa4 only needs to be importable to satisfy the dependency.
   flash-attn-4: '==4.0.0b19'
+  # Prebuilt FlashInfer JIT modules, pinned with ``bundles/sglang.yaml``.
+  flashinfer-jit-cache: '==0.6.7.post3'

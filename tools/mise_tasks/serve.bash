@@ -102,6 +102,15 @@ else
         sie-server resolve-deps -b default > "$REQS_FILE"
 fi
 
+# FlashInfer publishes its prebuilt JIT modules only on its own per-CUDA wheel page.
+if grep -Eq '^flashinfer-jit-cache[^A-Za-z0-9_.-]' "$REQS_FILE"; then
+    FLASHINFER_CUDA=cu129
+    if [[ "${BUNDLE_PLATFORM:-}" == "cuda13" ]]; then
+        FLASHINFER_CUDA=cu130
+    fi
+    UV_BUNDLE_ARGS+=(--find-links "https://flashinfer.ai/whl/$FLASHINFER_CUDA/flashinfer-jit-cache/")
+fi
+
 # Run with extra deps if any were resolved
 if [[ -s "$REQS_FILE" ]]; then
     echo "Syncing adapter dependencies..."

@@ -17,7 +17,7 @@ from typing import cast
 from packaging.requirements import Requirement
 from packaging.version import InvalidVersion, Version
 
-_CUDA_ONLY_PACKAGES = frozenset({"fla-core", "flash-attn", "xformers"})
+_CUDA_ONLY_PACKAGES = frozenset({"fla-core", "flash-attn", "flashinfer-jit-cache", "xformers"})
 _EXACT_OPERATORS = frozenset({"==", "==="})
 _DOWNGRADE_EXAMPLES = ("sentence-transformers", "gliner")
 
