@@ -120,7 +120,8 @@ a lane share its queue pool.
 that the lane's containers may be placed on when `cell` cannot be placed. No
 fallback cell repeats `cell` or another fallback cell. A realized card is
 billed at its own price, so the planner prices such a lane at its dearest
-member.
+member. A container may boot and serve on any listed cell, so the planner
+holds a lane it keeps to its evidence at every one of them.
 
 ## Capacity
 
@@ -543,6 +544,15 @@ the lane's floor, or the floor itself where no identity whose `comeAliveP95S` is
 placement lacks becomes a measurement request. Such a placement on a lane the
 price list cannot price has no cost to compare, so the identity keeps it.
 
+A lane with fallback cells is held to this at every cell it lists. A placement
+there lacks evidence where any listed cell has no receipt at the lane's
+container shape and concurrency or, for a cold warmth or a lazy resident, no
+boot or load. An identity pinned beside others needs, in place of those
+receipts, the co-residency receipt at the lane's `cell`. The placement is known
+to miss a bound where the evidence at any listed cell misses it: the slowest
+receipt at that cell misses a warm bound, the come-alive measured there is over
+the bound, or the boot or load there did not succeed.
+
 An identity that stays on its current placement keeps that lane exactly as it
 is, beside whoever else the lane hosts: its cell, container shape,
 concurrency and envelope, capped by the reviewed ceiling. A lazy resident
@@ -667,7 +677,9 @@ The report renders as a `placement-report` document:
   its receipt's warm latencies, a measured come-alive over the bound, an
   unreliable product, and with no `measured` value a boot or load at its lane
   that did not succeed, or a cold or `lazy-resident` warmth under a bound of
-  `0`, which needs no measurement.
+  `0`, which needs no measurement. Each bound is named once. On a lane with
+  fallback cells it carries the worst measurement among the listed cells: none
+  where one of them has no `measured` value, otherwise the largest.
 - `capacity`: for each ceiling of the `capacity` document, its `scope`
   (`total`, `type` with its `gpuProduct`, or `shared-quota` with
   `heldElsewhere`), the `ceiling`, the `accelerators` the plan's envelope
@@ -709,7 +721,10 @@ The report renders as a `placement-report` document:
   requests of an identity without a placement or a current one carry no bound
   and rank first. The evidence a kept current placement lacks is requested at
   its lane, named in `lane` with its `concurrency`, and also ranks first without
-  a bound; a profile it asks for there is not asked for again.
+  a bound; a profile it asks for there is not asked for again. On a lane with
+  fallback cells a receipt and boot evidence are requested for each listed cell
+  that lacks them, named in the request's `cell`, and a co-residency receipt
+  for the lane's `cell`.
 - `comeAliveLevers`: cold and `lazy-resident` warmths whose measured come-alive
   misses the bound on a cell that meets the warm bounds for less than the
   choice, or than a kept identity's current placement, listed only when

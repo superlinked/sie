@@ -523,6 +523,92 @@ def test_a_lane_with_fallback_cells_hosts_no_lazy_resident():
     assert all(request.warmth is not Warmth.LAZY_RESIDENT for request in result.report.measurement_requests)
 
 
+def listed(warmth=Warmth.COLD_WITH_BOUND) -> Plan:
+    floor = 1 if warmth is Warmth.PINNED else 0
+    return plan_of([lane("listed", fallbacks=(A100,), floor=floor)], {IDENTITY: ("listed", warmth)})
+
+
+@pytest.mark.parametrize(
+    ("first", "fallback", "measured"),
+    [
+        (attempt(boot=60.0), attempt(cell=A100, boot=200.0), 200.0),
+        (attempt(boot=150.0), attempt(cell=A100, boot=200.0), 200.0),
+        (attempt(boot=200.0), attempt(cell=A100, boot=150.0), 200.0),
+        (attempt(boot=200.0), attempt(cell=A100, outcome=BootOutcome.FAILED), None),
+        (attempt(outcome=BootOutcome.TIMED_OUT), attempt(cell=A100, boot=200.0), None),
+    ],
+)
+def test_a_kept_cold_lane_names_the_worst_come_alive_of_its_listed_cells(first, fallback, measured):
+    current = listed()
+    result = run(one(120), [], [first, fallback], current=current)
+    report = result.report.identity(IDENTITY)
+    assert report.status is IdentityStatus.KEPT
+    assert report.blocked_by == (Blocker(field="comeAliveP95S", bound=120, measured=measured),)
+    assert result.plan == current
+
+
+def test_a_cold_lane_whose_fallback_cell_boots_over_the_bound_moves_to_a_measured_option():
+    current = listed()
+    receipts = [receipt(), receipt(cell=A100)]
+    result = run(one(120), receipts, [attempt(boot=60.0), attempt(cell=A100, boot=200.0)], current=current)
+    report = result.report.identity(IDENTITY)
+    assert (report.status, report.chosen.cell, report.chosen.fallback_cells, report.chosen.warmth) == (
+        IdentityStatus.PLACED,
+        L4,
+        (),
+        Warmth.COLD_WITH_BOUND,
+    )
+    assert [entry.lane for entry in result.plan.identities] == ["org-model-l4"]
+    kept = run(one(120), receipts, [attempt(boot=60.0), attempt(cell=A100, boot=100.0)], current=current)
+    assert kept.plan == current
+    assert kept.report.unchanged
+    assert kept.report.identity(IDENTITY).blocked_by == ()
+    assert kept.report.measurement_requests == ()
+
+
+def test_an_unplaced_attempt_on_a_fallback_cell_withdraws_the_cold_posture_of_a_kept_lane():
+    current = listed()
+    boots = [attempt(boot=60.0), attempt(cell=A100, boot=60.0), unplaced(A100)]
+    report = run(one(120), [], boots, current=current).report.identity(IDENTITY)
+    assert (report.status, report.blocked_by) == (
+        IdentityStatus.KEPT,
+        (Blocker(field="comeAliveP95S", bound=120, measured=None),),
+    )
+    moved = run(one(120), [receipt(), receipt(cell=A100)], boots, current=current)
+    assert [(entry.lane, entry.warmth) for entry in moved.plan.identities] == [("org-model-l4", Warmth.COLD_WITH_BOUND)]
+
+
+@pytest.mark.parametrize(("measured", "asked"), [(L4, A100), (A100, L4)])
+def test_a_kept_lane_asks_for_the_receipt_and_boot_evidence_each_listed_cell_lacks(measured, asked):
+    current = listed()
+    result = run(one(120), [receipt(cell=measured)], [attempt(cell=measured, boot=60.0)], current=current)
+    assert result.plan == current
+    report = result.report.identity(IDENTITY)
+    assert (report.status, report.unplaced_reason, report.blocked_by) == (
+        IdentityStatus.KEPT,
+        UnplacedReason.CURRENT_UNMEASURED,
+        (),
+    )
+    assert [
+        (request.cell, request.container_shape, request.concurrency, request.lane, request.measure, request.reason)
+        for request in result.report.measurement_requests
+    ] == [
+        (asked, SHAPE, 8, "listed", (Measurement.BOOT_EVIDENCE,), RequestReason.UNMEASURED),
+        (asked, SHAPE, 8, "listed", (Measurement.RECEIPT,), RequestReason.UNMEASURED),
+    ]
+    assert all(request.warmth is Warmth.COLD_WITH_BOUND for request in result.report.measurement_requests)
+
+
+def test_a_kept_lane_is_held_to_the_warm_bound_at_every_listed_cell():
+    current = listed(Warmth.PINNED)
+    receipts = [receipt(rps=5.0), receipt(cell=A100, p99=300.0)]
+    result = run(one(0), receipts, scarce(), current=current)
+    report = result.report.identity(IDENTITY)
+    assert (report.status, report.lane) == (IdentityStatus.KEPT, "listed")
+    assert report.blocked_by == (Blocker(field="warmP99Ms", bound=250, measured=300.0),)
+    assert result.plan == current
+
+
 def two_lanes(**overrides):
     receipts = [receipt("org/a"), receipt("org/b", A100)]
     return run(levels(**{"org/a": 0, "org/b": 0}), receipts, buffer_containers=1, **overrides)
