@@ -75,6 +75,14 @@ print(match.group(1) if match else "cuda12")
             --extra-index-url https://docs.sglang.ai/whl/cu130/
         )
     fi
+    # FlashInfer publishes its prebuilt JIT modules only on its own per-CUDA wheel page.
+    if grep -Eq '^[[:space:]]+flashinfer-jit-cache:' "packages/sie_server/bundles/$BUNDLE.yaml"; then
+        FLASHINFER_CUDA=cu129
+        if [[ "$BUNDLE_PLATFORM" == "cuda13" ]]; then
+            FLASHINFER_CUDA=cu130
+        fi
+        UV_BUNDLE_ARGS+=(--find-links "https://flashinfer.ai/whl/$FLASHINFER_CUDA/flashinfer-jit-cache/")
+    fi
 fi
 
 # Device selection is automatic (cli.py picks mps on Apple Silicon). Bundles are

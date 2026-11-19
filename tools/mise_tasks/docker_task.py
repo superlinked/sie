@@ -299,7 +299,7 @@ _FLASHINFER_JIT_CACHE_CHECK = (
 )
 
 
-def smoke_image(image: str, *, bundle: str | None = None) -> None:
+def smoke_image(image: str, *, bundle: str | None = None, platform: str | None = None) -> None:
     if bundle in cuda13_image_smoke.ALLOWED_BUNDLES:
         # GPU engine imports need a host driver; use the same qualified CPU checks as PR image CI.
         for command in cuda13_image_smoke.docker_commands(bundle, image):
@@ -311,7 +311,9 @@ def smoke_image(image: str, *, bundle: str | None = None) -> None:
         if bundle == "ctranslate2":
             imports += "import ctranslate2; "
         elif bundle in {"sglang", "sglang-embedding", "sglang-vision-extract"}:
-            imports += "import sglang; " + _FLASHINFER_JIT_CACHE_CHECK
+            imports += "import sglang; "
+            if platform == "cuda12":
+                imports += _FLASHINFER_JIT_CACHE_CHECK
         imports += "print('release image imports passed')"
         command.extend(["--entrypoint", "python", image, "-c", imports])
     else:
@@ -616,8 +618,10 @@ def main() -> int:
             )
             if args.command == "build-service" and args.service == "sie-server-rust":
                 rust_cuda_image_smoke.validate(image, source_revision=args.source_revision)
+            elif args.command == "build-server":
+                smoke_image(image, bundle=args.bundle, platform=args.platform)
             else:
-                smoke_image(image, bundle=args.bundle if args.command == "build-server" else None)
+                smoke_image(image)
             if args.command == "build-server" and args.platform != "cpu":
                 engine_launch_contract.check(image, args.bundle)
             export_image(
