@@ -145,10 +145,10 @@ class ReasoningEffortDeclaration(BaseModel):
     is reported on ``/v1/models`` and never applied, so a request without the
     field renders and calls its upstream exactly as before.
 
-    ``grammar`` names the only value a grammar-constrained chat request runs
-    at, for a model that cannot reason and constrain its answer together. Such
-    a request that names no value runs at it, and one that names another value
-    is refused. ``None`` leaves grammar-constrained requests to the rules above.
+    ``grammar`` names the value a grammar-constrained chat request runs at
+    when it names none, for an upstream that does not answer such a request at
+    its own default. A request that names a value runs at that value. ``None``
+    leaves grammar-constrained requests to the rules above.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)

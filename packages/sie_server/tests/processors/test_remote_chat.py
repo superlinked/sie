@@ -314,11 +314,12 @@ _OBJECT = {"kind": "json_schema", "value": {"type": "object"}, "label": "json_ob
     [
         ({"grammar": _OBJECT}, "none"),
         ({"grammar": _OBJECT, "reasoning_effort": "none"}, "none"),
+        ({"grammar": _OBJECT, "reasoning_effort": "high"}, "high"),
         ({"reasoning_effort": "high"}, "high"),
         ({}, None),
     ],
 )
-async def test_a_constrained_request_runs_at_the_declared_grammar_effort(
+async def test_a_constrained_request_runs_at_the_declared_grammar_effort_unless_it_names_one(
     remote: tuple, fields: dict[str, Any], sent_effort: str | None
 ) -> None:
     _declare_grammar_effort(remote[1])
@@ -327,19 +328,6 @@ async def test_a_constrained_request_runs_at_the_declared_grammar_effort(
     assert chunks[-1]["done"]
     assert "error" not in chunks[-1]
     assert json.loads(remote[3][0].content).get("reasoning_effort") == sent_effort
-    msg.ack.assert_awaited_once()
-
-
-async def test_a_constrained_request_that_names_another_effort_refuses_without_dispatch(remote: tuple) -> None:
-    _declare_grammar_effort(remote[1])
-    respond(remote)
-    msg, chunks = await run(remote, grammar=_OBJECT, reasoning_effort="high")
-    assert chunks[-1]["error"]["code"] == "unsupported_field"
-    assert chunks[-1]["error"]["param"] == "reasoning_effort"
-    assert (
-        chunks[-1]["error"]["message"] == f"Model '{MODEL}' supports response_format only with reasoning_effort 'none'"
-    )
-    assert remote[3] == []
     msg.ack.assert_awaited_once()
 
 

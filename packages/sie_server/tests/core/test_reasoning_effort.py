@@ -274,8 +274,9 @@ def test_a_grammar_value_reaches_a_variant_of_its_profile() -> None:
     applied = apply_reasoning_effort(variant, None, model="acme/remote:relay", grammar=True)
     assert applied is not None
     assert applied.upstream == "low"
-    with pytest.raises(GenerationUnsupportedFieldError, match="only with reasoning_effort 'low'"):
-        apply_reasoning_effort(variant, "high", model="acme/remote:relay", grammar=True)
+    named = apply_reasoning_effort(variant, "high", model="acme/remote:relay", grammar=True)
+    assert named is not None
+    assert named.upstream == "high"
 
 
 def test_the_relay_body_carries_only_the_declared_upstream_value() -> None:

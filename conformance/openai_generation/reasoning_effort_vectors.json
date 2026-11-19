@@ -146,7 +146,7 @@
     {"name": "a value outside a profile's own declaration", "model": "acme/profile-declared", "value": "high", "message": "Model 'acme/profile-declared' does not support reasoning_effort 'high'. Supported values: low"},
     {"name": "a grammar request that names no value runs at the grammar value", "model": "acme/remote-grammar", "value": null, "grammar": true, "applied": {"chat_template_kwargs": {}, "upstream": "none"}},
     {"name": "a grammar request that names the grammar value", "model": "acme/remote-grammar", "value": "none", "grammar": true, "applied": {"chat_template_kwargs": {}, "upstream": "none"}},
-    {"name": "a grammar request that names another declared value", "model": "acme/remote-grammar", "value": "high", "grammar": true, "message": "Model 'acme/remote-grammar' supports response_format only with reasoning_effort 'none'"},
+    {"name": "a grammar request that names another declared value runs at it", "model": "acme/remote-grammar", "value": "high", "grammar": true, "applied": {"chat_template_kwargs": {}, "upstream": "high"}},
     {"name": "a grammar request that names an undeclared value", "model": "acme/remote-grammar", "value": "medium", "grammar": true, "message": "Model 'acme/remote-grammar' does not support reasoning_effort 'medium'. Supported values: none, low, high"},
     {"name": "a request without grammar that names no value changes nothing", "model": "acme/remote-grammar", "value": null, "applied": null},
     {"name": "a request without grammar keeps every declared value", "model": "acme/remote-grammar", "value": "high", "applied": {"chat_template_kwargs": {}, "upstream": "high"}},
