@@ -9677,9 +9677,7 @@ async fn proxy_chat_inner(
             }
         }
         if let Some(value) = params.reasoning_effort.as_deref() {
-            if let Some(message) =
-                info.chat_reasoning_effort_refusal(value, params.grammar.is_some(), &model_name)
-            {
+            if let Some(message) = info.reasoning_effort_refusal(value, &model_name) {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json_openai_error(
@@ -18895,7 +18893,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_response_format_takes_only_the_declared_grammar_effort() {
+    async fn chat_response_format_forwards_a_named_effort_beside_the_grammar_effort() {
         use crate::types::model::{ModelConfig, ProfileConfig};
 
         let (state, probe) = mixed_governed_generation_state(false).await;
@@ -18952,26 +18950,7 @@ mod tests {
             body
         };
 
-        let refused = proxy_chat(
-            State(Arc::clone(&state)),
-            json_request("/v1/chat/completions", body(Some("high"))),
-        )
-        .await;
-        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
-        let error: serde_json::Value = serde_json::from_slice(
-            &axum::body::to_bytes(refused.into_body(), 1 << 16)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(error["error"]["param"], "reasoning_effort");
-        assert_eq!(error["error"]["code"], "unsupported_field");
-        assert_eq!(
-            error["error"]["message"],
-            "Model 'org/g' supports response_format only with reasoning_effort 'none'"
-        );
-
-        for value in [Some("none"), None] {
+        for value in [Some("high"), Some("none"), None] {
             *probe.worker_chunks.lock().unwrap() = vec![
                 reasoning_worker_chunk(0, json!({"text_delta": "{}", "is_first": true})),
                 reasoning_worker_terminal(1, json!({})),

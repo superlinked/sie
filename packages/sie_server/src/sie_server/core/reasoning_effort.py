@@ -44,11 +44,6 @@ def unsupported_message(model: str, accepted: tuple[str, ...], value: str) -> st
     return f"Model '{model}' does not support reasoning_effort '{value}'. Supported values: {', '.join(accepted)}"
 
 
-def grammar_message(model: str, grammar: str) -> str:
-    """The refusal text for a grammar-constrained request that names a value other than ``grammar``."""
-    return f"Model '{model}' supports response_format only with reasoning_effort '{grammar}'"
-
-
 def apply_reasoning_effort(
     config: ModelConfig | None, value: str | None, *, model: str, grammar: bool = False
 ) -> AppliedReasoningEffort | None:
@@ -58,7 +53,7 @@ def apply_reasoning_effort(
     ``none`` for a model that does not reason at all. The declared default is
     not applied to a request that names no value. ``grammar`` marks a
     grammar-constrained chat request, which runs at the declaration's
-    ``grammar`` value when it declares one.
+    ``grammar`` value when it names none.
 
     Raises:
         GenerationUnsupportedFieldError: When the profile does not accept ``value``.
@@ -78,8 +73,6 @@ def apply_reasoning_effort(
     level = declaration.values.get(cast("ReasoningEffortValue", value))
     if level is None:
         raise GenerationUnsupportedFieldError(PARAM, unsupported_message(model, declaration.accepted, value))
-    if grammar_value is not None and value != grammar_value:
-        raise GenerationUnsupportedFieldError(PARAM, grammar_message(model, grammar_value))
     return AppliedReasoningEffort(
         chat_template_kwargs=dict(level.chat_template_kwargs or {}),
         upstream=level.upstream,

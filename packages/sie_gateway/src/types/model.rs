@@ -25,8 +25,7 @@ pub struct ReasoningEffortDecl {
     pub accepted: Vec<String>,
     /// The value the route runs at when a request names none.
     pub default: Option<String>,
-    /// The only value a grammar-constrained request runs at, when the route
-    /// restricts one.
+    /// The value a grammar-constrained request runs at when it names none.
     pub grammar: Option<String>,
 }
 
@@ -914,25 +913,6 @@ impl ModelEntry {
         }
     }
 
-    /// The refusal text for ``value`` on a chat request to this route, ``None``
-    /// when the route accepts it. A grammar-constrained request may name only
-    /// the route's grammar value, when it declares one.
-    pub fn chat_reasoning_effort_refusal(
-        &self,
-        value: &str,
-        grammar: bool,
-        model_name: &str,
-    ) -> Option<String> {
-        self.reasoning_effort_refusal(value, model_name).or_else(|| {
-            let restricted = self.effective_reasoning_effort()?.grammar.as_deref()?;
-            (grammar && value != restricted).then(|| {
-                format!(
-                    "Model '{model_name}' supports response_format only with reasoning_effort '{restricted}'"
-                )
-            })
-        })
-    }
-
     /// ``capabilities.reasoning`` on ``/v1/models``: null for a model without a
     /// generate task or one that cannot reason.
     fn reasoning_capability_value(&self) -> Value {
@@ -1564,10 +1544,9 @@ profiles:
         for case in vectors["cases"].as_array().unwrap() {
             let model = case["model"].as_str().unwrap();
             let entry = vector_entry(&vectors["models"][model]["config"], model, "default");
-            let grammar = case["grammar"].as_bool().unwrap_or(false);
             let refusal = case["value"]
                 .as_str()
-                .and_then(|value| entry.chat_reasoning_effort_refusal(value, grammar, model));
+                .and_then(|value| entry.reasoning_effort_refusal(value, model));
             assert_eq!(
                 refusal.as_deref(),
                 case.get("message").and_then(Value::as_str),

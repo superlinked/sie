@@ -405,6 +405,7 @@ def _declare_grammar_effort(config: ModelConfig) -> None:
     [
         ({"response_format": {"type": "json_object"}}, "none"),
         ({"response_format": {"type": "json_object"}, "reasoning_effort": "none"}, "none"),
+        ({"response_format": {"type": "json_object"}, "reasoning_effort": "high"}, "high"),
         (
             {"response_format": {"type": "json_schema", "json_schema": {"name": "a", "schema": {"type": "object"}}}},
             "none",
@@ -414,7 +415,7 @@ def _declare_grammar_effort(config: ModelConfig) -> None:
         ({}, None),
     ],
 )
-def test_a_constrained_request_runs_at_the_declared_grammar_effort(
+def test_a_constrained_request_runs_at_the_declared_grammar_effort_unless_it_names_one(
     remote_chat: tuple, changes: dict[str, Any], sent_effort: str | None
 ) -> None:
     client, _, config, requests = remote_chat
@@ -424,22 +425,6 @@ def test_a_constrained_request_runs_at_the_declared_grammar_effort(
     assert response.status_code == 200, response.text
     assert len(requests) == 1
     assert json.loads(requests[0].content).get("reasoning_effort") == sent_effort
-
-
-def test_a_constrained_request_that_names_another_effort_never_dispatches(remote_chat: tuple) -> None:
-    client, _, config, requests = remote_chat
-    _declare_grammar_effort(config)
-    answer_with(remote_chat, json_response(200, completion()))
-    response = client.post(
-        "/v1/chat/completions",
-        json={**BODY, "response_format": {"type": "json_object"}, "reasoning_effort": "high"},
-    )
-    assert response.status_code == 400
-    error = response.json()["error"]
-    assert error["param"] == "reasoning_effort"
-    assert error["code"] == "unsupported_field"
-    assert error["message"] == f"Model '{MODEL}' supports response_format only with reasoning_effort 'none'"
-    assert not requests
 
 
 def test_strict_invalid_first_event_preserves_the_buffered_error_before_200(remote_chat: tuple) -> None:
