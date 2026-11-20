@@ -1002,6 +1002,22 @@ def test_shared_definitions_under_combinators_are_inferred_once(combinator: str)
     assert tool_call_parser._parse_xml_tool_call(call, schemas) == ("f", {"v": 7})
 
 
+@pytest.mark.parametrize("combinator", ["anyOf", "allOf"])
+def test_a_definition_first_reached_at_the_depth_limit_is_inferred_again_nearer_the_root(combinator: str) -> None:
+    """The long chain reaches ``Shared`` at the depth limit, where its variants are cut off; the short path does not."""
+    depth = tool_call_parser._MAX_SCHEMA_DEPTH
+    definitions: dict[str, object] = {f"C{i}": {combinator: [{"$ref": f"#/$defs/C{i + 1}"}]} for i in range(depth - 2)}
+    definitions[f"C{depth - 2}"] = {combinator: [{"$ref": "#/$defs/Shared"}]}
+    definitions["Shared"] = {"anyOf": [{"$ref": "#/$defs/Leaf"}]}
+    root = {"$defs": definitions}
+    parameter = {combinator: [{"$ref": "#/$defs/C0"}, {"$ref": "#/$defs/Shared"}]}
+
+    definitions["Leaf"] = {"type": "integer"}
+    assert tool_call_parser._schema_type(parameter, root) == "integer"
+    definitions["Leaf"] = {"type": "null"}
+    assert tool_call_parser._schema_allows_null({"anyOf": parameter[combinator]}, root)
+
+
 @pytest.mark.asyncio
 async def test_non_streaming_candidates_keep_a_malformed_block_as_text() -> None:
     import json

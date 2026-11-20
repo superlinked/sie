@@ -9,6 +9,7 @@ chat validation, as the gateway checks it against its chat seam.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -104,6 +105,15 @@ def _shared_definition_schema() -> dict[str, Any]:
 
 def test_a_tool_schema_is_not_expanded_against_the_grammar_caps() -> None:
     schema = _shared_definition_schema()
+    expected = copy.deepcopy(schema)
+    body = {"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": "x"}]}
+
+    translation = messages_to_chat({**body, "tools": [{"name": "t", "input_schema": schema}]}, None)
+    assert translation.chat["tools"][0]["function"]["parameters"] == expected
+
+
+def test_a_tool_schema_with_a_lone_surrogate_is_measured_not_refused() -> None:
+    schema = json.loads('{"type": "object", "description": "\\ud800"}')
     body = {"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": "x"}]}
 
     translation = messages_to_chat({**body, "tools": [{"name": "t", "input_schema": schema}]}, None)

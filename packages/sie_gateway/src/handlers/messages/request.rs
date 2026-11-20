@@ -573,7 +573,10 @@ fn tools(body: &Map<String, Value>) -> Result<(Option<Vec<Value>>, Vec<String>),
         };
         let schema_path = format!("{path}.input_schema");
         if let Err(rejection) = validate_tool_parameters(schema, &schema_path) {
-            return Err(invalid(format!("{schema_path}: {}", rejection.message)));
+            return Err(invalid(format!(
+                "{}: {}",
+                rejection.param, rejection.message
+            )));
         }
         function.insert("parameters".into(), schema.clone());
         tools.push(json!({"type": "function", "function": Value::Object(function)}));

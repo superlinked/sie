@@ -572,7 +572,9 @@ def _validate_tool_parameters(schema: dict[str, Any], path: str) -> None:
     compiled into a grammar, so a schema that reuses definitions is measured as
     written and a recursive definition is allowed.
     """
-    encoded_size = len(json.dumps(schema, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    # ``surrogatepass``: a decoded JSON string may hold a lone surrogate, which strict UTF-8 cannot encode.
+    encoded = json.dumps(schema, separators=(",", ":"), ensure_ascii=False).encode("utf-8", "surrogatepass")
+    encoded_size = len(encoded)
     if encoded_size > _MAX_TOOL_SCHEMA_BYTES:
         raise _bad_request(
             f"JSON Schema {encoded_size} bytes exceeds limit ({_MAX_TOOL_SCHEMA_BYTES} bytes)",
@@ -582,11 +584,12 @@ def _validate_tool_parameters(schema: dict[str, Any], path: str) -> None:
 
 
 def _tool_parameters_rejection(schema: dict[str, Any], path: str) -> str | None:
-    """Why :func:`_validate_tool_parameters` refuses ``schema``, or ``None`` when it is accepted."""
+    """Why :func:`_validate_tool_parameters` refuses ``schema`` as ``"<param>: <message>"``, or ``None``."""
     try:
         _validate_tool_parameters(schema, path)
     except HTTPException as exc:
-        return cast("dict[str, Any]", exc.detail)["message"]
+        detail = cast("dict[str, Any]", exc.detail)
+        return f"{detail['param']}: {detail['message']}"
     return None
 
 

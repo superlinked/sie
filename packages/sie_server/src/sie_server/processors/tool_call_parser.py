@@ -197,26 +197,26 @@ def _enum_type(values: list[object]) -> str:
 
 
 def _schema_type(
-    schema: Any, root: Mapping[str, Any], depth: int = 0, seen: dict[int, str | None] | None = None
+    schema: Any, root: Mapping[str, Any], depth: int = 0, seen: dict[tuple[int, int], str | None] | None = None
 ) -> str | None:
     """Infer one conversion type from a parameter schema, as SGLang's ``infer_type_from_json_schema`` does.
 
-    ``seen`` holds each resolved schema's result for one inference. A ``$ref`` lets many variants name one
-    definition, so without it a chain of combinators over shared definitions is walked once per path,
-    exponentially in its depth. A schema reached again while it is still being inferred infers nothing.
+    ``seen`` holds each resolved schema's result at each depth for one inference. A ``$ref`` lets many
+    variants name one definition, so without it a chain of combinators over shared definitions is walked
+    once per path, exponentially in its depth; with it each schema is inferred at most once per depth.
     """
     seen = {} if seen is None else seen
     schema = _resolve_ref(schema, root)
     if not isinstance(schema, Mapping) or depth > _MAX_SCHEMA_DEPTH:
         return None
-    if id(schema) not in seen:
-        seen[id(schema)] = None
-        seen[id(schema)] = _infer_schema_type(schema, root, depth, seen)
-    return seen[id(schema)]
+    key = (id(schema), depth)
+    if key not in seen:
+        seen[key] = _infer_schema_type(schema, root, depth, seen)
+    return seen[key]
 
 
 def _infer_schema_type(
-    schema: Mapping[str, Any], root: Mapping[str, Any], depth: int, seen: dict[int, str | None]
+    schema: Mapping[str, Any], root: Mapping[str, Any], depth: int, seen: dict[tuple[int, int], str | None]
 ) -> str | None:
     declared = schema.get("type")
     if isinstance(declared, str):
@@ -252,20 +252,22 @@ def _infer_schema_type(
 
 
 def _schema_allows_null(
-    schema: Any, root: Mapping[str, Any], depth: int = 0, seen: dict[int, bool] | None = None
+    schema: Any, root: Mapping[str, Any], depth: int = 0, seen: dict[tuple[int, int], bool] | None = None
 ) -> bool:
     """Whether a parameter schema admits ``null``; ``seen`` memoizes as in :func:`_schema_type`."""
     seen = {} if seen is None else seen
     schema = _resolve_ref(schema, root)
     if not isinstance(schema, Mapping) or depth > _MAX_SCHEMA_DEPTH:
         return False
-    if id(schema) not in seen:
-        seen[id(schema)] = False
-        seen[id(schema)] = _schema_admits_null(schema, root, depth, seen)
-    return seen[id(schema)]
+    key = (id(schema), depth)
+    if key not in seen:
+        seen[key] = _schema_admits_null(schema, root, depth, seen)
+    return seen[key]
 
 
-def _schema_admits_null(schema: Mapping[str, Any], root: Mapping[str, Any], depth: int, seen: dict[int, bool]) -> bool:
+def _schema_admits_null(
+    schema: Mapping[str, Any], root: Mapping[str, Any], depth: int, seen: dict[tuple[int, int], bool]
+) -> bool:
     declared = schema.get("type")
     if schema.get("nullable") is True or declared == "null" or (isinstance(declared, list) and "null" in declared):
         return True

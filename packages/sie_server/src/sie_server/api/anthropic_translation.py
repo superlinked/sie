@@ -589,7 +589,7 @@ def _tools(body: dict[str, Any]) -> tuple[list[dict[str, Any]] | None, list[str]
             raise _invalid(f"{path}.input_schema: Input should be a valid dictionary")
         reason = _tool_parameters_rejection(schema, f"{path}.input_schema")
         if reason is not None:
-            raise _invalid(f"{path}.input_schema: {reason}")
+            raise _invalid(reason)
         function["parameters"] = schema
         tools.append({"type": "function", "function": function})
         names.append(name)
