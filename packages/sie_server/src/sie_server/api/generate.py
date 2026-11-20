@@ -169,20 +169,21 @@ _MAX_GENERATE_IMAGE_BYTES = 16 * 1024 * 1024
 _MAX_GENERATE_IMAGE_BASE64_CHARS = 4 * ((_MAX_GENERATE_IMAGE_BYTES + 2) // 3)
 _MAX_GENERATE_IMAGE_FORMAT_LENGTH = 32
 _MAX_GRAMMAR_BYTES = 64 * 1024
+# A tool schema's budget, measured as sent rather than with ``$ref`` expanded.
+_MAX_TOOL_SCHEMA_BYTES = _MAX_GRAMMAR_BYTES
 _MAX_SCHEMA_DEPTH = 16
 _MAX_SCHEMA_TRAVERSAL_DEPTH = 128
 _MAX_SCHEMA_NODES = 16 * 1024
 _MAX_REGEX_LENGTH = 4 * 1024
 _MAX_EBNF_LENGTH = 8 * 1024
-_UNSUPPORTED_SCHEMA_KEYWORDS = frozenset(
-    {
-        "$dynamicRef",
-        "if",
-        "then",
-        "else",
-        "unevaluatedProperties",
-        "dependentSchemas",
-    }
+# In the gateway's ``UNSUPPORTED_KEYWORDS`` order: the first one present is the one reported.
+_UNSUPPORTED_SCHEMA_KEYWORDS = (
+    "$dynamicRef",
+    "if",
+    "then",
+    "else",
+    "unevaluatedProperties",
+    "dependentSchemas",
 )
 _NATIVE_TOKENIZER_CACHE_SIZE = 16
 _NATIVE_TOKENIZER_LOAD_LOCK = threading.Lock()
@@ -392,7 +393,13 @@ def _json_pointer(root: Any, pointer: str) -> Any:
         token = raw_token.replace("~1", "/").replace("~0", "~")
         if isinstance(current, dict) and token in current:
             current = current[token]
-        elif isinstance(current, list) and token.isascii() and token.isdecimal():
+        elif (
+            isinstance(current, list)
+            and token.isascii()
+            and token.isdecimal()
+            # RFC 6901: an array index is "0" or has no leading zero, as the gateway's lookup requires.
+            and (len(token) == 1 or not token.startswith("0"))
+        ):
             try:
                 index = int(token)
             except ValueError as exc:
@@ -403,6 +410,30 @@ def _json_pointer(root: Any, pointer: str) -> Any:
         else:
             raise KeyError(pointer)
     return current
+
+
+def _quoted(text: str) -> str:
+    """Quote a schema value in an error message as the gateway does."""
+    return json.dumps(text, ensure_ascii=False)
+
+
+def _resolve_internal_ref(root: Any, ref: Any, ref_path: str) -> tuple[str, Any]:
+    """Resolve an internal ``$ref`` against ``root``, returning its JSON pointer and target."""
+    if not isinstance(ref, str):
+        raise _bad_request("'$ref' must be a string", param=ref_path)
+    if not ref.startswith("#"):
+        raise _bad_request("external '$ref' is not supported", param=ref_path, code="unsupported_field")
+    pointer = ref[1:]
+    if pointer and not pointer.startswith("/"):
+        raise _bad_request(
+            "only internal JSON-pointer '$ref' values are supported",
+            param=ref_path,
+            code="unsupported_field",
+        )
+    try:
+        return pointer, _json_pointer(root, pointer)
+    except KeyError as exc:
+        raise _bad_request(f"unresolved internal '$ref' {_quoted(ref)}", param=ref_path) from exc
 
 
 def _dereference_schema_refs(schema: dict[str, Any]) -> dict[str, Any]:
@@ -426,23 +457,11 @@ def _dereference_schema_refs(schema: dict[str, Any]) -> dict[str, Any]:
             if context == "schema" and "$ref" in value:
                 ref = value["$ref"]
                 ref_path = f"{path}.$ref"
-                if not isinstance(ref, str):
-                    raise _bad_request("'$ref' must be a string", param=ref_path)
-                if not ref.startswith("#"):
-                    raise _bad_request("external '$ref' is not supported", param=ref_path, code="unsupported_field")
-                pointer = ref[1:]
-                if pointer and not pointer.startswith("/"):
-                    raise _bad_request(
-                        "only internal JSON-pointer '$ref' values are supported",
-                        param=ref_path,
-                        code="unsupported_field",
-                    )
+                pointer, target = _resolve_internal_ref(schema, ref, ref_path)
+                # A pointer on the stack resolved when it was pushed, so
+                # checking the cycle after resolution reports the same error.
                 if pointer in stack:
-                    raise _bad_request(f"recursive '$ref' cycle detected at {ref!r}", param=ref_path)
-                try:
-                    target = _json_pointer(schema, pointer)
-                except KeyError as exc:
-                    raise _bad_request(f"unresolved internal '$ref' {ref!r}", param=ref_path) from exc
+                    raise _bad_request(f"recursive '$ref' cycle detected at {_quoted(ref)}", param=ref_path)
                 stack.append(pointer)
                 resolved = resolve(target, path, "schema", traversal_depth + 1)
                 stack.pop()
@@ -480,7 +499,11 @@ def _dereference_schema_refs(schema: dict[str, Any]) -> dict[str, Any]:
     return cast("dict[str, Any]", resolved)
 
 
-def _validate_schema_shape(schema: Any) -> None:
+def _validate_schema_shape(schema: Any, *, path: str = "grammar.json_schema", refs_root: Any = None) -> None:
+    """Enforce the schema caps and keyword reject-list on ``schema`` as given; ``path`` prefixes each ``param``.
+
+    With ``refs_root``, every ``$ref`` must resolve inside it; refs are checked, not followed.
+    """
     visited = 0
     nesting_keys = {
         "properties",
@@ -519,14 +542,16 @@ def _validate_schema_shape(schema: Any) -> None:
         if depth > _MAX_SCHEMA_DEPTH:
             raise _bad_request(f"JSON Schema depth exceeds limit ({_MAX_SCHEMA_DEPTH})", param=path)
         if isinstance(value, dict):
-            unsupported = _UNSUPPORTED_SCHEMA_KEYWORDS.intersection(value) if context == "schema" else set()
-            if unsupported:
-                keyword = sorted(unsupported)[0]
-                raise _bad_request(
-                    f"JSON Schema keyword '{keyword}' is not supported",
-                    param=f"{path}.{keyword}",
-                    code="unsupported_field",
-                )
+            if context == "schema":
+                keyword = next((kw for kw in _UNSUPPORTED_SCHEMA_KEYWORDS if kw in value), None)
+                if keyword is not None:
+                    raise _bad_request(
+                        f"JSON Schema keyword '{keyword}' is not supported",
+                        param=f"{path}.{keyword}",
+                        code="unsupported_field",
+                    )
+                if refs_root is not None and "$ref" in value:
+                    _resolve_internal_ref(refs_root, value["$ref"], f"{path}.$ref")
             for key, child in value.items():
                 child_context = _schema_child_context(context, key)
                 child_depth = depth + 1 if context == "schema" and key in nesting_keys else depth
@@ -542,7 +567,36 @@ def _validate_schema_shape(schema: Any) -> None:
             for index, child in enumerate(value):
                 walk(child, f"{path}[{index}]", depth, child_context, traversal_depth + 1)
 
-    walk(schema, "grammar.json_schema", 0, "schema", 0)
+    walk(schema, path, 0, "schema", 0)
+
+
+def _validate_tool_parameters(schema: dict[str, Any], path: str) -> None:
+    """Check a tool's parameter schema as sent, without ``$ref`` expansion.
+
+    Mirrors ``validate_tool_parameters`` in the gateway's ``handlers/grammar.rs``.
+    Tool schemas are rendered into the prompt and read to parse calls, never
+    compiled into a grammar, so a schema that reuses definitions is measured as
+    written and a recursive definition is allowed.
+    """
+    # ``surrogatepass``: a decoded JSON string may hold a lone surrogate, which strict UTF-8 cannot encode.
+    encoded = json.dumps(schema, separators=(",", ":"), ensure_ascii=False).encode("utf-8", "surrogatepass")
+    encoded_size = len(encoded)
+    if encoded_size > _MAX_TOOL_SCHEMA_BYTES:
+        raise _bad_request(
+            f"JSON Schema {encoded_size} bytes exceeds limit ({_MAX_TOOL_SCHEMA_BYTES} bytes)",
+            param=path,
+        )
+    _validate_schema_shape(schema, path=path, refs_root=schema)
+
+
+def _tool_parameters_rejection(schema: dict[str, Any], path: str) -> str | None:
+    """Why :func:`_validate_tool_parameters` refuses ``schema`` as ``"<param>: <message>"``, or ``None``."""
+    try:
+        _validate_tool_parameters(schema, path)
+    except HTTPException as exc:
+        detail = cast("dict[str, Any]", exc.detail)
+        return f"{detail['param']}: {detail['message']}"
+    return None
 
 
 def _parse_native_grammar(value: Any) -> GrammarSpec | None:

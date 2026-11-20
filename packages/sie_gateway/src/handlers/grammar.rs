@@ -24,6 +24,10 @@
 //! ``$ref`` support is deliberately bounded to internal JSON pointers
 //! (``#/...``). External documents, unresolved pointers, and recursive
 //! reference cycles are rejected before the worker sees the schema.
+//!
+//! Tool parameter schemas go through :func:`validate_tool_parameters`
+//! instead. They are never compiled into a grammar, so they are checked as
+//! sent, without ``$ref`` expansion.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -84,6 +88,11 @@ pub fn check_capability(
 /// in bytes. 64 KiB comfortably fits the typical extraction schemas
 /// while keeping the worker compile budget bounded.
 pub const MAX_GRAMMAR_BYTES: usize = 64 * 1024;
+
+/// Maximum size of a tool's parameter schema as sent, in bytes. The same
+/// budget as a grammar, but measured without ``$ref`` expansion; see
+/// :func:`validate_tool_parameters`.
+pub const MAX_TOOL_SCHEMA_BYTES: usize = MAX_GRAMMAR_BYTES;
 
 /// Maximum JSON Schema nesting depth. Counted by recursive walks over
 /// ``properties`` / ``items`` / ``oneOf`` / ``anyOf`` / ``allOf`` /
@@ -151,6 +160,29 @@ fn bad_request(message: String, param: &str, code: &'static str) -> Response {
         )),
     )
         .into_response()
+}
+
+/// Why a JSON Schema was refused: the 400's ``message``, the ``param``
+/// path it names, and its error ``code``.
+#[derive(Debug)]
+pub struct SchemaRejection {
+    pub message: String,
+    pub param: String,
+    pub code: &'static str,
+}
+
+impl SchemaRejection {
+    fn new(message: String, param: &str, code: &'static str) -> Self {
+        Self {
+            message,
+            param: param.to_string(),
+            code,
+        }
+    }
+
+    pub fn into_response(self) -> Response {
+        bad_request(self.message, &self.param, self.code)
+    }
 }
 
 /// Parse the ``grammar`` object as it appears under
@@ -230,7 +262,7 @@ pub fn parse_grammar(v: &Value) -> GrammarParseResult {
         let schema = obj.get("json_schema").expect("checked above");
         let resolved_schema = match dereference_schema_refs(schema, "grammar.json_schema") {
             Ok(schema) => schema,
-            Err(resp) => return GrammarParseResult::Err(resp),
+            Err(rejection) => return GrammarParseResult::Err(rejection.into_response()),
         };
         let serialized_len =
             json_schema_grammar_len(&resolved_schema, label.as_deref(), strict).unwrap_or(0);
@@ -243,8 +275,8 @@ pub fn parse_grammar(v: &Value) -> GrammarParseResult {
                 oai_code::INVALID_REQUEST,
             ));
         }
-        if let Err(resp) = walk_schema(&resolved_schema, "grammar.json_schema", 0) {
-            return GrammarParseResult::Err(resp);
+        if let Err(rejection) = walk_schema(&resolved_schema, "grammar.json_schema", None) {
+            return GrammarParseResult::Err(rejection.into_response());
         }
         GrammarParseResult::Ok(GrammarSpec::JsonSchema {
             value: resolved_schema,
@@ -326,8 +358,71 @@ fn json_schema_grammar_len(
     serde_json::to_vec(&Value::Object(obj)).map(|b| b.len())
 }
 
-#[allow(clippy::result_large_err)]
-fn dereference_schema_refs(schema: &Value, path: &str) -> Result<Value, Response> {
+/// Check a tool's ``parameters`` (or ``input_schema``) before the request
+/// is forwarded. ``path`` is the field's request path, used in ``param``.
+///
+/// The worker renders tool schemas into the prompt and reads them to parse
+/// the model's calls; it never compiles them into a grammar (a forced
+/// ``tool_choice`` constrains only the tool name), and it follows ``$ref``
+/// lazily with its own bound. So the schema is checked as sent, without
+/// ``$ref`` expansion: its serialized size, depth and node count, the
+/// unsupported keywords, and that every ``$ref`` names a definition inside
+/// it. A schema that reuses definitions is measured as written, and a
+/// recursive definition is allowed.
+pub fn validate_tool_parameters(schema: &Value, path: &str) -> Result<(), SchemaRejection> {
+    let serialized_len = serde_json::to_vec(schema).map(|b| b.len()).unwrap_or(0);
+    if serialized_len > MAX_TOOL_SCHEMA_BYTES {
+        return Err(SchemaRejection::new(
+            format!(
+                "JSON Schema {serialized_len} bytes exceeds limit ({MAX_TOOL_SCHEMA_BYTES} bytes)"
+            ),
+            path,
+            oai_code::INVALID_REQUEST,
+        ));
+    }
+    walk_schema(schema, path, Some(schema))
+}
+
+/// Resolve an internal ``$ref`` against ``root``, returning the ref
+/// string (``#`` plus its JSON pointer) and its target. ``ref_param`` is
+/// the ``param`` path of the ``$ref`` key itself.
+fn resolve_internal_ref<'r, 'v>(
+    root: &'r Value,
+    ref_value: &'v Value,
+    ref_param: &str,
+) -> Result<(&'v str, &'r Value), SchemaRejection> {
+    let Some(ref_str) = ref_value.as_str() else {
+        return Err(SchemaRejection::new(
+            "'$ref' must be a string".to_string(),
+            ref_param,
+            oai_code::INVALID_REQUEST,
+        ));
+    };
+    let Some(pointer) = ref_str.strip_prefix('#') else {
+        return Err(SchemaRejection::new(
+            "external '$ref' is not supported".to_string(),
+            ref_param,
+            oai_code::UNSUPPORTED_FIELD,
+        ));
+    };
+    if !pointer.is_empty() && !pointer.starts_with('/') {
+        return Err(SchemaRejection::new(
+            "only internal JSON-pointer '$ref' values are supported".to_string(),
+            ref_param,
+            oai_code::UNSUPPORTED_FIELD,
+        ));
+    }
+    let Some(target) = root.pointer(pointer) else {
+        return Err(SchemaRejection::new(
+            format!("unresolved internal '$ref' {ref_str:?}"),
+            ref_param,
+            oai_code::INVALID_REQUEST,
+        ));
+    };
+    Ok((ref_str, target))
+}
+
+fn dereference_schema_refs(schema: &Value, path: &str) -> Result<Value, SchemaRejection> {
     let mut visited: usize = 0;
     let mut stack: Vec<String> = Vec::new();
     dereference_schema_refs_inner(
@@ -349,7 +444,6 @@ enum SchemaContext {
     Other,
 }
 
-#[allow(clippy::result_large_err)]
 fn dereference_schema_refs_inner(
     root: &Value,
     v: &Value,
@@ -358,17 +452,17 @@ fn dereference_schema_refs_inner(
     stack: &mut Vec<String>,
     context: SchemaContext,
     traversal_depth: usize,
-) -> Result<Value, Response> {
+) -> Result<Value, SchemaRejection> {
     *visited = visited.saturating_add(1);
     if *visited > MAX_SCHEMA_NODES {
-        return Err(bad_request(
+        return Err(SchemaRejection::new(
             format!("JSON Schema node count exceeds limit ({MAX_SCHEMA_NODES})"),
             path,
             oai_code::INVALID_REQUEST,
         ));
     }
     if traversal_depth > MAX_SCHEMA_TRAVERSAL_DEPTH {
-        return Err(bad_request(
+        return Err(SchemaRejection::new(
             format!("JSON Schema traversal depth exceeds limit ({MAX_SCHEMA_TRAVERSAL_DEPTH})"),
             path,
             oai_code::INVALID_REQUEST,
@@ -378,45 +472,23 @@ fn dereference_schema_refs_inner(
     match v {
         Value::Object(map) => {
             if context == SchemaContext::Schema && map.contains_key("$ref") {
-                let ref_value = map.get("$ref").expect("checked above");
                 let ref_param = format!("{path}.$ref");
-                let Some(ref_str) = ref_value.as_str() else {
-                    return Err(bad_request(
-                        "'$ref' must be a string".to_string(),
-                        &ref_param,
-                        oai_code::INVALID_REQUEST,
-                    ));
-                };
-                let Some(pointer) = ref_str.strip_prefix('#') else {
-                    return Err(bad_request(
-                        "external '$ref' is not supported".to_string(),
-                        &ref_param,
-                        oai_code::UNSUPPORTED_FIELD,
-                    ));
-                };
-                if !pointer.is_empty() && !pointer.starts_with('/') {
-                    return Err(bad_request(
-                        "only internal JSON-pointer '$ref' values are supported".to_string(),
-                        &ref_param,
-                        oai_code::UNSUPPORTED_FIELD,
-                    ));
-                }
-                if stack.iter().any(|p| p == pointer) {
-                    return Err(bad_request(
+                let (ref_str, target) = resolve_internal_ref(
+                    root,
+                    map.get("$ref").expect("checked above"),
+                    &ref_param,
+                )?;
+                // A ref on the stack resolved when it was pushed, so
+                // checking the cycle after resolution reports the same error.
+                if stack.iter().any(|r| r == ref_str) {
+                    return Err(SchemaRejection::new(
                         format!("recursive '$ref' cycle detected at {ref_str:?}"),
                         &ref_param,
                         oai_code::INVALID_REQUEST,
                     ));
                 }
-                let Some(target) = root.pointer(pointer) else {
-                    return Err(bad_request(
-                        format!("unresolved internal '$ref' {ref_str:?}"),
-                        &ref_param,
-                        oai_code::INVALID_REQUEST,
-                    ));
-                };
 
-                stack.push(pointer.to_string());
+                stack.push(ref_str.to_string());
                 let resolved = dereference_schema_refs_inner(
                     root,
                     target,
@@ -537,13 +609,22 @@ fn schema_child_context(parent: SchemaContext, key: &str) -> SchemaContext {
 /// ``path`` is the dotted accessor for whatever produced 400s name in
 /// ``param``. Array elements append ``[N]``; object members append
 /// ``.<key>``.
-#[allow(clippy::result_large_err)]
-fn walk_schema(v: &Value, path: &str, depth: usize) -> Result<(), Response> {
+///
+/// With ``refs_root``, every ``$ref`` must resolve inside it (see
+/// :func:`resolve_internal_ref`); refs are checked, not followed.
+fn walk_schema(v: &Value, path: &str, refs_root: Option<&Value>) -> Result<(), SchemaRejection> {
     let mut visited: usize = 0;
-    walk_schema_inner(v, path, depth, &mut visited, SchemaContext::Schema, 0)
+    walk_schema_inner(
+        v,
+        path,
+        0,
+        &mut visited,
+        SchemaContext::Schema,
+        0,
+        refs_root,
+    )
 }
 
-#[allow(clippy::result_large_err)]
 fn walk_schema_inner(
     v: &Value,
     path: &str,
@@ -551,24 +632,25 @@ fn walk_schema_inner(
     visited: &mut usize,
     context: SchemaContext,
     traversal_depth: usize,
-) -> Result<(), Response> {
+    refs_root: Option<&Value>,
+) -> Result<(), SchemaRejection> {
     *visited = visited.saturating_add(1);
     if *visited > MAX_SCHEMA_NODES {
-        return Err(bad_request(
+        return Err(SchemaRejection::new(
             format!("JSON Schema node count exceeds limit ({MAX_SCHEMA_NODES})"),
             path,
             oai_code::INVALID_REQUEST,
         ));
     }
     if traversal_depth > MAX_SCHEMA_TRAVERSAL_DEPTH {
-        return Err(bad_request(
+        return Err(SchemaRejection::new(
             format!("JSON Schema traversal depth exceeds limit ({MAX_SCHEMA_TRAVERSAL_DEPTH})"),
             path,
             oai_code::INVALID_REQUEST,
         ));
     }
     if depth > MAX_SCHEMA_DEPTH {
-        return Err(bad_request(
+        return Err(SchemaRejection::new(
             format!("JSON Schema depth exceeds limit ({MAX_SCHEMA_DEPTH})"),
             path,
             oai_code::INVALID_REQUEST,
@@ -586,8 +668,15 @@ fn walk_schema_inner(
                     if map.contains_key(kw) {
                         let param = format!("{path}.{kw}");
                         let message = format!("JSON Schema keyword '{kw}' is not supported");
-                        return Err(bad_request(message, &param, oai_code::UNSUPPORTED_FIELD));
+                        return Err(SchemaRejection::new(
+                            message,
+                            &param,
+                            oai_code::UNSUPPORTED_FIELD,
+                        ));
                     }
+                }
+                if let (Some(root), Some(ref_value)) = (refs_root, map.get("$ref")) {
+                    resolve_internal_ref(root, ref_value, &format!("{path}.$ref"))?;
                 }
             }
             for (k, child) in map {
@@ -605,6 +694,7 @@ fn walk_schema_inner(
                     visited,
                     child_context,
                     traversal_depth + 1,
+                    refs_root,
                 )?;
             }
         }
@@ -624,6 +714,7 @@ fn walk_schema_inner(
                     visited,
                     child_context,
                     traversal_depth + 1,
+                    refs_root,
                 )?;
             }
         }
@@ -662,6 +753,7 @@ fn is_schema_nesting_key(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers::test_support::schema_with_shared_definition;
     use axum::body::to_bytes;
     use serde_json::json;
 
@@ -830,9 +922,9 @@ mod tests {
     #[tokio::test]
     async fn test_dereference_schema_refs_rejects_raw_traversal_depth() {
         let schema = deeply_nested_unknown_value(MAX_SCHEMA_TRAVERSAL_DEPTH + 1);
-        let response = dereference_schema_refs(&schema, "grammar.json_schema")
+        let rejection = dereference_schema_refs(&schema, "grammar.json_schema")
             .expect_err("raw traversal depth should reject during dereference");
-        let body = err_body(response).await;
+        let body = err_body(rejection.into_response()).await;
 
         assert_eq!(body["error"]["code"], "invalid_request");
         assert!(body["error"]["message"]
@@ -843,9 +935,9 @@ mod tests {
     #[tokio::test]
     async fn test_walk_schema_rejects_raw_traversal_depth() {
         let schema = deeply_nested_unknown_value(MAX_SCHEMA_TRAVERSAL_DEPTH + 1);
-        let response = walk_schema(&schema, "grammar.json_schema", 0)
+        let rejection = walk_schema(&schema, "grammar.json_schema", None)
             .expect_err("raw traversal depth should reject during validation");
-        let body = err_body(response).await;
+        let body = err_body(rejection.into_response()).await;
 
         assert_eq!(body["error"]["code"], "invalid_request");
         assert!(body["error"]["message"]
@@ -1310,5 +1402,147 @@ mod tests {
             }
         });
         let _ = ok_or_panic(parse_grammar(&v));
+    }
+
+    const TOOL_PATH: &str = "tools[0].function.parameters";
+
+    fn tool_rejection(schema: &Value) -> SchemaRejection {
+        validate_tool_parameters(schema, TOOL_PATH)
+            .expect_err("expected the tool schema to be refused")
+    }
+
+    #[tokio::test]
+    async fn test_tool_parameters_accept_refs_that_expand_past_the_node_cap() {
+        let schema = schema_with_shared_definition(150, 40, 1);
+        assert!(serde_json::to_vec(&schema).unwrap().len() < MAX_GRAMMAR_BYTES);
+
+        validate_tool_parameters(&schema, TOOL_PATH).expect("tool schema should be accepted");
+
+        let body = err_or_panic(parse_grammar(&json!({"json_schema": schema}))).await;
+        assert_eq!(
+            body["error"]["message"],
+            format!("JSON Schema node count exceeds limit ({MAX_SCHEMA_NODES})")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_parameters_accept_refs_that_expand_past_the_byte_cap() {
+        let schema = schema_with_shared_definition(40, 2, 2000);
+        assert!(serde_json::to_vec(&schema).unwrap().len() < MAX_GRAMMAR_BYTES);
+
+        validate_tool_parameters(&schema, TOOL_PATH).expect("tool schema should be accepted");
+
+        let body = err_or_panic(parse_grammar(&json!({"json_schema": schema}))).await;
+        let message = body["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            message.starts_with("grammar payload ")
+                && message.ends_with(&format!("exceeds limit ({MAX_GRAMMAR_BYTES} bytes)")),
+            "message: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_parameters_accept_a_recursive_definition() {
+        let schema = json!({
+            "type": "object",
+            "$defs": {
+                "Node": {
+                    "type": "object",
+                    "properties": {"children": {"type": "array", "items": {"$ref": "#/$defs/Node"}}},
+                }
+            },
+            "properties": {"root": {"$ref": "#/$defs/Node"}},
+        });
+
+        validate_tool_parameters(&schema, TOOL_PATH).expect("tool schema should be accepted");
+
+        let body = err_or_panic(parse_grammar(&json!({"json_schema": schema}))).await;
+        assert!(body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("recursive '$ref' cycle detected")));
+    }
+
+    #[test]
+    fn test_tool_parameters_reject_an_unresolved_ref() {
+        let rejection = tool_rejection(&json!({
+            "type": "object",
+            "properties": {"a": {"$ref": "#/$defs/Missing"}},
+        }));
+        assert_eq!(
+            rejection.message,
+            "unresolved internal '$ref' \"#/$defs/Missing\""
+        );
+        assert_eq!(rejection.param, format!("{TOOL_PATH}.properties.a.$ref"));
+        assert_eq!(rejection.code, oai_code::INVALID_REQUEST);
+    }
+
+    #[test]
+    fn test_tool_parameters_reject_an_external_ref() {
+        let rejection = tool_rejection(&json!({
+            "type": "object",
+            "properties": {"a": {"$ref": "https://example.com/schema.json"}},
+        }));
+        assert_eq!(rejection.message, "external '$ref' is not supported");
+        assert_eq!(rejection.param, format!("{TOOL_PATH}.properties.a.$ref"));
+        assert_eq!(rejection.code, oai_code::UNSUPPORTED_FIELD);
+    }
+
+    #[test]
+    fn test_tool_parameters_reject_an_unsupported_keyword_inside_a_definition() {
+        let rejection = tool_rejection(&json!({
+            "type": "object",
+            "$defs": {"Shared": {"type": "object", "if": {"required": ["a"]}}},
+            "properties": {"a": {"$ref": "#/$defs/Shared"}},
+        }));
+        assert_eq!(
+            rejection.message,
+            "JSON Schema keyword 'if' is not supported"
+        );
+        assert_eq!(rejection.param, format!("{TOOL_PATH}.$defs.Shared.if"));
+        assert_eq!(rejection.code, oai_code::UNSUPPORTED_FIELD);
+    }
+
+    #[test]
+    fn test_tool_parameters_reject_an_oversized_schema() {
+        let schema = json!({"type": "object", "description": "d".repeat(MAX_GRAMMAR_BYTES)});
+        let size = serde_json::to_vec(&schema).unwrap().len();
+
+        let rejection = tool_rejection(&schema);
+        assert_eq!(
+            rejection.message,
+            format!("JSON Schema {size} bytes exceeds limit ({MAX_GRAMMAR_BYTES} bytes)")
+        );
+        assert_eq!(rejection.param, TOOL_PATH);
+    }
+
+    #[test]
+    fn test_tool_parameters_reject_a_deep_schema() {
+        let mut schema = json!({"type": "string"});
+        for _ in 0..=MAX_SCHEMA_DEPTH {
+            schema = json!({"type": "object", "properties": {"x": schema}});
+        }
+
+        let rejection = tool_rejection(&schema);
+        assert_eq!(
+            rejection.message,
+            format!("JSON Schema depth exceeds limit ({MAX_SCHEMA_DEPTH})")
+        );
+        assert!(
+            rejection.param.starts_with(TOOL_PATH),
+            "param: {}",
+            rejection.param
+        );
+    }
+
+    #[test]
+    fn test_tool_parameters_reject_too_many_nodes() {
+        let schema = json!({"type": "integer", "enum": vec![0; MAX_SCHEMA_NODES]});
+        assert!(serde_json::to_vec(&schema).unwrap().len() < MAX_GRAMMAR_BYTES);
+
+        let rejection = tool_rejection(&schema);
+        assert_eq!(
+            rejection.message,
+            format!("JSON Schema node count exceeds limit ({MAX_SCHEMA_NODES})")
+        );
     }
 }

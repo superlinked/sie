@@ -25,9 +25,7 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Any
 
-from fastapi import HTTPException
-
-from sie_server.api.generate import _parse_native_grammar
+from sie_server.api.generate import _tool_parameters_rejection
 
 SUPPORTED_ANTHROPIC_VERSION = "2023-06-01"
 MAX_TOOLS = 64
@@ -589,13 +587,9 @@ def _tools(body: dict[str, Any]) -> tuple[list[dict[str, Any]] | None, list[str]
             raise _required(f"{path}.input_schema")
         if not isinstance(schema, dict):
             raise _invalid(f"{path}.input_schema: Input should be a valid dictionary")
-        try:
-            _parse_native_grammar({"json_schema": schema})
-        except HTTPException:
-            raise _invalid(
-                f"{path}.input_schema: the schema uses an unsupported JSON Schema keyword (if, then, else, "
-                "$dynamicRef, unevaluatedProperties, dependentSchemas) or exceeds the size or depth limits"
-            ) from None
+        reason = _tool_parameters_rejection(schema, f"{path}.input_schema")
+        if reason is not None:
+            raise _invalid(reason)
         function["parameters"] = schema
         tools.append({"type": "function", "function": function})
         names.append(name)
