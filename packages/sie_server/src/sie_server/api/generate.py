@@ -393,7 +393,13 @@ def _json_pointer(root: Any, pointer: str) -> Any:
         token = raw_token.replace("~1", "/").replace("~0", "~")
         if isinstance(current, dict) and token in current:
             current = current[token]
-        elif isinstance(current, list) and token.isascii() and token.isdecimal():
+        elif (
+            isinstance(current, list)
+            and token.isascii()
+            and token.isdecimal()
+            # RFC 6901: an array index is "0" or has no leading zero, as the gateway's lookup requires.
+            and (len(token) == 1 or not token.startswith("0"))
+        ):
             try:
                 index = int(token)
             except ValueError as exc:
