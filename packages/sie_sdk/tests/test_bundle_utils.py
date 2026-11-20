@@ -99,3 +99,48 @@ def test_match_bundle_model_adapters_supports_in_memory_catalogs(tmp_path: Path)
 
     assert match_bundle_model_adapters(bundle_path, inventory) == ["org/lighton"]
     assert find_bundle_for_model_adapters(["org/lighton"], bundles_dir, inventory) == "transformers5"
+
+
+def test_find_bundle_requires_every_requested_route(tmp_path: Path) -> None:
+    (tmp_path / "sglang.yaml").write_text("adapters:\n  - pkg.adapters.sglang\n")
+    inventory = {
+        "org/known": ({"pkg.adapters.sglang"}, None),
+        "org/unresolved": (set(), None),
+    }
+
+    for missing in ("org/unknown", "org/known:unknown", "org/unresolved"):
+        for names in (["org/known", missing], [missing, "org/known"]):
+            assert find_bundle_for_model_adapters(names, tmp_path, inventory) is None
+            assert find_bundle_for_model_adapters(names, tmp_path, inventory, pool_name="default") is None
+
+
+def test_find_bundle_keeps_known_pool_exclusions(tmp_path: Path) -> None:
+    (tmp_path / "sglang.yaml").write_text("adapters:\n  - pkg.adapters.sglang\n")
+    inventory = {
+        "org/known": ({"pkg.adapters.sglang"}, "generation"),
+        "org/other": ({"pkg.adapters.other"}, "embedding"),
+    }
+
+    assert (
+        find_bundle_for_model_adapters(["org/known", "org/other"], tmp_path, inventory, pool_name=" GENERATION ")
+        == "sglang"
+    )
+    assert (
+        find_bundle_for_model_adapters(["org/known", "org/unknown"], tmp_path, inventory, pool_name="generation")
+        is None
+    )
+
+
+def test_find_bundle_rejects_bare_route_without_default_in_mixed_request(tmp_path: Path) -> None:
+    bundles_dir = tmp_path / "bundles"
+    bundles_dir.mkdir()
+    (bundles_dir / "sglang.yaml").write_text("adapters:\n  - pkg.adapters.sglang\n")
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    _write_model(models_dir, "org/known")
+    (models_dir / "org__profile-only.yaml").write_text(
+        "sie_id: org/profile-only\nprofiles:\n  fast:\n    adapter_path: pkg.adapters.sglang:Adapter\n"
+    )
+
+    assert find_bundle_for_models(["org/known", "org/profile-only"], bundles_dir, models_dir) is None
+    assert find_bundle_for_models(["org/known", "org/profile-only:fast"], bundles_dir, models_dir) == "sglang"
