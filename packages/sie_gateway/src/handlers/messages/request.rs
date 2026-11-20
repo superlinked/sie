@@ -10,7 +10,7 @@
 use serde_json::{json, Map, Value};
 
 use super::error::MessagesError;
-use crate::handlers::grammar::{parse_grammar, GrammarParseResult};
+use crate::handlers::grammar::validate_tool_parameters;
 
 pub(crate) const SUPPORTED_ANTHROPIC_VERSION: &str = "2023-06-01";
 pub(crate) const MAX_TOOLS: usize = 64;
@@ -571,10 +571,9 @@ fn tools(body: &Map<String, Value>) -> Result<(Option<Vec<Value>>, Vec<String>),
                 )))
             }
         };
-        if let GrammarParseResult::Err(_) = parse_grammar(&json!({"json_schema": schema})) {
-            return Err(invalid(format!(
-                "{path}.input_schema: the schema uses an unsupported JSON Schema keyword (if, then, else, $dynamicRef, unevaluatedProperties, dependentSchemas) or exceeds the size or depth limits"
-            )));
+        let schema_path = format!("{path}.input_schema");
+        if let Err(rejection) = validate_tool_parameters(schema, &schema_path) {
+            return Err(invalid(format!("{schema_path}: {}", rejection.message)));
         }
         function.insert("parameters".into(), schema.clone());
         tools.push(json!({"type": "function", "function": Value::Object(function)}));

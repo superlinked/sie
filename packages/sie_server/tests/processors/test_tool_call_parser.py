@@ -991,6 +991,17 @@ def test_self_referencing_schema_does_not_loop() -> None:
     assert _parse_xml_tool_call("<function=f><parameter=v>\n1\n</parameter></function>", schemas) == ("f", {"v": "1"})
 
 
+@pytest.mark.parametrize("combinator", ["anyOf", "allOf"])
+def test_shared_definitions_under_combinators_are_inferred_once(combinator: str) -> None:
+    """Each definition names the next twice, so a walk without memoization visits 2**25 paths."""
+    definitions = {f"D{i}": {combinator: [{"$ref": f"#/$defs/D{i + 1}"}] * 2} for i in range(25)}
+    definitions["D25"] = {"type": "integer"}
+    schemas = {"f": {"$defs": definitions, "properties": {"v": {"$ref": "#/$defs/D0"}}}}
+
+    call = "<function=f><parameter=v>\n7\n</parameter></function>"
+    assert tool_call_parser._parse_xml_tool_call(call, schemas) == ("f", {"v": 7})
+
+
 @pytest.mark.asyncio
 async def test_non_streaming_candidates_keep_a_malformed_block_as_text() -> None:
     import json

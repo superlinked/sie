@@ -92,6 +92,24 @@ def test_a_rejected_request_vector_is_refused_with_its_wording(case: dict[str, A
     assert refused.value.message == case["message"]
 
 
+def _shared_definition_schema() -> dict[str, Any]:
+    """150 properties that ``$ref`` one 40-field definition: small as sent, past the node cap once expanded."""
+    fields = {f"f{index}": {"type": "string", "description": "d"} for index in range(40)}
+    return {
+        "type": "object",
+        "$defs": {"Shared": {"type": "object", "properties": fields}},
+        "properties": {f"p{index}": {"$ref": "#/$defs/Shared"} for index in range(150)},
+    }
+
+
+def test_a_tool_schema_is_not_expanded_against_the_grammar_caps() -> None:
+    schema = _shared_definition_schema()
+    body = {"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": "x"}]}
+
+    translation = messages_to_chat({**body, "tools": [{"name": "t", "input_schema": schema}]}, None)
+    assert translation.chat["tools"][0]["function"]["parameters"] == schema
+
+
 @pytest.mark.parametrize("case", _vectors("claude_code_requests.json")["cases"], ids=lambda case: case["name"])
 def test_a_captured_claude_code_request_translates_or_fails_with_the_recovery_wording(case: dict[str, Any]) -> None:
     expect = case["expect"]

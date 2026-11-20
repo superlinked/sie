@@ -6508,7 +6508,7 @@ struct ChatRequestParams {
     /// request omitted the field. Each entry is
     /// ``{type: "function", function: {name, description?, parameters?}}``
     /// with the ``function.parameters`` (when present) already
-    /// run through the JSON-Schema safety walker.
+    /// checked by :func:`grammar::validate_tool_parameters`.
     tools: Option<Vec<serde_json::Value>>,
     /// OpenAI ``tool_choice``: one of the literal strings ``"auto"`` /
     /// ``"none"`` / ``"required"`` or
@@ -6757,8 +6757,9 @@ fn decode_video_data_uri(value: &serde_json::Value) -> Result<(String, String), 
 ///   ``json_object`` (loose JSON) translates to a built-in generic
 ///   schema (``{"type": "object", ...}``).
 /// * ``tools`` / ``tool_choice`` / ``parallel_tool_calls`` — validated and
-///   forwarded; ``function.parameters`` is run through the JSON-Schema
-///   safety walker (see the `ChatRequestParams` field docs above).
+///   forwarded; ``function.parameters`` is checked by
+///   :func:`grammar::validate_tool_parameters` (see the `ChatRequestParams`
+///   field docs above).
 /// * ``logprobs`` / ``top_logprobs`` — validated and forwarded; the worker
 ///   emits per-token log-probabilities via SGLang ``return_logprob`` and
 ///   the gateway plumbs them onto each chunk / the aggregate body.
@@ -8048,10 +8049,11 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
 ///   description?: string, parameters?: object}}``.
 /// * ``function.name`` must match the OpenAI pattern
 ///   ``^[a-zA-Z0-9_-]{1,64}$``.
-/// * ``function.parameters`` (when present) is run through the shared
-///   JSON-Schema safety walker so the same depth / size / unsupported-
-///   keyword caps that apply to ``response_format.json_schema`` also
-///   apply here.
+/// * ``function.parameters`` (when present) is checked as sent by
+///   :func:`grammar::validate_tool_parameters`: the same size, depth,
+///   node and unsupported-keyword caps as ``response_format.json_schema``,
+///   but without ``$ref`` expansion, since tool schemas are never
+///   compiled into a grammar.
 ///
 /// Returns the original `Vec<Value>` (one entry per tool) on success
 /// so the caller can plumb it verbatim through the wire envelope —
@@ -8154,22 +8156,13 @@ fn validate_chat_tools(v: &serde_json::Value) -> Result<Vec<serde_json::Value>, 
         }
         if let Some(params) = func.get("parameters") {
             if !params.is_null() {
-                // Re-use the same JSON-Schema safety walker that
-                // ``response_format.json_schema`` runs. We wrap the
-                // schema in the ``{json_schema: <schema>}`` envelope
-                // ``parse_grammar`` expects.
-                let wrapped = serde_json::json!({"json_schema": params});
-                match super::grammar::parse_grammar(&wrapped) {
-                    super::grammar::GrammarParseResult::Ok(_) => {}
-                    super::grammar::GrammarParseResult::Err(_) => {
-                        return Err(bad(
-                            format!(
-                                "tools[{i}].function.parameters failed JSON-Schema safety caps"
-                            ),
-                            &format!("tools[{i}].function.parameters"),
-                            oai_code::INVALID_REQUEST,
-                        ));
-                    }
+                let path = format!("tools[{i}].function.parameters");
+                if let Err(rejection) = super::grammar::validate_tool_parameters(params, &path) {
+                    return Err(bad(
+                        format!("{path}: {}", rejection.message),
+                        &rejection.param,
+                        rejection.code,
+                    ));
                 }
             }
         }
@@ -27043,8 +27036,8 @@ mod tests {
     }
 
     /// ``tools[].function.parameters`` runs through the JSON-Schema
-    /// safety walker — a schema with ``$ref`` is rejected with a 400
-    /// keyed on the offending tool index.
+    /// safety walker — an unresolved ``$ref`` is rejected with a 400
+    /// that names the reason and the offending path.
     #[tokio::test]
     async fn test_chat_params_from_json_rejects_invalid_tool_schema() {
         let mut body = _chat_body_min("m");
@@ -27060,10 +27053,31 @@ mod tests {
         }]);
         let v = _expect_chat_err(body).await;
         assert_eq!(v["error"]["code"], "invalid_request");
-        let param = v["error"]["param"].as_str().unwrap_or("");
-        assert!(
-            param.starts_with("tools[0].function.parameters"),
-            "expected param path under tools[0].function.parameters, got {param}"
+        assert_eq!(
+            v["error"]["message"],
+            "tools[0].function.parameters: unresolved internal '$ref' \"#/$defs/Foo\""
+        );
+        assert_eq!(
+            v["error"]["param"],
+            "tools[0].function.parameters.properties.x.$ref"
+        );
+    }
+
+    /// Tool parameters are not compiled into a grammar, so a schema whose
+    /// ``$ref`` expansion would exceed the grammar caps is accepted as long
+    /// as the schema as sent is within them.
+    #[test]
+    fn test_chat_params_from_json_accepts_tool_schema_with_large_ref_expansion() {
+        let parameters = crate::handlers::test_support::schema_with_shared_definition(150, 40, 1);
+        let mut body = _chat_body_min("m");
+        body["tools"] = serde_json::json!([{
+            "type": "function",
+            "function": {"name": "f", "parameters": parameters},
+        }]);
+        let p = _expect_chat_ok(body);
+        assert_eq!(
+            p.tools.as_ref().unwrap()[0]["function"]["parameters"],
+            parameters
         );
     }
 
@@ -27492,7 +27506,7 @@ mod tests {
         assert_eq!(v["error"]["param"], "response_format.type");
     }
 
-    /// The shared safety walker applies to the chat translator too, after
+    /// The grammar safety walker applies to the chat translator too, after
     /// internal ``$ref`` entries inside ``json_schema.schema`` are inlined.
     #[test]
     fn test_chat_params_from_json_response_format_dereferences_dollar_ref() {

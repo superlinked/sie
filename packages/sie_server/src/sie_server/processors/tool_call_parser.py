@@ -196,11 +196,28 @@ def _enum_type(values: list[object]) -> str:
     return kinds.pop() if len(kinds) == 1 else "string"
 
 
-def _schema_type(schema: Any, root: Mapping[str, Any], depth: int = 0) -> str | None:
-    """Infer one conversion type from a parameter schema, as SGLang's ``infer_type_from_json_schema`` does."""
+def _schema_type(
+    schema: Any, root: Mapping[str, Any], depth: int = 0, seen: dict[int, str | None] | None = None
+) -> str | None:
+    """Infer one conversion type from a parameter schema, as SGLang's ``infer_type_from_json_schema`` does.
+
+    ``seen`` holds each resolved schema's result for one inference. A ``$ref`` lets many variants name one
+    definition, so without it a chain of combinators over shared definitions is walked once per path,
+    exponentially in its depth. A schema reached again while it is still being inferred infers nothing.
+    """
+    seen = {} if seen is None else seen
     schema = _resolve_ref(schema, root)
     if not isinstance(schema, Mapping) or depth > _MAX_SCHEMA_DEPTH:
         return None
+    if id(schema) not in seen:
+        seen[id(schema)] = None
+        seen[id(schema)] = _infer_schema_type(schema, root, depth, seen)
+    return seen[id(schema)]
+
+
+def _infer_schema_type(
+    schema: Mapping[str, Any], root: Mapping[str, Any], depth: int, seen: dict[int, str | None]
+) -> str | None:
     declared = schema.get("type")
     if isinstance(declared, str):
         return declared.strip().lower()
@@ -209,7 +226,7 @@ def _schema_type(schema: Any, root: Mapping[str, Any], depth: int = 0) -> str | 
         return non_null[0].strip().lower() if non_null else "string"
     variants = schema.get("anyOf") or schema.get("oneOf")
     if isinstance(variants, list):
-        kinds = [kind for kind in (_schema_type(variant, root, depth + 1) for variant in variants) if kind]
+        kinds = [kind for kind in (_schema_type(variant, root, depth + 1, seen) for variant in variants) if kind]
         if kinds:
             distinct = set(kinds)
             if len(distinct) == 1:
@@ -223,7 +240,7 @@ def _schema_type(schema: Any, root: Mapping[str, Any], depth: int = 0) -> str | 
     all_of = schema.get("allOf")
     if isinstance(all_of, list):
         for variant in all_of:
-            kind = _schema_type(variant, root, depth + 1)
+            kind = _schema_type(variant, root, depth + 1, seen)
             if kind and kind != "string":
                 return kind
         return "string"
@@ -234,10 +251,21 @@ def _schema_type(schema: Any, root: Mapping[str, Any], depth: int = 0) -> str | 
     return None
 
 
-def _schema_allows_null(schema: Any, root: Mapping[str, Any], depth: int = 0) -> bool:
+def _schema_allows_null(
+    schema: Any, root: Mapping[str, Any], depth: int = 0, seen: dict[int, bool] | None = None
+) -> bool:
+    """Whether a parameter schema admits ``null``; ``seen`` memoizes as in :func:`_schema_type`."""
+    seen = {} if seen is None else seen
     schema = _resolve_ref(schema, root)
     if not isinstance(schema, Mapping) or depth > _MAX_SCHEMA_DEPTH:
         return False
+    if id(schema) not in seen:
+        seen[id(schema)] = False
+        seen[id(schema)] = _schema_admits_null(schema, root, depth, seen)
+    return seen[id(schema)]
+
+
+def _schema_admits_null(schema: Mapping[str, Any], root: Mapping[str, Any], depth: int, seen: dict[int, bool]) -> bool:
     declared = schema.get("type")
     if schema.get("nullable") is True or declared == "null" or (isinstance(declared, list) and "null" in declared):
         return True
@@ -245,7 +273,7 @@ def _schema_allows_null(schema: Any, root: Mapping[str, Any], depth: int = 0) ->
     if isinstance(enum, list) and None in enum:
         return True
     return any(
-        isinstance(variants, list) and any(_schema_allows_null(variant, root, depth + 1) for variant in variants)
+        isinstance(variants, list) and any(_schema_allows_null(variant, root, depth + 1, seen) for variant in variants)
         for variants in (schema.get("anyOf"), schema.get("oneOf"))
     )
 
