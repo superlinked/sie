@@ -12866,6 +12866,7 @@ fn validate_queue_item_shapes(
             if !matches!(query, rmpv::Value::Map(_)) {
                 return Err("'query' must be an object".to_string().into());
             }
+            validate_item_text(query, "query")?;
         }
     }
 
@@ -12883,9 +12884,30 @@ fn validate_queue_item_shapes(
         }
         if endpoint == "extract" {
             validate_extract_item(item, index)?;
+        } else {
+            validate_item_text(item, &format!("items[{index}]"))?;
         }
     }
 
+    Ok(())
+}
+
+/// Item fields that carry content. A body without `items` (or the `input` /
+/// `inputs` aliases) is read as a single item only when it has one of these;
+/// otherwise there is nothing to run and the request is refused at ingress.
+const ITEM_CONTENT_FIELDS: [&str; 5] = ["text", "images", "audio", "video", "document"];
+
+const MISSING_ITEMS_MESSAGE: &str = "field 'items' is required";
+
+/// `Item.text` is `str | None` in the worker contract; any other type would
+/// only fail inside the adapter.
+fn validate_item_text(item: &rmpv::Value, path: &str) -> Result<(), String> {
+    let Some(fields) = item.as_map() else {
+        return Ok(());
+    };
+    if rmpv_map_get(fields, "text").is_some_and(|v| !v.is_nil() && v.as_str().is_none()) {
+        return Err(format!("{path}.text must be a string or null"));
+    }
     Ok(())
 }
 
@@ -13045,8 +13067,13 @@ fn parse_queue_request_json(
                 serde_json::Value::Array(arr) => arr,
                 _ => return Err("'inputs' must be an array".to_string().into()),
             }
-        } else {
+        } else if map
+            .keys()
+            .any(|key| ITEM_CONTENT_FIELDS.contains(&key.as_str()))
+        {
             vec![parsed]
+        } else {
+            return Err(MISSING_ITEMS_MESSAGE.to_string().into());
         }
     } else {
         vec![parsed]
@@ -13109,6 +13136,12 @@ fn parse_queue_request_msgpack(
             rmpv::Value::Array(arr) => arr,
             _ => return Err("'inputs' must be an array".to_string().into()),
         }
+    } else if !map.iter().any(|(key, _)| {
+        ITEM_CONTENT_FIELDS
+            .iter()
+            .any(|field| rmpv_key_eq(key, field))
+    }) {
+        return Err(MISSING_ITEMS_MESSAGE.to_string().into());
     } else {
         // No recognised items key — treat the remaining map as a
         // single item. Rebuild the map value (the original was
@@ -25185,6 +25218,105 @@ mod tests {
                 assert!(s.contains("msgpack map"), "unexpected error: {s}")
             }
             QueueParseError::PreBuilt(_) => panic!("expected generic error"),
+        }
+    }
+
+    /// Parse `body` as JSON and as msgpack and return each generic error.
+    fn queue_parse_errors(body: &serde_json::Value, endpoint: &str) -> [String; 2] {
+        let json_body = serde_json::to_vec(body).unwrap();
+        let msgpack_body = rmp_serde::to_vec(body).unwrap();
+        [(json_body, false), (msgpack_body, true)].map(|(bytes, is_msgpack)| {
+            match parse_queue_request(&bytes, is_msgpack, endpoint) {
+                Err(QueueParseError::Generic(message)) => message,
+                Err(QueueParseError::PreBuilt(_)) => panic!("expected a generic error"),
+                Ok(_) => panic!("{endpoint} body {body} (msgpack={is_msgpack}) was accepted"),
+            }
+        })
+    }
+
+    /// A body without `items` and without any item content used to be read
+    /// as one empty item, dispatched, and failed in the worker with a 500.
+    #[test]
+    fn test_parse_queue_request_requires_items_without_item_content() {
+        for endpoint in ["encode", "extract"] {
+            for body in [
+                json!({"params": {"output_types": ["dense"]}}),
+                json!({}),
+                json!({"id": "a", "metadata": {"k": "v"}}),
+            ] {
+                for message in queue_parse_errors(&body, endpoint) {
+                    assert_eq!(message, "field 'items' is required", "{endpoint} {body}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_missing_items_is_a_400_invalid_request() {
+        let body = serde_json::to_vec(&json!({"params": {"output_types": ["dense"]}})).unwrap();
+        let error = parse_queue_request(&body, false, "encode").unwrap_err();
+        let response = queue_parse_error_response("encode", error);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["detail"]["code"], err_code::INVALID_REQUEST);
+        assert_eq!(
+            body["detail"]["message"],
+            "Failed to parse request body: field 'items' is required"
+        );
+    }
+
+    /// The body-as-one-item form stays accepted when the body carries item
+    /// content, including media-only items.
+    #[test]
+    fn test_parse_queue_request_keeps_single_item_body() {
+        let text = json!({"text": "hello", "params": {"output_types": ["dense"]}});
+        let image = json!({"images": [{"data": "aGVsbG8=", "format": "png"}]});
+        for body in [text, image] {
+            let json_body = serde_json::to_vec(&body).unwrap();
+            let (items, _) = parse_queue_request(&json_body, false, "encode").unwrap();
+            assert_eq!(items.len(), 1, "{body}");
+            let msgpack_body = rmp_serde::to_vec(&body).unwrap();
+            let (items, _) = parse_queue_request(&msgpack_body, true, "encode").unwrap();
+            assert_eq!(items.len(), 1, "{body}");
+        }
+    }
+
+    #[test]
+    fn test_parse_queue_request_rejects_non_string_item_text() {
+        for text in [json!(5), json!(true), json!(["a"]), json!({"t": "a"})] {
+            let encode = json!({"items": [{"text": "ok"}, {"text": text}]});
+            for message in queue_parse_errors(&encode, "encode") {
+                assert_eq!(message, "items[1].text must be a string or null");
+            }
+            let score = json!({"query": {"text": "q"}, "items": [{"text": text}]});
+            for message in queue_parse_errors(&score, "score") {
+                assert_eq!(message, "items[0].text must be a string or null");
+            }
+            let query = json!({"query": {"text": text}, "items": [{"text": "a"}]});
+            for message in queue_parse_errors(&query, "score") {
+                assert_eq!(message, "query.text must be a string or null");
+            }
+        }
+    }
+
+    /// String, null and absent `text` (media-only items) keep passing.
+    #[test]
+    fn test_parse_queue_request_accepts_string_null_or_absent_item_text() {
+        let encode = json!({"items": [
+            {"text": "a"},
+            {"text": null},
+            {"images": [{"data": "aGVsbG8=", "format": "png"}]},
+            {"text": "caption", "images": [{"data": "aGVsbG8="}]},
+        ]});
+        let score = json!({"query": {"text": null, "images": [{"data": "aGVsbG8="}]}, "items": [{"text": "a"}, {"text": null}]});
+        for (body, endpoint) in [(encode, "encode"), (score, "score")] {
+            let json_body = serde_json::to_vec(&body).unwrap();
+            parse_queue_request(&json_body, false, endpoint).unwrap();
+            let msgpack_body = rmp_serde::to_vec(&body).unwrap();
+            parse_queue_request(&msgpack_body, true, endpoint).unwrap();
         }
     }
 
