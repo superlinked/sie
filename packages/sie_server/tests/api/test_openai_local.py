@@ -123,6 +123,7 @@ def _cuda_chat_client(
         inputs=SimpleNamespace(video=video, image=image),
         profiles={},
         routing=None,
+        reasoning_effort_for=lambda _profile="default": None,
     )
     registry = MagicMock()
     registry.device = "cuda:0"
@@ -179,6 +180,7 @@ def _mlx_chat_client(
         inputs=SimpleNamespace(video=False, image=image),
         profiles={},
         routing=None,
+        reasoning_effort_for=lambda _profile="default": None,
     )
     registry = MagicMock()
     registry.device = "mps"

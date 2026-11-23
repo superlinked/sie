@@ -541,7 +541,7 @@
     },
     "ReasoningEffortDeclaration": {
       "additionalProperties": false,
-      "description": "The ``reasoning_effort`` values a generation profile accepts, and what each does.\n\n``default`` names the value the profile already runs at when a request\nnames none, or is ``None`` when that is not one of the declared values. It\nis reported on ``/v1/models`` and never applied, so a request without the\nfield renders and calls its upstream exactly as before.",
+      "description": "The ``reasoning_effort`` values a generation profile accepts, and what each does.\n\n``default`` names the value the profile already runs at when a request\nnames none, or is ``None`` when that is not one of the declared values. It\nis reported on ``/v1/models`` and never applied, so a request without the\nfield renders and calls its upstream exactly as before.\n\n``grammar`` names the value a grammar-constrained chat request runs at\nwhen it names none, for an upstream that does not answer such a request at\nits own default. A request that names a value runs at that value. ``None``\nleaves grammar-constrained requests to the rules above.",
       "properties": {
         "default": {
           "anyOf": [
@@ -563,6 +563,27 @@
           ],
           "default": null,
           "title": "Default"
+        },
+        "grammar": {
+          "anyOf": [
+            {
+              "enum": [
+                "none",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Grammar"
         },
         "values": {
           "additionalProperties": {

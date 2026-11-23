@@ -154,6 +154,29 @@ def test_release_cuda13_smoke_uses_qualified_driverless_checks(bundle, monkeypat
     assert commands[1][-6:] == [image, "resolve-deps", "--bundle", bundle, "--models-dir", "/app/models"]
 
 
+@pytest.mark.parametrize("bundle", ["sglang", "sglang-embedding", "sglang-vision-extract"])
+def test_cuda12_sglang_smoke_checks_the_prebuilt_flashinfer_modules(bundle, monkeypatch):
+    commands = []
+    monkeypatch.setattr(docker_task, "run", commands.append)
+
+    docker_task.smoke_image(IMAGE, bundle=bundle, platform="cuda12")
+
+    assert commands[0][-1] == (
+        "import sie_server, sie_sdk, sie_audio_prep, torch, transformers; import sglang; "
+        + docker_task._FLASHINFER_JIT_CACHE_CHECK
+        + "print('release image imports passed')"
+    )
+
+
+def test_cpu_sglang_smoke_does_not_expect_gpu_kernel_caches(monkeypatch):
+    commands = []
+    monkeypatch.setattr(docker_task, "run", commands.append)
+
+    docker_task.smoke_image(IMAGE, bundle="sglang", platform="cpu")
+
+    assert "flashinfer_jit_cache" not in commands[0][-1]
+
+
 @pytest.mark.parametrize(
     ("bundle", "extra_import"),
     [

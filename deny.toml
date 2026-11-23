@@ -27,6 +27,14 @@ ignore = [
     # tokenizers 0.23 -> macro_rules_attribute. Drop when tokenizers ships a
     # release off macro_rules_attribute/paste.
     { id = "RUSTSEC-2024-0436", reason = "paste unmaintained (archived, no vuln); transitive via tokenizers 0.23 macro_rules_attribute; awaiting upstream bump" },
+    # `chrono` is unmaintained (no vulnerability), and `humantime` is flagged
+    # unmaintained with it. Both come in only transitively via object_store
+    # 0.14 (the `cloud-storage` feature of sie-gateway and sie-server-sidecar),
+    # which requires them in every 0.14.x release; chrono is part of its public
+    # API. Drop both when object_store ships a release without chrono and
+    # humantime.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained (no vuln); transitive via object_store 0.14 (required dependency); awaiting upstream migration" },
+    { id = "RUSTSEC-2026-0542", reason = "humantime unmaintained alongside chrono (no vuln); transitive via object_store 0.14 (required dependency); awaiting upstream migration" },
 ]
 
 [licenses]

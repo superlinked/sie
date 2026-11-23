@@ -11,7 +11,7 @@
     "root_versions_sha256": "baaee3f4ed167d22897e99edc787077a74b2ce56dbbf986ebc4e1a80bdde6f24"
   },
   "lock_sha256": "326af35075dac1d4598257f9b485ec0710888909d09683b35fcd2afffabcf2bb",
-  "policy_sha256": "d64e8e1cf9c2341810e07b556520974b73f5ccd3d09721efb3b6b107d2473d0f",
+  "policy_sha256": "63f7cb65d9bcfc5ce9d06397da86a90d8d50e05db0eb367824d599eba0459590",
   "root_exclude_newer": "2026-11-06T20:00:00Z",
   "schema_version": 1,
   "source_pins_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",

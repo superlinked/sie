@@ -11,14 +11,14 @@
     "unsafe-best-match"
   ],
   "inputs": {
-    "requirements_sha256": "378dabe9b77bc2c593a05e1113534e8f50093ca205d3344a7ba2e20fe660e38a",
+    "requirements_sha256": "0db0ae5aea7cb739be3c1711b6fd219fe5e654283a3b0b7043e29733a8edb6d7",
     "root_versions_sha256": "baaee3f4ed167d22897e99edc787077a74b2ce56dbbf986ebc4e1a80bdde6f24"
   },
-  "lock_sha256": "176e49681671029c1ad5d91cca3635a979fe9d38241397c9d31aaf259062e8f1",
-  "policy_sha256": "d64e8e1cf9c2341810e07b556520974b73f5ccd3d09721efb3b6b107d2473d0f",
+  "lock_sha256": "c792a5ec633f306dbca60e3cd53379282aae84ef021960e5aaf101b856503719",
+  "policy_sha256": "63f7cb65d9bcfc5ce9d06397da86a90d8d50e05db0eb367824d599eba0459590",
   "root_exclude_newer": "2026-11-06T20:00:00Z",
   "schema_version": 1,
-  "source_pins_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+  "source_pins_sha256": "4042e4637edf1c70def38d3f0ccccb56d13aa9f64e6d7a7e3efeec6dc32c5727",
   "target": {
     "architecture": "amd64",
     "bundle": "sglang-embedding",

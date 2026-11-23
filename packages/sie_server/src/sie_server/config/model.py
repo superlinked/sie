@@ -21,6 +21,11 @@ from pydantic import (
 
 from sie_server.config.device_groups import validate_tensor_parallel_size
 from sie_server.config.engine import ComputePrecision
+from sie_server.config.grammar_profiles import (
+    grammar_serving_profile,
+    model_grammar_profile,
+    profile_is_grammar_compatible,
+)
 from sie_server.config.package_artifacts import (
     PackageArtifactDeclaration,
     has_package_artifact_declaration,
@@ -139,11 +144,17 @@ class ReasoningEffortDeclaration(BaseModel):
     names none, or is ``None`` when that is not one of the declared values. It
     is reported on ``/v1/models`` and never applied, so a request without the
     field renders and calls its upstream exactly as before.
+
+    ``grammar`` names the value a grammar-constrained chat request runs at
+    when it names none, for an upstream that does not answer such a request at
+    its own default. A request that names a value runs at that value. ``None``
+    leaves grammar-constrained requests to the rules above.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     default: ReasoningEffortValue | None = None
+    grammar: ReasoningEffortValue | None = None
     values: dict[ReasoningEffortValue, ReasoningEffortLevel]
 
     @model_validator(mode="after")
@@ -152,6 +163,8 @@ class ReasoningEffortDeclaration(BaseModel):
             raise ValueError("reasoning_effort.values must name at least one value")
         if self.default is not None and self.default not in self.values:
             raise ValueError(f"reasoning_effort.default '{self.default}' is not one of its values")
+        if self.grammar is not None and self.grammar not in self.values:
+            raise ValueError(f"reasoning_effort.grammar '{self.grammar}' is not one of its values")
         return self
 
     @property
@@ -1149,6 +1162,16 @@ class ModelConfig(BaseModel):
             raise ValueError(msg)
         return self
 
+    def _grammar_target(self, name: str) -> str | None:
+        grammar_profile = model_grammar_profile(self)
+        if name == "default":
+            if grammar_profile is None or profile_is_grammar_compatible(self, name, grammar_profile):
+                return None
+            return grammar_profile
+        if is_remote_adapter_path(self._declared_adapter_path(name)):
+            return None
+        return grammar_serving_profile(self, name)
+
     def _declared_adapter_path(self, name: str) -> str | None:
         profile = self.profiles[name]
         if profile.adapter_path is not None or profile.extends is None:
@@ -1182,6 +1205,20 @@ class ModelConfig(BaseModel):
                 if not remote and level.upstream is not None:
                     msg = f"Profile '{name}' is local, so its reasoning_effort value '{value}' cannot name an upstream value"
                     raise ValueError(msg)
+        for source in self.profiles:
+            target = self._grammar_target(source)
+            if target is None or target == source or target not in self.profiles:
+                continue
+            source_declaration = self.reasoning_effort_for(source)
+            target_declaration = self.reasoning_effort_for(target)
+            source_grammar = source_declaration.grammar if source_declaration is not None else None
+            target_grammar = target_declaration.grammar if target_declaration is not None else None
+            if source_grammar != target_grammar:
+                msg = (
+                    f"Profile '{target}' serves grammar requests for '{source}', so they must declare the same "
+                    f"reasoning_effort grammar value, got {source_grammar!r} and {target_grammar!r}"
+                )
+                raise ValueError(msg)
         routing = self.routing
         if routing is not None and routing.fallback_profile is not None and "default" in self.profiles:
             local = self.reasoning_effort_for("default")
@@ -1200,6 +1237,14 @@ class ModelConfig(BaseModel):
                 msg = (
                     f"Profiles 'default' and '{routing.fallback_profile}' serve one route, so they must declare "
                     f"the same reasoning_effort default, got {local_default!r} and {remote_default!r}"
+                )
+                raise ValueError(msg)
+            local_grammar = local.grammar if local is not None else None
+            remote_grammar = remote.grammar if remote is not None else None
+            if local_grammar != remote_grammar:
+                msg = (
+                    f"Profiles 'default' and '{routing.fallback_profile}' serve one route, so they must declare "
+                    f"the same reasoning_effort grammar value, got {local_grammar!r} and {remote_grammar!r}"
                 )
                 raise ValueError(msg)
         return self

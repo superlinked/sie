@@ -2919,6 +2919,10 @@ pub struct ModelReasoningWire {
     /// The value the model runs at when a request names none; ``null`` when
     /// that is not one of the accepted values.
     pub default_effort: Option<String>,
+    /// The value a grammar-constrained request (a ``response_format`` other
+    /// than ``text``, or a ``grammar``) runs at when it names none; ``null``
+    /// when such a request follows ``default_effort``.
+    pub grammar_effort: Option<String>,
     /// The hard reasoning-token ceiling of each value that has one. Other
     /// values only instruct the model.
     pub budget_tokens: std::collections::HashMap<String, u32>,

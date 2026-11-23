@@ -27,6 +27,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -113,10 +114,13 @@ _KERNEL_CACHE_DIRS = {
     "FLASHINFER_WORKSPACE_BASE": "flashinfer",
     "SGLANG_CACHE_DIR": "sglang",
     "SGLANG_DG_CACHE_DIR": "deep-gemm",
+    "SGLANG_JIT_CACHE_DIR": "sglang/jit",
     "TORCHINDUCTOR_CACHE_DIR": "torchinductor",
     "TRITON_CACHE_DIR": "triton",
+    "TVM_FFI_CACHE_DIR": "tvm-ffi",
     "XDG_CACHE_HOME": "xdg",
 }
+_KERNEL_CACHE_READ_WORKERS = 8
 
 
 def _installed_jit_abi_key() -> str:
@@ -166,6 +170,56 @@ def _gpu_cache_key(device_indices: Sequence[int]) -> str | None:
     return f"gpu-{device_digest}"
 
 
+def _ninja_log_floor_ns(log: Path) -> int | None:
+    """Return the oldest output mtime a ninja build log recorded, in nanoseconds."""
+    floor = None
+    for line in log.read_text(errors="replace").splitlines():
+        fields = line.split("\t")
+        # Every ninja log version since v5 writes: start, end, mtime, output, command hash.
+        if line.startswith("#") or len(fields) != 5 or not fields[2].isdigit():
+            continue
+        mtime = int(fields[2])
+        if mtime > 0 and (floor is None or mtime < floor):
+            floor = mtime
+    return floor
+
+
+def _settle_ninja_mtimes(namespace: Path) -> int:
+    """Give every file of each kept ninja build the oldest mtime its log recorded.
+
+    A shared volume or a copy does not keep the relative mtimes of a build's
+    files. Ninja rebuilds an output that is older than one of its inputs, or
+    whose logged mtime is older than one of its inputs. One mtime no later than
+    any logged output satisfies both checks for the files inside the build.
+    """
+    settled = 0
+    for log in namespace.rglob(".ninja_log"):
+        floor = _ninja_log_floor_ns(log)
+        if floor is None:
+            continue
+        for path in log.parent.rglob("*"):
+            if path.is_symlink() or not path.is_file() or path.stat().st_mtime_ns == floor:
+                continue
+            os.utime(path, ns=(floor, floor))
+            settled += 1
+    return settled
+
+
+def _read_file(path: Path) -> int:
+    size = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(1 << 20):
+            size += len(chunk)
+    return size
+
+
+def _read_kernel_cache(namespace: Path) -> tuple[int, int]:
+    """Read every kept file once, so the engine does not wait on each first read."""
+    files = [path for path in namespace.rglob("*") if path.is_file() and not path.is_symlink()]
+    with ThreadPoolExecutor(max_workers=_KERNEL_CACHE_READ_WORKERS) as pool:
+        return len(files), sum(pool.map(_read_file, files))
+
+
 def _kernel_cache_env(env: dict[str, str], *, device_indices: Sequence[int]) -> dict[str, str]:
     """Return missing upstream cache variables for one persistent cache root.
 
@@ -182,6 +236,14 @@ def _kernel_cache_env(env: dict[str, str], *, device_indices: Sequence[int]) -> 
     root = Path(raw_root).expanduser()
     if not root.is_absolute():
         logger.warning("SGLang kernel cache disabled: %s must be an absolute path", KERNEL_CACHE_ROOT_ENV_VAR)
+        return {}
+    # SGLang's JIT cache leaves out its own build files only when their resolved
+    # path lies under the build directory it was given; under a symlinked root it
+    # records them by a per-build path, and no later process can reuse the build.
+    try:
+        root = root.resolve()
+    except (OSError, RuntimeError) as exc:
+        logger.warning("SGLang kernel cache disabled: cannot resolve %s: %s", root, exc)
         return {}
 
     gpu_key = _gpu_cache_key(device_indices)
@@ -203,7 +265,21 @@ def _kernel_cache_env(env: dict[str, str], *, device_indices: Sequence[int]) -> 
     except OSError as exc:
         logger.warning("SGLang kernel cache disabled: cannot prepare %s: %s", namespace, exc)
         return {}
-    logger.info("SGLang kernel cache enabled at %s", namespace)
+    started = time.monotonic()
+    try:
+        settled = _settle_ninja_mtimes(namespace)
+        files, size = _read_kernel_cache(namespace)
+    except OSError as exc:
+        logger.warning("SGLang kernel cache enabled at %s without a pre-read: %s", namespace, exc)
+        return defaults
+    logger.info(
+        "SGLang kernel cache enabled at %s: read %d files (%d bytes), settled %d ninja mtimes in %.1fs",
+        namespace,
+        files,
+        size,
+        settled,
+        time.monotonic() - started,
+    )
     return defaults
 
 

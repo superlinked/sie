@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from sie_server.adapters._generation_base import GenerationInvalidRequestError, GenerationUnsupportedFieldError
 from sie_server.api.models import _resolve_capabilities
 from sie_server.config.equivalence import canonical_digest
+from sie_server.config.grammar_profiles import grammar_serving_profile
 from sie_server.config.model import ModelConfig
 from sie_server.core.loader import expand_profile_variants
 from sie_server.core.reasoning_effort import MALFORMED_MESSAGE, apply_reasoning_effort, parse_reasoning_effort
@@ -58,13 +59,14 @@ def _hybrid(local: dict[str, Any] | None, remote: dict[str, Any] | None) -> dict
 @pytest.mark.parametrize("case", _VECTORS["cases"], ids=lambda case: case["name"])
 def test_shared_vectors_resolve_or_refuse(case: dict[str, Any]) -> None:
     config = _config(case["model"])
+    grammar = case.get("grammar", False)
     if "message" in case:
         with pytest.raises(GenerationUnsupportedFieldError) as refused:
-            apply_reasoning_effort(config, case["value"], model=case["model"])
+            apply_reasoning_effort(config, case["value"], model=case["model"], grammar=grammar)
         assert refused.value.param == "reasoning_effort"
         assert str(refused.value) == case["message"]
         return
-    applied = apply_reasoning_effort(config, case["value"], model=case["model"])
+    applied = apply_reasoning_effort(config, case["value"], model=case["model"], grammar=grammar)
     if case["applied"] is None:
         assert applied is None
     else:
@@ -101,6 +103,7 @@ def test_absent_and_null_change_nothing() -> None:
         ({"values": {}}, "at least one value"),
         ({"values": {"extreme": {}}}, "values"),
         ({"default": "low", "values": {"high": {}}}, "is not one of its values"),
+        ({"grammar": "none", "values": {"high": {}}}, "grammar 'none' is not one of its values"),
         ({"values": {"low": {"chat_template_kwargs": {"enable_thinking": "false"}}}}, "unsupported"),
         ({"values": {"low": {"chat_template_kwargs": {"reasoning_effort": "low; drop"}}}}, "letters, digits"),
         ({"values": {"low": {"budget": 512}}}, "budget"),
@@ -149,6 +152,8 @@ def test_both_profiles_of_a_routed_model_accept_the_same_values() -> None:
         ModelConfig.model_validate(_hybrid(low_local, {"values": {"low": {}, "high": {}}}))
     with pytest.raises(ValidationError, match="the same reasoning_effort default"):
         ModelConfig.model_validate(_hybrid(low_local, {"default": "low", "values": {"low": {"upstream": "low"}}}))
+    with pytest.raises(ValidationError, match="the same reasoning_effort grammar value"):
+        ModelConfig.model_validate(_hybrid(low_local, {"grammar": "low", "values": {"low": {"upstream": "low"}}}))
 
 
 def test_a_variant_carries_its_profiles_declaration() -> None:
@@ -207,6 +212,71 @@ def _chat_params(**overrides: Any) -> _GenerateRequestParams:
         max_new_tokens=64,
         **overrides,
     )
+
+
+@pytest.mark.parametrize("scope", ["model", "profile"])
+def test_a_grammar_fallback_declares_the_grammar_value_it_serves(scope: str) -> None:
+    spec = copy.deepcopy(_VECTORS["models"]["acme/declared"]["config"])
+    declaration = {**spec["tasks"]["generate"]["reasoning_effort"], "grammar": "low"}
+    spec["tasks"]["generate"]["reasoning_effort"] = declaration
+    spec["profiles"]["safe"] = {
+        "extends": "default",
+        "adapter_options": {"loadtime": {"speculative": {"enabled": False}}},
+        "reasoning_effort": {**declaration, "grammar": "high"},
+    }
+    if scope == "model":
+        spec["tasks"]["generate"]["grammar_profile"] = "safe"
+    else:
+        spec["profiles"]["long"] = {"extends": "default", "grammar_profile": "safe"}
+    with pytest.raises(ValidationError, match="must declare the same reasoning_effort grammar value"):
+        ModelConfig.model_validate(spec)
+    spec["profiles"]["safe"]["reasoning_effort"] = declaration
+    ModelConfig.model_validate(spec)
+
+
+def test_a_sibling_on_the_model_wide_grammar_fallback_declares_its_grammar_value() -> None:
+    spec = copy.deepcopy(_VECTORS["models"]["acme/declared"]["config"])
+    declaration = {**spec["tasks"]["generate"]["reasoning_effort"], "grammar": "low"}
+    spec["tasks"]["generate"]["reasoning_effort"] = declaration
+    spec["tasks"]["generate"]["grammar_profile"] = "safe"
+    spec["profiles"]["safe"] = {
+        "extends": "default",
+        "adapter_options": {"loadtime": {"speculative": {"enabled": False}}},
+    }
+    spec["profiles"]["fast"] = {"extends": "default", "reasoning_effort": {**declaration, "grammar": "high"}}
+    with pytest.raises(ValidationError, match="Profile 'safe' serves grammar requests for 'fast'"):
+        ModelConfig.model_validate(spec)
+    spec["profiles"]["fast"]["reasoning_effort"] = declaration
+    ModelConfig.model_validate(spec)
+
+
+def test_a_profile_that_keeps_its_grammar_requests_declares_its_own_grammar_value() -> None:
+    spec = copy.deepcopy(_VECTORS["models"]["acme/declared"]["config"])
+    declaration = {**spec["tasks"]["generate"]["reasoning_effort"], "grammar": "low"}
+    spec["tasks"]["generate"]["reasoning_effort"] = declaration
+    spec["tasks"]["generate"]["grammar_profile"] = "safe"
+    no_speculation = {"loadtime": {"speculative": {"enabled": False}}}
+    spec["profiles"]["safe"] = {**spec["profiles"]["default"], "adapter_options": no_speculation}
+    spec["profiles"]["child"] = {
+        "extends": "safe",
+        "adapter_options": no_speculation,
+        "reasoning_effort": {**declaration, "grammar": "high"},
+    }
+    config = ModelConfig.model_validate(spec)
+    assert grammar_serving_profile(config, "child") == "child"
+
+
+def test_a_grammar_value_reaches_a_variant_of_its_profile() -> None:
+    declaration = {"grammar": "low", "values": {"low": {"upstream": "low"}, "high": {"upstream": "high"}}}
+    spec = copy.deepcopy(_VECTORS["models"]["acme/remote"]["config"])
+    spec["profiles"]["relay"] = {"extends": "default", "reasoning_effort": declaration}
+    variant = expand_profile_variants([ModelConfig.model_validate(spec)])["acme/remote:relay"]
+    applied = apply_reasoning_effort(variant, None, model="acme/remote:relay", grammar=True)
+    assert applied is not None
+    assert applied.upstream == "low"
+    named = apply_reasoning_effort(variant, "high", model="acme/remote:relay", grammar=True)
+    assert named is not None
+    assert named.upstream == "high"
 
 
 def test_the_relay_body_carries_only_the_declared_upstream_value() -> None:

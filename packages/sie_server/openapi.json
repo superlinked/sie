@@ -2312,6 +2312,17 @@
             ],
             "title": "Default Effort"
           },
+          "grammar_effort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grammar Effort"
+          },
           "budget_tokens": {
             "additionalProperties": {
               "type": "integer"

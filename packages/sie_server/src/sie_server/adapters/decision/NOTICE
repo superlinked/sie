@@ -3,6 +3,8 @@ from the following independently maintained reference implementations:
 
 d3-code-readout-v1 (Apache-2.0):
 https://huggingface.co/vllm-sr/d3-ultra/tree/37fee01926f3de396620e794201b074fb427ac2d
+https://huggingface.co/vllm-sr/d3-mini/tree/df99bf4ca4418bc6908ee68e9b7479af1f3b8800
+Copyright 2026 vLLM Semantic Router Team
 
 qev-labels-v2 (Apache-2.0), with the checkpoint's serving patch:
 https://github.com/OmniJev/OneJev/tree/81ce62f1597c91e46767d4d02d6ac2e18534fe94

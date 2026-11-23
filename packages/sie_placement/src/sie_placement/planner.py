@@ -891,20 +891,27 @@ class _Planner:
     ) -> tuple[MeasurementRequest, ...]:
         if cost is None:
             return ()
-        missing: list[tuple[Measurement, RequestReason]] = []
+        missing: list[tuple[Cell, Measurement, RequestReason]] = []
         beside = self.pinned_beside(identity) if beside is None else beside
         if beside:
             if self.co_receipt(identity, lane, beside) is None:
-                missing.append((Measurement.CO_RESIDENCY_RECEIPT, RequestReason.UNMEASURED))
-        elif self.slowest_receipt(identity, lane) is None:
-            refused = (identity, lane.cell.machine_profile) in self.refused_profiles
-            missing.append((Measurement.RECEIPT, RequestReason.REFUSED if refused else RequestReason.UNMEASURED))
-        if entry.warmth in BOOT_WARMTHS and (identity, lane.cell, lane.container_shape, entry.warmth) not in self.boots:
-            missing.append((Measurement.BOOT_EVIDENCE, RequestReason.UNMEASURED))
+                missing.append((lane.cell, Measurement.CO_RESIDENCY_RECEIPT, RequestReason.UNMEASURED))
+        else:
+            for cell in lane.cells:
+                if self.slowest_receipt(identity, lane, cell) is None:
+                    refused = (identity, cell.machine_profile) in self.refused_profiles
+                    reason = RequestReason.REFUSED if refused else RequestReason.UNMEASURED
+                    missing.append((cell, Measurement.RECEIPT, reason))
+        if entry.warmth in BOOT_WARMTHS:
+            missing.extend(
+                (cell, Measurement.BOOT_EVIDENCE, RequestReason.UNMEASURED)
+                for cell in lane.cells
+                if (identity, cell, lane.container_shape, entry.warmth) not in self.boots
+            )
         requests = [
             MeasurementRequest(
                 identity=identity,
-                cell=lane.cell,
+                cell=cell,
                 container_shape=lane.container_shape,
                 concurrency=lane.concurrency,
                 lane=lane.name,
@@ -915,7 +922,7 @@ class _Planner:
                 saving_bound=None,
                 co_residents=tuple(sorted(beside)) if measurement is Measurement.CO_RESIDENCY_RECEIPT else (),
             )
-            for measurement, reason in missing
+            for cell, measurement, reason in missing
         ]
         if entry.warmth is Warmth.LAZY_RESIDENT:
             pinned = self.current_pinned[lane.name] - {identity}
@@ -1085,7 +1092,7 @@ class _Planner:
         current = self.keepable(identity)
         if current is not None and not any(option.current for option in options):
             entry, lane = current
-            if not self.kept_blockers(identity, entry, lane, self.slowest_receipt(identity, lane)):
+            if not self.kept_blockers(identity, entry, lane):
                 cost = self.current_cost(identity, entry, lane)
                 cheaper = [option for option in feasible if cost is not None and round(cost - option.cost, 2) > 0]
                 chosen = min(cheaper, key=lambda option: option.rank) if cheaper else None
@@ -1500,26 +1507,33 @@ class _Planner:
         )
         return replace(lane, max_containers=ceiling, envelope=envelope)
 
-    def slowest_receipt(self, identity: str, lane: PlanLane) -> Receipt | None:
-        matching = [(order, receipt) for order, receipt in self.receipts.get(identity, []) if _runs_on(receipt, lane)]
+    def slowest_receipt(self, identity: str, lane: PlanLane, cell: Cell | None = None) -> Receipt | None:
+        matching = [
+            (order, receipt)
+            for order, receipt in self.receipts.get(identity, [])
+            if _runs_on(receipt, lane) and (cell is None or receipt.cell == cell)
+        ]
         if not matching:
             return None
         return min(matching, key=lambda pair: (pair[1].throughput.requests_per_second, pair[0]))[1]
 
-    def kept_blockers(
-        self, identity: str, entry: PlanIdentity, lane: PlanLane, receipt: Receipt | None
-    ) -> tuple[Blocker, ...]:
+    def kept_blockers(self, identity: str, entry: PlanIdentity, lane: PlanLane) -> tuple[Blocker, ...]:
         level = self.levels[identity]
-        blockers = [] if receipt is None else list(_warm_blockers(level, receipt))
+        blockers: list[Blocker] = []
+        for cell in lane.cells:
+            receipt = self.slowest_receipt(identity, lane, cell)
+            if receipt is not None:
+                blockers.extend(_warm_blockers(level, receipt))
         if entry.warmth in BOOT_WARMTHS:
-            boot = self.boots.get((identity, lane.cell, lane.container_shape, entry.warmth))
-            if boot is not None and boot.seconds is not None:
-                blocker = _come_alive_blocker(level, boot.seconds)
-                blockers.extend(() if blocker is None else (blocker,))
-            elif boot is not None or level.come_alive_p95_s == 0:
-                blockers.append(Blocker(field="comeAliveP95S", bound=level.come_alive_p95_s, measured=None))
+            for cell in lane.cells:
+                boot = self.boots.get((identity, cell, lane.container_shape, entry.warmth))
+                if boot is not None and boot.seconds is not None:
+                    blocker = _come_alive_blocker(level, boot.seconds)
+                    blockers.extend(() if blocker is None else (blocker,))
+                elif boot is not None or level.come_alive_p95_s == 0:
+                    blockers.append(Blocker(field="comeAliveP95S", bound=level.come_alive_p95_s, measured=None))
         blockers.extend(self.reliability_blockers(level, lane.cells))
-        return tuple(blockers)
+        return _worst(blockers)
 
     def demand_hours(self, lane: PlanLane, identity: str, receipt: Receipt | None) -> float | None:
         requests = self.requests.get(identity, ())
@@ -1603,7 +1617,7 @@ class _Planner:
         if feasible:
             return replace(choice, chosen=min(feasible, key=lambda option: option.rank))
         entry, lane = current
-        if standing or self.kept_blockers(identity, entry, lane, self.slowest_receipt(identity, lane)):
+        if standing or self.kept_blockers(identity, entry, lane):
             return None
         cost = self.current_cost(identity, entry, lane)
         gaps = self.current_gaps(identity, entry, lane, cost, choice.beside)
@@ -1987,11 +2001,7 @@ class _Planner:
             if price_savings:
                 levers.extend(self.levers(choice, new_plan, total))
                 nearest = self.next_cheaper(choice, baseline, new_plan, total)
-            reports.append(
-                self._identity_report(
-                    choice, names, kept, costs.get(choice.identity), receipts.get(choice.identity), nearest
-                )
-            )
+            reports.append(self._identity_report(choice, names, kept, costs.get(choice.identity), nearest))
         identity_changes, lane_changes = _changes(self.current_plan, new_plan)
         report = Report(
             placement=self.parameters.placement,
@@ -2025,7 +2035,6 @@ class _Planner:
         names: Mapping[str, str],
         kept: Mapping[str, tuple[PlanIdentity, PlanLane]],
         cost: float | None,
-        receipt: Receipt | None,
         next_cheaper: Option | None,
     ) -> IdentityReport:
         current = self.current.get(choice.identity)
@@ -2047,7 +2056,7 @@ class _Planner:
                     lane=entry.lane,
                     monthly_cost=cost,
                     unplaced_reason=reason,
-                    blocked_by=self.kept_blockers(choice.identity, entry, lane, receipt),
+                    blocked_by=self.kept_blockers(choice.identity, entry, lane),
                     next_cheaper=next_cheaper,
                 )
             return replace(report, unplaced_reason=reason)
@@ -2149,6 +2158,17 @@ def _distinct(requests: Iterable[MeasurementRequest]) -> tuple[MeasurementReques
         )
         kept.setdefault(key, request)
     return tuple(kept.values())
+
+
+def _worst(blockers: Iterable[Blocker]) -> tuple[Blocker, ...]:
+    worst: dict[str, Blocker] = {}
+    for blocker in blockers:
+        known = worst.get(blocker.field)
+        if known is None or (
+            known.measured is not None and (blocker.measured is None or blocker.measured > known.measured)
+        ):
+            worst[blocker.field] = blocker
+    return tuple(worst.values())
 
 
 def _scarcity_reason(option: _Option, bound: int | None) -> ScarcityReason | None:

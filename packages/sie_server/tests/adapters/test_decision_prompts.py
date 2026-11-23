@@ -147,3 +147,50 @@ def test_knowline_null_noul_criterion_renders_its_default(structured_noul, crite
     block = knowline.question_block(question, ("A", "B"), structured_noul)
 
     assert block.endswith(f"Options:\n{options}")
+
+
+def test_d3_header_layout_lists_every_question_before_the_state():
+    tokenizer = TextTokenizer()
+    questions = parse_questions(
+        {
+            "route": {
+                "type": "choice",
+                "instructions": "Which team?",
+                "criteria": {"returns": "Refunds", "billing": None},
+            },
+            "ok": {"type": "noul", "instructions": "Is it ok?"},
+        }
+    )
+    ids, _ = d3.prompts(tokenizer, "arrived damaged", questions, ("A", "B"))[0]
+    text = "".join(map(chr, ids))
+    assert (
+        "Questions in this request:\n1. Which team?\n   - returns: Refunds\n   - billing\n2. Is it ok?\n\nState:\narrived damaged"
+        in text
+    )
+
+
+def test_d3_plain_layout_omits_the_request_header():
+    tokenizer = TextTokenizer()
+    questions = parse_questions(
+        {
+            "route": {
+                "type": "choice",
+                "instructions": "Which team?",
+                "criteria": {"returns": "Refunds", "billing": None},
+            },
+            "ok": {"type": "noul", "instructions": "Is it ok?"},
+        }
+    )
+    ids, boundary = d3.prompts(tokenizer, "arrived damaged", questions, ("A", "B"), layout="plain")[0]
+    text = "".join(map(chr, ids))
+    prefix = text[:boundary]
+    assert "Questions in this request:" not in text
+    assert prefix.endswith("\nState:\narrived damaged")
+    assert "Question:\nWhich team?\n\nOptions:\nA: returns: Refunds\nB: billing" in text
+
+
+def test_d3_rejects_unknown_prompt_layout():
+    tokenizer = TextTokenizer()
+    questions = parse_questions({"q": {"type": "noul"}})
+    with pytest.raises(ValueError, match="header-v1 or plain"):
+        d3.prompts(tokenizer, "state", questions, ("A", "B"), layout="header-v2")

@@ -1,0 +1,25 @@
+sie_id: vllm-sr/d3-mini
+hf_id: vllm-sr/d3-mini
+hf_revision: df99bf4ca4418bc6908ee68e9b7479af1f3b8800
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 8192
+profiles:
+  default:
+    max_batch_tokens: 8192
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.decision.qwen:QwenDecisionAdapter
+    adapter_options:
+      loadtime:
+        decision_format: d3
+        max_forward_tokens: 8192
+      runtime: {}
+description: d3-mini typed text decisions over the native Qwen3.5 architecture. Uses header-less (plain layout)
+  d3-code-readout-v1 prompts, noncausal full attention, FP32 readout and the checkpoint temperature.

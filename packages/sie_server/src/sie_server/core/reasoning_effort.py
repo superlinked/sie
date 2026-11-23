@@ -45,20 +45,27 @@ def unsupported_message(model: str, accepted: tuple[str, ...], value: str) -> st
 
 
 def apply_reasoning_effort(
-    config: ModelConfig | None, value: str | None, *, model: str
+    config: ModelConfig | None, value: str | None, *, model: str, grammar: bool = False
 ) -> AppliedReasoningEffort | None:
     """Resolve ``value`` against the declaration of ``config``'s default profile.
 
     ``None`` means nothing changes: the request named no value, or named
     ``none`` for a model that does not reason at all. The declared default is
-    not applied to a request that names no value.
+    not applied to a request that names no value. ``grammar`` marks a
+    grammar-constrained chat request, which runs at the declaration's
+    ``grammar`` value when it names none.
 
     Raises:
         GenerationUnsupportedFieldError: When the profile does not accept ``value``.
     """
-    if value is None:
+    if value is None and not grammar:
         return None
     declaration = config.reasoning_effort_for("default") if config is not None else None
+    grammar_value = declaration.grammar if grammar and declaration is not None else None
+    if value is None:
+        if grammar_value is None:
+            return None
+        value = grammar_value
     if declaration is None:
         if value == "none" and config is not None and config.declares_no_reasoning:
             return None

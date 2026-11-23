@@ -11,7 +11,9 @@ from sie_server.config.model import ModelConfig
 SERVER = Path(__file__).resolve().parents[2]
 MODELS = (
     ("vllm-sr/d3-ultra", "37fee01926f3de396620e794201b074fb427ac2d", "transformers5"),
+    ("vllm-sr/d3-mini", "df99bf4ca4418bc6908ee68e9b7479af1f3b8800", "transformers5"),
     ("baselabs/elephant-1", "14537f08b0374edf9867ed0a4d2bd8df59e0400c", "transformers5"),
+    ("baselabs/joey-1", "9efbe485efbed9598dfca5294cbbe8da00e21908", "transformers5"),
     ("baselabs/mammoth-1", "9d1962f193e48a68cf0f3598dc7fb4462fd23ad9", "transformers5"),
     ("perplexity-ai/pplx-decider-v1.2", "cce0f3f80033e9d89d80831d5281fd72124aacce", "transformers5"),
     ("PelaAI/KnowLine-4B-Gen5.5", "890ecc3765a16c8e22b884807e19827fa695eb9a", "sglang-cu130"),

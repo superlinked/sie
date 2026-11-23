@@ -23,7 +23,7 @@ from sie_server.api.generate import router as generate_router
 from sie_server.api.openai_completions import router as completions_router
 from sie_server.api.openai_local import _remote_chat_response, router
 from sie_server.api.openai_responses import router as responses_router
-from sie_server.config.model import ModelConfig
+from sie_server.config.model import ModelConfig, ReasoningEffortDeclaration
 from sie_server.config.upstreams import Upstream, install_upstreams
 from sie_server.core.loader import expand_profile_variants
 from sie_server.core.upstream_client import upstream_client
@@ -391,6 +391,40 @@ def test_strict_json_output_is_verified_after_remote_parsing(remote_chat: tuple,
     else:
         assert result.status_code == 500
         assert result.json()["error"]["code"] == "MODEL_OUTPUT_PARSE_ERROR"
+
+
+def _declare_grammar_effort(config: ModelConfig) -> None:
+    assert config.tasks.generate is not None
+    config.tasks.generate.reasoning_effort = ReasoningEffortDeclaration.model_validate(
+        {"default": "high", "grammar": "none", "values": {"none": {"upstream": "none"}, "high": {"upstream": "high"}}}
+    )
+
+
+@pytest.mark.parametrize(
+    ("changes", "sent_effort"),
+    [
+        ({"response_format": {"type": "json_object"}}, "none"),
+        ({"response_format": {"type": "json_object"}, "reasoning_effort": "none"}, "none"),
+        ({"response_format": {"type": "json_object"}, "reasoning_effort": "high"}, "high"),
+        (
+            {"response_format": {"type": "json_schema", "json_schema": {"name": "a", "schema": {"type": "object"}}}},
+            "none",
+        ),
+        ({"response_format": {"type": "text"}}, None),
+        ({"reasoning_effort": "high"}, "high"),
+        ({}, None),
+    ],
+)
+def test_a_constrained_request_runs_at_the_declared_grammar_effort_unless_it_names_one(
+    remote_chat: tuple, changes: dict[str, Any], sent_effort: str | None
+) -> None:
+    client, _, config, requests = remote_chat
+    _declare_grammar_effort(config)
+    answer_with(remote_chat, json_response(200, completion()))
+    response = client.post("/v1/chat/completions", json={**BODY, **changes})
+    assert response.status_code == 200, response.text
+    assert len(requests) == 1
+    assert json.loads(requests[0].content).get("reasoning_effort") == sent_effort
 
 
 def test_strict_invalid_first_event_preserves_the_buffered_error_before_200(remote_chat: tuple) -> None:

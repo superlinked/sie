@@ -567,7 +567,7 @@ Config (read-side only):
 Pools and operator:
 
 - `GET /v1/pools`, `POST /v1/pools`, `GET /v1/pools/{name}`, `POST /v1/pools/{name}/renew`, `DELETE /v1/pools/{name}`
-- `GET /v1/models`, `GET /v1/models/{*model}` — model catalogue. JSON objects mirror `sie_server` **`ModelInfo`** shape (including `inputs`, `outputs`, `dims`, `profiles`, worker-derived `loaded` / `state`, optional `last_error`, …). `context_length` and `max_output_tokens` are the limits the route admits, and `capabilities.reasoning` lists the `reasoning_effort` values it accepts, read from the same model config the chat gate checks. An unknown `model` id returns **`404`** with **`{"detail":{"code":"MODEL_NOT_FOUND",...}}`** (same envelope style as FastAPI validation errors on `sie_server`).
+- `GET /v1/models`, `GET /v1/models/{*model}` — model catalogue. JSON objects mirror `sie_server` **`ModelInfo`** shape (including `inputs`, `outputs`, `dims`, `profiles`, worker-derived `loaded` / `state`, optional `last_error`, …). `context_length` and `max_output_tokens` are the limits the route admits, and `capabilities.reasoning` lists the `reasoning_effort` values it accepts and, as `grammar_effort`, the value a grammar-constrained request (a `response_format` other than `text`) runs at when it names none, read from the same model config the chat gate checks. The worker runs such a request that names no value at `grammar_effort`, and one that names an accepted value at that value. An unknown `model` id returns **`404`** with **`{"detail":{"code":"MODEL_NOT_FOUND",...}}`** (same envelope style as FastAPI validation errors on `sie_server`).
 - `GET /healthz`, `GET /readyz`, `GET /health`
 - `GET /ws/cluster-status`
 - `GET /` — HTML status page (operator-facing, not a programmatic API).

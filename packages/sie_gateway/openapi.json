@@ -2935,6 +2935,13 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "grammar_effort": {
+            "description": "The value a grammar-constrained request (a ``response_format`` other\nthan ``text``, or a ``grammar``) runs at when it names none; ``null``\nwhen such a request follows ``default_effort``.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
