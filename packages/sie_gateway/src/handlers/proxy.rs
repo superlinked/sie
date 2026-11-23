@@ -2358,6 +2358,17 @@ async fn resolve_routing(
             &not_found_hint(state, ext, &model),
         )));
     }
+    // A model that does not declare `generate` has no governed route either, and
+    // that miss fails closed as a retryable 503. Refuse the operation first, so
+    // the caller is not told to retry something the model never serves. A model
+    // that declares `generate` but has no compiled route keeps the 503.
+    if generation_intent.is_some() {
+        if let Some(response) =
+            unsupported_operation_response(state, endpoint, "generate", &model_name, &model_name)
+        {
+            return Err(Box::new(response));
+        }
+    }
     let governed_route = if let Some(intent) = generation_intent {
         match governed_generation_route(state, &model_name, &dispatch_model, intent) {
             Ok(route) => route,
@@ -32489,6 +32500,52 @@ profiles:
             body["detail"]["message"],
             "Model 'acme/late' does not support extract; it supports: encode"
         );
+    }
+
+    struct NoCompiledRoutes;
+
+    impl crate::server::GenerationRoutePolicy for NoCompiledRoutes {
+        fn resolve(
+            &self,
+            _customer_model: &str,
+            _intent: GenerationRequestIntent,
+        ) -> Option<GovernedGenerationRoute> {
+            None
+        }
+    }
+
+    struct GovernsGeneration(NoCompiledRoutes);
+
+    impl ModelAccessPolicy for GovernsGeneration {
+        fn visible(&self, _resolved_model: &str, _ext: &axum::http::Extensions) -> bool {
+            true
+        }
+
+        fn generation_route_policy(&self) -> Option<&dyn crate::server::GenerationRoutePolicy> {
+            Some(&self.0)
+        }
+    }
+
+    /// Under a generation route policy, a model without a `generate` task has
+    /// no route. It is refused as an unsupported operation, not answered with
+    /// the retryable 503 a missing route gets. A model that declares
+    /// `generate` and has no route keeps that 503.
+    #[tokio::test]
+    async fn governed_native_generate_refuses_a_model_without_generate_before_the_route_lookup() {
+        let mut gateway = gateway().await;
+        gateway.install_policy(Arc::new(GovernsGeneration(NoCompiledRoutes)));
+
+        let (status, body) = native(&gateway, "generate", "acme/local").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["code"], oai_code::INVALID_REQUEST);
+        assert_eq!(
+            body["error"]["message"],
+            "Model 'acme/local' does not support generate; it supports: encode"
+        );
+
+        let (status, body) = native(&gateway, "generate", "acme/chat").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(gateway.dispatcher.dispatched().is_empty());
     }
 
     #[tokio::test]
