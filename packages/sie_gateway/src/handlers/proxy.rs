@@ -12979,21 +12979,33 @@ fn validate_queue_item_shapes(
     Ok(())
 }
 
-/// Whether an item carries a content field with a non-null value. The worker
-/// also reads `content` as an alias for `text`, so it counts too. An empty
-/// value (`""`, `[]`) counts as present and is left to the model to judge.
-/// Only encode is checked: some extractors read an item's `metadata` alone,
-/// and score items are left to the worker.
+/// Whether an item carries content the worker will keep. An item has content
+/// when `text` or a media field holds a non-null value. The worker reads
+/// `content` as an alias for `text` only when the item has no `text` key, so
+/// `content` counts only then. A MessagePack map may repeat a key and the
+/// worker keeps the last value, so the last entry of each key decides. An
+/// empty value (`""`, `[]`) counts as present and is left to the model to
+/// judge. Only encode is checked: some extractors read an item's `metadata`
+/// alone, and score items are left to the worker.
 fn item_has_content(item: &rmpv::Value) -> bool {
-    item.as_map().is_some_and(|fields| {
-        fields.iter().any(|(key, value)| {
-            !value.is_nil()
-                && (rmpv_key_eq(key, ITEM_TEXT_ALIAS)
-                    || ITEM_CONTENT_FIELDS
-                        .iter()
-                        .any(|field| rmpv_key_eq(key, field)))
-        })
-    })
+    let Some(fields) = item.as_map() else {
+        return false;
+    };
+    let kept = |name: &str| {
+        fields
+            .iter()
+            .rev()
+            .find(|(key, _)| rmpv_key_eq(key, name))
+            .map(|(_, value)| value)
+    };
+    let text = match kept("text") {
+        Some(value) => !value.is_nil(),
+        None => kept(ITEM_TEXT_ALIAS).is_some_and(|value| !value.is_nil()),
+    };
+    text || ITEM_CONTENT_FIELDS
+        .iter()
+        .filter(|field| **field != "text")
+        .any(|field| kept(field).is_some_and(|value| !value.is_nil()))
 }
 
 /// Item fields that carry content. A body without `items` (or the `input` /
@@ -25464,6 +25476,37 @@ mod tests {
             let msgpack_body = rmp_serde::to_vec(&body).unwrap();
             parse_queue_request(&msgpack_body, true, endpoint).unwrap();
         }
+    }
+
+    /// The gate follows what the worker keeps: `content` is the alias for
+    /// `text` only when the item has no `text` key, and a repeated key in a
+    /// MessagePack map resolves to its last value.
+    #[test]
+    fn test_parse_queue_request_content_gate_follows_the_value_the_worker_keeps() {
+        let expected = "items[0] has no content: set one of text, images, audio, video, document";
+        let body = json!({"items": [{"content": "hello", "text": null}]});
+        for message in queue_parse_errors(&body, "encode") {
+            assert_eq!(message, expected);
+        }
+
+        fn encode_body(text_entries: [rmpv::Value; 2]) -> Vec<u8> {
+            let key = |name: &str| rmpv::Value::String(name.into());
+            let [first, second] = text_entries;
+            let item = rmpv::Value::Map(vec![(key("text"), first), (key("text"), second)]);
+            let body = rmpv::Value::Map(vec![(key("items"), rmpv::Value::Array(vec![item]))]);
+            let mut bytes = Vec::new();
+            rmpv::encode::write_value(&mut bytes, &body).unwrap();
+            bytes
+        }
+        let hello = || rmpv::Value::String("hello".into());
+
+        match parse_queue_request(&encode_body([hello(), rmpv::Value::Nil]), true, "encode") {
+            Err(QueueParseError::Generic(message)) => assert_eq!(message, expected),
+            _ => panic!("a trailing null text must be refused"),
+        }
+        let (items, _) =
+            parse_queue_request(&encode_body([rmpv::Value::Nil, hello()]), true, "encode").unwrap();
+        assert_eq!(items.len(), 1);
     }
 
     #[test]
