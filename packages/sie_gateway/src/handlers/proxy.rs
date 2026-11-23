@@ -12988,7 +12988,7 @@ fn item_has_content(item: &rmpv::Value) -> bool {
     item.as_map().is_some_and(|fields| {
         fields.iter().any(|(key, value)| {
             !value.is_nil()
-                && (rmpv_key_eq(key, "content")
+                && (rmpv_key_eq(key, ITEM_TEXT_ALIAS)
                     || ITEM_CONTENT_FIELDS
                         .iter()
                         .any(|field| rmpv_key_eq(key, field)))
@@ -13000,6 +13000,10 @@ fn item_has_content(item: &rmpv::Value) -> bool {
 /// `inputs` aliases) is read as a single item only when it has one of these;
 /// otherwise there is nothing to run and the request is refused at ingress.
 const ITEM_CONTENT_FIELDS: [&str; 5] = ["text", "images", "audio", "video", "document"];
+
+/// The worker reads `content` as an alias for `text` when `text` is absent, so
+/// it counts as item content wherever `ITEM_CONTENT_FIELDS` does.
+const ITEM_TEXT_ALIAS: &str = "content";
 
 const MISSING_ITEMS_MESSAGE: &str = "field 'items' is required";
 
@@ -13178,7 +13182,7 @@ fn parse_queue_request_json(
             }
         } else if map
             .keys()
-            .any(|key| ITEM_CONTENT_FIELDS.contains(&key.as_str()))
+            .any(|key| key == ITEM_TEXT_ALIAS || ITEM_CONTENT_FIELDS.contains(&key.as_str()))
         {
             vec![parsed]
         } else {
@@ -13246,9 +13250,10 @@ fn parse_queue_request_msgpack(
             _ => return Err("'inputs' must be an array".to_string().into()),
         }
     } else if !map.iter().any(|(key, _)| {
-        ITEM_CONTENT_FIELDS
-            .iter()
-            .any(|field| rmpv_key_eq(key, field))
+        rmpv_key_eq(key, ITEM_TEXT_ALIAS)
+            || ITEM_CONTENT_FIELDS
+                .iter()
+                .any(|field| rmpv_key_eq(key, field))
     }) {
         return Err(MISSING_ITEMS_MESSAGE.to_string().into());
     } else {
@@ -25390,7 +25395,8 @@ mod tests {
     fn test_parse_queue_request_keeps_single_item_body() {
         let text = json!({"text": "hello", "params": {"output_types": ["dense"]}});
         let image = json!({"images": [{"data": "aGVsbG8=", "format": "png"}]});
-        for body in [text, image] {
+        let alias = json!({"content": "hello"});
+        for body in [text, image, alias] {
             let json_body = serde_json::to_vec(&body).unwrap();
             let (items, _) = parse_queue_request(&json_body, false, "encode").unwrap();
             assert_eq!(items.len(), 1, "{body}");
