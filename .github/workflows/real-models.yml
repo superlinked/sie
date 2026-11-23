@@ -50,6 +50,9 @@ env:
   HF_HOME: ${{ github.workspace }}/.cache/huggingface
   HF_HUB_DISABLE_PROGRESS_BARS: "1"
   SIE_TELEMETRY_DISABLED: "1"
+  # onnxruntime-node's install script would otherwise fetch CUDA binaries from
+  # a GitHub release on every install; the runner has no GPU.
+  ONNXRUNTIME_NODE_INSTALL_CUDA: skip
 
 jobs:
   cpu:
