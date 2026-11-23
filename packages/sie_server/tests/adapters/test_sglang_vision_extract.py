@@ -504,6 +504,9 @@ class LightOnOCRForConditionalGeneration:
     def __init__(self, *, config, prefix="", **kwargs):
         self.rope_theta = config.vision_config.rope_theta
 
+    def load_weights(self, weights):
+        return [name for name, _ in weights]
+
 EntryClass = LightOnOCRForConditionalGeneration
 """,
         encoding="utf-8",
@@ -540,7 +543,22 @@ class VisionConfig:
 class Config:
     vision_config = VisionConfig()
 
-assert registry.MODEL(config=Config()).rope_theta == 10000.0
+model = registry.MODEL(config=Config())
+assert model.rope_theta == 10000.0
+# LightOnOCR-3-1B's legacy layout maps onto LightOnOCR-2-1B's; the 2-1B layout is unchanged.
+assert model.load_weights(
+    [
+        ("language_model.model.layers.0.mlp.up_proj.weight", None),
+        ("language_model.lm_head.weight", None),
+        ("model.language_model.norm.weight", None),
+        ("model.vision_encoder.ln_pre.weight", None),
+    ]
+) == [
+    "model.language_model.layers.0.mlp.up_proj.weight",
+    "lm_head.weight",
+    "model.language_model.norm.weight",
+    "model.vision_encoder.ln_pre.weight",
+]
 print("native-lighton-ready")
 """
     env = dict(os.environ)
