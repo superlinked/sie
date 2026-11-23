@@ -2358,6 +2358,17 @@ async fn resolve_routing(
             &not_found_hint(state, ext, &model),
         )));
     }
+    // A model that does not declare `generate` has no governed route either, and
+    // that miss fails closed as a retryable 503. Refuse the operation first, so
+    // the caller is not told to retry something the model never serves. A model
+    // that declares `generate` but has no compiled route keeps the 503.
+    if generation_intent.is_some() {
+        if let Some(response) =
+            unsupported_operation_response(state, endpoint, "generate", &model_name, &model_name)
+        {
+            return Err(Box::new(response));
+        }
+    }
     let governed_route = if let Some(intent) = generation_intent {
         match governed_generation_route(state, &model_name, &dispatch_model, intent) {
             Ok(route) => route,
@@ -3284,6 +3295,13 @@ async fn proxy_request_inner(
         req.extensions_mut().insert(ExplicitProfileSelector);
     }
     ServingDisclosure::record(&state, req.extensions(), &dispatch_model);
+    if matches!(endpoint, "encode" | "score" | "extract" | "generate") {
+        if let Some(response) =
+            unsupported_operation_response(&state, endpoint, endpoint, &dispatch_model, &model_name)
+        {
+            return response;
+        }
+    }
     // A numerical bridge needs the body to detect a caller's profile selector,
     // to check the request against the admission and to replay it remotely.
     // The request is validated before either side counts it. Other encode and
@@ -4243,6 +4261,53 @@ fn worker_metadata_encoded_size(metadata: &rmpv::Value) -> Option<usize> {
         size = size.checked_add(bytes)?;
     }
     Some(size)
+}
+
+/// The `400 INVALID_REQUEST` answer for a request whose operation the model
+/// does not declare, naming the operations it does.
+///
+/// Call only after the model has passed the visibility gate, so a hidden or
+/// unknown model keeps its `MODEL_NOT_FOUND` answer and its capabilities are
+/// never revealed. `None` (the request goes on as before) when the registry
+/// has no entry for `model` or the entry declares no tasks, because the
+/// gateway then has no reliable view of what the model serves.
+///
+/// `score` on a model with a multivector encode output is also left alone:
+/// late-interaction adapters score with their own MaxSim without declaring a
+/// score task, so the worker decides.
+fn unsupported_operation_response(
+    state: &AppState,
+    endpoint: &str,
+    operation: &str,
+    model: &str,
+    display_model: &str,
+) -> Option<Response> {
+    let entry = state.model_registry.get_model_info(model)?;
+    let declared = entry.info_extras.declared_tasks.as_ref()?;
+    if declared.iter().any(|task| task == operation) {
+        return None;
+    }
+    if operation == "score"
+        && entry
+            .info_extras
+            .outputs
+            .iter()
+            .any(|output| output == "multivector")
+    {
+        return None;
+    }
+    Some(endpoint_error_response(
+        endpoint,
+        StatusCode::BAD_REQUEST,
+        err_code::INVALID_REQUEST,
+        oai_type::INVALID_REQUEST,
+        oai_code::INVALID_REQUEST,
+        Some("model"),
+        format!(
+            "Model '{display_model}' does not support {operation}; it supports: {}",
+            declared.join(", ")
+        ),
+    ))
 }
 
 fn validate_native_extract_pre_admission(
@@ -9598,6 +9663,11 @@ async fn proxy_chat_inner(
         }
     }
     ServingDisclosure::record(&state, &parts.extensions, &dispatch_model);
+    if let Some(response) =
+        unsupported_operation_response(&state, "chat", "generate", &dispatch_model, &model_name)
+    {
+        return response;
+    }
 
     // -- per-request max_output_tokens cap from model config + grammar capability.
     //    Gates resolve against the routed DISPATCH model so the profile-scoped
@@ -10482,6 +10552,11 @@ async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response
             Err(resp) => return resp,
         };
     ServingDisclosure::record(&state, &parts.extensions, &model_name);
+    if let Some(response) =
+        unsupported_operation_response(&state, "chat", "generate", &model_name, &model_name)
+    {
+        return response;
+    }
     let (explicit_bundle_override, _) =
         resolve_model_spec_with_aliases(&state.config.model_aliases, &params.model, |model| {
             state.model_registry.resolve_canonical_model_name(model)
@@ -11164,6 +11239,11 @@ async fn proxy_responses_inner(state: Arc<AppState>, req: Request) -> Response {
             Err(resp) => return resp,
         };
     ServingDisclosure::record(&state, &parts.extensions, &model_name);
+    if let Some(response) =
+        unsupported_operation_response(&state, "chat", "generate", &model_name, &model_name)
+    {
+        return response;
+    }
     let (explicit_bundle_override, _) =
         resolve_model_spec_with_aliases(&state.config.model_aliases, &params.model, |model| {
             state.model_registry.resolve_canonical_model_name(model)
@@ -19078,6 +19158,10 @@ mod tests {
             if surface == "extract" {
                 // This transport authority test needs a valid extraction task.
                 raw = raw.replace("tasks:\n", "tasks:\n  extract: {}\n");
+            }
+            if matches!(surface, "score" | "rerank" | "rerank-v2") {
+                // Likewise a valid score task for the score surfaces.
+                raw = raw.replace("tasks:\n", "tasks:\n  score: {}\n");
             }
             if routed {
                 std::fs::write(
@@ -30913,6 +30997,7 @@ profiles:
         let info_extras = ModelInfoExtras {
             inputs: vec!["text".to_string()],
             outputs: vec!["tokens".to_string()],
+            declared_tasks: None,
             dims: std::collections::HashMap::new(),
             max_sequence_length: None,
             revision: None,
@@ -32155,5 +32240,347 @@ mod governed_bridge_route_tests {
         if let Some(planned) = planned {
             assert_eq!(planned.as_deref(), Some("acme/chat:remote"));
         }
+    }
+}
+
+#[cfg(test)]
+mod unsupported_operation_tests {
+    use super::*;
+    use crate::handlers::test_support::{TestGateway, HYBRID_GENERATE_MODEL, LOCAL_ENCODE_MODEL};
+
+    /// A score-only model.
+    const SCORE_MODEL: &str = "\
+sie_id: acme/rerank
+hf_id: acme/rerank
+tasks:
+  score: {}
+profiles:
+  default:
+    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter
+    max_batch_tokens: 4096
+";
+
+    /// A late-interaction model: multivector encode output, no score task.
+    const MULTIVECTOR_MODEL: &str = "\
+sie_id: acme/late
+hf_id: acme/late
+tasks:
+  encode:
+    multivector:
+      dim: 128
+profiles:
+  default:
+    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter
+    max_batch_tokens: 4096
+";
+
+    /// A model whose YAML declares no tasks.
+    const UNDECLARED_MODEL: &str = "\
+sie_id: acme/plain
+hf_id: acme/plain
+profiles:
+  default:
+    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter
+    max_batch_tokens: 4096
+";
+
+    /// A generation model under an organization the caller cannot see.
+    const HIDDEN_GENERATE_MODEL: &str = "\
+sie_id: org-42/chat
+hf_id: org-42/chat
+tasks:
+  generate: {}
+profiles:
+  default:
+    adapter_path: sie_server.adapters.sglang:SGLangAdapter
+    max_batch_tokens: 8192
+";
+
+    struct HidesOrganization(&'static str);
+
+    impl ModelAccessPolicy for HidesOrganization {
+        fn visible(&self, resolved_model: &str, _ext: &axum::http::Extensions) -> bool {
+            !resolved_model.starts_with(self.0)
+        }
+    }
+
+    async fn gateway() -> TestGateway {
+        let mut gateway = TestGateway::new(&[
+            LOCAL_ENCODE_MODEL,
+            HYBRID_GENERATE_MODEL,
+            SCORE_MODEL,
+            MULTIVECTOR_MODEL,
+            UNDECLARED_MODEL,
+            HIDDEN_GENERATE_MODEL,
+        ])
+        .await;
+        gateway.install_policy(Arc::new(HidesOrganization("org-42/")));
+        gateway.set_request_timeout(0.2);
+        gateway
+    }
+
+    fn request(uri: &str, body: Value) -> Request {
+        Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    }
+
+    fn native_body(endpoint: &str) -> Value {
+        match endpoint {
+            "generate" => json!({"prompt": "hello", "max_new_tokens": 4}),
+            "score" => json!({"query": {"text": "q"}, "items": [{"text": "d"}]}),
+            _ => json!({"items": [{"text": "hello"}]}),
+        }
+    }
+
+    async fn native(gateway: &TestGateway, endpoint: &str, model: &str) -> (StatusCode, Value) {
+        let response = proxy_request(
+            State(Arc::clone(&gateway.state)),
+            request(&format!("/v1/{endpoint}/{model}"), native_body(endpoint)),
+            endpoint,
+        )
+        .await;
+        body_of(response).await
+    }
+
+    async fn body_of(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes)
+                .unwrap_or(Value::String(String::from_utf8_lossy(&bytes).into_owned())),
+        )
+    }
+
+    #[tokio::test]
+    async fn native_operation_the_model_does_not_declare_is_refused_with_its_operations() {
+        let gateway = gateway().await;
+        for (endpoint, model, supported) in [
+            ("encode", "acme/chat", "generate"),
+            ("score", "acme/local", "encode"),
+            ("extract", "acme/local", "encode"),
+            ("extract", "acme/rerank", "score"),
+            ("encode", "acme/rerank", "score"),
+        ] {
+            let (status, body) = native(&gateway, endpoint, model).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{endpoint} {model}: {body}"
+            );
+            assert_eq!(body["detail"]["code"], err_code::INVALID_REQUEST);
+            assert_eq!(
+                body["detail"]["message"],
+                format!("Model '{model}' does not support {endpoint}; it supports: {supported}")
+            );
+        }
+        assert!(gateway.dispatcher.dispatched().is_empty());
+    }
+
+    #[tokio::test]
+    async fn generation_routes_refuse_a_model_without_generate() {
+        let gateway = gateway().await;
+        let message = "Model 'acme/local' does not support generate; it supports: encode";
+
+        let (status, body) = native(&gateway, "generate", "acme/local").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], oai_code::INVALID_REQUEST);
+        assert_eq!(body["error"]["param"], "model");
+        assert_eq!(body["error"]["message"], message);
+
+        let state = || State(Arc::clone(&gateway.state));
+        let chat = json!({
+            "model": "acme/local",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 4,
+        });
+        let completions = json!({"model": "acme/local", "prompt": "hello", "max_tokens": 4});
+        let responses = json!({"model": "acme/local", "input": "hello"});
+        for response in [
+            proxy_chat(state(), request("/v1/chat/completions", chat)).await,
+            proxy_completions(state(), request("/v1/completions", completions)).await,
+            proxy_responses(state(), request("/v1/responses", responses)).await,
+        ] {
+            let (status, body) = body_of(response).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(body["error"]["type"], oai_type::INVALID_REQUEST);
+            assert_eq!(body["error"]["code"], oai_code::INVALID_REQUEST);
+            assert_eq!(body["error"]["param"], "model");
+            assert_eq!(body["error"]["message"], message);
+        }
+        assert!(gateway.dispatcher.dispatched().is_empty());
+    }
+
+    #[tokio::test]
+    async fn compatibility_embeddings_and_rerank_refuse_the_wrong_operation() {
+        let gateway = gateway().await;
+        let state = || State(Arc::clone(&gateway.state));
+        let embeddings = proxy_openai_embeddings(
+            state(),
+            request(
+                "/v1/embeddings",
+                json!({"model": "acme/chat", "input": "hello"}),
+            ),
+        )
+        .await;
+        let (status, body) = body_of(embeddings).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(
+            body["error"]["message"],
+            "Model 'acme/chat' does not support encode; it supports: generate"
+        );
+
+        let rerank = proxy_rerank(
+            state(),
+            request(
+                "/v1/rerank",
+                json!({"model": "acme/local", "query": "q", "documents": ["d"]}),
+            ),
+        )
+        .await;
+        let (status, body) = body_of(rerank).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(
+            body["message"],
+            "Model 'acme/local' does not support score; it supports: encode"
+        );
+        assert!(gateway.dispatcher.dispatched().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_declared_operation_is_not_refused() {
+        let gateway = gateway().await;
+        for (endpoint, model) in [
+            ("encode", "acme/local"),
+            ("score", "acme/rerank"),
+            ("generate", "acme/chat"),
+        ] {
+            let (status, body) = native(&gateway, endpoint, model).await;
+            assert_ne!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{endpoint} {model}: {body}"
+            );
+            assert!(!body.to_string().contains("does not support"), "{body}");
+        }
+        let chat = proxy_chat(
+            State(Arc::clone(&gateway.state)),
+            request(
+                "/v1/chat/completions",
+                json!({
+                    "model": "acme/chat",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 4,
+                }),
+            ),
+        )
+        .await;
+        let (status, body) = body_of(chat).await;
+        assert_ne!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(!body.to_string().contains("does not support"), "{body}");
+    }
+
+    /// Late-interaction adapters score through their own MaxSim without a
+    /// score task, so score on a multivector model is left to the worker.
+    /// Its other undeclared operations are still refused.
+    #[tokio::test]
+    async fn score_on_a_multivector_model_is_left_to_the_worker() {
+        let gateway = gateway().await;
+        let (status, body) = native(&gateway, "score", "acme/late").await;
+        assert_ne!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(!body.to_string().contains("does not support"), "{body}");
+
+        let (status, body) = native(&gateway, "extract", "acme/late").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(
+            body["detail"]["message"],
+            "Model 'acme/late' does not support extract; it supports: encode"
+        );
+    }
+
+    struct NoCompiledRoutes;
+
+    impl crate::server::GenerationRoutePolicy for NoCompiledRoutes {
+        fn resolve(
+            &self,
+            _customer_model: &str,
+            _intent: GenerationRequestIntent,
+        ) -> Option<GovernedGenerationRoute> {
+            None
+        }
+    }
+
+    struct GovernsGeneration(NoCompiledRoutes);
+
+    impl ModelAccessPolicy for GovernsGeneration {
+        fn visible(&self, _resolved_model: &str, _ext: &axum::http::Extensions) -> bool {
+            true
+        }
+
+        fn generation_route_policy(&self) -> Option<&dyn crate::server::GenerationRoutePolicy> {
+            Some(&self.0)
+        }
+    }
+
+    /// Under a generation route policy, a model without a `generate` task has
+    /// no route. It is refused as an unsupported operation, not answered with
+    /// the retryable 503 a missing route gets. A model that declares
+    /// `generate` and has no route keeps that 503.
+    #[tokio::test]
+    async fn governed_native_generate_refuses_a_model_without_generate_before_the_route_lookup() {
+        let mut gateway = gateway().await;
+        gateway.install_policy(Arc::new(GovernsGeneration(NoCompiledRoutes)));
+
+        let (status, body) = native(&gateway, "generate", "acme/local").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["code"], oai_code::INVALID_REQUEST);
+        assert_eq!(
+            body["error"]["message"],
+            "Model 'acme/local' does not support generate; it supports: encode"
+        );
+
+        let (status, body) = native(&gateway, "generate", "acme/chat").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(gateway.dispatcher.dispatched().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_model_without_declared_tasks_keeps_its_current_answers() {
+        let gateway = gateway().await;
+        for endpoint in ["encode", "score", "generate"] {
+            let (status, body) = native(&gateway, endpoint, "acme/plain").await;
+            assert_ne!(status, StatusCode::BAD_REQUEST, "{endpoint}: {body}");
+            assert!(!body.to_string().contains("does not support"), "{body}");
+        }
+        let (status, body) = native(&gateway, "extract", "acme/plain").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body["detail"]["message"],
+            "Model does not support extraction"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hidden_or_unknown_model_is_still_not_found() {
+        let gateway = gateway().await;
+        for model in ["org-42/chat", "acme/absent"] {
+            for endpoint in ["encode", "score", "extract"] {
+                let (status, body) = native(&gateway, endpoint, model).await;
+                assert_eq!(status, StatusCode::NOT_FOUND, "{endpoint} {model}: {body}");
+                assert_eq!(body["detail"]["code"], err_code::MODEL_NOT_FOUND);
+                assert!(!body.to_string().contains("supports"), "{body}");
+            }
+        }
+        let (status, body) = native(&gateway, "encode", "org-42/chat").await;
+        let (_, absent) = native(&gateway, "encode", "org-42/absent").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            body["detail"]["code"], absent["detail"]["code"],
+            "a hidden model answers like an absent one"
+        );
     }
 }

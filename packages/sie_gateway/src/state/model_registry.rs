@@ -3112,6 +3112,7 @@ impl ModelRegistry {
         }
         if config.tasks.is_some() {
             existing.outputs = refreshed.outputs;
+            existing.declared_tasks = refreshed.declared_tasks;
             existing.dims = refreshed.dims;
             existing.max_output_tokens = refreshed.max_output_tokens;
             // M10 follow-up: grammar+tools capabilities are derived

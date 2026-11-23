@@ -348,6 +348,7 @@ fn worker_only_model_info(name: &str, loaded: bool) -> Value {
         info_extras: ModelInfoExtras {
             inputs: Vec::new(),
             outputs: Vec::new(),
+            declared_tasks: None,
             dims: HashMap::new(),
             max_sequence_length: None,
             revision: None,

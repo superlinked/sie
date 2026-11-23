@@ -70,12 +70,22 @@ impl ReasoningEffortDecl {
     }
 }
 
+/// The operations a model YAML can declare under ``tasks``.
+pub const MODEL_OPERATIONS: [&str; 4] = ["encode", "score", "extract", "generate"];
+
 /// Fields mirrored from model YAML for ``/v1/models`` wire parity with
 /// ``sie_server`` ``ModelInfo`` (inputs, outputs, dims, profiles, …).
 #[derive(Debug, Clone, Default)]
 pub struct ModelInfoExtras {
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
+    /// The operations (``encode``, ``score``, ``extract``, ``generate``) the
+    /// model YAML declares under ``tasks``, in that order. A task counts when
+    /// its key is present with a non-null value, the rule the worker applies.
+    /// ``None`` when the YAML declares none: ``outputs`` then holds a
+    /// synthesized ``"dense"`` default, so it says nothing reliable about
+    /// which operations the model serves.
+    pub declared_tasks: Option<Vec<String>>,
     pub dims: HashMap<String, i64>,
     pub max_sequence_length: Option<u64>,
     /// Immutable Hugging Face commit SHA for the model weights. This is part
@@ -531,6 +541,14 @@ impl ModelInfoExtras {
         if extras.outputs.is_empty() && tasks_absent_or_empty {
             extras.outputs.push("dense".to_string());
         }
+        extras.declared_tasks = tasks.and_then(Value::as_object).and_then(|declared| {
+            let operations: Vec<String> = MODEL_OPERATIONS
+                .iter()
+                .filter(|operation| declared.get(**operation).is_some_and(|v| !v.is_null()))
+                .map(|operation| (*operation).to_string())
+                .collect();
+            (!operations.is_empty()).then_some(operations)
+        });
 
         extras
     }
@@ -541,6 +559,7 @@ impl ModelInfoExtras {
             Err(_) => Self {
                 inputs: vec!["text".to_string()],
                 outputs: vec!["dense".to_string()],
+                declared_tasks: None,
                 dims: HashMap::new(),
                 max_sequence_length: config.max_sequence_length,
                 revision: None,
@@ -1700,6 +1719,32 @@ inputs:
 
         let extras = ModelInfoExtras::from_yaml_raw(&raw);
         assert_eq!(extras.outputs, vec!["dense"]);
+        assert_eq!(extras.declared_tasks, None);
+    }
+
+    #[test]
+    fn test_model_info_extras_declared_tasks_follow_the_worker_rule() {
+        for (yaml, expected) in [
+            ("tasks: {}\n", None),
+            ("tasks:\n  encode: null\n", None),
+            ("tasks:\n  generate: {}\n", Some(vec!["generate"])),
+            (
+                "tasks:\n  score: {}\n  encode:\n    dense: {}\n  extract: null\n",
+                Some(vec!["encode", "score"]),
+            ),
+            (
+                "tasks:\n  generate: {}\n  extract: {}\n  score: {}\n  encode:\n    dense:\n      dim: 4\n",
+                Some(vec!["encode", "score", "extract", "generate"]),
+            ),
+        ] {
+            let raw: serde_json::Value = serde_saphyr::from_str(yaml).unwrap();
+            let extras = ModelInfoExtras::from_yaml_raw(&raw);
+            assert_eq!(
+                extras.declared_tasks,
+                expected.map(|tasks| tasks.into_iter().map(String::from).collect::<Vec<_>>()),
+                "{yaml}"
+            );
+        }
     }
 
     #[test]
