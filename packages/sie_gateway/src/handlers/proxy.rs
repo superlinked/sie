@@ -12905,7 +12905,12 @@ fn validate_item_text(item: &rmpv::Value, path: &str) -> Result<(), String> {
     let Some(fields) = item.as_map() else {
         return Ok(());
     };
-    if rmpv_map_get(fields, "text").is_some_and(|v| !v.is_nil() && v.as_str().is_none()) {
+    // A MessagePack map may repeat a key, and the worker keeps the last value,
+    // so every `text` entry is checked, not only the first.
+    if fields
+        .iter()
+        .any(|(k, v)| rmpv_key_eq(k, "text") && !v.is_nil() && v.as_str().is_none())
+    {
         return Err(format!("{path}.text must be a string or null"));
     }
     Ok(())
@@ -25299,6 +25304,46 @@ mod tests {
             for message in queue_parse_errors(&query, "score") {
                 assert_eq!(message, "query.text must be a string or null");
             }
+        }
+    }
+
+    /// A MessagePack map may repeat `text`; the worker keeps the last entry, so
+    /// a later non-string value is refused even after a valid first one.
+    #[test]
+    fn test_parse_queue_request_rejects_repeated_text_key_with_non_string() {
+        fn key(name: &str) -> rmpv::Value {
+            rmpv::Value::String(name.into())
+        }
+        let repeated = rmpv::Value::Map(vec![
+            (key("text"), rmpv::Value::String("ok".into())),
+            (key("text"), rmpv::Value::from(5)),
+        ]);
+        let valid = rmpv::Value::Map(vec![(key("text"), rmpv::Value::String("ok".into()))]);
+
+        let encode = rmpv::Value::Map(vec![(
+            key("items"),
+            rmpv::Value::Array(vec![repeated.clone()]),
+        )]);
+        let mut body = Vec::new();
+        rmpv::encode::write_value(&mut body, &encode).unwrap();
+        match parse_queue_request(&body, true, "encode") {
+            Err(QueueParseError::Generic(message)) => {
+                assert_eq!(message, "items[0].text must be a string or null");
+            }
+            _ => panic!("expected a generic parse error"),
+        }
+
+        let score = rmpv::Value::Map(vec![
+            (key("query"), repeated),
+            (key("items"), rmpv::Value::Array(vec![valid])),
+        ]);
+        let mut body = Vec::new();
+        rmpv::encode::write_value(&mut body, &score).unwrap();
+        match parse_queue_request(&body, true, "score") {
+            Err(QueueParseError::Generic(message)) => {
+                assert_eq!(message, "query.text must be a string or null");
+            }
+            _ => panic!("expected a generic parse error"),
         }
     }
 
