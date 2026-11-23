@@ -4260,6 +4260,10 @@ fn worker_metadata_encoded_size(metadata: &rmpv::Value) -> Option<usize> {
 /// never revealed. `None` (the request goes on as before) when the registry
 /// has no entry for `model` or the entry declares no tasks, because the
 /// gateway then has no reliable view of what the model serves.
+///
+/// `score` on a model with a multivector encode output is also left alone:
+/// late-interaction adapters score with their own MaxSim without declaring a
+/// score task, so the worker decides.
 fn unsupported_operation_response(
     state: &AppState,
     endpoint: &str,
@@ -4270,6 +4274,15 @@ fn unsupported_operation_response(
     let entry = state.model_registry.get_model_info(model)?;
     let declared = entry.info_extras.declared_tasks.as_ref()?;
     if declared.iter().any(|task| task == operation) {
+        return None;
+    }
+    if operation == "score"
+        && entry
+            .info_extras
+            .outputs
+            .iter()
+            .any(|output| output == "multivector")
+    {
         return None;
     }
     Some(endpoint_error_response(
@@ -32236,6 +32249,20 @@ profiles:
     max_batch_tokens: 4096
 ";
 
+    /// A late-interaction model: multivector encode output, no score task.
+    const MULTIVECTOR_MODEL: &str = "\
+sie_id: acme/late
+hf_id: acme/late
+tasks:
+  encode:
+    multivector:
+      dim: 128
+profiles:
+  default:
+    adapter_path: sie_server.adapters.bert_flash:BertFlashAdapter
+    max_batch_tokens: 4096
+";
+
     /// A model whose YAML declares no tasks.
     const UNDECLARED_MODEL: &str = "\
 sie_id: acme/plain
@@ -32271,6 +32298,7 @@ profiles:
             LOCAL_ENCODE_MODEL,
             HYBRID_GENERATE_MODEL,
             SCORE_MODEL,
+            MULTIVECTOR_MODEL,
             UNDECLARED_MODEL,
             HIDDEN_GENERATE_MODEL,
         ])
@@ -32443,6 +32471,24 @@ profiles:
         let (status, body) = body_of(chat).await;
         assert_ne!(status, StatusCode::BAD_REQUEST, "{body}");
         assert!(!body.to_string().contains("does not support"), "{body}");
+    }
+
+    /// Late-interaction adapters score through their own MaxSim without a
+    /// score task, so score on a multivector model is left to the worker.
+    /// Its other undeclared operations are still refused.
+    #[tokio::test]
+    async fn score_on_a_multivector_model_is_left_to_the_worker() {
+        let gateway = gateway().await;
+        let (status, body) = native(&gateway, "score", "acme/late").await;
+        assert_ne!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(!body.to_string().contains("does not support"), "{body}");
+
+        let (status, body) = native(&gateway, "extract", "acme/late").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(
+            body["detail"]["message"],
+            "Model 'acme/late' does not support extract; it supports: encode"
+        );
     }
 
     #[tokio::test]
