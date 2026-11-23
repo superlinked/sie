@@ -1,0 +1,29 @@
+sie_id: google/siglip2-so400m-patch14-384
+hf_id: google/siglip2-so400m-patch14-384
+hf_revision: e8e487298228002f3d8a82e0cd5c8ea9c567f57f
+inputs:
+  text: true
+  image: true
+  audio: false
+  video: false
+tasks:
+  encode:
+    dense:
+      dim: 1152
+    sparse: null
+    multivector: null
+  score: null
+  extract: null
+max_sequence_length: 64
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: float16
+    adapter_path: sie_server.adapters.siglip.adapter:SiglipAdapter
+    adapter_options:
+      # SigLIP 2 was trained on lowercased text; the transformers 4.x Gemma
+      # tokenizer does not lowercase, so the adapter does it (model card recipe).
+      loadtime:
+        lowercase_text: true
+      runtime:
+        normalize: false
