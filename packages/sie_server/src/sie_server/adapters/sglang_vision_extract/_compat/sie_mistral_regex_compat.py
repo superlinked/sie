@@ -89,15 +89,15 @@ def install_on(backend_cls: type) -> bool:
         )
 
     setattr(compat_init, _MARKER, True)
-    backend_cls.__init__ = compat_init
-    backend_cls._patch_mistral_regex = classmethod(compat_patch)
+    backend_cls.__init__ = compat_init  # ty: ignore[invalid-assignment]
+    backend_cls._patch_mistral_regex = classmethod(compat_patch)  # ty: ignore[unresolved-attribute]
     return True
 
 
 def install() -> bool:
     """Patch the installed Transformers ``TokenizersBackend`` when it needs it."""
     try:
-        from transformers.tokenization_utils_tokenizers import TokenizersBackend
+        from transformers.tokenization_utils_tokenizers import TokenizersBackend  # ty: ignore[unresolved-import]
     except ImportError:
         return False
     return install_on(TokenizersBackend)
@@ -128,7 +128,7 @@ class _PatchOnImport(importlib.abc.MetaPathFinder):
             if isinstance(backend, type):
                 install_on(backend)
 
-        loader.exec_module = exec_module
+        loader.exec_module = exec_module  # ty: ignore[invalid-assignment]
         return spec
 
 
