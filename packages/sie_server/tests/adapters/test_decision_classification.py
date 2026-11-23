@@ -1,14 +1,20 @@
 """The label contract is shared by NLI, Qwen and engine-backed decisions."""
 
+import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 import torch
-from sie_server.adapters.decision.base import Row
+from sie_server.adapters.decision import d3, qev
+from sie_server.adapters.decision.base import MAX_ITEM_TOKENS, Row
 from sie_server.adapters.decision.qwen import QwenDecisionAdapter
+from sie_server.adapters.errors import InputTooLongError
 from sie_server.adapters.nli_classification_flash import NLIClassificationFlashAdapter
+from sie_server.adapters.pplx_decider.adapter import PerplexityDecisionAdapter
 from sie_server.adapters.sglang.decision import SGLangDecisionAdapter
+from sie_server.core.extract_cost import adapter_extract_item_costs_off_loop
 from sie_server.types.inputs import InvalidInputError, Item
 
 
@@ -124,3 +130,105 @@ def test_typed_questions_keep_their_existing_output(decision):
     output = decision.extract([Item(text="hello")], output_schema={"spam": {"type": "noul"}})
     assert output.classifications is None
     assert output.data == [{"spam": {"type": "noul", "noul": 0.75, "answer": True, "confidence": 0.75}}]
+
+
+def test_loaded_costs_are_the_unpadded_tokens_of_the_rendered_rows(decision):
+    items = [Item(text="a message"), Item(text="x" * 65)]
+    costs = decision.extract_item_costs(items, labels=["spam", "ham"], options={"multi_label": True})
+    assert costs == [18, 130]
+    assert [call.args[1] for call in decision._item_rows.call_args_list] == items
+
+
+def test_unloaded_or_unrenderable_costs_use_a_bounded_character_estimate(decision):
+    items = [Item(text="a message about an invoice")]
+    exact = decision.extract_item_costs(items, labels=["spam"])
+    decision._check_decision_loaded.side_effect = RuntimeError("not loaded")
+    unloaded = decision.extract_item_costs(items, labels=["spam"])
+    decision._check_decision_loaded.side_effect = None
+    decision._item_rows.side_effect = ValueError("template")
+    unrenderable = decision.extract_item_costs(items, labels=["spam"])
+    question = decision._extract_questions(["spam"], None, None, None)[0]
+    chars = len(items[0].text) + len(question.instructions) + sum(map(len, question.descriptions))
+    assert exact == [len(items[0].text)]
+    assert unloaded == unrenderable == [chars + 8 * len(question.keys) + 384]
+    # Below the previous estimate, 2 * (characters + 512 per question).
+    assert unloaded[0] < chars + 8 * len(question.keys) + 512
+
+
+def test_costs_of_items_extract_rejects_stay_at_the_limit(decision):
+    decision._item_rows.side_effect = InputTooLongError("too long")
+    assert decision.extract_item_costs([Item(text="hello")], labels=["spam"]) == [MAX_ITEM_TOKENS * 4]
+    assert decision.extract_item_costs([Item(text="a", images=[{"data": b"x"}])], labels=["spam"]) == [
+        MAX_ITEM_TOKENS * 4
+    ]
+
+
+class _CharTokenizer:
+    all_special_tokens = ("<|im_start|>", "<|im_end|>")
+    pad_token_id = 0
+
+    def apply_chat_template(self, messages, **kwargs):
+        _ = kwargs
+        return (
+            "".join(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>" for m in messages) + "<|im_start|>assistant\n"
+        )
+
+    def encode(self, text, **kwargs):
+        _ = kwargs
+        return list(map(ord, text))
+
+    def __call__(self, text, **kwargs):
+        _ = kwargs
+        return {"input_ids": self.encode(text), "offset_mapping": [(i, i + 1) for i in range(len(text))]}
+
+
+@pytest.mark.parametrize("decision_format", ["d3", "qev"])
+def test_qwen_costs_match_the_prompts_extract_tokenizes(decision_format):
+    adapter = QwenDecisionAdapter("unused", decision_format=decision_format)
+    adapter._model, adapter._tokenizer, adapter._codes = Mock(), _CharTokenizer(), ("A", "B", "C")
+    schema = {
+        "topic": {"type": "choice", "instructions": "Topic?", "criteria": {"world": None, "sports": None}},
+        "spam": {"type": "noul"},
+    }
+    state = "Stocks rallied after the earnings report."
+    questions = adapter._parse_questions(schema)
+    rendered = (
+        d3.prompts(adapter._tokenizer, state, questions, adapter._codes)
+        if decision_format == "d3"
+        else qev.prompts(adapter._tokenizer, state, questions)
+    )
+    (cost,) = adapter.extract_item_costs([Item(text=state)], output_schema=schema)
+    assert cost == sum(len(ids) for ids, _ in rendered)
+
+
+def _estimating_thread(adapter) -> tuple[list[int] | None, int]:
+    seen: list[int] = []
+    estimate = adapter.extract_item_costs
+
+    def recording(*args, **kwargs):
+        seen.append(threading.get_ident())
+        return estimate(*args, **kwargs)
+
+    adapter.extract_item_costs = recording
+    costs = asyncio.run(adapter_extract_item_costs_off_loop(adapter, [Item(text="a message")], labels=["spam"]))
+    return costs, seen[0]
+
+
+def test_tokenizing_costs_run_off_the_event_loop_thread(decision):
+    costs, thread = _estimating_thread(decision)
+    assert costs == [len("a message")]
+    assert thread != threading.get_ident()
+
+
+def test_character_costs_stay_on_the_event_loop_thread(decision):
+    decision.extract_item_costs_tokenizes = False
+    costs, thread = _estimating_thread(decision)
+    assert costs == [len("a message")]
+    assert thread == threading.get_ident()
+
+
+def test_only_adapters_that_tokenize_costs_ask_for_a_thread():
+    assert QwenDecisionAdapter.extract_item_costs_tokenizes is True
+    assert SGLangDecisionAdapter.extract_item_costs_tokenizes is True
+    assert PerplexityDecisionAdapter.extract_item_costs_tokenizes is False
+    assert asyncio.run(adapter_extract_item_costs_off_loop(Mock(spec=[]), [Item(text="x")])) is None
