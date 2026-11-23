@@ -529,21 +529,36 @@ _CAPACITY_WAIT_CASES = [
 ]
 
 
-def _capacity_refusal(code: str) -> _Reply:
+_GENERATION_OPERATIONS = frozenset({"generate", "chat_completions", "responses", "stream_generate"})
+_FALLBACK_HEADERS = ("X-SIE-Fallback-Reason", "X-SIE-Fallback-Error")
+
+
+def _refusal_headers(operation: str) -> dict[str, str]:
+    # A refusal after a failed fallback attempt is terminal for generation, so
+    # the generation budget cases use a plain local refusal.
+    if operation in _GENERATION_OPERATIONS:
+        return {name: value for name, value in _REFUSAL_HEADERS.items() if name not in _FALLBACK_HEADERS}
+    return _REFUSAL_HEADERS
+
+
+def _capacity_refusal(code: str, operation: str) -> _Reply:
     body = {"detail": {"code": code, "message": "Capacity for model 'm' is starting."}}
-    return _Reply(503, json.dumps(body).encode(), {**_JSON_HEADERS, **_REFUSAL_HEADERS})
+    return _Reply(503, json.dumps(body).encode(), {**_JSON_HEADERS, **_refusal_headers(operation)})
 
 
-def _assert_final_refusal(error: SIEError, code: str) -> None:
+def _assert_final_refusal(error: SIEError, code: str, operation: str) -> None:
     assert isinstance(error, ProvisioningError if code == "PROVISIONING" else ModelLoadingError)
-    assert error.request == _REFUSAL_METADATA
+    if operation in _GENERATION_OPERATIONS:
+        assert error.request == {"id": "req-final", "served_by": "local"}
+    else:
+        assert error.request == _REFUSAL_METADATA
 
 
 @pytest.mark.parametrize(("operation", "code"), _CAPACITY_WAIT_CASES)
 def test_sync_final_attempt_follows_the_wait_that_ends_the_budget(
     stub: _StubServer, budget_clock: _BudgetClock, operation: str, code: str
 ) -> None:
-    stub.replies = [_capacity_refusal(code), _success(operation)]
+    stub.replies = [_capacity_refusal(code, operation), _success(operation)]
     client = SIEClient(stub.url)
     try:
         _call_sync(client, operation)
@@ -558,7 +573,7 @@ def test_sync_final_attempt_follows_the_wait_that_ends_the_budget(
 async def test_async_final_attempt_follows_the_wait_that_ends_the_budget(
     stub: _StubServer, budget_clock: _BudgetClock, operation: str, code: str
 ) -> None:
-    stub.replies = [_capacity_refusal(code), _success(operation)]
+    stub.replies = [_capacity_refusal(code, operation), _success(operation)]
     async with SIEAsyncClient(stub.url) as client:
         await _call_async(client, operation)
         assert client.last_retry_count == 1
@@ -570,14 +585,14 @@ async def test_async_final_attempt_follows_the_wait_that_ends_the_budget(
 def test_sync_refusal_of_the_final_attempt_is_raised_with_its_metadata(
     stub: _StubServer, budget_clock: _BudgetClock, operation: str, code: str
 ) -> None:
-    stub.replies = [_capacity_refusal(code)]
+    stub.replies = [_capacity_refusal(code, operation)]
     client = SIEClient(stub.url)
     try:
         with pytest.raises(SIEError) as excinfo:
             _call_sync(client, operation)
     finally:
         client.close()
-    _assert_final_refusal(excinfo.value, code)
+    _assert_final_refusal(excinfo.value, code, operation)
     assert len(stub.paths) == 2
     assert budget_clock.now == DEFAULT_PROVISION_TIMEOUT_S
 
@@ -586,13 +601,107 @@ def test_sync_refusal_of_the_final_attempt_is_raised_with_its_metadata(
 async def test_async_refusal_of_the_final_attempt_is_raised_with_its_metadata(
     stub: _StubServer, budget_clock: _BudgetClock, operation: str, code: str
 ) -> None:
-    stub.replies = [_capacity_refusal(code)]
+    stub.replies = [_capacity_refusal(code, operation)]
     async with SIEAsyncClient(stub.url) as client:
         with pytest.raises(SIEError) as excinfo:
             await _call_async(client, operation)
-    _assert_final_refusal(excinfo.value, code)
+    _assert_final_refusal(excinfo.value, code, operation)
     assert len(stub.paths) == 2
     assert budget_clock.now == DEFAULT_PROVISION_TIMEOUT_S
+
+
+_FAILED_FALLBACK_CASES = [
+    (operation, code)
+    for operation in ("generate", "chat_completions", "responses", "stream_generate")
+    for code in ("PROVISIONING", "MODEL_LOADING")
+]
+_IDEMPOTENT_OPERATIONS = ("encode", "score", "extract")
+
+
+def _failed_fallback_refusal(code: str) -> _Reply:
+    body = {"detail": {"code": code, "message": "Capacity for model 'm' is starting."}}
+    return _Reply(503, json.dumps(body).encode(), {**_JSON_HEADERS, **_REFUSAL_HEADERS})
+
+
+def _assert_not_retried_after_failed_fallback(error: SIEError, code: str) -> None:
+    assert isinstance(error, ProvisioningError if code == "PROVISIONING" else ServerError)
+    assert "may already have run it" in str(error)
+    assert error.request == _REFUSAL_METADATA  # type: ignore[attr-defined]
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize(("operation", "code"), _FAILED_FALLBACK_CASES)
+def test_sync_generation_is_not_retried_after_a_failed_fallback_attempt(
+    stub: _StubServer, operation: str, code: str
+) -> None:
+    stub.replies = [_failed_fallback_refusal(code), _success(operation)]
+    client = SIEClient(stub.url)
+    try:
+        with pytest.raises(SIEError) as excinfo:
+            _call_sync(client, operation)
+        assert client.last_retry_count == 0
+    finally:
+        client.close()
+    _assert_not_retried_after_failed_fallback(excinfo.value, code)
+    assert len(stub.paths) == 1
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize(("operation", "code"), _FAILED_FALLBACK_CASES)
+async def test_async_generation_is_not_retried_after_a_failed_fallback_attempt(
+    stub: _StubServer, operation: str, code: str
+) -> None:
+    stub.replies = [_failed_fallback_refusal(code), _success(operation)]
+    async with SIEAsyncClient(stub.url) as client:
+        with pytest.raises(SIEError) as excinfo:
+            await _call_async(client, operation)
+        assert client.last_retry_count == 0
+    _assert_not_retried_after_failed_fallback(excinfo.value, code)
+    assert len(stub.paths) == 1
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("operation", sorted(_GENERATION_OPERATIONS))
+def test_sync_generation_still_retries_provisioning_without_a_failed_fallback(
+    stub: _StubServer, operation: str
+) -> None:
+    stub.replies = [_capacity_refusal("PROVISIONING", operation), _success(operation)]
+    client = SIEClient(stub.url)
+    try:
+        _call_sync(client, operation)
+        assert client.last_retry_count == 1
+    finally:
+        client.close()
+    assert len(stub.paths) == 2
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("operation", _IDEMPOTENT_OPERATIONS)
+@pytest.mark.parametrize("code", ["PROVISIONING", "MODEL_LOADING"])
+def test_sync_idempotent_call_still_retries_after_a_failed_fallback(
+    stub: _StubServer, operation: str, code: str
+) -> None:
+    stub.replies = [_failed_fallback_refusal(code), _success(operation)]
+    client = SIEClient(stub.url)
+    try:
+        _call_sync(client, operation)
+        assert client.last_retry_count == 1
+    finally:
+        client.close()
+    assert len(stub.paths) == 2
+
+
+@pytest.mark.usefixtures("no_sleep")
+@pytest.mark.parametrize("operation", _IDEMPOTENT_OPERATIONS)
+@pytest.mark.parametrize("code", ["PROVISIONING", "MODEL_LOADING"])
+async def test_async_idempotent_call_still_retries_after_a_failed_fallback(
+    stub: _StubServer, operation: str, code: str
+) -> None:
+    stub.replies = [_failed_fallback_refusal(code), _success(operation)]
+    async with SIEAsyncClient(stub.url) as client:
+        await _call_async(client, operation)
+        assert client.last_retry_count == 1
+    assert len(stub.paths) == 2
 
 
 _FRESH_KEY = "sk-sie-just-created"

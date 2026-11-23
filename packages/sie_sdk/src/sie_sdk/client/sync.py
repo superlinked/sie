@@ -175,6 +175,7 @@ from ._shared import (
     parse_terminal_msgpack_object,
     provisioning_retry_delay,
     raise_if_estimate_unroutable,
+    raise_if_fallback_attempt_failed,
     raise_if_input_too_long,
     raise_if_model_load_failed,
     read_timeout_message,
@@ -2777,6 +2778,7 @@ class SIEClient:
 
             response = self._follow_modal_continuations(response, start_time=start_time, budget_s=timeout)
             raise_if_model_load_failed(response, model=model)
+            raise_if_fallback_attempt_failed(response)
 
             if response.status_code == 503:
                 error_code = get_error_code(response)

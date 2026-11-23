@@ -445,6 +445,13 @@ ago. None of them means the credit balance ran out, and none is billed.
 lists how each response is classified; the Python and TypeScript SDKs
 both test against it.
 
+A generation call (`generate`, `chat_completions`, `responses` and their
+streaming forms) does not retry a refusal that carries
+`X-SIE-Fallback-Error`. That refusal answers a failed remote fallback
+attempt, which may already have run the request, so a retry could run the
+generation twice. The SDK raises the refusal's error at once, with
+`fallback_error` in `.request`. Encode, score and extract still retry it.
+
 SIE Cloud answers `403` when it will not serve a request through SIE
 Relay, its partner capacity. The SDK raises `RelayUnavailableError`, a
 `RequestError` subclass that carries the server's message, and never

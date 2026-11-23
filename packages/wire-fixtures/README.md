@@ -36,8 +36,10 @@ executable.
 - `retry_classification.json` — how the SDKs classify a non-2xx response to a
   buffered call: `retry` or `terminal` for the idempotent operations (encode,
   score, extract) and for generation, keyed by status, error code, and whether
-  a usable `Retry-After` is present. It also pins how a `Retry-After` value is
-  parsed (delay seconds or an HTTP date; a past date means retry now).
+  a usable `Retry-After` is present. A refusal that carries
+  `X-SIE-Fallback-Error` is terminal for generation. It also pins how a
+  `Retry-After` value is parsed (delay seconds or an HTTP date; a past date
+  means retry now).
 - `sdk_requests.json` — the HTTP request each SDK sends for the same call to
   encode, score, extract, generate and the chat route: method, path, the
   headers that carry meaning, and the decoded body. Each case names one call;

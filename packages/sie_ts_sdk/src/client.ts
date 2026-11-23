@@ -84,6 +84,7 @@ import {
   parseScoreResult,
   readRequestId,
   throwIfEstimateUnroutable,
+  throwIfFallbackAttemptFailed,
   throwIfInputTooLong,
   throwIfModelLoadFailed,
   validateBatchResultCount,
@@ -1920,6 +1921,9 @@ export class SIEClient {
 
         // 502 MODEL_LOAD_FAILED is terminal — surface immediately.
         await throwIfModelLoadFailed(attemptResponse, model);
+        // A refusal that answers a failed remote fallback attempt is terminal:
+        // the attempt may already have run this non-idempotent request.
+        await throwIfFallbackAttemptFailed(attemptResponse);
 
         // Retry explicit SAFE pre-execution signals before the stream opens.
         // Without `waitForCapacity`, provisioning falls through to

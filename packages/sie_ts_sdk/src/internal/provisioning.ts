@@ -54,6 +54,7 @@ import {
   handleError,
   parseRequestMetadata,
   readRequestId,
+  throwIfFallbackAttemptFailed,
   throwIfModelLoadFailed,
 } from "./parsing.js";
 import { applyRetryJitter, computeOomBackoff } from "./retry.js";
@@ -276,6 +277,9 @@ export async function withProvisioningRetry(
 
     // 502 MODEL_LOAD_FAILED is terminal — surface immediately.
     await throwIfModelLoadFailed(response, opts.model);
+    // A refusal that answers a failed remote fallback attempt is terminal:
+    // the attempt may already have run this non-idempotent request.
+    await throwIfFallbackAttemptFailed(response);
 
     if (response.status === 503) {
       const errorCode = await getErrorCode(response.clone());

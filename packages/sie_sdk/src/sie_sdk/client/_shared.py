@@ -1436,6 +1436,29 @@ def raise_if_model_load_failed(response: _HttpResponse, model: str | None = None
     )
 
 
+FALLBACK_ATTEMPT_NOT_RETRIED = (
+    "a remote fallback attempt for this request failed and may already have run it; "
+    "not retried because generation is not idempotent and a retry can run it twice"
+)
+
+
+def raise_if_fallback_attempt_failed(response: _HttpResponse) -> None:
+    """Raise the response's error if it answers a failed remote fallback attempt.
+
+    The gateway or server marks a local refusal that it returns after a failed
+    remote attempt with ``X-SIE-Fallback-Error``. That attempt may already have
+    run the request, so the generation retry loops must not resend it. The
+    error is the one :func:`handle_error` maps the response to, with a note
+    appended to its message; its ``request`` metadata keeps ``fallback_error``.
+    The idempotent encode, score and extract loops do not call this.
+    """
+    if response.status_code < HTTP_CLIENT_ERROR:
+        return
+    if not _header_value(response.headers, FALLBACK_ERROR_HEADER):
+        return
+    handle_error(response, note=FALLBACK_ATTEMPT_NOT_RETRIED)
+
+
 def raise_if_input_too_long(response: _HttpResponse, model: str | None = None) -> None:
     """Raise :class:`InputTooLongError` if the response is 400 ``INPUT_TOO_LONG``.
 
@@ -1468,12 +1491,13 @@ def raise_if_input_too_long(response: _HttpResponse, model: str | None = None) -
     )
 
 
-def handle_error(response: _HttpResponse) -> NoReturn:
+def handle_error(response: _HttpResponse, *, note: str | None = None) -> NoReturn:
     """Handle error response from server.
 
     Always raises — every path terminates in a typed exception. Declared
     ``NoReturn`` so callers (and the type checker) know a call terminates
-    control flow, e.g. the admission-ladder give-up paths.
+    control flow, e.g. the admission-ladder give-up paths. ``note`` is
+    appended to the server's message.
 
     Raises:
         RateLimitError: For 429 responses (retry budget already spent by the
@@ -1530,6 +1554,8 @@ def handle_error(response: _HttpResponse) -> NoReturn:
         code = header_code
     else:
         code = normalize_error_code(code)
+    if note:
+        message = f"{message} ({note})"
 
     request = parse_request_metadata(response.headers)
 
@@ -1734,6 +1760,7 @@ def next_stream_retry_delay(
     # read the buffered body and raise their own typed errors).
     raise_if_model_load_failed(response, model=model)
     raise_if_input_too_long(response, model=model)
+    raise_if_fallback_attempt_failed(response)
 
     if status == HTTP_SERVICE_UNAVAILABLE:
         code = get_error_code(response)

@@ -1,5 +1,5 @@
 {
-  "description": "How the SDKs classify one non-2xx response to a buffered call. Each case is served verbatim, followed by a success; 'retry' means the SDK sends the request again and returns that success, 'terminal' means it raises after one request. 'idempotent' covers encode, score and extract; 'generation' covers buffered generate, chat completions and responses. Decisions assume the default wait_for_capacity=true.",
+  "description": "How the SDKs classify one non-2xx response to a buffered call. Each case is served verbatim, followed by a success; 'retry' means the SDK sends the request again and returns that success, 'terminal' means it raises after one request. 'idempotent' covers encode, score and extract; 'generation' covers buffered generate, chat completions and responses. Decisions assume the default wait_for_capacity=true. A refusal that carries X-SIE-Fallback-Error answers a failed remote fallback attempt that may already have run the request, so it is terminal for generation.",
   "responses": [
     {
       "name": "provisioning",
@@ -16,6 +16,22 @@
       "body": {"detail": {"code": "MODEL_LOADING", "message": "Model is loading"}},
       "idempotent": "retry",
       "generation": "retry"
+    },
+    {
+      "name": "provisioning_after_failed_fallback",
+      "status": 503,
+      "headers": {"Retry-After": "1", "X-SIE-Served-By": "local", "X-SIE-Fallback-Reason": "provisioning", "X-SIE-Fallback-Error": "QUEUE_FULL"},
+      "body": {"error": {"code": "PROVISIONING", "message": "Provisioning capacity"}},
+      "idempotent": "retry",
+      "generation": "terminal"
+    },
+    {
+      "name": "model_loading_after_failed_fallback",
+      "status": 503,
+      "headers": {"Retry-After": "1", "X-SIE-Served-By": "local", "X-SIE-Fallback-Reason": "model_loading", "X-SIE-Fallback-Error": "INFERENCE_ERROR"},
+      "body": {"detail": {"code": "MODEL_LOADING", "message": "Model is loading"}},
+      "idempotent": "retry",
+      "generation": "terminal"
     },
     {
       "name": "resource_exhausted",

@@ -15,6 +15,7 @@ import {
   ModelLoadingError,
   ProvisioningError,
   ResourceExhaustedError,
+  ServerError,
 } from "../src/errors.js";
 import {
   DEFAULT_PROVISION_TIMEOUT,
@@ -40,11 +41,22 @@ const REFUSAL_METADATA = {
   fallbackError: "QUEUE_FULL",
 };
 const CAPACITY_READY_AT_MS = 700_000;
+// A refusal after a failed fallback attempt is terminal for generation, so the
+// generation budget cases use a plain local refusal.
+const LOCAL_REFUSAL_HEADERS = {
+  "X-SIE-Request-ID": "req-refused",
+  "X-SIE-Served-By": "local",
+};
+const LOCAL_REFUSAL_METADATA = { id: "req-refused", servedBy: "local" };
 
 type Operation = "encode" | "generate" | "streamGenerate";
 const OPERATIONS: Operation[] = ["encode", "generate", "streamGenerate"];
 
-function refusal(code: string, retryAfter = "900"): Response {
+function refusal(
+  code: string,
+  retryAfter = "900",
+  headers: Record<string, string> = REFUSAL_HEADERS,
+): Response {
   return new Response(
     JSON.stringify({ error: { code, message: "Capacity for model 'm' is starting." } }),
     {
@@ -52,10 +64,18 @@ function refusal(code: string, retryAfter = "900"): Response {
       headers: {
         "Content-Type": "application/json",
         "Retry-After": retryAfter,
-        ...REFUSAL_HEADERS,
+        ...headers,
       },
     },
   );
+}
+
+function budgetRefusal(operation: Operation, code: string): Response {
+  return operation === "encode" ? refusal(code) : refusal(code, "900", LOCAL_REFUSAL_HEADERS);
+}
+
+function budgetRefusalMetadata(operation: Operation): Record<string, string> {
+  return operation === "encode" ? REFUSAL_METADATA : LOCAL_REFUSAL_METADATA;
 }
 
 function success(operation: Operation): Response {
@@ -119,7 +139,9 @@ describe("the final attempt at the end of the provisioning budget", () => {
     async (operation) => {
       const start = Date.now();
       mockFetch.mockImplementation(async () =>
-        Date.now() - start >= CAPACITY_READY_AT_MS ? success(operation) : refusal("PROVISIONING"),
+        Date.now() - start >= CAPACITY_READY_AT_MS
+          ? success(operation)
+          : budgetRefusal(operation, "PROVISIONING"),
       );
       const client = new SIEClient("http://localhost:8080");
 
@@ -140,7 +162,7 @@ describe("the final attempt at the end of the provisioning budget", () => {
   )(
     "$operation throws the $code refusal of the final attempt with its metadata",
     async ({ operation, code, type }) => {
-      mockFetch.mockImplementation(async () => refusal(code));
+      mockFetch.mockImplementation(async () => budgetRefusal(operation, code));
       const client = new SIEClient("http://localhost:8080");
 
       const settled = settle(call(client, operation));
@@ -148,10 +170,72 @@ describe("the final attempt at the end of the provisioning budget", () => {
       const { error } = await settled;
 
       expect(error).toBeInstanceOf(type);
-      expect((error as ProvisioningError | ModelLoadingError).request).toEqual(REFUSAL_METADATA);
+      expect((error as ProvisioningError | ModelLoadingError).request).toEqual(
+        budgetRefusalMetadata(operation),
+      );
       expect(mockFetch).toHaveBeenCalledTimes(2);
     },
   );
+});
+
+describe("a refusal after a failed fallback attempt", () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it.each(
+    (["generate", "streamGenerate"] as const).flatMap((operation) => [
+      { operation, code: "PROVISIONING", type: ProvisioningError },
+      { operation, code: "MODEL_LOADING", type: ServerError },
+    ]),
+  )(
+    "$operation does not retry $code and throws it with its metadata",
+    async ({ operation, code, type }) => {
+      mockFetch.mockResolvedValueOnce(refusal(code, "1")).mockResolvedValueOnce(success(operation));
+      const client = new SIEClient("http://localhost:8080");
+
+      const settled = settle(call(client, operation));
+      await vi.advanceTimersByTimeAsync(10_000);
+      const { error } = await settled;
+
+      expect(error).toBeInstanceOf(type);
+      expect((error as Error).message).toContain("may already have run it");
+      expect((error as ProvisioningError | ServerError).request).toEqual(REFUSAL_METADATA);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(["generate", "streamGenerate"] as const)(
+    "%s still retries PROVISIONING without the header",
+    async (operation) => {
+      mockFetch
+        .mockResolvedValueOnce(refusal("PROVISIONING", "1", LOCAL_REFUSAL_HEADERS))
+        .mockResolvedValueOnce(success(operation));
+      const client = new SIEClient("http://localhost:8080");
+
+      const settled = settle(call(client, operation));
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(await settled).toEqual({});
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each(["PROVISIONING", "MODEL_LOADING"])("encode still retries %s", async (code) => {
+    mockFetch.mockResolvedValueOnce(refusal(code, "1")).mockResolvedValueOnce(success("encode"));
+    const client = new SIEClient("http://localhost:8080");
+
+    const settled = settle(call(client, "encode"));
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(await settled).toEqual({});
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("request metadata on capacity refusals", () => {

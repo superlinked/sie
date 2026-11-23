@@ -460,9 +460,36 @@ export async function throwIfEstimateUnroutable(response: Response): Promise<voi
 }
 
 /**
- * Handle HTTP error response and throw appropriate error
+ * Appended to the error of a generation response that answers a failed
+ * remote fallback attempt. Mirrors the Python SDK's
+ * `FALLBACK_ATTEMPT_NOT_RETRIED`.
  */
-export async function handleError(response: Response, gpu?: string): Promise<never> {
+export const FALLBACK_ATTEMPT_NOT_RETRIED =
+  "a remote fallback attempt for this request failed and may already have run it; " +
+  "not retried because generation is not idempotent and a retry can run it twice";
+
+/**
+ * Throw the response's error if it answers a failed remote fallback attempt.
+ *
+ * The gateway or server marks a local refusal that it returns after a failed
+ * remote attempt with `X-SIE-Fallback-Error`. That attempt may already have
+ * run the request, so the generation retry loops must not resend it. The
+ * error is the one {@link handleError} maps the response to, with a note
+ * appended to its message; its `request` metadata keeps `fallbackError`. The
+ * idempotent encode, score and extract loop does not call this. Mirrors the
+ * Python SDK's `raise_if_fallback_attempt_failed`.
+ */
+export async function throwIfFallbackAttemptFailed(response: Response): Promise<void> {
+  if (response.status < HTTP_CLIENT_ERROR_MIN) return;
+  if (!response.headers.get("x-sie-fallback-error")) return;
+  await handleError(response, undefined, FALLBACK_ATTEMPT_NOT_RETRIED);
+}
+
+/**
+ * Handle HTTP error response and throw appropriate error. `note` is appended
+ * to the server's message.
+ */
+export async function handleError(response: Response, gpu?: string, note?: string): Promise<never> {
   const { status } = response;
 
   // Prefer nested ``error`` / ``detail`` objects (gateway + FastAPI dict detail),
@@ -501,6 +528,7 @@ export async function handleError(response: Response, gpu?: string): Promise<nev
     }
   }
   code = response.headers.get(SIE_ERROR_CODE_HEADER) ?? normalizeErrorCode(code);
+  if (note) message = `${message} (${note})`;
   const requestId = readRequestId(response);
   const request = parseRequestMetadata(response.headers);
 
