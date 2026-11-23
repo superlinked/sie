@@ -32,6 +32,8 @@ adopt it without coordinating on a calibration table.
 
 from __future__ import annotations
 
+import asyncio
+import functools
 from typing import TYPE_CHECKING, Any, Final
 
 from sie_server.core.prepared import ExtractPreparedItem
@@ -171,6 +173,37 @@ def adapter_extract_item_costs(
     except Exception:  # noqa: BLE001 — a cost estimate must never fail the request
         return None
     return _usable_item_costs(costs, len(items))
+
+
+async def adapter_extract_item_costs_off_loop(
+    adapter: object,
+    items: list[Item],
+    *,
+    labels: list[str] | None = None,
+    output_schema: dict[str, Any] | None = None,
+    instruction: str | None = None,
+    options: dict[str, Any] | None = None,
+) -> list[int] | None:
+    """``adapter_extract_item_costs`` for callers on the event loop.
+
+    An adapter that sets ``extract_item_costs_tokenizes = True`` renders and
+    tokenizes every item to price it, which takes milliseconds per item and
+    would stall every other request if it ran on the loop. Its estimate runs
+    on a worker thread; every other adapter's estimate is character
+    arithmetic and stays inline.
+    """
+    estimate = functools.partial(
+        adapter_extract_item_costs,
+        adapter,
+        items,
+        labels=labels,
+        output_schema=output_schema,
+        instruction=instruction,
+        options=options,
+    )
+    if getattr(adapter, "extract_item_costs_tokenizes", False) is True:
+        return await asyncio.to_thread(estimate)
+    return estimate()
 
 
 def _usable_item_costs(costs: object, expected_len: int) -> list[int] | None:

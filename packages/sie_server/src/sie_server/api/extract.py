@@ -18,7 +18,7 @@ from sie_server.api.routing import remote_routing, route_request
 from sie_server.api.serialization import MsgPackResponse
 from sie_server.api.validation import validate_machine_profile_header
 from sie_server.core.extract_cost import (
-    adapter_extract_item_costs,
+    adapter_extract_item_costs_off_loop,
     build_extract_prepared_items,
     dispatches_items_alone,
 )
@@ -153,7 +153,7 @@ async def _extract_via_worker(
             adapter = registry.get(model)
         except (AttributeError, KeyError):
             adapter = None
-        item_costs = adapter_extract_item_costs(
+        item_costs = await adapter_extract_item_costs_off_loop(
             adapter,
             items,
             labels=labels,

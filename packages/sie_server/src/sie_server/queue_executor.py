@@ -27,7 +27,7 @@ from sie_server.config.upstreams import validate_profile_upstreams
 from sie_server.core.encode_pipeline import EncodePipeline, resolve_encode_output_types
 from sie_server.core.extract_cost import (
     MAX_EXTRACT_LABELS,
-    adapter_extract_item_costs,
+    adapter_extract_item_costs_off_loop,
     build_extract_prepared_items,
     output_schema_shape_error,
 )
@@ -1723,7 +1723,7 @@ class QueueExecutor:
                         # Batching proxy only; authoritative text/page billing
                         # comes from the adapter's ExtractOutput unit counts.
                         # The sidecar sizes queue batches (cost 1 per extract item); this cost does not.
-                        item_costs = adapter_extract_item_costs(
+                        item_costs = await adapter_extract_item_costs_off_loop(
                             extract_adapter,
                             [server_item],
                             labels=bi.labels,
