@@ -12960,15 +12960,55 @@ fn validate_queue_item_shapes(
         } else {
             validate_item_text(item, &format!("items[{index}]"))?;
         }
+        if endpoint == "encode" && !item_has_content(item) {
+            return Err(format!(
+                "items[{index}] has no content: set one of {}",
+                ITEM_CONTENT_FIELDS.join(", ")
+            )
+            .into());
+        }
     }
 
     Ok(())
+}
+
+/// Whether an item carries content the worker will keep. An item has content
+/// when `text` or a media field holds a non-null value. The worker reads
+/// `content` as an alias for `text` only when the item has no `text` key, so
+/// `content` counts only then. A MessagePack map may repeat a key and the
+/// worker keeps the last value, so the last entry of each key decides. An
+/// empty value (`""`, `[]`) counts as present and is left to the model to
+/// judge. Only encode is checked: some extractors read an item's `metadata`
+/// alone, and score items are left to the worker.
+fn item_has_content(item: &rmpv::Value) -> bool {
+    let Some(fields) = item.as_map() else {
+        return false;
+    };
+    let kept = |name: &str| {
+        fields
+            .iter()
+            .rev()
+            .find(|(key, _)| rmpv_key_eq(key, name))
+            .map(|(_, value)| value)
+    };
+    let text = match kept("text") {
+        Some(value) => !value.is_nil(),
+        None => kept(ITEM_TEXT_ALIAS).is_some_and(|value| !value.is_nil()),
+    };
+    text || ITEM_CONTENT_FIELDS
+        .iter()
+        .filter(|field| **field != "text")
+        .any(|field| kept(field).is_some_and(|value| !value.is_nil()))
 }
 
 /// Item fields that carry content. A body without `items` (or the `input` /
 /// `inputs` aliases) is read as a single item only when it has one of these;
 /// otherwise there is nothing to run and the request is refused at ingress.
 const ITEM_CONTENT_FIELDS: [&str; 5] = ["text", "images", "audio", "video", "document"];
+
+/// The worker reads `content` as an alias for `text` when `text` is absent, so
+/// it counts as item content wherever `ITEM_CONTENT_FIELDS` does.
+const ITEM_TEXT_ALIAS: &str = "content";
 
 const MISSING_ITEMS_MESSAGE: &str = "field 'items' is required";
 
@@ -13147,7 +13187,7 @@ fn parse_queue_request_json(
             }
         } else if map
             .keys()
-            .any(|key| ITEM_CONTENT_FIELDS.contains(&key.as_str()))
+            .any(|key| key == ITEM_TEXT_ALIAS || ITEM_CONTENT_FIELDS.contains(&key.as_str()))
         {
             vec![parsed]
         } else {
@@ -13215,9 +13255,10 @@ fn parse_queue_request_msgpack(
             _ => return Err("'inputs' must be an array".to_string().into()),
         }
     } else if !map.iter().any(|(key, _)| {
-        ITEM_CONTENT_FIELDS
-            .iter()
-            .any(|field| rmpv_key_eq(key, field))
+        rmpv_key_eq(key, ITEM_TEXT_ALIAS)
+            || ITEM_CONTENT_FIELDS
+                .iter()
+                .any(|field| rmpv_key_eq(key, field))
     }) {
         return Err(MISSING_ITEMS_MESSAGE.to_string().into());
     } else {
@@ -25252,10 +25293,13 @@ mod tests {
         let payload: Vec<u8> = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02];
         let body_value = rmpv::Value::Map(vec![(
             rmpv::Value::from("items"),
-            rmpv::Value::Array(vec![rmpv::Value::Map(vec![(
-                rmpv::Value::from("blob"),
-                rmpv::Value::Binary(payload.clone()),
-            )])]),
+            rmpv::Value::Array(vec![rmpv::Value::Map(vec![
+                (rmpv::Value::from("text"), rmpv::Value::from("t")),
+                (
+                    rmpv::Value::from("blob"),
+                    rmpv::Value::Binary(payload.clone()),
+                ),
+            ])]),
         )]);
         let body = rmp_serde::to_vec(&body_value).unwrap();
 
@@ -25356,7 +25400,8 @@ mod tests {
     fn test_parse_queue_request_keeps_single_item_body() {
         let text = json!({"text": "hello", "params": {"output_types": ["dense"]}});
         let image = json!({"images": [{"data": "aGVsbG8=", "format": "png"}]});
-        for body in [text, image] {
+        let alias = json!({"content": "hello"});
+        for body in [text, image, alias] {
             let json_body = serde_json::to_vec(&body).unwrap();
             let (items, _) = parse_queue_request(&json_body, false, "encode").unwrap();
             assert_eq!(items.len(), 1, "{body}");
@@ -25364,6 +25409,97 @@ mod tests {
             let (items, _) = parse_queue_request(&msgpack_body, true, "encode").unwrap();
             assert_eq!(items.len(), 1, "{body}");
         }
+    }
+
+    /// An encode item with no content field holding a value has nothing to
+    /// embed; it is refused at ingress and names the item.
+    #[test]
+    fn test_parse_queue_request_rejects_encode_item_without_content() {
+        let expected = "has no content: set one of text, images, audio, video, document";
+        for item in [
+            json!({}),
+            json!({"text": null}),
+            json!({"text": null, "images": null, "audio": null}),
+            json!({"id": "a", "metadata": {"k": "v"}}),
+            json!({"txt": "hello"}),
+        ] {
+            let body = json!({"items": [item]});
+            for message in queue_parse_errors(&body, "encode") {
+                assert_eq!(message, format!("items[0] {expected}"), "{body}");
+            }
+            let body = json!({"items": [{"text": "first"}, item]});
+            for message in queue_parse_errors(&body, "encode") {
+                assert_eq!(message, format!("items[1] {expected}"), "{body}");
+            }
+        }
+    }
+
+    /// Any content field with a value keeps an encode item, including the
+    /// worker's `content` alias for `text` and empty values, which the model
+    /// judges. Extract and score items without content are not refused here.
+    #[test]
+    fn test_parse_queue_request_keeps_encode_item_with_content() {
+        let media = json!({"data": "aGVsbG8=", "format": "png"});
+        for item in [
+            json!({"text": "hello"}),
+            json!({"text": ""}),
+            json!({"content": "hello"}),
+            json!({"images": [media]}),
+            json!({"images": []}),
+            json!({"text": "caption", "images": [media]}),
+            json!({"audio": {"data": "aGVsbG8=", "format": "wav"}}),
+            json!({"video": {"data": "aGVsbG8=", "format": "mp4"}}),
+            json!({"document": {"data": "aGVsbG8=", "format": "pdf"}}),
+            json!({"id": "a", "text": null, "images": [media]}),
+        ] {
+            let body = json!({"items": [item]});
+            let json_body = serde_json::to_vec(&body).unwrap();
+            let (items, _) = parse_queue_request(&json_body, false, "encode").unwrap();
+            assert_eq!(items.len(), 1, "{body}");
+            let msgpack_body = rmp_serde::to_vec(&body).unwrap();
+            let (items, _) = parse_queue_request(&msgpack_body, true, "encode").unwrap();
+            assert_eq!(items.len(), 1, "{body}");
+        }
+
+        let extract = json!({"items": [{"id": "a", "metadata": {"state": "s"}}]});
+        let score = json!({"query": {}, "items": [{}]});
+        for (body, endpoint) in [(extract, "extract"), (score, "score")] {
+            let json_body = serde_json::to_vec(&body).unwrap();
+            parse_queue_request(&json_body, false, endpoint).unwrap();
+            let msgpack_body = rmp_serde::to_vec(&body).unwrap();
+            parse_queue_request(&msgpack_body, true, endpoint).unwrap();
+        }
+    }
+
+    /// The gate follows what the worker keeps: `content` is the alias for
+    /// `text` only when the item has no `text` key, and a repeated key in a
+    /// MessagePack map resolves to its last value.
+    #[test]
+    fn test_parse_queue_request_content_gate_follows_the_value_the_worker_keeps() {
+        let expected = "items[0] has no content: set one of text, images, audio, video, document";
+        let body = json!({"items": [{"content": "hello", "text": null}]});
+        for message in queue_parse_errors(&body, "encode") {
+            assert_eq!(message, expected);
+        }
+
+        fn encode_body(text_entries: [rmpv::Value; 2]) -> Vec<u8> {
+            let key = |name: &str| rmpv::Value::String(name.into());
+            let [first, second] = text_entries;
+            let item = rmpv::Value::Map(vec![(key("text"), first), (key("text"), second)]);
+            let body = rmpv::Value::Map(vec![(key("items"), rmpv::Value::Array(vec![item]))]);
+            let mut bytes = Vec::new();
+            rmpv::encode::write_value(&mut bytes, &body).unwrap();
+            bytes
+        }
+        let hello = || rmpv::Value::String("hello".into());
+
+        match parse_queue_request(&encode_body([hello(), rmpv::Value::Nil]), true, "encode") {
+            Err(QueueParseError::Generic(message)) => assert_eq!(message, expected),
+            _ => panic!("a trailing null text must be refused"),
+        }
+        let (items, _) =
+            parse_queue_request(&encode_body([rmpv::Value::Nil, hello()]), true, "encode").unwrap();
+        assert_eq!(items.len(), 1);
     }
 
     #[test]
@@ -25429,7 +25565,7 @@ mod tests {
     fn test_parse_queue_request_accepts_string_null_or_absent_item_text() {
         let encode = json!({"items": [
             {"text": "a"},
-            {"text": null},
+            {"text": null, "images": [{"data": "aGVsbG8="}]},
             {"images": [{"data": "aGVsbG8=", "format": "png"}]},
             {"text": "caption", "images": [{"data": "aGVsbG8="}]},
         ]});
