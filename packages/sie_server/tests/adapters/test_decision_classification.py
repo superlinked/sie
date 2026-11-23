@@ -1,5 +1,7 @@
 """The label contract is shared by NLI, Qwen and engine-backed decisions."""
 
+import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -10,7 +12,9 @@ from sie_server.adapters.decision.base import MAX_ITEM_TOKENS, Row
 from sie_server.adapters.decision.qwen import QwenDecisionAdapter
 from sie_server.adapters.errors import InputTooLongError
 from sie_server.adapters.nli_classification_flash import NLIClassificationFlashAdapter
+from sie_server.adapters.pplx_decider.adapter import PerplexityDecisionAdapter
 from sie_server.adapters.sglang.decision import SGLangDecisionAdapter
+from sie_server.core.extract_cost import adapter_extract_item_costs_off_loop
 from sie_server.types.inputs import InvalidInputError, Item
 
 
@@ -147,7 +151,7 @@ def test_unloaded_or_unrenderable_costs_use_a_bounded_character_estimate(decisio
     chars = len(items[0].text) + len(question.instructions) + sum(map(len, question.descriptions))
     assert exact == [len(items[0].text)]
     assert unloaded == unrenderable == [chars + 8 * len(question.keys) + 384]
-    # Under half of the previous estimate, 2 * (characters + 512 per question).
+    # Below the previous estimate, 2 * (characters + 512 per question).
     assert unloaded[0] < chars + 8 * len(question.keys) + 512
 
 
@@ -195,3 +199,36 @@ def test_qwen_costs_match_the_prompts_extract_tokenizes(decision_format):
     )
     (cost,) = adapter.extract_item_costs([Item(text=state)], output_schema=schema)
     assert cost == sum(len(ids) for ids, _ in rendered)
+
+
+def _estimating_thread(adapter) -> tuple[list[int] | None, int]:
+    seen: list[int] = []
+    estimate = adapter.extract_item_costs
+
+    def recording(*args, **kwargs):
+        seen.append(threading.get_ident())
+        return estimate(*args, **kwargs)
+
+    adapter.extract_item_costs = recording
+    costs = asyncio.run(adapter_extract_item_costs_off_loop(adapter, [Item(text="a message")], labels=["spam"]))
+    return costs, seen[0]
+
+
+def test_tokenizing_costs_run_off_the_event_loop_thread(decision):
+    costs, thread = _estimating_thread(decision)
+    assert costs == [len("a message")]
+    assert thread != threading.get_ident()
+
+
+def test_character_costs_stay_on_the_event_loop_thread(decision):
+    decision.extract_item_costs_tokenizes = False
+    costs, thread = _estimating_thread(decision)
+    assert costs == [len("a message")]
+    assert thread == threading.get_ident()
+
+
+def test_only_adapters_that_tokenize_costs_ask_for_a_thread():
+    assert QwenDecisionAdapter.extract_item_costs_tokenizes is True
+    assert SGLangDecisionAdapter.extract_item_costs_tokenizes is True
+    assert PerplexityDecisionAdapter.extract_item_costs_tokenizes is False
+    assert asyncio.run(adapter_extract_item_costs_off_loop(Mock(spec=[]), [Item(text="x")])) is None

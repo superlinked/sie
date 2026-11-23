@@ -62,6 +62,8 @@ class PerplexityDecisionAdapter(DecisionBatchAdapter):
         outputs=("json",),
         unload_fields=("_model", "_processor", "_tokenizer"),
     )
+    # The override below prices items from character counts alone.
+    extract_item_costs_tokenizes = False
 
     def __init__(
         self,

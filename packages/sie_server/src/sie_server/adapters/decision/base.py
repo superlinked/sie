@@ -54,6 +54,8 @@ class DecisionBatchAdapter(BaseAdapter):
 
     _max_seq_length: int
     _max_forward_tokens: int
+    # ``extract_item_costs`` tokenizes once loaded, so async callers run it off the event loop.
+    extract_item_costs_tokenizes = True
 
     def _check_decision_loaded(self) -> None:
         raise NotImplementedError
