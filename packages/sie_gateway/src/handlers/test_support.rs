@@ -1252,6 +1252,39 @@ impl ThresholdBroker {
     }
 }
 
+/// An object schema whose ``properties`` each ``$ref`` one shared
+/// definition of ``fields`` string fields, each with a
+/// ``description_len``-byte description. Expanding the refs copies the
+/// definition once per property.
+pub(crate) fn schema_with_shared_definition(
+    properties: usize,
+    fields: usize,
+    description_len: usize,
+) -> serde_json::Value {
+    let description = "d".repeat(description_len);
+    let shared_fields: serde_json::Map<String, serde_json::Value> = (0..fields)
+        .map(|i| {
+            (
+                format!("f{i}"),
+                serde_json::json!({"type": "string", "description": description}),
+            )
+        })
+        .collect();
+    let refs: serde_json::Map<String, serde_json::Value> = (0..properties)
+        .map(|i| {
+            (
+                format!("p{i}"),
+                serde_json::json!({"$ref": "#/$defs/Shared"}),
+            )
+        })
+        .collect();
+    serde_json::json!({
+        "type": "object",
+        "$defs": {"Shared": {"type": "object", "properties": shared_fields}},
+        "properties": refs,
+    })
+}
+
 #[cfg(test)]
 mod threshold_broker_tests {
     use super::ThresholdBroker;

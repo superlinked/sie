@@ -1069,8 +1069,8 @@ class TestGenerateEndpoint:
 
     @pytest.mark.parametrize(
         "list_index",
-        ["²", "9" * 5000],
-        ids=["non-ascii", "overlong-ascii"],
+        ["²", "9" * 5000, "01"],
+        ids=["non-ascii", "overlong-ascii", "leading-zero"],
     )
     def test_native_grammar_rejects_invalid_json_pointer_list_index(self, list_index: str) -> None:
         pointer = f"/{list_index}"

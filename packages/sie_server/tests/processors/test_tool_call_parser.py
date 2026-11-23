@@ -991,6 +991,33 @@ def test_self_referencing_schema_does_not_loop() -> None:
     assert _parse_xml_tool_call("<function=f><parameter=v>\n1\n</parameter></function>", schemas) == ("f", {"v": "1"})
 
 
+@pytest.mark.parametrize("combinator", ["anyOf", "allOf"])
+def test_shared_definitions_under_combinators_are_inferred_once(combinator: str) -> None:
+    """Each definition names the next twice, so a walk without memoization visits 2**25 paths."""
+    definitions = {f"D{i}": {combinator: [{"$ref": f"#/$defs/D{i + 1}"}] * 2} for i in range(25)}
+    definitions["D25"] = {"type": "integer"}
+    schemas = {"f": {"$defs": definitions, "properties": {"v": {"$ref": "#/$defs/D0"}}}}
+
+    call = "<function=f><parameter=v>\n7\n</parameter></function>"
+    assert tool_call_parser._parse_xml_tool_call(call, schemas) == ("f", {"v": 7})
+
+
+@pytest.mark.parametrize("combinator", ["anyOf", "allOf"])
+def test_a_definition_first_reached_at_the_depth_limit_is_inferred_again_nearer_the_root(combinator: str) -> None:
+    """The long chain reaches ``Shared`` at the depth limit, where its variants are cut off; the short path does not."""
+    depth = tool_call_parser._MAX_SCHEMA_DEPTH
+    definitions: dict[str, object] = {f"C{i}": {combinator: [{"$ref": f"#/$defs/C{i + 1}"}]} for i in range(depth - 2)}
+    definitions[f"C{depth - 2}"] = {combinator: [{"$ref": "#/$defs/Shared"}]}
+    definitions["Shared"] = {"anyOf": [{"$ref": "#/$defs/Leaf"}]}
+    root = {"$defs": definitions}
+    parameter = {combinator: [{"$ref": "#/$defs/C0"}, {"$ref": "#/$defs/Shared"}]}
+
+    definitions["Leaf"] = {"type": "integer"}
+    assert tool_call_parser._schema_type(parameter, root) == "integer"
+    definitions["Leaf"] = {"type": "null"}
+    assert tool_call_parser._schema_allows_null({"anyOf": parameter[combinator]}, root)
+
+
 @pytest.mark.asyncio
 async def test_non_streaming_candidates_keep_a_malformed_block_as_text() -> None:
     import json

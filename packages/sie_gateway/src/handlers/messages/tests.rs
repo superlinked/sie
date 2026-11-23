@@ -206,6 +206,20 @@ fn tool_count_over_the_limit_is_refused() {
 }
 
 #[test]
+fn a_tool_schema_is_not_expanded_against_the_grammar_caps() {
+    let schema = crate::handlers::test_support::schema_with_shared_definition(150, 40, 1);
+    let translation = messages_to_chat(
+        &json!({"model": "m", "max_tokens": 1, "tools": [{"name": "t", "input_schema": schema}], "messages": [{"role": "user", "content": "x"}]}),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        translation.chat["tools"][0]["function"]["parameters"],
+        schema
+    );
+}
+
+#[test]
 fn response_vectors_translate_the_chat_completion() {
     let vectors = vectors("response_vectors.json");
     for case in vectors["translated"].as_array().unwrap() {
