@@ -105,8 +105,13 @@ from sie_sdk.types import (
     PoolSpec,
     Recommendation,
     RequestMetadata,
-    ResponseInputMessage,
+    ResponseInputItem,
+    ResponseReasoning,
     ResponseResult,
+    ResponseStreamEvent,
+    ResponseTextConfig,
+    ResponseTool,
+    ResponseToolChoice,
     ScoreResult,
     StatusMessage,
     SystemOneResult,
@@ -2891,12 +2896,22 @@ class SIEClient:
     def responses(
         self,
         model: str,
-        input: str | Sequence[ResponseInputMessage],
+        input: str | Sequence[ResponseInputItem],
         *,
+        instructions: str | None = None,
         max_output_tokens: int | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
         seed: int | None = None,
+        tools: Sequence[ResponseTool] | None = None,
+        tool_choice: ResponseToolChoice | None = None,
+        parallel_tool_calls: bool | None = None,
+        reasoning: ResponseReasoning | None = None,
+        text: ResponseTextConfig | None = None,
+        metadata: dict[str, str] | None = None,
+        prompt_cache_key: str | None = None,
+        user: str | None = None,
+        safety_identifier: str | None = None,
         gpu: str | None = None,
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
@@ -2905,11 +2920,11 @@ class SIEClient:
     ) -> ResponseResult:
         """Create one non-streaming OpenAI-compatible Responses result.
 
-        The gateway's Responses MVP is stateless and text-only. ``input`` may
-        be a raw prompt or a sequence of role/content messages; content-part
-        arrays accept text parts only. Streaming, tools, stateful threading,
-        reasoning, metadata, instructions, and multimodal parts are not
-        supported by this surface.
+        The gateway serves Responses statelessly as a translation onto chat
+        completions: send the whole conversation in ``input`` every turn,
+        including earlier ``output`` items and the tool results that answer
+        them. Stored responses, background mode and hosted tools are not
+        supported. For streaming use :meth:`stream_responses`.
 
         Generation is non-idempotent. Only explicit pre-execution 503
         PROVISIONING / MODEL_LOADING / RESOURCE_EXHAUSTED responses,
@@ -2920,11 +2935,27 @@ class SIEClient:
 
         Args:
             model: Model name to use for generation.
-            input: Raw prompt string or typed role/content messages.
+            input: Raw prompt string or typed input items: messages (text and,
+                on user messages, base64 ``data:`` image parts), function and
+                custom tool calls, and their outputs.
+            instructions: Optional system text placed before any leading
+                system or developer messages.
             max_output_tokens: Optional hard cap on output tokens.
             temperature: Optional sampling temperature override.
             top_p: Optional nucleus sampling cutoff override.
             seed: Optional signed 64-bit per-request sampling seed.
+            tools: Optional function and custom tool definitions.
+            tool_choice: Optional ``"auto"``, ``"none"``, ``"required"``, or a
+                named declared tool.
+            parallel_tool_calls: Optional parallel tool calls toggle.
+            reasoning: Optional reasoning configuration; ``effort`` is checked
+                against the model's advertised reasoning efforts.
+            text: Optional output configuration; ``format`` selects text,
+                JSON object, or JSON Schema output.
+            metadata: Optional string key/value metadata.
+            prompt_cache_key: Optional prompt cache affinity key.
+            user: Optional end-user identifier.
+            safety_identifier: Optional opaque privacy-preserving safety id.
             gpu: Target GPU type or pool spec; see :meth:`encode`.
             wait_for_capacity: Auto-retry ``503 PROVISIONING`` responses
                 under ``provision_timeout_s``. Worker-side model loading and
@@ -2953,10 +2984,20 @@ class SIEClient:
             build_responses_body(
                 model,
                 input,
+                instructions=instructions,
                 max_output_tokens=max_output_tokens,
                 temperature=temperature,
                 top_p=top_p,
                 seed=seed,
+                tools=tools,
+                tool_choice=tool_choice,
+                parallel_tool_calls=parallel_tool_calls,
+                reasoning=reasoning,
+                text=text,
+                metadata=metadata,
+                prompt_cache_key=prompt_cache_key,
+                user=user,
+                safety_identifier=safety_identifier,
             )
         ).encode("utf-8")
         headers: dict[str, str] = {"content-type": JSON_CONTENT_TYPE, "accept": JSON_CONTENT_TYPE}
@@ -3025,6 +3066,78 @@ class SIEClient:
         data = parse_terminal_json_object(response, owner="Responses")
         attach_request_metadata([data], response.headers, data)
         return cast("ResponseResult", data)
+
+    def stream_responses(
+        self,
+        model: str,
+        input: str | Sequence[ResponseInputItem],
+        *,
+        instructions: str | None = None,
+        max_output_tokens: int | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        seed: int | None = None,
+        tools: Sequence[ResponseTool] | None = None,
+        tool_choice: ResponseToolChoice | None = None,
+        parallel_tool_calls: bool | None = None,
+        reasoning: ResponseReasoning | None = None,
+        text: ResponseTextConfig | None = None,
+        metadata: dict[str, str] | None = None,
+        prompt_cache_key: str | None = None,
+        user: str | None = None,
+        safety_identifier: str | None = None,
+        gpu: str | None = None,
+        wait_for_capacity: bool = True,
+        provision_timeout_s: float | None = None,
+        max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
+    ) -> Iterator[ResponseStreamEvent]:
+        """Streaming OpenAI-compatible Responses result.
+
+        Takes the request fields of :meth:`responses` and yields
+        :class:`ResponseStreamEvent` events in ``sequence_number`` order:
+        ``response.created`` and ``response.in_progress``, then output item,
+        content part, text delta and tool call argument events, and finally
+        ``response.completed`` or ``response.incomplete`` carrying the whole
+        result with ``usage``. A ``response.failed`` event or an error event
+        raises :class:`ServerError` with the failure code instead of being
+        yielded, and :class:`SIEConnectionError` is raised if the stream ends
+        before a terminal event. Breaking out of the iterator early closes the
+        stream so the worker stops generating. Capacity retries before the
+        first event match :meth:`stream_chat_completions`.
+        """
+        pool_name, resolved_gpu = self._resolve_pool_and_gpu(gpu)
+        body = json.dumps(
+            build_responses_body(
+                model,
+                input,
+                stream=True,
+                instructions=instructions,
+                max_output_tokens=max_output_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                seed=seed,
+                tools=tools,
+                tool_choice=tool_choice,
+                parallel_tool_calls=parallel_tool_calls,
+                reasoning=reasoning,
+                text=text,
+                metadata=metadata,
+                prompt_cache_key=prompt_cache_key,
+                user=user,
+                safety_identifier=safety_identifier,
+            )
+        ).encode("utf-8")
+        headers = sse_headers(resolved_gpu, pool_name)
+        yield from self._stream_sse_chunks(
+            "/v1/responses",
+            body,
+            headers,
+            model=model,
+            resolved_gpu=resolved_gpu,
+            wait_for_capacity=wait_for_capacity,
+            provision_timeout_s=provision_timeout_s,
+            max_oom_retries=max_oom_retries,
+        )
 
     def chat_completions(
         self,
@@ -3377,7 +3490,8 @@ class SIEClient:
     ) -> Iterator[Any]:
         """Open an SSE stream (with pre-stream provisioning retry) and yield chunks.
 
-        Shared by :meth:`stream_chat_completions` and :meth:`stream_generate`.
+        Shared by :meth:`stream_chat_completions`, :meth:`stream_responses`
+        and :meth:`stream_generate`.
         Pre-execution capacity errors are retried when they arrive either as
         an HTTP 503 or as the first SSE event. Once a chunk has been yielded a
         failure is terminal (non-idempotent). Yielding inside the ``with``
@@ -3426,7 +3540,7 @@ class SIEClient:
                             chat_choices = json.loads(body).get("n")
                             if chat_choices is None:
                                 chat_choices = 1
-                        completion = SSECompletion(chat_choices=chat_choices)
+                        completion = SSECompletion(chat_choices=chat_choices, responses=url == "/v1/responses")
                         for payload in iter_sse_payloads(response.iter_lines(), completion=completion):
                             try:
                                 chunk = json.loads(payload)

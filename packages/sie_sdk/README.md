@@ -231,6 +231,24 @@ answer = client.chat_completions(
 print(answer["choices"][0]["message"]["content"])
 ```
 
+`responses` and `stream_responses` take the OpenAI Responses shape and keep
+no state: send the whole conversation in `input` every turn, including earlier
+`output` items and the `function_call_output` or `custom_tool_call_output`
+items that answer tool calls. Both take `instructions`, function and custom
+`tools`, `tool_choice`, `reasoning` (`effort`), `text` (`format`), and base64
+`data:` `input_image` parts. `stream_responses` yields typed events and raises
+`ServerError` on `response.failed`:
+
+```python
+for event in client.stream_responses(
+    "Qwen/Qwen3-4B-Instruct-2507",
+    "Write a haiku about the sea.",
+    instructions="Answer in English.",
+):
+    if event["type"] == "response.output_text.delta":
+        print(event["delta"], end="")
+```
+
 Requests that constrain decoding with a grammar (`response_format` with a
 `json_schema` or `json_object` type, the Responses `text.format`, or a native
 `grammar`) default to greedy decoding: temperature, `presence_penalty`, and

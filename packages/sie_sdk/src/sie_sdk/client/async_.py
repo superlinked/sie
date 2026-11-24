@@ -35,13 +35,14 @@ import json
 import logging
 import time
 import warnings
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from inspect import signature
 from pathlib import Path
 from typing import IO, Any, Literal, Self, cast, overload
 from urllib.parse import quote, urlencode
 
 import aiohttp
+from aiohttp.http_exceptions import LineTooLong
 
 from sie_sdk._msgpack import packb as pack_msgpack
 from sie_sdk.audio import convert_item_audio
@@ -97,8 +98,13 @@ from sie_sdk.types import (
     PoolSpec,
     Recommendation,
     RequestMetadata,
-    ResponseInputMessage,
+    ResponseInputItem,
+    ResponseReasoning,
     ResponseResult,
+    ResponseStreamEvent,
+    ResponseTextConfig,
+    ResponseTool,
+    ResponseToolChoice,
     ScoreResult,
     StatusMessage,
     SystemOneResult,
@@ -185,7 +191,7 @@ from ._shared import (
     validate_generate_request_body,
     websocket_matches_base_url_origin,
 )
-from ._sse import SSECompletion, aiter_sse_payloads
+from ._sse import SSE_MAX_LINE_BYTES, SSECompletion, aiter_sse_payloads
 from .errors import (
     JobFailedError,
     LoraLoadingError,
@@ -400,9 +406,18 @@ async def _aiter_text_lines(content: aiohttp.StreamReader) -> AsyncIterator[str]
     aiohttp async-iterates ``content`` as byte chunks split on newline
     boundaries (each includes the trailing newline). We decode UTF-8 and strip
     the line ending so the SSE parser sees the same per-line shape as httpx's
-    ``iter_lines``.
+    ``iter_lines``. A line longer than aiohttp accepts raises
+    :class:`RequestError` instead of aiohttp's own error.
     """
-    async for raw in content:
+    lines = aiter(content)
+    while True:
+        try:
+            raw = await anext(lines)
+        except StopAsyncIteration:
+            return
+        except (LineTooLong, ValueError) as e:
+            msg = f"SSE event line exceeds the {SSE_MAX_LINE_BYTES}-byte limit"
+            raise RequestError(msg) from e
         yield raw.decode("utf-8").rstrip("\r\n")
 
 
@@ -2523,12 +2538,22 @@ class SIEAsyncClient:
     async def responses(
         self,
         model: str,
-        input: str | Sequence[ResponseInputMessage],
+        input: str | Sequence[ResponseInputItem],
         *,
+        instructions: str | None = None,
         max_output_tokens: int | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
         seed: int | None = None,
+        tools: Sequence[ResponseTool] | None = None,
+        tool_choice: ResponseToolChoice | None = None,
+        parallel_tool_calls: bool | None = None,
+        reasoning: ResponseReasoning | None = None,
+        text: ResponseTextConfig | None = None,
+        metadata: dict[str, str] | None = None,
+        prompt_cache_key: str | None = None,
+        user: str | None = None,
+        safety_identifier: str | None = None,
         gpu: str | None = None,
         wait_for_capacity: bool = True,
         provision_timeout_s: float | None = None,
@@ -2537,8 +2562,9 @@ class SIEAsyncClient:
     ) -> ResponseResult:
         """Async counterpart of :meth:`SIEClient.responses`.
 
-        The gateway's Responses MVP is stateless, text-only, and
-        non-streaming. Retry behavior matches the sync method: only explicit
+        The gateway serves Responses statelessly: send the whole conversation
+        in ``input`` every turn. For streaming use :meth:`stream_responses`.
+        Retry behavior matches the sync method: only explicit
         pre-execution capacity signals, pre-dispatch admission rejections and
         connect-before-send failures are retried; mid-flight failures, read
         timeouts and post-publish 504 responses are terminal because
@@ -2550,10 +2576,20 @@ class SIEAsyncClient:
             build_responses_body(
                 model,
                 input,
+                instructions=instructions,
                 max_output_tokens=max_output_tokens,
                 temperature=temperature,
                 top_p=top_p,
                 seed=seed,
+                tools=tools,
+                tool_choice=tool_choice,
+                parallel_tool_calls=parallel_tool_calls,
+                reasoning=reasoning,
+                text=text,
+                metadata=metadata,
+                prompt_cache_key=prompt_cache_key,
+                user=user,
+                safety_identifier=safety_identifier,
             )
         ).encode("utf-8")
         headers: dict[str, str] = {"content-type": JSON_CONTENT_TYPE, "accept": JSON_CONTENT_TYPE}
@@ -2628,6 +2664,75 @@ class SIEAsyncClient:
         data = parse_terminal_json_object(response, owner="Responses")
         attach_request_metadata([data], response.headers, data)
         return cast("ResponseResult", data)
+
+    async def stream_responses(
+        self,
+        model: str,
+        input: str | Sequence[ResponseInputItem],
+        *,
+        instructions: str | None = None,
+        max_output_tokens: int | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        seed: int | None = None,
+        tools: Sequence[ResponseTool] | None = None,
+        tool_choice: ResponseToolChoice | None = None,
+        parallel_tool_calls: bool | None = None,
+        reasoning: ResponseReasoning | None = None,
+        text: ResponseTextConfig | None = None,
+        metadata: dict[str, str] | None = None,
+        prompt_cache_key: str | None = None,
+        user: str | None = None,
+        safety_identifier: str | None = None,
+        gpu: str | None = None,
+        wait_for_capacity: bool = True,
+        provision_timeout_s: float | None = None,
+        max_oom_retries: int = RESOURCE_EXHAUSTED_MAX_RETRIES,
+    ) -> AsyncIterator[ResponseStreamEvent]:
+        """Streaming OpenAI-compatible Responses result.
+
+        Async counterpart of :meth:`SIEClient.stream_responses`. Yields
+        :class:`ResponseStreamEvent` events; raises :class:`ServerError` on a
+        ``response.failed`` or error event. Breaking out of the iterator early
+        closes the stream so the worker stops generating.
+        """
+        pool_name, resolved_gpu = await self._resolve_pool_and_gpu(gpu)
+        body = json.dumps(
+            build_responses_body(
+                model,
+                input,
+                stream=True,
+                instructions=instructions,
+                max_output_tokens=max_output_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                seed=seed,
+                tools=tools,
+                tool_choice=tool_choice,
+                parallel_tool_calls=parallel_tool_calls,
+                reasoning=reasoning,
+                text=text,
+                metadata=metadata,
+                prompt_cache_key=prompt_cache_key,
+                user=user,
+                safety_identifier=safety_identifier,
+            )
+        ).encode("utf-8")
+        headers = sse_headers(resolved_gpu, pool_name)
+        async with contextlib.aclosing(
+            self._stream_sse_chunks(
+                "/v1/responses",
+                body,
+                headers,
+                model=model,
+                resolved_gpu=resolved_gpu,
+                wait_for_capacity=wait_for_capacity,
+                provision_timeout_s=provision_timeout_s,
+                max_oom_retries=max_oom_retries,
+            )
+        ) as events:
+            async for event in events:
+                yield event
 
     async def chat_completions(
         self,
@@ -2863,17 +2968,20 @@ class SIEAsyncClient:
             )
         ).encode("utf-8")
         headers = sse_headers(resolved_gpu, pool_name)
-        async for chunk in self._stream_sse_chunks(
-            "/v1/chat/completions",
-            body,
-            headers,
-            model=model,
-            resolved_gpu=resolved_gpu,
-            wait_for_capacity=wait_for_capacity,
-            provision_timeout_s=provision_timeout_s,
-            max_oom_retries=max_oom_retries,
-        ):
-            yield chunk
+        async with contextlib.aclosing(
+            self._stream_sse_chunks(
+                "/v1/chat/completions",
+                body,
+                headers,
+                model=model,
+                resolved_gpu=resolved_gpu,
+                wait_for_capacity=wait_for_capacity,
+                provision_timeout_s=provision_timeout_s,
+                max_oom_retries=max_oom_retries,
+            )
+        ) as chunks:
+            async for chunk in chunks:
+                yield chunk
 
     async def stream_generate(
         self,
@@ -2947,17 +3055,20 @@ class SIEAsyncClient:
         req.update(prompt=prompt, max_new_tokens=max_new_tokens, stream=True)
         body = json.dumps(req).encode("utf-8")
         headers = sse_headers(resolved_gpu, pool_name)
-        async for chunk in self._stream_sse_chunks(
-            f"/v1/generate/{safe_model}",
-            body,
-            headers,
-            model=model,
-            resolved_gpu=resolved_gpu,
-            wait_for_capacity=wait_for_capacity,
-            provision_timeout_s=provision_timeout_s,
-            max_oom_retries=max_oom_retries,
-        ):
-            yield chunk
+        async with contextlib.aclosing(
+            self._stream_sse_chunks(
+                f"/v1/generate/{safe_model}",
+                body,
+                headers,
+                model=model,
+                resolved_gpu=resolved_gpu,
+                wait_for_capacity=wait_for_capacity,
+                provision_timeout_s=provision_timeout_s,
+                max_oom_retries=max_oom_retries,
+            )
+        ) as chunks:
+            async for chunk in chunks:
+                yield chunk
 
     async def _stream_sse_chunks(
         self,
@@ -2970,10 +3081,11 @@ class SIEAsyncClient:
         wait_for_capacity: bool,
         provision_timeout_s: float | None,
         max_oom_retries: int,
-    ) -> AsyncIterator[Any]:
+    ) -> AsyncGenerator[Any, None]:
         """Open an aiohttp SSE stream (with pre-stream provisioning retry) and yield chunks.
 
-        Shared by :meth:`stream_chat_completions` and :meth:`stream_generate`.
+        Shared by :meth:`stream_chat_completions`, :meth:`stream_responses`
+        and :meth:`stream_generate`.
         Pre-execution capacity errors are retried when they arrive either as
         an HTTP 503 or as the first SSE event. Once a chunk has been yielded a
         failure is terminal (non-idempotent). The ``async with`` keeps the
@@ -3018,6 +3130,8 @@ class SIEAsyncClient:
                             sock_connect=min(self._connect_timeout, attempt_timeout_cap(remaining)),
                             sock_read=self._timeout,
                         ),
+                        # aiohttp refuses a line longer than twice ``read_bufsize``.
+                        read_bufsize=SSE_MAX_LINE_BYTES // 2,
                         allow_redirects=False,
                     ) as raw,
                 ):
@@ -3042,7 +3156,7 @@ class SIEAsyncClient:
                             chat_choices = json.loads(body).get("n")
                             if chat_choices is None:
                                 chat_choices = 1
-                        completion = SSECompletion(chat_choices=chat_choices)
+                        completion = SSECompletion(chat_choices=chat_choices, responses=url == "/v1/responses")
                         async for payload in aiter_sse_payloads(_aiter_text_lines(raw.content), completion=completion):
                             try:
                                 chunk = json.loads(payload)
