@@ -218,14 +218,22 @@ carries `type`, equal to the event name, and `sequence_number`, counting from
    `error: {"code": "server_error", "message": "the generation stream ended without a finish reason"}`,
    and one that breaks with
    `error: {"code": "server_error", "message": "the generation stream ended unexpectedly"}`.
+8. Tool-call chunks are routed by their chat `index`, as on `/v1/messages`. A
+   call starts at the first chunk for an index the stream has not used; that
+   chunk must carry the call `id` and function `name`, otherwise the stream
+   fails with `server_error` and
+   `"a tool call arrived without its id and name"`. A non-empty arguments
+   fragment for a call whose item has already closed, because a later call or
+   text started, fails the stream with `server_error` and
+   `"tool call arguments arrived after another output item started"`.
 
 ## Errors
 
 A chat error returned before the stream opens is returned as it is: the same
 status, `Retry-After` and `x-sie-error-code` headers, and OpenAI error body.
-The only change is the `param` when it names a chat field, which is renamed to
-the Responses field the caller sent; the message keeps the chat route's
-wording.
+The route adds no header of its own. The only change is the `param` when it
+names a chat field, which is renamed to the Responses field the caller sent;
+the message keeps the chat route's wording.
 
 | Chat `param` | Responses `param` |
 |---|---|
