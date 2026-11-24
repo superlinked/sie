@@ -1011,6 +1011,17 @@ fn check_schema_keyword_shapes(
             }
         }
     }
+    // A number in current drafts, a boolean modifier in draft 4.
+    for kw in ["exclusiveMinimum", "exclusiveMaximum"] {
+        if let Some(v) = present(kw) {
+            if !v.is_number() && !v.is_boolean() {
+                return Err(invalid_schema(
+                    format!("'{kw}' must be a number or a boolean, got {}", json_kind(v)),
+                    &format!("{path}.{kw}"),
+                ));
+            }
+        }
+    }
     if let Some(v) = present("multipleOf").and_then(Value::as_f64) {
         if v <= 0.0 {
             return Err(invalid_schema(
@@ -1937,6 +1948,16 @@ mod tests {
                 "'minimum' must be a number",
             ),
             (
+                json!({"type": "number", "minimum": 0, "exclusiveMinimum": "bad"}),
+                "p.exclusiveMinimum",
+                "'exclusiveMinimum' must be a number or a boolean",
+            ),
+            (
+                json!({"type": "number", "exclusiveMaximum": [1]}),
+                "p.exclusiveMaximum",
+                "'exclusiveMaximum' must be a number or a boolean",
+            ),
+            (
                 json!({"type": "number", "multipleOf": 0}),
                 "p.multipleOf",
                 "'multipleOf' must be greater than 0",
@@ -2022,6 +2043,8 @@ mod tests {
             // ``null`` keyword values read as absent.
             json!({"type": "object", "properties": {"a": {"type": "string"}}, "required": null, "items": null}),
             json!({"type": "string", "format": "custom", "description": "d", "examples": ["x"], "const": "x"}),
+            json!({"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 9.5}),
+            json!({"type": "number", "maximum": 9, "exclusiveMaximum": false, "exclusiveMinimum": null}),
             // A definition may hold an array that a ``$ref`` indexes into.
             json!({"type": "object", "$defs": {"variants": [{"type": "string"}, {"type": "integer"}]}, "properties": {"a": {"$ref": "#/$defs/variants/1"}}}),
         ]
