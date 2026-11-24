@@ -884,9 +884,6 @@ class StreamMachine:
         output = list(self._output) if status != "in_progress" else []
         return response_object(self._shape, self._request_id, self._created_at, status=status, output=output, **fields)
 
-    def _item_status(self) -> str:
-        return "completed" if self._finish_reason is None else _status(self._finish_reason)[0]
-
     def _terminal(self, events: list[Event]) -> None:
         if self._finish_reason is None:
             self._fail(events, "server_error", "the generation stream ended without a finish reason")
@@ -941,7 +938,7 @@ class StreamMachine:
         opened, self._text = self._text, None
         item_id, index, text = opened.item_id, opened.output_index, opened.text
         part = _output_text(text)
-        item = _message_item(item_id, text, self._item_status())
+        item = _message_item(item_id, text, _status(self._finish_reason)[0])
         events.append(
             self._event(
                 "response.output_text.done",
@@ -1016,7 +1013,9 @@ class StreamMachine:
                     "response.function_call_arguments.done", item_id=item_id, output_index=index, arguments=value
                 )
             )
-        item = _call_item(item_id, opened.call_id, opened.name, value, custom=opened.custom, status=self._item_status())
+        item = _call_item(
+            item_id, opened.call_id, opened.name, value, custom=opened.custom, status=_status(self._finish_reason)[0]
+        )
         events.append(self._event("response.output_item.done", output_index=index, item=item))
         self._output.append(item)
         self._closed_calls.add(opened.chat_index)
