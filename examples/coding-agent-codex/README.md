@@ -140,8 +140,8 @@ codex() { npx -y @openai/codex@0.167.0 "$@"; }
   with, whatever version is installed.
 - `wire_api = "responses"` is the wire Codex speaks to a custom provider.
   `base_url` ends in `/v1`, and Codex appends `/responses`. Codex reads the
-  key from `SIE_API_KEY` and sends it as `Authorization: Bearer ...`; neither
-  the endpoint's key nor any other secret sits in the file.
+  key from `SIE_API_KEY` and sends it as `Authorization: Bearer ...`; the key
+  is not in the file.
 - The model id is sent byte for byte, slash and colon included.
 - Codex has no metadata for a model outside its catalog. It prints `Model
   metadata for ... not found. Defaulting to fallback metadata` on every run,
