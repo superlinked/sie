@@ -2648,8 +2648,7 @@ class StreamingProcessor:
         # H6: separate flag for "the terminal we published was
         # ``transport_failure``" — even when the terminal lands on the
         # wire successfully, we MUST withhold the JetStream ACK so the
-        # message is redelivered (per ADR-0001 supported-primitive
-        # contract). ``terminal_sent`` stays True so the publisher loop
+        # message is redelivered. ``terminal_sent`` stays True so the publisher loop
         # drains cleanly; the ACK gate at the bottom of run_one() reads
         # both flags.
         transport_failure_published = False
@@ -3143,7 +3142,7 @@ class StreamingProcessor:
         # H6: withhold ACK when the terminal we published was a
         # ``transport_failure`` — required content was dropped on the
         # backpressure path and JetStream redelivery is the recovery
-        # mechanism (per ADR-0001 supported-primitive contract). The
+        # mechanism. The
         # gateway forwards the transport_failure terminal to the client
         # so the surface error is still visible; redelivery gives the
         # request a second chance on a healthy worker.
