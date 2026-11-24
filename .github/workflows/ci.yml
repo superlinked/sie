@@ -118,6 +118,13 @@ jobs:
           mise exec -- uv run --frozen ruff format --check .
           mise exec -- uv run --frozen ruff check .
           mise exec -- uv run --frozen pytest -q
+      - name: Codex example gate
+        working-directory: examples/coding-agent-codex
+        run: |
+          mise exec -- uv lock --check
+          mise exec -- uv run --frozen ruff format --check .
+          mise exec -- uv run --frozen ruff check .
+          mise exec -- uv run --frozen pytest -q
       - name: System One example checker
         working-directory: examples/systemone-local
         run: |
