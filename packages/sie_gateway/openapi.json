@@ -1520,6 +1520,16 @@
           },
           "message": {
             "type": "string"
+          },
+          "suggestions": {
+            "description": "``MODEL_NOT_FOUND`` only: the model ids the message suggests, closest\nfirst, drawn only from ids the caller may list. Absent when there is\nno suggestion.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           }
         },
         "required": [
@@ -3408,6 +3418,16 @@
               {
                 "$ref": "#/components/schemas/UpstreamFailureReason"
               }
+            ]
+          },
+          "suggestions": {
+            "description": "``model_not_found`` only: the model ids the message suggests, closest\nfirst, drawn only from ids the caller may list. Absent when there is\nno suggestion.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
             ]
           },
           "type": {
