@@ -315,8 +315,9 @@ pub async fn build_sse_response(params: SseParams<'_>) -> Response {
         &work_params,
         max_new_tokens,
     );
-    // Generation streaming uses the profile/runtime
-    // overall_timeout_s as authority. The legacy SIE_GATEWAY_REQUEST_TIMEOUT
+    // Generation streaming uses the overall timeout that
+    // `generation_timeout_config` resolves (env override, request option,
+    // profile runtime, default) as authority. The legacy SIE_GATEWAY_REQUEST_TIMEOUT
     // ceiling is not applied — it would clamp a 300s model-profile overall
     // to the default 30s and make the first-chunk policy unreachable on
     // cold loads.

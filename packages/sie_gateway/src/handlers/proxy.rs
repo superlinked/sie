@@ -5780,8 +5780,9 @@ pub(crate) async fn run_streaming_generate(
     //   first_chunk : 30s   (cold-start, grammar compile, queue depth)
     //   inter_chunk : 10s   (gap between chunks after streaming starts)
     //   overall     : max_new_tokens/10 + 30, capped at 5 min
-    // Env overrides keep tuning ops-friendly. The profile/runtime
-    // overall_timeout_s is the sole authority for
+    // Env overrides keep tuning ops-friendly. The overall timeout that
+    // `generation_timeout_config` resolves (env override, request option,
+    // profile runtime, default) is the sole authority for
     // generation; the legacy `SIE_GATEWAY_REQUEST_TIMEOUT` ceiling is
     // *not* applied here (it would collapse a 300s profile overall to
     // the default 30s and make the first-chunk policy unreachable).
