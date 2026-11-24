@@ -1,0 +1,302 @@
+{
+  "description": "A chat error answer returned before the stream opens (status, headers, JSON body) and the answer the Responses route gives: the same status, Retry-After and x-sie-error-code, and the same OpenAI error body, except that a param naming a chat field is renamed to the Responses field. Headers not listed under expect.headers are not asserted, except that expect.absent_headers must be missing.",
+  "errors": [
+    {
+      "name": "capacity is a 503 with Retry-After and x-sie-error-code",
+      "status": 503,
+      "headers": {"retry-after": "60", "x-sie-error-code": "PROVISIONING"},
+      "body": {
+        "error": {
+          "message": "Capacity for model 'm' is starting. Retry after the number of seconds in Retry-After.",
+          "type": "server_error",
+          "param": null,
+          "code": "provisioning"
+        }
+      },
+      "expect": {
+        "status": 503,
+        "headers": {"retry-after": "60", "x-sie-error-code": "PROVISIONING"},
+        "body": {
+          "error": {
+            "message": "Capacity for model 'm' is starting. Retry after the number of seconds in Retry-After.",
+            "type": "server_error",
+            "param": null,
+            "code": "provisioning"
+          }
+        }
+      }
+    },
+    {
+      "name": "busy upstream",
+      "status": 503,
+      "headers": {"retry-after": "5", "x-sie-error-code": "RESOURCE_EXHAUSTED"},
+      "body": {
+        "error": {
+          "message": "The upstream serving the model is busy, please retry",
+          "type": "server_error",
+          "param": null,
+          "code": "RESOURCE_EXHAUSTED",
+          "attempt_id": "attempt-1"
+        }
+      },
+      "expect": {
+        "status": 503,
+        "headers": {"retry-after": "5", "x-sie-error-code": "RESOURCE_EXHAUSTED"},
+        "body": {
+          "error": {
+            "message": "The upstream serving the model is busy, please retry",
+            "type": "server_error",
+            "param": null,
+            "code": "RESOURCE_EXHAUSTED",
+            "attempt_id": "attempt-1"
+          }
+        }
+      }
+    },
+    {
+      "name": "rate limited",
+      "status": 429,
+      "headers": {"retry-after": "1"},
+      "body": {"error": {"message": "rate limit exceeded", "type": "rate_limit_error", "param": null, "code": "rate_limit_exceeded"}},
+      "expect": {
+        "status": 429,
+        "headers": {"retry-after": "1"},
+        "body": {"error": {"message": "rate limit exceeded", "type": "rate_limit_error", "param": null, "code": "rate_limit_exceeded"}}
+      }
+    },
+    {
+      "name": "tool name pattern names the Responses tool, gateway wording",
+      "status": 400,
+      "body": {
+        "error": {
+          "message": "tools[1].function.name must match ^[a-zA-Z0-9_-]{1,64}$",
+          "type": "invalid_request_error",
+          "param": "tools[1].function.name",
+          "code": "invalid_request"
+        }
+      },
+      "expect": {
+        "status": 400,
+        "body": {
+          "error": {
+            "message": "tools[1].function.name must match ^[a-zA-Z0-9_-]{1,64}$",
+            "type": "invalid_request_error",
+            "param": "tools[1].name",
+            "code": "invalid_request"
+          }
+        }
+      }
+    },
+    {
+      "name": "tool name pattern names the Responses tool, server wording",
+      "status": 400,
+      "body": {
+        "error": {
+          "message": "'tools[12].function.name' must match ^[a-zA-Z0-9_-]{1,64}$",
+          "type": "invalid_request_error",
+          "param": "tools[12].function.name",
+          "code": "invalid_request"
+        }
+      },
+      "expect": {
+        "status": 400,
+        "body": {
+          "error": {
+            "message": "'tools[12].function.name' must match ^[a-zA-Z0-9_-]{1,64}$",
+            "type": "invalid_request_error",
+            "param": "tools[12].name",
+            "code": "invalid_request"
+          }
+        }
+      }
+    },
+    {
+      "name": "too many tools",
+      "status": 400,
+      "body": {"error": {"message": "'tools' length 65 exceeds limit (64)", "type": "invalid_request_error", "param": "tools", "code": "invalid_request"}},
+      "expect": {
+        "status": 400,
+        "body": {"error": {"message": "'tools' length 65 exceeds limit (64)", "type": "invalid_request_error", "param": "tools", "code": "invalid_request"}}
+      }
+    },
+    {
+      "name": "model without tool calling",
+      "status": 400,
+      "body": {"error": {"message": "Model 'm' does not support tool calling", "type": "invalid_request_error", "param": "tools", "code": "unsupported_field"}},
+      "expect": {
+        "status": 400,
+        "body": {
+          "error": {"message": "Model 'm' does not support tool calling", "type": "invalid_request_error", "param": "tools", "code": "unsupported_field"}
+        }
+      }
+    },
+    {
+      "name": "unknown model",
+      "status": 404,
+      "body": {"error": {"message": "Model 'nope' not found", "type": "invalid_request_error", "param": "model", "code": "model_not_found"}},
+      "expect": {
+        "status": 404,
+        "body": {"error": {"message": "Model 'nope' not found", "type": "invalid_request_error", "param": "model", "code": "model_not_found"}}
+      }
+    },
+    {
+      "name": "first-chunk timeout carries no retry headers",
+      "status": 504,
+      "body": {"error": {"message": "Generation aborted: first_chunk timeout", "type": "server_error", "param": null, "code": "first_chunk_timeout"}},
+      "expect": {
+        "status": 504,
+        "body": {"error": {"message": "Generation aborted: first_chunk timeout", "type": "server_error", "param": null, "code": "first_chunk_timeout"}},
+        "absent_headers": ["retry-after", "x-sie-error-code"]
+      }
+    },
+    {
+      "name": "extra error fields are kept",
+      "status": 500,
+      "body": {"error": {"message": "internal error during generation", "type": "server_error", "param": null, "code": "inference_error", "attempt_id": "a1"}},
+      "expect": {
+        "status": 500,
+        "body": {
+          "error": {"message": "internal error during generation", "type": "server_error", "param": null, "code": "inference_error", "attempt_id": "a1"}
+        }
+      }
+    },
+    {
+      "name": "output cap names max_output_tokens",
+      "status": 400,
+      "body": {
+        "error": {
+          "message": "max_completion_tokens (40000) exceeds model max_output_tokens (32768)",
+          "type": "invalid_request_error",
+          "param": "max_completion_tokens",
+          "code": "invalid_request"
+        }
+      },
+      "expect": {
+        "status": 400,
+        "body": {
+          "error": {
+            "message": "max_completion_tokens (40000) exceeds model max_output_tokens (32768)",
+            "type": "invalid_request_error",
+            "param": "max_output_tokens",
+            "code": "invalid_request"
+          }
+        }
+      }
+    },
+    {
+      "name": "reasoning effort refusal names reasoning.effort",
+      "status": 400,
+      "body": {
+        "error": {
+          "message": "Model 'm' does not support reasoning_effort",
+          "type": "invalid_request_error",
+          "param": "reasoning_effort",
+          "code": "unsupported_field"
+        }
+      },
+      "expect": {
+        "status": 400,
+        "body": {
+          "error": {
+            "message": "Model 'm' does not support reasoning_effort",
+            "type": "invalid_request_error",
+            "param": "reasoning.effort",
+            "code": "unsupported_field"
+          }
+        }
+      }
+    },
+    {
+      "name": "structured output refusal names text.format",
+      "status": 400,
+      "body": {
+        "error": {
+          "message": "Model 'm' does not support response_format",
+          "type": "invalid_request_error",
+          "param": "response_format",
+          "code": "unsupported_field"
+        }
+      },
+      "expect": {
+        "status": 400,
+        "body": {
+          "error": {
+            "message": "Model 'm' does not support response_format",
+            "type": "invalid_request_error",
+            "param": "text.format",
+            "code": "unsupported_field"
+          }
+        }
+      }
+    },
+    {
+      "name": "json_schema field names text.format",
+      "status": 400,
+      "body": {
+        "error": {
+          "message": "'response_format.json_schema.schema' is required",
+          "type": "invalid_request_error",
+          "param": "response_format.json_schema.schema",
+          "code": "invalid_request"
+        }
+      },
+      "expect": {
+        "status": 400,
+        "body": {
+          "error": {
+            "message": "'response_format.json_schema.schema' is required",
+            "type": "invalid_request_error",
+            "param": "text.format.schema",
+            "code": "invalid_request"
+          }
+        }
+      }
+    },
+    {
+      "name": "tool parameter schema path names the Responses tool",
+      "status": 400,
+      "body": {
+        "error": {
+          "message": "tools[0].function.parameters: unresolved internal '$ref' \"#/$defs/Missing\"",
+          "type": "invalid_request_error",
+          "param": "tools[0].function.parameters.properties.a.$ref",
+          "code": "invalid_request"
+        }
+      },
+      "expect": {
+        "status": 400,
+        "body": {
+          "error": {
+            "message": "tools[0].function.parameters: unresolved internal '$ref' \"#/$defs/Missing\"",
+            "type": "invalid_request_error",
+            "param": "tools[0].parameters.properties.a.$ref",
+            "code": "invalid_request"
+          }
+        }
+      }
+    },
+    {
+      "name": "a messages param passes unchanged",
+      "status": 400,
+      "body": {
+        "error": {
+          "message": "messages[3].content[0]: image data URI must be base64-encoded",
+          "type": "invalid_request_error",
+          "param": "messages[3].content[0].image_url",
+          "code": "invalid_request"
+        }
+      },
+      "expect": {
+        "status": 400,
+        "body": {
+          "error": {
+            "message": "messages[3].content[0]: image data URI must be base64-encoded",
+            "type": "invalid_request_error",
+            "param": "messages[3].content[0].image_url",
+            "code": "invalid_request"
+          }
+        }
+      }
+    }
+  ]
+}

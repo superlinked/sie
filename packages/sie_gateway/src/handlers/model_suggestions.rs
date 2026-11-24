@@ -68,6 +68,21 @@ pub(crate) fn unknown_model_message(requested: &str, hint: &NotFoundHint) -> Str
     }
 }
 
+/// The `MODEL_NOT_FOUND` fields that sit beside `message`: `suggestions`,
+/// the "Did you mean" ids closest first, so a client need not parse the
+/// message. Empty when the hint suggests nothing or is a retired note.
+pub(crate) fn unknown_model_extra(
+    hint: &NotFoundHint,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut extra = serde_json::Map::new();
+    if let NotFoundHint::Suggestions(ids) = hint {
+        if !ids.is_empty() {
+            extra.insert("suggestions".to_string(), serde_json::json!(ids));
+        }
+    }
+    extra
+}
+
 /// The hint every `MODEL_NOT_FOUND` site renders for `requested`.
 ///
 /// A retired note wins when the operator retired the caller's string and this

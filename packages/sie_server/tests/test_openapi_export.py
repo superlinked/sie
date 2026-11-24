@@ -31,11 +31,11 @@ def test_openapi_has_expected_paths() -> None:
         "/v1/extract/{model}",
         "/v1/generate/{model}",
         "/v1/completions",
-        "/v1/responses",
         "/v1/score/{model}",
         "/v1/models",
     ]:
         assert expected in paths, f"Missing path: {expected}"
+    assert not paths & {"/v1/chat/completions", "/v1/messages", "/v1/responses"}
 
 
 def test_openapi_has_request_body_schemas() -> None:
@@ -160,26 +160,6 @@ def test_openapi_documents_direct_completions_contract() -> None:
         "$ref": "#/components/schemas/OpenAICompletionResponseModel"
     }
     assert response_content["text/event-stream"]["schema"]["type"] == "string"
-
-
-def test_openapi_documents_direct_responses_contract() -> None:
-    result = runner.invoke(app, ["openapi"])
-    assert result.exit_code == 0, result.output
-    spec = json.loads(result.output)
-
-    operation = spec["paths"]["/v1/responses"]["post"]
-    assert operation["requestBody"]["content"]["application/json"]["schema"] == {
-        "$ref": "#/components/schemas/OpenAIResponsesRequestModel"
-    }
-    schema = spec["components"]["schemas"]["OpenAIResponsesRequestModel"]
-    assert schema["additionalProperties"] is False
-    assert set(schema["required"]) == {"model", "input"}
-    assert schema["properties"]["max_output_tokens"]["anyOf"][0]["minimum"] == 1
-    assert schema["properties"]["stream"]["anyOf"][0]["const"] is False
-    assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
-        "$ref": "#/components/schemas/OpenAIResponsesResponseModel"
-    }
-    assert "413" in operation["responses"]
 
 
 def test_openapi_audio_timestamp_contract() -> None:

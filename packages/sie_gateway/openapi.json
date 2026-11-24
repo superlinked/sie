@@ -1520,6 +1520,16 @@
           },
           "message": {
             "type": "string"
+          },
+          "suggestions": {
+            "description": "``MODEL_NOT_FOUND`` only: the model ids the message suggests, closest\nfirst, drawn only from ids the caller may list. Absent when there is\nno suggestion.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           }
         },
         "required": [
@@ -2766,7 +2776,7 @@
               },
               {
                 "$ref": "#/components/schemas/ModelCapabilitiesWire",
-                "description": "Advertised model capabilities. Consumers use this to discover\nwhich features the model supports before composing a request.\n\nValidation is profile-scoped per ADR-0001 / M10 — clients\nselecting a specific profile must check\n``capabilities.profile_lora_adapters[profile_name]``, not the\n``capabilities.lora_adapters`` union summary."
+                "description": "Advertised model capabilities. Consumers use this to discover\nwhich features the model supports before composing a request.\n\nValidation is profile-scoped — clients\nselecting a specific profile must check\n``capabilities.profile_lora_adapters[profile_name]``, not the\n``capabilities.lora_adapters`` union summary."
               }
             ]
           },
@@ -3408,6 +3418,16 @@
               {
                 "$ref": "#/components/schemas/UpstreamFailureReason"
               }
+            ]
+          },
+          "suggestions": {
+            "description": "``model_not_found`` only: the model ids the message suggests, closest\nfirst, drawn only from ids the caller may list. Absent when there is\nno suggestion.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
             ]
           },
           "type": {
