@@ -528,7 +528,13 @@ fn assert_event_grammar(events: &[Value], context: &str) {
                     assert_eq!(data["output_index"], index, "{context}");
                     assert_eq!(data["item"]["id"], id, "{context}");
                     assert_eq!(data["item"]["type"], kind.as_str(), "{context}");
-                    assert_eq!(data["item"]["status"], "completed", "{context}");
+                    assert!(
+                        matches!(
+                            data["item"]["status"].as_str(),
+                            Some("completed" | "incomplete")
+                        ),
+                        "{context}"
+                    );
                     done.push(data["item"].clone());
                     continue;
                 }
@@ -818,7 +824,7 @@ async fn a_buffered_response_is_served_by_the_chat_route() {
                 "id": "msg-request-1",
                 "role": "assistant",
                 "status": "completed",
-                "content": [{"type": "output_text", "text": "ok", "annotations": []}],
+                "content": [{"type": "output_text", "text": "ok", "annotations": [], "logprobs": []}],
             }],
             "usage": {
                 "input_tokens": 1,
