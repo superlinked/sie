@@ -156,6 +156,24 @@ The chat request and response keep the wire's snake_case field names. The
 Python SDK takes the same fields as keyword arguments after `model` and
 `messages`.
 
+`responses` and `streamResponses` take the OpenAI Responses shape and keep no
+state: send the whole conversation in `input` every turn, including earlier
+`output` items and the `function_call_output` or `custom_tool_call_output`
+items that answer tool calls. Both take `instructions`, function and custom
+`tools`, `tool_choice`, `reasoning` (`effort`), `text` (`format`), and base64
+`data:` `input_image` parts. `streamResponses` yields typed events and throws
+`SIEStreamError` on `response.failed`:
+
+```typescript
+for await (const event of client.streamResponses({
+  model: "Qwen/Qwen3-4B-Instruct-2507",
+  instructions: "Answer in English.",
+  input: "Write a haiku about the sea.",
+})) {
+  if (event.type === "response.output_text.delta") process.stdout.write(event.delta);
+}
+```
+
 Granite Guardian's shipped risk dimension is `harm`; requesting another
 dimension in prompt text does not change it. Valid thresholded verdicts are
 `Yes` (unsafe) and `No` (safe); missing or invalid verdicts fail with
@@ -268,8 +286,9 @@ retries it. Branch on `.code`:
 Each attempt waits up to `timeoutMs` (default 150000 ms, longer than the
 gateway's default 120 s request deadline) for a response. A timed-out
 request is never retried, because the server may still be processing it.
-`generate` and `chatCompletions` accept a per-call `timeoutMs`; set it to
-at least the model profile's `overall_timeout_s` for long generations.
+`generate`, `chatCompletions` and `responses` accept a per-call
+`timeoutMs`; set it to at least the model profile's `overall_timeout_s`
+for long generations.
 Connection failures are classified by their cause: refused, unreachable
 or reset connections are retried under `waitForCapacity`, while DNS name,
 TLS and certificate failures fail immediately.

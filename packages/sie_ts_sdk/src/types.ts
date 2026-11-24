@@ -1595,10 +1595,11 @@ export interface ChatCompletionChunk {
 }
 
 /**
- * Per-call options for `chatCompletions` controlling the pre-execution
- * provisioning / retry loop. The request body itself is the separate
- * {@link ChatCompletionRequest} argument; these knobs only govern HOW the
- * SDK talks to the gateway, not WHAT it asks for.
+ * Per-call options for `chatCompletions` and `responses` controlling the
+ * pre-execution provisioning / retry loop. The request body itself is the
+ * separate {@link ChatCompletionRequest} or {@link ResponseRequest} argument;
+ * these knobs only govern HOW the SDK talks to the gateway, not WHAT it asks
+ * for.
  *
  * All fields are optional and fall back to the client-level defaults
  * (`waitForCapacity`, `provisionTimeout`) when omitted.
@@ -1636,6 +1637,337 @@ export interface ChatCompletionOptions {
    */
   timeoutMs?: number;
 }
+
+// ---------------------------------------------------------------------------
+// Responses (OpenAI-compatible) — /v1/responses
+// ---------------------------------------------------------------------------
+
+/** One text content part of a Responses input message or tool output. */
+export interface ResponseInputText {
+  type: "input_text" | "output_text" | "text";
+  text: string;
+}
+
+/**
+ * One image content part of a user message or tool output. `image_url` is a
+ * base64 `data:` URI; remote URLs and file ids are rejected. `detail` is
+ * accepted and ignored.
+ */
+export interface ResponseInputImage {
+  type: "input_image";
+  image_url: string;
+  detail?: "auto" | "low" | "high";
+}
+
+/** Content part of a Responses input message or tool output. */
+export type ResponseInputContent = ResponseInputText | ResponseInputImage;
+
+/** Status of a Responses output item. */
+export type ResponseItemStatus = "in_progress" | "completed" | "incomplete";
+
+/**
+ * One message of a stateless Responses conversation. `input_image` parts are
+ * accepted on user messages only.
+ */
+export interface ResponseInputMessage {
+  type?: "message";
+  role: "system" | "user" | "assistant" | "developer";
+  content: string | ResponseInputContent[];
+}
+
+/** A function tool call, returned as an output item and replayed as an input item. */
+export interface ResponseFunctionCall {
+  type: "function_call";
+  call_id: string;
+  name: string;
+  arguments: string;
+  id?: string;
+  status?: ResponseItemStatus;
+}
+
+/** A custom tool call, returned as an output item and replayed as an input item. */
+export interface ResponseCustomToolCall {
+  type: "custom_tool_call";
+  call_id: string;
+  name: string;
+  input: string;
+  id?: string;
+  status?: ResponseItemStatus;
+}
+
+/** The result of a function tool call, sent back as an input item. */
+export interface ResponseFunctionCallOutput {
+  type: "function_call_output";
+  call_id: string;
+  output: string | ResponseInputContent[];
+}
+
+/** The result of a custom tool call, sent back as an input item. */
+export interface ResponseCustomToolCallOutput {
+  type: "custom_tool_call_output";
+  call_id: string;
+  output: string | ResponseInputContent[];
+}
+
+/** One text content part of a Responses output message. */
+export interface ResponseOutputText {
+  type: "output_text";
+  text: string;
+  annotations: unknown[];
+}
+
+/** One assistant message output item; may also be replayed as an input item. */
+export interface ResponseOutputMessage {
+  type: "message";
+  id: string;
+  role: "assistant";
+  status: ResponseItemStatus;
+  content: ResponseOutputText[];
+}
+
+/** One item of `ResponseResult.output`. */
+export type ResponseOutputItem =
+  | ResponseOutputMessage
+  | ResponseFunctionCall
+  | ResponseCustomToolCall;
+
+/** One item of a Responses `input` array. */
+export type ResponseInputItem =
+  | ResponseInputMessage
+  | ResponseOutputMessage
+  | ResponseFunctionCall
+  | ResponseFunctionCallOutput
+  | ResponseCustomToolCall
+  | ResponseCustomToolCallOutput;
+
+/**
+ * A function tool the model may call. `strict` may be omitted or `false`;
+ * strict function schemas are rejected.
+ */
+export interface ResponseFunctionTool {
+  type: "function";
+  name: string;
+  description?: string;
+  /** JSON Schema describing the function arguments. */
+  parameters?: Record<string, unknown>;
+  strict?: false;
+}
+
+/**
+ * A custom tool whose call carries one free-text `input`. `format` is
+ * accepted and not enforced.
+ */
+export interface ResponseCustomTool {
+  type: "custom";
+  name: string;
+  description?: string;
+  format?: Record<string, unknown>;
+}
+
+/** A tool definition accepted by `tools`. */
+export type ResponseTool = ResponseFunctionTool | ResponseCustomTool;
+
+/** A `tool_choice` value: a mode, or one declared function or custom tool. */
+export type ResponseToolChoice =
+  | "auto"
+  | "none"
+  | "required"
+  | { type: "function" | "custom"; name: string };
+
+/**
+ * Reasoning configuration. `effort` is forwarded as the chat
+ * `reasoning_effort` and checked against the model's advertised values
+ * (`ModelReasoning.effort`).
+ */
+export interface ResponseReasoning {
+  effort?: string | null;
+}
+
+/** Structured-output format of `text.format`. */
+export type ResponseTextFormat =
+  | { type: "text" }
+  | { type: "json_object" }
+  | {
+      type: "json_schema";
+      name: string;
+      schema: Record<string, unknown>;
+      strict?: boolean;
+      description?: string;
+    };
+
+/** Text output configuration. */
+export interface ResponseTextConfig {
+  format?: ResponseTextFormat;
+}
+
+/**
+ * Request body for `responses` / `streamResponses`.
+ *
+ * Field names are snake_case (the wire shape). The gateway serves Responses
+ * statelessly as a translation onto chat completions: send the whole
+ * conversation in `input` every turn, including earlier output items and the
+ * tool results that answer them. Stored responses, background mode and hosted
+ * tools are refused.
+ */
+export interface ResponseRequest {
+  model: string;
+  /** A raw prompt string or typed input items. */
+  input: string | ResponseInputItem[];
+  /** System text placed before any leading system or developer messages. */
+  instructions?: string | null;
+  max_output_tokens?: number;
+  temperature?: number;
+  top_p?: number;
+  /**
+   * Optional per-request sampling seed. Must be a JavaScript safe integer;
+   * the SDK throws `RangeError` before network I/O for invalid values.
+   */
+  seed?: number;
+  /** Set to `true` to use `streamResponses`. `responses` rejects this. */
+  stream?: boolean;
+  tools?: ResponseTool[];
+  tool_choice?: ResponseToolChoice;
+  /** Parallel tool calls toggle (default `true`). */
+  parallel_tool_calls?: boolean;
+  reasoning?: ResponseReasoning | null;
+  text?: ResponseTextConfig | null;
+  metadata?: Record<string, string>;
+  prompt_cache_key?: string;
+  /** End-user identifier. */
+  user?: string;
+  /** Opaque safety identifier; accepted but not logged. */
+  safety_identifier?: string;
+}
+
+/** Token usage of a Responses result. */
+export interface ResponseUsage {
+  input_tokens: number;
+  input_tokens_details?: { cached_tokens: number };
+  output_tokens: number;
+  output_tokens_details?: { reasoning_tokens: number };
+  total_tokens: number;
+}
+
+/**
+ * A Responses result. Returned by `responses` and carried by the lifecycle
+ * events of `streamResponses`, where `status` is `"in_progress"`, `output` is
+ * empty and `usage` is `null` until the terminal event.
+ */
+export interface ResponseResult {
+  id: string;
+  object: "response";
+  created_at: number;
+  model: string;
+  status: "in_progress" | "completed" | "incomplete" | "failed";
+  incomplete_details: { reason: "max_output_tokens" | "content_filter" } | null;
+  error: { code: string; message: string } | null;
+  store: boolean;
+  parallel_tool_calls: boolean;
+  tool_choice: ResponseToolChoice;
+  output: ResponseOutputItem[];
+  usage: ResponseUsage | null;
+  /** Request-scoped usage and settled debit, when supplied by the gateway. */
+  request?: RequestMetadata;
+}
+
+/**
+ * A stream event carrying the whole response object.
+ * `response.completed` and `response.incomplete` end the stream.
+ */
+export interface ResponseLifecycleEvent {
+  type: "response.created" | "response.in_progress" | "response.completed" | "response.incomplete";
+  sequence_number: number;
+  response: ResponseResult;
+}
+
+/** An output item opened (`added`) or finished (`done`). */
+export interface ResponseOutputItemEvent {
+  type: "response.output_item.added" | "response.output_item.done";
+  sequence_number: number;
+  output_index: number;
+  item: ResponseOutputItem;
+}
+
+/** A message content part opened (`added`) or finished (`done`). */
+export interface ResponseContentPartEvent {
+  type: "response.content_part.added" | "response.content_part.done";
+  sequence_number: number;
+  item_id: string;
+  output_index: number;
+  content_index: number;
+  part: ResponseOutputText;
+}
+
+/** Incremental message text. */
+export interface ResponseOutputTextDeltaEvent {
+  type: "response.output_text.delta";
+  sequence_number: number;
+  item_id: string;
+  output_index: number;
+  content_index: number;
+  delta: string;
+}
+
+/** The complete message text. */
+export interface ResponseOutputTextDoneEvent {
+  type: "response.output_text.done";
+  sequence_number: number;
+  item_id: string;
+  output_index: number;
+  content_index: number;
+  text: string;
+}
+
+/** Incremental function call arguments. */
+export interface ResponseFunctionCallArgumentsDeltaEvent {
+  type: "response.function_call_arguments.delta";
+  sequence_number: number;
+  item_id: string;
+  output_index: number;
+  delta: string;
+}
+
+/** The complete function call arguments. */
+export interface ResponseFunctionCallArgumentsDoneEvent {
+  type: "response.function_call_arguments.done";
+  sequence_number: number;
+  item_id: string;
+  output_index: number;
+  arguments: string;
+}
+
+/** The decoded custom tool call input, emitted once when the call ends. */
+export interface ResponseCustomToolCallInputDeltaEvent {
+  type: "response.custom_tool_call_input.delta";
+  sequence_number: number;
+  item_id: string;
+  output_index: number;
+  delta: string;
+}
+
+/** The complete custom tool call input. */
+export interface ResponseCustomToolCallInputDoneEvent {
+  type: "response.custom_tool_call_input.done";
+  sequence_number: number;
+  item_id: string;
+  output_index: number;
+  input: string;
+}
+
+/**
+ * One event yielded by `streamResponses`. A `response.failed` event is never
+ * yielded: the SDK throws `SIEStreamError` instead.
+ */
+export type ResponseStreamEvent =
+  | ResponseLifecycleEvent
+  | ResponseOutputItemEvent
+  | ResponseContentPartEvent
+  | ResponseOutputTextDeltaEvent
+  | ResponseOutputTextDoneEvent
+  | ResponseFunctionCallArgumentsDeltaEvent
+  | ResponseFunctionCallArgumentsDoneEvent
+  | ResponseCustomToolCallInputDeltaEvent
+  | ResponseCustomToolCallInputDoneEvent;
 
 // ---------------------------------------------------------------------------
 // Streaming generate — /v1/generate/{model} with stream:true

@@ -9,8 +9,10 @@ payload out of each line and honour the ``[DONE]`` terminator.
 Scope mirrors the gateway (``packages/sie_gateway/src/handlers/sse.rs``):
 the SIE gateway emits one single-line ``data: <json>`` event per chunk plus
 the literal ``data: [DONE]`` terminator. Blank separator lines and ``:``
-keep-alive comments are skipped; ``event:`` / ``id:`` / ``retry:`` fields and
-multi-line ``data:`` continuations are not produced and are not handled here.
+keep-alive comments are skipped. Responses events also carry an ``event:``
+line, which is skipped because the payload repeats it as ``type``; ``id:`` /
+``retry:`` fields and multi-line ``data:`` continuations are not produced
+and are not handled here.
 """
 
 from __future__ import annotations
@@ -23,20 +25,23 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterable, AsyncIterator, Iterable, Iterator
 
 _SSE_DONE = "[DONE]"
+_RESPONSES_TERMINAL_EVENTS = frozenset({"response.completed", "response.incomplete"})
 
 
 class SSECompletion:
     """Distinguish transport EOF from a completed generation.
 
-    A gateway ``[DONE]`` marker ends either surface. Without that marker,
+    A gateway ``[DONE]`` marker ends every surface. Without that marker,
     native generation must have emitted ``done: true``; chat must have
-    finished every requested choice. Usage-only chat events do not complete
-    a stream and do not erase an earlier finish event.
+    finished every requested choice; Responses must have emitted
+    ``response.completed`` or ``response.incomplete``. Usage-only chat events
+    do not complete a stream and do not erase an earlier finish event.
     """
 
-    def __init__(self, *, chat_choices: int | None = None) -> None:
+    def __init__(self, *, chat_choices: int | None = None, responses: bool = False) -> None:
         self.done = False
         self._native_terminal = False
+        self._responses = responses
         self._chat_choices = chat_choices
         if chat_choices is not None and (type(chat_choices) is not int or chat_choices <= 0):
             # The gateway still validates the unchanged request. A malformed
@@ -46,6 +51,10 @@ class SSECompletion:
 
     def observe(self, chunk: Any) -> None:
         if not isinstance(chunk, dict):
+            return
+        if self._responses:
+            if chunk.get("type") in _RESPONSES_TERMINAL_EVENTS:
+                self._native_terminal = True
             return
         if self._chat_choices is None:
             if chunk.get("done") is True:
