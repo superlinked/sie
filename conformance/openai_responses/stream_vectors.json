@@ -2951,6 +2951,456 @@
           }
         }
       ]
+    },
+    {
+      "name": "arguments for a call whose item already closed fail the stream",
+      "request_id": "r",
+      "model": "m",
+      "request": {
+        "model": "m",
+        "input": "Run both.",
+        "stream": true,
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "cmd": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "cmd"
+              ]
+            }
+          }
+        ]
+      },
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                      "name": "exec_command",
+                      "arguments": "{\"cmd\":"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 1,
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {
+                      "name": "exec_command",
+                      "arguments": "{\"cmd\":\"echo two\"}"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "function": {
+                      "arguments": "\"echo one\"}"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "tool_calls"
+            }
+          ]
+        },
+        {
+          "choices": [],
+          "usage": {
+            "prompt_tokens": 30,
+            "completion_tokens": 20,
+            "total_tokens": 50
+          }
+        },
+        "[DONE]"
+      ],
+      "events": [
+        {
+          "event": "response.created",
+          "data": {
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "in_progress",
+              "incomplete_details": null,
+              "error": null,
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [],
+              "usage": null
+            }
+          }
+        },
+        {
+          "event": "response.in_progress",
+          "data": {
+            "type": "response.in_progress",
+            "sequence_number": 1,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "in_progress",
+              "incomplete_details": null,
+              "error": null,
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [],
+              "usage": null
+            }
+          }
+        },
+        {
+          "event": "response.output_item.added",
+          "data": {
+            "type": "response.output_item.added",
+            "sequence_number": 2,
+            "output_index": 0,
+            "item": {
+              "type": "function_call",
+              "id": "fc-r-0",
+              "call_id": "call_1",
+              "name": "exec_command",
+              "arguments": "",
+              "status": "in_progress"
+            }
+          }
+        },
+        {
+          "event": "response.function_call_arguments.delta",
+          "data": {
+            "type": "response.function_call_arguments.delta",
+            "sequence_number": 3,
+            "item_id": "fc-r-0",
+            "output_index": 0,
+            "delta": "{\"cmd\":"
+          }
+        },
+        {
+          "event": "response.function_call_arguments.done",
+          "data": {
+            "type": "response.function_call_arguments.done",
+            "sequence_number": 4,
+            "item_id": "fc-r-0",
+            "output_index": 0,
+            "arguments": "{\"cmd\":"
+          }
+        },
+        {
+          "event": "response.output_item.done",
+          "data": {
+            "type": "response.output_item.done",
+            "sequence_number": 5,
+            "output_index": 0,
+            "item": {
+              "type": "function_call",
+              "id": "fc-r-0",
+              "call_id": "call_1",
+              "name": "exec_command",
+              "arguments": "{\"cmd\":",
+              "status": "completed"
+            }
+          }
+        },
+        {
+          "event": "response.output_item.added",
+          "data": {
+            "type": "response.output_item.added",
+            "sequence_number": 6,
+            "output_index": 1,
+            "item": {
+              "type": "function_call",
+              "id": "fc-r-1",
+              "call_id": "call_2",
+              "name": "exec_command",
+              "arguments": "",
+              "status": "in_progress"
+            }
+          }
+        },
+        {
+          "event": "response.function_call_arguments.delta",
+          "data": {
+            "type": "response.function_call_arguments.delta",
+            "sequence_number": 7,
+            "item_id": "fc-r-1",
+            "output_index": 1,
+            "delta": "{\"cmd\":\"echo two\"}"
+          }
+        },
+        {
+          "event": "response.failed",
+          "data": {
+            "type": "response.failed",
+            "sequence_number": 8,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "failed",
+              "incomplete_details": null,
+              "error": {
+                "code": "server_error",
+                "message": "tool call arguments arrived after another output item started"
+              },
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [
+                {
+                  "type": "function_call",
+                  "id": "fc-r-0",
+                  "call_id": "call_1",
+                  "name": "exec_command",
+                  "arguments": "{\"cmd\":",
+                  "status": "completed"
+                }
+              ],
+              "usage": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "a new tool call without its id and name fails the stream",
+      "request_id": "r",
+      "model": "m",
+      "request": {
+        "model": "m",
+        "input": "Run ls.",
+        "stream": true,
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "cmd": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "cmd"
+              ]
+            }
+          }
+        ]
+      },
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "role": "assistant",
+                "content": "Running."
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "function": {
+                      "arguments": "{\"cmd\":\"ls\"}"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "tool_calls"
+            }
+          ]
+        },
+        {
+          "choices": [],
+          "usage": {
+            "prompt_tokens": 20,
+            "completion_tokens": 8,
+            "total_tokens": 28
+          }
+        },
+        "[DONE]"
+      ],
+      "events": [
+        {
+          "event": "response.created",
+          "data": {
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "in_progress",
+              "incomplete_details": null,
+              "error": null,
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [],
+              "usage": null
+            }
+          }
+        },
+        {
+          "event": "response.in_progress",
+          "data": {
+            "type": "response.in_progress",
+            "sequence_number": 1,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "in_progress",
+              "incomplete_details": null,
+              "error": null,
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [],
+              "usage": null
+            }
+          }
+        },
+        {
+          "event": "response.output_item.added",
+          "data": {
+            "type": "response.output_item.added",
+            "sequence_number": 2,
+            "output_index": 0,
+            "item": {
+              "type": "message",
+              "id": "msg-r",
+              "role": "assistant",
+              "status": "in_progress",
+              "content": []
+            }
+          }
+        },
+        {
+          "event": "response.content_part.added",
+          "data": {
+            "type": "response.content_part.added",
+            "sequence_number": 3,
+            "item_id": "msg-r",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {
+              "type": "output_text",
+              "text": "",
+              "annotations": []
+            }
+          }
+        },
+        {
+          "event": "response.output_text.delta",
+          "data": {
+            "type": "response.output_text.delta",
+            "sequence_number": 4,
+            "item_id": "msg-r",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Running."
+          }
+        },
+        {
+          "event": "response.failed",
+          "data": {
+            "type": "response.failed",
+            "sequence_number": 5,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "failed",
+              "incomplete_details": null,
+              "error": {
+                "code": "server_error",
+                "message": "a tool call arrived without its id and name"
+              },
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [],
+              "usage": null
+            }
+          }
+        }
+      ]
     }
   ]
 }
