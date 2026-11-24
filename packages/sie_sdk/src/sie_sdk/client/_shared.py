@@ -1894,27 +1894,50 @@ def build_responses_body(
     model: str,
     input: str | Sequence[Mapping[str, Any]],
     *,
+    stream: bool = False,
+    instructions: str | None = None,
     max_output_tokens: int | None = None,
     temperature: float | None = None,
     top_p: float | None = None,
     seed: int | None = None,
+    tools: Sequence[Mapping[str, Any]] | None = None,
+    tool_choice: str | Mapping[str, Any] | None = None,
+    parallel_tool_calls: bool | None = None,
+    reasoning: Mapping[str, Any] | None = None,
+    text: Mapping[str, Any] | None = None,
+    metadata: Mapping[str, str] | None = None,
+    prompt_cache_key: str | None = None,
+    user: str | None = None,
+    safety_identifier: str | None = None,
 ) -> dict[str, Any]:
-    """Assemble the strict, non-streaming ``/v1/responses`` request body.
+    """Assemble the strict ``/v1/responses`` request body.
 
-    The gateway's Responses MVP is stateless, text-only, and non-streaming.
-    Keeping this builder typed to the complete public OpenAPI allow-list
-    prevents SDK callers from accidentally relying on wider parser behavior or
-    OpenAI fields that the gateway contract does not expose.
+    The gateway serves Responses statelessly: the full conversation travels
+    in ``input`` and nothing is stored. Keeping this builder typed to the
+    accepted field set prevents SDK callers from relying on OpenAI fields the
+    gateway refuses (stored responses, background mode, hosted tools).
     """
     body: dict[str, Any] = {
         "model": model,
         "input": input if isinstance(input, str) else list(input),
     }
+    if stream:
+        body["stream"] = True
     optional: dict[str, Any] = {
+        "instructions": instructions,
         "max_output_tokens": max_output_tokens,
         "temperature": temperature,
         "top_p": top_p,
         "seed": seed,
+        "tools": list(tools) if tools is not None else None,
+        "tool_choice": tool_choice,
+        "parallel_tool_calls": parallel_tool_calls,
+        "reasoning": reasoning,
+        "text": text,
+        "metadata": metadata,
+        "prompt_cache_key": prompt_cache_key,
+        "user": user,
+        "safety_identifier": safety_identifier,
     }
     body.update({key: value for key, value in optional.items() if value is not None})
     return body
@@ -1938,12 +1961,18 @@ def sse_chunk_error(chunk: dict[str, Any]) -> tuple[str, str, str | None, int | 
 
     Both the chat and SIE-native generate surfaces put the error object at the
     top level of the chunk (see ``send_error_chunk`` in
-    ``packages/sie_gateway/src/handlers/sse.rs``). The additive retry hint is
-    trusted only for ``RESOURCE_EXHAUSTED`` and only in the engine config's
-    integer ``1..=60`` domain; booleans are integers in Python, so exclude
-    them explicitly.
+    ``packages/sie_gateway/src/handlers/sse.rs``); a Responses
+    ``response.failed`` event carries it as ``response.error``. The additive
+    retry hint is trusted only for ``RESOURCE_EXHAUSTED`` and only in the
+    engine config's integer ``1..=60`` domain; booleans are integers in
+    Python, so exclude them explicitly.
     """
     err = chunk.get("error")
+    if chunk.get("type") == "response.failed":
+        response = chunk.get("response")
+        err = response.get("error") if isinstance(response, dict) else None
+        if not isinstance(err, dict):
+            err = {}
     if isinstance(err, dict):
         code = str(err.get("code") or "error")
         param = err.get("param")

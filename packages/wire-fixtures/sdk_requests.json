@@ -1,5 +1,5 @@
 {
-  "description": "The HTTP request each SDK sends for the same call to a native primitive or the chat route. Every SDK replays every case through its real client and compares what reached the wire. A case an SDK cannot express fails that SDK's test.",
+  "description": "The HTTP request each SDK sends for the same call to a native primitive, the chat route or the Responses route. Every SDK replays every case through its real client and compares what reached the wire. A case an SDK cannot express fails that SDK's test.",
   "client": {
     "api_key": "sk-sie-fixture"
   },
@@ -451,6 +451,136 @@
           "max_completion_tokens": 64,
           "stream_options": { "include_usage": true },
           "include_reasoning": true
+        }
+      }
+    },
+    {
+      "id": "responses_text",
+      "summary": "a Responses call with a plain text input",
+      "request": {
+        "method": "POST",
+        "path": "/v1/responses",
+        "headers": {
+          "accept": "application/json",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/json"
+        },
+        "body": {
+          "model": "Qwen/Qwen3-4B-Instruct-2507",
+          "input": "Write a haiku about the sea.",
+          "max_output_tokens": 64
+        },
+        "may_send_default": { "stream": false }
+      }
+    },
+    {
+      "id": "responses_tools",
+      "summary": "a Responses call with instructions, function and custom tools, a forced tool choice and a reasoning effort",
+      "request": {
+        "method": "POST",
+        "path": "/v1/responses",
+        "headers": {
+          "accept": "application/json",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/json"
+        },
+        "body": {
+          "model": "Qwen/Qwen3-4B-Instruct-2507",
+          "input": [{ "role": "user", "content": "What is the weather in Paris?" }],
+          "instructions": "Use the tools when they help.",
+          "max_output_tokens": 256,
+          "tools": [
+            {
+              "type": "function",
+              "name": "get_weather",
+              "description": "Look up the current weather in a city.",
+              "parameters": {
+                "type": "object",
+                "properties": { "city": { "type": "string" } },
+                "required": ["city"]
+              }
+            },
+            { "type": "custom", "name": "run_python", "description": "Run a Python snippet." }
+          ],
+          "tool_choice": { "type": "function", "name": "get_weather" },
+          "parallel_tool_calls": false,
+          "reasoning": { "effort": "low" }
+        },
+        "may_send_default": { "stream": false }
+      }
+    },
+    {
+      "id": "responses_image_and_tool_output",
+      "summary": "a Responses call replaying an image part, a function call and its output",
+      "request": {
+        "method": "POST",
+        "path": "/v1/responses",
+        "headers": {
+          "accept": "application/json",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/json"
+        },
+        "body": {
+          "model": "Qwen/Qwen3-VL-8B-Instruct",
+          "input": [
+            {
+              "role": "user",
+              "content": [
+                { "type": "input_text", "text": "Which city is this, and what is its weather?" },
+                {
+                  "type": "input_image",
+                  "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+                }
+              ]
+            },
+            {
+              "type": "function_call",
+              "call_id": "call_1",
+              "name": "get_weather",
+              "arguments": "{\"city\":\"Paris\"}"
+            },
+            { "type": "function_call_output", "call_id": "call_1", "output": "Sunny, 21 C" }
+          ],
+          "max_output_tokens": 128,
+          "tools": [{ "type": "function", "name": "get_weather" }]
+        },
+        "may_send_default": { "stream": false }
+      }
+    },
+    {
+      "id": "stream_responses",
+      "summary": "stream a Responses call with a json_schema text format and identity fields",
+      "request": {
+        "method": "POST",
+        "path": "/v1/responses",
+        "headers": {
+          "accept": "text/event-stream",
+          "authorization": "Bearer sk-sie-fixture",
+          "content-type": "application/json"
+        },
+        "body": {
+          "model": "Qwen/Qwen3-4B-Instruct-2507",
+          "input": "Extract the invoice fields.",
+          "stream": true,
+          "instructions": "Answer in JSON.",
+          "temperature": 0,
+          "seed": 7,
+          "text": {
+            "format": {
+              "type": "json_schema",
+              "name": "invoice",
+              "strict": true,
+              "schema": {
+                "type": "object",
+                "properties": { "vendor": { "type": "string" }, "total": { "type": "number" } },
+                "required": ["vendor", "total"]
+              }
+            }
+          },
+          "metadata": { "tenant": "tenant-1" },
+          "prompt_cache_key": "invoice-v1",
+          "user": "user-9",
+          "safety_identifier": "safety-9"
         }
       }
     }

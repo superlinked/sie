@@ -989,24 +989,80 @@ class ChatCompletionChunk(TypedDict, total=False):
 
 
 class ResponseInputContentPart(TypedDict):
-    """One text-only content part accepted by the Responses MVP."""
+    """One text content part of a Responses input message or tool output."""
 
-    type: Literal["text", "input_text"]
+    type: Literal["text", "input_text", "output_text"]
     text: str
+
+
+class ResponseInputImagePart(TypedDict):
+    """One image content part of a user message or tool output.
+
+    ``image_url`` is a base64 ``data:`` URI; remote URLs and file ids are
+    rejected. ``detail`` is accepted and ignored.
+    """
+
+    type: Literal["input_image"]
+    image_url: str
+    detail: NotRequired[Literal["auto", "low", "high"]]
 
 
 ResponseInputRole = Literal["system", "user", "assistant", "developer"]
 
+ResponseItemStatus = Literal["in_progress", "completed", "incomplete"]
+
 
 class ResponseInputMessage(TypedDict):
-    """One stateless text message accepted by the Responses MVP."""
+    """One message of a stateless Responses conversation.
+
+    ``input_image`` parts are accepted on user messages only.
+    """
 
     role: ResponseInputRole
-    content: str | list[ResponseInputContentPart]
+    content: str | list[ResponseInputContentPart | ResponseInputImagePart]
+    type: NotRequired[Literal["message"]]
+
+
+class ResponseFunctionCall(TypedDict):
+    """A function tool call, returned as an output item and replayed as an input item."""
+
+    type: Literal["function_call"]
+    call_id: str
+    name: str
+    arguments: str
+    id: NotRequired[str]
+    status: NotRequired[ResponseItemStatus]
+
+
+class ResponseCustomToolCall(TypedDict):
+    """A custom tool call, returned as an output item and replayed as an input item."""
+
+    type: Literal["custom_tool_call"]
+    call_id: str
+    name: str
+    input: str
+    id: NotRequired[str]
+    status: NotRequired[ResponseItemStatus]
+
+
+class ResponseFunctionCallOutput(TypedDict):
+    """The result of a function tool call, sent back as an input item."""
+
+    type: Literal["function_call_output"]
+    call_id: str
+    output: str | list[ResponseInputContentPart | ResponseInputImagePart]
+
+
+class ResponseCustomToolCallOutput(TypedDict):
+    """The result of a custom tool call, sent back as an input item."""
+
+    type: Literal["custom_tool_call_output"]
+    call_id: str
+    output: str | list[ResponseInputContentPart | ResponseInputImagePart]
 
 
 class ResponseOutputText(TypedDict):
-    """One text content part returned by the Responses MVP."""
+    """One text content part of a Responses output message."""
 
     type: Literal["output_text"]
     text: str
@@ -1014,35 +1070,271 @@ class ResponseOutputText(TypedDict):
 
 
 class ResponseOutputMessage(TypedDict):
-    """One completed assistant message returned by the Responses MVP."""
+    """One assistant message output item; may also be replayed as an input item."""
 
     type: Literal["message"]
     id: str
     role: Literal["assistant"]
-    status: Literal["completed"]
+    status: ResponseItemStatus
     content: list[ResponseOutputText]
 
 
+ResponseOutputItem = ResponseOutputMessage | ResponseFunctionCall | ResponseCustomToolCall
+"""One item of :attr:`ResponseResult.output`."""
+
+ResponseInputItem = (
+    ResponseInputMessage
+    | ResponseOutputMessage
+    | ResponseFunctionCall
+    | ResponseFunctionCallOutput
+    | ResponseCustomToolCall
+    | ResponseCustomToolCallOutput
+)
+"""One item of a Responses ``input`` array."""
+
+
+class ResponseFunctionTool(TypedDict):
+    """A function tool the model may call.
+
+    ``strict`` may be omitted or ``False``; strict function schemas are
+    rejected.
+    """
+
+    type: Literal["function"]
+    name: str
+    description: NotRequired[str]
+    parameters: NotRequired[dict[str, Any]]
+    strict: NotRequired[Literal[False]]
+
+
+class ResponseCustomTool(TypedDict):
+    """A custom tool whose call carries one free-text ``input``.
+
+    ``format`` is accepted and not enforced.
+    """
+
+    type: Literal["custom"]
+    name: str
+    description: NotRequired[str]
+    format: NotRequired[dict[str, Any]]
+
+
+ResponseTool = ResponseFunctionTool | ResponseCustomTool
+"""A tool definition accepted by ``tools``."""
+
+
+class ResponseNamedToolChoice(TypedDict):
+    """Force a call to one declared function or custom tool."""
+
+    type: Literal["function", "custom"]
+    name: str
+
+
+ResponseToolChoice = Literal["auto", "none", "required"] | ResponseNamedToolChoice
+"""A ``tool_choice`` value."""
+
+
+class ResponseReasoning(TypedDict, total=False):
+    """Reasoning configuration.
+
+    ``effort`` is forwarded as the chat ``reasoning_effort`` and checked
+    against the model's advertised values (:class:`ModelReasoning`).
+    """
+
+    effort: str | None
+
+
+class ResponseTextFormatText(TypedDict):
+    """Plain text output (the default)."""
+
+    type: Literal["text"]
+
+
+class ResponseTextFormatJsonObject(TypedDict):
+    """Output constrained to a JSON object."""
+
+    type: Literal["json_object"]
+
+
+class ResponseTextFormatJsonSchema(TypedDict):
+    """Output constrained to a JSON Schema."""
+
+    type: Literal["json_schema"]
+    name: str
+    schema: dict[str, Any]
+    strict: NotRequired[bool]
+    description: NotRequired[str]
+
+
+ResponseTextFormat = ResponseTextFormatText | ResponseTextFormatJsonObject | ResponseTextFormatJsonSchema
+"""Structured-output format of ``text.format``."""
+
+
+class ResponseTextConfig(TypedDict, total=False):
+    """Text output configuration."""
+
+    format: ResponseTextFormat
+
+
+class ResponseOutputTokensDetails(TypedDict):
+    """Breakdown of a response's output tokens."""
+
+    reasoning_tokens: int
+
+
 class ResponseUsage(TypedDict):
-    """Token usage returned by the Responses MVP."""
+    """Token usage of a Responses result."""
 
     input_tokens: int
     output_tokens: int
     total_tokens: int
     input_tokens_details: NotRequired[PromptTokensDetails]
+    output_tokens_details: NotRequired[ResponseOutputTokensDetails]
+
+
+class ResponseIncompleteDetails(TypedDict):
+    """Why a response ended with ``status: "incomplete"``."""
+
+    reason: Literal["max_output_tokens", "content_filter"]
+
+
+class ResponseError(TypedDict):
+    """Why a streamed response ended with ``status: "failed"``."""
+
+    code: str
+    message: str
 
 
 class ResponseResult(TypedDict, total=False):
-    """Non-streaming result from :meth:`SIEClient.responses`."""
+    """A Responses result.
+
+    Returned by :meth:`SIEClient.responses` and carried by the lifecycle
+    events of :meth:`SIEClient.stream_responses`, where ``status`` is
+    ``"in_progress"``, ``output`` is empty and ``usage`` is ``None`` until
+    the terminal event.
+    """
 
     id: str
     object: Literal["response"]
     created_at: int
     model: str
-    status: Literal["completed"]
-    output: list[ResponseOutputMessage]
-    usage: ResponseUsage
+    status: Literal["in_progress", "completed", "incomplete", "failed"]
+    incomplete_details: ResponseIncompleteDetails | None
+    error: ResponseError | None
+    store: bool
+    parallel_tool_calls: bool
+    tool_choice: ResponseToolChoice
+    output: list[ResponseOutputItem]
+    usage: ResponseUsage | None
     request: RequestMetadata
+
+
+class ResponseLifecycleEvent(TypedDict):
+    """A stream event carrying the whole response object.
+
+    ``response.completed`` and ``response.incomplete`` end the stream with
+    the final result.
+    """
+
+    type: Literal["response.created", "response.in_progress", "response.completed", "response.incomplete"]
+    sequence_number: int
+    response: ResponseResult
+
+
+class ResponseOutputItemEvent(TypedDict):
+    """An output item opened (``added``) or finished (``done``)."""
+
+    type: Literal["response.output_item.added", "response.output_item.done"]
+    sequence_number: int
+    output_index: int
+    item: ResponseOutputItem
+
+
+class ResponseContentPartEvent(TypedDict):
+    """A message content part opened (``added``) or finished (``done``)."""
+
+    type: Literal["response.content_part.added", "response.content_part.done"]
+    sequence_number: int
+    item_id: str
+    output_index: int
+    content_index: int
+    part: ResponseOutputText
+
+
+class ResponseOutputTextDeltaEvent(TypedDict):
+    """Incremental message text."""
+
+    type: Literal["response.output_text.delta"]
+    sequence_number: int
+    item_id: str
+    output_index: int
+    content_index: int
+    delta: str
+
+
+class ResponseOutputTextDoneEvent(TypedDict):
+    """The complete message text."""
+
+    type: Literal["response.output_text.done"]
+    sequence_number: int
+    item_id: str
+    output_index: int
+    content_index: int
+    text: str
+
+
+class ResponseFunctionCallArgumentsDeltaEvent(TypedDict):
+    """Incremental function call arguments."""
+
+    type: Literal["response.function_call_arguments.delta"]
+    sequence_number: int
+    item_id: str
+    output_index: int
+    delta: str
+
+
+class ResponseFunctionCallArgumentsDoneEvent(TypedDict):
+    """The complete function call arguments."""
+
+    type: Literal["response.function_call_arguments.done"]
+    sequence_number: int
+    item_id: str
+    output_index: int
+    arguments: str
+
+
+class ResponseCustomToolCallInputDeltaEvent(TypedDict):
+    """The decoded custom tool call input, emitted once when the call ends."""
+
+    type: Literal["response.custom_tool_call_input.delta"]
+    sequence_number: int
+    item_id: str
+    output_index: int
+    delta: str
+
+
+class ResponseCustomToolCallInputDoneEvent(TypedDict):
+    """The complete custom tool call input."""
+
+    type: Literal["response.custom_tool_call_input.done"]
+    sequence_number: int
+    item_id: str
+    output_index: int
+    input: str
+
+
+ResponseStreamEvent = (
+    ResponseLifecycleEvent
+    | ResponseOutputItemEvent
+    | ResponseContentPartEvent
+    | ResponseOutputTextDeltaEvent
+    | ResponseOutputTextDoneEvent
+    | ResponseFunctionCallArgumentsDeltaEvent
+    | ResponseFunctionCallArgumentsDoneEvent
+    | ResponseCustomToolCallInputDeltaEvent
+    | ResponseCustomToolCallInputDoneEvent
+)
+"""One event yielded by :meth:`SIEClient.stream_responses`."""
 
 
 class NumericalAdmissionObservation(TypedDict):

@@ -64,6 +64,16 @@ const DOCUMENTS = [
   { id: "doc-2", text: "Python is a programming language." },
 ];
 const ENTITY_TEXT = { text: "Apple was founded by Steve Jobs." };
+const WEATHER_TOOL = {
+  type: "function" as const,
+  name: "get_weather",
+  description: "Look up the current weather in a city.",
+  parameters: {
+    type: "object",
+    properties: { city: { type: "string" } },
+    required: ["city"],
+  },
+};
 
 async function drain(stream: AsyncIterable<unknown>): Promise<void> {
   for await (const _chunk of stream) {
@@ -204,6 +214,63 @@ const CALLS: Record<string, (client: SIEClient) => Promise<unknown>> = {
         include_reasoning: true,
       }),
     ),
+  responses_text: (client) =>
+    client.responses({
+      model: "Qwen/Qwen3-4B-Instruct-2507",
+      input: "Write a haiku about the sea.",
+      max_output_tokens: 64,
+    }),
+  responses_tools: (client) =>
+    client.responses({
+      model: "Qwen/Qwen3-4B-Instruct-2507",
+      input: [{ role: "user", content: "What is the weather in Paris?" }],
+      instructions: "Use the tools when they help.",
+      max_output_tokens: 256,
+      tools: [
+        WEATHER_TOOL,
+        { type: "custom", name: "run_python", description: "Run a Python snippet." },
+      ],
+      tool_choice: { type: "function", name: "get_weather" },
+      parallel_tool_calls: false,
+      reasoning: { effort: "low" },
+    }),
+  responses_image_and_tool_output: (client) =>
+    client.responses({
+      model: "Qwen/Qwen3-VL-8B-Instruct",
+      input: [
+        {
+          role: "user",
+          content: [
+            { type: "input_text", text: "Which city is this, and what is its weather?" },
+            { type: "input_image", image_url: `data:image/png;base64,${fixture.media.png}` },
+          ],
+        },
+        {
+          type: "function_call",
+          call_id: "call_1",
+          name: "get_weather",
+          arguments: '{"city":"Paris"}',
+        },
+        { type: "function_call_output", call_id: "call_1", output: "Sunny, 21 C" },
+      ],
+      max_output_tokens: 128,
+      tools: [{ type: "function", name: "get_weather" }],
+    }),
+  stream_responses: (client) =>
+    drain(
+      client.streamResponses({
+        model: "Qwen/Qwen3-4B-Instruct-2507",
+        input: "Extract the invoice fields.",
+        instructions: "Answer in JSON.",
+        temperature: 0,
+        seed: 7,
+        text: { format: { type: "json_schema", name: "invoice", strict: true, schema: SCHEMA } },
+        metadata: { tenant: "tenant-1" },
+        prompt_cache_key: "invoice-v1",
+        user: "user-9",
+        safety_identifier: "safety-9",
+      }),
+    ),
 };
 
 function msgpackResponse(body: unknown): Response {
@@ -236,7 +303,9 @@ function successFor(path: string, accept: string | undefined, itemCount: number)
   }
   const body = path.startsWith("/v1/generate/")
     ? { model: "m", text: "ok", finish_reason: "stop" }
-    : { id: "chat-1", object: "chat.completion", model: "m", choices: [] };
+    : path === "/v1/responses"
+      ? { id: "resp-1", object: "response", model: "m", status: "completed", output: [] }
+      : { id: "chat-1", object: "chat.completion", model: "m", choices: [] };
   return new Response(JSON.stringify(body), {
     status: 200,
     headers: { "Content-Type": "application/json" },
