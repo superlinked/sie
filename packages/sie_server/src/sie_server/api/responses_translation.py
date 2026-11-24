@@ -932,9 +932,11 @@ class StreamMachine:
         chat_index = index if isinstance(index, int) and not isinstance(index, bool) else 0
         function = call.get("function")
         function = function if isinstance(function, dict) else {}
+        fragment = function.get("arguments")
+        fragment = fragment if isinstance(fragment, str) else ""
         if self._call is None or self._call.chat_index != chat_index:
             if chat_index in self._closed_calls:
-                return "tool call arguments arrived after the call closed"
+                return "tool call arguments arrived after another output item started" if fragment else None
             call_id = call.get("id")
             name = function.get("name")
             if not isinstance(call_id, str) or not isinstance(name, str):
@@ -948,8 +950,7 @@ class StreamMachine:
             self._next_index += 1
             item = _call_item(item_id, call_id, name, "", custom=custom, done=False)
             events.append(self._event("response.output_item.added", output_index=self._call.output_index, item=item))
-        fragment = function.get("arguments")
-        if not isinstance(fragment, str) or not fragment:
+        if not fragment:
             return None
         self._call.arguments += fragment
         if not self._call.custom:

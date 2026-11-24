@@ -361,10 +361,14 @@ def test_any_chat_chunk_sequence_yields_a_valid_event_grammar() -> None:
         ),
         (
             [_STEPS["call 0"], _STEPS["call 1"], _STEPS["arguments 0"]],
-            "tool call arguments arrived after the call closed",
+            "tool call arguments arrived after another output item started",
+        ),
+        (
+            [_STEPS["call 0"], _STEPS["text"], _STEPS["arguments 0"]],
+            "tool call arguments arrived after another output item started",
         ),
     ],
-    ids=["malformed chunk", "call without an id", "arguments after the call closed"],
+    ids=["malformed chunk", "call without an id", "arguments after a later call", "arguments after text"],
 )
 def test_a_chat_stream_the_translation_cannot_follow_fails_the_response(frames: list[str], message: str) -> None:
     machine = StreamMachine(_SHAPE, "r", 0)
