@@ -71,10 +71,10 @@ The seeded gate, which needs `npx` and `uv` on `PATH`:
 ./run_gate.sh laptop     # sie-server on this machine, see below
 ```
 
-No recipe has been run against a live endpoint yet. The recipes and the gate
-were checked with the pinned Codex against a recording stub and against
-`sie-server` on the weightless fake engine
-([recorded below](#what-result-to-expect)).
+The laptop recipe and the gate have run against `sie-server` serving a model
+on a GPU, and the recipes against a recording stub and `sie-server` on the
+weightless fake engine ([recorded below](#what-result-to-expect)). The cloud
+and cluster recipes have not run against a live endpoint yet.
 
 ### On this machine
 
@@ -118,6 +118,7 @@ cat > "$CODEX_HOME/config.toml" <<TOML
 model = "zai-org/GLM-5.3-Flash:relay"
 model_provider = "sie"
 model_context_window = 131072
+model_auto_compact_token_limit = 98304
 web_search = "disabled"
 
 [features]
@@ -185,7 +186,15 @@ codex() { npx -y @openai/codex@0.167.0 "$@"; }
   run. The recipe allows 30 minutes, like the Claude Code example's
   `API_TIMEOUT_MS`.
 - Codex sends no output cap, so the chat route's default for the model
-  applies. On `sie-server` that is the profile's `max_output_tokens`.
+  applies. On `sie-server` that is the profile's `max_output_tokens`, and the
+  window must hold the input and that cap: the 32K profile of
+  `Qwen/Qwen3.5-4B` refused 28,800 input tokens and answered 28,500. Codex
+  compacts at about 90% of `model_context_window` by default (the stub run
+  above), past that point, and in a live run it had not compacted at 28,590
+  tokens when its next request was refused.
+  `model_auto_compact_token_limit` is the total that triggers compaction, and
+  the recipes set it to three quarters of the window. In a stub run with a
+  limit of 2,000, Codex compacted after a turn that reported 3,010 tokens.
 
 ## What Codex puts on the wire
 
@@ -224,6 +233,12 @@ and the gateway's and `sie-server`'s tests translate every one of them.
   commands run in a login shell, so they use the `uv` your login shell finds.
   On macOS, Homebrew's uv 0.8.24 panicked inside the sandbox; uv 0.5.31 and
   0.12.10 ran there.
+- On Linux the sandbox is bubblewrap, which gives the commands a network
+  namespace of their own. In a container whose kernel is gVisor that fails:
+  every command exits 1 with `bwrap: loopback: Failed RTM_NEWADDR: No child
+  process`. Adding `[sandbox_workspace_write]` with `network_access = true` to
+  the config leaves the namespace out, so the commands run with network;
+  writes outside the working directory were still refused.
 
 To check another Codex version, change the version in the recipe, run
 `codex exec --json --skip-git-repo-check --sandbox workspace-write "<task>" < /dev/null`
@@ -343,6 +358,36 @@ The conformance check against the same server:
 The fake takes no image input, so the image is refused by the chat route and
 recorded.
 
+### Codex against `sie-server` on a GPU, recorded
+
+`sie-server` from this branch with the `sglang` bundle (SGLang 0.5.10.post1),
+serving `Qwen/Qwen3.5-4B:long-context` on one A100 80GB in a Linux container
+whose kernel is gVisor, 2026-11-24. The bundle's `flashinfer-jit-cache` pin was
+left out, which moves FlashInfer's kernel compile into the model load and
+changes nothing on the wire. Then `./run_gate.sh laptop` and the conformance
+check, from the same container.
+
+- **The gate as written failed on the sandbox.** Every command Codex ran
+  exited with the bubblewrap error above. The model tried again for 223
+  requests while its input grew to 28,590 tokens, the next request was
+  refused because the input and the 4,096-token output cap no longer fit the
+  32K window, and the turn failed with the tests untouched.
+- **With `network_access = true` the gate passed 3 times out of 3.** Each run
+  was one turn of 6 or 7 requests and 15 to 16 seconds, with 4 or 5 commands,
+  43,010 to 50,834 input tokens and no reconnects. Each made the same
+  three-line fix to the module, and the seeded tests passed in a fresh
+  environment.
+- **The model also called `apply_patch`**, a tool these requests did not
+  declare. SIE passes a call through as the model makes it, Codex answered it
+  as an unsupported call, and the model wrote the file with a shell command
+  instead.
+- **The conformance check passed every case.** This model reads images, so
+  `image_in_tool_output` was answered rather than recorded:
+
+```
+8 pass, 0 fail, 0 recorded
+```
+
 ### Checked in this repository
 
 - The gateway's and `sie-server`'s tests replay the shared vectors in
@@ -378,9 +423,9 @@ uv run pytest
   other than its own behind Codex. A Codex release can change what it sends,
   which is why the recipe pins 0.167.0. The capture above is how to re-check a
   new version.
-- **No live run yet.** Neither SIE Cloud, a cluster nor a real model on a
-  laptop has run the gate or the conformance check. The results above come
-  from a recording stub and the weightless fake engine.
+- **One live model.** The gate and the conformance check ran against
+  `sie-server` serving one 4B model on a GPU. Neither SIE Cloud nor a cluster
+  has run them.
 - **Not a coding benchmark.** The fixture is two failing tests in a
   twenty-line module.
 - **Compaction seen only against a stub.** Codex 0.167.0 compacts with an
@@ -389,5 +434,6 @@ uv run pytest
   session.
 - **Images need a model that reads them.** On a model without image input, a
   `view_image` call is refused, and Codex ends the turn.
-- **One operating system.** The sandbox and the stub runs were on macOS.
-  Codex's Linux sandbox has not been run with this gate.
+- **Two sandboxes.** The stub runs used Codex's macOS sandbox. The live run
+  used its Linux sandbox under gVisor, with network allowed. The Linux sandbox
+  without network has not run the gate.

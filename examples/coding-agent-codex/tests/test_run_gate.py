@@ -154,6 +154,7 @@ def test_a_fixing_run_passes_with_the_pinned_codex_and_the_recipe(tmp_path: Path
     assert config["model"] == "zai-org/GLM-5.3-Flash:relay"
     assert config["model_provider"] == "sie"
     assert config["model_context_window"] == 131072
+    assert config["model_auto_compact_token_limit"] == 98304
     assert config["web_search"] == "disabled"
     assert config["features"] == {"multi_agent": False, "goals": False, "plugins": False}
     assert config["analytics"] == {"enabled": False}
@@ -181,6 +182,7 @@ def test_the_cluster_recipe_takes_the_model_and_window_from_the_environment(tmp_
     config = _recorded_config(record)
     assert config["model"] == "org/model:long"
     assert config["model_context_window"] == 65536
+    assert config["model_auto_compact_token_limit"] == 49152
     assert config["model_providers"]["sie"]["base_url"] == "http://gateway:8080/v1"
 
 
@@ -199,6 +201,7 @@ def test_the_laptop_recipe_defaults_to_the_local_server_and_its_32k_profile(tmp_
     config = _recorded_config(record)
     assert config["model"] == "Qwen/Qwen3.5-4B:long-context"
     assert config["model_context_window"] == 32768
+    assert config["model_auto_compact_token_limit"] == 24576
     assert config["model_providers"]["sie"]["base_url"] == "http://localhost:8080/v1"
     assert _recorded_env(record)["SIE_API_KEY"] == "local"
 
@@ -215,6 +218,7 @@ def test_the_laptop_recipe_takes_the_server_key_and_model_from_the_environment(t
     config = _recorded_config(record)
     assert config["model"] == "sie-fake:chat"
     assert config["model_context_window"] == 131072
+    assert config["model_auto_compact_token_limit"] == 98304
     assert config["model_providers"]["sie"]["base_url"] == "http://127.0.0.1:9000/v1"
     assert _recorded_env(record)["SIE_API_KEY"] == "server-token"
 

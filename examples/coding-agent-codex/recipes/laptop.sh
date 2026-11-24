@@ -6,6 +6,7 @@ cat > "$CODEX_HOME/config.toml" <<TOML
 model = "${SIE_MODEL:-Qwen/Qwen3.5-4B:long-context}"
 model_provider = "sie"
 model_context_window = ${SIE_CONTEXT_TOKENS:-32768}
+model_auto_compact_token_limit = $(( ${SIE_CONTEXT_TOKENS:-32768} * 3 / 4 ))
 web_search = "disabled"
 
 [features]
