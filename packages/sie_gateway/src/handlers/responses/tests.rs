@@ -600,6 +600,49 @@ async fn a_failed_event_ends_the_body_and_drops_the_chat_body() {
     assert!(dropped.load(Ordering::SeqCst));
 }
 
+#[test]
+fn tool_call_deltas_the_translation_cannot_place_fail_the_response() {
+    let cases = [
+        (
+            vec![
+                Step::ToolStart(0, "f"),
+                Step::Text("a"),
+                Step::ToolStart(0, "f"),
+            ],
+            None,
+        ),
+        (
+            vec![Step::ToolStart(0, "f"), Step::Text("a"), Step::ToolArgs(0)],
+            Some("tool call arguments arrived after another output item started"),
+        ),
+        (
+            vec![
+                Step::ToolStart(0, "f"),
+                Step::ToolStart(1, "f"),
+                Step::ToolArgs(0),
+            ],
+            Some("tool call arguments arrived after another output item started"),
+        ),
+        (
+            vec![Step::ToolArgs(0)],
+            Some("a tool call arrived without its id and name"),
+        ),
+    ];
+    for (case, (steps, failure)) in cases.into_iter().enumerate() {
+        let mut machine = StreamMachine::new(plain_shell());
+        let mut events = machine.start();
+        for step in &steps {
+            events.extend(machine.on_data(&step_frame(*step)));
+        }
+        let failed = events.iter().find(|event| event.name == "response.failed");
+        assert_eq!(
+            failed.map(|event| event.data["response"]["error"].clone()),
+            failure.map(|message| json!({"code": "server_error", "message": message})),
+            "case {case}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_broken_chat_stream_fails_the_response() {
     let broken = futures_util::stream::iter([

@@ -330,10 +330,8 @@ impl StreamMachine {
     fn tool_call(&mut self, call: &Value, events: &mut Vec<Event>) -> Result<(), &'static str> {
         let chat_index = call.get("index").and_then(Value::as_u64).unwrap_or(0);
         let function = call.get("function").unwrap_or(&Value::Null);
-        if self.call.as_ref().map(|open| open.chat_index) != Some(chat_index) {
-            if self.closed_calls.contains(&chat_index) {
-                return Err("tool call arguments arrived after the call closed");
-            }
+        let is_open = self.call.as_ref().map(|open| open.chat_index) == Some(chat_index);
+        if !is_open && !self.closed_calls.contains(&chat_index) {
             let (Some(call_id), Some(name)) = (
                 call.get("id").and_then(Value::as_str),
                 function.get("name").and_then(Value::as_str),
@@ -370,8 +368,12 @@ impl StreamMachine {
         else {
             return Ok(());
         };
-        let Some(open) = self.call.as_mut() else {
-            return Ok(());
+        let Some(open) = self
+            .call
+            .as_mut()
+            .filter(|open| open.chat_index == chat_index)
+        else {
+            return Err("tool call arguments arrived after another output item started");
         };
         open.arguments.push_str(fragment);
         if open.custom {
