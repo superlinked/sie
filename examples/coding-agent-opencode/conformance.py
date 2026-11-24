@@ -1941,12 +1941,14 @@ def responses_case_function_call(session: ResponsesSession, model: str) -> tuple
         done = result.done_items.get(call.index) or {}
         if done.get("arguments") != call.arguments:
             problems.append(f"item {call.index}: output_item.done arguments differ from the streamed ones")
+        if done.get("name") != call.name:
+            problems.append(f"item {call.index}: output_item.done name differs from the streamed one")
         final = [
             item
             for item in (result.response or {}).get("output") or []
             if item.get("type") == "function_call" and item.get("call_id") == call.id
         ]
-        if [item.get("arguments") for item in final] != [call.arguments]:
+        if [(item.get("name"), item.get("arguments")) for item in final] != [(call.name, call.arguments)]:
             problems.append(f"item {call.index}: the terminal response's output differs from the streamed call")
     if result.finish_reason != "completed":
         problems.append(f"status is {result.finish_reason!r}, expected 'completed'")

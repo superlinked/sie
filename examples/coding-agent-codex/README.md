@@ -347,8 +347,8 @@ recorded.
   `--api responses` checker against a scripted Responses stub that plays a
   conforming stream, then breaks one thing per test: an accepted hosted tool,
   a refusal at another field, an image request refused for another reason, a
-  further `view_image` call instead of an answer, done or terminal arguments
-  that differ from the streamed ones, a buffered answer that is not an object,
+  further `view_image` call instead of an answer, a done or terminal tool
+  name or arguments that differ from the streamed ones, a buffered answer that is not an object,
   a gap in the sequence numbers, busy refusals and a loading model.
 - `tests/test_run_gate.py` runs `run_gate.sh` with a scripted stand-in for
   `npx`: a real fix, no change, a failed run, a failed turn, an error event,

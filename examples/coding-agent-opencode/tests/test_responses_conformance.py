@@ -133,11 +133,15 @@ class Handler(BaseHTTPRequestHandler):
         if "call" in reply:
             ids = {"item_id": "fc-0", "output_index": 0}
             done_arguments = '{"city": "Lyon"}' if KNOBS.get("done_differs") else done["arguments"]
+            done_name = "get_time" if KNOBS.get("done_name_differs") else done["name"]
             events += [
                 ("response.output_item.added", {"output_index": 0, "item": {**item, "arguments": ""}}),
                 ("response.function_call_arguments.delta", {**ids, "delta": done["arguments"]}),
                 ("response.function_call_arguments.done", {**ids, "arguments": done["arguments"]}),
-                ("response.output_item.done", {"output_index": 0, "item": {**done, "arguments": done_arguments}}),
+                (
+                    "response.output_item.done",
+                    {"output_index": 0, "item": {**done, "name": done_name, "arguments": done_arguments}},
+                ),
             ]
         else:
             ids = {"item_id": "msg-0", "output_index": 0, "content_index": 0}
@@ -150,7 +154,11 @@ class Handler(BaseHTTPRequestHandler):
                 ("response.content_part.done", {**ids, "part": done["content"][0]}),
                 ("response.output_item.done", {"output_index": 0, "item": done}),
             ]
-        final = [{**output[0], "arguments": "{}"}] if KNOBS.get("final_differs") and "call" in reply else output
+        final = output
+        if "call" in reply and KNOBS.get("final_differs"):
+            final = [{**output[0], "arguments": "{}"}]
+        if "call" in reply and KNOBS.get("final_name_differs"):
+            final = [{**output[0], "name": "get_time"}]
         events.append(("response.completed", {"response": _response(body, "completed", final, usage)}))
         for number, (name, data) in enumerate(events):
             if KNOBS.get("sequence_gap") and number >= 3:
@@ -239,6 +247,18 @@ def test_done_arguments_that_differ_from_the_stream_fail(base_url: str) -> None:
 
 def test_a_terminal_output_that_differs_from_the_stream_fails(base_url: str) -> None:
     case = _cases(base_url, final_differs=True)["function_call"]
+    assert case["status"] == "fail"
+    assert "the terminal response's output differs from the streamed call" in case["detail"]
+
+
+def test_a_done_name_that_differs_from_the_stream_fails(base_url: str) -> None:
+    case = _cases(base_url, done_name_differs=True)["function_call"]
+    assert case["status"] == "fail"
+    assert "output_item.done name differs" in case["detail"]
+
+
+def test_a_terminal_name_that_differs_from_the_stream_fails(base_url: str) -> None:
+    case = _cases(base_url, final_name_differs=True)["function_call"]
     assert case["status"] == "fail"
     assert "the terminal response's output differs from the streamed call" in case["detail"]
 
