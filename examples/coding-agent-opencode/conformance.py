@@ -1943,6 +1943,8 @@ def responses_case_function_call(session: ResponsesSession, model: str) -> tuple
             problems.append(f"item {call.index}: output_item.done arguments differ from the streamed ones")
         if done.get("name") != call.name:
             problems.append(f"item {call.index}: output_item.done name differs from the streamed one")
+        if done.get("call_id") != call.id:
+            problems.append(f"item {call.index}: output_item.done call_id differs from the streamed one")
         final = [
             item
             for item in (result.response or {}).get("output") or []

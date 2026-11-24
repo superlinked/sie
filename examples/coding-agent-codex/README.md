@@ -52,7 +52,7 @@ The conformance check, from this directory:
 
 ```sh
 uv run --project ../coding-agent-opencode python ../coding-agent-opencode/conformance.py \
-    --api responses --base-url "$SIE_BASE_URL/v1" --model zai-org/GLM-5.3-Flash:relay
+    --api responses --base-url "$SIE_BASE_URL/v1" --model "${SIE_MODEL:-zai-org/GLM-5.3-Flash:relay}"
 ```
 
 The seeded gate, which needs `npx` and `uv` on `PATH`:
@@ -94,7 +94,8 @@ The conformance check and the gate against it:
 
 ```sh
 uv run --project ../coding-agent-opencode python ../coding-agent-opencode/conformance.py \
-    --api responses --base-url http://localhost:8080/v1 --model Qwen/Qwen3.5-4B:long-context
+    --api responses --base-url "${SIE_BASE_URL:-http://localhost:8080}/v1" \
+    --model "${SIE_MODEL:-Qwen/Qwen3.5-4B:long-context}"
 ./run_gate.sh laptop
 ```
 
@@ -228,7 +229,7 @@ items. Then run the conformance check and the gate.
 | Case | Passes when |
 |---|---|
 | `plain_answer` | a streamed one-word answer ends `completed` with `output_text` and usage carrying `input_tokens` and `output_tokens` |
-| `function_call` | with Codex's fields and a developer message, a `function_call` item opens with a `call_id` and the name `get_weather`, its argument deltas join into a JSON object with `city`, its `output_item.done` and the terminal response's `output` carry the same arguments, and the response ends `completed` |
+| `function_call` | with Codex's fields and a developer message, a `function_call` item opens with a `call_id` and the name `get_weather`, its argument deltas join into a JSON object with `city`, its `output_item.done` carries the same `call_id`, name and arguments, the terminal response's `output` the same name and arguments, and the response ends `completed` |
 | `tool_output_round_trip` | after the `function_call` and a `function_call_output` of 18 degrees, as Codex sends them, the answer carries 18, no further call, `completed` |
 | `image_in_tool_output` | a `view_image` call whose output is an `input_image` `data:` URL, as Codex sends it, is answered with text, no further call, `completed`. A refusal saying the model `does not support image input` is recorded; any other refusal fails |
 | `buffered_response` | a non-streamed request returns an `object: "response"` that is `completed`, with `output_text` and usage |
@@ -347,9 +348,10 @@ recorded.
   `--api responses` checker against a scripted Responses stub that plays a
   conforming stream, then breaks one thing per test: an accepted hosted tool,
   a refusal at another field, an image request refused for another reason, a
-  further `view_image` call instead of an answer, a done or terminal tool
-  name or arguments that differ from the streamed ones, a buffered answer that is not an object,
-  a gap in the sequence numbers, busy refusals and a loading model.
+  further `view_image` call instead of an answer, a done item whose
+  `call_id`, name or arguments differ from the streamed call, a terminal
+  output whose name or arguments differ, a buffered answer that is not an
+  object, a gap in the sequence numbers, busy refusals and a loading model.
 - `tests/test_run_gate.py` runs `run_gate.sh` with a scripted stand-in for
   `npx`: a real fix, no change, a failed run, a failed turn, an error event,
   no input tokens, no command, no turn completed, edited tests, an added

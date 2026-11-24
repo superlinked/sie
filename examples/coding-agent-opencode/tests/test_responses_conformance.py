@@ -134,13 +134,17 @@ class Handler(BaseHTTPRequestHandler):
             ids = {"item_id": "fc-0", "output_index": 0}
             done_arguments = '{"city": "Lyon"}' if KNOBS.get("done_differs") else done["arguments"]
             done_name = "get_time" if KNOBS.get("done_name_differs") else done["name"]
+            done_call_id = "call_other" if KNOBS.get("done_call_id_differs") else done["call_id"]
             events += [
                 ("response.output_item.added", {"output_index": 0, "item": {**item, "arguments": ""}}),
                 ("response.function_call_arguments.delta", {**ids, "delta": done["arguments"]}),
                 ("response.function_call_arguments.done", {**ids, "arguments": done["arguments"]}),
                 (
                     "response.output_item.done",
-                    {"output_index": 0, "item": {**done, "name": done_name, "arguments": done_arguments}},
+                    {
+                        "output_index": 0,
+                        "item": {**done, "call_id": done_call_id, "name": done_name, "arguments": done_arguments},
+                    },
                 ),
             ]
         else:
@@ -243,6 +247,12 @@ def test_done_arguments_that_differ_from_the_stream_fail(base_url: str) -> None:
     case = _cases(base_url, done_differs=True)["function_call"]
     assert case["status"] == "fail"
     assert "output_item.done arguments differ" in case["detail"]
+
+
+def test_a_done_call_id_that_differs_from_the_stream_fails(base_url: str) -> None:
+    case = _cases(base_url, done_call_id_differs=True)["function_call"]
+    assert case["status"] == "fail"
+    assert "output_item.done call_id differs" in case["detail"]
 
 
 def test_a_terminal_output_that_differs_from_the_stream_fails(base_url: str) -> None:

@@ -980,9 +980,10 @@ What runs anywhere, and in this repository's CI, is the test suite:
 - `tests/test_responses_conformance.py` runs `conformance.py --api responses`
   against a scripted Responses stub in the same way: an accepted hosted tool,
   a refusal at another field, an image request refused for another reason, a
-  further `view_image` call instead of an answer, a done or terminal tool
-  name or arguments that differ from the streamed ones, a buffered answer that is not an object,
-  a gap in the sequence numbers, busy refusals and a loading model.
+  further `view_image` call instead of an answer, a done item whose
+  `call_id`, name or arguments differ from the streamed call, a terminal
+  output whose name or arguments differ, a buffered answer that is not an
+  object, a gap in the sequence numbers, busy refusals and a loading model.
 - `tests/test_run_gate.py` runs `run_gate.sh` with a scripted stand-in for
   `opencode`: a real fix, no change, a failed `opencode run`, edited tests, an
   environment planted in the worked copy, a caller's `PYTEST_ADDOPTS` or
