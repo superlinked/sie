@@ -11,6 +11,9 @@
 //! * Internal JSON Schema ``$ref`` dereferencing (``#/...`` only)
 //! * JSON Schema reject-list (``$dynamicRef``, ``if/then/else``,
 //!   ``unevaluatedProperties``, ``dependentSchemas``)
+//! * Keyword value shapes every JSON Schema draft refuses (an unknown
+//!   ``type`` name, ``properties`` that is not an object, ``required``
+//!   that is not an array of strings, a string where a schema belongs, …)
 //! * Mutual exclusivity of ``json_schema`` and ``regex``
 //! * ``strict: true`` only on ``json_schema`` and ``regex`` grammars, whose
 //!   finished output the worker verifies
@@ -204,6 +207,14 @@ impl SchemaRejection {
 /// worker via the resulting :class:`GrammarSpec`. They never affect the
 /// cache key — see :func:`sie_server.types.grammar.hash_grammar`.
 pub fn parse_grammar(v: &Value) -> GrammarParseResult {
+    parse_grammar_at(v, "grammar.json_schema")
+}
+
+/// :func:`parse_grammar` with the ``param`` path that schema rejections
+/// name for the ``json_schema`` variant. Callers that translate another
+/// request field into a grammar pass that field's path, so a refused
+/// schema is reported where the client sent it.
+pub fn parse_grammar_at(v: &Value, schema_param: &str) -> GrammarParseResult {
     let Some(obj) = v.as_object() else {
         return GrammarParseResult::Err(bad_request(
             "'grammar' must be a JSON object".to_string(),
@@ -260,7 +271,7 @@ pub fn parse_grammar(v: &Value) -> GrammarParseResult {
 
     if has_schema {
         let schema = obj.get("json_schema").expect("checked above");
-        let resolved_schema = match dereference_schema_refs(schema, "grammar.json_schema") {
+        let resolved_schema = match dereference_schema_refs(schema, schema_param) {
             Ok(schema) => schema,
             Err(rejection) => return GrammarParseResult::Err(rejection.into_response()),
         };
@@ -275,7 +286,7 @@ pub fn parse_grammar(v: &Value) -> GrammarParseResult {
                 oai_code::INVALID_REQUEST,
             ));
         }
-        if let Err(rejection) = walk_schema(&resolved_schema, "grammar.json_schema", None) {
+        if let Err(rejection) = walk_schema(&resolved_schema, schema_param, None) {
             return GrammarParseResult::Err(rejection.into_response());
         }
         GrammarParseResult::Ok(GrammarSpec::JsonSchema {
@@ -678,6 +689,7 @@ fn walk_schema_inner(
                 if let (Some(root), Some(ref_value)) = (refs_root, map.get("$ref")) {
                     resolve_internal_ref(root, ref_value, &format!("{path}.$ref"))?;
                 }
+                check_schema_keyword_shapes(map, path)?;
             }
             for (k, child) in map {
                 let child_path = format!("{path}.{k}");
@@ -718,9 +730,242 @@ fn walk_schema_inner(
                 )?;
             }
         }
-        // Scalars (string / number / bool / null) cannot host
-        // unsupported keywords and do not contribute to depth.
+        // A schema is an object or a boolean. A string or number where a
+        // schema belongs (``"properties": {"a": "string"}``) is never a
+        // schema. ``null`` is left alone: it is read as an absent keyword.
+        Value::String(_) | Value::Number(_) if context == SchemaContext::Schema => {
+            return Err(invalid_schema(
+                "a JSON Schema must be an object or a boolean".to_string(),
+                path,
+            ));
+        }
+        // Other scalars cannot host unsupported keywords and do not
+        // contribute to depth.
         _ => {}
+    }
+
+    Ok(())
+}
+
+/// The type names JSON Schema defines for ``type``.
+const SCHEMA_TYPE_NAMES: &[&str] = &[
+    "array", "boolean", "integer", "null", "number", "object", "string",
+];
+
+/// Keywords whose value is a map from names to schemas.
+const SCHEMA_MAP_KEYWORDS: &[&str] = &["properties", "patternProperties", "$defs", "definitions"];
+
+/// Keywords whose value is a non-empty array of schemas.
+const SCHEMA_ARRAY_KEYWORDS: &[&str] = &["allOf", "anyOf", "oneOf"];
+
+/// Keywords whose value is a non-negative integer.
+const NON_NEGATIVE_INTEGER_KEYWORDS: &[&str] = &[
+    "minLength",
+    "maxLength",
+    "minItems",
+    "maxItems",
+    "minProperties",
+    "maxProperties",
+    "minContains",
+    "maxContains",
+];
+
+/// Keywords whose value is a number.
+const NUMBER_KEYWORDS: &[&str] = &["minimum", "maximum", "multipleOf"];
+
+fn invalid_schema(message: String, param: &str) -> SchemaRejection {
+    SchemaRejection::new(message, param, oai_code::INVALID_REQUEST)
+}
+
+fn json_kind(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
+}
+
+fn check_type_name(v: &Value, param: &str) -> Result<(), SchemaRejection> {
+    match v.as_str() {
+        Some(name) if SCHEMA_TYPE_NAMES.contains(&name) => Ok(()),
+        Some(name) => Err(invalid_schema(
+            format!(
+                "'type' {name:?} is not a JSON Schema type; expected one of {}",
+                SCHEMA_TYPE_NAMES.join(", ")
+            ),
+            param,
+        )),
+        None => Err(invalid_schema(
+            format!("'type' entries must be strings, got {}", json_kind(v)),
+            param,
+        )),
+    }
+}
+
+/// Refuse keyword values that no JSON Schema draft allows, one schema
+/// object at a time (the caller walks the children). Only shapes every
+/// draft's metaschema refuses are checked; unknown keywords, annotations
+/// and ``null`` values pass.
+fn check_schema_keyword_shapes(
+    map: &serde_json::Map<String, Value>,
+    path: &str,
+) -> Result<(), SchemaRejection> {
+    let present = |key: &str| map.get(key).filter(|v| !v.is_null());
+
+    if let Some(ty) = present("type") {
+        let param = format!("{path}.type");
+        match ty {
+            Value::String(_) => check_type_name(ty, &param)?,
+            Value::Array(names) => {
+                if names.is_empty() {
+                    return Err(invalid_schema(
+                        "'type' must not be an empty array".to_string(),
+                        &param,
+                    ));
+                }
+                for (i, name) in names.iter().enumerate() {
+                    check_type_name(name, &format!("{param}[{i}]"))?;
+                }
+            }
+            other => {
+                return Err(invalid_schema(
+                    format!(
+                        "'type' must be a string or an array of strings, got {}",
+                        json_kind(other)
+                    ),
+                    &param,
+                ));
+            }
+        }
+    }
+
+    for &kw in SCHEMA_MAP_KEYWORDS {
+        if let Some(v) = present(kw) {
+            if !v.is_object() {
+                return Err(invalid_schema(
+                    format!(
+                        "'{kw}' must be an object mapping names to schemas, got {}",
+                        json_kind(v)
+                    ),
+                    &format!("{path}.{kw}"),
+                ));
+            }
+        }
+    }
+
+    if let Some(v) = present("required") {
+        let param = format!("{path}.required");
+        let Some(names) = v.as_array() else {
+            return Err(invalid_schema(
+                format!(
+                    "'required' must be an array of property names, got {}",
+                    json_kind(v)
+                ),
+                &param,
+            ));
+        };
+        for (i, name) in names.iter().enumerate() {
+            if !name.is_string() {
+                return Err(invalid_schema(
+                    format!(
+                        "'required' entries must be strings, got {}",
+                        json_kind(name)
+                    ),
+                    &format!("{param}[{i}]"),
+                ));
+            }
+        }
+    }
+
+    if let Some(v) = present("enum") {
+        if !v.is_array() {
+            return Err(invalid_schema(
+                format!("'enum' must be an array, got {}", json_kind(v)),
+                &format!("{path}.enum"),
+            ));
+        }
+    }
+
+    for &kw in SCHEMA_ARRAY_KEYWORDS {
+        if let Some(v) = present(kw) {
+            let param = format!("{path}.{kw}");
+            match v.as_array() {
+                Some(items) if items.is_empty() => {
+                    return Err(invalid_schema(
+                        format!("'{kw}' must be a non-empty array of schemas"),
+                        &param,
+                    ));
+                }
+                Some(_) => {}
+                None => {
+                    return Err(invalid_schema(
+                        format!(
+                            "'{kw}' must be a non-empty array of schemas, got {}",
+                            json_kind(v)
+                        ),
+                        &param,
+                    ));
+                }
+            }
+        }
+    }
+
+    if let Some(v) = present("prefixItems") {
+        if !v.is_array() {
+            return Err(invalid_schema(
+                format!(
+                    "'prefixItems' must be an array of schemas, got {}",
+                    json_kind(v)
+                ),
+                &format!("{path}.prefixItems"),
+            ));
+        }
+    }
+
+    for &kw in NON_NEGATIVE_INTEGER_KEYWORDS {
+        if let Some(v) = present(kw) {
+            // ``5.0`` counts as an integer, as JSON Schema validators read it.
+            let ok = v
+                .as_f64()
+                .is_some_and(|n| n >= 0.0 && n.fract() == 0.0 && n.is_finite());
+            if !ok {
+                return Err(invalid_schema(
+                    format!("'{kw}' must be a non-negative integer, got {v}"),
+                    &format!("{path}.{kw}"),
+                ));
+            }
+        }
+    }
+
+    for &kw in NUMBER_KEYWORDS {
+        if let Some(v) = present(kw) {
+            if !v.is_number() {
+                return Err(invalid_schema(
+                    format!("'{kw}' must be a number, got {}", json_kind(v)),
+                    &format!("{path}.{kw}"),
+                ));
+            }
+        }
+    }
+    if let Some(v) = present("multipleOf").and_then(Value::as_f64) {
+        if v <= 0.0 {
+            return Err(invalid_schema(
+                format!("'multipleOf' must be greater than 0, got {v}"),
+                &format!("{path}.multipleOf"),
+            ));
+        }
+    }
+
+    if let Some(v) = present("pattern") {
+        if !v.is_string() {
+            return Err(invalid_schema(
+                format!("'pattern' must be a string, got {}", json_kind(v)),
+                &format!("{path}.pattern"),
+            ));
+        }
     }
 
     Ok(())
@@ -1543,6 +1788,203 @@ mod tests {
         assert_eq!(
             rejection.message,
             format!("JSON Schema node count exceeds limit ({MAX_SCHEMA_NODES})")
+        );
+    }
+
+    /// Schemas that every JSON Schema draft refuses, with the ``param``
+    /// each refusal names (relative to the schema root ``p``).
+    fn structurally_invalid_schemas() -> Vec<(Value, &'static str, &'static str)> {
+        vec![
+            (
+                json!({"type": "objekt"}),
+                "p.type",
+                "'type' \"objekt\" is not a JSON Schema type",
+            ),
+            (
+                json!({"type": 3}),
+                "p.type",
+                "'type' must be a string or an array of strings",
+            ),
+            (
+                json!({"type": []}),
+                "p.type",
+                "'type' must not be an empty array",
+            ),
+            (
+                json!({"type": ["string", "nul"]}),
+                "p.type[1]",
+                "'type' \"nul\" is not a JSON Schema type",
+            ),
+            (
+                json!({"type": ["string", 1]}),
+                "p.type[1]",
+                "'type' entries must be strings",
+            ),
+            (
+                json!({"type": "object", "properties": [{"a": {"type": "string"}}]}),
+                "p.properties",
+                "'properties' must be an object mapping names to schemas",
+            ),
+            (
+                json!({"type": "object", "properties": {"a": "string"}}),
+                "p.properties.a",
+                "a JSON Schema must be an object or a boolean",
+            ),
+            (
+                json!({"type": "object", "properties": {"a": {"type": "string"}}, "required": "a"}),
+                "p.required",
+                "'required' must be an array of property names",
+            ),
+            (
+                json!({"type": "object", "properties": {"a": {"type": "string", "required": true}}}),
+                "p.properties.a.required",
+                "'required' must be an array of property names",
+            ),
+            (
+                json!({"type": "object", "required": ["a", 1]}),
+                "p.required[1]",
+                "'required' entries must be strings",
+            ),
+            (
+                json!({"type": "string", "enum": "a"}),
+                "p.enum",
+                "'enum' must be an array",
+            ),
+            (
+                json!({"anyOf": []}),
+                "p.anyOf",
+                "'anyOf' must be a non-empty array of schemas",
+            ),
+            (
+                json!({"oneOf": {"type": "string"}}),
+                "p.oneOf",
+                "'oneOf' must be a non-empty array of schemas",
+            ),
+            (
+                json!({"type": "string", "minLength": -1}),
+                "p.minLength",
+                "'minLength' must be a non-negative integer",
+            ),
+            (
+                json!({"type": "array", "maxItems": 1.5}),
+                "p.maxItems",
+                "'maxItems' must be a non-negative integer",
+            ),
+            (
+                json!({"type": "number", "minimum": "0"}),
+                "p.minimum",
+                "'minimum' must be a number",
+            ),
+            (
+                json!({"type": "number", "multipleOf": 0}),
+                "p.multipleOf",
+                "'multipleOf' must be greater than 0",
+            ),
+            (
+                json!({"type": "string", "pattern": 1}),
+                "p.pattern",
+                "'pattern' must be a string",
+            ),
+            (
+                json!({"type": "array", "items": "string"}),
+                "p.items",
+                "a JSON Schema must be an object or a boolean",
+            ),
+            (
+                json!("object"),
+                "p",
+                "a JSON Schema must be an object or a boolean",
+            ),
+            (
+                json!({"type": "object", "properties": {"a": {"$ref": "#/$defs/A"}}, "$defs": {"A": {"type": "strin"}}}),
+                "p.$defs.A.type",
+                "'type' \"strin\" is not a JSON Schema type",
+            ),
+            (
+                json!({"type": "object", "properties": {"a": {"type": "array", "items": {"anyOf": [{"type": "string"}, {"type": "object", "properties": {"b": {"type": "intger"}}}]}}}}),
+                "p.properties.a.items.anyOf[1].properties.b.type",
+                "'type' \"intger\" is not a JSON Schema type",
+            ),
+        ]
+    }
+
+    /// Valid schemas from common clients that must keep passing.
+    fn structurally_valid_schemas() -> Vec<Value> {
+        vec![
+            json!({}),
+            json!(true),
+            json!({"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"], "additionalProperties": false}),
+            json!({"type": "object", "properties": {"u": {"type": ["string", "null"], "enum": ["c", "f", null]}}}),
+            json!({"type": "object", "properties": {"a": {"$ref": "#/$defs/A"}}, "$defs": {"A": {"type": "object", "properties": {"b": {"type": "integer", "minimum": 0}}}}}),
+            json!({"type": "object", "properties": {"a": {"$ref": "#/definitions/A"}}, "definitions": {"A": {"type": "string", "minLength": 1, "maxLength": 5.0, "pattern": "^x"}}}),
+            json!({"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "T"}),
+            json!({"type": "array", "items": [{"type": "string"}, {"type": "number"}], "minItems": 2, "additionalItems": false}),
+            json!({"type": "number", "exclusiveMinimum": true, "minimum": 0, "multipleOf": 0.5}),
+            // Unknown keywords and annotations pass, whatever they hold;
+            // property names that look like keywords are names, not keywords.
+            json!({"type": "object", "x-extra": {"type": "objekt"}, "nullable": true, "properties": {"type": {"type": "string"}, "required": {"type": "boolean"}, "enum": {"type": "array"}}}),
+            // ``null`` keyword values read as absent.
+            json!({"type": "object", "properties": {"a": {"type": "string"}}, "required": null, "items": null}),
+            json!({"type": "string", "format": "custom", "description": "d", "examples": ["x"], "const": "x"}),
+        ]
+    }
+
+    #[test]
+    fn test_tool_parameters_reject_structurally_invalid_schemas() {
+        for (schema, param, message) in structurally_invalid_schemas() {
+            let rejection = validate_tool_parameters(&schema, "p")
+                .expect_err(&format!("{schema} should be refused"));
+            assert_eq!(rejection.param, param, "{schema}");
+            assert_eq!(rejection.code, oai_code::INVALID_REQUEST, "{schema}");
+            assert!(
+                rejection.message.starts_with(message),
+                "{schema}: {}",
+                rejection.message
+            );
+        }
+    }
+
+    #[test]
+    fn test_tool_parameters_accept_structurally_valid_schemas() {
+        for schema in structurally_valid_schemas() {
+            if let Err(rejection) = validate_tool_parameters(&schema, "p") {
+                panic!("{schema} refused: {rejection:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_grammar_rejects_structurally_invalid_schemas() {
+        for (schema, param, message) in structurally_invalid_schemas() {
+            // A refused ``$defs`` entry is reported where it is referenced,
+            // since the grammar walks the schema with ``$ref`` inlined.
+            let param = param
+                .replacen('p', "grammar.json_schema", 1)
+                .replace("$defs.A", "properties.a");
+            let body = err_or_panic(parse_grammar(&json!({"json_schema": schema}))).await;
+            assert_eq!(body["error"]["param"], param, "{schema}");
+            assert_eq!(body["error"]["code"], "invalid_request", "{schema}");
+            let got = body["error"]["message"].as_str().unwrap();
+            assert!(got.starts_with(message), "{schema}: {got}");
+        }
+    }
+
+    #[test]
+    fn test_parse_grammar_accepts_structurally_valid_schemas() {
+        for schema in structurally_valid_schemas() {
+            if let GrammarParseResult::Err(_) = parse_grammar(&json!({"json_schema": schema})) {
+                panic!("{schema} refused");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_grammar_at_names_the_given_schema_path() {
+        let v = json!({"json_schema": {"type": "objekt"}});
+        let body = err_or_panic(parse_grammar_at(&v, "response_format.json_schema.schema")).await;
+        assert_eq!(
+            body["error"]["param"],
+            "response_format.json_schema.schema.type"
         );
     }
 }
