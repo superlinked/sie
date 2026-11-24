@@ -193,6 +193,19 @@ fn every_captured_claude_code_request_translates_or_fails_with_the_recovery_word
 }
 
 #[test]
+fn a_structurally_invalid_tool_schema_is_refused() {
+    let error = messages_to_chat(
+        &json!({"model": "m", "max_tokens": 1, "tools": [{"name": "t", "input_schema": {"type": "objekt"}}], "messages": [{"role": "user", "content": "x"}]}),
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.message,
+        "tools.0.input_schema.type: 'type' \"objekt\" is not a JSON Schema type; expected one of array, boolean, integer, null, number, object, string"
+    );
+}
+
+#[test]
 fn tool_count_over_the_limit_is_refused() {
     let tools: Vec<Value> = (0..=MAX_TOOLS)
         .map(|index| json!({"name": format!("tool_{index}"), "input_schema": {"type": "object"}}))
