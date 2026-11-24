@@ -5783,8 +5783,9 @@ pub(crate) async fn run_streaming_generate(
     //   first_chunk : 30s   (cold-start, grammar compile, queue depth)
     //   inter_chunk : 10s   (gap between chunks after streaming starts)
     //   overall     : max_new_tokens/10 + 30, capped at 5 min
-    // Env overrides keep tuning ops-friendly. Per ADR-0003 the
-    // profile/runtime overall_timeout_s is the sole authority for
+    // Env overrides keep tuning ops-friendly. The overall timeout that
+    // `generation_timeout_config` resolves (env override, request option,
+    // profile runtime, default) is the sole authority for
     // generation; the legacy `SIE_GATEWAY_REQUEST_TIMEOUT` ceiling is
     // *not* applied here (it would collapse a 300s profile overall to
     // the default 30s and make the first-chunk policy unreachable).
@@ -10853,7 +10854,7 @@ pub fn generation_timeout_config(
     }
 }
 
-/// ADR-0003 invariant: `overall >= first_chunk`. If a misconfiguration
+/// Invariant: `overall >= first_chunk`. If a misconfiguration
 /// declares the inverse, the first-chunk policy would be dead code (the
 /// overall deadline would fire before first-chunk could). The
 /// pure-function shape keeps the runtime guard testable without
@@ -10877,7 +10878,7 @@ pub(crate) fn enforce_first_chunk_invariant(
             overall_s = overall,
             "generation timeout misconfigured: first_chunk > overall; clamping first_chunk \
              to overall. Adjust the profile or env override so overall_timeout_s >= \
-             first_chunk_timeout_s (ADR-0003)."
+             first_chunk_timeout_s."
         );
         (overall, overall)
     } else {
@@ -11477,7 +11478,7 @@ fn alias_model_target(target: &str, requested_profile: Option<&str>) -> String {
 /// target, else the `__`->`/` form, else verbatim). The addition: an alias
 /// *target* may be a full `bundle:/org/model` spec, so an operator can pin a
 /// precision/profile bundle for a job alias — e.g. map `sql` to a BF16 bundle
-/// that avoids the FP8 SQL-accuracy regression (ADR 0001). An explicit caller
+/// that avoids an FP8 accuracy regression on SQL. An explicit caller
 /// bundle (`somebundle:/sql`) always wins over the alias's bundle.
 /// `pub` because it is THE definition of "which model does this string denote"
 /// for this gateway, and two surfaces outside the route need that definition:
@@ -21655,7 +21656,7 @@ mod tests {
     // accepts (and that the chat route already accepts). Each newly-
     // accepted field gets a forward-path test (the value lands on
     // ``GenerateParams``) and a rejection test (type / range / cross-
-    // field). See ADR-0001 for the canonicality argument.
+    // field).
 
     #[test]
     fn test_generate_params_from_json_forwards_seed() {
@@ -22384,7 +22385,7 @@ mod tests {
         std::env::remove_var(&key);
     }
 
-    // ── ADR-0003: generation timeout authority + invariant ────────
+    // ── Generation timeout authority + invariant ──────────────────
 
     #[test]
     fn test_enforce_first_chunk_invariant_passes_through_when_ok() {
@@ -22527,15 +22528,15 @@ mod tests {
         }
     }
 
-    // H7 contract (ADR-0003): generation streaming does NOT clamp
+    // H7 contract: generation streaming does NOT clamp
     // `timeout_config.overall` with `state.config.request_timeout`. The
     // legacy ceiling continues to bound encode/score/extract, but the
     // two generation call-sites in `proxy.rs::handle_generation_streaming`
     // and `sse.rs::handle_sse_stream` feed `timeout_config.overall`
     // directly into the driver. A textual-contract test was tried here
     // but self-matched its own assertion strings; the contract is
-    // enforced by ADR-0003, the invariant unit tests above, and the
-    // gateway integration tests that exercise long-running generations.
+    // enforced by the invariant unit tests above and the gateway
+    // integration tests that exercise long-running generations.
 
     // ── StreamCancelGuard (streaming cancel-on-drop) ──────────────
     //

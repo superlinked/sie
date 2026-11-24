@@ -2535,7 +2535,7 @@ pub struct ModelInfoWire {
     /// Advertised model capabilities. Consumers use this to discover
     /// which features the model supports before composing a request.
     ///
-    /// Validation is profile-scoped per ADR-0001 / M10 — clients
+    /// Validation is profile-scoped — clients
     /// selecting a specific profile must check
     /// ``capabilities.profile_lora_adapters[profile_name]``, not the
     /// ``capabilities.lora_adapters`` union summary.
