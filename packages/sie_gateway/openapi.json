@@ -4286,63 +4286,40 @@
       },
       "ResponsesRequest": {
         "additionalProperties": false,
-        "description": "OpenAI-compatible ``POST /v1/responses`` request (Responses MVP).\n\n**Strict allow-list**: unknown fields reject with 400\n``unsupported_field``. Type-invalid values reject with 400 ``invalid_request``.\n\n**Known-rejected fields**:\n- ``tools`` / ``tool_choice`` — rejected with 400 ``unsupported_field``.\n- ``previous_response_id`` — rejected with 400 ``unsupported_field``\n  (Responses MVP is stateless single-turn).\n- ``reasoning`` — rejected with 400 ``unsupported_field``.\n- ``background`` — rejected with 400 ``unsupported_field``.\n- ``metadata`` — rejected with 400 ``unsupported_field``.\n- ``instructions`` — rejected with 400 ``unsupported_field``.\n- ``stream: true`` — rejected with 400 ``unsupported_field`` (SSE on\n  Responses is deferred; use ``stream: false`` or omit).\n- Multimodal ``image_url`` / ``input_image`` content parts on the array\n  form — rejected with 400 ``unsupported_field``: the Responses surface is\n  text-only. (Vision input is supported on ``/v1/chat/completions``.)",
+        "description": "OpenAI Responses request, as accepted by ``POST /v1/responses``.\n\nThe request is translated into a ``/v1/chat/completions`` request and\nserved by the chat route, so every chat limit and check applies, and a\nchat refusal names the Responses field (``tools[i].name``,\n``max_output_tokens``, ``reasoning.effort``, ``text.format``). A field\nsent as ``null`` is treated as absent.\n\nResponses are not stored: ``store: true`` and a non-null\n``previous_response_id`` or ``conversation`` fail with ``400\nunsupported_field`` and the message ``<field>: SIE does not store\nresponses; send the full conversation in input``. ``background: true``,\na ``truncation`` other than ``disabled`` and an ``include`` entry other\nthan ``reasoning.encrypted_content`` fail the same way. ``prompt``,\n``max_tool_calls``, ``top_logprobs``, ``stream_options`` and every other\nfield outside this set fail with ``<field>: Extra inputs are not\npermitted``. ``client_metadata``, ``reasoning.summary``,\n``reasoning.generate_summary`` and ``text.verbosity`` are accepted and\nhave no effect.",
         "properties": {
+          "background": {
+            "description": "Accepted only ``false``.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "client_metadata": {
+            "description": "Accepted and ignored."
+          },
+          "conversation": {
+            "description": "Accepted only `null`: responses are not stored.",
+            "type": "null"
+          },
+          "include": {
+            "description": "Accepted only with ``reasoning.encrypted_content`` entries, which\nhave no effect.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "input": {
-            "description": "Either a string prompt OR an array of `{role, content}` messages (array-input support). Array form: `role` is one of `\"system\" | \"user\" | \"assistant\" | \"developer\"` (\"developer\" normalizes to \"system\"). `content` is a string or an array of `text`, `input_text`, or `output_text` parts; image parts (`image_url` / `input_image`) reject with 400 unsupported_field. The array must not be empty.",
+            "description": "A string, sent as one user message, or a non-empty list of items: messages (`role` `user`, `assistant`, `system` or `developer`, with string content or `input_text`, `output_text` and `text` parts, and base64 `data:` `input_image` parts in user messages), `function_call`, `custom_tool_call`, their `*_output` items, and `reasoning` items, which do not reach the model. Item `id` and `status` are ignored. Other item and part types are refused.",
             "oneOf": [
               {
                 "type": "string"
               },
               {
                 "items": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "content": {
-                      "oneOf": [
-                        {
-                          "type": "string"
-                        },
-                        {
-                          "items": {
-                            "additionalProperties": false,
-                            "properties": {
-                              "text": {
-                                "type": "string"
-                              },
-                              "type": {
-                                "enum": [
-                                  "text",
-                                  "input_text",
-                                  "output_text"
-                                ],
-                                "type": "string"
-                              }
-                            },
-                            "required": [
-                              "type",
-                              "text"
-                            ],
-                            "type": "object"
-                          },
-                          "type": "array"
-                        }
-                      ]
-                    },
-                    "role": {
-                      "enum": [
-                        "system",
-                        "user",
-                        "assistant",
-                        "developer"
-                      ],
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "role",
-                    "content"
-                  ],
                   "type": "object"
                 },
                 "minItems": 1,
@@ -4350,55 +4327,122 @@
               }
             ]
           },
+          "instructions": {
+            "description": "Prepended to the leading ``system`` and ``developer`` messages as\none system message.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "max_output_tokens": {
-            "description": "Maximum number of generated tokens. Defaults to 16 when absent or null.",
-            "maximum": 4294967295,
+            "description": "Output token limit, at least 1 and at most the serving profile's\n``max_output_tokens``. Absent: the chat route's default.",
+            "format": "int32",
             "minimum": 1,
             "type": [
               "integer",
               "null"
             ]
           },
+          "metadata": {
+            "description": "Passed to the chat route."
+          },
           "model": {
+            "description": "The model id, used as on ``/v1/chat/completions`` (``model`` or\n``model:profile``, or an operator alias).",
             "minLength": 1,
             "type": "string"
           },
+          "parallel_tool_calls": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "previous_response_id": {
+            "description": "Accepted only `null`: responses are not stored.",
+            "type": "null"
+          },
+          "prompt_cache_key": {
+            "description": "Passed to the chat route.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reasoning": {
+            "description": "``effort`` becomes the chat ``reasoning_effort``. Reasoning is not\nreturned."
+          },
+          "safety_identifier": {
+            "description": "Passed to the chat route.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "seed": {
-            "description": "Optional signed 64-bit per-request sampling seed. Reproducibility is best effort, not guaranteed, and depends on the active generation backend and deployment configuration. Non-integer or out-of-range values reject with 400 invalid_request.",
+            "description": "Checked as on ``/v1/chat/completions``.",
             "format": "int64",
-            "maximum": 9223372036854775807,
-            "minimum": -9223372036854775808,
             "type": [
               "integer",
               "null"
             ]
           },
+          "service_tier": {
+            "description": "Passed to the chat route.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "store": {
+            "description": "Accepted only ``false``.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "stream": {
-            "description": "Accepted only as `false` (or absent). `true` rejects with 400 unsupported_field because Responses SSE is not supported yet.",
-            "enum": [
-              false,
-              null
-            ],
+            "description": "Server-sent events: ``response.created``, ``response.in_progress``,\noutput item, content part, text and call-argument events, then\n``response.completed`` or ``response.incomplete`` with the full\nResponse. Every event carries ``sequence_number``. A failure after\nthe stream opened is ``response.failed``, and the stream then ends.",
             "type": [
               "boolean",
               "null"
             ]
           },
           "temperature": {
-            "description": "Sampling temperature representable by the worker runtime.",
-            "format": "float",
-            "maximum": 3.4028234663852886e+38,
-            "minimum": 0,
+            "description": "Checked as on ``/v1/chat/completions``.",
+            "format": "double",
             "type": [
               "number",
               "null"
             ]
           },
+          "text": {
+            "description": "``format`` ``text``, ``json_object`` or ``json_schema`` (``name``,\n``schema``, ``strict``, ``description``) becomes the chat\n``response_format``."
+          },
+          "tool_choice": {
+            "description": "``auto``, ``none``, ``required``, or ``{\"type\": \"function\" |\n\"custom\", \"name\"}`` naming a declared tool."
+          },
+          "tools": {
+            "description": "``function`` tools (``name``, ``description``, ``parameters``,\n``strict`` only ``false``) and ``custom`` tools (``name``,\n``description``, ``format``, which is not enforced), at most 64,\nnames matching ``^[a-zA-Z0-9_-]{1,64}$``. Hosted tool types are\nrefused."
+          },
           "top_p": {
-            "description": "Nucleus sampling. Finite number in ``(0, 1]``.",
-            "format": "float",
+            "description": "Checked as on ``/v1/chat/completions``.",
+            "format": "double",
             "type": [
               "number",
+              "null"
+            ]
+          },
+          "truncation": {
+            "description": "Accepted only ``disabled``.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user": {
+            "description": "Passed to the chat route.",
+            "type": [
+              "string",
               "null"
             ]
           }
@@ -4406,6 +4450,104 @@
         "required": [
           "model",
           "input"
+        ],
+        "type": "object"
+      },
+      "ResponsesResponse": {
+        "additionalProperties": false,
+        "description": "Response answered by ``POST /v1/responses`` without ``stream``.",
+        "properties": {
+          "created_at": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "error": {
+            "description": "Always ``null``."
+          },
+          "id": {
+            "description": "``resp-`` followed by the gateway request id.",
+            "type": "string"
+          },
+          "incomplete_details": {
+            "description": "``{\"reason\": \"max_output_tokens\" | \"content_filter\"}`` when\n``incomplete``."
+          },
+          "model": {
+            "description": "The model the request named.",
+            "type": "string"
+          },
+          "object": {
+            "description": "Always ``response``.",
+            "type": "string"
+          },
+          "output": {
+            "description": "A ``message`` item with one ``output_text`` part when the model\nwrote text, then one ``function_call`` or ``custom_tool_call`` item\nper tool call."
+          },
+          "parallel_tool_calls": {
+            "description": "As the request sent it, ``true`` when absent."
+          },
+          "status": {
+            "description": "``completed`` or ``incomplete``.",
+            "type": "string"
+          },
+          "store": {
+            "description": "Always ``false``.",
+            "type": "boolean"
+          },
+          "tool_choice": {
+            "description": "As the request sent it, ``auto`` when absent."
+          },
+          "usage": {
+            "$ref": "#/components/schemas/ResponsesUsage"
+          }
+        },
+        "required": [
+          "id",
+          "object",
+          "created_at",
+          "model",
+          "status",
+          "store",
+          "parallel_tool_calls",
+          "tool_choice",
+          "output",
+          "usage"
+        ],
+        "type": "object"
+      },
+      "ResponsesUsage": {
+        "additionalProperties": false,
+        "description": "Token usage of a Response, from the chat route's usage.",
+        "properties": {
+          "input_tokens": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "input_tokens_details": {
+            "description": "``cached_tokens``: prompt tokens served from the prefix cache."
+          },
+          "output_tokens": {
+            "description": "Includes reasoning tokens.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_tokens_details": {
+            "description": "``reasoning_tokens``."
+          },
+          "total_tokens": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input_tokens",
+          "input_tokens_details",
+          "output_tokens",
+          "output_tokens_details",
+          "total_tokens"
         ],
         "type": "object"
       },
@@ -8757,9 +8899,33 @@
     },
     "/v1/responses": {
       "post": {
-        "description": "OpenAI Responses API (MVP). Strict allow-list parser: unknown top-level fields reject with 400 `unsupported_field`. `input` is either a string prompt OR an array of `{role, content}` messages. Known-rejected fields: `tools`, `tool_choice`, `previous_response_id`, `reasoning`, `background`, `metadata`, `instructions` — each rejects with 400 `unsupported_field`. `stream: true` is rejected (Responses SSE is deferred). Multimodal image content parts reject with 400 `unsupported_field` on the array form.",
+        "description": "OpenAI Responses API. The request is translated into a /v1/chat/completions request, served by the chat route with all of its limits, and the answer is translated back. Buffered and streaming answers are supported. Function and custom tools are supported; hosted tools are refused. Responses are not stored: previous_response_id, conversation, store: true and background: true are refused, and the /v1/responses/{id} routes are not served.",
         "operationId": "proxy_responses",
         "parameters": [
+          {
+            "description": "Preferred GPU or machine profile",
+            "in": "header",
+            "name": "X-SIE-MACHINE-PROFILE",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Explicit pool routing override",
+            "in": "header",
+            "name": "X-SIE-Pool",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
           {
             "description": "Require local serving through a current worker execution fence. A selected remote profile returns 400; no verified local worker returns retryable 503. Duplicate or other values return 400.",
             "in": "header",
@@ -8788,134 +8954,16 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "created_at": {
-                      "type": "integer"
-                    },
-                    "id": {
-                      "type": "string"
-                    },
-                    "model": {
-                      "type": "string"
-                    },
-                    "object": {
-                      "const": "response",
-                      "type": "string"
-                    },
-                    "output": {
-                      "items": {
-                        "additionalProperties": false,
-                        "properties": {
-                          "content": {
-                            "items": {
-                              "additionalProperties": false,
-                              "properties": {
-                                "annotations": {
-                                  "items": {
-                                    "type": "object"
-                                  },
-                                  "type": "array"
-                                },
-                                "text": {
-                                  "type": "string"
-                                },
-                                "type": {
-                                  "const": "output_text",
-                                  "type": "string"
-                                }
-                              },
-                              "required": [
-                                "type",
-                                "text",
-                                "annotations"
-                              ],
-                              "type": "object"
-                            },
-                            "type": "array"
-                          },
-                          "id": {
-                            "type": "string"
-                          },
-                          "role": {
-                            "const": "assistant",
-                            "type": "string"
-                          },
-                          "status": {
-                            "const": "completed",
-                            "type": "string"
-                          },
-                          "type": {
-                            "const": "message",
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "type",
-                          "id",
-                          "role",
-                          "status",
-                          "content"
-                        ],
-                        "type": "object"
-                      },
-                      "type": "array"
-                    },
-                    "status": {
-                      "const": "completed",
-                      "type": "string"
-                    },
-                    "usage": {
-                      "additionalProperties": false,
-                      "properties": {
-                        "input_tokens": {
-                          "minimum": 0,
-                          "type": "integer"
-                        },
-                        "input_tokens_details": {
-                          "additionalProperties": false,
-                          "properties": {
-                            "cached_tokens": {
-                              "minimum": 0,
-                              "type": "integer"
-                            }
-                          },
-                          "required": [
-                            "cached_tokens"
-                          ],
-                          "type": "object"
-                        },
-                        "output_tokens": {
-                          "minimum": 0,
-                          "type": "integer"
-                        },
-                        "total_tokens": {
-                          "minimum": 0,
-                          "type": "integer"
-                        }
-                      },
-                      "required": [
-                        "input_tokens",
-                        "output_tokens",
-                        "total_tokens"
-                      ],
-                      "type": "object"
-                    }
-                  },
-                  "required": [
-                    "id",
-                    "object",
-                    "created_at",
-                    "model",
-                    "status",
-                    "output",
-                    "usage"
-                  ],
-                  "type": "object"
+                  "$ref": "#/components/schemas/ResponsesResponse"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
                 }
               }
             },
-            "description": "Response object",
+            "description": "Response, or a text/event-stream of Responses events when stream is true",
             "headers": {
               "X-Inference-Time": {
                 "description": "Worker-reported inference time in milliseconds",
@@ -9100,7 +9148,6 @@
             }
           }
         },
-        "summary": "`/v1/responses` — OpenAI Responses API (MVP, stateless single-turn).",
         "tags": [
           "inference"
         ]
