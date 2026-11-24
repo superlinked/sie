@@ -154,7 +154,7 @@ def test_a_fixing_run_passes_with_the_pinned_codex_and_the_recipe(tmp_path: Path
     assert config["model"] == "zai-org/GLM-5.3-Flash:relay"
     assert config["model_provider"] == "sie"
     assert config["model_context_window"] == 131072
-    assert config["model_auto_compact_token_limit"] == 98304
+    assert config["model_auto_compact_token_limit"] == 81920
     assert config["web_search"] == "disabled"
     assert config["features"] == {"multi_agent": False, "goals": False, "plugins": False}
     assert config["analytics"] == {"enabled": False}
@@ -176,19 +176,24 @@ def test_a_fixing_run_passes_with_the_pinned_codex_and_the_recipe(tmp_path: Path
 
 
 def test_the_cluster_recipe_takes_the_model_and_window_from_the_environment(tmp_path: Path) -> None:
-    extra = {"SIE_MODEL": "org/model:long", "SIE_CONTEXT_TOKENS": "65536", "SIE_BASE_URL": "http://gateway:8080"}
+    extra = {
+        "SIE_MODEL": "org/model:long",
+        "SIE_CONTEXT_TOKENS": "65536",
+        "SIE_OUTPUT_TOKENS": "16384",
+        "SIE_BASE_URL": "http://gateway:8080",
+    }
     status, output, record = _gate(tmp_path, f"{FIX}\ncat <<'EOF'\n{_events()}\nEOF", "cluster", extra)
     assert status == 0, output
     config = _recorded_config(record)
     assert config["model"] == "org/model:long"
     assert config["model_context_window"] == 65536
-    assert config["model_auto_compact_token_limit"] == 49152
+    assert config["model_auto_compact_token_limit"] == 40960
     assert config["model_providers"]["sie"]["base_url"] == "http://gateway:8080/v1"
 
 
-@pytest.mark.parametrize("missing", ["SIE_MODEL", "SIE_CONTEXT_TOKENS"])
+@pytest.mark.parametrize("missing", ["SIE_MODEL", "SIE_CONTEXT_TOKENS", "SIE_OUTPUT_TOKENS"])
 def test_the_cluster_recipe_needs_the_model_and_window(tmp_path: Path, missing: str) -> None:
-    extra = {"SIE_MODEL": "m", "SIE_CONTEXT_TOKENS": "65536", missing: ""}
+    extra = {"SIE_MODEL": "m", "SIE_CONTEXT_TOKENS": "65536", "SIE_OUTPUT_TOKENS": "8192", missing: ""}
     status, output, _ = _gate(tmp_path, "exit 0", "cluster", extra)
     assert status == 2
     assert f"{missing} is not set" in output

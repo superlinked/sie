@@ -36,12 +36,14 @@ source recipes/cloud.sh           # or recipes/cluster.sh, see below
 codex
 ```
 
-The cluster recipe also reads the model and its window, which must match what
-the gateway's `GET /v1/models` declares for the model:
+The cluster recipe also reads the model, its window and its output cap, which
+must match the `context_length` and `max_output_tokens` the gateway's
+`GET /v1/models` declares for the model:
 
 ```sh
 export SIE_MODEL=zai-org/GLM-5.3-Flash:relay
 export SIE_CONTEXT_TOKENS=131072
+export SIE_OUTPUT_TOKENS=32768
 source recipes/cluster.sh
 ```
 
@@ -67,7 +69,7 @@ The seeded gate, which needs `npx` and `uv` on `PATH`:
 
 ```sh
 ./run_gate.sh            # SIE Cloud
-./run_gate.sh cluster    # your gateway, with SIE_MODEL and SIE_CONTEXT_TOKENS set
+./run_gate.sh cluster    # your gateway, with SIE_MODEL, SIE_CONTEXT_TOKENS and SIE_OUTPUT_TOKENS set
 ./run_gate.sh laptop     # sie-server on this machine, see below
 ```
 
@@ -94,8 +96,9 @@ codex
 
 `recipes/laptop.sh` points Codex at `http://localhost:8080` and names
 `Qwen/Qwen3.5-4B:long-context`, the 32K-window profile of a 4B model that
-declares tool calling. `SIE_BASE_URL`, `SIE_API_KEY`, `SIE_MODEL` and
-`SIE_CONTEXT_TOKENS` override those. A server with authentication off accepts
+declares tool calling, with its 4,096-token output cap. `SIE_BASE_URL`,
+`SIE_API_KEY`, `SIE_MODEL`, `SIE_CONTEXT_TOKENS` and `SIE_OUTPUT_TOKENS`
+override those. A server with authentication off accepts
 any key. With authentication on, `SIE_API_KEY` is the server's token.
 
 The conformance check and the gate against it:
@@ -118,7 +121,7 @@ cat > "$CODEX_HOME/config.toml" <<TOML
 model = "zai-org/GLM-5.3-Flash:relay"
 model_provider = "sie"
 model_context_window = 131072
-model_auto_compact_token_limit = 98304
+model_auto_compact_token_limit = 81920
 web_search = "disabled"
 
 [features]
@@ -192,9 +195,13 @@ codex() { npx -y @openai/codex@0.167.0 "$@"; }
   compacts at about 90% of `model_context_window` by default (the stub run
   above), past that point, and in a live run it had not compacted at 28,590
   tokens when its next request was refused.
-  `model_auto_compact_token_limit` is the total that triggers compaction, and
-  the recipes set it to three quarters of the window. In a stub run with a
-  limit of 2,000, Codex compacted after a turn that reported 3,010 tokens.
+  `model_auto_compact_token_limit` is the total that triggers compaction. The
+  recipes set it to three quarters of the window, or lower when the output cap
+  is large, so that an eighth of the window is left between it and the input
+  limit, the window less the cap: 81,920 for the cloud model's 131,072-token
+  window and 32,768-token cap, 24,576 for the laptop profile. In a stub run
+  with a limit of 2,000, Codex compacted after a turn that reported 3,010
+  tokens.
 
 ## What Codex puts on the wire
 

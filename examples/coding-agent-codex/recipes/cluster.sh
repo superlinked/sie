@@ -4,7 +4,7 @@ cat > "$CODEX_HOME/config.toml" <<TOML
 model = "$SIE_MODEL"
 model_provider = "sie"
 model_context_window = $SIE_CONTEXT_TOKENS
-model_auto_compact_token_limit = $(( SIE_CONTEXT_TOKENS * 3 / 4 ))
+model_auto_compact_token_limit = $(( SIE_CONTEXT_TOKENS * 3 / 4 < SIE_CONTEXT_TOKENS * 7 / 8 - SIE_OUTPUT_TOKENS ? SIE_CONTEXT_TOKENS * 3 / 4 : SIE_CONTEXT_TOKENS * 7 / 8 - SIE_OUTPUT_TOKENS ))
 web_search = "disabled"
 
 [features]

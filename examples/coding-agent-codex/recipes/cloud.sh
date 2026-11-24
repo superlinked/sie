@@ -4,7 +4,7 @@ cat > "$CODEX_HOME/config.toml" <<TOML
 model = "zai-org/GLM-5.3-Flash:relay"
 model_provider = "sie"
 model_context_window = 131072
-model_auto_compact_token_limit = 98304
+model_auto_compact_token_limit = 81920
 web_search = "disabled"
 
 [features]

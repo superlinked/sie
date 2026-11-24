@@ -3,8 +3,8 @@
 # then pytest judges it.
 #
 #   SIE_BASE_URL=https://... SIE_API_KEY=sk-sie-... ./run_gate.sh      # SIE Cloud (recipes/cloud.sh)
-#   SIE_BASE_URL=https://... SIE_API_KEY=... SIE_MODEL=... \
-#     SIE_CONTEXT_TOKENS=... ./run_gate.sh cluster  # your gateway (recipes/cluster.sh)
+#   SIE_BASE_URL=https://... SIE_API_KEY=... SIE_MODEL=... SIE_CONTEXT_TOKENS=... \
+#     SIE_OUTPUT_TOKENS=... ./run_gate.sh cluster  # your gateway (recipes/cluster.sh)
 #   ./run_gate.sh laptop     # sie-server on this machine (recipes/laptop.sh)
 #
 # Needs npx and uv on PATH. The recipe runs Codex CLI 0.167.0 through npx. The fixture is the
@@ -40,7 +40,7 @@ if [[ ! "$GATE_DEADLINE_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
 fi
 case "$RECIPE" in
     cloud) REQUIRED=(SIE_BASE_URL SIE_API_KEY) ;;
-    cluster) REQUIRED=(SIE_BASE_URL SIE_API_KEY SIE_MODEL SIE_CONTEXT_TOKENS) ;;
+    cluster) REQUIRED=(SIE_BASE_URL SIE_API_KEY SIE_MODEL SIE_CONTEXT_TOKENS SIE_OUTPUT_TOKENS) ;;
     *) REQUIRED=() ;;
 esac
 for var in ${REQUIRED[@]+"${REQUIRED[@]}"}; do

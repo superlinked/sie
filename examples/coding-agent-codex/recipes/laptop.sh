@@ -1,12 +1,14 @@
 export SIE_BASE_URL="${SIE_BASE_URL:-http://localhost:8080}"
 export SIE_API_KEY="${SIE_API_KEY:-local}"
+export SIE_CONTEXT_TOKENS="${SIE_CONTEXT_TOKENS:-32768}"
+export SIE_OUTPUT_TOKENS="${SIE_OUTPUT_TOKENS:-4096}"
 export CODEX_HOME="${SIE_CODEX_HOME:-$HOME/.codex-sie}"
 mkdir -p "$CODEX_HOME"
 cat > "$CODEX_HOME/config.toml" <<TOML
 model = "${SIE_MODEL:-Qwen/Qwen3.5-4B:long-context}"
 model_provider = "sie"
-model_context_window = ${SIE_CONTEXT_TOKENS:-32768}
-model_auto_compact_token_limit = $(( ${SIE_CONTEXT_TOKENS:-32768} * 3 / 4 ))
+model_context_window = $SIE_CONTEXT_TOKENS
+model_auto_compact_token_limit = $(( SIE_CONTEXT_TOKENS * 3 / 4 < SIE_CONTEXT_TOKENS * 7 / 8 - SIE_OUTPUT_TOKENS ? SIE_CONTEXT_TOKENS * 3 / 4 : SIE_CONTEXT_TOKENS * 7 / 8 - SIE_OUTPUT_TOKENS ))
 web_search = "disabled"
 
 [features]
