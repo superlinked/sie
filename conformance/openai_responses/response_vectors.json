@@ -583,6 +583,44 @@
           "total_tokens": 21
         }
       }
+    },
+    {
+      "name": "a finish reason other than length and content_filter completes",
+      "model": "m",
+      "request_id": "r12",
+      "request": {"model": "m", "input": "Hi"},
+      "chat": {
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hello."}, "finish_reason": "function_call"}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}
+      },
+      "response": {
+        "id": "resp-r12",
+        "object": "response",
+        "created_at": 0,
+        "model": "m",
+        "status": "completed",
+        "incomplete_details": null,
+        "error": null,
+        "store": false,
+        "parallel_tool_calls": true,
+        "tool_choice": "auto",
+        "output": [
+          {
+            "type": "message",
+            "id": "msg-r12",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Hello.", "annotations": []}]
+          }
+        ],
+        "usage": {
+          "input_tokens": 10,
+          "input_tokens_details": {"cached_tokens": 0},
+          "output_tokens": 3,
+          "output_tokens_details": {"reasoning_tokens": 0},
+          "total_tokens": 13
+        }
+      }
     }
   ]
 }
