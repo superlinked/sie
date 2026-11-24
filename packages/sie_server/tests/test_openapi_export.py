@@ -162,26 +162,6 @@ def test_openapi_documents_direct_completions_contract() -> None:
     assert response_content["text/event-stream"]["schema"]["type"] == "string"
 
 
-def test_openapi_documents_direct_responses_contract() -> None:
-    result = runner.invoke(app, ["openapi"])
-    assert result.exit_code == 0, result.output
-    spec = json.loads(result.output)
-
-    operation = spec["paths"]["/v1/responses"]["post"]
-    assert operation["requestBody"]["content"]["application/json"]["schema"] == {
-        "$ref": "#/components/schemas/OpenAIResponsesRequestModel"
-    }
-    schema = spec["components"]["schemas"]["OpenAIResponsesRequestModel"]
-    assert schema["additionalProperties"] is False
-    assert set(schema["required"]) == {"model", "input"}
-    assert schema["properties"]["max_output_tokens"]["anyOf"][0]["minimum"] == 1
-    assert schema["properties"]["stream"]["anyOf"][0]["const"] is False
-    assert operation["responses"]["200"]["content"]["application/json"]["schema"] == {
-        "$ref": "#/components/schemas/OpenAIResponsesResponseModel"
-    }
-    assert "413" in operation["responses"]
-
-
 def test_openapi_audio_timestamp_contract() -> None:
     """Audio compatibility documents word and segment timestamps."""
     result = runner.invoke(app, ["openapi"])
