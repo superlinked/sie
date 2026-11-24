@@ -665,20 +665,22 @@ async fn a_failed_event_ends_the_body_and_drops_the_chat_body() {
     assert!(dropped.load(Ordering::SeqCst));
 }
 
+fn run_steps(steps: &[Step]) -> Vec<super::stream::Event> {
+    let mut machine = StreamMachine::new(plain_shell());
+    let mut events = machine.start();
+    for step in steps {
+        events.extend(machine.on_data(&step_frame(*step)));
+    }
+    events.extend(machine.on_end());
+    events
+}
+
 #[test]
 fn tool_call_deltas_the_translation_cannot_place_fail_the_response() {
     let cases = [
         (
-            vec![
-                Step::ToolStart(0, "f"),
-                Step::Text("a"),
-                Step::ToolStart(0, "f"),
-            ],
-            None,
-        ),
-        (
             vec![Step::ToolStart(0, "f"), Step::Text("a"), Step::ToolArgs(0)],
-            Some("tool call arguments arrived after another output item started"),
+            "tool call arguments arrived after another output item started",
         ),
         (
             vec![
@@ -686,26 +688,41 @@ fn tool_call_deltas_the_translation_cannot_place_fail_the_response() {
                 Step::ToolStart(1, "f"),
                 Step::ToolArgs(0),
             ],
-            Some("tool call arguments arrived after another output item started"),
+            "tool call arguments arrived after another output item started",
         ),
         (
             vec![Step::ToolArgs(0)],
-            Some("a tool call arrived without its id and name"),
+            "a tool call arrived without its id and name",
         ),
     ];
-    for (case, (steps, failure)) in cases.into_iter().enumerate() {
-        let mut machine = StreamMachine::new(plain_shell());
-        let mut events = machine.start();
-        for step in &steps {
-            events.extend(machine.on_data(&step_frame(*step)));
-        }
-        let failed = events.iter().find(|event| event.name == "response.failed");
+    for (steps, message) in cases {
+        let events = run_steps(&steps);
+        let terminal = events.last().unwrap();
+        assert_eq!(terminal.name, "response.failed", "{message}");
         assert_eq!(
-            failed.map(|event| event.data["response"]["error"].clone()),
-            failure.map(|message| json!({"code": "server_error", "message": message})),
-            "case {case}"
+            terminal.data["response"]["error"],
+            json!({"code": "server_error", "message": message})
         );
     }
+}
+
+#[test]
+fn a_closed_call_delta_without_arguments_is_ignored() {
+    let events = run_steps(&[
+        Step::ToolStart(0, "f"),
+        Step::Text("a"),
+        Step::ToolStart(0, "f"),
+        Step::Text("b"),
+        Step::Finish("stop"),
+        Step::Usage,
+        Step::Done,
+    ]);
+    let terminal = events.last().unwrap();
+    assert_eq!(terminal.name, "response.completed");
+    let output = &terminal.data["response"]["output"];
+    assert_eq!(output[0]["type"], "function_call");
+    assert_eq!(output[1]["id"], "msg-r-1");
+    assert_eq!(output[1]["content"][0]["text"], "ab");
 }
 
 #[tokio::test]
