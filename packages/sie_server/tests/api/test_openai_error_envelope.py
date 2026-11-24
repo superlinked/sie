@@ -125,12 +125,19 @@ def _refusal(request: Request) -> Response:
     )
 
 
-def _chunked(request: Request) -> Response:
-    async def chunks() -> Any:
-        yield b'{"detail": "Not '
-        yield b'Found"}'
+async def _chunks() -> Any:
+    yield b'{"detail": "Not '
+    yield b'Found"}'
 
-    return StreamingResponse(chunks(), status_code=404, media_type="application/json")
+
+def _chunked(request: Request) -> Response:
+    return StreamingResponse(_chunks(), status_code=404, media_type="application/json")
+
+
+def _chunked_with_length(request: Request) -> Response:
+    return StreamingResponse(
+        _chunks(), status_code=404, media_type="application/json", headers={"content-length": "23"}
+    )
 
 
 def _oversized(request: Request) -> Response:
@@ -155,6 +162,7 @@ def _app() -> TestClient:
     handlers = {
         "refusal": _refusal,
         "chunked": _chunked,
+        "chunked_with_length": _chunked_with_length,
         "oversized": _oversized,
         "plain": _plain,
         "success": _success,
@@ -184,16 +192,17 @@ def test_a_detail_refusal_keeps_its_status_and_headers() -> None:
     }
 
 
-def test_a_body_sent_in_chunks_is_rewritten() -> None:
-    response = _app().get("/v1/chat/completions/chunked")
+def test_a_declared_length_body_sent_in_chunks_is_rewritten() -> None:
+    response = _app().get("/v1/chat/completions/chunked_with_length")
 
     assert response.status_code == 404
+    assert response.headers["content-length"] == str(len(response.content))
     assert response.json() == {
         "error": {"message": "Not Found", "type": "invalid_request_error", "param": None, "code": "NOT_FOUND"}
     }
 
 
-@pytest.mark.parametrize("name", ["oversized", "plain", "success", "openai"])
+@pytest.mark.parametrize("name", ["chunked", "oversized", "plain", "success", "openai"])
 def test_other_answers_pass_through(name: str) -> None:
     client = _app()
     expected = client.get(f"/v1/encode/{name}")

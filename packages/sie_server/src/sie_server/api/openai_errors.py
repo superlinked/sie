@@ -96,12 +96,19 @@ def openai_error_from_detail(status: int, body: Any) -> dict[str, Any] | None:
     return {"error": error}
 
 
-def _is_json(headers: list[tuple[bytes, bytes]]) -> bool:
+def _rewritable(headers: list[tuple[bytes, bytes]]) -> bool:
+    """Whether a response start declares a JSON body of at most 1 MiB."""
+    mime: str | None = None
+    length: bytes | None = None
     for name, value in headers:
-        if name.lower() == b"content-type":
+        lowered = name.lower()
+        if lowered == b"content-type" and mime is None:
             mime = value.decode("latin-1").split(";", 1)[0].strip().lower()
-            return mime == "application/json" or mime.endswith("+json")
-    return False
+        elif lowered == b"content-length" and length is None:
+            length = value.strip()
+    if mime is None or not (mime == "application/json" or mime.endswith("+json")):
+        return False
+    return length is not None and length.isdigit() and int(length) <= _MAX_ERROR_BODY_BYTES
 
 
 def _render(status: int, body: bytes) -> bytes | None:
@@ -124,8 +131,8 @@ class OpenAIErrorEnvelopeMiddleware:
     ``Content-Length``. ``type`` follows the status: ``authentication_error``
     (401), ``permission_error`` (403), ``rate_limit_error`` (429),
     ``invalid_request_error`` (other 4xx) and ``server_error`` (5xx). Answers
-    already in the OpenAI envelope, answers that are not JSON, and successes
-    pass through untouched.
+    already in the OpenAI envelope, answers that are not JSON or do not declare
+    a ``Content-Length`` of at most 1 MiB, and successes pass through untouched.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -141,7 +148,7 @@ class OpenAIErrorEnvelopeMiddleware:
         async def respond(message: Message) -> None:
             nonlocal held
             if message["type"] == "http.response.start":
-                if message["status"] >= HTTPStatus.BAD_REQUEST and _is_json(message.get("headers", [])):
+                if message["status"] >= HTTPStatus.BAD_REQUEST and _rewritable(message.get("headers", [])):
                     held = message
                     return
                 await send(message)
