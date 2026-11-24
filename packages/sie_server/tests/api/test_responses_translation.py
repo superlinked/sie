@@ -46,7 +46,7 @@ def _chat_route_accepts(chat: dict[str, Any]) -> None:
 
 
 def _frames(case: dict[str, Any]) -> list[str]:
-    return [frame if isinstance(frame, str) else json.dumps(frame) for frame in case["frames"]]
+    return [frame if isinstance(frame, str) else json.dumps(frame, ensure_ascii=False) for frame in case["frames"]]
 
 
 def _named(events: list[Event]) -> list[dict[str, Any]]:
@@ -188,8 +188,8 @@ async def test_a_stream_vector_survives_the_sse_body_split_at_any_byte(case: dic
     sse = "".join(f": keepalive\n\ndata: {frame}\n\n" for frame in _frames(case)).encode()
 
     async def chunks() -> AsyncIterator[bytes]:
-        for start in range(0, len(sse), 7):
-            yield sse[start : start + 7]
+        for start in range(len(sse)):
+            yield sse[start : start + 1]
 
     events, comments = _parse_body(await _drain(stream_events(chunks(), _machine(case))))
 
@@ -216,9 +216,10 @@ def test_an_error_vector_keeps_the_answer_and_renames_the_param(case: dict[str, 
     headers, content = responses_error(sent, body)
 
     expect = case["expect"]
-    assert case["status"] == expect["status"]
     for name, value in (expect.get("headers") or {}).items():
         assert dict(headers)[name] == value, name
+    for name in expect.get("absent_headers") or []:
+        assert name not in dict(headers), name
     assert "content-length" not in dict(headers)
     assert json.loads(content) == expect["body"]
 
@@ -361,10 +362,14 @@ def test_any_chat_chunk_sequence_yields_a_valid_event_grammar() -> None:
         ),
         (
             [_STEPS["call 0"], _STEPS["call 1"], _STEPS["arguments 0"]],
-            "tool call arguments arrived after the call closed",
+            "tool call arguments arrived after another output item started",
+        ),
+        (
+            [_STEPS["call 0"], _STEPS["text"], _STEPS["arguments 0"]],
+            "tool call arguments arrived after another output item started",
         ),
     ],
-    ids=["malformed chunk", "call without an id", "arguments after the call closed"],
+    ids=["malformed chunk", "call without an id", "arguments after a later call", "arguments after text"],
 )
 def test_a_chat_stream_the_translation_cannot_follow_fails_the_response(frames: list[str], message: str) -> None:
     machine = StreamMachine(_SHAPE, "r", 0)

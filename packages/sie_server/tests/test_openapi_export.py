@@ -31,11 +31,11 @@ def test_openapi_has_expected_paths() -> None:
         "/v1/extract/{model}",
         "/v1/generate/{model}",
         "/v1/completions",
-        "/v1/responses",
         "/v1/score/{model}",
         "/v1/models",
     ]:
         assert expected in paths, f"Missing path: {expected}"
+    assert not paths & {"/v1/chat/completions", "/v1/messages", "/v1/responses"}
 
 
 def test_openapi_has_request_body_schemas() -> None:

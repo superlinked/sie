@@ -44,9 +44,6 @@
 //! 4. Legacy whole-window hash of the system message / prompt (first 512
 //!    bytes) — used when the prefix is too short to pin, or `mode=off`.
 //! 5. None — caller falls through to round-robin / pool publish.
-//!
-//! See ADR-0001 *Decision 10* ("keep default-on; document + add knobs;
-//! load-test") for the rationale behind making these knobs opt-in.
 
 use std::sync::LazyLock;
 

@@ -728,8 +728,8 @@ fn env_static_queue_pools(key: &str) -> Vec<PoolSpec> {
 /// A target may be a bare model id (`Org/Model`), a concrete profile variant
 /// (`Org/Model:profile`), or a bundle-qualified spec (`bundle:/Org/Model`).
 /// The bundle form lets an operator pin a precision / profile bundle for a job
-/// — e.g. map `sql` to a BF16 bundle that avoids the FP8 SQL-accuracy
-/// regression (ADR 0001). `resolve_model_spec_with_aliases` (proxy.rs) applies
+/// — e.g. map `sql` to a BF16 bundle that avoids an FP8 accuracy regression
+/// on SQL. `resolve_model_spec_with_aliases` (proxy.rs) applies
 /// the bundle and preserves concrete profile variants.
 /// Returns the resolution map plus the subset that may be advertised on
 /// `/v1/models`. Only explicitly-declared aliases are publishable; see
