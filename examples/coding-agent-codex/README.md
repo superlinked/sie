@@ -372,11 +372,10 @@ uv run pytest
   from a recording stub and the weightless fake engine.
 - **Not a coding benchmark.** The fixture is two failing tests in a
   twenty-line module.
-- **Compaction through another route.** Codex 0.167.0 compacted through an
-  ordinary `/v1/responses` request in a stub run, and it sends
-  `x-codex-beta-features: remote_compaction_v2`. A Codex release or setting
-  that compacts a long session through `POST /v1/responses/compact` would get
-  a 404, because SIE does not serve that route.
+- **Compaction seen only against a stub.** Codex 0.167.0 compacts with an
+  ordinary `POST /v1/responses` request without tools, which SIE serves. That
+  was checked with a 6,000-token window against a stub, not in a long live
+  session.
 - **Images need a model that reads them.** On a model without image input, a
   `view_image` call is refused, and Codex ends the turn.
 - **One operating system.** The sandbox and the stub runs were on macOS.
