@@ -219,6 +219,8 @@ def test_an_error_vector_keeps_the_answer_and_renames_the_param(case: dict[str, 
     assert case["status"] == expect["status"]
     for name, value in (expect.get("headers") or {}).items():
         assert dict(headers)[name] == value, name
+    for name in expect.get("absent_headers") or []:
+        assert name not in dict(headers), name
     assert "content-length" not in dict(headers)
     assert json.loads(content) == expect["body"]
 
