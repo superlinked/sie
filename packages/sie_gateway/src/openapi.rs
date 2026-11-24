@@ -1607,6 +1607,11 @@ pub fn get_model_config_status_doc() {}
 pub struct ErrorDetailCore {
     pub code: String,
     pub message: String,
+    /// ``MODEL_NOT_FOUND`` only: the model ids the message suggests, closest
+    /// first, drawn only from ids the caller may list. Absent when there is
+    /// no suggestion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestions: Option<Vec<String>>,
 }
 
 /// FastAPI-style error envelope for most gateway JSON errors.
@@ -2389,6 +2394,11 @@ pub struct OpenAIErrorBody {
     pub code: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<UpstreamFailureReason>,
+    /// ``model_not_found`` only: the model ids the message suggests, closest
+    /// first, drawn only from ids the caller may list. Absent when there is
+    /// no suggestion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestions: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]

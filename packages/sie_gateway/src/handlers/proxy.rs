@@ -45,7 +45,9 @@ use crate::types::AuditEntry;
 
 use crate::middleware::auth::request_token_id;
 
-use super::model_suggestions::{not_found_hint, unknown_model_message, NotFoundHint};
+use super::model_suggestions::{
+    not_found_hint, unknown_model_extra, unknown_model_message, NotFoundHint,
+};
 use super::serving_disclosure::{
     remote_forbidden, DeferredFallbackFinish, FallbackAttempt, ServingDisclosure,
     UnansweredBeforeDeadline,
@@ -1557,16 +1559,37 @@ pub async fn proxy_generate(state: State<Arc<AppState>>, req: Request) -> impl I
 /// every call site, so it depends only on what the caller sent, the operator's
 /// retired-model map, and what the caller may list, and the three responses
 /// stay identical.
+///
+/// Both envelopes carry the "Did you mean" ids as `suggestions` beside the
+/// message (see [`unknown_model_extra`]); the field is absent when there are
+/// none.
 fn unknown_model_response(endpoint: &str, requested: &str, hint: &NotFoundHint) -> Response {
-    endpoint_error_response(
-        endpoint,
-        StatusCode::NOT_FOUND,
-        err_code::MODEL_NOT_FOUND,
-        oai_type::MODEL_NOT_FOUND,
-        oai_code::MODEL_NOT_FOUND,
-        Some("model"),
+    let body = if endpoint_uses_openai_envelope(endpoint) {
+        unknown_model_openai_body(requested, hint)
+    } else {
+        json_detail_merge(
+            err_code::MODEL_NOT_FOUND,
+            unknown_model_message(requested, hint),
+            unknown_model_extra(hint),
+        )
+    };
+    (StatusCode::NOT_FOUND, Json(body)).into_response()
+}
+
+/// The OpenAI-envelope `MODEL_NOT_FOUND` body for `requested`, shared by
+/// [`unknown_model_response`] and the body-model routes in
+/// [`resolve_model_and_bundle`] so every OpenAI-shaped 404 stays identical.
+fn unknown_model_openai_body(requested: &str, hint: &NotFoundHint) -> Value {
+    let mut body = json_openai_error(
         unknown_model_message(requested, hint),
-    )
+        oai_type::MODEL_NOT_FOUND,
+        Some("model"),
+        oai_code::MODEL_NOT_FOUND,
+    );
+    if let Some(error) = body.get_mut("error").and_then(Value::as_object_mut) {
+        error.extend(unknown_model_extra(hint));
+    }
+    body
 }
 
 /// Is this id absent from a registry that has models?
@@ -8291,6 +8314,20 @@ fn validate_chat_tool_choice(v: &serde_json::Value) -> Result<serde_json::Value,
     Ok(v.clone())
 }
 
+/// Every ``response_format.type`` [`translate_response_format`] accepts, in
+/// the order its refusals list them. Keep in step with its match arms.
+const RESPONSE_FORMAT_TYPES: &[&str] = &["json_schema", "json_object", "regex", "grammar"];
+
+/// [`RESPONSE_FORMAT_TYPES`] as the refusal message lists them:
+/// ``"json_schema", "json_object", "regex", "grammar"``.
+fn supported_response_format_types() -> String {
+    RESPONSE_FORMAT_TYPES
+        .iter()
+        .map(|t| format!("{t:?}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Translate the OpenAI ``response_format`` field into a
 /// :class:`GrammarSpec`. Returns ``Ok(None)`` only for the (unusual)
 /// case of an explicit JSON ``null``; otherwise the function either
@@ -8415,14 +8452,20 @@ fn translate_response_format(
         }
         "" => {
             return Err(bad(
-                "'response_format.type' is required".to_string(),
+                format!(
+                    "'response_format.type' is required; supported types: {}",
+                    supported_response_format_types()
+                ),
                 "response_format.type",
                 oai_code::INVALID_REQUEST,
             ));
         }
         other => {
             return Err(bad(
-                format!("'response_format.type' = {other:?} is not supported"),
+                format!(
+                    "'response_format.type' = {other:?} is not supported; supported types: {}",
+                    supported_response_format_types()
+                ),
                 "response_format.type",
                 oai_code::UNSUPPORTED_FIELD,
             ));
@@ -8670,11 +8713,9 @@ pub(crate) fn resolve_model_and_bundle(
     {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(json_openai_error(
-                unknown_model_message(model_spec, &not_found_hint(state, ext, model_spec)),
-                oai_type::MODEL_NOT_FOUND,
-                Some("model"),
-                oai_code::MODEL_NOT_FOUND,
+            Json(unknown_model_openai_body(
+                model_spec,
+                &not_found_hint(state, ext, model_spec),
             )),
         )
             .into_response());
@@ -8738,13 +8779,11 @@ pub(crate) fn resolve_model_and_bundle(
     } else if state.model_registry.has_any_models() {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(json_openai_error(
-                // The caller's string, never the resolved one — see the
-                // visibility gate above (#2542).
-                unknown_model_message(model_spec, &not_found_hint(state, ext, model_spec)),
-                oai_type::MODEL_NOT_FOUND,
-                Some("model"),
-                oai_code::MODEL_NOT_FOUND,
+            // The caller's string, never the resolved one — see the
+            // visibility gate above (#2542).
+            Json(unknown_model_openai_body(
+                model_spec,
+                &not_found_hint(state, ext, model_spec),
             )),
         )
             .into_response());
@@ -11852,7 +11891,25 @@ pub(crate) async fn translate_inner_compat_error(resp: Response) -> Response {
         .and_then(|m| m.as_str())
         .unwrap_or("internal server error")
         .to_string();
-    let mut out = (status, Json(embeddings_error(&sie_code, None, message))).into_response();
+    let mut body = embeddings_error(&sie_code, None, message);
+    // The inner `MODEL_NOT_FOUND` was built by this gateway for the same
+    // caller, so its `suggestions` are already limited to ids that caller may
+    // list. Carry them over; anything that is not a list of strings is dropped.
+    if sie_code == err_code::MODEL_NOT_FOUND {
+        let suggestions = parsed
+            .get("detail")
+            .or_else(|| parsed.get("error"))
+            .and_then(|d| d.get("suggestions"))
+            .and_then(Value::as_array)
+            .filter(|ids| !ids.is_empty() && ids.iter().all(Value::is_string));
+        if let (Some(ids), Some(error)) = (
+            suggestions,
+            body.get_mut("error").and_then(Value::as_object_mut),
+        ) {
+            error.insert("suggestions".to_string(), Value::Array(ids.clone()));
+        }
+    }
+    let mut out = (status, Json(body)).into_response();
     // Keep gateway-owned translation faults visible to metered compositions.
     *out.extensions_mut() = parts.extensions;
     for (k, v) in headers.iter() {
@@ -19960,6 +20017,109 @@ mod tests {
         let openai: serde_json::Value = serde_json::from_slice(&openai).expect("error JSON");
         assert_eq!(openai["error"]["message"], expected);
         assert_eq!(openai["error"]["code"], "model_not_found");
+        assert_eq!(
+            native["detail"]["suggestions"],
+            json!(["vendor/embedder-large"])
+        );
+        assert_eq!(
+            openai["error"]["suggestions"],
+            json!(["vendor/embedder-large"])
+        );
+    }
+
+    /// The "Did you mean" ids are also a `suggestions` list, closest first, in
+    /// both envelopes and in the same order as the message; the message is
+    /// unchanged. No suggestion, or a retired note, means no field at all.
+    #[tokio::test]
+    async fn not_found_suggestions_are_a_list_beside_the_message() {
+        const HIDDEN: &str = "org-42/embedder-large-tuned";
+        let (registry, _bundles, _models) = registry_with_models(&[
+            "vendor/embedder-large",
+            "vendor/embedder-small",
+            "other/unrelated-reranker",
+            HIDDEN,
+        ]);
+        let state = state_with_registry_hiding_org_42(registry);
+
+        let (native, openai) = not_found_bodies(&state, "vendor/embedder").await;
+        let native: serde_json::Value = serde_json::from_str(&native).expect("error JSON");
+        let openai: serde_json::Value = serde_json::from_str(&openai).expect("error JSON");
+        let suggestions = &native["detail"]["suggestions"];
+        assert_eq!(suggestions, &openai["error"]["suggestions"]);
+        let ids: Vec<&str> = suggestions
+            .as_array()
+            .expect("suggestions is a list")
+            .iter()
+            .map(|id| id.as_str().expect("each suggestion is a string"))
+            .collect();
+        assert_eq!(ids, ["vendor/embedder-large", "vendor/embedder-small"]);
+        let message = native["detail"]["message"].as_str().expect("message");
+        assert_eq!(
+            message,
+            "Model 'vendor/embedder' not found. Did you mean one of: \
+             'vendor/embedder-large', 'vendor/embedder-small'?"
+        );
+        for id in &ids {
+            assert!(message.contains(&format!("'{id}'")), "{message} / {id}");
+        }
+        assert_eq!(native["detail"]["code"], "MODEL_NOT_FOUND");
+        assert_eq!(openai["error"]["param"], "model");
+
+        // One edit from the hidden id only: no suggestion and no field.
+        let (native, openai) = not_found_bodies(&state, "embedder-large-tune").await;
+        let native: serde_json::Value = serde_json::from_str(&native).expect("error JSON");
+        let openai: serde_json::Value = serde_json::from_str(&openai).expect("error JSON");
+        assert_eq!(
+            native["detail"]["message"],
+            "Model 'embedder-large-tune' not found"
+        );
+        assert!(native["detail"].get("suggestions").is_none(), "{native}");
+        assert!(openai["error"].get("suggestions").is_none(), "{openai}");
+
+        // A retired note names its replacement in the message only.
+        let retired = with_retired_models(
+            state_with_registry_hiding_org_42(Arc::clone(&state.model_registry)),
+            &[("vendor/embedder", "vendor/embedder-large")],
+        );
+        let (native, openai) = not_found_bodies(&retired, "vendor/embedder").await;
+        let native: serde_json::Value = serde_json::from_str(&native).expect("error JSON");
+        let openai: serde_json::Value = serde_json::from_str(&openai).expect("error JSON");
+        assert!(native["detail"].get("suggestions").is_none(), "{native}");
+        assert!(openai["error"].get("suggestions").is_none(), "{openai}");
+    }
+
+    /// Native generate answers in the OpenAI envelope; its unknown-model 404
+    /// carries the same `suggestions` list.
+    #[tokio::test]
+    async fn native_generate_not_found_carries_suggestions() {
+        let (registry, _bundles, _models) = registry_with_models(&["vendor/embedder-large"]);
+        let state = state_with_registry_hiding_org_42(registry);
+        let response = match resolve_routing(
+            &state,
+            &HeaderMap::new(),
+            &axum::http::Extensions::new(),
+            "/v1/generate/vendor/embedder-lrge",
+            "generate",
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("an unknown model must 404"),
+            Err(response) => *response,
+        };
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("error JSON");
+        assert_eq!(
+            body["error"]["message"],
+            "Model 'vendor/embedder-lrge' not found. Did you mean 'vendor/embedder-large'?"
+        );
+        assert_eq!(
+            body["error"]["suggestions"],
+            json!(["vendor/embedder-large"])
+        );
     }
 
     /// `state` with `retired` as the operator's retired-model map.
@@ -22683,6 +22843,46 @@ mod tests {
         assert_eq!(body["error"]["type"], "server_error");
         assert_eq!(body["error"]["code"], "transport_failure");
         assert_eq!(body["error"]["message"], "pool saturated");
+    }
+
+    /// An inner `MODEL_NOT_FOUND` keeps its `suggestions` list on the OpenAI
+    /// surface; a malformed list, or the field on another code, is dropped.
+    #[tokio::test]
+    async fn test_translate_inner_compat_error_keeps_model_suggestions() {
+        async fn translated(code: &str, status: StatusCode, suggestions: Value) -> Value {
+            let mut extra = Map::new();
+            extra.insert("suggestions".to_string(), suggestions);
+            let resp = (status, Json(json_detail_merge(code, "msg", extra))).into_response();
+            let out = translate_inner_compat_error(resp).await;
+            let bytes = axum::body::to_bytes(out.into_body(), 64 * 1024)
+                .await
+                .expect("read body");
+            serde_json::from_slice(&bytes).expect("valid JSON")
+        }
+        let body = translated(
+            err_code::MODEL_NOT_FOUND,
+            StatusCode::NOT_FOUND,
+            json!(["vendor/a", "vendor/b"]),
+        )
+        .await;
+        assert_eq!(body["error"]["code"], "model_not_found");
+        assert_eq!(
+            body["error"]["suggestions"],
+            json!(["vendor/a", "vendor/b"])
+        );
+
+        for malformed in [json!([]), json!(["vendor/a", 1]), json!("vendor/a")] {
+            let body =
+                translated(err_code::MODEL_NOT_FOUND, StatusCode::NOT_FOUND, malformed).await;
+            assert!(body["error"].get("suggestions").is_none(), "{body}");
+        }
+        let body = translated(
+            err_code::INVALID_REQUEST,
+            StatusCode::BAD_REQUEST,
+            json!(["vendor/a"]),
+        )
+        .await;
+        assert!(body["error"].get("suggestions").is_none(), "{body}");
     }
 
     #[tokio::test]
@@ -27265,6 +27465,49 @@ mod tests {
         let v = _expect_chat_err(body).await;
         assert_eq!(v["error"]["code"], "unsupported_field");
         assert_eq!(v["error"]["param"], "response_format.type");
+        assert_eq!(
+            v["error"]["message"],
+            "'response_format.type' = \"ebnf\" is not supported; supported types: \
+             \"json_schema\", \"json_object\", \"regex\", \"grammar\""
+        );
+        assert_eq!(v["error"]["type"], "invalid_request_error");
+    }
+
+    /// A missing or non-string `response_format.type` names the same list.
+    #[tokio::test]
+    async fn test_chat_response_format_missing_type_lists_supported_types() {
+        for response_format in [json!({}), json!({"type": 5}), json!({"type": null})] {
+            let mut body = _chat_body_min("m");
+            body["response_format"] = response_format.clone();
+            let v = _expect_chat_err(body).await;
+            assert_eq!(v["error"]["code"], "invalid_request", "{response_format}");
+            assert_eq!(v["error"]["param"], "response_format.type");
+            assert_eq!(
+                v["error"]["message"],
+                "'response_format.type' is required; supported types: \
+                 \"json_schema\", \"json_object\", \"regex\", \"grammar\""
+            );
+        }
+    }
+
+    /// Every type the refusal lists is one the translator accepts.
+    #[test]
+    fn test_chat_response_format_listed_types_are_accepted() {
+        for &kind in RESPONSE_FORMAT_TYPES {
+            let response_format = match kind {
+                "json_schema" => json!({
+                    "type": kind,
+                    "json_schema": {"name": "x", "schema": {"type": "object"}},
+                }),
+                "regex" => json!({"type": kind, "regex": "^(yes|no)$"}),
+                "grammar" => json!({"type": kind, "grammar": "root ::= \"yes\""}),
+                _ => json!({"type": kind}),
+            };
+            let mut body = _chat_body_min("m");
+            body["response_format"] = response_format;
+            let params = _expect_chat_ok(body);
+            assert!(params.grammar.is_some(), "{kind}");
+        }
     }
 
     /// The grammar safety walker applies to the chat translator too, after
@@ -28740,6 +28983,72 @@ mod tests {
         match completions_params_from_json(&body) {
             CompletionsParamsResult::Ok(params) => assert_eq!(params.seed, Some(-1)),
             CompletionsParamsResult::Err(_) => panic!("expected Ok"),
+        }
+    }
+
+    /// `temperature` on every generation body parser (chat, completions,
+    /// native generate; streaming and non-streaming share them):
+    /// any finite number >= 0 is accepted, as the worker accepts it, and a
+    /// negative, non-finite-looking or non-numeric value is a 400 naming the
+    /// param and the range.
+    #[tokio::test]
+    async fn test_temperature_range_is_the_same_on_every_generation_parser() {
+        type Accepted = fn(&serde_json::Value) -> Option<f32>;
+        let parsers: [(&str, serde_json::Value, Accepted); 3] =
+            [
+                ("chat", _chat_body_min("m"), |body| {
+                    _expect_chat_ok(body.clone()).temperature
+                }),
+                ("completions", _completions_body_min("m"), |body| {
+                    match completions_params_from_json(body) {
+                        CompletionsParamsResult::Ok(p) => p.temperature,
+                        CompletionsParamsResult::Err(_) => panic!("completions refused {body}"),
+                    }
+                }),
+                (
+                    "generate",
+                    json!({"prompt": "hi", "max_new_tokens": 8}),
+                    |body| _expect_generate_ok(body).temperature,
+                ),
+            ];
+        for (route, base, accepted) in parsers {
+            for stream in [false, true] {
+                for (value, want) in [
+                    (json!(0), 0.0_f32),
+                    (json!(0.0), 0.0),
+                    (json!(1), 1.0),
+                    (json!(2.0), 2.0),
+                    (json!(100.5), 100.5),
+                ] {
+                    let mut body = base.clone();
+                    body["stream"] = json!(stream);
+                    body["temperature"] = value.clone();
+                    assert_eq!(accepted(&body), Some(want), "{route} {value}");
+                }
+                for value in [
+                    json!(-0.01),
+                    json!(-1),
+                    json!(1e39),
+                    json!("0.5"),
+                    json!(true),
+                    json!([0.5]),
+                ] {
+                    let mut body = base.clone();
+                    body["stream"] = json!(stream);
+                    body["temperature"] = value.clone();
+                    let err = match route {
+                        "chat" => _expect_chat_err(body).await,
+                        "completions" => _completions_err(body).await,
+                        _ => _expect_generate_err(&body).await,
+                    };
+                    assert_eq!(err["error"]["param"], "temperature", "{route} {value}");
+                    assert_eq!(err["error"]["code"], "invalid_request", "{route} {value}");
+                    assert_eq!(
+                        err["error"]["message"], "'temperature' must be a finite number >= 0",
+                        "{route} {value}"
+                    );
+                }
+            }
         }
     }
 

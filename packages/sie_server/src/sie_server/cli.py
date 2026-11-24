@@ -445,7 +445,6 @@ def openapi_export(
     from sie_server.api.models import router as models_router
     from sie_server.api.openai_compat import router as openai_router
     from sie_server.api.openai_completions import router as openai_completions_router
-    from sie_server.api.openai_responses import router as openai_responses_router
     from sie_server.api.openapi import setup_custom_openapi_schema
     from sie_server.api.root import router as root_router
     from sie_server.api.score import router as score_router
@@ -456,8 +455,8 @@ def openapi_export(
     # init, model registry, telemetry, or NATS). NOTE: the direct-container convenience routes
     # are intentionally excluded from the committed openapi.json — the ``openai_local`` router
     # (/v1/chat/completions + /v1/rerank) proxies managed MLX/SGLang children for single-node
-    # serving, and /v1/messages is translated onto it, while the Rust gateway owns the
-    # published production chat and Messages contracts. The
+    # serving, and /v1/messages and /v1/responses are translated onto it, while the Rust
+    # gateway owns the published production chat, Messages and Responses contracts. The
     # SIE-native ``generate`` route is part of the worker contract and is published here.
     app_ = FastAPI(
         title="SIE Server",
@@ -475,7 +474,6 @@ def openapi_export(
     app_.include_router(openai_audio_router)
     app_.include_router(openai_router)
     app_.include_router(openai_completions_router)
-    app_.include_router(openai_responses_router)
     app_.include_router(systemone_router)
     app_.include_router(decisions_router)
     setup_custom_openapi_schema(app_)
