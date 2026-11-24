@@ -5,7 +5,10 @@ use std::time::Duration;
 use axum::body::{to_bytes, Body};
 use axum::extract::{Request, State};
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
-use axum::response::Response;
+use axum::middleware::{from_fn, Next};
+use axum::response::{IntoResponse, Response};
+use axum::routing::post;
+use axum::Router;
 use bytes::Bytes;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -410,6 +413,60 @@ async fn an_inner_error_keeps_its_response_extensions() {
             .map(|fault| fault.stage),
         Some("stage")
     );
+}
+
+#[tokio::test]
+async fn an_outer_rate_limit_refusal_keeps_its_rate_limit_headers() {
+    async fn rate_limited(_request: Request, _next: Next) -> Response {
+        let mut response = (
+            StatusCode::TOO_MANY_REQUESTS,
+            axum::Json(json!({
+                "error": {"message": "rate limit exceeded", "type": "rate_limit_error"}
+            })),
+        )
+            .into_response();
+        for (name, value) in [
+            ("retry-after", "1"),
+            ("x-sie-ratelimit-rps", "10"),
+            ("x-sie-ratelimit-concurrency", "4"),
+            ("x-sie-ratelimit-scope", "key"),
+            ("x-sie-ratelimit-dimension", "rps"),
+            ("x-unlisted", "dropped"),
+        ] {
+            response
+                .headers_mut()
+                .insert(name, HeaderValue::from_static(value));
+        }
+        response
+    }
+    let router = Router::new()
+        .route("/v1/messages", post(|| async { StatusCode::OK }))
+        .layer(from_fn(rate_limited))
+        .layer(from_fn(super::anthropic_error_envelope));
+
+    let response = router
+        .oneshot(messages_request(
+            json!({"model": "acme/chat", "max_tokens": 16, "messages": []}),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    for (name, value) in [
+        ("retry-after", "1"),
+        ("x-should-retry", "true"),
+        ("x-sie-ratelimit-rps", "10"),
+        ("x-sie-ratelimit-concurrency", "4"),
+        ("x-sie-ratelimit-scope", "key"),
+        ("x-sie-ratelimit-dimension", "rps"),
+    ] {
+        assert_eq!(response.headers()[name], value, "{name}");
+    }
+    assert!(response.headers().get("x-unlisted").is_none());
+    let body = json_body(response).await;
+    assert_eq!(body["type"], "error");
+    assert_eq!(body["error"]["type"], "rate_limit_error");
+    assert_eq!(body["error"]["message"], "rate limit exceeded");
 }
 
 #[derive(Clone, Copy)]
