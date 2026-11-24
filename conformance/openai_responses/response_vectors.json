@@ -29,7 +29,7 @@
             "id": "msg-r1",
             "role": "assistant",
             "status": "completed",
-            "content": [{"type": "output_text", "text": "Hello.", "annotations": []}]
+            "content": [{"type": "output_text", "text": "Hello.", "annotations": [], "logprobs": []}]
           }
         ],
         "usage": {
@@ -93,7 +93,7 @@
             "id": "msg-r2",
             "role": "assistant",
             "status": "completed",
-            "content": [{"type": "output_text", "text": "Running both.", "annotations": []}]
+            "content": [{"type": "output_text", "text": "Running both.", "annotations": [], "logprobs": []}]
           },
           {
             "type": "function_call",
@@ -329,8 +329,8 @@
             "type": "message",
             "id": "msg-r6",
             "role": "assistant",
-            "status": "completed",
-            "content": [{"type": "output_text", "text": "Once upon a time", "annotations": []}]
+            "status": "incomplete",
+            "content": [{"type": "output_text", "text": "Once upon a time", "annotations": [], "logprobs": []}]
           }
         ],
         "usage": {
@@ -404,7 +404,7 @@
             "id": "msg-r8",
             "role": "assistant",
             "status": "completed",
-            "content": [{"type": "output_text", "text": "42", "annotations": []}]
+            "content": [{"type": "output_text", "text": "42", "annotations": [], "logprobs": []}]
           }
         ],
         "usage": {
@@ -571,7 +571,7 @@
             "id": "msg-r11",
             "role": "assistant",
             "status": "completed",
-            "content": [{"type": "output_text", "text": "\n\n", "annotations": []}]
+            "content": [{"type": "output_text", "text": "\n\n", "annotations": [], "logprobs": []}]
           },
           {"type": "function_call", "id": "fc-r11-0", "call_id": "call_1", "name": "exec_command", "arguments": "{\"cmd\":\"ls\"}", "status": "completed"}
         ],
@@ -610,7 +610,7 @@
             "id": "msg-r12",
             "role": "assistant",
             "status": "completed",
-            "content": [{"type": "output_text", "text": "Hello.", "annotations": []}]
+            "content": [{"type": "output_text", "text": "Hello.", "annotations": [], "logprobs": []}]
           }
         ],
         "usage": {
@@ -619,6 +619,67 @@
           "output_tokens": 3,
           "output_tokens_details": {"reasoning_tokens": 0},
           "total_tokens": 13
+        }
+      }
+    },
+    {
+      "name": "length cutting off a function call leaves the message completed and the call incomplete",
+      "model": "m",
+      "request_id": "r13",
+      "request": {
+        "model": "m",
+        "input": "List the files.",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+          }
+        ],
+        "max_output_tokens": 12
+      },
+      "chat": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "Checking.",
+              "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "exec_command", "arguments": "{\"cmd\":\"l"}}]
+            },
+            "finish_reason": "length"
+          }
+        ],
+        "usage": {"prompt_tokens": 12, "completion_tokens": 12, "total_tokens": 24}
+      },
+      "response": {
+        "id": "resp-r13",
+        "object": "response",
+        "created_at": 0,
+        "model": "m",
+        "status": "incomplete",
+        "incomplete_details": {"reason": "max_output_tokens"},
+        "error": null,
+        "store": false,
+        "parallel_tool_calls": true,
+        "tool_choice": "auto",
+        "output": [
+          {
+            "type": "message",
+            "id": "msg-r13",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Checking.", "annotations": [], "logprobs": []}]
+          },
+          {"type": "function_call", "id": "fc-r13-0", "call_id": "call_1", "name": "exec_command", "arguments": "{\"cmd\":\"l", "status": "incomplete"}
+        ],
+        "usage": {
+          "input_tokens": 12,
+          "input_tokens_details": {"cached_tokens": 0},
+          "output_tokens": 12,
+          "output_tokens_details": {"reasoning_tokens": 0},
+          "total_tokens": 24
         }
       }
     }
