@@ -173,26 +173,37 @@ class _Parts:
     """The content of one chat message: adjacent texts joined, empty texts dropped, images kept in order."""
 
     def __init__(self) -> None:
-        self.items: list[tuple[str, str]] = []
+        self._items: list[tuple[str, str]] = []
+        self._texts: list[str] = []
 
     def text(self, text: str) -> None:
-        if not text:
-            return
-        if self.items and self.items[-1][0] == "text":
-            self.items[-1] = ("text", self.items[-1][1] + text)
-        else:
-            self.items.append(("text", text))
+        if text:
+            self._texts.append(text)
 
     def image(self, data_uri: str) -> None:
-        self.items.append(("image", data_uri))
+        self._join_texts()
+        self._items.append(("image", data_uri))
+
+    def items(self) -> list[tuple[str, str]]:
+        self._join_texts()
+        return self._items
+
+    def joined_text(self) -> str:
+        return "".join(value for kind, value in self.items() if kind == "text")
 
     def content(self) -> str | list[dict[str, Any]]:
-        if all(kind == "text" for kind, _ in self.items):
-            return "".join(value for _, value in self.items)
+        items = self.items()
+        if all(kind == "text" for kind, _ in items):
+            return "".join(value for _, value in items)
         return [
             {"type": "text", "text": value} if kind == "text" else {"type": "image_url", "image_url": {"url": value}}
-            for kind, value in self.items
+            for kind, value in items
         ]
+
+    def _join_texts(self) -> None:
+        if self._texts:
+            self._items.append(("text", "".join(self._texts)))
+            self._texts = []
 
 
 def responses_to_chat(body: Any) -> ChatTranslation:
@@ -466,7 +477,7 @@ class _Conversation:
             raise _invalid(f"{path}.role", "Input should be 'user', 'assistant', 'system' or 'developer'")
         parts = _content(item, role, path)
         if _ROLES[role] == "system":
-            text = "".join(value for _, value in parts.items)
+            text = parts.joined_text()
             if self._leading:
                 self._system.append(text)
                 return
@@ -479,14 +490,18 @@ class _Conversation:
             self._flush_tool_images()
             if self._assistant_text is None:
                 self._assistant_text = []
-            self._assistant_text.append("".join(value for _, value in parts.items))
+            self._assistant_text.append(parts.joined_text())
             return
         self._flush_assistant()
         if self._tool_images:
             merged = _Parts()
             for url in self._tool_images:
                 merged.image(url)
-            merged.items.extend(parts.items)
+            for kind, value in parts.items():
+                if kind == "text":
+                    merged.text(value)
+                else:
+                    merged.image(value)
             parts = merged
         self._tool_images = None
         self._out.append({"role": "user", "content": parts.content()})
