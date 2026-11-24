@@ -228,13 +228,13 @@ items. Then run the conformance check and the gate.
 | Case | Passes when |
 |---|---|
 | `plain_answer` | a streamed one-word answer ends `completed` with `output_text` and usage carrying `input_tokens` and `output_tokens` |
-| `function_call` | with Codex's fields and a developer message, a `function_call` item opens with a `call_id` and the name `get_weather`, its argument deltas join into a JSON object with `city`, its `output_item.done` carries the same arguments, and the response ends `completed` |
+| `function_call` | with Codex's fields and a developer message, a `function_call` item opens with a `call_id` and the name `get_weather`, its argument deltas join into a JSON object with `city`, its `output_item.done` and the terminal response's `output` carry the same arguments, and the response ends `completed` |
 | `tool_output_round_trip` | after the `function_call` and a `function_call_output` of 18 degrees, as Codex sends them, the answer carries 18, no further call, `completed` |
-| `image_in_tool_output` | a `view_image` call whose output is an `input_image` `data:` URL, as Codex sends it, is answered. When the chat route refuses the image, for a model without image input, the refusal is recorded. A refusal at an `input` field, the translation's own, fails |
+| `image_in_tool_output` | a `view_image` call whose output is an `input_image` `data:` URL, as Codex sends it, is answered with text, no further call, `completed`. A refusal saying the model `does not support image input` is recorded; any other refusal fails |
 | `buffered_response` | a non-streamed request returns an `object: "response"` that is `completed`, with `output_text` and usage |
 | `hosted_tool_refusal` | a `web_search` tool beside a function tool is refused with a 400 at `tools[1].type`, the refusal Codex prints with its default tools |
 | `previous_response_id_refusal` | `previous_response_id` is refused with a 400 at that field |
-| `event_order` | every stream starts with `response.created` and `response.in_progress`, numbers its events from 0 without a gap, carries each event's name as its `type`, opens one item at a time at the next `output_index`, sends each item's events while it is open, and ends with one terminal event that closes every item, or with `response.failed` |
+| `event_order` | every stream starts with `response.created` and `response.in_progress`, numbers its events from 0 without a gap, carries each event's name as its `type`, opens one item at a time at the next `output_index`, sends each item's events with its id and `output_index` while it is open, and ends with one terminal event that closes every item, or with `response.failed` |
 
 Busy refusals are retried as in the chat check: a `429` or `503` whose code
 is `QUEUE_FULL`, `RESOURCE_EXHAUSTED` or `rate_limit_exceeded`, or a
@@ -322,7 +322,7 @@ The conformance check against the same server:
   plain_answer                  pass      status=completed after 'tok_b0437c31 tok_5aaf6099 tok_f3b6ad77 t'; usage {'input_tokens': 7, 'input_tokens_details': {'cached_tokens': 0}, 'output_tokens': 40, 'output_tokens_details': {'reasoning_tokens': 0}, 'total_tokens': 47}
   function_call                 pass      1 function_call: get_weather({"city": "What is the weather in Paris right now? Use the get_weather tool."}); 13 arguments deltas; status=completed
   tool_output_round_trip        pass      final answer used the tool output: 'Tool result: {"city": "Paris", "temperature_c": 18, "conditions": "overcast"}'
-  image_in_tool_output          recorded  the model's chat route refused the image: 400 unsupported_field: Model 'sie-fake:chat' does not support image input
+  image_in_tool_output          recorded  the model takes no image input: 400 unsupported_field: Model 'sie-fake:chat' does not support image input
   buffered_response             pass      status=completed, usage {'input_tokens': 7, 'input_tokens_details': {'cached_tokens': 0}, 'output_tokens': 40, 'output_tokens_details': {'reasoning_tokens': 0}, 'total_tokens': 47}
   hosted_tool_refusal           pass      400 unsupported_field: tools[1].type: 'web_search' tools are not supported; send function or custom tools
   previous_response_id_refusal  pass      400 unsupported_field: previous_response_id: SIE does not store responses; send the full conversation in input
@@ -346,13 +346,14 @@ recorded.
 - The OpenCode example's `tests/test_responses_conformance.py` checks the
   `--api responses` checker against a scripted Responses stub that plays a
   conforming stream, then breaks one thing per test: an accepted hosted tool,
-  a refusal at another field, an image refused by the translation, done
-  arguments that differ from the streamed ones, a gap in the sequence numbers,
-  busy refusals and a loading model.
+  a refusal at another field, an image request refused for another reason, a
+  further `view_image` call instead of an answer, done or terminal arguments
+  that differ from the streamed ones, a buffered answer that is not an object,
+  a gap in the sequence numbers, busy refusals and a loading model.
 - `tests/test_run_gate.py` runs `run_gate.sh` with a scripted stand-in for
   `npx`: a real fix, no change, a failed run, a failed turn, an error event,
-  no input tokens, no command, no turn completed, edited tests, a run past its
-  deadline, the three recipes, the config each writes, and the arguments and
+  no input tokens, no command, no turn completed, edited tests, an added
+  `conftest.py`, a run past its deadline, the three recipes, the config each writes, and the arguments and
   environment Codex is started with. It also sources a recipe the way a user
   does and checks that it writes its own `CODEX_HOME` and runs the pinned
   Codex.

@@ -48,11 +48,13 @@ def _reply(body: dict[str, Any]) -> dict[str, Any]:
     items = body["input"] if isinstance(body["input"], list) else []
     last = items[-1] if items else {}
     if last.get("type") == "function_call_output" and isinstance(last["output"], list):
+        if KNOBS.get("image_calls_again"):
+            return {"call": ("view_image", {"path": "red.png"})}
         return {"text": "Red."}
     if last.get("type") == "function_call_output":
         return {"text": "It is 18 degrees and overcast in Paris."}
     if body.get("tools") and "weather" in _texts(body):
-        return {"call": {"city": "Paris"}}
+        return {"call": ("get_weather", {"city": "Paris"})}
     return {"text": "ready"}
 
 
@@ -104,21 +106,20 @@ class Handler(BaseHTTPRequestHandler):
             self._error(refusal[0], refusal[1], refusal[2], refusal[3])
             return
         items = body["input"] if isinstance(body["input"], list) else []
-        if items and isinstance(items[-1].get("output"), list) and "image_param" in KNOBS:
-            param = KNOBS["image_param"]
-            self._error(400, "unsupported_field", param, "Model 'stub-model' does not support image input")
+        if items and isinstance(items[-1].get("output"), list) and "image_refusal" in KNOBS:
+            self._error(400, "unsupported_field", *KNOBS["image_refusal"])
             return
         reply = _reply(body)
         usage = {"input_tokens": 12, "output_tokens": 3, "total_tokens": 15}
         if "call" in reply:
-            arguments = json.dumps(reply["call"])
-            item = {"type": "function_call", "id": "fc-0", "call_id": "call_0", "name": "get_weather"}
-            output = [{**item, "arguments": arguments, "status": "completed"}]
+            tool, arguments = reply["call"]
+            item = {"type": "function_call", "id": "fc-0", "call_id": "call_0", "name": tool}
+            output = [{**item, "arguments": json.dumps(arguments), "status": "completed"}]
         else:
             part = {"type": "output_text", "text": reply["text"], "annotations": []}
             output = [{"type": "message", "id": "msg-0", "role": "assistant", "status": "completed", "content": [part]}]
         if not body.get("stream"):
-            self._json(200, _response(body, "completed", output, usage))
+            self._json(200, [] if KNOBS.get("buffered_list") else _response(body, "completed", output, usage))
             return
         self.send_response(200)
         self.send_header("content-type", "text/event-stream")
@@ -149,7 +150,8 @@ class Handler(BaseHTTPRequestHandler):
                 ("response.content_part.done", {**ids, "part": done["content"][0]}),
                 ("response.output_item.done", {"output_index": 0, "item": done}),
             ]
-        events.append(("response.completed", {"response": _response(body, "completed", output, usage)}))
+        final = [{**output[0], "arguments": "{}"}] if KNOBS.get("final_differs") and "call" in reply else output
+        events.append(("response.completed", {"response": _response(body, "completed", final, usage)}))
         for number, (name, data) in enumerate(events):
             if KNOBS.get("sequence_gap") and number >= 3:
                 number += 1
@@ -190,15 +192,31 @@ def test_a_conforming_endpoint_passes(base_url: str) -> None:
     assert cases["event_order"]["observed"]["streams"] == 4
 
 
-def test_an_image_refused_by_the_chat_route_is_recorded(base_url: str) -> None:
-    case = _cases(base_url, image_param="messages")["image_in_tool_output"]
+def test_an_image_refused_for_a_model_without_image_input_is_recorded(base_url: str) -> None:
+    refusal = ("messages", "Model 'stub-model' does not support image input")
+    case = _cases(base_url, image_refusal=refusal)["image_in_tool_output"]
     assert case["status"] == "recorded"
-    assert "does not support image input" in case["detail"]
+    assert case["detail"].startswith("the model takes no image input: 400 unsupported_field")
 
 
-def test_an_image_refused_by_the_translation_fails(base_url: str) -> None:
-    case = _cases(base_url, image_param="input[3].output[0].type")["image_in_tool_output"]
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        ("input[3].output[0].type", "input[3].output[0].type: parts of type 'input_image' are not supported"),
+        ("tools[0].parameters", "tools[0].parameters: invalid schema"),
+    ],
+)
+def test_any_other_refusal_of_the_image_request_fails(base_url: str, refusal: tuple[str, str]) -> None:
+    case = _cases(base_url, image_refusal=refusal)["image_in_tool_output"]
     assert case["status"] == "fail"
+    assert refusal[1] in case["detail"]
+
+
+def test_another_view_image_call_is_not_an_answer_to_the_image(base_url: str) -> None:
+    case = _cases(base_url, image_calls_again=True)["image_in_tool_output"]
+    assert case["status"] == "fail"
+    assert "answered with another function_call: view_image" in case["detail"]
+    assert "no text answer to the image" in case["detail"]
 
 
 def test_an_accepted_hosted_tool_fails_the_refusal_case(base_url: str) -> None:
@@ -217,6 +235,18 @@ def test_done_arguments_that_differ_from_the_stream_fail(base_url: str) -> None:
     case = _cases(base_url, done_differs=True)["function_call"]
     assert case["status"] == "fail"
     assert "output_item.done arguments differ" in case["detail"]
+
+
+def test_a_terminal_output_that_differs_from_the_stream_fails(base_url: str) -> None:
+    case = _cases(base_url, final_differs=True)["function_call"]
+    assert case["status"] == "fail"
+    assert "the terminal response's output differs from the streamed call" in case["detail"]
+
+
+def test_a_buffered_answer_that_is_not_an_object_fails_its_case(base_url: str) -> None:
+    case = _cases(base_url, buffered_list=True)["buffered_response"]
+    assert case["status"] == "fail"
+    assert "expected a JSON object, got list" in case["detail"]
 
 
 def test_a_gap_in_the_sequence_numbers_breaks_the_order(base_url: str) -> None:
@@ -253,7 +283,18 @@ def _event(name: str, number: int, **fields: Any) -> dict[str, Any]:
                 _event("response.output_text.delta", 2, output_index=0, item_id="msg-0"),
                 _event("response.completed", 3),
             ],
-            "response.output_text.delta for item msg-0 while None is open",
+            "response.output_text.delta for item msg-0 at output_index 0 while None is open",
+        ),
+        (
+            [
+                _event("response.created", 0),
+                _event("response.in_progress", 1),
+                _event("response.output_item.added", 2, output_index=0, item_id="msg-0"),
+                _event("response.output_text.delta", 3, output_index=1, item_id="msg-0"),
+                _event("response.output_item.done", 4, output_index=0, item_id="msg-0"),
+                _event("response.completed", 5),
+            ],
+            "response.output_text.delta for item msg-0 at output_index 1 while msg-0 is open",
         ),
         (
             [

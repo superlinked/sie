@@ -261,6 +261,13 @@ def test_edited_tests_fail(tmp_path: Path) -> None:
     assert "GATE FAIL: the tests or pyproject.toml were changed" in output
 
 
+def test_an_added_conftest_fails(tmp_path: Path) -> None:
+    plant = "printf 'import pytest\\n' > conftest.py"
+    status, output, _ = _gate(tmp_path, f"{FIX}\n{plant}\ncat <<'EOF'\n{_events()}\nEOF")
+    assert status == 1
+    assert "GATE FAIL: a conftest.py was added" in output
+
+
 def test_a_run_past_its_deadline_is_stopped(tmp_path: Path) -> None:
     status, output, _ = _gate(tmp_path, "sleep 60", extra_env={"GATE_DEADLINE_SECONDS": "2"})
     assert status == 1
@@ -283,8 +290,9 @@ def test_sourcing_a_recipe_writes_its_own_codex_home_and_runs_the_pinned_codex(t
     home = tmp_path / "home"
     home.mkdir()
     env = _env(tmp_path, "", {"HOME": str(home)}, ())
-    script = f"source {EXAMPLE / 'recipes' / 'cloud.sh'} && codex --version"
-    completed = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, check=False)
+    recipe = str(EXAMPLE / "recipes" / "cloud.sh")
+    command = ["bash", "-c", 'source "$1" && codex --version', "bash", recipe]
+    completed = subprocess.run(command, env=env, capture_output=True, text=True, check=False)
     assert completed.returncode == 0, completed.stderr
     record = tmp_path / "record"
     assert (record / "args").read_text().split("\n")[:3] == [*PINNED, "--version"]

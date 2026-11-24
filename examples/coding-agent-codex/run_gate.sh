@@ -120,7 +120,8 @@ if ! diff -r -x __pycache__ "$FIXTURE/tests" "$WORK/tests" || ! diff "$FIXTURE/p
     echo "GATE FAIL: the tests or pyproject.toml were changed ($OUT)"
     exit 1
 fi
-if find "$WORK" -name conftest.py -not -path '*/.venv/*' -not -path '*/.uv-cache/*' | grep -q .; then
+ADDED_CONFTEST="$(find "$WORK" -name conftest.py -not -path '*/.venv/*' -not -path '*/.uv-cache/*' -print -quit)"
+if [[ -n "$ADDED_CONFTEST" ]]; then
     echo "GATE FAIL: a conftest.py was added ($OUT)"
     exit 1
 fi

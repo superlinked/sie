@@ -1687,6 +1687,7 @@ RED_SQUARE_PNG = (
 )
 RESPONSES_TERMINAL = frozenset({"response.completed", "response.incomplete", "response.failed"})
 RESPONSES_HOSTED_TOOL = {"type": "web_search"}
+IMAGE_INPUT_REFUSAL = re.compile(r"does not support (image input|media messages)")
 
 
 @dataclass
@@ -1761,6 +1762,12 @@ def _responses_event(result: ResponsesResult, name: str, data: dict[str, Any]) -
     result.events.append(summary)
 
 
+def _json_object(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise TypeError(f"expected a JSON object, got {type(value).__name__}")
+    return value
+
+
 def _responses_answer(result: ResponsesResult, response: dict[str, Any]) -> None:
     _responses_output(result, response)
     for item in response.get("output") or []:
@@ -1793,7 +1800,7 @@ def _responses_once(client: httpx.Client, body: dict[str, Any]) -> ResponsesResu
                 return result
             if not body.get("stream"):
                 response.read()
-                _responses_answer(result, response.json())
+                _responses_answer(result, _json_object(response.json()))
                 return result
             name = ""
             for line in response.iter_lines():
@@ -1803,8 +1810,8 @@ def _responses_once(client: httpx.Client, body: dict[str, Any]) -> ResponsesResu
                     name = line[len("event:") :].strip()
                 elif line.startswith("data:"):
                     result.chunks += 1
-                    _responses_event(result, name, json.loads(line[len("data:") :]))
-    except (httpx.HTTPError, ValueError) as exc:
+                    _responses_event(result, name, _json_object(json.loads(line[len("data:") :])))
+    except (httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
         result.error = {
             "status": None,
             "code": type(exc).__name__,
@@ -1868,8 +1875,9 @@ def responses_event_problems(events: list[dict[str, Any]]) -> list[str]:
             if open_item is None or (event.get("output_index"), event.get("item_id")) != open_item:
                 problems.append(f"item {event.get('item_id')} done while {open_item and open_item[1]} is open")
             open_item = None
-        elif "item_id" in event and (open_item is None or event["item_id"] != open_item[1]):
-            problems.append(f"{name} for item {event['item_id']} while {open_item and open_item[1]} is open")
+        elif "item_id" in event and (event.get("output_index"), event["item_id"]) != open_item:
+            where = f"{event['item_id']} at output_index {event.get('output_index')}"
+            problems.append(f"{name} for item {where} while {open_item and open_item[1]} is open")
     terminal = [position for position, name in enumerate(names) if name in RESPONSES_TERMINAL]
     if terminal != [len(names) - 1]:
         problems.append(f"ends with {names[-1]}, not one terminal event last")
@@ -1933,6 +1941,13 @@ def responses_case_function_call(session: ResponsesSession, model: str) -> tuple
         done = result.done_items.get(call.index) or {}
         if done.get("arguments") != call.arguments:
             problems.append(f"item {call.index}: output_item.done arguments differ from the streamed ones")
+        final = [
+            item
+            for item in (result.response or {}).get("output") or []
+            if item.get("type") == "function_call" and item.get("call_id") == call.id
+        ]
+        if [item.get("arguments") for item in final] != [call.arguments]:
+            problems.append(f"item {call.index}: the terminal response's output differs from the streamed call")
     if result.finish_reason != "completed":
         problems.append(f"status is {result.finish_reason!r}, expected 'completed'")
     if problems:
@@ -2026,17 +2041,23 @@ def responses_case_image_in_tool_output(session: ResponsesSession, model: str) -
     observed = result.observed()
     observed["mentions_red"] = "red" in result.content.lower()
     error = result.error
-    if error is not None and _is_refusal(error) and not str(error.get("param") or "").startswith("input"):
-        detail = f"the model's chat route refused the image: {error['status']} {error['code']}: {error['message']}"
+    if error is not None and _is_refusal(error) and IMAGE_INPUT_REFUSAL.search(str(error.get("message") or "")):
+        detail = f"the model takes no image input: {error['status']} {error['code']}: {error['message']}"
         return Case(name, "recorded", detail, observed)
     failed = _fail_on_error(name, result)
     if failed:
         failed.observed = observed
         return failed
-    if result.finish_reason != "completed" or not (result.content.strip() or result.calls()):
-        return Case(name, "fail", f"status={result.finish_reason!r} with no answer to the image", observed)
-    answer = result.content.strip()[:60] or _describe_calls(result)
-    return Case(name, "pass", f"image accepted and answered: {answer!r}", observed)
+    problems = []
+    if result.calls():
+        problems.append(f"answered with another function_call: {_describe_calls(result)}")
+    if result.finish_reason != "completed":
+        problems.append(f"status is {result.finish_reason!r}, expected 'completed'")
+    if not result.content.strip():
+        problems.append("no text answer to the image")
+    if problems:
+        return Case(name, "fail", "; ".join(problems), observed)
+    return Case(name, "pass", f"image accepted and answered: {result.content.strip()[:60]!r}", observed)
 
 
 def responses_case_buffered(session: ResponsesSession, model: str) -> Case:
