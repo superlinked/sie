@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import inspect
 import json
+import threading
 from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Self, get_args, get_type_hints
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -678,6 +680,7 @@ class _AsyncRaw:
         self.headers = headers or {}
         self._lines = lines or []
         self.content = self._aiter_bytes()
+        self.exited = False
 
     async def _aiter_bytes(self):
         for line in self._lines:
@@ -687,6 +690,7 @@ class _AsyncRaw:
         return self
 
     async def __aexit__(self, *exc: object) -> bool:
+        self.exited = True
         return False
 
     async def read(self) -> bytes:
@@ -916,3 +920,100 @@ async def test_async_stream_responses_retries_capacity_before_the_first_event(fi
     assert session.post.call_count == 2
     assert client.last_retry_count == 1
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_stream_responses_aclose_releases_the_stream() -> None:
+    raw = _AsyncRaw(200, {}, lines=_sse(*_opening(), _lifecycle("completed", _response("completed"))))
+    client = SIEAsyncClient("http://localhost:8080")
+    _patch_async_session(client, post_returns=raw)
+    stream = client.stream_responses("m", "Hi")
+
+    first = await anext(stream)
+    await stream.aclose()
+
+    assert first["type"] == "response.created"
+    assert raw.exited
+    await client.close()
+
+
+class _SSEServer:
+    def __init__(self, body: bytes) -> None:
+        class _Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self) -> None:
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                try:
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+            def log_message(self, format: str, *args: Any) -> None:
+                return None
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self._server.daemon_threads = True
+        self._thread = threading.Thread(target=self._server.serve_forever, args=(0.01,), daemon=True)
+        self._thread.start()
+
+    @property
+    def url(self) -> str:
+        host, port = self._server.server_address[:2]
+        return f"http://{host!s}:{port}"
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+
+def _sse_body(*events: dict[str, Any]) -> bytes:
+    return "\n".join(_sse(*events)).encode() + b"\n"
+
+
+def _long_text_events(text: str) -> list[dict[str, Any]]:
+    return [
+        *_opening(),
+        *_text_events(text),
+        _lifecycle("completed", _response("completed", [_message(text, "completed")])),
+    ]
+
+
+def test_stream_responses_accepts_event_lines_longer_than_the_default_read_buffer() -> None:
+    text = "x" * (1 << 20)
+    server = _SSEServer(_sse_body(*_long_text_events(text)))
+    try:
+        with SIEClient(server.url) as client:
+            events = list(client.stream_responses("m", "Hi"))
+    finally:
+        server.close()
+
+    assert events == [{**event, "sequence_number": i} for i, event in enumerate(_long_text_events(text))]
+
+
+@pytest.mark.asyncio
+async def test_async_stream_responses_accepts_event_lines_longer_than_the_default_read_buffer() -> None:
+    text = "x" * (1 << 20)
+    server = _SSEServer(_sse_body(*_long_text_events(text)))
+    try:
+        async with SIEAsyncClient(server.url) as client:
+            events = [event async for event in client.stream_responses("m", "Hi")]
+    finally:
+        server.close()
+
+    assert events == [{**event, "sequence_number": i} for i, event in enumerate(_long_text_events(text))]
+
+
+@pytest.mark.asyncio
+async def test_async_stream_responses_reports_an_oversized_event_line_as_request_error() -> None:
+    server = _SSEServer(_sse_body(*_long_text_events("x" * (9 << 20))))
+    try:
+        async with SIEAsyncClient(server.url) as client:
+            with pytest.raises(RequestError, match="SSE event line exceeds"):
+                _ = [event async for event in client.stream_responses("m", "Hi")]
+    finally:
+        server.close()

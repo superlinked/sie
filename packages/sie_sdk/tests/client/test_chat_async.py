@@ -34,6 +34,7 @@ class _FakeRaw:
         self._body = {} if body is None else body
         # ``content`` async-iterates byte lines, mirroring aiohttp.StreamReader.
         self.content = self._aiter_bytes()
+        self.exited = False
 
     async def _aiter_bytes(self):
         for b in self._line_bytes:
@@ -43,6 +44,7 @@ class _FakeRaw:
         return self
 
     async def __aexit__(self, *exc: object) -> bool:
+        self.exited = True
         return False
 
     async def read(self) -> bytes:
@@ -459,6 +461,24 @@ async def test_async_stream_capacity_after_output_preserves_hint_without_retry(
     assert exc_info.value.request == {"id": "req-capacity"}
     assert exc_info.value.retry_after == expected
     assert session.post.call_count == 1
+    await client.close()
+
+
+@pytest.mark.parametrize("surface", ["chat", "native"])
+@pytest.mark.asyncio
+async def test_async_stream_aclose_releases_the_stream(surface: str) -> None:
+    first = (
+        _chat_chunk("Hi") if surface == "chat" else {"request_id": "req-1", "seq": 0, "text_delta": "Hi", "done": False}
+    )
+    raw = _FakeRaw(status=200, line_bytes=_sse_bytes(first, first))
+    client = SIEAsyncClient("http://localhost:8080")
+    _patch_session(client, post_returns=raw)
+    stream = _stream_surface(client, surface)
+
+    await anext(stream)
+    await stream.aclose()
+
+    assert raw.exited
     await client.close()
 
 

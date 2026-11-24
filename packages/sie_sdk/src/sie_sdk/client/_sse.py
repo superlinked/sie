@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterable, AsyncIterator, Iterable, Iterator
 
 _SSE_DONE = "[DONE]"
+SSE_MAX_LINE_BYTES = 8 * 1024 * 1024
 _RESPONSES_TERMINAL_EVENTS = frozenset({"response.completed", "response.incomplete"})
 
 
