@@ -155,7 +155,7 @@ Generation is a supported fourth primitive. Strict allow-list parsing on the Ope
 |--------|------|-------------|
 | POST | `/v1/chat/completions` | OpenAI Chat Completions (streaming + non-streaming, `n`, `best_of`, `tools`, `response_format`, `lora_adapter`) |
 | POST | `/v1/completions` | OpenAI legacy Completions (raw `prompt`, streaming + non-streaming, single-candidate) |
-| POST | `/v1/responses` | OpenAI Responses API MVP (stateless single-turn, non-streaming) |
+| POST | `/v1/responses` | OpenAI Responses API, translated onto chat completions (streaming + non-streaming, function and custom tools, `text.format`, `reasoning.effort`; stateless: `previous_response_id`, `store: true` and hosted tools are refused) |
 | POST | `/v1/generate/{*model}` | SIE-native generate (full `GenerateParams` envelope, streaming + non-streaming) |
 
 Common headers:

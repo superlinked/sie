@@ -61,7 +61,7 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         crate::handlers::proxy::proxy_generate,
         crate::handlers::proxy::proxy_chat,
         crate::handlers::proxy::proxy_completions,
-        crate::handlers::proxy::proxy_responses,
+        crate::handlers::responses::proxy_responses,
         crate::handlers::messages::proxy_messages,
         crate::handlers::proxy::proxy_moderations,
         docs_ui
@@ -150,7 +150,6 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         ChatCompletionChoiceMessage,
         ChatCompletionUsage,
         CompletionsRequest,
-        ResponsesRequest,
         OpenAIErrorBody,
         OpenAIErrorEnvelope,
         crate::handlers::messages::schema::MessagesRequest,
@@ -159,6 +158,9 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         crate::handlers::messages::schema::MessagesUsage,
         crate::handlers::messages::schema::AnthropicErrorBody,
         crate::handlers::messages::schema::AnthropicErrorEnvelope,
+        crate::handlers::responses::schema::ResponsesRequest,
+        crate::handlers::responses::schema::ResponsesResponse,
+        crate::handlers::responses::schema::ResponsesUsage,
         PoolListResponse,
         crate::types::pool::PoolSpec,
         crate::types::pool::PoolStatus,
@@ -483,10 +485,8 @@ fn patch_chat_completion_schema(value: &mut Value) {
     patch_chat_request_schema(value);
     patch_chat_message_schema(value);
     patch_completions_request_schema(value);
-    patch_responses_request_schema(value);
     patch_chat_completion_paths(value);
     patch_completions_path(value);
-    patch_responses_path(value);
 }
 
 fn patch_generate_request_schema(value: &mut Value) {
@@ -1065,118 +1065,6 @@ fn patch_completions_request_schema(value: &mut Value) {
     );
 }
 
-fn patch_responses_request_schema(value: &mut Value) {
-    let Some(schema) = value
-        .get_mut("components")
-        .and_then(|components| components.get_mut("schemas"))
-        .and_then(|schemas| schemas.get_mut("ResponsesRequest"))
-    else {
-        return;
-    };
-    schema["additionalProperties"] = json!(false);
-    let Some(properties) = schema
-        .get_mut("properties")
-        .and_then(|properties| properties.as_object_mut())
-    else {
-        return;
-    };
-    if let Some(model) = properties.get_mut("model") {
-        model["minLength"] = json!(1);
-    }
-    // input: either a string OR an array of {role, content} messages.
-    properties.insert(
-        "input".to_string(),
-        json!({
-            "description": "Either a string prompt OR an array of `{role, content}` messages \
-                            (array-input support). Array form: `role` is one of \
-                            `\"system\" | \"user\" | \"assistant\" | \"developer\"` \
-                            (\"developer\" normalizes to \"system\"). `content` is a string or \
-                            an array of `text`, `input_text`, or `output_text` parts; image parts \
-                            (`image_url` / `input_image`) reject with 400 unsupported_field. The \
-                            array must not be empty.",
-            "oneOf": [
-                {"type": "string"},
-                {
-                    "type": "array",
-                    "minItems": 1,
-                    "items": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": ["role", "content"],
-                        "properties": {
-                            "role": {
-                                "type": "string",
-                                "enum": ["system", "user", "assistant", "developer"],
-                            },
-                            "content": {
-                                "oneOf": [
-                                    {"type": "string"},
-                                    {
-                                        "type": "array",
-                                        "items": {
-                                            "type": "object",
-                                            "additionalProperties": false,
-                                            "required": ["type", "text"],
-                                            "properties": {
-                                                "type": {
-                                                    "type": "string",
-                                                    "enum": ["text", "input_text", "output_text"],
-                                                },
-                                                "text": {"type": "string"},
-                                            },
-                                        },
-                                    },
-                                ],
-                            },
-                        },
-                    },
-                },
-            ],
-        }),
-    );
-    properties.insert(
-        "max_output_tokens".to_string(),
-        json!({
-            "description": "Maximum number of generated tokens. Defaults to 16 when absent or null.",
-            "type": ["integer", "null"],
-            "minimum": 1,
-            "maximum": u32::MAX,
-        }),
-    );
-    properties.insert(
-        "temperature".to_string(),
-        json!({
-            "description": "Sampling temperature representable by the worker runtime.",
-            "type": ["number", "null"],
-            "format": "float",
-            "minimum": 0,
-            "maximum": f32::MAX,
-        }),
-    );
-    properties.insert(
-        "stream".to_string(),
-        json!({
-            "description": "Accepted only as `false` (or absent). `true` rejects with 400 \
-                            unsupported_field because Responses SSE is not supported yet.",
-            "type": ["boolean", "null"],
-            "enum": [false, null],
-        }),
-    );
-    properties.insert(
-        "seed".to_string(),
-        json!({
-            "description": "Optional signed 64-bit per-request sampling seed. \
-                            Reproducibility is best effort, not guaranteed, and depends on the \
-                            active generation backend and deployment configuration. Non-integer \
-                            or out-of-range values reject with 400 invalid_request.",
-            "type": ["integer", "null"],
-            "format": "int64",
-            "minimum": i64::MIN,
-            "maximum": i64::MAX,
-        }),
-    );
-}
-
 fn patch_chat_completion_paths(value: &mut Value) {
     let Some(op) = value
         .get_mut("paths")
@@ -1243,123 +1131,6 @@ fn patch_completions_path(value: &mut Value) {
                 json!({
                     "application/json": {
                         "schema": {"$ref": "#/components/schemas/CompletionsRequest"}
-                    }
-                }),
-            );
-        }
-    }
-}
-
-fn patch_responses_path(value: &mut Value) {
-    let Some(post) = value
-        .get_mut("paths")
-        .and_then(|paths| paths.get_mut("/v1/responses"))
-        .and_then(|path_item| path_item.get_mut("post"))
-    else {
-        return;
-    };
-    if let Some(op_obj) = post.as_object_mut() {
-        op_obj.insert(
-            "description".to_string(),
-            json!(
-                "OpenAI Responses API (MVP). Strict allow-list parser: \
-                 unknown top-level fields reject with 400 \
-                 `unsupported_field`. `input` is either a string prompt OR an array of \
-                 `{role, content}` messages. \
-                 Known-rejected fields: `tools`, `tool_choice`, `previous_response_id`, \
-                 `reasoning`, `background`, `metadata`, `instructions` — each rejects \
-                 with 400 `unsupported_field`. `stream: true` is rejected (Responses SSE \
-                 is deferred). Multimodal image content parts reject with 400 \
-                 `unsupported_field` on the array form."
-            ),
-        );
-        op_obj.insert(
-            "summary".to_string(),
-            json!("`/v1/responses` — OpenAI Responses API (MVP, stateless single-turn)."),
-        );
-        let request_body = op_obj
-            .entry("requestBody".to_string())
-            .or_insert_with(|| json!({}));
-        if let Some(request_body) = request_body.as_object_mut() {
-            request_body.insert("required".to_string(), json!(true));
-            request_body.insert(
-                "content".to_string(),
-                json!({
-                    "application/json": {
-                        "schema": {"$ref": "#/components/schemas/ResponsesRequest"}
-                    }
-                }),
-            );
-        }
-        if let Some(success) = op_obj
-            .get_mut("responses")
-            .and_then(|responses| responses.get_mut("200"))
-            .and_then(|response| response.as_object_mut())
-        {
-            success.insert(
-                "content".to_string(),
-                json!({
-                    "application/json": {
-                        "schema": {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "required": ["id", "object", "created_at", "model", "status", "output", "usage"],
-                            "properties": {
-                                "id": {"type": "string"},
-                                "object": {"type": "string", "const": "response"},
-                                "created_at": {"type": "integer"},
-                                "model": {"type": "string"},
-                                "status": {"type": "string", "const": "completed"},
-                                "output": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "additionalProperties": false,
-                                        "required": ["type", "id", "role", "status", "content"],
-                                        "properties": {
-                                            "type": {"type": "string", "const": "message"},
-                                            "id": {"type": "string"},
-                                            "role": {"type": "string", "const": "assistant"},
-                                            "status": {"type": "string", "const": "completed"},
-                                            "content": {
-                                                "type": "array",
-                                                "items": {
-                                                    "type": "object",
-                                                    "additionalProperties": false,
-                                                    "required": ["type", "text", "annotations"],
-                                                    "properties": {
-                                                        "type": {"type": "string", "const": "output_text"},
-                                                        "text": {"type": "string"},
-                                                        "annotations": {
-                                                            "type": "array",
-                                                            "items": {"type": "object"},
-                                                        },
-                                                    },
-                                                },
-                                            },
-                                        },
-                                    },
-                                },
-                                "usage": {
-                                    "type": "object",
-                                    "additionalProperties": false,
-                                    "required": ["input_tokens", "output_tokens", "total_tokens"],
-                                    "properties": {
-                                        "input_tokens": {"type": "integer", "minimum": 0},
-                                        "output_tokens": {"type": "integer", "minimum": 0},
-                                        "total_tokens": {"type": "integer", "minimum": 0},
-                                        "input_tokens_details": {
-                                            "type": "object",
-                                            "additionalProperties": false,
-                                            "required": ["cached_tokens"],
-                                            "properties": {
-                                                "cached_tokens": {"type": "integer", "minimum": 0},
-                                            },
-                                        },
-                                    },
-                                },
-                            },
-                        }
                     }
                 }),
             );
@@ -1836,6 +1607,11 @@ pub fn get_model_config_status_doc() {}
 pub struct ErrorDetailCore {
     pub code: String,
     pub message: String,
+    /// ``MODEL_NOT_FOUND`` only: the model ids the message suggests, closest
+    /// first, drawn only from ids the caller may list. Absent when there is
+    /// no suggestion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestions: Option<Vec<String>>,
 }
 
 /// FastAPI-style error envelope for most gateway JSON errors.
@@ -2603,52 +2379,6 @@ pub struct CompletionsRequest {
     pub n: Option<u32>,
 }
 
-/// OpenAI-compatible ``POST /v1/responses`` request (Responses MVP).
-///
-/// **Strict allow-list**: unknown fields reject with 400
-/// ``unsupported_field``. Type-invalid values reject with 400 ``invalid_request``.
-///
-/// **Known-rejected fields**:
-/// - ``tools`` / ``tool_choice`` — rejected with 400 ``unsupported_field``.
-/// - ``previous_response_id`` — rejected with 400 ``unsupported_field``
-///   (Responses MVP is stateless single-turn).
-/// - ``reasoning`` — rejected with 400 ``unsupported_field``.
-/// - ``background`` — rejected with 400 ``unsupported_field``.
-/// - ``metadata`` — rejected with 400 ``unsupported_field``.
-/// - ``instructions`` — rejected with 400 ``unsupported_field``.
-/// - ``stream: true`` — rejected with 400 ``unsupported_field`` (SSE on
-///   Responses is deferred; use ``stream: false`` or omit).
-/// - Multimodal ``image_url`` / ``input_image`` content parts on the array
-///   form — rejected with 400 ``unsupported_field``: the Responses surface is
-///   text-only. (Vision input is supported on ``/v1/chat/completions``.)
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct ResponsesRequest {
-    pub model: String,
-    /// Either a string prompt OR an array of ``{role, content}`` messages
-    /// (array-input support). Array form: ``role`` is one of
-    /// ``"system" | "user" | "assistant" | "developer"``.
-    /// ``content`` is a string or an array of text-only content parts; image
-    /// parts reject.
-    pub input: Value,
-    /// Defaults to 16 (mirroring completions) when absent. Positive integer.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_output_tokens: Option<u32>,
-    /// Sampling temperature. Finite number ``>= 0``.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
-    /// Nucleus sampling. Finite number in ``(0, 1]``.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f32>,
-    /// Optional signed 64-bit per-request sampling seed. Reproducibility is
-    /// best effort, not guaranteed, and backend/deployment-specific.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seed: Option<i64>,
-    /// Accepted only as ``false`` (or absent). ``true`` rejects with 400
-    /// ``unsupported_field`` (Responses SSE is deferred).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stream: Option<bool>,
-}
-
 /// OpenAI-shaped error body used by ``/v1/generate/{model}`` and
 /// ``/v1/chat/completions``.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -2664,6 +2394,11 @@ pub struct OpenAIErrorBody {
     pub code: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<UpstreamFailureReason>,
+    /// ``model_not_found`` only: the model ids the message suggests, closest
+    /// first, drawn only from ids the caller may list. Absent when there is
+    /// no suggestion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestions: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -3989,47 +3724,47 @@ mod tests {
     fn openapi_json_documents_strict_responses_contract() {
         let spec: serde_json::Value = serde_json::from_str(&OPENAPI_JSON).unwrap();
         let request = &spec["components"]["schemas"]["ResponsesRequest"];
-
         assert_eq!(request["additionalProperties"], false);
+        assert_eq!(request["required"], json!(["model", "input"]));
         assert_eq!(request["properties"]["model"]["minLength"], 1);
         assert_eq!(request["properties"]["max_output_tokens"]["minimum"], 1);
-        assert_eq!(
-            request["properties"]["max_output_tokens"]["maximum"],
-            u32::MAX
-        );
-        let message = &request["properties"]["input"]["oneOf"][1]["items"];
-        assert_eq!(message["additionalProperties"], false);
-        assert!(!message["properties"]["role"]["enum"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|role| role == "tool"));
-        let part = &message["properties"]["content"]["oneOf"][1]["items"];
-        assert_eq!(part["additionalProperties"], false);
-        assert_eq!(part["required"], json!(["type", "text"]));
-        assert!(part["properties"]["type"]["enum"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|part_type| part_type == "output_text"));
+        let input = &request["properties"]["input"]["oneOf"];
+        assert_eq!(input[0]["type"], "string");
+        assert_eq!(input[1]["type"], "array");
+        assert_eq!(input[1]["minItems"], 1);
+        for stored in ["previous_response_id", "conversation"] {
+            assert_eq!(request["properties"][stored]["type"], "null", "{stored}");
+        }
+        for refused in ["prompt", "stream_options"] {
+            assert!(request["properties"].get(refused).is_none(), "{refused}");
+        }
+        for closed in ["ResponsesResponse", "ResponsesUsage"] {
+            assert_eq!(
+                spec["components"]["schemas"][closed]["additionalProperties"], false,
+                "{closed}"
+            );
+        }
 
-        let response = &spec["paths"]["/v1/responses"]["post"]["responses"]["200"]["content"]
-            ["application/json"]["schema"];
-        assert_eq!(response["additionalProperties"], false);
-        assert_eq!(response["properties"]["object"]["const"], "response");
+        let operation = &spec["paths"]["/v1/responses"]["post"];
         assert_eq!(
-            response["properties"]["output"]["items"]["properties"]["content"]["items"]
-                ["properties"]["type"]["const"],
-            "output_text"
+            operation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ResponsesRequest"
         );
         assert_eq!(
-            response["properties"]["usage"]["required"],
-            json!(["input_tokens", "output_tokens", "total_tokens"])
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ResponsesResponse"
         );
-        assert!(spec["paths"]["/v1/responses"]["post"]["responses"]
-            .as_object()
-            .unwrap()
-            .contains_key("413"));
+        assert_eq!(
+            operation["responses"]["200"]["content"]["text/event-stream"]["schema"]["type"],
+            "string"
+        );
+        for status in ["400", "404", "413", "503"] {
+            assert_eq!(
+                operation["responses"][status]["content"]["application/json"]["schema"]["$ref"],
+                "#/components/schemas/OpenAIErrorEnvelope",
+                "{status}"
+            );
+        }
     }
 
     #[test]

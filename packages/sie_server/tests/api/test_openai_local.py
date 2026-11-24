@@ -3107,7 +3107,12 @@ def test_mlx_messages_refuse_a_prompt_over_the_window_with_the_compaction_wordin
     }
 
 
-_IGNORED_OPENAI_FIELDS = {"metadata": {"run": "eval-7"}, "store": True, "service_tier": "auto"}
+_IGNORED_OPENAI_FIELDS = {
+    "metadata": {"run": "eval-7"},
+    "store": True,
+    "service_tier": "auto",
+    "prompt_cache_key": "session-1",
+}
 
 
 def _chat_client_for(
@@ -3120,7 +3125,7 @@ def _chat_client_for(
 
 @pytest.mark.parametrize("engine", ["cuda", "mlx"])
 @pytest.mark.parametrize("extra", [_IGNORED_OPENAI_FIELDS, dict.fromkeys(_IGNORED_OPENAI_FIELDS)])
-def test_chat_accepts_and_drops_metadata_store_service_tier(
+def test_chat_accepts_and_drops_the_ignored_openai_fields(
     monkeypatch: pytest.MonkeyPatch, engine: str, extra: dict[str, Any]
 ) -> None:
     forwarded: list[dict[str, Any]] = []
@@ -3158,9 +3163,14 @@ def test_chat_accepts_and_drops_metadata_store_service_tier(
 @pytest.mark.parametrize("engine", ["cuda", "mlx"])
 @pytest.mark.parametrize(
     ("field", "value", "expected"),
-    [("metadata", "run", "an object"), ("store", "yes", "a boolean"), ("service_tier", 1, "a string")],
+    [
+        ("metadata", "run", "an object"),
+        ("store", "yes", "a boolean"),
+        ("service_tier", 1, "a string"),
+        ("prompt_cache_key", 1, "a string"),
+    ],
 )
-def test_chat_rejects_wrongly_typed_metadata_store_service_tier(
+def test_chat_rejects_wrongly_typed_ignored_openai_fields(
     monkeypatch: pytest.MonkeyPatch, engine: str, field: str, value: Any, expected: str
 ) -> None:
     client = _chat_client_for(

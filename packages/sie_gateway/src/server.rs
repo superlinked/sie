@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::config::Config;
 use crate::handlers::{
-    audio, config_api, decisions, health, messages, models, pools, proxy, systemone,
+    audio, config_api, decisions, health, messages, models, pools, proxy, responses, systemone,
 };
 use crate::middleware::audit::AuditLayer;
 use crate::middleware::auth::AuthLayer;
@@ -643,8 +643,8 @@ pub fn create_router_core(
         .route("/v1/chat/completions", post(proxy::proxy_chat))
         // OpenAI legacy Completions — raw-prompt continuation (non-streaming).
         .route("/v1/completions", post(proxy::proxy_completions))
-        // OpenAI Responses API (MVP: string input, non-streaming).
-        .route("/v1/responses", post(proxy::proxy_responses))
+        // OpenAI Responses API, translated onto chat completions.
+        .route("/v1/responses", post(responses::proxy_responses))
         // Anthropic Messages API, translated onto chat completions.
         .route("/v1/messages", post(messages::proxy_messages))
         // OpenAI moderations surface — registered but not implemented (501)

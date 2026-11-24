@@ -1,8 +1,12 @@
-"""Direct OpenAI-compatible ``/v1/responses`` generation surface.
+"""``POST /v1/responses``: the OpenAI Responses API on the single-instance server.
 
-This is the direct-server counterpart of the gateway's stateless, text-only
-Responses MVP. Both raw string input and validated message input are reduced to
-one rendered prompt and executed through ``GenerationAdapter.generate``.
+The request is validated and translated into a chat completions body
+(:mod:`sie_server.api.responses_translation`), this server's own
+``/v1/chat/completions`` serves it in process, and the answer is translated
+back: a chat completion into a Response, chat SSE chunks into Responses events,
+and a chat error into the same error with the field the caller sent. Every chat
+gate, limit and timeout therefore applies unchanged. Responses are not stored,
+so ``/v1/responses/{id}`` and the routes below it are not served.
 """
 
 from __future__ import annotations
@@ -10,403 +14,130 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from dataclasses import dataclass
-from typing import Annotated, Any, cast
+from http import HTTPStatus
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
-from fastapi.responses import JSONResponse
-from sie_sdk.queue_types import denormalize_model_id
+from fastapi import APIRouter, Depends, Header, Request
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.types import Receive, Scope, Send
 
-from sie_server.adapters._generation_base import (
-    GenerationAdapter,
-    GenerationError,
-    reasoning_starts_in_prompt,
-    resolve_reasoning_format,
-    suppress_thinking_blocks,
-    thinking_blocks_must_be_hidden,
+from sie_server.api.anthropic_messages import _header_pairs, _json_answer, _read, _ResponseBody
+from sie_server.api.anthropic_translation import is_forwarded_header, parse_json
+from sie_server.api.openai_local import _MAX_BODY_BYTES, serve_chat_completions
+from sie_server.api.responses_translation import (
+    ResponsesError,
+    ResponseShape,
+    StreamMachine,
+    chat_completion_to_response,
+    responses_error,
+    responses_to_chat,
+    stream_events,
 )
-from sie_server.adapters.remote.sie import SieUpstreamAdapter
-from sie_server.api.generate import _render_native_messages_prompt
-from sie_server.api.helpers import ModelStateChecker, check_sdk_version
-from sie_server.api.openai_completions import (
-    _MAX_F32,
-    _MAX_PROMPT_BYTES,
-    _collect_completion,
-    _completion_error_response,
-    _CompletionError,
-    _from_generation_error,
-    _from_http_exception,
-    _generation_timeout_error,
-    _number,
-    _read_json_body,
-)
-from sie_server.api.routing import remote_routing, route_request
-from sie_server.api.validation import validate_machine_profile_header, validate_signed_i64
-from sie_server.core.runtime_options import (
-    GenerationTimeoutError,
-    apply_generation_runtime_options,
-    bound_generation,
-    resolve_generation_timeouts,
-)
-from sie_server.observability.tracing import tracer
-from sie_server.types.openapi import OpenAIGenerationErrorResponse, OpenAIResponsesResponseModel
+from sie_server.api.routing import remote_routing
 
-router = APIRouter(prefix="/v1", tags=["openai-compat"], dependencies=[Depends(remote_routing)])
 logger = logging.getLogger(__name__)
 
-_MAX_U32 = (1 << 32) - 1
-_SUPPORTED_FIELDS = frozenset(
-    {
-        "model",
-        "input",
-        "max_output_tokens",
-        "temperature",
-        "top_p",
-        "seed",
-        "stream",
-    }
-)
-_KNOWN_UNSUPPORTED_FIELDS = frozenset(
-    {
-        "previous_response_id",
-        "tools",
-        "tool_choice",
-        "reasoning",
-        "background",
-        "metadata",
-        "instructions",
-    }
-)
-_ALLOWED_ROLES = frozenset({"system", "user", "assistant", "developer"})
-_ALLOWED_CONTENT_TYPES = frozenset({"text", "input_text", "output_text"})
+router = APIRouter(prefix="/v1", tags=["openai-compat"], dependencies=[Depends(remote_routing)])
 
 
-@dataclass(frozen=True, slots=True)
-class _ResponsesParams:
-    model: str
-    prompt: str | None
-    messages: list[dict[str, str]] | None
-    max_output_tokens: int
-    temperature: float | None
-    top_p: float | None
-    seed: int | None
+def _refusal(error: ResponsesError) -> Response:
+    return JSONResponse(status_code=error.status, content=error.body())
 
 
-def _unsupported(field: str) -> _CompletionError:
-    return _CompletionError(
-        f"'{field}' is not supported by this endpoint",
-        param=field,
-        code="unsupported_field",
-    )
+def _server_error(message: str) -> Response:
+    return _refusal(ResponsesError(message, param=None, code="server_error", status=500))
 
 
-def _parse_message_content(value: Any, *, index: int) -> str:
-    path = f"input[{index}].content"
-    if isinstance(value, str):
-        return value
-    if not isinstance(value, list):
-        raise _CompletionError(f"'{path}' must be a string or text parts", param=path)
-
-    text: list[str] = []
-    for part_index, part in enumerate(value):
-        part_path = f"{path}[{part_index}]"
-        if not isinstance(part, dict):
-            raise _CompletionError(f"'{part_path}' must be an object", param=part_path)
-        part_obj = cast("dict[str, Any]", part)
-        unknown = set(part_obj) - {"type", "text"}
-        if unknown:
-            field = sorted(unknown)[0]
-            raise _unsupported(f"{part_path}.{field}")
-        part_type = part_obj.get("type")
-        if not isinstance(part_type, str):
-            raise _CompletionError(f"'{part_path}.type' is required and must be a string", param=f"{part_path}.type")
-        if part_type not in _ALLOWED_CONTENT_TYPES:
-            raise _CompletionError(
-                f"unsupported content part type '{part_type}'",
-                param=f"{part_path}.type",
-                code="unsupported_field",
-            )
-        part_text = part_obj.get("text")
-        if not isinstance(part_text, str):
-            raise _CompletionError(
-                f"'{part_path}.text' is required and must be a string",
-                param=f"{part_path}.text",
-            )
-        text.append(part_text)
-    return "".join(text)
+async def _error_answer(answer: Response) -> Response:
+    headers, content = responses_error(_header_pairs(answer), await _read(answer))
+    return _json_answer(answer.status_code, headers, content)
 
 
-def _parse_input(value: Any) -> tuple[str | None, list[dict[str, str]] | None]:
-    if isinstance(value, str):
-        return value, None
-    if not isinstance(value, list) or not value:
-        raise _CompletionError(
-            'field "input" is required (a string or a non-empty list of messages)',
-            param="input",
-        )
-
-    messages: list[dict[str, str]] = []
-    for index, item in enumerate(value):
-        path = f"input[{index}]"
-        if not isinstance(item, dict):
-            raise _CompletionError(f"'{path}' must be an object", param=path)
-        item_obj = cast("dict[str, Any]", item)
-        unknown = set(item_obj) - {"role", "content"}
-        if unknown:
-            field = sorted(unknown)[0]
-            raise _unsupported(f"{path}.{field}")
-        role = item_obj.get("role")
-        if not isinstance(role, str):
-            raise _CompletionError(f"'{path}.role' is required and must be a string", param=f"{path}.role")
-        if role not in _ALLOWED_ROLES:
-            raise _CompletionError(f"'{path}.role' is invalid", param=f"{path}.role")
-        messages.append(
-            {
-                "role": "system" if role == "developer" else role,
-                "content": _parse_message_content(item_obj.get("content"), index=index),
-            }
-        )
-    return None, messages
-
-
-def _parse_params(body: dict[str, Any]) -> _ResponsesParams:
-    for field in _KNOWN_UNSUPPORTED_FIELDS:
-        if field in body:
-            raise _unsupported(field)
-    unknown = set(body) - _SUPPORTED_FIELDS
-    if unknown:
-        raise _unsupported(sorted(unknown)[0])
-
-    model = body.get("model")
-    if not isinstance(model, str) or not model:
-        raise _CompletionError('field "model" is required', param="model")
-
-    prompt, messages = _parse_input(body.get("input"))
-
-    stream = body.get("stream")
-    if stream is not None and not isinstance(stream, bool):
-        raise _CompletionError("'stream' must be a boolean", param="stream")
-    if stream:
-        raise _unsupported("stream")
-
-    max_output_tokens = body.get("max_output_tokens", 16)
-    if max_output_tokens is None:
-        max_output_tokens = 16
-    if (
-        isinstance(max_output_tokens, bool)
-        or not isinstance(max_output_tokens, int)
-        or not (1 <= max_output_tokens <= _MAX_U32)
-    ):
-        raise _CompletionError("'max_output_tokens' must be a positive integer", param="max_output_tokens")
-
-    temperature = _number(body.get("temperature"), param="temperature", minimum=0, maximum=_MAX_F32)
-    top_p = _number(body.get("top_p"), param="top_p", minimum=0, maximum=1)
-    if top_p is not None and top_p == 0:
-        raise _CompletionError("'top_p' must be a number in (0, 1]", param="top_p")
+async def _read_body(request: Request) -> Any:
+    declared = request.headers.get("content-length")
+    too_large = ResponsesError("request body too large", param=None, code="INPUT_TOO_LONG", status=413)
+    if declared is not None and declared.isdigit() and int(declared) > _MAX_BODY_BYTES:
+        raise too_large
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > _MAX_BODY_BYTES:
+            raise too_large
+        raw.extend(chunk)
     try:
-        seed = validate_signed_i64(body.get("seed"), param="seed")
-    except ValueError as exc:
-        raise _CompletionError(str(exc), param="seed") from exc
+        return parse_json(bytes(raw))
+    except (ValueError, UnicodeDecodeError):
+        raise ResponsesError("body: invalid JSON", param="body", code="invalid_request") from None
 
-    return _ResponsesParams(
-        model=model,
-        prompt=prompt,
-        messages=messages,
-        max_output_tokens=max_output_tokens,
-        temperature=temperature,
-        top_p=top_p,
-        seed=seed,
-    )
+
+async def _buffered_response(answer: Response, shape: ResponseShape, request_id: str) -> Response:
+    try:
+        chat = parse_json(await _read(answer))
+    except ValueError:
+        return _server_error("the chat completion is not valid JSON")
+    try:
+        response = chat_completion_to_response(chat, shape, request_id, int(time.time()))
+    except ValueError:
+        logger.warning("a chat completion could not be translated into a Response", exc_info=True)
+        return _server_error("the chat completion could not be translated")
+    headers = {name: value for name, value in _header_pairs(answer) if is_forwarded_header(name)}
+    return JSONResponse(content=response, headers=headers)
+
+
+class _ResponsesStream(StreamingResponse):
+    """A chat SSE answer served as Responses events. Ending this answer ends the chat answer."""
+
+    def __init__(self, chat: Response, machine: StreamMachine) -> None:
+        self._body = _ResponseBody(chat)
+        headers = {name: value for name, value in _header_pairs(chat) if name not in ("content-length", "content-type")}
+        super().__init__(stream_events(self._body, machine), media_type="text/event-stream", headers=headers)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._body.aclose()
 
 
 @router.post(
     "/responses",
-    response_model=OpenAIResponsesResponseModel,
+    response_model=None,
     responses={
         400: {"description": "Invalid or unsupported request"},
         404: {"description": "Model not found"},
-        413: {"description": "Request body or rendered input is too large"},
-        500: {"description": "Generation failed", "model": OpenAIGenerationErrorResponse},
-        503: {"description": "Model loading or temporarily unavailable", "model": OpenAIGenerationErrorResponse},
-        504: {
-            "description": "Non-streaming generation exceeded its first_chunk_timeout_s or overall_timeout_s",
-            "model": OpenAIGenerationErrorResponse,
-        },
-    },
-    openapi_extra={
-        "requestBody": {
-            "required": True,
-            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OpenAIResponsesRequestModel"}}},
-        }
+        413: {"description": "Request body is too large"},
+        500: {"description": "Generation failed"},
+        502: {"description": "The generation backend failed the request"},
+        503: {"description": "Model loading or temporarily unavailable; retry after Retry-After"},
+        504: {"description": "Generation timed out"},
     },
 )
 async def responses(
     http_request: Request,
     x_machine_profile: Annotated[str | None, Header(alias="X-SIE-MACHINE-PROFILE")] = None,
-) -> JSONResponse:
-    """Create one stateless, text-only OpenAI Responses result."""
+) -> Response:
+    """OpenAI Responses API, served by this server's chat completions route.
+
+    The request is translated into a ``/v1/chat/completions`` request, served
+    in process with all of that route's limits, and the answer is translated
+    back, as a Response or, with ``stream``, as Responses events. Responses are
+    not stored: ``store``, ``previous_response_id`` and ``conversation`` are
+    refused, and the caller sends the whole conversation in ``input``. Function
+    and custom tools are supported. Errors use the OpenAI envelope at the status
+    the chat route answers.
+    """
     try:
-        validate_machine_profile_header(x_machine_profile)
-        check_sdk_version(http_request)
-        params = _parse_params(await _read_json_body(http_request))
-
-        registry = http_request.app.state.registry
-        registry_key = denormalize_model_id(params.model)
-        with tracer.start_as_current_span("openai_responses") as span:
-            span.set_attribute("model", params.model)
-            ModelStateChecker(registry, registry_key, span).check_exists()
-
-            config = registry.get_config(registry_key)
-            generate_task = getattr(config.tasks, "generate", None)
-            if generate_task is None:
-                raise _CompletionError(
-                    f"Model '{params.model}' does not support generation",
-                    param="model",
-                    code="model_not_found",
-                )
-            if params.max_output_tokens > generate_task.max_output_tokens:
-                raise _CompletionError(
-                    f"max_output_tokens ({params.max_output_tokens}) exceeds model cap "
-                    f"({generate_task.max_output_tokens})",
-                    param="max_output_tokens",
-                    code="context_exceeded",
-                )
-
-            prompt = params.prompt
-            if params.messages is not None:
-                prompt = await _render_native_messages_prompt(config, params.messages)
-            if prompt is None:  # pragma: no cover - parser invariant
-                raise _CompletionError("input did not resolve to a prompt", param="input")
-            prompt_bytes = len(prompt.encode("utf-8"))
-            if prompt_bytes > _MAX_PROMPT_BYTES:
-                raise _CompletionError(
-                    f"rendered input is {prompt_bytes} bytes, exceeds the limit of {_MAX_PROMPT_BYTES} bytes",
-                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-                    param="input",
-                    code="context_exceeded",
-                )
-
-            runtime_params: dict[str, Any] = {
-                "prompt": prompt,
-                "max_new_tokens": params.max_output_tokens,
-                **{
-                    key: value
-                    for key, value in (
-                        ("temperature", params.temperature),
-                        ("top_p", params.top_p),
-                        ("seed", params.seed),
-                    )
-                    if value is not None
-                },
-            }
-            try:
-                runtime_params = apply_generation_runtime_options(config, None, runtime_params)
-            except ValueError as exc:
-                raise _CompletionError(str(exc), code="invalid_request") from exc
-
-            route = await route_request(http_request, registry_key, span)
-            adapter = registry.get(route.key)
-            registry.touch_lru(route.key)
-            if not isinstance(adapter, GenerationAdapter):
-                raise _CompletionError(
-                    f"Model '{params.model}' adapter does not support generation",
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    param="model",
-                    code="inference_error",
-                )
-
-            generation_parameters: dict[str, Any] = {
-                "prompt": prompt,
-                "max_new_tokens": params.max_output_tokens,
-                "temperature": float(runtime_params.get("temperature", 1.0)),
-                "top_p": float(runtime_params.get("top_p", 1.0)),
-                "stop": runtime_params.get("stop"),
-                "frequency_penalty": runtime_params.get("frequency_penalty"),
-                "presence_penalty": runtime_params.get("presence_penalty"),
-                "top_k": runtime_params.get("top_k"),
-                "min_new_tokens": runtime_params.get("min_tokens"),
-                "seed": runtime_params.get("seed"),
-            }
-            try:
-                adapter.preflight_generate(generation_parameters, stream=False)
-            except GenerationError as exc:
-                raise _from_generation_error(exc, registry) from exc
-            except Exception as exc:
-                logger.warning("OpenAI Responses preflight failed for %s", params.model, exc_info=True)
-                raise _CompletionError(
-                    "internal error during generation",
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    code="inference_error",
-                ) from exc
-
-            try:
-                chunks = adapter.generate(**generation_parameters)
-            except GenerationError as exc:
-                raise _from_generation_error(exc, registry) from exc
-            if thinking_blocks_must_be_hidden(config):
-                reasoning_format = resolve_reasoning_format(config, adapter)
-                chunks = suppress_thinking_blocks(
-                    chunks,
-                    start_inside=not isinstance(adapter, SieUpstreamAdapter)
-                    and reasoning_starts_in_prompt(prompt, reasoning_format),
-                    reasoning_format=reasoning_format,
-                )
-            try:
-                text, terminal = await _collect_completion(
-                    bound_generation(chunks, resolve_generation_timeouts(config, None))
-                )
-            except _CompletionError:
-                raise
-            except GenerationTimeoutError as exc:
-                raise _generation_timeout_error(exc, remote=route.upstream is not None) from exc
-            except GenerationError as exc:
-                raise _from_generation_error(exc, registry) from exc
-            except Exception as exc:
-                logger.warning("OpenAI Responses generation failed for %s", params.model, exc_info=True)
-                raise _CompletionError(
-                    "internal error during generation",
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    code="inference_error",
-                ) from exc
-
-            canonical_model = getattr(config, "name", None) or registry_key
-            response_id = f"resp-{uuid.uuid4().hex}"
-            if terminal.prompt_tokens is None or terminal.completion_tokens is None:
-                raise _CompletionError(
-                    "generation terminal event omitted required usage",
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    code="malformed_worker_response",
-                )
-            prompt_tokens = terminal.prompt_tokens
-            completion_tokens = terminal.completion_tokens
-            usage: dict[str, Any] = {
-                "input_tokens": prompt_tokens,
-                "output_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
-            }
-            if terminal.cached_tokens is not None:
-                usage["input_tokens_details"] = {"cached_tokens": min(terminal.cached_tokens, prompt_tokens)}
-            return JSONResponse(
-                content={
-                    "id": response_id,
-                    "object": "response",
-                    "created_at": int(time.time()),
-                    "model": canonical_model,
-                    "status": "completed",
-                    "output": [
-                        {
-                            "type": "message",
-                            "id": f"msg-{response_id.removeprefix('resp-')}",
-                            "role": "assistant",
-                            "status": "completed",
-                            "content": [{"type": "output_text", "text": text, "annotations": []}],
-                        }
-                    ],
-                    "usage": usage,
-                },
-                headers=route.headers(),
-            )
-    except _CompletionError as exc:
-        return _completion_error_response(http_request, exc)
-    except HTTPException as exc:
-        return _completion_error_response(http_request, _from_http_exception(exc))
+        translation = responses_to_chat(await _read_body(http_request))
+    except ResponsesError as error:
+        return _refusal(error)
+    try:
+        answer = await serve_chat_completions(http_request, x_machine_profile, translation.chat)
+        if not HTTPStatus.OK <= answer.status_code < HTTPStatus.MULTIPLE_CHOICES:
+            return await _error_answer(answer)
+        request_id = next((value for name, value in _header_pairs(answer) if name == "x-sie-request-id"), None)
+        request_id = request_id or uuid.uuid4().hex
+        if translation.stream:
+            return _ResponsesStream(answer, StreamMachine(translation.shape, request_id, int(time.time())))
+        return await _buffered_response(answer, translation.shape, request_id)
+    except Exception:
+        logger.exception("the Responses translation of a chat answer failed")
+        return _server_error("internal server error")

@@ -167,11 +167,12 @@ _IGNORED_CHAT_FIELDS: dict[str, tuple[type, str]] = {
     "metadata": (dict, "an object"),
     "store": (bool, "a boolean"),
     "service_tier": (str, "a string"),
+    "prompt_cache_key": (str, "a string"),
 }
 
 # Mirror the gateway's public chat field boundary, minus controls that require
-# gateway-owned admission/routing translation (best_of, cache
-# keys). Most importantly this excludes SGLang's backend/DP/custom-processor
+# gateway-owned admission/routing translation (best_of,
+# routing_key). Most importantly this excludes SGLang's backend/DP/custom-processor
 # extensions, so the public body cannot steer the managed child or execute a
 # client-supplied logit processor.
 _CUDA_CHAT_FIELDS = frozenset(
