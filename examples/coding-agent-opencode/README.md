@@ -53,6 +53,11 @@ surface is the right instrument.
 [The Claude Code example](../coding-agent-claude-code/README.md) lists its
 cases and runs Claude Code on this directory's fixture.
 
+`conformance.py --api responses` checks the OpenAI Responses endpoint,
+`/v1/responses`, the way Codex CLI speaks it, reading the raw event stream.
+[The Codex example](../coding-agent-codex/README.md) lists its cases and runs
+Codex on this directory's fixture.
+
 ## Run it
 
 ### Against SIE Cloud
@@ -940,7 +945,8 @@ What runs anywhere, and in this repository's CI, is the test suite:
   same usage without it, the long prompt's size against the window, and
   `max_tokens: 8` spending exactly 8 tokens. It also runs
   `conformance.py --api messages` against the same server, whose
-  `/v1/messages` translates onto that chat route, and asserts that table. It
+  `/v1/messages` translates onto that chat route, and asserts that table, and
+  `conformance.py --api responses` the same way through `/v1/responses`. It
   needs the repository's environment, from `mise run sync` at the root, and is
   skipped without it outside CI.
 - `tests/test_conformance.py` starts a scripted OpenAI-compatible stub that
@@ -971,6 +977,11 @@ What runs anywhere, and in this repository's CI, is the test suite:
   `message_delta`, a delta before its block, an accepted `output_config.effort`,
   a system-turn refusal without the wording Claude Code resends on, busy
   refusals and a loading model.
+- `tests/test_responses_conformance.py` runs `conformance.py --api responses`
+  against a scripted Responses stub in the same way: an accepted hosted tool,
+  a refusal at another field, an image refused by the translation, done
+  arguments that differ from the streamed ones, a gap in the sequence numbers,
+  busy refusals and a loading model.
 - `tests/test_run_gate.py` runs `run_gate.sh` with a scripted stand-in for
   `opencode`: a real fix, no change, a failed `opencode run`, edited tests, an
   environment planted in the worked copy, a caller's `PYTEST_ADDOPTS` or
@@ -1009,8 +1020,8 @@ uv run pytest
 
 `tests/test_conformance.py`, `tests/test_session_load.py` and
 `tests/test_run_gate.py` check the checkers,
-`tests/test_fake_engine.py` checks SIE's chat and Messages routes with a
-scripted model, and `tests/test_openrouter_recipe.py` checks the OpenRouter
+`tests/test_fake_engine.py` checks SIE's chat, Messages and Responses routes
+with a scripted model, and `tests/test_openrouter_recipe.py` checks the OpenRouter
 recipe against a scripted stand-in for OpenRouter.
 A model's endpoint is only checked by running `conformance.py` against it.
 

@@ -23,6 +23,12 @@ that Claude Code speaks: the same agent-loop cases over ``tool_use`` and
 ``tool_result`` blocks, plus the event grammar, the inert fields Claude Code
 sends and the refusal wording it recovers from. It reads the raw event stream
 with ``httpx``, because the event sequence is what the client depends on.
+
+``--api responses`` checks ``/v1/responses``, the OpenAI Responses wire that
+Codex CLI speaks: a plain answer, a function tool loop sent with the fields
+Codex sends, an image in a tool output, the event order, and the refusals of a
+hosted tool and of ``previous_response_id``. It reads the raw event stream
+with ``httpx`` as well.
 """
 
 from __future__ import annotations
@@ -1640,6 +1646,517 @@ def run_messages(base_url: str, api_key: str, model: str) -> dict[str, Any]:
     }
 
 
+# --- OpenAI Responses (`--api responses`) ----------------------------------
+
+RESPONSES_TOOL = {
+    "type": "function",
+    "name": "get_weather",
+    "description": WEATHER_TOOL["function"]["description"],
+    "strict": False,
+    "parameters": WEATHER_TOOL["function"]["parameters"],
+}
+VIEW_IMAGE_TOOL = {
+    "type": "function",
+    "name": "view_image",
+    "description": "View a local image file from the filesystem.",
+    "strict": False,
+    "parameters": {
+        "type": "object",
+        "properties": {"path": {"type": "string", "description": "Local filesystem path to an image file."}},
+        "required": ["path"],
+        "additionalProperties": False,
+    },
+}
+CODEX_FIELDS: dict[str, Any] = {
+    "tool_choice": "auto",
+    "parallel_tool_calls": True,
+    "reasoning": {"summary": "auto"},
+    "store": False,
+    "include": ["reasoning.encrypted_content"],
+    "prompt_cache_key": "sie-conformance",
+    "client_metadata": {"session_id": "sie-conformance"},
+}
+DEVELOPER_MESSAGE = {
+    "type": "message",
+    "role": "developer",
+    "content": [{"type": "input_text", "text": "You are a coding agent. Use the tools when they help."}],
+}
+RED_SQUARE_PNG = (
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKklEQVR42mO4IydHU8QwasGoBaMWjFowasGoBaMWjFowa"
+    "sGoBaMWDBULAJI2YD30P/0LAAAAAElFTkSuQmCC"
+)
+RESPONSES_TERMINAL = frozenset({"response.completed", "response.incomplete", "response.failed"})
+RESPONSES_HOSTED_TOOL = {"type": "web_search"}
+
+
+@dataclass
+class ResponsesResult(StreamResult):
+    """A ``/v1/responses`` answer. ``finish_reason`` holds the response ``status``."""
+
+    events: list[dict[str, Any]] = field(default_factory=list)
+    done_items: dict[int, dict[str, Any]] = field(default_factory=dict)
+    response: dict[str, Any] | None = None
+    status: int | None = None
+
+    def observed(self) -> dict[str, Any]:
+        observed = super().observed()
+        observed["response_status"] = observed.pop("finish_reason")
+        observed.pop("usage_on_last_chunk")
+        observed["status"] = self.status
+        observed["events"] = len(self.events)
+        observed["output"] = [item.get("type") for item in (self.response or {}).get("output") or []]
+        return observed
+
+
+def _responses_error(status: int | None, body: Any, headers: httpx.Headers | None) -> dict[str, Any]:
+    error = body.get("error") if isinstance(body, dict) and isinstance(body.get("error"), dict) else {}
+    sie_code = headers.get("x-sie-error-code") if headers is not None else None
+    retry_after = _retry_after(headers.get("retry-after")) if headers is not None else None
+    return {
+        "status": status,
+        "code": error.get("code") or sie_code,
+        "type": error.get("type"),
+        "param": error.get("param"),
+        "message": error.get("message") or (json.dumps(body)[:200] if body else None),
+        "retry_after_s": retry_after,
+    }
+
+
+def _responses_output(result: ResponsesResult, response: dict[str, Any]) -> None:
+    result.response = response
+    result.finish_reason = response.get("status")
+    result.usage = response.get("usage")
+
+
+def _responses_event(result: ResponsesResult, name: str, data: dict[str, Any]) -> None:
+    summary: dict[str, Any] = {"event": name, "type": data.get("type"), "sequence_number": data.get("sequence_number")}
+    item = data.get("item") if isinstance(data.get("item"), dict) else None
+    if "output_index" in data:
+        summary["output_index"] = data["output_index"]
+    if "item_id" in data or item is not None:
+        summary["item_id"] = data["item_id"] if "item_id" in data else item.get("id")
+    index = data.get("output_index", 0)
+    if name == "response.output_item.added" and item is not None and item.get("type") == "function_call":
+        result.tool_calls[index] = ToolCall(
+            index=index,
+            id=item.get("call_id"),
+            name=item.get("name"),
+            first_delta_complete=bool(item.get("call_id")) and bool(item.get("name")),
+        )
+    elif name == "response.output_item.done" and item is not None:
+        result.done_items[index] = item
+    elif name == "response.function_call_arguments.delta":
+        call = result.tool_calls.setdefault(index, ToolCall(index=index))
+        call.arguments += data.get("delta", "")
+        call.deltas += 1
+    elif name == "response.output_text.delta":
+        result.content += data.get("delta", "")
+    elif name in RESPONSES_TERMINAL:
+        _responses_output(result, data.get("response") or {})
+        if name == "response.failed":
+            error = (data.get("response") or {}).get("error") or {}
+            result.error = _responses_error(None, {"error": error}, None)
+    elif name == "error":
+        result.error = _responses_error(None, {"error": data}, None)
+    result.events.append(summary)
+
+
+def _responses_answer(result: ResponsesResult, response: dict[str, Any]) -> None:
+    _responses_output(result, response)
+    for item in response.get("output") or []:
+        if item.get("type") == "message":
+            result.content += "".join(part.get("text", "") for part in item.get("content") or [])
+        elif item.get("type") == "function_call":
+            index = len(result.tool_calls)
+            result.tool_calls[index] = ToolCall(
+                index=index,
+                id=item.get("call_id"),
+                name=item.get("name"),
+                arguments=item.get("arguments") or "",
+                first_delta_complete=True,
+            )
+
+
+def _responses_once(client: httpx.Client, body: dict[str, Any]) -> ResponsesResult:
+    result = ResponsesResult()
+    try:
+        with client.stream("POST", "/responses", json=body) as response:
+            result.status = response.status_code
+            result.headers = {name: response.headers[name] for name in RECORDED_HEADERS if name in response.headers}
+            if response.status_code != 200:
+                response.read()
+                try:
+                    payload = response.json()
+                except ValueError:
+                    payload = None
+                result.error = _responses_error(response.status_code, payload, response.headers)
+                return result
+            if not body.get("stream"):
+                response.read()
+                _responses_answer(result, response.json())
+                return result
+            name = ""
+            for line in response.iter_lines():
+                if not line:
+                    name = ""
+                elif line.startswith("event:"):
+                    name = line[len("event:") :].strip()
+                elif line.startswith("data:"):
+                    result.chunks += 1
+                    _responses_event(result, name, json.loads(line[len("data:") :]))
+    except (httpx.HTTPError, ValueError) as exc:
+        result.error = {
+            "status": None,
+            "code": type(exc).__name__,
+            "type": None,
+            "param": None,
+            "message": str(exc),
+            "retry_after_s": None,
+        }
+    return result
+
+
+@dataclass
+class ResponsesSession:
+    """The client for one run, and every answer it got, for the event-order check."""
+
+    client: httpx.Client
+    results: list[ResponsesResult] = field(default_factory=list)
+
+    def send(self, body: dict[str, Any]) -> ResponsesResult:
+        result = cast(ResponsesResult, _retrying(lambda: _responses_once(self.client, body)))
+        self.results.append(result)
+        return result
+
+
+def _responses_body(model: str, text: str, **params: Any) -> dict[str, Any]:
+    params.setdefault("stream", True)
+    return {"model": model, "input": text, **params}
+
+
+def _user_message(text: str) -> dict[str, Any]:
+    return {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}
+
+
+def responses_event_problems(events: list[dict[str, Any]]) -> list[str]:
+    """What breaks the Responses event order a Responses client parses."""
+    if not events:
+        return ["no events"]
+    names = [event["event"] for event in events]
+    problems = []
+    if names[:2] != ["response.created", "response.in_progress"]:
+        problems.append(f"starts with {names[:2]}, not response.created then response.in_progress")
+    for event in events:
+        if event["type"] != event["event"]:
+            problems.append(f"event {event['event']} carries type {event['type']!r}")
+            break
+    numbers = [event["sequence_number"] for event in events]
+    if numbers != list(range(len(events))):
+        problems.append(f"sequence_number runs {numbers[:8]}, not 0, 1, 2 and on")
+    open_item: tuple[Any, Any] | None = None
+    next_index = 0
+    for event in events:
+        name = event["event"]
+        if name == "response.output_item.added":
+            if open_item is not None:
+                problems.append(f"item {event.get('item_id')} added while {open_item[1]} is open")
+            if event.get("output_index") != next_index:
+                problems.append(f"output_index {event.get('output_index')}, expected {next_index}")
+            open_item = (event.get("output_index"), event.get("item_id"))
+            next_index += 1
+        elif name == "response.output_item.done":
+            if open_item is None or (event.get("output_index"), event.get("item_id")) != open_item:
+                problems.append(f"item {event.get('item_id')} done while {open_item and open_item[1]} is open")
+            open_item = None
+        elif "item_id" in event and (open_item is None or event["item_id"] != open_item[1]):
+            problems.append(f"{name} for item {event['item_id']} while {open_item and open_item[1]} is open")
+    terminal = [position for position, name in enumerate(names) if name in RESPONSES_TERMINAL]
+    if terminal != [len(names) - 1]:
+        problems.append(f"ends with {names[-1]}, not one terminal event last")
+    elif names[-1] != "response.failed" and open_item is not None:
+        problems.append(f"item {open_item[1]} never done")
+    return problems
+
+
+def responses_case_plain_answer(session: ResponsesSession, model: str) -> Case:
+    name = "plain_answer"
+    result = session.send(_responses_body(model, "Reply with the single word: ready.", temperature=0))
+    failed = _fail_on_error(name, result)
+    if failed:
+        return failed
+    usage = result.usage or {}
+    problems = []
+    if result.finish_reason != "completed":
+        problems.append(f"status is {result.finish_reason!r}, expected 'completed'")
+    if not result.content.strip():
+        problems.append("no output_text came back")
+    missing = [key for key in ("input_tokens", "output_tokens") if not usage.get(key)]
+    if missing:
+        problems.append(f"usage lacks {missing}: {usage}")
+    if problems:
+        return Case(name, "fail", "; ".join(problems), result.observed())
+    return Case(
+        name, "pass", f"status=completed after {result.content.strip()[:40]!r}; usage {usage}", result.observed()
+    )
+
+
+def responses_case_function_call(session: ResponsesSession, model: str) -> tuple[Case, ResponsesResult]:
+    name = "function_call"
+    body = {
+        "model": model,
+        "input": [
+            DEVELOPER_MESSAGE,
+            _user_message("What is the weather in Paris right now? Use the get_weather tool."),
+        ],
+        "tools": [RESPONSES_TOOL],
+        "stream": True,
+        **CODEX_FIELDS,
+    }
+    result = session.send(body)
+    failed = _fail_on_error(name, result)
+    if failed:
+        return failed, result
+    calls = result.calls()
+    problems = []
+    if not calls:
+        problems.append("no function_call item came back")
+    for call in calls:
+        if not call.first_delta_complete:
+            problems.append(f"item {call.index}: output_item.added lacks call_id or name")
+        if call.name != "get_weather":
+            problems.append(f"item {call.index} named {call.name!r}")
+        parsed = call.parsed_arguments()
+        if parsed is None:
+            problems.append(f"item {call.index} arguments are not a JSON object: {call.arguments[:80]!r}")
+        elif "city" not in parsed:
+            problems.append(f"item {call.index} arguments lack 'city': {parsed}")
+        done = result.done_items.get(call.index) or {}
+        if done.get("arguments") != call.arguments:
+            problems.append(f"item {call.index}: output_item.done arguments differ from the streamed ones")
+    if result.finish_reason != "completed":
+        problems.append(f"status is {result.finish_reason!r}, expected 'completed'")
+    if problems:
+        return Case(name, "fail", "; ".join(problems), result.observed()), result
+    deltas = sum(call.deltas for call in calls)
+    detail = f"{len(calls)} function_call: {_describe_calls(result)}; {deltas} arguments deltas; status=completed"
+    return Case(name, "pass", detail, result.observed()), result
+
+
+def responses_case_tool_output_round_trip(session: ResponsesSession, model: str, first: ResponsesResult) -> Case:
+    name = "tool_output_round_trip"
+    calls = first.calls()
+    if _is_busy(first.error):
+        return Case(name, "capacity", "not run, function_call stayed busy", first.observed())
+    if first.error or not calls:
+        return Case(name, "fail", "no function_call from the function_call case to answer", first.observed())
+    history: list[dict[str, Any]] = [
+        {
+            "type": "function_call",
+            "id": f"fc_{position}",
+            "status": "completed",
+            "call_id": call.id,
+            "name": call.name,
+            "arguments": call.arguments,
+        }
+        for position, call in enumerate(calls)
+    ]
+    history += [
+        {
+            "type": "function_call_output",
+            "id": f"fco_{position}",
+            "call_id": call.id,
+            "output": json.dumps({"city": "Paris", "temperature_c": 18, "conditions": "overcast"}),
+        }
+        for position, call in enumerate(calls)
+    ]
+    question = _user_message("What is the weather in Paris right now? Use the get_weather tool.")
+    body = {
+        "model": model,
+        "input": [DEVELOPER_MESSAGE, question, *history],
+        "tools": [RESPONSES_TOOL],
+        "stream": True,
+        "temperature": 0,
+        **CODEX_FIELDS,
+    }
+    result = session.send(body)
+    failed = _fail_on_error(name, result)
+    if failed:
+        return failed
+    problems = []
+    if result.calls():
+        problems.append(f"answered with another function_call: {_describe_calls(result)}")
+    if result.finish_reason != "completed":
+        problems.append(f"status is {result.finish_reason!r}, expected 'completed'")
+    if not result.content.strip():
+        problems.append("empty final answer")
+    elif "18" not in result.content:
+        problems.append(f"final answer does not carry the tool's 18: {result.content[:120]!r}")
+    if problems:
+        return Case(name, "fail", "; ".join(problems), result.observed())
+    detail = f"final answer used the tool output: {result.content.strip()[:100]!r}"
+    return Case(name, "pass", detail, result.observed())
+
+
+def responses_case_image_in_tool_output(session: ResponsesSession, model: str) -> Case:
+    name = "image_in_tool_output"
+    call = {
+        "type": "function_call",
+        "id": "fc_image",
+        "status": "completed",
+        "call_id": "call_view_image",
+        "name": "view_image",
+        "arguments": json.dumps({"path": "red.png"}),
+    }
+    output = {
+        "type": "function_call_output",
+        "id": "fco_image",
+        "call_id": "call_view_image",
+        "output": [{"type": "input_image", "image_url": RED_SQUARE_PNG, "detail": "high"}],
+    }
+    question = _user_message("Look at red.png with the view_image tool, then name its colour in one word.")
+    body = {
+        "model": model,
+        "input": [DEVELOPER_MESSAGE, question, call, output],
+        "tools": [VIEW_IMAGE_TOOL],
+        "stream": True,
+        "temperature": 0,
+        **CODEX_FIELDS,
+    }
+    result = session.send(body)
+    observed = result.observed()
+    observed["mentions_red"] = "red" in result.content.lower()
+    error = result.error
+    if error is not None and _is_refusal(error) and not str(error.get("param") or "").startswith("input"):
+        detail = f"the model's chat route refused the image: {error['status']} {error['code']}: {error['message']}"
+        return Case(name, "recorded", detail, observed)
+    failed = _fail_on_error(name, result)
+    if failed:
+        failed.observed = observed
+        return failed
+    if result.finish_reason != "completed" or not (result.content.strip() or result.calls()):
+        return Case(name, "fail", f"status={result.finish_reason!r} with no answer to the image", observed)
+    answer = result.content.strip()[:60] or _describe_calls(result)
+    return Case(name, "pass", f"image accepted and answered: {answer!r}", observed)
+
+
+def responses_case_buffered(session: ResponsesSession, model: str) -> Case:
+    name = "buffered_response"
+    result = session.send(_responses_body(model, "Reply with the single word: ready.", stream=False, temperature=0))
+    failed = _fail_on_error(name, result)
+    if failed:
+        return failed
+    response = result.response or {}
+    usage = result.usage or {}
+    problems = []
+    if response.get("object") != "response":
+        problems.append(f"object is {response.get('object')!r}, expected 'response'")
+    if result.finish_reason != "completed":
+        problems.append(f"status is {result.finish_reason!r}, expected 'completed'")
+    if not result.content.strip():
+        problems.append("no output_text came back")
+    if not usage.get("input_tokens") or not usage.get("output_tokens"):
+        problems.append(f"usage lacks tokens: {usage}")
+    if problems:
+        return Case(name, "fail", "; ".join(problems), result.observed())
+    return Case(name, "pass", f"status=completed, usage {usage}", result.observed())
+
+
+def _responses_refusal_case(name: str, result: ResponsesResult, param: str) -> Case:
+    observed = result.observed()
+    error = result.error
+    if error is None:
+        return Case(name, "fail", f"accepted, expected a 400 at {param}", observed)
+    if _is_busy(error):
+        return Case(name, "capacity", _still_busy(result), observed)
+    if error["status"] != 400 or error["type"] != "invalid_request_error":
+        return Case(
+            name, "fail", f"answered {error['status']} {error['type']}, expected 400 invalid_request_error", observed
+        )
+    if error["param"] != param:
+        return Case(name, "fail", f"400 at {error['param']!r}, expected {param!r}: {error['message']}", observed)
+    return Case(name, "pass", f"400 {error['code']}: {error['message']}", observed)
+
+
+def responses_case_hosted_tool_refusal(session: ResponsesSession, model: str) -> Case:
+    body = _responses_body(model, "Say hello.", tools=[RESPONSES_TOOL, RESPONSES_HOSTED_TOOL])
+    return _responses_refusal_case("hosted_tool_refusal", session.send(body), "tools[1].type")
+
+
+def responses_case_previous_response_refusal(session: ResponsesSession, model: str) -> Case:
+    body = _responses_body(model, "Say hello.", previous_response_id="resp_sie_conformance")
+    return _responses_refusal_case("previous_response_id_refusal", session.send(body), "previous_response_id")
+
+
+def responses_case_event_order(results: list[ResponsesResult]) -> Case:
+    name = "event_order"
+    streams = [result for result in results if result.events]
+    problems = {
+        f"stream {position}": responses_event_problems(result.events) for position, result in enumerate(streams)
+    }
+    problems = {key: value for key, value in problems.items() if value}
+    observed = {"streams": len(streams), "problems": problems}
+    if not streams:
+        return Case(name, "fail", "no stream to check", observed)
+    if problems:
+        first = next(iter(problems.values()))
+        return Case(name, "fail", f"{len(problems)} of {len(streams)} streams break the order: {first[0]}", observed)
+    detail = (
+        f"{len(streams)} streams: created, in_progress, one item at a time, "
+        "sequence numbers from 0, one terminal event last"
+    )
+    return Case(name, "pass", detail, observed)
+
+
+def wait_until_responses_served(client: httpx.Client, model: str) -> dict[str, Any]:
+    started = time.monotonic()
+    attempts = 0
+    body = _responses_body(model, "Reply with the single word: ready.", stream=False, max_output_tokens=4)
+    while True:
+        attempts += 1
+        result = _responses_once(client, body)
+        elapsed = time.monotonic() - started
+        code = str((result.error or {}).get("code") or "").upper()
+        if code not in MESSAGES_WARM_UP_CODES or elapsed > WARM_UP_TIMEOUT_S:
+            return {"attempts": attempts, "seconds": round(elapsed, 1), "error": result.error}
+        time.sleep(WARM_UP_POLL_S)
+
+
+def run_responses(base_url: str, api_key: str, model: str) -> dict[str, Any]:
+    headers = {"authorization": f"Bearer {api_key}"} if api_key else {}
+    client = httpx.Client(base_url=base_url.rstrip("/"), headers=headers, timeout=REQUEST_TIMEOUT_S)
+    started = datetime.now(UTC)
+    entry = model_entry(base_url, api_key, model)
+    warm_up = wait_until_responses_served(client, model)
+    session = ResponsesSession(client)
+    cases: list[Case] = []
+
+    cases.append(responses_case_plain_answer(session, model))
+    tool_case, tool_result = responses_case_function_call(session, model)
+    cases.append(tool_case)
+    cases.append(responses_case_tool_output_round_trip(session, model, tool_result))
+    cases.append(responses_case_image_in_tool_output(session, model))
+    cases.append(responses_case_buffered(session, model))
+    cases.append(responses_case_hosted_tool_refusal(session, model))
+    cases.append(responses_case_previous_response_refusal(session, model))
+    cases.append(responses_case_event_order(session.results))
+    client.close()
+
+    statuses = ("pass", "fail", "recorded", "capacity")
+    counts = {status: sum(1 for case in cases if case.status == status) for status in statuses}
+    return {
+        "api": "responses",
+        "base_url": base_url,
+        "model": model,
+        "model_entry": entry,
+        "started_at": started.isoformat(),
+        "finished_at": datetime.now(UTC).isoformat(),
+        "served_by": tool_result.headers.get("x-sie-served-by"),
+        "warm_up": warm_up,
+        "cases": [{**case.__dict__, "retries": _retries_in(case.observed)} for case in cases],
+        "summary": counts,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
@@ -1652,13 +2169,13 @@ def main() -> int:
     )
     parser.add_argument(
         "--api",
-        choices=("chat", "messages"),
+        choices=("chat", "messages", "responses"),
         default="chat",
-        help="wire to check: chat completions, as OpenCode speaks it (default), or Anthropic Messages",
+        help="wire to check: chat completions, as OpenCode speaks it (default), Anthropic Messages or OpenAI Responses",
     )
     args = parser.parse_args()
 
-    check = run_messages if args.api == "messages" else run
+    check = {"chat": run, "messages": run_messages, "responses": run_responses}[args.api]
     report = check(args.base_url, args.api_key, args.model)
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

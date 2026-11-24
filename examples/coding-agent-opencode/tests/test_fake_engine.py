@@ -18,6 +18,11 @@ The same server answers ``conformance.py --api messages``: ``/v1/messages``
 on ``sie-server`` translates each request onto the chat route above and the
 answer back, so the Messages cases check that translation over the same
 scripted turns.
+
+It answers ``conformance.py --api responses`` the same way: ``/v1/responses``
+translates each request onto the chat route and the answer back. The fake
+takes no image input, so the image in a tool output is refused by the chat
+route and recorded.
 """
 
 from __future__ import annotations
@@ -256,3 +261,69 @@ def test_the_messages_refusals_use_the_anthropic_wording(messages_report: dict[s
     assert cases["unknown_model"]["observed"]["error"]["type"] == "not_found_error"
     assert cases["count_tokens"]["observed"]["status"] == 404
     assert cases["count_tokens"]["observed"]["body"]["error"]["type"] == "not_found_error"
+
+
+@pytest.fixture(scope="module")
+def responses_report(server: str) -> dict[str, Any]:
+    return conformance.run_responses(f"{server}/v1", "", MODEL)
+
+
+def test_each_responses_case_against_the_fake(responses_report: dict[str, Any]) -> None:
+    statuses = {name: case["status"] for name, case in _cases(responses_report).items()}
+    assert statuses == {
+        "plain_answer": "pass",
+        "function_call": "pass",
+        "tool_output_round_trip": "pass",
+        "image_in_tool_output": "recorded",
+        "buffered_response": "pass",
+        "hosted_tool_refusal": "pass",
+        "previous_response_id_refusal": "pass",
+        "event_order": "pass",
+    }, responses_report["cases"]
+    assert responses_report["served_by"] == "local"
+    assert responses_report["warm_up"]["error"] is None
+
+
+def test_the_function_call_item_streams_the_scripted_call(responses_report: dict[str, Any]) -> None:
+    observed = _cases(responses_report)["function_call"]["observed"]
+    [call] = observed["tool_calls"]
+    question = "What is the weather in Paris right now? Use the get_weather tool."
+    assert call["first_delta_has_id_and_name"] is True
+    assert json.loads(call["arguments"]) == {"city": question}
+    assert observed["response_status"] == "completed"
+    assert observed["output"] == ["function_call"]
+
+
+def test_the_tool_output_reaches_the_responses_answer(responses_report: dict[str, Any]) -> None:
+    observed = _cases(responses_report)["tool_output_round_trip"]["observed"]
+    assert observed["content"] == f"Tool result: {json.dumps(TOOL_RESULT)}"
+    assert observed["output"] == ["message"]
+
+
+def test_responses_usage_is_the_chat_usage_translated(responses_report: dict[str, Any]) -> None:
+    cases = _cases(responses_report)
+    usage = cases["plain_answer"]["observed"]["usage"]
+    assert usage["input_tokens"] > 0
+    assert usage["total_tokens"] == usage["input_tokens"] + usage["output_tokens"]
+    assert usage["input_tokens_details"] == {"cached_tokens": 0}
+    assert usage["output_tokens_details"] == {"reasoning_tokens": 0}
+    assert cases["buffered_response"]["observed"]["usage"] == usage
+
+
+def test_the_chat_route_refuses_the_image_for_a_model_without_image_input(responses_report: dict[str, Any]) -> None:
+    error = _cases(responses_report)["image_in_tool_output"]["observed"]["error"]
+    assert error["status"] == 400
+    assert error["param"] == "messages"
+    assert error["message"] == f"Model '{MODEL}' does not support image input"
+
+
+def test_the_responses_refusals_name_the_field_sent(responses_report: dict[str, Any]) -> None:
+    cases = _cases(responses_report)
+    hosted = cases["hosted_tool_refusal"]["observed"]["error"]
+    previous = cases["previous_response_id_refusal"]["observed"]["error"]
+    assert (hosted["code"], hosted["param"]) == ("unsupported_field", "tools[1].type")
+    assert hosted["message"] == "tools[1].type: 'web_search' tools are not supported; send function or custom tools"
+    assert (previous["code"], previous["param"]) == ("unsupported_field", "previous_response_id")
+    assert previous["message"] == (
+        "previous_response_id: SIE does not store responses; send the full conversation in input"
+    )
