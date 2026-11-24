@@ -27,7 +27,8 @@ Every accepted chat body must also pass the chat route's own validation.
 `0` and tests inject the clock. Item ids derive from the request id: the
 response is `resp-<request_id>`, the message item `msg-<request_id>`, and the
 tool call at position `k` (0-based) `fc-<request_id>-<k>` or
-`ctc-<request_id>-<k>`.
+`ctc-<request_id>-<k>`. In a stream, a message item that follows a tool call is
+`msg-<request_id>-<output_index>`.
 
 ## Request
 
@@ -138,7 +139,7 @@ and no `type` is a message. The accepted item types are `message`,
   `tools[i].type`: `'<type>' tools are not supported; send function or custom tools`.
 - Tool names and the tool count are checked by the chat route (64 tools, names
   matching `^[a-zA-Z0-9_-]{1,64}$`); its error comes back with the param
-  `tools[i].function.name` renamed to `tools[i].name`.
+  `tools[i].function.name` renamed to `tools[i].name` (see [Errors](#errors)).
 - `tool_choice` `"auto"`, `"none"` and `"required"` pass through.
   `{"type":"function","name"}` and `{"type":"custom","name"}` become
   `{"type":"function","function":{"name"}}`; the name must be a declared tool.
@@ -167,15 +168,15 @@ A chat completion with the content `"Hello."` for request `r1` becomes:
 }
 ```
 
-`model` is the model the request named. `parallel_tool_calls` and `tool_choice` echo the request as sent, defaulting
-to `true` and `"auto"`. `output` holds a `message` item with one `output_text`
+`model` is the model the request named. `parallel_tool_calls` and
+`tool_choice` echo the request as sent, defaulting to `true` and `"auto"`. `output` holds a `message` item with one `output_text`
 part when the chat content is non-empty, then one item per tool call: a
 `function_call` with the arguments string, or a `custom_tool_call` whose
 `input` is the `input` string of the arguments, or the raw arguments when they
-are not a JSON object with a string `input`. Finish reasons `stop` and
-`tool_calls` complete the response; `length` and `content_filter` make it
-`incomplete` with `incomplete_details.reason` `max_output_tokens` or
-`content_filter`. Usage is `input_tokens`, `input_tokens_details.cached_tokens`,
+are not a JSON object with a string `input`. The finish reasons `length` and
+`content_filter` make the response `incomplete` with
+`incomplete_details.reason` `max_output_tokens` or `content_filter`; every
+other finish reason (`stop`, `tool_calls` or any other value) completes it. Usage is `input_tokens`, `input_tokens_details.cached_tokens`,
 `output_tokens`, `output_tokens_details.reasoning_tokens` and `total_tokens`
 from the chat usage, with absent details counted as 0.
 
@@ -195,7 +196,9 @@ carries `type`, equal to the event name, and `sequence_number`, counting from
 2. The first non-empty text delta adds the message item and its `output_text`
    part; each text delta is a `response.output_text.delta`.
 3. Text ends at the first tool-call delta or at the finish:
-   `output_text.done`, `content_part.done`, `output_item.done`.
+   `output_text.done`, `content_part.done`, `output_item.done`. Text that
+   arrives after a tool call ends that call and opens a new message item at
+   the next `output_index`, with id `msg-<request_id>-<output_index>`.
 4. Each new chat tool call adds a `function_call` item with empty arguments,
    then one `function_call_arguments.delta` per non-empty arguments fragment.
    A custom tool call adds a `custom_tool_call` item; its fragments are
@@ -204,17 +207,36 @@ carries `type`, equal to the event name, and `sequence_number`, counting from
    `function_call_arguments.done` (or `custom_tool_call_input.done`) and
    `output_item.done`.
 5. After the usage chunk and `[DONE]`, `response.completed` (or
-   `response.incomplete`) carries the full answer. The stream ends there,
-   without a `[DONE]` frame of its own.
+   `response.incomplete` for a `length` or `content_filter` finish) carries the
+   full answer; a chat stream that closes after a finish without `[DONE]` ends
+   the same way. The stream ends there, without a `[DONE]` frame of its own.
 6. A chat error chunk after the stream opened becomes `response.failed` with
    `status: "failed"`, `error: {"code", "message"}` from the chat error, the
-   items completed so far as `output` and `usage: null`, and the stream ends.
+   items completed so far as `output` (an item still open is left out) and
+   `usage: null`, and the stream ends.
+7. A chat stream that ends without a finish reason fails the same way with
+   `error: {"code": "server_error", "message": "the generation stream ended without a finish reason"}`,
+   and one that breaks with
+   `error: {"code": "server_error", "message": "the generation stream ended unexpectedly"}`.
 
 ## Errors
 
 A chat error returned before the stream opens is returned as it is: the same
 status, `Retry-After` and `x-sie-error-code` headers, and OpenAI error body.
-The only change is the tool-name param described above.
+The only change is the `param` when it names a chat field, which is renamed to
+the Responses field the caller sent; the message keeps the chat route's
+wording.
+
+| Chat `param` | Responses `param` |
+|---|---|
+| `tools[i].function.<path>` | `tools[i].<path>` |
+| `max_completion_tokens` | `max_output_tokens` |
+| `reasoning_effort` | `reasoning.effort` |
+| `response_format` | `text.format` |
+| `response_format.json_schema.<path>` | `text.format.<path>` |
+
+Every other param, for example `messages[i].content[j].image_url`, is returned
+unchanged.
 
 ## Codex CLI requests
 

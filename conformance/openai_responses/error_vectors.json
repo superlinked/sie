@@ -1,5 +1,5 @@
 {
-  "description": "A chat error answer returned before the stream opens (status, headers, JSON body) and the answer the Responses route gives: the same status, Retry-After and x-sie-error-code, and the same OpenAI error body, except that a tool-name param is renamed to the Responses tool. Headers not listed under expect.headers are not asserted.",
+  "description": "A chat error answer returned before the stream opens (status, headers, JSON body) and the answer the Responses route gives: the same status, Retry-After and x-sie-error-code, and the same OpenAI error body, except that a param naming a chat field is renamed to the Responses field. Headers not listed under expect.headers are not asserted.",
   "errors": [
     {
       "name": "capacity is a 503 with Retry-After and x-sie-error-code",
@@ -132,6 +132,144 @@
         "status": 500,
         "body": {
           "error": {"message": "internal error during generation", "type": "server_error", "param": null, "code": "inference_error", "attempt_id": "a1"}
+        }
+      }
+    },
+    {
+      "name": "output cap names max_output_tokens",
+      "status": 400,
+      "body": {
+        "error": {
+          "message": "max_completion_tokens (40000) exceeds model max_output_tokens (32768)",
+          "type": "invalid_request_error",
+          "param": "max_completion_tokens",
+          "code": "invalid_request"
+        }
+      },
+      "expect": {
+        "status": 400,
+        "body": {
+          "error": {
+            "message": "max_completion_tokens (40000) exceeds model max_output_tokens (32768)",
+            "type": "invalid_request_error",
+            "param": "max_output_tokens",
+            "code": "invalid_request"
+          }
+        }
+      }
+    },
+    {
+      "name": "reasoning effort refusal names reasoning.effort",
+      "status": 400,
+      "body": {
+        "error": {
+          "message": "Model 'm' does not support reasoning_effort",
+          "type": "invalid_request_error",
+          "param": "reasoning_effort",
+          "code": "unsupported_field"
+        }
+      },
+      "expect": {
+        "status": 400,
+        "body": {
+          "error": {
+            "message": "Model 'm' does not support reasoning_effort",
+            "type": "invalid_request_error",
+            "param": "reasoning.effort",
+            "code": "unsupported_field"
+          }
+        }
+      }
+    },
+    {
+      "name": "structured output refusal names text.format",
+      "status": 400,
+      "body": {
+        "error": {
+          "message": "Model 'm' does not support response_format",
+          "type": "invalid_request_error",
+          "param": "response_format",
+          "code": "unsupported_field"
+        }
+      },
+      "expect": {
+        "status": 400,
+        "body": {
+          "error": {
+            "message": "Model 'm' does not support response_format",
+            "type": "invalid_request_error",
+            "param": "text.format",
+            "code": "unsupported_field"
+          }
+        }
+      }
+    },
+    {
+      "name": "json_schema field names text.format",
+      "status": 400,
+      "body": {
+        "error": {
+          "message": "'response_format.json_schema.schema' is required",
+          "type": "invalid_request_error",
+          "param": "response_format.json_schema.schema",
+          "code": "invalid_request"
+        }
+      },
+      "expect": {
+        "status": 400,
+        "body": {
+          "error": {
+            "message": "'response_format.json_schema.schema' is required",
+            "type": "invalid_request_error",
+            "param": "text.format.schema",
+            "code": "invalid_request"
+          }
+        }
+      }
+    },
+    {
+      "name": "tool parameter schema path names the Responses tool",
+      "status": 400,
+      "body": {
+        "error": {
+          "message": "tools[0].function.parameters: unresolved internal '$ref' \"#/$defs/Missing\"",
+          "type": "invalid_request_error",
+          "param": "tools[0].function.parameters.properties.a.$ref",
+          "code": "invalid_request"
+        }
+      },
+      "expect": {
+        "status": 400,
+        "body": {
+          "error": {
+            "message": "tools[0].function.parameters: unresolved internal '$ref' \"#/$defs/Missing\"",
+            "type": "invalid_request_error",
+            "param": "tools[0].parameters.properties.a.$ref",
+            "code": "invalid_request"
+          }
+        }
+      }
+    },
+    {
+      "name": "a messages param passes unchanged",
+      "status": 400,
+      "body": {
+        "error": {
+          "message": "messages[3].content[0]: image data URI must be base64-encoded",
+          "type": "invalid_request_error",
+          "param": "messages[3].content[0].image_url",
+          "code": "invalid_request"
+        }
+      },
+      "expect": {
+        "status": 400,
+        "body": {
+          "error": {
+            "message": "messages[3].content[0]: image data URI must be base64-encoded",
+            "type": "invalid_request_error",
+            "param": "messages[3].content[0].image_url",
+            "code": "invalid_request"
+          }
         }
       }
     }

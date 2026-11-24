@@ -1675,6 +1675,1282 @@
           }
         }
       ]
+    },
+    {
+      "name": "text after a tool call opens a new message item",
+      "request_id": "r",
+      "model": "m",
+      "request": {
+        "model": "m",
+        "input": "List the files.",
+        "stream": true,
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "cmd": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "cmd"
+              ]
+            }
+          }
+        ]
+      },
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "role": "assistant",
+                "content": "Listing."
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                      "name": "exec_command",
+                      "arguments": "{\"cmd\":\"ls\"}"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "Waiting for "
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "the output."
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "tool_calls"
+            }
+          ]
+        },
+        {
+          "choices": [],
+          "usage": {
+            "prompt_tokens": 40,
+            "completion_tokens": 12,
+            "total_tokens": 52
+          }
+        },
+        "[DONE]"
+      ],
+      "events": [
+        {
+          "event": "response.created",
+          "data": {
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "in_progress",
+              "incomplete_details": null,
+              "error": null,
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [],
+              "usage": null
+            }
+          }
+        },
+        {
+          "event": "response.in_progress",
+          "data": {
+            "type": "response.in_progress",
+            "sequence_number": 1,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "in_progress",
+              "incomplete_details": null,
+              "error": null,
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [],
+              "usage": null
+            }
+          }
+        },
+        {
+          "event": "response.output_item.added",
+          "data": {
+            "type": "response.output_item.added",
+            "sequence_number": 2,
+            "output_index": 0,
+            "item": {
+              "type": "message",
+              "id": "msg-r",
+              "role": "assistant",
+              "status": "in_progress",
+              "content": []
+            }
+          }
+        },
+        {
+          "event": "response.content_part.added",
+          "data": {
+            "type": "response.content_part.added",
+            "sequence_number": 3,
+            "item_id": "msg-r",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {
+              "type": "output_text",
+              "text": "",
+              "annotations": []
+            }
+          }
+        },
+        {
+          "event": "response.output_text.delta",
+          "data": {
+            "type": "response.output_text.delta",
+            "sequence_number": 4,
+            "item_id": "msg-r",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Listing."
+          }
+        },
+        {
+          "event": "response.output_text.done",
+          "data": {
+            "type": "response.output_text.done",
+            "sequence_number": 5,
+            "item_id": "msg-r",
+            "output_index": 0,
+            "content_index": 0,
+            "text": "Listing."
+          }
+        },
+        {
+          "event": "response.content_part.done",
+          "data": {
+            "type": "response.content_part.done",
+            "sequence_number": 6,
+            "item_id": "msg-r",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {
+              "type": "output_text",
+              "text": "Listing.",
+              "annotations": []
+            }
+          }
+        },
+        {
+          "event": "response.output_item.done",
+          "data": {
+            "type": "response.output_item.done",
+            "sequence_number": 7,
+            "output_index": 0,
+            "item": {
+              "type": "message",
+              "id": "msg-r",
+              "role": "assistant",
+              "status": "completed",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "Listing.",
+                  "annotations": []
+                }
+              ]
+            }
+          }
+        },
+        {
+          "event": "response.output_item.added",
+          "data": {
+            "type": "response.output_item.added",
+            "sequence_number": 8,
+            "output_index": 1,
+            "item": {
+              "type": "function_call",
+              "id": "fc-r-0",
+              "call_id": "call_1",
+              "name": "exec_command",
+              "arguments": "",
+              "status": "in_progress"
+            }
+          }
+        },
+        {
+          "event": "response.function_call_arguments.delta",
+          "data": {
+            "type": "response.function_call_arguments.delta",
+            "sequence_number": 9,
+            "item_id": "fc-r-0",
+            "output_index": 1,
+            "delta": "{\"cmd\":\"ls\"}"
+          }
+        },
+        {
+          "event": "response.function_call_arguments.done",
+          "data": {
+            "type": "response.function_call_arguments.done",
+            "sequence_number": 10,
+            "item_id": "fc-r-0",
+            "output_index": 1,
+            "arguments": "{\"cmd\":\"ls\"}"
+          }
+        },
+        {
+          "event": "response.output_item.done",
+          "data": {
+            "type": "response.output_item.done",
+            "sequence_number": 11,
+            "output_index": 1,
+            "item": {
+              "type": "function_call",
+              "id": "fc-r-0",
+              "call_id": "call_1",
+              "name": "exec_command",
+              "arguments": "{\"cmd\":\"ls\"}",
+              "status": "completed"
+            }
+          }
+        },
+        {
+          "event": "response.output_item.added",
+          "data": {
+            "type": "response.output_item.added",
+            "sequence_number": 12,
+            "output_index": 2,
+            "item": {
+              "type": "message",
+              "id": "msg-r-2",
+              "role": "assistant",
+              "status": "in_progress",
+              "content": []
+            }
+          }
+        },
+        {
+          "event": "response.content_part.added",
+          "data": {
+            "type": "response.content_part.added",
+            "sequence_number": 13,
+            "item_id": "msg-r-2",
+            "output_index": 2,
+            "content_index": 0,
+            "part": {
+              "type": "output_text",
+              "text": "",
+              "annotations": []
+            }
+          }
+        },
+        {
+          "event": "response.output_text.delta",
+          "data": {
+            "type": "response.output_text.delta",
+            "sequence_number": 14,
+            "item_id": "msg-r-2",
+            "output_index": 2,
+            "content_index": 0,
+            "delta": "Waiting for "
+          }
+        },
+        {
+          "event": "response.output_text.delta",
+          "data": {
+            "type": "response.output_text.delta",
+            "sequence_number": 15,
+            "item_id": "msg-r-2",
+            "output_index": 2,
+            "content_index": 0,
+            "delta": "the output."
+          }
+        },
+        {
+          "event": "response.output_text.done",
+          "data": {
+            "type": "response.output_text.done",
+            "sequence_number": 16,
+            "item_id": "msg-r-2",
+            "output_index": 2,
+            "content_index": 0,
+            "text": "Waiting for the output."
+          }
+        },
+        {
+          "event": "response.content_part.done",
+          "data": {
+            "type": "response.content_part.done",
+            "sequence_number": 17,
+            "item_id": "msg-r-2",
+            "output_index": 2,
+            "content_index": 0,
+            "part": {
+              "type": "output_text",
+              "text": "Waiting for the output.",
+              "annotations": []
+            }
+          }
+        },
+        {
+          "event": "response.output_item.done",
+          "data": {
+            "type": "response.output_item.done",
+            "sequence_number": 18,
+            "output_index": 2,
+            "item": {
+              "type": "message",
+              "id": "msg-r-2",
+              "role": "assistant",
+              "status": "completed",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "Waiting for the output.",
+                  "annotations": []
+                }
+              ]
+            }
+          }
+        },
+        {
+          "event": "response.completed",
+          "data": {
+            "type": "response.completed",
+            "sequence_number": 19,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "completed",
+              "incomplete_details": null,
+              "error": null,
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [
+                {
+                  "type": "message",
+                  "id": "msg-r",
+                  "role": "assistant",
+                  "status": "completed",
+                  "content": [
+                    {
+                      "type": "output_text",
+                      "text": "Listing.",
+                      "annotations": []
+                    }
+                  ]
+                },
+                {
+                  "type": "function_call",
+                  "id": "fc-r-0",
+                  "call_id": "call_1",
+                  "name": "exec_command",
+                  "arguments": "{\"cmd\":\"ls\"}",
+                  "status": "completed"
+                },
+                {
+                  "type": "message",
+                  "id": "msg-r-2",
+                  "role": "assistant",
+                  "status": "completed",
+                  "content": [
+                    {
+                      "type": "output_text",
+                      "text": "Waiting for the output.",
+                      "annotations": []
+                    }
+                  ]
+                }
+              ],
+              "usage": {
+                "input_tokens": 40,
+                "input_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "output_tokens": 12,
+                "output_tokens_details": {
+                  "reasoning_tokens": 0
+                },
+                "total_tokens": 52
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "a tool call completed before an error frame stays in the failed response",
+      "request_id": "r",
+      "model": "m",
+      "request": {
+        "model": "m",
+        "input": "Run both.",
+        "stream": true,
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "cmd": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "cmd"
+              ]
+            }
+          }
+        ]
+      },
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                      "name": "exec_command",
+                      "arguments": "{\"cmd\":\"echo one\"}"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 1,
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {
+                      "name": "exec_command",
+                      "arguments": "{\"cmd\""
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": null
+            }
+          ],
+          "error": {
+            "message": "Generation aborted: inter_chunk timeout",
+            "type": "server_error",
+            "param": null,
+            "code": "inter_chunk_timeout"
+          }
+        },
+        "[DONE]"
+      ],
+      "events": [
+        {
+          "event": "response.created",
+          "data": {
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "in_progress",
+              "incomplete_details": null,
+              "error": null,
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [],
+              "usage": null
+            }
+          }
+        },
+        {
+          "event": "response.in_progress",
+          "data": {
+            "type": "response.in_progress",
+            "sequence_number": 1,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "in_progress",
+              "incomplete_details": null,
+              "error": null,
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [],
+              "usage": null
+            }
+          }
+        },
+        {
+          "event": "response.output_item.added",
+          "data": {
+            "type": "response.output_item.added",
+            "sequence_number": 2,
+            "output_index": 0,
+            "item": {
+              "type": "function_call",
+              "id": "fc-r-0",
+              "call_id": "call_1",
+              "name": "exec_command",
+              "arguments": "",
+              "status": "in_progress"
+            }
+          }
+        },
+        {
+          "event": "response.function_call_arguments.delta",
+          "data": {
+            "type": "response.function_call_arguments.delta",
+            "sequence_number": 3,
+            "item_id": "fc-r-0",
+            "output_index": 0,
+            "delta": "{\"cmd\":\"echo one\"}"
+          }
+        },
+        {
+          "event": "response.function_call_arguments.done",
+          "data": {
+            "type": "response.function_call_arguments.done",
+            "sequence_number": 4,
+            "item_id": "fc-r-0",
+            "output_index": 0,
+            "arguments": "{\"cmd\":\"echo one\"}"
+          }
+        },
+        {
+          "event": "response.output_item.done",
+          "data": {
+            "type": "response.output_item.done",
+            "sequence_number": 5,
+            "output_index": 0,
+            "item": {
+              "type": "function_call",
+              "id": "fc-r-0",
+              "call_id": "call_1",
+              "name": "exec_command",
+              "arguments": "{\"cmd\":\"echo one\"}",
+              "status": "completed"
+            }
+          }
+        },
+        {
+          "event": "response.output_item.added",
+          "data": {
+            "type": "response.output_item.added",
+            "sequence_number": 6,
+            "output_index": 1,
+            "item": {
+              "type": "function_call",
+              "id": "fc-r-1",
+              "call_id": "call_2",
+              "name": "exec_command",
+              "arguments": "",
+              "status": "in_progress"
+            }
+          }
+        },
+        {
+          "event": "response.function_call_arguments.delta",
+          "data": {
+            "type": "response.function_call_arguments.delta",
+            "sequence_number": 7,
+            "item_id": "fc-r-1",
+            "output_index": 1,
+            "delta": "{\"cmd\""
+          }
+        },
+        {
+          "event": "response.failed",
+          "data": {
+            "type": "response.failed",
+            "sequence_number": 8,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "failed",
+              "incomplete_details": null,
+              "error": {
+                "code": "inter_chunk_timeout",
+                "message": "Generation aborted: inter_chunk timeout"
+              },
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [
+                {
+                  "type": "function_call",
+                  "id": "fc-r-0",
+                  "call_id": "call_1",
+                  "name": "exec_command",
+                  "arguments": "{\"cmd\":\"echo one\"}",
+                  "status": "completed"
+                }
+              ],
+              "usage": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "a stream that ends with neither a finish reason nor [DONE] fails",
+      "request_id": "r",
+      "model": "m",
+      "request": {
+        "model": "m",
+        "input": "Hi",
+        "stream": true
+      },
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "role": "assistant",
+                "content": "par"
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "tial"
+              },
+              "finish_reason": null
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "event": "response.created",
+          "data": {
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "in_progress",
+              "incomplete_details": null,
+              "error": null,
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [],
+              "usage": null
+            }
+          }
+        },
+        {
+          "event": "response.in_progress",
+          "data": {
+            "type": "response.in_progress",
+            "sequence_number": 1,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "in_progress",
+              "incomplete_details": null,
+              "error": null,
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [],
+              "usage": null
+            }
+          }
+        },
+        {
+          "event": "response.output_item.added",
+          "data": {
+            "type": "response.output_item.added",
+            "sequence_number": 2,
+            "output_index": 0,
+            "item": {
+              "type": "message",
+              "id": "msg-r",
+              "role": "assistant",
+              "status": "in_progress",
+              "content": []
+            }
+          }
+        },
+        {
+          "event": "response.content_part.added",
+          "data": {
+            "type": "response.content_part.added",
+            "sequence_number": 3,
+            "item_id": "msg-r",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {
+              "type": "output_text",
+              "text": "",
+              "annotations": []
+            }
+          }
+        },
+        {
+          "event": "response.output_text.delta",
+          "data": {
+            "type": "response.output_text.delta",
+            "sequence_number": 4,
+            "item_id": "msg-r",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "par"
+          }
+        },
+        {
+          "event": "response.output_text.delta",
+          "data": {
+            "type": "response.output_text.delta",
+            "sequence_number": 5,
+            "item_id": "msg-r",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "tial"
+          }
+        },
+        {
+          "event": "response.failed",
+          "data": {
+            "type": "response.failed",
+            "sequence_number": 6,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "failed",
+              "incomplete_details": null,
+              "error": {
+                "code": "server_error",
+                "message": "the generation stream ended without a finish reason"
+              },
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [],
+              "usage": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "a stream that ends after a finish without [DONE] completes",
+      "request_id": "r",
+      "model": "m",
+      "request": {
+        "model": "m",
+        "input": "Hi",
+        "stream": true
+      },
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "Hello."
+              },
+              "finish_reason": "stop"
+            }
+          ]
+        },
+        {
+          "choices": [],
+          "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 2,
+            "total_tokens": 12
+          }
+        }
+      ],
+      "events": [
+        {
+          "event": "response.created",
+          "data": {
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "in_progress",
+              "incomplete_details": null,
+              "error": null,
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [],
+              "usage": null
+            }
+          }
+        },
+        {
+          "event": "response.in_progress",
+          "data": {
+            "type": "response.in_progress",
+            "sequence_number": 1,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "in_progress",
+              "incomplete_details": null,
+              "error": null,
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [],
+              "usage": null
+            }
+          }
+        },
+        {
+          "event": "response.output_item.added",
+          "data": {
+            "type": "response.output_item.added",
+            "sequence_number": 2,
+            "output_index": 0,
+            "item": {
+              "type": "message",
+              "id": "msg-r",
+              "role": "assistant",
+              "status": "in_progress",
+              "content": []
+            }
+          }
+        },
+        {
+          "event": "response.content_part.added",
+          "data": {
+            "type": "response.content_part.added",
+            "sequence_number": 3,
+            "item_id": "msg-r",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {
+              "type": "output_text",
+              "text": "",
+              "annotations": []
+            }
+          }
+        },
+        {
+          "event": "response.output_text.delta",
+          "data": {
+            "type": "response.output_text.delta",
+            "sequence_number": 4,
+            "item_id": "msg-r",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Hello."
+          }
+        },
+        {
+          "event": "response.output_text.done",
+          "data": {
+            "type": "response.output_text.done",
+            "sequence_number": 5,
+            "item_id": "msg-r",
+            "output_index": 0,
+            "content_index": 0,
+            "text": "Hello."
+          }
+        },
+        {
+          "event": "response.content_part.done",
+          "data": {
+            "type": "response.content_part.done",
+            "sequence_number": 6,
+            "item_id": "msg-r",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {
+              "type": "output_text",
+              "text": "Hello.",
+              "annotations": []
+            }
+          }
+        },
+        {
+          "event": "response.output_item.done",
+          "data": {
+            "type": "response.output_item.done",
+            "sequence_number": 7,
+            "output_index": 0,
+            "item": {
+              "type": "message",
+              "id": "msg-r",
+              "role": "assistant",
+              "status": "completed",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "Hello.",
+                  "annotations": []
+                }
+              ]
+            }
+          }
+        },
+        {
+          "event": "response.completed",
+          "data": {
+            "type": "response.completed",
+            "sequence_number": 8,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "completed",
+              "incomplete_details": null,
+              "error": null,
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [
+                {
+                  "type": "message",
+                  "id": "msg-r",
+                  "role": "assistant",
+                  "status": "completed",
+                  "content": [
+                    {
+                      "type": "output_text",
+                      "text": "Hello.",
+                      "annotations": []
+                    }
+                  ]
+                }
+              ],
+              "usage": {
+                "input_tokens": 10,
+                "input_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "output_tokens": 2,
+                "output_tokens_details": {
+                  "reasoning_tokens": 0
+                },
+                "total_tokens": 12
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "a finish reason other than length and content_filter completes",
+      "request_id": "r",
+      "model": "m",
+      "request": {
+        "model": "m",
+        "input": "Hi",
+        "stream": true
+      },
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "Hello."
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "function_call"
+            }
+          ]
+        },
+        {
+          "choices": [],
+          "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 2,
+            "total_tokens": 12
+          }
+        },
+        "[DONE]"
+      ],
+      "events": [
+        {
+          "event": "response.created",
+          "data": {
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "in_progress",
+              "incomplete_details": null,
+              "error": null,
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [],
+              "usage": null
+            }
+          }
+        },
+        {
+          "event": "response.in_progress",
+          "data": {
+            "type": "response.in_progress",
+            "sequence_number": 1,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "in_progress",
+              "incomplete_details": null,
+              "error": null,
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [],
+              "usage": null
+            }
+          }
+        },
+        {
+          "event": "response.output_item.added",
+          "data": {
+            "type": "response.output_item.added",
+            "sequence_number": 2,
+            "output_index": 0,
+            "item": {
+              "type": "message",
+              "id": "msg-r",
+              "role": "assistant",
+              "status": "in_progress",
+              "content": []
+            }
+          }
+        },
+        {
+          "event": "response.content_part.added",
+          "data": {
+            "type": "response.content_part.added",
+            "sequence_number": 3,
+            "item_id": "msg-r",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {
+              "type": "output_text",
+              "text": "",
+              "annotations": []
+            }
+          }
+        },
+        {
+          "event": "response.output_text.delta",
+          "data": {
+            "type": "response.output_text.delta",
+            "sequence_number": 4,
+            "item_id": "msg-r",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Hello."
+          }
+        },
+        {
+          "event": "response.output_text.done",
+          "data": {
+            "type": "response.output_text.done",
+            "sequence_number": 5,
+            "item_id": "msg-r",
+            "output_index": 0,
+            "content_index": 0,
+            "text": "Hello."
+          }
+        },
+        {
+          "event": "response.content_part.done",
+          "data": {
+            "type": "response.content_part.done",
+            "sequence_number": 6,
+            "item_id": "msg-r",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {
+              "type": "output_text",
+              "text": "Hello.",
+              "annotations": []
+            }
+          }
+        },
+        {
+          "event": "response.output_item.done",
+          "data": {
+            "type": "response.output_item.done",
+            "sequence_number": 7,
+            "output_index": 0,
+            "item": {
+              "type": "message",
+              "id": "msg-r",
+              "role": "assistant",
+              "status": "completed",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "Hello.",
+                  "annotations": []
+                }
+              ]
+            }
+          }
+        },
+        {
+          "event": "response.completed",
+          "data": {
+            "type": "response.completed",
+            "sequence_number": 8,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "completed",
+              "incomplete_details": null,
+              "error": null,
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [
+                {
+                  "type": "message",
+                  "id": "msg-r",
+                  "role": "assistant",
+                  "status": "completed",
+                  "content": [
+                    {
+                      "type": "output_text",
+                      "text": "Hello.",
+                      "annotations": []
+                    }
+                  ]
+                }
+              ],
+              "usage": {
+                "input_tokens": 10,
+                "input_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "output_tokens": 2,
+                "output_tokens_details": {
+                  "reasoning_tokens": 0
+                },
+                "total_tokens": 12
+              }
+            }
+          }
+        }
+      ]
     }
   ]
 }
