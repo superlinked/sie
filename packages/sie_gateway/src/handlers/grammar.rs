@@ -482,6 +482,11 @@ fn dereference_schema_refs_inner(
 
     match v {
         Value::Object(map) => {
+            // Definitions are dropped below once their references are
+            // inlined, so their shape is checked here, before they go.
+            if context == SchemaContext::Schema {
+                check_definitions_shape(map, path)?;
+            }
             if context == SchemaContext::Schema && map.contains_key("$ref") {
                 let ref_param = format!("{path}.$ref");
                 let (ref_str, target) = resolve_internal_ref(
@@ -591,6 +596,39 @@ fn dereference_schema_refs_inner(
     }
 }
 
+/// ``$defs`` / ``definitions`` must map names to schemas.
+fn check_definitions_shape(
+    map: &serde_json::Map<String, Value>,
+    path: &str,
+) -> Result<(), SchemaRejection> {
+    for kw in ["$defs", "definitions"] {
+        if let Some(v) = map.get(kw).filter(|v| !v.is_null()) {
+            if !v.is_object() {
+                return Err(invalid_schema(
+                    format!(
+                        "'{kw}' must be an object mapping names to schemas, got {}",
+                        json_kind(v)
+                    ),
+                    &format!("{path}.{kw}"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// An array where a single schema belongs is never a schema. The caller
+/// excludes the tuple form of ``items`` and the members of definition maps.
+fn reject_array_schema(v: &Value, path: &str) -> Result<(), SchemaRejection> {
+    if v.is_array() {
+        return Err(invalid_schema(
+            "a JSON Schema must be an object or a boolean".to_string(),
+            path,
+        ));
+    }
+    Ok(())
+}
+
 fn schema_child_context(parent: SchemaContext, key: &str) -> SchemaContext {
     match parent {
         SchemaContext::Schema => match key {
@@ -624,6 +662,7 @@ fn schema_child_context(parent: SchemaContext, key: &str) -> SchemaContext {
 /// With ``refs_root``, every ``$ref`` must resolve inside it (see
 /// :func:`resolve_internal_ref`); refs are checked, not followed.
 fn walk_schema(v: &Value, path: &str, refs_root: Option<&Value>) -> Result<(), SchemaRejection> {
+    reject_array_schema(v, path)?;
     let mut visited: usize = 0;
     walk_schema_inner(
         v,
@@ -699,6 +738,25 @@ fn walk_schema_inner(
                     depth
                 };
                 let child_context = schema_child_context(context, k);
+                if context == SchemaContext::Schema {
+                    // ``items`` also takes the tuple form, an array of schemas.
+                    if child_context == SchemaContext::Schema && k != "items" {
+                        reject_array_schema(child, &child_path)?;
+                    }
+                    // Members of a property map are schemas. Definition maps
+                    // are left alone: a ``$ref`` may point into an array held
+                    // there, and that is reported as a reference error.
+                    if matches!(
+                        k.as_str(),
+                        "properties" | "patternProperties" | "dependentSchemas"
+                    ) {
+                        if let Some(members) = child.as_object() {
+                            for (name, member) in members {
+                                reject_array_schema(member, &format!("{child_path}.{name}"))?;
+                            }
+                        }
+                    }
+                }
                 walk_schema_inner(
                     child,
                     &child_path,
@@ -719,6 +777,9 @@ fn walk_schema_inner(
                 };
             for (i, child) in arr.iter().enumerate() {
                 let child_path = format!("{path}[{i}]");
+                if child_context == SchemaContext::Schema {
+                    reject_array_schema(child, &child_path)?;
+                }
                 walk_schema_inner(
                     child,
                     &child_path,
@@ -1896,6 +1957,41 @@ mod tests {
                 "a JSON Schema must be an object or a boolean",
             ),
             (
+                json!({"type": "object", "$defs": 7}),
+                "p.$defs",
+                "'$defs' must be an object mapping names to schemas",
+            ),
+            (
+                json!({"type": "object", "definitions": ["a"]}),
+                "p.definitions",
+                "'definitions' must be an object mapping names to schemas",
+            ),
+            (
+                json!([]),
+                "p",
+                "a JSON Schema must be an object or a boolean",
+            ),
+            (
+                json!({"type": "object", "properties": {"a": []}}),
+                "p.properties.a",
+                "a JSON Schema must be an object or a boolean",
+            ),
+            (
+                json!({"allOf": [[]]}),
+                "p.allOf[0]",
+                "a JSON Schema must be an object or a boolean",
+            ),
+            (
+                json!({"not": [{"type": "string"}]}),
+                "p.not",
+                "a JSON Schema must be an object or a boolean",
+            ),
+            (
+                json!({"type": "array", "items": [[{"type": "string"}]]}),
+                "p.items[0]",
+                "a JSON Schema must be an object or a boolean",
+            ),
+            (
                 json!({"type": "object", "properties": {"a": {"$ref": "#/$defs/A"}}, "$defs": {"A": {"type": "strin"}}}),
                 "p.$defs.A.type",
                 "'type' \"strin\" is not a JSON Schema type",
@@ -1926,6 +2022,8 @@ mod tests {
             // ``null`` keyword values read as absent.
             json!({"type": "object", "properties": {"a": {"type": "string"}}, "required": null, "items": null}),
             json!({"type": "string", "format": "custom", "description": "d", "examples": ["x"], "const": "x"}),
+            // A definition may hold an array that a ``$ref`` indexes into.
+            json!({"type": "object", "$defs": {"variants": [{"type": "string"}, {"type": "integer"}]}, "properties": {"a": {"$ref": "#/$defs/variants/1"}}}),
         ]
     }
 
