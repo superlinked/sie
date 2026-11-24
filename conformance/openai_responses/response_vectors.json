@@ -1,0 +1,626 @@
+{
+  "translated": [
+    {
+      "name": "text",
+      "model": "m",
+      "request_id": "r1",
+      "request": {"model": "m", "input": "Hi"},
+      "chat": {
+        "id": "chatcmpl-r1",
+        "object": "chat.completion",
+        "model": "m",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hello."}, "finish_reason": "stop", "logprobs": null}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}
+      },
+      "response": {
+        "id": "resp-r1",
+        "object": "response",
+        "created_at": 0,
+        "model": "m",
+        "status": "completed",
+        "incomplete_details": null,
+        "error": null,
+        "store": false,
+        "parallel_tool_calls": true,
+        "tool_choice": "auto",
+        "output": [
+          {
+            "type": "message",
+            "id": "msg-r1",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Hello.", "annotations": []}]
+          }
+        ],
+        "usage": {
+          "input_tokens": 10,
+          "input_tokens_details": {"cached_tokens": 0},
+          "output_tokens": 3,
+          "output_tokens_details": {"reasoning_tokens": 0},
+          "total_tokens": 13
+        }
+      }
+    },
+    {
+      "name": "text and parallel function calls",
+      "model": "m",
+      "request_id": "r2",
+      "request": {
+        "model": "m",
+        "input": "Run both.",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+          }
+        ],
+        "tool_choice": "auto",
+        "parallel_tool_calls": true
+      },
+      "chat": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "Running both.",
+              "tool_calls": [
+                {"id": "call_1", "type": "function", "function": {"name": "exec_command", "arguments": "{\"cmd\": \"echo one\"}"}},
+                {"id": "call_2", "type": "function", "function": {"name": "exec_command", "arguments": "{\"cmd\": \"echo two\"}"}}
+              ]
+            },
+            "finish_reason": "tool_calls"
+          }
+        ],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 12, "total_tokens": 32}
+      },
+      "response": {
+        "id": "resp-r2",
+        "object": "response",
+        "created_at": 0,
+        "model": "m",
+        "status": "completed",
+        "incomplete_details": null,
+        "error": null,
+        "store": false,
+        "parallel_tool_calls": true,
+        "tool_choice": "auto",
+        "output": [
+          {
+            "type": "message",
+            "id": "msg-r2",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Running both.", "annotations": []}]
+          },
+          {
+            "type": "function_call",
+            "id": "fc-r2-0",
+            "call_id": "call_1",
+            "name": "exec_command",
+            "arguments": "{\"cmd\": \"echo one\"}",
+            "status": "completed"
+          },
+          {
+            "type": "function_call",
+            "id": "fc-r2-1",
+            "call_id": "call_2",
+            "name": "exec_command",
+            "arguments": "{\"cmd\": \"echo two\"}",
+            "status": "completed"
+          }
+        ],
+        "usage": {
+          "input_tokens": 20,
+          "input_tokens_details": {"cached_tokens": 0},
+          "output_tokens": 12,
+          "output_tokens_details": {"reasoning_tokens": 0},
+          "total_tokens": 32
+        }
+      }
+    },
+    {
+      "name": "custom tool call",
+      "model": "m",
+      "request_id": "r3",
+      "request": {
+        "model": "m",
+        "input": "Add a line.",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+          },
+          {"type": "custom", "name": "apply_patch", "description": "Apply a patch to files."}
+        ]
+      },
+      "chat": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {
+                  "id": "call_p",
+                  "type": "function",
+                  "function": {"name": "apply_patch", "arguments": "{\"input\": \"*** Begin Patch\\n*** Update File: notes.txt\\n+café\\n*** End Patch\\n\"}"}
+                }
+              ]
+            },
+            "finish_reason": "tool_calls"
+          }
+        ],
+        "usage": {"prompt_tokens": 30, "completion_tokens": 25, "total_tokens": 55}
+      },
+      "response": {
+        "id": "resp-r3",
+        "object": "response",
+        "created_at": 0,
+        "model": "m",
+        "status": "completed",
+        "incomplete_details": null,
+        "error": null,
+        "store": false,
+        "parallel_tool_calls": true,
+        "tool_choice": "auto",
+        "output": [
+          {
+            "type": "custom_tool_call",
+            "id": "ctc-r3-0",
+            "call_id": "call_p",
+            "name": "apply_patch",
+            "input": "*** Begin Patch\n*** Update File: notes.txt\n+café\n*** End Patch\n",
+            "status": "completed"
+          }
+        ],
+        "usage": {
+          "input_tokens": 30,
+          "input_tokens_details": {"cached_tokens": 0},
+          "output_tokens": 25,
+          "output_tokens_details": {"reasoning_tokens": 0},
+          "total_tokens": 55
+        }
+      }
+    },
+    {
+      "name": "custom tool call whose arguments are not JSON keeps them as the input",
+      "model": "m",
+      "request_id": "r4",
+      "request": {"model": "m", "input": "Add a line.", "tools": [{"type": "custom", "name": "apply_patch", "description": "Apply a patch to files."}]},
+      "chat": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [{"id": "call_p", "type": "function", "function": {"name": "apply_patch", "arguments": "*** Begin Patch\n*** End Patch\n"}}]
+            },
+            "finish_reason": "tool_calls"
+          }
+        ],
+        "usage": {"prompt_tokens": 30, "completion_tokens": 9, "total_tokens": 39}
+      },
+      "response": {
+        "id": "resp-r4",
+        "object": "response",
+        "created_at": 0,
+        "model": "m",
+        "status": "completed",
+        "incomplete_details": null,
+        "error": null,
+        "store": false,
+        "parallel_tool_calls": true,
+        "tool_choice": "auto",
+        "output": [
+          {
+            "type": "custom_tool_call",
+            "id": "ctc-r4-0",
+            "call_id": "call_p",
+            "name": "apply_patch",
+            "input": "*** Begin Patch\n*** End Patch\n",
+            "status": "completed"
+          }
+        ],
+        "usage": {
+          "input_tokens": 30,
+          "input_tokens_details": {"cached_tokens": 0},
+          "output_tokens": 9,
+          "output_tokens_details": {"reasoning_tokens": 0},
+          "total_tokens": 39
+        }
+      }
+    },
+    {
+      "name": "calls are numbered by position, a custom call without a string input keeps its arguments",
+      "model": "m",
+      "request_id": "r5",
+      "request": {
+        "model": "m",
+        "input": "Do three things.",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+          },
+          {"type": "custom", "name": "apply_patch", "description": "Apply a patch to files."}
+        ]
+      },
+      "chat": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [
+                {"id": "call_a", "type": "function", "function": {"name": "apply_patch", "arguments": "{\"input\":\"*** Begin Patch\\n*** End Patch\\n\"}"}},
+                {"id": "call_b", "type": "function", "function": {"name": "exec_command", "arguments": "{\"cmd\":\"ls\"}"}},
+                {"id": "call_c", "type": "function", "function": {"name": "apply_patch", "arguments": "{\"patch\":\"x\"}"}}
+              ]
+            },
+            "finish_reason": "tool_calls"
+          }
+        ],
+        "usage": {"prompt_tokens": 40, "completion_tokens": 30, "total_tokens": 70}
+      },
+      "response": {
+        "id": "resp-r5",
+        "object": "response",
+        "created_at": 0,
+        "model": "m",
+        "status": "completed",
+        "incomplete_details": null,
+        "error": null,
+        "store": false,
+        "parallel_tool_calls": true,
+        "tool_choice": "auto",
+        "output": [
+          {
+            "type": "custom_tool_call",
+            "id": "ctc-r5-0",
+            "call_id": "call_a",
+            "name": "apply_patch",
+            "input": "*** Begin Patch\n*** End Patch\n",
+            "status": "completed"
+          },
+          {"type": "function_call", "id": "fc-r5-1", "call_id": "call_b", "name": "exec_command", "arguments": "{\"cmd\":\"ls\"}", "status": "completed"},
+          {"type": "custom_tool_call", "id": "ctc-r5-2", "call_id": "call_c", "name": "apply_patch", "input": "{\"patch\":\"x\"}", "status": "completed"}
+        ],
+        "usage": {
+          "input_tokens": 40,
+          "input_tokens_details": {"cached_tokens": 0},
+          "output_tokens": 30,
+          "output_tokens_details": {"reasoning_tokens": 0},
+          "total_tokens": 70
+        }
+      }
+    },
+    {
+      "name": "length is incomplete with reason max_output_tokens",
+      "model": "m",
+      "request_id": "r6",
+      "request": {"model": "m", "input": "Write a long story.", "max_output_tokens": 16},
+      "chat": {
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "Once upon a time"}, "finish_reason": "length"}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 16, "total_tokens": 21}
+      },
+      "response": {
+        "id": "resp-r6",
+        "object": "response",
+        "created_at": 0,
+        "model": "m",
+        "status": "incomplete",
+        "incomplete_details": {"reason": "max_output_tokens"},
+        "error": null,
+        "store": false,
+        "parallel_tool_calls": true,
+        "tool_choice": "auto",
+        "output": [
+          {
+            "type": "message",
+            "id": "msg-r6",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Once upon a time", "annotations": []}]
+          }
+        ],
+        "usage": {
+          "input_tokens": 5,
+          "input_tokens_details": {"cached_tokens": 0},
+          "output_tokens": 16,
+          "output_tokens_details": {"reasoning_tokens": 0},
+          "total_tokens": 21
+        }
+      }
+    },
+    {
+      "name": "content_filter is incomplete with reason content_filter, empty content has no message item",
+      "model": "m",
+      "request_id": "r7",
+      "request": {"model": "m", "input": "x"},
+      "chat": {
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": "content_filter"}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 0, "total_tokens": 5}
+      },
+      "response": {
+        "id": "resp-r7",
+        "object": "response",
+        "created_at": 0,
+        "model": "m",
+        "status": "incomplete",
+        "incomplete_details": {"reason": "content_filter"},
+        "error": null,
+        "store": false,
+        "parallel_tool_calls": true,
+        "tool_choice": "auto",
+        "output": [],
+        "usage": {
+          "input_tokens": 5,
+          "input_tokens_details": {"cached_tokens": 0},
+          "output_tokens": 0,
+          "output_tokens_details": {"reasoning_tokens": 0},
+          "total_tokens": 5
+        }
+      }
+    },
+    {
+      "name": "cached and reasoning tokens",
+      "model": "org/model:profile",
+      "request_id": "r8",
+      "request": {"model": "org/model:profile", "input": "Think.", "reasoning": {"effort": "high"}},
+      "chat": {
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "42"}, "finish_reason": "stop"}],
+        "usage": {
+          "prompt_tokens": 100,
+          "completion_tokens": 30,
+          "total_tokens": 130,
+          "prompt_tokens_details": {"cached_tokens": 60},
+          "completion_tokens_details": {"reasoning_tokens": 20}
+        }
+      },
+      "response": {
+        "id": "resp-r8",
+        "object": "response",
+        "created_at": 0,
+        "model": "org/model:profile",
+        "status": "completed",
+        "incomplete_details": null,
+        "error": null,
+        "store": false,
+        "parallel_tool_calls": true,
+        "tool_choice": "auto",
+        "output": [
+          {
+            "type": "message",
+            "id": "msg-r8",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "42", "annotations": []}]
+          }
+        ],
+        "usage": {
+          "input_tokens": 100,
+          "input_tokens_details": {"cached_tokens": 60},
+          "output_tokens": 30,
+          "output_tokens_details": {"reasoning_tokens": 20},
+          "total_tokens": 130
+        }
+      }
+    },
+    {
+      "name": "null content with only a tool call, request tool_choice and parallel_tool_calls are echoed",
+      "model": "m",
+      "request_id": "r9",
+      "request": {
+        "model": "m",
+        "input": "Run ls.",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+          }
+        ],
+        "tool_choice": {"type": "function", "name": "exec_command"},
+        "parallel_tool_calls": false
+      },
+      "chat": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": null,
+              "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "exec_command", "arguments": "{\"cmd\":\"ls\"}"}}]
+            },
+            "finish_reason": "tool_calls"
+          }
+        ],
+        "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}
+      },
+      "response": {
+        "id": "resp-r9",
+        "object": "response",
+        "created_at": 0,
+        "model": "m",
+        "status": "completed",
+        "incomplete_details": null,
+        "error": null,
+        "store": false,
+        "parallel_tool_calls": false,
+        "tool_choice": {"type": "function", "name": "exec_command"},
+        "output": [
+          {"type": "function_call", "id": "fc-r9-0", "call_id": "call_1", "name": "exec_command", "arguments": "{\"cmd\":\"ls\"}", "status": "completed"}
+        ],
+        "usage": {
+          "input_tokens": 12,
+          "input_tokens_details": {"cached_tokens": 0},
+          "output_tokens": 8,
+          "output_tokens_details": {"reasoning_tokens": 0},
+          "total_tokens": 20
+        }
+      }
+    },
+    {
+      "name": "empty content with only a tool call",
+      "model": "m",
+      "request_id": "r10",
+      "request": {
+        "model": "m",
+        "input": "Run ls.",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+          }
+        ]
+      },
+      "chat": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "",
+              "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "exec_command", "arguments": "{\"cmd\":\"ls\"}"}}]
+            },
+            "finish_reason": "tool_calls"
+          }
+        ],
+        "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}
+      },
+      "response": {
+        "id": "resp-r10",
+        "object": "response",
+        "created_at": 0,
+        "model": "m",
+        "status": "completed",
+        "incomplete_details": null,
+        "error": null,
+        "store": false,
+        "parallel_tool_calls": true,
+        "tool_choice": "auto",
+        "output": [
+          {"type": "function_call", "id": "fc-r10-0", "call_id": "call_1", "name": "exec_command", "arguments": "{\"cmd\":\"ls\"}", "status": "completed"}
+        ],
+        "usage": {
+          "input_tokens": 12,
+          "input_tokens_details": {"cached_tokens": 0},
+          "output_tokens": 8,
+          "output_tokens_details": {"reasoning_tokens": 0},
+          "total_tokens": 20
+        }
+      }
+    },
+    {
+      "name": "whitespace-only content is non-empty and stays a message item",
+      "model": "m",
+      "request_id": "r11",
+      "request": {
+        "model": "m",
+        "input": "Run ls.",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+          }
+        ]
+      },
+      "chat": {
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "\n\n",
+              "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "exec_command", "arguments": "{\"cmd\":\"ls\"}"}}]
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {"prompt_tokens": 12, "completion_tokens": 9, "total_tokens": 21}
+      },
+      "response": {
+        "id": "resp-r11",
+        "object": "response",
+        "created_at": 0,
+        "model": "m",
+        "status": "completed",
+        "incomplete_details": null,
+        "error": null,
+        "store": false,
+        "parallel_tool_calls": true,
+        "tool_choice": "auto",
+        "output": [
+          {
+            "type": "message",
+            "id": "msg-r11",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "\n\n", "annotations": []}]
+          },
+          {"type": "function_call", "id": "fc-r11-0", "call_id": "call_1", "name": "exec_command", "arguments": "{\"cmd\":\"ls\"}", "status": "completed"}
+        ],
+        "usage": {
+          "input_tokens": 12,
+          "input_tokens_details": {"cached_tokens": 0},
+          "output_tokens": 9,
+          "output_tokens_details": {"reasoning_tokens": 0},
+          "total_tokens": 21
+        }
+      }
+    },
+    {
+      "name": "a finish reason other than length and content_filter completes",
+      "model": "m",
+      "request_id": "r12",
+      "request": {"model": "m", "input": "Hi"},
+      "chat": {
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hello."}, "finish_reason": "function_call"}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}
+      },
+      "response": {
+        "id": "resp-r12",
+        "object": "response",
+        "created_at": 0,
+        "model": "m",
+        "status": "completed",
+        "incomplete_details": null,
+        "error": null,
+        "store": false,
+        "parallel_tool_calls": true,
+        "tool_choice": "auto",
+        "output": [
+          {
+            "type": "message",
+            "id": "msg-r12",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Hello.", "annotations": []}]
+          }
+        ],
+        "usage": {
+          "input_tokens": 10,
+          "input_tokens_details": {"cached_tokens": 0},
+          "output_tokens": 3,
+          "output_tokens_details": {"reasoning_tokens": 0},
+          "total_tokens": 13
+        }
+      }
+    }
+  ]
+}
