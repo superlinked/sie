@@ -352,6 +352,17 @@ async fn error_vectors_keep_the_chat_error_with_the_responses_param() {
                 "{name}: {header}"
             );
         }
+        for header in expect
+            .get("absent_headers")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            assert!(
+                translated.headers().get(header.as_str().unwrap()).is_none(),
+                "{name}: {header}"
+            );
+        }
         assert_eq!(json_body(translated).await, expect["body"], "{name}");
     }
 }
