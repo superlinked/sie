@@ -2,7 +2,35 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use utoipa::openapi::schema::{ArrayBuilder, ObjectBuilder, OneOfBuilder, Schema, Type};
+use utoipa::openapi::RefOr;
 use utoipa::ToSchema;
+
+fn input_schema() -> RefOr<Schema> {
+    OneOfBuilder::new()
+        .description(Some(
+            "A string, sent as one user message, or a non-empty list of items: messages \
+             (`role` `user`, `assistant`, `system` or `developer`, with string content or \
+             `input_text`, `output_text` and `text` parts, and base64 `data:` `input_image` \
+             parts in user messages), `function_call`, `custom_tool_call`, their `*_output` \
+             items, and `reasoning` items, which do not reach the model. Item `id` and \
+             `status` are ignored. Other item and part types are refused.",
+        ))
+        .item(ObjectBuilder::new().schema_type(Type::String))
+        .item(
+            ArrayBuilder::new()
+                .items(ObjectBuilder::new().schema_type(Type::Object))
+                .min_items(Some(1)),
+        )
+        .into()
+}
+
+fn null_only() -> RefOr<Schema> {
+    ObjectBuilder::new()
+        .schema_type(Type::Null)
+        .description(Some("Accepted only `null`: responses are not stored."))
+        .into()
+}
 
 /// OpenAI Responses request, as accepted by ``POST /v1/responses``.
 ///
@@ -30,14 +58,7 @@ pub struct ResponsesRequest {
     /// ``model:profile``, or an operator alias).
     #[schema(min_length = 1)]
     pub model: String,
-    /// A string, sent as one user message, or a non-empty list of items:
-    /// messages (``role`` ``user``, ``assistant``, ``system`` or
-    /// ``developer``, with string content or ``input_text``,
-    /// ``output_text`` and ``text`` parts, and base64 ``data:``
-    /// ``input_image`` parts in user messages), ``function_call``,
-    /// ``custom_tool_call``, their ``*_output`` items, and ``reasoning``
-    /// items, which do not reach the model. Item ``id`` and ``status`` are
-    /// ignored. Other item and part types are refused.
+    #[schema(schema_with = input_schema)]
     pub input: Value,
     /// Prepended to the leading ``system`` and ``developer`` messages as
     /// one system message.
@@ -117,10 +138,17 @@ pub struct ResponsesRequest {
     /// Accepted and ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_metadata: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(schema_with = null_only)]
+    pub previous_response_id: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(schema_with = null_only)]
+    pub conversation: Option<Value>,
 }
 
 /// Token usage of a Response, from the chat route's usage.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ResponsesUsage {
     pub input_tokens: u64,
     /// ``cached_tokens``: prompt tokens served from the prefix cache.
@@ -134,6 +162,7 @@ pub struct ResponsesUsage {
 
 /// Response answered by ``POST /v1/responses`` without ``stream``.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ResponsesResponse {
     /// ``resp-`` followed by the gateway request id.
     pub id: String,

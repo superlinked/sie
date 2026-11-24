@@ -389,6 +389,60 @@ async fn an_inner_error_keeps_its_response_extensions() {
     );
 }
 
+#[tokio::test]
+async fn an_inner_error_body_that_cannot_be_rewritten_is_not_emptied() {
+    let oversized = json!({"error": {"message": "x".repeat(2 * 1024 * 1024), "param": "max_completion_tokens"}}).to_string();
+    let mut response = Response::new(Body::from(oversized.clone()));
+    *response.status_mut() = StatusCode::FORBIDDEN;
+    let passed = responses_error_response(response).await;
+    assert_eq!(passed.status(), StatusCode::FORBIDDEN);
+    let bytes = to_bytes(passed.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(bytes, oversized.as_bytes());
+
+    let broken = futures_util::stream::iter([
+        Ok::<Bytes, std::io::Error>(Bytes::from_static(b"{\"error\":")),
+        Err(std::io::Error::other("reset")),
+    ]);
+    let mut response = Response::new(Body::from_stream(broken));
+    *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+    response
+        .headers_mut()
+        .insert("retry-after", HeaderValue::from_static("5"));
+    let unreadable = responses_error_response(response).await;
+    assert_eq!(unreadable.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(unreadable.headers()["retry-after"], "5");
+    assert_eq!(unreadable.headers()["content-type"], "application/json");
+    let body = json_body(unreadable).await;
+    assert_eq!(body["error"]["code"], "transport_failure");
+    assert_eq!(body["error"]["type"], "server_error");
+}
+
+#[tokio::test]
+async fn a_translation_fault_keeps_the_serving_headers() {
+    let mut answer = Response::new(Body::from("not json"));
+    answer
+        .headers_mut()
+        .insert("x-sie-request-id", HeaderValue::from_static("request-9"));
+    answer
+        .headers_mut()
+        .insert("x-sie-served-by", HeaderValue::from_static("local"));
+    let fault = super::buffered_response(answer, &plain_shell()).await;
+    assert_eq!(fault.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(fault.headers()["x-sie-request-id"], "request-9");
+    assert_eq!(fault.headers()["x-sie-served-by"], "local");
+    assert_eq!(
+        fault
+            .extensions()
+            .get::<crate::http_error::GatewayOwnedFault>()
+            .map(|fault| fault.stage),
+        Some("translate_chat_response")
+    );
+    assert_eq!(
+        json_body(fault).await["error"]["message"],
+        "the chat completion is not valid JSON"
+    );
+}
+
 #[derive(Clone, Copy)]
 enum Step {
     Role,

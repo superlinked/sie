@@ -72,7 +72,10 @@ fn now() -> u64 {
         ("X-SIE-Pool" = Option<String>, Header, description = "Explicit pool routing override")
     ),
     responses(
-        (status = 200, description = "Response, or a text/event-stream of Responses events when stream is true", body = crate::handlers::responses::schema::ResponsesResponse),
+        (status = 200, description = "Response, or a text/event-stream of Responses events when stream is true", content(
+            (crate::handlers::responses::schema::ResponsesResponse = "application/json"),
+            (String = "text/event-stream"),
+        )),
         (status = 400, description = "Invalid or unsupported request", body = crate::openapi::OpenAIErrorEnvelope),
         (status = 404, description = "Model not found", body = crate::openapi::OpenAIErrorEnvelope),
         (status = 413, description = "Request body is too large", body = crate::openapi::OpenAIErrorEnvelope),
@@ -136,33 +139,38 @@ pub async fn proxy_responses(State(state): State<Arc<AppState>>, request: Reques
     buffered_response(answer, &shell).await
 }
 
-fn translation_fault(stage: &'static str, message: &str) -> Response {
-    GatewayOwnedFault::new(stage).mark(ResponsesError::internal(message).into_response())
-}
-
 async fn buffered_response(answer: Response, shell: &ResponseShell) -> Response {
     let (parts, body) = answer.into_parts();
-    let bytes = match buffer_compat_response_body(body).await {
-        CompatResponseBody::Buffered(bytes) => bytes,
-        CompatResponseBody::TooLarge { .. } | CompatResponseBody::Unreadable => {
-            return translation_fault("read_chat_response", "failed to read the chat completion")
-        }
+    let translated = match buffer_compat_response_body(body).await {
+        CompatResponseBody::Buffered(bytes) => serde_json::from_slice::<Value>(&bytes)
+            .map_err(|_| "the chat completion is not valid JSON".to_string())
+            .and_then(|chat| chat_completion_to_response(&chat, shell))
+            .map_err(|reason| ("translate_chat_response", reason)),
+        CompatResponseBody::TooLarge { .. } | CompatResponseBody::Unreadable => Err((
+            "read_chat_response",
+            "failed to read the chat completion".to_string(),
+        )),
     };
-    let translated = serde_json::from_slice::<Value>(&bytes)
-        .map_err(|_| "the chat completion is not valid JSON".to_string())
-        .and_then(|chat| chat_completion_to_response(&chat, shell));
-    let translated = match translated {
-        Ok(translated) => translated,
-        Err(reason) => return translation_fault("translate_chat_response", &reason),
+    let (mut response, fault) = match translated {
+        Ok(translated) => (
+            (StatusCode::OK, axum::Json(translated)).into_response(),
+            None,
+        ),
+        Err((stage, reason)) => (
+            ResponsesError::internal(reason).into_response(),
+            Some(stage),
+        ),
     };
-    let mut response = (StatusCode::OK, axum::Json(translated)).into_response();
     for (name, value) in parts.headers.iter() {
         if is_openai_compat_forwarded_header(name.as_str()) {
             response.headers_mut().insert(name.clone(), value.clone());
         }
     }
     *response.extensions_mut() = parts.extensions;
-    response
+    match fault {
+        Some(stage) => GatewayOwnedFault::new(stage).mark(response),
+        None => response,
+    }
 }
 
 /// The `(model, WorkParams)` a `/v1/responses` body dispatches with: the

@@ -3718,13 +3718,21 @@ mod tests {
         assert_eq!(request["required"], json!(["model", "input"]));
         assert_eq!(request["properties"]["model"]["minLength"], 1);
         assert_eq!(request["properties"]["max_output_tokens"]["minimum"], 1);
-        for refused in [
-            "previous_response_id",
-            "conversation",
-            "prompt",
-            "stream_options",
-        ] {
+        let input = &request["properties"]["input"]["oneOf"];
+        assert_eq!(input[0]["type"], "string");
+        assert_eq!(input[1]["type"], "array");
+        assert_eq!(input[1]["minItems"], 1);
+        for stored in ["previous_response_id", "conversation"] {
+            assert_eq!(request["properties"][stored]["type"], "null", "{stored}");
+        }
+        for refused in ["prompt", "stream_options"] {
             assert!(request["properties"].get(refused).is_none(), "{refused}");
+        }
+        for closed in ["ResponsesResponse", "ResponsesUsage"] {
+            assert_eq!(
+                spec["components"]["schemas"][closed]["additionalProperties"], false,
+                "{closed}"
+            );
         }
 
         let operation = &spec["paths"]["/v1/responses"]["post"];
@@ -3735,6 +3743,10 @@ mod tests {
         assert_eq!(
             operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
             "#/components/schemas/ResponsesResponse"
+        );
+        assert_eq!(
+            operation["responses"]["200"]["content"]["text/event-stream"]["schema"]["type"],
+            "string"
         );
         for status in ["400", "404", "413", "503"] {
             assert_eq!(

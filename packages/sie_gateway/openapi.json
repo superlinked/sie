@@ -4278,6 +4278,10 @@
           "client_metadata": {
             "description": "Accepted and ignored."
           },
+          "conversation": {
+            "description": "Accepted only `null`: responses are not stored.",
+            "type": "null"
+          },
           "include": {
             "description": "Accepted only with ``reasoning.encrypted_content`` entries, which\nhave no effect.",
             "items": {
@@ -4289,7 +4293,19 @@
             ]
           },
           "input": {
-            "description": "A string, sent as one user message, or a non-empty list of items:\nmessages (``role`` ``user``, ``assistant``, ``system`` or\n``developer``, with string content or ``input_text``,\n``output_text`` and ``text`` parts, and base64 ``data:``\n``input_image`` parts in user messages), ``function_call``,\n``custom_tool_call``, their ``*_output`` items, and ``reasoning``\nitems, which do not reach the model. Item ``id`` and ``status`` are\nignored. Other item and part types are refused."
+            "description": "A string, sent as one user message, or a non-empty list of items: messages (`role` `user`, `assistant`, `system` or `developer`, with string content or `input_text`, `output_text` and `text` parts, and base64 `data:` `input_image` parts in user messages), `function_call`, `custom_tool_call`, their `*_output` items, and `reasoning` items, which do not reach the model. Item `id` and `status` are ignored. Other item and part types are refused.",
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "object"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            ]
           },
           "instructions": {
             "description": "Prepended to the leading ``system`` and ``developer`` messages as\none system message.",
@@ -4320,6 +4336,10 @@
               "boolean",
               "null"
             ]
+          },
+          "previous_response_id": {
+            "description": "Accepted only `null`: responses are not stored.",
+            "type": "null"
           },
           "prompt_cache_key": {
             "description": "Passed to the chat route.",
@@ -4414,6 +4434,7 @@
         "type": "object"
       },
       "ResponsesResponse": {
+        "additionalProperties": false,
         "description": "Response answered by ``POST /v1/responses`` without ``stream``.",
         "properties": {
           "created_at": {
@@ -4475,6 +4496,7 @@
         "type": "object"
       },
       "ResponsesUsage": {
+        "additionalProperties": false,
         "description": "Token usage of a Response, from the chat route's usage.",
         "properties": {
           "input_tokens": {
@@ -8913,6 +8935,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ResponsesResponse"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
                 }
               }
             },

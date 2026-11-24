@@ -6,9 +6,10 @@
 //! renamed from the chat field to the Responses field it was translated from.
 
 use axum::body::{to_bytes, Body};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use hyper::body::Body as _;
 use serde_json::Value;
 
 use crate::http_error::{json_openai_error, openai_code, openai_type};
@@ -113,10 +114,27 @@ pub(crate) fn responses_param(param: &str) -> String {
     param.to_string()
 }
 
-/// A non-2xx chat answer as `/v1/responses` returns it.
+/// A non-2xx chat answer as `/v1/responses` returns it. A body too large to
+/// rewrite passes through as it is.
 pub(crate) async fn responses_error_response(response: Response) -> Response {
     let (mut parts, body) = response.into_parts();
-    let bytes = to_bytes(body, MAX_ERROR_BODY).await.unwrap_or_default();
+    if body.size_hint().lower() > MAX_ERROR_BODY as u64 {
+        return Response::from_parts(parts, body);
+    }
+    parts.headers.remove(header::CONTENT_LENGTH);
+    let Ok(bytes) = to_bytes(body, MAX_ERROR_BODY).await else {
+        parts.headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        let unreadable = json_openai_error(
+            "the chat route's error answer could not be read",
+            openai_type::SERVER_ERROR,
+            None,
+            openai_code::TRANSPORT_FAILURE,
+        );
+        return Response::from_parts(parts, Body::from(unreadable.to_string()));
+    };
     let renamed = serde_json::from_slice::<Value>(&bytes)
         .ok()
         .and_then(|mut answer| {
@@ -129,7 +147,6 @@ pub(crate) async fn responses_error_response(response: Response) -> Response {
             *param = Value::String(renamed);
             serde_json::to_vec(&answer).ok()
         });
-    parts.headers.remove(header::CONTENT_LENGTH);
     let body = match renamed {
         Some(renamed) => Body::from(renamed),
         None => Body::from(bytes),
