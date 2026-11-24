@@ -48,11 +48,19 @@ source recipes/cluster.sh
 Codex's first request is about 35 KB of JSON, most of it Codex's developer
 instructions and four tool schemas, and every later request repeats it.
 
-The conformance check, from this directory:
+The conformance check, from this directory, on the model the cloud recipe
+configures:
 
 ```sh
 uv run --project ../coding-agent-opencode python ../coding-agent-opencode/conformance.py \
-    --api responses --base-url "$SIE_BASE_URL/v1" --model "${SIE_MODEL:-zai-org/GLM-5.3-Flash:relay}"
+    --api responses --base-url "$SIE_BASE_URL/v1" --model zai-org/GLM-5.3-Flash:relay
+```
+
+On your gateway, on the model the cluster recipe configures:
+
+```sh
+uv run --project ../coding-agent-opencode python ../coding-agent-opencode/conformance.py \
+    --api responses --base-url "$SIE_BASE_URL/v1" --model "$SIE_MODEL"
 ```
 
 The seeded gate, which needs `npx` and `uv` on `PATH`:
