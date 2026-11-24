@@ -1587,8 +1587,9 @@ mod tests {
 
     use crate::handlers::proxy::{
         proxy_chat, proxy_completions, proxy_openai_embeddings, proxy_request, proxy_rerank,
-        proxy_rerank_v2, proxy_responses,
+        proxy_rerank_v2,
     };
+    use crate::handlers::responses::proxy_responses;
     use crate::handlers::test_support::{
         Dispatched, TestGateway, HYBRID_ENCODE_MODEL, HYBRID_EXTRACT_MODEL, HYBRID_GENERATE_MODEL,
         LOCAL_ENCODE_MODEL, LOCAL_LANE, REMOTE_ENCODE_MODEL, REMOTE_LANE,

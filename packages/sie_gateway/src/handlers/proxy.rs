@@ -45,11 +45,16 @@ use crate::types::AuditEntry;
 
 use crate::middleware::auth::request_token_id;
 
-use super::model_suggestions::{not_found_hint, unknown_model_message, NotFoundHint};
+use super::model_suggestions::{
+    not_found_hint, unknown_model_extra, unknown_model_message, NotFoundHint,
+};
 use super::serving_disclosure::{
     remote_forbidden, DeferredFallbackFinish, FallbackAttempt, ServingDisclosure,
     UnansweredBeforeDeadline,
 };
+
+#[allow(unused_imports)]
+pub use crate::handlers::responses::responses_dispatch_inputs;
 
 const GATEWAY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -1554,16 +1559,37 @@ pub async fn proxy_generate(state: State<Arc<AppState>>, req: Request) -> impl I
 /// every call site, so it depends only on what the caller sent, the operator's
 /// retired-model map, and what the caller may list, and the three responses
 /// stay identical.
+///
+/// Both envelopes carry the "Did you mean" ids as `suggestions` beside the
+/// message (see [`unknown_model_extra`]); the field is absent when there are
+/// none.
 fn unknown_model_response(endpoint: &str, requested: &str, hint: &NotFoundHint) -> Response {
-    endpoint_error_response(
-        endpoint,
-        StatusCode::NOT_FOUND,
-        err_code::MODEL_NOT_FOUND,
-        oai_type::MODEL_NOT_FOUND,
-        oai_code::MODEL_NOT_FOUND,
-        Some("model"),
+    let body = if endpoint_uses_openai_envelope(endpoint) {
+        unknown_model_openai_body(requested, hint)
+    } else {
+        json_detail_merge(
+            err_code::MODEL_NOT_FOUND,
+            unknown_model_message(requested, hint),
+            unknown_model_extra(hint),
+        )
+    };
+    (StatusCode::NOT_FOUND, Json(body)).into_response()
+}
+
+/// The OpenAI-envelope `MODEL_NOT_FOUND` body for `requested`, shared by
+/// [`unknown_model_response`] and the body-model routes in
+/// [`resolve_model_and_bundle`] so every OpenAI-shaped 404 stays identical.
+fn unknown_model_openai_body(requested: &str, hint: &NotFoundHint) -> Value {
+    let mut body = json_openai_error(
         unknown_model_message(requested, hint),
-    )
+        oai_type::MODEL_NOT_FOUND,
+        Some("model"),
+        oai_code::MODEL_NOT_FOUND,
+    );
+    if let Some(error) = body.get_mut("error").and_then(Value::as_object_mut) {
+        error.extend(unknown_model_extra(hint));
+    }
+    body
 }
 
 /// Is this id absent from a registry that has models?
@@ -5780,8 +5806,9 @@ pub(crate) async fn run_streaming_generate(
     //   first_chunk : 30s   (cold-start, grammar compile, queue depth)
     //   inter_chunk : 10s   (gap between chunks after streaming starts)
     //   overall     : max_new_tokens/10 + 30, capped at 5 min
-    // Env overrides keep tuning ops-friendly. Per ADR-0003 the
-    // profile/runtime overall_timeout_s is the sole authority for
+    // Env overrides keep tuning ops-friendly. The overall timeout that
+    // `generation_timeout_config` resolves (env override, request option,
+    // profile runtime, default) is the sole authority for
     // generation; the legacy `SIE_GATEWAY_REQUEST_TIMEOUT` ceiling is
     // *not* applied here (it would collapse a 300s profile overall to
     // the default 30s and make the first-chunk policy unreachable).
@@ -8287,6 +8314,20 @@ fn validate_chat_tool_choice(v: &serde_json::Value) -> Result<serde_json::Value,
     Ok(v.clone())
 }
 
+/// Every ``response_format.type`` [`translate_response_format`] accepts, in
+/// the order its refusals list them. Keep in step with its match arms.
+const RESPONSE_FORMAT_TYPES: &[&str] = &["json_schema", "json_object", "regex", "grammar"];
+
+/// [`RESPONSE_FORMAT_TYPES`] as the refusal message lists them:
+/// ``"json_schema", "json_object", "regex", "grammar"``.
+fn supported_response_format_types() -> String {
+    RESPONSE_FORMAT_TYPES
+        .iter()
+        .map(|t| format!("{t:?}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Translate the OpenAI ``response_format`` field into a
 /// :class:`GrammarSpec`. Returns ``Ok(None)`` only for the (unusual)
 /// case of an explicit JSON ``null``; otherwise the function either
@@ -8411,14 +8452,20 @@ fn translate_response_format(
         }
         "" => {
             return Err(bad(
-                "'response_format.type' is required".to_string(),
+                format!(
+                    "'response_format.type' is required; supported types: {}",
+                    supported_response_format_types()
+                ),
                 "response_format.type",
                 oai_code::INVALID_REQUEST,
             ));
         }
         other => {
             return Err(bad(
-                format!("'response_format.type' = {other:?} is not supported"),
+                format!(
+                    "'response_format.type' = {other:?} is not supported; supported types: {}",
+                    supported_response_format_types()
+                ),
                 "response_format.type",
                 oai_code::UNSUPPORTED_FIELD,
             ));
@@ -8666,11 +8713,9 @@ pub(crate) fn resolve_model_and_bundle(
     {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(json_openai_error(
-                unknown_model_message(model_spec, &not_found_hint(state, ext, model_spec)),
-                oai_type::MODEL_NOT_FOUND,
-                Some("model"),
-                oai_code::MODEL_NOT_FOUND,
+            Json(unknown_model_openai_body(
+                model_spec,
+                &not_found_hint(state, ext, model_spec),
             )),
         )
             .into_response());
@@ -8734,13 +8779,11 @@ pub(crate) fn resolve_model_and_bundle(
     } else if state.model_registry.has_any_models() {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(json_openai_error(
-                // The caller's string, never the resolved one — see the
-                // visibility gate above (#2542).
-                unknown_model_message(model_spec, &not_found_hint(state, ext, model_spec)),
-                oai_type::MODEL_NOT_FOUND,
-                Some("model"),
-                oai_code::MODEL_NOT_FOUND,
+            // The caller's string, never the resolved one — see the
+            // visibility gate above (#2542).
+            Json(unknown_model_openai_body(
+                model_spec,
+                &not_found_hint(state, ext, model_spec),
             )),
         )
             .into_response());
@@ -10719,647 +10762,6 @@ async fn proxy_completions_inner(state: Arc<AppState>, req: Request) -> Response
     response
 }
 
-/// Parsed, validated `/v1/responses` (OpenAI Responses API) request. MVP scope:
-/// a single string `input` (raw prompt continuation), non-streaming.
-struct ResponsesParams {
-    model: String,
-    /// Either a raw string prompt or a list of role/content messages.
-    input: publisher::GenerateInput,
-    max_new_tokens: u32,
-    temperature: Option<f32>,
-    top_p: Option<f32>,
-    seed: Option<i64>,
-}
-
-impl ResponsesParams {
-    /// The EXACT `WorkParams` a validated `/v1/responses` body dispatches with.
-    /// Extracted (not copied) for the same reason as
-    /// [`ChatRequestParams::into_work_params`] — see #2435.
-    fn into_work_params(self) -> publisher::WorkParams {
-        publisher::WorkParams {
-            generate: Some(publisher::GenerateParams {
-                input: self.input,
-                max_new_tokens: self.max_new_tokens,
-                temperature: self.temperature,
-                top_p: self.top_p,
-                seed: self.seed,
-                ..Default::default()
-            }),
-            ..Default::default()
-        }
-    }
-}
-
-enum ResponsesParamsResult {
-    Ok(ResponsesParams),
-    Err(Response),
-}
-
-/// The `(model, WorkParams)` a `/v1/responses` body dispatches with. See
-/// [`chat_completions_dispatch_inputs`], including the `dead_code` note.
-#[allow(clippy::result_large_err, dead_code)]
-pub fn responses_dispatch_inputs(
-    body: &serde_json::Value,
-) -> Result<(String, publisher::WorkParams), Response> {
-    match responses_params_from_json(body) {
-        ResponsesParamsResult::Ok(params) => {
-            let model = params.model.clone();
-            Ok((model, params.into_work_params()))
-        }
-        ResponsesParamsResult::Err(response) => Err(response),
-    }
-}
-
-/// Parse + validate a `/v1/responses` body. MVP: a string `input` or a
-/// list of role/content messages, non-streaming. Out of scope per
-/// ADR-0001: tools, stateful threading (`previous_response_id`), reasoning,
-/// background, metadata, instructions, multimodal content parts.
-///
-/// Validation is strict (H2 hardening): unrecognized top-level fields,
-/// known-out-of-scope fields, missing roles, non-text content parts,
-/// and present-but-wrong-type sampler / token-cap values all surface as
-/// 400 rather than being silently coerced or dropped.
-fn responses_params_from_json(body: &serde_json::Value) -> ResponsesParamsResult {
-    let bad = |msg: &str, param: Option<&str>, code: &'static str| {
-        ResponsesParamsResult::Err(
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json_openai_error(
-                    msg.to_string(),
-                    oai_type::INVALID_REQUEST,
-                    param,
-                    code,
-                )),
-            )
-                .into_response(),
-        )
-    };
-    let Some(obj) = body.as_object() else {
-        return bad(
-            "request body must be a JSON object",
-            None,
-            oai_code::INVALID_REQUEST,
-        );
-    };
-
-    // -- explicit reject-list: known-out-of-scope Responses fields. ADR-0001
-    //    scopes the Responses MVP to a stateless, single-turn, text-only
-    //    surface. Anything else surfaces as ``unsupported_field`` so SDKs
-    //    that target the wider OpenAI Responses spec fail loudly rather
-    //    than silently losing context.
-    for &fname in &[
-        "previous_response_id",
-        "tools",
-        "tool_choice",
-        "reasoning",
-        "background",
-        "metadata",
-        "instructions",
-    ] {
-        if obj.contains_key(fname) {
-            return bad(
-                &format!("'{fname}' is not supported by this endpoint"),
-                Some(fname),
-                oai_code::UNSUPPORTED_FIELD,
-            );
-        }
-    }
-
-    let model = match obj.get("model").and_then(|v| v.as_str()) {
-        Some(m) if !m.is_empty() => m.to_string(),
-        _ => {
-            return bad(
-                "field \"model\" is required",
-                Some("model"),
-                oai_code::INVALID_REQUEST,
-            )
-        }
-    };
-
-    // The stateless Responses MVP accepts ordinary text messages only.
-    // Tool outputs require the wider Responses item/tool contract, which is
-    // explicitly out of scope here. ``developer`` normalizes to ``system``.
-    const ALLOWED_ROLES: &[&str] = &["system", "user", "assistant", "developer"];
-
-    let input = match obj.get("input") {
-        Some(serde_json::Value::String(s)) => {
-            publisher::GenerateInput::Prompt { prompt: s.clone() }
-        }
-        // Responses array input: a list of {role, content} items. content
-        // is a string or a list of text parts; non-text parts reject.
-        Some(serde_json::Value::Array(items)) => {
-            if items.is_empty() {
-                return bad(
-                    "'input' array must not be empty",
-                    Some("input"),
-                    oai_code::INVALID_REQUEST,
-                );
-            }
-            let mut messages: Vec<publisher::ChatMessage> = Vec::with_capacity(items.len());
-            for (i, item) in items.iter().enumerate() {
-                let Some(o) = item.as_object() else {
-                    return bad(
-                        &format!("input[{i}] must be an object"),
-                        Some("input"),
-                        oai_code::INVALID_REQUEST,
-                    );
-                };
-                for key in o.keys() {
-                    if !matches!(key.as_str(), "role" | "content") {
-                        let param = format!("input[{i}].{key}");
-                        return bad(
-                            &format!("'{param}' is not supported by this endpoint"),
-                            Some(&param),
-                            oai_code::UNSUPPORTED_FIELD,
-                        );
-                    }
-                }
-                let role = match o.get("role").and_then(|v| v.as_str()) {
-                    Some("developer") => "system".to_string(),
-                    Some(r) if ALLOWED_ROLES.contains(&r) => r.to_string(),
-                    Some(other) => {
-                        return bad(
-                            &format!(
-                                "input[{i}].role must be one of {ALLOWED_ROLES:?}, got {other:?}"
-                            ),
-                            Some(&format!("input[{i}].role")),
-                            oai_code::INVALID_REQUEST,
-                        );
-                    }
-                    None => {
-                        return bad(
-                            &format!("input[{i}].role is required and must be a string"),
-                            Some(&format!("input[{i}].role")),
-                            oai_code::INVALID_REQUEST,
-                        );
-                    }
-                };
-                let content = match o.get("content") {
-                    Some(serde_json::Value::String(s)) => s.clone(),
-                    Some(serde_json::Value::Array(parts)) => {
-                        // Strict validation: each part must be a text part
-                        // with a string ``text`` field. Non-text parts
-                        // (image_url / input_image / etc.) reject;
-                        // missing-or-non-string ``text`` rejects.
-                        let mut text = String::new();
-                        for (j, p) in parts.iter().enumerate() {
-                            let Some(part_obj) = p.as_object() else {
-                                return bad(
-                                    &format!("input[{i}].content[{j}] must be an object"),
-                                    Some(&format!("input[{i}].content[{j}]")),
-                                    oai_code::INVALID_REQUEST,
-                                );
-                            };
-                            for key in part_obj.keys() {
-                                if !matches!(key.as_str(), "type" | "text") {
-                                    let param = format!("input[{i}].content[{j}].{key}");
-                                    return bad(
-                                        &format!("'{param}' is not supported by this endpoint"),
-                                        Some(&param),
-                                        oai_code::UNSUPPORTED_FIELD,
-                                    );
-                                }
-                            }
-                            let ptype = match part_obj.get("type").and_then(|v| v.as_str()) {
-                                Some(t) => t,
-                                None => {
-                                    return bad(
-                                        &format!(
-                                            "input[{i}].content[{j}].type is required and must be a string"
-                                        ),
-                                        Some(&format!("input[{i}].content[{j}].type")),
-                                        oai_code::INVALID_REQUEST,
-                                    );
-                                }
-                            };
-                            if !matches!(ptype, "text" | "input_text" | "output_text") {
-                                return bad(
-                                    &format!(
-                                        "input[{i}].content[{j}]: unsupported content part type '{ptype}'"
-                                    ),
-                                    Some(&format!("input[{i}].content[{j}].type")),
-                                    oai_code::UNSUPPORTED_FIELD,
-                                );
-                            }
-                            match part_obj.get("text") {
-                                Some(serde_json::Value::String(t)) => text.push_str(t),
-                                Some(_) => {
-                                    return bad(
-                                        &format!("input[{i}].content[{j}].text must be a string"),
-                                        Some(&format!("input[{i}].content[{j}].text")),
-                                        oai_code::INVALID_REQUEST,
-                                    );
-                                }
-                                None => {
-                                    return bad(
-                                        &format!(
-                                            "input[{i}].content[{j}].text is required for text content parts"
-                                        ),
-                                        Some(&format!("input[{i}].content[{j}].text")),
-                                        oai_code::INVALID_REQUEST,
-                                    );
-                                }
-                            }
-                        }
-                        text
-                    }
-                    _ => {
-                        return bad(
-                            &format!("input[{i}].content must be a string or text parts"),
-                            Some(&format!("input[{i}].content")),
-                            oai_code::INVALID_REQUEST,
-                        );
-                    }
-                };
-                messages.push(publisher::ChatMessage {
-                    role,
-                    content,
-                    tool_calls: None,
-                    tool_call_id: None,
-                    // Responses-API path is text-only for now; vision arrives
-                    // via /v1/chat/completions (the cut-your-bill skill surface).
-                    images: None,
-                    content_parts: None,
-                    videos: None,
-                });
-            }
-            publisher::GenerateInput::Messages { messages }
-        }
-        _ => {
-            return bad(
-                "field \"input\" is required (a string or a list of messages)",
-                Some("input"),
-                oai_code::INVALID_REQUEST,
-            );
-        }
-    };
-
-    // ``stream`` must be a boolean when present. ``true`` is rejected
-    // (streaming responses unimplemented); non-bool values reject as
-    // a type error rather than silently coercing.
-    match obj.get("stream") {
-        None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(false)) => {}
-        Some(serde_json::Value::Bool(true)) => {
-            return bad(
-                "streaming is not yet supported on /v1/responses; use stream:false",
-                Some("stream"),
-                oai_code::UNSUPPORTED_FIELD,
-            );
-        }
-        Some(_) => {
-            return bad(
-                "'stream' must be a boolean",
-                Some("stream"),
-                oai_code::INVALID_REQUEST,
-            );
-        }
-    }
-
-    // Responses uses ``max_output_tokens``; default to 16 to mirror completions.
-    let max_new_tokens = match obj.get("max_output_tokens") {
-        None | Some(serde_json::Value::Null) => 16u32,
-        Some(v) => match v.as_u64() {
-            Some(n) if (1..=u32::MAX as u64).contains(&n) => n as u32,
-            _ => {
-                return bad(
-                    "'max_output_tokens' must be a positive integer",
-                    Some("max_output_tokens"),
-                    oai_code::INVALID_REQUEST,
-                )
-            }
-        },
-    };
-
-    // -- samplers: reject present-but-invalid values rather than silently
-    //    dropping them on the floor.
-    let temperature = match obj.get("temperature") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(v) => match v.as_f64() {
-            Some(f) if f.is_finite() && f >= 0.0 && f <= f32::MAX as f64 => Some(f as f32),
-            _ => {
-                return bad(
-                    "'temperature' must be a finite number >= 0",
-                    Some("temperature"),
-                    oai_code::INVALID_REQUEST,
-                );
-            }
-        },
-    };
-    let top_p = match obj.get("top_p") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(v) => match v.as_f64() {
-            Some(f) if f.is_finite() && f > 0.0 && f <= 1.0 => Some(f as f32),
-            _ => {
-                return bad(
-                    "'top_p' must be a number in (0, 1]",
-                    Some("top_p"),
-                    oai_code::INVALID_REQUEST,
-                );
-            }
-        },
-    };
-    let seed = match parse_seed_field(obj.get("seed")) {
-        Ok(seed) => seed,
-        Err(resp) => return ResponsesParamsResult::Err(resp),
-    };
-
-    // -- allow-list: anything else surfaces as ``unsupported_field``.
-    const ACCEPTED: &[&str] = &[
-        "model",
-        "input",
-        "max_output_tokens",
-        "temperature",
-        "top_p",
-        "seed",
-        "stream",
-    ];
-    for key in obj.keys() {
-        if !ACCEPTED.contains(&key.as_str()) {
-            return bad(
-                &format!("'{key}' is not supported by this endpoint"),
-                Some(key),
-                oai_code::UNSUPPORTED_FIELD,
-            );
-        }
-    }
-
-    ResponsesParamsResult::Ok(ResponsesParams {
-        model,
-        input,
-        max_new_tokens,
-        temperature,
-        top_p,
-        seed,
-    })
-}
-
-/// Responses-API usage block. `input_tokens_details.cached_tokens` appears
-/// only when the worker reported a prefix-cache count.
-fn responses_usage(usage: &crate::queue::streaming::UsageBlock) -> Value {
-    let mut body = json!({
-        "input_tokens": usage.prompt_tokens,
-        "output_tokens": usage.completion_tokens,
-        "total_tokens": usage.total_tokens,
-    });
-    if let Some(cached) = usage.cached_prompt_tokens() {
-        body["input_tokens_details"] = json!({ "cached_tokens": cached });
-    }
-    body
-}
-
-/// Build the OpenAI Responses `response` body from the aggregated outcome.
-#[allow(clippy::result_large_err)]
-fn build_responses_body(
-    model: &str,
-    request_id: &str,
-    outcome: &crate::queue::streaming::StreamOutcome,
-) -> Result<Vec<u8>, Response> {
-    let Some(usage) = outcome.usage.as_ref() else {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json_openai_error(
-                "worker terminal chunk omitted required 'usage' block",
-                oai_type::SERVER_ERROR,
-                None,
-                oai_code::MALFORMED_WORKER_RESPONSE,
-            )),
-        )
-            .into_response());
-    };
-    let created = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let body = json!({
-        "id": format!("resp-{}", request_id),
-        "object": "response",
-        "created_at": created,
-        "model": model,
-        "status": "completed",
-        "output": [{
-            "type": "message",
-            "id": format!("msg-{}", request_id),
-            "role": "assistant",
-            "status": "completed",
-            "content": [{
-                "type": "output_text",
-                "text": outcome.text,
-                "annotations": [],
-            }],
-        }],
-        "usage": responses_usage(usage),
-    });
-    Ok(serde_json::to_vec(&body).unwrap_or_default())
-}
-
-#[utoipa::path(
-    post,
-    path = "/v1/responses",
-    tag = "inference",
-    description = "OpenAI Responses API (MVP): string input, non-streaming.",
-    responses(
-        (status = 200, description = "Response object"),
-        (status = 400, description = "Invalid or unsupported request", body = crate::openapi::OpenAIErrorEnvelope),
-        (status = 404, description = "Model not found", body = crate::openapi::OpenAIErrorEnvelope),
-        (status = 413, description = "Request body is too large", body = crate::openapi::OpenAIErrorEnvelope),
-        (status = 500, description = "Worker emitted malformed response", body = crate::openapi::OpenAIErrorEnvelope),
-        (status = 503, description = "Provisioning in progress, queue unavailable, or model loading", body = crate::openapi::OpenAIErrorEnvelope),
-    )
-)]
-/// `/v1/responses` — OpenAI Responses API (MVP). String `input` → raw-prompt
-/// generation via the shared resolve+drive helpers; `response`-shaped body.
-pub async fn proxy_responses(State(state): State<Arc<AppState>>, mut req: Request) -> Response {
-    if let Some(response) = invalid_remote_header_response("generate", req.headers()) {
-        return response;
-    }
-    let disclosure = ServingDisclosure::install(&mut req);
-    let fallback = FallbackAttempt::install(&mut req);
-    let mut response = proxy_responses_inner(state, req).await;
-    disclosure.stamp(response.status(), response.headers_mut());
-    fallback.finish(response)
-}
-
-async fn proxy_responses_inner(state: Arc<AppState>, req: Request) -> Response {
-    check_sdk_version(req.headers());
-    let metric_labels_slot = req
-        .extensions()
-        .get::<telemetry::MetricLabelsSlot>()
-        .cloned();
-
-    let max_responses_body = compat_request_body_limit("/v1/responses");
-    let hdr = req.headers().clone();
-    let (parts, body) = req.into_parts(); // keep extensions (caller identity) for the #1841 gate
-    let body_bytes = match to_bytes(body, max_responses_body).await {
-        Ok(b) => b,
-        Err(e) => {
-            let (status, _, message) = request_body_error(&e, max_responses_body);
-            return (
-                status,
-                Json(json_openai_error(
-                    message,
-                    oai_type::INVALID_REQUEST,
-                    None,
-                    oai_code::INVALID_REQUEST,
-                )),
-            )
-                .into_response();
-        }
-    };
-    let body_json: serde_json::Value = match serde_json::from_slice(&body_bytes) {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json_openai_error(
-                    format!("invalid JSON: {e}"),
-                    oai_type::INVALID_REQUEST,
-                    None,
-                    oai_code::INVALID_REQUEST,
-                )),
-            )
-                .into_response();
-        }
-    };
-
-    let params = match responses_params_from_json(&body_json) {
-        ResponsesParamsResult::Ok(p) => p,
-        ResponsesParamsResult::Err(resp) => return resp,
-    };
-
-    let (model_name, bundle) =
-        match resolve_model_and_bundle(&state, &params.model, &parts.extensions) {
-            Ok(mb) => mb,
-            Err(resp) => return resp,
-        };
-    ServingDisclosure::record(&state, &parts.extensions, &model_name);
-    if let Some(response) =
-        unsupported_operation_response(&state, "chat", "generate", &model_name, &model_name)
-    {
-        return response;
-    }
-    let (explicit_bundle_override, _) =
-        resolve_model_spec_with_aliases(&state.config.model_aliases, &params.model, |model| {
-            state.model_registry.resolve_canonical_model_name(model)
-        });
-    let ResolvedRoute {
-        dispatch_model,
-        require_execution_authority_v1,
-        fallback_reason,
-        physical_lane,
-        bundle,
-        gpu,
-        engine,
-        admission_pool,
-        effective_pool,
-        effective_machine_profile,
-        bundle_config_hash,
-        model_revision,
-        work_publisher: work_publisher_arc,
-        token_id,
-        content_length,
-    } = match resolve_generation_route(
-        &state,
-        &hdr,
-        &bundle,
-        &params.model,
-        &model_name,
-        &model_name,
-        GenerationRequestIntent::Default,
-        &explicit_bundle_override,
-        &parts.extensions,
-        !native_request_has_profile_selector(&body_bytes, false),
-        (params.max_new_tokens, "max_output_tokens"),
-        metric_labels_slot.as_ref(),
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(resp) => return resp,
-    };
-    let start = Instant::now();
-
-    let requested_model = params.model.clone();
-    let mut work_params = params.into_work_params();
-    work_params.require_execution_authority_v1 = require_execution_authority_v1;
-    work_params.fallback_reason = fallback_reason;
-
-    let driver = run_streaming_generate(
-        &state,
-        work_publisher_arc,
-        &physical_lane,
-        &requested_model,
-        &model_name,
-        &dispatch_model,
-        &bundle,
-        &engine,
-        &effective_machine_profile,
-        &effective_pool,
-        &admission_pool,
-        &bundle_config_hash,
-        &work_params,
-        RouteKind::Compatibility,
-    )
-    .await;
-    let StreamingDriverOk {
-        outcome,
-        request_id,
-        publish_elapsed,
-        wait_elapsed,
-    } = match driver {
-        Ok(ok) => ok,
-        Err(err) => return build_streaming_error_response(&err),
-    };
-    let elapsed = start.elapsed();
-
-    let body_bytes = match build_responses_body(&model_name, &request_id, &outcome) {
-        Ok(b) => b,
-        Err(resp) => return resp,
-    };
-
-    state.registry.record_request("queue").await;
-    emit_audit_log(AuditEntry {
-        event: "proxy_request".to_string(),
-        method: "POST".to_string(),
-        endpoint: "responses".to_string(),
-        status: 200,
-        token_id,
-        model: model_name.clone(),
-        pool: effective_pool.clone(),
-        gpu: gpu.clone(),
-        worker: format!("queue:{request_id}"),
-        latency_ms: elapsed.as_millis() as u64,
-        body_bytes: content_length,
-    });
-
-    let mut response = Response::builder()
-        .status(StatusCode::OK)
-        .body(Body::from(body_bytes))
-        .unwrap();
-    let h = response.headers_mut();
-    h.insert(
-        HeaderName::from_static("content-type"),
-        HeaderValue::from_static("application/json"),
-    );
-    h.insert(
-        HeaderName::from_static("x-sie-version"),
-        HeaderValue::from_static(GATEWAY_VERSION),
-    );
-    insert_buffered_generation_model_revision_header(
-        h,
-        model_revision.as_deref(),
-        &bundle_config_hash,
-        &outcome,
-    );
-    insert_stream_execution_identity_header(h, &outcome);
-    insert_stream_execution_binding_header(h, &outcome);
-    if let Ok(val) = HeaderValue::from_str(&request_id) {
-        h.insert(HeaderName::from_static("x-sie-request-id"), val);
-    }
-    insert_duration_header(h, "x-queue-publish-time", publish_elapsed);
-    insert_duration_header(h, "x-queue-wait-time", wait_elapsed);
-    response
-}
-
 /// Read a duration-in-seconds env var, falling back to ``default``.
 /// Used by the streaming timeout taxonomy. Invalid values are silently
 /// treated as missing so a typo in an env var doesn't fail-closed.
@@ -11491,7 +10893,7 @@ pub fn generation_timeout_config(
     }
 }
 
-/// ADR-0003 invariant: `overall >= first_chunk`. If a misconfiguration
+/// Invariant: `overall >= first_chunk`. If a misconfiguration
 /// declares the inverse, the first-chunk policy would be dead code (the
 /// overall deadline would fire before first-chunk could). The
 /// pure-function shape keeps the runtime guard testable without
@@ -11515,7 +10917,7 @@ pub(crate) fn enforce_first_chunk_invariant(
             overall_s = overall,
             "generation timeout misconfigured: first_chunk > overall; clamping first_chunk \
              to overall. Adjust the profile or env override so overall_timeout_s >= \
-             first_chunk_timeout_s (ADR-0003)."
+             first_chunk_timeout_s."
         );
         (overall, overall)
     } else {
@@ -12115,7 +11517,7 @@ fn alias_model_target(target: &str, requested_profile: Option<&str>) -> String {
 /// target, else the `__`->`/` form, else verbatim). The addition: an alias
 /// *target* may be a full `bundle:/org/model` spec, so an operator can pin a
 /// precision/profile bundle for a job alias — e.g. map `sql` to a BF16 bundle
-/// that avoids the FP8 SQL-accuracy regression (ADR 0001). An explicit caller
+/// that avoids an FP8 accuracy regression on SQL. An explicit caller
 /// bundle (`somebundle:/sql`) always wins over the alias's bundle.
 /// `pub` because it is THE definition of "which model does this string denote"
 /// for this gateway, and two surfaces outside the route need that definition:
@@ -12489,7 +11891,25 @@ pub(crate) async fn translate_inner_compat_error(resp: Response) -> Response {
         .and_then(|m| m.as_str())
         .unwrap_or("internal server error")
         .to_string();
-    let mut out = (status, Json(embeddings_error(&sie_code, None, message))).into_response();
+    let mut body = embeddings_error(&sie_code, None, message);
+    // The inner `MODEL_NOT_FOUND` was built by this gateway for the same
+    // caller, so its `suggestions` are already limited to ids that caller may
+    // list. Carry them over; anything that is not a list of strings is dropped.
+    if sie_code == err_code::MODEL_NOT_FOUND {
+        let suggestions = parsed
+            .get("detail")
+            .or_else(|| parsed.get("error"))
+            .and_then(|d| d.get("suggestions"))
+            .and_then(Value::as_array)
+            .filter(|ids| !ids.is_empty() && ids.iter().all(Value::is_string));
+        if let (Some(ids), Some(error)) = (
+            suggestions,
+            body.get_mut("error").and_then(Value::as_object_mut),
+        ) {
+            error.insert("suggestions".to_string(), Value::Array(ids.clone()));
+        }
+    }
+    let mut out = (status, Json(body)).into_response();
     // Keep gateway-owned translation faults visible to metered compositions.
     *out.extensions_mut() = parts.extensions;
     for (k, v) in headers.iter() {
@@ -16563,6 +15983,7 @@ pub async fn proxy_moderations() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers::responses::proxy_responses;
     use crate::handlers::test_support::{
         TestGateway, HYBRID_GENERATE_MODEL, LOCAL_LANE, REMOTE_LANE,
     };
@@ -20596,6 +20017,109 @@ mod tests {
         let openai: serde_json::Value = serde_json::from_slice(&openai).expect("error JSON");
         assert_eq!(openai["error"]["message"], expected);
         assert_eq!(openai["error"]["code"], "model_not_found");
+        assert_eq!(
+            native["detail"]["suggestions"],
+            json!(["vendor/embedder-large"])
+        );
+        assert_eq!(
+            openai["error"]["suggestions"],
+            json!(["vendor/embedder-large"])
+        );
+    }
+
+    /// The "Did you mean" ids are also a `suggestions` list, closest first, in
+    /// both envelopes and in the same order as the message; the message is
+    /// unchanged. No suggestion, or a retired note, means no field at all.
+    #[tokio::test]
+    async fn not_found_suggestions_are_a_list_beside_the_message() {
+        const HIDDEN: &str = "org-42/embedder-large-tuned";
+        let (registry, _bundles, _models) = registry_with_models(&[
+            "vendor/embedder-large",
+            "vendor/embedder-small",
+            "other/unrelated-reranker",
+            HIDDEN,
+        ]);
+        let state = state_with_registry_hiding_org_42(registry);
+
+        let (native, openai) = not_found_bodies(&state, "vendor/embedder").await;
+        let native: serde_json::Value = serde_json::from_str(&native).expect("error JSON");
+        let openai: serde_json::Value = serde_json::from_str(&openai).expect("error JSON");
+        let suggestions = &native["detail"]["suggestions"];
+        assert_eq!(suggestions, &openai["error"]["suggestions"]);
+        let ids: Vec<&str> = suggestions
+            .as_array()
+            .expect("suggestions is a list")
+            .iter()
+            .map(|id| id.as_str().expect("each suggestion is a string"))
+            .collect();
+        assert_eq!(ids, ["vendor/embedder-large", "vendor/embedder-small"]);
+        let message = native["detail"]["message"].as_str().expect("message");
+        assert_eq!(
+            message,
+            "Model 'vendor/embedder' not found. Did you mean one of: \
+             'vendor/embedder-large', 'vendor/embedder-small'?"
+        );
+        for id in &ids {
+            assert!(message.contains(&format!("'{id}'")), "{message} / {id}");
+        }
+        assert_eq!(native["detail"]["code"], "MODEL_NOT_FOUND");
+        assert_eq!(openai["error"]["param"], "model");
+
+        // One edit from the hidden id only: no suggestion and no field.
+        let (native, openai) = not_found_bodies(&state, "embedder-large-tune").await;
+        let native: serde_json::Value = serde_json::from_str(&native).expect("error JSON");
+        let openai: serde_json::Value = serde_json::from_str(&openai).expect("error JSON");
+        assert_eq!(
+            native["detail"]["message"],
+            "Model 'embedder-large-tune' not found"
+        );
+        assert!(native["detail"].get("suggestions").is_none(), "{native}");
+        assert!(openai["error"].get("suggestions").is_none(), "{openai}");
+
+        // A retired note names its replacement in the message only.
+        let retired = with_retired_models(
+            state_with_registry_hiding_org_42(Arc::clone(&state.model_registry)),
+            &[("vendor/embedder", "vendor/embedder-large")],
+        );
+        let (native, openai) = not_found_bodies(&retired, "vendor/embedder").await;
+        let native: serde_json::Value = serde_json::from_str(&native).expect("error JSON");
+        let openai: serde_json::Value = serde_json::from_str(&openai).expect("error JSON");
+        assert!(native["detail"].get("suggestions").is_none(), "{native}");
+        assert!(openai["error"].get("suggestions").is_none(), "{openai}");
+    }
+
+    /// Native generate answers in the OpenAI envelope; its unknown-model 404
+    /// carries the same `suggestions` list.
+    #[tokio::test]
+    async fn native_generate_not_found_carries_suggestions() {
+        let (registry, _bundles, _models) = registry_with_models(&["vendor/embedder-large"]);
+        let state = state_with_registry_hiding_org_42(registry);
+        let response = match resolve_routing(
+            &state,
+            &HeaderMap::new(),
+            &axum::http::Extensions::new(),
+            "/v1/generate/vendor/embedder-lrge",
+            "generate",
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("an unknown model must 404"),
+            Err(response) => *response,
+        };
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("error JSON");
+        assert_eq!(
+            body["error"]["message"],
+            "Model 'vendor/embedder-lrge' not found. Did you mean 'vendor/embedder-large'?"
+        );
+        assert_eq!(
+            body["error"]["suggestions"],
+            json!(["vendor/embedder-large"])
+        );
     }
 
     /// `state` with `retired` as the operator's retired-model map.
@@ -22292,7 +21816,7 @@ mod tests {
     // accepts (and that the chat route already accepts). Each newly-
     // accepted field gets a forward-path test (the value lands on
     // ``GenerateParams``) and a rejection test (type / range / cross-
-    // field). See ADR-0001 for the canonicality argument.
+    // field).
 
     #[test]
     fn test_generate_params_from_json_forwards_seed() {
@@ -23021,7 +22545,7 @@ mod tests {
         std::env::remove_var(&key);
     }
 
-    // ── ADR-0003: generation timeout authority + invariant ────────
+    // ── Generation timeout authority + invariant ──────────────────
 
     #[test]
     fn test_enforce_first_chunk_invariant_passes_through_when_ok() {
@@ -23164,15 +22688,15 @@ mod tests {
         }
     }
 
-    // H7 contract (ADR-0003): generation streaming does NOT clamp
+    // H7 contract: generation streaming does NOT clamp
     // `timeout_config.overall` with `state.config.request_timeout`. The
     // legacy ceiling continues to bound encode/score/extract, but the
     // two generation call-sites in `proxy.rs::handle_generation_streaming`
     // and `sse.rs::handle_sse_stream` feed `timeout_config.overall`
     // directly into the driver. A textual-contract test was tried here
     // but self-matched its own assertion strings; the contract is
-    // enforced by ADR-0003, the invariant unit tests above, and the
-    // gateway integration tests that exercise long-running generations.
+    // enforced by the invariant unit tests above and the gateway
+    // integration tests that exercise long-running generations.
 
     // ── StreamCancelGuard (streaming cancel-on-drop) ──────────────
     //
@@ -23319,6 +22843,46 @@ mod tests {
         assert_eq!(body["error"]["type"], "server_error");
         assert_eq!(body["error"]["code"], "transport_failure");
         assert_eq!(body["error"]["message"], "pool saturated");
+    }
+
+    /// An inner `MODEL_NOT_FOUND` keeps its `suggestions` list on the OpenAI
+    /// surface; a malformed list, or the field on another code, is dropped.
+    #[tokio::test]
+    async fn test_translate_inner_compat_error_keeps_model_suggestions() {
+        async fn translated(code: &str, status: StatusCode, suggestions: Value) -> Value {
+            let mut extra = Map::new();
+            extra.insert("suggestions".to_string(), suggestions);
+            let resp = (status, Json(json_detail_merge(code, "msg", extra))).into_response();
+            let out = translate_inner_compat_error(resp).await;
+            let bytes = axum::body::to_bytes(out.into_body(), 64 * 1024)
+                .await
+                .expect("read body");
+            serde_json::from_slice(&bytes).expect("valid JSON")
+        }
+        let body = translated(
+            err_code::MODEL_NOT_FOUND,
+            StatusCode::NOT_FOUND,
+            json!(["vendor/a", "vendor/b"]),
+        )
+        .await;
+        assert_eq!(body["error"]["code"], "model_not_found");
+        assert_eq!(
+            body["error"]["suggestions"],
+            json!(["vendor/a", "vendor/b"])
+        );
+
+        for malformed in [json!([]), json!(["vendor/a", 1]), json!("vendor/a")] {
+            let body =
+                translated(err_code::MODEL_NOT_FOUND, StatusCode::NOT_FOUND, malformed).await;
+            assert!(body["error"].get("suggestions").is_none(), "{body}");
+        }
+        let body = translated(
+            err_code::INVALID_REQUEST,
+            StatusCode::BAD_REQUEST,
+            json!(["vendor/a"]),
+        )
+        .await;
+        assert!(body["error"].get("suggestions").is_none(), "{body}");
     }
 
     #[tokio::test]
@@ -27901,6 +27465,49 @@ mod tests {
         let v = _expect_chat_err(body).await;
         assert_eq!(v["error"]["code"], "unsupported_field");
         assert_eq!(v["error"]["param"], "response_format.type");
+        assert_eq!(
+            v["error"]["message"],
+            "'response_format.type' = \"ebnf\" is not supported; supported types: \
+             \"json_schema\", \"json_object\", \"regex\", \"grammar\""
+        );
+        assert_eq!(v["error"]["type"], "invalid_request_error");
+    }
+
+    /// A missing or non-string `response_format.type` names the same list.
+    #[tokio::test]
+    async fn test_chat_response_format_missing_type_lists_supported_types() {
+        for response_format in [json!({}), json!({"type": 5}), json!({"type": null})] {
+            let mut body = _chat_body_min("m");
+            body["response_format"] = response_format.clone();
+            let v = _expect_chat_err(body).await;
+            assert_eq!(v["error"]["code"], "invalid_request", "{response_format}");
+            assert_eq!(v["error"]["param"], "response_format.type");
+            assert_eq!(
+                v["error"]["message"],
+                "'response_format.type' is required; supported types: \
+                 \"json_schema\", \"json_object\", \"regex\", \"grammar\""
+            );
+        }
+    }
+
+    /// Every type the refusal lists is one the translator accepts.
+    #[test]
+    fn test_chat_response_format_listed_types_are_accepted() {
+        for &kind in RESPONSE_FORMAT_TYPES {
+            let response_format = match kind {
+                "json_schema" => json!({
+                    "type": kind,
+                    "json_schema": {"name": "x", "schema": {"type": "object"}},
+                }),
+                "regex" => json!({"type": kind, "regex": "^(yes|no)$"}),
+                "grammar" => json!({"type": kind, "grammar": "root ::= \"yes\""}),
+                _ => json!({"type": kind}),
+            };
+            let mut body = _chat_body_min("m");
+            body["response_format"] = response_format;
+            let params = _expect_chat_ok(body);
+            assert!(params.grammar.is_some(), "{kind}");
+        }
     }
 
     /// The grammar safety walker applies to the chat translator too, after
@@ -29379,441 +28986,70 @@ mod tests {
         }
     }
 
-    // ── /v1/responses ────────────────────────────────────────────────
-
-    fn _responses_body_min(model: &str) -> serde_json::Value {
-        serde_json::json!({"model": model, "input": "Tell me a joke"})
-    }
-
-    async fn _responses_err(body: serde_json::Value) -> serde_json::Value {
-        let resp = match responses_params_from_json(&body) {
-            ResponsesParamsResult::Ok(_) => panic!("expected Err"),
-            ResponsesParamsResult::Err(r) => r,
-        };
-        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
-            .await
-            .unwrap();
-        serde_json::from_slice(&bytes).unwrap()
-    }
-
+    /// `temperature` on every generation body parser (chat, completions,
+    /// native generate; streaming and non-streaming share them):
+    /// any finite number >= 0 is accepted, as the worker accepts it, and a
+    /// negative, non-finite-looking or non-numeric value is a 400 naming the
+    /// param and the range.
     #[tokio::test]
-    async fn test_responses_shared_request_conformance_vectors() {
-        let raw = include_str!(
-            "../../../../conformance/openai_generation/responses_request_vectors.json"
-        );
-        let vectors: serde_json::Value = serde_json::from_str(raw).expect("valid conformance JSON");
-
-        for case in vectors["accepted"].as_array().expect("accepted vectors") {
-            let name = case["name"].as_str().expect("case name");
-            let params = match responses_params_from_json(&case["body"]) {
-                ResponsesParamsResult::Ok(params) => params,
-                ResponsesParamsResult::Err(_) => panic!("accepted case {name:?} was rejected"),
-            };
-            let (prompt, messages) = match params.input {
-                publisher::GenerateInput::Prompt { prompt } => {
-                    (Some(prompt), serde_json::Value::Null)
-                }
-                publisher::GenerateInput::Messages { messages } => (
-                    None,
-                    serde_json::Value::Array(
-                        messages
-                            .into_iter()
-                            .map(|message| {
-                                serde_json::json!({
-                                    "role": message.role,
-                                    "content": message.content,
-                                })
-                            })
-                            .collect(),
-                    ),
-                ),
-            };
-            let mut observed = serde_json::json!({
-                "model": params.model,
-                "prompt": prompt,
-                "messages": messages,
-                "max_output_tokens": params.max_new_tokens,
-                "temperature": params.temperature,
-                "top_p": params.top_p,
-                "seed": params.seed,
-            });
-            let mut expected = case["expected"].clone();
-            for field in ["temperature", "top_p"] {
-                match (observed[field].as_f64(), expected[field].as_f64()) {
-                    (Some(left), Some(right)) => assert!(
-                        (left - right).abs() <= f32::EPSILON as f64,
-                        "accepted case {name:?} field {field:?}: {left} != {right}"
-                    ),
-                    (None, None) if observed[field].is_null() && expected[field].is_null() => {}
-                    _ => panic!("accepted case {name:?} field {field:?} differs"),
-                }
-                observed
-                    .as_object_mut()
-                    .expect("observed object")
-                    .remove(field);
-                expected
-                    .as_object_mut()
-                    .expect("expected object")
-                    .remove(field);
-            }
-            assert_eq!(observed, expected, "accepted case {name:?}");
-        }
-
-        for case in vectors["rejected"].as_array().expect("rejected vectors") {
-            let name = case["name"].as_str().expect("case name");
-            let error = _responses_err(case["body"].clone()).await;
-            assert_eq!(
-                error["error"]["param"], case["param"],
-                "rejected case {name:?}"
-            );
-            assert_eq!(
-                error["error"]["code"], case["code"],
-                "rejected case {name:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_responses_params_ok_string_input() {
-        match responses_params_from_json(&_responses_body_min("m")) {
-            ResponsesParamsResult::Ok(p) => {
-                assert_eq!(p.model, "m");
-                assert_eq!(p.max_new_tokens, 16);
-                match p.input {
-                    publisher::GenerateInput::Prompt { prompt } => {
-                        assert_eq!(prompt, "Tell me a joke")
+    async fn test_temperature_range_is_the_same_on_every_generation_parser() {
+        type Accepted = fn(&serde_json::Value) -> Option<f32>;
+        let parsers: [(&str, serde_json::Value, Accepted); 3] =
+            [
+                ("chat", _chat_body_min("m"), |body| {
+                    _expect_chat_ok(body.clone()).temperature
+                }),
+                ("completions", _completions_body_min("m"), |body| {
+                    match completions_params_from_json(body) {
+                        CompletionsParamsResult::Ok(p) => p.temperature,
+                        CompletionsParamsResult::Err(_) => panic!("completions refused {body}"),
                     }
-                    publisher::GenerateInput::Messages { .. } => panic!("expected Prompt"),
+                }),
+                (
+                    "generate",
+                    json!({"prompt": "hi", "max_new_tokens": 8}),
+                    |body| _expect_generate_ok(body).temperature,
+                ),
+            ];
+        for (route, base, accepted) in parsers {
+            for stream in [false, true] {
+                for (value, want) in [
+                    (json!(0), 0.0_f32),
+                    (json!(0.0), 0.0),
+                    (json!(1), 1.0),
+                    (json!(2.0), 2.0),
+                    (json!(100.5), 100.5),
+                ] {
+                    let mut body = base.clone();
+                    body["stream"] = json!(stream);
+                    body["temperature"] = value.clone();
+                    assert_eq!(accepted(&body), Some(want), "{route} {value}");
+                }
+                for value in [
+                    json!(-0.01),
+                    json!(-1),
+                    json!(1e39),
+                    json!("0.5"),
+                    json!(true),
+                    json!([0.5]),
+                ] {
+                    let mut body = base.clone();
+                    body["stream"] = json!(stream);
+                    body["temperature"] = value.clone();
+                    let err = match route {
+                        "chat" => _expect_chat_err(body).await,
+                        "completions" => _completions_err(body).await,
+                        _ => _expect_generate_err(&body).await,
+                    };
+                    assert_eq!(err["error"]["param"], "temperature", "{route} {value}");
+                    assert_eq!(err["error"]["code"], "invalid_request", "{route} {value}");
+                    assert_eq!(
+                        err["error"]["message"], "'temperature' must be a finite number >= 0",
+                        "{route} {value}"
+                    );
                 }
             }
-            ResponsesParamsResult::Err(_) => panic!("expected Ok"),
         }
-    }
-
-    #[tokio::test]
-    async fn test_responses_missing_input() {
-        let v = _responses_err(serde_json::json!({"model": "m"})).await;
-        assert_eq!(v["error"]["param"], "input");
-    }
-
-    #[test]
-    fn test_responses_accepts_array_input_as_messages() {
-        let mut body = _responses_body_min("m");
-        body["input"] = serde_json::json!([
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": [{"type": "output_text", "text": "hello "}, {"type": "output_text", "text": "there"}]},
-        ]);
-        match responses_params_from_json(&body) {
-            ResponsesParamsResult::Ok(p) => match p.input {
-                publisher::GenerateInput::Messages { messages } => {
-                    assert_eq!(messages.len(), 2);
-                    assert_eq!(messages[0].role, "user");
-                    assert_eq!(messages[0].content, "hi");
-                    assert_eq!(messages[1].content, "hello there"); // text parts concatenated
-                }
-                publisher::GenerateInput::Prompt { .. } => panic!("expected Messages"),
-            },
-            ResponsesParamsResult::Err(_) => panic!("expected Ok"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_responses_rejects_empty_array_input() {
-        let mut body = _responses_body_min("m");
-        body["input"] = serde_json::json!([]);
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["param"], "input");
-    }
-
-    #[tokio::test]
-    async fn test_responses_rejects_stream() {
-        let mut body = _responses_body_min("m");
-        body["stream"] = serde_json::json!(true);
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["param"], "stream");
-    }
-
-    // ── /v1/responses H2 hardening ───────────────────────────────────
-    //
-    // Strict allow-list + present-but-wrong-type rejection. These cases
-    // previously silently coerced or dropped — they must now 400.
-
-    #[tokio::test]
-    async fn test_responses_rejects_previous_response_id() {
-        let mut body = _responses_body_min("m");
-        body["previous_response_id"] = serde_json::json!("resp-abc");
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["param"], "previous_response_id");
-        assert_eq!(v["error"]["code"], "unsupported_field");
-    }
-
-    #[tokio::test]
-    async fn test_responses_rejects_tools() {
-        let mut body = _responses_body_min("m");
-        body["tools"] = serde_json::json!([{"type": "function"}]);
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["param"], "tools");
-        assert_eq!(v["error"]["code"], "unsupported_field");
-    }
-
-    #[tokio::test]
-    async fn test_responses_rejects_tool_choice() {
-        let mut body = _responses_body_min("m");
-        body["tool_choice"] = serde_json::json!("auto");
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["param"], "tool_choice");
-        assert_eq!(v["error"]["code"], "unsupported_field");
-    }
-
-    #[tokio::test]
-    async fn test_responses_rejects_reasoning() {
-        let mut body = _responses_body_min("m");
-        body["reasoning"] = serde_json::json!({"effort": "high"});
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["param"], "reasoning");
-        assert_eq!(v["error"]["code"], "unsupported_field");
-    }
-
-    #[tokio::test]
-    async fn test_responses_rejects_background() {
-        let mut body = _responses_body_min("m");
-        body["background"] = serde_json::json!(true);
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["param"], "background");
-        assert_eq!(v["error"]["code"], "unsupported_field");
-    }
-
-    #[tokio::test]
-    async fn test_responses_rejects_metadata() {
-        let mut body = _responses_body_min("m");
-        body["metadata"] = serde_json::json!({"k": "v"});
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["param"], "metadata");
-        assert_eq!(v["error"]["code"], "unsupported_field");
-    }
-
-    #[tokio::test]
-    async fn test_responses_rejects_instructions() {
-        let mut body = _responses_body_min("m");
-        body["instructions"] = serde_json::json!("be terse");
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["param"], "instructions");
-        assert_eq!(v["error"]["code"], "unsupported_field");
-    }
-
-    #[tokio::test]
-    async fn test_responses_rejects_unknown_top_level_field() {
-        let mut body = _responses_body_min("m");
-        body["foo_bar"] = serde_json::json!(1);
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["param"], "foo_bar");
-        assert_eq!(v["error"]["code"], "unsupported_field");
-    }
-
-    #[tokio::test]
-    async fn test_responses_rejects_non_bool_stream_string() {
-        let mut body = _responses_body_min("m");
-        body["stream"] = serde_json::json!("true");
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["param"], "stream");
-        assert_eq!(v["error"]["code"], "invalid_request");
-    }
-
-    #[tokio::test]
-    async fn test_responses_rejects_non_bool_stream_int() {
-        let mut body = _responses_body_min("m");
-        body["stream"] = serde_json::json!(1);
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["param"], "stream");
-    }
-
-    #[tokio::test]
-    async fn test_responses_rejects_input_image_part() {
-        let mut body = _responses_body_min("m");
-        body["input"] = serde_json::json!([
-            {"role": "user", "content": [{"type": "input_image", "image_url": "data:image/png;base64,..."}]},
-        ]);
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["code"], "unsupported_field");
-    }
-
-    #[tokio::test]
-    async fn test_responses_rejects_unknown_content_part_type() {
-        let mut body = _responses_body_min("m");
-        body["input"] = serde_json::json!([
-            {"role": "user", "content": [{"type": "audio", "data": "..."}]},
-        ]);
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["code"], "unsupported_field");
-    }
-
-    #[tokio::test]
-    async fn test_responses_rejects_missing_text_on_text_part() {
-        let mut body = _responses_body_min("m");
-        body["input"] = serde_json::json!([
-            {"role": "user", "content": [{"type": "input_text"}]},
-        ]);
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["code"], "invalid_request");
-    }
-
-    #[tokio::test]
-    async fn test_responses_rejects_non_string_text_on_text_part() {
-        let mut body = _responses_body_min("m");
-        body["input"] = serde_json::json!([
-            {"role": "user", "content": [{"type": "input_text", "text": 42}]},
-        ]);
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["code"], "invalid_request");
-    }
-
-    #[tokio::test]
-    async fn test_responses_rejects_missing_role_on_input_message() {
-        let mut body = _responses_body_min("m");
-        body["input"] = serde_json::json!([{"content": "hi"}]);
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["code"], "invalid_request");
-        assert!(v["error"]["param"].as_str().unwrap().ends_with(".role"));
-    }
-
-    #[tokio::test]
-    async fn test_responses_rejects_invalid_role_on_input_message() {
-        let mut body = _responses_body_min("m");
-        body["input"] = serde_json::json!([{"role": "alien", "content": "hi"}]);
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["code"], "invalid_request");
-    }
-
-    #[test]
-    fn test_responses_accepts_developer_role_as_system() {
-        let mut body = _responses_body_min("m");
-        body["input"] = serde_json::json!([{"role": "developer", "content": "be helpful"}]);
-        match responses_params_from_json(&body) {
-            ResponsesParamsResult::Ok(p) => match p.input {
-                publisher::GenerateInput::Messages { messages } => {
-                    assert_eq!(messages[0].role, "system");
-                }
-                _ => panic!("expected Messages"),
-            },
-            ResponsesParamsResult::Err(_) => panic!("expected Ok"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_responses_rejects_string_temperature() {
-        let mut body = _responses_body_min("m");
-        body["temperature"] = serde_json::json!("0.5");
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["param"], "temperature");
-    }
-
-    #[tokio::test]
-    async fn test_responses_rejects_top_p_out_of_range() {
-        let mut body = _responses_body_min("m");
-        body["top_p"] = serde_json::json!(1.5);
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["param"], "top_p");
-    }
-
-    #[tokio::test]
-    async fn test_responses_rejects_string_seed() {
-        let mut body = _responses_body_min("m");
-        body["seed"] = serde_json::json!("42");
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["param"], "seed");
-    }
-
-    #[test]
-    fn test_responses_preserves_negative_seed() {
-        let mut body = _responses_body_min("m");
-        body["seed"] = serde_json::json!(-1);
-        match responses_params_from_json(&body) {
-            ResponsesParamsResult::Ok(params) => assert_eq!(params.seed, Some(-1)),
-            ResponsesParamsResult::Err(_) => panic!("expected Ok"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_responses_rejects_string_max_output_tokens() {
-        let mut body = _responses_body_min("m");
-        body["max_output_tokens"] = serde_json::json!("16");
-        let v = _responses_err(body).await;
-        assert_eq!(v["error"]["param"], "max_output_tokens");
-    }
-
-    #[test]
-    fn test_responses_accepts_null_temperature() {
-        // Explicit null must not 400 — it is treated as "absent".
-        let mut body = _responses_body_min("m");
-        body["temperature"] = serde_json::Value::Null;
-        match responses_params_from_json(&body) {
-            ResponsesParamsResult::Ok(p) => assert!(p.temperature.is_none()),
-            ResponsesParamsResult::Err(_) => panic!("expected Ok"),
-        }
-    }
-
-    #[test]
-    fn test_build_responses_body_shape() {
-        let outcome = crate::queue::streaming::StreamOutcome {
-            text: "a joke".to_string(),
-            finish_reason: "stop".to_string(),
-            usage: Some(crate::queue::streaming::UsageBlock {
-                upstream_usage: None,
-                gpu_second: None,
-                images: None,
-                prompt_tokens_details: None,
-                prompt_tokens: 5,
-                completion_tokens: 7,
-                total_tokens: 12,
-            }),
-            attempt_id: "att".to_string(),
-            ttft_ms: None,
-            tpot_ms: None,
-            error: None,
-            origin: crate::queue::streaming::StreamOutcomeOrigin::WorkerTerminal,
-            tool_calls: None,
-            logprobs: None,
-            candidates: Vec::new(),
-            executed_bundle_config_hash: None,
-            execution_identity_sha256: None,
-            execution_binding_sha256: None,
-            reasoning: Default::default(),
-        };
-        let bytes = build_responses_body("m", "req-1", &outcome).expect("ok");
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["object"], "response");
-        assert_eq!(v["status"], "completed");
-        assert!(v["id"].as_str().unwrap().starts_with("resp-"));
-        assert_eq!(v["output"][0]["type"], "message");
-        assert_eq!(v["output"][0]["content"][0]["type"], "output_text");
-        assert_eq!(v["output"][0]["content"][0]["text"], "a joke");
-        assert_eq!(v["usage"]["input_tokens"], 5);
-        assert_eq!(v["usage"]["output_tokens"], 7);
-        assert!(v["usage"].get("input_tokens_details").is_none());
-    }
-
-    #[test]
-    fn test_responses_usage_reports_cached_input_tokens() {
-        let usage = crate::queue::streaming::UsageBlock {
-            upstream_usage: None,
-            gpu_second: None,
-            images: None,
-            prompt_tokens_details: Some(crate::queue::streaming::PromptTokensDetails {
-                cached_tokens: 4,
-            }),
-            prompt_tokens: 5,
-            completion_tokens: 7,
-            total_tokens: 12,
-        };
-        assert_eq!(
-            responses_usage(&usage),
-            serde_json::json!({
-                "input_tokens": 5,
-                "output_tokens": 7,
-                "total_tokens": 12,
-                "input_tokens_details": {"cached_tokens": 4},
-            })
-        );
     }
 
     /// ``n=0`` rejects as invalid_request (must be positive).
@@ -32396,6 +31632,7 @@ mod governed_bridge_route_tests {
 #[cfg(test)]
 mod unsupported_operation_tests {
     use super::*;
+    use crate::handlers::responses::proxy_responses;
     use crate::handlers::test_support::{TestGateway, HYBRID_GENERATE_MODEL, LOCAL_ENCODE_MODEL};
 
     /// A score-only model.

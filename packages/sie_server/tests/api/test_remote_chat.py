@@ -22,7 +22,6 @@ from sie_server.api import openai_local
 from sie_server.api.generate import router as generate_router
 from sie_server.api.openai_completions import router as completions_router
 from sie_server.api.openai_local import _remote_chat_response, router
-from sie_server.api.openai_responses import router as responses_router
 from sie_server.config.model import ModelConfig, ReasoningEffortDeclaration
 from sie_server.config.upstreams import Upstream, install_upstreams
 from sie_server.core.loader import expand_profile_variants
@@ -124,7 +123,6 @@ def remote_chat(
     app.include_router(router)
     app.include_router(generate_router)
     app.include_router(completions_router)
-    app.include_router(responses_router)
     app.state.registry = registry
     requests: list[httpx.Request] = []
     try:
@@ -877,7 +875,6 @@ _GENERATION_SURFACES = [
     ("chat", True),
     ("completions", False),
     ("completions", True),
-    ("responses", False),
 ]
 
 
@@ -912,8 +909,6 @@ def _generation_request(surface: str, *, stream: bool) -> tuple[str, dict[str, A
         return f"/v1/generate/{SAFE_MODEL}", {"prompt": "question", "max_new_tokens": 8, "stream": stream}
     if surface == "chat":
         return "/v1/chat/completions", {**BODY, "stream": stream, "max_tokens": 8}
-    if surface == "responses":
-        return "/v1/responses", {"model": MODEL, "input": "question", "max_output_tokens": 8}
     return "/v1/completions", {"model": MODEL, "prompt": "question", "max_tokens": 8, "stream": stream}
 
 
@@ -986,7 +981,7 @@ def test_remote_forbid_keeps_cold_generation_off_the_bridge(remote_chat: tuple, 
     registry.start_load_async.assert_not_awaited()
 
 
-@pytest.mark.parametrize("surface", ["native", "chat", "completions", "responses"])
+@pytest.mark.parametrize("surface", ["native", "chat", "completions"])
 def test_buffered_generation_bridge_discloses_success_and_warms_local(remote_chat: tuple, surface: str) -> None:
     client, adapter, _, requests = remote_chat
     registry = _cold_generation_bridge(remote_chat)
@@ -1062,9 +1057,7 @@ def test_invalid_generation_never_starts_a_bridge(remote_chat: tuple, surface: s
     registry = _cold_generation_bridge(remote_chat)
     answer_with(remote_chat, json_response(200, completion()))
     path, body = _generation_request(surface, stream=streaming)
-    body[
-        "max_new_tokens" if surface == "native" else "max_output_tokens" if surface == "responses" else "max_tokens"
-    ] = 1000
+    body["max_new_tokens" if surface == "native" else "max_tokens"] = 1000
     response = client.post(path, json=body)
     assert response.status_code == 400, response.text
     assert "X-SIE-Fallback-Reason" not in response.headers
@@ -1309,7 +1302,7 @@ def test_native_upstream_prompt_reasoning_ownership_across_surfaces(remote_chat,
     stream = ChatStream(frames)
     answer_with(remote_chat, httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream))
     path, request = _generation_request(surface, stream=streaming)
-    request["input" if surface == "responses" else "prompt"] = "owned prompt<think>"
+    request["prompt"] = "owned prompt<think>"
     response = client.post(path, json=request)
     assert response.status_code == 200, response.text
     assert "answer" in response.text
@@ -1640,7 +1633,6 @@ class HangingStream(ChatStream):
     [
         ("native", False, "first_chunk_timeout"),
         ("completions", False, "first_chunk_timeout"),
-        ("responses", False, "first_chunk_timeout"),
         ("rendered chat", False, "generation_timeout"),
         ("rendered chat", True, "generation_timeout"),
     ],

@@ -7,6 +7,7 @@ pub mod messages;
 pub mod models;
 pub mod pools;
 pub mod proxy;
+pub mod responses;
 pub mod serving_disclosure;
 pub mod sse;
 pub mod systemone;
