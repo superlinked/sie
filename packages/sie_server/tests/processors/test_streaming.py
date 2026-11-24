@@ -1635,10 +1635,11 @@ def _patch_compile(monkeypatch: pytest.MonkeyPatch, fn: Any) -> list[int]:
     invocation appended).
 
     Also enables ``SIE_GRAMMAR_PREFLIGHT_DEBUG=1`` so tests that
-    exercise the legacy worker-side preflight (now off by default per
-    ADR-0002) still run the preflight code path.
+    exercise the legacy worker-side preflight (now off by default because
+    SGLang owns request-time grammar compilation) still run the preflight
+    code path.
     """
-    # ADR-0002: the worker-side preflight is off by default. Tests that
+    # The worker-side preflight is off by default. Tests that
     # use this helper are explicitly exercising the preflight path, so
     # enable the debug flag for their scope.
     monkeypatch.setenv("SIE_GRAMMAR_PREFLIGHT_DEBUG", "1")
@@ -3065,7 +3066,7 @@ async def test_streaming_tool_choice_named_unknown_function_rejected() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ADR-0002 — SGLang owns request-time grammar compilation
+# SGLang owns request-time grammar compilation
 # ---------------------------------------------------------------------------
 
 
@@ -3073,7 +3074,7 @@ async def test_streaming_tool_choice_named_unknown_function_rejected() -> None:
 async def test_grammar_preflight_default_does_not_call_compile_outlines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ADR-0002: with ``SIE_GRAMMAR_PREFLIGHT_DEBUG`` unset the default
+    """With ``SIE_GRAMMAR_PREFLIGHT_DEBUG`` unset the default
     structured-output path MUST NOT invoke ``compile_outlines``. The raw
     schema is forwarded straight to SGLang.
     """
@@ -3114,7 +3115,7 @@ async def test_grammar_preflight_default_does_not_call_compile_outlines(
     wi = _make_work_item(generate={"prompt": "Hi", "max_new_tokens": 8, "grammar": grammar_payload})
     await proc.process(_make_msg(wi), "test/model")
 
-    assert calls == [], "Default path (SIE_GRAMMAR_PREFLIGHT_DEBUG unset) must NOT invoke compile_outlines per ADR-0002"
+    assert calls == [], "Default path (SIE_GRAMMAR_PREFLIGHT_DEBUG unset) must NOT invoke compile_outlines"
     terminal = _terminal_chunk(nc)
     assert terminal["finish_reason"] == "stop"
 
@@ -3123,7 +3124,7 @@ async def test_grammar_preflight_default_does_not_call_compile_outlines(
 async def test_grammar_preflight_enabled_via_env_calls_compile_outlines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ADR-0002: ``SIE_GRAMMAR_PREFLIGHT_DEBUG=1`` re-enables the legacy
+    """``SIE_GRAMMAR_PREFLIGHT_DEBUG=1`` re-enables the legacy
     worker-side Outlines preflight. The preflight code path runs and
     ``compile_outlines`` is invoked exactly once for a cache-miss
     request.
@@ -3159,7 +3160,7 @@ async def test_grammar_preflight_enabled_via_env_calls_compile_outlines(
 async def test_grammar_malformed_payload_still_rejected_without_preflight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ADR-0002 regression: removing the worker preflight from the hot
+    """Regression: removing the worker preflight from the hot
     path MUST NOT weaken validation. Cheap shape checks (``kind`` must be
     one of the allowed strings) still reject a malformed grammar at the
     worker before any inference cost is spent.
