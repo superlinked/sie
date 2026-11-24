@@ -1,15 +1,29 @@
 {
-  "description": "A chat error answer returned before the stream opens (status, headers, JSON body) and the answer the Responses route gives: the same status, Retry-After and x-sie-error-code, and the same OpenAI error body, except that a param naming a chat field is renamed to the Responses field. Headers not listed under expect.headers are not asserted.",
+  "description": "A chat error answer returned before the stream opens (status, headers, JSON body) and the answer the Responses route gives: the same status, Retry-After and x-sie-error-code, and the same OpenAI error body, except that a param naming a chat field is renamed to the Responses field. Headers not listed under expect.headers are not asserted, except that expect.absent_headers must be missing.",
   "errors": [
     {
       "name": "capacity is a 503 with Retry-After and x-sie-error-code",
       "status": 503,
       "headers": {"retry-after": "60", "x-sie-error-code": "PROVISIONING"},
-      "body": {"error": {"message": "Model 'm' is provisioning; retry later", "type": "server_error", "param": null, "code": "provisioning"}},
+      "body": {
+        "error": {
+          "message": "Capacity for model 'm' is starting. Retry after the number of seconds in Retry-After.",
+          "type": "server_error",
+          "param": null,
+          "code": "provisioning"
+        }
+      },
       "expect": {
         "status": 503,
         "headers": {"retry-after": "60", "x-sie-error-code": "PROVISIONING"},
-        "body": {"error": {"message": "Model 'm' is provisioning; retry later", "type": "server_error", "param": null, "code": "provisioning"}}
+        "body": {
+          "error": {
+            "message": "Capacity for model 'm' is starting. Retry after the number of seconds in Retry-After.",
+            "type": "server_error",
+            "param": null,
+            "code": "provisioning"
+          }
+        }
       }
     },
     {
@@ -17,13 +31,25 @@
       "status": 503,
       "headers": {"retry-after": "5", "x-sie-error-code": "RESOURCE_EXHAUSTED"},
       "body": {
-        "error": {"message": "The upstream serving the model is busy, please retry", "type": "server_error", "param": null, "code": "RESOURCE_EXHAUSTED"}
+        "error": {
+          "message": "The upstream serving the model is busy, please retry",
+          "type": "server_error",
+          "param": null,
+          "code": "RESOURCE_EXHAUSTED",
+          "attempt_id": "attempt-1"
+        }
       },
       "expect": {
         "status": 503,
         "headers": {"retry-after": "5", "x-sie-error-code": "RESOURCE_EXHAUSTED"},
         "body": {
-          "error": {"message": "The upstream serving the model is busy, please retry", "type": "server_error", "param": null, "code": "RESOURCE_EXHAUSTED"}
+          "error": {
+            "message": "The upstream serving the model is busy, please retry",
+            "type": "server_error",
+            "param": null,
+            "code": "RESOURCE_EXHAUSTED",
+            "attempt_id": "attempt-1"
+          }
         }
       }
     },
@@ -114,14 +140,13 @@
       }
     },
     {
-      "name": "gateway timeout",
+      "name": "first-chunk timeout carries no retry headers",
       "status": 504,
-      "headers": {"retry-after": "5", "x-sie-error-code": "GATEWAY_TIMEOUT"},
       "body": {"error": {"message": "Generation aborted: first_chunk timeout", "type": "server_error", "param": null, "code": "first_chunk_timeout"}},
       "expect": {
         "status": 504,
-        "headers": {"retry-after": "5", "x-sie-error-code": "GATEWAY_TIMEOUT"},
-        "body": {"error": {"message": "Generation aborted: first_chunk timeout", "type": "server_error", "param": null, "code": "first_chunk_timeout"}}
+        "body": {"error": {"message": "Generation aborted: first_chunk timeout", "type": "server_error", "param": null, "code": "first_chunk_timeout"}},
+        "absent_headers": ["retry-after", "x-sie-error-code"]
       }
     },
     {
