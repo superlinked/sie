@@ -231,9 +231,9 @@ carries `type`, equal to the event name, and `sequence_number`, counting from
 
 A chat error returned before the stream opens is returned as it is: the same
 status, `Retry-After` and `x-sie-error-code` headers, and OpenAI error body.
-The route adds no header of its own. The only change is the `param` when it
-names a chat field, which is renamed to the Responses field the caller sent;
-the message keeps the chat route's wording.
+The route adds no header of its own. The only change is the `param`: only the
+chat params listed in the table below are renamed, to the Responses field the
+caller sent. The message keeps the chat route's wording.
 
 | Chat `param` | Responses `param` |
 |---|---|

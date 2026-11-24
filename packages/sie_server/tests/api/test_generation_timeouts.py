@@ -15,7 +15,6 @@ from sie_server.adapters._generation_base import GenerationChunk
 from sie_server.adapters.fake.adapter import FakeAdapter
 from sie_server.api.generate import router as generate_router
 from sie_server.api.openai_completions import router as completions_router
-from sie_server.api.openai_responses import router as responses_router
 from sie_server.config.model import AdapterOptions, GenerateTask, ModelConfig, ProfileConfig, Tasks
 from sie_server.core.registry import ModelRegistry
 
@@ -67,7 +66,6 @@ def _client(adapter: FakeAdapter, runtime: dict[str, float]) -> TestClient:
     app = FastAPI()
     app.include_router(generate_router)
     app.include_router(completions_router)
-    app.include_router(responses_router)
     app.state.registry = registry
     return TestClient(app)
 
@@ -83,7 +81,6 @@ def _openai_code(body: dict[str, Any]) -> str:
 _ROUTES: list[tuple[str, dict[str, Any], Callable[[dict[str, Any]], str]]] = [
     (f"/v1/generate/{_MODEL.replace('/', '__')}", {"prompt": "hello", "max_new_tokens": 8}, _native_code),
     ("/v1/completions", {"model": _MODEL, "prompt": "hello", "max_tokens": 8}, _openai_code),
-    ("/v1/responses", {"model": _MODEL, "input": "hello", "max_output_tokens": 8}, _openai_code),
 ]
 
 
