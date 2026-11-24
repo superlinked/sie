@@ -11,15 +11,20 @@ from huggingface_hub.utils import validate_repo_id
 from sie_sdk.cache import ensure_model_cached, get_cache_config
 
 from sie_server.config.model import is_immutable_revision
+from sie_server.config.serving_artifacts import _is_cache_owned_file
 
 _FILES = ("adapter_config.json", "adapter_model.safetensors")
 
 
-def _check_files(directory: Path, *, blobs: Path | None = None) -> Path:
+def _check_files(directory: Path, *, repo_root: Path | None = None) -> Path:
     for filename in _FILES:
         path = directory / filename
         resolved = path.resolve()
-        if not resolved.is_relative_to(directory) and (blobs is None or not resolved.is_relative_to(blobs)):
+        # Ownership (not location) is the policy: repository blobs and the
+        # cache-level shared Xet blob store are both legitimate targets.
+        if not resolved.is_relative_to(directory) and (
+            repo_root is None or not _is_cache_owned_file(resolved, repo_root)
+        ):
             raise ValueError("LoRA artifact escapes its declared directory or repository blobs")
         if not path.is_file():
             raise ValueError(f"LoRA source ships no {filename}")
@@ -56,7 +61,7 @@ def resolve_lora_source(source: str, revision: str | None = None) -> Path:
             and repository.name.startswith("models--")
         ):
             _check_repository(repository)
-            return _check_files(directory, blobs=repository / "blobs")
+            return _check_files(directory, repo_root=repository)
         return _check_files(directory)
 
     validate_repo_id(source)
@@ -92,4 +97,4 @@ def resolve_lora_source(source: str, revision: str | None = None) -> Path:
     directory = repository / "snapshots" / revision
     if directory.resolve() != directory:
         raise ValueError("LoRA snapshot cannot alias another revision or repository")
-    return _check_files(directory, blobs=repository / "blobs")
+    return _check_files(directory, repo_root=repository)
