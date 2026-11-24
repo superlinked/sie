@@ -125,6 +125,7 @@ from sie_server.processors.strict_grammar import (
     first_output_violation,
     unverifiable_schema_keyword,
 )
+from sie_server.processors.tool_call_grammar import is_strict_tool, tools_require_grammar
 from sie_server.types.grammar import GrammarSpec
 from sie_server.types.inputs import InvalidInputError, InvalidMediaError, Item, decode_image, item_size_error
 from sie_server.types.openapi import OpenAIGenerationErrorResponse
@@ -682,6 +683,24 @@ def _validate_chat_tools(body: dict[str, Any]) -> None:
         raise _bad_request("'tool_choice' must name a declared function", param="tool_choice")
 
 
+def _reject_strict_tools(body: dict[str, Any]) -> None:
+    """Refuse ``strict`` tools on a route whose engine would not enforce them.
+
+    The engine's own chat endpoint parses tool calls without constraining
+    their arguments for these models, so accepting ``strict`` would promise a
+    schema guarantee nothing checks. The queued route enforces it.
+    """
+    if body.get("tool_choice") == "none":
+        return
+    for index, tool in enumerate(body.get("tools") or []):
+        if is_strict_tool(tool):
+            raise _bad_request(
+                "strict function tools are not enforced on this route for this model",
+                param=f"tools[{index}].function.strict",
+                code="unsupported_field",
+            )
+
+
 def _validate_mlx_chat_body(body: dict[str, Any]) -> None:
     unknown_fields = body.keys() - _MLX_CHAT_FIELDS
     if unknown_fields:
@@ -689,6 +708,7 @@ def _validate_mlx_chat_body(body: dict[str, Any]) -> None:
         raise _bad_request(f"field '{unknown}' is not supported", param=unknown, code="unsupported_field")
 
     _validate_common_chat_body(body)
+    _reject_strict_tools(body)
     choice = body.get("tool_choice")
     if choice is not None and choice not in ("auto", "none"):
         raise _bad_request(
@@ -1002,6 +1022,7 @@ def _prepare_sglang_body(
             param="tool_choice",
             code="unsupported_field",
         )
+    _reject_strict_tools(body)
     proxied = _prepare_chat_body(
         body,
         config=config,
@@ -1735,11 +1756,14 @@ async def _chat_completions(
     requested_key = denormalize_model_id(model)
     registry_key = requested_key
     constrained = _response_format_constrains_decoding(body.get("response_format"))
-    if constrained:
+    # A forced tool_choice or a strict tool compiles a grammar too.
+    constrained_decoding = constrained or tools_require_grammar(body.get("tools"), body.get("tool_choice"))
+    if constrained_decoding:
         try:
             registry_key = resolve_grammar_serving_model(registry, registry_key)
         except GenerationUnsupportedFieldError as exc:
-            raise _bad_request(str(exc), param="response_format", code="unsupported_field") from exc
+            param = "response_format" if constrained else "tools"
+            raise _bad_request(str(exc), param=param, code="unsupported_field") from exc
     strict_grammar = _strict_response_format_grammar(body.get("response_format"))
     if strict_grammar is not None and (keyword := unverifiable_schema_keyword(strict_grammar.value)) is not None:
         raise _bad_request(
@@ -1773,7 +1797,7 @@ async def _chat_completions(
             )
         try:
             reasoning_effort = parse_reasoning_effort(body.get("reasoning_effort"))
-            apply_reasoning_effort(config, reasoning_effort, model=model, grammar=constrained)
+            apply_reasoning_effort(config, reasoning_effort, model=model, grammar=constrained_decoding)
         except (GenerationInvalidRequestError, GenerationUnsupportedFieldError) as exc:
             code = "unsupported_field" if isinstance(exc, GenerationUnsupportedFieldError) else None
             raise _bad_request(str(exc), param=exc.param, code=code) from exc
@@ -1824,7 +1848,7 @@ async def _chat_completions(
         await ensure_generation_lora(registry, route.key, lora, n=body.get("n"))
         route_config = registry.get_config(route.key)
         try:
-            effort = apply_reasoning_effort(route_config, reasoning_effort, model=model, grammar=constrained)
+            effort = apply_reasoning_effort(route_config, reasoning_effort, model=model, grammar=constrained_decoding)
         except GenerationUnsupportedFieldError as exc:
             raise _bad_request(str(exc), param=exc.param, code="unsupported_field") from exc
         if _adapter_answers_chat(route_config) and isinstance(adapter, GenerationAdapter):

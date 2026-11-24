@@ -79,6 +79,7 @@ from sie_server.ipc_types import (
 )
 from sie_server.processors.admission import resolve_admission_enabled
 from sie_server.processors.generate_params import extract_generate_params
+from sie_server.processors.tool_call_grammar import request_constrains_decoding
 from sie_server.queue_executor import QueueExecutor
 from sie_server.types.responses import ErrorCode
 
@@ -1014,7 +1015,13 @@ class IpcServer:
             if expected_hash and valid:
                 generate = extract_generate_params(work_item)
                 valid = work_item.get("model_id") == req.model_id
-                if valid and isinstance(generate, dict) and generate.get("grammar") is not None:
+                if (
+                    valid
+                    and isinstance(generate, dict)
+                    and request_constrains_decoding(
+                        generate.get("grammar"), generate.get("tools"), generate.get("tool_choice")
+                    )
+                ):
                     try:
                         valid = resolve_grammar_serving_model(self._executor.registry, req.model_id) == req.model_id
                     except GenerationUnsupportedFieldError:

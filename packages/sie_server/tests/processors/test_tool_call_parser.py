@@ -511,21 +511,21 @@ def test_xml_param_scan_stops_at_unterminated_parameter() -> None:
 
 def test_xml_param_scan_bounds_param_count() -> None:
     """Adversarial buffer with a huge number of openers parses at most
-    ``_MAX_XML_PARAMS`` and returns in linear time (no O(n^2) backtracking).
+    ``MAX_XML_PARAMS`` and returns in linear time (no O(n^2) backtracking).
     """
     import time
 
-    from sie_server.processors.tool_call_parser import _MAX_XML_PARAMS, _parse_xml_tool_call
+    from sie_server.processors.tool_call_parser import MAX_XML_PARAMS, _parse_xml_tool_call
 
     # Far more params than the cap, each well-formed.
-    n = _MAX_XML_PARAMS + 5_000
+    n = MAX_XML_PARAMS + 5_000
     body = "".join(f"<parameter=p{i}>\n{i}\n</parameter>" for i in range(n))
     raw = "<function=f>" + body + "</function>"
     t0 = time.monotonic()
     name, args = _parse_xml_tool_call(raw)
     elapsed = time.monotonic() - t0
     assert name == "f"
-    assert len(args) == _MAX_XML_PARAMS
+    assert len(args) == MAX_XML_PARAMS
     # Generous ceiling: linear parse of this buffer is milliseconds.
     assert elapsed < 2.0
 
@@ -697,20 +697,20 @@ async def test_glm_xml_misplaced_tags_are_terminal_parse_errors(raw: str, reason
 def test_glm_argument_scan_bounds_argument_count() -> None:
     import time
 
-    from sie_server.processors.tool_call_parser import _MAX_XML_PARAMS, _parse_glm_tool_call
+    from sie_server.processors.tool_call_parser import MAX_XML_PARAMS, _parse_glm_tool_call
 
-    n = _MAX_XML_PARAMS + 5_000
+    n = MAX_XML_PARAMS + 5_000
     raw = "f" + "".join(f"<arg_key>p{i}</arg_key><arg_value>{i}</arg_value>" for i in range(n))
     t0 = time.monotonic()
-    with pytest.raises(ValueError, match=f"more than {_MAX_XML_PARAMS} arguments"):
+    with pytest.raises(ValueError, match=f"more than {MAX_XML_PARAMS} arguments"):
         _parse_glm_tool_call(raw)
     elapsed = time.monotonic() - t0
     assert elapsed < 2.0
 
-    at_cap = "f" + "".join(f"<arg_key>p{i}</arg_key><arg_value>{i}</arg_value>" for i in range(_MAX_XML_PARAMS))
+    at_cap = "f" + "".join(f"<arg_key>p{i}</arg_key><arg_value>{i}</arg_value>" for i in range(MAX_XML_PARAMS))
     name, args = _parse_glm_tool_call(at_cap)
     assert name == "f"
-    assert len(args) == _MAX_XML_PARAMS
+    assert len(args) == MAX_XML_PARAMS
 
 
 # ── Per-choice (n>1) streaming (H5) ──────────────────────────────────────
@@ -1013,9 +1013,9 @@ def test_a_definition_first_reached_at_the_depth_limit_is_inferred_again_nearer_
     parameter = {combinator: [{"$ref": "#/$defs/C0"}, {"$ref": "#/$defs/Shared"}]}
 
     definitions["Leaf"] = {"type": "integer"}
-    assert tool_call_parser._schema_type(parameter, root) == "integer"
+    assert tool_call_parser.schema_conversion_type(parameter, root) == "integer"
     definitions["Leaf"] = {"type": "null"}
-    assert tool_call_parser._schema_allows_null({"anyOf": parameter[combinator]}, root)
+    assert tool_call_parser.schema_allows_null({"anyOf": parameter[combinator]}, root)
 
 
 @pytest.mark.asyncio

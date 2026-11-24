@@ -202,7 +202,8 @@ def compile_outlines(tokenizer: Any, grammar: GrammarSpec) -> Any:
     # (tokenizer, grammar) pair as "ready"; SGLang stays the source of
     # truth for EBNF validity (a genuinely malformed grammar surfaces as an
     # HTTP 500 → ``finish_reason: "error"`` chunk via the adapter).
-    if grammar.kind == "ebnf":
+    # Structural tags (strict tools) compile only in SGLang's XGrammar backend.
+    if grammar.kind in ("ebnf", "structural_tag"):
         return True
     json_factory, regex_factory = _get_factories()
     # The factories require an Outlines ``Tokenizer`` adapter, not a raw

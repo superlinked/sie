@@ -12,6 +12,7 @@ from sie_server.processors import strict_grammar
 from sie_server.processors.strict_grammar import (
     MODEL_OUTPUT_PARSE_ERROR,
     enforce_strict_grammar,
+    enforce_strict_tool_arguments,
     output_violation,
     requires_output_validation,
 )
@@ -449,3 +450,130 @@ async def test_closing_the_wrapper_closes_the_upstream_iterator() -> None:
     await wrapped.aclose()  # type: ignore[attr-defined]
 
     assert closed is True
+
+
+# -- strict function-tool arguments ---------------------------------------------
+
+# ``minimum`` and ``pattern`` are among the keywords the grammar backend can drop,
+# so the terminal check is what guarantees them.
+_TOOL_SCHEMAS = {
+    "lookup": {**_SCHEMA, "properties": {**_SCHEMA["properties"], "count": {"type": "integer", "minimum": 1}}}
+}
+
+
+def _tool_call(name: str, arguments: str) -> list[GenerationChunk]:
+    return [
+        GenerationChunk(text_delta="", tool_call_delta=ToolCallDelta(index=0, id="call_1", function_name=name)),
+        GenerationChunk(text_delta="", tool_call_delta=ToolCallDelta(index=0, arguments_delta=arguments)),
+        GenerationChunk(text_delta="", done=True, finish_reason="tool_calls"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_strict_tool_arguments_that_violate_the_schema_error_the_terminal() -> None:
+    upstream = _tool_call("lookup", '{"name": "Ada", "count": 0}')
+
+    chunks = await _drain(enforce_strict_tool_arguments(_stream(upstream), _TOOL_SCHEMAS))
+
+    assert chunks[-1].finish_reason == "error"
+    assert chunks[-1].error_code == MODEL_OUTPUT_PARSE_ERROR
+    assert "'lookup'" in (chunks[-1].error_message or "")
+    assert "minimum" in (chunks[-1].error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_invalid_strict_tool_arguments_are_never_streamed() -> None:
+    """The deltas of a strict call are held until the terminal check, so a violation reaches no client."""
+    upstream = _tool_call("lookup", '{"name": "Ada", "count": 0}')
+
+    chunks = await _drain(enforce_strict_tool_arguments(_stream(upstream), _TOOL_SCHEMAS))
+
+    assert [chunk.tool_call_delta for chunk in chunks] == [None]
+    assert chunks[0].error_code == MODEL_OUTPUT_PARSE_ERROR
+
+
+@pytest.mark.asyncio
+async def test_strict_tool_deltas_are_released_in_order_once_valid() -> None:
+    text = GenerationChunk(text_delta="Looking it up.")
+    trailing = GenerationChunk(text_delta=" Done.")
+    calls = _tool_call("lookup", '{"name": "Ada", "count": 2}')
+    upstream = [text, *calls[:2], trailing, calls[2]]
+    released: list[GenerationChunk] = []
+
+    async for chunk in enforce_strict_tool_arguments(_stream(upstream), _TOOL_SCHEMAS):
+        released.append(chunk)
+        if chunk is text:
+            # Text before any strict call is not delayed.
+            assert len(released) == 1
+
+    assert released == upstream
+
+
+@pytest.mark.asyncio
+async def test_a_choice_finish_after_a_strict_call_is_held_until_validation() -> None:
+    """With ``n > 1`` a choice closes before the terminal; it must not close on an invalid call."""
+    calls = _tool_call("lookup", '{"name": "Ada", "count": 0}')
+    choice_finish = GenerationChunk(text_delta="", finish_reason="tool_calls")
+
+    chunks = await _drain(enforce_strict_tool_arguments(_stream([*calls[:2], choice_finish, calls[2]]), _TOOL_SCHEMAS))
+
+    assert [chunk.finish_reason for chunk in chunks] == ["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("day", "valid"), [("2026-01-01", True), ("tomorrow", False)])
+async def test_strict_tool_argument_formats_are_checked(day: str, valid: bool) -> None:
+    schemas = {"book": {"type": "object", "properties": {"day": {"type": "string", "format": "date"}}}}
+    upstream = _tool_call("book", f'{{"day": "{day}"}}')
+
+    chunks = await _drain(enforce_strict_tool_arguments(_stream(upstream), schemas))
+
+    assert (chunks[-1].error_code is None) is valid
+
+
+@pytest.mark.asyncio
+async def test_an_upstream_error_drops_the_unvalidated_strict_call() -> None:
+    calls = _tool_call("lookup", '{"name": "Ada", "count": 2}')
+    failed = GenerationChunk(text_delta="", done=True, finish_reason="error", error_code="upstream_error")
+
+    chunks = await _drain(enforce_strict_tool_arguments(_stream([*calls[:2], failed]), _TOOL_SCHEMAS))
+
+    assert chunks == [failed]
+
+
+@pytest.mark.asyncio
+async def test_conforming_strict_tool_arguments_keep_the_terminal() -> None:
+    upstream = _tool_call("lookup", '{"name": "Ada", "count": 2}')
+
+    chunks = await _drain(enforce_strict_tool_arguments(_stream(upstream), _TOOL_SCHEMAS))
+
+    assert chunks == upstream
+
+
+@pytest.mark.asyncio
+async def test_non_strict_tool_calls_are_not_validated() -> None:
+    upstream = _tool_call("other", '{"anything": true}')
+
+    chunks = await _drain(enforce_strict_tool_arguments(_stream(upstream), _TOOL_SCHEMAS))
+
+    assert chunks[-1].error_code is None
+
+
+@pytest.mark.asyncio
+async def test_strict_tool_calls_on_candidates_are_validated() -> None:
+    function = {"name": "lookup", "arguments": '{"name": "ada", "count": 1}'}
+    call = {"id": "call_1", "type": "function", "function": function}
+    terminal = GenerationChunk(
+        text_delta="", done=True, finish_reason="tool_calls", candidates=({"tool_calls": [call]},)
+    )
+
+    chunks = await _drain(enforce_strict_tool_arguments(_stream([terminal]), _TOOL_SCHEMAS))
+
+    assert chunks[-1].error_code == MODEL_OUTPUT_PARSE_ERROR
+    assert "pattern" in (chunks[-1].error_message or "")
+
+
+def test_no_strict_tools_return_the_stream_unchanged() -> None:
+    upstream = _stream([])
+
+    assert enforce_strict_tool_arguments(upstream, {}) is upstream
