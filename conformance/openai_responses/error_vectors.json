@@ -1,0 +1,139 @@
+{
+  "description": "A chat error answer returned before the stream opens (status, headers, JSON body) and the answer the Responses route gives: the same status, Retry-After and x-sie-error-code, and the same OpenAI error body, except that a tool-name param is renamed to the Responses tool. Headers not listed under expect.headers are not asserted.",
+  "errors": [
+    {
+      "name": "capacity is a 503 with Retry-After and x-sie-error-code",
+      "status": 503,
+      "headers": {"retry-after": "60", "x-sie-error-code": "PROVISIONING"},
+      "body": {"error": {"message": "Model 'm' is provisioning; retry later", "type": "server_error", "param": null, "code": "provisioning"}},
+      "expect": {
+        "status": 503,
+        "headers": {"retry-after": "60", "x-sie-error-code": "PROVISIONING"},
+        "body": {"error": {"message": "Model 'm' is provisioning; retry later", "type": "server_error", "param": null, "code": "provisioning"}}
+      }
+    },
+    {
+      "name": "busy upstream",
+      "status": 503,
+      "headers": {"retry-after": "5", "x-sie-error-code": "RESOURCE_EXHAUSTED"},
+      "body": {
+        "error": {"message": "The upstream serving the model is busy, please retry", "type": "server_error", "param": null, "code": "RESOURCE_EXHAUSTED"}
+      },
+      "expect": {
+        "status": 503,
+        "headers": {"retry-after": "5", "x-sie-error-code": "RESOURCE_EXHAUSTED"},
+        "body": {
+          "error": {"message": "The upstream serving the model is busy, please retry", "type": "server_error", "param": null, "code": "RESOURCE_EXHAUSTED"}
+        }
+      }
+    },
+    {
+      "name": "rate limited",
+      "status": 429,
+      "headers": {"retry-after": "1"},
+      "body": {"error": {"message": "rate limit exceeded", "type": "rate_limit_error", "param": null, "code": "rate_limit_exceeded"}},
+      "expect": {
+        "status": 429,
+        "headers": {"retry-after": "1"},
+        "body": {"error": {"message": "rate limit exceeded", "type": "rate_limit_error", "param": null, "code": "rate_limit_exceeded"}}
+      }
+    },
+    {
+      "name": "tool name pattern names the Responses tool, gateway wording",
+      "status": 400,
+      "body": {
+        "error": {
+          "message": "tools[1].function.name must match ^[a-zA-Z0-9_-]{1,64}$",
+          "type": "invalid_request_error",
+          "param": "tools[1].function.name",
+          "code": "invalid_request"
+        }
+      },
+      "expect": {
+        "status": 400,
+        "body": {
+          "error": {
+            "message": "tools[1].function.name must match ^[a-zA-Z0-9_-]{1,64}$",
+            "type": "invalid_request_error",
+            "param": "tools[1].name",
+            "code": "invalid_request"
+          }
+        }
+      }
+    },
+    {
+      "name": "tool name pattern names the Responses tool, server wording",
+      "status": 400,
+      "body": {
+        "error": {
+          "message": "'tools[12].function.name' must match ^[a-zA-Z0-9_-]{1,64}$",
+          "type": "invalid_request_error",
+          "param": "tools[12].function.name",
+          "code": "invalid_request"
+        }
+      },
+      "expect": {
+        "status": 400,
+        "body": {
+          "error": {
+            "message": "'tools[12].function.name' must match ^[a-zA-Z0-9_-]{1,64}$",
+            "type": "invalid_request_error",
+            "param": "tools[12].name",
+            "code": "invalid_request"
+          }
+        }
+      }
+    },
+    {
+      "name": "too many tools",
+      "status": 400,
+      "body": {"error": {"message": "'tools' length 65 exceeds limit (64)", "type": "invalid_request_error", "param": "tools", "code": "invalid_request"}},
+      "expect": {
+        "status": 400,
+        "body": {"error": {"message": "'tools' length 65 exceeds limit (64)", "type": "invalid_request_error", "param": "tools", "code": "invalid_request"}}
+      }
+    },
+    {
+      "name": "model without tool calling",
+      "status": 400,
+      "body": {"error": {"message": "Model 'm' does not support tool calling", "type": "invalid_request_error", "param": "tools", "code": "unsupported_field"}},
+      "expect": {
+        "status": 400,
+        "body": {
+          "error": {"message": "Model 'm' does not support tool calling", "type": "invalid_request_error", "param": "tools", "code": "unsupported_field"}
+        }
+      }
+    },
+    {
+      "name": "unknown model",
+      "status": 404,
+      "body": {"error": {"message": "Model 'nope' not found", "type": "invalid_request_error", "param": "model", "code": "model_not_found"}},
+      "expect": {
+        "status": 404,
+        "body": {"error": {"message": "Model 'nope' not found", "type": "invalid_request_error", "param": "model", "code": "model_not_found"}}
+      }
+    },
+    {
+      "name": "gateway timeout",
+      "status": 504,
+      "headers": {"retry-after": "5", "x-sie-error-code": "GATEWAY_TIMEOUT"},
+      "body": {"error": {"message": "Generation aborted: first_chunk timeout", "type": "server_error", "param": null, "code": "first_chunk_timeout"}},
+      "expect": {
+        "status": 504,
+        "headers": {"retry-after": "5", "x-sie-error-code": "GATEWAY_TIMEOUT"},
+        "body": {"error": {"message": "Generation aborted: first_chunk timeout", "type": "server_error", "param": null, "code": "first_chunk_timeout"}}
+      }
+    },
+    {
+      "name": "extra error fields are kept",
+      "status": 500,
+      "body": {"error": {"message": "internal error during generation", "type": "server_error", "param": null, "code": "inference_error", "attempt_id": "a1"}},
+      "expect": {
+        "status": 500,
+        "body": {
+          "error": {"message": "internal error during generation", "type": "server_error", "param": null, "code": "inference_error", "attempt_id": "a1"}
+        }
+      }
+    }
+  ]
+}

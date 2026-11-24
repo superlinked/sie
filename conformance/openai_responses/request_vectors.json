@@ -1,0 +1,1827 @@
+{
+  "accepted": [
+    {
+      "name": "string input, absent max_output_tokens is omitted",
+      "body": {"model": "m", "input": "Hi"},
+      "chat": {"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": false, "include_reasoning": false}
+    },
+    {
+      "name": "max_output_tokens becomes max_completion_tokens",
+      "body": {"model": "m", "input": "Hi", "max_output_tokens": 256},
+      "chat": {"model": "m", "messages": [{"role": "user", "content": "Hi"}], "max_completion_tokens": 256, "stream": false, "include_reasoning": false}
+    },
+    {
+      "name": "null optional fields are omitted",
+      "body": {
+        "model": "m",
+        "input": "Hi",
+        "instructions": null,
+        "max_output_tokens": null,
+        "temperature": null,
+        "top_p": null,
+        "seed": null,
+        "stream": null,
+        "tools": null,
+        "tool_choice": null,
+        "parallel_tool_calls": null,
+        "reasoning": null,
+        "text": null,
+        "metadata": null,
+        "store": null,
+        "background": null,
+        "truncation": null,
+        "include": null,
+        "previous_response_id": null,
+        "conversation": null
+      },
+      "chat": {"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": false, "include_reasoning": false}
+    },
+    {
+      "name": "instructions and the leading developer and system messages form one system message",
+      "body": {
+        "model": "m",
+        "instructions": "You are a coding agent.",
+        "input": [
+          {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "Follow the repository rules."}]},
+          {"role": "developer", "content": [{"type": "input_text", "text": "Sandbox: read-only."}, {"type": "input_text", "text": " Network: off."}]},
+          {"role": "system", "content": "Answer briefly."},
+          {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "List the files."}]}
+        ]
+      },
+      "chat": {
+        "model": "m",
+        "messages": [
+          {"role": "system", "content": "You are a coding agent.\n\nFollow the repository rules.\n\nSandbox: read-only. Network: off.\n\nAnswer briefly."},
+          {"role": "user", "content": "List the files."}
+        ],
+        "stream": false,
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "leading developer messages without instructions, consecutive user messages stay separate",
+      "body": {
+        "model": "m",
+        "input": [
+          {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "Be careful."}]},
+          {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "Ask before deleting."}]},
+          {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<context>cwd</context>"}]},
+          {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Say hello."}]}
+        ]
+      },
+      "chat": {
+        "model": "m",
+        "messages": [
+          {"role": "system", "content": "Be careful.\n\nAsk before deleting."},
+          {"role": "user", "content": "<context>cwd</context>"},
+          {"role": "user", "content": "Say hello."}
+        ],
+        "stream": false,
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "a later system or developer message is translated in place",
+      "body": {
+        "model": "m",
+        "instructions": "Be helpful.",
+        "input": [
+          {"role": "user", "content": "Hi"},
+          {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Hello."}]},
+          {"type": "message", "role": "developer", "content": "Reply in French from now on."},
+          {"role": "system", "content": [{"type": "input_text", "text": "Keep it short."}]},
+          {"role": "user", "content": "How are you?"}
+        ]
+      },
+      "chat": {
+        "model": "m",
+        "messages": [
+          {"role": "system", "content": "Be helpful."},
+          {"role": "user", "content": "Hi"},
+          {"role": "assistant", "content": "Hello."},
+          {"role": "system", "content": "Reply in French from now on."},
+          {"role": "system", "content": "Keep it short."},
+          {"role": "user", "content": "How are you?"}
+        ],
+        "stream": false,
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "text parts are concatenated without a separator",
+      "body": {
+        "model": "m",
+        "input": [
+          {"role": "user", "content": [{"type": "input_text", "text": "Hello, "}, {"type": "text", "text": "world"}, {"type": "input_text", "text": "!"}]},
+          {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Hi ", "annotations": [], "logprobs": []}, {"type": "output_text", "text": "there."}]
+          },
+          {"role": "user", "content": [{"type": "input_text", "text": "Again."}]}
+        ]
+      },
+      "chat": {
+        "model": "m",
+        "messages": [{"role": "user", "content": "Hello, world!"}, {"role": "assistant", "content": "Hi there."}, {"role": "user", "content": "Again."}],
+        "stream": false,
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "data URI image parts keep their position, adjacent texts join, detail is ignored",
+      "body": {
+        "model": "m",
+        "input": [
+          {
+            "role": "user",
+            "content": [
+              {"type": "input_text", "text": "Before "},
+              {"type": "input_text", "text": ""},
+              {
+                "type": "input_image",
+                "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+                "detail": "high"
+              },
+              {"type": "input_text", "text": "a"},
+              {"type": "text", "text": "b"},
+              {"type": "input_image", "image_url": "data:image/jpeg;base64,/9j/AA==", "detail": "auto"}
+            ]
+          }
+        ]
+      },
+      "chat": {
+        "model": "m",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {"type": "text", "text": "Before "},
+              {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}
+              },
+              {"type": "text", "text": "ab"},
+              {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,/9j/AA=="}}
+            ]
+          }
+        ],
+        "stream": false,
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "assistant text and parallel function calls become one assistant message",
+      "body": {
+        "model": "m",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+          }
+        ],
+        "input": [
+          {"role": "user", "content": "Run both."},
+          {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Running both."}]},
+          {"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": "{\"cmd\":\"echo one\"}"},
+          {"type": "function_call", "call_id": "call_2", "name": "exec_command", "arguments": "{\"cmd\": \"echo two\"}"},
+          {"type": "function_call_output", "call_id": "call_1", "output": "one\n"},
+          {"type": "function_call_output", "call_id": "call_2", "output": "two\n"},
+          {"role": "user", "content": "Thanks."}
+        ]
+      },
+      "chat": {
+        "model": "m",
+        "messages": [
+          {"role": "user", "content": "Run both."},
+          {
+            "role": "assistant",
+            "content": "Running both.",
+            "tool_calls": [
+              {"id": "call_1", "type": "function", "function": {"name": "exec_command", "arguments": "{\"cmd\":\"echo one\"}"}},
+              {"id": "call_2", "type": "function", "function": {"name": "exec_command", "arguments": "{\"cmd\": \"echo two\"}"}}
+            ]
+          },
+          {"role": "tool", "tool_call_id": "call_1", "content": "one\n"},
+          {"role": "tool", "tool_call_id": "call_2", "content": "two\n"},
+          {"role": "user", "content": "Thanks."}
+        ],
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "exec_command",
+              "description": "Run a shell command.",
+              "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+            }
+          }
+        ],
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "consecutive assistant messages merge, reasoning items are dropped and do not split assistant output",
+      "body": {
+        "model": "m",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+          }
+        ],
+        "input": [
+          {"role": "user", "content": "What is here?"},
+          {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "opaque-1"},
+          {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Checking."}]},
+          {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": " One moment."}]},
+          {"type": "reasoning", "id": "rs_2", "summary": [{"type": "summary_text", "text": "List files."}]},
+          {"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": "{\"cmd\":\"ls\"}"},
+          {"type": "reasoning", "id": "rs_3", "summary": [], "content": [], "encrypted_content": "opaque-3"},
+          {"type": "function_call_output", "call_id": "call_1", "output": "README.md\n"},
+          {"type": "reasoning", "id": "rs_4", "summary": []},
+          {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "One file."}]},
+          {"role": "user", "content": "Thanks."}
+        ]
+      },
+      "chat": {
+        "model": "m",
+        "messages": [
+          {"role": "user", "content": "What is here?"},
+          {
+            "role": "assistant",
+            "content": "Checking. One moment.",
+            "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "exec_command", "arguments": "{\"cmd\":\"ls\"}"}}]
+          },
+          {"role": "tool", "tool_call_id": "call_1", "content": "README.md\n"},
+          {"role": "assistant", "content": "One file."},
+          {"role": "user", "content": "Thanks."}
+        ],
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "exec_command",
+              "description": "Run a shell command.",
+              "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+            }
+          }
+        ],
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "a custom tool becomes a function with one string input, its call carries the input as JSON",
+      "body": {
+        "model": "m",
+        "tools": [
+          {
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Apply a patch to files.",
+            "format": {"type": "grammar", "syntax": "lark", "definition": "start: /.+/"}
+          }
+        ],
+        "input": [
+          {"role": "user", "content": "Add a line."},
+          {
+            "type": "custom_tool_call",
+            "call_id": "call_p",
+            "name": "apply_patch",
+            "input": "*** Begin Patch\n*** Update File: notes.txt\n+café\n*** End Patch\n"
+          },
+          {"type": "custom_tool_call_output", "call_id": "call_p", "output": "Success."},
+          {"role": "user", "content": "Thanks."}
+        ]
+      },
+      "chat": {
+        "model": "m",
+        "messages": [
+          {"role": "user", "content": "Add a line."},
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_p",
+                "type": "function",
+                "function": {"name": "apply_patch", "arguments": "{\"input\":\"*** Begin Patch\\n*** Update File: notes.txt\\n+café\\n*** End Patch\\n\"}"}
+              }
+            ]
+          },
+          {"role": "tool", "tool_call_id": "call_p", "content": "Success."},
+          {"role": "user", "content": "Thanks."}
+        ],
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "apply_patch",
+              "description": "Apply a patch to files.",
+              "parameters": {"type": "object", "properties": {"input": {"type": "string"}}, "required": ["input"], "additionalProperties": false}
+            }
+          }
+        ],
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "function and custom tool outputs given as text part arrays",
+      "body": {
+        "model": "m",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+          },
+          {"type": "custom", "name": "apply_patch"}
+        ],
+        "input": [
+          {"role": "user", "content": "Patch and test."},
+          {"type": "custom_tool_call", "call_id": "call_p", "name": "apply_patch", "input": "*** Begin Patch\n*** End Patch\n"},
+          {"type": "function_call", "call_id": "call_t", "name": "exec_command", "arguments": "{\"cmd\":\"pytest\"}"},
+          {"type": "custom_tool_call_output", "call_id": "call_p", "output": [{"type": "input_text", "text": "Patch "}, {"type": "text", "text": "applied."}]},
+          {
+            "type": "function_call_output",
+            "call_id": "call_t",
+            "output": [{"type": "input_text", "text": "3 passed\n"}, {"type": "output_text", "text": "ok", "annotations": []}]
+          }
+        ]
+      },
+      "chat": {
+        "model": "m",
+        "messages": [
+          {"role": "user", "content": "Patch and test."},
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {"id": "call_p", "type": "function", "function": {"name": "apply_patch", "arguments": "{\"input\":\"*** Begin Patch\\n*** End Patch\\n\"}"}},
+              {"id": "call_t", "type": "function", "function": {"name": "exec_command", "arguments": "{\"cmd\":\"pytest\"}"}}
+            ]
+          },
+          {"role": "tool", "tool_call_id": "call_p", "content": "Patch applied."},
+          {"role": "tool", "tool_call_id": "call_t", "content": "3 passed\nok"}
+        ],
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "exec_command",
+              "description": "Run a shell command.",
+              "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+            }
+          },
+          {
+            "type": "function",
+            "function": {
+              "name": "apply_patch",
+              "parameters": {"type": "object", "properties": {"input": {"type": "string"}}, "required": ["input"], "additionalProperties": false}
+            }
+          }
+        ],
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "tool output images move into the following user message, images first",
+      "body": {
+        "model": "m",
+        "tools": [
+          {"type": "function", "name": "view_image", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}
+        ],
+        "input": [
+          {"role": "user", "content": "Look at dot.png."},
+          {"type": "function_call", "call_id": "call_v", "name": "view_image", "arguments": "{\"path\":\"dot.png\"}"},
+          {
+            "type": "function_call_output",
+            "call_id": "call_v",
+            "output": [
+              {"type": "input_text", "text": "dot.png"},
+              {
+                "type": "input_image",
+                "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+                "detail": "high"
+              }
+            ]
+          },
+          {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Compare it with this one."}, {"type": "input_image", "image_url": "data:image/jpeg;base64,/9j/AA=="}]
+          }
+        ]
+      },
+      "chat": {
+        "model": "m",
+        "messages": [
+          {"role": "user", "content": "Look at dot.png."},
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{"id": "call_v", "type": "function", "function": {"name": "view_image", "arguments": "{\"path\":\"dot.png\"}"}}]
+          },
+          {"role": "tool", "tool_call_id": "call_v", "content": "dot.png"},
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}
+              },
+              {"type": "text", "text": "Compare it with this one."},
+              {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,/9j/AA=="}}
+            ]
+          }
+        ],
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "function": {"name": "view_image", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}
+          }
+        ],
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "tool output images without a following user message form a user message after the run",
+      "body": {
+        "model": "m",
+        "tools": [
+          {"type": "function", "name": "view_image", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}
+        ],
+        "input": [
+          {"role": "user", "content": "Look at both images."},
+          {"type": "function_call", "call_id": "call_a", "name": "view_image", "arguments": "{\"path\":\"a.png\"}"},
+          {"type": "function_call", "call_id": "call_b", "name": "view_image", "arguments": "{\"path\":\"b.jpg\"}"},
+          {
+            "type": "function_call_output",
+            "call_id": "call_a",
+            "output": [
+              {
+                "type": "input_image",
+                "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+                "detail": "high"
+              }
+            ]
+          },
+          {
+            "type": "function_call_output",
+            "call_id": "call_b",
+            "output": [{"type": "input_text", "text": "b.jpg"}, {"type": "input_image", "image_url": "data:image/jpeg;base64,/9j/AA=="}]
+          }
+        ]
+      },
+      "chat": {
+        "model": "m",
+        "messages": [
+          {"role": "user", "content": "Look at both images."},
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {"id": "call_a", "type": "function", "function": {"name": "view_image", "arguments": "{\"path\":\"a.png\"}"}},
+              {"id": "call_b", "type": "function", "function": {"name": "view_image", "arguments": "{\"path\":\"b.jpg\"}"}}
+            ]
+          },
+          {"role": "tool", "tool_call_id": "call_a", "content": ""},
+          {"role": "tool", "tool_call_id": "call_b", "content": "b.jpg"},
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}
+              },
+              {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,/9j/AA=="}}
+            ]
+          }
+        ],
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "function": {"name": "view_image", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}
+          }
+        ],
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "tool output images are emitted before the next assistant output",
+      "body": {
+        "model": "m",
+        "tools": [
+          {"type": "function", "name": "view_image", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}
+        ],
+        "input": [
+          {"role": "user", "content": "Look at the image."},
+          {"type": "function_call", "call_id": "call_a", "name": "view_image", "arguments": "{\"path\":\"a.png\"}"},
+          {
+            "type": "function_call_output",
+            "call_id": "call_a",
+            "output": [
+              {
+                "type": "input_image",
+                "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+              }
+            ]
+          },
+          {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "A single pixel."}]},
+          {"role": "user", "content": "Thanks."}
+        ]
+      },
+      "chat": {
+        "model": "m",
+        "messages": [
+          {"role": "user", "content": "Look at the image."},
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{"id": "call_a", "type": "function", "function": {"name": "view_image", "arguments": "{\"path\":\"a.png\"}"}}]
+          },
+          {"role": "tool", "tool_call_id": "call_a", "content": ""},
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}
+              }
+            ]
+          },
+          {"role": "assistant", "content": "A single pixel."},
+          {"role": "user", "content": "Thanks."}
+        ],
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "function": {"name": "view_image", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}
+          }
+        ],
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "item id and status are ignored",
+      "body": {
+        "model": "m",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+          }
+        ],
+        "input": [
+          {"type": "message", "id": "msg_1", "status": "completed", "role": "user", "content": [{"type": "input_text", "text": "List."}]},
+          {"type": "function_call", "id": "fc_1", "status": "completed", "call_id": "call_1", "name": "exec_command", "arguments": "{\"cmd\":\"ls\"}"},
+          {"type": "function_call_output", "id": "fco_1", "status": "completed", "call_id": "call_1", "output": "a\n"},
+          {"type": "reasoning", "id": "rs_1", "status": "completed", "summary": []},
+          {"id": "msg_2", "status": "completed", "role": "user", "content": "Thanks."}
+        ]
+      },
+      "chat": {
+        "model": "m",
+        "messages": [
+          {"role": "user", "content": "List."},
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "exec_command", "arguments": "{\"cmd\":\"ls\"}"}}]
+          },
+          {"role": "tool", "tool_call_id": "call_1", "content": "a\n"},
+          {"role": "user", "content": "Thanks."}
+        ],
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "exec_command",
+              "description": "Run a shell command.",
+              "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+            }
+          }
+        ],
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "every ignore-list field is accepted with no effect",
+      "body": {
+        "model": "m",
+        "input": "Hi",
+        "store": false,
+        "background": false,
+        "truncation": "disabled",
+        "include": ["reasoning.encrypted_content"],
+        "client_metadata": {"session_id": "s-1", "turn": "t-1"},
+        "reasoning": {"summary": "auto", "generate_summary": "concise"},
+        "text": {"verbosity": "low"}
+      },
+      "chat": {"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": false, "include_reasoning": false}
+    },
+    {
+      "name": "an empty include list is accepted",
+      "body": {"model": "m", "input": "Hi", "include": []},
+      "chat": {"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": false, "include_reasoning": false}
+    },
+    {
+      "name": "text.format text adds nothing",
+      "body": {"model": "m", "input": "Hi", "text": {"format": {"type": "text"}, "verbosity": "medium"}},
+      "chat": {"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": false, "include_reasoning": false}
+    },
+    {
+      "name": "text.format json_object",
+      "body": {"model": "m", "input": "Reply in JSON.", "text": {"format": {"type": "json_object"}}},
+      "chat": {
+        "model": "m",
+        "messages": [{"role": "user", "content": "Reply in JSON."}],
+        "stream": false,
+        "response_format": {"type": "json_object"},
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "text.format json_schema",
+      "body": {
+        "model": "m",
+        "input": "Name a city.",
+        "text": {
+          "format": {
+            "type": "json_schema",
+            "name": "city",
+            "description": "A city and its country.",
+            "schema": {
+              "type": "object",
+              "properties": {"city": {"type": "string"}, "country": {"type": "string"}},
+              "required": ["city", "country"],
+              "additionalProperties": false
+            },
+            "strict": true
+          }
+        }
+      },
+      "chat": {
+        "model": "m",
+        "messages": [{"role": "user", "content": "Name a city."}],
+        "stream": false,
+        "response_format": {
+          "type": "json_schema",
+          "json_schema": {
+            "name": "city",
+            "schema": {
+              "type": "object",
+              "properties": {"city": {"type": "string"}, "country": {"type": "string"}},
+              "required": ["city", "country"],
+              "additionalProperties": false
+            },
+            "strict": true,
+            "description": "A city and its country."
+          }
+        },
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "text.format json_schema without strict or description",
+      "body": {"model": "m", "input": "Name a city.", "text": {"format": {"type": "json_schema", "name": "city", "schema": {"type": "object"}}}},
+      "chat": {
+        "model": "m",
+        "messages": [{"role": "user", "content": "Name a city."}],
+        "stream": false,
+        "response_format": {"type": "json_schema", "json_schema": {"name": "city", "schema": {"type": "object"}}},
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "reasoning.effort becomes reasoning_effort",
+      "body": {"model": "m", "input": "Think hard.", "reasoning": {"effort": "high", "summary": "auto"}},
+      "chat": {"model": "m", "messages": [{"role": "user", "content": "Think hard."}], "stream": false, "include_reasoning": false, "reasoning_effort": "high"}
+    },
+    {
+      "name": "reasoning with a null effort adds nothing",
+      "body": {"model": "m", "input": "Hi", "reasoning": {"effort": null}},
+      "chat": {"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": false, "include_reasoning": false}
+    },
+    {
+      "name": "stream adds stream_options",
+      "body": {"model": "m", "input": "Hi", "stream": true},
+      "chat": {
+        "model": "m",
+        "messages": [{"role": "user", "content": "Hi"}],
+        "stream": true,
+        "stream_options": {"include_usage": true},
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "stream false",
+      "body": {"model": "m", "input": "Hi", "stream": false},
+      "chat": {"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": false, "include_reasoning": false}
+    },
+    {
+      "name": "sampling and passed-through fields",
+      "body": {
+        "model": "m",
+        "input": "Hi",
+        "max_output_tokens": 64,
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "seed": 7,
+        "parallel_tool_calls": false,
+        "metadata": {"trace": "t-1"},
+        "user": "u-1",
+        "safety_identifier": "s-1",
+        "service_tier": "auto"
+      },
+      "chat": {
+        "model": "m",
+        "messages": [{"role": "user", "content": "Hi"}],
+        "max_completion_tokens": 64,
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "seed": 7,
+        "stream": false,
+        "parallel_tool_calls": false,
+        "metadata": {"trace": "t-1"},
+        "user": "u-1",
+        "safety_identifier": "s-1",
+        "service_tier": "auto",
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "prompt_cache_key is passed through",
+      "body": {"model": "m", "input": "Hi", "prompt_cache_key": "cache-1"},
+      "chat": {"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": false, "prompt_cache_key": "cache-1", "include_reasoning": false}
+    },
+    {
+      "name": "function tools, strict false is accepted and dropped, tool_choice required passes through",
+      "body": {
+        "model": "m",
+        "input": "Run ls.",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]},
+            "strict": false
+          },
+          {"type": "function", "name": "noop"}
+        ],
+        "tool_choice": "required",
+        "parallel_tool_calls": true
+      },
+      "chat": {
+        "model": "m",
+        "messages": [{"role": "user", "content": "Run ls."}],
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "exec_command",
+              "description": "Run a shell command.",
+              "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+            }
+          },
+          {"type": "function", "function": {"name": "noop"}}
+        ],
+        "tool_choice": "required",
+        "parallel_tool_calls": true,
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "tool_choice auto passes through with tools",
+      "body": {
+        "model": "m",
+        "input": "Run ls.",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+          }
+        ],
+        "tool_choice": "auto"
+      },
+      "chat": {
+        "model": "m",
+        "messages": [{"role": "user", "content": "Run ls."}],
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "exec_command",
+              "description": "Run a shell command.",
+              "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+            }
+          }
+        ],
+        "tool_choice": "auto",
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "tool_choice none passes through with tools",
+      "body": {
+        "model": "m",
+        "input": "Run ls.",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+          }
+        ],
+        "tool_choice": "none"
+      },
+      "chat": {
+        "model": "m",
+        "messages": [{"role": "user", "content": "Run ls."}],
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "exec_command",
+              "description": "Run a shell command.",
+              "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+            }
+          }
+        ],
+        "tool_choice": "none",
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "named function tool_choice",
+      "body": {
+        "model": "m",
+        "input": "Run ls.",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+          }
+        ],
+        "tool_choice": {"type": "function", "name": "exec_command"}
+      },
+      "chat": {
+        "model": "m",
+        "messages": [{"role": "user", "content": "Run ls."}],
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "exec_command",
+              "description": "Run a shell command.",
+              "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+            }
+          }
+        ],
+        "tool_choice": {"type": "function", "function": {"name": "exec_command"}},
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "named custom tool_choice",
+      "body": {
+        "model": "m",
+        "input": "Patch it.",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+          },
+          {"type": "custom", "name": "apply_patch", "description": "Apply a patch to files."}
+        ],
+        "tool_choice": {"type": "custom", "name": "apply_patch"}
+      },
+      "chat": {
+        "model": "m",
+        "messages": [{"role": "user", "content": "Patch it."}],
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "exec_command",
+              "description": "Run a shell command.",
+              "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+            }
+          },
+          {
+            "type": "function",
+            "function": {
+              "name": "apply_patch",
+              "description": "Apply a patch to files.",
+              "parameters": {"type": "object", "properties": {"input": {"type": "string"}}, "required": ["input"], "additionalProperties": false}
+            }
+          }
+        ],
+        "tool_choice": {"type": "function", "function": {"name": "apply_patch"}},
+        "include_reasoning": false
+      }
+    },
+    {
+      "name": "tool_choice auto without tools is dropped",
+      "body": {"model": "m", "input": "Hi", "tool_choice": "auto"},
+      "chat": {"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": false, "include_reasoning": false}
+    },
+    {
+      "name": "tool_choice none with an empty tools list is dropped with the list",
+      "body": {"model": "m", "input": "Hi", "tools": [], "tool_choice": "none"},
+      "chat": {"model": "m", "messages": [{"role": "user", "content": "Hi"}], "stream": false, "include_reasoning": false}
+    }
+  ],
+  "rejected": [
+    {
+      "name": "missing model",
+      "body": {"input": "x"},
+      "expect": {"status": 400, "type": "invalid_request_error", "code": "invalid_request", "param": "model", "message": "model: Field required"}
+    },
+    {
+      "name": "missing input",
+      "body": {"model": "m"},
+      "expect": {"status": 400, "type": "invalid_request_error", "code": "invalid_request", "param": "input", "message": "input: Field required"}
+    },
+    {
+      "name": "empty input list",
+      "body": {"model": "m", "input": []},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "invalid_request",
+        "param": "input",
+        "message": "input: List should have at least 1 item"
+      }
+    },
+    {
+      "name": "max_output_tokens as a string",
+      "body": {"model": "m", "input": "x", "max_output_tokens": "16"},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "invalid_request",
+        "param": "max_output_tokens",
+        "message": "max_output_tokens: Input should be a valid integer"
+      }
+    },
+    {
+      "name": "zero max_output_tokens",
+      "body": {"model": "m", "input": "x", "max_output_tokens": 0},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "invalid_request",
+        "param": "max_output_tokens",
+        "message": "max_output_tokens: Input should be greater than or equal to 1"
+      }
+    },
+    {
+      "name": "stream as a string",
+      "body": {"model": "m", "input": "x", "stream": "true"},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "invalid_request",
+        "param": "stream",
+        "message": "stream: Input should be a valid boolean"
+      }
+    },
+    {
+      "name": "store true",
+      "body": {"model": "m", "input": "x", "store": true},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "store",
+        "message": "store: SIE does not store responses; send the full conversation in input"
+      }
+    },
+    {
+      "name": "previous_response_id",
+      "body": {"model": "m", "input": "x", "previous_response_id": "resp_123"},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "previous_response_id",
+        "message": "previous_response_id: SIE does not store responses; send the full conversation in input"
+      }
+    },
+    {
+      "name": "conversation id",
+      "body": {"model": "m", "input": "x", "conversation": "conv_123"},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "conversation",
+        "message": "conversation: SIE does not store responses; send the full conversation in input"
+      }
+    },
+    {
+      "name": "conversation object",
+      "body": {"model": "m", "input": "x", "conversation": {"id": "conv_123"}},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "conversation",
+        "message": "conversation: SIE does not store responses; send the full conversation in input"
+      }
+    },
+    {
+      "name": "background true",
+      "body": {"model": "m", "input": "x", "background": true},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "background",
+        "message": "background: background responses are not supported"
+      }
+    },
+    {
+      "name": "truncation auto",
+      "body": {"model": "m", "input": "x", "truncation": "auto"},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "truncation",
+        "message": "truncation: only \"disabled\" is supported"
+      }
+    },
+    {
+      "name": "include another value",
+      "body": {"model": "m", "input": "x", "include": ["reasoning.encrypted_content", "message.output_text.logprobs"]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "include[1]",
+        "message": "include[1]: 'message.output_text.logprobs' is not supported"
+      }
+    },
+    {
+      "name": "prompt template",
+      "body": {"model": "m", "input": "x", "prompt": {"id": "pmpt_123", "variables": {"city": "Paris"}}},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "prompt",
+        "message": "prompt: Extra inputs are not permitted"
+      }
+    },
+    {
+      "name": "max_tool_calls",
+      "body": {"model": "m", "input": "x", "max_tool_calls": 4},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "max_tool_calls",
+        "message": "max_tool_calls: Extra inputs are not permitted"
+      }
+    },
+    {
+      "name": "top_logprobs",
+      "body": {"model": "m", "input": "x", "top_logprobs": 2},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "top_logprobs",
+        "message": "top_logprobs: Extra inputs are not permitted"
+      }
+    },
+    {
+      "name": "stream_options",
+      "body": {"model": "m", "input": "x", "stream": true, "stream_options": {"include_obfuscation": false}},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "stream_options",
+        "message": "stream_options: Extra inputs are not permitted"
+      }
+    },
+    {
+      "name": "unknown top-level field",
+      "body": {"model": "m", "input": "x", "stop": ["END"]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "stop",
+        "message": "stop: Extra inputs are not permitted"
+      }
+    },
+    {
+      "name": "unknown reasoning key",
+      "body": {"model": "m", "input": "x", "reasoning": {"effort": "low", "budget_tokens": 1024}},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "reasoning.budget_tokens",
+        "message": "reasoning.budget_tokens: Extra inputs are not permitted"
+      }
+    },
+    {
+      "name": "unknown text key",
+      "body": {"model": "m", "input": "x", "text": {"format": {"type": "text"}, "stop": ["END"]}},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "text.stop",
+        "message": "text.stop: Extra inputs are not permitted"
+      }
+    },
+    {
+      "name": "unknown text.format type",
+      "body": {"model": "m", "input": "x", "text": {"format": {"type": "grammar"}}},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "text.format.type",
+        "message": "text.format.type: 'grammar' is not supported"
+      }
+    },
+    {
+      "name": "unknown text.format key",
+      "body": {"model": "m", "input": "x", "text": {"format": {"type": "json_object", "schema": {"type": "object"}}}},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "text.format.schema",
+        "message": "text.format.schema: Extra inputs are not permitted"
+      }
+    },
+    {
+      "name": "item_reference item",
+      "body": {"model": "m", "input": [{"role": "user", "content": "x"}, {"type": "item_reference", "id": "msg_1"}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[1].type",
+        "message": "input[1].type: items of type 'item_reference' are not supported"
+      }
+    },
+    {
+      "name": "web_search_call item",
+      "body": {"model": "m", "input": [{"role": "user", "content": "x"}, {"type": "web_search_call", "id": "ws_1", "status": "completed"}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[1].type",
+        "message": "input[1].type: items of type 'web_search_call' are not supported"
+      }
+    },
+    {
+      "name": "file_search_call item",
+      "body": {"model": "m", "input": [{"role": "user", "content": "x"}, {"type": "file_search_call", "id": "fs_1", "queries": []}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[1].type",
+        "message": "input[1].type: items of type 'file_search_call' are not supported"
+      }
+    },
+    {
+      "name": "computer_call item",
+      "body": {"model": "m", "input": [{"role": "user", "content": "x"}, {"type": "computer_call", "id": "cu_1", "call_id": "c1"}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[1].type",
+        "message": "input[1].type: items of type 'computer_call' are not supported"
+      }
+    },
+    {
+      "name": "computer_call_output item",
+      "body": {"model": "m", "input": [{"role": "user", "content": "x"}, {"type": "computer_call_output", "call_id": "c1", "output": {}}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[1].type",
+        "message": "input[1].type: items of type 'computer_call_output' are not supported"
+      }
+    },
+    {
+      "name": "local_shell_call item",
+      "body": {"model": "m", "input": [{"role": "user", "content": "x"}, {"type": "local_shell_call", "id": "ls_1", "call_id": "c1"}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[1].type",
+        "message": "input[1].type: items of type 'local_shell_call' are not supported"
+      }
+    },
+    {
+      "name": "local_shell_call_output item",
+      "body": {"model": "m", "input": [{"role": "user", "content": "x"}, {"type": "local_shell_call_output", "id": "c1", "output": "ok"}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[1].type",
+        "message": "input[1].type: items of type 'local_shell_call_output' are not supported"
+      }
+    },
+    {
+      "name": "mcp_call item",
+      "body": {"model": "m", "input": [{"role": "user", "content": "x"}, {"type": "mcp_call", "id": "mcp_1", "name": "t", "server_label": "s"}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[1].type",
+        "message": "input[1].type: items of type 'mcp_call' are not supported"
+      }
+    },
+    {
+      "name": "mcp_list_tools item",
+      "body": {"model": "m", "input": [{"role": "user", "content": "x"}, {"type": "mcp_list_tools", "id": "mcp_2", "server_label": "s", "tools": []}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[1].type",
+        "message": "input[1].type: items of type 'mcp_list_tools' are not supported"
+      }
+    },
+    {
+      "name": "image_generation_call item",
+      "body": {"model": "m", "input": [{"role": "user", "content": "x"}, {"type": "image_generation_call", "id": "ig_1"}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[1].type",
+        "message": "input[1].type: items of type 'image_generation_call' are not supported"
+      }
+    },
+    {
+      "name": "code_interpreter_call item",
+      "body": {"model": "m", "input": [{"role": "user", "content": "x"}, {"type": "code_interpreter_call", "id": "ci_1"}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[1].type",
+        "message": "input[1].type: items of type 'code_interpreter_call' are not supported"
+      }
+    },
+    {
+      "name": "unknown item type",
+      "body": {"model": "m", "input": [{"role": "user", "content": "x"}, {"type": "note", "text": "y"}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[1].type",
+        "message": "input[1].type: items of type 'note' are not supported"
+      }
+    },
+    {
+      "name": "unknown message key",
+      "body": {"model": "m", "input": [{"role": "user", "content": "x", "name": "caller"}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[0].name",
+        "message": "input[0].name: Extra inputs are not permitted"
+      }
+    },
+    {
+      "name": "unknown function_call_output key",
+      "body": {
+        "model": "m",
+        "input": [
+          {"role": "user", "content": "x"},
+          {"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": "{\"cmd\":\"ls\"}"},
+          {"type": "function_call_output", "call_id": "call_1", "output": "a", "is_error": false}
+        ]
+      },
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[2].is_error",
+        "message": "input[2].is_error: Extra inputs are not permitted"
+      }
+    },
+    {
+      "name": "unknown content part key",
+      "body": {"model": "m", "input": [{"role": "user", "content": [{"type": "input_text", "text": "x", "cache_control": {"type": "ephemeral"}}]}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[0].content[0].cache_control",
+        "message": "input[0].content[0].cache_control: Extra inputs are not permitted"
+      }
+    },
+    {
+      "name": "missing role",
+      "body": {"model": "m", "input": [{"content": "x"}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "invalid_request",
+        "param": "input[0].role",
+        "message": "input[0].role: Field required"
+      }
+    },
+    {
+      "name": "tool role",
+      "body": {"model": "m", "input": [{"role": "tool", "content": "x"}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "invalid_request",
+        "param": "input[0].role",
+        "message": "input[0].role: Input should be 'user', 'assistant', 'system' or 'developer'"
+      }
+    },
+    {
+      "name": "input_file part",
+      "body": {
+        "model": "m",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Read this."}, {"type": "input_file", "file_id": "file_1"}]}]
+      },
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[0].content[1].type",
+        "message": "input[0].content[1].type: parts of type 'input_file' are not supported"
+      }
+    },
+    {
+      "name": "input_audio part",
+      "body": {"model": "m", "input": [{"role": "user", "content": [{"type": "input_audio", "input_audio": {"data": "UklGRg==", "format": "wav"}}]}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[0].content[0].type",
+        "message": "input[0].content[0].type: parts of type 'input_audio' are not supported"
+      }
+    },
+    {
+      "name": "refusal part",
+      "body": {
+        "model": "m",
+        "input": [
+          {"role": "user", "content": "x"},
+          {"type": "message", "role": "assistant", "content": [{"type": "refusal", "refusal": "No."}]},
+          {"role": "user", "content": "y"}
+        ]
+      },
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[1].content[0].type",
+        "message": "input[1].content[0].type: parts of type 'refusal' are not supported"
+      }
+    },
+    {
+      "name": "image in an assistant message",
+      "body": {
+        "model": "m",
+        "input": [
+          {"role": "user", "content": "x"},
+          {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "input_image",
+                "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+              }
+            ]
+          },
+          {"role": "user", "content": "y"}
+        ]
+      },
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[1].content[0].type",
+        "message": "input[1].content[0].type: parts of type 'input_image' are only supported in user messages"
+      }
+    },
+    {
+      "name": "image in a developer message",
+      "body": {
+        "model": "m",
+        "input": [
+          {
+            "role": "developer",
+            "content": [
+              {
+                "type": "input_image",
+                "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+              }
+            ]
+          },
+          {"role": "user", "content": "y"}
+        ]
+      },
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[0].content[0].type",
+        "message": "input[0].content[0].type: parts of type 'input_image' are only supported in user messages"
+      }
+    },
+    {
+      "name": "remote image URL",
+      "body": {"model": "m", "input": [{"role": "user", "content": [{"type": "input_image", "image_url": "https://example.com/a.png"}]}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[0].content[0].image_url",
+        "message": "input[0].content[0].image_url: only base64 data: URLs are supported"
+      }
+    },
+    {
+      "name": "file_id image",
+      "body": {"model": "m", "input": [{"role": "user", "content": [{"type": "input_image", "file_id": "file_123", "detail": "auto"}]}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[0].content[0].file_id",
+        "message": "input[0].content[0].file_id: only base64 data: URLs are supported"
+      }
+    },
+    {
+      "name": "input_file in a tool output",
+      "body": {
+        "model": "m",
+        "input": [
+          {"role": "user", "content": "x"},
+          {"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": "{\"cmd\":\"ls\"}"},
+          {"type": "function_call_output", "call_id": "call_1", "output": [{"type": "input_file", "file_id": "file_1"}]}
+        ]
+      },
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[2].output[0].type",
+        "message": "input[2].output[0].type: parts of type 'input_file' are not supported"
+      }
+    },
+    {
+      "name": "remote image URL in a tool output",
+      "body": {
+        "model": "m",
+        "input": [
+          {"role": "user", "content": "x"},
+          {"type": "function_call", "call_id": "call_1", "name": "exec_command", "arguments": "{\"cmd\":\"ls\"}"},
+          {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": [{"type": "input_text", "text": "a"}, {"type": "input_image", "image_url": "https://example.com/a.png"}]
+          }
+        ]
+      },
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "input[2].output[1].image_url",
+        "message": "input[2].output[1].image_url: only base64 data: URLs are supported"
+      }
+    },
+    {
+      "name": "web_search tool",
+      "body": {
+        "model": "m",
+        "input": "x",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+          },
+          {"type": "web_search"}
+        ]
+      },
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "tools[1].type",
+        "message": "tools[1].type: 'web_search' tools are not supported; send function or custom tools"
+      }
+    },
+    {
+      "name": "web_search_preview tool",
+      "body": {"model": "m", "input": "x", "tools": [{"type": "web_search_preview"}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "tools[0].type",
+        "message": "tools[0].type: 'web_search_preview' tools are not supported; send function or custom tools"
+      }
+    },
+    {
+      "name": "file_search tool",
+      "body": {"model": "m", "input": "x", "tools": [{"type": "file_search", "vector_store_ids": ["vs_1"]}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "tools[0].type",
+        "message": "tools[0].type: 'file_search' tools are not supported; send function or custom tools"
+      }
+    },
+    {
+      "name": "code_interpreter tool",
+      "body": {"model": "m", "input": "x", "tools": [{"type": "code_interpreter", "container": {"type": "auto"}}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "tools[0].type",
+        "message": "tools[0].type: 'code_interpreter' tools are not supported; send function or custom tools"
+      }
+    },
+    {
+      "name": "computer_use_preview tool",
+      "body": {"model": "m", "input": "x", "tools": [{"type": "computer_use_preview", "display_width": 1024, "display_height": 768, "environment": "browser"}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "tools[0].type",
+        "message": "tools[0].type: 'computer_use_preview' tools are not supported; send function or custom tools"
+      }
+    },
+    {
+      "name": "mcp tool",
+      "body": {"model": "m", "input": "x", "tools": [{"type": "mcp", "server_label": "docs", "server_url": "https://example.com/mcp"}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "tools[0].type",
+        "message": "tools[0].type: 'mcp' tools are not supported; send function or custom tools"
+      }
+    },
+    {
+      "name": "local_shell tool",
+      "body": {"model": "m", "input": "x", "tools": [{"type": "local_shell"}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "tools[0].type",
+        "message": "tools[0].type: 'local_shell' tools are not supported; send function or custom tools"
+      }
+    },
+    {
+      "name": "image_generation tool",
+      "body": {"model": "m", "input": "x", "tools": [{"type": "image_generation"}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "tools[0].type",
+        "message": "tools[0].type: 'image_generation' tools are not supported; send function or custom tools"
+      }
+    },
+    {
+      "name": "namespace tool",
+      "body": {
+        "model": "m",
+        "input": "x",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+          },
+          {"type": "custom", "name": "apply_patch", "description": "Apply a patch to files."},
+          {"type": "namespace", "name": "agents", "description": "d", "tools": [{"type": "function", "name": "spawn"}]}
+        ]
+      },
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "tools[2].type",
+        "message": "tools[2].type: 'namespace' tools are not supported; send function or custom tools"
+      }
+    },
+    {
+      "name": "unknown tool type",
+      "body": {"model": "m", "input": "x", "tools": [{"type": "shell"}]},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "tools[0].type",
+        "message": "tools[0].type: 'shell' tools are not supported; send function or custom tools"
+      }
+    },
+    {
+      "name": "strict function tool",
+      "body": {
+        "model": "m",
+        "input": "x",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]},
+            "strict": true
+          }
+        ]
+      },
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "tools[0].strict",
+        "message": "tools[0].strict: strict function schemas are not supported"
+      }
+    },
+    {
+      "name": "unknown function tool key",
+      "body": {
+        "model": "m",
+        "input": "x",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]},
+            "defer_loading": true
+          }
+        ]
+      },
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "tools[0].defer_loading",
+        "message": "tools[0].defer_loading: Extra inputs are not permitted"
+      }
+    },
+    {
+      "name": "allowed_tools tool_choice",
+      "body": {
+        "model": "m",
+        "input": "x",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+          }
+        ],
+        "tool_choice": {"type": "allowed_tools", "mode": "auto", "tools": [{"type": "function", "name": "exec_command"}]}
+      },
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "tool_choice.type",
+        "message": "tool_choice.type: 'allowed_tools' is not supported"
+      }
+    },
+    {
+      "name": "hosted tool_choice",
+      "body": {
+        "model": "m",
+        "input": "x",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+          }
+        ],
+        "tool_choice": {"type": "web_search_preview"}
+      },
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "unsupported_field",
+        "param": "tool_choice.type",
+        "message": "tool_choice.type: 'web_search_preview' is not supported"
+      }
+    },
+    {
+      "name": "undeclared named function tool_choice",
+      "body": {
+        "model": "m",
+        "input": "x",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+          }
+        ],
+        "tool_choice": {"type": "function", "name": "read_file"}
+      },
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "invalid_request",
+        "param": "tool_choice.name",
+        "message": "tool_choice.name: tool 'read_file' is not declared in tools"
+      }
+    },
+    {
+      "name": "undeclared named custom tool_choice",
+      "body": {
+        "model": "m",
+        "input": "x",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}
+          }
+        ],
+        "tool_choice": {"type": "custom", "name": "apply_patch"}
+      },
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "invalid_request",
+        "param": "tool_choice.name",
+        "message": "tool_choice.name: tool 'apply_patch' is not declared in tools"
+      }
+    },
+    {
+      "name": "named tool_choice without tools",
+      "body": {"model": "m", "input": "x", "tool_choice": {"type": "function", "name": "exec_command"}},
+      "expect": {
+        "status": 400,
+        "type": "invalid_request_error",
+        "code": "invalid_request",
+        "param": "tool_choice.name",
+        "message": "tool_choice.name: tool 'exec_command' is not declared in tools"
+      }
+    }
+  ]
+}
