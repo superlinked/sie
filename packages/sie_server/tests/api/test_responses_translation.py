@@ -46,7 +46,7 @@ def _chat_route_accepts(chat: dict[str, Any]) -> None:
 
 
 def _frames(case: dict[str, Any]) -> list[str]:
-    return [frame if isinstance(frame, str) else json.dumps(frame) for frame in case["frames"]]
+    return [frame if isinstance(frame, str) else json.dumps(frame, ensure_ascii=False) for frame in case["frames"]]
 
 
 def _named(events: list[Event]) -> list[dict[str, Any]]:
@@ -188,8 +188,8 @@ async def test_a_stream_vector_survives_the_sse_body_split_at_any_byte(case: dic
     sse = "".join(f": keepalive\n\ndata: {frame}\n\n" for frame in _frames(case)).encode()
 
     async def chunks() -> AsyncIterator[bytes]:
-        for start in range(0, len(sse), 7):
-            yield sse[start : start + 7]
+        for start in range(len(sse)):
+            yield sse[start : start + 1]
 
     events, comments = _parse_body(await _drain(stream_events(chunks(), _machine(case))))
 
@@ -216,7 +216,6 @@ def test_an_error_vector_keeps_the_answer_and_renames_the_param(case: dict[str, 
     headers, content = responses_error(sent, body)
 
     expect = case["expect"]
-    assert case["status"] == expect["status"]
     for name, value in (expect.get("headers") or {}).items():
         assert dict(headers)[name] == value, name
     for name in expect.get("absent_headers") or []:

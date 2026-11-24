@@ -18,7 +18,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.testclient import TestClient
 from sie_server.adapters.errors import UPSTREAM_FAILURE_MESSAGES
 from sie_server.adapters.remote._http import RemoteUpstreamError
@@ -31,6 +31,7 @@ from sie_server.config.model import ModelConfig
 from sie_server.core.loader import load_adapter, load_model_configs
 
 MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
+VECTORS = Path(__file__).resolve().parents[4] / "conformance" / "openai_responses"
 MODEL = "sie-fake:chat"
 QUESTION = "What is the weather in Paris?"
 WEATHER = {
@@ -291,7 +292,7 @@ def test_a_body_that_is_not_json_or_is_too_large_is_refused(
     large = _post(client, _body())
 
     error = _error(invalid, 400)
-    assert error["message"].startswith("body: invalid JSON: ")
+    assert error["message"] == "body: invalid JSON"
     assert (error["param"], error["code"]) == ("body", "invalid_request")
     assert _error(large, 413) == {
         "message": "request body too large",
@@ -342,6 +343,31 @@ def test_a_loading_model_answers_the_chat_error_with_its_retry_after() -> None:
     assert _error(response, 503) == chat.json()["error"]
     assert response.json()["error"]["code"] == "MODEL_LOADING"
     assert response.headers["retry-after"] == chat.headers["retry-after"] == "5"
+
+
+@pytest.mark.parametrize(
+    "case",
+    json.loads((VECTORS / "error_vectors.json").read_text(encoding="utf-8"))["errors"],
+    ids=lambda case: case["name"],
+)
+@pytest.mark.parametrize("stream", [False, True])
+def test_an_error_vector_from_the_chat_route_is_answered_at_its_status(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, case: dict[str, Any], stream: bool
+) -> None:
+    async def chat_error(*_: Any) -> JSONResponse:
+        return JSONResponse(status_code=case["status"], content=case["body"], headers=case.get("headers"))
+
+    monkeypatch.setattr(openai_responses, "serve_chat_completions", chat_error)
+    response = _post(client, _body(stream=stream))
+
+    expect = case["expect"]
+    assert response.status_code == expect["status"]
+    assert response.headers["content-type"] == "application/json"
+    for name, value in (expect.get("headers") or {}).items():
+        assert response.headers[name] == value, name
+    for name in expect.get("absent_headers") or []:
+        assert name not in response.headers, name
+    assert response.json() == expect["body"]
 
 
 def test_stored_response_routes_are_not_served(client: TestClient) -> None:

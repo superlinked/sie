@@ -65,8 +65,8 @@ async def _read_body(request: Request) -> Any:
         raw.extend(chunk)
     try:
         return parse_json(bytes(raw))
-    except (ValueError, UnicodeDecodeError) as error:
-        raise ResponsesError(f"body: invalid JSON: {error}", param="body", code="invalid_request") from None
+    except (ValueError, UnicodeDecodeError):
+        raise ResponsesError("body: invalid JSON", param="body", code="invalid_request") from None
 
 
 async def _buffered_response(answer: Response, shape: ResponseShape, request_id: str) -> Response:
@@ -76,8 +76,9 @@ async def _buffered_response(answer: Response, shape: ResponseShape, request_id:
         return _server_error("the chat completion is not valid JSON")
     try:
         response = chat_completion_to_response(chat, shape, request_id, int(time.time()))
-    except ValueError as error:
-        return _server_error(str(error))
+    except ValueError:
+        logger.warning("a chat completion could not be translated into a Response", exc_info=True)
+        return _server_error("the chat completion could not be translated")
     headers = {name: value for name, value in _header_pairs(answer) if is_forwarded_header(name)}
     return JSONResponse(content=response, headers=headers)
 
