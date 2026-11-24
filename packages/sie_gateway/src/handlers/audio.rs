@@ -574,7 +574,7 @@ fn copy_native_response_headers(from: &HeaderMap, to: &mut HeaderMap) {
     responses(
         (status = 200, description = "OpenAI-compatible transcription response", body = crate::openapi::OpenAITranscriptionResponse),
         (status = 400, description = "Invalid or unsupported field", body = crate::openapi::OpenAIErrorEnvelope),
-        (status = 401, description = "Missing or invalid bearer token", body = crate::openapi::StandardApiError),
+        (status = 401, description = "Missing or invalid bearer token", body = crate::openapi::OpenAIErrorEnvelope),
         (status = 404, description = "Model not found", body = crate::openapi::OpenAIErrorEnvelope),
         (status = 413, description = "Multipart body or audio file too large", body = crate::openapi::OpenAIErrorEnvelope),
         (status = 500, description = "Malformed worker response or gateway internal error", body = crate::openapi::OpenAIErrorEnvelope),

@@ -15148,7 +15148,7 @@ fn openai_embedding_items_to_data(
     responses(
         (status = 200, description = "OpenAI-compatible embeddings response", body = crate::openapi::OpenAIEmbeddingsListResponse),
         (status = 400, description = "Invalid request", body = crate::openapi::OpenAIErrorEnvelope),
-        (status = 401, description = "Missing or invalid bearer token", body = crate::openapi::StandardApiError),
+        (status = 401, description = "Missing or invalid bearer token", body = crate::openapi::OpenAIErrorEnvelope),
         (status = 404, description = "Model not found", body = crate::openapi::OpenAIErrorEnvelope),
         (status = 409, description = "Bundle override conflicts with model routing", body = crate::openapi::OpenAIErrorEnvelope),
         (status = 413, description = "Request body too large", body = crate::openapi::OpenAIErrorEnvelope),
