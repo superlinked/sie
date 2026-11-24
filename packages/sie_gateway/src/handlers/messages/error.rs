@@ -326,6 +326,10 @@ pub(crate) async fn anthropic_error_response(
             || name_str.eq_ignore_ascii_case("x-sie-error-version")
             || name_str.eq_ignore_ascii_case("retry-after")
             || name_str.eq_ignore_ascii_case("www-authenticate")
+            || name_str.eq_ignore_ascii_case("x-sie-ratelimit-rps")
+            || name_str.eq_ignore_ascii_case("x-sie-ratelimit-concurrency")
+            || name_str.eq_ignore_ascii_case("x-sie-ratelimit-scope")
+            || name_str.eq_ignore_ascii_case("x-sie-ratelimit-dimension")
         {
             headers.append(name.clone(), value.clone());
         }
