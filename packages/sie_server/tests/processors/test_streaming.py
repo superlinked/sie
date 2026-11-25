@@ -2996,37 +2996,95 @@ async def test_streaming_valid_strict_arguments_are_released() -> None:
     assert [chunk for chunk in chunks if chunk.get("done") is True][-1].get("error") is None
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("backend", "parser", "extra", "param"),
-    [
-        pytest.param("outlines", "qwen3_coder", {}, "tools", id="outlines-backend"),
-        pytest.param(None, "qwen3_coder", {}, "tools", id="no-grammar-backend"),
-        pytest.param("xgrammar", "gemma4", {}, "tools", id="unsupported-format"),
-        pytest.param(
-            "xgrammar",
-            "qwen3_coder",
-            {"grammar": {"kind": "json_schema", "value": {"type": "object"}}},
-            "response_format",
-            id="with-response-format",
-        ),
-    ],
+_QWEN_WEATHER_CALL = (
+    "<tool_call>\n<function=get_weather>\n<parameter=city>\nTokyo\n</parameter>\n"
+    "<parameter=days>\n{days}\n</parameter>\n</function>\n</tool_call>"
 )
-async def test_streaming_strict_tool_unenforceable_is_rejected(
-    backend: str | None, parser: str, extra: dict[str, Any], param: str
-) -> None:
+_GEMMA_WEATHER_CALL = '<|tool_call>call:get_weather{{city:<|"|>Tokyo<|"|>,days:{days}}}<tool_call|>'
+_UNCONSTRAINED_STRICT_REQUESTS = [
+    pytest.param("outlines", "qwen3_coder", {}, _QWEN_WEATHER_CALL, "soon", id="outlines-backend"),
+    pytest.param(None, "qwen3_coder", {}, _QWEN_WEATHER_CALL, "soon", id="no-grammar-backend"),
+    pytest.param("xgrammar", "gemma4", {}, _GEMMA_WEATHER_CALL, '<|"|>soon<|"|>', id="format-without-a-tag"),
+    pytest.param(
+        "xgrammar",
+        "qwen3_coder",
+        {"grammar": {"kind": "json_schema", "value": {"type": "object"}}},
+        _QWEN_WEATHER_CALL,
+        "soon",
+        id="with-response-format",
+    ),
+]
+
+
+async def _run_unconstrained_strict_weather(
+    backend: str | None, parser: str, extra: dict[str, Any], call: str
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     proc, nc, captured = _strict_tool_processor(
-        [GenerationChunk(text_delta="never", done=True, finish_reason="stop")], backend=backend, parser=parser
+        [
+            GenerationChunk(text_delta=call, is_first=True),
+            GenerationChunk(text_delta="", done=True, finish_reason="stop"),
+        ],
+        backend=backend,
+        parser=parser,
     )
     generate = {"prompt": "weather?", "max_new_tokens": 64, "tools": list(_STRICT_WEATHER_TOOLS), **extra}
-
     await proc.process(_make_msg(_make_work_item(generate=generate)), "test/model")
+    return _decode_chunks(nc), captured
 
-    assert "grammar" not in captured
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("backend", "parser", "extra", "call", "bad_days"), _UNCONSTRAINED_STRICT_REQUESTS)
+async def test_streaming_strict_tool_without_a_structural_tag_is_served(
+    backend: str | None, parser: str, extra: dict[str, Any], call: str, bad_days: str
+) -> None:
+    """Where the structural tag cannot apply, the request keeps the grammar a non-strict one gets."""
+    chunks, captured = await _run_unconstrained_strict_weather(backend, parser, extra, call.format(days="3"))
+
+    grammar = captured.get("grammar")
+    assert (grammar.kind if grammar is not None else None) == (extra["grammar"]["kind"] if extra else None)
+    assert _tool_call_deltas(chunks)[1]["function"]["arguments"] == '{"city":"Tokyo","days":3}'
+    assert [chunk for chunk in chunks if chunk.get("done") is True][-1].get("error") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("backend", "parser", "extra", "call", "bad_days"), _UNCONSTRAINED_STRICT_REQUESTS)
+async def test_streaming_strict_tool_without_a_structural_tag_is_still_validated(
+    backend: str | None, parser: str, extra: dict[str, Any], call: str, bad_days: str
+) -> None:
+    chunks, _captured = await _run_unconstrained_strict_weather(backend, parser, extra, call.format(days=bad_days))
+
+    assert _tool_call_deltas(chunks) == []
+    terminals = [chunk for chunk in chunks if chunk.get("done") is True]
+    assert len(terminals) == 1
+    assert terminals[0]["error"]["code"] == "MODEL_OUTPUT_PARSE_ERROR"
+    assert "'get_weather'" in terminals[0]["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_streaming_strict_tool_that_cannot_be_validated_is_rejected() -> None:
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "strict": True,
+                "parameters": {"type": "object", "properties": {"city": {}}, "unevaluatedProperties": False},
+            },
+        }
+    ]
+    proc, nc, captured = _strict_tool_processor(
+        [GenerationChunk(text_delta="never", done=True, finish_reason="stop")], backend="outlines", parser="gemma4"
+    )
+
+    await proc.process(
+        _make_msg(_make_work_item(generate={"prompt": "weather?", "max_new_tokens": 64, "tools": tools})), "test/model"
+    )
+
+    assert "calls" not in captured
     terminals = [chunk for chunk in _decode_chunks(nc) if chunk.get("done") is True]
     assert len(terminals) == 1
     assert terminals[0]["error"]["code"] == "unsupported_field"
-    assert terminals[0]["error"].get("param") == param
+    assert terminals[0]["error"].get("param") == "tools[0].function.parameters"
 
 
 @pytest.mark.asyncio

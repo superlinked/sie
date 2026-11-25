@@ -110,6 +110,7 @@ from sie_server.processors.tool_call_grammar import (
     ToolChoiceError,
     build_strict_tool_grammar,
     build_tool_choice_grammar,
+    check_strict_tools,
     has_strict_tools,
     normalize_tool_choice,
     request_constrains_decoding,
@@ -1428,27 +1429,20 @@ class StreamingProcessor:
         tools: tuple[dict[str, Any], ...],
         tool_call_format: ToolCallFormat,
     ) -> GrammarSpec | None:
-        """Build the grammar that enforces ``strict`` tool arguments, or refuse.
+        """Build the grammar for a request with ``strict`` tools.
 
-        Strict tools compile to an XGrammar structural tag, so the request is
-        refused with ``unsupported_field`` instead of silently dropping the
-        guarantee when the backend is not XGrammar or a ``response_format``
-        grammar would compete for the same decode.
+        Strict arguments are guaranteed by the end-of-turn validation, which
+        runs on every backend and tool-call format. The structural tag only
+        steers generation and needs XGrammar and the whole decode, so without
+        XGrammar, or beside a ``response_format`` grammar, the request keeps
+        the grammar a non-strict request gets.
         """
-        if params.grammar is not None:
-            raise StrictToolError(
-                "response_format", "strict function tools cannot be combined with 'response_format' on this model"
+        if params.grammar is None and getattr(adapter, "_grammar_backend", None) == "xgrammar":
+            return build_strict_tool_grammar(
+                tools, params.tool_choice, tool_call_format, parallel_tool_calls=params.parallel_tool_calls
             )
-        backend = getattr(adapter, "_grammar_backend", None)
-        if backend != "xgrammar":
-            raise StrictToolError(
-                "tools",
-                "strict function tools require the xgrammar grammar backend; "
-                f"this model is served with {backend or 'no grammar backend'}",
-            )
-        return build_strict_tool_grammar(
-            tools, params.tool_choice, tool_call_format, parallel_tool_calls=params.parallel_tool_calls
-        )
+        check_strict_tools(tools)
+        return build_tool_choice_grammar(tools, params.tool_choice, tool_call_format)
 
     @staticmethod
     def _grammar_backend_for_model_config(config: Any) -> str | None:

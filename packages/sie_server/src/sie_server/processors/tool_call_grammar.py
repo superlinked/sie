@@ -63,11 +63,12 @@ class ToolChoiceError(ValueError):
 
 
 class StrictToolError(ValueError):
-    """Raised when a ``strict`` function tool cannot be enforced.
+    """Raised when a ``strict`` function tool cannot be served or constrained.
 
-    OpenAI rejects a strict schema it cannot honour instead of silently
-    generating unconstrained arguments, so the worker surfaces this as a
-    terminal ``unsupported_field`` chunk naming ``param``.
+    From :func:`check_strict_tools` the tool's arguments could not be
+    validated, and the worker surfaces a terminal ``unsupported_field`` chunk
+    naming ``param``. From a tag builder the grammar cannot express the
+    schema, and the caller constrains less and leaves the call to validation.
     """
 
     def __init__(self, param: str, message: str) -> None:
@@ -402,6 +403,35 @@ def request_constrains_decoding(grammar: Any, tools: Any, tool_choice: Any) -> b
     return grammar is not None or tools_require_grammar(tools, tool_choice)
 
 
+def check_strict_tools(tools: tuple[dict[str, Any], ...] | list[dict[str, Any]]) -> None:
+    """Refuse strict tools whose arguments could not be validated.
+
+    Every strict call is validated against its schema when the turn ends
+    (:func:`~sie_server.processors.strict_grammar.enforce_strict_tool_arguments`),
+    on every tool-call format and grammar backend. That validation is the
+    guarantee, so a request is refused only when it cannot run: two tools
+    share the name a call is validated by, the arguments schema does not
+    describe an object, or it uses a keyword the verifier cannot evaluate.
+
+    Raises:
+        StrictToolError: A strict tool cannot be validated.
+    """
+    names = extract_tool_names(tools)
+    duplicates = sorted({tool_name for tool_name in names if names.count(tool_name) > 1})
+    if duplicates:
+        raise StrictToolError("tools", f"function names must be unique for strict tools; repeated: {duplicates!r}")
+    for index, tool in enumerate(tools):
+        if not is_strict_tool(tool):
+            continue
+        path = f"tools[{index}].function.parameters"
+        parameters = _function_parameters(tool["function"], path)
+        if parameters.get("type") not in (None, "object"):
+            raise StrictToolError(path, f"'{path}' must describe an object for a strict tool")
+        keyword = unverifiable_schema_keyword(parameters)
+        if keyword is not None:
+            raise StrictToolError(path, f"'{keyword}' in '{path}' is not supported for strict tools")
+
+
 def build_strict_tool_grammar(
     tools: tuple[dict[str, Any], ...] | list[dict[str, Any]],
     tool_choice: dict[str, Any] | str | None,
@@ -409,50 +439,56 @@ def build_strict_tool_grammar(
     *,
     parallel_tool_calls: bool = True,
 ) -> GrammarSpec | None:
-    """Build the structural-tag grammar that enforces strict tool arguments.
+    """Build the grammar for a request with strict tools.
 
-    Every strict tool's arguments are constrained by its schema; a non-strict
-    tool in the same request keeps a free argument body. ``auto`` admits free
-    text or calls, ``required`` and the named form admit only calls, and
+    Every strict tool's arguments are constrained by its schema as far as the
+    model's tool-call format can express it; a non-strict tool in the same
+    request keeps a free argument body. ``auto`` admits free text or calls,
+    ``required`` and the named form admit only calls, and
     ``parallel_tool_calls=False`` stops after the first call. Returns ``None``
     for ``tool_choice: "none"``.
 
+    The grammar steers generation; the end-of-turn validation guarantees the
+    arguments. So what the grammar cannot express is constrained less, never
+    refused: a parameter becomes free text, a tool gets a free argument body,
+    and a format without a structural tag keeps the grammar of a non-strict
+    request (:func:`build_tool_choice_grammar`).
+
     Raises:
-        StrictToolError: The format, or a strict tool's schema, cannot be
-            enforced.
+        StrictToolError: A strict tool cannot be validated
+            (:func:`check_strict_tools`).
         ToolChoiceError: The ``tool_choice`` cannot be satisfied.
     """
     mode, name = normalize_tool_choice(tool_choice)
     if mode == "none":
         return None
+    check_strict_tools(tools)
     build_tag = _STRICT_TAG_BUILDERS.get(tool_call_format)
     if build_tag is None:
-        raise StrictToolError(
-            "tools",
-            f"strict function tools are not supported for this model's tool-call format ({tool_call_format!r})",
-        )
+        return build_tool_choice_grammar(tuple(tools), tool_choice, tool_call_format)
     names = extract_tool_names(tools)
     if not names:
         raise ToolChoiceError("strict function tools require a non-empty 'tools' array with named functions")
     if mode == "named" and name not in names:
         raise ToolChoiceError(f"tool_choice names function {name!r}, which is not in tools {names!r}")
 
-    duplicates = sorted({tool_name for tool_name in names if names.count(tool_name) > 1})
-    if duplicates:
-        # The parser converts each call by one schema per name.
-        raise StrictToolError("tools", f"function names must be unique for strict tools; repeated: {duplicates!r}")
-
     tags: list[dict[str, Any]] = []
     for index, tool in enumerate(tools):
         function = tool.get("function") if isinstance(tool, dict) else None
         if not isinstance(function, dict) or not isinstance(function.get("name"), str) or not function["name"]:
             continue
-        # Every strict schema is checked, even one the named choice excludes:
-        # an unenforceable strict tool is rejected whichever call is chosen.
-        tag = build_tag(function, strict=is_strict_tool(tool), path=f"tools[{index}].function.parameters")
-        if mode != "named" or function["name"] == name:
-            tags.append(tag)
-    _check_schema_cache_collisions(tags)
+        if mode == "named" and function["name"] != name:
+            continue
+        path = f"tools[{index}].function.parameters"
+        try:
+            tag = build_tag(function, strict=is_strict_tool(tool), path=path)
+        except StrictToolError:
+            tag = build_tag(function, strict=False, path=path)
+        tags.append(tag)
+    try:
+        _check_schema_cache_collisions(tags)
+    except StrictToolError:
+        return build_tool_choice_grammar(tuple(tools), tool_choice, tool_call_format)
 
     stop_after_first = not parallel_tool_calls
     if mode == "auto":
@@ -553,9 +589,7 @@ def _hermes_json_tool_tag(function: dict[str, Any], *, strict: bool, path: str) 
     begin = _HERMES_CALL_START + orjson.dumps(function["name"]).decode() + ', "arguments": '
     if strict:
         schema = _function_parameters(function, path)
-        _check_enforceable(schema, path)
-        if schema.get("type") not in (None, "object"):
-            raise StrictToolError(path, f"'{path}' must describe an object for a strict tool")
+        _check_constrainable(schema, path)
         # Strict arguments never carry undeclared keys, as with Qwen XML; an
         # open object would let the backend generate them.
         schema = {**schema, "additionalProperties": False}
@@ -593,7 +627,7 @@ def _qwen_xml_tool_tag(function: dict[str, Any], *, strict: bool, path: str) -> 
         free = {"type": "any_text", "excludes": [_TRIGGER, "</tool_call>"]}
         return {"type": "tag", "begin": begin, "content": free, "end": _QWEN_CALL_END}
     parameters = _function_parameters(function, path)
-    _check_enforceable(parameters, path)
+    _check_constrainable(parameters, path)
     properties, required = _object_properties(parameters, path)
     if len(properties) > MAX_XML_PARAMS:
         # The parser reads at most this many parameters from one call.
@@ -602,10 +636,15 @@ def _qwen_xml_tool_tag(function: dict[str, Any], *, strict: bool, path: str) -> 
     for key, schema in properties.items():
         if not _XML_PARAMETER_NAME.fullmatch(key):
             raise StrictToolError(path, f"parameter name {key!r} cannot be written in this model's tool-call format")
+        try:
+            content = _qwen_xml_value_format(schema, parameters, f"{path}.properties.{key}")
+        except StrictToolError:
+            # The other parameters stay constrained; this one is validated.
+            content = _raw_text_format()
         parameter: dict[str, Any] = {
             "type": "tag",
             "begin": f"<parameter={key}>\n",
-            "content": _qwen_xml_value_format(schema, parameters, f"{path}.properties.{key}"),
+            "content": content,
             "end": "\n</parameter>\n",
         }
         if key not in required:
@@ -617,20 +656,16 @@ def _qwen_xml_tool_tag(function: dict[str, Any], *, strict: bool, path: str) -> 
     return {"type": "tag", "begin": begin, "content": content, "end": _QWEN_CALL_END}
 
 
-def _check_enforceable(parameters: dict[str, Any], path: str) -> None:
-    """Reject a strict schema that cannot be served, not one the grammar only loosens.
+def _check_constrainable(parameters: dict[str, Any], path: str) -> None:
+    """Raise for a schema the grammar would constrain to something else.
 
-    Every strict call's arguments are validated against the full schema when
-    the turn ends (:func:`~sie_server.processors.strict_grammar.enforce_strict_tool_arguments`),
-    so a keyword the grammar backend drops (``multipleOf``, ``pattern`` beside
-    ``format``, an assertion beside ``$ref``) can at worst fail a turn, never
-    return arguments that break the schema. What remains rejected here is a
-    keyword the verifier itself cannot evaluate, a reference the per-parameter
-    grammar would resolve elsewhere, and listed values no argument can match.
+    A keyword the grammar backend drops (``multipleOf``, ``pattern`` beside
+    ``format``, an assertion beside ``$ref``) only loosens the grammar and is
+    left to the end-of-turn validation. A reference the per-parameter grammar
+    would resolve elsewhere, or listed values no argument can match, would
+    make it generate arguments that cannot validate, so the tool keeps a free
+    argument body instead.
     """
-    keyword = unverifiable_schema_keyword(parameters)
-    if keyword is not None:
-        raise StrictToolError(path, f"'{keyword}' in '{path}' is not supported for strict tools")
     for subschema in iter_subschemas(parameters):
         _check_reference(subschema.get("$ref"), path)
         _check_listed_values(subschema, path)
@@ -706,8 +741,6 @@ def _json_value_has_type(value: Any, kind: Any) -> bool:
 
 def _object_properties(parameters: dict[str, Any], path: str) -> tuple[dict[str, Any], set[str]]:
     """Return a strict tool's declared properties and required keys."""
-    if parameters.get("type") not in (None, "object"):
-        raise StrictToolError(path, f"'{path}' must describe an object for a strict tool")
     for keyword in _UNSUPPORTED_PARAMETERS_KEYWORDS:
         if keyword in parameters:
             raise StrictToolError(path, f"'{keyword}' in '{path}' is not supported for strict tools on this model")
