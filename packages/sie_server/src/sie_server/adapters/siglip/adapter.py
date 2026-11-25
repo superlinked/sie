@@ -149,6 +149,7 @@ class SiglipAdapter(BaseAdapter):
         backend: SiglipBackend = "transformers",
         open_clip_model_id: str | None = None,
         dense_dim: int | None = None,
+        lowercase_text: bool = False,
     ) -> None:
         """Initialize the adapter.
 
@@ -182,6 +183,11 @@ class SiglipAdapter(BaseAdapter):
                 a single config attribute). When omitted with the
                 ``transformers`` backend, the adapter reads
                 ``vision_config.hidden_size`` from the loaded model config.
+            lowercase_text: Lowercase every text before tokenization. SigLIP 2
+                was trained on lowercased text; transformers 4.x loads its
+                Gemma tokenizer without that normalization (transformers 5
+                adds it as ``Siglip2Tokenizer``), so SigLIP 2 catalog entries
+                opt in here. SigLIP 1's tokenizer already lowercases.
         """
         self._model_name_or_path = str(model_name_or_path)
         self._normalize = normalize
@@ -195,6 +201,7 @@ class SiglipAdapter(BaseAdapter):
         self._backend: SiglipBackend = backend
         self._open_clip_model_id = open_clip_model_id
         self._dense_dim_override = dense_dim
+        self._lowercase_text = lowercase_text
 
         # Validate the open_clip backend's required options up-front so the
         # error surfaces at adapter construction rather than at load time.
@@ -695,6 +702,8 @@ class SiglipAdapter(BaseAdapter):
         could be surfaced.
         """
         assert self._model is not None
+        if self._lowercase_text:
+            texts = [text.lower() for text in texts]
 
         if self._backend == "open_clip":
             assert self._open_clip_tokenizer is not None

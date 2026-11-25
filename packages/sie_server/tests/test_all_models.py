@@ -393,6 +393,18 @@ def test_google_siglip2_base_patch16_224_image_dense() -> None:
     )
 
 
+def test_google_siglip2_so400m_patch14_384_dense() -> None:
+    _assert_dense(
+        "google/siglip2-so400m-patch14-384", 1152, [0.0211334228515625, 0.01535797119140625, -0.03228759765625]
+    )
+
+
+def test_google_siglip2_so400m_patch14_384_image_dense() -> None:
+    _assert_dense_image(
+        "google/siglip2-so400m-patch14-384", 1152, [-0.0163116455078125, 0.0170745849609375, 0.01384735107421875]
+    )
+
+
 def test_laion_clip_vit_b_32_laion2b_dense() -> None:
     _assert_dense(
         "laion/CLIP-ViT-B-32-laion2B-s34B-b79K", 512, [-0.020416259765625, -0.0300140380859375, -0.0004265308380126953]
