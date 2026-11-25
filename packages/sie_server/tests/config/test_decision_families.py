@@ -16,6 +16,7 @@ MODELS = (
     ("baselabs/joey-1", "9efbe485efbed9598dfca5294cbbe8da00e21908", "transformers5"),
     ("baselabs/mammoth-1", "9d1962f193e48a68cf0f3598dc7fb4462fd23ad9", "transformers5"),
     ("perplexity-ai/pplx-decider-v1.2", "cce0f3f80033e9d89d80831d5281fd72124aacce", "transformers5"),
+    ("perplexity-ai/pplx-decider-v1.3", "9c2ebb27470d3dec2ad7ab727727e40d142c7213", "transformers5"),
     ("PelaAI/KnowLine-4B-Gen5.5", "890ecc3765a16c8e22b884807e19827fa695eb9a", "sglang-cu130"),
     ("PelaAI/KnowLine-31B-Gen1", "a45b64060e1d6928e7e20bdffd2c482e4ebf7de6", "sglang-cu130"),
 )

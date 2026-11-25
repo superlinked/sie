@@ -4,7 +4,9 @@ Adapted from the Apache-2.0 reference distributed with
 perplexity-ai/pplx-decider-v1.1-27b at 14c9d90137962d300f3de95633f7b6535e80c5ce
 (format 1: one row per question, last-token readout) and
 perplexity-ai/pplx-decider-flash-v1.2 at 9ff7cf9838e59df461c276b7699d56b244d2af58
-(format 2: joint protocol v3, one readout per question at its marker).
+(format 2: joint protocol v3, one readout per question at its marker) and
+perplexity-ai/pplx-decider-v1.3 at 9c2ebb27470d3dec2ad7ab727727e40d142c7213
+(format 2: chunked protocol v4, one sequence per question, readout at its marker).
 The upstream model derives from Qwen/Qwen3.8-27B, revision
 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0, under Apache-2.0. Its modifications
 are a trained 255-option readout, fine-tuned backbone/vision weights,
@@ -37,14 +39,26 @@ JOINT_PROTOCOL: dict[str, Any] = {
     "max_length": None,
     "usage": "nonpadding_joint_sequence_including_template_and_image_positions",
 }
+#: The chunked protocol (version 4): a shared context ending in ``separator``, then one question chunk per sequence.
+CHUNKED_PROTOCOL: dict[str, Any] = {
+    "version": 4,
+    "template": "joint-chunked-readout-v1",
+    "marker": "<|fim_suffix|>",
+    "readout_offset": 0,
+    "max_questions": None,
+    "max_length": None,
+    "usage": "nonpadding_joint_sequence_including_template_and_image_positions",
+    "separator": "<|fim_middle|>",
+}
 
 
 def checkpoint_config(directory: Path) -> dict[str, Any]:
     """Validate saved semantics before acquiring the backbone's weights.
 
     Format 1 answers one question per row at the last token. Format 2 must
-    declare the joint inline-readout protocol (version 3) in ``joint_config.json``;
-    the returned config then carries it under ``joint``.
+    declare the joint inline-readout protocol (version 3) or the chunked
+    protocol (version 4) in ``joint_config.json``; the returned config then
+    carries it under ``joint``.
     """
     config = json.loads((directory / "decision_config.json").read_text())
     version = config.get("format_version") if isinstance(config, dict) else None
@@ -53,8 +67,8 @@ def checkpoint_config(directory: Path) -> dict[str, Any]:
     if config["format_version"] == 2:
         path = directory / "joint_config.json"
         joint = json.loads(path.read_text()) if path.is_file() else None
-        if joint != JOINT_PROTOCOL:
-            raise ValueError("Format 2 checkpoints must declare the joint inline-readout protocol (version 3)")
+        if joint not in (JOINT_PROTOCOL, CHUNKED_PROTOCOL):
+            raise ValueError("Format 2 checkpoints must declare the joint protocol version 3 or the chunked version 4")
         if config.get("attention_mode") != "noncausal_full_attention" or config.get("pooling", "last") != "last":
             raise ValueError("Joint checkpoints need noncausal full attention and per-marker readouts")
         config = {**config, "joint": joint}
@@ -98,10 +112,12 @@ def validate_tokenizer(tokenizer: Any, config: Mapping[str, Any]) -> None:
     if codes != config["codes"] or ids != config["token_ids"] or len(set(ids)) != MAX_OPTIONS:
         raise ValueError("Checkpoint answer vocabulary differs from its tokenizer")
     if "joint" in config:
-        marker = config["joint"]["marker"]
-        ids = tokenizer.encode(marker, add_special_tokens=False)
-        if len(ids) != 1 or tokenizer.convert_ids_to_tokens(ids[0]) != marker:
-            raise ValueError("The joint readout marker must be a single existing token")
+        for token in (config["joint"]["marker"], config["joint"].get("separator")):
+            if token is None:
+                continue
+            ids = tokenizer.encode(token, add_special_tokens=False)
+            if len(ids) != 1 or tokenizer.convert_ids_to_tokens(ids[0]) != token:
+                raise ValueError("The joint readout marker and separator must be single existing tokens")
         return
     prefix = tokenizer.apply_chat_template(
         [{"role": "user", "content": "Choose an option."}],

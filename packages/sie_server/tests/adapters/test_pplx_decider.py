@@ -7,9 +7,17 @@ import pytest
 import torch
 from sie_server.adapters.errors import InputTooLongError
 from sie_server.adapters.pplx_decider.adapter import PerplexityDecisionAdapter
-from sie_server.adapters.pplx_decider.model import JOINT_PROTOCOL, DecisionModel, checkpoint_config
+from sie_server.adapters.pplx_decider.model import (
+    CHUNKED_PROTOCOL,
+    JOINT_PROTOCOL,
+    DecisionModel,
+    checkpoint_config,
+)
 from sie_server.adapters.pplx_decider.questions import (
+    CONTEXT_END,
     answer,
+    chunked_context_messages,
+    chunked_question_text,
     describe,
     joint_messages,
     messages,
@@ -470,3 +478,110 @@ def test_joint_and_single_rows_never_share_a_forward():
     single = instance._item_rows(1, Item(text="a"), parse_questions({"q": choice()}))
     with pytest.raises(ValueError, match="Joint"):
         instance._forward(joint + single)
+
+
+# ---------------------------------------------------------------------------
+# Format 2: chunked protocol v4 (pplx-decider-v1.3)
+# ---------------------------------------------------------------------------
+
+
+SEPARATOR = CHUNKED_PROTOCOL["separator"]
+SEPARATOR_ID = 9
+
+
+def test_format_two_accepts_the_exact_chunked_protocol(tmp_path):
+    assert checkpoint_config(joint_checkpoint(tmp_path, joint=CHUNKED_PROTOCOL))["joint"] == CHUNKED_PROTOCOL
+    variants = (
+        {k: v for k, v in CHUNKED_PROTOCOL.items() if k != "separator"},
+        CHUNKED_PROTOCOL | {"separator": "<x>"},
+        CHUNKED_PROTOCOL | {"template": JOINT_PROTOCOL["template"]},
+        JOINT_PROTOCOL | {"separator": SEPARATOR},
+    )
+    for joint in variants:
+        with pytest.raises(ValueError, match="joint"):
+            checkpoint_config(joint_checkpoint(tmp_path, joint=joint))
+
+
+def test_chunked_prompt_matches_reference_layout_and_escapes_markers():
+    question = parse_questions(
+        {"a": {"type": "choice", "instructions": f"Pick {SEPARATOR}", "criteria": {"x": None, "y": "why"}}}
+    )[0]
+    escapes = (SEPARATOR, MARKER)
+    assert chunked_question_text(question, ("A", "B"), escapes) == (
+        "Question:\nPick \uff1c|fim_middle|\uff1e\nOptions:\nA: x\nB: y: why"
+    )
+    chat = chunked_context_messages(f"s {MARKER}", escapes)
+    assert chat[0]["content"].startswith("Classify the shared state for each question.")
+    assert chat[1]["content"][0]["text"] == "State:\ns \uff1c|fim_suffix|\uff1e" + CONTEXT_END
+
+
+class ChunkedProcessor:
+    """Template wraps the turn; the adapter must cut the context at the sentinel and tokenize each piece alone."""
+
+    def __init__(self):
+        self.tokenizer = SimpleNamespace(pad_token_id=0, encode=self.encode)
+
+    @staticmethod
+    def _ids(text):
+        return [1 + ord(c) % 4 for c in text]
+
+    def encode(self, text, add_special_tokens):
+        assert add_special_tokens is False
+        return self._ids(text)
+
+    def apply_chat_template(self, chat, **kwargs):
+        assert kwargs == {"tokenize": False, "add_generation_prompt": False, "enable_thinking": False}
+        return "<s>" + chat[0]["content"] + "<u>" + chat[1]["content"][0]["text"].strip() + "<end>"
+
+    def __call__(self, *, text, images, padding, truncation, return_tensors):
+        assert images is None
+        assert padding is False
+        assert truncation is False
+        assert len(text) == 1
+        assert CONTEXT_END not in text[0]
+        ids = torch.tensor([self._ids(text[0])])
+        return {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
+
+
+def chunked_adapter(window=4096, budget=8192):
+    result = adapter(window, budget)
+    result._processor = ChunkedProcessor()
+    result._tokenizer = result._processor.tokenizer
+    result._marker, result._marker_id = MARKER, MARKER_ID
+    result._separator_id, result._escapes = SEPARATOR_ID, (SEPARATOR, MARKER)
+    return result
+
+
+def test_chunked_mode_gives_every_question_its_own_row_over_the_shared_context():
+    instance = chunked_adapter()
+    schema = {"q1": choice(), "q2": {"type": "noul"}, "q3": choice(instructions="Other")}
+    rows = instance._item_rows(0, Item(text="state one  "), parse_questions(schema))
+    assert [[q.id for q in row.questions] for row in rows] == [["q1"], ["q2"], ["q3"]]
+    processor = instance._processor
+    context = processor._ids("<s>" + chunked_context_messages("", ())[0]["content"] + "<u>State:\nstate one  ")
+    for row, question in zip(rows, parse_questions(schema), strict=True):
+        ids = row.inputs["input_ids"].tolist()
+        tail = processor._ids(chunked_question_text(question, instance._codes, instance._escapes))
+        assert ids == [*context, SEPARATOR_ID, *tail, MARKER_ID]
+        assert row.markers == (len(ids) - 1,)
+        assert row.inputs["attention_mask"].all()
+
+
+def test_chunked_answers_do_not_depend_on_the_other_questions():
+    instance = chunked_adapter()
+    alone = instance.extract([Item(text="state")], output_schema={"q": choice()})
+    mixed = instance.extract(
+        [Item(text="state")], output_schema={"z": choice(instructions="Longer other"), "q": choice()}
+    )
+    assert mixed.errors == alone.errors == [None]
+    assert mixed.data[0]["q"] == alone.data[0]["q"]
+    assert list(mixed.data[0]) == ["z", "q"]
+    assert mixed.input_token_counts[0] > alone.input_token_counts[0]
+
+
+def test_chunked_question_over_the_window_fails_without_truncation():
+    instance = chunked_adapter(window=400, budget=400)
+    out = instance.extract([Item(text="x" * 400), Item(text="ok")], output_schema={"q": choice()})
+    assert out.errors[0].code == "INPUT_TOO_LONG"
+    assert out.errors[1] is None
+    assert out.input_token_counts[0] == 0
