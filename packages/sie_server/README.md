@@ -606,9 +606,10 @@ not fit whole with `options={"overflow_policy": "error"}`, returns a per-item
 
 ### GLiNER2.5 entity extraction
 
-`fastino/gliner2.5-base-v1`, `fastino/gliner2.5-small-v1`, and
+`fastino/gliner2.5-base-v1`, `fastino/gliner2.5-small-v1`,
+`fastino/gliner2.5-multi-v1`, and
 `fastino/gliner2-privacy-filter-PII-multi` use the native `AutoExtractor` API in
-the Transformers 5 bundle. The base and small checkpoints use boundary
+the Transformers 5 bundle. The base, small and multilingual checkpoints use boundary
 extraction; the PII checkpoint uses span extraction. Existing GLiNER2 v1 and
 Decide routes keep their own adapters.
 
