@@ -35,6 +35,12 @@ ignore = [
     # humantime.
     { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained (no vuln); transitive via object_store 0.14 (required dependency); awaiting upstream migration" },
     { id = "RUSTSEC-2026-0542", reason = "humantime unmaintained alongside chrono (no vuln); transitive via object_store 0.14 (required dependency); awaiting upstream migration" },
+    # kube-client 4.0.0's optional openssl-tls connector trusts OpenSSL's
+    # default CA store in addition to the configured cluster CA, fixed in
+    # 4.2.1. The resolved gateway graph uses rustls-tls (the default since
+    # 0.86) and does not enable openssl-tls. Drop when kube-client is bumped
+    # to >=4.2.1.
+    { id = "RUSTSEC-2026-0600", reason = "kube-client 4.0.0 optional openssl-tls trusts the default CA store (fixed in 4.2.1); gateway resolves rustls-tls and does not enable openssl-tls. Drop on bump to kube-client >=4.2.1" },
 ]
 
 [licenses]
