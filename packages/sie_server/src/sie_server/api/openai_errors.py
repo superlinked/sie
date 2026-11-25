@@ -1,4 +1,4 @@
-"""The OpenAI error envelope for every error answer on the OpenAI-compatible routes.
+"""The OpenAI error envelope for the ``detail`` error answers on the OpenAI-compatible routes.
 
 The routes' handlers answer in the OpenAI envelope. Refusals made outside them,
 such as token authentication's, use the SIE ``{"detail": ...}`` envelope, which
@@ -24,6 +24,7 @@ OPENAI_PATHS = (
     "/v1/audio/transcriptions",
 )
 _MAX_ERROR_BODY_BYTES = 1024 * 1024
+_MAX_LENGTH_DIGITS = len(str(_MAX_ERROR_BODY_BYTES))
 _ENVELOPE_FIELDS = frozenset({"message", "type", "param", "code"})
 _STATUS_TYPES: dict[int, str] = {
     HTTPStatus.UNAUTHORIZED: "authentication_error",
@@ -97,7 +98,7 @@ def openai_error_from_detail(status: int, body: Any) -> dict[str, Any] | None:
 
 
 def _rewritable(headers: list[tuple[bytes, bytes]]) -> bool:
-    """Whether a response start declares a JSON body of at most 1 MiB."""
+    """Whether a response start declares an unencoded JSON body of at most 1 MiB."""
     mime: str | None = None
     length: bytes | None = None
     for name, value in headers:
@@ -106,9 +107,18 @@ def _rewritable(headers: list[tuple[bytes, bytes]]) -> bool:
             mime = value.decode("latin-1").split(";", 1)[0].strip().lower()
         elif lowered == b"content-length" and length is None:
             length = value.strip()
+        elif lowered == b"transfer-encoding" or (
+            lowered == b"content-encoding" and value.strip().lower() != b"identity"
+        ):
+            return False
     if mime is None or not (mime == "application/json" or mime.endswith("+json")):
         return False
-    return length is not None and length.isdigit() and int(length) <= _MAX_ERROR_BODY_BYTES
+    return (
+        length is not None
+        and length.isdigit()
+        and len(length) <= _MAX_LENGTH_DIGITS
+        and int(length) <= _MAX_ERROR_BODY_BYTES
+    )
 
 
 def _render(status: int, body: bytes) -> bytes | None:
@@ -117,11 +127,16 @@ def _render(status: int, body: bytes) -> bytes | None:
     except orjson.JSONDecodeError:
         return None
     envelope = openai_error_from_detail(status, parsed)
-    return None if envelope is None else orjson.dumps(envelope)
+    if envelope is None:
+        return None
+    try:
+        return orjson.dumps(envelope)
+    except orjson.JSONEncodeError:
+        return None
 
 
 class OpenAIErrorEnvelopeMiddleware:
-    """Give every error answer on the OpenAI-compatible routes and the paths below them the OpenAI envelope.
+    """Give every ``detail`` error answer on the OpenAI-compatible routes and the paths below them the OpenAI envelope.
 
     Added outside the server's other middleware, so their refusals on these
     paths, such as a missing credential, take the shape OpenAI clients read. A
@@ -131,8 +146,11 @@ class OpenAIErrorEnvelopeMiddleware:
     ``Content-Length``. ``type`` follows the status: ``authentication_error``
     (401), ``permission_error`` (403), ``rate_limit_error`` (429),
     ``invalid_request_error`` (other 4xx) and ``server_error`` (5xx). Answers
-    already in the OpenAI envelope, answers that are not JSON or do not declare
-    a ``Content-Length`` of at most 1 MiB, and successes pass through untouched.
+    already in the OpenAI envelope, other bodies such as a validation list,
+    answers that are not JSON, are encoded, or do not declare a
+    ``Content-Length`` of at most 1 MiB, and successes pass through untouched.
+    An exception raised after a held error start sends that start and the
+    body received so far before it propagates, as it would without this layer.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -177,4 +195,11 @@ class OpenAIErrorEnvelopeMiddleware:
             await send({**start, "headers": headers})
             await send({"type": "http.response.body", "body": rendered})
 
-        await self.app(scope, receive, respond)
+        try:
+            await self.app(scope, receive, respond)
+        except Exception:
+            if held is not None:
+                start, held = held, None
+                await send(start)
+                await send({"type": "http.response.body", "body": bytes(body), "more_body": True})
+            raise
