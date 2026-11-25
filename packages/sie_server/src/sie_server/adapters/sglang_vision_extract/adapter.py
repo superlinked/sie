@@ -25,6 +25,9 @@ from sie_server.adapters.base import ModelCapabilities, ModelDims
 from sie_server.adapters.lighton_ocr._markdown import lightonocr3_markdown
 from sie_server.adapters.sglang._window import SGLangInputTooLongError
 from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
+from sie_server.adapters.sglang_vision_extract._compat.sie_mistral_regex_compat import (
+    install as install_fix_mistral_regex_compat,
+)
 from sie_server.core.inference_output import ExtractOutput
 from sie_server.types.inputs import InvalidMediaError
 from sie_server.types.responses import Entity
@@ -178,6 +181,7 @@ class SGLangVisionExtractAdapter(SGLangGenerationAdapter):
         if self._processor_use_fast is not None:
             processor_kwargs["use_fast"] = self._processor_use_fast
         install_transformers_security_fixes()
+        install_fix_mistral_regex_compat()
         self._processor = AutoProcessor.from_pretrained(processor_dir, **processor_kwargs)
 
         try:

@@ -152,6 +152,9 @@ import type {
   RecommendOptions,
   Recommendation,
   RequestMetadata,
+  ResponseRequest,
+  ResponseResult,
+  ResponseStreamEvent,
   SIEClientOptions,
   File as SIEFile,
   ScoreOptions,
@@ -734,6 +737,15 @@ function extractChatChunkError(chunk: ChatCompletionChunk): SIEStreamError | nul
     requestId,
     retryAfter: validatedStreamRetryAfter(chunk.error),
   });
+}
+
+function extractResponseEventError(event: ResponseStreamEvent): SIEStreamError | null {
+  const record = event as unknown as Record<string, unknown>;
+  if (record.error) return extractChatChunkError(record as unknown as ChatCompletionChunk);
+  if (record.type !== "response.failed") return null;
+  const response = record.response as Partial<ResponseResult> | undefined;
+  const error = response?.error;
+  return new SIEStreamError(error?.message ?? "stream error", { code: error?.code });
 }
 
 /**
@@ -1749,6 +1761,109 @@ export class SIEClient {
       signal,
       (chunk) => extractChatChunkError(chunk),
       new SSECompletion(req.n ?? 1),
+    );
+  }
+
+  /**
+   * Non-streaming OpenAI-compatible Responses call against `/v1/responses`.
+   *
+   * The gateway serves Responses statelessly as a translation onto chat
+   * completions: send the whole conversation in `req.input` every turn,
+   * including earlier output items and the tool results that answer them.
+   * Retry and error semantics match {@link chatCompletions}, and like it this
+   * method throws `RequestError` immediately when `req.stream === true` — use
+   * {@link streamResponses} instead.
+   *
+   * @example
+   * ```typescript
+   * const result = await client.responses({
+   *   model: "Qwen/Qwen3-4B-Instruct-2507",
+   *   instructions: "Answer in one sentence.",
+   *   input: "Why is the sea salty?",
+   *   max_output_tokens: 64,
+   * });
+   * for (const item of result.output) {
+   *   if (item.type === "message") console.log(item.content[0]?.text);
+   * }
+   * ```
+   */
+  async responses(
+    req: ResponseRequest,
+    options: ChatCompletionOptions = {},
+  ): Promise<ResponseResult> {
+    if (req.stream === true) {
+      throw new RequestError(
+        "responses() cannot be used with stream:true — use streamResponses() instead.",
+        "invalid_request",
+        400,
+      );
+    }
+    if (req.seed !== undefined) {
+      validateGenerationSeed(req.seed);
+    }
+
+    const body = { ...req, stream: false };
+    const url = `${this.baseUrl}/v1/responses`;
+    const headers = this.buildChatHeaders("application/json");
+    const waitForCapacity = options.waitForCapacity ?? this.defaultWaitForCapacity;
+    const provisionTimeoutMs = options.provisionTimeoutMs ?? this.provisionTimeout;
+    const timeoutMs = options.timeoutMs ?? this.timeout;
+    const response = await withProvisioningRetry(
+      () => this.performJsonPost(url, body, headers, timeoutMs),
+      {
+        model: req.model,
+        gpu: undefined,
+        waitForCapacity,
+        provisionTimeoutMs,
+      },
+    );
+
+    this.checkServerVersion(response);
+
+    const data = (await parseTerminalJsonObject(response, "response")) as unknown as ResponseResult;
+    attachRequestMetadata([data], response.headers, data);
+    return data;
+  }
+
+  /**
+   * Streaming OpenAI-compatible Responses call against `/v1/responses` with
+   * `Accept: text/event-stream`.
+   *
+   * Yields `ResponseStreamEvent` events in `sequence_number` order:
+   * `response.created` and `response.in_progress`, then output item, content
+   * part, text delta and tool call argument events, and finally
+   * `response.completed` or `response.incomplete` carrying the whole result
+   * with `usage`. Error semantics match {@link streamChatCompletions}: a
+   * `response.failed` event or an error event throws {@link SIEStreamError}
+   * and is never yielded, and EOF before a terminal event throws
+   * `SIEConnectionError`. `req.stream` is set to `true` automatically.
+   *
+   * @example
+   * ```typescript
+   * for await (const event of client.streamResponses({
+   *   model: "Qwen/Qwen3-4B-Instruct-2507",
+   *   input: "Count to ten.",
+   * })) {
+   *   if (event.type === "response.output_text.delta") process.stdout.write(event.delta);
+   * }
+   * ```
+   */
+  async *streamResponses(
+    req: ResponseRequest,
+    signal?: AbortSignal,
+  ): AsyncGenerator<ResponseStreamEvent, void, undefined> {
+    if (req.seed !== undefined) {
+      validateGenerationSeed(req.seed);
+    }
+    const body = { ...req, stream: true };
+    const url = `${this.baseUrl}/v1/responses`;
+    yield* this.consumeSseStream<ResponseStreamEvent>(
+      url,
+      body,
+      req.model,
+      signal,
+      (event) => extractResponseEventError(event),
+      new SSECompletion(undefined, true),
     );
   }
 

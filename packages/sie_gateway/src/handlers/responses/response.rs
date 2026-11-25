@@ -98,12 +98,17 @@ impl ResponseShell {
     }
 }
 
+/// An `output_text` content part.
+pub(crate) fn output_text(text: &str) -> Value {
+    json!({"type": "output_text", "text": text, "annotations": [], "logprobs": []})
+}
+
 /// A `message` item. An item still in progress has no content yet.
 pub(crate) fn message_item(id: &str, text: &str, status: &str) -> Value {
-    let content = if status == "completed" {
-        json!([{"type": "output_text", "text": text, "annotations": []}])
-    } else {
+    let content = if status == "in_progress" {
         json!([])
+    } else {
+        json!([output_text(text)])
     };
     json!({
         "type": "message",
@@ -202,6 +207,9 @@ pub(crate) fn chat_completion_to_response(
     }
     let (status, incomplete_details) =
         status_for(choice.get("finish_reason").and_then(Value::as_str));
+    if let Some(last) = output.last_mut() {
+        last["status"] = json!(status);
+    }
     let usage = chat
         .get("usage")
         .and_then(responses_usage)

@@ -39,7 +39,13 @@ _DOCUMENTS = [
     {"id": "doc-2", "text": "Python is a programming language."},
 ]
 _ENTITY_TEXT = {"text": "Apple was founded by Steve Jobs."}
-_STREAMS = frozenset({"stream_generate", "stream_chat_completions"})
+_STREAMS = frozenset({"stream_generate", "stream_chat_completions", "stream_responses"})
+_WEATHER_TOOL = {
+    "type": "function",
+    "name": "get_weather",
+    "description": "Look up the current weather in a city.",
+    "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]},
+}
 
 # The call each fixture case stands for: (method, positional arguments, keyword arguments).
 _CALLS: dict[str, tuple[str, tuple[Any, ...], dict[str, Any]]] = {
@@ -154,6 +160,55 @@ _CALLS: dict[str, tuple[str, tuple[Any, ...], dict[str, Any]]] = {
         ("Qwen/Qwen3-4B-Instruct-2507", [{"role": "user", "content": "Count to ten."}]),
         {"max_completion_tokens": 64, "stream_options": {"include_usage": True}, "include_reasoning": True},
     ),
+    "responses_text": (
+        "responses",
+        ("Qwen/Qwen3-4B-Instruct-2507", "Write a haiku about the sea."),
+        {"max_output_tokens": 64},
+    ),
+    "responses_tools": (
+        "responses",
+        ("Qwen/Qwen3-4B-Instruct-2507", [{"role": "user", "content": "What is the weather in Paris?"}]),
+        {
+            "instructions": "Use the tools when they help.",
+            "max_output_tokens": 256,
+            "tools": [_WEATHER_TOOL, {"type": "custom", "name": "run_python", "description": "Run a Python snippet."}],
+            "tool_choice": {"type": "function", "name": "get_weather"},
+            "parallel_tool_calls": False,
+            "reasoning": {"effort": "low"},
+        },
+    ),
+    "responses_image_and_tool_output": (
+        "responses",
+        (
+            "Qwen/Qwen3-VL-8B-Instruct",
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Which city is this, and what is its weather?"},
+                        {"type": "input_image", "image_url": f"data:image/png;base64,{_FIXTURE['media']['png']}"},
+                    ],
+                },
+                {"type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": '{"city":"Paris"}'},
+                {"type": "function_call_output", "call_id": "call_1", "output": "Sunny, 21 C"},
+            ],
+        ),
+        {"max_output_tokens": 128, "tools": [{"type": "function", "name": "get_weather"}]},
+    ),
+    "stream_responses": (
+        "stream_responses",
+        ("Qwen/Qwen3-4B-Instruct-2507", "Extract the invoice fields."),
+        {
+            "instructions": "Answer in JSON.",
+            "temperature": 0,
+            "seed": 7,
+            "text": {"format": {"type": "json_schema", "name": "invoice", "strict": True, "schema": _SCHEMA}},
+            "metadata": {"tenant": "tenant-1"},
+            "prompt_cache_key": "invoice-v1",
+            "user": "user-9",
+            "safety_identifier": "safety-9",
+        },
+    ),
 }
 
 
@@ -171,6 +226,9 @@ def _success(path: str, accept: str, item_count: int) -> tuple[bytes, str]:
         return b"data: [DONE]\n\n", "text/event-stream"
     if path.startswith("/v1/generate/"):
         return json.dumps({"model": "m", "text": "ok", "finish_reason": "stop"}).encode(), "application/json"
+    if path == "/v1/responses":
+        response = {"id": "resp-1", "object": "response", "model": "m", "status": "completed", "output": []}
+        return json.dumps(response).encode(), "application/json"
     chat = {"id": "chat-1", "object": "chat.completion", "model": "m", "choices": []}
     return json.dumps(chat).encode(), "application/json"
 

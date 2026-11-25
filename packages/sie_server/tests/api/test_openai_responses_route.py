@@ -190,7 +190,12 @@ def test_a_buffered_response_matches_the_chat_answer_to_the_same_conversation(cl
                 "role": "assistant",
                 "status": "completed",
                 "content": [
-                    {"type": "output_text", "text": chat["choices"][0]["message"]["content"], "annotations": []}
+                    {
+                        "type": "output_text",
+                        "text": chat["choices"][0]["message"]["content"],
+                        "annotations": [],
+                        "logprobs": [],
+                    }
                 ],
             }
         ],

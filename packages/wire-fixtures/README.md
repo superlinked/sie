@@ -39,8 +39,9 @@ executable.
   a usable `Retry-After` is present. It also pins how a `Retry-After` value is
   parsed (delay seconds or an HTTP date; a past date means retry now).
 - `sdk_requests.json` — the HTTP request each SDK sends for the same call to
-  encode, score, extract, generate and the chat route: method, path, the
-  headers that carry meaning, and the decoded body. Each case names one call;
+  encode, score, extract, generate, the chat route and the Responses route:
+  method, path, the headers that carry meaning, and the decoded body. Each
+  case names one call;
   each SDK spells that call with its own options and must put the same request
   on the wire. The file states what counts as the same: paths are compared
   percent-decoded, a `null` member equals an absent one, and a case may list

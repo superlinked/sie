@@ -68,6 +68,7 @@ from sie_server.adapters.errors import (
 from sie_server.adapters.fake.adapter import FakeAdapter
 from sie_server.adapters.mlx.generation import MLXGenerationAdapter, normalize_mlx_seed
 from sie_server.adapters.remote._http import RemoteUpstreamError
+from sie_server.adapters.sglang._window import chat_window_refusal_message
 from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
 from sie_server.api.generate import (
     _generation_http_exception,
@@ -347,6 +348,24 @@ def _upstream_error_response(
     if reason is not None:
         error["reason"] = reason
     return JSONResponse(status_code=response_status, content={"error": error})
+
+
+def _raise_for_child_window_refusal(upstream_status: int, body: bytes, *, requested_model: str) -> None:
+    """Raise the route's too-long refusal when the child's 400 is a window refusal.
+
+    Raises:
+        HTTPException: The child's 400 carries one of its window refusals.
+    """
+    if upstream_status != status.HTTP_400_BAD_REQUEST:
+        return
+    try:
+        payload = json.loads(body)
+    except (ValueError, RecursionError):
+        return
+    message = payload.get("message") if isinstance(payload, dict) else None
+    refusal = chat_window_refusal_message(message, model=requested_model)
+    if refusal is not None:
+        raise _generation_http_exception(GenerationInputTooLongError(refusal))
 
 
 def _translated_upstream_status(upstream_status: int) -> int:
@@ -1960,12 +1979,14 @@ async def _chat_completions(
                 context="generation child SSE response",
             )
             if upstream.status_code != status.HTTP_200_OK:
+                error_body = b""
                 try:
-                    await _read_upstream_body(upstream)
+                    error_body = await _read_upstream_body(upstream)
                 except (httpx.HTTPError, ValueError):
-                    # The body is intentionally discarded; never log child
-                    # validation details because they can include user input.
+                    # Never log child validation details because they can
+                    # include user input.
                     pass
+                _raise_for_child_window_refusal(upstream.status_code, error_body, requested_model=model)
                 logger.error("generation child chat error status=%d", upstream.status_code)
                 return _upstream_error_response(
                     response_status=_translated_upstream_status(upstream.status_code),
@@ -2024,6 +2045,7 @@ async def _chat_completions(
                 slot.release()
 
         if upstream_status != status.HTTP_200_OK:
+            _raise_for_child_window_refusal(upstream_status, raw, requested_model=model)
             logger.error("generation child chat error status=%d", upstream_status)
             return _upstream_error_response(
                 response_status=_translated_upstream_status(upstream_status),

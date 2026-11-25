@@ -14,8 +14,9 @@
  *   - the literal `data: [DONE]\n\n` terminator
  *   - keep-alive comment lines (`: <text>\n`), which are skipped
  *
- * Other SSE features (`event:`, `id:`, `retry:`, multi-line `data:`
- * continuations) are not produced by `sse.rs` and are not handled here.
+ * Responses events also carry an `event:` line, which is skipped because the
+ * payload repeats it as `type`. Other SSE features (`id:`, `retry:`,
+ * multi-line `data:` continuations) are not produced and are not handled here.
  * If the gateway grows new event shapes, extend this parser deliberately
  * rather than adding a generic SSE dependency.
  */
@@ -24,14 +25,27 @@ import { SIEConnectionError, SIEStreamError } from "./errors.js";
 
 const SSE_DONE = "[DONE]";
 
-/** Track generation completion separately from a clean HTTP body EOF. */
+const RESPONSES_TERMINAL_EVENTS: ReadonlySet<unknown> = new Set([
+  "response.completed",
+  "response.incomplete",
+]);
+
+/**
+ * Track generation completion separately from a clean HTTP body EOF.
+ *
+ * `[DONE]` ends every surface. Without it, native generation must emit
+ * `done: true`, chat must finish every requested choice, and Responses must
+ * emit `response.completed` or `response.incomplete`.
+ */
 export class SSECompletion {
   done = false;
   private nativeTerminal = false;
   private readonly chatChoices: number | undefined;
+  private readonly responses: boolean;
   private readonly finishedChoices = new Set<number>();
 
-  constructor(chatChoices?: number) {
+  constructor(chatChoices?: number, responses = false) {
+    this.responses = responses;
     this.chatChoices =
       chatChoices === undefined
         ? undefined
@@ -43,6 +57,10 @@ export class SSECompletion {
   observe(chunk: unknown): void {
     if (typeof chunk !== "object" || chunk === null) return;
     const record = chunk as Record<string, unknown>;
+    if (this.responses) {
+      if (RESPONSES_TERMINAL_EVENTS.has(record.type)) this.nativeTerminal = true;
+      return;
+    }
     if (this.chatChoices === undefined) {
       if (record.done === true) this.nativeTerminal = true;
       return;

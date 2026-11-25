@@ -16,7 +16,9 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
 
-use super::response::{custom_input, message_item, responses_usage, status_for, ResponseShell};
+use super::response::{
+    custom_input, message_item, output_text, responses_usage, status_for, ResponseShell,
+};
 
 pub(crate) const FAILED: &str = "response.failed";
 const SERVER_ERROR: &str = "server_error";
@@ -172,9 +174,9 @@ impl StreamMachine {
                 }
             }
             if let Some(finish_reason) = choice.get("finish_reason").and_then(Value::as_str) {
+                self.finish_reason = Some(finish_reason.to_string());
                 self.close_text(&mut events);
                 self.close_call(&mut events);
-                self.finish_reason = Some(finish_reason.to_string());
             }
         }
         if let Some(usage) = chunk.get("usage").filter(|usage| usage.is_object()) {
@@ -272,7 +274,7 @@ impl StreamMachine {
                     "item_id": item_id,
                     "output_index": output_index,
                     "content_index": 0,
-                    "part": {"type": "output_text", "text": "", "annotations": []},
+                    "part": output_text(""),
                 }),
             );
             events.extend([added, part]);
@@ -291,6 +293,7 @@ impl StreamMachine {
             "output_index": open.output_index,
             "content_index": 0,
             "delta": text,
+            "logprobs": [],
         });
         let event = self.event("response.output_text.delta", payload);
         events.push(event);
@@ -300,7 +303,8 @@ impl StreamMachine {
         let Some(open) = self.text.take() else {
             return;
         };
-        let item = message_item(&open.item_id, &open.text, "completed");
+        let status = status_for(self.finish_reason.as_deref()).0;
+        let item = message_item(&open.item_id, &open.text, status);
         let text_done = self.event(
             "response.output_text.done",
             json!({
@@ -308,6 +312,7 @@ impl StreamMachine {
                 "output_index": open.output_index,
                 "content_index": 0,
                 "text": open.text,
+                "logprobs": [],
             }),
         );
         let part_done = self.event(
@@ -316,7 +321,7 @@ impl StreamMachine {
                 "item_id": open.item_id,
                 "output_index": open.output_index,
                 "content_index": 0,
-                "part": {"type": "output_text", "text": open.text, "annotations": []},
+                "part": output_text(&open.text),
             }),
         );
         let item_done = self.event(
@@ -423,7 +428,7 @@ impl StreamMachine {
             &open.call_id,
             &open.name,
             &value,
-            "completed",
+            status_for(self.finish_reason.as_deref()).0,
         );
         let done = self.event(
             "response.output_item.done",

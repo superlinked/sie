@@ -8549,7 +8549,10 @@ fn translate_response_format(
     if let Some(s) = js.get("strict") {
         wrapped.insert("strict".to_string(), s.clone());
     }
-    match super::grammar::parse_grammar(&serde_json::Value::Object(wrapped)) {
+    match super::grammar::parse_grammar_at(
+        &serde_json::Value::Object(wrapped),
+        "response_format.json_schema.schema",
+    ) {
         super::grammar::GrammarParseResult::Ok(g) => {
             // ``parse_grammar`` builds a :class:`GrammarSpec` from the
             // wrapped form. Re-attach the OpenAI label/strict in case
@@ -27580,6 +27583,98 @@ mod tests {
         let v = _expect_chat_err(body).await;
         assert_eq!(v["error"]["code"], "invalid_request");
         assert_eq!(v["error"]["param"], "response_format.json_schema.schema");
+    }
+
+    #[tokio::test]
+    async fn test_chat_params_from_json_response_format_invalid_schema_returns_400() {
+        let mut body = _chat_body_min("m");
+        body["response_format"] = serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "x",
+                "strict": true,
+                "schema": {"type": "object", "properties": {"a": {"type": "objekt"}}},
+            },
+        });
+        let v = _expect_chat_err(body).await;
+        assert_eq!(v["error"]["type"], "invalid_request_error");
+        assert_eq!(v["error"]["code"], "invalid_request");
+        assert_eq!(
+            v["error"]["param"],
+            "response_format.json_schema.schema.properties.a.type"
+        );
+        assert_eq!(
+            v["error"]["message"],
+            "'type' \"objekt\" is not a JSON Schema type; expected one of array, boolean, integer, null, number, object, string"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chat_params_from_json_tool_invalid_parameters_returns_400() {
+        let mut body = _chat_body_min("m");
+        body["tools"] = serde_json::json!([
+            {"type": "function", "function": {"name": "ok", "parameters": {"type": "object"}}},
+            {"type": "function", "function": {"name": "bad", "parameters": {"type": "objekt"}}},
+        ]);
+        let v = _expect_chat_err(body).await;
+        assert_eq!(v["error"]["type"], "invalid_request_error");
+        assert_eq!(v["error"]["code"], "invalid_request");
+        assert_eq!(v["error"]["param"], "tools[1].function.parameters.type");
+        assert_eq!(
+            v["error"]["message"],
+            "tools[1].function.parameters: 'type' \"objekt\" is not a JSON Schema type; expected one of array, boolean, integer, null, number, object, string"
+        );
+
+        let mut body = _chat_body_min("m");
+        body["tools"] = serde_json::json!([
+            {"type": "function", "function": {"name": "bad", "parameters": {
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "required": "a",
+            }}},
+        ]);
+        let v = _expect_chat_err(body).await;
+        assert_eq!(v["error"]["param"], "tools[0].function.parameters.required");
+    }
+
+    #[test]
+    fn test_chat_params_from_json_valid_schemas_still_pass() {
+        let mut body = _chat_body_min("m");
+        body["stream"] = serde_json::json!(true);
+        body["tools"] = serde_json::json!([
+            {"type": "function", "function": {"name": "no_params"}},
+            {"type": "function", "function": {"name": "empty_params", "parameters": {}}},
+            {"type": "function", "function": {"name": "strict_tool", "strict": true, "parameters": {
+                "type": "object",
+                "properties": {
+                    "unit": {"type": ["string", "null"], "enum": ["c", "f", null]},
+                    "where": {"$ref": "#/$defs/Place"},
+                },
+                "required": ["unit", "where"],
+                "additionalProperties": false,
+                "$defs": {"Place": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"], "additionalProperties": false}},
+            }}},
+        ]);
+        body["response_format"] = serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer",
+                "strict": true,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "answer": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                        "place": {"$ref": "#/$defs/Place"},
+                    },
+                    "required": ["answer", "place"],
+                    "additionalProperties": false,
+                    "$defs": {"Place": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"], "additionalProperties": false}},
+                },
+            },
+        });
+        let p = _expect_chat_ok(body);
+        assert_eq!(p.tools.as_ref().map(Vec::len), Some(3));
+        assert!(p.grammar.is_some());
     }
 
     #[tokio::test]
