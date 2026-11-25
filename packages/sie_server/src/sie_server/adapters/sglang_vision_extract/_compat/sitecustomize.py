@@ -3,7 +3,11 @@
 SGLang 0.5.10 reads ``vision_config.rope_theta`` while Transformers 5 stores
 the same value in ``vision_config.rope_parameters``. Upstream SGLang fixed this
 in #28292. This site hook runs only in the OCR engine subprocess and can be
-removed when the shared bundle advances to a release containing that fix.
+removed when the shared bundle advances to a release containing that fix. It
+also renames LightOnOCR-3-1B's legacy ``language_model.model.*`` weights to the
+LightOnOCR-2-1B layout that SGLang 0.5.10 loads. The
+same flag installs the ``fix_mistral_regex`` tokenizer backport
+(``sie_mistral_regex_compat``), which Transformers 5.16.1 no longer needs.
 
 The SGLang model registry discovers implementations by importing every model
 module. Importing LightOnOCR eagerly from ``sitecustomize`` races that registry
@@ -31,6 +35,23 @@ _CLASS_PATCH_MARKER = "_sie_rope_parameters_compat"
 _IMPORT_HOOK_MARKER = "_sie_lightonocr_deferred_compat"
 
 
+# LightOnOCR-3-1B ships the older Mistral3 checkpoint layout (``language_model.model.*``);
+# SGLang 0.5.10's loader only maps LightOnOCR-2-1B's (``model.language_model.*``).
+_LEGACY_WEIGHT_PREFIXES = (
+    ("language_model.model.", "model.language_model."),
+    ("language_model.lm_head.", "lm_head."),
+)
+
+
+def _normalize_weight_names(weights: Any) -> Any:
+    for name, tensor in weights:
+        for legacy, current in _LEGACY_WEIGHT_PREFIXES:
+            if name.startswith(legacy):
+                name = current + name[len(legacy) :]
+                break
+        yield name, tensor
+
+
 def _patch_lightonocr_module(module: ModuleType) -> None:
     model_class = getattr(module, "LightOnOCRForConditionalGeneration", None)
     if model_class is None:
@@ -51,7 +72,14 @@ def _patch_lightonocr_module(module: ModuleType) -> None:
                 vision_config.rope_theta = rope_theta
         original_init(self, config=config, prefix=prefix, **kwargs)
 
+    original_load_weights = model_class.load_weights
+
+    @wraps(original_load_weights)
+    def compat_load_weights(self: Any, weights: Any) -> Any:
+        return original_load_weights(self, _normalize_weight_names(weights))
+
     model_class.__init__ = compat_init
+    model_class.load_weights = compat_load_weights
     setattr(model_class, _CLASS_PATCH_MARKER, True)
 
 
@@ -97,6 +125,19 @@ def _run_next_sitecustomize() -> None:
         return
 
 
+def _install_tokenizer_compat() -> None:
+    """Load the sibling fix_mistral_regex backport (LightOnOCR-3-1B's tokenizer sets it)."""
+    spec = importlib.util.spec_from_file_location(
+        "_sie_mistral_regex_compat", Path(__file__).resolve().with_name("sie_mistral_regex_compat.py")
+    )
+    if spec is None or spec.loader is None:
+        return
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.install_when_imported()
+
+
 if os.environ.get("SIE_SGLANG_LIGHTON_OCR_COMPAT") == "1":
     _install_lightonocr_compat()
+    _install_tokenizer_compat()
 _run_next_sitecustomize()

@@ -1,0 +1,101 @@
+sie_id: lightonai/LightOnOCR-3-1B
+hf_id: lightonai/LightOnOCR-3-1B
+hf_revision: 23d544085c886bbdace647bcfab91203299417e2
+inputs:
+  text: false
+  image: true
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+# Settings follow github.com/lightonai/LightOnOCR at 36755d461be079737860a5f03ae0c803501269e9
+# (README, lightonocr/models.py, benchmarks/ocr_bench/config.py) and the model card.
+#
+# Architecture: unlike LightOnOCR-3-0.8B and -4B (Qwen3.5), the 1B keeps the LightOnOCR-2-1B
+# architecture (Mistral3: Pixtral vision encoder + Qwen3 decoder, 16,384-token context) and the same
+# chat template, so it is served the way LightOnOCR-2-1B is, with the LightOnOCR-3 prompt contract.
+# There is no `transformers` profile: LightOnOCRAdapter always sends LightOnOCR-2's system prompt and
+# decodes greedily, and LightOnOCR3Adapter loads only the Qwen3.5 checkpoints.
+#
+# Mode: omit `instruction` for plain Markdown transcription. Send exactly `grounding` to get a
+# `![label](x1,y1,x2,y2)` block marker, in 0-1000 page coordinates, before each layout block.
+# These are the only two trained prompts. The adapter rejects any other prompt. No system prompt:
+# the chat template then adds the empty system turn the model was trained with.
+#
+# Page image: the Pixtral processor downscales every page to at most 1,540 px on the longest edge
+# (about 3,100 image tokens), and upstream renders the 1B's pages at that size.
+#
+# Sampling: temperature 0.1, top_p 1.0, one beam, as the upstream client and benchmarks use for
+# LightOnOCR-3 ("use temperature 0.1, not greedy decoding"). The model card examples use 0.2/0.9.
+#
+# Output cap: 4,096 new tokens, the max_tokens of the model card's vLLM example. A page plus its
+# output must fit the 16,384-token context. On the SGLang profiles a request's max_new_tokens
+# replaces the default in either direction.
+#
+# Normalization: none beyond trimming leading and trailing whitespace; grounding markers are kept.
+# The upstream client repairs escaped math dollars by default. The explicit `markdown` profile
+# defaults to `grounding` and applies upstream's published olmOCR-bench conversion: omit
+# margin/aside blocks and leading unmarked text, repair escaped math dollars, then PP3. This is a
+# lossy output policy; footnotes remain and all-margin pages can return empty text.
+#
+# Serving: SGLang (sglang-vision-extract bundle) with continuous batching and the
+# SIE_SGLANG_LIGHTON_OCR_COMPAT hook that LightOnOCR-2-1B uses for the Transformers 5 vision rope
+# config. The radix cache is off: every page is a new image, so it saves nothing.
+#
+# Throughput: up to 256 pages are dispatched to the engine at once. SIE's HTTP client to SGLang
+# allows 256 connections (max_connections=256 in
+# SGLangGenerationAdapter._get_or_create_http_client), so 256 is the highest value that cannot
+# exhaust that pool; past it, requests wait for a connection and fail with a PoolTimeout after 10 s
+# unless SIE_SGLANG_GENERATE_POOL_TIMEOUT_S is raised. How many dispatched pages decode at once is
+# decided by SGLang's own running-request limit and KV pool.
+#
+# Memory: mem_fraction_static 0.70, as the other LightOnOCR-3 descriptors use; on a 1B checkpoint
+# (about 2 GB of bf16 weights) most of the static share becomes KV cache, at 112 KiB per token.
+max_sequence_length: 16384
+profiles:
+  default:
+    max_batch_tokens: 16384
+    compute_precision: bfloat16
+    adapter_path: sie_server.adapters.sglang_vision_extract.adapter:SGLangVisionExtractAdapter
+    adapter_options:
+      loadtime:
+        mem_fraction_static: 0.70
+        served_model_name: lightonai/LightOnOCR-3-1B
+        trust_remote_code: false
+        max_concurrent_requests: 256
+        meter_pages: true
+        max_new_tokens: 4096
+        temperature: 0.1
+        top_p: 1.0
+        allowed_instructions:
+          - grounding
+        extra_env:
+          SIE_SGLANG_LIGHTON_OCR_COMPAT: "1"
+        extra_launch_args:
+          - --disable-radix-cache
+      runtime:
+        max_new_tokens: 4096
+        num_beams: 1
+  markdown:
+    extends: default
+    adapter_options:
+      # Profile inheritance replaces loadtime, so retain every engine/sampling option.
+      loadtime:
+        mem_fraction_static: 0.70
+        served_model_name: lightonai/LightOnOCR-3-1B
+        trust_remote_code: false
+        max_concurrent_requests: 256
+        meter_pages: true
+        max_new_tokens: 4096
+        temperature: 0.1
+        top_p: 1.0
+        allowed_instructions:
+          - grounding
+        extra_env:
+          SIE_SGLANG_LIGHTON_OCR_COMPAT: "1"
+        extra_launch_args:
+          - --disable-radix-cache
+        default_prompt: grounding
+        output_postprocess: lightonocr3_markdown
