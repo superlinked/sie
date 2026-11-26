@@ -838,6 +838,41 @@
       }
     },
     {
+      "name": "strict true reaches the chat tool, strict null is dropped",
+      "body": {
+        "model": "m",
+        "input": "Run ls.",
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"], "additionalProperties": false},
+            "strict": true
+          },
+          {"type": "function", "name": "noop", "strict": null}
+        ]
+      },
+      "chat": {
+        "model": "m",
+        "messages": [{"role": "user", "content": "Run ls."}],
+        "stream": false,
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "exec_command",
+              "description": "Run a shell command.",
+              "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"], "additionalProperties": false},
+              "strict": true
+            }
+          },
+          {"type": "function", "function": {"name": "noop"}}
+        ],
+        "include_reasoning": false
+      }
+    },
+    {
       "name": "tool_choice auto passes through with tools",
       "body": {
         "model": "m",
@@ -1706,26 +1741,18 @@
       }
     },
     {
-      "name": "strict function tool",
+      "name": "strict function tool as a string",
       "body": {
         "model": "m",
         "input": "x",
-        "tools": [
-          {
-            "type": "function",
-            "name": "exec_command",
-            "description": "Run a shell command.",
-            "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]},
-            "strict": true
-          }
-        ]
+        "tools": [{"type": "function", "name": "exec_command", "strict": "true"}]
       },
       "expect": {
         "status": 400,
         "type": "invalid_request_error",
-        "code": "unsupported_field",
+        "code": "invalid_request",
         "param": "tools[0].strict",
-        "message": "tools[0].strict: strict function schemas are not supported"
+        "message": "tools[0].strict: Input should be a valid boolean"
       }
     },
     {

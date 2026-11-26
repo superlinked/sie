@@ -383,18 +383,18 @@ def _tools(value: Any) -> tuple[list[dict[str, Any]], list[str], list[str]]:
             raise _unsupported(f"{path}.type", f"'{kind}' tools are not supported; send function or custom tools")
         if kind == "function":
             _only_keys(tool, _FUNCTION_TOOL_KEYS, path)
-            strict = tool.get("strict")
-            if strict is True:
-                raise _unsupported(f"{path}.strict", "strict function schemas are not supported")
-            if strict is not None and strict is not False:
+            if tool.get("strict") is not None and not isinstance(tool["strict"], bool):
                 raise _invalid(f"{path}.strict", "Input should be a valid boolean")
         else:
             _only_keys(tool, _CUSTOM_TOOL_KEYS, path)
         function = {key: tool[key] for key in ("name", "description") if tool.get(key) is not None}
         if kind == "custom":
             function["parameters"] = _custom_tool_parameters()
-        elif tool.get("parameters") is not None:
-            function["parameters"] = tool["parameters"]
+        else:
+            if tool.get("parameters") is not None:
+                function["parameters"] = tool["parameters"]
+            if tool.get("strict") is True:
+                function["strict"] = True
         tools.append({"type": "function", "function": function})
         name = tool.get("name")
         if isinstance(name, str):

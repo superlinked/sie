@@ -97,6 +97,12 @@ or undeclared keys.
   `/v1/chat/completions` routes of a standalone server, because those routes
   return the engine's own tool calls without validating them. Remote-backed
   models pass `strict` to their upstream unchanged.
+- **Responses.** `/v1/responses` now accepts `strict: true` on a function tool
+  and translates it to the chat tool's `function.strict`, so the rules above
+  apply to it. Earlier releases refused it with `400 unsupported_field`. A
+  refusal names the Responses field, `tools[i].strict` or `tools[i].parameters`.
+  An omitted `strict` is not strict on either route, while OpenAI's Responses
+  API tries strict mode whenever the schema allows it.
 
 This document defines SIE's compatibility commitments: what constitutes a breaking change, how deprecations are communicated, and what must be true before declaring 1.0.
 

@@ -127,9 +127,12 @@ and no `type` is a message. The accepted item types are `message`,
 ### Tools and tool_choice
 
 - `{"type":"function","name","description"?,"parameters"?,"strict"?}` becomes
-  `{"type":"function","function":{"name","description"?,"parameters"?}}`.
-  `strict: false` is accepted and dropped; `strict: true` is refused at
-  `tools[i].strict`: `strict function schemas are not supported`.
+  `{"type":"function","function":{"name","description"?,"parameters"?,"strict"?}}`.
+  `strict: true` is kept, and the chat route enforces it on the call's
+  arguments; a refusal names `tools[i].strict` or `tools[i].parameters`.
+  `strict: false` and `strict: null` are dropped. An omitted `strict` is not
+  strict, as on the chat route; OpenAI's Responses API instead tries strict
+  mode when the schema allows it.
 - `{"type":"custom","name","description"?,"format"?}` becomes a function whose
   parameters are one required string `input`. `format` is accepted and not
   enforced. A call to a custom tool comes back as a `custom_tool_call` item.
