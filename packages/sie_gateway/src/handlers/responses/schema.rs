@@ -86,8 +86,8 @@ pub struct ResponsesRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
     /// ``function`` tools (``name``, ``description``, ``parameters``,
-    /// ``strict`` only ``false``) and ``custom`` tools (``name``,
-    /// ``description``, ``format``, which is not enforced), at most 64,
+    /// ``strict``, which the chat route enforces) and ``custom`` tools
+    /// (``name``, ``description``, ``format``, which is not enforced), at most 64,
     /// names matching ``^[a-zA-Z0-9_-]{1,64}$``. Hosted tool types are
     /// refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]

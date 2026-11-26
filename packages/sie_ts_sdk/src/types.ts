@@ -1741,8 +1741,9 @@ export type ResponseInputItem =
   | ResponseCustomToolCallOutput;
 
 /**
- * A function tool the model may call. `strict` may be omitted or `false`;
- * strict function schemas are rejected.
+ * A function tool the model may call. `strict: true` makes the server
+ * validate the call's arguments against `parameters`; an omitted `strict` is
+ * not strict.
  */
 export interface ResponseFunctionTool {
   type: "function";
@@ -1750,7 +1751,7 @@ export interface ResponseFunctionTool {
   description?: string;
   /** JSON Schema describing the function arguments. */
   parameters?: Record<string, unknown>;
-  strict?: false;
+  strict?: boolean | null;
 }
 
 /**

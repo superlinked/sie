@@ -457,20 +457,11 @@ fn tools(value: Option<&Value>) -> Result<(Vec<Value>, Vec<String>, Vec<String>)
                 &["type", "name", "description", "parameters", "strict"],
                 &path,
             )?;
-            match present(tool, "strict") {
-                None | Some(Value::Bool(false)) => {}
-                Some(Value::Bool(true)) => {
-                    return Err(ResponsesError::unsupported(
-                        format!("{path}.strict"),
-                        "strict function schemas are not supported",
-                    ))
-                }
-                Some(_) => {
-                    return Err(ResponsesError::invalid(
-                        format!("{path}.strict"),
-                        "Input should be a valid boolean",
-                    ))
-                }
+            if !matches!(present(tool, "strict"), None | Some(Value::Bool(_))) {
+                return Err(ResponsesError::invalid(
+                    format!("{path}.strict"),
+                    "Input should be a valid boolean",
+                ));
             }
         }
         let mut function = Map::new();
@@ -489,8 +480,13 @@ fn tools(value: Option<&Value>) -> Result<(Vec<Value>, Vec<String>, Vec<String>)
                     "additionalProperties": false,
                 }),
             );
-        } else if let Some(parameters) = present(tool, "parameters") {
-            function.insert("parameters".into(), parameters.clone());
+        } else {
+            if let Some(parameters) = present(tool, "parameters") {
+                function.insert("parameters".into(), parameters.clone());
+            }
+            if present(tool, "strict") == Some(&Value::Bool(true)) {
+                function.insert("strict".into(), Value::Bool(true));
+            }
         }
         tools.push(json!({"type": "function", "function": Value::Object(function)}));
         if let Some(name) = tool.get("name").and_then(Value::as_str) {
