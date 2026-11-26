@@ -1394,9 +1394,9 @@ dependencies = [
 
 [[package]]
 name = "granit-parser"
-version = "0.0.3"
+version = "0.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f50ba32164f9e098d5da618776a32afbb32270adcbe3d3d006107dae11e37c91"
+checksum = "d03f81ad4732830d85cfd417a9f62cde6dadda4354d37d078a6084a19560aa2d"
 dependencies = [
  "arraydeque",
  "smallvec",
@@ -2020,9 +2020,9 @@ dependencies = [
 
 [[package]]
 name = "kube"
-version = "4.0.0"
+version = "4.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4bb9108095346a7096d11feeaff419c75dddcac1b2f59acb38d7bf3d13c3e146"
+checksum = "e0a034a7cb6141527e9225e660e48565305b8557f9fb71946d5436aee929d82f"
 dependencies = [
  "k8s-openapi",
  "kube-client",
@@ -2033,9 +2033,9 @@ dependencies = [
 
 [[package]]
 name = "kube-client"
-version = "4.0.0"
+version = "4.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0f628e05bc2264c21fe10d3d675117dc9b43ea3bf4fb07262a222679757537b"
+checksum = "0dd59e09518478bda46674fb056103318e443a000089b342d32e440a52afe552"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2054,9 +2054,10 @@ dependencies = [
  "kube-core",
  "pem",
  "rustls",
+ "rustls-platform-verifier",
  "secrecy",
  "serde",
- "serde-saphyr 0.0.27",
+ "serde-saphyr 0.0.29",
  "serde_json",
  "thiserror",
  "tokio",
@@ -2068,9 +2069,9 @@ dependencies = [
 
 [[package]]
 name = "kube-core"
-version = "4.0.0"
+version = "4.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1b02f5933ba06140d58c7d6727f6c319f0962ec6a344aa5e21e475e891deaa8"
+checksum = "10b14df286fa701cd30920fa5251f26d8fcbd0fc54b50e02281cafe0a4505743"
 dependencies = [
  "derive_more",
  "form_urlencoded",
@@ -2087,9 +2088,9 @@ dependencies = [
 
 [[package]]
 name = "kube-derive"
-version = "4.0.0"
+version = "4.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe171898707dadf1818ef94e81ef57f6beb7edf9ba87b9e814c045dad356c7aa"
+checksum = "765bfab0ab9f36780fc2d99b53f28d5594df530bb9c1164a82028276a3669b61"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
@@ -2101,9 +2102,9 @@ dependencies = [
 
 [[package]]
 name = "kube-runtime"
-version = "4.0.0"
+version = "4.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99ddec66c540c7cf29a5b41fe4a657a53687f95c346e03bdf00585b70a1bab21"
+checksum = "5733225dce4bcc855a689f57b741423d27e593631987724067bc0c3ac5e10342"
 dependencies = [
  "ahash",
  "async-broadcast",
@@ -3585,19 +3586,19 @@ dependencies = [
 
 [[package]]
 name = "serde-saphyr"
-version = "0.0.27"
+version = "0.0.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5897b4c3faadadd35fdb6689f015641f3bc481d5adaaac56231ea15aeb243db3"
+checksum = "7bd22781911de0ca6debda95f073c8f18bec65d1a94f1fa9573f3102e514cea4"
 dependencies = [
  "ahash",
  "annotate-snippets",
  "base64 0.22.1",
  "encoding_rs_io",
  "getrandom 0.3.4",
- "granit-parser 0.0.3",
+ "granit-parser 0.0.7",
  "nohash-hasher",
  "num-traits",
- "serde",
+ "serde_core",
  "smallvec",
  "zmij",
 ]
