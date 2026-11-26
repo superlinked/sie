@@ -1,5 +1,67 @@
 # Changelog
 
+## [0.11.2](https://github.com/superlinked/sie/compare/v0.11.1...v0.11.2) (2026-11-26)
+
+
+### Features
+
+* accept reasoning_effort on chat completions ([#955](https://github.com/superlinked/sie/issues/955)) ([c570c1b](https://github.com/superlinked/sie/commit/c570c1b6889c36b7cb8b0314588770aa3ea03892))
+* **examples:** run Codex CLI against SIE through /v1/responses ([#1018](https://github.com/superlinked/sie/issues/1018)) ([26e5af4](https://github.com/superlinked/sie/commit/26e5af49af946339814327d838be4ef5b90aa922))
+* **gateway:** let a composition rewrite one answer into the OpenAI error envelope ([#1029](https://github.com/superlinked/sie/issues/1029)) ([39a76c8](https://github.com/superlinked/sie/commit/39a76c86d445234ba5adf31a67318adeb4190872))
+* **gateway:** machine-readable model suggestions and response_format types ([#1012](https://github.com/superlinked/sie/issues/1012)) ([5e99caa](https://github.com/superlinked/sie/commit/5e99caa50486e1ae41ef2004a3ab5d7a98c16e8d))
+* **gateway:** serve /v1/responses as a translation onto chat completions ([#1017](https://github.com/superlinked/sie/issues/1017)) ([c32eeab](https://github.com/superlinked/sie/commit/c32eeabe92f1282a418943b7f2b5fa901a86c3d4)), closes [#1013](https://github.com/superlinked/sie/issues/1013)
+* **generation:** run grammar-constrained chat at a declared reasoning_effort ([#990](https://github.com/superlinked/sie/issues/990)) ([f01cb68](https://github.com/superlinked/sie/commit/f01cb6802b4dc3b27f5d805ffb8d6a448a8f0589))
+* **models:** add lightonai/LightOnOCR-3-1B (SGLang default + markdown) ([#1009](https://github.com/superlinked/sie/issues/1009)) ([d7be537](https://github.com/superlinked/sie/commit/d7be537f75a027866272ddd2934ce76bd2838561))
+* **models:** add LightOnOCR-3-0.8B ([#974](https://github.com/superlinked/sie/issues/974)) ([0ffffd1](https://github.com/superlinked/sie/commit/0ffffd125470fdf70593bcebd8b8d357097f6f98))
+* **responses:** enforce strict function tools on /v1/responses ([#1030](https://github.com/superlinked/sie/issues/1030)) ([ac2d46f](https://github.com/superlinked/sie/commit/ac2d46fd8eaf068fca1e46d18e9f6d9e83e5d862))
+* **sdk:** cover tools, streaming and reasoning effort in the responses helpers ([#1015](https://github.com/superlinked/sie/issues/1015)) ([45bdd5c](https://github.com/superlinked/sie/commit/45bdd5cfa5716162586f88bd57564a44a595d59c))
+* **server:** serve /v1/responses as a translation onto chat completions ([#1016](https://github.com/superlinked/sie/issues/1016)) ([e508250](https://github.com/superlinked/sie/commit/e508250c2d2079e2b328a182f0b9cece4677948f)), closes [#1013](https://github.com/superlinked/sie/issues/1013)
+
+
+### Bug Fixes
+
+* carry logprobs and mark the cut-off item incomplete on /v1/responses ([#1020](https://github.com/superlinked/sie/issues/1020)) ([6ce1634](https://github.com/superlinked/sie/commit/6ce1634f77509a217b780420d7ad2ff90a4beab7))
+* **chart:** keep rtx-pro-6000 as its own collector machine_profile ([#958](https://github.com/superlinked/sie/issues/958)) ([7f773dd](https://github.com/superlinked/sie/commit/7f773dd59f8714107ef99fe74be3b1a167012548))
+* **decision:** token-accurate batch costs for decision adapters ([#978](https://github.com/superlinked/sie/issues/978)) ([91c778f](https://github.com/superlinked/sie/commit/91c778f4d50214bcc059a24d85394d4b946fabf5))
+* **deps:** resolve new cargo-deny advisory failures ([#984](https://github.com/superlinked/sie/issues/984)) ([286e2e1](https://github.com/superlinked/sie/commit/286e2e1757cc93412ce14fbe2005c26be749e633))
+* **deps:** update kube dependencies to 4.2.1 ([#1025](https://github.com/superlinked/sie/issues/1025)) ([4f95357](https://github.com/superlinked/sie/commit/4f9535703b6e2658e7c8e04a57742267f5c50ae0))
+* **deps:** update url to 2.5.9 for RUSTSEC-2026-0592 ([#1003](https://github.com/superlinked/sie/issues/1003)) ([58102fa](https://github.com/superlinked/sie/commit/58102fa0d21b242b35ce75c3c2d58cd09672a396))
+* **gateway:** accept and ignore metadata, store and service_tier on chat completions ([#973](https://github.com/superlinked/sie/issues/973)) ([e58777a](https://github.com/superlinked/sie/commit/e58777abb5eb3d16fa4db1940062fd6cb7529409)), closes [#972](https://github.com/superlinked/sie/issues/972)
+* **gateway:** answer OpenAI-compatible routes in the OpenAI error envelope ([#1024](https://github.com/superlinked/sie/issues/1024)) ([b6abf94](https://github.com/superlinked/sie/commit/b6abf94331fa142ba8d1a9f436484de634e948b2))
+* **gateway:** check tool parameter schemas as sent, without $ref expansion ([#1000](https://github.com/superlinked/sie/issues/1000)) ([a1b6297](https://github.com/superlinked/sie/commit/a1b629790bfd7314876397ecf961b8e1e33aafaa))
+* **gateway:** keep X-SIE-RateLimit headers in the Messages error envelope ([#1019](https://github.com/superlinked/sie/issues/1019)) ([04f8ff1](https://github.com/superlinked/sie/commit/04f8ff1dcc7264f1613167c46d746fd01636a618))
+* **gateway:** refuse an encode item with no content ([#1008](https://github.com/superlinked/sie/issues/1008)) ([32d47bf](https://github.com/superlinked/sie/commit/32d47bfc88214e2e64326a3286ef93ebb1aa3f82))
+* **gateway:** refuse an operation the model does not support ([#1005](https://github.com/superlinked/sie/issues/1005)) ([3e09471](https://github.com/superlinked/sie/commit/3e09471fa92990b885bd6ae21467f8dd5f2f1875))
+* **gateway:** refuse bodies without items or with a non-string text ([#1002](https://github.com/superlinked/sie/issues/1002)) ([cb8fa31](https://github.com/superlinked/sie/commit/cb8fa31e14126aa86e5cc022fddf772984be9615))
+* **gateway:** refuse structurally invalid JSON schemas before dispatch ([#1011](https://github.com/superlinked/sie/issues/1011)) ([3cfed23](https://github.com/superlinked/sie/commit/3cfed236919e6b2116b54be95aa5010dd67a8a24))
+* **gateway:** suggest model ids listed only with a profile ([#986](https://github.com/superlinked/sie/issues/986)) ([a23a94f](https://github.com/superlinked/sie/commit/a23a94ff00f19c02df8aacb0caab868900b459a2)), closes [#985](https://github.com/superlinked/sie/issues/985)
+* **generation:** enforce strict function-tool arguments ([#1023](https://github.com/superlinked/sie/issues/1023)) ([dc9389a](https://github.com/superlinked/sie/commit/dc9389a67c76c395af68a4f93b9911b8e658e15b))
+* **generation:** run a named reasoning_effort on grammar-constrained chat ([#991](https://github.com/superlinked/sie/issues/991)) ([17ed3d7](https://github.com/superlinked/sie/commit/17ed3d77786fedd5376ffcf08ab53a7d87b4e468))
+* **models:** name a tool-call parser for Qwen3-4B-Instruct-2507 ([#957](https://github.com/superlinked/sie/issues/957)) ([3925d4f](https://github.com/superlinked/sie/commit/3925d4f248972424adc6ad6449394a24c9a1da7e))
+* **models:** re-pin the KnowLine checkpoints to their rewritten upstream revisions ([#959](https://github.com/superlinked/sie/issues/959)) ([5548cfe](https://github.com/superlinked/sie/commit/5548cfe4eaece15c15fb2518e9086f0e4c2b6f11))
+* **placement:** check boot evidence and receipts for every listed cell ([#995](https://github.com/superlinked/sie/issues/995)) ([1518299](https://github.com/superlinked/sie/commit/1518299aa6c6f8ad80b2d831115034c18137cb2c)), closes [#994](https://github.com/superlinked/sie/issues/994)
+* **placement:** close the deferred review items on the applier and the Grafana Secret check ([#1028](https://github.com/superlinked/sie/issues/1028)) ([30ac755](https://github.com/superlinked/sie/commit/30ac75544e9f67d4e35d4ad6006e96abafb0d033)), closes [#903](https://github.com/superlinked/sie/issues/903)
+* **sdk:** retry 503 KEY_STATE_UNAVAILABLE that carries Retry-After ([#965](https://github.com/superlinked/sie/issues/965)) ([3f84db7](https://github.com/superlinked/sie/commit/3f84db7cfd1533cf8c3ae4f52cf16c69822684c2))
+* **server:** count an eviction that finishes during an OOM retry ([#987](https://github.com/superlinked/sie/issues/987)) ([26adb39](https://github.com/superlinked/sie/commit/26adb39377e9e72c5eac6a56095d511e5a770238))
+* **server:** enforce parallel_tool_calls=false on non-streaming n&gt;1 candidates ([#960](https://github.com/superlinked/sie/issues/960)) ([1332c10](https://github.com/superlinked/sie/commit/1332c10c11cb2e27388125c3c181693453ad5583)), closes [#954](https://github.com/superlinked/sie/issues/954)
+* **server:** finish a tool call cut by the token limit as length ([#971](https://github.com/superlinked/sie/issues/971)) ([8959a35](https://github.com/superlinked/sie/commit/8959a350a281fdc33e6b063b3ff2d7be4cbb5890))
+* **server:** keep finish_reason length when reasoning exhausts the budget ([#950](https://github.com/superlinked/sie/issues/950)) ([216e41f](https://github.com/superlinked/sie/commit/216e41fce730f4c6b12d3a72cead885667406aa3))
+* **server:** name the context window when the generation child refuses a chat request ([#1021](https://github.com/superlinked/sie/issues/1021)) ([17f7443](https://github.com/superlinked/sie/commit/17f744388087749ad4f10fee0bd138c1680dcfc0))
+* **server:** omit default sample count from OpenAI upstream requests ([#1032](https://github.com/superlinked/sie/issues/1032)) ([4bd28e3](https://github.com/superlinked/sie/commit/4bd28e369334e6e38a8371dc9d322f332554b9f2))
+* **server:** parse Gemma 4 tool calls and allow forced tool choice ([#953](https://github.com/superlinked/sie/issues/953)) ([df17788](https://github.com/superlinked/sie/commit/df1778818b5586fc08c5aab465387cf40915fa51))
+* **server:** release a failed load and evict enough before the OOM retry ([#946](https://github.com/superlinked/sie/issues/946)) ([994ba71](https://github.com/superlinked/sie/commit/994ba711a871f9527a7d7d1b5a093679f029ef68))
+* **server:** restore Docling "&lt;word&gt;sign" glyph names that docling-parse leaves unmapped ([#961](https://github.com/superlinked/sie/issues/961)) ([5639065](https://github.com/superlinked/sie/commit/56390658a4cb0abc7139918abefdf28d6350ee46))
+* **server:** restore Docling "u" glyph names that docling-parse leaves unmapped ([#962](https://github.com/superlinked/sie/issues/962)) ([dbfda27](https://github.com/superlinked/sie/commit/dbfda27934f40f2e82b5a3cb827e8aeecda216a6))
+* **server:** warm SGLang's sampling kernels before a generation model reports ready ([#964](https://github.com/superlinked/sie/issues/964)) ([c8f7ccd](https://github.com/superlinked/sie/commit/c8f7ccdb5d60ba75f734247e08563c65e8ecd0d5))
+
+
+### Performance Improvements
+
+* **server:** keep SGLang tvm_ffi kernels and reuse kept ninja builds in a new container ([#993](https://github.com/superlinked/sie/issues/993)) ([77461a3](https://github.com/superlinked/sie/commit/77461a320a2841108afa1c1f484415951171c44a))
+* **server:** keep SGLang's JIT kernel builds in the kernel cache root ([#989](https://github.com/superlinked/sie/issues/989)) ([bfee97c](https://github.com/superlinked/sie/commit/bfee97c2eb3fce5640309d7b2a84328353332b57))
+* **server:** ship FlashInfer's prebuilt JIT modules in the CUDA 12 SGLang bundles ([#992](https://github.com/superlinked/sie/issues/992)) ([0bf3f12](https://github.com/superlinked/sie/commit/0bf3f124cb962a2f08e6af476bb9f01947843d6e))
+* **server:** ship FlashInfer's prebuilt JIT modules in the sglang-cu130 bundle ([#988](https://github.com/superlinked/sie/issues/988)) ([359516e](https://github.com/superlinked/sie/commit/359516ec950cf2dc616111e832b10da7353cdd23))
+
 ## [0.11.1](https://github.com/superlinked/sie/compare/v0.11.0...v0.11.1) (2026-11-11)
 
 
