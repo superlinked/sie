@@ -20,6 +20,7 @@ from sie_server.api.models import router as models_router
 from sie_server.api.openai_audio import router as openai_audio_router
 from sie_server.api.openai_compat import router as openai_router
 from sie_server.api.openai_completions import router as openai_completions_router
+from sie_server.api.openai_errors import OpenAIErrorEnvelopeMiddleware
 from sie_server.api.openai_local import router as openai_local_router
 from sie_server.api.openai_responses import router as openai_responses_router
 from sie_server.api.openapi import setup_custom_openapi_schema
@@ -102,6 +103,7 @@ class AppFactory:
         elif config.bind_host and is_loopback_host(config.bind_host):
             app.add_middleware(LoopbackHostMiddleware, allowed_hosts=loopback_host_allowlist(config.bind_host))
         app.add_middleware(AnthropicErrorEnvelopeMiddleware)
+        app.add_middleware(OpenAIErrorEnvelopeMiddleware)
 
         install_upstreams(
             load_upstreams(config.upstreams_file) if config.upstreams_file else {},

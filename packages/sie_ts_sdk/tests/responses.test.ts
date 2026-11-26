@@ -340,6 +340,40 @@ describe("SIEClient.responses", () => {
     expect(mockFetch).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    [
+      "detail",
+      {
+        detail: { code: "UNAUTHORIZED", message: "Missing Authorization or x-api-key header" },
+      },
+    ],
+    [
+      "openai",
+      {
+        error: {
+          message: "Missing Authorization or x-api-key header",
+          type: "authentication_error",
+          param: null,
+          code: "UNAUTHORIZED",
+        },
+      },
+    ],
+  ])("throws the same RequestError for a 401 in the %s envelope", async (_envelope, body) => {
+    mockFetch.mockResolvedValueOnce(jsonResponse(body, 401, { "WWW-Authenticate": "Bearer" }));
+
+    const client = new SIEClient("http://localhost:8080");
+    const error = await client
+      .responses({ model: "m", input: "Hi" })
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(RequestError);
+    expect((error as RequestError).constructor).toBe(RequestError);
+    expect((error as RequestError).statusCode).toBe(401);
+    expect((error as RequestError).code).toBe("UNAUTHORIZED");
+    expect((error as RequestError).message).toBe("Missing Authorization or x-api-key header");
+    expect(mockFetch).toHaveBeenCalledOnce();
+  });
+
   it("retries 503 MODEL_LOADING then returns the result", async () => {
     vi.useFakeTimers();
     try {

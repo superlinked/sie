@@ -1125,6 +1125,15 @@ server reads every value of a repeated header, skips empty ones, and refuses
 values that carry different tokens, while the gateway reads only the first
 `Authorization` value and uses `x-api-key` when that value is empty or blank.
 
+A refused request gets `401` with `WWW-Authenticate: Bearer` and the code
+`UNAUTHORIZED`, on the server and the gateway alike. On the OpenAI-compatible
+routes (`/v1/chat/completions`, `/v1/completions`, `/v1/responses`,
+`/v1/embeddings`, `/v1/audio/transcriptions`, and on the gateway also
+`/v1/models` and `/v1/moderations`) the body is the OpenAI error envelope,
+`{"error": {"message", "type": "authentication_error", "param": null, "code"}}`,
+so OpenAI clients read it; `/v1/messages` answers in the Anthropic envelope and
+the other routes in `{"detail": {"code", "message"}}`.
+
 Token auth covers the HTTP port. The other listeners are local: the IPC socket
 that a worker sidecar uses (`SIE_IPC_SOCKET_PATH`, mode `0600`) and the
 loopback ports of the engines the server launches. On macOS a socket can

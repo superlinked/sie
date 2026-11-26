@@ -172,7 +172,7 @@ fn leave_out_profile(body: &mut Value, profile: &str) {
     params(("model" = String, Path, description = "Model id; percent-encode slashes when using OpenAPI-generated clients")),
     responses(
         (status = 200, description = "Model detail", body = crate::openapi::ModelInfoWire),
-        (status = 404, description = "Model not found", body = crate::openapi::ModelNotFoundResponse)
+        (status = 404, description = "Model not found", body = crate::openapi::OpenAIErrorEnvelope)
     )
 )]
 pub async fn get_model(
@@ -1251,8 +1251,9 @@ mod route_tests {
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let body = body_json(response).await;
-        assert_eq!(body["detail"]["code"], "MODEL_NOT_FOUND");
-        assert!(body["detail"]["message"]
+        assert_eq!(body["error"]["code"], "MODEL_NOT_FOUND");
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert!(body["error"]["message"]
             .as_str()
             .unwrap()
             .contains("does/not/exist"));
@@ -1337,8 +1338,9 @@ mod route_tests {
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let body = body_json(response).await;
-        assert_eq!(body["detail"]["code"], "MODEL_NOT_FOUND");
-        assert!(body["detail"]["message"]
+        assert_eq!(body["error"]["code"], "MODEL_NOT_FOUND");
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert!(body["error"]["message"]
             .as_str()
             .unwrap()
             .contains("anything"));
