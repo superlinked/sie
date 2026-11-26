@@ -1,0 +1,23 @@
+# Financial sentiment (positive, negative, neutral), BERT fine-tuned on Financial PhraseBank.
+# Apache-2.0 (license of the FinBERT project, github.com/ProsusAI/finBERT).
+sie_id: ProsusAI/finbert
+hf_id: ProsusAI/finbert
+hf_revision: 4556d13015211d73dccd3fdd39d39232506f3e43
+inputs:
+  text: true
+  image: false
+  audio: false
+  video: false
+tasks:
+  encode: null
+  score: null
+  extract: {}
+max_sequence_length: 512
+profiles:
+  default:
+    max_batch_tokens: 65536
+    compute_precision: null
+    adapter_path: sie_server.adapters.sequence_classification.adapter:SequenceClassificationAdapter
+    adapter_options:
+      loadtime: {}
+      runtime: {}
