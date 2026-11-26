@@ -1092,16 +1092,21 @@ class TestRunsAloneLane:
 
     @pytest.mark.parametrize("seed", range(20))
     def test_unflagged_items_batch_exactly_as_cost_sorted_greedy_packing(self, seed: int) -> None:
-        """Without a flagged item pending, every batch matches the old algorithm."""
+        """Items that fit the configured budget match cost-sorted greedy packing.
+
+        An item above that budget uses the over-budget lane instead. This
+        control keeps every generated cost inside the budget.
+        """
         rng = random.Random(seed)  # noqa: S311 -- reproducible test data
         config = BatchConfig(max_batch_cost=rng.randint(1, 4_000), max_batch_requests=rng.randint(1, 8))
+        configured_budget = config.max_batch_cost
         batcher: BatchFormer[HasCost, int] = BatchFormer(config)
         reference: list[tuple[int, int]] = []
         next_id = 0
 
         for _ in range(60):
             for _ in range(rng.randint(0, 5)):
-                cost = rng.randint(1, 1_500)
+                cost = rng.randint(1, configured_budget)
                 # Items with runs_alone=False and items without the attribute.
                 item: HasCost = _Audio(cost=cost) if rng.random() < 0.5 else ExtractPreparedItem(cost, 0)
                 batcher._append_item(item, next_id)
@@ -1109,7 +1114,9 @@ class TestRunsAloneLane:
                 next_id += 1
             if not reference:
                 continue
-            max_items = rng.choice([None, None, 1, 2, 5])
+            config.max_batch_cost = rng.randint(1, configured_budget * 2)
+            config.max_batch_requests = rng.randint(1, 8)
+            max_items = rng.choice([None, 0, 1, 2, 5])
 
             batch = batcher._extract_batch(max_items=max_items)
 
@@ -1273,4 +1280,363 @@ class TestRunsAloneLane:
 
         assert sorted(served) == sorted(submitted)
         assert not flagged_waits
+        assert batcher.pending_cost == 0
+
+
+def _queue(batcher: BatchFormer[ExtractPreparedItem, str], cost: int, name: str, *, at: float) -> None:
+    """Queue an extract row as if it arrived at monotonic time ``at``."""
+    batcher._append_item(ExtractPreparedItem(cost, 0), name)
+    batcher._pending[-1].arrival_time = at
+
+
+class TestOverBudgetLane:
+    """Items above the configured batch cost take turns with cheaper items (#390).
+
+    Cost-sorted packing never reaches an item that does not fit the configured
+    limit while a cheaper item is pending. The cheaper lane keeps one batch,
+    then an arrival-ordered over-budget prefix fits the live limits. Items
+    that fit stay on cost order. Waiting is not itself a reason to move an item.
+    """
+
+    def test_over_budget_items_dispatch_while_cheaper_items_keep_arriving(self) -> None:
+        """24 rows above the GLiClass budget move while cheaper rows are still queued."""
+        batcher: BatchFormer[ExtractPreparedItem, str] = BatchFormer(
+            BatchConfig(max_batch_cost=16_384, max_batch_requests=64)
+        )
+        for index in range(24):
+            _queue(batcher, 22_355 + index, f"long-{index}", at=float(index))
+        for index in range(8):
+            _queue(batcher, 128, f"cheap-{index}", at=100.0 + index)
+
+        served: list[list[str]] = []
+        for index in range(48):
+            served.append(batcher._extract_batch().metadata)
+            _queue(batcher, 128, f"later-{index}", at=200.0 + index)
+
+        long_batches = [batch for batch in served if batch[0].startswith("long-")]
+        assert [batch[0] for batch in long_batches] == [f"long-{index}" for index in range(24)]
+        assert all(len(batch) == 1 for batch in long_batches)
+        cheap_batches = [batch for batch in served if not batch[0].startswith("long-")]
+        assert all(not name.startswith("long-") for batch in cheap_batches for name in batch)
+        cheap_before = 0
+        seen_long = 0
+        for batch in served:
+            if batch[0].startswith("long-"):
+                assert cheap_before <= seen_long + 1
+                seen_long += 1
+            else:
+                cheap_before += 1
+        assert batcher.pending_count > 0
+
+    def test_the_oldest_pending_item_decides_the_first_batch(self) -> None:
+        batcher: BatchFormer[ExtractPreparedItem, str] = BatchFormer(BatchConfig(max_batch_cost=100))
+        _queue(batcher, 250, "long", at=0.0)
+        _queue(batcher, 40, "cheap", at=1.0)
+
+        assert batcher._extract_batch().metadata == ["long"]
+        assert batcher._extract_batch().metadata == ["cheap"]
+
+    def test_an_empty_queue_restarts_the_over_budget_lane(self) -> None:
+        """The next queue follows its oldest item after an extract empties the queue."""
+        batcher: BatchFormer[ExtractPreparedItem, str] = BatchFormer(BatchConfig(max_batch_cost=100))
+        _queue(batcher, 250, "lone", at=0.0)
+        assert batcher._extract_batch().metadata == ["lone"]
+        assert batcher.pending_count == 0
+
+        _queue(batcher, 250, "over-budget", at=0.0)
+        _queue(batcher, 40, "cheap", at=1.0)
+
+        assert batcher._extract_batch().metadata == ["over-budget"]
+        assert batcher._extract_batch().metadata == ["cheap"]
+
+    def test_drain_pending_restarts_the_over_budget_lane(self) -> None:
+        """Draining the remainder of a queue clears the over-budget lane flag."""
+        batcher: BatchFormer[ExtractPreparedItem, str] = BatchFormer(BatchConfig(max_batch_cost=100))
+        _queue(batcher, 250, "over-budget", at=0.0)
+        _queue(batcher, 40, "cheap", at=1.0)
+        assert batcher._extract_batch().metadata == ["over-budget"]
+
+        assert batcher.drain_pending() == ["cheap"]
+        assert batcher.pending_count == 0
+
+        _queue(batcher, 250, "next-over-budget", at=0.0)
+        _queue(batcher, 40, "next-cheap", at=1.0)
+        assert batcher._extract_batch().metadata == ["next-over-budget"]
+
+    def test_over_budget_items_run_in_arrival_order(self) -> None:
+        """A newer, cheaper over-budget row does not pass an older one."""
+        batcher: BatchFormer[ExtractPreparedItem, str] = BatchFormer(BatchConfig(max_batch_cost=100))
+        _queue(batcher, 400, "older-larger", at=0.0)
+        _queue(batcher, 200, "newer-smaller", at=1.0)
+
+        assert batcher._extract_batch().metadata == ["older-larger"]
+        assert batcher._extract_batch().metadata == ["newer-smaller"]
+
+    def test_items_within_the_configured_budget_stay_on_cost_order(self) -> None:
+        """A row that fits is not pulled ahead because cheaper rows filled the budget."""
+        batcher: BatchFormer[ExtractPreparedItem, str] = BatchFormer(
+            BatchConfig(max_batch_cost=100, max_batch_requests=10)
+        )
+        _queue(batcher, 80, "larger", at=0.0)
+        for index in range(6):
+            _queue(batcher, 30, f"cheap-{index}", at=float(index + 1))
+
+        assert batcher._extract_batch().metadata == ["cheap-0", "cheap-1", "cheap-2"]
+        for index in range(3):
+            _queue(batcher, 30, f"more-{index}", at=10.0 + index)
+        second = batcher._extract_batch().metadata
+        assert "larger" not in second
+        assert all(name != "larger" for name in second)
+
+    def test_a_raised_live_budget_does_not_pack_the_over_budget_item_with_cheaper_ones(self) -> None:
+        config = BatchConfig(max_batch_cost=16_384)
+        batcher: BatchFormer[ExtractPreparedItem, str] = BatchFormer(config)
+        _queue(batcher, 100, "cheap", at=0.0)
+        _queue(batcher, 22_355, "long", at=1.0)
+        config.max_batch_cost = 65_536
+
+        assert config.configured_max_batch_cost == 16_384
+        assert batcher._extract_batch().metadata == ["cheap"]
+        assert batcher._extract_batch().metadata == ["long"]
+        assert batcher.pending_cost == 0
+
+    @pytest.mark.parametrize("with_cheap", [False, True])
+    def test_raised_budget_packs_an_over_budget_fifo_prefix(self, with_cheap: bool) -> None:
+        config = BatchConfig(max_batch_cost=100)
+        batcher: BatchFormer[ExtractPreparedItem, str] = BatchFormer(config)
+        for index, cost in enumerate([200, 150, 110]):
+            _queue(batcher, cost, f"long-{index}", at=float(index))
+        if with_cheap:
+            _queue(batcher, 1, "cheap", at=3.0)
+        config.max_batch_cost = 450
+
+        first = batcher._extract_batch()
+
+        assert first.metadata == ["long-0", "long-1"]
+        assert first.total_cost == 350
+        if with_cheap:
+            assert batcher._extract_batch().metadata == ["cheap"]
+        assert batcher._extract_batch().metadata == ["long-2"]
+        assert batcher.pending_count == batcher.pending_cost == 0
+
+    def test_fifo_packing_does_not_skip_an_older_item_to_fill_spare_budget(self) -> None:
+        config = BatchConfig(max_batch_cost=100)
+        batcher: BatchFormer[ExtractPreparedItem, str] = BatchFormer(config)
+        for index, cost in enumerate([140, 190, 110]):
+            _queue(batcher, cost, f"long-{index}", at=float(index))
+        config.max_batch_cost = 300
+
+        assert batcher._extract_batch().metadata == ["long-0"]
+        assert batcher._extract_batch().metadata == ["long-1", "long-2"]
+
+    @pytest.mark.parametrize(("request_cap", "item_cap", "taken"), [(1, None, 1), (8, 2, 2), (3, 8, 3)])
+    def test_over_budget_fifo_pack_respects_both_item_caps(self, request_cap, item_cap, taken) -> None:
+        config = BatchConfig(max_batch_cost=100, max_batch_requests=request_cap)
+        batcher: BatchFormer[ExtractPreparedItem, str] = BatchFormer(config)
+        for index in range(4):
+            _queue(batcher, 200 - index, f"long-{index}", at=float(index))
+        config.max_batch_cost = 1_000
+
+        batch = batcher._extract_batch(max_items=item_cap)
+
+        assert batch.metadata == [f"long-{index}" for index in range(taken)]
+        assert batcher.pending_count == 4 - taken
+        assert batcher.pending_cost + batch.total_cost == 794
+
+    def test_lowered_live_budget_still_dispatches_one_oversized_item(self) -> None:
+        config = BatchConfig(max_batch_cost=100)
+        batcher: BatchFormer[ExtractPreparedItem, str] = BatchFormer(config)
+        _queue(batcher, 250, "first", at=0.0)
+        _queue(batcher, 150, "second", at=1.0)
+        config.max_batch_cost = 50
+
+        assert batcher._extract_batch().metadata == ["first"]
+        assert batcher._extract_batch().metadata == ["second"]
+        assert batcher.pending_count == batcher.pending_cost == 0
+
+    @pytest.mark.parametrize("over_first", [False, True])
+    def test_tied_timestamps_choose_the_first_submitted_lane(self, over_first: bool) -> None:
+        batcher: BatchFormer[ExtractPreparedItem, str] = BatchFormer(BatchConfig(max_batch_cost=100))
+        rows = [(250, "long"), (40, "cheap")]
+        if not over_first:
+            rows.reverse()
+        for cost, name in rows:
+            _queue(batcher, cost, name, at=1.0)
+
+        assert batcher._extract_batch().metadata == [rows[0][1]]
+        assert batcher._extract_batch().metadata == [rows[1][1]]
+
+    @pytest.mark.parametrize("live_budget", [100, 600])
+    def test_tied_over_budget_arrivals_survive_runs_alone_cost_sorting(self, live_budget: int) -> None:
+        config = BatchConfig(max_batch_cost=100)
+        batcher: BatchFormer[_Audio, str] = BatchFormer(config)
+        _arrive(batcher, _Audio(1_000, runs_alone=True), "alone", at=0.0)
+        _arrive(batcher, _Audio(300), "first", at=1.0)
+        _arrive(batcher, _Audio(200), "second", at=1.0)
+        _arrive(batcher, _Audio(10), "cheap", at=2.0)
+        config.max_batch_cost = live_budget
+
+        assert batcher._extract_batch().metadata == ["alone"]
+        if live_budget == 100:
+            assert batcher._extract_batch().metadata == ["first"]
+            assert batcher._extract_batch().metadata == ["cheap"]
+            assert batcher._extract_batch().metadata == ["second"]
+        else:
+            assert batcher._extract_batch().metadata == ["first", "second"]
+            assert batcher._extract_batch().metadata == ["cheap"]
+        assert batcher.pending_count == batcher.pending_cost == 0
+
+    def test_flagged_lane_preserves_normal_live_budget_packing(self) -> None:
+        config = BatchConfig(max_batch_cost=100)
+        batcher: BatchFormer[_Audio, str] = BatchFormer(config)
+        _arrive(batcher, _Audio(10), "cheap", at=0.0)
+        _arrive(batcher, _Audio(200), "large", at=1.0)
+        _arrive(batcher, _Audio(1_000, runs_alone=True), "alone", at=2.0)
+        config.max_batch_cost = 500
+
+        assert batcher._extract_batch().metadata == ["cheap", "large"]
+        assert batcher._extract_batch().metadata == ["alone"]
+
+    def test_zero_and_flagged_turns_preserve_the_next_over_budget_turn(self) -> None:
+        config = BatchConfig(max_batch_cost=100)
+        batcher: BatchFormer[_Audio, str] = BatchFormer(config)
+        _arrive(batcher, _Audio(40), "cheap", at=0.0)
+        _arrive(batcher, _Audio(200), "first", at=1.0)
+        _arrive(batcher, _Audio(150), "second", at=2.0)
+        assert batcher._extract_batch().metadata == ["cheap"]
+        _arrive(batcher, _Audio(1_000, runs_alone=True), "alone", at=3.0)
+        _arrive(batcher, _Audio(1), "later-cheap", at=4.0)
+        config.max_batch_cost = 500
+
+        assert batcher._extract_batch().metadata == ["alone"]
+        assert batcher._extract_batch(max_items=0).metadata == []
+        assert batcher._extract_batch().metadata == ["first", "second"]
+        assert batcher._extract_batch().metadata == ["later-cheap"]
+
+    def test_over_budget_order_never_compares_metadata(self) -> None:
+        class Metadata:
+            __hash__ = object.__hash__
+
+            def __eq__(self, other: object) -> bool:
+                raise AssertionError("batch selection must not compare metadata")
+
+        batcher: BatchFormer[ExtractPreparedItem, Metadata] = BatchFormer(BatchConfig(max_batch_cost=100))
+        first, second = Metadata(), Metadata()
+        for cost, metadata in [(250, first), (150, second)]:
+            batcher._append_item(ExtractPreparedItem(cost, 0), metadata)
+            batcher._pending[-1].arrival_time = 1.0
+        batcher.config.max_batch_cost = 500
+
+        batch = batcher._extract_batch()
+
+        assert len(batch.metadata) == 2
+        assert batch.metadata[0] is first
+        assert batch.metadata[1] is second
+
+    def test_turn_taking_keeps_pending_cost_consistent(self) -> None:
+        batcher: BatchFormer[ExtractPreparedItem, str] = BatchFormer(BatchConfig(max_batch_cost=100))
+        _queue(batcher, 40, "a", at=0.0)
+        _queue(batcher, 250, "b", at=1.0)
+        _queue(batcher, 40, "c", at=2.0)
+
+        assert batcher.pending_cost == 330
+        first = batcher._extract_batch()
+        assert first.metadata == ["a", "c"]
+        assert first.total_cost == 80
+        assert batcher.pending_cost == 250
+        second = batcher._extract_batch()
+        assert second.metadata == ["b"]
+        assert second.total_cost == 250
+        assert batcher.pending_count == 0
+        assert batcher.pending_cost == 0
+
+    @pytest.mark.parametrize("seed", range(20))
+    def test_over_budget_items_wait_for_at_most_one_extra_cheaper_batch(self, seed: int) -> None:
+        rng = random.Random(seed)  # noqa: S311 -- reproducible test data
+        budget = rng.randint(10, 500)
+        batcher: BatchFormer[ExtractPreparedItem, str] = BatchFormer(
+            BatchConfig(max_batch_cost=budget, max_batch_requests=rng.randint(1, 8))
+        )
+        served: list[str] = []
+        submitted: list[str] = []
+        waits: dict[str, list[int]] = {}
+        last_over: bool | None = None
+
+        def extract() -> None:
+            nonlocal last_over
+            pending = list(batcher._pending)
+            batch = batcher._extract_batch(max_items=rng.choice([None, 1, 3]))
+            assert batch.size > 0
+            over = batch.items[0].cost > budget
+            assert batch.total_cost <= batcher.config.max_batch_cost or batch.size == 1
+            assert all((item.cost > budget) is over for item in batch.items)
+            has_over = any(request.item.cost > budget for request in pending)
+            has_pack = any(request.item.cost <= budget for request in pending)
+            if has_over and has_pack:
+                pending_by_name = {request.metadata: request for request in pending}
+                oldest_name = next(name for name in submitted if name in pending_by_name)
+                oldest_over = pending_by_name[oldest_name].item.cost > budget
+                assert over is (oldest_over if last_over is None else not last_over)
+            last_over = over
+            if batcher.pending_count == 0:
+                last_over = None
+            if over:
+                assert batch.metadata == list(waits)[: batch.size]
+                for name in batch.metadata:
+                    ahead, cheap_batches = waits.pop(name)
+                    assert cheap_batches <= ahead + 1
+            else:
+                for wait in waits.values():
+                    wait[1] += 1
+            served.extend(batch.metadata)
+            assert batch.total_cost == sum(item.cost for item in batch.items)
+            assert batcher.pending_cost == sum(request.item.cost for request in batcher._pending)
+
+        now = 0.0
+        for index in range(200):
+            now += rng.choice([0.0, rng.uniform(0.0, 2.0)])
+            if rng.random() < 0.7:
+                name = f"item-{index}"
+                if rng.random() < 0.25:
+                    waits[name] = [len(waits), 0]
+                    cost = budget + rng.randint(1, budget)
+                else:
+                    cost = rng.randint(1, budget)
+                _queue(batcher, cost, name, at=now)
+                submitted.append(name)
+            if batcher.pending_count and rng.random() < 0.55:
+                batcher.config.max_batch_cost = rng.choice([max(1, budget // 2), budget, budget * 3])
+                extract()
+        while batcher.pending_count:
+            extract()
+
+        assert sorted(served) == sorted(submitted)
+        assert not waits
+        assert batcher.pending_cost == 0
+
+    @pytest.mark.asyncio
+    async def test_try_drain_takes_the_over_budget_turn(self) -> None:
+        batcher: BatchFormer[ExtractPreparedItem, str] = BatchFormer(BatchConfig(max_batch_cost=100))
+        await batcher.submit_many(
+            [
+                (ExtractPreparedItem(40, 0), "cheap-a"),
+                (ExtractPreparedItem(250, 1), "long-a"),
+                (ExtractPreparedItem(40, 2), "cheap-b"),
+                (ExtractPreparedItem(180, 3), "long-b"),
+            ]
+        )
+        # submit_many stamps arrival in call order. Equal timestamps keep that order.
+        for index, request in enumerate(batcher._pending):
+            request.arrival_time = float(index)
+
+        first = await batcher.try_drain()
+        assert first is not None
+        assert first.metadata == ["cheap-a", "cheap-b"]
+        second = await batcher.try_drain()
+        assert second is not None
+        assert second.metadata == ["long-a"]
+        third = await batcher.try_drain(max_items=1)
+        assert third is not None
+        assert third.metadata == ["long-b"]
+        assert await batcher.try_drain() is None
         assert batcher.pending_cost == 0
