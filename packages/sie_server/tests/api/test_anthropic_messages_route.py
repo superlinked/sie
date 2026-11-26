@@ -420,7 +420,7 @@ def test_token_auth_takes_either_header_and_refuses_in_the_anthropic_envelope(
     assert missing.headers["www-authenticate"] == "Bearer"
     assert missing.headers["x-sie-error-code"] == "UNAUTHORIZED"
     assert chat_missing.status_code == 401
-    assert chat_missing.json()["detail"]["code"] == "UNAUTHORIZED"
+    assert chat_missing.json()["error"]["code"] == "UNAUTHORIZED"
     for credentials in (
         {"x-api-key": TOKEN},
         {"authorization": f"Bearer {TOKEN}"},

@@ -2891,32 +2891,6 @@
         ],
         "type": "object"
       },
-      "ModelNotFoundDetail": {
-        "properties": {
-          "code": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "code",
-          "message"
-        ],
-        "type": "object"
-      },
-      "ModelNotFoundResponse": {
-        "properties": {
-          "detail": {
-            "$ref": "#/components/schemas/ModelNotFoundDetail"
-          }
-        },
-        "required": [
-          "detail"
-        ],
-        "type": "object"
-      },
       "ModelReasoningWire": {
         "description": "``capabilities.reasoning`` on a ``GET /v1/models`` entry.",
         "properties": {
@@ -5323,7 +5297,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StandardApiError"
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
                 }
               }
             },
@@ -5353,14 +5327,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "oneOf": [
-                    {
-                      "$ref": "#/components/schemas/OpenAIErrorEnvelope"
-                    },
-                    {
-                      "$ref": "#/components/schemas/StandardApiError"
-                    }
-                  ]
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
                 }
               }
             },
@@ -5632,7 +5599,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StandardApiError"
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
                 }
               }
             },
@@ -5662,14 +5629,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "oneOf": [
-                    {
-                      "$ref": "#/components/schemas/OpenAIErrorEnvelope"
-                    },
-                    {
-                      "$ref": "#/components/schemas/StandardApiError"
-                    }
-                  ]
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
                 }
               }
             },
@@ -5852,7 +5812,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StandardApiError"
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
                 }
               }
             },
@@ -5872,14 +5832,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "oneOf": [
-                    {
-                      "$ref": "#/components/schemas/OpenAIErrorEnvelope"
-                    },
-                    {
-                      "$ref": "#/components/schemas/StandardApiError"
-                    }
-                  ]
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
                 }
               }
             },
@@ -6748,7 +6701,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StandardApiError"
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
                 }
               }
             },
@@ -6788,14 +6741,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "oneOf": [
-                    {
-                      "$ref": "#/components/schemas/OpenAIErrorEnvelope"
-                    },
-                    {
-                      "$ref": "#/components/schemas/StandardApiError"
-                    }
-                  ]
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
                 }
               }
             },
@@ -8284,7 +8230,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StandardApiError"
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
                 }
               }
             },
@@ -8294,7 +8240,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StandardApiError"
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
                 }
               }
             },
@@ -8335,7 +8281,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StandardApiError"
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
                 }
               }
             },
@@ -8345,7 +8291,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ModelNotFoundResponse"
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
                 }
               }
             },
@@ -8355,7 +8301,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StandardApiError"
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
                 }
               }
             },
@@ -8378,7 +8324,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StandardApiError"
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
                 }
               }
             },
@@ -8388,7 +8334,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StandardApiError"
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
                 }
               }
             },
@@ -9068,7 +9014,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StandardApiError"
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
                 }
               }
             },
@@ -9098,14 +9044,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "oneOf": [
-                    {
-                      "$ref": "#/components/schemas/OpenAIErrorEnvelope"
-                    },
-                    {
-                      "$ref": "#/components/schemas/StandardApiError"
-                    }
-                  ]
+                  "$ref": "#/components/schemas/OpenAIErrorEnvelope"
                 }
               }
             },

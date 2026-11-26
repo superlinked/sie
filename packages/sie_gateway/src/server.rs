@@ -666,6 +666,9 @@ pub fn create_router_core(
         .layer(axum::middleware::from_fn(
             messages::anthropic_error_envelope,
         ))
+        .layer(axum::middleware::from_fn(
+            crate::http_error::openai_error_envelope,
+        ))
         .with_state(state)
 }
 
@@ -1301,12 +1304,20 @@ mod flat_404_tests {
 
     // Returned tempdirs must outlive the router so they drop after the test.
     fn build_router() -> (Router, tempfile::TempDir, tempfile::TempDir) {
+        build_router_with(|_| {})
+    }
+
+    pub(super) fn build_router_with(
+        configure: impl FnOnce(&mut Config),
+    ) -> (Router, tempfile::TempDir, tempfile::TempDir) {
         let bundles_dir = tempfile::TempDir::new().unwrap();
         let models_dir = tempfile::TempDir::new().unwrap();
-        let config = Arc::new(test_config(
+        let mut config = test_config(
             bundles_dir.path().to_str().unwrap(),
             models_dir.path().to_str().unwrap(),
-        ));
+        );
+        configure(&mut config);
+        let config = Arc::new(config);
         let state = Arc::new(AppState {
             registry: Arc::new(WorkerRegistry::new(Duration::from_secs(30), None)),
             config: Arc::clone(&config),
@@ -1463,5 +1474,100 @@ mod flat_404_tests {
             Body::from("{\"purpose\":\"batch\"}"),
         )
         .await;
+    }
+}
+
+#[cfg(test)]
+mod openai_error_envelope_tests {
+    use axum::body::{to_bytes, Body};
+    use axum::http::{Method, Request, StatusCode};
+    use axum::Router;
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+
+    use super::flat_404_tests::build_router_with;
+
+    async fn refuse(app: &Router, method: Method, uri: &str) -> (StatusCode, String, Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let challenge = response
+            .headers()
+            .get("www-authenticate")
+            .map(|value| value.to_str().unwrap().to_string())
+            .unwrap_or_default();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, challenge, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_missing_token_on_an_openai_route_gets_the_openai_envelope() {
+        let (app, _bundles_dir, _models_dir) = build_router_with(|config| {
+            config.auth_mode = "token".to_string();
+            config.auth_tokens = vec!["secret".to_string()];
+        });
+        for (method, uri) in [
+            (Method::POST, "/v1/chat/completions"),
+            (Method::POST, "/v1/completions"),
+            (Method::POST, "/v1/responses"),
+            (Method::POST, "/v1/embeddings"),
+            (Method::GET, "/v1/models"),
+            (Method::GET, "/v1/models/BAAI/bge-m3"),
+            (Method::POST, "/v1/moderations"),
+        ] {
+            let (status, challenge, body) = refuse(&app, method, uri).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}");
+            assert_eq!(challenge, "Bearer", "{uri}");
+            assert_eq!(
+                body,
+                json!({"error": {
+                    "message": "Missing Authorization or x-api-key header",
+                    "type": "authentication_error",
+                    "param": null,
+                    "code": "UNAUTHORIZED",
+                }}),
+                "{uri}"
+            );
+        }
+
+        let (status, challenge, body) = refuse(&app, Method::POST, "/v1/encode/BAAI/bge-m3").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(challenge, "Bearer");
+        assert_eq!(
+            body,
+            json!({"detail": {
+                "code": "UNAUTHORIZED",
+                "message": "Missing Authorization or x-api-key header",
+            }})
+        );
+
+        let (status, _, body) = refuse(&app, Method::POST, "/v1/messages").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "authentication_error");
+    }
+
+    #[tokio::test]
+    async fn a_misconfigured_gateway_refuses_openai_routes_in_the_openai_envelope() {
+        let (app, _bundles_dir, _models_dir) = build_router_with(|config| {
+            config.auth_mode = "tokens".to_string();
+        });
+        let (status, _, body) = refuse(&app, Method::POST, "/v1/chat/completions").await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["type"], "server_error");
+        assert_eq!(body["error"]["code"], "GATEWAY_AUTH_MISCONFIGURED");
+        let (status, _, body) = refuse(&app, Method::POST, "/v1/score/m").await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["detail"]["code"], "GATEWAY_AUTH_MISCONFIGURED");
     }
 }

@@ -116,8 +116,6 @@ static OPENAPI_JSON: LazyLock<String> = LazyLock::new(|| {
         ModelRoutingWire,
         ModelsResponse,
         OpenAiModelObject,
-        ModelNotFoundDetail,
-        ModelNotFoundResponse,
         ProfileInfoWire,
         crate::types::worker::ModelInfo,
         MultiVector,
@@ -1360,36 +1358,39 @@ fn inject_inference_response_headers(paths: &mut serde_json::Map<String, Value>)
 }
 
 /// Add documented auth responses for bearer-protected operations (spec completeness).
+///
+/// The OpenAI-compatible routes document the OpenAI envelope, which
+/// `http_error::openai_error_envelope` gives the auth middleware's refusals
+/// there; every other route documents `StandardApiError`.
 fn inject_bearer_auth_error_responses(paths: &mut serde_json::Map<String, Value>) {
-    let unauthorized = json!({
-        "description": "Missing or invalid bearer token (inference token)",
-        "content": {
-            "application/json": {
-                "schema": { "$ref": "#/components/schemas/StandardApiError" }
+    let error_response = |description: &str, schema: &Value| {
+        json!({
+            "description": description,
+            "content": {
+                "application/json": {
+                    "schema": schema
+                }
             }
-        }
-    });
-    let forbidden = json!({
-        "description": "Valid bearer token but admin token required for this mutation (or admin token not configured)",
-        "content": {
-            "application/json": {
-                "schema": { "$ref": "#/components/schemas/StandardApiError" }
-            }
-        }
-    });
-    let auth_misconfigured = json!({
-        "description": "Gateway auth enabled but no tokens configured",
-        "content": {
-            "application/json": {
-                "schema": { "$ref": "#/components/schemas/StandardApiError" }
-            }
-        }
-    });
+        })
+    };
 
     for (path, path_item) in paths.iter_mut() {
         let Some(path_item) = path_item.as_object_mut() else {
             continue;
         };
+        let error_schema = auth_error_schema(path);
+        let unauthorized = error_response(
+            "Missing or invalid bearer token (inference token)",
+            &error_schema,
+        );
+        let forbidden = error_response(
+            "Valid bearer token but admin token required for this mutation (or admin token not configured)",
+            &error_schema,
+        );
+        let auth_misconfigured = error_response(
+            "Gateway auth enabled but no tokens configured",
+            &error_schema,
+        );
         for (method, op) in path_item.iter_mut() {
             if !matches!(method.as_str(), "get" | "post" | "put" | "delete" | "patch") {
                 continue;
@@ -1411,7 +1412,7 @@ fn inject_bearer_auth_error_responses(paths: &mut serde_json::Map<String, Value>
             responses
                 .entry("401".to_string())
                 .or_insert(unauthorized.clone());
-            merge_auth_misconfigured_response(responses, &auth_misconfigured);
+            merge_auth_misconfigured_response(responses, &auth_misconfigured, &error_schema);
 
             if admin_mutation(method.as_str(), path) {
                 responses
@@ -1422,24 +1423,29 @@ fn inject_bearer_auth_error_responses(paths: &mut serde_json::Map<String, Value>
     }
 }
 
-fn standard_api_error_schema() -> Value {
-    json!({ "$ref": "#/components/schemas/StandardApiError" })
+fn auth_error_schema(path: &str) -> Value {
+    if crate::http_error::is_openai_path(path) {
+        json!({ "$ref": "#/components/schemas/OpenAIErrorEnvelope" })
+    } else {
+        json!({ "$ref": "#/components/schemas/StandardApiError" })
+    }
 }
 
-fn schema_allows_standard_api_error(schema: &Value) -> bool {
-    if schema == &standard_api_error_schema() {
+fn schema_allows(schema: &Value, wanted: &Value) -> bool {
+    if schema == wanted {
         return true;
     }
     schema
         .get("oneOf")
         .and_then(|one_of| one_of.as_array())
-        .map(|schemas| schemas.iter().any(schema_allows_standard_api_error))
+        .map(|schemas| schemas.iter().any(|schema| schema_allows(schema, wanted)))
         .unwrap_or(false)
 }
 
 fn merge_auth_misconfigured_response(
     responses: &mut serde_json::Map<String, Value>,
     auth_misconfigured: &Value,
+    error_schema: &Value,
 ) {
     let Some(existing) = responses.get_mut("500") else {
         responses.insert("500".to_string(), auth_misconfigured.clone());
@@ -1472,13 +1478,13 @@ fn merge_auth_misconfigured_response(
         .expect("OpenAPI application/json response should be an object");
     let schema = json_content.entry("schema").or_insert_with(|| json!(null));
     if schema.is_null() {
-        *schema = standard_api_error_schema();
-    } else if !schema_allows_standard_api_error(schema) {
+        *schema = error_schema.clone();
+    } else if !schema_allows(schema, error_schema) {
         let old_schema = schema.clone();
         *schema = json!({
             "oneOf": [
                 old_schema,
-                standard_api_error_schema()
+                error_schema
             ]
         });
     }
@@ -2694,17 +2700,6 @@ pub struct ModelsResponse {
     pub data: Vec<OpenAiModelObject>,
     /// Native SIE model info (capabilities, dims, profiles).
     pub models: Vec<ModelInfoWire>,
-}
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct ModelNotFoundResponse {
-    pub detail: ModelNotFoundDetail,
-}
-
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct ModelNotFoundDetail {
-    pub code: String,
-    pub message: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -3999,21 +3994,59 @@ mod tests {
             );
         }
 
-        // `/v1/embeddings` is OpenAI-compatible: every handler-generated error
-        // path documents the OpenAI `{error:{…}}` envelope so an `openai`
-        // client's error handling works unchanged. (401 is emitted upstream by
-        // the auth middleware and stays on the SIE-native shape.)
-        // (In the raw document each error is a direct `$ref`; the export step
-        // later merges the auth-misconfigured `StandardApiError` into the 500
-        // as a `oneOf` — see `openapi_export_*` tests.)
+        // `/v1/embeddings` is OpenAI-compatible: every error path, including
+        // the auth middleware's 401, documents the OpenAI `{error:{…}}`
+        // envelope so an `openai` client's error handling works unchanged.
         let emb = &spec["paths"]["/v1/embeddings"]["post"]["responses"];
-        for status in ["400", "404", "409", "413", "500", "502", "503", "504"] {
+        for status in [
+            "400", "401", "404", "409", "413", "500", "502", "503", "504",
+        ] {
             assert_eq!(
                 emb[status]["content"]["application/json"]["schema"]["$ref"],
                 "#/components/schemas/OpenAIErrorEnvelope",
                 "/v1/embeddings {status} must be the OpenAI envelope"
             );
         }
+    }
+
+    #[test]
+    fn openapi_export_documents_the_openai_envelope_on_openai_routes() {
+        let spec: serde_json::Value = serde_json::from_str(&OPENAPI_JSON).unwrap();
+        let openai = json!({"$ref": "#/components/schemas/OpenAIErrorEnvelope"});
+        let standard = json!({"$ref": "#/components/schemas/StandardApiError"});
+        let schema = |path: &str, method: &str, status: &str| {
+            spec["paths"][path][method]["responses"][status]["content"]["application/json"]
+                ["schema"]
+                .clone()
+        };
+        let mut seen = 0;
+        for (path, item) in spec["paths"].as_object().unwrap() {
+            if !crate::http_error::is_openai_path(path) {
+                continue;
+            }
+            for method in item.as_object().unwrap().keys() {
+                seen += 1;
+                assert_eq!(schema(path, method, "401"), openai, "{method} {path} 401");
+                let internal = schema(path, method, "500");
+                assert!(
+                    schema_allows(&internal, &openai) && !schema_allows(&internal, &standard),
+                    "{method} {path} 500: {internal}"
+                );
+            }
+        }
+        assert_eq!(seen, 8);
+        assert_eq!(schema("/v1/models/{model}", "get", "404"), openai);
+        for (path, method) in [
+            ("/v1/encode/{model}", "post"),
+            ("/v1/generate/{model}", "post"),
+            ("/v1/pools", "post"),
+        ] {
+            assert_eq!(schema(path, method, "401"), standard, "{method} {path} 401");
+        }
+        assert_eq!(
+            schema("/v1/messages", "post", "401"),
+            json!({"$ref": "#/components/schemas/AnthropicErrorEnvelope"})
+        );
     }
 
     #[test]
