@@ -319,49 +319,88 @@ def test_non_strict_requests_keep_the_forcing_regex() -> None:
     assert spec.kind == "regex"
 
 
-# -- rejection ------------------------------------------------------------------
+# -- what the grammar cannot express is constrained less, not refused -----------
+#
+# The end-of-turn validation guarantees a strict call on every format, so these
+# requests run; only a tool that cannot be validated is refused.
+
+_RAW_TEXT = {"type": "any_text", "excludes": ["</parameter>", "</tool_call>"]}
+_FREE_BODY = {"type": "any_text", "excludes": ["<tool_call>", "</tool_call>"]}
 
 
-@pytest.mark.parametrize("fmt", ["glm_xml", "muse_atem", "gemma4", "auto"])
-def test_unsupported_format_is_rejected(fmt: Any) -> None:
-    with pytest.raises(StrictToolError) as excinfo:
-        build_strict_tool_grammar(TOOLS, "auto", fmt)
-    assert excinfo.value.param == "tools"
+@pytest.mark.parametrize("fmt", ["glm_xml", "muse_atem", "gemma4"])
+def test_format_without_a_structural_tag_keeps_the_non_strict_grammar(fmt: Any) -> None:
+    assert build_strict_tool_grammar(TOOLS, "auto", fmt) is None
+    forced = build_strict_tool_grammar(TOOLS, "required", fmt)
+    assert forced is not None
+    assert forced.kind == "regex"
+    assert forced == build_tool_choice_grammar(tuple(TOOLS), "required", fmt)
+
+
+def test_unresolved_format_keeps_the_non_strict_behaviour() -> None:
+    assert build_strict_tool_grammar(TOOLS, "auto", "auto") is None
+    with pytest.raises(ToolChoiceError):
+        build_strict_tool_grammar(TOOLS, "required", "auto")
 
 
 @pytest.mark.parametrize(
-    ("schema", "fragment"),
+    "schema",
     [
-        ({"anyOf": [{"type": "integer"}, {"type": "string"}]}, "mixes string"),
-        ({"anyOf": [{"type": "integer"}, {"type": "object"}]}, "mixes integer"),
-        ({"enum": ["a", 1]}, "enum values must be strings"),
-        ({"$ref": "#/$defs/missing"}, "resolvable references"),
-        ({"type": "uuid"}, "type 'uuid'"),
-        ({"type": "string", "enum": ["a</parameter>b"]}, "cannot contain"),
-        ({"type": "string", "enum": ["a</tool_call>b"]}, "cannot contain"),
-        ({"type": "string", "const": 1}, "does not match its 'type'"),
-        ({"type": "string", "enum": ["a"], "const": "b"}, "is not one of its 'enum' values"),
-        ({"type": "string", "enum": ["x", None]}, "does not match its 'type'"),
-        ({"type": "integer", "enum": [1, "a"]}, "does not match its 'type'"),
-        ({"$ref": "#/properties/other"}, "must point into"),
-        ({"type": "array", "items": {"$ref": "#/$defs/T~1"}}, "escaped pointer"),
-        ({"const": True, "enum": [1]}, "is not one of its 'enum' values"),
-        ({"const": [True], "enum": [[1]]}, "is not one of its 'enum' values"),
-        ({"anyOf": [{"type": "integer"}, {"const": True}]}, "mixes integer"),
-        ({"type": "string", "enum": ["a<think>b"]}, "reasoning delimiter"),
-        ({"type": "array", "items": {"const": "</think>"}}, "reasoning delimiter"),
-        ({"type": ["string", "null"], "enum": ["null"]}, "cannot list the string 'null'"),
-        ({"anyOf": [{"type": "string", "enum": ["NULL"]}, {"type": "null"}]}, "cannot list the string 'NULL'"),
-        ({"anyOf": [{"type": "string", "enum": ["x"]}, {"type": "null", "enum": ["x"]}]}, "does not match"),
-        ({"type": "object", "properties": {"a": {}}, "unevaluatedProperties": False}, "'unevaluatedProperties'"),
+        {"anyOf": [{"type": "integer"}, {"type": "string"}]},
+        {"anyOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]},
+        {"anyOf": [{"type": "integer"}, {"type": "object"}]},
+        {"anyOf": [{"type": "integer"}, {"const": True}]},
+        {"enum": ["a", 1]},
+        {"$ref": "#/$defs/missing"},
+        {"type": "uuid"},
+        {"type": "string", "enum": ["a</parameter>b"]},
+        {"type": "string", "enum": ["a</tool_call>b"]},
+        {"type": ["string", "null"], "enum": ["null"]},
+        {"anyOf": [{"type": "string", "enum": ["NULL"]}, {"type": "null"}]},
     ],
 )
-def test_unservable_parameter_is_rejected(schema: dict[str, Any], fragment: str) -> None:
+def test_parameter_the_layout_cannot_constrain_is_free_text(schema: dict[str, Any]) -> None:
+    parameters = {
+        "type": "object",
+        "properties": {"value": schema, "exact": {"type": "boolean"}},
+        "required": ["value", "exact"],
+    }
+    contents = _parameter_contents(_tags(build_strict_tool_grammar([_tool("f", parameters)], "auto", "qwen_xml"))[0])
+    assert contents["value"] == _RAW_TEXT
+    assert contents["exact"] == {"type": "json_schema", "json_schema": {"type": "boolean"}}
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "string", "const": 1},
+        {"type": "string", "enum": ["a"], "const": "b"},
+        {"type": "string", "enum": ["x", None]},
+        {"type": "integer", "enum": [1, "a"]},
+        {"$ref": "#/properties/other"},
+        {"type": "array", "items": {"$ref": "#/$defs/T~1"}},
+        {"const": True, "enum": [1]},
+        {"const": [True], "enum": [[1]]},
+        {"type": "string", "enum": ["a<think>b"]},
+        {"type": "array", "items": {"const": "</think>"}},
+        {"anyOf": [{"type": "string", "enum": ["x"]}, {"type": "null", "enum": ["x"]}]},
+    ],
+)
+@pytest.mark.parametrize("fmt", ["qwen_xml", "hermes_json"])
+def test_tool_the_grammar_would_misconstrain_keeps_a_free_body(schema: dict[str, Any], fmt: Any) -> None:
     parameters = {"type": "object", "properties": {"value": schema}, "required": ["value"]}
-    with pytest.raises(StrictToolError) as excinfo:
-        build_strict_tool_grammar([_tool("f", parameters)], "auto", "qwen_xml")
-    assert fragment in str(excinfo.value)
-    assert excinfo.value.param.startswith("tools[0].function.parameters")
+    tags = _tags(build_strict_tool_grammar([_tool("f", parameters), _tool("search", SEARCH)], "auto", fmt))
+    free = build_strict_tool_grammar([_tool("f", parameters, strict=False)], "auto", fmt)
+    assert tags[0] == _tags(free)[0]
+    assert tags[1]["content"] != tags[0]["content"]
+
+
+def test_parameters_the_verifier_cannot_evaluate_are_rejected() -> None:
+    parameters = {"type": "object", "properties": {"a": {}}, "unevaluatedProperties": False}
+    for fmt in ("qwen_xml", "hermes_json", "glm_xml", "gemma4", "auto"):
+        with pytest.raises(StrictToolError, match="'unevaluatedProperties'") as excinfo:
+            build_strict_tool_grammar([_tool("search", SEARCH), _tool("f", parameters)], "auto", fmt)
+        assert excinfo.value.param == "tools[1].function.parameters"
 
 
 # Keywords XGrammar 0.1.32 compiles without enforcing. They are accepted: the
@@ -456,7 +495,6 @@ def test_string_choices_honour_enum_const_and_null(schema: dict[str, Any], patte
 @pytest.mark.parametrize(
     "parameters",
     [
-        {"type": "array"},
         {"anyOf": [{"type": "object"}]},
         {"type": "object", "patternProperties": {"^x": {"type": "string"}}},
         {"type": "object", "properties": {}, "required": ["missing"]},
@@ -470,13 +508,20 @@ def test_string_choices_honour_enum_const_and_null(schema: dict[str, Any], patte
         },
     ],
 )
-def test_unenforceable_parameters_object_is_rejected(parameters: dict[str, Any]) -> None:
-    with pytest.raises(StrictToolError):
-        build_strict_tool_grammar([_tool("f", parameters)], "auto", "qwen_xml")
+def test_parameters_object_the_xml_layout_cannot_write_keeps_a_free_body(parameters: dict[str, Any]) -> None:
+    tag = _tags(build_strict_tool_grammar([_tool("f", parameters)], "auto", "qwen_xml"))[0]
+    assert tag["content"] == _FREE_BODY
 
 
-def test_unservable_strict_tool_is_rejected_even_when_not_named() -> None:
-    tools = [_tool("search", SEARCH), _tool("bad", {"type": "object", "properties": {"d": {"type": "uuid"}}})]
+@pytest.mark.parametrize("fmt", ["qwen_xml", "hermes_json", "glm_xml", "gemma4"])
+def test_parameters_must_describe_an_object(fmt: Any) -> None:
+    with pytest.raises(StrictToolError, match="must describe an object"):
+        build_strict_tool_grammar([_tool("f", {"type": "array"})], "auto", fmt)
+
+
+def test_unvalidatable_strict_tool_is_rejected_even_when_not_named() -> None:
+    bad = {"type": "object", "properties": {"d": {}}, "unevaluatedProperties": False}
+    tools = [_tool("search", SEARCH), _tool("bad", bad)]
     with pytest.raises(StrictToolError):
         build_strict_tool_grammar(tools, {"type": "function", "function": {"name": "search"}}, "qwen_xml")
 
@@ -547,17 +592,17 @@ def test_an_overflowing_number_fails_the_call_instead_of_emitting_infinity(paylo
 @pytest.mark.parametrize(("value", "accepted"), [(1, True), (1.0, True), (1.5, False), (True, False)])
 def test_integer_listed_values_follow_json_schema_equality(value: Any, accepted: bool) -> None:
     parameters = {"type": "object", "properties": {"x": {"type": "integer", "const": value}}, "required": ["x"]}
-    if accepted:
-        assert build_strict_tool_grammar([_tool("f", parameters)], "auto", "hermes_json") is not None
-    else:
-        with pytest.raises(StrictToolError, match="does not match its 'type'"):
-            build_strict_tool_grammar([_tool("f", parameters)], "auto", "hermes_json")
+    content = _tags(build_strict_tool_grammar([_tool("f", parameters)], "auto", "hermes_json"))[0]["content"]
+    # A listed value outside its ``type`` leaves the arguments to validation.
+    constrained = content["json_schema"] != {"type": "object", "additionalProperties": True}
+    assert constrained is accepted
 
 
-def test_duplicate_function_names_are_rejected() -> None:
+@pytest.mark.parametrize("fmt", ["hermes_json", "glm_xml"])
+def test_duplicate_function_names_are_rejected(fmt: Any) -> None:
     tools = [_tool("f", {"type": "object", "properties": {"x": {"type": "integer"}}}), _tool("f", None, strict=False)]
     with pytest.raises(StrictToolError, match="unique"):
-        build_strict_tool_grammar(tools, "auto", "hermes_json")
+        build_strict_tool_grammar(tools, "auto", fmt)
 
 
 def _box(kind: str, description: str = "") -> dict[str, Any]:
@@ -567,11 +612,13 @@ def _box(kind: str, description: str = "") -> dict[str, Any]:
     return {"type": "object", "properties": {"description": field}, "required": ["description"]}
 
 
-def test_subschemas_the_backend_cache_would_conflate_are_rejected() -> None:
+def test_subschemas_the_backend_cache_would_conflate_drop_the_structural_tag() -> None:
     """XGrammar's cache key drops property names such as ``description``, so these two would share one grammar."""
     parameters = {"type": "object", "properties": {"a": _box("integer"), "b": _box("string")}, "required": ["a", "b"]}
-    with pytest.raises(StrictToolError, match="cannot tell apart"):
-        build_strict_tool_grammar([_tool("f", parameters)], "auto", "hermes_json")
+    assert build_strict_tool_grammar([_tool("f", parameters)], "auto", "hermes_json") is None
+    forced = build_strict_tool_grammar([_tool("f", parameters)], "required", "hermes_json")
+    assert forced is not None
+    assert forced.kind == "regex"
 
 
 def test_subschemas_differing_only_in_annotations_are_accepted() -> None:
@@ -794,3 +841,32 @@ def test_backend_hermes_json(xgr: Any) -> None:
     bad = '{"keywords": ["a"], "exact": "yes", "filter": "x"}'
     assert _accepts(xgr, spec, '<tool_call>\n{"name": "search", "arguments": ' + good + "}\n</tool_call>")
     assert not _accepts(xgr, spec, '<tool_call>\n{"name": "search", "arguments": ' + bad + "}\n</tool_call>")
+
+
+def test_backend_constrains_the_siblings_of_a_free_text_parameter(xgr: Any) -> None:
+    parameters = {
+        "type": "object",
+        "properties": {"id": {"anyOf": [{"type": "integer"}, {"type": "string"}]}, "exact": {"type": "boolean"}},
+        "required": ["id", "exact"],
+    }
+    spec = build_strict_tool_grammar([_tool("f", parameters)], "required", "qwen_xml")
+    assert _accepts(xgr, spec, _call("f", [("id", "abc"), ("exact", "true")]))
+    assert _accepts(xgr, spec, _call("f", [("id", "7"), ("exact", "false")]))
+    assert not _accepts(xgr, spec, _call("f", [("id", "abc"), ("exact", "yes")]))
+    assert not _accepts(xgr, spec, _call("f", [("exact", "true")]))
+
+
+@pytest.mark.parametrize("fmt", ["qwen_xml", "hermes_json"])
+def test_backend_constrains_the_other_tools_beside_a_free_body(xgr: Any, fmt: Any) -> None:
+    recursive = {"type": "object", "properties": {"child": {"$ref": "#"}}}
+    spec = build_strict_tool_grammar([_tool("tree", recursive), _tool("search", SEARCH)], "required", fmt)
+    if fmt == "qwen_xml":
+        free, good, bad = _call("tree", [("child", '{"child": {}}')]), GOOD_SEARCH, BAD_SEARCH
+    else:
+        free = '<tool_call>\n{"name": "tree", "arguments": {"child": {"child": {}}}}\n</tool_call>'
+        arguments = '{"keywords": ["revenue"], "exact": %s, "filter": {"measures": ["revenue"]}, "limit": 5}'
+        good = '<tool_call>\n{"name": "search", "arguments": ' + arguments % "true" + "}\n</tool_call>"
+        bad = '<tool_call>\n{"name": "search", "arguments": ' + arguments % '"yes"' + "}\n</tool_call>"
+    assert _accepts(xgr, spec, free)
+    assert _accepts(xgr, spec, good)
+    assert not _accepts(xgr, spec, bad)

@@ -27,34 +27,55 @@ the Safetensors format is unaffected.
 
 ## Chat function tools: `strict`
 
-`/v1/chat/completions` now enforces `tools[].function.strict: true` with
-OpenAI semantics: every call to a strict tool that the response returns has
-arguments that match its `parameters` schema. Earlier releases accepted the flag
-and ignored it, so a strict tool could receive arguments of the wrong type,
-missing required keys, or undeclared keys.
+`/v1/chat/completions` now enforces `tools[].function.strict: true`: every call
+to a strict tool that the response returns has arguments that match its
+`parameters` schema. Earlier releases accepted the flag and ignored it, so a
+strict tool could receive arguments of the wrong type, missing required keys,
+or undeclared keys.
 
-- **Enforcement, in two layers.**
-  - *Grammar.* The worker compiles each strict tool's schema into an XGrammar
-    structural tag. The tag applies with every `tool_choice`: with `auto` the
-    model may answer in text or call a tool, and any call it makes is
-    constrained. Required keys must be present and undeclared keys cannot
-    appear. Optional keys may be omitted, and nullable values
-    (`anyOf: [T, {type: "null"}]`) may be `null`. Values follow their own
-    schema as far as the backend enforces it: types, `enum`, `const`,
-    `$ref`/`$defs`, object and array structure, and numeric bounds. A
-    non-strict tool in the same request keeps free arguments.
-  - *Validation.* When the turn ends, every strict call's arguments are
-    validated against the tool's full JSON Schema (Draft 2020-12, the same
-    verifier as a strict `response_format`). XGrammar 0.1.32 compiles some
-    keywords without enforcing them, for example `multipleOf`, `uniqueItems`,
-    `not`, `if`/`then`, `oneOf` (compiled as `anyOf`), `pattern` beside
-    `format` or a length bound, assertions beside `$ref`, and string
-    assertions on Qwen XML parameters. Such schemas are accepted. The grammar
-    constrains what it can, and a call that still breaks the schema ends the
-    turn with a `MODEL_OUTPUT_PARSE_ERROR` error instead of reaching the
-    client. When streaming, a strict call's deltas, and anything generated
-    after them, are sent once the turn has been validated, so a client never
-    receives arguments that are then declared invalid.
+- **Validation is the guarantee.** When the turn ends, every strict call's
+  arguments are validated against the tool's full JSON Schema (Draft 2020-12,
+  the same verifier as a strict `response_format`). This runs for every model
+  the worker serves, whatever its tool-call format or grammar backend. A call
+  that breaks its schema ends the turn with a `MODEL_OUTPUT_PARSE_ERROR` error
+  instead of reaching the client. When streaming, a strict call's deltas, and
+  anything generated after them, are sent once the turn has been validated, so
+  a client never receives arguments that are then declared invalid.
+- **A grammar makes violations unlikely.** With the `xgrammar` backend and the
+  Qwen XML (`qwen3_coder`) or Hermes JSON (`qwen25`) tool-call format, the
+  worker also compiles each strict tool's schema into an XGrammar structural
+  tag. The tag applies with every `tool_choice`: with `auto` the model may
+  answer in text or call a tool, and any call it makes is constrained.
+  Required keys must be present and undeclared keys cannot appear. Optional
+  keys may be omitted, and nullable values (`anyOf: [T, {type: "null"}]`) may
+  be `null`. Values follow their own schema: types, `enum`, `const`,
+  `$ref`/`$defs`, object and array structure, and numeric bounds. A non-strict
+  tool in the same request keeps free arguments.
+
+  What the grammar cannot express is constrained less and left to validation.
+  It is never a reason to refuse the request:
+  - XGrammar 0.1.32 compiles some keywords without enforcing them, for example
+    `multipleOf`, `uniqueItems`, `not`, `if`/`then`, `oneOf` (compiled as
+    `anyOf`), `pattern` beside `format` or a length bound, assertions beside
+    `$ref`, and string assertions on Qwen XML parameters.
+  - A Qwen XML parameter whose value the layout cannot constrain is free text,
+    and the other parameters stay constrained. Examples: a union of a scalar
+    with another non-null type (`anyOf: [integer, string]`), an `enum` of mixed
+    types, a nullable string whose `enum` lists the string `"null"`.
+  - A tool the grammar would constrain to something else keeps a free argument
+    body, and the other tools stay constrained. Examples: a `$ref` outside
+    `#/$defs/...` or `#/definitions/...` (such as `"$ref": "#"`), a listed
+    value that does not match its `type`, and with Qwen XML a parameters
+    object that is not a plain object of named properties (a top-level `anyOf`,
+    `allOf`, `$ref`, `patternProperties`, more than 256 properties).
+  - A request without a structural tag runs with the grammar a non-strict
+    request gets: none for `auto`, the forcing grammar for `required` and a
+    named choice, and the `response_format` grammar when the request sets
+    one. This covers the other grammar backends, the Gemma 4, GLM and Muse
+    tool-call formats, a request that also sets `response_format`, and schemas
+    XGrammar's schema cache would conflate (two subschemas that differ only
+    under a property named `description`, `title`, `default` or a similar
+    annotation keyword).
 - **Routing.** A request with a strict tool, `tool_choice: "required"`, or a
   named `tool_choice` now runs on the model's `grammar_profile` (for example
   `:no-spec`), like a `response_format` grammar, because speculative decoding
@@ -64,37 +85,18 @@ missing required keys, or undeclared keys.
   do not change the profile. Roll out the gateway before the workers: a newer
   worker behind an older gateway receives these requests on the base model and
   resolves them to the grammar profile, which it may not have loaded.
-- **Rejection.** A strict tool that cannot be served fails the request with
-  `400 unsupported_field` before generation. This happens when:
-  - the model's grammar backend is not `xgrammar`;
-  - its tool-call format is not Qwen XML (`qwen3_coder`) or Hermes JSON
-    (`qwen25`);
-  - the request also sets `response_format`;
+- **Rejection.** A strict tool fails the request with `400 unsupported_field`
+  before generation only when its arguments could not be validated:
   - two function tools share a name;
+  - its `parameters` do not describe an object;
   - the schema uses `unevaluatedProperties`, which the verifier cannot
     evaluate within its pattern budget;
-  - a `$ref` points anywhere but `#/$defs/...` or `#/definitions/...`, uses an
-    escaped pointer segment (`~0` or `~1`), or does not resolve;
-  - no argument can satisfy a listed value: a `const` outside its `enum`, or
-    an `enum`/`const` value that does not match its `type`;
-  - an `enum` or `const` string contains a reasoning delimiter such as
-    `<think>`, which a profile that hides reasoning would strip;
-  - two subschemas differ only under a property named `description`, `title`,
-    `default`, `examples` or a similar annotation keyword. XGrammar's schema
-    cache would treat them as one and constrain the second by the first;
-  - with Qwen XML, the parameters object is not a plain object of named
-    properties: a top-level `anyOf`, `allOf`, `const`, `enum`, `$ref`,
-    `patternProperties`, `propertyNames`, a property-count limit, or more than
-    256 properties;
-  - with Qwen XML, a scalar parameter is a union with a non-null type, or a
-    string parameter that allows `null` lists the string `"null"` (the raw
-    text `null` reads back as JSON null);
-  - the backend cannot compile the schema.
+  - the backend cannot compile the structural tag.
 
   Strict tools are also refused on the direct SGLang and MLX
-  `/v1/chat/completions` routes of a standalone server, because those engines
-  do not constrain tool arguments. Remote-backed models pass `strict` to their
-  upstream unchanged.
+  `/v1/chat/completions` routes of a standalone server, because those routes
+  return the engine's own tool calls without validating them. Remote-backed
+  models pass `strict` to their upstream unchanged.
 
 This document defines SIE's compatibility commitments: what constitutes a breaking change, how deprecations are communicated, and what must be true before declaring 1.0.
 
