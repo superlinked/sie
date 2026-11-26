@@ -178,6 +178,27 @@ def _dispatch_width(adapter: object) -> int:
     return max(1, width)
 
 
+async def _yield_ready_callbacks() -> None:
+    """Let ready producer callbacks schedule submissions before the idle recheck.
+
+    Completing a Future queues this task behind work those callbacks create.
+    This is one scheduling checkpoint, not a drain of all incoming work: later
+    network arrivals or unfinished preparation may still miss the batch.
+    """
+    loop = asyncio.get_running_loop()
+    ready: asyncio.Future[None] = loop.create_future()
+
+    def wake() -> None:
+        if not ready.done():
+            ready.set_result(None)
+
+    handle = loop.call_soon(wake)
+    try:
+        await ready
+    finally:
+        handle.cancel()
+
+
 class ModelWorker:
     """Worker that batches and processes inference requests for a single model.
 
@@ -348,6 +369,7 @@ class ModelWorker:
         self._running = False
         self._stopping = False  # True when graceful stop has begun
         self._process_task: asyncio.Task[None] | None = None
+        # ``stop()`` sets this too so an idle ``_get_next_batch_fcfs`` unblocks.
         self._work_available = asyncio.Event()
         self._stats = WorkerStats()
 
@@ -1330,20 +1352,25 @@ class ModelWorker:
         Selects the batcher whose first pending request has waited the longest.
         This ensures fairness across LoRAs - no LoRA starves even with low traffic.
 
-        When the worker was idle (had to wait for requests), a short
-        accumulation window (``idle_coalesce_ms``, #2874) caps the coalesce
-        wait instead of dispatching immediately: bursty arrivals at an idle
-        worker fuse into one batch rather than degenerating into a train of
-        small serialized forwards, while a lone request only waits the small
-        cap once arrivals stop. Setting ``idle_coalesce_ms=0`` restores the
-        legacy immediate dispatch.
+        When the worker was idle, one pending request is dispatched immediately
+        (#373), however many items it carries. It is not held for
+        ``idle_coalesce_ms``. A lone head yields one callback generation so
+        ready producers and the submissions they schedule can join it, without
+        waiting for a timer. Later arrivals may still miss this batch. A
+        follow-up is a tail only while another request
+        on that same batcher is still pending (arrived and not yet dispatched);
+        the idle window can then catch a straggler. A finished request is no
+        longer pending, so it does not hold the next one, and another LoRA's
+        arrival does not hold this batcher. Several requests already pending
+        when a batch is selected form one batch. ``idle_coalesce_ms=0``
+        disables the tail window and dispatches every idle arrival immediately.
 
         Args:
             was_idle: Whether the worker was idle before this call. When True,
-                dispatches after the capped idle accumulation window (or
-                immediately when the window is 0). When False, uses the
-                normal timeout/coalesce mechanism to accumulate a proper
-                batch.
+                one pending request dispatches immediately and two or more on
+                the selected batcher use the capped idle window. When False,
+                uses the normal timeout/coalesce mechanism to accumulate a
+                proper batch.
 
         Returns:
             Tuple of (lora_name, batch, was_idle) where lora_name is None for
@@ -1351,6 +1378,9 @@ class ModelWorker:
             (was truly idle).
         """
         while True:
+            if not self._running:
+                return None, FormattedBatch(items=[], metadata=[], total_cost=0), was_idle
+
             oldest_lora: str | None = None
             oldest_time: float = float("inf")
 
@@ -1365,14 +1395,25 @@ class ModelWorker:
             if oldest_lora is not None or (oldest_lora is None and self._batchers[None].pending_count > 0):
                 # Found a batcher with pending items - get batch from it
                 selected_lora = oldest_lora if oldest_lora is not None else None
+                selected = self._batchers[selected_lora]
                 idle_window_ms = self._config.idle_coalesce_ms
-                if was_idle and idle_window_ms > 0:
-                    batch = await self._batchers[selected_lora].get_batch(coalesce_cap_ms=idle_window_ms)
+                if was_idle and idle_window_ms > 0 and selected.pending_request_count == 1:
+                    # A ready transport callback may create the submission task.
+                    # Give that task one opportunity before the lone-head check.
+                    await _yield_ready_callbacks()
+                    if not self._running:
+                        return None, FormattedBatch(items=[], metadata=[], total_cost=0), was_idle
+                # Alone is one request, not one item: ``submit_many`` queues
+                # an entry per item. The distinct-request count is only the
+                # idle tail check. A busy worker, and ``idle_coalesce_ms=0``,
+                # dispatch without consulting it.
+                if was_idle and idle_window_ms > 0 and selected.pending_request_count > 1:
+                    batch = await selected.get_batch(coalesce_cap_ms=idle_window_ms)
                 else:
-                    batch = await self._batchers[selected_lora].get_batch(immediate=was_idle)
+                    batch = await selected.get_batch(immediate=was_idle)
                 return selected_lora, batch, was_idle
 
-            # No batchers have pending items - worker is idle
+            # No batchers have pending items - worker is idle until submit().
             was_idle = True
             # Admission latches the signal even if it precedes this wait.
             # Re-scan every batcher after clearing; queue state owns the work.
@@ -1437,10 +1478,10 @@ class ModelWorker:
             await self._process_loop_concurrent()
             return
 
-        # Track idle state across iterations. When idle, the next batch is
-        # dispatched immediately (low-concurrency optimization). When busy
-        # (just finished inference + drain), we let BatchFormer's
-        # timeout/coalesce mechanism accumulate a proper batch.
+        # Track idle state across iterations. An idle worker dispatches one
+        # pending request immediately (#373). Two or more still pending on
+        # the selected batcher use the idle window. After a busy batch,
+        # BatchFormer's timeout/coalesce mechanism accumulates the next batch.
         was_idle = True
 
         while self._running:
