@@ -219,6 +219,10 @@ class OpenAIUpstreamAdapter(BaseAdapter, GenerationAdapter):
             sent["stream_options"] = {"include_usage": True}
         else:
             sent.pop("stream_options", None)
+        # One choice is the OpenAI default; some compatible upstreams reject
+        # an explicit sample count even when it requests that same default.
+        if type(sent.get("n")) is int and sent["n"] == 1:
+            sent.pop("n")
         client = self._generation_client()
         return client, client.build_request(
             "POST",
