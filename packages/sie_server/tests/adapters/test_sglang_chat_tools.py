@@ -106,7 +106,9 @@ _STRICT = {
         "name": "lookup",
         "description": "Look one key up.",
         "parameters": {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]},
-        "strict": True,
+        # A strict tool is refused on the single-server route, which cannot enforce it;
+        # an explicit ``strict: false`` still has to render the same on both routes.
+        "strict": False,
     },
 }
 _ASK = {"role": "user", "content": "What is the weather in Paris right now? Use the get_weather tool."}
@@ -125,7 +127,7 @@ _REQUESTS: dict[str, dict[str, Any]] = {
         "messages": [{"role": "system", "content": "Answer briefly."}, _ASK, _CALL, _RESULT],
         "tools": [_WEATHER, _PING],
     },
-    "strict_tool": {"messages": [_ASK], "tools": [_STRICT, _WEATHER]},
+    "strict_false_tool": {"messages": [_ASK], "tools": [_STRICT, _WEATHER]},
     "named_tool_choice": {
         "messages": [_ASK],
         "tools": [_PING, _WEATHER],
@@ -328,6 +330,7 @@ def _single_server_prompts(
         inputs=SimpleNamespace(video=False),
         profiles={},
         routing=None,
+        reasoning_effort_for=lambda _profile="default": None,
     )
     registry = MagicMock()
     registry.device = "cuda:0"

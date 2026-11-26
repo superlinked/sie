@@ -1467,19 +1467,22 @@ impl ModelRegistry {
         }
     }
 
-    /// Whether ``model`` is an explicit ``{base}:{profile}`` variant whose
-    /// profile is served by a remote adapter. The server sends the grammar to
-    /// that upstream and verifies the output, so the named profile is honoured.
+    /// Whether ``model`` names a profile served by a remote adapter: an
+    /// explicit ``{base}:{profile}`` variant, or a base model whose default
+    /// profile is remote. The server sends the grammar to that upstream and
+    /// verifies the output, so the named model is honoured (the worker's
+    /// ``core/grammar_routing.py`` keeps the same ids).
     fn names_remote_profile(snap: &RegistrySnapshot, model: &str) -> bool {
         let Some(canonical) = Self::canonical_model_name(snap, model) else {
             return false;
         };
-        let Some((base, profile)) = canonical.rsplit_once(':') else {
-            return false;
+        let (base, profile) = match canonical.rsplit_once(':') {
+            Some((base, profile)) if snap.models.contains_key(base) => (base, profile),
+            _ => (canonical.as_str(), "default"),
         };
         snap.models
             .get(base)
-            .filter(|entry| entry.profile_configs.contains_key(profile))
+            .filter(|entry| profile == "default" || entry.profile_configs.contains_key(profile))
             .and_then(|entry| Self::effective_adapter_path_from_entry(entry, profile))
             .is_some_and(|path| path.starts_with(REMOTE_ADAPTER_MODULE_PREFIX))
     }
@@ -4012,6 +4015,21 @@ mod tests {
         }))
         .unwrap();
         registry.add_model_config(remote_backed).unwrap();
+        // A remote-served base model keeps its id even when it declares a
+        // grammar profile, as on the worker.
+        let remote_with_grammar_profile: ModelConfig = serde_json::from_value(serde_json::json!({
+            "sie_id": "org/remote-gp",
+            "tasks": {"generate": {"grammar_profile": "alt"}},
+            "profiles": {"default": remote.clone(), "alt": remote.clone()},
+        }))
+        .unwrap();
+        registry
+            .add_model_config(remote_with_grammar_profile)
+            .unwrap();
+        assert_eq!(
+            registry.grammar_route_variant("org/remote-gp"),
+            GrammarRoute::Keep
+        );
 
         for model in [
             "org/g:relay",

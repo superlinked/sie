@@ -72,12 +72,17 @@ def requires_output_validation(grammar: GrammarSpec | None) -> bool:
     return grammar is not None and grammar.strict is True and grammar.kind in VERIFIABLE_GRAMMAR_KINDS
 
 
-def output_violation(grammar: GrammarSpec, text: str) -> str | None:
-    """Return a client-safe violation message, or ``None`` when ``text`` conforms."""
+def output_violation(grammar: GrammarSpec, text: str, *, check_formats: bool = False) -> str | None:
+    """Return a client-safe violation message, or ``None`` when ``text`` conforms.
+
+    ``check_formats`` also asserts ``format`` (``jsonschema`` treats it as an
+    annotation by default); strict tool arguments use it because their grammar
+    cannot always enforce a format.
+    """
     token = _pattern_deadline.set(time.monotonic() + _PATTERN_BUDGET_S)
     try:
         if grammar.kind == "json_schema" and isinstance(grammar.value, dict):
-            return _json_schema_violation(grammar.value, text)
+            return _json_schema_violation(grammar.value, text, check_formats=check_formats)
         if grammar.kind == "regex" and isinstance(grammar.value, str):
             return _regex_violation(grammar.value, text)
         return _UNVERIFIABLE_MESSAGE
@@ -162,6 +167,119 @@ async def _validated_chunks(
         )
 
 
+def enforce_strict_tool_arguments(
+    chunks: AsyncIterator[GenerationChunk],
+    schemas: Mapping[str, dict[str, Any]],
+) -> AsyncIterator[GenerationChunk]:
+    """Return ``chunks`` with every strict tool call's arguments validated at the terminal.
+
+    ``schemas`` maps each strict tool's name to its parameters schema. The
+    grammar backend constrains the arguments while they are generated; this
+    check guarantees the result against the full schema, including keywords
+    the backend does not enforce. A violation replaces the terminal with a
+    ``MODEL_OUTPUT_PARSE_ERROR`` terminal, as for a strict ``response_format``.
+    Apply it after tool-call parsing.
+    """
+    if not schemas:
+        return chunks
+    return _validated_tool_calls(chunks, schemas)
+
+
+async def _validated_tool_calls(
+    chunks: AsyncIterator[GenerationChunk],
+    schemas: Mapping[str, dict[str, Any]],
+) -> AsyncIterator[GenerationChunk]:
+    names: dict[tuple[int, int], str] = {}
+    # Arguments of strict calls only; other calls are never validated.
+    arguments: dict[tuple[int, int], list[str]] = {}
+    # From the first strict call on, chunks are held back until the terminal
+    # check passes, so a client never receives arguments that are then
+    # declared invalid. Holding everything after that point keeps the order.
+    held: list[GenerationChunk] = []
+    terminal_outcome_selected = False
+
+    async def violation(terminal: GenerationChunk) -> str | None:
+        calls = [(names[key], "".join(parts)) for key, parts in arguments.items()]
+        calls.extend(_candidate_tool_calls(terminal))
+        return await asyncio.to_thread(_first_tool_arguments_violation, schemas, calls)
+
+    try:
+        async for chunk in chunks:
+            delta = chunk.tool_call_delta
+            if delta is not None:
+                key = (chunk.choice_index, delta.index)
+                if delta.function_name:
+                    names[key] = delta.function_name
+                if names.get(key) in schemas:
+                    arguments.setdefault(key, []).append(delta.arguments_delta or "")
+                    held.append(chunk)
+                    continue
+            if not chunk.done:
+                if held:
+                    held.append(chunk)
+                else:
+                    yield chunk
+                continue
+            terminal_outcome_selected = True
+            if chunk.error_code is not None:
+                # The turn failed upstream; held arguments were never validated.
+                yield chunk
+                continue
+            message = await violation(chunk)
+            if message is not None:
+                yield replace(chunk, finish_reason="error", error_code=MODEL_OUTPUT_PARSE_ERROR, error_message=message)
+                continue
+            for pending in held:
+                yield pending
+            held.clear()
+            yield chunk
+        if not terminal_outcome_selected:
+            # Consumers settle an iterator that ends without a terminal as a
+            # natural stop, so the held calls are verified here.
+            implicit_stop = GenerationChunk(text_delta="", done=True)
+            message = await violation(implicit_stop)
+            if message is not None:
+                terminal_outcome_selected = True
+                yield replace(
+                    implicit_stop, finish_reason="error", error_code=MODEL_OUTPUT_PARSE_ERROR, error_message=message
+                )
+            else:
+                for pending in held:
+                    yield pending
+    finally:
+        await aclose_with_error_precedence(
+            chunks,
+            outcome_selected=terminal_outcome_selected,
+            context="strict tool arguments upstream iterator",
+        )
+
+
+def _candidate_tool_calls(chunk: GenerationChunk) -> list[tuple[str, str]]:
+    """Return ``(name, arguments)`` for the tool calls on non-streamed candidates."""
+    calls: list[tuple[str, str]] = []
+    for candidate in chunk.candidates or ():
+        for call in candidate.get("tool_calls") or ():
+            function = call.get("function") if isinstance(call, dict) else None
+            if isinstance(function, dict):
+                calls.append((str(function.get("name") or ""), str(function.get("arguments") or "")))
+    return calls
+
+
+def _first_tool_arguments_violation(
+    schemas: Mapping[str, dict[str, Any]], calls: Sequence[tuple[str, str]]
+) -> str | None:
+    for name, text in calls:
+        schema = schemas.get(name)
+        if schema is None:
+            continue
+        violation = output_violation(
+            GrammarSpec(kind="json_schema", value=schema, strict=True), text or "{}", check_formats=True
+        )
+        if violation is not None:
+            return f"arguments of strict tool {name!r}: {violation.removeprefix('generated output ')}"
+    return None
+
+
 def _terminal_outputs(
     chunk: GenerationChunk,
     texts: Mapping[int, Sequence[str]],
@@ -199,24 +317,56 @@ def unverifiable_schema_keyword(schema: Any) -> str | None:
     standard-library ``re`` engine inside ``jsonschema``, outside the bounded
     ``regex`` engine used for every other pattern keyword.
     """
-    return _find_schema_keyword(schema, "schema")
+    return find_schema_keyword(schema, _UNVERIFIABLE_SCHEMA_KEYWORDS)
 
 
-def _find_schema_keyword(value: Any, context: str) -> str | None:
+def find_schema_keyword(schema: Any, keywords: Iterable[str]) -> str | None:
+    """Return the first of ``keywords`` used as a keyword anywhere in ``schema``.
+
+    Property names, definition names and ``enum`` / ``const`` data are not
+    keywords, so a property called ``not`` does not match.
+    """
+    wanted = tuple(keywords)
+    for subschema in iter_subschemas(schema):
+        for keyword in wanted:
+            if keyword in subschema:
+                return keyword
+    return None
+
+
+def iter_subschemas(schema: Any) -> Iterator[dict[str, Any]]:
+    """Yield ``schema`` and every schema object nested in it, skipping instance data."""
+    yield from _iter_subschemas(schema, "schema")
+
+
+def _iter_subschemas(value: Any, context: str) -> Iterator[dict[str, Any]]:
     if isinstance(value, dict):
         if context == "schema":
-            for keyword in _UNVERIFIABLE_SCHEMA_KEYWORDS:
-                if keyword in value:
-                    return keyword
+            yield value
         for key, child in value.items():
-            if found := _find_schema_keyword(child, _schema_child_context(context, key)):
-                return found
+            yield from _iter_subschemas(child, _schema_child_context(context, key))
     elif isinstance(value, list):
         child_context = "schema" if context == "schema" else "other"
         for item in value:
-            if found := _find_schema_keyword(item, child_context):
-                return found
-    return None
+            yield from _iter_subschemas(item, child_context)
+
+
+def without_schema_keywords(schema: Any, keywords: frozenset[str]) -> Any:
+    """Return ``schema`` without ``keywords`` in any schema object; property names and instance data stay."""
+    return _without_keywords(schema, keywords, "schema")
+
+
+def _without_keywords(value: Any, keywords: frozenset[str], context: str) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _without_keywords(child, keywords, _schema_child_context(context, key))
+            for key, child in value.items()
+            if not (context == "schema" and key in keywords)
+        }
+    if isinstance(value, list):
+        child_context = "schema" if context == "schema" else "other"
+        return [_without_keywords(item, keywords, child_context) for item in value]
+    return value
 
 
 def _schema_child_context(parent: str, key: str) -> str:
@@ -232,7 +382,7 @@ def _schema_child_context(parent: str, key: str) -> str:
     return "schema"
 
 
-def _json_schema_violation(schema: dict[str, Any], text: str) -> str | None:
+def _json_schema_violation(schema: dict[str, Any], text: str, *, check_formats: bool = False) -> str | None:
     try:
         instance = json.loads(text, parse_constant=_reject_json_constant)
     except (ValueError, RecursionError):
@@ -240,7 +390,9 @@ def _json_schema_violation(schema: dict[str, Any], text: str) -> str | None:
     if unverifiable_schema_keyword(schema) is not None:
         return _UNVERIFIABLE_MESSAGE
     validator_class = _bounded_validator_class(validators.validator_for(schema, default=Draft202012Validator))
-    error = next(validator_class(schema, registry=_LOCAL_REFERENCES).iter_errors(instance), None)
+    format_checker = validator_class.FORMAT_CHECKER if check_formats else None
+    validator = validator_class(schema, registry=_LOCAL_REFERENCES, format_checker=format_checker)
+    error = next(validator.iter_errors(instance), None)
     if error is None:
         return None
     path = error.json_path

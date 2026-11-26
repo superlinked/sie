@@ -85,6 +85,9 @@ def _grammar_target(registry: ModelConfigSource, model_id: str) -> tuple[str, st
     config = registry.get_config(model_id)
     source = getattr(config, "synthetic_profile_variant_source", None)
     if not isinstance(source, tuple):
+        # A remote upstream enforces the request itself, so it keeps its id.
+        if is_remote_adapter_path(getattr(config.resolve_profile("default"), "adapter_path", None)):
+            return None
         grammar_profile = model_grammar_profile(config)
         return None if grammar_profile is None else (model_id, grammar_profile)
     base_id, source_profile = source

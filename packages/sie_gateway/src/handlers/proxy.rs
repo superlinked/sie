@@ -6635,6 +6635,38 @@ struct ChatRequestParams {
 }
 
 impl ChatRequestParams {
+    /// Whether ``tools`` / ``tool_choice`` make the worker constrain decoding.
+    ///
+    /// A forced ``tool_choice`` (``"required"`` or a named function) compiles
+    /// a forcing grammar, and a ``strict`` function tool compiles a grammar
+    /// over its arguments. Speculative decoding bypasses the grammar backend,
+    /// so either must route to the grammar-safe profile exactly like
+    /// ``response_format``. Mirrors the worker's ``tools_require_grammar``.
+    fn tools_require_grammar(&self) -> bool {
+        let Some(tools) = self.tools.as_ref().filter(|tools| !tools.is_empty()) else {
+            return false;
+        };
+        if tool_choice_forces(self.tool_choice.as_ref()) {
+            return true;
+        }
+        self.tool_choice
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            != Some("none")
+            && tools.iter().any(|tool| {
+                tool.get("function")
+                    .and_then(|function| function.get("strict"))
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+            })
+    }
+
+    /// Whether the request is grammar-constrained: a ``response_format``
+    /// grammar, a forced ``tool_choice``, or a ``strict`` tool.
+    fn constrains_decoding(&self) -> bool {
+        self.grammar.is_some() || self.tools_require_grammar()
+    }
+
     /// The EXACT `WorkParams` a validated chat body dispatches with.
     ///
     /// Extracted from the handler body (not copied) so the managed
@@ -8017,12 +8049,7 @@ fn chat_params_from_json(body: &serde_json::Value) -> ChatParamsResult {
     // the combination early with a clear 400 rather than letting the
     // worker silently drop one. ``"auto"`` / ``"none"`` don't force a
     // grammar, so they remain compatible with ``response_format``.
-    let tool_choice_forces = match &tool_choice {
-        Some(serde_json::Value::String(s)) => s == "required",
-        Some(serde_json::Value::Object(_)) => true, // named {type:function,function:{name}}
-        _ => false,
-    };
-    if tool_choice_forces && grammar.is_some() {
+    if tool_choice_forces(tool_choice.as_ref()) && grammar.is_some() {
         return bad(
             "'tool_choice' (\"required\" or a named function) cannot be combined with \
              'response_format' — both constrain decoding",
@@ -8246,6 +8273,15 @@ fn validate_chat_tools(v: &serde_json::Value) -> Result<Vec<serde_json::Value>, 
                 ));
             }
         }
+        if let Some(strict) = func.get("strict") {
+            if !strict.is_boolean() && !strict.is_null() {
+                return Err(bad(
+                    format!("tools[{i}].function.strict must be a boolean"),
+                    &format!("tools[{i}].function.strict"),
+                    oai_code::INVALID_REQUEST,
+                ));
+            }
+        }
         if let Some(params) = func.get("parameters") {
             if !params.is_null() {
                 let path = format!("tools[{i}].function.parameters");
@@ -8260,6 +8296,17 @@ fn validate_chat_tools(v: &serde_json::Value) -> Result<Vec<serde_json::Value>, 
         }
     }
     Ok(arr.clone())
+}
+
+/// Whether a validated OpenAI ``tool_choice`` forces a call: ``"required"`` or a
+/// named function ``{type:"function", function:{name}}``. The worker compiles a
+/// forcing grammar for either.
+fn tool_choice_forces(tool_choice: Option<&serde_json::Value>) -> bool {
+    match tool_choice {
+        Some(serde_json::Value::String(choice)) => choice == "required",
+        Some(serde_json::Value::Object(_)) => true,
+        _ => false,
+    }
 }
 
 /// Validate OpenAI ``tool_choice``: ``"auto"`` / ``"none"`` /
@@ -9684,17 +9731,25 @@ async fn proxy_chat_inner(
     // DISPLAY id (``model_name``) stays the requested model for the response
     // body, success metrics, and audit log. Equal to ``model_name`` unless a
     // grammar is present and a variant exists. See ``route_grammar_to_profile``.
+    // A forced ``tool_choice`` or a ``strict`` tool also compiles a grammar on
+    // the worker (see ``ChatRequestParams::tools_require_grammar``).
     let mut dispatch_model = model_name.clone();
-    if params.grammar.is_some() {
+    let constrains_decoding = params.constrains_decoding();
+    if constrains_decoding {
         if let Err(unavailable) =
             route_grammar_to_profile(&state.model_registry, &mut dispatch_model)
         {
+            let param = if params.grammar.is_some() {
+                "response_format"
+            } else {
+                "tools"
+            };
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json_openai_error(
                     unavailable.message(&model_name),
                     oai_type::INVALID_REQUEST,
-                    Some("response_format"),
+                    Some(param),
                     oai_code::UNSUPPORTED_FIELD,
                 )),
             )
@@ -9938,7 +9993,7 @@ async fn proxy_chat_inner(
         &params.model,
         &model_name,
         &dispatch_model,
-        if params.grammar.is_some() {
+        if constrains_decoding {
             GenerationRequestIntent::Grammar
         } else {
             GenerationRequestIntent::Default
@@ -26725,6 +26780,75 @@ mod tests {
         assert_eq!(p.messages[0].role, "user");
         assert_eq!(p.messages[0].content, "Hi");
         assert_eq!(p.max_new_tokens, 32);
+    }
+
+    // ── tools: strict function tools and forced tool_choice route like grammars ──
+
+    fn _chat_body_with_tool(strict: serde_json::Value) -> serde_json::Value {
+        let mut body = _chat_body_min("m");
+        body["tools"] = serde_json::json!([{
+            "type": "function",
+            "function": {
+                "name": "search",
+                "strict": strict,
+                "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+            },
+        }]);
+        body
+    }
+
+    #[test]
+    fn test_chat_tools_require_grammar_for_strict_tools_and_forced_choices() {
+        let cases = [
+            (serde_json::json!(true), None, true),
+            (
+                serde_json::json!(true),
+                Some(serde_json::json!("auto")),
+                true,
+            ),
+            (
+                serde_json::json!(true),
+                Some(serde_json::json!("none")),
+                false,
+            ),
+            (serde_json::json!(false), None, false),
+            (
+                serde_json::json!(false),
+                Some(serde_json::json!("auto")),
+                false,
+            ),
+            (
+                serde_json::json!(false),
+                Some(serde_json::json!("required")),
+                true,
+            ),
+            (
+                serde_json::Value::Null,
+                Some(serde_json::json!({"type": "function", "function": {"name": "search"}})),
+                true,
+            ),
+        ];
+        for (strict, tool_choice, expected) in cases {
+            let mut body = _chat_body_with_tool(strict.clone());
+            if let Some(choice) = tool_choice.clone() {
+                body["tool_choice"] = choice;
+            }
+            let params = _expect_chat_ok(body);
+            assert_eq!(
+                params.tools_require_grammar(),
+                expected,
+                "strict={strict} tool_choice={tool_choice:?}"
+            );
+            assert_eq!(params.constrains_decoding(), expected);
+        }
+        assert!(!_expect_chat_ok(_chat_body_min("m")).constrains_decoding());
+    }
+
+    #[tokio::test]
+    async fn test_chat_tools_strict_must_be_boolean() {
+        let err = _expect_chat_err(_chat_body_with_tool(serde_json::json!("yes"))).await;
+        assert_eq!(err["error"]["param"], "tools[0].function.strict");
+        assert_eq!(err["error"]["code"], oai_code::INVALID_REQUEST);
     }
 
     // ── schema_in_prompt: json_schema response formats shown to the model ──

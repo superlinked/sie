@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 import yaml
 from sie_server.adapters._generation_base import GenerationUnsupportedFieldError
+from sie_server.config.model import is_remote_adapter_path
 from sie_server.config.upstreams import Upstream, install_upstreams
 from sie_server.core.grammar_routing import resolve_grammar_serving_model
 from sie_server.core.registry import ModelRegistry
@@ -232,3 +233,27 @@ def test_a_remote_variant_keeps_its_grammar_requests(tmp_path: Path, serve_base:
     registry = _gemma_registry(tmp_path, config=config, model_filter=model_filter)
 
     assert resolve_grammar_serving_model(registry, requested) == requested
+
+
+@pytest.mark.usefixtures("relay_upstream")
+def test_a_remote_base_model_keeps_its_grammar_requests(tmp_path: Path) -> None:
+    """A model served by a remote upstream keeps its id even when it declares a grammar profile."""
+    config = yaml.safe_load(_GEMMA_FILE.read_text(encoding="utf-8"))
+    config["profiles"] = {
+        "default": {
+            "adapter_path": "sie_server.adapters.remote.sie:SieUpstreamAdapter",
+            "max_batch_tokens": 16384,
+            "adapter_options": {"loadtime": {"upstream": "relay", "upstream_model": _GEMMA_ID}},
+        },
+        "no-spec": {"extends": "default"},
+    }
+    config["tasks"]["generate"]["grammar_profile"] = "no-spec"
+    registry = _gemma_registry(tmp_path, config=config, model_filter=[_GEMMA_ID])
+
+    # The resolver also keeps the id of an unknown model, so first pin that this
+    # one registered as remote-served with a grammar profile.
+    assert registry.has_model(_GEMMA_ID)
+    served = registry.get_config(_GEMMA_ID)
+    assert is_remote_adapter_path(served.resolve_profile("default").adapter_path)
+    assert served.tasks.generate.grammar_profile == "no-spec"
+    assert resolve_grammar_serving_model(registry, _GEMMA_ID) == _GEMMA_ID

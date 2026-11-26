@@ -153,7 +153,7 @@ def tool_parameter_schemas(tools: Sequence[Mapping[str, Any]] | None) -> dict[st
     return schemas
 
 
-def _resolve_ref(schema: Any, root: Mapping[str, Any]) -> Any:
+def resolve_schema_ref(schema: Any, root: Mapping[str, Any]) -> Any:
     """Follow local ``#/...`` JSON pointers. An unresolvable reference yields ``None``."""
     for _ in range(_MAX_SCHEMA_DEPTH):
         if not isinstance(schema, Mapping):
@@ -196,7 +196,7 @@ def _enum_type(values: list[object]) -> str:
     return kinds.pop() if len(kinds) == 1 else "string"
 
 
-def _schema_type(
+def schema_conversion_type(
     schema: Any, root: Mapping[str, Any], depth: int = 0, seen: dict[tuple[int, int], str | None] | None = None
 ) -> str | None:
     """Infer one conversion type from a parameter schema, as SGLang's ``infer_type_from_json_schema`` does.
@@ -206,7 +206,7 @@ def _schema_type(
     once per path, exponentially in its depth; with it each schema is inferred at most once per depth.
     """
     seen = {} if seen is None else seen
-    schema = _resolve_ref(schema, root)
+    schema = resolve_schema_ref(schema, root)
     if not isinstance(schema, Mapping) or depth > _MAX_SCHEMA_DEPTH:
         return None
     key = (id(schema), depth)
@@ -226,7 +226,9 @@ def _infer_schema_type(
         return non_null[0].strip().lower() if non_null else "string"
     variants = schema.get("anyOf") or schema.get("oneOf")
     if isinstance(variants, list):
-        kinds = [kind for kind in (_schema_type(variant, root, depth + 1, seen) for variant in variants) if kind]
+        kinds = [
+            kind for kind in (schema_conversion_type(variant, root, depth + 1, seen) for variant in variants) if kind
+        ]
         if kinds:
             distinct = set(kinds)
             if len(distinct) == 1:
@@ -240,7 +242,7 @@ def _infer_schema_type(
     all_of = schema.get("allOf")
     if isinstance(all_of, list):
         for variant in all_of:
-            kind = _schema_type(variant, root, depth + 1, seen)
+            kind = schema_conversion_type(variant, root, depth + 1, seen)
             if kind and kind != "string":
                 return kind
         return "string"
@@ -251,12 +253,12 @@ def _infer_schema_type(
     return None
 
 
-def _schema_allows_null(
+def schema_allows_null(
     schema: Any, root: Mapping[str, Any], depth: int = 0, seen: dict[tuple[int, int], bool] | None = None
 ) -> bool:
-    """Whether a parameter schema admits ``null``; ``seen`` memoizes as in :func:`_schema_type`."""
+    """Whether a parameter schema admits ``null``; ``seen`` memoizes as in :func:`schema_conversion_type`."""
     seen = {} if seen is None else seen
-    schema = _resolve_ref(schema, root)
+    schema = resolve_schema_ref(schema, root)
     if not isinstance(schema, Mapping) or depth > _MAX_SCHEMA_DEPTH:
         return False
     key = (id(schema), depth)
@@ -272,10 +274,10 @@ def _schema_admits_null(
     if schema.get("nullable") is True or declared == "null" or (isinstance(declared, list) and "null" in declared):
         return True
     enum = schema.get("enum")
-    if isinstance(enum, list) and None in enum:
+    if (isinstance(enum, list) and None in enum) or ("const" in schema and schema["const"] is None):
         return True
     return any(
-        isinstance(variants, list) and any(_schema_allows_null(variant, root, depth + 1, seen) for variant in variants)
+        isinstance(variants, list) and any(schema_allows_null(variant, root, depth + 1, seen) for variant in variants)
         for variants in (schema.get("anyOf"), schema.get("oneOf"))
     )
 
@@ -284,8 +286,11 @@ def _reject_constant(constant: str) -> object:
     raise ValueError(f"non-finite JSON constant {constant}")
 
 
+_JSON_DECODER = json.JSONDecoder(parse_constant=_reject_constant)
+
+
 def _loads_json(text: str) -> object:
-    return json.loads(text, parse_constant=_reject_constant)
+    return _JSON_DECODER.decode(text)
 
 
 def _convert_argument(raw: str, schema: Any, root: Mapping[str, Any]) -> object:
@@ -297,9 +302,9 @@ def _convert_argument(raw: str, schema: Any, root: Mapping[str, Any]) -> object:
     """
     if schema is None:
         return raw
-    kind = _schema_type(schema, root) or "string"
+    kind = schema_conversion_type(schema, root) or "string"
     text = raw.strip()
-    if text.lower() == "null" and (kind not in _STRING_TYPES or _schema_allows_null(schema, root)):
+    if text.lower() == "null" and (kind not in _STRING_TYPES or schema_allows_null(schema, root)):
         return None
     if kind in _STRING_TYPES:
         return raw
@@ -989,7 +994,9 @@ def _tool_call_deltas(
     if arguments is None:
         arguments = {}
     try:
-        arguments_json = json.dumps(arguments, separators=(",", ":"), ensure_ascii=False)
+        # ``allow_nan=False``: an overflowing number such as ``1e999`` would otherwise
+        # serialise as ``Infinity``, which is not JSON.
+        arguments_json = json.dumps(arguments, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
         size = len(arguments_json.encode())
     except (TypeError, ValueError) as exc:
         raise ValueError(f"tool-call 'arguments' is not JSON-serialisable: {exc}") from exc
@@ -1025,10 +1032,11 @@ _XML_FUNC_RE = re.compile(r"<function=([^>\s]+)\s*>")
 # rather than a ``(.*?)...</parameter>`` group, which on a 256 KiB buffer of garbled
 # output (many openers, no closers) is O(n²) and runs INLINE on the event loop.
 _XML_PARAM_OPEN_RE = re.compile(r"<parameter=([^<>]*[^<>\s])\s*>")
-_XML_PARAM_CLOSE = "</parameter>"
+XML_PARAM_CLOSE = "</parameter>"
+_XML_FUNC_CLOSE = "</function>"
 # Hard cap on parameters parsed from one XML tool call. Defends against an
 # adversarial buffer packed with openers; well-formed calls have a handful.
-_MAX_XML_PARAMS = 256
+MAX_XML_PARAMS = 256
 
 
 def _parse_xml_tool_call(raw: str, schemas: ToolSchemas | None = None) -> tuple[str, dict[str, object]]:
@@ -1056,22 +1064,60 @@ def _parse_xml_tool_call(raw: str, schemas: ToolSchemas | None = None) -> tuple[
     # ``str.find`` (no regex backtracking). Worst case is O(n) over ``raw``.
     pos = 0
     count = 0
-    while count < _MAX_XML_PARAMS:
+    while count < MAX_XML_PARAMS:
         om = _XML_PARAM_OPEN_RE.search(raw, pos)
         if om is None:
             break
         key = om.group(1)
         val_start = om.end()
-        close_idx = raw.find(_XML_PARAM_CLOSE, val_start)
+        schema, root = _parameter_schema(schemas or {}, name, key)
+        close_idx = _xml_value_end(raw, val_start, schema, root)
         if close_idx == -1:
-            # Unterminated parameter — stop; well-formed input always closes.
+            # An opener that never closes ends the scan with the arguments read
+            # so far, as before; strict calls are then checked against their
+            # schema at the end of the turn.
             break
         val = raw[val_start:close_idx].removeprefix("\n").removesuffix("\n")
-        schema, root = _parameter_schema(schemas or {}, name, key)
         arguments[key] = _convert_argument(val, schema, root)
-        pos = close_idx + len(_XML_PARAM_CLOSE)
+        pos = close_idx + len(XML_PARAM_CLOSE)
         count += 1
     return name, arguments
+
+
+def _xml_value_end(raw: str, start: int, schema: Any, root: Mapping[str, Any]) -> int:
+    """Return the index of the ``</parameter>`` that closes the value starting at ``start``.
+
+    A container value is JSON, and its strings may contain ``</parameter>``, so
+    it is decoded once from ``start`` (linear in its length) and ends at the
+    closing tag right after the decoded value. A ``</parameter>`` inside a JSON
+    string that never terminates means the block was cut at a ``</tool_call>``
+    inside that string, so the tag found belongs to the string and the call
+    fails. ``-1`` means no closing tag at all. Other values, and a container
+    value that is not JSON, end at the first closing tag.
+
+    Raises:
+        ValueError: The block was cut inside a JSON string.
+    """
+    first = raw.find(XML_PARAM_CLOSE, start)
+    kind = schema_conversion_type(schema, root) if schema is not None else None
+    if first == -1 or kind is None or not (kind in _CONTAINER_TYPES or kind.startswith(_CONTAINER_TYPE_PREFIXES)):
+        return first
+    begin = _skip_whitespace(raw, start)
+    try:
+        _, end = _JSON_DECODER.raw_decode(raw, begin)
+    except json.JSONDecodeError as exc:
+        # A closed call ends with ``</function>``; a block cut at a
+        # ``</tool_call>`` inside the string does not, so only that case fails.
+        cut = (
+            exc.msg.startswith("Unterminated string") and exc.pos < first and not raw.rstrip().endswith(_XML_FUNC_CLOSE)
+        )
+        if cut:
+            raise ValueError("malformed XML tool-call: a <parameter> value was cut inside a JSON string") from exc
+        return first
+    except (ValueError, RecursionError):
+        return first
+    close = _skip_whitespace(raw, end)
+    return close if raw.startswith(XML_PARAM_CLOSE, close) else first
 
 
 _GLM_KEY_OPEN = "<arg_key>"
@@ -1100,7 +1146,7 @@ def _parse_glm_tool_call(raw: str, schemas: ToolSchemas | None = None) -> tuple[
     template writes ``<arg_value>{value}</arg_value>`` with nothing around the
     value, so the text is kept verbatim and converted by its declared parameter
     type in ``schemas``. The scan is linear, and a call with more than
-    ``_MAX_XML_PARAMS`` pairs is rejected rather than truncated.
+    ``MAX_XML_PARAMS`` pairs is rejected rather than truncated.
     """
     first_key = raw.find(_GLM_KEY_OPEN)
     name = (raw if first_key == -1 else raw[:first_key]).strip()
@@ -1109,7 +1155,7 @@ def _parse_glm_tool_call(raw: str, schemas: ToolSchemas | None = None) -> tuple[
     arguments: dict[str, object] = {}
     pos = len(raw) if first_key == -1 else first_key
     count = 0
-    while (pos := _skip_whitespace(raw, pos)) < len(raw) and count < _MAX_XML_PARAMS:
+    while (pos := _skip_whitespace(raw, pos)) < len(raw) and count < MAX_XML_PARAMS:
         if not raw.startswith(_GLM_KEY_OPEN, pos):
             raise ValueError("malformed GLM tool-call: expected <arg_key>")
         key_close = raw.find(_GLM_KEY_CLOSE, pos)
@@ -1130,7 +1176,7 @@ def _parse_glm_tool_call(raw: str, schemas: ToolSchemas | None = None) -> tuple[
         pos = value_close + len(_GLM_VALUE_CLOSE)
         count += 1
     if _skip_whitespace(raw, pos) < len(raw):
-        raise ValueError(f"malformed GLM tool-call: more than {_MAX_XML_PARAMS} arguments")
+        raise ValueError(f"malformed GLM tool-call: more than {MAX_XML_PARAMS} arguments")
     return name, arguments
 
 
@@ -1207,8 +1253,8 @@ class _GemmaArgumentParser:
             if key in result:
                 raise _gemma_error(f"duplicate key {key[:64]!r}")
             if top_level:
-                if len(result) >= _MAX_XML_PARAMS:
-                    raise _gemma_error(f"more than {_MAX_XML_PARAMS} arguments")
+                if len(result) >= MAX_XML_PARAMS:
+                    raise _gemma_error(f"more than {MAX_XML_PARAMS} arguments")
                 result[key], pos = self.argument(pos, key)
             else:
                 result[key], pos = self.value(pos, depth)
@@ -1261,7 +1307,7 @@ class _GemmaArgumentParser:
         type.
         """
         schema, root = _parameter_schema(self.schemas, self.name, key)
-        kind = None if schema is None else _schema_type(schema, root)
+        kind = None if schema is None else schema_conversion_type(schema, root)
         if self.text.startswith(_GEMMA_STRING, pos):
             text, end = self.string(pos)
             if kind is None or kind in _STRING_TYPES:

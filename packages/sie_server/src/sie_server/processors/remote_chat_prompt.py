@@ -29,7 +29,7 @@ from sie_server.config.model import ModelConfig
 from sie_server.core.runtime_options import bound_generation, resolve_generation_timeouts
 from sie_server.core.tokenizer import load_tokenizer
 from sie_server.processors.remote_chat import _check_tools
-from sie_server.processors.tool_call_grammar import normalize_tool_choice
+from sie_server.processors.tool_call_grammar import has_strict_tools, normalize_tool_choice
 from sie_server.processors.tool_call_parser import (
     ToolCallFormat,
     parse_tool_call_stream,
@@ -77,7 +77,7 @@ async def prepare_rendered_chat(
             body.get(field) is not None
             for field in ("min_p", "repetition_context_size", "role_mapping", "user", "safety_identifier")
         )
-        or (mode != "none" and any(tool.get("function", {}).get("strict") is True for tool in body.get("tools") or []))
+        or (mode != "none" and has_strict_tools(body.get("tools")))
     ):
         return None
     source = config.hf_id or config.weights_path
