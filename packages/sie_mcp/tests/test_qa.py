@@ -3,6 +3,7 @@ from typing import Any
 import pytest
 from sie_mcp import qa
 from sie_mcp.qa import AnswerQuestionsError
+from sie_sdk import RequestError
 
 # A tiny keyword vocabulary lets the fake produce deterministic embeddings:
 # encode() returns per-keyword counts, so cosine / dot-product retrieval is
@@ -267,6 +268,24 @@ async def test_raises_when_reranker_returns_no_scores() -> None:
         await qa.answer_questions(_NoScores(), documents=_DOCS, questions=["alpha?"], **_PARAMS)
 
 
+async def test_names_the_setting_when_the_reranker_is_not_served() -> None:
+    class _NoReranker(_FakeQAClient):
+        async def score(self, model: str, query: Any, items: list[Any], **kwargs: Any) -> Any:
+            raise RequestError(f"Model '{model}' not found", code="MODEL_NOT_FOUND", status_code=404)
+
+    with pytest.raises(AnswerQuestionsError, match=r"'rr'.*not found.*SIE_MCP_RERANK_MODEL"):
+        await qa.answer_questions(_NoReranker(), documents=_DOCS, questions=["alpha?"], **_PARAMS)
+
+
+async def test_other_request_errors_pass_through() -> None:
+    class _BadRequest(_FakeQAClient):
+        async def score(self, model: str, query: Any, items: list[Any], **kwargs: Any) -> Any:
+            raise RequestError("bad request", code="INVALID_INPUT", status_code=400)
+
+    with pytest.raises(RequestError, match="bad request"):
+        await qa.answer_questions(_BadRequest(), documents=_DOCS, questions=["alpha?"], **_PARAMS)
+
+
 async def test_doc_index_points_to_original_documents_when_some_are_empty() -> None:
     # A leading empty document must not shift the surviving document's doc_index:
     # the bravo doc stays at its caller-supplied index 2.
@@ -323,3 +342,23 @@ async def test_raises_when_generation_returns_no_content() -> None:
 
     with pytest.raises(AnswerQuestionsError, match="no choices"):
         await qa.answer_questions(_NoContent(), documents=_DOCS, questions=["alpha?"], **_PARAMS)
+
+
+async def test_names_the_setting_when_the_generate_model_is_not_served() -> None:
+    # The OpenAI-shaped chat endpoint reports a missing model as lower-case
+    # "model_not_found"; the hint must still name the setting.
+    class _NoGenerator(_FakeQAClient):
+        async def chat_completions(self, model: str, messages: list[Any], **kwargs: Any) -> Any:
+            raise RequestError(f"Model '{model}' not found", code="model_not_found", status_code=404)
+
+    with pytest.raises(AnswerQuestionsError, match=r"not found.*SIE_MCP_GENERATE_MODEL"):
+        await qa.answer_questions(_NoGenerator(), documents=_DOCS, questions=["alpha?"], **_PARAMS)
+
+
+async def test_names_the_setting_when_the_encoder_is_not_served() -> None:
+    class _NoEncoder(_FakeQAClient):
+        async def encode(self, model: str, items: Any, **kwargs: Any) -> Any:
+            raise RequestError(f"Model '{model}' not found", code="MODEL_NOT_FOUND", status_code=404)
+
+    with pytest.raises(AnswerQuestionsError, match=r"not found.*SIE_MCP_ENCODE_MODEL"):
+        await qa.answer_questions(_NoEncoder(), documents=_DOCS, questions=["alpha?"], **_PARAMS)
