@@ -318,6 +318,17 @@ def test_encoded_chunked_or_unbounded_framing_passes_through(framing: tuple[byte
     assert _drive(*answer) == answer
 
 
+def test_a_zero_padded_length_is_rewritten() -> None:
+    padded = b"0" * 5000 + str(len(REFUSAL)).encode()
+    sent = _drive(
+        _start(401, (b"content-type", b"application/json"), (b"content-length", padded)),
+        {"type": "http.response.body", "body": REFUSAL},
+    )
+
+    assert json.loads(sent[1]["body"])["error"]["code"] == "UNAUTHORIZED"
+    assert dict(sent[0]["headers"])[b"content-length"] == str(len(sent[1]["body"])).encode()
+
+
 def test_an_identity_encoding_is_rewritten() -> None:
     sent = _drive(
         _start(401, *_json(len(REFUSAL)), (b"content-encoding", b"identity")),

@@ -113,12 +113,10 @@ def _rewritable(headers: list[tuple[bytes, bytes]]) -> bool:
             return False
     if mime is None or not (mime == "application/json" or mime.endswith("+json")):
         return False
-    return (
-        length is not None
-        and length.isdigit()
-        and len(length) <= _MAX_LENGTH_DIGITS
-        and int(length) <= _MAX_ERROR_BODY_BYTES
-    )
+    if length is None or not length.isdigit():
+        return False
+    significant = length.lstrip(b"0")
+    return len(significant) <= _MAX_LENGTH_DIGITS and int(significant or b"0") <= _MAX_ERROR_BODY_BYTES
 
 
 def _render(status: int, body: bytes) -> bytes | None:
