@@ -335,7 +335,15 @@ fn is_json(headers: &HeaderMap) -> bool {
         .is_some_and(|mime| mime == "application/json" || mime.ends_with("+json"))
 }
 
-async fn openai_error_response(response: Response) -> Response {
+/// One answer in the OpenAI envelope, rewritten as [`openai_error_envelope`]
+/// rewrites the answers on its routes. A composition that serves further
+/// OpenAI-compatible routes applies it to theirs. Successes pass through
+/// untouched.
+pub async fn openai_error_response(response: Response) -> Response {
+    let status = response.status();
+    if !(status.is_client_error() || status.is_server_error()) {
+        return response;
+    }
     let fits = response
         .body()
         .size_hint()
@@ -389,13 +397,10 @@ async fn openai_error_response(response: Response) -> Response {
 /// and so does every answer on another path: `/v1/messages` belongs to
 /// `anthropic_error_envelope`, and the SIE-native routes keep `detail`.
 pub async fn openai_error_envelope(request: Request, next: Next) -> Response {
-    let applies = is_openai_path(request.uri().path());
-    let response = next.run(request).await;
-    let status = response.status();
-    if !applies || !(status.is_client_error() || status.is_server_error()) {
-        return response;
+    if !is_openai_path(request.uri().path()) {
+        return next.run(request).await;
     }
-    openai_error_response(response).await
+    openai_error_response(next.run(request).await).await
 }
 
 #[cfg(test)]
@@ -720,6 +725,22 @@ mod tests {
                     "{path}"
                 );
             }
+        }
+
+        #[tokio::test]
+        async fn one_answer_is_rewritten_as_the_layer_rewrites_it() {
+            let response = openai_error_response(missing_token()).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(response.headers()["www-authenticate"], "Bearer");
+            let body: Value = serde_json::from_slice(&bytes(response).await).expect("json");
+            assert_eq!(body["error"]["type"], "authentication_error");
+            assert_eq!(body["error"]["code"], "UNAUTHORIZED");
+
+            let success = (StatusCode::OK, axum::Json(json!({"detail": "kept"}))).into_response();
+            let response = openai_error_response(success).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: Value = serde_json::from_slice(&bytes(response).await).expect("json");
+            assert_eq!(body, json!({"detail": "kept"}));
         }
 
         #[tokio::test]
