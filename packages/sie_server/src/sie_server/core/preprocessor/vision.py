@@ -892,7 +892,7 @@ class LightOnOCRPreprocessor:
     Handles CPU-bound image preprocessing:
     1. Load image from bytes (PIL)
     2. Convert to RGB if needed
-    3. Build chat messages with system prompt and image placeholder
+    3. Build chat messages with an image placeholder and optional system prompt
     4. Apply chat template and process through PixtralProcessor
     5. Extract image_sizes from processor output
 
@@ -907,14 +907,14 @@ class LightOnOCRPreprocessor:
         processor: Any,
         model_name: str,
         *,
-        system_prompt: str = "You are an OCR engine. Return the markdown representation of the document.",
+        system_prompt: str | None = None,
     ) -> None:
         """Initialize with a LightOnOCR processor.
 
         Args:
             processor: HuggingFace AutoProcessor (PixtralProcessor).
             model_name: Model name for logging.
-            system_prompt: System prompt for the chat template.
+            system_prompt: Optional explicit system prompt for the chat template.
         """
         self._processor = processor
         self._model_name = model_name
@@ -932,16 +932,17 @@ class LightOnOCRPreprocessor:
             instruction: Optional instruction to append to user content.
 
         Returns:
-            List of message dicts with system and user roles.
+            User message with an optional explicit system message.
         """
         user_content: list[dict[str, str]] = [{"type": "image"}]
         if instruction:
             user_content.append({"type": "text", "text": instruction})
 
-        return [
-            {"role": "system", "content": self._system_prompt},
-            {"role": "user", "content": user_content},
-        ]
+        messages: list[dict[str, Any]] = []
+        if self._system_prompt:
+            messages.append({"role": "system", "content": self._system_prompt})
+        messages.append({"role": "user", "content": user_content})
+        return messages
 
     def _process_single_image(
         self,

@@ -133,6 +133,22 @@ def test_lighton_default_profile_enables_compat_hook() -> None:
     assert config.resolve_profile("default").loadtime["extra_env"] == {"SIE_SGLANG_LIGHTON_OCR_COMPAT": "1"}
 
 
+@pytest.mark.parametrize("instruction", [None, "", "Extract tables only"])
+def test_lighton_default_profile_uses_image_only_prompt(instruction: str | None) -> None:
+    model_path = Path(__file__).resolve().parents[2] / "models" / "lightonai__LightOnOCR-2-1B.yaml"
+    config = ModelConfig.model_validate(yaml.safe_load(model_path.read_text()))
+    instance = SGLangVisionExtractAdapter("lightonai/LightOnOCR-2-1B", **config.resolve_profile("default").loadtime)
+    instance._processor = _FakeProcessor()
+
+    prompt, label = instance._resolve_prompt_and_label(instruction, {})
+    assert label == "markdown"
+    assert instance._build_prompt(prompt) == "rendered prompt"
+    content = [{"type": "image"}]
+    if instruction:
+        content.append({"type": "text", "text": instruction})
+    assert instance._processor.messages == [{"role": "user", "content": content}]
+
+
 def test_build_prompt_preserves_instruction(adapter: SGLangVisionExtractAdapter) -> None:
     assert adapter._build_prompt("Extract tables only") == "rendered prompt"
     assert adapter._processor.messages == [
