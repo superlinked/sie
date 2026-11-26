@@ -158,7 +158,7 @@ A chat completion with the content `"Hello."` for request `r1` becomes:
   "parallel_tool_calls": true, "tool_choice": "auto",
   "output": [
     {"type": "message", "id": "msg-r1", "role": "assistant", "status": "completed",
-     "content": [{"type": "output_text", "text": "Hello.", "annotations": []}]}
+     "content": [{"type": "output_text", "text": "Hello.", "annotations": [], "logprobs": []}]}
   ],
   "usage": {
     "input_tokens": 10, "input_tokens_details": {"cached_tokens": 0},
@@ -170,13 +170,16 @@ A chat completion with the content `"Hello."` for request `r1` becomes:
 
 `model` is the model the request named. `parallel_tool_calls` and
 `tool_choice` echo the request as sent, defaulting to `true` and `"auto"`. `output` holds a `message` item with one `output_text`
-part when the chat content is non-empty, then one item per tool call: a
+part, whose `annotations` and `logprobs` are empty lists, when the chat content
+is non-empty, then one item per tool call: a
 `function_call` with the arguments string, or a `custom_tool_call` whose
 `input` is the `input` string of the arguments, or the raw arguments when they
 are not a JSON object with a string `input`. The finish reasons `length` and
 `content_filter` make the response `incomplete` with
 `incomplete_details.reason` `max_output_tokens` or `content_filter`; every
-other finish reason (`stop`, `tool_calls` or any other value) completes it. Usage is `input_tokens`, `input_tokens_details.cached_tokens`,
+other finish reason (`stop`, `tool_calls` or any other value) completes it.
+In an `incomplete` response the last output item, the one the finish cut off,
+has `status: "incomplete"`; the items before it are `completed`. Usage is `input_tokens`, `input_tokens_details.cached_tokens`,
 `output_tokens`, `output_tokens_details.reasoning_tokens` and `total_tokens`
 from the chat usage, with absent details counted as 0.
 
@@ -190,7 +193,8 @@ carries `type`, equal to the event name, and `sequence_number`, counting from
 `output` and `usage: null` until the terminal event. `output_item.added` and
 `output_item.done` carry `output_index` and `item`. The other item events carry
 `item_id` and `output_index`, and the text and content-part events also carry
-`content_index: 0`.
+`content_index: 0`. `output_text.delta` and `output_text.done` carry
+`logprobs: []`, as every `output_text` part does.
 
 1. `response.created` and `response.in_progress` open the stream.
 2. The first non-empty text delta adds the message item and its `output_text`
@@ -209,7 +213,10 @@ carries `type`, equal to the event name, and `sequence_number`, counting from
 5. After the usage chunk and `[DONE]`, `response.completed` (or
    `response.incomplete` for a `length` or `content_filter` finish) carries the
    full answer; a chat stream that closes after a finish without `[DONE]` ends
-   the same way. The stream ends there, without a `[DONE]` frame of its own.
+   the same way. On a `length` or `content_filter` finish, the item open when
+   the finish arrives closes with `status: "incomplete"`, in its
+   `output_item.done` and in the terminal response; the items closed before it
+   stay `completed`. The stream ends there, without a `[DONE]` frame of its own.
 6. A chat error chunk after the stream opened becomes `response.failed` with
    `status: "failed"`, `error: {"code", "message"}` from the chat error, the
    items completed so far as `output` (an item still open is left out) and

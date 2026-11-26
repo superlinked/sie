@@ -422,9 +422,37 @@ class TestSiglipAdapter:
             }
         ]
 
+    @pytest.mark.parametrize(("lowercase_text", "expected"), [(False, ["A Dog", "x"]), (True, ["a dog", "x"])])
+    def test_encode_text_lowercases_only_when_configured(self, lowercase_text: bool, expected: list[str]) -> None:
+        adapter = SiglipAdapter(
+            "google/siglip2-so400m-patch14-384",
+            normalize=False,
+            lowercase_text=lowercase_text,
+        )
+        model = MagicMock()
+        model.get_text_features.return_value = torch.zeros((2, 8))
+        processor = MagicMock()
+        processor.return_value = {"input_ids": torch.tensor([[1, 2], [3, 4]])}
+        adapter._model = model
+        adapter._processor = processor
+        adapter._device = "cpu"
+
+        adapter._encode_texts(["A Dog", "x"])
+
+        assert processor.call_args.kwargs["text"] == expected
+
+    def test_siglip2_so400m_catalog_entry_lowercases_text(self) -> None:
+        config_path = Path(__file__).resolve().parents[2] / "models" / "google__siglip2-so400m-patch14-384.yaml"
+        data = yaml.safe_load(config_path.read_text())
+        assert data["profiles"]["default"]["adapter_options"]["loadtime"] == {"lowercase_text": True}
+
     @pytest.mark.parametrize(
         "model_id",
-        ["google/siglip-so400m-patch14-384", "google/siglip2-base-patch16-224"],
+        [
+            "google/siglip-so400m-patch14-384",
+            "google/siglip2-base-patch16-224",
+            "google/siglip2-so400m-patch14-384",
+        ],
     )
     def test_encode_text_bills_fixed_padded_length(self, model_id: str) -> None:
         adapter = SiglipAdapter(model_id, normalize=False)

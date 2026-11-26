@@ -4901,6 +4901,28 @@ def test_the_notes_name_no_grafana_admin_secret_when_grafana_reads_none(tmp_path
 
 
 @pytest.mark.parametrize(
+    "env",
+    [
+        {"GF_SECURITY_ADMIN_USER": "admin", "GF_SECURITY_ADMIN_PASSWORD": "fixture-password"},
+        {"GF_SECURITY_ADMIN_USER": "admin", "GF_SECURITY_ADMIN_PASSWORD__FILE": "/etc/grafana/password"},
+        {"GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION": "true"},
+    ],
+    ids=["password", "password-file", "no-initial-admin"],
+)
+@pytest.mark.parametrize(
+    "existing",
+    ["Graf-{{ .Release.Name }}", "{{ .Capabilities.KubeVersion.Major }}-graf"],
+    ids=["uppercase", "capabilities"],
+)
+def test_a_grafana_admin_secret_that_grafana_never_reads_is_not_checked_in_the_release_namespace(
+    tmp_path: Path, env: dict, existing: str
+) -> None:
+    grafana = {"env": env, "admin": {"existingSecret": existing}}
+    result = render_chart(tmp_path, {"kube-prometheus-stack": {"install": True, "grafana": grafana}})
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
     ("existing", "grafana", "error"),
     [
         (

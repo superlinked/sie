@@ -292,11 +292,13 @@ def _assert_event_grammar(events: list[dict[str, Any]], context: str) -> None:
 
     ``response.created`` and ``response.in_progress``, then one item at a time
     with contiguous output indices and the events of its kind, then one
-    terminal event, and nothing after. Sequence numbers count from 0.
+    terminal event whose output is the items closed so far, and nothing after.
+    Sequence numbers count from 0.
     """
     assert [event["data"]["sequence_number"] for event in events] == list(range(len(events))), context
     assert [event["event"] for event in events[:2]] == ["response.created", "response.in_progress"], context
     open_item: tuple[int, str] | None = None
+    closed: list[dict[str, Any]] = []
     next_index = 0
     allowed = {
         "message": {
@@ -314,8 +316,8 @@ def _assert_event_grammar(events: list[dict[str, Any]], context: str) -> None:
             assert position == len(events) - 1, f"{context}: event after the end"
             if name != "response.failed":
                 assert open_item is None, f"{context}: {name} with an open item"
-            items = data["response"]["output"]
-            assert [item["status"] for item in items] == ["completed"] * len(items), context
+            assert data["response"]["output"] == closed, context
+            assert {item["status"] for item in closed} <= {"completed", "incomplete"}, context
             return
         if name == "response.output_item.added":
             assert open_item is None, f"{context}: two open items"
@@ -325,6 +327,7 @@ def _assert_event_grammar(events: list[dict[str, Any]], context: str) -> None:
         elif name == "response.output_item.done":
             assert open_item is not None, context
             assert (data["output_index"], data["item"]["type"]) == open_item, context
+            closed.append(data["item"])
             open_item = None
         else:
             assert open_item is not None, f"{context}: {name} without an open item"

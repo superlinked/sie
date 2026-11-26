@@ -29,7 +29,7 @@ from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from sie_server.adapters.mlx import generation as mlx_generation
 from sie_server.adapters.mlx.generation import MLXGenerationAdapter
 from sie_server.adapters.sglang.generation import SGLangGenerationAdapter
-from sie_server.api import anthropic_messages, openai_local
+from sie_server.api import anthropic_messages, openai_local, openai_responses
 from sie_server.api.openai_local import _validate_mlx_seed, router
 from sie_server.config.model import ModelConfig
 from sie_server.core import video_frames
@@ -1237,6 +1237,103 @@ def test_cuda_chat_does_not_log_upstream_error_body(
     assert response.status_code == 400
     assert response.json()["error"]["message"] == "upstream generation request failed"
     assert private_marker not in caplog.text
+
+
+# SGLang's chat surface refusing a request whose input plus output cap does not fit its window.
+_SGLANG_WINDOW_REFUSAL = {
+    "object": "error",
+    "message": (
+        "Requested token count exceeds the model's maximum context length of 32768 tokens. You requested a total "
+        "of 32898 tokens: 28802 tokens from the input messages and 4096 tokens for the completion. Please reduce "
+        "the number of tokens in the input messages or the completion to fit within the limit."
+    ),
+    "type": "BadRequestError",
+    "param": None,
+    "code": 400,
+}
+_WINDOW_REFUSAL_ERROR = {
+    "message": (
+        "prompt_tokens (28802) + max_new_tokens (4096) = 32898 exceeds context_length (32768) "
+        "for model 'Qwen/Qwen3.5-4B'"
+    ),
+    "type": "invalid_request_error",
+    "param": "prompt",
+    "code": "INPUT_TOO_LONG",
+}
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_cuda_chat_names_the_window_the_child_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    stream: bool,
+) -> None:
+    client, _ = _cuda_chat_client(monkeypatch, lambda _request: httpx.Response(400, json=_SGLANG_WINDOW_REFUSAL))
+    with caplog.at_level("ERROR", logger="sie_server.api.openai_local"):
+        response = client.post(
+            "/v1/chat/completions",
+            json={"model": "Qwen/Qwen3.5-4B", "messages": [{"role": "user", "content": "Hello"}], "stream": stream},
+        )
+
+    assert response.status_code == 400, response.text
+    assert response.json() == {"error": _WINDOW_REFUSAL_ERROR}
+    assert "generation child chat error" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("path", "body", "error"),
+    [
+        (
+            "/v1/responses",
+            {"model": "Qwen/Qwen3.5-4B", "input": "Hello"},
+            {"error": _WINDOW_REFUSAL_ERROR},
+        ),
+        (
+            "/v1/messages",
+            {"model": "Qwen/Qwen3.5-4B", "max_tokens": 32, "messages": [{"role": "user", "content": "Hello"}]},
+            {
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "prompt is too long: 32898 tokens > 32768 maximum",
+                },
+            },
+        ),
+    ],
+    ids=["responses", "messages"],
+)
+def test_cuda_chat_window_refusal_reaches_the_translated_routes(
+    monkeypatch: pytest.MonkeyPatch, path: str, body: dict[str, Any], error: dict[str, Any]
+) -> None:
+    client, _ = _cuda_chat_client(monkeypatch, lambda _request: httpx.Response(400, json=_SGLANG_WINDOW_REFUSAL))
+    client.app.include_router(openai_responses.router)
+    client.app.include_router(anthropic_messages.router)
+
+    response = client.post(path, json=body)
+
+    assert response.status_code == 400, response.text
+    assert {key: response.json()[key] for key in error} == error
+
+
+@pytest.mark.parametrize(
+    ("upstream_status", "body"),
+    [
+        (500, _SGLANG_WINDOW_REFUSAL),
+        (400, {**_SGLANG_WINDOW_REFUSAL, "message": f"{_SGLANG_WINDOW_REFUSAL['message']} secret"}),
+    ],
+    ids=["engine failure status", "longer text"],
+)
+def test_cuda_chat_keeps_other_child_errors_opaque(
+    monkeypatch: pytest.MonkeyPatch, upstream_status: int, body: dict[str, Any]
+) -> None:
+    client, _ = _cuda_chat_client(monkeypatch, lambda _request: httpx.Response(upstream_status, json=body))
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "Qwen/Qwen3.5-4B", "messages": [{"role": "user", "content": "Hello"}]},
+    )
+
+    assert response.json()["error"]["code"] == "upstream_error"
+    assert "secret" not in response.text
 
 
 def test_cuda_chat_rejects_engine_control_and_output_above_model_cap(

@@ -133,7 +133,8 @@
             "part": {
               "type": "output_text",
               "text": "",
-              "annotations": []
+              "annotations": [],
+              "logprobs": []
             }
           }
         },
@@ -145,7 +146,8 @@
             "item_id": "msg-r",
             "output_index": 0,
             "content_index": 0,
-            "delta": "Hel"
+            "delta": "Hel",
+            "logprobs": []
           }
         },
         {
@@ -156,7 +158,8 @@
             "item_id": "msg-r",
             "output_index": 0,
             "content_index": 0,
-            "delta": "lo"
+            "delta": "lo",
+            "logprobs": []
           }
         },
         {
@@ -167,7 +170,8 @@
             "item_id": "msg-r",
             "output_index": 0,
             "content_index": 0,
-            "text": "Hello"
+            "text": "Hello",
+            "logprobs": []
           }
         },
         {
@@ -181,7 +185,8 @@
             "part": {
               "type": "output_text",
               "text": "Hello",
-              "annotations": []
+              "annotations": [],
+              "logprobs": []
             }
           }
         },
@@ -200,7 +205,8 @@
                 {
                   "type": "output_text",
                   "text": "Hello",
-                  "annotations": []
+                  "annotations": [],
+                  "logprobs": []
                 }
               ]
             }
@@ -232,7 +238,8 @@
                     {
                       "type": "output_text",
                       "text": "Hello",
-                      "annotations": []
+                      "annotations": [],
+                      "logprobs": []
                     }
                   ]
                 }
@@ -446,7 +453,8 @@
             "part": {
               "type": "output_text",
               "text": "",
-              "annotations": []
+              "annotations": [],
+              "logprobs": []
             }
           }
         },
@@ -458,7 +466,8 @@
             "item_id": "msg-r",
             "output_index": 0,
             "content_index": 0,
-            "delta": "Let me look."
+            "delta": "Let me look.",
+            "logprobs": []
           }
         },
         {
@@ -469,7 +478,8 @@
             "item_id": "msg-r",
             "output_index": 0,
             "content_index": 0,
-            "text": "Let me look."
+            "text": "Let me look.",
+            "logprobs": []
           }
         },
         {
@@ -483,7 +493,8 @@
             "part": {
               "type": "output_text",
               "text": "Let me look.",
-              "annotations": []
+              "annotations": [],
+              "logprobs": []
             }
           }
         },
@@ -502,7 +513,8 @@
                 {
                   "type": "output_text",
                   "text": "Let me look.",
-                  "annotations": []
+                  "annotations": [],
+                  "logprobs": []
                 }
               ]
             }
@@ -596,7 +608,8 @@
                     {
                       "type": "output_text",
                       "text": "Let me look.",
-                      "annotations": []
+                      "annotations": [],
+                      "logprobs": []
                     }
                   ]
                 },
@@ -1308,7 +1321,8 @@
             "part": {
               "type": "output_text",
               "text": "",
-              "annotations": []
+              "annotations": [],
+              "logprobs": []
             }
           }
         },
@@ -1320,7 +1334,8 @@
             "item_id": "msg-r",
             "output_index": 0,
             "content_index": 0,
-            "delta": "Once upon"
+            "delta": "Once upon",
+            "logprobs": []
           }
         },
         {
@@ -1331,7 +1346,8 @@
             "item_id": "msg-r",
             "output_index": 0,
             "content_index": 0,
-            "delta": " a time"
+            "delta": " a time",
+            "logprobs": []
           }
         },
         {
@@ -1342,7 +1358,8 @@
             "item_id": "msg-r",
             "output_index": 0,
             "content_index": 0,
-            "text": "Once upon a time"
+            "text": "Once upon a time",
+            "logprobs": []
           }
         },
         {
@@ -1356,7 +1373,8 @@
             "part": {
               "type": "output_text",
               "text": "Once upon a time",
-              "annotations": []
+              "annotations": [],
+              "logprobs": []
             }
           }
         },
@@ -1370,12 +1388,13 @@
               "type": "message",
               "id": "msg-r",
               "role": "assistant",
-              "status": "completed",
+              "status": "incomplete",
               "content": [
                 {
                   "type": "output_text",
                   "text": "Once upon a time",
-                  "annotations": []
+                  "annotations": [],
+                  "logprobs": []
                 }
               ]
             }
@@ -1404,12 +1423,13 @@
                   "type": "message",
                   "id": "msg-r",
                   "role": "assistant",
-                  "status": "completed",
+                  "status": "incomplete",
                   "content": [
                     {
                       "type": "output_text",
                       "text": "Once upon a time",
-                      "annotations": []
+                      "annotations": [],
+                      "logprobs": []
                     }
                   ]
                 }
@@ -1424,6 +1444,361 @@
                   "reasoning_tokens": 0
                 },
                 "total_tokens": 9
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "length cutting off a tool call closes the message completed and the call incomplete",
+      "request_id": "r",
+      "model": "m",
+      "request": {
+        "model": "m",
+        "input": "List the files.",
+        "stream": true,
+        "tools": [
+          {
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a shell command.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "cmd": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "cmd"
+              ]
+            }
+          }
+        ],
+        "max_output_tokens": 12
+      },
+      "frames": [
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "role": "assistant",
+                "content": "Checking."
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                      "name": "exec_command",
+                      "arguments": "{\"cmd\":"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "function": {
+                      "arguments": "\"l"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        },
+        {
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "finish_reason": "length"
+            }
+          ]
+        },
+        {
+          "choices": [],
+          "usage": {
+            "prompt_tokens": 12,
+            "completion_tokens": 12,
+            "total_tokens": 24
+          }
+        },
+        "[DONE]"
+      ],
+      "events": [
+        {
+          "event": "response.created",
+          "data": {
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "in_progress",
+              "incomplete_details": null,
+              "error": null,
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [],
+              "usage": null
+            }
+          }
+        },
+        {
+          "event": "response.in_progress",
+          "data": {
+            "type": "response.in_progress",
+            "sequence_number": 1,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "in_progress",
+              "incomplete_details": null,
+              "error": null,
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [],
+              "usage": null
+            }
+          }
+        },
+        {
+          "event": "response.output_item.added",
+          "data": {
+            "type": "response.output_item.added",
+            "sequence_number": 2,
+            "output_index": 0,
+            "item": {
+              "type": "message",
+              "id": "msg-r",
+              "role": "assistant",
+              "status": "in_progress",
+              "content": []
+            }
+          }
+        },
+        {
+          "event": "response.content_part.added",
+          "data": {
+            "type": "response.content_part.added",
+            "sequence_number": 3,
+            "item_id": "msg-r",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {
+              "type": "output_text",
+              "text": "",
+              "annotations": [],
+              "logprobs": []
+            }
+          }
+        },
+        {
+          "event": "response.output_text.delta",
+          "data": {
+            "type": "response.output_text.delta",
+            "sequence_number": 4,
+            "item_id": "msg-r",
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "Checking.",
+            "logprobs": []
+          }
+        },
+        {
+          "event": "response.output_text.done",
+          "data": {
+            "type": "response.output_text.done",
+            "sequence_number": 5,
+            "item_id": "msg-r",
+            "output_index": 0,
+            "content_index": 0,
+            "text": "Checking.",
+            "logprobs": []
+          }
+        },
+        {
+          "event": "response.content_part.done",
+          "data": {
+            "type": "response.content_part.done",
+            "sequence_number": 6,
+            "item_id": "msg-r",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {
+              "type": "output_text",
+              "text": "Checking.",
+              "annotations": [],
+              "logprobs": []
+            }
+          }
+        },
+        {
+          "event": "response.output_item.done",
+          "data": {
+            "type": "response.output_item.done",
+            "sequence_number": 7,
+            "output_index": 0,
+            "item": {
+              "type": "message",
+              "id": "msg-r",
+              "role": "assistant",
+              "status": "completed",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "Checking.",
+                  "annotations": [],
+                  "logprobs": []
+                }
+              ]
+            }
+          }
+        },
+        {
+          "event": "response.output_item.added",
+          "data": {
+            "type": "response.output_item.added",
+            "sequence_number": 8,
+            "output_index": 1,
+            "item": {
+              "type": "function_call",
+              "id": "fc-r-0",
+              "call_id": "call_1",
+              "name": "exec_command",
+              "arguments": "",
+              "status": "in_progress"
+            }
+          }
+        },
+        {
+          "event": "response.function_call_arguments.delta",
+          "data": {
+            "type": "response.function_call_arguments.delta",
+            "sequence_number": 9,
+            "item_id": "fc-r-0",
+            "output_index": 1,
+            "delta": "{\"cmd\":"
+          }
+        },
+        {
+          "event": "response.function_call_arguments.delta",
+          "data": {
+            "type": "response.function_call_arguments.delta",
+            "sequence_number": 10,
+            "item_id": "fc-r-0",
+            "output_index": 1,
+            "delta": "\"l"
+          }
+        },
+        {
+          "event": "response.function_call_arguments.done",
+          "data": {
+            "type": "response.function_call_arguments.done",
+            "sequence_number": 11,
+            "item_id": "fc-r-0",
+            "output_index": 1,
+            "arguments": "{\"cmd\":\"l"
+          }
+        },
+        {
+          "event": "response.output_item.done",
+          "data": {
+            "type": "response.output_item.done",
+            "sequence_number": 12,
+            "output_index": 1,
+            "item": {
+              "type": "function_call",
+              "id": "fc-r-0",
+              "call_id": "call_1",
+              "name": "exec_command",
+              "arguments": "{\"cmd\":\"l",
+              "status": "incomplete"
+            }
+          }
+        },
+        {
+          "event": "response.incomplete",
+          "data": {
+            "type": "response.incomplete",
+            "sequence_number": 13,
+            "response": {
+              "id": "resp-r",
+              "object": "response",
+              "created_at": 0,
+              "model": "m",
+              "status": "incomplete",
+              "incomplete_details": {
+                "reason": "max_output_tokens"
+              },
+              "error": null,
+              "store": false,
+              "parallel_tool_calls": true,
+              "tool_choice": "auto",
+              "output": [
+                {
+                  "type": "message",
+                  "id": "msg-r",
+                  "role": "assistant",
+                  "status": "completed",
+                  "content": [
+                    {
+                      "type": "output_text",
+                      "text": "Checking.",
+                      "annotations": [],
+                      "logprobs": []
+                    }
+                  ]
+                },
+                {
+                  "type": "function_call",
+                  "id": "fc-r-0",
+                  "call_id": "call_1",
+                  "name": "exec_command",
+                  "arguments": "{\"cmd\":\"l",
+                  "status": "incomplete"
+                }
+              ],
+              "usage": {
+                "input_tokens": 12,
+                "input_tokens_details": {
+                  "cached_tokens": 0
+                },
+                "output_tokens": 12,
+                "output_tokens_details": {
+                  "reasoning_tokens": 0
+                },
+                "total_tokens": 24
               }
             }
           }
@@ -1538,7 +1913,8 @@
             "part": {
               "type": "output_text",
               "text": "",
-              "annotations": []
+              "annotations": [],
+              "logprobs": []
             }
           }
         },
@@ -1550,7 +1926,8 @@
             "item_id": "msg-r",
             "output_index": 0,
             "content_index": 0,
-            "delta": "par"
+            "delta": "par",
+            "logprobs": []
           }
         },
         {
@@ -1847,7 +2224,8 @@
             "part": {
               "type": "output_text",
               "text": "",
-              "annotations": []
+              "annotations": [],
+              "logprobs": []
             }
           }
         },
@@ -1859,7 +2237,8 @@
             "item_id": "msg-r",
             "output_index": 0,
             "content_index": 0,
-            "delta": "Listing."
+            "delta": "Listing.",
+            "logprobs": []
           }
         },
         {
@@ -1870,7 +2249,8 @@
             "item_id": "msg-r",
             "output_index": 0,
             "content_index": 0,
-            "text": "Listing."
+            "text": "Listing.",
+            "logprobs": []
           }
         },
         {
@@ -1884,7 +2264,8 @@
             "part": {
               "type": "output_text",
               "text": "Listing.",
-              "annotations": []
+              "annotations": [],
+              "logprobs": []
             }
           }
         },
@@ -1903,7 +2284,8 @@
                 {
                   "type": "output_text",
                   "text": "Listing.",
-                  "annotations": []
+                  "annotations": [],
+                  "logprobs": []
                 }
               ]
             }
@@ -1987,7 +2369,8 @@
             "part": {
               "type": "output_text",
               "text": "",
-              "annotations": []
+              "annotations": [],
+              "logprobs": []
             }
           }
         },
@@ -1999,7 +2382,8 @@
             "item_id": "msg-r-2",
             "output_index": 2,
             "content_index": 0,
-            "delta": "Waiting for "
+            "delta": "Waiting for ",
+            "logprobs": []
           }
         },
         {
@@ -2010,7 +2394,8 @@
             "item_id": "msg-r-2",
             "output_index": 2,
             "content_index": 0,
-            "delta": "the output."
+            "delta": "the output.",
+            "logprobs": []
           }
         },
         {
@@ -2021,7 +2406,8 @@
             "item_id": "msg-r-2",
             "output_index": 2,
             "content_index": 0,
-            "text": "Waiting for the output."
+            "text": "Waiting for the output.",
+            "logprobs": []
           }
         },
         {
@@ -2035,7 +2421,8 @@
             "part": {
               "type": "output_text",
               "text": "Waiting for the output.",
-              "annotations": []
+              "annotations": [],
+              "logprobs": []
             }
           }
         },
@@ -2054,7 +2441,8 @@
                 {
                   "type": "output_text",
                   "text": "Waiting for the output.",
-                  "annotations": []
+                  "annotations": [],
+                  "logprobs": []
                 }
               ]
             }
@@ -2086,7 +2474,8 @@
                     {
                       "type": "output_text",
                       "text": "Listing.",
-                      "annotations": []
+                      "annotations": [],
+                      "logprobs": []
                     }
                   ]
                 },
@@ -2107,7 +2496,8 @@
                     {
                       "type": "output_text",
                       "text": "Waiting for the output.",
-                      "annotations": []
+                      "annotations": [],
+                      "logprobs": []
                     }
                   ]
                 }
@@ -2474,7 +2864,8 @@
             "part": {
               "type": "output_text",
               "text": "",
-              "annotations": []
+              "annotations": [],
+              "logprobs": []
             }
           }
         },
@@ -2486,7 +2877,8 @@
             "item_id": "msg-r",
             "output_index": 0,
             "content_index": 0,
-            "delta": "par"
+            "delta": "par",
+            "logprobs": []
           }
         },
         {
@@ -2497,7 +2889,8 @@
             "item_id": "msg-r",
             "output_index": 0,
             "content_index": 0,
-            "delta": "tial"
+            "delta": "tial",
+            "logprobs": []
           }
         },
         {
@@ -2625,7 +3018,8 @@
             "part": {
               "type": "output_text",
               "text": "",
-              "annotations": []
+              "annotations": [],
+              "logprobs": []
             }
           }
         },
@@ -2637,7 +3031,8 @@
             "item_id": "msg-r",
             "output_index": 0,
             "content_index": 0,
-            "delta": "Hello."
+            "delta": "Hello.",
+            "logprobs": []
           }
         },
         {
@@ -2648,7 +3043,8 @@
             "item_id": "msg-r",
             "output_index": 0,
             "content_index": 0,
-            "text": "Hello."
+            "text": "Hello.",
+            "logprobs": []
           }
         },
         {
@@ -2662,7 +3058,8 @@
             "part": {
               "type": "output_text",
               "text": "Hello.",
-              "annotations": []
+              "annotations": [],
+              "logprobs": []
             }
           }
         },
@@ -2681,7 +3078,8 @@
                 {
                   "type": "output_text",
                   "text": "Hello.",
-                  "annotations": []
+                  "annotations": [],
+                  "logprobs": []
                 }
               ]
             }
@@ -2713,7 +3111,8 @@
                     {
                       "type": "output_text",
                       "text": "Hello.",
-                      "annotations": []
+                      "annotations": [],
+                      "logprobs": []
                     }
                   ]
                 }
@@ -2843,7 +3242,8 @@
             "part": {
               "type": "output_text",
               "text": "",
-              "annotations": []
+              "annotations": [],
+              "logprobs": []
             }
           }
         },
@@ -2855,7 +3255,8 @@
             "item_id": "msg-r",
             "output_index": 0,
             "content_index": 0,
-            "delta": "Hello."
+            "delta": "Hello.",
+            "logprobs": []
           }
         },
         {
@@ -2866,7 +3267,8 @@
             "item_id": "msg-r",
             "output_index": 0,
             "content_index": 0,
-            "text": "Hello."
+            "text": "Hello.",
+            "logprobs": []
           }
         },
         {
@@ -2880,7 +3282,8 @@
             "part": {
               "type": "output_text",
               "text": "Hello.",
-              "annotations": []
+              "annotations": [],
+              "logprobs": []
             }
           }
         },
@@ -2899,7 +3302,8 @@
                 {
                   "type": "output_text",
                   "text": "Hello.",
-                  "annotations": []
+                  "annotations": [],
+                  "logprobs": []
                 }
               ]
             }
@@ -2931,7 +3335,8 @@
                     {
                       "type": "output_text",
                       "text": "Hello.",
-                      "annotations": []
+                      "annotations": [],
+                      "logprobs": []
                     }
                   ]
                 }
@@ -3361,7 +3766,8 @@
             "part": {
               "type": "output_text",
               "text": "",
-              "annotations": []
+              "annotations": [],
+              "logprobs": []
             }
           }
         },
@@ -3373,7 +3779,8 @@
             "item_id": "msg-r",
             "output_index": 0,
             "content_index": 0,
-            "delta": "Running."
+            "delta": "Running.",
+            "logprobs": []
           }
         },
         {

@@ -681,23 +681,27 @@ def response_object(
     }
 
 
-def _message_item(item_id: str, text: str | None) -> dict[str, Any]:
+def _output_text(text: str) -> dict[str, Any]:
+    return {"type": "output_text", "text": text, "annotations": [], "logprobs": []}
+
+
+def _message_item(item_id: str, text: str | None, status: str = "completed") -> dict[str, Any]:
     """A message item, ``in_progress`` and empty while ``text`` is None."""
     return {
         "type": "message",
         "id": item_id,
         "role": "assistant",
-        "status": "in_progress" if text is None else "completed",
-        "content": [] if text is None else [{"type": "output_text", "text": text, "annotations": []}],
+        "status": "in_progress" if text is None else status,
+        "content": [] if text is None else [_output_text(text)],
     }
 
 
-def _call_item(item_id: str, call_id: str, name: str, value: str, *, custom: bool, done: bool) -> dict[str, Any]:
+def _call_item(item_id: str, call_id: str, name: str, value: str, *, custom: bool, status: str) -> dict[str, Any]:
     if custom:
         payload = {"type": "custom_tool_call", "id": item_id, "call_id": call_id, "name": name, "input": value}
     else:
         payload = {"type": "function_call", "id": item_id, "call_id": call_id, "name": name, "arguments": value}
-    return {**payload, "status": "completed" if done else "in_progress"}
+    return {**payload, "status": status}
 
 
 def _call_item_id(request_id: str, position: int, *, custom: bool) -> str:
@@ -736,8 +740,10 @@ def chat_completion_to_response(chat: Any, shape: ResponseShape, request_id: str
         custom = name in shape.custom_tools
         value = custom_tool_input(arguments) if custom else arguments
         item_id = _call_item_id(request_id, position, custom=custom)
-        output.append(_call_item(item_id, call_id, name, value, custom=custom, done=True))
+        output.append(_call_item(item_id, call_id, name, value, custom=custom, status="completed"))
     status, incomplete = _status(choice.get("finish_reason"))
+    if output:
+        output[-1]["status"] = status
     return response_object(
         shape,
         request_id,
@@ -911,7 +917,7 @@ class StreamMachine:
                     item_id=item_id,
                     output_index=index,
                     content_index=0,
-                    part={"type": "output_text", "text": "", "annotations": []},
+                    part=_output_text(""),
                 )
             )
         self._text.text += text
@@ -922,6 +928,7 @@ class StreamMachine:
                 output_index=self._text.output_index,
                 content_index=0,
                 delta=text,
+                logprobs=[],
             )
         )
 
@@ -930,10 +937,17 @@ class StreamMachine:
             return
         opened, self._text = self._text, None
         item_id, index, text = opened.item_id, opened.output_index, opened.text
-        part = {"type": "output_text", "text": text, "annotations": []}
-        item = _message_item(item_id, text)
+        part = _output_text(text)
+        item = _message_item(item_id, text, _status(self._finish_reason)[0])
         events.append(
-            self._event("response.output_text.done", item_id=item_id, output_index=index, content_index=0, text=text)
+            self._event(
+                "response.output_text.done",
+                item_id=item_id,
+                output_index=index,
+                content_index=0,
+                text=text,
+                logprobs=[],
+            )
         )
         events.append(
             self._event("response.content_part.done", item_id=item_id, output_index=index, content_index=0, part=part)
@@ -963,7 +977,7 @@ class StreamMachine:
             self._call = _OpenCall(chat_index, self._calls, self._next_index, item_id, call_id, name, custom)
             self._calls += 1
             self._next_index += 1
-            item = _call_item(item_id, call_id, name, "", custom=custom, done=False)
+            item = _call_item(item_id, call_id, name, "", custom=custom, status="in_progress")
             events.append(self._event("response.output_item.added", output_index=self._call.output_index, item=item))
         if not fragment:
             return None
@@ -999,7 +1013,9 @@ class StreamMachine:
                     "response.function_call_arguments.done", item_id=item_id, output_index=index, arguments=value
                 )
             )
-        item = _call_item(item_id, opened.call_id, opened.name, value, custom=opened.custom, done=True)
+        item = _call_item(
+            item_id, opened.call_id, opened.name, value, custom=opened.custom, status=_status(self._finish_reason)[0]
+        )
         events.append(self._event("response.output_item.done", output_index=index, item=item))
         self._output.append(item)
         self._closed_calls.add(opened.chat_index)
