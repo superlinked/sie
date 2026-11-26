@@ -1307,6 +1307,9 @@ token-separation check and the upstream-key collision check read this list.
 {{- with index $root.Subcharts "kube-prometheus-stack" -}}
 {{- with index .Subcharts "grafana" -}}
 {{- if eq (include "grafana.namespace" .) (include "sie-cluster.namespace" $root) -}}
+{{- $readsUser := and (not .Values.env.GF_SECURITY_ADMIN_USER) (not .Values.env.GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION) -}}
+{{- $readsPassword := and (not .Values.env.GF_SECURITY_ADMIN_PASSWORD) (not .Values.env.GF_SECURITY_ADMIN_PASSWORD__FILE) (not .Values.env.GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION) -}}
+{{- if or $readsUser $readsPassword -}}
 {{- $existingSecret := toString (default "" .Values.admin.existingSecret) -}}
 {{- if and (contains "{{" $existingSecret) (not (regexMatch `^([a-z0-9. \t\r\n-]|\{\{-?[ \t\r\n]*\$?\.(Release|Values|Chart)(\.[A-Za-z0-9_]+)+[ \t\r\n]*-?\}\})+$` $existingSecret)) -}}
 {{- fail (printf "kube-prometheus-stack.grafana.admin.existingSecret may hold only lowercase letters, digits, '-', '.', whitespace and actions that hold one chain of names on .Release, .Values or .Chart, such as {{ .Release.Name }}, optionally with {{- -}} trim markers or a leading $: the Grafana chart evaluates it in its own templates, so the chart can check the Secret Grafana reads only when it depends on nothing but those objects, got %q" $existingSecret) -}}
@@ -1314,11 +1317,12 @@ token-separation check and the upstream-key collision check read this list.
 {{- $template := ternary $existingSecret "" (contains "{{" $existingSecret) -}}
 {{- $context := merge (dict "Template" $root.Template) . -}}
 {{- $secretName := tpl .Values.admin.existingSecret $context | default (include "grafana.fullname" .) -}}
-{{- if and (not .Values.env.GF_SECURITY_ADMIN_USER) (not .Values.env.GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION) -}}
+{{- if $readsUser -}}
 {{- $keys = append $keys (dict "owner" "the Grafana admin username" "name" "Grafana admin username" "ref" (include "sie-cluster.secretKeyRef" (dict "unquoted" true "name" $secretName "template" $template "key" (default "admin-user" .Values.admin.userKey) "nameField" "kube-prometheus-stack.grafana.admin.existingSecret" "keyField" "kube-prometheus-stack.grafana.admin.userKey"))) -}}
 {{- end -}}
-{{- if and (not .Values.env.GF_SECURITY_ADMIN_PASSWORD) (not .Values.env.GF_SECURITY_ADMIN_PASSWORD__FILE) (not .Values.env.GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION) -}}
+{{- if $readsPassword -}}
 {{- $keys = append $keys (dict "owner" "the Grafana admin password" "name" "Grafana admin password" "ref" (include "sie-cluster.secretKeyRef" (dict "unquoted" true "name" $secretName "template" $template "key" (default "admin-password" .Values.admin.passwordKey) "nameField" "kube-prometheus-stack.grafana.admin.existingSecret" "keyField" "kube-prometheus-stack.grafana.admin.passwordKey"))) -}}
+{{- end -}}
 {{- end -}}
 {{- if .Values.smtp.existingSecret -}}
 {{- $smtpSecret := .Values.smtp.existingSecret -}}

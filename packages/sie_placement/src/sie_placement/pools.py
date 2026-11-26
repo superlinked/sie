@@ -44,11 +44,13 @@ def _is_file(entry: os.DirEntry[str]) -> bool:
 
 
 def _holds_files(path: str) -> bool:
+    if not os.access(path, os.X_OK, effective_ids=_ACCESS_BY_EFFECTIVE_IDS):
+        return False
     try:
         with os.scandir(path) as entries:
             return any(_is_file(entry) for entry in entries)
     except PermissionError:
-        return os.access(path, os.X_OK, effective_ids=_ACCESS_BY_EFFECTIVE_IDS)
+        return True
     except OSError:
         return False
 
