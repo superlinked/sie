@@ -43,7 +43,12 @@ _LONG_CONTEXT_THINKING_IDS = {model_id for _, model_id in _LONG_CONTEXT_THINKING
 _HARDWARE_THINKING_PROFILES = {
     "Qwen/Qwen3.6-27B": ("h100-256k-thinking", "long-context-thinking-no-spec"),
     "Qwen/Qwen3.6-35B-A3B": ("h100-256k-thinking",),
-    "Qwen/Qwen3.8-27B-FP8": ("h100-256k-thinking", "h100-256k-thinking-no-spec"),
+    "Qwen/Qwen3.8-27B-FP8": (
+        "h100-256k-thinking",
+        "h100-256k-thinking-no-spec",
+        "rtx-pro-6000-32k-thinking-bounded-rlm",
+        "rtx-pro-6000-32k-thinking-bounded-rlm-no-spec",
+    ),
     "google/gemma-4-31B-it": (
         "h100-96k-thinking",
         "h200-256k-thinking",
