@@ -17,7 +17,11 @@ from sie_server.adapters._generation_base import (
     GenerationInvalidRequestError,
 )
 from sie_server.adapters.errors import InputTooLongError
-from sie_server.adapters.sglang._window import SGLangInputTooLongError, window_refusal_message
+from sie_server.adapters.sglang._window import (
+    SGLangInputTooLongError,
+    chat_window_refusal_message,
+    window_refusal_message,
+)
 from sie_server.adapters.sglang.embedding import SGLangEmbeddingAdapter
 from sie_server.adapters.sglang.generation import (
     SGLangGenerationAdapter,
@@ -85,6 +89,33 @@ def test_engine_refusals_become_fixed_text(message: str, tokens: str, limit: str
 @pytest.mark.parametrize("message", OTHER_MESSAGES)
 def test_other_engine_messages_are_not_window_refusals(message: object) -> None:
     assert window_refusal_message(message) is None
+
+
+# Chat: the tokenizer measures against the window, so its refusals name the prompt, output cap and window.
+CHAT_REFUSALS = [
+    pytest.param(
+        REFUSALS[0].values[0],
+        "prompt_tokens (30042) exceeds context_length (24576) for model 'org/model:long'",
+        id="tokenizer-input",
+    ),
+    pytest.param(
+        REFUSALS[1].values[0],
+        "prompt_tokens (8176) + max_new_tokens (16) = 8192 exceeds context_length (8192) for model 'org/model:long'",
+        id="tokenizer-total",
+    ),
+    pytest.param(REFUSALS[2].values[0], _expected("8189", "8186"), id="scheduler-input"),
+    pytest.param(REFUSALS[3].values[0], _expected("16454", "16378"), id="scheduler-multimodal"),
+]
+
+
+@pytest.mark.parametrize(("message", "expected"), CHAT_REFUSALS)
+def test_chat_refusals_name_the_prompt_output_cap_and_window(message: str, expected: str) -> None:
+    assert chat_window_refusal_message(message, model="org/model:long") == expected
+
+
+@pytest.mark.parametrize("message", OTHER_MESSAGES)
+def test_other_engine_messages_are_not_chat_window_refusals(message: object) -> None:
+    assert chat_window_refusal_message(message, model="org/model") is None
 
 
 # Generation: where the engine reports the refusal depends on where it noticed.
