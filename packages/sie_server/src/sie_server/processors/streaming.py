@@ -104,11 +104,17 @@ from sie_server.processors.schema_prompt import (
     starts_with_system_message,
     with_response_format,
 )
-from sie_server.processors.strict_grammar import enforce_strict_grammar
+from sie_server.processors.strict_grammar import enforce_strict_grammar, enforce_strict_tool_arguments
 from sie_server.processors.tool_call_grammar import (
+    StrictToolError,
     ToolChoiceError,
+    build_strict_tool_grammar,
     build_tool_choice_grammar,
+    check_strict_tools,
+    has_strict_tools,
     normalize_tool_choice,
+    request_constrains_decoding,
+    strict_tool_schemas,
 )
 from sie_server.processors.tool_call_parser import (
     ToolCallFormat,
@@ -1417,6 +1423,28 @@ class StreamingProcessor:
         return tool_call_format_for_parser(loadtime.get("tool_call_parser"))
 
     @staticmethod
+    def _strict_tool_grammar(
+        adapter: GenerationAdapter,
+        params: _GenerateRequestParams,
+        tools: tuple[dict[str, Any], ...],
+        tool_call_format: ToolCallFormat,
+    ) -> GrammarSpec | None:
+        """Build the grammar for a request with ``strict`` tools.
+
+        Strict arguments are guaranteed by the end-of-turn validation, which
+        runs on every backend and tool-call format. The structural tag only
+        steers generation and needs XGrammar and the whole decode, so without
+        XGrammar, or beside a ``response_format`` grammar, the request keeps
+        the grammar a non-strict request gets.
+        """
+        if params.grammar is None and getattr(adapter, "_grammar_backend", None) == "xgrammar":
+            return build_strict_tool_grammar(
+                tools, params.tool_choice, tool_call_format, parallel_tool_calls=params.parallel_tool_calls
+            )
+        check_strict_tools(tools)
+        return build_tool_choice_grammar(tools, params.tool_choice, tool_call_format)
+
+    @staticmethod
     def _grammar_backend_for_model_config(config: Any) -> str | None:
         """Resolve configured SGLang grammar backend for prewarm.
 
@@ -1832,7 +1860,10 @@ class StreamingProcessor:
             )
             return
 
-        if (self._extract_generate_params(wi) or {}).get("grammar") is not None:
+        raw_params = self._extract_generate_params(wi) or {}
+        if request_constrains_decoding(
+            raw_params.get("grammar"), raw_params.get("tools"), raw_params.get("tool_choice")
+        ):
             try:
                 model_id = resolve_grammar_serving_model(self._registry, model_id)
             except GenerationError as exc:
@@ -2003,7 +2034,8 @@ class StreamingProcessor:
                 config,
                 params.reasoning_effort,
                 model=model_id,
-                grammar=params.grammar is not None and isinstance(params.input, _MessagesInput),
+                grammar=request_constrains_decoding(params.grammar, params.tools, params.tool_choice)
+                and isinstance(params.input, _MessagesInput),
             )
         except GenerationError as exc:
             await self._terminal_error_then_settle(
@@ -2041,7 +2073,7 @@ class StreamingProcessor:
                 or params.grammar is not None
                 or (effort is not None and effort.upstream is not None)
                 or tool_choice_mode in ("required", "named")
-                or any(tool.get("function", {}).get("strict") is True for tool in effective_tools or ())
+                or has_strict_tools(effective_tools)
                 or (params.n is not None and params.n > 1)
                 or (
                     isinstance(adapter, OpenAIUpstreamAdapter)
@@ -2318,15 +2350,20 @@ class StreamingProcessor:
         forcing_grammar: GrammarSpec | None = None
         if effective_tools and not remote_chat:
             try:
-                forcing_grammar = build_tool_choice_grammar(effective_tools, params.tool_choice, tool_call_format)
-            except ToolChoiceError as exc:
+                if has_strict_tools(effective_tools):
+                    forcing_grammar = self._strict_tool_grammar(adapter, params, effective_tools, tool_call_format)
+                else:
+                    forcing_grammar = build_tool_choice_grammar(effective_tools, params.tool_choice, tool_call_format)
+            except (StrictToolError, ToolChoiceError) as exc:
+                param = exc.param if isinstance(exc, StrictToolError) else None
                 await self._terminal_error_then_settle(
                     reply_subject,
                     request_id=request_id,
                     attempt_id=attempt_id,
                     seq=0,
-                    code="invalid_request",
+                    code="invalid_request" if param is None else "unsupported_field",
                     message=str(exc),
+                    param=param,
                     msg=msg,
                 )
                 return
@@ -2610,6 +2647,9 @@ class StreamingProcessor:
                 parallel_tool_calls=parallel_tool_calls,
                 tools=tools,
             )
+            # The grammar constrains strict tool arguments while they are
+            # generated; this guarantees each call against its full schema.
+            chunks_iter = enforce_strict_tool_arguments(chunks_iter, strict_tool_schemas(tools))
         chunks_iter = enforce_strict_grammar(chunks_iter, grammar)
 
         # Bounded chunk queue + a single publisher task drains it. If the

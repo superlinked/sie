@@ -4396,7 +4396,7 @@
             "description": "``auto``, ``none``, ``required``, or ``{\"type\": \"function\" |\n\"custom\", \"name\"}`` naming a declared tool."
           },
           "tools": {
-            "description": "``function`` tools (``name``, ``description``, ``parameters``,\n``strict`` only ``false``) and ``custom`` tools (``name``,\n``description``, ``format``, which is not enforced), at most 64,\nnames matching ``^[a-zA-Z0-9_-]{1,64}$``. Hosted tool types are\nrefused."
+            "description": "``function`` tools (``name``, ``description``, ``parameters``,\n``strict``, which the chat route enforces) and ``custom`` tools\n(``name``, ``description``, ``format``, which is not enforced), at most 64,\nnames matching ``^[a-zA-Z0-9_-]{1,64}$``. Hosted tool types are\nrefused."
           },
           "top_p": {
             "description": "Checked as on ``/v1/chat/completions``.",

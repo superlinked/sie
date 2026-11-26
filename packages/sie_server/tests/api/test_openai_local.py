@@ -2180,6 +2180,25 @@ def _serve_grammar_routed_configs(registry: MagicMock, *, without: tuple[str, ..
     registry.get_config.side_effect = configs.__getitem__
 
 
+def test_cuda_chat_refuses_strict_tools_before_the_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SGLang's own chat endpoint does not constrain tool arguments, so the direct route refuses strict tools."""
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("a strict tool must not reach the child")
+
+    client, _registry = _cuda_chat_client(monkeypatch, _handler)
+    strict_tool = {**_WEATHER_TOOL, "function": {**_WEATHER_TOOL["function"], "strict": True}}
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "upstream/repo", "messages": [{"role": "user", "content": "hi"}], "tools": [strict_tool]},
+    )
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "unsupported_field"
+    assert error["param"] == "tools[0].function.strict"
+
+
 def test_cuda_chat_strict_schema_with_unevaluated_properties_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     def _handler(_request: httpx.Request) -> httpx.Response:
         raise AssertionError("an unverifiable strict schema must not reach the child")

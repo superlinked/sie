@@ -201,7 +201,7 @@ _EVICTION_REASONS: Final = frozenset(
     }
 )
 _P50_KINDS: Final = frozenset({"observed", "target"})
-_GRAMMAR_MODES: Final = frozenset({"none", "json_schema", "regex", "ebnf", _OTHER})
+_GRAMMAR_MODES: Final = frozenset({"none", "json_schema", "regex", "ebnf", "structural_tag", _OTHER})
 _GRAMMAR_BACKENDS: Final = frozenset({"outlines", "xgrammar", "llguidance", _OTHER})
 _GRAMMAR_PHASES: Final = frozenset({"request", "prewarm", _OTHER})
 _GRAMMAR_OUTCOMES: Final = frozenset({"success", "error", "timeout", _OTHER})

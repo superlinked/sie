@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 import httpx
+import orjson
 
 from sie_server.adapters._generation_base import (
     REASONING_CONTROL_TOKENS,
@@ -48,6 +49,7 @@ from sie_server.adapters._generation_base import (
     GenerationInputTooLongError,
     GenerationInvalidRequestError,
     GenerationResult,
+    GenerationUnsupportedFieldError,
     ReasoningFormat,
     reasoning_expected_after_prompt,
     reasoning_starts_in_prompt,
@@ -369,7 +371,21 @@ async def _raise_for_sglang_http_error(
                 raise GenerationInvalidRequestError("grammar", OUTLINES_JSON_SCHEMA_TYPE_MESSAGE)
             _raise_for_media_load_error(message)
             _raise_for_window_refusal(message)
+            if (
+                grammar is not None
+                and grammar.kind == "structural_tag"
+                and isinstance(message, str)
+                and "structural_tag" in message
+            ):
+                raise _strict_tool_unsupported()
     response.raise_for_status()
+
+
+def _strict_tool_unsupported() -> GenerationUnsupportedFieldError:
+    """A strict tool schema the backend cannot compile is unsupported, as OpenAI reports it."""
+    return GenerationUnsupportedFieldError(
+        "tools", "The generation backend cannot enforce a strict tool's parameters schema"
+    )
 
 
 def _raise_for_sglang_event_error(
@@ -399,6 +415,10 @@ def _raise_for_sglang_event_error(
                     and finish.get("message") == _JSON_SCHEMA_TYPE_DIAGNOSTIC
                 ):
                     raise GenerationInvalidRequestError("grammar", OUTLINES_JSON_SCHEMA_TYPE_MESSAGE)
+                if grammar.kind == "structural_tag":
+                    # Built from strict tool schemas; the only 400 abort for a
+                    # grammar request that is not a window refusal is its compile.
+                    raise _strict_tool_unsupported()
                 raise GenerationInvalidRequestError(
                     "grammar", f"The generation backend rejected the requested {grammar.kind} grammar"
                 )
@@ -1709,6 +1729,10 @@ class SGLangGenerationAdapter(SGLangLoraMixin, GenerationAdapter):
                 # The gateway has size-capped the source via ``MAX_EBNF_LEN``;
                 # further compile-time validation happens inside the backend.
                 sampling_params["ebnf"] = grammar.value
+            elif grammar.kind == "structural_tag":
+                # Built by the worker for ``strict`` function tools and only on
+                # an XGrammar backend, which compiles SGLang's ``structural_tag``.
+                sampling_params["structural_tag"] = orjson.dumps(grammar.value).decode()
 
         thinking_budget = self._thinking_budget_spec(prompt) if require_reasoning else None
         if thinking_budget is not None:

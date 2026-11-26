@@ -37,7 +37,7 @@ from typing import Literal
 
 # Backend literal kept here (and not in :mod:`grammar_cache`) so callers
 # building cache keys don't import the cache module just for the tag.
-GrammarKind = Literal["json_schema", "regex", "ebnf"]
+GrammarKind = Literal["json_schema", "regex", "ebnf", "structural_tag"]
 
 OUTLINES_JSON_SCHEMA_TYPE_DIAGNOSTIC = "'type' must be a string"
 OUTLINES_JSON_SCHEMA_TYPE_MESSAGE = (
@@ -55,7 +55,10 @@ class GrammarSpec:
             Schema object (``dict``); ``"regex"`` and ``"ebnf"`` mean
             ``value`` is a string (regex pattern or EBNF source).
             Mutual exclusivity is enforced by the gateway before this
-            dataclass is built.
+            dataclass is built. ``"structural_tag"`` is worker-internal:
+            the worker builds it for ``strict`` function tools (see
+            :func:`~sie_server.processors.tool_call_grammar.build_strict_tool_grammar`)
+            and ``value`` is an XGrammar structural-tag object (``dict``).
         value: The schema or grammar payload itself. Type depends on
             ``kind`` — ``dict`` for ``json_schema``, ``str`` for
             ``regex`` and ``ebnf``. The gateway has already enforced

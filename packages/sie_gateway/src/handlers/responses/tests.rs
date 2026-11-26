@@ -952,6 +952,70 @@ async fn chat_refusals_name_the_responses_field() {
     assert!(gateway.dispatcher.dispatched().is_empty());
 }
 
+const GRAMMAR_CODER_MODEL: &str = "\
+sie_id: acme/gcoder
+hf_id: acme/gcoder
+tasks:
+  generate:
+    max_output_tokens: 64
+    grammar_profile: no-spec
+    capabilities:
+      tools: true
+profiles:
+  default:
+    adapter_path: sie_server.adapters.sglang:SGLangAdapter
+    max_batch_tokens: 8192
+  no-spec:
+    adapter_path: sie_server.adapters.sglang:SGLangAdapter
+    max_batch_tokens: 8192
+";
+
+#[tokio::test]
+async fn a_strict_function_tool_is_served_on_the_grammar_profile() {
+    let gateway = chat_gateway(
+        &[GRAMMAR_CODER_MODEL],
+        &["acme/gcoder", "acme/gcoder:no-spec"],
+    )
+    .await;
+    let cases = [
+        (json!(true), json!("auto"), "acme/gcoder:no-spec"),
+        (json!(false), json!("auto"), "acme/gcoder"),
+        (json!(true), json!("none"), "acme/gcoder"),
+    ];
+    for (strict, tool_choice, dispatched_model) in cases {
+        let response = proxy_responses(
+            State(Arc::clone(&gateway.state)),
+            responses_request(json!({
+                "model": "acme/gcoder",
+                "input": "Run ls.",
+                "max_output_tokens": 32,
+                "tools": [{
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}},
+                    "strict": strict,
+                }],
+                "tool_choice": tool_choice,
+            })),
+        )
+        .await;
+        let status = response.status();
+        let body = json_body(response).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "strict={strict} tool_choice={tool_choice}: {body}"
+        );
+        assert_eq!(body["model"], "acme/gcoder", "{body}");
+        let dispatched = gateway.dispatcher.dispatched();
+        assert_eq!(
+            dispatched.last().map(|work| work.model.as_str()),
+            Some(dispatched_model),
+            "strict={strict} tool_choice={tool_choice}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_translation_refusal_publishes_nothing() {
     let gateway = chat_gateway(&[HYBRID_GENERATE_MODEL], &["acme/chat"]).await;
