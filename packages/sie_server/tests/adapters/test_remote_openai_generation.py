@@ -2,6 +2,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractContextManager
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -105,7 +106,6 @@ async def test_raw_prompt_pins_endpoint_model_usage_and_operator_fields(adapter:
         "max_tokens": 9,
         "temperature": 1.0,
         "top_p": 1.0,
-        "n": 1,
         "echo": False,
         "seed": 4,
         "model": "operator/model",
@@ -115,6 +115,65 @@ async def test_raw_prompt_pins_endpoint_model_usage_and_operator_fields(adapter:
     }
     assert stream.closed
     assert upstream_limiter("generation-test")._in_flight == 0
+
+
+@pytest.mark.parametrize("chat", [False, True])
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("samples", [None, 1, 2])
+async def test_generation_wire_omits_only_the_default_sample_count(
+    adapter: OpenAIUpstreamAdapter, chat: bool, streaming: bool, samples: int | None
+) -> None:
+    body: dict[str, Any] = {
+        "max_tokens": 9,
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
+    if chat:
+        body.update(
+            messages=[{"role": "user", "content": "Update the greeting."}],
+            tools=[{"type": "function", "function": {"name": "edit", "parameters": {"type": "object"}}}],
+            tool_choice={"type": "function", "function": {"name": "edit"}},
+            parallel_tool_calls=True,
+        )
+    else:
+        body["prompt"] = "Update the greeting."
+    if samples is not None:
+        body["n"] = samples
+    original = deepcopy(body)
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        sent = json.loads(request.content)
+        if sent.get("n") == 1:
+            return httpx.Response(400, json={"error": {"message": "Explicit single-choice count is unsupported"}})
+        if samples in (None, 1):
+            assert "n" not in sent
+        else:
+            assert sent["n"] == samples
+        for field in original.keys() - {"n"}:
+            assert sent[field] == original[field]
+        assert sent["model"] == "operator/model"
+        assert sent["stream"] is streaming
+        assert sent.get("stream_options") == ({"include_usage": True} if streaming else None)
+        assert request.url.path == ("/prefix/v1/chat/completions" if chat else "/prefix/v1/completions")
+        return httpx.Response(200, json={"accepted": True})
+
+    answer_with(adapter, respond)
+    client, request = adapter._generation_request(body, chat=chat, stream=streaming)
+    response = await client.send(request)
+    assert response.status_code == 200
+    assert len(requests) == 1
+    assert body == original
+
+
+@pytest.mark.parametrize("samples", [True, 1.0])
+def test_non_integer_sample_counts_are_not_reinterpreted(adapter: OpenAIUpstreamAdapter, samples: object) -> None:
+    _, request = adapter._generation_request({"messages": [], "n": samples}, chat=True, stream=False)
+    sent = json.loads(request.content)
+    assert type(sent["n"]) is type(samples)
+    assert sent["n"] == samples
 
 
 @pytest.mark.parametrize("streaming", [False, True])
@@ -313,6 +372,7 @@ def test_native_generation_crosses_real_wire_through_sdk(
     assert streamed[-1]["usage"] == USAGE
     assert len(calls) == 2
     assert all(call["model"] == "operator/model" and call["prompt"] == "rendered prompt" for call in calls)
+    assert all("n" not in call for call in calls)
 
 
 @pytest.mark.parametrize("caller_field", ["max_tokens", "max_completion_tokens"])
