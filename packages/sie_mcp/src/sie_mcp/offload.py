@@ -135,27 +135,15 @@ async def summarize_document(
     reduction_rounds = 0
 
     if len(chunks) == 1:
-        result = await client.generate(
-            model,
-            _SINGLE_PROMPT.format(text=chunks[0]),
-            max_new_tokens=reduce_tokens,
-            gpu=gpu,
-            wait_for_capacity=True,
-            provision_timeout_s=REQUEST_TIMEOUT_S,
+        summary = await _complete(
+            client, model, _SINGLE_PROMPT.format(text=chunks[0]), max_tokens=reduce_tokens, gpu=gpu
         )
-        summary = _generated_text(result)
     else:
         summaries: list[str] = []
         for chunk in chunks:
-            result = await client.generate(
-                model,
-                _MAP_PROMPT.format(chunk=chunk),
-                max_new_tokens=map_tokens,
-                gpu=gpu,
-                wait_for_capacity=True,
-                provision_timeout_s=REQUEST_TIMEOUT_S,
+            summaries.append(
+                await _complete(client, model, _MAP_PROMPT.format(chunk=chunk), max_tokens=map_tokens, gpu=gpu)
             )
-            summaries.append(_generated_text(result))
         summary, reduce_calls, reduction_rounds = await _reduce_summaries(
             client,
             summaries,
@@ -205,16 +193,10 @@ async def _reduce_summaries(
                 next_round.append(batch[0])
                 continue
             parts = "\n\n".join(f"## Section {i}\n{part}" for i, part in enumerate(batch, start=1))
-            result = await client.generate(
-                model,
-                _REDUCE_PROMPT.format(parts=parts),
-                max_new_tokens=max_new_tokens,
-                gpu=gpu,
-                wait_for_capacity=True,
-                provision_timeout_s=REQUEST_TIMEOUT_S,
+            next_round.append(
+                await _complete(client, model, _REDUCE_PROMPT.format(parts=parts), max_tokens=max_new_tokens, gpu=gpu)
             )
             reduce_calls += 1
-            next_round.append(_generated_text(result))
         if len(next_round) >= len(current):
             raise OffloadError("summary reduction did not make progress")
         current = next_round
@@ -225,11 +207,30 @@ def _batches(items: Sequence[str], batch_size: int) -> list[list[str]]:
     return [list(items[index : index + batch_size]) for index in range(0, len(items), batch_size)]
 
 
-def _generated_text(result: Mapping[str, Any]) -> str:
-    text = result.get("text")
-    if not isinstance(text, str):
+async def _complete(client: Any, model: str, prompt: str, *, max_tokens: int, gpu: str | None) -> str:
+    """Run one summary prompt as a chat completion and return the answer text.
+
+    The chat route renders the model's chat template, so the instruction is a
+    user turn and the profile's template settings apply (Qwen3.5's
+    ``enable_thinking: false``). A native ``/v1/generate`` text prompt skips the
+    template: an instruction-tuned model may continue the text instead of
+    answering it, or spend tokens on reasoning that is never returned.
+    """
+    response = await client.chat_completions(
+        model,
+        [{"role": "user", "content": prompt}],
+        max_completion_tokens=max_tokens,
+        gpu=gpu,
+        wait_for_capacity=True,
+        provision_timeout_s=REQUEST_TIMEOUT_S,
+    )
+    choices = response.get("choices") if isinstance(response, Mapping) else None
+    first = choices[0] if isinstance(choices, Sequence) and choices else None
+    message = first.get("message") if isinstance(first, Mapping) else None
+    content = message.get("content") if isinstance(message, Mapping) else None
+    if not isinstance(content, str):
         raise OffloadError("generation result did not include text")
-    return text
+    return content
 
 
 def _extract_windows(content: str, window_words: int, overlap_words: int) -> list[tuple[int, str]]:
