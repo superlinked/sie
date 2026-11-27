@@ -178,8 +178,10 @@ def _adapter_has_releasable_memory(adapter: ModelAdapter) -> bool:
 def _collect_then_unload(adapter: ModelAdapter) -> None:
     """Release a failed load: collect garbage, then ``unload()``.
 
-    The failed attempt's frames take two collector passes to free and
-    ``unload()`` runs one, so they would outlive its cache release.
+    The failed attempt's allocations are reachable only through its
+    exception's traceback, so a collection frees them only once nothing
+    refers to that exception. The caller must have left the ``except``
+    clause and, on the event loop, ended the task step that delivered it.
     """
     gc.collect()
     adapter.unload()
@@ -1865,8 +1867,17 @@ class ModelRegistry:
 
     async def _release_failed_load(self, adapter: ModelAdapter, name: str) -> bool:
         """Free the device memory a load that raised had already allocated; False if that raised."""
+        teardown = functools.partial(_collect_then_unload, adapter)
         try:
-            await self._run_adapter_unload(adapter, name, teardown=functools.partial(_collect_then_unload, adapter))
+            try:
+                # The task step that threw the load's exception into this
+                # coroutine holds it until the coroutine next suspends.
+                await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                with contextlib.suppress(Exception):
+                    await self._run_adapter_unload(adapter, name, teardown=teardown)
+                raise
+            await self._run_adapter_unload(adapter, name, teardown=teardown)
         except Exception:
             logger.exception("Releasing the failed load of '%s' raised", name)
             return False
