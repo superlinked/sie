@@ -1,6 +1,6 @@
 {
   "name": "@superlinked/sie-chroma",
-  "version": "0.11.2",
+  "version": "0.11.3",
   "description": "SIE embedding function for ChromaDB",
   "type": "module",
   "main": "./dist/index.cjs",

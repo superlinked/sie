@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.3](https://github.com/superlinked/sie/compare/v0.11.2...v0.11.3) (2026-11-27)
+
+
+### Bug Fixes
+
+* **release:** skip the onnxruntime-node CUDA download before every pnpm install ([#1035](https://github.com/superlinked/sie/issues/1035)) ([4b8a540](https://github.com/superlinked/sie/commit/4b8a540898e987379417286b00c04103beb0e4cf))
+
 ## [0.11.2](https://github.com/superlinked/sie/compare/v0.11.1...v0.11.2) (2026-11-26)
 
 
