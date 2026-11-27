@@ -179,6 +179,14 @@ def _stop_patches() -> Iterator[None]:
     patch.stopall()
 
 
+@pytest.fixture(autouse=True)
+def _collect_the_whole_heap() -> None:
+    # A failed load's memory is free only once the event loop task that
+    # received its exception has yielded. A collection over the whole heap
+    # takes long enough for that; one that skips frozen objects does not.
+    gc.unfreeze()
+
+
 async def test_retry_runs_after_the_failed_attempt_is_released() -> None:
     device = _Device(total_bytes=10 * GIB)
     registry = await _registry(
