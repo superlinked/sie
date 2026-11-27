@@ -8,6 +8,10 @@
 # The runner image has no node-gyp on PATH, so install it into the mise node
 # tree, and point node-gyp at that tree's headers so it does not fetch them
 # from nodejs.org either.
+#
+# onnxruntime-node (pulled in by @huggingface/transformers) downloads CUDA
+# provider binaries from a GitHub release on every Linux x64 install; the
+# runners have no GPU, so skip that download.
 set -euo pipefail
 
 NODE_GYP_VERSION=12.4.0
@@ -24,5 +28,6 @@ mise exec --no-deps node -- npm install --global --no-fund --no-audit --fetch-re
 node_dir="$(mise where node)"
 if [ -n "${GITHUB_ENV:-}" ]; then
   echo "npm_config_nodedir=${node_dir}" >> "$GITHUB_ENV"
+  echo "ONNXRUNTIME_NODE_INSTALL_CUDA=skip" >> "$GITHUB_ENV"
 fi
 mise exec --no-deps node -- node-gyp --version

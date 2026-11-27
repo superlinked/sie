@@ -149,6 +149,7 @@ def test_pnpm_installs_prepare_local_native_builds():
     assert re.search(r"node-gyp@\$\{NODE_GYP_VERSION\}", script)
     assert re.search(r"^NODE_GYP_VERSION=[0-9.]+$", script, re.MULTILINE)
     assert "npm_config_nodedir" in script
+    assert 'echo "ONNXRUNTIME_NODE_INSTALL_CUDA=skip" >> "$GITHUB_ENV"' in script
     # The cold bootstrap lane has no tool installed when this runs: node is
     # installed serially, like tools/init.sh does, and nothing else lazily.
     assert "mise install --jobs=1 node" in script
