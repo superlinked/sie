@@ -7,6 +7,7 @@ All server management is inline to avoid cross-package dependencies.
 from __future__ import annotations
 
 import contextlib
+import gc
 import logging
 import os
 import signal
@@ -28,6 +29,14 @@ logger = logging.getLogger(__name__)
 
 # Project root (for finding models directory, Dockerfiles, etc.)
 _project_root = Path(__file__).parent.parent.parent.parent
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _freeze_session_heap() -> None:
+    # Adapter.unload() runs a full gc.collect() whose cost grows with every
+    # object the session has accumulated; frozen objects are skipped.
+    gc.collect()
+    gc.freeze()
 
 
 @pytest.fixture(scope="session")
