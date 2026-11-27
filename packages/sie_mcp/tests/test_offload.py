@@ -18,12 +18,14 @@ _FILLER = "The committee reviewed the figures, then adjourned. "  # 9 GLiNER wor
 
 class _FakeOffloadClient:
     def __init__(self) -> None:
-        self.generate_calls: list[dict[str, Any]] = []
+        self.chat_calls: list[dict[str, Any]] = []
         self.extract_calls: list[dict[str, Any]] = []
 
-    async def generate(self, model: str, prompt: str, **kwargs: Any) -> dict[str, str]:
-        self.generate_calls.append({"model": model, "prompt": prompt, **kwargs})
-        return {"text": f"summary {len(self.generate_calls)}"}
+    async def chat_completions(self, model: str, messages: list[dict[str, str]], **kwargs: Any) -> dict[str, Any]:
+        (message,) = messages
+        assert message["role"] == "user"
+        self.chat_calls.append({"model": model, "prompt": message["content"], **kwargs})
+        return {"choices": [{"message": {"role": "assistant", "content": f"summary {len(self.chat_calls)}"}}]}
 
     async def extract(self, model: str, items: Any, **kwargs: Any) -> Any:
         self.extract_calls.append({"model": model, "items": items, **kwargs})
@@ -75,8 +77,8 @@ async def test_summarize_document_uses_map_reduce_for_large_content() -> None:
     assert result["summary"] == "summary 3"
     assert result["metadata"]["chunks"] == 2
     assert result["metadata"]["token_savings_estimate"] > 0
-    assert [call["model"] for call in client.generate_calls] == ["gen", "gen", "gen"]
-    assert all(call["gpu"] == "l4" for call in client.generate_calls)
+    assert [call["model"] for call in client.chat_calls] == ["gen", "gen", "gen"]
+    assert all(call["gpu"] == "l4" for call in client.chat_calls)
 
 
 async def test_summarize_document_reduces_many_chunks_hierarchically() -> None:
@@ -91,13 +93,43 @@ async def test_summarize_document_reduces_many_chunks_hierarchically() -> None:
         max_output_tokens=128,
     )
 
-    reduce_prompts = [call["prompt"] for call in client.generate_calls if "SECTION SUMMARIES:" in call["prompt"]]
+    reduce_prompts = [call["prompt"] for call in client.chat_calls if "SECTION SUMMARIES:" in call["prompt"]]
     assert result["metadata"]["chunks"] == chunk_count
     assert result["metadata"]["reduce_calls"] == 2
     assert result["metadata"]["reduction_rounds"] == 2
     assert result["summary"] == f"summary {chunk_count + 2}"
-    assert len(client.generate_calls) == chunk_count + 2
+    assert len(client.chat_calls) == chunk_count + 2
     assert all(prompt.count("## Section") <= offload.SUMMARY_REDUCE_BATCH_SIZE for prompt in reduce_prompts)
+
+
+async def test_summarize_document_sends_each_prompt_as_a_capped_chat_completion() -> None:
+    client = _FakeOffloadClient()
+
+    result = await offload.summarize_document(client, content="Alice met Bob.", model="gen", max_output_tokens=96)
+
+    (call,) = client.chat_calls
+    assert result["summary"] == "summary 1"
+    assert "Alice met Bob." in call["prompt"]
+    assert call["max_completion_tokens"] == 96
+    assert call["wait_for_capacity"] is True
+    assert call["provision_timeout_s"] == offload.REQUEST_TIMEOUT_S
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"choices": []},
+        {"choices": [{"message": {"role": "assistant", "content": None}}]},
+        {"choices": [{"message": {"role": "assistant", "content": "   "}}]},
+    ],
+)
+async def test_summarize_document_refuses_a_completion_without_answer_text(response: dict[str, Any]) -> None:
+    class _NoAnswerClient(_FakeOffloadClient):
+        async def chat_completions(self, model: str, messages: list[dict[str, str]], **kwargs: Any) -> dict[str, Any]:
+            return response
+
+    with pytest.raises(offload.OffloadError):
+        await offload.summarize_document(_NoAnswerClient(), content="Alice met Bob.", model="gen")
 
 
 async def test_extract_entities_returns_entities_and_markdown_table() -> None:
