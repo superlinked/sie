@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import Mock
@@ -94,13 +95,15 @@ def test_cpu_builds_all_six_images_without_publish(monkeypatch, tmp_path):
     )
 
 
-def test_cpu_build_failure_names_the_image_after_every_build_ran(monkeypatch, tmp_path):
+def test_cpu_build_failures_name_each_image_after_every_build_ran(monkeypatch, tmp_path):
     def run(command, **_kwargs):
+        if "sie-config" in command:
+            raise subprocess.TimeoutExpired(command, 3600)
         return Mock(returncode=int("sie-gateway" in command))
 
     calls = Mock(side_effect=run)
     monkeypatch.setattr(cpu_stack_smoke.subprocess, "run", calls)
-    with pytest.raises(RuntimeError, match="Docker build failed for sie-gateway$"):
+    with pytest.raises(RuntimeError, match="Docker build failed for sie-config, sie-gateway$"):
         cpu_stack_smoke.build_images("local/test", "a" * 40, tmp_path)
     assert calls.call_count == 6
 

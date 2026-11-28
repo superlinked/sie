@@ -147,24 +147,28 @@ def build_images(registry: str, revision: str, logs: Path) -> None:
     builds = {"sie-server": ["build-server", "--platform", "cpu", "--bundle", "default", *common]}
     builds.update({service: ["build-service", "--service", service, *common] for service in SERVICES})
 
-    def build(name: str) -> int:
+    def build(name: str) -> str:
         with (logs / f"build-{name}.log").open("w") as log:
-            return subprocess.run(
-                [sys.executable, "-m", "tools.mise_tasks.docker_task", *builds[name]],
-                check=False,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                timeout=3600,
-            ).returncode
+            try:
+                status = subprocess.run(
+                    [sys.executable, "-m", "tools.mise_tasks.docker_task", *builds[name]],
+                    check=False,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    timeout=3600,
+                ).returncode
+            except subprocess.TimeoutExpired:
+                return "timed out"
+        return f"exit {status}"
 
     # Concurrent builds write to one log each, printed whole when the build
     # ends, so their output does not interleave.
     failed = []
     with ThreadPoolExecutor(max_workers=len(builds)) as pool:
-        for name, status in zip(builds, pool.map(build, builds), strict=True):
-            print(f"--- docker build {name}: exit {status} ---")
+        for name, outcome in zip(builds, pool.map(build, builds), strict=True):
+            print(f"--- docker build {name}: {outcome} ---")
             print((logs / f"build-{name}.log").read_text(), flush=True)
-            if status:
+            if outcome != "exit 0":
                 failed.append(name)
     if failed:
         raise RuntimeError(f"Docker build failed for {', '.join(failed)}")
