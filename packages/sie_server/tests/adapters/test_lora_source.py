@@ -220,6 +220,49 @@ def test_explicit_local_hf_snapshot_supports_owned_blob_links(
         resolve_lora_source(str(selected), SHA)
 
 
+@pytest.mark.parametrize("selected_alias", [False, True])
+def test_explicit_local_hf_snapshot_supports_shared_cache_blob_links(
+    cache_policy: tuple[Path, Path], tmp_path: Path, selected_alias: bool
+) -> None:
+    directory = snapshot(tmp_path / "explicit-cache")
+    repository = directory.parent.parent
+    shared = tmp_path / "explicit-cache" / "blobs" / "bb" / ("b" * 64)
+    shared.parent.mkdir(parents=True)
+    shared.write_bytes(b"shared weights")
+    (repository / "blobs").mkdir()
+    (repository / "blobs" / "weights").symlink_to(shared)
+    (directory / FILES[1]).unlink()
+    (directory / FILES[1]).symlink_to(Path("../../blobs") / "weights")
+    selected = directory
+    if selected_alias:
+        selected = tmp_path / "selected"
+        selected.symlink_to(directory, target_is_directory=True)
+
+    assert resolve_lora_source(str(selected)) == directory
+
+
+@pytest.mark.parametrize("escape", ["other-cache-shared-blob", "shared-blob-bad-prefix", "shared-blob-bad-name"])
+def test_explicit_local_snapshot_rejects_foreign_or_malformed_shared_blob_links(
+    cache_policy: tuple[Path, Path], tmp_path: Path, escape: str
+) -> None:
+    directory = snapshot(tmp_path / "explicit-cache")
+    repository = directory.parent.parent
+    if escape == "other-cache-shared-blob":
+        target = tmp_path / "other-cache" / "blobs" / "cc" / ("c" * 64)
+    elif escape == "shared-blob-bad-prefix":
+        target = tmp_path / "explicit-cache" / "blobs" / "00" / ("d" * 64)
+    else:
+        target = tmp_path / "explicit-cache" / "blobs" / "ee" / ("e" * 63)
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"foreign shared weights")
+    (repository / "blobs").mkdir()
+    (repository / "blobs" / "weights").symlink_to(target)
+    (directory / FILES[1]).unlink()
+    (directory / FILES[1]).symlink_to(Path("../../blobs") / "weights")
+    with pytest.raises(ValueError, match="escapes"):
+        resolve_lora_source(str(directory))
+
+
 @pytest.mark.parametrize("escape", ["other-repository", "blobs-directory-alias", "non-hf-layout"])
 def test_explicit_local_snapshot_does_not_allow_unowned_blob_links(
     cache_policy: tuple[Path, Path], tmp_path: Path, escape: str
