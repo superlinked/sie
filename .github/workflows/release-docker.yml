@@ -47,8 +47,9 @@ jobs:
   build-server:
     needs: matrix
     # Layer export, image save and artifact upload take most of this job and
-    # do not use more cores.
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # do not use more cores. Disk sets the size: a CUDA image, its build cache
+    # and its archive need more than the 80 GB of a 4-vCPU runner.
+    runs-on: ${{ matrix.platform == 'cpu' && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-8vcpu-ubuntu-2404' }}
     timeout-minutes: 120
     permissions:
       contents: read
@@ -92,6 +93,9 @@ jobs:
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'release' && 30 || 5 }}
           compression-level: 0
+      - name: Report disk use
+        if: always()
+        run: df -h /
       - id: restore-evidence
         name: Reuse original image verification evidence on retry
         if: github.run_attempt > 1
