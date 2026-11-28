@@ -177,5 +177,6 @@ serviceAccount:
   # eks.amazonaws.com/role-arn: <ARN>  # inject via --set at deploy time
 
 dcgm-exporter:
-  # AWS GPU nodes use taints, not the GCP accelerator label
-  nodeSelector: {}
+  # GPU node label set by the terraform-aws-sie GPU node groups
+  nodeSelector:
+    sie.superlinked.com/node-type: gpu
