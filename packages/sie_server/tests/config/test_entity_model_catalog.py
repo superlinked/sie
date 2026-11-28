@@ -18,6 +18,7 @@ PRIVACY_ADAPTER = "sie_server.adapters.privacy_filter.adapter:PrivacyFilterAdapt
     [
         ("fastino/gliner2.5-base-v1", "ca906247640776a07753514055be9726f9080ead", GLINER_ADAPTER, 4096),
         ("fastino/gliner2.5-small-v1", "7132dc4561c3f94563c6147e75ffa8ef34c4964a", GLINER_ADAPTER, 4096),
+        ("fastino/gliner2.5-multi-v1", "2ca71aafb3446d9014e1c55c7ff51c9bc7209c47", GLINER_ADAPTER, 4096),
         ("fastino/gliner2-privacy-filter-PII-multi", "1cb4166094dc58fa8d836429f060d6c95f62b495", GLINER_ADAPTER, 4096),
         ("openai/privacy-filter", "7ffa9a043d54d1be65afb281eddf0ffbe629385b", PRIVACY_ADAPTER, 128000),
     ],
