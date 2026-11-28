@@ -1,7 +1,9 @@
-"""Every error answer on the server's OpenAI-compatible routes uses the OpenAI envelope."""
+"""Every ``detail`` error answer on the server's OpenAI-compatible routes uses the OpenAI envelope."""
 
 from __future__ import annotations
 
+import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -13,6 +15,7 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from starlette.routing import Route
+from starlette.types import Message, Receive, Scope, Send
 
 TOKEN = "openai-envelope-token"  # noqa: S105 - a test credential
 OPENAI_PATHS = [
@@ -35,6 +38,8 @@ OTHER_PATHS = [
     "/v1/systemone",
     "/v1/decisions",
     "/v1/completionsx",
+    "/V1/chat/completions",
+    "/v1/chat%2Fcompletions",
     "/healthz",
 ]
 MISSING = "Missing credentials: send Authorization: Bearer <token> or x-api-key: <token>"
@@ -265,3 +270,131 @@ def test_routing_refusals_on_openai_paths_get_the_openai_envelope(served: TestCl
     assert wrong_method.status_code == 405
     assert wrong_method.json()["error"]["code"] == "INVALID_REQUEST"
     assert wrong_method.headers["allow"] == "POST"
+
+
+REFUSAL = b'{"detail": {"code": "UNAUTHORIZED", "message": "no"}}'
+
+
+def _start(status: int, *headers: tuple[bytes, bytes]) -> Message:
+    return {"type": "http.response.start", "status": status, "headers": list(headers)}
+
+
+def _drive(*messages: Message) -> list[Message]:
+    """The messages the layer sends for an app that sends ``messages``."""
+    sent: list[Message] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        for message in messages:
+            await send(message)
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    scope = {"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []}
+    asyncio.run(OpenAIErrorEnvelopeMiddleware(app)(scope, receive, send))
+    return sent
+
+
+def _json(length: int) -> tuple[tuple[bytes, bytes], tuple[bytes, bytes]]:
+    return (b"content-type", b"application/json"), (b"content-length", str(length).encode())
+
+
+@pytest.mark.parametrize(
+    "framing",
+    [
+        (b"content-encoding", b"gzip"),
+        (b"transfer-encoding", b"chunked"),
+        (b"content-length", b"9" * 5000),
+    ],
+)
+def test_encoded_chunked_or_unbounded_framing_passes_through(framing: tuple[bytes, bytes]) -> None:
+    content_type, length = _json(len(REFUSAL))
+    headers = (content_type, framing) if framing[0] == b"content-length" else (content_type, length, framing)
+    answer = [_start(401, *headers), {"type": "http.response.body", "body": REFUSAL}]
+
+    assert _drive(*answer) == answer
+
+
+def test_a_zero_padded_length_is_rewritten() -> None:
+    padded = b"0" * 5000 + str(len(REFUSAL)).encode()
+    sent = _drive(
+        _start(401, (b"content-type", b"application/json"), (b"content-length", padded)),
+        {"type": "http.response.body", "body": REFUSAL},
+    )
+
+    assert json.loads(sent[1]["body"])["error"]["code"] == "UNAUTHORIZED"
+    assert dict(sent[0]["headers"])[b"content-length"] == str(len(sent[1]["body"])).encode()
+
+
+def test_an_identity_encoding_is_rewritten() -> None:
+    sent = _drive(
+        _start(401, *_json(len(REFUSAL)), (b"content-encoding", b"identity")),
+        {"type": "http.response.body", "body": REFUSAL},
+    )
+
+    assert json.loads(sent[1]["body"])["error"]["code"] == "UNAUTHORIZED"
+
+
+def test_a_detail_too_deep_to_render_passes_through() -> None:
+    detail: dict[str, Any] = {"code": "X"}
+    for _ in range(300):
+        detail = {"inner": detail}
+    body = json.dumps({"detail": detail}).encode()
+    answer = [_start(400, *_json(len(body))), {"type": "http.response.body", "body": body}]
+
+    assert _drive(*answer) == answer
+
+
+def test_an_empty_head_answer_passes_through() -> None:
+    answer = [_start(401, *_json(len(REFUSAL))), {"type": "http.response.body", "body": b""}]
+
+    assert _drive(*answer) == answer
+
+
+def test_an_exception_after_a_held_start_keeps_the_status() -> None:
+    sent: list[Message] = []
+
+    async def app(scope: Scope, receive: Receive, send: Send) -> None:
+        await send(_start(401, *_json(len(REFUSAL))))
+        await send({"type": "http.response.body", "body": REFUSAL[:10], "more_body": True})
+        raise RuntimeError("upstream reset")
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    scope = {"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": []}
+    with pytest.raises(RuntimeError, match="upstream reset"):
+        asyncio.run(OpenAIErrorEnvelopeMiddleware(app)(scope, receive, send))
+
+    assert sent == [
+        _start(401, *_json(len(REFUSAL))),
+        {"type": "http.response.body", "body": REFUSAL[:10], "more_body": True},
+    ]
+
+
+def test_the_drain_answer_keeps_its_message_and_retry_after() -> None:
+    body = {
+        "error": "Service shutting down",
+        "detail": "Server is draining requests before shutdown. Retry on another instance.",
+    }
+    encoded = json.dumps(body).encode()
+    sent = _drive(
+        _start(503, *_json(len(encoded)), (b"retry-after", b"5")),
+        {"type": "http.response.body", "body": encoded},
+    )
+
+    assert (b"retry-after", b"5") in sent[0]["headers"]
+    assert json.loads(sent[1]["body"]) == {
+        "error": {
+            "message": "Server is draining requests before shutdown. Retry on another instance.",
+            "type": "server_error",
+            "param": None,
+            "code": "INTERNAL_SERVER_ERROR",
+        }
+    }

@@ -326,6 +326,18 @@ fn openai_error_from_detail_body(status: StatusCode, body: &Value) -> Option<Val
     Some(json!({ "error": error }))
 }
 
+fn is_unencoded(headers: &HeaderMap) -> bool {
+    !headers.contains_key(header::TRANSFER_ENCODING)
+        && headers
+            .get_all(header::CONTENT_ENCODING)
+            .iter()
+            .all(|value| {
+                value
+                    .to_str()
+                    .is_ok_and(|value| value.trim().eq_ignore_ascii_case("identity"))
+            })
+}
+
 fn is_json(headers: &HeaderMap) -> bool {
     headers
         .get(header::CONTENT_TYPE)
@@ -349,13 +361,19 @@ pub async fn openai_error_response(response: Response) -> Response {
         .size_hint()
         .upper()
         .is_some_and(|len| len <= MAX_ERROR_BODY as u64);
-    if !fits || !is_json(response.headers()) {
+    if !fits || !is_json(response.headers()) || !is_unencoded(response.headers()) {
         return response;
     }
     let (mut parts, body) = response.into_parts();
-    let Ok(bytes) = to_bytes(body, MAX_ERROR_BODY).await else {
-        parts.headers.remove(header::CONTENT_LENGTH);
-        return Response::from_parts(parts, Body::empty());
+    let bytes = match to_bytes(body, MAX_ERROR_BODY).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let failed = futures_util::stream::once(std::future::ready(Err::<
+                axum::body::Bytes,
+                axum::Error,
+            >(error)));
+            return Response::from_parts(parts, Body::from_stream(failed));
+        }
     };
     let rendered = serde_json::from_slice::<Value>(&bytes)
         .ok()
@@ -370,8 +388,8 @@ pub async fn openai_error_response(response: Response) -> Response {
     Response::from_parts(parts, Body::from(rendered))
 }
 
-/// Middleware that gives every error answer on the OpenAI-compatible routes
-/// ([`is_openai_path`]) the OpenAI envelope.
+/// Middleware that gives every `detail` error answer on the OpenAI-compatible
+/// routes ([`is_openai_path`]) the OpenAI envelope.
 ///
 /// Compositions that add admission layers around the gateway's routes apply
 /// it outermost (`axum::middleware::from_fn(openai_error_envelope)`), so
@@ -393,8 +411,11 @@ pub async fn openai_error_response(response: Response) -> Response {
 ///
 /// The status, the response extensions and every header are kept, with
 /// `Content-Length` set to the new body. Answers that are already in the
-/// OpenAI envelope, are not JSON, or are not errors pass through untouched,
-/// and so does every answer on another path: `/v1/messages` belongs to
+/// OpenAI envelope, carry another body such as a validation list or none,
+/// are not JSON, are encoded, have an unknown length or more than 1 MiB, or
+/// are not errors pass through untouched. A body that fails while it is read
+/// still fails, after the same status and headers. So does every answer on
+/// another path: `/v1/messages` belongs to
 /// `anthropic_error_envelope`, and the SIE-native routes keep `detail`.
 pub async fn openai_error_envelope(request: Request, next: Next) -> Response {
     if !is_openai_path(request.uri().path()) {
@@ -854,6 +875,88 @@ mod tests {
                 bytes(expected).await,
                 "{case} {path}"
             );
+        }
+
+        #[tokio::test]
+        async fn encoded_unbounded_and_oversized_answers_pass_through_untouched() {
+            fn labelled(name: HeaderName, value: &'static str) -> Response {
+                let mut response = missing_token();
+                response
+                    .headers_mut()
+                    .insert(name, HeaderValue::from_static(value));
+                response
+            }
+            fn gzip() -> Response {
+                labelled(header::CONTENT_ENCODING, "gzip")
+            }
+            fn chunked() -> Response {
+                labelled(header::TRANSFER_ENCODING, "chunked")
+            }
+            fn unknown_length() -> Response {
+                let chunk = Ok::<_, std::convert::Infallible>(axum::body::Bytes::from_static(
+                    br#"{"detail": {"code": "UNAUTHORIZED", "message": "no"}}"#,
+                ));
+                (
+                    StatusCode::UNAUTHORIZED,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    Body::from_stream(futures_util::stream::iter([chunk])),
+                )
+                    .into_response()
+            }
+            fn oversized() -> Response {
+                (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json_detail("X", "a".repeat(MAX_ERROR_BODY))),
+                )
+                    .into_response()
+            }
+            fn scalar() -> Response {
+                (StatusCode::BAD_REQUEST, axum::Json(json!({"detail": 7}))).into_response()
+            }
+            fn null() -> Response {
+                (StatusCode::BAD_REQUEST, axum::Json(json!({"detail": null}))).into_response()
+            }
+
+            let cases: [(&str, MakeResponse); 6] = [
+                ("gzip", gzip),
+                ("chunked", chunked),
+                ("unknown length", unknown_length),
+                ("oversized", oversized),
+                ("scalar detail", scalar),
+                ("null detail", null),
+            ];
+            for (case, make) in cases {
+                assert_untouched("/v1/responses", make, case).await;
+            }
+
+            let identity = labelled(header::CONTENT_ENCODING, "identity");
+            let body: Value =
+                serde_json::from_slice(&bytes(openai_error_response(identity).await).await)
+                    .expect("json");
+            assert_eq!(body["error"]["code"], "UNAUTHORIZED");
+        }
+
+        #[tokio::test]
+        async fn a_body_that_fails_while_read_still_fails() {
+            fn failing() -> Response {
+                let declared = http_body_util::Limited::new(
+                    http_body_util::Full::new(axum::body::Bytes::from_static(
+                        br#"{"detail": {"code": "UNAUTHORIZED", "message": "no"}}"#,
+                    )),
+                    37,
+                );
+                (
+                    StatusCode::UNAUTHORIZED,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    Body::new(declared),
+                )
+                    .into_response()
+            }
+
+            let response = through("/v1/chat/completions", failing).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(response.headers()["content-type"], "application/json");
+            assert!(to_bytes(response.into_body(), usize::MAX).await.is_err());
         }
 
         #[tokio::test]
