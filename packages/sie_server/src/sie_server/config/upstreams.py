@@ -296,6 +296,8 @@ class Upstream(BaseModel):
     """For kind ``openai``: request fields added to every call, in place of any value the server sends."""
     strip_params: frozenset[str] = frozenset()
     """For kind ``openai``: request fields removed from every call."""
+    max_choices: int | None = Field(default=None, ge=1, strict=True)
+    """For kind ``openai``: the most choices (``n``) one generation call may ask for. ``None`` sets no limit."""
     equivalence: EquivalencePolicy | None = Field(default=None, repr=False)
     """For kind ``openai``: local files containing exact-model measured evidence."""
 
@@ -361,7 +363,9 @@ class Upstream(BaseModel):
         if self.kind is UpstreamKind.SIE:
             if self.equivalence is not None:
                 raise UpstreamConfigError("kind sie uses immutable identity, not OpenAI equivalence records")
-            declared = [name for name in ("endpoints", "set_params", "strip_params") if getattr(self, name)]
+            declared = [
+                name for name in ("endpoints", "set_params", "strip_params", "max_choices") if getattr(self, name)
+            ]
             if declared:
                 raise UpstreamConfigError(f"kind sie takes no {' or '.join(declared)}")
         elif not self.endpoints:

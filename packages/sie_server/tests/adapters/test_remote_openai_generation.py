@@ -176,6 +176,43 @@ def test_non_integer_sample_counts_are_not_reinterpreted(adapter: OpenAIUpstream
     assert sent["n"] == samples
 
 
+@pytest.mark.parametrize("chat", [False, True])
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize(("samples", "refused"), [(None, False), (1, False), (2, True)])
+async def test_choices_above_the_upstream_limit_refuse_without_dispatch(
+    adapter: OpenAIUpstreamAdapter, chat: bool, streaming: bool, samples: int | None, refused: bool
+) -> None:
+    assert adapter._upstream is not None
+    adapter._upstream = adapter._upstream.model_copy(update={"max_choices": 1})
+    body: dict[str, Any] = {"max_tokens": 9}
+    body.update({"messages": [{"role": "user", "content": "Hi."}]} if chat else {"prompt": "Hi."})
+    if samples is not None:
+        body["n"] = samples
+    if not refused:
+        _, request = adapter._generation_request(body, chat=chat, stream=streaming)
+        assert "n" not in json.loads(request.content)
+        return
+    with pytest.raises(GenerationUnsupportedFieldError) as raised:
+        adapter._generation_request(body, chat=chat, stream=streaming)
+    assert raised.value.param == "n"
+    assert raised.value.code == "unsupported_field"
+
+
+async def test_chat_choices_above_the_upstream_limit_never_reach_the_upstream(
+    adapter: OpenAIUpstreamAdapter,
+) -> None:
+    assert adapter._upstream is not None
+    adapter._upstream = adapter._upstream.model_copy(update={"max_choices": 1})
+    calls = []
+    answer_with(adapter, lambda request: calls.append(request) or httpx.Response(200))
+    body = {"messages": [{"role": "user", "content": "Hi."}], "max_tokens": 9, "n": 2}
+    with pytest.raises(GenerationUnsupportedFieldError):
+        await adapter.chat_completion(body, requested_model="caller/model")
+    with pytest.raises(GenerationUnsupportedFieldError):
+        adapter.chat_completion_stream(body, requested_model="caller/model")
+    assert calls == []
+
+
 @pytest.mark.parametrize("streaming", [False, True])
 async def test_missing_chat_endpoint_refuses_without_dispatch(adapter: OpenAIUpstreamAdapter, streaming: bool) -> None:
     assert adapter._upstream is not None

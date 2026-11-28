@@ -202,6 +202,12 @@ The operator may add `set_params` and `strip_params` on the upstream. Reserved
 input and response-shaping fields, including `model`, cannot be overridden or
 stripped. Callers cannot pass additional upstream fields or credentials.
 
+Some OpenAI-compatible upstreams refuse the `n` field, so they return a single
+choice per call. Set `max_choices: 1` on such an upstream. A chat or raw
+completion request asking for more choices than `max_choices` is then refused
+with `400 unsupported_field` (param `n`) before anything is sent upstream.
+Without `max_choices`, the server sets no limit.
+
 ## Context window of a remote profile
 
 A generation model with local weights can declare a different window for its

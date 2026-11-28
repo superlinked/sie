@@ -148,6 +148,23 @@ def answer_with(
     adapter._async_client = upstream_client(adapter._upstream, transport=httpx.MockTransport(respond))
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_choices_above_the_upstream_limit_are_refused_before_dispatch(remote_chat: tuple, stream: bool) -> None:
+    client, adapter, _, requests = remote_chat
+    if isinstance(adapter, SieUpstreamAdapter):
+        pytest.skip("max_choices is an openai upstream field")
+    adapter._upstream = adapter._upstream.model_copy(update={"max_choices": 1})
+    answer_with(remote_chat, json_response(200, completion()))
+    response = client.post("/v1/chat/completions", json={**BODY, "n": 2, "stream": stream})
+    assert response.status_code == 400, response.text
+    error = response.json()["error"]
+    assert (error["code"], error["param"]) == ("unsupported_field", "n")
+    assert not requests
+    response = client.post("/v1/chat/completions", json={**BODY, "n": 1, "stream": False})
+    assert response.status_code == 200, response.text
+    assert "n" not in json.loads(requests[0].content)
+
+
 def test_cpu_chat_preserves_identity_exact_usage_and_operator_defaults(remote_chat: tuple) -> None:
     client, _, _, requests = remote_chat
     answer_with(remote_chat, json_response(200, completion(model="private", id="private-id")))

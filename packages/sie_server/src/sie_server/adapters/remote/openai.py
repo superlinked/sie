@@ -196,6 +196,11 @@ class OpenAIUpstreamAdapter(BaseAdapter, GenerationAdapter):
         self, body: dict[str, Any], *, chat: bool, stream: bool
     ) -> tuple[httpx.AsyncClient, httpx.Request]:
         upstream = self._generation_upstream(UpstreamEndpoint.CHAT if chat else UpstreamEndpoint.COMPLETIONS)
+        choices = body.get("n")
+        if upstream.max_choices is not None and type(choices) is int and choices > upstream.max_choices:
+            raise GenerationUnsupportedFieldError(
+                "n", f"'n' above {upstream.max_choices} is not supported by this model"
+            )
         sent = upstream.apply_params({**body, "model": self._upstream_model, "stream": stream})
         if not chat:
             sent["echo"] = False
