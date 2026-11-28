@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -77,15 +79,33 @@ def test_docker_host_override_cannot_hide_remote_endpoint(monkeypatch):
         cpu_stack_smoke.require_local_docker()
 
 
-def test_cpu_builds_all_six_images_without_publish(monkeypatch):
-    run = Mock()
+def test_cpu_builds_all_six_images_without_publish(monkeypatch, tmp_path):
+    run = Mock(return_value=Mock(returncode=0))
     monkeypatch.setattr(cpu_stack_smoke.subprocess, "run", run)
-    cpu_stack_smoke.build_images("local/test", "a" * 40)
-    assert len(run.call_args_list) == 6
+    cpu_stack_smoke.build_images("local/test", "a" * 40, tmp_path)
     commands = [call.args[0] for call in run.call_args_list]
-    assert all(command[:4] == ["mise", "run", "docker", "--"] for command in commands)
+    assert len(commands) == 6
+    assert all(command[:3] == [sys.executable, "-m", "tools.mise_tasks.docker_task"] for command in commands)
     assert all("--push" not in command for command in commands)
-    assert [command[command.index("--service") + 1] for command in commands[1:]] == list(cpu_stack_smoke.SERVICES)
+    assert sum(command[3] == "build-server" for command in commands) == 1
+    services = [command[command.index("--service") + 1] for command in commands if command[3] == "build-service"]
+    assert sorted(services) == sorted(cpu_stack_smoke.SERVICES)
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
+        f"build-{name}.log" for name in ("sie-server", *cpu_stack_smoke.SERVICES)
+    )
+
+
+def test_cpu_build_failures_name_each_image_after_every_build_ran(monkeypatch, tmp_path):
+    def run(command, **_kwargs):
+        if "sie-config" in command:
+            raise subprocess.TimeoutExpired(command, 3600)
+        return Mock(returncode=int("sie-gateway" in command))
+
+    calls = Mock(side_effect=run)
+    monkeypatch.setattr(cpu_stack_smoke.subprocess, "run", calls)
+    with pytest.raises(RuntimeError, match="Docker build failed for sie-config, sie-gateway$"):
+        cpu_stack_smoke.build_images("local/test", "a" * 40, tmp_path)
+    assert calls.call_count == 6
 
 
 def test_cpu_stack_task_wraps_one_harness_and_docker_flag_delegates():
