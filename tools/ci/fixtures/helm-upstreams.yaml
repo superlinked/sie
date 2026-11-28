@@ -25,6 +25,7 @@ values:
     set_params:
       provider: {data_collection: deny}
     strip_params: [user]
+    max_choices: 1
     equivalence:
       max_age_s: 300
       record_files: {local/model: /proofs/local-model.json}
@@ -49,6 +50,7 @@ rendered:
       set_params:
         provider: {data_collection: deny}
       strip_params: [user]
+      max_choices: 1
       equivalence:
         max_age_s: 300
         record_files: {local/model: /proofs/local-model.json}
@@ -109,6 +111,16 @@ definitions:
   - {accepted: false, upstream: {kind: openai, endpoints: [chat], strip_params: [user, user]}}
   - {accepted: false, upstream: {kind: openai, endpoints: [chat], strip_params: [p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16, p17, p18, p19, p20, p21, p22, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32]}}
   - {accepted: false, upstream: {kind: openai, endpoints: [chat], set_params: {user: x}, strip_params: [user]}}
+  - {accepted: true, upstream: {kind: openai, endpoints: [chat], max_choices: 1}}
+  - {accepted: true, upstream: {kind: openai, endpoints: [chat], max_choices: 8}}
+  - {accepted: true, upstream: {kind: openai, endpoints: [chat], max_choices: null}}
+  - {accepted: true, upstream: {kind: sie, max_choices: null}}
+  - {accepted: false, upstream: {kind: sie, max_choices: 1}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [chat], max_choices: 0}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [chat], max_choices: -1}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [chat], max_choices: 1.5}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [chat], max_choices: true}}
+  - {accepted: false, upstream: {kind: openai, endpoints: [chat], max_choices: "1"}}
 
   - {accepted: true, upstream: {kind: sie, breaker: {failures: 3, window_s: 12.5, cooldown_s: 45}}}
   - {accepted: true, upstream: {kind: sie, breaker: {}}}

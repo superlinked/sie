@@ -2202,6 +2202,9 @@ the upstream's Secret.
 {{- with $upstream.equivalence -}}
 {{- $_ := set $entry "equivalence" (dict "max_age_s" (int64 .max_age_s) "record_files" .record_files) -}}
 {{- end -}}
+{{- if not (kindIs "invalid" $upstream.max_choices) -}}
+{{- $_ := set $entry "max_choices" (int64 $upstream.max_choices) -}}
+{{- end -}}
 {{- if $upstream.api_key_secret -}}
 {{- $_ := set $entry "api_key_secret" (include "sie-cluster.upstream.keyEnvName" $name) -}}
 {{- end -}}
@@ -2330,12 +2333,22 @@ Args (dict): url, field, requireTls.
 
 {{/*
 Check the fields of an upstream of kind openai the way the server does: the
-endpoints it offers, and the request fields set or stripped on every call.
+endpoints it offers, the request fields set or stripped on every call, and the
+most choices one call may ask for.
 Names that fail the pattern are not repeated. Args (dict): upstream, path.
 */}}
 {{- define "sie-cluster.upstreams.validateOpenaiFields" -}}
 {{- $upstream := .upstream -}}
 {{- $path := .path -}}
+{{- $maxChoices := $upstream.max_choices -}}
+{{- if not (kindIs "invalid" $maxChoices) -}}
+{{- if eq $upstream.kind "sie" -}}
+{{- fail (printf "%s: kind sie takes no max_choices" $path) -}}
+{{- end -}}
+{{- if not (and (or (kindIs "int" $maxChoices) (kindIs "int64" $maxChoices) (kindIs "float64" $maxChoices)) (eq (float64 $maxChoices) (floor (float64 $maxChoices))) (ge (float64 $maxChoices) 1.0)) -}}
+{{- fail (printf "%s.max_choices must be a positive integer" $path) -}}
+{{- end -}}
+{{- end -}}
 {{- $reserved := list "documents" "encoding_format" "input" "messages" "model" "n" "prompt" "query" "stream" "stream_options" "top_n" -}}
 {{- $namePattern := "^[A-Za-z_][A-Za-z0-9_]{0,63}$" -}}
 {{- if eq $upstream.kind "sie" -}}
@@ -2469,8 +2482,8 @@ credential pasted as a key would otherwise be printed.
 {{- $fieldPosition := 0 -}}
 {{- range $field, $_ := $upstream -}}
 {{- $fieldPosition = add1 $fieldPosition -}}
-{{- if not (has $field (list "kind" "base_url" "api_key_secret" "rate_cap" "proxy_url" "endpoints" "set_params" "strip_params" "breaker" "equivalence")) -}}
-{{- fail (printf "%s: field %d, counting in name order, is not an upstream field; use kind, base_url, api_key_secret, rate_cap, proxy_url, endpoints, set_params, strip_params, breaker and equivalence" $path $fieldPosition) -}}
+{{- if not (has $field (list "kind" "base_url" "api_key_secret" "rate_cap" "proxy_url" "endpoints" "set_params" "strip_params" "max_choices" "breaker" "equivalence")) -}}
+{{- fail (printf "%s: field %d, counting in name order, is not an upstream field; use kind, base_url, api_key_secret, rate_cap, proxy_url, endpoints, set_params, strip_params, max_choices, breaker and equivalence" $path $fieldPosition) -}}
 {{- end -}}
 {{- end -}}
 {{- if not (has $upstream.kind (list "sie" "openai")) -}}

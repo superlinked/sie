@@ -131,13 +131,32 @@ def test_a_list_is_never_silently_shortened_or_widened(tmp_path: Path, fields: d
 
 @pytest.mark.parametrize(
     "field",
-    [{"endpoints": ["chat"]}, {"set_params": {"provider": {"zdr": True}}}, {"strip_params": ["user"]}],
-    ids=["endpoints", "set_params", "strip_params"],
+    [
+        {"endpoints": ["chat"]},
+        {"set_params": {"provider": {"zdr": True}}},
+        {"strip_params": ["user"]},
+        {"max_choices": 1},
+    ],
+    ids=["endpoints", "set_params", "strip_params", "max_choices"],
 )
 def test_kind_sie_takes_no_openai_field(field: dict[str, Any]) -> None:
     with pytest.raises(ValidationError, match=f"kind sie takes no {next(iter(field))}"):
         Upstream.model_validate(
             {"kind": "sie", "base_url": "https://sie.example.internal", "rate_cap": RATE_CAP, **field}
+        )
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.0, "1"])
+def test_max_choices_is_a_positive_integer(value: object) -> None:
+    with pytest.raises(ValidationError, match="max_choices"):
+        Upstream.model_validate(
+            {
+                "kind": "openai",
+                "base_url": "https://api.example.com/v1",
+                "endpoints": ["chat"],
+                "rate_cap": RATE_CAP,
+                "max_choices": value,
+            }
         )
 
 

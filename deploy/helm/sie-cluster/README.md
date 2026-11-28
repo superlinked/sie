@@ -978,7 +978,8 @@ Below, `<fullname>` is the chart's full name: `<release>-sie-cluster`, or
   `proxy_url`. An upstream of kind `openai` also declares the `endpoints` it
   offers (`completions`, `chat`, `embeddings`, `rerank`) and may name request
   fields to add to every call (`set_params`) or remove from it
-  (`strip_params`). `api_key_secret` names a Kubernetes Secret and key that you
+  (`strip_params`), and the most choices (`n`) one call may ask for
+  (`max_choices`), for an upstream that refuses `n`. `api_key_secret` names a Kubernetes Secret and key that you
   create; the chart rejects a plain string, so a credential cannot be written
   into values. The chart checks these fields as the server does when it
   renders, and a test sends the same URLs and definitions through the chart
