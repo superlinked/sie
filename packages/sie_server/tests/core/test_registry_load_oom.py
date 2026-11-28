@@ -179,14 +179,6 @@ def _stop_patches() -> Iterator[None]:
     patch.stopall()
 
 
-@pytest.fixture(autouse=True)
-def _collect_the_whole_heap() -> None:
-    # A failed load's memory is free only once the event loop task that
-    # received its exception has yielded. A collection over the whole heap
-    # takes long enough for that; one that skips frozen objects does not.
-    gc.unfreeze()
-
-
 async def test_retry_runs_after_the_failed_attempt_is_released() -> None:
     device = _Device(total_bytes=10 * GIB)
     registry = await _registry(
@@ -419,6 +411,32 @@ async def test_cancelling_the_load_while_the_attempt_is_released_still_unloads_i
 
     assert cancelled.is_set()
     device.adapters["new"][0].unload.assert_called_once()
+    assert registry.loaded_model_names == ["pinned", "cold"]
+
+
+async def test_cancelling_the_load_before_the_release_starts_still_unloads_the_attempt() -> None:
+    device = _Device(total_bytes=10 * GIB)
+    registry = await _registry(
+        device,
+        {"pinned": 3 * GIB, "cold": 3 * GIB, "new": 5 * GIB},
+        pinned=["pinned"],
+        resident=["pinned", "cold"],
+    )
+    load = asyncio.ensure_future(registry.load_now("new", "cpu"))
+    is_oom_error = registry._is_oom_error
+
+    def cancel_while_the_oom_is_handled(error: RuntimeError) -> bool:
+        load.cancel()
+        return is_oom_error(error)
+
+    with (
+        patch.object(registry, "_is_oom_error", cancel_while_the_oom_is_handled),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await load
+
+    device.adapters["new"][0].unload.assert_called_once()
+    assert not any(device.stranded_bytes)
     assert registry.loaded_model_names == ["pinned", "cold"]
 
 
