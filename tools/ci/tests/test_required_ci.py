@@ -96,6 +96,24 @@ def test_required_check_reports_on_merge_queue_groups():
             assert all(context not in json.dumps(document) for document in documents), (name, context)
 
 
+def test_unit_test_shards_cover_every_test_once():
+    """The python job and the two server shards split the unit tests without a gap or an overlap."""
+    jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
+    server = "packages/sie_server/tests"
+    selections = [step["run"] for step in jobs["python"]["steps"] if step.get("run", "").startswith("mise run test ")]
+    # A glob, because pytest never ignores a directory that is itself a test path.
+    assert selections == [f"mise run test -- --ignore-glob '{server}/*'"]
+    shards = jobs["python-server-tests"]
+    assert shards["strategy"]["fail-fast"] is False
+    assert {shard["shard"]: shard["selection"] for shard in shards["strategy"]["matrix"]["include"]} == {
+        "adapters": f"{server}/adapters",
+        "other": f"--ignore-glob {server}/adapters {server}",
+    }
+    assert [step["run"] for step in shards["steps"] if "mise run test" in step.get("run", "")] == [
+        "mise run test -- ${{ matrix.selection }}"
+    ]
+
+
 def test_bootstrap_builds_fresh_trees_and_checks_all_locks():
     """The bootstrap lane may restore the tool cache but must build the Python and pnpm trees itself."""
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
@@ -354,7 +372,7 @@ def test_cpu_lane_uses_cpu_stack_task():
 
 def test_rust_audits_both_committed_dependency_graphs():
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
-    commands = [shlex.split(step.get("run", "")) for step in workflow["jobs"]["rust"]["steps"]]
+    commands = [shlex.split(step.get("run", "")) for step in workflow["jobs"]["rust-checks"]["steps"]]
     assert ["mise", "run", "gateway-deny"] in commands
     assert [
         "mise",

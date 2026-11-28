@@ -6,6 +6,7 @@
 #USAGE flag "-l --collect-only" help="Only collect and list test names, don't run them"
 #USAGE flag "-k --filter <filter>" help="Filter tests by name expression (passed to pytest -k)"
 #USAGE flag "-m --model <model>" help="Run model tests for a model ID (e.g. BAAI/bge-m3) or 'all' for all models"
+#USAGE flag "--ignore-glob <glob>" help="Skip paths matching this glob (passed to pytest --ignore-glob)"
 #USAGE arg "<path>" help="Optional path to test" default=""
 
 set -euo pipefail
@@ -15,7 +16,7 @@ ARGS=()
 if [[ "${usage_docker:-}" == "true" ]]; then
     if [[ "${usage_collect_only:-}" == "true" || "${usage_coverage:-}" == "true" || \
           "${usage_integration:-}" == "true" || -n "${usage_filter:-}" || \
-          -n "${usage_model:-}" || -n "${usage_path:-}" ]]; then
+          -n "${usage_model:-}" || -n "${usage_ignore_glob:-}" || -n "${usage_path:-}" ]]; then
         echo "ERROR: --docker delegates to 'mise run cpu-stack' and cannot be combined with pytest selectors." >&2
         exit 1
     fi
@@ -38,6 +39,10 @@ fi
 
 if [[ "${usage_integration:-}" == "true" ]]; then
     ARGS+=("-m" "integration" "-s" "-o" "log_cli=true" "-o" "log_cli_level=INFO")
+fi
+
+if [[ -n "${usage_ignore_glob:-}" ]]; then
+    ARGS+=("--ignore-glob=${usage_ignore_glob}")
 fi
 
 if [[ -n "${usage_path:-}" ]]; then

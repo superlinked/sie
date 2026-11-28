@@ -7,11 +7,13 @@ import json
 import os
 import secrets
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import nats
@@ -140,23 +142,43 @@ async def assert_nats_refuses_anonymous(url: str) -> None:
     raise RuntimeError("NATS accepted an anonymous connection")
 
 
-def build_images(registry: str, revision: str) -> None:
+def build_images(registry: str, revision: str, logs: Path) -> None:
     common = ["--registry", registry, "--version", "0.0.0", "--source-revision", revision]
-    commands = [["build-server", "--platform", "cpu", "--bundle", "default", *common]]
-    commands.extend(["build-service", "--service", service, *common] for service in SERVICES)
-    for args in commands:
-        subprocess.run(["mise", "run", "docker", "--", *args], check=True, timeout=3600)
+    builds = {"sie-server": ["build-server", "--platform", "cpu", "--bundle", "default", *common]}
+    builds.update({service: ["build-service", "--service", service, *common] for service in SERVICES})
+
+    def build(name: str) -> int:
+        with (logs / f"build-{name}.log").open("w") as log:
+            return subprocess.run(
+                [sys.executable, "-m", "tools.mise_tasks.docker_task", *builds[name]],
+                check=False,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                timeout=3600,
+            ).returncode
+
+    # Concurrent builds write to one log each, printed whole when the build
+    # ends, so their output does not interleave.
+    failed = []
+    with ThreadPoolExecutor(max_workers=len(builds)) as pool:
+        for name, status in zip(builds, pool.map(build, builds), strict=True):
+            print(f"--- docker build {name}: exit {status} ---")
+            print((logs / f"build-{name}.log").read_text(), flush=True)
+            if status:
+                failed.append(name)
+    if failed:
+        raise RuntimeError(f"Docker build failed for {', '.join(failed)}")
 
 
 def main() -> None:
     require_local_docker()
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     registry = f"local/sie-ci-{uuid.uuid4().hex[:8]}"
-    build_images(registry, revision)
-    network = f"sie-ci-{uuid.uuid4().hex[:8]}"
-    containers: list[str] = []
     logs = Path(".cache/ci-logs")
     logs.mkdir(parents=True, exist_ok=True)
+    build_images(registry, revision, logs)
+    network = f"sie-ci-{uuid.uuid4().hex[:8]}"
+    containers: list[str] = []
     docker("network", "create", network)
     with tempfile.TemporaryDirectory(prefix="sie-cpu-ipc-", dir="/tmp") as ipc:
 
