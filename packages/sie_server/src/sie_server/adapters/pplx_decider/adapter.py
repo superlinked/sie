@@ -4,7 +4,11 @@ Format 1 checkpoints: every (state, question) is a complete chat-template row,
 read out at its last token. Format 2 checkpoints (joint protocol v3): an item's
 questions share one row and each is read out at its own marker; a row over the
 window is bisected by questions, every chunk keeping the full state, exactly
-as the reference does. The checkpoint's
+as the reference does. Format 2 checkpoints with the chunked protocol (v4):
+the context (system prompt and state, then the separator) is tokenized once
+and every question chunk on its own; each question gets its own row, context
+plus that chunk, read out at its final marker (the reference "separate" mode,
+so answers never depend on the other questions). The checkpoint's
 readout, temperature, pooling and attention mode are preserved. Rows never
 truncate; oversized items fail independently before any of their rows run.
 Actual input usage sums the complete, unpadded rows the backbone processed.
@@ -25,8 +29,12 @@ from sie_server.adapters.decision.base import MAX_ITEM_TOKENS, DecisionBatchAdap
 from sie_server.adapters.errors import InputTooLongError
 from sie_server.adapters.pplx_decider.model import DecisionModel, checkpoint_config, load_model, validate_tokenizer
 from sie_server.adapters.pplx_decider.questions import (
+    CONTEXT_END,
     SYSTEM_PROMPT,
     Question,
+    chunked_context_messages,
+    chunked_question_text,
+    chunked_state_text,
     describe,
     joint_messages,
     messages,
@@ -96,6 +104,7 @@ class PerplexityDecisionAdapter(DecisionBatchAdapter):
         self._codes: tuple[str, ...] = ()
         self._marker: str | None = None
         self._marker_id: int | None = None
+        self._separator_id: int | None = None
         self._escapes: tuple[str, ...] = ()
 
     def load(self, device: str) -> None:
@@ -121,6 +130,10 @@ class PerplexityDecisionAdapter(DecisionBatchAdapter):
             self._marker = marker
             self._marker_id = processor.tokenizer.encode(marker, add_special_tokens=False)[0]
             specials.add(str(marker))
+            separator = config["joint"].get("separator")
+            if separator is not None:
+                self._separator_id = processor.tokenizer.encode(separator, add_special_tokens=False)[0]
+                specials.add(str(separator))
         self._escapes = tuple(sorted(specials, key=lambda token: (len(token), token), reverse=True))
 
     def _state(self, item: Item) -> str:
@@ -155,8 +168,53 @@ class PerplexityDecisionAdapter(DecisionBatchAdapter):
             raise ValueError("Readout markers do not match questions after tokenization")
         return [Row(index, questions, {name: tensor[0] for name, tensor in encoded.items()}, markers)]
 
+    def _chunked_rows(self, index: int, state: str, questions: tuple[Question, ...]) -> list[Row]:
+        """One row per question: the shared context and separator, then that question's chunk and marker."""
+        marker_id, separator_id = self._marker_id, self._separator_id
+        if marker_id is None or separator_id is None:
+            raise RuntimeError(ERR_NOT_LOADED)
+        with self._tokenizer_guard():
+            text = self._processor.apply_chat_template(
+                chunked_context_messages(state, self._escapes),
+                tokenize=False,
+                add_generation_prompt=False,
+                enable_thinking=False,
+            )
+            cut = text.rindex(CONTEXT_END)
+            if not text[:cut].endswith(chunked_state_text(state, self._escapes)):
+                raise ValueError("The chat template changed the decision state")
+            context = dict(
+                self._processor(text=[text[:cut]], images=None, padding=False, truncation=False, return_tensors="pt")
+            )
+            chunks = [
+                [
+                    *self._tokenizer.encode(
+                        chunked_question_text(question, self._codes, self._escapes), add_special_tokens=False
+                    ),
+                    marker_id,
+                ]
+                for question in questions
+            ]
+        context_ids = self._checked(context)[0]
+        context_ids = torch.cat([context_ids, context_ids.new_tensor([separator_id])])
+        rows = []
+        for question, chunk in zip(questions, chunks, strict=True):
+            ids = torch.cat([context_ids, context_ids.new_tensor(chunk)])
+            if ids.numel() > self._max_seq_length:
+                raise InputTooLongError("A decision question with its state exceeds the window; no input was truncated")
+            if int(ids.eq(marker_id).sum()) != 1 or int(ids[-1]) != marker_id:
+                raise ValueError("Readout markers do not match questions after tokenization")
+            inputs = {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
+            for name in ("token_type_ids", "mm_token_type_ids"):
+                if name in context:
+                    inputs[name] = torch.zeros_like(ids, dtype=context[name].dtype)
+            rows.append(Row(index, (question,), inputs, (ids.numel() - 1,)))
+        return rows
+
     def _item_rows(self, index: int, item: Item, questions: tuple[Question, ...]) -> list[Row]:
         state = self._state(item)
+        if self._separator_id is not None:
+            return self._chunked_rows(index, state, questions)
         if self._marker is not None:
             return self._joint_rows(index, state, questions)
         rows = []
