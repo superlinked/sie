@@ -90,8 +90,10 @@ def validate_lora_target_modules(
             list/set of module-name suffixes (``"query"``, ``"q_proj"``,
             possibly dotted like ``"encoder.layer.0.attention.self.query"``)
             or a regex string matched against full module paths.
-        called_module_names: Leaf module names the adapter's serving forward
-            actually invokes (e.g. ``{"query", "key", "value", "dense"}``).
+        called_module_names: Names of the modules the adapter's serving
+            forward actually invokes, as leaf names (e.g. ``{"query", "key",
+            "value", "dense"}``) or dotted name suffixes (e.g.
+            ``"intermediate.dense"``). This check compares leaf names.
 
     Raises:
         ValueError: If ``target_modules`` is a collection and none of its
@@ -105,6 +107,7 @@ def validate_lora_target_modules(
         return
 
     called = set(called_module_names)
+    called_leaves = {name.rsplit(".", 1)[-1] for name in called}
 
     if isinstance(target_modules, str):
         # PEFT regex form (fullmatched against full module paths). Leaf names
@@ -123,7 +126,7 @@ def validate_lora_target_modules(
     targets = [str(t) for t in target_modules]
     # Compare by leaf component: PEFT matches suffixes, and dotted targets
     # ("encoder.layer.0.attention.self.query") end in the module's leaf name.
-    if any(t.rsplit(".", 1)[-1] in called for t in targets):
+    if any(t.rsplit(".", 1)[-1] in called_leaves for t in targets):
         return
 
     msg = (
@@ -132,6 +135,77 @@ def validate_lora_target_modules(
         f"silently ignored (zero effect). Retrain/export the LoRA against the "
         f"called projections, or serve it via the merge-at-staging path."
     )
+    raise ValueError(msg)
+
+
+def _is_called_module(module_path: str, called_module_names: Collection[str]) -> bool:
+    return any(module_path == name or module_path.endswith(f".{name}") for name in called_module_names)
+
+
+def _lora_layer_changes_output(layer: Any, adapter_name: str) -> bool:
+    if adapter_name in layer.lora_variant:
+        return True
+    if adapter_name in layer.lora_B:
+        down, up = layer.lora_A[adapter_name], layer.lora_B[adapter_name]
+        if up.bias is not None and bool(up.bias.any()):
+            return True
+        return bool(down.weight.any()) and bool(up.weight.any())
+    return bool(layer.lora_embedding_A[adapter_name].any()) and bool(layer.lora_embedding_B[adapter_name].any())
+
+
+def validate_lora_has_effect(
+    lora_path: str,
+    model: Any,
+    adapter_name: str,
+    called_module_names: Collection[str] | None,
+) -> None:
+    """Reject a LoRA whose attached weights cannot change any module the serving forward calls.
+
+    A LoRA module adds ``B @ A`` (plus ``B``'s bias, if it has one) to its
+    base module's output, so it changes nothing when either factor is all
+    zero. PEFT initializes ``lora_B`` to zero, so an adapter exported before
+    training is a no-op, and so is one trained only on modules the serving
+    forward never calls, such as ``pooler.dense`` under a manual flash
+    forward. Both can pass :func:`validate_lora_target_modules`, which reads
+    only names, and then serve base weights. This check reads the weights
+    PEFT attached under ``adapter_name``. DoRA and other LoRA variants count
+    as changing their module.
+
+    Args:
+        lora_path: Public LoRA id (HF/local path), for error messages.
+        model: The ``PeftModel`` the LoRA is attached to.
+        adapter_name: The PEFT adapter name the LoRA is attached under.
+        called_module_names: Module names or dotted name suffixes the serving
+            forward calls (see :func:`validate_lora_target_modules`), matched
+            against module paths the way PEFT matches ``target_modules``.
+            ``None`` or empty counts every module as called.
+
+    Raises:
+        ValueError: If no LoRA module the serving forward calls can change
+            its output.
+    """
+    from peft.tuners.lora import LoraLayer
+
+    layers = {
+        name: module
+        for name, module in model.named_modules()
+        if isinstance(module, LoraLayer) and (adapter_name in module.lora_A or adapter_name in module.lora_embedding_A)
+    }
+    if not layers:
+        return
+    called = {name for name in layers if not called_module_names or _is_called_module(name, called_module_names)}
+    if any(_lora_layer_changes_output(layers[name], adapter_name) for name in called):
+        return
+
+    uncalled = sorted(
+        name.removeprefix("base_model.model.")
+        for name, layer in layers.items()
+        if name not in called and _lora_layer_changes_output(layer, adapter_name)
+    )
+    msg = f"LoRA '{lora_path}' cannot change any output: its update is zero on every module the serving forward calls"
+    if uncalled:
+        msg += f", and only {uncalled!r}, which the serving forward never calls, carry non-zero weights"
+    msg += ". Export the LoRA after training it on the called projections."
     raise ValueError(msg)
 
 
@@ -281,7 +355,9 @@ class PEFTLoRAMixin:
         Raises:
             RuntimeError: If model not loaded or PEFT import fails.
             ValueError: If :meth:`fetch_lora` or :meth:`_check_lora_config`
-                refuses the LoRA.
+                refuses the LoRA, or its attached weights cannot change any
+                module the serving forward calls (see
+                :func:`validate_lora_has_effect`).
         """
         self._ensure_lora_tracking()
 
@@ -314,21 +390,26 @@ class PEFTLoRAMixin:
             if self._peft_model is None:
                 # First LoRA - wrap the base model
                 logger.debug("Creating PeftModel from base model")
-                self._peft_model = PeftModel.from_pretrained(
+                peft_model = PeftModel.from_pretrained(
                     base_model,
                     source,
                     adapter_name=peft_adapter_name,
                 )
-                # Update self._model to point to the PEFT-wrapped model
-                # This ensures encode() uses the LoRA-enhanced model
-                self._model = self._peft_model
             else:
                 # Additional LoRA - add to existing PeftModel
                 logger.debug("Adding adapter to existing PeftModel")
-                self._peft_model.load_adapter(source, adapter_name=peft_adapter_name)
+                peft_model = self._peft_model
+                peft_model.load_adapter(source, adapter_name=peft_adapter_name)
+            validate_lora_has_effect(lora_path, peft_model, peft_adapter_name, self.lora_called_module_names)
         except Exception:
             self._detach_failed_lora(base_model, peft_adapter_name)
             raise
+
+        if self._peft_model is None:
+            # Update self._model to point to the PEFT-wrapped model
+            # This ensures encode() uses the LoRA-enhanced model
+            self._peft_model = peft_model
+            self._model = peft_model
 
         self._loaded_loras.add(lora_path)
         self._lora_adapter_names[lora_path] = peft_adapter_name
@@ -350,7 +431,8 @@ class PEFTLoRAMixin:
         """Remove what PEFT attached for a LoRA whose load raised, so no request runs through it.
 
         PEFT injects a LoRA's layers into the model before it loads the
-        adapter's weights, so a load that fails on the weights leaves them in
+        adapter's weights, so a load that fails on the weights, or whose
+        weights :func:`validate_lora_has_effect` refuses, leaves them in
         place. A first LoRA's layers wrap the shared base model's own modules,
         which are restored here; a later LoRA's adapter is deleted from the
         existing PeftModel.
