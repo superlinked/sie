@@ -138,16 +138,20 @@ def find_bundle_for_model_adapters(
     *,
     pool_name: str | None = None,
 ) -> str | None:
-    """Find the most specific bundle covering models in an adapter inventory."""
+    """Find a covering bundle, or None if a requested route cannot be resolved."""
     if not model_names or not bundles_dir.exists():
         return None
 
     needed_adapters: set[str] = set()
     normalized_pool_name = pool_name.strip().lower() if pool_name is not None else None
     for name in model_names:
-        modules, pool = model_adapters.get(name, (set(), None))
+        if name not in model_adapters:
+            return None
+        modules, pool = model_adapters[name]
         if normalized_pool_name is not None and (pool or "default") != normalized_pool_name:
             continue
+        if not modules:
+            return None
         needed_adapters |= modules
 
     if not needed_adapters:
