@@ -103,7 +103,6 @@ class TestBGEM3YamlConfig:
             "sparse": "float16",
             "multivector": "float16",
             "candle": "bfloat16",
-            "banking": "bfloat16",
             "medical-vn": "bfloat16",
             "bge_m3_flag": None,
         }

@@ -59,15 +59,6 @@ profiles:
       runtime:
         pooling: cls
         normalize: true
-  banking:
-    extends: default
-    compute_precision: bfloat16
-    adapter_options:
-      runtime:
-        pooling: cls
-        normalize: true
-        lora_id: saivamshiatukuri/bge-m3-banking77-lora
-        instruction: Classify banking intent
   medical-vn:
     extends: default
     compute_precision: bfloat16
